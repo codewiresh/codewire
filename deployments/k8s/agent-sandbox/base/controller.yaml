@@ -28,45 +28,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: agent-sandbox-controller
-  namespace: agent-sandbox-system
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - create
-- apiGroups:
-  - ""
-  resourceNames:
-  - agent-sandbox-webhook-certs
-  resources:
-  - secrets
-  verbs:
-  - get
-  - patch
-  - update
-
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: agent-sandbox-controller
-  namespace: agent-sandbox-system
-subjects:
-- kind: ServiceAccount
-  name: agent-sandbox-controller
-  namespace: agent-sandbox-system
-roleRef:
-  kind: Role
-  name: agent-sandbox-controller
-  apiGroup: rbac.authorization.k8s.io
-
----
 kind: Service
 apiVersion: v1
 metadata:
@@ -104,7 +65,7 @@ spec:
       serviceAccountName: agent-sandbox-controller
       containers:
       - name: agent-sandbox-controller
-        image: ghcr.io/noeljackson/agent-sandbox-controller@sha256:555146af2337dd5d8baf0844d7f5de9a3cd8fc7b032b85756ae244bc2583fb41
+        image: ghcr.io/noeljackson/agent-sandbox-controller@sha256:199efbb13e4af3fff69eaba218e5d36d3103568b2fa73e8606e7ad7da8c28609
         args:
         - --leader-elect=true
         - --extensions
@@ -119,9 +80,6 @@ spec:
         - name: healthz
           containerPort: 8081
           protocol: TCP
-        - name: webhook
-          containerPort: 9443
-          protocol: TCP
         volumeMounts:
         - name: config-volume
           mountPath: /etc/sandbox-config
@@ -131,18 +89,3 @@ spec:
         configMap:
           name: agent-sandbox-config
           optional: true
-
----
-kind: Service
-apiVersion: v1
-metadata:
-  name: agent-sandbox-webhook-service
-  namespace: agent-sandbox-system
-spec:
-  selector:
-    app: agent-sandbox-controller
-  ports:
-  - name: webhook
-    port: 443
-    targetPort: 9443
-    protocol: TCP

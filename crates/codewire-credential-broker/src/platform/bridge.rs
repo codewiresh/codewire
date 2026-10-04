@@ -21,7 +21,9 @@ use codewire_gateway_proto::broker::v1::credential_broker_service_server::{
     CredentialBrokerService, CredentialBrokerServiceServer,
 };
 use codewire_gateway_proto::codewire::bridge::v1;
-use codewire_platform_credentials::{PlatformAccessProfileStore, PlatformCredentialStore};
+use codewire_platform_credentials::{
+    EpochMaterialCache, PlatformAccessProfileStore, PlatformCredentialStore,
+};
 use futures::{Stream, StreamExt, stream::BoxStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::Instant;
@@ -42,17 +44,23 @@ use crate::{
 };
 
 /// Admission and active/draining epochs share one process-wide service budget.
-/// Each hosted Sandbox with credentials holds one long-lived epoch (two while
-/// its gateway rotates), so this is the replica's Sandbox ceiling. An idle
-/// epoch is one TLS connection and its tasks; its response buffer is bounded.
+/// Each hosted Sandbox with credentials holds one long-lived epoch, and two for
+/// up to 90 seconds at each renewal, while its gateway admits the next epoch
+/// before the current identity expires. Kubelet rotates each Pod's 600-second
+/// token every 480 seconds, so a Sandbox renews at most twice per 480 seconds
+/// and holds at most 1.375 streams on average: 1024 streams serve about 740
+/// Sandboxes whose renewals are spread out, and 512 even if all renew at once.
+/// An idle epoch is one TLS connection and its tasks; its response buffer is
+/// bounded.
 pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS: usize = 1024;
 /// Concurrent leases across all epochs: authority checks, grant and record
-/// reads and the protected-material read (SQL and KEK unwrap). A lease runs
-/// its statements one at a time, so it holds at most one of the credential
-/// service's 16 pool connections and none during its Kubernetes reads or the
-/// unwrap. Sixty-four leases queue at most four per connection for a few
-/// statement times, far inside the pool's 5-second acquire timeout, whose
-/// expiry would end the epoch, and bound Kubernetes and OpenBao concurrency.
+/// reads and the protected-material read (SQL and KEK unwrap), or a reuse from
+/// this epoch's material cache. A lease runs its statements one at a time, so
+/// it holds at most one of the credential service's 16 pool connections and
+/// none during its Kubernetes reads or the unwrap. Sixty-four leases queue at
+/// most four per connection for a few statement times, far inside the pool's
+/// 5-second acquire timeout, whose expiry would end the epoch, and bound
+/// Kubernetes and OpenBao concurrency.
 pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES: usize = 64;
 /// Optional operations this broker serves, listed in the admitted stream's
 /// response headers. The gateway copies them into the daemon's Open, and the
@@ -240,10 +248,18 @@ where
     /// the returned receiver signals transport cancellation; the tracked worker
     /// retains its permit until accepted refresh/signing work has drained. Only
     /// awaiting this owner's `shutdown` acknowledges that process-owned drain.
+    /// Also returns the epoch's verified identity expiry (Unix seconds), at
+    /// which this epoch ends.
     pub async fn serve_authenticated<B, I, F>(
         &self,
         admission: F,
-    ) -> Result<ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>, Status>
+    ) -> Result<
+        (
+            ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>,
+            u64,
+        ),
+        Status,
+    >
     where
         B: PlatformRuntimeAuthority + 'static,
         I: Stream<Item = Result<v1::CredentialBridgeGuestMessage, Status>> + Send + 'static,
@@ -281,6 +297,7 @@ where
             receiver,
         } = admission?;
         sink.epoch.ensure_live().map_err(bridge_status)?;
+        let expires_at_unix = sink.epoch.expires_at_unix;
         self.spawn_worker(permit, async move {
             // Never select cancellation against or abort this future. Transport
             // termination ends request tasks, then the shared runner drains
@@ -289,7 +306,7 @@ where
                 let _ = sink.output.try_send(Err(bridge_status(error)));
             }
         })?;
-        Ok(ReceiverStream::new(receiver))
+        Ok((ReceiverStream::new(receiver), expires_at_unix))
     }
 
     /// Stop admission and signal transport cancellation synchronously. The
@@ -373,6 +390,8 @@ where
         let provider = PlatformBrokerLeaseProvider {
             // Every epoch of this service shares its one lease budget.
             leases: Some(self.state.leases.clone()),
+            // Each epoch owns its own material cache and drops it on exit.
+            material: Some(EpochMaterialCache::new()),
             ..PlatformBrokerLeaseProvider::connect(
                 authority,
                 Arc::clone(&self.state.credentials),
@@ -464,7 +483,7 @@ where
             Ok((authority, input))
         })
         .await
-        .map(|stream| {
+        .map(|(stream, expires_at_unix)| {
             let mut response = Response::new(stream);
             for capability in PLATFORM_CREDENTIAL_BRIDGE_CAPABILITIES {
                 response.metadata_mut().append(
@@ -472,6 +491,12 @@ where
                     tonic::metadata::MetadataValue::from_static(capability),
                 );
             }
+            // The verified expiry at which this epoch ends, so the gateway can
+            // admit the next one first. Not a credential; digits only.
+            response.metadata_mut().insert(
+                codewire_gateway_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,
+                tonic::metadata::MetadataValue::from(expires_at_unix),
+            );
             response
         })
     }

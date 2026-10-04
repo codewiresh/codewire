@@ -778,8 +778,10 @@ async fn reserve_confidential_capacity(
     Ok(())
 }
 
+// A create that names no resources gets 2 vCPU, 8 GiB and 10 GiB (owner,
+// 2026-10-04): the same shape as a Dev warm pool, so it can start warm.
 const DEFAULT_CPU_MILLICORES: u32 = 2_000;
-const DEFAULT_MEMORY_MIB: u64 = 4_096;
+const DEFAULT_MEMORY_MIB: u64 = 8_192;
 const DEFAULT_DISK_GIB: u64 = 10;
 
 fn apply_environment_resource_defaults(spec: &mut codewire_project::ProjectSpec) {

@@ -95,9 +95,10 @@ impl CredentialBridge {
         cancellation.disarm();
         let response = response?;
         // Recheck after acquiring the lock: waiting for it must not extend the
-        // original deadline or release a signature from a replaced epoch.
+        // original deadline or release a signature from a lost epoch. A live
+        // draining epoch still answers what was sent on it.
         let state = self.inner.lock().await;
-        require_active_epoch(&state, epoch)?;
+        require_live_epoch(&state, epoch)?;
         check_deadline(deadline_unix_ms, deadline)?;
         Ok(response)
     }
@@ -108,7 +109,7 @@ impl CredentialBridge {
         response: v1::CredentialSshResponse,
     ) -> Result<(), Status> {
         let mut state = self.inner.lock().await;
-        require_active_epoch(&state, epoch)?;
+        require_live_epoch(&state, epoch)?;
         let pending = state
             .ssh
             .get(&response.request_id)

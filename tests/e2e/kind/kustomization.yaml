@@ -199,8 +199,10 @@ patches:
                 image: codewire-services:e2e
                 imagePullPolicy: Never
   # Warm-pool members on Kind run a diagnostic runtime: runc, or the node
-  # default ('') when SANDBOX_RUNTIME_PROFILE is none. The test op pins the
-  # variable's position in the base policy.
+  # default ('') when SANDBOX_RUNTIME_PROFILE is none. They mount the
+  # side-loaded gateway image (SANDBOX_GATEWAY_IMAGE above), which has no
+  # registry digest. The test ops pin each variable's position in the base
+  # policy.
   - target:
       group: admissionregistration.k8s.io
       kind: ValidatingAdmissionPolicy
@@ -212,6 +214,12 @@ patches:
       - op: replace
         path: /spec/variables/0/expression
         value: "['commodity', 'runc', '']"
+      - op: test
+        path: /spec/variables/1/name
+        value: localImages
+      - op: replace
+        path: /spec/variables/1/expression
+        value: "['codewire-gateway:e2e']"
 
 # Namespace transforms do not rewrite DNS SANs inside custom resources.
 replacements:

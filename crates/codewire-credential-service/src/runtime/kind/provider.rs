@@ -32,8 +32,10 @@ pub(super) const GITHUB_DEVICE_TOKEN: &str = "gho_0123456789ABCDEFGHIJKLMNOPQRST
 pub(super) const GITHUB_APP_CLIENT_ID: &str = "Iv1.kindsynthetic";
 pub(super) const GITHUB_APP_CLIENT_SECRET: &str = "kind-synthetic-secret";
 pub(super) const GITHUB_APP_SLUG: &str = "codewire-synthetic";
-pub(super) const GITHUB_APP_CALLBACK_URL: &str =
-    "http://127.0.0.1:8090/api/v1/github/oauth/callback";
+/// The registered GitHub App callback on the harness ingress origin.
+pub(super) fn github_app_callback_url(public_origin: &str) -> String {
+    format!("{public_origin}/api/v1/github/oauth/callback")
+}
 pub(super) const GITHUB_APP_USER_TOKEN: &str = "ghu_kind_synthetic_user_token_1234567890";
 const GITHUB_APP_UNINSTALLED_USER_TOKEN: &str = "ghu_kind_synthetic_uninstalled_user_1234567890";
 pub(super) const GITHUB_APP_REFRESHED_USER_TOKEN: &str =
@@ -142,15 +144,36 @@ struct Counters {
 }
 
 #[derive(Clone)]
-pub(super) struct SyntheticProvider(Arc<Mutex<Counters>>, Option<Arc<super::git::Fixture>>);
+pub(super) struct SyntheticProvider(
+    Arc<Mutex<Counters>>,
+    Option<Arc<super::git::Fixture>>,
+    // The GitHub App callback the exchange must name.
+    Arc<str>,
+);
 
 impl SyntheticProvider {
     pub(super) fn new() -> Self {
-        Self(Arc::new(Mutex::new(Counters::default())), None)
+        Self(
+            Arc::new(Mutex::new(Counters::default())),
+            None,
+            github_app_callback_url(super::config::DEFAULT_PUBLIC_ORIGIN).into(),
+        )
     }
 
-    pub(super) fn with_git(git: Arc<super::git::Fixture>) -> Self {
-        Self(Arc::new(Mutex::new(Counters::default())), Some(git))
+    pub(super) fn with_git(git: Arc<super::git::Fixture>, public_origin: &str) -> Self {
+        Self(
+            Arc::new(Mutex::new(Counters::default())),
+            Some(git),
+            github_app_callback_url(public_origin).into(),
+        )
+    }
+
+    fn github_app_exchange_body(&self, code: &str) -> String {
+        let redirect_uri: String =
+            url::form_urlencoded::byte_serialize(self.2.as_bytes()).collect();
+        format!(
+            "client_id={GITHUB_APP_CLIENT_ID}&client_secret={GITHUB_APP_CLIENT_SECRET}&code={code}&redirect_uri={redirect_uri}"
+        )
     }
 
     async fn github_git(
@@ -216,7 +239,11 @@ impl SyntheticProvider {
         ) {
             return Err(BrokerUpstreamError::Protocol);
         }
-        if body == github_app_exchange_body(GITHUB_APP_AUTHORIZATION_CODES[0]).as_bytes() {
+        if body
+            == self
+                .github_app_exchange_body(GITHUB_APP_AUTHORIZATION_CODES[0])
+                .as_bytes()
+        {
             // 60 seconds is valid for GitHub App user tokens, but inside the
             // five-minute renewal skew. The managed browser journey therefore
             // proves durable controlled refresh before its protected checkout.
@@ -228,7 +255,11 @@ impl SyntheticProvider {
                 "refresh_token_expires_in": 15_897_600,
             }));
         }
-        if body == github_app_exchange_body(GITHUB_APP_AUTHORIZATION_CODES[1]).as_bytes() {
+        if body
+            == self
+                .github_app_exchange_body(GITHUB_APP_AUTHORIZATION_CODES[1])
+                .as_bytes()
+        {
             // The duplicate-account browser path retains a non-expiring
             // response as a compatibility check; it is never persisted.
             return json_response(json!({
@@ -236,7 +267,11 @@ impl SyntheticProvider {
                 "token_type": "bearer",
             }));
         }
-        if body == github_app_exchange_body("kind-synthetic-code-uninstalled").as_bytes() {
+        if body
+            == self
+                .github_app_exchange_body("kind-synthetic-code-uninstalled")
+                .as_bytes()
+        {
             return json_response(json!({
                 "access_token": GITHUB_APP_UNINSTALLED_USER_TOKEN,
                 "token_type": "bearer",
@@ -389,9 +424,11 @@ impl SyntheticProvider {
             counters.responses = increment(counters.responses)?;
             counters.attempts[scenario.index()] = attempt;
             let status = scenario.status(attempt);
+            // `generation` is the fixture's public synthetic token counter: it
+            // shows which login a request presented, never a token value.
             tracing::info!(target: TARGET, event = "provider_response", scenario = scenario.name(), attempt,
-                status = status.as_u16(), response_calls = counters.responses, refresh_calls = counters.refreshes,
-                "provider_response");
+                status = status.as_u16(), generation, response_calls = counters.responses,
+                refresh_calls = counters.refreshes, "provider_response");
             status
         };
         let (content_type, body) = if status == StatusCode::OK {
@@ -500,12 +537,6 @@ impl BrokerUpstreamTransport for SyntheticProvider {
             _ => Err(BrokerUpstreamError::Protocol),
         }
     }
-}
-
-fn github_app_exchange_body(code: &str) -> String {
-    format!(
-        "client_id={GITHUB_APP_CLIENT_ID}&client_secret={GITHUB_APP_CLIENT_SECRET}&code={code}&redirect_uri=http%3A%2F%2F127.0.0.1%3A8090%2Fapi%2Fv1%2Fgithub%2Foauth%2Fcallback"
-    )
 }
 
 fn github_app_refresh_body() -> String {
@@ -674,7 +705,8 @@ mod tests {
         let git = super::super::git::Fixture::create(runtime.path())
             .await
             .unwrap();
-        let provider = SyntheticProvider::with_git(git.clone());
+        let provider =
+            SyntheticProvider::with_git(git.clone(), super::super::config::DEFAULT_PUBLIC_ORIGIN);
         let advertisement =
             "https://github.com/synthetic-user/repository-01.git/info/refs?service=git-upload-pack"
                 .parse()
@@ -809,6 +841,25 @@ mod tests {
     }
 
     #[test]
+    fn github_app_exchange_names_the_callback_on_the_harness_origin() {
+        // The default port keeps the exact body the fixture always accepted.
+        assert_eq!(
+            SyntheticProvider::new().github_app_exchange_body("code"),
+            format!(
+                "client_id={GITHUB_APP_CLIENT_ID}&client_secret={GITHUB_APP_CLIENT_SECRET}&code=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A8090%2Fapi%2Fv1%2Fgithub%2Foauth%2Fcallback"
+            )
+        );
+        let shifted = SyntheticProvider(
+            Arc::new(Mutex::new(Counters::default())),
+            None,
+            github_app_callback_url("http://127.0.0.1:9090").into(),
+        );
+        assert!(shifted.github_app_exchange_body("code").ends_with(
+            "&redirect_uri=http%3A%2F%2F127.0.0.1%3A9090%2Fapi%2Fv1%2Fgithub%2Foauth%2Fcallback"
+        ));
+    }
+
+    #[test]
     fn github_app_fixture_requires_the_registered_exchange_and_identity_contract() {
         let provider = SyntheticProvider::new();
         let exchange_headers = HeaderMap::from_iter([
@@ -829,7 +880,9 @@ mod tests {
             provider
                 .github_app_exchange(
                     &exchange_headers,
-                    github_app_exchange_body(GITHUB_APP_AUTHORIZATION_CODES[0]).as_bytes(),
+                    provider
+                        .github_app_exchange_body(GITHUB_APP_AUTHORIZATION_CODES[0])
+                        .as_bytes(),
                 )
                 .is_ok()
         );
@@ -910,7 +963,7 @@ mod tests {
             GITHUB_APP_CLIENT_ID.into(),
             zeroize::Zeroizing::new(GITHUB_APP_CLIENT_SECRET.into()),
             GITHUB_APP_SLUG.into(),
-            GITHUB_APP_CALLBACK_URL.into(),
+            github_app_callback_url(super::super::config::DEFAULT_PUBLIC_ORIGIN),
         )
         .unwrap();
         let owner = GitHubAppAuthorizationOwner::new(config, std::sync::Arc::new(provider));

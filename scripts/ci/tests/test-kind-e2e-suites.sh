@@ -29,7 +29,7 @@ FIXTURE="$(mktemp -d "$ROOT/.tmp/kind-e2e-suites.XXXXXX")"
 CALLS="$FIXTURE/calls"
 readonly SEALED_CONTROLLER_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
 readonly SEALED_CERTGEN_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
-readonly SEALED_AGENT_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125'
+readonly SEALED_AGENT_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:872d7c1d2d3e01d3c5f5ec1509ea3620408f588547a355625ee00a0f63181615'
 readonly SEALED_WORKSPACE_IMAGE='registry.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510'
 readonly SEALED_DIND_IMAGE='registry.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e'
 
@@ -54,6 +54,39 @@ expect_failure() {
 record() {
   printf '%s\n' "$1" >>"$CALLS"
 }
+
+# Program #2238 C4: the retired shared warm-pool keys stay forbidden, and a
+# render names SANDBOX_WARM_POOL_SHAPES once, with valid exact shapes of at
+# most 16 members each. A render that configures a pool, or whose suite
+# configures one at run time ("pool-suite"), must admit, through the pool
+# template policy, exactly the gateway image its orchestration runs.
+assert_warm_pool_config() {
+  local rendered="$1" want="$2" admit="${3:-}" shapes shape gateway
+  shape='[1-9][0-9]{0,9}m/[1-9][0-9]{0,9}Mi/[1-9][0-9]{0,9}Gi=([0-9]|1[0-6])'
+  if grep -Eq 'SANDBOX_(FULL_WARM_PROFILES|WARM_POOL_WORKSPACE_IMAGE)' "$rendered"; then
+    echo "retired shared warm-pool configuration in ${rendered}" >&2
+    return 1
+  fi
+  if [ "$(grep -c 'SANDBOX_WARM_POOL_SHAPES:' "$rendered")" -ne 1 ]; then
+    echo "SANDBOX_WARM_POOL_SHAPES is not configured exactly once in ${rendered}" >&2
+    return 1
+  fi
+  shapes="$(sed -n 's/^ *SANDBOX_WARM_POOL_SHAPES: *//p' "$rendered" | tr -d "\"'")"
+  if [ "$shapes" != "$want" ] || { [ -n "$shapes" ] && ! [[ "$shapes" =~ ^${shape}(,${shape})*$ ]]; }; then
+    echo "SANDBOX_WARM_POOL_SHAPES is '${shapes}' in ${rendered}, want '${want}'" >&2
+    return 1
+  fi
+  [ -n "$shapes" ] || [ "$admit" = pool-suite ] || return 0
+  gateway="$(grep -A1 -- '- name: SANDBOX_GATEWAY_IMAGE' "$rendered" | sed -n 's/^ *value: *//p')"
+  if [ -z "$gateway" ] ||
+      ! grep -Fxq "  - expression: '[''${gateway}'']'" "$rendered" ||
+      ! grep -A1 -Fx "  - expression: '[''${gateway}'']'" "$rendered" | grep -Fxq '    name: localImages'; then
+    echo "the pool template policy in ${rendered} does not admit exactly its gateway image ${gateway:-missing}" >&2
+    return 1
+  fi
+}
+# The sealed render fixture below runs in its own Bash process.
+export -f assert_warm_pool_config
 
 # kind-e2e.sh runs every suite as a plain statement with errexit in force, and
 # require_kind_errexit refuses anything else: Bash ignores errexit inside a
@@ -400,6 +433,16 @@ grep -Fq 'configure_remote_dind_kind_network' "$COMMON" ||
 if grep -Fq '127.0.0.1:25432/codewire' "$COMMON"; then
   fail 'Kind smoke callers bypass the configurable Postgres URL'
 fi
+# Smoke binaries default to the default host ports, which belong to another
+# cluster whenever this one runs shifted: every Temporal smoke names this
+# cluster's frontend.
+for temporal_smoke in temporal-smoke temporal-fencing-smoke; do
+  invocations="$(grep -c "\"\$CARGO_CI_DIR/${temporal_smoke}\"" "$COMMON" || true)"
+  addressed="$({ grep -B3 "\"\$CARGO_CI_DIR/${temporal_smoke}\"" "$COMMON" || true; } |
+    grep -Fc 'TEMPORAL_ADDRESS="$KIND_TEMPORAL_FRONTEND_URL"' || true)"
+  [ "$invocations" -ge 1 ] && [ "$addressed" -eq "$invocations" ] ||
+    fail "${temporal_smoke} can fall back to another cluster's Temporal (${addressed}/${invocations} addressed)"
+done
 for hardcoded_loopback in '127.0.0.1:7233' '127.0.0.1:8084' '127.0.0.1:18092' '127.0.0.1:8090' 'localhost:10443'; do
   if grep -Fq "$hardcoded_loopback" "$COMMON"; then
     fail "Kind harness still hardcodes client address ${hardcoded_loopback}"
@@ -1209,6 +1252,59 @@ if grep -Eq 'hostPort: (8090|7233|25432)$' "$FIXTURE/kind-config-rendered.yaml";
   fail 'default Kind host ports survived requested-port rendering'
 fi
 
+# The overlay and the credential fixture follow the requested ingress origin
+# (#2395): the default port renders byte-identically, a shifted port replaces
+# every pinned occurrence, and drift, foreign origins or bad ports fail.
+grep -Fq 'render_kind_ingress_origin "$rendered" "$KIND_OVERLAY_INGRESS_ORIGINS" || return $?' "$COMMON" ||
+  fail 'Kind overlay render does not render its ingress origin'
+source_origins="$(cat "$ROOT/tests/e2e/kind/support.yaml" "$ROOT/tests/e2e/kind/kustomization.yaml" |
+  grep -oE 'http://127\.0\.0\.1:8090([^0-9]|$)' | wc -l)"
+[ "$source_origins" -eq "$KIND_OVERLAY_INGRESS_ORIGINS" ] ||
+  fail "overlay sources carry ${source_origins} ingress origins, but ${KIND_OVERLAY_INGRESS_ORIGINS} are pinned"
+(
+  RUN_DIR="$FIXTURE/ingress-origin-default"
+  rendered="$(render_kind_credential_fixture_patch)"
+  cmp -s "$rendered" "$ROOT/tests/e2e/kind/credential-fixture-patch.yaml"
+) || fail 'default ingress origin changed the credential fixture patch'
+(
+  RUN_DIR="$FIXTURE/ingress-origin-shifted"
+  KIND_INGRESS_URL=http://127.0.0.1:18090
+  rendered="$(render_kind_credential_fixture_patch)"
+  grep -Fxq '              value: http://127.0.0.1:18090' "$rendered" &&
+    ! grep -Fq '127.0.0.1:8090' "$rendered"
+) || fail 'shifted ingress origin was not rendered into the credential fixture patch'
+printf '%s\n' 'FRONTEND_URL: http://127.0.0.1:8090' 'ISSUER: http://127.0.0.1:8090' \
+  '- value: http://127.0.0.1:8090' '- value: http://127.0.0.1:8090' 'decoy: http://127.0.0.1:80901' \
+  >"$FIXTURE/overlay-origins.yaml"
+cp "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-default.yaml"
+render_kind_ingress_origin "$FIXTURE/overlay-origins-default.yaml" 4 ||
+  fail 'default ingress origin render failed'
+cmp -s "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-default.yaml" ||
+  fail 'default ingress origin render was not byte-identical'
+cp "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-shifted.yaml"
+KIND_INGRESS_URL=http://127.0.0.1:9090 render_kind_ingress_origin "$FIXTURE/overlay-origins-shifted.yaml" 4 ||
+  fail 'shifted ingress origin render failed'
+[ "$(grep -c 'http://127.0.0.1:9090$' "$FIXTURE/overlay-origins-shifted.yaml")" -eq 4 ] &&
+  grep -Fxq 'decoy: http://127.0.0.1:80901' "$FIXTURE/overlay-origins-shifted.yaml" ||
+  fail 'shifted ingress origin render missed an origin or rewrote a longer port'
+for refused in '3:http://127.0.0.1:9090' '4:http://localhost:9090' '4:https://127.0.0.1:9090' \
+  '4:http://127.0.0.1:99999' '4:http://127.0.0.1:80' '4:http://127.0.0.1:9090/'; do
+  cp "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-refused.yaml"
+  if KIND_INGRESS_URL="${refused#*:}" render_kind_ingress_origin \
+    "$FIXTURE/overlay-origins-refused.yaml" "${refused%%:*}" 2>"$FIXTURE/overlay-origins.err"; then
+    fail "ingress origin render accepted ${refused}"
+  fi
+  cmp -s "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-refused.yaml" ||
+    fail "refused ingress origin render ${refused} still rewrote its file"
+done
+cp "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-drift.yaml"
+if KIND_INGRESS_URL=http://127.0.0.1:9090 render_kind_ingress_origin \
+  "$FIXTURE/overlay-origins-drift.yaml" 5 2>"$FIXTURE/overlay-origins-drift.err"; then
+  fail 'ingress origin render accepted a count drift'
+fi
+grep -Fq 'Kind ingress origin occurrence mismatch in overlay-origins-drift.yaml: expected 5, got 4' \
+  "$FIXTURE/overlay-origins-drift.err" || fail 'ingress origin count drift was not explained'
+
 # A held requested port fails fast and names the owning cluster; shifted
 # assignments pass, and the cluster being recreated ignores its own holders.
 docker() {
@@ -1564,9 +1660,30 @@ PY
     fail 'sealed Kind overlay does not contain the local DinD alias once'
   [ "$(grep -Fc 'SANDBOX_IMAGE_CACHE: disabled' "$kind_rendered")" -eq 1 ] ||
     fail 'sealed Kind overlay does not disable the public-image cache'
-  if grep -Eq 'SANDBOX_(FULL_WARM_PROFILES|WARM_POOL_WORKSPACE_IMAGE)' "$kind_rendered"; then
-    fail 'sealed Kind overlay retained removed shared warm-pool configuration'
-  fi
+  # The e2e overlay runs no pool (the warm-pools suite configures its own),
+  # but still admits its side-loaded gateway for the suite's pool template.
+  assert_warm_pool_config "$kind_rendered" '' pool-suite ||
+    fail 'sealed Kind overlay warm-pool configuration is retired, repeated, invalid or active'
+  # Old and new fixtures: each retired key, a repeated or malformed key, an
+  # oversized pool, a pool left configured for every suite and an unadmitted
+  # gateway image all fail the guard.
+  for warm_fixture in \
+      's/^  SANDBOX_WARM_POOL_SHAPES: .*$/  SANDBOX_WARM_POOL_SHAPES: 500m\/1024Mi\/5Gi=1/' \
+      's/^  SANDBOX_WARM_POOL_SHAPES: .*$/&\n  SANDBOX_FULL_WARM_PROFILES: full/' \
+      's/^  SANDBOX_WARM_POOL_SHAPES: .*$/&\n  SANDBOX_WARM_POOL_WORKSPACE_IMAGE: ghcr.io\/codewiresh\/workspace:latest/' \
+      's/^  SANDBOX_WARM_POOL_SHAPES: .*$/&\n  SANDBOX_WARM_POOL_SHAPES: 500m\/1024Mi\/5Gi=1/' \
+      's/^  SANDBOX_WARM_POOL_SHAPES: .*$/  SANDBOX_WARM_POOL_SHAPES: 500m\/1Gi\/5Gi=1/' \
+      's/^  SANDBOX_WARM_POOL_SHAPES: .*$/  SANDBOX_WARM_POOL_SHAPES: 500m\/1024Mi\/5Gi=17/' \
+      "s/^  - expression: '\[''codewire-gateway:e2e'']'$/  - expression: '[]'/"; do
+    sed -e "$warm_fixture" "$kind_rendered" >"$FIXTURE/warm-pool-config.yaml"
+    if cmp -s "$kind_rendered" "$FIXTURE/warm-pool-config.yaml"; then
+      fail "warm-pool guard fixture did not change the render: ${warm_fixture}"
+    fi
+    if (assert_warm_pool_config "$FIXTURE/warm-pool-config.yaml" '' pool-suite) \
+        >"$FIXTURE/warm-pool-config.out" 2>&1; then
+      fail "warm-pool guard accepted ${warm_fixture}"
+    fi
+  done
   [ "$(grep -Fc "$KIND_POSTGRES_LOCAL_IMAGE" "$kind_rendered")" -eq 2 ] ||
     fail 'sealed Kind overlay does not contain the local Postgres alias twice'
   [ "$(grep -Fc "$KIND_TEMPORAL_LOCAL_IMAGE" "$kind_rendered")" -eq 1 ] ||
@@ -1591,6 +1708,10 @@ PY
     >"$FIXTURE/local-kind-overlay.yaml"
   kubectl kustomize "$ROOT/deployments/k8s/overlays/local-kind-static" \
     >"$FIXTURE/local-kind-static-overlay.yaml"
+  for topology in local-kind local-kind-static; do
+    assert_warm_pool_config "$FIXTURE/${topology}-overlay.yaml" '' ||
+      fail "${topology} overlay configures a warm pool it cannot admit"
+  done
   for topology in \
       "$ROOT/tests/e2e/kind/vendor/ingress-nginx-deploy.yaml" \
       "$kind_rendered" \
@@ -1816,7 +1937,7 @@ grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
 expect_failure substituted-agent-image env \
   KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
   KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
-  KIND_AGENT_SANDBOX_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:555146af2337dd5d8baf0844d7f5de9a3cd8fc7b032b85756ae244bc2583fb41' \
+  KIND_AGENT_SANDBOX_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:199efbb13e4af3fff69eaba218e5d36d3103568b2fa73e8606e7ad7da8c28609' \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
   KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
@@ -1856,7 +1977,7 @@ grep -Fq "docker:image tag $SEALED_CERTGEN_IMAGE localhost/codewire-ci/ingress-k
   fail 'sealed certgen was not assigned its disposable Kind reference'
 grep -Fq "docker:image inspect $SEALED_AGENT_IMAGE" "$CALLS" ||
   fail 'sealed agent-sandbox controller was not proven in the runner-preloaded Docker store'
-grep -Fq "docker:image tag $SEALED_AGENT_IMAGE localhost/codewire-ci/agent-sandbox-controller:verified-6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125" "$CALLS" ||
+grep -Fq "docker:image tag $SEALED_AGENT_IMAGE localhost/codewire-ci/agent-sandbox-controller:verified-872d7c1d2d3e01d3c5f5ec1509ea3620408f588547a355625ee00a0f63181615" "$CALLS" ||
   fail 'sealed agent-sandbox controller was not assigned its disposable Kind reference'
 grep -Fq "docker:image inspect $SEALED_WORKSPACE_IMAGE" "$CALLS" ||
   fail 'sealed workspace was not proven in the runner-preloaded Docker store'

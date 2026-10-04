@@ -45,7 +45,8 @@ Requirements:
   - The Sandbox has curl and egress to api.openai.com.
   - --phases also reads the credential service's secret-free timing lines for
     the run window with kubectl (read-only). Every proxied OpenAI API-key
-    request the service handled in that window is included.
+    request the service handled in that window is included. Its summary
+    counts the requests whose material cache use was hit, miss or bypass.
 
 Options:
   --env ID              Environment to run in (required)
@@ -237,6 +238,10 @@ jq -s --arg finished "$finished_at" '
         material_reads: ($requests | map(.material_reads) | pct(0.5)),
         provider_requests: ($requests | map(.provider_requests) | pct(0.5))
       }),
+      # How many requests reused decrypted material from their epoch (hit),
+      # read it through the store (miss) or never consulted a cache (bypass).
+      cache: ($requests | group_by(.cache // "unreported")
+        | map({key: (.[0].cache // "unreported"), value: length}) | from_entries),
       phases_ms: ([$phases[] as $phase | {
         key: $phase,
         value: {p50: ($requests | map(.[$phase]) | pct(0.5) | round1),

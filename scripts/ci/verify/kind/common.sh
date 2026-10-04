@@ -120,7 +120,7 @@ if [ -z "${APPROVED_KIND_INGRESS_CERTGEN_IMAGE+x}" ]; then
   APPROVED_KIND_INGRESS_CERTGEN_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
 fi
 if [ -z "${APPROVED_KIND_AGENT_SANDBOX_IMAGE+x}" ]; then
-  APPROVED_KIND_AGENT_SANDBOX_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125'
+  APPROVED_KIND_AGENT_SANDBOX_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:872d7c1d2d3e01d3c5f5ec1509ea3620408f588547a355625ee00a0f63181615'
 fi
 if [ -z "${APPROVED_KIND_WORKSPACE_IMAGE+x}" ]; then
   APPROVED_KIND_WORKSPACE_IMAGE='registry.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510'
@@ -135,7 +135,7 @@ if [ -z "${KIND_INGRESS_CERTGEN_LOCAL_IMAGE+x}" ]; then
   KIND_INGRESS_CERTGEN_LOCAL_IMAGE='localhost/codewire-ci/ingress-kube-webhook-certgen:verified-334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
 fi
 if [ -z "${KIND_AGENT_SANDBOX_LOCAL_IMAGE+x}" ]; then
-  KIND_AGENT_SANDBOX_LOCAL_IMAGE='localhost/codewire-ci/agent-sandbox-controller:verified-6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125'
+  KIND_AGENT_SANDBOX_LOCAL_IMAGE='localhost/codewire-ci/agent-sandbox-controller:verified-872d7c1d2d3e01d3c5f5ec1509ea3620408f588547a355625ee00a0f63181615'
 fi
 if [ -z "${KIND_WORKSPACE_LOCAL_IMAGE+x}" ]; then
   KIND_WORKSPACE_LOCAL_IMAGE='localhost/codewire-ci/workspace:verified-cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510'
@@ -244,6 +244,48 @@ render_kind_host_port_mappings() {
     fi
     sed -i "s/hostPort: ${default_port}\$/hostPort: ${requested_port}/" "$output"
   done < <(kind_host_port_mappings)
+}
+
+# The checked-in overlay and credential fixture name the default host ingress
+# origin. A cluster on a shifted KIND_INGRESS_HOST_PORT serves the same routes
+# on its own loopback port, so their rendered copies carry KIND_INGRESS_URL
+# instead. Each occurrence count is pinned so a new hard-coded origin fails here
+# rather than splitting the browser and IdP origins.
+KIND_OVERLAY_INGRESS_ORIGINS=4
+KIND_CREDENTIAL_FIXTURE_INGRESS_ORIGINS=1
+
+render_kind_ingress_origin() {
+  local file="$1" expected="$2" default_port
+  # The checked-in origin is the default ingress host port's (the first
+  # templated mapping), on the loopback address the harness clients dial.
+  default_port="$(kind_host_port_mappings | awk -F: 'NR == 1 { print $1 }')"
+  [ -n "$default_port" ] || return 1
+  python3 - "$file" "$expected" "http://127.0.0.1:${default_port}" "$KIND_INGRESS_URL" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+file, expected, default, origin = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+if not re.fullmatch(r"http://127\.0\.0\.1:[1-9][0-9]{3,4}", origin) or int(origin.rsplit(":", 1)[1]) > 65535:
+    raise SystemExit(f"KIND_INGRESS_URL must be http://127.0.0.1:<port> for the Kind overlay, got {origin}")
+path = Path(file)
+pattern = re.compile(re.escape(default) + r"(?![0-9])")
+text, count = pattern.subn(origin, path.read_text())
+if count != expected:
+    raise SystemExit(
+        f"Kind ingress origin occurrence mismatch in {path.name}: expected {expected}, got {count}"
+    )
+path.write_text(text)
+PY
+}
+
+# The credential fixture patch with this cluster's ingress origin, as a path.
+render_kind_credential_fixture_patch() {
+  local rendered="$RUN_DIR/credential-fixture-patch.yaml"
+  mkdir -p "$RUN_DIR"
+  cp "$ROOT/tests/e2e/kind/credential-fixture-patch.yaml" "$rendered"
+  render_kind_ingress_origin "$rendered" "$KIND_CREDENTIAL_FIXTURE_INGRESS_ORIGINS" >&2 || return $?
+  printf '%s\n' "$rendered"
 }
 
 acquire_kind_host_lock() {
@@ -1213,7 +1255,7 @@ import sys
 rendered, local_image = sys.argv[1:]
 path = Path(rendered)
 text = path.read_text()
-public_image = "ghcr.io/noeljackson/agent-sandbox-controller@sha256:555146af2337dd5d8baf0844d7f5de9a3cd8fc7b032b85756ae244bc2583fb41"
+public_image = "ghcr.io/noeljackson/agent-sandbox-controller@sha256:199efbb13e4af3fff69eaba218e5d36d3103568b2fa73e8606e7ad7da8c28609"
 pattern = re.compile(rf"(?m)^(?P<indent>[ ]*)image: {re.escape(public_image)}$")
 
 def replace(match: re.Match[str]) -> str:
@@ -1266,6 +1308,7 @@ for public, (local, expected) in replacements.items():
         )
 path.write_text(text)
 PY
+  render_kind_ingress_origin "$rendered" "$KIND_OVERLAY_INGRESS_ORIGINS" || return $?
   if validate_sealed_kind_images; then
     python3 - "$rendered" "$KIND_DIND_LOCAL_IMAGE" <<'PY' || return $?
 from pathlib import Path
@@ -3451,7 +3494,10 @@ VALUES ('$env_id', 'org_contract_1', 'usr_contract_admin', 'sandbox', 'pending',
         2000, 4096, 10, 'preset_contract_1',
         '{"schema_version":1,"working_directory":"/workspace"}'::jsonb);
 SQL
+  # Name this cluster's frontend: the binary's default-port frontend is
+  # another cluster's Temporal whenever the host ports are shifted.
   if ! DATABASE_URL="$KIND_DATABASE_URL" \
+    TEMPORAL_ADDRESS="$KIND_TEMPORAL_FRONTEND_URL" \
     SMOKE_ENV_ID="$env_id" "$CARGO_CI_DIR/temporal-smoke"; then
     kubectl -n "$NS" logs deploy/codewire-orchestration --tail=80 || true
     kubectl -n "$NS" logs deploy/temporal --tail=50 || true

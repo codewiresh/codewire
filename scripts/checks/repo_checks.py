@@ -10,6 +10,7 @@ from repo_policy.idp_security import check_idp_signing_kek_isolation
 from repo_policy.ses_security import check_ses_sender_isolation
 from repo_policy.turnstile_security import check_turnstile_access_projection
 from repo_policy.licensing import check_license_map
+from repo_policy.material_cache import check_epoch_material_cache_owner
 from repo_policy.mesh import check_mesh_surface_freeze
 from repo_policy.orchestration_security import check_orchestration_host_key_authz
 from repo_policy.permanent_raw import check_permanent_raw_surface
@@ -66,6 +67,9 @@ def main(argv: list[str] | None = None) -> int:
     design_parser.add_argument("--self-test", action="store_true")
     design_parser.add_argument("--root", default=str(ROOT))
     design_parser.set_defaults(func=check_design_tokens)
+    material_cache_parser = subparsers.add_parser("epoch-material-cache-owner")
+    material_cache_parser.add_argument("--self-test", action="store_true")
+    material_cache_parser.set_defaults(func=check_epoch_material_cache_owner)
 
     args = parser.parse_args(argv)
     return args.func(args)
