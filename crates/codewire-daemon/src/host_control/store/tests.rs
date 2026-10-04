@@ -9,6 +9,101 @@ fn admitted(root: &Path) -> Store {
     store
 }
 
+fn managed_admitted(root: &Path) -> Store {
+    let config = config(root);
+    let mut store = Store::open(&config.host.unwrap().state_root, &scope().environment_id).unwrap();
+    let mut request = grant(&scope(), 0);
+    request.grant.as_mut().unwrap().verbs = (1..=11).collect();
+    store.put_grant(request).unwrap();
+    store
+}
+fn managed_launch(id: u128) -> Mutation {
+    Mutation::from_wire(v1::HostControlMutationRequest {
+        request_id: Uuid::from_u128(id).to_string(),
+        scope: Some(scope().to_wire()),
+        operation: Some(v1::host_control_mutation_request::Operation::ManagedLaunch(
+            v1::HostControlManagedLaunch {
+                agent: 1,
+                model: "synthetic".into(),
+                effort: Some("max".into()),
+                prompt: Some("hello".into()),
+                ..Default::default()
+            },
+        )),
+    })
+    .unwrap()
+}
+#[test]
+fn member_managed_store_preserves_reserved_ids_and_never_reissues_pending_or_issued_after_reload() {
+    for issued in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = managed_admitted(temp.path());
+        let request = managed_launch(3);
+        let pending = store.register(&request).unwrap();
+        assert_eq!(pending.driver_id, request.request_id);
+        assert_eq!(pending.message_id, request.request_id);
+        if issued {
+            store.issue(&request).unwrap();
+        }
+        drop(store);
+        let mut recovered =
+            Store::open(&temp.path().join("state"), &scope().environment_id).unwrap();
+        let observed = recovered.find(&request.request_id).unwrap().unwrap();
+        assert_eq!(observed.phase, v1::HostControlRequestPhase::Unknown as i32);
+        assert_eq!(observed.driver_id, request.request_id);
+        assert_eq!(observed.message_id, request.request_id);
+        assert!(matches!(recovered.issue(&request), Err(Error::Conflict)));
+        assert!(!temp.path().join("state/sessions").exists());
+        recovered
+            .revoke_grant(v1::HostControlRevokeGrantRequest {
+                expected_book_revision: 1,
+                grant_id: scope().grant_id,
+                expected_grant_revision: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            recovered
+                .find(&request.request_id)
+                .unwrap()
+                .unwrap()
+                .to_wire(),
+            observed.to_wire()
+        );
+    }
+}
+#[test]
+fn member_managed_store_refuses_rebound_message_driver_and_false_restart_generation() {
+    for field in ["message", "driver", "requested-zero", "launch-generation"] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = managed_admitted(temp.path());
+        let request = managed_launch(3);
+        store.register(&request).unwrap();
+        let path = temp
+            .path()
+            .join("state/host-control")
+            .join(&store.snapshots.last().unwrap().name);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let receipt = &mut value["requests"][&request.request_id];
+        match field {
+            "message" => receipt["message_id"] = serde_json::json!(Uuid::from_u128(8).to_string()),
+            "driver" => receipt["driver_id"] = serde_json::json!(Uuid::from_u128(9).to_string()),
+            "requested-zero" => receipt["requested_generation"] = serde_json::json!(0),
+            "launch-generation" => receipt["requested_generation"] = serde_json::json!(2),
+            _ => unreachable!(),
+        };
+        drop(store);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            matches!(
+                Store::open(&temp.path().join("state"), &scope().environment_id),
+                Err(Error::Storage)
+            ),
+            "{field}"
+        );
+    }
+}
+
 #[test]
 fn host_control_store_recovery_never_upgrades_pending_or_issued_to_permission_to_replay() {
     for issued in [false, true] {

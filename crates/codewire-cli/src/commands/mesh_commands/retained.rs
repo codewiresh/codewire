@@ -76,6 +76,21 @@ pub(crate) struct StateDir {
     directory: File,
 }
 
+/// Member cleanup retains the original descriptor, rather than treating equal
+/// JSON bytes in a replacement inode as ownership of the original record.
+pub(crate) struct MemberRecord {
+    name: String,
+    file: File,
+    stamp: FileStamp,
+    bytes: Vec<u8>,
+}
+
+impl MemberRecord {
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 impl StateDir {
     pub(crate) fn open(path: &Path, create: bool) -> anyhow::Result<Option<Self>> {
         if create {
@@ -257,6 +272,61 @@ impl StateDir {
         Ok(())
     }
 
+    pub(crate) fn hold_member_record(&self, name: &str) -> anyhow::Result<Option<MemberRecord>> {
+        anyhow::ensure!(
+            matches!(
+                name,
+                "member-runtime.json" | "member-ready.json" | "member-starting.json"
+            ),
+            "member cleanup record name is invalid"
+        );
+        let Some(mut file) = self.named_file(name, libc::O_RDONLY, MAX_STATE)? else {
+            return Ok(None);
+        };
+        let before = private_file(&file, MAX_STATE)?;
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(MAX_STATE as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        let record = MemberRecord {
+            name: name.into(),
+            file,
+            stamp: stamp(&before),
+            bytes,
+        };
+        self.validate_member_record(&record)?;
+        Ok(Some(record))
+    }
+
+    pub(crate) fn validate_member_record(&self, record: &MemberRecord) -> anyhow::Result<()> {
+        self.check(true)?;
+        anyhow::ensure!(
+            record.bytes.len() <= MAX_STATE,
+            "member record exceeds its bound"
+        );
+        let held = private_file(&record.file, MAX_STATE)?;
+        let current = fs::symlink_metadata(self.path.join(&record.name))?;
+        anyhow::ensure!(
+            record.stamp == stamp(&held) && record.stamp == stamp(&current),
+            "member record identity changed before cleanup"
+        );
+        anyhow::ensure!(
+            self.read(&record.name)?.as_deref() == Some(record.bytes()),
+            "member record bytes changed before cleanup"
+        );
+        self.check(true)
+    }
+
+    pub(crate) fn remove_member_record(&self, record: &MemberRecord) -> anyhow::Result<()> {
+        self.validate_member_record(record)?;
+        let name = std::ffi::CString::new(record.name.as_str())?;
+        if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        self.directory.sync_all()?;
+        Ok(())
+    }
+
     pub(crate) fn log(&self, name: &str) -> anyhow::Result<File> {
         self.check(true)?;
         if let Some(file) =
@@ -423,6 +493,7 @@ impl ExecutableIdentity {
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum HelperRole {
+    HostMember,
     EmbeddedMesh,
     EmbeddedDerp,
     ExternalMesh,
@@ -432,6 +503,17 @@ pub(crate) enum HelperRole {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum HelperConfiguration {
+    HostMember {
+        directory: PathBuf,
+        environment_id: String,
+        host_root: PathBuf,
+        origin: String,
+        org: String,
+        network: String,
+        control_key: String,
+        wg_key: String,
+        derp_only: bool,
+    },
     Mesh {
         base_url: String,
         listen_addr: String,
@@ -692,6 +774,48 @@ impl ProcessCustody {
         ];
         match (role, configuration) {
             (
+                HelperRole::HostMember,
+                HelperConfiguration::HostMember {
+                    directory,
+                    environment_id,
+                    host_root,
+                    origin,
+                    org,
+                    network,
+                    control_key,
+                    wg_key,
+                    derp_only,
+                },
+            ) => {
+                arguments.extend([
+                    "__host-member".into(),
+                    "--directory".into(),
+                    directory
+                        .to_str()
+                        .context("member directory invalid")?
+                        .into(),
+                    "--environment".into(),
+                    environment_id.clone(),
+                    "--host-root".into(),
+                    host_root
+                        .to_str()
+                        .context("member host root invalid")?
+                        .into(),
+                    "--origin".into(),
+                    origin.clone(),
+                    "--org".into(),
+                    org.clone(),
+                    "--network".into(),
+                    network.clone(),
+                    "--control-key".into(),
+                    control_key.clone(),
+                    "--wg-key".into(),
+                    wg_key.clone(),
+                    "--derp-only".into(),
+                    derp_only.to_string(),
+                ]);
+            }
+            (
                 HelperRole::EmbeddedMesh | HelperRole::ExternalMesh,
                 HelperConfiguration::Mesh {
                     base_url,
@@ -754,6 +878,34 @@ impl ProcessCustody {
                 "helper authorization projection is invalid"
             );
         }
+        if let HelperConfiguration::HostMember {
+            environment_id,
+            directory,
+            host_root,
+            origin,
+            org,
+            network,
+            control_key,
+            wg_key,
+            ..
+        } = &self.configuration
+        {
+            anyhow::ensure!(
+                uuid::Uuid::parse_str(environment_id).is_ok()
+                    && directory.is_absolute()
+                    && host_root.is_absolute()
+                    && origin.len() <= 2048
+                    && !org.is_empty()
+                    && org.len() <= 128
+                    && !network.is_empty()
+                    && network.len() <= 128
+                    && [control_key, wg_key].iter().all(|key| key.len() == 64
+                        && key
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
+                "member retained configuration is invalid"
+            );
+        }
         Ok(())
     }
 
@@ -791,6 +943,199 @@ impl ProcessCustody {
         handle.validate(self)?;
         Ok(handle)
     }
+
+    pub(crate) fn pin_member(&self) -> anyhow::Result<PinnedProcess> {
+        anyhow::ensure!(
+            self.role == HelperRole::HostMember,
+            "retained process is not a member helper"
+        );
+        self.pin(
+            self.pid,
+            self.executable
+                .path
+                .to_str()
+                .context("member executable invalid")?,
+        )
+    }
+    pub(crate) fn member_configuration(&self) -> anyhow::Result<&HelperConfiguration> {
+        self.validate_binding()?;
+        anyhow::ensure!(
+            self.role == HelperRole::HostMember,
+            "retained process is not a member helper"
+        );
+        Ok(&self.configuration)
+    }
+    pub(crate) fn member_nonce(&self) -> &str {
+        &self.launch_nonce
+    }
+    pub(crate) fn member_pid(&self) -> u32 {
+        self.pid
+    }
+    /// A retained private record proves a prior admitted incarnation. Absence
+    /// or a different birth proves only that incarnation ended; it grants no
+    /// authority to signal a numeric replacement or stop delegated sessions.
+    pub(crate) fn member_terminal(&self) -> anyhow::Result<bool> {
+        self.member_configuration()?;
+        anyhow::ensure!(
+            self.schema_version == 1
+                && self.uid == euid()
+                && self.pid > 0
+                && self.pid <= i32::MAX as u32
+                && self.start_ticks > 0
+                && uuid::Uuid::parse_str(&self.boot_id)
+                    .is_ok_and(|id| !id.is_nil() && id.to_string() == self.boot_id),
+            "member retained birth identity unavailable"
+        );
+        anyhow::ensure!(
+            ExecutableIdentity::admit(&self.executable.path)? == self.executable,
+            "retained member image changed or disappeared"
+        );
+        if self.boot_id != boot_id()? {
+            return Ok(true);
+        }
+        let directory = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(format!("/proc/{}", self.pid))
+        {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error) => return Err(error.into()),
+        };
+        let bytes = read_proc(&directory, "stat", 4096)?;
+        let text = std::str::from_utf8(&bytes)?;
+        let fields = text
+            .rsplit_once(") ")
+            .context("member birth metadata unavailable")?
+            .1
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        anyhow::ensure!(fields.len() > 19, "member birth metadata unavailable");
+        let start: u64 = fields[19].parse()?;
+        anyhow::ensure!(start > 0, "member kernel birth identity unavailable");
+        if start != self.start_ticks {
+            return Ok(true);
+        }
+        if !matches!(fields[0], "Z" | "X") {
+            return Ok(false);
+        }
+        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, self.pid, 0) };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error()).context("pin terminal member incarnation");
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
+        let mut item = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        anyhow::ensure!(
+            unsafe { libc::poll(&mut item, 1, 0) } >= 0
+                && item.revents & (libc::POLLERR | libc::POLLNVAL) == 0,
+            "member terminal custody unavailable"
+        );
+        // The held proc directory still proves the captured birth; the pidfd
+        // supplies actual terminal state, rather than trusting a state string.
+        let after = read_proc(&directory, "stat", 4096)?;
+        anyhow::ensure!(
+            after == bytes,
+            "member birth changed during terminal admission"
+        );
+        Ok(item.revents & (libc::POLLIN | libc::POLLHUP) != 0)
+    }
+}
+
+/// A member helper has no provider/shell descendants. Its enrollment is sent
+/// once through stdin, never durable argv, environment, config or log output.
+pub(crate) struct OwnedMember {
+    child: std::process::Child,
+    handle: PinnedProcess,
+    pub(crate) custody: ProcessCustody,
+    retained: bool,
+}
+impl OwnedMember {
+    pub(crate) fn retain(mut self) -> ProcessCustody {
+        self.retained = true;
+        self.custody.clone()
+    }
+    pub(crate) fn live(&self) -> anyhow::Result<()> {
+        self.handle.validate(&self.custody)
+    }
+}
+impl Drop for OwnedMember {
+    fn drop(&mut self) {
+        if !self.retained {
+            let _ = self.handle.signal(libc::SIGKILL);
+            let _ = self.child.wait();
+        }
+    }
+}
+pub(crate) fn spawn_member(
+    directory: &StateDir,
+    executable: ExecutableIdentity,
+    configuration: HelperConfiguration,
+    enrollment: &[u8],
+) -> anyhow::Result<OwnedMember> {
+    anyhow::ensure!(
+        matches!(configuration, HelperConfiguration::HostMember { .. })
+            && !enrollment.is_empty()
+            && enrollment.len() <= 8192,
+        "member enrollment or role invalid"
+    );
+    let arguments = ProcessCustody::expected_arguments(
+        &executable.path,
+        HelperRole::HostMember,
+        &configuration,
+    )?;
+    let log = directory.log("member-helper.log")?;
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let mut command = ProcessCommand::new(&executable.path);
+    command
+        .arg0(&arguments[0])
+        .args(&arguments[1..])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log));
+    configure_environment(&mut command, &configuration, &nonce);
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 || libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().context("start exact member helper")?;
+    let (custody, handle) = match ProcessCustody::capture(
+        &child,
+        executable,
+        HelperRole::HostMember,
+        arguments,
+        configuration,
+        nonce,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    let mut owned = OwnedMember {
+        child,
+        handle,
+        custody,
+        retained: false,
+    };
+    let mut input = owned
+        .child
+        .stdin
+        .take()
+        .context("member bootstrap pipe absent")?;
+    input.write_all(enrollment)?;
+    drop(input);
+    owned.live()?;
+    Ok(owned)
 }
 
 struct OwnedHelper {
@@ -827,6 +1172,9 @@ fn spawn_helper(
 ) -> anyhow::Result<OwnedHelper> {
     let arguments = ProcessCustody::expected_arguments(&executable.path, role, &configuration)?;
     let log_name = match &configuration {
+        HelperConfiguration::HostMember { .. } => {
+            anyhow::bail!("member helper requires its dedicated launch adapter")
+        }
         HelperConfiguration::Mesh { .. } => LOCAL_MESH_LOG_FILE,
         HelperConfiguration::Derp { .. } => LOCAL_DERP_LOG_FILE,
     };
@@ -894,6 +1242,7 @@ fn launch_environment(
 ) -> BTreeMap<String, String> {
     let mut projection = BTreeMap::from([(NONCE_ENV.to_owned(), nonce.to_owned())]);
     match configuration {
+        HelperConfiguration::HostMember { .. } => {}
         HelperConfiguration::Mesh {
             organization_id,
             api_key_hash,

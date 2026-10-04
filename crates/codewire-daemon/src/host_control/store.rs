@@ -147,16 +147,66 @@ impl Book {
                     v1::HostControlVerb::try_from(receipt.verb),
                     Ok(v1::HostControlVerb::Launch
                         | v1::HostControlVerb::Input
-                        | v1::HostControlVerb::Stop)
+                        | v1::HostControlVerb::Stop
+                        | v1::HostControlVerb::ManagedLaunch
+                        | v1::HostControlVerb::ManagedMessage
+                        | v1::HostControlVerb::ManagedSteer
+                        | v1::HostControlVerb::ManagedInterrupt
+                        | v1::HostControlVerb::ManagedStop
+                        | v1::HostControlVerb::ManagedRestart)
                 )
                 || v1::HostControlRequestPhase::try_from(receipt.phase).is_err()
                 || receipt.phase == v1::HostControlRequestPhase::Unspecified as i32
                 || v1::SessionLifecycleState::try_from(receipt.session_state).is_err()
                 || !valid_reason(&receipt.reason)
                 || (receipt.input_acknowledged
-                    && (receipt.verb != v1::HostControlVerb::Input as i32
+                    && (!super::managed::is_input(receipt.verb)
                         || receipt.phase != v1::HostControlRequestPhase::Completed as i32))
             {
+                return Err(Error::Storage);
+            }
+            if super::managed::is_managed(receipt.verb) {
+                super::canonical_uuid(&receipt.driver_id).map_err(|_| Error::Storage)?;
+                if receipt.session_id != format!("session-{}", receipt.driver_id)
+                    || receipt.requested_generation == 0
+                {
+                    return Err(Error::Storage);
+                }
+                if super::managed::is_input(receipt.verb)
+                    && receipt.message_id != receipt.origin.request_id
+                {
+                    return Err(Error::Storage);
+                }
+                if (receipt.verb == v1::HostControlVerb::ManagedLaunch as i32
+                    && (!receipt.message_id.is_empty()
+                        && receipt.message_id != receipt.origin.request_id
+                        || receipt.requested_generation != 1))
+                    || (matches!(receipt.verb, 9 | 10) && !receipt.message_id.is_empty())
+                {
+                    return Err(Error::Storage);
+                }
+                if !receipt.message_id.is_empty() {
+                    super::canonical_uuid(&receipt.message_id).map_err(|_| Error::Storage)?;
+                }
+                let next = receipt.requested_generation.checked_add(1);
+                if receipt.generation != receipt.requested_generation
+                    && !(receipt.verb == v1::HostControlVerb::ManagedRestart as i32
+                        && Some(receipt.generation) == next
+                        && matches!(
+                            v1::HostControlRequestPhase::try_from(receipt.phase),
+                            Ok(v1::HostControlRequestPhase::Completed
+                                | v1::HostControlRequestPhase::Unknown)
+                        ))
+                {
+                    return Err(Error::Storage);
+                }
+                if receipt.verb == v1::HostControlVerb::ManagedRestart as i32
+                    && receipt.phase == v1::HostControlRequestPhase::Completed as i32
+                    && Some(receipt.generation) != next
+                {
+                    return Err(Error::Storage);
+                }
+            } else if !receipt.driver_id.is_empty() || !receipt.message_id.is_empty() {
                 return Err(Error::Storage);
             }
             let phase =
@@ -205,10 +255,9 @@ impl Book {
                                 | v1::SessionLifecycleState::Starting
                                 | v1::SessionLifecycleState::Stopping
                         )
-                        || (receipt.verb == v1::HostControlVerb::Stop as i32
+                        || (super::managed::is_stop(receipt.verb)
                             && state == v1::SessionLifecycleState::Running)
-                        || receipt.input_acknowledged
-                            != (receipt.verb == v1::HostControlVerb::Input as i32)
+                        || receipt.input_acknowledged != super::managed::is_input(receipt.verb)
                         || receipt.reason
                             != if receipt.input_acknowledged {
                                 "input_acknowledged"
@@ -239,7 +288,7 @@ impl Book {
                 .ok_or(Error::Storage)?;
             if !grant.scope.same_principal(&receipt.origin.scope)
                 || receipt.origin.scope.grant_revision > grant.scope.grant_revision
-                || (receipt.verb == v1::HostControlVerb::Launch as i32
+                || (super::managed::is_launch(receipt.verb)
                     && receipt.session_id != format!("session-{id}"))
             {
                 return Err(Error::Storage);
@@ -271,7 +320,7 @@ fn valid_reason(value: &str) -> bool {
 
 fn validate_verbs(verbs: &[i32]) -> Result<(), Error> {
     if verbs.is_empty()
-        || verbs.len() > 4
+        || verbs.len() > 11
         || !verbs.windows(2).all(|pair| pair[0] < pair[1])
         || verbs.iter().any(|verb| {
             !matches!(
@@ -279,7 +328,14 @@ fn validate_verbs(verbs: &[i32]) -> Result<(), Error> {
                 Ok(v1::HostControlVerb::Read
                     | v1::HostControlVerb::Launch
                     | v1::HostControlVerb::Input
-                    | v1::HostControlVerb::Stop)
+                    | v1::HostControlVerb::Stop
+                    | v1::HostControlVerb::ManagedLaunch
+                    | v1::HostControlVerb::ManagedMessage
+                    | v1::HostControlVerb::ManagedSteer
+                    | v1::HostControlVerb::ManagedInterrupt
+                    | v1::HostControlVerb::ManagedStop
+                    | v1::HostControlVerb::ManagedRestart
+                    | v1::HostControlVerb::ManagedRead)
             )
         })
     {
@@ -650,7 +706,7 @@ impl Store {
             let request_id = name.strip_prefix("session-").ok_or(Error::Storage)?;
             let receipt = self.book.requests.get(request_id).ok_or(Error::Storage)?;
             if receipt.session_id != name
-                || receipt.verb != v1::HostControlVerb::Launch as i32
+                || !super::managed::is_launch(receipt.verb)
                 || !matches!(
                     v1::HostControlRequestPhase::try_from(receipt.phase),
                     Ok(v1::HostControlRequestPhase::Issued | v1::HostControlRequestPhase::Unknown)
@@ -789,7 +845,7 @@ impl Store {
             .get(&request.request_id)
             .ok_or(Error::Conflict)?;
         if receipt.origin != request.origin()
-            || receipt.verb != v1::HostControlVerb::Launch as i32
+            || !super::managed::is_launch(receipt.verb)
             || receipt.phase != v1::HostControlRequestPhase::Issued as i32
             || metadata.len() > MAX_SESSION_METADATA_BYTES
         {
@@ -1018,7 +1074,15 @@ impl Store {
             Ok(record) => {
                 if receipt.phase != v1::HostControlRequestPhase::Issued as i32
                     || record.session_id != receipt.session_id
-                    || record.launch_generation != receipt.generation
+                    || record.launch_generation
+                        != if request.verb() == v1::HostControlVerb::ManagedRestart {
+                            receipt
+                                .requested_generation
+                                .checked_add(1)
+                                .ok_or(Error::Conflict)?
+                        } else {
+                            receipt.generation
+                        }
                 {
                     return Err(Error::Conflict);
                 }
@@ -1028,10 +1092,11 @@ impl Store {
                     v1::HostControlRequestPhase::Completed
                 } as i32;
                 receipt.session_state = record.state;
+                receipt.generation = record.launch_generation;
                 receipt.exit_code = record.exit_code;
                 receipt.cleanup_unknown = record.cleanup_unknown;
                 receipt.input_acknowledged =
-                    request.verb() == v1::HostControlVerb::Input && !record.cleanup_unknown;
+                    super::managed::is_input(request.verb() as i32) && !record.cleanup_unknown;
                 receipt.reason = if record.cleanup_unknown {
                     "cleanup_unknown"
                 } else if receipt.input_acknowledged {

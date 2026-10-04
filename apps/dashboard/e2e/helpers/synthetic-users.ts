@@ -5,6 +5,13 @@ import type postgres from "postgres";
 // provider credential. Production sign-in verifies the encoded parameters.
 export const TEST_PASSWORD_HASH = "$argon2id$v=19$m=65536,t=3,p=1$ajS0+W4G4VKEvSmIJj2ZSiPnNdORFB0LmKXmXIXahes$7XWR9Ucge0x9Y/Iz/RLyH1YXdrFNtyxM9g8KImRswkE";
 
+// Each Playwright worker process acts as its own master-class identity so
+// org and personal-store mutations never cross between concurrent specs.
+// The ceiling is seeded eagerly; a higher --workers count self-seeds lazily.
+export const WORKER_IDENTITY_CEILING = 4;
+export const workerIdentityEmail = (index: number) => `e2e-worker-${index}@codewire.sh`;
+export const workerIdentityName = (index: number) => `E2E Worker ${index}`;
+
 /** Test-database fixture authority, never a production signup bypass. */
 export async function seedSyntheticIdentity(
   sql: postgres.Sql,
@@ -35,4 +42,14 @@ export async function seedSyntheticIdentity(
       VALUES ($1, $2, 'credential', $3, $4)
     `, [randomBytes(16).toString("hex"), user.id, email, TEST_PASSWORD_HASH]);
   });
+}
+
+/** Seed the per-worker dashboard identities 0..count-1 (idempotent). */
+export async function seedWorkerIdentities(
+  sql: postgres.Sql,
+  count: number,
+): Promise<void> {
+  for (let index = 0; index < count; index += 1) {
+    await seedSyntheticIdentity(sql, workerIdentityEmail(index), workerIdentityName(index));
+  }
 }

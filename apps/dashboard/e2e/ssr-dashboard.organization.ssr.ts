@@ -1,10 +1,6 @@
-import { expect, test } from "@playwright/test";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { expect, test } from "./helpers/test";
 import { cleanupTestOrg } from "./helpers/org";
 
-const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const authState = path.join(dashboardDir, "playwright/.auth/user.json");
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 const slugPrefix = `ssr-create-${Date.now()}`;
 
@@ -153,13 +149,13 @@ test.describe("server-rendered organization creation", () => {
     await expect(page.getByText("An organization with this slug already exists")).toBeVisible();
   });
 
-  test("creates an organization with JavaScript disabled and a normal redirect", async ({ browser, isMobile }) => {
+  test("creates an organization with JavaScript disabled and a normal redirect", async ({ browser, isMobile, workerStorageState }) => {
     test.skip(!!isMobile, "covered by the desktop no-JavaScript contract");
     const slug = `${slugPrefix}-no-js`;
     const context = await browser.newContext({
       baseURL: ssrUrl,
       javaScriptEnabled: false,
-      storageState: authState,
+      storageState: workerStorageState,
     });
     const page = await context.newPage();
     await page.goto("/organizations/new/");

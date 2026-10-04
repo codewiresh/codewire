@@ -101,6 +101,13 @@ const LOCAL_DERP_LOG_FILE: &str = "codewire-derp.log";
 struct Cli {
     #[arg(short, long, global = true, help = "Platform server URL override")]
     server: Option<String>,
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "server",
+        help = "Pinned trusted host member"
+    )]
+    member: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -108,6 +115,7 @@ struct Cli {
 #[derive(Clone, Debug)]
 struct Globals {
     server: Option<String>,
+    member: Option<String>,
 }
 
 mod commands;
@@ -235,6 +243,9 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(about = "Manage trusted Mesh access to a local host")]
     Control(HostControlArgs),
+    #[cfg(target_os = "linux")]
+    #[command(about = "Manage pinned trusted host members")]
+    Member(MemberArgs),
     #[command(name = "__hosted-daemon", hide = true)]
     HostedDaemon,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -314,11 +325,23 @@ where
     let Command::EnvironmentLaunch(args) = cli.command else {
         return Err(invalid());
     };
-    if cli.server.is_some() {
+    if cli.server.is_some() || cli.member.is_some() {
         return Err(invalid());
     }
     codewire_daemon::execution::run_environment_launcher(&args.projection_socket, &args.command)
         .map_err(|_| invalid())
+}
+
+#[cfg(target_os = "linux")]
+pub async fn run_host_member_helper_from(arguments: Vec<std::ffi::OsString>) -> anyhow::Result<()> {
+    commands::run_host_member_helper(arguments).await
+}
+
+/// Run the fixed target-owned managed record adapter without ordinary CLI
+/// configuration, provider resolution or caller-selected executable paths.
+#[cfg(target_os = "linux")]
+pub async fn run_host_agent_control_from(arguments: Vec<std::ffi::OsString>) -> anyhow::Result<()> {
+    commands::run_host_agent_control(arguments).await
 }
 
 /// Preserve the fixed private worker failure taxonomy across the thin binary
@@ -369,17 +392,62 @@ fn require_local_broker_smoke_executable() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_member_mutation_flags(cli: &Cli) -> anyhow::Result<()> {
+    if cli.member.is_none() {
+        match &cli.command {
+            Command::Stop(args)
+            | Command::Restart(args)
+            | Command::Interrupt(args)
+            | Command::Inbox(args) => anyhow::ensure!(
+                args.request_id.is_none() && args.expected_launch_generation.is_none(),
+                "member mutation flags require --member"
+            ),
+            Command::Msg(args) | Command::Steer(args) => anyhow::ensure!(
+                args.request_id.is_none() && args.expected_launch_generation.is_none(),
+                "member mutation flags require --member"
+            ),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub async fn run_from<I, T>(args: I) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
     let cli = Cli::parse_from(args);
+    validate_member_mutation_flags(&cli)?;
+    if cli.member.is_some() {
+        #[cfg(target_os = "linux")]
+        anyhow::ensure!(
+            matches!(
+                &cli.command,
+                Command::Run(_)
+                    | Command::List(_)
+                    | Command::Send(_)
+                    | Command::Logs(_)
+                    | Command::Wait(_)
+                    | Command::Stop(_)
+                    | Command::Restart(_)
+                    | Command::Msg(_)
+                    | Command::Steer(_)
+                    | Command::Interrupt(_)
+                    | Command::Inbox(_)
+                    | Command::Member(_)
+            ),
+            "--member supports run, list, send, logs, wait, stop, restart, msg, steer, interrupt, inbox and member commands"
+        );
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!("trusted host member commands require Linux");
+    }
     // Validate an explicitly selected Mesh state root before any ordinary
     // command effects, including routes that otherwise need only platform state.
     ResolvePaths::from_env(&OsEnv)?;
     let globals = Globals {
         server: cli.server.clone(),
+        member: cli.member.clone(),
     };
     match cli.command {
         Command::Config {
@@ -431,6 +499,8 @@ where
         Command::Mesh { command } => handle_mesh_command(&globals, command).await,
         #[cfg(target_os = "linux")]
         Command::Control(args) => handle_host_control_command(&globals, args).await,
+        #[cfg(target_os = "linux")]
+        Command::Member(args) => handle_member_command(&globals, args).await,
         Command::HostedDaemon => run_hosted_daemon().await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeSupervisor(args) => run_native_supervisor(args).await,

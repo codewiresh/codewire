@@ -344,6 +344,9 @@ def produce(args):
             result = run_solve(command, source_dir, prepared.path / "build.log", time.monotonic() + producer.BUILD_BOUND)
             prepared.revalidate()
             return producer.finish(prepared, result, args.builder)
+        except SolveFailure:
+            failed_solve_log(prepared.path / "build.log")
+            raise
         except BaseException:
             # The producer retains its compiler log and history in its receipt.
             # Successful output here would mix those vertices into the caller's
@@ -357,6 +360,22 @@ def stream_log(path):
         with closing(asset.HeldFile(path, 256 * 1024 * 1024)) as held:
             sys.stderr.buffer.write(held.data)
             sys.stderr.buffer.flush()
+
+
+def failed_solve_log(path, *, terminal=False):
+    """Diagnostics cannot replace an already-owned failed solve outcome."""
+    try:
+        if terminal:
+            with closing(asset.HeldFile(path, 256 * 1024 * 1024)) as held:
+                lines = [line for line in held.data.splitlines() if line.strip()]
+                if lines and len(lines[-1]) <= 4096:
+                    sys.stderr.buffer.write(lines[-1] + b"\n")
+        else:
+            stream_log(path)
+    except (OSError, ValueError):
+        # Keep intake strict: unreadable, empty or unsafe logs are not read
+        # through another path and cannot qualify a receipt or a retry.
+        pass
 
 
 def consume(args, command):
@@ -387,7 +406,13 @@ def consume_plan(args, source_dir, cwd, version, plan, held):
         held.revalidate()
         try:
             result = run_solve(command, cwd, output / "build.log", time.monotonic() + BOUND)
-        finally:
+        except SolveFailure:
+            failed_solve_log(output / "build.log")
+            raise
+        except BaseException:
+            stream_log(output / "build.log")
+            raise
+        else:
             stream_log(output / "build.log")
         held.revalidate()
         return {"status": "native-arm-consumer" if targets else "unrelated-product-consumer",
@@ -410,7 +435,13 @@ def consume_plan(args, source_dir, cwd, version, plan, held):
             held.revalidate()
             try:
                 result = run_solve(operation, cwd, output / "build.log", time.monotonic() + BOUND)
-            finally:
+            except SolveFailure:
+                failed_solve_log(output / "build.log")
+                raise
+            except BaseException:
+                stream_log(output / "build.log")
+                raise
+            else:
                 stream_log(output / "build.log")
             admitted.revalidate()
             context.revalidate()
@@ -484,14 +515,14 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except SolveFailure as error:
-        print("cw-image-consumer: solve failed; owned outputs retained", file=sys.stderr)
+        try:
+            print("cw-image-consumer: solve failed; owned outputs retained", file=sys.stderr)
+        except OSError:
+            pass
         if error.code == 1:
             # Preserve the real terminal Buildx diagnostic for the existing
             # cache owner's one diagnosed read-failure retry predicate.
-            with closing(asset.HeldFile(error.log, 256 * 1024 * 1024)) as held:
-                lines = [line for line in held.data.splitlines() if line.strip()]
-                if lines and len(lines[-1]) <= 4096:
-                    sys.stderr.buffer.write(lines[-1] + b"\n")
+            failed_solve_log(error.log, terminal=True)
         sys.exit(error.code)
     except (OSError, ValueError, KeyError, TypeError, release.ReleaseError, asset.release.ReleaseError):
         print("cw-image-consumer: build refused; owned outputs retained", file=sys.stderr)

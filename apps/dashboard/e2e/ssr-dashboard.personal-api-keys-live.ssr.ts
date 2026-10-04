@@ -1,12 +1,8 @@
-import { expect, test, type Page } from "@playwright/test";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { getUserId } from "./helpers/db";
+import { expect, test } from "./helpers/test";
+import type { Page } from "@playwright/test";
+import { ensureWorkerIdentity } from "./helpers/worker-identity";
 import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
-import { USERS } from "./helpers/seed";
 
-const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const authState = path.join(dashboardDir, "playwright/.auth/user.json");
 const origin = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 const slug = `ssr-personal-keys-${Date.now()}`;
 let organizationId = "";
@@ -26,11 +22,9 @@ async function checkReveal(page: Page) {
 }
 
 test.describe.serial("personal Codewire API keys through the managed app", () => {
-  test.beforeAll(async () => {
+  test.beforeAll(async ({}, testInfo) => {
     test.skip(!!process.env.CODEWIRE_DESIGN_ORIGIN, "Authenticated managed-app journey, not an editable fixture");
-    const owner = await getUserId(USERS.master.email);
-    if (!owner) throw new Error("Synthetic owner was not seeded");
-    organizationId = await ensureTestOrg("AAA Personal API Keys", slug, owner);
+    organizationId = await ensureTestOrg("AAA Personal API Keys", slug, await ensureWorkerIdentity(testInfo.workerIndex));
   });
 
   test.afterAll(async () => {
@@ -83,9 +77,9 @@ test.describe.serial("personal Codewire API keys through the managed app", () =>
     await expect(row).toHaveCount(0);
   });
 
-  test("keeps Create and Delete usable without JavaScript or raw-key readback", async ({ browser, isMobile }) => {
+  test("keeps Create and Delete usable without JavaScript or raw-key readback", async ({ browser, isMobile, workerStorageState }) => {
     const context = await browser.newContext({
-      javaScriptEnabled: false, storageState: authState, baseURL: origin,
+      javaScriptEnabled: false, storageState: workerStorageState, baseURL: origin,
       viewport: isMobile ? { width: 390, height: 844 } : { width: 1440, height: 900 },
     });
     const page = await context.newPage();

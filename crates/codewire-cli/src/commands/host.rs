@@ -725,7 +725,8 @@ pub(crate) async fn run_host_daemon(args: HostDaemonArgs) -> anyhow::Result<()> 
     #[cfg(target_os = "linux")]
     let result = codewire_daemon::serve_host_control_grpc_with_incoming(
         config,
-        codewire_daemon::host_control::HostControlBinding::new(environment.id.clone())?,
+        codewire_daemon::host_control::HostControlBinding::new(environment.id.clone())?
+            .with_managed_agents(),
         incoming,
         shutdown,
     )

@@ -751,6 +751,23 @@ wait_kind_credential_environment '%s' running
             '::error::credential fixture environment observation failed while waiting for running',
             result.stderr)
 
+    def test_environment_observation_failure_survives_an_empty_successful_jq(self):
+        # Older jq variants exit 0 with no output on empty input (the job
+        # image's jq, where -e does not cover the empty stream). The empty
+        # state must still fail as a named observation error, not burn the
+        # whole budget into 'did not reach running'.
+        result = self.shell('''
+kind_credential_cli() { return 0; }
+jq() { cat >/dev/null; }
+sleep() { :; }
+wait_kind_credential_environment '%s' running
+''' % ENVIRONMENT)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(
+            '::error::credential fixture environment observation failed while waiting for running',
+            result.stderr)
+        self.assertNotIn('did not reach running', result.stderr)
+
     @staticmethod
     def _sandbox_pair_pods(workspace_phase, gateway_generation, gateway_uid=GATEWAY_UID):
         return json.dumps({"items": [
@@ -779,6 +796,7 @@ wait_kind_credential_environment '%s' running
 SANDBOX_NS=dev-sandboxes
 sleep() { :; }
 kubectl() {
+  if [ "$*" = "-n dev-sandboxes exec sandbox-workspace -c workspace -- true" ]; then return 0; fi
   count="$(( $(cat '%(dir)s/count' 2>/dev/null || printf 0) + 1 ))"
   printf '%%s\\n' "$count" > '%(dir)s/count'
   if [ "$count" -lt 2 ]; then printf '%%s' '%(pending)s'; else printf '%%s' '%(ready)s'; fi
@@ -793,6 +811,35 @@ wait_kind_credential_sandbox_pair '%(env)s' 2
         with open(os.path.join(directory.name, "count"), encoding="utf-8") as handle:
             self.assertEqual(int(handle.read()), 2)
 
+    def test_sandbox_pair_wait_holds_through_the_suspended_recreate_transition(self):
+        directory = tempfile.TemporaryDirectory(prefix="kind-sandbox-pair-exec-")
+        self.addCleanup(directory.cleanup)
+        # The recreated pair is Running immediately, but the Suspended/recreate
+        # transition has not finished inside the workspace container: execs
+        # fail twice before the container accepts them. The wait must hold
+        # instead of handing the suite a pod it cannot use yet.
+        ready = self._sandbox_pair_pods("Running", 2)
+        result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+sleep() { :; }
+kubectl() {
+  if [ "$*" = "-n dev-sandboxes exec sandbox-workspace -c workspace -- true" ]; then
+    attempts="$(( $(cat '%(dir)s/attempts' 2>/dev/null || printf 0) + 1 ))"
+    printf '%%s\\n' "$attempts" > '%(dir)s/attempts'
+    [ "$attempts" -ge 3 ]
+    return $?
+  fi
+  printf '%%s' '%(ready)s'
+}
+wait_kind_credential_sandbox_pair '%(env)s' 2
+''' % {"dir": directory.name, "ready": ready, "env": ENVIRONMENT})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 2, result.stdout)
+        self.assertEqual(lines[0], "sandbox-workspace")
+        with open(os.path.join(directory.name, "attempts"), encoding="utf-8") as handle:
+            self.assertEqual(int(handle.read()), 3)
+
     def test_sandbox_pair_wait_exhaustion_names_environment_and_generation(self):
         pending = self._sandbox_pair_pods("Pending", 1)
         result = self.shell('''
@@ -804,8 +851,94 @@ wait_kind_credential_sandbox_pair '%s' 2
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn(
             '::error::credential fixture environment %s did not materialize its '
-            'generation-2 workspace and gateway Pods after the managed restart' % ENVIRONMENT,
+            'generation-2 workspace and gateway Pods exec-ready after the managed restart' % ENVIRONMENT,
             result.stderr)
+
+    def test_sandbox_pair_wait_exhaustion_when_exec_never_opens(self):
+        ready = self._sandbox_pair_pods("Running", 2)
+        result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+sleep() { :; }
+kubectl() {
+  if [ "$*" = "-n dev-sandboxes exec sandbox-workspace -c workspace -- true" ]; then return 1; fi
+  printf '%%s' '%s'
+}
+wait_kind_credential_sandbox_pair '%s' 2
+''' % (ready, ENVIRONMENT))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('exec-ready', result.stderr)
+
+    def test_native_acceptance_reports_the_failing_command_instead_of_a_bare_exit(self):
+        # prepare_kind_credential_cli is the first fallible plain command after
+        # the trap is armed; its failure must be reported, never a bare exit.
+        result = self.shell('''
+log() { :; }
+kind_workspace_runtime_image() { printf 'localhost/synthetic:latest\\n'; }
+prepare_kind_credential_cli() { synthetic_prepare_failure_marker; }
+kind_credential_native_smoke
+''')
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertIn('::error::native Codex acceptance failed:', result.stderr)
+        self.assertIn('command=synthetic_prepare_failure_marker', result.stderr)
+        self.assertIn('status=127', result.stderr)
+
+    def test_native_acceptance_names_a_delivered_login_without_a_generation(self):
+        # Drive the whole post-update window with stubs and hand the flow a
+        # deliver completion whose event stream lacks the delivered event.
+        # jq's select-miss exit code differs between jq 1.8 and the job image,
+        # so the missing generation must be a named error on content.
+        gateway = json.dumps({"metadata": {"uid": GATEWAY_UID},
+                              "spec": {"containers": [{"name": "gateway", "env": [
+                                  {"name": "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
+                                   "value": "1"}]}]}}) .replace("'", "'\\''")
+        workspace = json.dumps({"metadata": {"uid": WORKSPACE_UID},
+                                "spec": {"containers": [{"name": "workspace"}]}}).replace("'", "'\\''")
+        result = self.shell('''
+log() { :; }
+SANDBOX_NS=dev-sandboxes
+kind_workspace_runtime_image() { printf 'localhost/synthetic:latest\\n'; }
+prepare_kind_credential_cli() { :; }
+kind_credential_cli() {
+  case "$*" in
+    'org list --output json')
+      printf '[{"id":"org_contract_1","role":"member"},{"id":"org_contract_2","role":"owner"}]\\n' ;;
+    'org current') printf 'ID: org_contract_1\\n' ;;
+    'credentials --platform get'*)
+      printf '[{"name":"%%s","provider":"openai","status":"CREDENTIAL_STATUS_ACTIVE"}]\\n' "$4" ;;
+    'env --platform create'*) printf '{"id":"%%s"}\\n' '%(env)s' ;;
+    'env --platform update'*) printf '{"operation_generation":1}\\n' ;;
+    *) return 0 ;;
+  esac
+}
+wait_kind_credential_environment() { return 0; }
+kind_credential_probe() { :; }
+wait_kind_credential_sandbox_pair() { printf 'sandbox-x\\n%%s\\n' '%(gateway)s'; }
+kubectl() {
+  case "$*" in
+    "-n dev-sandboxes get pod sandbox-x -o jsonpath={.metadata.uid}") printf '%%s\\n' '%(uid)s' ;;
+    "-n dev-sandboxes get pod sandbox-x -o json") printf '%%s\\n' '%(workspace)s' ;;
+    *) return 99 ;;
+  esac
+}
+kind_credential_codex_login() { printf '{"event":"complete","mode":"deliver"}\\n'; }
+kind_credential_native_smoke
+''' % {"env": ENVIRONMENT, "gateway": gateway, "workspace": workspace, "uid": WORKSPACE_UID})
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('::error::the delivered Codex login event is missing its generation',
+                      result.stderr)
+
+    def test_native_acceptance_arms_its_error_trap_before_io(self):
+        source = HELPERS.read_text()
+        flow = source.split("kind_credential_native_smoke() (", 1)[1]
+        trap = flow.index("trap 'echo \"::error::native Codex acceptance failed:")
+        self.assertLess(trap, flow.index('workspace_image="$(kind_workspace_runtime_image)"'))
+        self.assertLess(trap, flow.index('prepare_kind_credential_cli'))
+        self.assertIn("set -E", flow[:trap])
+        generation = flow.index('login_generation="$(jq -er')
+        guard = flow.index('::error::the delivered Codex login event is missing its generation')
+        self.assertLess(generation, guard)
+        self.assertNotIn('login_generation="$(jq -er \'select(.event == "delivered") | .generation\' <<<"$login_events")" ||',
+                         flow)
 
     def test_native_restart_wait_binds_the_update_generation_before_pod_assertions(self):
         source = HELPERS.read_text()

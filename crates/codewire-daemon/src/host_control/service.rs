@@ -2,12 +2,45 @@ use codewire_gateway_proto::DAEMON_AUTH_TOKEN_HEADER;
 use codewire_gateway_proto::daemon::v1;
 use codewire_gateway_proto::daemon::v1::host_control_service_server::HostControlService as Rpc;
 use prost::Message;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tonic::{Request, Response, Status};
 
 use super::{Error, HostControlBinding, Mutation, Owner, Scope};
 
 const SESSION_PAGE_BYTES: usize = 256 * 1024;
+
+pub(super) fn managed_chunks(
+    request: &v1::HostControlManagedReadRequest,
+    bytes: &[u8],
+) -> Result<Vec<v1::HostControlManagedRecordChunk>, Error> {
+    if bytes.is_empty() || bytes.len() > super::managed::MAX_RECORD_REPLY {
+        return Err(Error::Capacity);
+    }
+    let digest = format!("{:x}", Sha256::digest(bytes));
+    bytes
+        .chunks(super::managed::CHUNK_DATA)
+        .enumerate()
+        .map(|(index, data)| {
+            let chunk = v1::HostControlManagedRecordChunk {
+                session_id: request.session_id.clone(),
+                driver_id: request.driver_id.clone(),
+                launch_generation: request.expected_launch_generation,
+                message_id: request.message_id.clone(),
+                offset: (index * super::managed::CHUNK_DATA) as u64,
+                total_bytes: bytes.len() as u64,
+                payload_sha256: digest.clone(),
+                data: data.to_vec(),
+            };
+            // Reserve the member response success byte as well as protobuf framing.
+            if chunk.encoded_len() + 1 > super::managed::MAX_CHUNK {
+                Err(Error::Capacity)
+            } else {
+                Ok(chunk)
+            }
+        })
+        .collect()
+}
 
 pub(super) fn session_page(
     records: Vec<v1::SessionRecord>,
@@ -110,6 +143,49 @@ impl HostControlService {
 
 #[tonic::async_trait]
 impl Rpc for HostControlService {
+    type ReadHostManagedSessionStream = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<Item = Result<v1::HostControlManagedRecordChunk, Status>>
+                + Send
+                + 'static,
+        >,
+    >;
+
+    async fn read_host_managed_session(
+        &self,
+        request: Request<v1::HostControlManagedReadRequest>,
+    ) -> Result<Response<Self::ReadHostManagedSessionStream>, Status> {
+        self.authorize(&request)?;
+        let request = request.into_inner();
+        let scope = Scope::from_wire(
+            request
+                .scope
+                .clone()
+                .ok_or(Error::Invalid)
+                .map_err(Error::status)?,
+        )
+        .map_err(Error::status)?;
+        super::session_id(&request.session_id).map_err(Error::status)?;
+        super::canonical_uuid(&request.driver_id).map_err(Error::status)?;
+        if request.session_id != format!("session-{}", request.driver_id)
+            || request.expected_launch_generation == 0
+            || request.limit > 100
+        {
+            return Err(Error::Invalid.status());
+        }
+        if !request.message_id.is_empty() {
+            super::canonical_uuid(&request.message_id).map_err(Error::status)?;
+        }
+        let bytes = self
+            .owner
+            .read_managed(&request, &scope)
+            .await
+            .map_err(Error::status)?;
+        let chunks = managed_chunks(&request, &bytes).map_err(Error::status)?;
+        Ok(Response::new(Box::pin(tokio_stream::iter(
+            chunks.into_iter().map(Ok),
+        ))))
+    }
     async fn get_host_control_info(
         &self,
         request: Request<v1::HostControlInfoRequest>,
@@ -118,12 +194,12 @@ impl Rpc for HostControlService {
         Ok(Response::new(v1::HostControlInfoResponse {
             protocol_version: super::HOST_CONTROL_PROTOCOL,
             environment_id: self.owner.environment_id().into(),
-            verbs: vec![
-                v1::HostControlVerb::Read as i32,
-                v1::HostControlVerb::Launch as i32,
-                v1::HostControlVerb::Input as i32,
-                v1::HostControlVerb::Stop as i32,
-            ],
+            verbs: super::managed::verbs(self.owner.managed_agents()),
+            managed_agent_protocol_version: if self.owner.managed_agents() {
+                super::managed::PROTOCOL
+            } else {
+                0
+            },
         }))
     }
 
@@ -277,5 +353,84 @@ impl Rpc for HostControlService {
             .await
             .map(Response::new)
             .map_err(Error::status)
+    }
+}
+
+#[cfg(test)]
+mod managed_tests {
+    use super::*;
+    fn request() -> v1::HostControlManagedReadRequest {
+        let driver = uuid::Uuid::new_v4().to_string();
+        v1::HostControlManagedReadRequest {
+            scope: Some(crate::host_control::tests::scope().to_wire()),
+            session_id: format!("session-{driver}"),
+            driver_id: driver,
+            expected_launch_generation: 7,
+            message_id: uuid::Uuid::new_v4().to_string(),
+            limit: 20,
+        }
+    }
+    #[test]
+    fn managed_record_chunks_preserve_four_mib_outcome_and_bound_every_encoded_frame() {
+        let request = request();
+        let bytes = vec![b'x'; 4 * 1024 * 1024];
+        let chunks = managed_chunks(&request, &bytes).unwrap();
+        assert!(chunks.len() > 16);
+        assert!(chunks.iter().all(|c| c.encoded_len() < 256 * 1024));
+        assert_eq!(
+            crate::client::validate_host_managed_chunks(&request, &chunks).unwrap(),
+            bytes
+        );
+        assert!(managed_chunks(&request, &[]).is_err());
+        assert!(
+            managed_chunks(
+                &request,
+                &vec![0; super::super::managed::MAX_RECORD_REPLY + 1]
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn managed_record_chunks_refuse_missing_reordered_truncated_tampered_or_rebound_frames() {
+        let request = request();
+        let bytes = vec![b'x'; 300 * 1024];
+        let valid = managed_chunks(&request, &bytes).unwrap();
+        for field in [
+            "missing",
+            "reorder",
+            "duplicate",
+            "offset",
+            "total",
+            "hash",
+            "bytes",
+            "scope",
+            "message",
+            "generation",
+            "oversize",
+        ] {
+            let mut chunks = valid.clone();
+            match field {
+                "missing" => {
+                    chunks.pop();
+                }
+                "reorder" => chunks.swap(0, 1),
+                "duplicate" => {
+                    chunks.insert(1, chunks[0].clone());
+                }
+                "offset" => chunks[1].offset += 1,
+                "total" => chunks[0].total_bytes += 1,
+                "hash" => chunks[0].payload_sha256 = "00".repeat(32),
+                "bytes" => chunks[0].data[0] ^= 1,
+                "scope" => chunks[0].driver_id = uuid::Uuid::new_v4().to_string(),
+                "message" => chunks[0].message_id = uuid::Uuid::new_v4().to_string(),
+                "generation" => chunks[0].launch_generation += 1,
+                "oversize" => chunks[0].data = vec![0; 256 * 1024],
+                _ => unreachable!(),
+            }
+            assert!(
+                crate::client::validate_host_managed_chunks(&request, &chunks).is_err(),
+                "{field}"
+            );
+        }
     }
 }

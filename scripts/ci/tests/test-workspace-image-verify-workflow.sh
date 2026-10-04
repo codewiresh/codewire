@@ -500,6 +500,7 @@ run_mock_verifier() {
     CODEWIRE_SCCACHE_MODE="${MOCK_COMPILER:-local}" \
     CODEWIRE_BUILDKIT_CACHE_MODE="${MOCK_LAYERS:-local}" \
     CODEWIRE_WORKSPACE_IMAGE_REUSE="${MOCK_REUSE:-auto}" \
+    CODEWIRE_WORKSPACE_CW_PRODUCER_RETAIN="${MOCK_RETAIN:-0}" \
     CODEWIRE_WORKSPACE_CACHE_CASE="${MOCK_MEASUREMENT_CASE:-}" \
     CODEWIRE_WORKSPACE_CACHE_REPORT_DIR="$work/measurement/$1" \
     CODEWIRE_EXPECTED_SOURCE_SHA="$fixture_sha" CODEWIRE_EXPECTED_SOURCE_TREE="$fixture_tree" \
@@ -551,6 +552,11 @@ seal_line="$(grep -n '^image tag ' "$work/docker.log" | cut -d: -f1)"
 contract_line="$(grep -n -- '--mounted-home-agents' "$work/docker.log" | cut -d: -f1)"
 [[ "$cleanup_line" -lt "$contract_line" && "$contract_line" -lt "$seal_line" ]] || fail 'builder outlived contracts or seal preceded acceptance'
 [[ -s "$fixture_receipt" && "$(stat -c %a "$fixture_receipt")" == 600 ]] || fail 'private receipt missing'
+if [[ "$standalone_producers" == 1 ]]; then
+  default_producer_pointer="$(<"$work/selected-producer-result")"
+  [[ ! -e "$default_producer_pointer" && ! -e "${default_producer_pointer%/cw-image-work/*}" ]] ||
+    fail 'default verification retained its original producer staging'
+fi
 archive_name="$(jq -er '.workspace_oci.file' "$fixture_receipt")"
 [[ "$(stat -c '%a %h' "$fixture_root/.tmp/$archive_name")" == '400 1' ]] ||
   fail 'verified OCI archive is not immutable and single-linked'
@@ -563,6 +569,71 @@ grep -Eq -- '--provenance(=| )false --sbom(=| )false' "$work/docker.log" ||
 run_mock_verifier reuse >/dev/null
 [[ "$(wc -l <"$work/docker.log")" == 2 ]] || fail 'exact-tree reuse rebuilt or reran contracts'
 ! grep -Eq '^buildx |^run ' "$work/docker.log" || fail 'verified image reuse performed duplicate qualification'
+
+# An image-only acceptance is insufficient for opt-in producer retention. Run
+# the unchanged compiler/copy/contracts/seal route and retain its original
+# paths, not a copied JSON descriptor or a relabeled build reference.
+if [[ "$standalone_producers" == 1 ]]; then
+  : >"$work/docker.log"
+  MOCK_RETAIN=1 run_mock_verifier retained >"$work/retained.out" 2>&1 || {
+    cat "$work/retained.out" >&2; fail 'opt-in producer retention failed';
+  }
+  [[ "$(grep '^buildx build ' "$work/docker.log" | grep -vc -- '--target cw-runtime-export')" == 2 \
+    && "$(grep -c -- '--target cw-runtime-export' "$work/docker.log")" == 1 ]] ||
+    fail 'image-only reuse bypassed retained producer qualification'
+  retained_pointer="$(<"$work/selected-producer-result")"
+  [[ "$retained_pointer" == "$work/tmp/"*/cw-image-work/cw-producer-result.json \
+    && -s "$retained_pointer" && -s "$fixture_receipt" ]] ||
+    fail 'opt-in success discarded its original producer pointer'
+  python3 -B - "$fixture_root" "$retained_pointer" "$work/retained.out" <<'PY'
+from contextlib import closing
+import hashlib, importlib.util, json, os, pathlib, stat, sys
+root, pointer, log = map(pathlib.Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location('retention_contract', root / 'scripts/ci/images/cw-image-consumer.py')
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+with closing(module.asset.HeldFile(pointer, module.release.MAX_JSON)) as held:
+    value = module.release.parse_canonical(held.data)
+    lines = [line for line in log.read_text().splitlines() if line.startswith('{')
+             and module.release.parse_json(line.encode()).get('status') == 'workspace-cw-producer-retained']
+    assert len(lines) == 1, 'retention result missing or repeated'
+    note = module.release.parse_canonical(lines[0].encode() + b'\n')
+    assert note == {'status': 'workspace-cw-producer-retained', 'result': held.evidence(),
+                    'profile': value['profile'], 'version': value['version'],
+                    'source': value['source'], 'original_build_ref': value['build_ref']}
+    revision = module.producer.source.git(root, ['rev-parse', 'HEAD']).strip().decode()
+    with module.producer.reopen(value['receipt']['path'], value['receipt']['sha256'], root,
+                                revision, 'release', module.effective_version(root, None)) as retained:
+        assert value == {key: retained.summary[key] for key in value}
+        original = pathlib.Path(value['receipt']['path']).parent
+        assert original.is_relative_to(pointer.parent) and stat.S_IMODE(original.stat().st_mode) == 0o700
+        assert len(module.producer.finalizer.FILES) == 8
+        for name in module.producer.finalizer.FILES:
+            path = original / 'assets' / name
+            assert path.is_file() and path.stat().st_nlink == 1
+            assert stat.S_IMODE(path.stat().st_mode) == (0o500 if name == 'cw' else 0o400)
+        assert (original / 'source-context/source').is_dir() and (original / 'source-context/git').is_dir()
+        assert (original / 'source-context/request.json').is_file()
+        metadata = json.loads((original / 'metadata.json').read_bytes())
+        assert metadata['buildx.build.ref'] == value['build_ref'] == note['original_build_ref']
+        assert hashlib.sha256((original / 'assets/cw.d').read_bytes()).hexdigest() == retained.model['depinfo']['sha256']
+        retained.revalidate(); held.revalidate(content=True)
+    sealed = next(i for i, line in enumerate(log.read_text().splitlines()) if line.startswith('localhost/codewire-ci/workspace:source-'))
+    reported = next(i for i, line in enumerate(log.read_text().splitlines()) if line == lines[0])
+    assert sealed < reported, 'retention success preceded the original seal'
+PY
+  : >"$work/docker.log"
+  run_mock_verifier reuse-retained >"$work/reuse-retained.out" 2>&1
+  ! grep -Eq '^buildx |^run ' "$work/docker.log" || fail 'default reuse after retention rebuilt'
+  ! grep -q 'workspace-cw-producer-retained' "$work/reuse-retained.out" || fail 'image-only reuse claimed retained producer success'
+  [[ -s "$retained_pointer" ]] || fail 'default image reuse deleted previously retained staging'
+  printf 'workspace producer retention: success/original8exports/default/reuse contract OK\n'
+fi
+
+: >"$work/docker.log"
+if MOCK_RETAIN=invalid run_mock_verifier invalid-retention >"$work/invalid-retention.out" 2>&1; then
+  fail 'invalid producer retention mode was accepted'
+fi
+[[ ! -s "$work/docker.log" ]] || fail 'invalid producer retention reached Docker or image reuse'
 
 # Fresh verification invalidates the old marker immediately, but successful
 # publication still retires that marker's exact previously verified archive.
@@ -590,6 +661,33 @@ for failure in full mounted cleanup cancel; do
 done
 grep -q 'workspace cache cleanup: phase=builder-removal status=43 elapsed_seconds=' \
   "$work/cleanup.out" || fail 'builder removal failure omitted its bounded diagnostic'
+
+if [[ "$standalone_producers" == 1 ]]; then
+  for failure in full mounted cleanup receipt cw-mismatch; do
+    : >"$work/docker.log"
+    if MOCK_RETAIN=1 MOCK_REUSE=disabled run_mock_verifier "retain-$failure" valid docker "$failure" \
+        >"$work/retain-$failure.out" 2>&1; then
+      fail "retention accepted $failure failure"
+    fi
+    ! grep -q 'workspace-cw-producer-retained' "$work/retain-$failure.out" ||
+      fail "retention success was emitted for $failure failure"
+    if [[ "$failure" == receipt ]]; then
+      [[ -d "$fixture_receipt" ]] || fail 'retained seal failure was not reached'
+      rmdir "$fixture_receipt"
+    else
+      [[ ! -e "$fixture_receipt" ]] || fail "$failure retention failure emitted a receipt"
+    fi
+    failed_pointer="$(<"$work/selected-producer-result")"
+    if [[ "$failure" == cw-mismatch ]]; then
+      [[ -s "$failed_pointer" ]] || fail 'opt-in copy failure discarded original failure evidence'
+      grep -q 'failed CW copy evidence retained at ' "$work/retain-$failure.out" ||
+        fail 'opt-in copy failure omitted its existing retention diagnostic'
+    else
+      [[ ! -e "$failed_pointer" ]] || fail "$failure failure retained successful-producer staging"
+    fi
+  done
+  printf 'workspace producer retention: five failure contracts OK\n'
+fi
 
 : >"$work/docker.log"
 archives_before="$(find "$fixture_root/.tmp" -maxdepth 1 -name 'workspace-image-*.oci.tar' -printf '%f\n' | sort)"
@@ -861,6 +959,47 @@ if [[ "$(uname -m)" == x86_64 ]]; then
 import hashlib, sys
 from pathlib import Path
 current = Path(sys.argv[1]).read_text()
+# Reconstruct the hash-bound verifier before this retention addition first;
+# the original installed-byte counterproof below still uses its exact bytes.
+def remove_between(start, end):
+    global current
+    assert current.count(start) == current.count(end) == 1
+    left, right = current.index(start), current.index(end)
+    assert left < right
+    current = current[:left] + current[right:]
+
+def replace_once(old, new):
+    global current
+    assert current.count(old) == 1
+    current = current.replace(old, new, 1)
+
+remove_between('retain_cw_producer="${CODEWIRE_WORKSPACE_CW_PRODUCER_RETAIN:-0}"\n',
+               'if [[ -n "$workspace_measurement_case" ]]; then\n  # Experiments always build; an old image receipt cannot seed a measurement.\n')
+remove_between('if [[ "$retain_cw_producer" == 1 && "$architecture" != amd64 ]]; then\n',
+               'if [[ "$retain_cw_producer" == 0 && "${CODEWIRE_WORKSPACE_IMAGE_REUSE:-auto}" == auto ]]')
+replace_once('if [[ "$retain_cw_producer" == 0 && "${CODEWIRE_WORKSPACE_IMAGE_REUSE:-auto}" == auto ]]',
+             'if [[ "${CODEWIRE_WORKSPACE_IMAGE_REUSE:-auto}" == auto ]]')
+remove_between('retained_cw_producer() {\n', 'stop_sampler() {\n')
+replace_once("  local status=$? cleanup_status=0 retained_result=''\n", '  local status=$? cleanup_status=0\n')
+replace_once('''    # Opt-in success keeps the entire original private staging tree. Defer its
+    # deletion until the existing cleanup and atomic seal have been observed.
+    [[ "$retain_cw_producer" == 1 ]] || rm -rf "$work"
+''', '    rm -rf "$work"\n')
+replace_once('''  if [[ "$status" -eq 0 ]]; then
+    if [[ "$retain_cw_producer" == 1 ]]; then
+      retained_result="$(retained_cw_producer)" || status=$?
+    fi
+  fi
+''', '')
+replace_once('''  if [[ "$retain_cw_producer" == 1 && "$cw_copy_started" == false ]]; then
+    if [[ "$status" -eq 0 ]]; then
+      printf '%s\\n' "$retained_result"
+    else
+      rm -rf "$work"
+    fi
+  fi
+''', '')
+assert hashlib.sha256(current.encode()).hexdigest() == '4a9556428364ce20fc450cb245f00774a6ffa2ea0b1c0bdb8046653814716d19'
 copy = '''if [[ "$architecture" == amd64 ]]; then
   # Keep original source provenance and prove the installed bytes after the
   # owning builder/provider file is gone. This never executes incoming CW.

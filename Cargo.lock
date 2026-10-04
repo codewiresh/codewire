@@ -1434,6 +1434,7 @@ dependencies = [
  "codewire-project-proto",
  "codewire-protected-store",
  "codewire-proto",
+ "codewire-tailnet",
  "codewire-workload-secrets",
  "connectrpc",
  "futures",

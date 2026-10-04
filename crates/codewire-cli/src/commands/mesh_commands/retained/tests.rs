@@ -55,6 +55,129 @@ impl Drop for KernelFixture {
     }
 }
 
+/// This derives a synthetic HostMember record from a real, owned kernel birth.
+/// It exercises terminal recovery policy only; it never claims the head child
+/// is a cw helper or uses the synthetic role as live signaling authority.
+fn member_recovery_record(fixture: &KernelFixture) -> ProcessCustody {
+    let mut custody = fixture.custody.clone();
+    custody.role = HelperRole::HostMember;
+    custody.configuration = HelperConfiguration::HostMember {
+        directory: PathBuf::from("/synthetic/members"),
+        environment_id: uuid::Uuid::new_v4().to_string(),
+        host_root: PathBuf::from("/synthetic/host"),
+        origin: "http://127.0.0.1:18090".into(),
+        org: "synthetic-org".into(),
+        network: "synthetic-network".into(),
+        control_key: "12".repeat(32),
+        wg_key: "34".repeat(32),
+        derp_only: true,
+    };
+    custody.arguments = ProcessCustody::expected_arguments(
+        &custody.executable.path,
+        custody.role,
+        &custody.configuration,
+    )
+    .unwrap();
+    custody
+}
+
+#[tokio::test]
+async fn member_recovery_real_crash_proves_terminal_birth_before_and_after_reap() {
+    let mut fixture = KernelFixture::new();
+    let member = member_recovery_record(&fixture);
+    assert!(!member.member_terminal().unwrap());
+    fixture.child.kill().unwrap();
+    assert!(fixture.handle.wait(Duration::from_secs(2)).await.unwrap());
+    // A held same-birth terminal pidfd and then actual old-PID absence both
+    // permit record retirement, without reissuing any target request.
+    assert!(member.member_terminal().unwrap());
+    fixture.child.wait().unwrap();
+    assert!(member.member_terminal().unwrap());
+}
+
+#[test]
+fn member_recovery_changed_birth_never_signals_the_actual_unrelated_process() {
+    let mut original = KernelFixture::new();
+    let mut member = member_recovery_record(&original);
+    original.child.kill().unwrap();
+    original.child.wait().unwrap();
+    std::thread::sleep(Duration::from_millis(30));
+    let mut replacement = KernelFixture::new();
+    assert_ne!(member.start_ticks, replacement.custody.start_ticks);
+    // A persisted numeric collision is modeled explicitly; the current birth
+    // is a real distinct child, not a claim that the kernel reused a PID here.
+    member.pid = replacement.child.id();
+    assert!(member.member_terminal().unwrap());
+    assert!(replacement.alive());
+    replacement.handle.validate(&replacement.custody).unwrap();
+    let mut unknown = member.clone();
+    unknown.boot_id.clear();
+    assert!(unknown.member_terminal().is_err());
+    assert!(replacement.alive());
+}
+
+#[test]
+fn member_recovery_missing_or_diverged_image_and_bad_record_refuse() {
+    let mut fixture = KernelFixture::new();
+    let member = member_recovery_record(&fixture);
+    for kind in [
+        "missing-image",
+        "changed-image",
+        "missing-birth",
+        "foreign-uid",
+        "role",
+    ] {
+        let mut invalid = member.clone();
+        match kind {
+            "missing-image" => {
+                invalid.executable.path = PathBuf::from("/nonexistent/synthetic-member-image");
+                invalid.arguments = ProcessCustody::expected_arguments(
+                    &invalid.executable.path,
+                    invalid.role,
+                    &invalid.configuration,
+                )
+                .unwrap();
+            }
+            "changed-image" => invalid.executable.sha256 = "00".repeat(32),
+            "missing-birth" => invalid.start_ticks = 0,
+            "foreign-uid" => invalid.uid += 1,
+            "role" => invalid.role = HelperRole::EmbeddedMesh,
+            _ => unreachable!(),
+        }
+        assert!(invalid.member_terminal().is_err(), "{kind}");
+        assert!(fixture.alive(), "{kind}");
+    }
+    assert!(!member.member_terminal().unwrap());
+}
+
+#[test]
+fn member_record_cleanup_retains_original_inode_and_refuses_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = StateDir::open(&root.path().join("member"), true)
+        .unwrap()
+        .unwrap();
+    let name = "member-runtime.json";
+    directory.write(name, br#"{"safe":true}"#).unwrap();
+    let captured = directory.hold_member_record(name).unwrap().unwrap();
+    directory.validate_member_record(&captured).unwrap();
+    let original_inode = captured.file.metadata().unwrap().ino();
+    // Atomic byte-identical replacement is still a different ownership event.
+    directory.write(name, captured.bytes()).unwrap();
+    assert_ne!(
+        fs::symlink_metadata(directory.path.join(name))
+            .unwrap()
+            .ino(),
+        original_inode
+    );
+    assert!(directory.validate_member_record(&captured).is_err());
+    assert!(directory.remove_member_record(&captured).is_err());
+    assert_eq!(directory.read(name).unwrap().unwrap(), captured.bytes());
+    let fresh = directory.hold_member_record(name).unwrap().unwrap();
+    directory.remove_member_record(&fresh).unwrap();
+    assert!(directory.read(name).unwrap().is_none());
+    assert!(directory.hold_member_record("mesh_runtime.json").is_err());
+}
+
 fn paths(root: &Path) -> ResolvePaths {
     ResolvePaths {
         mesh_data_dir: root.join("mesh"),

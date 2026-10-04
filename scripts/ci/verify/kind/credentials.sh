@@ -261,9 +261,11 @@ WHERE id = :'environment' AND org_id = 'org_contract_1';
 SQL
       )"
     elif ! state="$(kind_credential_cli env --platform info "$environment" --output json |
-        jq -er '.state')"; then
-      # A failed observation must name itself: jq exits 4 without a word when
-      # its input is empty, which would otherwise kill the suite silently.
+        jq -er '.state')" || [ -z "$state" ]; then
+      # A failed observation must name itself. jq exits 4 without a word when
+      # its input is empty, and older jq variants return success with no
+      # output there, so an empty state is an observation failure too —
+      # otherwise the suite either dies silently or burns its whole budget.
       echo "::error::credential fixture environment observation failed while waiting for ${expected}" >&2
       return 1
     fi
@@ -282,12 +284,16 @@ SQL
 # The environment state can read running again while the new Pods are still
 # Pending, and one-shot selectors then miss them: a jq empty result exits 4
 # without printing anything, which is how the failure reaches the log as a
-# bare exit code. Wait for exactly one exact workspace and one exact gateway
-# rendering the restart's operation generation, then print the workspace name
-# and the gateway document on two lines. Binding the gateway to the update's
-# generation keeps the pre-restart Pods from satisfying the wait.
+# bare exit code. A recreated Pod is also Running before its workspace
+# container accepts execs, so phase alone cannot gate the suite's next
+# commands — every one of them selects or execs into exactly that container.
+# Wait for exactly one exact workspace and one exact gateway rendering the
+# restart's operation generation, with the workspace answering an exec,
+# then print the workspace name and the gateway document on two lines.
+# Binding the gateway to the update's generation keeps the pre-restart Pods
+# from satisfying the wait.
 wait_kind_credential_sandbox_pair() {
-  local environment="$1" generation="$2" attempt pair
+  local environment="$1" generation="$2" attempt pair candidate
   [[ "$generation" =~ ^[1-9][0-9]*$ ]] || return 1
   for ((attempt = 0; attempt < 90; attempt++)); do
     if pair="$(kubectl -n "$SANDBOX_NS" get pods \
@@ -305,12 +311,15 @@ wait_kind_credential_sandbox_pair() {
       if ($workspace | length) == 1 and ($gateway | length) == 1 then
         $workspace[0].metadata.name + "\n" + ($gateway[0] | tojson)
       else empty end')" && [ -n "$pair" ]; then
-      printf '%s\n' "$pair"
-      return 0
+      candidate="$(sed -n '1p' <<<"$pair")"
+      if kubectl -n "$SANDBOX_NS" exec "$candidate" -c workspace -- true 2>/dev/null; then
+        printf '%s\n' "$pair"
+        return 0
+      fi
     fi
     sleep 2
   done
-  echo "::error::credential fixture environment ${environment} did not materialize its generation-${generation} workspace and gateway Pods after the managed restart" >&2
+  echo "::error::credential fixture environment ${environment} did not materialize its generation-${generation} workspace and gateway Pods exec-ready after the managed restart" >&2
   return 1
 }
 
@@ -499,6 +508,11 @@ kind_credential_native_smoke() (
   local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation gateway gateway_uid
   local certificate certificate_uid after_certificate_uid workspace_image marker
   local login_events login_generation update restart_generation pair
+  # The acceptance must never die with a bare exit status again (runs 10381,
+  # 10459, 10465 all lost the failing command to a silent jq exit 4). Report
+  # the exact failing command before errexit unwinds the suite.
+  set -E
+  trap 'echo "::error::native Codex acceptance failed: command=${BASH_COMMAND} status=$?" >&2' ERR
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-credentials.XXXXXX)"
   trap 'rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
@@ -557,8 +571,14 @@ kind_credential_native_smoke() (
   # The creator's own login reaches Codex's auth.json; stock Codex reads it as
   # ChatGPT, reads usage and completes a turn against a synthetic backend.
   login_events="$(kind_credential_codex_login "$environment" deliver)" || return $?
-  login_generation="$(jq -er 'select(.event == "delivered") | .generation' <<<"$login_events")" ||
-    return $?
+  # jq's empty-result exit code is image-dependent (4 in jq 1.8, success with
+  # no output in the job image), and either way a failing assignment would
+  # outrun the content check, so disarm the exit status and test the content.
+  login_generation="$(jq -er 'select(.event == "delivered") | .generation' <<<"$login_events" || true)"
+  [[ "$login_generation" =~ ^[0-9]+$ ]] || {
+    echo '::error::the delivered Codex login event is missing its generation' >&2
+    return 1
+  }
   # The proxy session forces the proxy provider; its broker refreshes rotate
   # the delivered login too.
   kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- python3 -B -u - \

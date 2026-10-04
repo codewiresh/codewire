@@ -18,6 +18,8 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWriteExt as _};
 #[cfg(target_os = "linux")]
 mod guest_peer;
 #[cfg(target_os = "linux")]
+pub(super) mod host_control;
+#[cfg(target_os = "linux")]
 mod native;
 #[cfg(target_os = "linux")]
 mod native_host;
@@ -356,12 +358,23 @@ struct MessageRecord {
     started_at: Option<String>,
     finished_at: Option<String>,
     native_acknowledged: bool,
+    /// Target-owned birth proof for member messages; ordinary records keep
+    /// their established wire bytes and do not acquire a guessed generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    member_launch_generation: Option<u64>,
     result: Option<String>,
     result_truncated: bool,
     error: Option<String>,
     usage: Option<Value>,
     source: Option<MessageSource>,
     notification: Option<ParentNotification>,
+}
+
+fn member_message_generation_matches(current: Option<u64>, record: &MessageRecord) -> bool {
+    match current {
+        Some(generation) => generation > 0 && record.member_launch_generation == Some(generation),
+        None => record.member_launch_generation.is_none(),
+    }
 }
 
 impl MessageRecord {
@@ -385,6 +398,7 @@ impl MessageRecord {
             started_at: None,
             finished_at: None,
             native_acknowledged: false,
+            member_launch_generation: None,
             result: None,
             result_truncated: false,
             error: None,
@@ -420,7 +434,10 @@ impl MessageRecord {
     }
 
     fn validate(&self, dir: &Path, id: &str) -> anyhow::Result<()> {
-        if self.version != 1 || self.id != id || Some(self.driver_id.as_str()) != dir_driver_id(dir)
+        if self.version != 1
+            || self.id != id
+            || Some(self.driver_id.as_str()) != dir_driver_id(dir)
+            || self.member_launch_generation == Some(0)
         {
             anyhow::bail!("message record {id} does not belong to this conversation");
         }
@@ -593,9 +610,23 @@ impl StateLock {
             .create(true)
             .truncate(false)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(path)
             .with_context(|| format!("open lock {}", path.display()))?;
+        let held = file.metadata()?;
+        let named = fs::symlink_metadata(path)?;
+        if !held.is_file()
+            || held.uid() != euid()
+            || held.mode() & 0o7777 != 0o600
+            || held.nlink() != 1
+            || held.dev() != named.dev()
+            || held.ino() != named.ino()
+            || held.mode() != named.mode()
+            || held.uid() != named.uid()
+            || held.nlink() != named.nlink()
+        {
+            anyhow::bail!("managed conversation lock is unsafe");
+        }
         // SAFETY: the descriptor remains owned by the returned guard.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             return Ok(Some(Self(file)));
@@ -738,6 +769,22 @@ fn list_messages(dir: &Path) -> anyhow::Result<Vec<MessageRecord>> {
             .then_with(|| a.id.cmp(&b.id))
     });
     Ok(records)
+}
+
+/// Recovery keeps only bounded identity/timestamp pairs, not every retained
+/// provider result. Full records are read one at a time in the same ordering.
+fn ordered_message_ids(dir: &Path) -> anyhow::Result<Vec<String>> {
+    let mut order = Vec::new();
+    for id in message_ids(dir)? {
+        let record = load_message(dir, &id)?;
+        anyhow::ensure!(
+            record.created_at.len() <= 64,
+            "managed record timestamp exceeds bound"
+        );
+        order.push((record.created_at, id));
+    }
+    order.sort();
+    Ok(order.into_iter().map(|(_, id)| id).collect())
 }
 
 /// One deterministic ID per worker message, so a parent is notified once.
@@ -1170,6 +1217,10 @@ pub(crate) async fn handle_agent_message_command(
     args: AgentMessageArgs,
     steer: bool,
 ) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        return super::super::member_control::managed::send_message(globals, args, steer).await;
+    }
     let (environment, session, text) = match args.target_and_text.as_slice() {
         [session, text] => (None, session.as_str(), text.as_str()),
         [environment, session, text] => {
@@ -1244,6 +1295,15 @@ pub(crate) async fn handle_agent_interrupt_command(
     globals: &Globals,
     args: SessionTargetArgs,
 ) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        return super::super::member_control::managed::action(
+            globals,
+            args,
+            codewire_gateway_proto::daemon::v1::HostManagedAction::Interrupt,
+        )
+        .await;
+    }
     let (environment, session) = split_session_target(&args.target)?;
     #[cfg(target_os = "linux")]
     {
@@ -1287,6 +1347,10 @@ pub(crate) async fn handle_agent_inbox_command(
     globals: &Globals,
     args: SessionTargetArgs,
 ) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        return super::super::member_control::managed::inbox(globals, args).await;
+    }
     let (environment, session) = split_session_target(&args.target)?;
     #[cfg(target_os = "linux")]
     {
@@ -1690,7 +1754,7 @@ pub(crate) async fn run_agent_driver(args: AgentDriverArgs) -> anyhow::Result<()
     let previous = read_optional::<DriverState>(&dir.join("state.json"))?
         .filter(|state| state.driver_id == driver_id && state.agent == config.agent);
     #[cfg(target_os = "linux")]
-    if environment.host().is_none() && previous.is_some() {
+    if host_control::guardian_required(&environment, &driver_id)? && previous.is_some() {
         guest_peer::require_clean_previous(
             &dir,
             environment.id(),
@@ -1973,6 +2037,17 @@ struct GuestPeer {
 }
 
 impl Peer {
+    fn has_guardian(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.guest.is_some()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
     fn spawn(
         program: &Path,
         args: &[&str],
@@ -1981,20 +2056,21 @@ impl Peer {
         label: &'static str,
     ) -> anyhow::Result<Self> {
         #[cfg(target_os = "linux")]
-        let guest = if driver.environment.host().is_none() {
-            Some(GuestPeer {
-                dir: driver.dir.clone(),
-                identity: guest_peer::prepare(
-                    &driver.dir,
-                    driver.environment.id(),
-                    &driver.config.driver_id,
-                    &driver.binding.session_id,
-                    &driver.started_at,
-                )?,
-            })
-        } else {
-            None
-        };
+        let guest =
+            if host_control::guardian_required(&driver.environment, &driver.config.driver_id)? {
+                Some(GuestPeer {
+                    dir: driver.dir.clone(),
+                    identity: guest_peer::prepare(
+                        &driver.dir,
+                        driver.environment.id(),
+                        &driver.config.driver_id,
+                        &driver.binding.session_id,
+                        &driver.started_at,
+                    )?,
+                })
+            } else {
+                None
+            };
         #[cfg(target_os = "linux")]
         let mut command = if let Some(guest) = &guest {
             let identity = &guest.identity;
@@ -2021,8 +2097,11 @@ impl Peer {
                 &driver.environment.root().to_string_lossy(),
                 "--program",
                 &program.to_string_lossy(),
-                "--",
             ]);
+            if driver.environment.host().is_some() {
+                command.arg("--host-member-custody");
+            }
+            command.arg("--");
             command
         } else {
             tokio::process::Command::new(program)
@@ -2047,7 +2126,16 @@ impl Peer {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // A guest guardian retains custody after a driver crash or timeout.
-            .kill_on_drop(driver.environment.host().is_some())
+            .kill_on_drop({
+                #[cfg(target_os = "linux")]
+                {
+                    guest.is_none()
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    true
+                }
+            })
             .spawn()
             .with_context(|| format!("start the installed {label} CLI at {}", program.display()))?;
         let stdin = child.stdin.take().context("native agent stdin")?;
@@ -2328,6 +2416,16 @@ struct Driver {
 }
 
 impl Driver {
+    fn member_generation(&self) -> anyhow::Result<Option<u64>> {
+        #[cfg(target_os = "linux")]
+        {
+            host_control::generation(&self.environment, &self.config.driver_id)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(None)
+        }
+    }
     fn persist_state(&mut self) -> anyhow::Result<()> {
         self.state.queued = self.queue.len();
         self.state.updated_at = now();
@@ -2479,7 +2577,7 @@ impl Driver {
                 _ = interrupt.recv() => DriverEvent::Stop("SIGINT"),
                 _ = hangup.recv() => DriverEvent::Stop("SIGHUP"),
                 _ = adopt.tick() => DriverEvent::Adopt,
-                _ = shutdown_probe.tick(), if self.environment.host().is_none() => DriverEvent::ShutdownProbe,
+                _ = shutdown_probe.tick(), if peer.has_guardian() => DriverEvent::ShutdownProbe,
             };
             let result = match event {
                 DriverEvent::Control(Some(ControlInput::Line(line))) => {
@@ -2582,14 +2680,26 @@ impl Driver {
     async fn recover(&mut self) -> anyhow::Result<()> {
         let initial = self.config.initial_message_id.clone();
         let started_at = self.started_at.clone();
+        let generation = self.member_generation()?;
         let mut unknown = Vec::new();
-        for record in list_messages(&self.dir)? {
+        for id in ordered_message_ids(&self.dir)? {
+            let record = load_message(&self.dir, &id)?;
             if record.state.is_terminal() {
                 self.settled.insert(record.id.clone());
                 // Repair the result outbox after a crash between completion
                 // and parent delivery. Native turns are never replayed.
                 if record.action.starts_turn() {
-                    unknown.push(record);
+                    unknown.push(record.id);
+                }
+                continue;
+            }
+            if !member_message_generation_matches(generation, &record) {
+                let updated = update_message(&self.dir, &record.id, |r| {
+                    r.fail(MessageState::Unknown,"the member incarnation changed; this message is retained and never replayed");
+                })?;
+                self.settled.insert(updated.id.clone());
+                if updated.action.starts_turn() {
+                    unknown.push(updated.id);
                 }
                 continue;
             }
@@ -2633,7 +2743,7 @@ impl Driver {
                 }
                 MessageState::Unknown if previous == MessageState::Running => {
                     self.settled.insert(updated.id.clone());
-                    unknown.push(updated);
+                    unknown.push(updated.id);
                 }
                 state if state.is_terminal() => {
                     self.settled.insert(updated.id);
@@ -2642,7 +2752,8 @@ impl Driver {
             }
         }
         self.persist_state()?;
-        for record in unknown {
+        for id in unknown {
+            let record = load_message(&self.dir, &id)?;
             self.notify_parent(&record).await;
         }
         Ok(())
@@ -2652,6 +2763,7 @@ impl Driver {
     /// single accepted transition keeps delivery at most once.
     async fn adopt_notifications(&mut self) -> anyhow::Result<()> {
         let mut adopted = false;
+        let generation = self.member_generation()?;
         for id in message_ids(&self.dir)? {
             if self.settled.contains(&id) {
                 continue;
@@ -2664,6 +2776,16 @@ impl Driver {
             if record.action != MessageAction::Notification
                 || record.target_session_id != self.binding.session_id
             {
+                continue;
+            }
+            if !member_message_generation_matches(generation, &record) {
+                update_message(&self.dir, &id, |r| {
+                    r.fail(
+                        MessageState::Unknown,
+                        "the parent member incarnation changed; notification was not adopted",
+                    );
+                })?;
+                self.settled.insert(id);
                 continue;
             }
             let mut accepted = false;
@@ -2809,10 +2931,18 @@ impl Driver {
             let Some(id) = self.queue.pop_front() else {
                 break;
             };
+            let generation = self.member_generation()?;
             let mut issued = false;
             let record = update_message(&self.dir, &id, |r| {
                 if r.state == MessageState::Accepted {
-                    issued = r.transition(MessageState::Running);
+                    if member_message_generation_matches(generation, r) {
+                        issued = r.transition(MessageState::Running);
+                    } else {
+                        r.fail(
+                            MessageState::Unknown,
+                            "the member incarnation changed before issue; nothing was replayed",
+                        );
+                    }
                 }
             })?;
             if !issued {
@@ -2888,6 +3018,7 @@ impl Driver {
         let session_id = self.binding.session_id.clone();
         let capabilities = self.state.capabilities.clone();
         let agent = self.config.agent;
+        let generation = self.member_generation()?;
         let active = self
             .active
             .as_ref()
@@ -2896,6 +3027,13 @@ impl Driver {
         let record = match update_message(&self.dir, id, |r| {
             if r.state.rank() >= MessageState::Accepted.rank() {
                 decision = Decision::Duplicate;
+                return;
+            }
+            if !member_message_generation_matches(generation, r) {
+                r.fail(
+                    MessageState::Unknown,
+                    "the member message has no current birth proof; it was not adopted",
+                );
                 return;
             }
             if r.target_session_id != session_id {
@@ -2915,6 +3053,16 @@ impl Driver {
                         r.fail(
                             MessageState::Error,
                             format!("steering is not supported: {}", capabilities.note),
+                        );
+                    }
+                    Some((message, Some(turn)))
+                        if generation.is_some()
+                            && (r.expected_turn_id.as_ref() != Some(turn)
+                                || r.expected_active_message_id.as_ref() != Some(message)) =>
+                    {
+                        r.fail(
+                            MessageState::Error,
+                            "the targeted member turn ended; nothing was steered",
                         );
                     }
                     Some((_, Some(turn))) => {
@@ -3648,6 +3796,14 @@ impl Driver {
         if !source.action.starts_turn() || !source.state.is_terminal() {
             return Ok(());
         }
+        if let Some(current) = self.member_generation()? {
+            anyhow::ensure!(
+                source
+                    .member_launch_generation
+                    .is_some_and(|g| g > 0 && g <= current),
+                "member child result has no original birth proof"
+            );
+        }
         let notification = ParentNotification {
             message_id: notification_id(&source.id),
             parent_session_id: parent.session_id.clone(),
@@ -3657,6 +3813,12 @@ impl Driver {
             updated_at: now(),
         };
         let parent_dir = driver_dir(&self.environment, &parent.driver_id)?;
+        #[cfg(target_os = "linux")]
+        host_control::admit_parent_notification(
+            &self.environment,
+            &self.config.driver_id,
+            &parent.driver_id,
+        )?;
         // Deliver only to the canonical parent bound at launch; never via aliases.
         let binding: AgentBinding = read_record(&parent_dir.join("binding.json"))?;
         if binding.driver_id != parent.driver_id || binding.session_id != parent.session_id {
@@ -3671,6 +3833,14 @@ impl Driver {
             self.notification_text(source),
         );
         record.id = notification.message_id.clone();
+        #[cfg(target_os = "linux")]
+        {
+            record.member_launch_generation = host_control::parent_generation(
+                &self.environment,
+                &self.config.driver_id,
+                &parent.driver_id,
+            )?;
+        }
         record.source = Some(MessageSource {
             session_id: self.binding.session_id.clone(),
             driver_id: self.config.driver_id.clone(),
@@ -3688,6 +3858,21 @@ impl Driver {
             return Ok(());
         }
         self.set_notification(&source.id, &notification, NotificationState::Pending, None)?;
+        #[cfg(target_os = "linux")]
+        if self.member_generation()?.is_some() {
+            // The target-owned parent adopts this original-birth notification
+            // from its inbox. Never start/contact a daemon from a member driver
+            // or confuse durable queueing with pipe/native acceptance.
+            self.set_notification(
+                &source.id,
+                &notification,
+                NotificationState::Pending,
+                Some(
+                    "queued in the canonical member parent inbox; adoption remains pending".into(),
+                ),
+            )?;
+            return Ok(());
+        }
         let Some(environment) = self.environment.host() else {
             self.set_notification(
                 &source.id,

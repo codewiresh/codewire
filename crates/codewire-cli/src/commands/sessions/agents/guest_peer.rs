@@ -304,6 +304,11 @@ pub(crate) struct AgentPeerArgs {
     pub(crate) guest_root: PathBuf,
     #[arg(long, help = "Installed provider executable")]
     pub(crate) program: PathBuf,
+    #[arg(
+        long,
+        help = "Retain member-host family custody outside the driver process group"
+    )]
+    pub(crate) host_member_custody: bool,
     #[arg(last = true, help = "Provider arguments")]
     pub(crate) arguments: Vec<String>,
 }
@@ -329,6 +334,20 @@ pub(crate) async fn run_agent_peer(args: AgentPeerArgs) -> anyhow::Result<()> {
 /// this process with that status once the clean receipt is durable.
 fn agent_peer(args: AgentPeerArgs, custody: Custody) -> anyhow::Result<()> {
     let mut guardian = Guardian::admit(&args, custody)?;
+    if args.host_member_custody {
+        super::host_control::admit_member_guardian(
+            &args.guest_root,
+            &args.environment,
+            &args.driver_id,
+            &args.session_id,
+        )?;
+        // The host daemon may finish the dead driver's original process group.
+        // The guardian retains the provider/adopted family independently and
+        // remains the sole publisher of a complete ECHILD receipt.
+        if unsafe { libc::setsid() } < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+    }
     let failure = guardian
         .start(&args.program, &args.arguments)
         .err()
@@ -1198,6 +1217,8 @@ esac
         close_input_when: Option<PathBuf>,
         term_grace_ms: u64,
         deadline_ms: u64,
+        #[serde(default)]
+        host_member_custody: bool,
     }
 
     #[derive(serde::Serialize, serde::Deserialize)]
@@ -1300,6 +1321,9 @@ esac
             ("--program", spec.program.display().to_string()),
         ] {
             argv.extend([flag.to_owned(), value]);
+        }
+        if spec.host_member_custody {
+            argv.push("--host-member-custody".into());
         }
         argv.push("--".into());
         argv.extend(spec.arguments.iter().cloned());
@@ -1455,6 +1479,7 @@ esac
                 close_input_when: None,
                 term_grace_ms: 1000,
                 deadline_ms: 30_000,
+                host_member_custody: false,
             }
         }
 
@@ -1636,6 +1661,9 @@ esac
     impl DriverProcess {
         fn spawn(fixture: &Fixture, spec: &DriverSpec) -> Self {
             let mut command = role("driver", spec);
+            if spec.host_member_custody {
+                command.process_group(0);
+            }
             command.stderr(fs::File::create(fixture.work.join("driver.stderr")).unwrap());
             Self(command.spawn().unwrap())
         }
@@ -1719,6 +1747,67 @@ esac
         )
         .unwrap();
         assert!(journal.contains("cleanup started"), "{journal}");
+        assert!(journal.contains("adopted pid="), "{journal}");
+        assert!(fixture.require_clean().unwrap().unwrap().clean());
+    }
+
+    #[test]
+    fn member_host_driver_group_sigkill_preserves_guardian_until_exact_family_echild() {
+        let mut fixture = fixture();
+        fixture.session_id = format!("session-{}", fixture.driver_id);
+        // Synthetic target-owned origin, not a claim of authenticated network
+        // admission. The guardian reads the real closed marker and kernel birth.
+        write_private_json(&fixture.dir.join("member-origin.json"),&json!({
+            "version":1,"origin":{"request_id":fixture.driver_id,"fingerprint":"ab".repeat(32),
+                "scope":{"environment_id":fixture.environment_id,"org_id":"test-org","network_id":"test-network",
+                    "caller_key":vec![1u8;32],"target_key":vec![2u8;32],"grant_id":uuid::Uuid::new_v4().to_string(),"grant_revision":1}},
+            "driver_id":fixture.driver_id,"session_id":fixture.session_id,"parent_generation":null})).unwrap();
+        let mut sentinel = Sentinel::spawn();
+        let mut spec = fixture.spec(&["provider", "hold"]);
+        spec.host_member_custody = true;
+        let (mut driver, identity, family, mut leftovers) = launched(&fixture, &spec);
+        let receipt = fixture.receipt_where(&identity, "member provider birth", |r| {
+            r.provider_pid.is_some()
+        });
+        let guardian = (
+            receipt.guardian_pid.unwrap(),
+            receipt.guardian_start_ticks.unwrap(),
+        );
+        leftovers.0.push(guardian);
+        assert_eq!(
+            unsafe { libc::getpgid(driver.0.id() as i32) },
+            driver.0.id() as i32
+        );
+        assert_eq!(
+            unsafe { libc::getsid(guardian.0 as i32) },
+            guardian.0 as i32
+        );
+        assert_ne!(
+            unsafe { libc::getpgid(guardian.0 as i32) },
+            driver.0.id() as i32
+        );
+        assert!(fixture.require_clean().is_err());
+        // Exact isolated driver group, as in the owning durable monitor's
+        // cleanup after a driver crash. No unowned group is ever signaled.
+        assert_eq!(
+            unsafe { libc::kill(-(driver.0.id() as i32), libc::SIGKILL) },
+            0
+        );
+        driver.0.wait().unwrap();
+        let receipt = fixture.receipt_where(&identity, "member ECHILD receipt", PeerReceipt::clean);
+        assert_eq!(receipt.error, None);
+        assert_eq!(receipt.exit_code, Some(128 + libc::SIGTERM));
+        assert_family_gone(&fixture, &family);
+        fixture.wait_for("member guardian exit", || {
+            (!alive(guardian.0, guardian.1)).then_some(())
+        });
+        assert!(sentinel.alive());
+        let journal = fs::read_to_string(
+            fixture
+                .dir
+                .join(format!("peer-{}.journal", identity.instance_id)),
+        )
+        .unwrap();
         assert!(journal.contains("adopted pid="), "{journal}");
         assert!(fixture.require_clean().unwrap().unwrap().clean());
     }

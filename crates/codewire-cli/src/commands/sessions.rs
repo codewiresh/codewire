@@ -4,6 +4,13 @@ use tokio::io::AsyncReadExt as _;
 #[cfg(unix)]
 pub(crate) mod agents;
 
+#[cfg(target_os = "linux")]
+pub(crate) async fn run_host_agent_control(
+    arguments: Vec<std::ffi::OsString>,
+) -> anyhow::Result<()> {
+    agents::host_control::run_from(arguments).await
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct EnvironmentSessionView {
     pub(crate) session_id: String,
@@ -608,7 +615,7 @@ fn platform_environment_session_view(
 }
 
 #[cfg(unix)]
-fn host_environment_session_view(
+pub(super) fn host_environment_session_view(
     session: codewire_gateway_proto::daemon::v1::SessionRecord,
 ) -> EnvironmentSessionView {
     use codewire_gateway_proto::daemon::v1::SessionLifecycleState as State;
@@ -682,6 +689,14 @@ fn managed_session(session: &EnvironmentSessionView) -> bool {
 }
 
 pub(crate) async fn handle_send_command(globals: &Globals, args: SendArgs) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        return super::member_control::terminal::send(globals, args).await;
+    }
+    anyhow::ensure!(
+        args.request_id.is_none() && args.expected_launch_generation.is_none(),
+        "member mutation flags require --member"
+    );
     let (values, data) = if let Some(key) = args.key.as_deref() {
         let data = match key {
             "ctrl-c" => vec![3],
@@ -725,6 +740,14 @@ pub(crate) async fn handle_stop_command(
     globals: &Globals,
     args: SessionTargetArgs,
 ) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        return super::member_control::managed::stop(globals, args).await;
+    }
+    anyhow::ensure!(
+        args.request_id.is_none() && args.expected_launch_generation.is_none(),
+        "member mutation flags require --member"
+    );
     let (target, session) = resolve_selected_session(globals, &args.target).await?;
     #[cfg(target_os = "linux")]
     if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) && managed_session(&session) {
@@ -743,6 +766,21 @@ pub(crate) async fn handle_restart_command(
     globals: &Globals,
     args: SessionTargetArgs,
 ) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        return super::member_control::managed::action(
+            globals,
+            args,
+            codewire_gateway_proto::daemon::v1::HostManagedAction::Restart,
+        )
+        .await;
+    }
+    anyhow::ensure!(
+        globals.member.is_none()
+            && args.request_id.is_none()
+            && args.expected_launch_generation.is_none(),
+        "member restart is not admitted"
+    );
     let (target, session) = resolve_selected_session(globals, &args.target).await?;
     if session.cleanup_unknown {
         anyhow::bail!("session cleanup is unknown; restart is fenced");
@@ -757,6 +795,13 @@ pub(crate) async fn handle_restart_command(
 }
 
 pub(crate) async fn handle_wait_command(globals: &Globals, args: WaitArgs) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        if args.message.is_some() {
+            return super::member_control::managed::wait(globals, args).await;
+        }
+        return super::member_control::terminal::wait(globals, args).await;
+    }
     let timeout = tailnet_ssh::parse_duration(&args.timeout)
         .map_err(|e| anyhow::anyhow!("invalid wait timeout: {e}"))?;
     if timeout.is_zero() {
@@ -1027,7 +1072,7 @@ fn session_command_label(session: &EnvironmentSessionView) -> String {
     }
 }
 
-fn print_environment_sessions(
+pub(super) fn print_environment_sessions(
     sessions: &[EnvironmentSessionView],
     output: OutputFormat,
 ) -> anyhow::Result<()> {
@@ -1053,6 +1098,14 @@ pub(crate) async fn handle_environment_run_command(
     globals: &Globals,
     args: EnvironmentRunArgs,
 ) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        if args.agent.is_some() {
+            return super::member_control::managed::run(globals, args).await;
+        }
+        return super::member_control::terminal::run(globals, args).await;
+    }
+    anyhow::ensure!(args.request_id.is_none(), "--request-id requires --member");
     let target = resolve_environment_session_target(globals, args.environment.as_deref()).await?;
     if args.agent.is_some() {
         #[cfg(unix)]
@@ -1099,6 +1152,7 @@ pub(crate) async fn handle_environment_shell_command(
     handle_environment_run_command(
         globals,
         EnvironmentRunArgs {
+            request_id: None,
             name: None,
             parent: None,
             agent: None,
@@ -1445,7 +1499,7 @@ pub(crate) fn ensure_environment_session_succeeded(
     }
 }
 
-fn write_session_output(
+pub(super) fn write_session_output(
     stdout: &mut std::io::Stdout,
     data: &[u8],
     raw_output: bool,
@@ -1623,6 +1677,10 @@ fn strip_ansi_escapes(data: &[u8]) -> Vec<u8> {
 }
 
 pub(crate) async fn handle_list_command(globals: &Globals, args: ListArgs) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        return super::member_control::terminal::list(globals, args).await;
+    }
     if args.all {
         let paths = ResolvePaths::from_env(&OsEnv)?;
         let targets = attachment_environment_targets(globals, &paths, &OsEnv).await?;
@@ -1711,6 +1769,10 @@ pub(crate) async fn handle_attach_command(
 }
 
 pub(crate) async fn handle_logs_command(globals: &Globals, args: LogsArgs) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        return super::member_control::terminal::logs(globals, args).await;
+    }
     let (target, requested) =
         resolve_attach_or_logs_target(globals, args.environment, args.session).await?;
     let session = match select_environment_session(&target, requested.as_deref()).await? {
@@ -1795,13 +1857,13 @@ pub(crate) async fn handle_logs_command(globals: &Globals, args: LogsArgs) -> an
 }
 
 #[derive(Default)]
-struct LogsAnsiFilter {
+pub(super) struct LogsAnsiFilter {
     escape: bool,
     csi: bool,
 }
 
 impl LogsAnsiFilter {
-    fn strip(&mut self, data: &[u8]) -> Vec<u8> {
+    pub(super) fn strip(&mut self, data: &[u8]) -> Vec<u8> {
         let mut output = Vec::with_capacity(data.len());
         for &byte in data {
             if self.csi {
@@ -1852,7 +1914,7 @@ pub(crate) fn tail_session_output(data: &[u8], tail: Option<u32>) -> Vec<u8> {
     data[session_output_tail_start(data, tail)..].to_vec()
 }
 
-fn session_output_tail_start(data: &[u8], tail: Option<u32>) -> usize {
+pub(super) fn session_output_tail_start(data: &[u8], tail: Option<u32>) -> usize {
     let Some(tail) = tail else {
         return 0;
     };

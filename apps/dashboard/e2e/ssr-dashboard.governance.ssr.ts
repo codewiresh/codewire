@@ -1,9 +1,9 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "./helpers/test";
+import type { Page } from "@playwright/test";
 import * as OTPAuth from "otpauth";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { cleanupUser, clearRateLimits, disableTwoFactor, getUserId, seedSyntheticUser } from "./helpers/db";
 import { fillField } from "./helpers/auth-flow";
+import { ensureWorkerIdentity } from "./helpers/worker-identity";
 import {
   addOrgMember,
   cleanupTestOrg,
@@ -11,8 +11,6 @@ import {
 } from "./helpers/org";
 import { TEST_PASSWORD, USERS } from "./helpers/seed";
 
-const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const authState = path.join(dashboardDir, "playwright/.auth/user.json");
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 const slug = `ssr-governance-${Date.now()}`;
 const invitationEmail = `invited-${Date.now()}@example.com`;
@@ -37,10 +35,10 @@ async function oneTimeInvitationUrl(page: Page): Promise<string> {
 }
 
 test.describe.serial("server-rendered organization governance", () => {
-  test.beforeAll(async () => {
-    const ownerId = await getUserId(USERS.master.email);
+  test.beforeAll(async ({}, testInfo) => {
+    const ownerId = await ensureWorkerIdentity(testInfo.workerIndex);
     const memberId = await getUserId(USERS.member.email);
-    if (!ownerId || !memberId) throw new Error("E2E users were not seeded");
+    if (!memberId) throw new Error("E2E users were not seeded");
     const orgId = await ensureTestOrg("SSR Governance", slug, ownerId);
     await addOrgMember(orgId, memberId, "member");
     await seedSyntheticUser(outsiderEmail, "E2E Governance Outsider");
@@ -196,12 +194,12 @@ test.describe.serial("server-rendered organization governance", () => {
     }
   });
 
-  test("normal form responses work without HTMX and keep one-time key material out of URLs", async ({ browser, isMobile }) => {
+  test("normal form responses work without HTMX and keep one-time key material out of URLs", async ({ browser, isMobile, workerStorageState }) => {
     test.skip(!!isMobile, "desktop no-JavaScript contract");
     const context = await browser.newContext({
       baseURL: ssrUrl,
       javaScriptEnabled: false,
-      storageState: authState,
+      storageState: workerStorageState,
     });
     const page = await context.newPage();
     await page.goto(`/${slug}/api-keys/`);

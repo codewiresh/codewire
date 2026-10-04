@@ -104,18 +104,6 @@ fn exact_id(reference: &str) -> Result<String, Error> {
 pub(crate) const METADATA_QUERY: &str =
     "SELECT * FROM public.codewire_platform_projection_metadata($1)";
 
-pub(crate) async fn metadata(
-    pool: &PgPool,
-    environment: &str,
-) -> Result<ProjectionMetadata, Error> {
-    sqlx::query_as(METADATA_QUERY)
-        .bind(environment)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Error::Unavailable)?
-        .ok_or(Error::Denied)
-}
-
 #[derive(PartialEq, Eq, sqlx::FromRow)]
 struct KeyRow {
     key: String,

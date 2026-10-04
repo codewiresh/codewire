@@ -1,11 +1,9 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test } from "./helpers/test";
+import type { Locator, Page } from "@playwright/test";
 import postgres from "postgres";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { getUserId } from "./helpers/db";
+import { ensureWorkerIdentity } from "./helpers/worker-identity";
 import { cleanupEnvironments, waitForEnvironmentState } from "./helpers/environment";
 import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
-import { USERS } from "./helpers/seed";
 import { defaultWorkspaceImage } from "./helpers/runtime-images";
 import { terminalWebSocketUrl } from "./helpers/terminal-websocket";
 
@@ -15,8 +13,6 @@ import { terminalWebSocketUrl } from "./helpers/terminal-websocket";
 test.use({ screenshot: "off", trace: "off", video: "off" });
 
 const sql = postgres(process.env.DATABASE_URL!);
-const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const authState = path.join(dashboardDir, "playwright/.auth/user.json");
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 const serverUrl = process.env.SERVER_URL || "http://127.0.0.1:8080";
 const fixtureRunIdOverride = process.env.CODEWIRE_PLAYWRIGHT_ENVIRONMENTS_FIXTURE_RUN_ID;
@@ -410,10 +406,8 @@ async function openConfiguredImageForm(page: Page) {
 }
 
 test.describe.serial("server-rendered environments", () => {
-  test.beforeAll(async () => {
-    const seededOwnerId = await getUserId(USERS.master.email);
-    if (!seededOwnerId) throw new Error("E2E owner was not seeded");
-    ownerId = seededOwnerId;
+  test.beforeAll(async ({}, testInfo) => {
+    ownerId = await ensureWorkerIdentity(testInfo.workerIndex);
     orgId = await ensureTestOrg(orgName, slug, ownerId);
     await seedPinnedPreset();
   });
@@ -803,7 +797,7 @@ test.describe.serial("server-rendered environments", () => {
     expect(destroyed.external_cleanup_completed_at).not.toBeNull();
   });
 
-  test("creates, runs, exposes a port, stops, starts, and destroys through real Kind", async ({ page, isMobile }) => {
+  test("creates, runs, exposes a port, stops, starts, and destroys through real Kind", async ({ page, isMobile, workerStorageState }) => {
     test.skip(!!isMobile, "desktop lifecycle contract");
     test.setTimeout(900_000);
     const disallowedBrowserCalls = watchDisallowedBrowserCalls(page);
@@ -1184,7 +1178,7 @@ test.describe.serial("server-rendered environments", () => {
     const noJavaScriptContext = await page.context().browser()!.newContext({
       baseURL: ssrUrl,
       javaScriptEnabled: false,
-      storageState: authState,
+      storageState: workerStorageState,
     });
     const noJavaScriptPage = await noJavaScriptContext.newPage();
     const noJavaScriptRequests: string[] = [];

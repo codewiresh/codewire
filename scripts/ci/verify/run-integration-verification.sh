@@ -258,7 +258,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test authority \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform credential restricted-role matrix" "$logfile" 10
+  assert_passed_count "platform credential restricted-role matrix" "$logfile" 13
 
   logfile="$RUN_DIR/platform-broker-admission.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -285,7 +285,7 @@ run_database() {
       --lib tests::database:: -- --ignored \
       --skip tests::database::projection:: \
       --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform runtime restricted identity matrix" "$logfile" 3
+  assert_passed_count "platform runtime restricted identity matrix" "$logfile" 5
 
   logfile="$RUN_DIR/platform-runtime-projection.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

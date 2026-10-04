@@ -35,6 +35,13 @@ enum GrantedVerb {
     Launch,
     Input,
     Stop,
+    ManagedLaunch,
+    ManagedMessage,
+    ManagedSteer,
+    ManagedInterrupt,
+    ManagedStop,
+    ManagedRestart,
+    ManagedRead,
 }
 
 #[derive(Clone, Debug)]
@@ -47,6 +54,13 @@ impl GrantedVerb {
             Self::Launch => v1::HostControlVerb::Launch as i32,
             Self::Input => v1::HostControlVerb::Input as i32,
             Self::Stop => v1::HostControlVerb::Stop as i32,
+            Self::ManagedLaunch => v1::HostControlVerb::ManagedLaunch as i32,
+            Self::ManagedMessage => v1::HostControlVerb::ManagedMessage as i32,
+            Self::ManagedSteer => v1::HostControlVerb::ManagedSteer as i32,
+            Self::ManagedInterrupt => v1::HostControlVerb::ManagedInterrupt as i32,
+            Self::ManagedStop => v1::HostControlVerb::ManagedStop as i32,
+            Self::ManagedRestart => v1::HostControlVerb::ManagedRestart as i32,
+            Self::ManagedRead => v1::HostControlVerb::ManagedRead as i32,
         }
     }
 }

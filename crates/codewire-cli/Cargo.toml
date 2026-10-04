@@ -57,6 +57,7 @@ uuid = { workspace = true }
 zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+codewire-tailnet = { workspace = true }
 buffa = { workspace = true }
 futures = { workspace = true }
 prost = { workspace = true }

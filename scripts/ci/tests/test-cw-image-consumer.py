@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -329,6 +331,116 @@ class Consumer(unittest.TestCase):
                 consumer.consume(self.args, self.command)
         docker.assert_not_called()
         self.assertFalse((Path(self.args.output) / "consumer.json").exists())
+
+
+class OwnedFailureDiagnostics(unittest.TestCase):
+    """Real c0 children with genuine source/producer intake; no Docker/CW."""
+
+    @classmethod
+    def setUpClass(cls):
+        (ROOT / ".tmp").mkdir(exist_ok=True)
+        cls.temporary = tempfile.TemporaryDirectory(prefix="cw-owned-diagnostic-", dir=ROOT / ".tmp")
+        cls.addClassCleanup(cls.temporary.cleanup)
+        cls.base = Path(cls.temporary.name)
+        cls.source = cls.base / "source"
+        cls.helper = load("cw_diagnostic_source_fixture", ROOT / "scripts/ci/tests/cw_image_fixtures.py")
+        cls.identity = cls.helper.create_source(cls.source)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cls.original = cls.helper.make_producer(cls.source, cls.base / "original", profile="ci")
+        cls.receipt = Path(cls.original["receipt"]["path"])
+        cls.receipt_bytes = cls.receipt.read_bytes()
+        cls.receipt_sha256 = hashlib.sha256(cls.receipt_bytes).hexdigest()
+        cls.home, cls.tmp = cls.base / "home", cls.base / "tmp"
+        cls.home.mkdir(mode=0o700)
+        cls.tmp.mkdir(mode=0o700)
+        cls.environment = {"PATH": "/usr/bin:/bin", "HOME": str(cls.home), "TMPDIR": str(cls.tmp),
+                           "USER": "noel", "LOGNAME": "noel", "PYTHONDONTWRITEBYTECODE": "1",
+                           "LC_ALL": "C", "TZ": "UTC"}
+
+    def solve(self, operation, status, diagnostic=b""):
+        case = Path(tempfile.mkdtemp(prefix=operation + "-", dir=self.base))
+        docker = case / "docker"
+        # The actual child has no Docker/API/ELF dispatch. Its only effects are
+        # a closed synthetic stderr string and the selected process status.
+        docker.write_text("#!/usr/bin/python3\nimport os, sys\n"
+                          "if sys.argv[1:3] != ['buildx', 'build']: sys.exit(98)\n"
+                          "os.write(2, " + repr(diagnostic) + ")\n"
+                          "sys.exit(" + str(status) + ")\n")
+        docker.chmod(0o700)
+        output = case / "output"
+        command = [sys.executable, "-B", str(ROOT / "scripts/ci/images/cw-image-consumer.py"),
+                   "produce" if operation == "produce" else "consume", "--source-dir", str(self.source),
+                   "--source-sha", self.identity["source_sha"], "--profile", "ci", "--output", str(output),
+                   "--docker-bin", str(docker)]
+        if operation == "produce":
+            command.extend(("--builder", "synthetic-owned", "--sccache-mode", "disabled"))
+        else:
+            if operation == "amd64":
+                command.extend(("--producer-receipt", str(self.receipt),
+                                "--producer-sha256", self.receipt_sha256))
+            command.extend(("--", str(docker), "buildx", "build", "--platform",
+                            "linux/arm64" if operation == "native" else "linux/amd64", "--file",
+                            str(self.source / "deployments/docker/gateway.Dockerfile"), str(self.source)))
+        process = subprocess.Popen(command, cwd=ROOT, env=self.environment, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            stdout, stderr = process.communicate(timeout=120)
+        except subprocess.TimeoutExpired:
+            # Cancel the identified CLI owner so its c0 handler drains children.
+            process.terminate()
+            stdout, stderr = process.communicate(timeout=20)
+            self.fail("owned diagnostic fixture timed out")
+        self.assertEqual(self.receipt.read_bytes(), self.receipt_bytes)
+        with self.helper.driver.reopen(str(self.receipt), self.receipt_sha256, self.source,
+                                       self.identity["source_sha"], "ci", "0.0.0-ci") as admitted:
+            admitted.revalidate()
+        self.assertEqual((output / "build.log").read_bytes(), diagnostic)
+        self.assertFalse((output / "build.json").exists())
+        self.assertFalse((output / "consumer.json").exists())
+        self.assertEqual(stdout, b"")
+        return process.returncode, stderr
+
+    def assert_empty_failure(self, operation):
+        status, stderr = self.solve(operation, 53)
+        self.assertEqual(status, 53, stderr.decode())
+        self.assertIn(b"solve failed; owned outputs retained", stderr)
+        self.assertNotIn(b"Traceback", stderr)
+
+    def test_empty_producer_failure_preserves_owned_exit_53(self):
+        self.assert_empty_failure("produce")
+
+    def test_empty_amd64_consumer_failure_preserves_owned_exit_53(self):
+        self.assert_empty_failure("amd64")
+
+    def test_empty_native_consumer_failure_preserves_owned_exit_53(self):
+        self.assert_empty_failure("native")
+
+    def test_empty_owned_exit_one_does_not_fail_terminal_diagnostics(self):
+        for operation in ("produce", "amd64", "native"):
+            with self.subTest(operation=operation):
+                status, stderr = self.solve(operation, 1)
+                self.assertEqual(status, 1)
+                self.assertIn(b"solve failed; owned outputs retained", stderr)
+                self.assertNotIn(b"Traceback", stderr)
+
+    def test_nonempty_terminal_cache_diagnostic_is_preserved(self):
+        diagnostic = (b"synthetic earlier solve vertex\n"
+                      b"ERROR: failed to build: failed to solve: failed to load cache: S3 GetObject NoSuchKey\n")
+        for operation in ("produce", "amd64", "native"):
+            with self.subTest(operation=operation):
+                status, stderr = self.solve(operation, 1, diagnostic)
+                self.assertEqual(status, 1)
+                self.assertIn(diagnostic, stderr)
+                self.assertTrue(stderr.endswith(diagnostic.splitlines()[-1] + b"\n"), stderr)
+                self.assertNotIn(b"Traceback", stderr)
+
+    def test_silent_success_still_requires_log_and_provenance_admission(self):
+        for operation in ("produce", "amd64", "native"):
+            with self.subTest(operation=operation):
+                status, stderr = self.solve(operation, 0)
+                self.assertEqual(status, 1)
+                self.assertIn(b"build refused; owned outputs retained", stderr)
+                self.assertNotIn(b"solve failed", stderr)
 
 
 if __name__ == "__main__":

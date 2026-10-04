@@ -191,7 +191,7 @@ fn sanitize_error(text: &str) -> String {
 
 type ResolveProgram<'a> = &'a dyn Fn(AgentKind) -> anyhow::Result<PathBuf>;
 
-fn handle(
+pub(super) fn handle(
     environment: &DriverEnvironment,
     request: ControlRequest,
     resolve: ResolveProgram<'_>,

@@ -632,6 +632,22 @@ impl SessionEngine {
         }
         {
             let metadata = handle.metadata.lock().await;
+            #[cfg(target_os = "linux")]
+            if metadata.control_origin.as_ref().is_some_and(|origin| {
+                metadata
+                    .session_id
+                    .strip_prefix("session-")
+                    .is_some_and(|driver| {
+                        crate::host_control::managed::driver_command_shape(
+                            &metadata.command,
+                            &origin.scope.environment_id,
+                            driver,
+                        )
+                    })
+            }) {
+                return Err(SessionError::FailedPrecondition(
+                    "member managed restart requires its exact guardian and target-owned generation transaction".into()));
+            }
             if metadata.environment_projection_required && metadata.env.is_empty() {
                 return Err(SessionError::FailedPrecondition(
                     "the launch environment projection is no longer available after daemon recovery; launch a new session with the required environment overrides".into(),
@@ -883,7 +899,12 @@ impl SessionEngine {
             || metadata.cleanup_confirmed
             || !metadata.env.is_empty()
             || metadata.environment_projection_required
-            || metadata.parent_session_id.is_some()
+            || (metadata.parent_session_id.is_some()
+                && !crate::host_control::managed::driver_command_shape(
+                    &metadata.command,
+                    &origin.scope.environment_id,
+                    &origin.request_id,
+                ))
         {
             return Err(Error::Storage);
         }
@@ -908,7 +929,7 @@ impl SessionEngine {
                 let engine = self.clone();
                 self.own_launch(move |cancel| async move {
                     engine
-                        .launch_host_control(owner, request, launch, cancel)
+                        .launch_host_control(owner, request, launch, None, cancel)
                         .await
                 })
                 .await
@@ -936,6 +957,42 @@ impl SessionEngine {
                 )
                 .await
             }
+            Operation::ManagedLaunch(managed) => {
+                if !owner.managed_agents() {
+                    return Err(Error::Unavailable);
+                }
+                let managed = managed.clone();
+                let command = crate::host_control::managed::driver_command(
+                    &self.inner.config,
+                    owner.environment_id(),
+                    &request.request_id,
+                )?;
+                let launch = v1::HostControlLaunch {
+                    command,
+                    working_dir: managed.working_dir.clone(),
+                    name: managed.name.clone(),
+                    pty: false,
+                    term: String::new(),
+                    width: 0,
+                    height: 0,
+                };
+                let engine = self.clone();
+                self.own_launch(move |cancel| async move {
+                    engine
+                        .launch_host_control(owner, request, launch, Some(managed), cancel)
+                        .await
+                })
+                .await
+                .map_err(|_| Error::Unavailable)
+            }
+            Operation::ManagedControl(control) => {
+                if !owner.managed_agents() {
+                    return Err(Error::Unavailable);
+                }
+                let control = control.clone();
+                self.with_host_managed_process(owner, request, control)
+                    .await
+            }
         }
     }
 
@@ -945,6 +1002,7 @@ impl SessionEngine {
         owner: crate::host_control::Owner,
         request: crate::host_control::Mutation,
         launch: v1::HostControlLaunch,
+        mut managed: Option<v1::HostControlManagedLaunch>,
         cancel: CancellationToken,
     ) -> Result<v1::SessionRecord, SessionError> {
         self.ensure_initialized().await?;
@@ -971,7 +1029,11 @@ impl SessionEngine {
             }
         }
         let working_dir = if launch.working_dir.is_empty() {
-            self.inner.config.home_root.to_string_lossy().into_owned()
+            self.inner
+                .config
+                .workspace_root
+                .to_string_lossy()
+                .into_owned()
         } else {
             launch.working_dir
         };
@@ -980,13 +1042,52 @@ impl SessionEngine {
                 "controlled session working directory is unavailable".into(),
             ));
         }
+        if let Some(managed) = &mut managed {
+            managed.working_dir = working_dir.clone();
+        }
+        let parent = match managed
+            .as_ref()
+            .filter(|value| !value.parent_session_id.is_empty())
+        {
+            Some(value) => Some(self.handle(&value.parent_session_id)?),
+            None => None,
+        };
+        let _parent_operation = match &parent {
+            Some(handle) => Some(handle.operation.lock().await),
+            None => None,
+        };
+        if let (Some(parent), Some(managed)) = (&parent, &managed) {
+            let metadata = parent.metadata.lock().await;
+            if metadata.launch_generation != managed.expected_parent_launch_generation
+                || metadata.cleanup_unknown
+                || !metadata
+                    .control_origin
+                    .as_ref()
+                    .is_some_and(|origin| origin.scope.same_principal(&request.scope))
+                || !crate::host_control::managed::driver_command_shape(
+                    &metadata.command,
+                    owner.environment_id(),
+                    managed
+                        .parent_session_id
+                        .strip_prefix("session-")
+                        .unwrap_or_default(),
+                )
+            {
+                return Err(SessionError::FailedPrecondition(
+                    "controlled parent binding changed".into(),
+                ));
+            }
+        }
         let handle = Arc::new(SessionHandle {
             metadata: AsyncMutex::new(PersistedSession {
                 session_id: session_id.clone(),
                 control_origin: Some(request.origin()),
                 launch_generation: 1,
                 name: launch.name,
-                parent_session_id: None,
+                parent_session_id: managed
+                    .as_ref()
+                    .filter(|m| !m.parent_session_id.is_empty())
+                    .map(|m| m.parent_session_id.clone()),
                 state: v1::SessionLifecycleState::Starting as i32,
                 command: launch.command,
                 working_dir,
@@ -1017,6 +1118,27 @@ impl SessionEngine {
             SessionError::FailedPrecondition("controlled launch admission refused".into())
         })?;
         self.make_record_room_preserving(None).await?;
+        if let Some(managed) = &managed {
+            let prepared = crate::host_control::managed::helper(
+                &self.inner.config,
+                owner.environment_id(),
+                crate::host_control::managed::prepare(&request.origin(), managed),
+            )
+            .await
+            .map_err(|_| SessionError::FailedPrecondition("managed preparation refused".into()))?;
+            if prepared["driver_id"].as_str() != Some(request.request_id.as_str())
+                || prepared["message_id"].as_str()
+                    != Some(if managed.prompt.is_some() {
+                        request.request_id.as_str()
+                    } else {
+                        ""
+                    })
+            {
+                return Err(SessionError::FailedPrecondition(
+                    "managed preparation identity changed".into(),
+                ));
+            }
+        }
         {
             let metadata = handle.metadata.lock().await;
             let bytes = serde_json::to_vec(&*metadata)
@@ -1027,6 +1149,7 @@ impl SessionEngine {
                 .map_err(|_| SessionError::Internal("publish controlled session".into()))?;
         }
         lock(&self.inner.sessions).insert(session_id, handle.clone());
+        drop(_parent_operation);
         drop(admission);
         self.start_process(handle.clone(), &cancel).await
     }
@@ -1062,6 +1185,10 @@ impl SessionEngine {
         }
         if generation == 0 || metadata.launch_generation != generation || metadata.cleanup_unknown {
             return Err(Error::Unavailable);
+        }
+        if crate::host_control::managed::is_driver(&metadata.command) {
+            // Raw terminal actions cannot bypass managed turn/custody admission.
+            return Err(Error::Denied);
         }
         let captured = lock(&self.inner.active)
             .get(session_id)
@@ -1119,6 +1246,353 @@ impl SessionEngine {
             return Err(Error::Unavailable);
         }
         Ok(record)
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn with_host_managed_process(
+        &self,
+        owner: crate::host_control::Owner,
+        request: crate::host_control::Mutation,
+        control: v1::HostControlManagedControl,
+    ) -> Result<v1::SessionRecord, crate::host_control::Error> {
+        use crate::host_control::{Error, managed};
+        use serde_json::json;
+        self.ensure_initialized()
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        let cancellation = owner.cancellation();
+        // Retention -> exact incarnation operation -> grant/journal. The
+        // captured control belongs to this incarnation even if its monitor dies.
+        let admission = tokio::select! {
+            biased;
+            _=cancellation.cancelled()=>return Err(Error::Closed),
+            admission=self.inner.retention_admission.lock()=>admission,
+        };
+        let handle = self
+            .handle(&control.session_id)
+            .map_err(|_| Error::Unavailable)?;
+        let _operation = tokio::select! {
+            biased;
+            _=cancellation.cancelled()=>return Err(Error::Closed),
+            operation=handle.operation.lock()=>operation,
+        };
+        let metadata = handle.metadata.lock().await;
+        if !metadata
+            .control_origin
+            .as_ref()
+            .is_some_and(|origin| origin.scope.same_principal(&request.scope))
+        {
+            return Err(Error::Denied);
+        }
+        if metadata.launch_generation != control.expected_launch_generation
+            || !managed::driver_command_shape(
+                &metadata.command,
+                owner.environment_id(),
+                &control.driver_id,
+            )
+            || metadata.pty
+            || metadata.environment_projection_required
+        {
+            return Err(Error::Unavailable);
+        }
+        let captured = lock(&self.inner.active)
+            .get(&control.session_id)
+            .map(|active| (active.token, active.control.clone()));
+        let action = v1::HostManagedAction::try_from(control.action).map_err(|_| Error::Invalid)?;
+        let shutdown = matches!(
+            action,
+            v1::HostManagedAction::Stop | v1::HostManagedAction::Restart
+        );
+        if !shutdown
+            && (metadata.state != v1::SessionLifecycleState::Running as i32
+                || metadata.cleanup_unknown
+                || captured.is_none())
+        {
+            return Err(Error::Unavailable);
+        }
+        if captured.is_none() && is_live_state(metadata.state) {
+            return Err(Error::Unavailable);
+        }
+        drop(metadata);
+
+        // Captured peer evidence is read-only. Missing/stale/unknown proof can
+        // never grant restart; a guardian remains responsible after driver death.
+        let peer = if shutdown {
+            Some(
+                managed::helper(
+                    &self.inner.config,
+                    owner.environment_id(),
+                    managed::scoped(
+                        "peer_status",
+                        &request.scope,
+                        &control.driver_id,
+                        &control.session_id,
+                    ),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        if let Some(peer) = &peer {
+            let identity = &peer["peer"]["identity"];
+            if identity["environment_id"].as_str() != Some(owner.environment_id())
+                || identity["driver_id"].as_str() != Some(control.driver_id.as_str())
+                || identity["session_id"].as_str() != Some(control.session_id.as_str())
+                || peer["peer"]["cleanup_unknown"].as_bool().is_none()
+            {
+                return Err(Error::Unavailable);
+            }
+            crate::host_control::canonical_uuid(
+                identity["instance_id"].as_str().ok_or(Error::Unavailable)?,
+            )?;
+        }
+        if action == v1::HostManagedAction::Restart {
+            // Admission of B must retain A's exact immutable executable, not
+            // the latest selected host cw or a caller-controlled path.
+            let metadata = handle.metadata.lock().await;
+            let expected = managed::driver_command(
+                &self.inner.config,
+                owner.environment_id(),
+                &control.driver_id,
+            )?;
+            if metadata.command != expected {
+                return Err(Error::Unavailable);
+            }
+            metadata
+                .launch_generation
+                .checked_add(1)
+                .ok_or(Error::Capacity)?;
+        }
+        owner.issue(&request).await?;
+        if !shutdown {
+            let queued = managed::helper(
+                &self.inner.config,
+                owner.environment_id(),
+                managed::queue(&request.origin(), &control),
+            )
+            .await?;
+            if queued["message_id"].as_str() != Some(request.request_id.as_str()) {
+                return Err(Error::Unavailable);
+            }
+            let (_, sender) = captured.ok_or(Error::Unavailable)?;
+            let delivered = self
+                .host_managed_input(
+                    sender,
+                    managed::line(&control.driver_id, &request.request_id, false)?,
+                )
+                .await;
+            let mut outcome = managed::scoped(
+                "mark_delivery",
+                &request.scope,
+                &control.driver_id,
+                &control.session_id,
+            );
+            outcome["message_id"] = json!(request.request_id);
+            outcome["outcome"] = json!(if delivered.is_ok() {
+                "written"
+            } else {
+                "ambiguous_failure"
+            });
+            // Lost pipe ACK never downgrades a native Accepted/Completed record.
+            managed::helper(&self.inner.config, owner.environment_id(), outcome).await?;
+            delivered?;
+            let record = handle.metadata.lock().await.to_record();
+            if record.launch_generation != control.expected_launch_generation {
+                return Err(Error::Unavailable);
+            }
+            return Ok(record);
+        }
+
+        let peer = peer.ok_or(Error::Unavailable)?;
+        let identity = peer["peer"]["identity"].clone();
+        let instance = identity["instance_id"]
+            .as_str()
+            .ok_or(Error::Unavailable)?
+            .to_owned();
+        crate::host_control::canonical_uuid(&instance)?;
+        let clean = peer["peer"]["cleanup_unknown"].as_bool() == Some(false)
+            && peer["peer"]["finished_at"].as_str().is_some();
+        if !clean {
+            let mut shutdown = managed::scoped(
+                "shutdown",
+                &request.scope,
+                &control.driver_id,
+                &control.session_id,
+            );
+            shutdown["operation_id"] = json!(request.request_id);
+            shutdown["peer"] = identity;
+            managed::helper(&self.inner.config, owner.environment_id(), shutdown).await?;
+            if let Some((_, sender)) = captured {
+                // This is only a wake hint. The durable intent is independently
+                // adopted by the exact driver, including after pipe ambiguity.
+                let _ = self
+                    .host_managed_input(
+                        sender,
+                        managed::line(&control.driver_id, &request.request_id, true)?,
+                    )
+                    .await;
+            }
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let mut read = managed::scoped(
+                if clean { "peer_status" } else { "get_shutdown" },
+                &request.scope,
+                &control.driver_id,
+                &control.session_id,
+            );
+            if !clean {
+                read["operation_id"] = json!(request.request_id);
+                read["instance_id"] = json!(instance);
+            }
+            let status = managed::helper(&self.inner.config, owner.environment_id(), read).await?;
+            if status["peer"]["identity"]["instance_id"].as_str() != Some(instance.as_str()) {
+                return Err(Error::Unavailable);
+            }
+            let record = handle.metadata.lock().await.to_record();
+            if record.launch_generation != control.expected_launch_generation {
+                return Err(Error::Unavailable);
+            }
+            let peer_clean = status["peer"]["cleanup_unknown"].as_bool() == Some(false)
+                && status["peer"]["finished_at"].as_str().is_some();
+            let shutdown_clean = clean
+                || (status["shutdown"]["cleanup_unknown"].as_bool() == Some(false)
+                    && status["shutdown"]["finished_at"].as_str().is_some());
+            if peer_clean
+                && shutdown_clean
+                && !is_live_state(record.state)
+                && !record.cleanup_unknown
+                && !lock(&self.inner.active).contains_key(&control.session_id)
+            {
+                if action == v1::HostManagedAction::Stop {
+                    return Ok(record);
+                }
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::Unavailable);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // The same operation guard covers old family closure and authoritative
+        // generation CAS. Persist B before spawn; failures never reset to A.
+        handle.launch_cancellation.send_replace(false);
+        {
+            let mut metadata = handle.metadata.lock().await;
+            if metadata.launch_generation != control.expected_launch_generation
+                || metadata.cleanup_unknown
+                || is_live_state(metadata.state)
+            {
+                return Err(Error::Unavailable);
+            }
+            metadata.launch_generation = metadata
+                .launch_generation
+                .checked_add(1)
+                .ok_or(Error::Capacity)?;
+            metadata.state = v1::SessionLifecycleState::Starting as i32;
+            metadata.started_at = None;
+            metadata.finished_at = None;
+            metadata.exit_code = None;
+            metadata.cleanup_unknown = true;
+            metadata.cleanup_confirmed = false;
+            metadata.status_message = "managed session restarting".into();
+            persist_metadata(&self.inner.root, &metadata)
+                .await
+                .map_err(|_| Error::Storage)?;
+        }
+        // The private mailbox generation advances only after the authoritative
+        // session CAS and old guardian closure. A crash between these writes
+        // fences B instead of adopting A's unissued messages or replaying them.
+        let mut advance = managed::scoped(
+            "advance_generation",
+            &request.scope,
+            &control.driver_id,
+            &control.session_id,
+        );
+        advance
+            .as_object_mut()
+            .ok_or(Error::Invalid)?
+            .remove("scope");
+        advance["origin"] = json!(request.origin());
+        advance["expected_generation"] = json!(control.expected_launch_generation);
+        let advanced = managed::helper(&self.inner.config, owner.environment_id(), advance).await?;
+        if advanced["launch_generation"].as_u64()
+            != control.expected_launch_generation.checked_add(1)
+        {
+            return Err(Error::Unavailable);
+        }
+        drop(admission);
+        let _ = self.start_process(handle.clone(), &cancellation).await;
+        Ok(handle.metadata.lock().await.to_record())
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn host_managed_input(
+        &self,
+        sender: mpsc::Sender<SessionControl>,
+        data: Vec<u8>,
+    ) -> Result<(), crate::host_control::Error> {
+        use crate::host_control::Error;
+        tokio::time::timeout(SESSION_INPUT_TIMEOUT, async {
+            let (reply, received) = oneshot::channel();
+            sender
+                .send(SessionControl::Input { data, reply })
+                .await
+                .map_err(|_| Error::Unavailable)?;
+            received
+                .await
+                .map_err(|_| Error::Unavailable)?
+                .map_err(|_| Error::Unavailable)
+        })
+        .await
+        .map_err(|_| Error::Unavailable)?
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn read_host_managed(
+        &self,
+        owner: &crate::host_control::Owner,
+        request: &v1::HostControlManagedReadRequest,
+        scope: &crate::host_control::Scope,
+    ) -> Result<Vec<u8>, crate::host_control::Error> {
+        use crate::host_control::{Error, managed};
+        use serde_json::json;
+        self.ensure_initialized()
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        let handle = self
+            .handle(&request.session_id)
+            .map_err(|_| Error::Unavailable)?;
+        let _operation = handle.operation.lock().await;
+        let metadata = handle.metadata.lock().await;
+        if metadata.launch_generation != request.expected_launch_generation
+            || !metadata
+                .control_origin
+                .as_ref()
+                .is_some_and(|o| o.scope.same_principal(scope))
+            || !managed::driver_command_shape(
+                &metadata.command,
+                owner.environment_id(),
+                &request.driver_id,
+            )
+        {
+            return Err(Error::Denied);
+        }
+        drop(metadata);
+        // A reader queued behind an incarnation operation must re-admit its
+        // current explicit read grant after that operation, including revoke.
+        owner.authorize_managed_read(scope).await?;
+        let mut read = managed::scoped("read", scope, &request.driver_id, &request.session_id);
+        read["message_id"] = json!(request.message_id);
+        read["limit"] = json!(request.limit);
+        read["launch_generation"] = json!(request.expected_launch_generation);
+        let value = managed::helper(&self.inner.config, owner.environment_id(), read).await?;
+        let bytes = serde_json::to_vec(&value).map_err(|_| Error::Unavailable)?;
+        if bytes.len() > managed::MAX_RECORD_REPLY {
+            return Err(Error::Capacity);
+        }
+        Ok(bytes)
     }
 
     #[cfg(target_os = "linux")]

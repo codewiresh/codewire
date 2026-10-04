@@ -1040,12 +1040,12 @@ async fn fetch_initial_derp_map(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct StunServer {
+pub(crate) struct StunServer {
     host: String,
     port: u16,
 }
 
-fn derp_target_from_map(map: Option<&Value>) -> Option<DerpTarget> {
+pub(crate) fn derp_target_from_map(map: Option<&Value>) -> Option<DerpTarget> {
     let regions = map?.get("Regions")?.as_object()?;
     let mut region_keys = regions.keys().collect::<Vec<_>>();
     region_keys.sort();
@@ -1085,7 +1085,7 @@ fn derp_target_from_map(map: Option<&Value>) -> Option<DerpTarget> {
     None
 }
 
-fn stun_servers_from_map(map: Option<&Value>) -> Vec<StunServer> {
+pub(crate) fn stun_servers_from_map(map: Option<&Value>) -> Vec<StunServer> {
     let Some(regions) = map
         .and_then(|map| map.get("Regions"))
         .and_then(Value::as_object)
@@ -1132,7 +1132,9 @@ fn stun_servers_from_map(map: Option<&Value>) -> Vec<StunServer> {
     servers
 }
 
-async fn resolve_stun_servers(servers: Vec<StunServer>) -> anyhow::Result<Vec<SocketAddr>> {
+pub(crate) async fn resolve_stun_servers(
+    servers: Vec<StunServer>,
+) -> anyhow::Result<Vec<SocketAddr>> {
     let mut resolved = Vec::new();
     for server in servers {
         let addrs = lookup_host((server.host.as_str(), server.port))

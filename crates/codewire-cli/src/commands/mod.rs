@@ -28,6 +28,11 @@ mod host_control;
 pub(crate) use host_control::*;
 
 #[cfg(target_os = "linux")]
+mod member_control;
+#[cfg(target_os = "linux")]
+pub(crate) use member_control::*;
+
+#[cfg(target_os = "linux")]
 mod native;
 #[cfg(target_os = "linux")]
 pub(crate) use native::*;
@@ -687,6 +692,8 @@ pub(crate) struct EnvironmentShellArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvironmentRunArgs {
+    #[arg(long, help = "Durable request UUID for a member launch")]
+    pub(crate) request_id: Option<String>,
     #[arg(long, help = "Unique session name within this environment")]
     pub(crate) name: Option<String>,
     #[arg(long, help = "Parent session name or ID within this environment")]
@@ -1954,6 +1961,10 @@ pub(crate) struct ListArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct SessionTargetArgs {
+    #[arg(long, help = "Durable request UUID for a member mutation")]
+    pub(crate) request_id: Option<String>,
+    #[arg(long, help = "Exact positive member session generation")]
+    pub(crate) expected_launch_generation: Option<u64>,
     #[arg(value_name = "TARGET", help = "SESSION, or ENV SESSION", num_args = 1..=2)]
     pub(crate) target: Vec<String>,
     #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
@@ -1962,6 +1973,10 @@ pub(crate) struct SessionTargetArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct SendArgs {
+    #[arg(long, help = "Durable request UUID for member input")]
+    pub(crate) request_id: Option<String>,
+    #[arg(long, help = "Exact positive member session generation")]
+    pub(crate) expected_launch_generation: Option<u64>,
     #[arg(value_name = "TARGET_AND_TEXT", help = "SESSION TEXT, or ENV SESSION TEXT; --key omits TEXT", num_args = 1..=3)]
     pub(crate) target_and_text: Vec<String>,
     #[arg(
@@ -2002,6 +2017,10 @@ pub(crate) struct AgentMessageArgs {
     pub(crate) reply_to: Option<String>,
     #[arg(long, help = "Expected active turn ID for steering")]
     pub(crate) turn_id: Option<String>,
+    #[arg(long, help = "Saved request UUID for a member-managed message")]
+    pub(crate) request_id: Option<String>,
+    #[arg(long, help = "Expected member session launch generation")]
+    pub(crate) expected_launch_generation: Option<u64>,
     #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) output: OutputFormat,
 }

@@ -2,7 +2,7 @@
 use std::ffi::OsStr;
 
 pub(super) fn is_role(role: &OsStr) -> bool {
-    role == "__local-mesh" || role == "__local-derp"
+    role == "__local-mesh" || role == "__local-derp" || role == "__host-member"
 }
 
 pub(super) fn run(role: &OsStr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -15,6 +15,13 @@ pub(super) fn run(role: &OsStr) -> Result<(), Box<dyn std::error::Error + Send +
         .enable_all()
         .build()?;
     runtime.block_on(async {
+        if role == "__host-member" {
+            return codewire_cli::run_host_member_helper_from(
+                std::env::args_os().skip(2).collect(),
+            )
+            .await
+            .map_err(Into::into);
+        }
         if role == "__local-derp" {
             if std::env::args_os().nth(2).is_some() {
                 return Err(

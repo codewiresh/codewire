@@ -7,17 +7,26 @@ fn short_env_id_does_not_panic_on_non_ascii_refs() {
 #[test]
 fn native_delete_replacement_persists_an_existing_or_unselected_target_without_stale_identity() {
     let data = tempfile::tempdir().unwrap();
-    config::save_current_target(data.path(), &config::CurrentTargetConfig {
-        kind: "local".into(), target_ref: "deleted-vm".into(), name: "deleted-vm".into(),
-    }).unwrap();
+    config::save_current_target(
+        data.path(),
+        &config::CurrentTargetConfig {
+            kind: "local".into(),
+            target_ref: "deleted-vm".into(),
+            name: "deleted-vm".into(),
+        },
+    )
+    .unwrap();
     for selected in [Some("remaining-vm".to_owned()), None] {
         let replacement = super::environment::native_current_target_after_delete(selected.clone());
         config::save_current_target(data.path(), &replacement).unwrap();
         let saved = config::current_target(data.path()).unwrap();
         assert_eq!(saved, replacement);
         assert_ne!(saved.target_ref, "deleted-vm");
-        if let Some(name) = selected { assert_eq!(saved.target_ref, name); }
-        else { assert_eq!(saved, config::default_current_target()); }
+        if let Some(name) = selected {
+            assert_eq!(saved.target_ref, name);
+        } else {
+            assert_eq!(saved, config::default_current_target());
+        }
     }
 }
 
@@ -325,8 +334,14 @@ fn platform_resize_restart_consent_error_names_the_runtime_reason() {
     let message = platform_resize_restart_consent_error(
         "runtime class commodity sizes the workspace VM when the Pod starts; memory growth needs a replacement Pod to reach the guest",
     );
-    assert!(message.contains("sizes the workspace VM when the Pod starts"), "{message}");
-    assert!(message.ends_with("non-interactive use requires --allow-restart"), "{message}");
+    assert!(
+        message.contains("sizes the workspace VM when the Pod starts"),
+        "{message}"
+    );
+    assert!(
+        message.ends_with("non-interactive use requires --allow-restart"),
+        "{message}"
+    );
     assert_eq!(
         platform_resize_restart_consent_error("  "),
         "this resize requires workspace Pod replacement; non-interactive use requires --allow-restart"
@@ -1128,7 +1143,10 @@ async fn init_command_writes_codewire_yaml_from_direct_flags() {
         panic!("expected init command");
     };
 
-    let globals = Globals { server: None };
+    let globals = Globals {
+        server: None,
+        member: None,
+    };
     handle_init_command(&globals, args).await.unwrap();
 
     let yaml = fs::read_to_string(&path).unwrap();
@@ -1168,7 +1186,10 @@ async fn init_command_refuses_existing_file_without_force() {
         panic!("expected init command");
     };
 
-    let globals = Globals { server: None };
+    let globals = Globals {
+        server: None,
+        member: None,
+    };
     let err = handle_init_command(&globals, args).await.unwrap_err();
 
     assert!(err.to_string().contains("already exists"));
@@ -2135,7 +2156,10 @@ async fn env_share_rejects_local_before_platform_resolution() {
     let Command::Env(args) = cli.command else {
         panic!("expected env command");
     };
-    let globals = Globals { server: None };
+    let globals = Globals {
+        server: None,
+        member: None,
+    };
 
     let error = handle_env_command(&globals, args).await.unwrap_err();
     assert_eq!(

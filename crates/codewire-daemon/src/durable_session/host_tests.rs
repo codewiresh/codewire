@@ -2,6 +2,380 @@ use super::*;
 
 #[cfg(target_os = "linux")]
 use crate::host_control::tests as control_fixture;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+#[cfg(target_os = "linux")]
+async fn completed_directory_command(engine: &SessionEngine, session: &str) -> v1::SessionRecord {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let record = engine.get(session).await.unwrap();
+            if !is_live_state(record.state) {
+                return record;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("owned directory command completed")
+}
+
+#[cfg(target_os = "linux")]
+fn retained_directory_metadata(engine: &SessionEngine, session: &str) -> PersistedSession {
+    serde_json::from_slice(
+        &std::fs::read(engine.inner.root.join(session).join(METADATA_FILE)).unwrap(),
+    )
+    .unwrap()
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn host_control_directory_default_uses_workspace_and_keeps_generic_home() {
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, engine) = control_fixture::owner(temp.path()).await;
+    let workspace = engine.inner.config.workspace_root.clone();
+    let home = engine.inner.config.home_root.clone();
+    assert_ne!(workspace, home);
+    let launched = owner
+        .mutate(control_fixture::launch(
+            3,
+            &control_fixture::scope(),
+            "pwd > member-default-cwd",
+        ))
+        .await
+        .unwrap();
+    let controlled = completed_directory_command(&engine, &launched.session_id).await;
+    let default_marker = std::fs::read_to_string(workspace.join("member-default-cwd"));
+    let generic = engine
+        .launch(request("pwd > local-generic-cwd", false))
+        .await
+        .unwrap();
+    let generic = completed_directory_command(&engine, &generic.session_id).await;
+    let generic_marker = std::fs::read_to_string(home.join("local-generic-cwd"));
+    owner.drain().await.unwrap();
+    engine.shutdown().await.unwrap();
+
+    assert_eq!(controlled.exit_code, Some(0));
+    assert_eq!(controlled.working_dir, workspace.to_string_lossy());
+    assert_eq!(
+        retained_directory_metadata(&engine, &controlled.session_id).working_dir,
+        workspace.to_string_lossy()
+    );
+    assert_eq!(
+        default_marker.unwrap(),
+        format!("{}\n", workspace.display())
+    );
+    assert!(!home.join("member-default-cwd").exists());
+    assert_eq!(generic.exit_code, Some(0));
+    assert_eq!(generic.working_dir, home.to_string_lossy());
+    assert_eq!(
+        retained_directory_metadata(&engine, &generic.session_id).working_dir,
+        home.to_string_lossy()
+    );
+    assert_eq!(generic_marker.unwrap(), format!("{}\n", home.display()));
+    assert!(!workspace.join("local-generic-cwd").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn host_control_directory_explicit_override_is_preserved() {
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, engine) = control_fixture::owner(temp.path()).await;
+    let selected = temp.path().join("explicit");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&selected)
+        .unwrap();
+    let mutation = crate::host_control::Mutation::from_wire(v1::HostControlMutationRequest {
+        request_id: uuid::Uuid::from_u128(3).to_string(),
+        scope: Some(control_fixture::scope().to_wire()),
+        operation: Some(v1::host_control_mutation_request::Operation::Launch(
+            v1::HostControlLaunch {
+                command: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "pwd > member-explicit-cwd".into(),
+                ],
+                working_dir: selected.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        )),
+    })
+    .unwrap();
+    let launched = owner.mutate(mutation).await.unwrap();
+    let record = completed_directory_command(&engine, &launched.session_id).await;
+    let marker = std::fs::read_to_string(selected.join("member-explicit-cwd"));
+    owner.drain().await.unwrap();
+    engine.shutdown().await.unwrap();
+
+    assert_eq!(record.exit_code, Some(0));
+    assert_eq!(record.working_dir, selected.to_string_lossy());
+    assert_eq!(
+        retained_directory_metadata(&engine, &record.session_id).working_dir,
+        selected.to_string_lossy()
+    );
+    assert_eq!(marker.unwrap(), format!("{}\n", selected.display()));
+    for directory in ["home", "workspace"] {
+        assert!(
+            !temp
+                .path()
+                .join(directory)
+                .join("member-explicit-cwd")
+                .exists()
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn host_control_directory_missing_workspace_refuses_before_session_publication() {
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, engine) = control_fixture::owner(temp.path()).await;
+    std::fs::remove_dir(&engine.inner.config.workspace_root).unwrap();
+    let launched = owner
+        .mutate(control_fixture::launch(
+            3,
+            &control_fixture::scope(),
+            "printf ran > must-not-execute",
+        ))
+        .await
+        .unwrap();
+    owner.drain().await.unwrap();
+    engine.shutdown().await.unwrap();
+
+    assert_eq!(launched.phase, v1::HostControlRequestPhase::Rejected as i32);
+    assert!(!temp.path().join("home/must-not-execute").exists());
+    assert!(
+        engine
+            .get(&format!("session-{}", uuid::Uuid::from_u128(3)))
+            .await
+            .is_err()
+    );
+    assert!(
+        !engine
+            .inner
+            .root
+            .join(format!("session-{}", uuid::Uuid::from_u128(3)))
+            .exists()
+    );
+}
+
+#[cfg(target_os = "linux")]
+async fn managed_test_owner(root: &Path) -> (crate::host_control::Owner, SessionEngine) {
+    let config = control_fixture::config(root);
+    let engine = SessionEngine::new(&config, CredentialBridge::new(None));
+    let owner = crate::host_control::Owner::new(
+        &config,
+        crate::host_control::HostControlBinding::new(control_fixture::scope().environment_id)
+            .unwrap()
+            .with_managed_agents(),
+        engine.clone(),
+    )
+    .await
+    .unwrap();
+    let mut grant = control_fixture::grant(&control_fixture::scope(), 0);
+    grant.grant.as_mut().unwrap().verbs = (1..=11).collect();
+    owner.put_grant(grant).await.unwrap();
+    (owner, engine)
+}
+
+#[cfg(target_os = "linux")]
+async fn managed_test_session(
+    owner: &crate::host_control::Owner,
+    engine: &SessionEngine,
+) -> String {
+    let request = control_fixture::launch(3, &control_fixture::scope(), "sleep 60");
+    let receipt = owner.mutate(request).await.unwrap();
+    let handle = engine.handle(&receipt.session_id).unwrap();
+    // Only the durable record is shaped as a managed driver. The live child
+    // remains synthetic sleep; invalid admissions must never reach the helper.
+    let mut metadata = handle.metadata.lock().await;
+    let driver = receipt.session_id.strip_prefix("session-").unwrap();
+    metadata.command = vec![
+        "/retained/cw".into(),
+        "_agent-driver".into(),
+        "--environment".into(),
+        control_fixture::scope().environment_id,
+        "--driver-id".into(),
+        driver.into(),
+        "--registry-root".into(),
+        "/private/hosts".into(),
+    ];
+    receipt.session_id
+}
+
+#[cfg(target_os = "linux")]
+fn managed_test_message(id: u128, sid: &str, generation: u64) -> crate::host_control::Mutation {
+    crate::host_control::Mutation::from_wire(v1::HostControlMutationRequest {
+        request_id: uuid::Uuid::from_u128(id).to_string(),
+        scope: Some(control_fixture::scope().to_wire()),
+        operation: Some(
+            v1::host_control_mutation_request::Operation::ManagedControl(
+                v1::HostControlManagedControl {
+                    action: v1::HostManagedAction::Message as i32,
+                    session_id: sid.into(),
+                    driver_id: sid.strip_prefix("session-").unwrap().into(),
+                    expected_launch_generation: generation,
+                    text: "must-not-deliver".into(),
+                    ..Default::default()
+                },
+            ),
+        ),
+    })
+    .unwrap()
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn member_managed_stale_generation_refuses_before_helper_or_current_process_effect() {
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, engine) = managed_test_owner(temp.path()).await;
+    let sid = managed_test_session(&owner, &engine).await;
+    let before = engine.get(&sid).await.unwrap();
+    let receipt = owner
+        .mutate(managed_test_message(4, &sid, 2))
+        .await
+        .unwrap();
+    assert_eq!(receipt.phase, v1::HostControlRequestPhase::Rejected as i32);
+    assert_eq!(receipt.generation, 2);
+    assert!(!receipt.input_acknowledged);
+    assert_eq!(engine.get(&sid).await.unwrap(), before);
+    assert!(lock(&engine.inner.active).contains_key(&sid));
+    owner.drain().await.unwrap();
+    engine.shutdown().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn member_managed_caller_drop_and_revoke_serialize_before_queue_effect_and_duplicates() {
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, engine) = managed_test_owner(temp.path()).await;
+    let sid = managed_test_session(&owner, &engine).await;
+    let handle = engine.handle(&sid).unwrap();
+    let operation = handle.operation.lock().await;
+    let request = managed_test_message(4, &sid, 1);
+    let waiting = owner.clone();
+    let message = request.clone();
+    let waiter = tokio::spawn(async move { waiting.mutate(message).await });
+    wait_control_pending(&owner, &request).await;
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    owner
+        .revoke_grant(v1::HostControlRevokeGrantRequest {
+            expected_book_revision: 1,
+            grant_id: request.scope.grant_id.clone(),
+            expected_grant_revision: 1,
+        })
+        .await
+        .unwrap();
+    drop(operation);
+    let terminal = control_fixture::settled(&owner, &request).await;
+    assert_eq!(terminal.phase, v1::HostControlRequestPhase::Rejected as i32);
+    assert!(!terminal.input_acknowledged);
+    assert_eq!(
+        owner.mutate(request.clone()).await.unwrap().to_wire(),
+        terminal.to_wire()
+    );
+    assert_eq!(
+        owner
+            .observe(&request.request_id, &request.scope)
+            .await
+            .unwrap()
+            .to_wire(),
+        terminal.to_wire()
+    );
+    assert!(lock(&engine.inner.active).contains_key(&sid));
+    owner.drain().await.unwrap();
+    engine.shutdown().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn member_managed_generic_restart_refuses_before_launch_cancel_but_legacy_stop_remains() {
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, engine) = managed_test_owner(temp.path()).await;
+    let sid = managed_test_session(&owner, &engine).await;
+    let handle = engine.handle(&sid).unwrap();
+    let before = engine.get(&sid).await.unwrap();
+    let messages = temp
+        .path()
+        .join("state/agents")
+        .join(sid.strip_prefix("session-").unwrap())
+        .join("messages");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&messages)
+        .unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let at = "2026-10-04T00:00:00Z";
+    // A closed generation-A queued-record fixture. The generic engine must
+    // refuse without reaching any private mailbox recovery/adoption path.
+    let queue=serde_json::to_vec(&serde_json::json!({"version":1,"id":id,"driver_id":sid.strip_prefix("session-").unwrap(),
+        "target_session_id":sid,"action":"message","text":"queued A","reply_to":null,"expected_turn_id":null,
+        "expected_active_message_id":null,"turn_id":null,"state":"accepted","created_at":at,"updated_at":at,
+        "accepted_at":at,"started_at":null,"finished_at":null,"native_acknowledged":false,"member_launch_generation":1,
+        "result":null,"result_truncated":false,"error":null,"usage":null,"source":null,"notification":null})).unwrap();
+    let path = messages.join(format!("{id}.json"));
+    std::fs::write(&path, &queue).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    for expected in [None, Some(1)] {
+        assert!(
+            engine
+                .restart_with_generation(&sid, expected)
+                .await
+                .is_err()
+        );
+        assert!(!*handle.launch_cancellation.borrow());
+        assert_eq!(engine.get(&sid).await.unwrap(), before);
+        assert_eq!(std::fs::read(&path).unwrap(), queue);
+    }
+    let stopped = engine.stop(&sid).await.unwrap();
+    assert!(!is_live_state(stopped.state));
+    assert_eq!(stopped.launch_generation, 1);
+    assert!(!stopped.cleanup_unknown);
+    owner.drain().await.unwrap();
+    engine.shutdown().await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn member_managed_read_queued_behind_operation_readmits_revocation_before_helper() {
+    let temp = tempfile::tempdir().unwrap();
+    let (owner, engine) = managed_test_owner(temp.path()).await;
+    let sid = managed_test_session(&owner, &engine).await;
+    let handle = engine.handle(&sid).unwrap();
+    let operation = handle.operation.lock().await;
+    let scope = control_fixture::scope();
+    let driver = sid.strip_prefix("session-").unwrap().to_owned();
+    let reading = owner.clone();
+    let read_scope = scope.clone();
+    let request = v1::HostControlManagedReadRequest {
+        scope: Some(scope.to_wire()),
+        session_id: sid.clone(),
+        driver_id: driver,
+        expected_launch_generation: 1,
+        ..Default::default()
+    };
+    let reader = tokio::spawn(async move { reading.read_managed(&request, &read_scope).await });
+    tokio::task::yield_now().await;
+    owner
+        .revoke_grant(v1::HostControlRevokeGrantRequest {
+            expected_book_revision: 1,
+            grant_id: scope.grant_id,
+            expected_grant_revision: 1,
+        })
+        .await
+        .unwrap();
+    drop(operation);
+    assert!(matches!(
+        reader.await.unwrap(),
+        Err(crate::host_control::Error::Denied)
+    ));
+    assert!(lock(&engine.inner.active).contains_key(&sid));
+    owner.drain().await.unwrap();
+    engine.shutdown().await.unwrap();
+}
 
 #[cfg(target_os = "linux")]
 async fn wait_control_pending(

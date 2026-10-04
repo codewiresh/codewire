@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::durable_session::SessionEngine;
 
+pub(crate) mod managed;
 mod service;
 mod store;
 #[cfg(test)]
@@ -37,12 +38,23 @@ const OWNER_DRAIN_TIMEOUT: Duration = Duration::from_secs(50);
 #[derive(Clone)]
 pub struct HostControlBinding {
     environment_id: String,
+    managed_agents: bool,
 }
 
 impl HostControlBinding {
     pub fn new(environment_id: String) -> Result<Self, tonic::Status> {
         canonical_uuid(&environment_id).map_err(Error::status)?;
-        Ok(Self { environment_id })
+        Ok(Self {
+            environment_id,
+            managed_agents: false,
+        })
+    }
+
+    /// Only a cw-bearing host owner implements the fixed private helper role.
+    /// Standalone/library owners remain terminal-only without an executable fallback.
+    pub fn with_managed_agents(mut self) -> Self {
+        self.managed_agents = true;
+        self
     }
 }
 
@@ -207,6 +219,8 @@ pub(crate) enum Operation {
     Launch(v1::HostControlLaunch),
     Input(v1::HostControlInput),
     Stop(v1::HostControlStop),
+    ManagedLaunch(v1::HostControlManagedLaunch),
+    ManagedControl(v1::HostControlManagedControl),
 }
 
 #[derive(Clone)]
@@ -262,6 +276,14 @@ impl Mutation {
                 }
                 Operation::Stop(request)
             }
+            v1::host_control_mutation_request::Operation::ManagedLaunch(request) => {
+                managed::validate_launch(&request)?;
+                Operation::ManagedLaunch(request)
+            }
+            v1::host_control_mutation_request::Operation::ManagedControl(request) => {
+                managed::validate_control(&request)?;
+                Operation::ManagedControl(request)
+            }
         };
         let mut request = Self {
             request_id: value.request_id,
@@ -278,6 +300,8 @@ impl Mutation {
             Operation::Launch(_) => v1::HostControlVerb::Launch,
             Operation::Input(_) => v1::HostControlVerb::Input,
             Operation::Stop(_) => v1::HostControlVerb::Stop,
+            Operation::ManagedLaunch(_) => v1::HostControlVerb::ManagedLaunch,
+            Operation::ManagedControl(ref value) => managed::verb(value),
         }
     }
 
@@ -331,6 +355,14 @@ impl Mutation {
                 part(&mut hash, request.session_id.as_bytes());
                 hash.update(request.expected_launch_generation.to_le_bytes());
             }
+            Operation::ManagedLaunch(request) => {
+                use prost::Message;
+                part(&mut hash, &request.encode_to_vec());
+            }
+            Operation::ManagedControl(request) => {
+                use prost::Message;
+                part(&mut hash, &request.encode_to_vec());
+            }
         }
         format!("{:x}", hash.finalize())
     }
@@ -349,14 +381,49 @@ pub(crate) struct Receipt {
     pub cleanup_unknown: bool,
     pub input_acknowledged: bool,
     pub reason: String,
+    #[serde(default)]
+    pub driver_id: String,
+    #[serde(default)]
+    pub message_id: String,
+    #[serde(default)]
+    pub requested_generation: u64,
 }
 
 impl Receipt {
-    fn pending(request: &Mutation) -> Self {
+    pub(crate) fn pending(request: &Mutation) -> Self {
         let (session_id, generation) = match &request.operation {
-            Operation::Launch(_) => (format!("session-{}", request.request_id), 1),
+            Operation::Launch(_) | Operation::ManagedLaunch(_) => {
+                (format!("session-{}", request.request_id), 1)
+            }
             Operation::Input(value) => (value.session_id.clone(), value.expected_launch_generation),
             Operation::Stop(value) => (value.session_id.clone(), value.expected_launch_generation),
+            Operation::ManagedControl(value) => {
+                (value.session_id.clone(), value.expected_launch_generation)
+            }
+        };
+        let (driver_id, message_id) = match &request.operation {
+            Operation::ManagedLaunch(value) => (
+                request.request_id.clone(),
+                value
+                    .prompt
+                    .as_ref()
+                    .map(|_| request.request_id.clone())
+                    .unwrap_or_default(),
+            ),
+            Operation::ManagedControl(value) => (
+                value.driver_id.clone(),
+                if matches!(
+                    v1::HostManagedAction::try_from(value.action),
+                    Ok(v1::HostManagedAction::Message
+                        | v1::HostManagedAction::Steer
+                        | v1::HostManagedAction::Interrupt)
+                ) {
+                    request.request_id.clone()
+                } else {
+                    String::new()
+                },
+            ),
+            _ => (String::new(), String::new()),
         };
         Self {
             origin: request.origin(),
@@ -369,6 +436,9 @@ impl Receipt {
             cleanup_unknown: false,
             input_acknowledged: false,
             reason: "pending".into(),
+            driver_id,
+            message_id,
+            requested_generation: generation,
         }
     }
 
@@ -393,6 +463,8 @@ impl Receipt {
             cleanup_unknown: self.cleanup_unknown,
             input_acknowledged: self.input_acknowledged,
             reason: self.reason.clone(),
+            driver_id: self.driver_id.clone(),
+            message_id: self.message_id.clone(),
         }
     }
 }
@@ -411,6 +483,7 @@ struct Inner {
     tasks: TaskTracker,
     shutdown: CancellationToken,
     environment_id: String,
+    managed_agents: bool,
 }
 
 #[derive(Clone)]
@@ -447,11 +520,15 @@ impl Owner {
             tasks: TaskTracker::new(),
             shutdown: CancellationToken::new(),
             environment_id: binding.environment_id,
+            managed_agents: binding.managed_agents,
         })))
     }
 
     pub(crate) fn environment_id(&self) -> &str {
         &self.0.environment_id
+    }
+    pub(crate) fn managed_agents(&self) -> bool {
+        self.0.managed_agents
     }
     pub(crate) fn cancellation(&self) -> CancellationToken {
         self.0.shutdown.clone()
@@ -475,6 +552,9 @@ impl Owner {
     }
 
     pub(crate) async fn mutate(&self, request: Mutation) -> Result<Receipt, Error> {
+        if managed::is_managed(request.verb() as i32) && !self.managed_agents() {
+            return Err(Error::Unavailable);
+        }
         let mut receiver = {
             let mut state = self.0.state.lock().await;
             let _gate = self.0.admission.lock().unwrap_or_else(|e| e.into_inner());
@@ -644,5 +724,24 @@ impl Owner {
             .read_output(request)
             .await
             .map_err(|_| Error::Unavailable)
+    }
+    pub(crate) async fn read_managed(
+        &self,
+        request: &v1::HostControlManagedReadRequest,
+        scope: &Scope,
+    ) -> Result<Vec<u8>, Error> {
+        self.authorize_managed_read(scope).await?;
+        self.0.engine.read_host_managed(self, request, scope).await
+    }
+    pub(crate) async fn authorize_managed_read(&self, scope: &Scope) -> Result<(), Error> {
+        if !self.managed_agents() {
+            return Err(Error::Unavailable);
+        }
+        self.0
+            .state
+            .lock()
+            .await
+            .store
+            .authorize(scope, v1::HostControlVerb::ManagedRead)
     }
 }

@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::platform_test_support as support;
-use support::{TestDatabase, quote_ident};
+use support::{StatementCounter, TestDatabase, ensure_cheap_plans, quote_ident};
 
 mod projection;
 
@@ -344,6 +344,175 @@ async fn final_scope_reread_and_original_expiry_fence_pending_kubernetes() -> Re
         fixture.kube.gate.release();
         ensure!(matches!(task.await?, Err(PlatformRuntimeError::Denied)));
         ensure!(fixture.kube.reviews.load(Ordering::SeqCst) == reviews);
+        Ok(())
+    }
+    .await;
+    fixture.finish(result).await
+}
+
+/// Statement round trips of one runtime authority resolve, counted at the wire
+/// after the admission resolve has prepared every statement on the one pooled
+/// connection. Each count is exact: a change must update it deliberately.
+#[tokio::test]
+#[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
+async fn each_runtime_authority_resolve_takes_a_fixed_number_of_statement_round_trips() -> Result<()>
+{
+    let fixture = Fixture::create().await?;
+    let result = async {
+        let (counter, pool) = StatementCounter::pool(&fixture.pool, 1).await?;
+        let authenticator = KubernetesPlatformBridgeAuthenticator::new(
+            fixture.kube.client(),
+            pool.clone(),
+            Arc::new(TestKekProvider),
+        );
+        let mut observed = Vec::new();
+        // Scope and metadata; BEGIN, timeouts, owner and environment locks,
+        // binding and revision, COMMIT; GitHub and ownership; the final scope
+        // and metadata. With one statement per read these were 24 and 4.
+        for (case, expected) in [("personal profile", 8), ("no profile", 2)] {
+            if case == "no profile" {
+                sqlx::query("DELETE FROM platform_environment_access_bindings")
+                    .execute(&fixture.db.pool)
+                    .await?;
+                sqlx::query("UPDATE environments SET project_spec=project_spec-'credentials'")
+                    .execute(&fixture.db.pool)
+                    .await?;
+            }
+            let authority = authenticator
+                .authenticate(&headers(unix_now()? + 600))
+                .await?;
+            let (session, statements) = counter.count(authority.current_session()).await;
+            session?;
+            observed.push((case, statements, expected));
+        }
+        ensure!(
+            observed
+                .iter()
+                .all(|(_, counted, expected)| counted == expected),
+            "statement round trips per resolve (case, observed, expected): {observed:?}"
+        );
+        // No statement on the path is planned large enough to be JIT-compiled.
+        ensure_cheap_plans(&fixture.db.pool, &counter.texts()).await?;
+        pool.close().await;
+        Ok(())
+    }
+    .await;
+    fixture.finish(result).await
+}
+
+/// The one-statement scope and metadata read and the one-statement GitHub and
+/// ownership read: each condition they decide changes the runtime session on
+/// its own, as the separate statements did, including in the final reread.
+#[tokio::test]
+#[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
+async fn merged_resolve_reads_decide_each_condition_alone() -> Result<()> {
+    let fixture = Fixture::create().await?;
+    let result = async {
+        let authority = fixture.admitted().await?;
+        let admitted = authority.current_session().await?;
+        fixture.db.user("synthetic-other").await?;
+        let credential = fixture
+            .profile
+            .entries
+            .values()
+            .next()
+            .context("synthetic profile entry")?
+            .to_string();
+        let selected = format!(
+            "UPDATE environments SET project_spec=jsonb_set(project_spec,'{{credentials}}',\
+             '{{\"profile\":\"platform:id:{}\"}}')",
+            fixture.profile.id
+        );
+        for (case, change, restore) in [
+            // The scope half.
+            (
+                "membership",
+                "DELETE FROM org_members WHERE id='synthetic-membership'".to_string(),
+                "INSERT INTO org_members(id,org_id,user_id,role) \
+                 VALUES ('synthetic-membership','synthetic-org','synthetic-creator','member')"
+                    .to_string(),
+            ),
+            // The metadata half.
+            (
+                "profile reference",
+                format!(
+                    "UPDATE environments SET project_spec=jsonb_set(project_spec,'{{credentials}}',\
+                     '{{\"profile\":\"platform:id:{}\"}}')",
+                    Uuid::new_v4()
+                ),
+                selected.clone(),
+            ),
+            (
+                "secret source",
+                "UPDATE environments SET project_spec=\
+                 jsonb_set(project_spec,'{secrets}','{\"user\":\"local\"}')"
+                    .to_string(),
+                "UPDATE environments SET project_spec=project_spec-'secrets'".to_string(),
+            ),
+            // The ownership half of the GitHub and ownership read.
+            (
+                "credential owner",
+                format!("UPDATE platform_credentials SET user_id='synthetic-other' WHERE id='{credential}'"),
+                format!("UPDATE platform_credentials SET user_id='synthetic-creator' WHERE id='{credential}'"),
+            ),
+        ] {
+            sqlx::query(&change).execute(&fixture.db.pool).await?;
+            ensure!(
+                matches!(authority.current_session().await, Err(PlatformRuntimeError::Denied)),
+                "{case}"
+            );
+            sqlx::query(&restore).execute(&fixture.db.pool).await?;
+            ensure!(authority.current_session().await? == admitted, "{case} restored");
+        }
+        // The GitHub half: the creator's connection is authorized while it can
+        // be used now, and omitted, not denied, when it cannot.
+        let github = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO platform_credentials(id,user_id,provider,authentication_kind,display_name,\
+             status,revocation_generation,material_generation) \
+             VALUES ($1,'synthetic-creator','github','oauth','GitHub','active',1,1)",
+        )
+        .bind(&github)
+        .execute(&fixture.db.pool)
+        .await?;
+        let connected = authority.current_session().await?;
+        ensure!(connected != admitted && format!("{connected:?}").contains(&github));
+        for (change, restore) in [
+            ("expires_at_unix=1", "expires_at_unix=NULL"),
+            ("status='revoked'", "status='active'"),
+        ] {
+            sqlx::query(&format!("UPDATE platform_credentials SET {change} WHERE id=$1"))
+                .bind(&github)
+                .execute(&fixture.db.pool)
+                .await?;
+            ensure!(authority.current_session().await? == admitted, "{change}");
+            sqlx::query(&format!("UPDATE platform_credentials SET {restore} WHERE id=$1"))
+                .bind(&github)
+                .execute(&fixture.db.pool)
+                .await?;
+            ensure!(authority.current_session().await? == connected, "{restore}");
+        }
+        // The final reread's metadata half: a valid selection change while
+        // Kubernetes is pending denies, as a scope change does.
+        fixture.kube.gate.arm(pod_path(WORKSPACE));
+        let pending = authority.clone();
+        let task = tokio::spawn(async move { pending.current_session().await });
+        fixture.kube.gate.wait().await?;
+        sqlx::query(
+            "UPDATE environments SET project_spec=\
+             jsonb_set(project_spec,'{secrets}','{\"organization\":true}')",
+        )
+        .execute(&fixture.db.pool)
+        .await?;
+        fixture.kube.gate.release();
+        ensure!(matches!(
+            tokio::time::timeout(TIMEOUT, task).await??,
+            Err(PlatformRuntimeError::Denied)
+        ));
+        sqlx::query("UPDATE environments SET project_spec=project_spec-'secrets'")
+            .execute(&fixture.db.pool)
+            .await?;
+        ensure!(authority.current_session().await? == connected);
         Ok(())
     }
     .await;

@@ -63,6 +63,9 @@ service HostControlService {
   rpc ListHostSessions(HostControlReadRequest) returns (HostControlListSessionsResponse);
   rpc GetHostSession(HostControlReadRequest) returns (GetSessionResponse);
   rpc ReadHostSessionOutput(HostControlReadRequest) returns (ReadSessionOutputResponse);
+  // One bounded target-owned managed record or status/inbox snapshot. Native
+  // provider protocols stay on the target; frames never carry credentials.
+  rpc ReadHostManagedSession(HostControlManagedReadRequest) returns (stream HostControlManagedRecordChunk);
 }
 
 enum HostControlVerb {
@@ -71,6 +74,13 @@ enum HostControlVerb {
   HOST_CONTROL_VERB_LAUNCH = 2;
   HOST_CONTROL_VERB_INPUT = 3;
   HOST_CONTROL_VERB_STOP = 4;
+  HOST_CONTROL_VERB_MANAGED_LAUNCH = 5;
+  HOST_CONTROL_VERB_MANAGED_MESSAGE = 6;
+  HOST_CONTROL_VERB_MANAGED_STEER = 7;
+  HOST_CONTROL_VERB_MANAGED_INTERRUPT = 8;
+  HOST_CONTROL_VERB_MANAGED_STOP = 9;
+  HOST_CONTROL_VERB_MANAGED_RESTART = 10;
+  HOST_CONTROL_VERB_MANAGED_READ = 11;
 }
 
 enum HostControlRequestPhase {
@@ -87,6 +97,8 @@ message HostControlInfoResponse {
   uint32 protocol_version = 1;
   string environment_id = 2;
   repeated HostControlVerb verbs = 3;
+  // Zero for owners that have not explicitly enabled the managed adapter.
+  uint32 managed_agent_protocol_version = 4;
 }
 
 message HostControlGrant {
@@ -150,7 +162,66 @@ message HostControlMutationRequest {
     HostControlLaunch launch = 3;
     HostControlInput input = 4;
     HostControlStop stop = 5;
+    HostControlManagedLaunch managed_launch = 6;
+    HostControlManagedControl managed_control = 7;
   }
+}
+enum HostManagedAgent {
+  HOST_MANAGED_AGENT_UNSPECIFIED = 0;
+  HOST_MANAGED_AGENT_CODEX = 1;
+  HOST_MANAGED_AGENT_CLAUDE = 2;
+}
+enum HostManagedAction {
+  HOST_MANAGED_ACTION_UNSPECIFIED = 0;
+  HOST_MANAGED_ACTION_MESSAGE = 1;
+  HOST_MANAGED_ACTION_STEER = 2;
+  HOST_MANAGED_ACTION_INTERRUPT = 3;
+  HOST_MANAGED_ACTION_STOP = 4;
+  HOST_MANAGED_ACTION_RESTART = 5;
+}
+message HostControlManagedLaunch {
+  HostManagedAgent agent = 1;
+  string model = 2;
+  optional string effort = 3;
+  string working_dir = 4;
+  string name = 5;
+  optional string prompt = 6;
+  // Canonical same-target parent; server resolves exact driver and origin.
+  string parent_session_id = 7;
+  // Required nonzero when parent_session_id is set.
+  uint64 expected_parent_launch_generation = 8;
+}
+message HostControlManagedControl {
+  HostManagedAction action = 1;
+  string session_id = 2;
+  uint64 expected_launch_generation = 3;
+  string driver_id = 4;
+  string text = 5;
+  optional string reply_to = 6;
+  optional string expected_turn_id = 7;
+  optional string expected_active_message_id = 8;
+}
+message HostControlManagedReadRequest {
+  HostControlScope scope = 1;
+  string session_id = 2;
+  uint64 expected_launch_generation = 3;
+  string driver_id = 4;
+  // Empty selects bounded status/inbox summaries; otherwise one full record.
+  string message_id = 5;
+  // At most100 summaries with an actual total-byte cap; zero selects20.
+  uint32 limit = 6;
+}
+message HostControlManagedRecordChunk {
+  string session_id = 1;
+  string driver_id = 2;
+  uint64 launch_generation = 3;
+  string message_id = 4;
+  uint64 offset = 5;
+  uint64 total_bytes = 6;
+  string payload_sha256 = 7;
+  // One atomic snapshot, total<=5MiB; the encoded frame, including metadata,
+  // must remain<=256KiB. Callers cannot widen the ordinary terminal bound.
+  bytes data = 8;
 }
 message HostControlObserveRequest {
   string request_id = 1;
@@ -172,6 +243,8 @@ message HostControlReceipt {
   // to relaunch or repeat input. Completed Launch means admission settled,
   // not that the durable command exited.
   string reason = 12;
+  string driver_id = 13;
+  string message_id = 14;
 }
 message HostControlReadRequest {
   HostControlScope scope = 1;

@@ -108,16 +108,28 @@ impl HostControlClient {
             .into_inner();
         if info.protocol_version != crate::host_control::HOST_CONTROL_PROTOCOL
             || info.environment_id != self.environment_id
+            || !matches!(
+                info.managed_agent_protocol_version,
+                0 | crate::host_control::managed::PROTOCOL
+            )
             || info.verbs
-                != [
-                    v1::HostControlVerb::Read as i32,
-                    v1::HostControlVerb::Launch as i32,
-                    v1::HostControlVerb::Input as i32,
-                    v1::HostControlVerb::Stop as i32,
-                ]
+                != crate::host_control::managed::verbs(info.managed_agent_protocol_version != 0)
         {
             return Err(tonic::Status::failed_precondition(
                 "host control protocol or identity is unavailable",
+            )
+            .into());
+        }
+        Ok(info)
+    }
+
+    pub async fn require_managed_ready(
+        &self,
+    ) -> Result<v1::HostControlInfoResponse, SessionClientError> {
+        let info = self.require_ready().await?;
+        if info.managed_agent_protocol_version != crate::host_control::managed::PROTOCOL {
+            return Err(tonic::Status::failed_precondition(
+                "member managed agents are unavailable on this owner",
             )
             .into());
         }
@@ -159,7 +171,7 @@ impl HostControlClient {
                     || !ids.insert(grant.grant_id.clone())
                     || grant.revision > response.book_revision
                     || grant.verbs.is_empty()
-                    || grant.verbs.len() > 4
+                    || grant.verbs.len() > 11
                     || !grant.verbs.windows(2).all(|pair| pair[0] < pair[1])
                     || grant.verbs.iter().any(|verb| {
                         !matches!(
@@ -167,7 +179,14 @@ impl HostControlClient {
                             Ok(v1::HostControlVerb::Read
                                 | v1::HostControlVerb::Launch
                                 | v1::HostControlVerb::Input
-                                | v1::HostControlVerb::Stop)
+                                | v1::HostControlVerb::Stop
+                                | v1::HostControlVerb::ManagedLaunch
+                                | v1::HostControlVerb::ManagedMessage
+                                | v1::HostControlVerb::ManagedSteer
+                                | v1::HostControlVerb::ManagedInterrupt
+                                | v1::HostControlVerb::ManagedStop
+                                | v1::HostControlVerb::ManagedRestart
+                                | v1::HostControlVerb::ManagedRead)
                         )
                     })
             })
@@ -241,11 +260,17 @@ impl HostControlClient {
                 v1::HostControlVerb::try_from(response.verb),
                 Ok(v1::HostControlVerb::Launch
                     | v1::HostControlVerb::Input
-                    | v1::HostControlVerb::Stop)
+                    | v1::HostControlVerb::Stop
+                    | v1::HostControlVerb::ManagedLaunch
+                    | v1::HostControlVerb::ManagedMessage
+                    | v1::HostControlVerb::ManagedSteer
+                    | v1::HostControlVerb::ManagedInterrupt
+                    | v1::HostControlVerb::ManagedStop
+                    | v1::HostControlVerb::ManagedRestart)
             )
             || v1::SessionLifecycleState::try_from(response.session_state).is_err()
             || (response.input_acknowledged
-                && (response.verb != v1::HostControlVerb::Input as i32
+                && (!crate::host_control::managed::is_input(response.verb)
                     || response.phase != v1::HostControlRequestPhase::Completed as i32
                     || response.cleanup_unknown))
             || (response.phase == v1::HostControlRequestPhase::Completed as i32
@@ -267,6 +292,36 @@ impl HostControlClient {
             )
             .into());
         }
+        if crate::host_control::managed::is_managed(response.verb) {
+            if crate::host_control::canonical_uuid(&response.driver_id).is_err()
+                || response.session_id != format!("session-{}", response.driver_id)
+                || (!response.message_id.is_empty()
+                    && crate::host_control::canonical_uuid(&response.message_id).is_err())
+            {
+                return Err(
+                    tonic::Status::failed_precondition("managed receipt binding differs").into(),
+                );
+            }
+            if (crate::host_control::managed::is_input(response.verb)
+                && response.message_id != response.request_id)
+                || (response.verb == v1::HostControlVerb::ManagedLaunch as i32
+                    && (response.driver_id != response.request_id
+                        || response.launch_generation != 1
+                        || (!response.message_id.is_empty()
+                            && response.message_id != response.request_id)))
+                || (matches!(response.verb, 9 | 10) && !response.message_id.is_empty())
+            {
+                return Err(tonic::Status::failed_precondition(
+                    "managed receipt reservation differs",
+                )
+                .into());
+            }
+        } else if !response.driver_id.is_empty() || !response.message_id.is_empty() {
+            return Err(tonic::Status::failed_precondition(
+                "terminal receipt carries managed identity",
+            )
+            .into());
+        }
         Ok(response)
     }
 
@@ -276,21 +331,22 @@ impl HostControlClient {
         validated: &crate::host_control::Mutation,
     ) -> Result<v1::HostControlReceipt, SessionClientError> {
         let response = self.receipt(response, &validated.request_id, &validated.scope.to_wire())?;
-        let (expected_session, expected_generation) = match &validated.operation {
-            crate::host_control::Operation::Launch(_) => {
-                (format!("session-{}", validated.request_id), 1)
-            }
-            crate::host_control::Operation::Input(value) => {
-                (value.session_id.clone(), value.expected_launch_generation)
-            }
-            crate::host_control::Operation::Stop(value) => {
-                (value.session_id.clone(), value.expected_launch_generation)
-            }
-        };
+        let reserved = crate::host_control::Receipt::pending(validated);
+        let restarted = response.verb == v1::HostControlVerb::ManagedRestart as i32
+            && matches!(
+                v1::HostControlRequestPhase::try_from(response.phase),
+                Ok(v1::HostControlRequestPhase::Completed | v1::HostControlRequestPhase::Unknown)
+            )
+            && Some(response.launch_generation) == reserved.generation.checked_add(1);
         if response.fingerprint_sha256 != validated.fingerprint
             || response.verb != validated.verb() as i32
-            || response.session_id != expected_session
-            || response.launch_generation != expected_generation
+            || response.session_id != reserved.session_id
+            || response.driver_id != reserved.driver_id
+            || response.message_id != reserved.message_id
+            || (response.launch_generation != reserved.generation && !restarted)
+            || (response.verb == v1::HostControlVerb::ManagedRestart as i32
+                && response.phase == v1::HostControlRequestPhase::Completed as i32
+                && !restarted)
         {
             return Err(tonic::Status::failed_precondition(
                 "host control request fingerprint changed; retain original request",
@@ -307,7 +363,11 @@ impl HostControlClient {
         self.scope(request.scope.as_ref())?;
         let validated = crate::host_control::Mutation::from_wire(request.clone())
             .map_err(|_| tonic::Status::invalid_argument("invalid host control mutation"))?;
-        self.require_ready().await?;
+        if crate::host_control::managed::is_managed(validated.verb() as i32) {
+            self.require_managed_ready().await?;
+        } else {
+            self.require_ready().await?;
+        }
         let mut client = self.inner.clone();
         let response = client
             .mutate_host_session(self.authorized(request))
@@ -413,6 +473,74 @@ impl HostControlClient {
             .await?
             .into_inner())
     }
+
+    pub async fn read_managed_chunks(
+        &self,
+        request: v1::HostControlManagedReadRequest,
+    ) -> Result<Vec<v1::HostControlManagedRecordChunk>, SessionClientError> {
+        self.scope(request.scope.as_ref())?;
+        self.require_managed_ready().await?;
+        let mut client = self.inner.clone();
+        let mut stream = client
+            .read_host_managed_session(self.authorized(request.clone()))
+            .await?
+            .into_inner();
+        let mut chunks = Vec::new();
+        let mut total = 0usize;
+        while let Some(chunk) = stream.message().await? {
+            total = total
+                .checked_add(chunk.data.len())
+                .ok_or_else(|| tonic::Status::resource_exhausted("managed record too large"))?;
+            if total > crate::host_control::managed::MAX_RECORD_REPLY || chunks.len() >= 32 {
+                return Err(tonic::Status::resource_exhausted("managed record too large").into());
+            }
+            chunks.push(chunk);
+        }
+        validate_host_managed_chunks(&request, &chunks)?;
+        Ok(chunks)
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn validate_host_managed_chunks(
+    request: &v1::HostControlManagedReadRequest,
+    chunks: &[v1::HostControlManagedRecordChunk],
+) -> Result<Vec<u8>, SessionClientError> {
+    use prost::Message;
+    use sha2::{Digest, Sha256};
+    let failure =
+        || tonic::Status::failed_precondition("managed record framing or identity differs");
+    let first = chunks.first().ok_or_else(failure)?;
+    if first.total_bytes == 0
+        || first.total_bytes > crate::host_control::managed::MAX_RECORD_REPLY as u64
+        || chunks.len() > 32
+        || crate::host_control::valid_sha256(&first.payload_sha256).is_err()
+    {
+        return Err(failure().into());
+    }
+    let mut bytes = Vec::with_capacity(first.total_bytes as usize);
+    for chunk in chunks {
+        if chunk.session_id != request.session_id
+            || chunk.driver_id != request.driver_id
+            || chunk.message_id != request.message_id
+            || chunk.launch_generation != request.expected_launch_generation
+            || chunk.offset != bytes.len() as u64
+            || chunk.total_bytes != first.total_bytes
+            || chunk.payload_sha256 != first.payload_sha256
+            || chunk.data.is_empty()
+            || chunk.encoded_len() + 1 > crate::host_control::managed::MAX_CHUNK
+            || bytes.len() + chunk.data.len() > first.total_bytes as usize
+        {
+            return Err(failure().into());
+        }
+        bytes.extend_from_slice(&chunk.data);
+    }
+    if bytes.len() as u64 != first.total_bytes
+        || format!("{:x}", Sha256::digest(&bytes)) != first.payload_sha256
+    {
+        return Err(failure().into());
+    }
+    Ok(bytes)
 }
 
 pub struct SessionAttachment {
@@ -456,6 +584,7 @@ mod host_control_tests {
             cleanup_unknown: false,
             input_acknowledged: false,
             reason: "completed".into(),
+            ..Default::default()
         };
         assert!(client.mutation_receipt(receipt.clone(), &request).is_ok());
         let mut changed = receipt.clone();
@@ -492,6 +621,7 @@ mod host_control_tests {
             cleanup_unknown: false,
             input_acknowledged: true,
             reason: "input_acknowledged".into(),
+            ..Default::default()
         };
         assert!(client.mutation_receipt(receipt.clone(), &request).is_ok());
         for field in ["unknown", "zero-state", "zero-verb", "foreign-scope"] {
@@ -539,6 +669,81 @@ mod host_control_tests {
                 _ => unreachable!(),
             }
             assert!(client.grant_response(changed).is_err(), "{field}");
+        }
+    }
+
+    #[tokio::test]
+    async fn host_control_client_managed_receipts_preserve_reserved_ids_and_exact_restart_cas() {
+        let client = client();
+        let driver = uuid::Uuid::from_u128(4).to_string();
+        let sid = format!("session-{driver}");
+        for action in [
+            v1::HostManagedAction::Message,
+            v1::HostManagedAction::Restart,
+        ] {
+            let mutation =
+                crate::host_control::Mutation::from_wire(v1::HostControlMutationRequest {
+                    request_id: uuid::Uuid::from_u128(3).to_string(),
+                    scope: Some(fixture::scope().to_wire()),
+                    operation: Some(
+                        v1::host_control_mutation_request::Operation::ManagedControl(
+                            v1::HostControlManagedControl {
+                                action: action as i32,
+                                session_id: sid.clone(),
+                                driver_id: driver.clone(),
+                                expected_launch_generation: 7,
+                                text: if action == v1::HostManagedAction::Message {
+                                    "hello".into()
+                                } else {
+                                    String::new()
+                                },
+                                ..Default::default()
+                            },
+                        ),
+                    ),
+                })
+                .unwrap();
+            let mut response = crate::host_control::Receipt::pending(&mutation).to_wire();
+            response.phase = v1::HostControlRequestPhase::Completed as i32;
+            response.reason = "completed".into();
+            response.session_state = v1::SessionLifecycleState::Running as i32;
+            response.input_acknowledged = action == v1::HostManagedAction::Message;
+            if action == v1::HostManagedAction::Restart {
+                response.launch_generation = 8;
+            }
+            assert!(client.mutation_receipt(response.clone(), &mutation).is_ok());
+            for field in ["driver", "message", "generation", "fingerprint", "scope"] {
+                let mut changed = response.clone();
+                match field {
+                    "driver" => changed.driver_id = uuid::Uuid::new_v4().to_string(),
+                    "message" => changed.message_id = uuid::Uuid::new_v4().to_string(),
+                    "generation" => {
+                        changed.launch_generation = if action == v1::HostManagedAction::Restart {
+                            7
+                        } else {
+                            8
+                        }
+                    }
+                    "fingerprint" => changed.fingerprint_sha256 = "ff".repeat(32),
+                    "scope" => changed.scope.as_mut().unwrap().target_key[0] ^= 1,
+                    _ => unreachable!(),
+                }
+                assert!(
+                    client.mutation_receipt(changed, &mutation).is_err(),
+                    "{action:?} {field}"
+                );
+            }
+            response.phase = v1::HostControlRequestPhase::Unknown as i32;
+            response.input_acknowledged = false;
+            response.cleanup_unknown = true;
+            response.reason = "unknown".into();
+            assert!(client.mutation_receipt(response.clone(), &mutation).is_ok());
+            if action == v1::HostManagedAction::Restart {
+                response.launch_generation = 7;
+                assert!(client.mutation_receipt(response.clone(), &mutation).is_ok());
+                response.launch_generation = 9;
+                assert!(client.mutation_receipt(response, &mutation).is_err());
+            }
         }
     }
 }

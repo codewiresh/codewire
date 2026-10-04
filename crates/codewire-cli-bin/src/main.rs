@@ -11,6 +11,30 @@ fn main() {
             std::env::args_os(),
         ));
     }
+    #[cfg(target_os = "linux")]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "__host-agent-control")
+    {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+        else {
+            eprintln!("host agent control failed");
+            std::process::exit(1);
+        };
+        if runtime
+            .block_on(codewire_cli::run_host_agent_control_from(
+                std::env::args_os().skip(2).collect(),
+            ))
+            .is_err()
+        {
+            eprintln!("host agent control failed");
+            std::process::exit(1);
+        }
+        return;
+    }
     // Helper roles must not resolve ordinary CLI settings, credentials or the
     // mutable managed entry. The parent already selected this exact executable.
     #[cfg(target_os = "linux")]

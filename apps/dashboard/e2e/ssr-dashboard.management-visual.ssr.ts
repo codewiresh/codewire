@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "./helpers/test";
+import type { Page } from "@playwright/test";
 import { fillField } from "./helpers/auth-flow";
 import {
   bypassTwoFactor,
@@ -10,9 +11,10 @@ import {
   seedSyntheticUser,
   stabilizeSyntheticAccountVisual,
 } from "./helpers/db";
+import { ensureWorkerIdentity } from "./helpers/worker-identity";
 import { ensureTestSandboxPreset } from "./helpers/environment";
 import { addOrgMember, cleanupTestOrg, ensureTestOrg } from "./helpers/org";
-import { TEST_PASSWORD, USERS } from "./helpers/seed";
+import { TEST_PASSWORD } from "./helpers/seed";
 
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 // Per-project-run slug: desktop and mobile workers may run this file at the
@@ -48,9 +50,8 @@ async function loginAsAdmin(page: Page) {
 }
 
 test.describe.serial("rounded management interface", () => {
-  test.beforeAll(async () => {
-    const ownerId = await getUserId(USERS.master.email);
-    if (!ownerId) throw new Error("E2E master user was not seeded");
+  test.beforeAll(async ({}, testInfo) => {
+    const ownerId = await ensureWorkerIdentity(testInfo.workerIndex);
     const orgId = await ensureTestOrg("Management Visual", slug, ownerId);
     managementOrgId = orgId;
     await seedSyntheticUser(adminEmail, "E2E Admin", true);

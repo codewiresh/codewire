@@ -13,6 +13,11 @@ source "$ROOT/scripts/ci/images/workspace-cache.sh"
 workspace_cache_validate
 report_tool="$ROOT/scripts/ci/verify/workspace-cache-report.py"
 report_dir=''
+retain_cw_producer="${CODEWIRE_WORKSPACE_CW_PRODUCER_RETAIN:-0}"
+case "$retain_cw_producer" in
+  0|1) ;;
+  *) echo 'workspace CW producer retention must be 0 or 1' >&2; exit 2 ;;
+esac
 if [[ -n "$workspace_measurement_case" ]]; then
   # Experiments always build; an old image receipt cannot seed a measurement.
   export CODEWIRE_WORKSPACE_IMAGE_REUSE=disabled
@@ -39,7 +44,13 @@ source_tree="$(jq -er '.source_tree' <<<"$identity")"
 architecture="$(jq -er '.architecture' <<<"$identity")"
 contract_sha="$(jq -er '.inputs["scripts/ci/verify/workspace-agent-contract.sh"]' <<<"$identity")"
 workspace_tag="codewire-workspace-verify:${source_id}"
-if [[ "${CODEWIRE_WORKSPACE_IMAGE_REUSE:-auto}" == auto ]] \
+if [[ "$retain_cw_producer" == 1 && "$architecture" != amd64 ]]; then
+  echo 'workspace CW producer retention requires the verified amd64 producer' >&2
+  exit 2
+fi
+# The image-only seal contains no original compiler staging/reference. A
+# retention request must qualify its own producer through the existing route.
+if [[ "$retain_cw_producer" == 0 && "${CODEWIRE_WORKSPACE_IMAGE_REUSE:-auto}" == auto ]] \
     && alias="$(python3 "$artifact_tool" reuse-for-build "$ROOT" "$receipt" 2>/dev/null)"; then
   printf 'workspace image verification: reused exact verified image %s\n' "$alias"
   exit 0
@@ -69,6 +80,37 @@ contract_container=''
 sampler_pid=''
 cw_copy_started=false
 
+retained_cw_producer() {
+  python3 -B - "$ROOT" "$source_id" "$build_log_root/cw-image-work/cw-producer-result.json" <<'PY'
+from contextlib import closing
+import importlib.util, os, pathlib, stat, sys
+root, revision, pointer = pathlib.Path(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3])
+spec = importlib.util.spec_from_file_location('cw_retained_workspace_producer', root / 'scripts/ci/images/cw-image-consumer.py')
+consumer = importlib.util.module_from_spec(spec); spec.loader.exec_module(consumer)
+producer, asset, release = consumer.producer, consumer.asset, consumer.release
+fields = {'status', 'receipt', 'producer_receipt', 'image', 'index_sha256', 'payload', 'source',
+          'profile', 'version', 'build_ref', 'cache_qualified', 'image_qualified'}
+with closing(asset.HeldFile(pointer, release.MAX_JSON)) as held:
+    asset.require(pointer.name == 'cw-producer-result.json' and pointer.parent.name == 'cw-image-work'
+                  and held.metadata['uid'] == os.geteuid()
+                  and stat.S_IMODE(held.metadata['mode']) == 0o400, 'retained producer pointer is not private')
+    parent = os.fstat(held.parent.fd)
+    asset.require(parent.st_uid == os.geteuid() and stat.S_IMODE(parent.st_mode) == 0o700,
+                  'retained producer pointer directory is not private')
+    value = release.parse_canonical(held.data)
+    asset.require(type(value) is dict and set(value) == fields and value['status'] == 'producer-admitted',
+                  'retained producer pointer is not complete')
+    version = consumer.effective_version(root, os.environ.get('CODEWIRE_VERSION'))
+    with producer.reopen(value['receipt']['path'], value['receipt']['sha256'], root, revision, 'release', version) as admitted:
+        summary = admitted.summary
+        asset.require(value == {key: summary[key] for key in fields}, 'retained producer reference changed')
+        admitted.revalidate(); held.revalidate(content=True)
+        print(release.canonical({'status': 'workspace-cw-producer-retained', 'result': held.evidence(),
+                                'profile': summary['profile'], 'version': summary['version'],
+                                'source': summary['source'], 'original_build_ref': summary['build_ref']}).decode(), end='')
+PY
+}
+
 stop_sampler() {
   local sampler_status=0 wait_status=0
   if [[ -n "$sampler_pid" ]]; then
@@ -91,7 +133,7 @@ stop_sampler() {
 }
 
 cleanup() {
-  local status=$? cleanup_status=0
+  local status=$? cleanup_status=0 retained_result=''
   trap - EXIT INT TERM
 
   stop_sampler || cleanup_status=$?
@@ -101,7 +143,9 @@ cleanup() {
       "$docker_bin" rm --force "$contract_container" >/dev/null 2>&1 || cleanup_status=$?
   fi
   if [[ "$cw_copy_started" == false ]]; then
-    rm -rf "$work"
+    # Opt-in success keeps the entire original private staging tree. Defer its
+    # deletion until the existing cleanup and atomic seal have been observed.
+    [[ "$retain_cw_producer" == 1 ]] || rm -rf "$work"
   else
     printf 'workspace image verification: failed CW copy evidence retained at %s\n' "$work" >&2
   fi
@@ -120,11 +164,23 @@ cleanup() {
     fi
   fi
   if [[ "$status" -eq 0 ]]; then
+    if [[ "$retain_cw_producer" == 1 ]]; then
+      retained_result="$(retained_cw_producer)" || status=$?
+    fi
+  fi
+  if [[ "$status" -eq 0 ]]; then
     CODEWIRE_BUILDKIT_CACHE_FALLBACK="$workspace_cache_fallback" \
       python3 "$artifact_tool" seal "$ROOT" "$receipt" "$workspace_id" \
         "$base_digest" "$workspace_archive" "${prior_receipt[@]}" || status=$?
   fi
   rm -rf "$archive_work"
+  if [[ "$retain_cw_producer" == 1 && "$cw_copy_started" == false ]]; then
+    if [[ "$status" -eq 0 ]]; then
+      printf '%s\n' "$retained_result"
+    else
+      rm -rf "$work"
+    fi
+  fi
   exit "$status"
 }
 trap cleanup EXIT
