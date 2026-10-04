@@ -7,6 +7,9 @@
 //! CAS is not an atomic compare of every observed field or a tamper boundary.
 
 mod fs;
+mod launcher;
+
+pub use launcher::redirect_from;
 mod wire;
 
 #[cfg(test)]

@@ -18,6 +18,8 @@ mod update;
 
 pub use hosted_exec::run_hosted_exec_from;
 #[cfg(target_os = "linux")]
+pub use platform_cw_runtime::redirect_from as redirect_platform_cw_default_from;
+#[cfg(target_os = "linux")]
 pub use platform_cw_runtime::run_from as run_platform_cw_runtime_from;
 
 use std::collections::{BTreeMap, BTreeSet};

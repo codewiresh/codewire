@@ -73,7 +73,6 @@ mod linux {
     const READ_BUDGET: Duration = Duration::from_secs(60);
     const HISTORY_BUDGET: Duration = Duration::from_secs(30);
     const STORE: &str = "/home/codewire/.local/share/codewire/cli";
-    const ENTRY: &str = "/home/codewire/.local/bin/cw";
 
     pub(super) async fn main() -> anyhow::Result<()> {
         let inputs = Inputs::open().context("admit all original journey inputs")?;
@@ -85,6 +84,10 @@ mod linux {
         let original = initial.incarnation.as_option().unwrap().clone();
         let image = initial.bootstrap_identity.as_option().unwrap().clone();
         admit_original_image(&image, &inputs.support.identity)?;
+        let original_images = OriginalImages {
+            support: &image,
+            workspace: &inputs.a.identity,
+        };
         let selection = initial.selection.as_option().unwrap();
         ensure!(
             selection.generation == 0
@@ -117,6 +120,14 @@ mod linux {
                 image.sha256.clone(),
                 "--daemon-size".into(),
                 image.size.to_string(),
+                "--daemon-version".into(),
+                image.package_version.clone(),
+                "--workspace-sha256".into(),
+                inputs.a.identity.sha256.clone(),
+                "--workspace-size".into(),
+                inputs.a.identity.size.to_string(),
+                "--workspace-version".into(),
+                inputs.a.identity.package_version.clone(),
             ],
             working_dir: "/workspace".into(),
             pty: false,
@@ -202,7 +213,7 @@ mod linux {
         let mut stage = "baseline";
         let result = tokio::time::timeout(JOURNEY_BUDGET, async {
             let baseline = next_event(&mut events_rx).await?;
-            validate_probe(&baseline, 0, "ready", "baseline", None, &image, None)?;
+            validate_probe(&baseline, 0, "ready", "baseline", None, &original_images, None)?;
             let session = get_session(&client, &inputs, &launched.session_id).await?;
             validate_session(&session, &launched, false)?;
             ensure!(session.started_at.as_option().is_some(), "original session has no settled birth");
@@ -233,7 +244,7 @@ mod linux {
                 checkpoint(&client, &inputs, &session, phase, payload).await?;
                 let event = next_event(&mut events_rx).await?;
                 let sequence = if phase == "bootstrapped-a" { 1 } else { 2 };
-                validate_probe(&event, sequence, "checkpoint", phase, Some(&payload.identity), &image,
+                validate_probe(&event, sequence, "checkpoint", phase, Some(&payload.identity), &original_images,
                     Some(&baseline))?;
                 ensure!(event.samples > previous_samples, "observer sample counter regressed");
                 previous_samples = event.samples;
@@ -282,7 +293,7 @@ mod linux {
                 == Some(&proto_identity(&inputs.b.identity)), "rollback did not retain exact B");
             checkpoint(&client, &inputs, &session, "rolled-back-a", &inputs.a).await?;
             let returned = next_event(&mut events_rx).await?;
-            validate_probe(&returned, 3, "checkpoint", "rolled-back-a", Some(&inputs.a.identity), &image,
+            validate_probe(&returned, 3, "checkpoint", "rolled-back-a", Some(&inputs.a.identity), &original_images,
                 Some(&baseline))?;
             ensure!(returned.samples > previous_samples, "observer sample counter regressed");
             previous_samples = returned.samples;
@@ -290,7 +301,7 @@ mod linux {
             send(&client, &inputs, &session.session_id, b"{\"op\":\"close\"}\n".to_vec()).await?;
             stage = "close-and-history";
             let closed = next_event(&mut events_rx).await?;
-            validate_probe(&closed, 4, "closed", "closed", Some(&inputs.a.identity), &image,
+            validate_probe(&closed, 4, "closed", "closed", Some(&inputs.a.identity), &original_images,
                 Some(&baseline))?;
             ensure!(closed.samples > previous_samples, "observer sample counter regressed");
             let captured = tokio::time::timeout(READ_BUDGET, &mut reader).await
@@ -1723,15 +1734,20 @@ mod linux {
         shell_terminal: bool,
         evidence: Evidence,
     }
+    struct OriginalImages<'a> {
+        support: &'a EnvironmentCwRuntimeIdentity,
+        workspace: &'a CwPayloadIdentity,
+    }
     fn validate_probe(
         event: &ProbeEvent,
         sequence: u32,
         kind: &str,
         phase: &str,
         payload: Option<&CwPayloadIdentity>,
-        image: &EnvironmentCwRuntimeIdentity,
+        images: &OriginalImages<'_>,
         baseline: Option<&ProbeEvent>,
     ) -> anyhow::Result<()> {
+        let image = images.support;
         ensure!(
             event.schema_version == 1
                 && event.sequence == sequence
@@ -1790,10 +1806,42 @@ mod linux {
             );
         }
         match (payload, &event.selection) {
-            (None, None) => {}
+            (None, Some(selected)) => {
+                let (checksum, size, version) = match selected.logical_path.as_str() {
+                    "/usr/local/bin/cw" => (
+                        images.workspace.sha256.as_str(),
+                        images.workspace.size,
+                        images.workspace.package_version.as_str(),
+                    ),
+                    "/codewire/bin/cw" => (
+                        image.sha256.as_str(),
+                        image.size,
+                        image.package_version.as_str(),
+                    ),
+                    _ => anyhow::bail!("prebootstrap cached image path differs"),
+                };
+                ensure!(
+                    sequence == 0
+                        && kind == "ready"
+                        && phase == "baseline"
+                        && matches!(
+                            selected.logical_path.as_str(),
+                            "/usr/local/bin/cw" | "/codewire/bin/cw"
+                        )
+                        && selected.resolved_path == selected.logical_path
+                        && selected.sha256 == checksum
+                        && selected.size == size
+                        && selected.version == version,
+                    "prebootstrap cached image CW differs"
+                );
+            }
             (Some(payload), Some(selected)) => {
                 ensure!(
-                    selected.logical_path == ENTRY
+                    selected.logical_path
+                        == baseline
+                            .and_then(|before| before.selection.as_ref())
+                            .context("prebootstrap image cache was not observed")?
+                            .logical_path
                         && selected.resolved_path
                             == format!("{STORE}/versions/{}/cw", payload.sha256)
                         && selected.sha256 == payload.sha256
@@ -2551,6 +2599,7 @@ mod linux {
         fn probe(
             sequence: u32,
             image: &CwPayloadIdentity,
+            workspace: &CwPayloadIdentity,
             selected: Option<&CwPayloadIdentity>,
         ) -> ProbeEvent {
             let actor = |pid, parent_pid, path: &str, sha: &str, size| Actor {
@@ -2591,12 +2640,15 @@ mod linux {
                     session: actor(3, 2, "/usr/bin/python3.13", &"e".repeat(64), 64),
                     shell: actor(4, 3, "/usr/bin/bash", &"f".repeat(64), 64),
                 },
-                selection: selected.map(|id| Selection {
-                    logical_path: ENTRY.into(),
-                    resolved_path: format!("{STORE}/versions/{}/cw", id.sha256),
-                    sha256: id.sha256.clone(),
-                    size: id.size,
-                    version: id.package_version.clone(),
+                selection: Some(Selection {
+                    logical_path: "/usr/local/bin/cw".into(),
+                    resolved_path: selected.map_or_else(
+                        || "/usr/local/bin/cw".into(),
+                        |id| format!("{STORE}/versions/{}/cw", id.sha256),
+                    ),
+                    sha256: selected.unwrap_or(workspace).sha256.clone(),
+                    size: selected.unwrap_or(workspace).size,
+                    version: selected.unwrap_or(workspace).package_version.clone(),
                 }),
                 shell_terminal: sequence == 4,
                 evidence: Evidence {
@@ -2621,36 +2673,146 @@ mod linux {
         fn original_root_owned_images_are_distinct_from_uid1000_process_custody() {
             let image = identity('c', "ci");
             let a = identity('a', "a");
-            let before = probe(0, &image, None);
+            let before = probe(0, &image, &a, None);
             validate_probe(
                 &before,
                 0,
                 "ready",
                 "baseline",
                 None,
-                &proto_identity(&image),
+                &OriginalImages {
+                    support: &proto_identity(&image),
+                    workspace: &a,
+                },
                 None,
             )
             .unwrap();
-            let event = probe(1, &image, Some(&a));
+            let event = probe(1, &image, &a, Some(&a));
             validate_probe(
                 &event,
                 1,
                 "checkpoint",
                 "bootstrapped-a",
                 Some(&a),
-                &proto_identity(&image),
+                &OriginalImages {
+                    support: &proto_identity(&image),
+                    workspace: &a,
+                },
                 Some(&before),
             )
             .unwrap();
         }
         #[test]
+        fn distinct_workspace_and_support_bootstrap_profiles_cannot_be_interchanged() {
+            let mut image = identity('c', "ci");
+            image.size = 96;
+            let a = identity('a', "release-a");
+            let support = proto_identity(&image);
+            let images = OriginalImages {
+                support: &support,
+                workspace: &a,
+            };
+            assert_ne!(image.sha256, a.sha256);
+            assert_ne!(image.size, a.size);
+            assert_ne!(image.package_version, a.package_version);
+            for (path, expected, wrong) in [
+                ("/usr/local/bin/cw", &a, &image),
+                ("/codewire/bin/cw", &image, &a),
+            ] {
+                let mut before = probe(0, &image, &a, None);
+                let selection = before.selection.as_mut().unwrap();
+                selection.logical_path = path.into();
+                selection.resolved_path = path.into();
+                selection.sha256 = expected.sha256.clone();
+                selection.size = expected.size;
+                selection.version = expected.package_version.clone();
+                seal_evidence(&mut before);
+                validate_probe(&before, 0, "ready", "baseline", None, &images, None).unwrap();
+                assert_eq!(before.actors.daemon.sha256, image.sha256);
+                let before_json = serde_json::to_vec(&before).unwrap();
+                for field in 0..3 {
+                    let mut swapped = serde_json::from_slice::<ProbeEvent>(&before_json).unwrap();
+                    let selection = swapped.selection.as_mut().unwrap();
+                    match field {
+                        0 => selection.sha256 = wrong.sha256.clone(),
+                        1 => selection.size = wrong.size,
+                        _ => selection.version = wrong.package_version.clone(),
+                    }
+                    seal_evidence(&mut swapped);
+                    assert!(
+                        validate_probe(&swapped, 0, "ready", "baseline", None, &images, None)
+                            .is_err()
+                    );
+                }
+                let mut replaced = serde_json::from_slice::<ProbeEvent>(&before_json).unwrap();
+                replaced.actors.daemon.sha256 = a.sha256.clone();
+                seal_evidence(&mut replaced);
+                assert!(
+                    validate_probe(&replaced, 0, "ready", "baseline", None, &images, None).is_err()
+                );
+            }
+        }
+
+        #[test]
+        fn prebootstrap_cache_and_stable_image_alias_are_mandatory() {
+            let image = identity('c', "ci");
+            let a = identity('a', "a");
+            let before = probe(0, &image, &a, None);
+            for change in 0..4 {
+                let mut event = probe(0, &image, &a, None);
+                match change {
+                    0 => event.selection = None,
+                    1 => {
+                        event.selection.as_mut().unwrap().logical_path =
+                            "/home/codewire/.local/bin/cw".into()
+                    }
+                    2 => event.selection.as_mut().unwrap().sha256 = image.sha256.clone(),
+                    _ => event.selection.as_mut().unwrap().version = "stale".into(),
+                }
+                seal_evidence(&mut event);
+                assert!(
+                    validate_probe(
+                        &event,
+                        0,
+                        "ready",
+                        "baseline",
+                        None,
+                        &OriginalImages {
+                            support: &proto_identity(&image),
+                            workspace: &a,
+                        },
+                        None
+                    )
+                    .is_err()
+                );
+            }
+            let mut event = probe(1, &image, &a, Some(&a));
+            event.selection.as_mut().unwrap().logical_path = "/codewire/bin/cw".into();
+            seal_evidence(&mut event);
+            assert!(
+                validate_probe(
+                    &event,
+                    1,
+                    "checkpoint",
+                    "bootstrapped-a",
+                    Some(&a),
+                    &OriginalImages {
+                        support: &proto_identity(&image),
+                        workspace: &a,
+                    },
+                    Some(&before)
+                )
+                .is_err()
+            );
+        }
+
+        #[test]
         fn probe_refuses_actor_exec_replacement_foreign_scope_and_evidence_redirection() {
             let image = identity('c', "ci");
             let a = identity('a', "a");
-            let before = probe(0, &image, None);
+            let before = probe(0, &image, &a, None);
             for change in 0..6 {
-                let mut event = probe(1, &image, Some(&a));
+                let mut event = probe(1, &image, &a, Some(&a));
                 match change {
                     0 => event.actors.daemon.inode += 1,
                     1 => event.actors.session.start_ticks += 1,
@@ -2671,7 +2833,10 @@ mod linux {
                         "checkpoint",
                         "bootstrapped-a",
                         Some(&a),
-                        &proto_identity(&image),
+                        &OriginalImages {
+                            support: &proto_identity(&image),
+                            workspace: &a,
+                        },
                         Some(&before)
                     )
                     .is_err()
@@ -2702,7 +2867,7 @@ mod linux {
                 (3, Some(&a)),
                 (4, Some(&a)),
             ] {
-                let event = probe(sequence, &image, selected);
+                let event = probe(sequence, &image, &a, selected);
                 let chunk = frame(&event, decoder.captured.len() as u64);
                 let mut offset = chunk.offset;
                 let mut count = 0;
@@ -2731,7 +2896,7 @@ mod linux {
             assert!(
                 decoder
                     .push(frame(
-                        &probe(4, &image, Some(&a)),
+                        &probe(4, &image, &a, Some(&a)),
                         decoder.captured.len() as u64
                     ))
                     .is_err()
@@ -2740,7 +2905,8 @@ mod linux {
         #[test]
         fn attachment_refuses_gap_replay_stderr_oversize_and_early_terminal() {
             let image = identity('c', "ci");
-            let event = probe(0, &image, None);
+            let a = identity('a', "a");
+            let event = probe(0, &image, &a, None);
             for change in 0..5 {
                 let mut decoder = OutputDecoder::new(NONCE, ENVIRONMENT);
                 let mut chunk = frame(&event, 0);
@@ -2755,7 +2921,7 @@ mod linux {
                         chunk.next_offset = MAX_LINE as u64;
                     }
                     3 => {
-                        let mut wrong = probe(1, &image, None);
+                        let mut wrong = probe(1, &image, &a, None);
                         wrong.environment_id = "550e8400-e29b-41d4-a716-446655440099".into();
                         chunk = frame(&wrong, 0);
                     }

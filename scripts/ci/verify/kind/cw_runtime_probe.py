@@ -2,10 +2,11 @@
 """Fixed, ordinary-owner CW selection/continuity witness for retained Kind.
 
 The client compile-embeds this file in one public no-PTY session. Ready holds
-the original process handles BEFORE Store generation0 bootstrap. The first CW
-lookup is after bootstrap: the same persistent Bash then caches the managed
-entry through B and rollback. This does not prove migration of an already
-cached unmanaged image alias. The observer never reads credentials or signals
+the original process handles BEFORE Store generation0 bootstrap. The same
+persistent Bash invokes and caches its admitted image CW BEFORE bootstrap,
+then retains that exact cached path through A/B/A without PATH or hash resets.
+The image must already contain the ordinary dispatcher: UID1000 selection
+cannot retrofit it into a legacy immutable image. The observer never reads credentials or signals
 any process. Its one fixed child has kernel parent-death confinement only.
 
 No native runner, provider guardian, sealed-memfd or platform managed-agent
@@ -38,6 +39,10 @@ SECONDS = 900
 INTERVAL = 0.02
 PHASES = ("bootstrapped-a", "selected-b", "rolled-back-a")
 ENTRY = "/home/codewire/.local/bin/cw"
+WORKSPACE_ALIAS = "/usr/local/bin/cw"
+SUPPORT_ALIAS = "/codewire/bin/cw"
+IMAGE_ALIASES = (WORKSPACE_ALIAS, SUPPORT_ALIAS)
+IMAGE_OWNER = 0
 VERSIONS = "/home/codewire/.local/share/codewire/cli/versions"
 PROOF_ROOT = "/home/codewire/.local/state/codewire/cw-runtime-proof"
 HOME_ROOT = "/home/codewire"
@@ -358,6 +363,104 @@ def child_confinement(parent_pid):
     return prepare
 
 
+def image_directory(info):
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid in {0, IMAGE_OWNER}
+            and info.st_gid in {0, IMAGE_OWNER} and not info.st_mode & 0o7022
+            and info.st_mode & 0o500 == 0o500, "image-ancestry")
+
+
+class ImageAlias:
+    """Held immutable alias and safe fixed ancestry; no process/signal API."""
+    def __init__(self, path, checksum, size, deadline):
+        self.path, self.parents, self.fd = path, [], None
+        try:
+            require(path in IMAGE_ALIASES, "image-alias")
+            parent = os.open("/", DIRECTORY_FLAGS)
+            self.parents.append(("/", parent, directory_stamp(os.fstat(parent))))
+            image_directory(os.fstat(parent))
+            current = ""
+            for part in path.split("/")[1:-1]:
+                current += "/" + part
+                next_parent = os.open(part, DIRECTORY_FLAGS, dir_fd=parent)
+                self.parents.append((current, next_parent, directory_stamp(os.fstat(next_parent))))
+                image_directory(os.fstat(next_parent))
+                parent = next_parent
+            self.fd = os.open("cw", FILE_FLAGS, dir_fd=parent)
+            before = os.fstat(self.fd)
+            require(stat.S_ISREG(before.st_mode) and before.st_uid == IMAGE_OWNER
+                    and before.st_gid == IMAGE_OWNER and before.st_nlink == 1
+                    and stat.S_IMODE(before.st_mode) in {0o555, 0o755}, "image-identity")
+            observed, info = hash_file(self.fd, MAX_EXECUTABLE, deadline)
+            require(observed == checksum and info.st_size == size and info.st_uid == IMAGE_OWNER
+                    and info.st_gid == IMAGE_OWNER and info.st_nlink == 1
+                    and stat.S_IMODE(info.st_mode) in {0o555, 0o755}, "image-identity")
+            self.before = stamp(info)
+            self.checksum, self.size = observed, size
+            self.verify()
+        except BaseException:
+            self.close()
+            raise
+
+    def verify(self):
+        for path, fd, before in self.parents:
+            for info in (os.fstat(fd), os.stat(path, follow_symlinks=False)):
+                image_directory(info)
+                require(directory_stamp(info) == before, "image-ancestry")
+        require(stamp(os.fstat(self.fd)) == self.before
+                and stamp(os.stat(self.path, follow_symlinks=False)) == self.before, "image-changed")
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        for _, fd, _ in reversed(self.parents):
+            os.close(fd)
+        self.parents = []
+
+
+def original_alias_identity(path, args):
+    # Fixed image paths have distinct producers. The workspace launcher comes
+    # from release A; the original daemon always comes from support-CI.
+    if path == WORKSPACE_ALIAS:
+        return args.workspace_sha256, args.workspace_size, args.workspace_version
+    require(path == SUPPORT_ALIAS, "image-alias")
+    return args.daemon_sha256, args.daemon_size, args.daemon_version
+
+
+def cache_result(raw, nonce):
+    require(len(raw) <= MAX_LINE, "shell-output-bound", "shell")
+    fields = raw.split(b"\n")
+    require(len(fields) == 6, "shell-cached-image", "shell")
+    try:
+        path = fields[1].decode("ascii")
+    except UnicodeError:
+        raise Refused("shell-cached-image", "shell") from None
+    require(path in IMAGE_ALIASES, "shell-cached-image", "shell")
+    expected = (f"CWRC_PATH_{nonce}\n{path}\nCWRC_HASH_{nonce}\n{path}\n"
+                f"CWRC_END_{nonce}\n").encode("ascii")
+    # Six fields including the terminal empty field; no uncontrolled output.
+    require(raw == expected, "shell-cached-image", "shell")
+    return path
+
+
+def shell_result(raw, nonce, version, expected_path=None):
+    """Exact bounded marker/exit/version/cache evidence; raw output never leaks."""
+    require(len(raw) <= MAX_LINE, "shell-output-bound", "shell")
+    fields = raw.split(b"\n")
+    require(len(fields) == 9, "shell-default", "shell")
+    try:
+        path = fields[1].decode("ascii")
+    except UnicodeError:
+        raise Refused("shell-default", "shell") from None
+    require(path in IMAGE_ALIASES and (expected_path is None or path == expected_path),
+            "shell-cached-image", "shell")
+    expected = (f"CWRP_PATH_{nonce}\n{path}\nCWRP_VERSION_{nonce}\n"
+                f"cw {version}\nCWRP_STATUS_{nonce}=0\nCWRP_HASH_{nonce}\n{path}\n"
+                f"CWRP_END_{nonce}\n").encode("ascii")
+    require(raw == expected, "shell-default", "shell")
+    return path
+
+
 class Probe:
     def __init__(self, args):
         self.args, self.deadline = args, time.monotonic() + SECONDS
@@ -367,6 +470,7 @@ class Probe:
         self.pending, self.stdout = b"", b""
         self.boot = ""
         self.input_fd = 0
+        self.image = None
 
     def budget(self):
         require(time.monotonic() < self.deadline, "deadline")
@@ -405,6 +509,7 @@ class Probe:
             os.set_blocking(stream.fileno(), False)
         os.set_blocking(self.input_fd, False)
         self.directory = Directory(self.args.nonce)
+        self.baseline_shell()
         self.settle()
         self.emit("ready")
 
@@ -414,6 +519,8 @@ class Probe:
             if name != "shell" or not self.shell_terminal:
                 actor.verify()
         self.directory.verify()
+        if self.image is not None:
+            self.image.verify()
         self.samples += 1
 
     def settle(self):
@@ -480,15 +587,9 @@ class Probe:
             require(count > 0, "shell-input", "shell")
             remaining = remaining[count:]
 
-    def shell_check(self, request):
-        nonce = self.args.nonce
-        data = (f"printf 'CWRP_PATH_{nonce}\\n'\ncommand -v cw\n"
-                f"printf 'CWRP_VERSION_{nonce}\\n'\ncommand cw --version\n"
-                f"printf 'CWRP_STATUS_{nonce}=%s\\n' \"$?\"\n"
-                f"printf 'CWRP_END_{nonce}\\n'\n").encode("ascii")
+    def shell_read(self, data, end):
         self.write_shell(data)
         raw = b""
-        end = f"CWRP_END_{nonce}\n".encode("ascii")
         while not raw.endswith(end):
             self.verify()
             ready, _, _ = select.select([self.child.stdout.fileno(), self.child.stderr.fileno()], [], [], INTERVAL)
@@ -499,9 +600,38 @@ class Probe:
                 require(block, "shell-output-ended", "shell")
                 raw += block
                 require(len(raw) <= MAX_LINE, "shell-output-bound", "shell")
-        expected = (f"CWRP_PATH_{nonce}\n{ENTRY}\nCWRP_VERSION_{nonce}\n"
-                    f"cw {request['version']}\nCWRP_STATUS_{nonce}=0\nCWRP_END_{nonce}\n").encode("ascii")
-        require(raw == expected, "shell-default", "shell")
+        return raw
+
+    def shell_output(self, version, expected_path):
+        nonce = self.args.nonce
+        data = (f"printf 'CWRP_PATH_{nonce}\\n'\ncommand -v cw\n"
+                f"printf 'CWRP_VERSION_{nonce}\\n'\ncommand cw --version\n"
+                f"printf 'CWRP_STATUS_{nonce}=%s\\n' \"$?\"\n"
+                f"printf 'CWRP_HASH_{nonce}\\n'\nhash -t cw\n"
+                f"printf 'CWRP_END_{nonce}\\n'\n").encode("ascii")
+        raw = self.shell_read(data, f"CWRP_END_{nonce}\n".encode("ascii"))
+        return shell_result(raw, nonce, version, expected_path)
+
+    def baseline_shell(self):
+        nonce = self.args.nonce
+        data = ("hash cw\n" + f"printf 'CWRC_PATH_{nonce}\\n'\ncommand -v cw\n"
+                f"printf 'CWRC_HASH_{nonce}\\n'\nhash -t cw\n"
+                f"printf 'CWRC_END_{nonce}\\n'\n").encode("ascii")
+        raw = self.shell_read(data, f"CWRC_END_{nonce}\n".encode("ascii"))
+        path = cache_result(raw, nonce)
+        # Admit the original image alias BEFORE executing it. The shell cache
+        # lookup itself is builtin-only and never executes an incoming path.
+        checksum, size, version = original_alias_identity(path, self.args)
+        self.image = ImageAlias(path, checksum, size, self.deadline)
+        self.shell_output(version, path)
+        self.selection = {"logical_path": path, "resolved_path": path,
+                          "sha256": self.image.checksum, "size": self.image.size,
+                          "version": version}
+        self.settle()
+
+    def shell_check(self, request):
+        require(self.image is not None, "image-baseline")
+        self.shell_output(request["version"], self.image.path)
         resolved = VERSIONS + "/" + request["sha256"] + "/cw"
         require(os.path.realpath(ENTRY) == resolved, "selection-path")
         fd = os.open(resolved, FILE_FLAGS)
@@ -509,12 +639,12 @@ class Probe:
             checksum, info = hash_file(fd, MAX_EXECUTABLE, self.deadline)
             require(checksum == request["sha256"] and info.st_size == request["size"]
                     and info.st_uid == UID and info.st_gid == GID and info.st_nlink == 1
-                    and stat.S_IMODE(info.st_mode) == 0o500
+                    and stat.S_IMODE(info.st_mode) == 0o555
                     and stamp(info) == stamp(os.stat(resolved, follow_symlinks=False))
                     and os.path.realpath(ENTRY) == resolved, "selection-identity")
         finally:
             os.close(fd)
-        self.selection = {"logical_path": ENTRY, "resolved_path": resolved,
+        self.selection = {"logical_path": self.image.path, "resolved_path": resolved,
                           "sha256": checksum, "size": info.st_size, "version": request["version"]}
         self.settle()
 
@@ -584,6 +714,8 @@ class Probe:
                 stream.close()
         for actor in reversed(tuple(self.actors.values())):
             actor.close()
+        if self.image is not None:
+            self.image.close()
         if self.directory is not None:
             self.directory.close()
 
@@ -599,14 +731,19 @@ class SingleUse(argparse.Action):
 
 def arguments(argv):
     parser = argparse.ArgumentParser(description="Fixed UID1000 Kind CW process witness", allow_abbrev=False)
-    for key in ("environment-id", "nonce", "daemon-sha256", "daemon-size"):
+    for key in ("environment-id", "nonce", "daemon-sha256", "daemon-size", "daemon-version",
+                "workspace-sha256", "workspace-size", "workspace-version"):
         parser.add_argument("--" + key, required=True, action=SingleUse)
     args = parser.parse_args(argv)
     try:
         require(identifier(args.environment_id) and re.fullmatch(r"[0-9a-f]{32}", args.nonce), "option-identity")
-        require(digest(args.daemon_sha256) and re.fullmatch(r"[1-9][0-9]{0,8}", args.daemon_size), "option-identity")
-        args.daemon_size = int(args.daemon_size)
-        require(args.daemon_size <= MAX_EXECUTABLE, "option-identity")
+        for role in ("daemon", "workspace"):
+            checksum, size, version = (getattr(args, role + "_" + key)
+                                       for key in ("sha256", "size", "version"))
+            require(digest(checksum) and re.fullmatch(r"[1-9][0-9]{0,8}", size), "option-identity")
+            size = int(size)
+            require(size <= MAX_EXECUTABLE and package_version(version), "option-identity")
+            setattr(args, role + "_size", size)
     except Refused:
         parser.error("probe identity refused")
     return args

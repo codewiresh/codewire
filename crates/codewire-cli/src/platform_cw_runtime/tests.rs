@@ -1397,6 +1397,23 @@ fn owned_stage_subprocess() {
         }
         Ok("deadline") => arm_deadline(1).unwrap(),
         Ok("stage") => {}
+        Ok("fd-exec") => {
+            // Low-level held-FD execution witness only, not CW release intake.
+            let path = root.join("fd-executable");
+            let mut held = HeldFile::open(&path, 256 * 1024 * 1024, 0o555).unwrap();
+            held.check().unwrap();
+            write(&root.join("fd-ready"), b"ready", 0o600);
+            let mut input = BoundedInput::stdin(Instant::now() + Duration::from_secs(5)).unwrap();
+            let mut byte = [0];
+            input.read_exact(&mut byte).unwrap();
+            assert_eq!(byte, *b"E");
+            super::launcher::execute(
+                held.file_mut(),
+                &[std::ffi::OsString::from("retained-true")],
+            )
+            .unwrap();
+            panic!("held executable did not replace the child");
+        }
         _ => panic!("unknown synthetic child mode"),
     }
     let mode = std::env::var(CHILD_MODE).unwrap();
@@ -1418,4 +1435,356 @@ fn owned_stage_subprocess() {
     engine.image_fixture = Some((root.join("image-a"), a.identity));
     let _ = engine.execute(&request, &mut input);
     panic!("controlled cancellation child must not finish without the owner");
+}
+
+#[test]
+fn platform_image_dispatch_host_musl_context_never_reads_store() {
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::ffi::OsStringExt as _;
+    let invalid_unicode = OsString::from_vec(vec![0xff]);
+    // Public musl cw can legitimately live at this image alias on a normal
+    // UID1000 host. The context gate must skip before any fixed Store read.
+    assert!(super::launcher::image_alias(Path::new("/usr/local/bin/cw")));
+    for home in [
+        None,
+        Some(OsStr::new("")),
+        Some(OsStr::new("/home/user")),
+        Some(OsStr::new("/")),
+        Some(OsStr::new("/home/codewire/")),
+        Some(OsStr::new("/home/codewire/../codewire")),
+        Some(invalid_unicode.as_os_str()),
+    ] {
+        assert!(
+            super::launcher::admit_context::<()>((1000, 1000), home, || {
+                panic!("host musl CW touched fixed platform Store");
+            })
+            .unwrap()
+            .is_none()
+        );
+    }
+    let platform_home = Some(OsStr::new("/home/codewire"));
+    for owner in [(0, 0), (1000, 0), (0, 1000), (1001, 1000)] {
+        assert!(
+            super::launcher::admit_context::<()>(owner, platform_home, || {
+                panic!("wrong owner touched fixed platform Store");
+            })
+            .unwrap()
+            .is_none()
+        );
+    }
+    assert_eq!(
+        super::launcher::admit_context((1000, 1000), platform_home, || Ok(Some(7_u32))),
+        Ok(Some(7))
+    );
+}
+
+#[test]
+fn platform_image_dispatch_private_roles_skip_all_admission() {
+    use std::ffi::OsString;
+    for role in [
+        "_host-daemon",
+        "_agent-driver",
+        "_agent-control",
+        "_agent-peer",
+        "__platform-cw-runtime",
+        "__hosted-daemon",
+        "__hosted-exec",
+        "__host-agent-control",
+        "__environment-launch",
+        "__native-network-worker",
+        "__local-mesh",
+        "__host-member",
+        "__local-derp",
+        "__local-credential-broker",
+        "__local-git-repository-executor",
+        "__unknown-future-helper",
+    ] {
+        assert!(
+            super::launcher::admit_arguments::<()>(
+                &[OsString::from("/codewire/bin/cw"), OsString::from(role)],
+                || panic!("private role read selection/configuration"),
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+    assert!(
+        super::launcher::admit_arguments::<()>(
+            &[
+                OsString::from(codewire_local_credentials::SSH_HELPER_BASENAME),
+                OsString::from("host")
+            ],
+            || panic!("SSH helper read selection/configuration"),
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        super::launcher::admit_arguments(
+            &[
+                OsString::from("/codewire/bin/cw"),
+                OsString::from("--version")
+            ],
+            || Ok(Some(7_u32)),
+        ),
+        Ok(Some(7))
+    );
+    for path in ["/codewire/bin/cw", "/usr/local/bin/cw"] {
+        assert!(super::launcher::image_alias(Path::new(path)));
+    }
+    for path in [
+        "/home/codewire/.local/bin/cw",
+        "/home/codewire/.local/share/codewire/cli/versions/a/cw",
+        "/usr/bin/cw",
+        "/codewire/bin/../bin/cw",
+    ] {
+        assert!(!super::launcher::image_alias(Path::new(path)));
+    }
+}
+
+#[test]
+fn platform_image_dispatch_absence_is_read_only_and_foreign_entry_refuses() {
+    let f = Fixture::new();
+    assert!(
+        super::launcher::select(&f.paths, Instant::now() + Duration::from_secs(5))
+            .unwrap()
+            .is_none()
+    );
+    assert_no_home_effect(&f);
+    let _tree = Tree::open(&f.paths, true).unwrap();
+    write(&f.paths.entry, b"foreign command", 0o500);
+    let before = stdfs::read(&f.paths.entry).unwrap();
+    assert!(matches!(
+        super::launcher::select(&f.paths, Instant::now() + Duration::from_secs(5)),
+        Err(Code::UnmanagedEntry)
+    ));
+    assert_eq!(stdfs::read(&f.paths.entry).unwrap(), before);
+    assert!(!f.paths.store.exists());
+    assert!(!f.lock_path().exists());
+}
+
+#[test]
+fn platform_image_dispatch_actual_store_selects_a_b_a_without_recovery() {
+    let f = Fixture::new();
+    f.bootstrap();
+    f.stage();
+    for (index, payload) in [&f.a, &f.b, &f.a].into_iter().enumerate() {
+        if index == 1 {
+            assert!(
+                f.execute(
+                    Action::Update {
+                        identity: f.b.identity.clone(),
+                        expected: f.expected()
+                    },
+                    &[]
+                )
+                .0
+                .is_ok()
+            );
+        } else if index == 2 {
+            assert!(
+                f.execute(
+                    Action::Rollback {
+                        identity: f.a.identity.clone(),
+                        expected: f.expected()
+                    },
+                    &[]
+                )
+                .0
+                .is_ok()
+            );
+        }
+        let before = selected_files(&f);
+        let mut held = super::launcher::select(&f.paths, Instant::now() + Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        held.check().unwrap();
+        held.file_mut().seek(SeekFrom::Start(0)).unwrap();
+        let mut bytes = Vec::new();
+        held.file_mut().read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, payload.bytes);
+        assert_eq!(held.file_mut().metadata().unwrap().mode() & 0o7777, 0o555);
+        assert_eq!(selected_files(&f), before);
+    }
+}
+
+#[test]
+fn platform_image_dispatch_pending_and_corrupt_current_are_preserved() {
+    let f = Fixture::new();
+    f.bootstrap();
+    let path = f.paths.store.join("selection.json");
+    let before = stdfs::read(&path).unwrap();
+    let mut selection: Selection = serde_json::from_slice(&before).unwrap();
+    selection.pending = Some(PendingSelection {
+        operation: Uuid::new_v4().to_string(),
+        generation: 1,
+        from: Some(f.a.identity.sha256.clone()),
+        to: f.b.identity.sha256.clone(),
+    });
+    write(&path, &serde_json::to_vec(&selection).unwrap(), 0o644);
+    let intent = stdfs::read(&path).unwrap();
+    assert!(matches!(
+        super::launcher::select(&f.paths, Instant::now() + Duration::from_secs(5)),
+        Err(Code::PendingSelection)
+    ));
+    assert_eq!(stdfs::read(&path).unwrap(), intent);
+    write(&path, &before, 0o644);
+    let executable = f.store().version_executable(&f.a.identity.sha256);
+    chmod(&executable, 0o755);
+    write(&executable, b"corrupt", 0o555);
+    assert!(super::launcher::select(&f.paths, Instant::now() + Duration::from_secs(5)).is_err());
+    assert_eq!(stdfs::read(&executable).unwrap(), b"corrupt");
+    assert_eq!(stdfs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn platform_image_dispatch_unsafe_ancestry_and_linked_or_fifo_member_refuse() {
+    for kind in ["home", "symlink", "hardlink", "fifo"] {
+        let f = Fixture::new();
+        f.bootstrap();
+        let selected = f.store().version_executable(&f.a.identity.sha256);
+        let sentinel = f.root.path().join("sentinel");
+        write(&sentinel, &f.a.bytes, 0o555);
+        match kind {
+            "home" => chmod(f.paths.home_for_test(), 0o720),
+            "symlink" | "hardlink" | "fifo" => {
+                chmod(selected.parent().unwrap(), 0o755);
+                stdfs::remove_file(&selected).unwrap();
+                match kind {
+                    "symlink" => symlink(&sentinel, &selected).unwrap(),
+                    "hardlink" => stdfs::hard_link(&sentinel, &selected).unwrap(),
+                    _ => {
+                        let path = std::ffi::CString::new(selected.as_os_str().as_encoded_bytes())
+                            .unwrap();
+                        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o555) }, 0);
+                    }
+                }
+                chmod(selected.parent().unwrap(), 0o555);
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            super::launcher::select(&f.paths, Instant::now() + Duration::from_secs(5)).is_err(),
+            "{kind}"
+        );
+        assert_eq!(stdfs::read(&sentinel).unwrap(), f.a.bytes);
+    }
+}
+
+#[test]
+fn platform_image_dispatch_full_intake_rejects_nonstatic_or_duplicate_record() {
+    for kind in ["interpreter", "record"] {
+        let f = Fixture::new();
+        f.bootstrap();
+        let mut bytes = f.b.bytes.clone();
+        if kind == "interpreter" {
+            bytes[64..68].copy_from_slice(&3_u32.to_le_bytes());
+        } else {
+            bytes.extend_from_slice(&crate::build_record::tests::framed(
+                &crate::build_record::tests::json("v1.2.4", TARGET, true),
+            ));
+        }
+        let payload = Payload::with_bytes("v1.2.4", bytes);
+        let path = f.root.path().join("ordinary-writer-candidate");
+        write(&path, &payload.bytes, 0o500);
+        f.store()
+            .publish_and_select(
+                &Candidate {
+                    executable: path,
+                    admission: Admission::Pinned {
+                        identity: payload.identity.clone(),
+                        sha256: payload.identity.sha256.clone(),
+                    },
+                },
+                Some(1),
+            )
+            .unwrap();
+        let before = selected_files(&f);
+        assert!(
+            matches!(
+                super::launcher::select(&f.paths, Instant::now() + Duration::from_secs(5)),
+                Err(Code::CandidateRefused)
+            ),
+            "{kind}"
+        );
+        assert_eq!(selected_files(&f), before);
+    }
+}
+
+#[test]
+fn platform_image_dispatch_concurrent_ordinary_selection_refuses_mixed_tuple() {
+    let f = Fixture::new();
+    f.bootstrap();
+    let source = f.root.path().join("ordinary-b");
+    write(&source, &f.b.bytes, 0o500);
+    let result = super::launcher::select_before_recheck(
+        &f.paths,
+        Instant::now() + Duration::from_secs(5),
+        || {
+            f.store()
+                .publish_and_select(
+                    &Candidate {
+                        executable: source,
+                        admission: Admission::Pinned {
+                            identity: f.b.identity.clone(),
+                            sha256: f.b.identity.sha256.clone(),
+                        },
+                    },
+                    Some(1),
+                )
+                .unwrap();
+        },
+    );
+    assert!(matches!(result, Err(Code::StaleSelection)));
+    assert_eq!(f.expected().current, Some(f.b.identity.sha256.clone()));
+}
+
+#[test]
+fn platform_image_dispatch_held_fd_exec_does_not_reopen_replaced_name() {
+    let f = Fixture::new();
+    let path = f.root.path().join("fd-executable");
+    write(&path, &stdfs::read("/usr/bin/true").unwrap(), 0o555);
+    let mut child = OwnedChild::spawn(&f, "fd-exec");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !f.root.path().join("fd-ready").exists() {
+        assert!(!child.terminal(), "owned child died before holding the FD");
+        assert!(Instant::now() < deadline, "owned FD readiness deadline");
+        thread::sleep(Duration::from_millis(10));
+    }
+    // The old inode remains held after replacement. Reopening this exact
+    // pathname would run false; the original FD must still run true.
+    stdfs::rename(&path, f.root.path().join("original-true")).unwrap();
+    write(&path, &stdfs::read("/usr/bin/false").unwrap(), 0o555);
+    child.child.stdin.as_mut().unwrap().write_all(b"E").unwrap();
+    assert_eq!(child.wait().code(), Some(0));
+    assert_eq!(
+        stdfs::read(&path).unwrap(),
+        stdfs::read("/usr/bin/false").unwrap()
+    );
+}
+
+#[test]
+fn platform_image_dispatch_missing_or_linked_store_lock_is_not_created_or_repaired() {
+    for linked in [false, true] {
+        let f = Fixture::new();
+        f.bootstrap();
+        let path = f.paths.store.join("lock");
+        stdfs::remove_file(&path).unwrap();
+        let sentinel = f.root.path().join("lock-sentinel");
+        write(&sentinel, b"", 0o600);
+        if linked {
+            stdfs::hard_link(&sentinel, &path).unwrap();
+        }
+        let before = selected_files(&f);
+        assert!(
+            super::launcher::select(&f.paths, Instant::now() + Duration::from_secs(5)).is_err()
+        );
+        assert_eq!(selected_files(&f), before);
+        assert_eq!(stdfs::symlink_metadata(&path).is_ok(), linked);
+        assert_eq!(stdfs::read(&sentinel).unwrap(), b"");
+        assert_eq!(
+            stdfs::symlink_metadata(&sentinel).unwrap().nlink(),
+            if linked { 2 } else { 1 }
+        );
+    }
 }

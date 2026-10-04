@@ -46,7 +46,9 @@ def frame(index=0, **changes):
 
 def args():
     return argparse.Namespace(environment_id=ENVIRONMENT, nonce=NONCE,
-                              daemon_sha256="a" * 64, daemon_size=1)
+                              daemon_sha256="c" * 64, daemon_size=100, daemon_version="0.1.0-ci",
+                              workspace_sha256="a" * 64, workspace_size=200,
+                              workspace_version="0.1.0-release-A")
 
 
 def own_fd_count():
@@ -87,18 +89,65 @@ class Guards(unittest.TestCase):
 
     def test_arguments_refuse_before_any_process_or_path_effect(self):
         valid = ["--environment-id", ENVIRONMENT, "--nonce", NONCE,
-                 "--daemon-sha256", "a" * 64, "--daemon-size", "10"]
+                 "--daemon-sha256", "c" * 64, "--daemon-size", "10", "--daemon-version", "0.1.0-ci",
+                 "--workspace-sha256", "a" * 64, "--workspace-size", "20", "--workspace-version", "0.1.0-release-A"]
         self.assertEqual(probe.arguments(valid).daemon_size, 10)
+        self.assertEqual(probe.arguments(valid).workspace_size, 20)
+        def changed(flag, value):
+            result = list(valid)
+            result[result.index(flag) + 1] = value
+            return result
         invalid = [valid + ["--nonce", NONCE], valid + ["--signal", "9"],
-                   valid[:-1] + ["0"], valid[:-1] + [str(probe.MAX_EXECUTABLE + 1)],
-                   ["--environment-id", "0" * 36] + valid[2:],
-                   ["--environment-id", ENVIRONMENT, "--nonce", "../../foreign"] + valid[4:]]
+                   changed("--environment-id", "0" * 36), changed("--nonce", "../../foreign")]
+        for role in ("daemon", "workspace"):
+            for field, value in (("size", "0"), ("size", str(probe.MAX_EXECUTABLE + 1)),
+                                 ("sha256", "A" * 64), ("version", "unsafe\nversion")):
+                invalid.append(changed("--" + role + "-" + field, value))
+            invalid.append(valid + ["--" + role + "-version", "0.1.0-ci"])
+            missing = list(valid)
+            offset = missing.index("--" + role + "-sha256")
+            del missing[offset:offset + 2]
+            invalid.append(missing)
         with mock.patch.object(probe, "Probe", side_effect=AssertionError("process effect")):
             for command in invalid:
                 with self.subTest(arguments=len(command)), contextlib.redirect_stderr(io.StringIO()):
                     with self.assertRaises(SystemExit) as error:
                         probe.main(command)
                     self.assertEqual(error.exception.code, 2)
+
+    def test_cached_image_output_requires_exact_path_version_and_hash_without_reset(self):
+        path, version = probe.IMAGE_ALIASES[0], "0.1.0-ci"
+        raw = (f"CWRP_PATH_{NONCE}\n{path}\nCWRP_VERSION_{NONCE}\ncw {version}\n"
+               f"CWRP_STATUS_{NONCE}=0\nCWRP_HASH_{NONCE}\n{path}\nCWRP_END_{NONCE}\n").encode()
+        self.assertEqual(probe.shell_result(raw, NONCE, version), path)
+        cache = (f"CWRC_PATH_{NONCE}\n{path}\nCWRC_HASH_{NONCE}\n{path}\nCWRC_END_{NONCE}\n").encode()
+        self.assertEqual(probe.cache_result(cache, NONCE), path)
+        for wrong in (cache.replace(path.encode(), probe.ENTRY.encode()), cache + b"extra\n"):
+            with self.assertRaises(probe.Refused):
+                probe.cache_result(wrong, NONCE)
+        for wrong in (raw.replace(path.encode(), probe.ENTRY.encode()),
+                      raw.replace(b"cw 0.1.0-ci", b"cw stale"),
+                      raw.replace(b"=0\n", b"=1\n"), raw + b"trailing\n",
+                      raw.replace(f"CWRP_HASH_{NONCE}\n{path}".encode(),
+                                  f"CWRP_HASH_{NONCE}\n{probe.IMAGE_ALIASES[1]}".encode())):
+            with self.assertRaises(probe.Refused):
+                probe.shell_result(wrong, NONCE, version)
+        source = SOURCE.read_text()
+        self.assertEqual(source.count('"hash cw\\n"'), 1)
+        self.assertNotIn("hash -r", source)
+        self.assertNotIn("PATH=", source)
+        self.assertLess(source.index("self.baseline_shell()"), source.index('self.emit("ready")'))
+
+    def test_distinct_workspace_release_and_support_alias_identities_are_closed(self):
+        admitted = args()
+        workspace = (admitted.workspace_sha256, admitted.workspace_size, admitted.workspace_version)
+        support = (admitted.daemon_sha256, admitted.daemon_size, admitted.daemon_version)
+        self.assertNotEqual(workspace, support)
+        self.assertEqual(probe.original_alias_identity("/usr/local/bin/cw", admitted), workspace)
+        self.assertEqual(probe.original_alias_identity("/codewire/bin/cw", admitted), support)
+        for path in (probe.ENTRY, "/usr/local/bin/../bin/cw", "/foreign/cw"):
+            with self.assertRaises(probe.Refused):
+                probe.original_alias_identity(path, admitted)
 
     def test_fixed_role_matches_current_default_template_not_custom_supervisor(self):
         source = (ROOT / "crates/codewire-orchestration/src/sandbox/template/workspace.rs").read_text()
@@ -313,7 +362,7 @@ class KernelAndFiles(unittest.TestCase):
         finally:
             directory.close()
 
-    def test_real_persistent_shell_selects_test_A_B_A_without_path_or_hash_reset(self):
+    def test_real_persistent_shell_caches_image_before_test_A_B_A_without_path_or_hash_reset(self):
         entry = self.home / ".local/bin/cw"
         entry.parent.mkdir(parents=True, mode=0o700)
         versions = self.home / ".local/share/codewire/cli/versions"
@@ -325,15 +374,28 @@ class KernelAndFiles(unittest.TestCase):
             member = versions / checksum
             member.mkdir(mode=0o700)
             (member / "cw").write_bytes(raw)
-            (member / "cw").chmod(0o500)
+            (member / "cw").chmod(0o555)
             identities.append({"sha256": checksum, "size": len(raw), "version": version})
-        environment = {"PATH": str(entry.parent) + ":/usr/bin:/bin", "HOME": str(self.home), "LC_ALL": "C"}
+        image_bin = self.home / "image-bin"
+        image_bin.mkdir(mode=0o755)
+        image = image_bin / "cw"
+        # Test-executable witness only: production selection is independently
+        # exercised by Rust intake fixtures and the mandatory real Pod journey.
+        image_bytes = ("#!/usr/bin/python3\nimport os\nentry=" + repr(str(entry)) + "\n"
+                       "if os.path.lexists(entry): os.execv(entry,[entry,'--version'])\n"
+                       "print('cw 0.1.0-release-A')\n").encode()
+        image.write_bytes(image_bytes)
+        image.chmod(0o555)
+        environment = {"PATH": str(entry.parent) + ":" + str(image_bin) + ":/usr/bin:/bin", "HOME": str(self.home), "LC_ALL": "C"}
         child = subprocess.Popen(["/bin/bash", "--noprofile", "--norc"], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment,
                                  preexec_fn=probe.child_confinement(os.getpid()))
         fd = os.pidfd_open(child.pid)
         input_read, input_write = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
-        current = probe.Probe(args())
+        argument = args()
+        argument.workspace_sha256 = hashlib.sha256(image_bytes).hexdigest()
+        argument.workspace_size = len(image_bytes)
+        current = probe.Probe(argument)
         current.deadline = time.monotonic() + 15
         current.input_fd = input_read
         events = []
@@ -347,8 +409,16 @@ class KernelAndFiles(unittest.TestCase):
             for stream in (child.stdin, child.stdout, child.stderr):
                 os.set_blocking(stream.fileno(), False)
             original = dict(current.actors["shell"].identity)
-            with mock.patch.multiple(probe, ENTRY=str(entry), VERSIONS=str(versions)), \
+            with mock.patch.multiple(probe, ENTRY=str(entry), VERSIONS=str(versions),
+                                     WORKSPACE_ALIAS=str(image), IMAGE_ALIASES=(str(image), probe.SUPPORT_ALIAS),
+                                     IMAGE_OWNER=probe.UID), \
                     mock.patch.object(current, "output", side_effect=events.append):
+                current.baseline_shell()
+                self.assertFalse(entry.exists())
+                self.assertEqual(current.selection["logical_path"], str(image))
+                self.assertEqual(current.selection["sha256"], argument.workspace_sha256)
+                self.assertNotEqual(current.selection["sha256"], argument.daemon_sha256)
+                self.assertEqual(current.selection["version"], argument.workspace_version)
                 current.settle()
                 current.emit("ready")
                 for index, identity in enumerate((identities[0], identities[1], identities[0])):
@@ -357,6 +427,7 @@ class KernelAndFiles(unittest.TestCase):
                     next_entry.replace(entry)
                     current.shell_check(frame(index, **identity))
                     self.assertEqual(current.selection["sha256"], identity["sha256"])
+                    self.assertEqual(current.selection["logical_path"], str(image))
                     self.assertEqual(current.actors["shell"].identity, original)
                     current.phase = probe.PHASES[index]
                     current.sequence += 1
