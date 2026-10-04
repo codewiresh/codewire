@@ -28,6 +28,10 @@ RENEWAL_SPEC = importlib.util.spec_from_file_location(
     "bridge_renewal", ROOT / "scripts/ci/verify/kind/bridge_renewal.py")
 RENEWAL = importlib.util.module_from_spec(RENEWAL_SPEC)
 RENEWAL_SPEC.loader.exec_module(RENEWAL)
+DAEMON_SPEC = importlib.util.spec_from_file_location(
+    "daemon_probe", ROOT / "scripts/ci/verify/kind/daemon_probe.py")
+DAEMON = importlib.util.module_from_spec(DAEMON_SPEC)
+DAEMON_SPEC.loader.exec_module(DAEMON)
 ENVIRONMENT = "86fb3daa-dde0-4fb4-bf83-6e2399d78a5f"
 WORKSPACE_UID = "57f35d02-39f9-40ed-b9e1-bc4a64ad3b0e"
 GATEWAY_UID = "65d41c9c-510b-4c8a-961d-338a879c1fa4"
@@ -542,23 +546,31 @@ assert_kind_credential_provider_counts %d
 ''' % (logs, pods, baseline))
 
     def test_provider_audit_accepts_one_refresh_retry_and_closed_exhaustion(self):
-        for baseline in (2, 3, 5):
+        for baseline in (2, 3, 6, 12, 15):
             with self.subTest(baseline=baseline):
                 result = self.provider_counts(self.provider_events(baseline), baseline)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, "")
-        for baseline, events in ((4, 4), (5, 4), (5, 3), (3, 5)):
+        for baseline, events in ((5, 4), (5, 3), (3, 5), (6, 5), (12, 11), (12, 13), (6, 12)):
             with self.subTest(baseline=baseline, events=events):
                 self.assertNotEqual(
                     self.provider_counts(self.provider_events(events), baseline).returncode, 0)
+        # A baseline outside the session's own count or the journey's bound.
+        for baseline in (1, 65):
+            with self.subTest(baseline=baseline):
+                self.assertNotEqual(
+                    self.provider_counts(self.provider_events(baseline), baseline).returncode, 0)
 
     @staticmethod
-    def reuse_lines(presented=(2, 2, 0), caches=("miss", "hit", "miss"), admitted_between=False,
+    def reuse_lines(presented=(2, 2, 2, 0), caches=("miss", "hit", "miss"), admitted_at=None,
                     gap=1.5, total_ms=40):
+        """The gateway request (attempt 3), then the daemon epoch's warm-up at
+        10 s, its reuse `gap` later, and the request after Reconnect at 20 s +
+        `gap`, with an epoch admission at `admitted_at` seconds if given."""
         fixture = [{"target": "codewire_kind_credential_fixture", "fields": {
             "event": "provider_response", "scenario": "baseline", "attempt": attempt,
             "status": 200, "generation": generation, "response_calls": attempt + 4,
-            "refresh_calls": 2}} for attempt, generation in zip((3, 4, 5), presented)]
+            "refresh_calls": 2}} for attempt, generation in zip((3, 4, 5, 6), presented)]
         def at(seconds):
             whole, fraction = divmod(round(seconds * 1_000_000), 1_000_000)
             return f"2026-10-04T00:{whole // 60:02d}:{whole % 60:02d}.{fraction:06d}Z"
@@ -568,15 +580,17 @@ assert_kind_credential_provider_counts %d
                     "fields": {"event": "proxied_request", "slot": "codex", "route": "openai-api",
                                "outcome": "response", "status": 200, "cache": cache,
                                "total_ms": total_ms, "material_reads": read, "unwraps": read}}
-        admission = {"timestamp": at(10.5), "target": "codewire_credential_broker::timing",
-                     "fields": {"event": "epoch_admission", "outcome": "admitted"}}
-        # The earlier session's requests, then the warm-up at 10 s.
-        lines = [timed("miss", 1), timed("hit", 2), fixture[0], timed(caches[0], 10)]
-        if admitted_between:
-            lines.append(admission)
-        lines += [fixture[1], timed(caches[1], 10 + gap), fixture[2],
-                  timed(caches[2], 20 + gap)]
-        return lines
+        def admission(seconds):
+            return {"timestamp": at(seconds), "target": "codewire_credential_broker::timing",
+                    "fields": {"event": "epoch_admission", "outcome": "admitted"}}
+        # The gateway request is its own epoch.
+        timeline = [(5, admission(5)), (5.1, fixture[0]), (5.2, timed("miss", 5.2)),
+                    (10, fixture[1]), (10, timed(caches[0], 10)),
+                    (10 + gap, fixture[2]), (10 + gap, timed(caches[1], 10 + gap)),
+                    (20 + gap, fixture[3]), (20 + gap, timed(caches[2], 20 + gap))]
+        if admitted_at is not None:
+            timeline.append((admitted_at, admission(admitted_at)))
+        return [line for _, line in sorted(timeline, key=lambda item: item[0])]
 
     def material_reuse(self, lines):
         logs = "\n".join(json.dumps(line) for line in lines)
@@ -590,32 +604,267 @@ kubectl() {
 assert_kind_credential_material_reuse
 ''' % logs)
 
-    def test_material_reuse_requires_a_hit_then_the_reconnected_login(self):
+    def test_material_reuse_requires_a_real_hit_on_one_epoch_then_the_reconnected_login(self):
         result = self.material_reuse(self.reuse_lines())
         self.assertEqual(result.returncode, 0, result.stderr)
-        # Only a new epoch admitted between the first two requests, or a gap
-        # that can reach the two-minute window, may miss.
-        for cold in ({"admitted_between": True}, {"gap": 119.97}, {"gap": 125}):
-            with self.subTest(cold=cold):
-                result = self.material_reuse(self.reuse_lines(caches=("miss", "miss", "miss"),
-                                                              **cold))
+        # A new epoch admitted before the warm-up or after the last request is
+        # outside the window.
+        for admitted_at in (9.9, 30):
+            with self.subTest(admitted_at=admitted_at):
+                result = self.material_reuse(self.reuse_lines(admitted_at=admitted_at))
                 self.assertEqual(result.returncode, 0, result.stderr)
+        # A new epoch admitted inside the window fails, whatever was reused:
+        # it would make the reuse proof vacuous.
+        for caches in (("miss", "miss", "miss"), ("miss", "hit", "miss")):
+            for admitted_at in (10.5, 15):
+                with self.subTest(caches=caches, admitted_at=admitted_at):
+                    result = self.material_reuse(self.reuse_lines(caches=caches,
+                                                                  admitted_at=admitted_at))
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("admitted inside the material reuse window", result.stderr)
         for lines in (
+                # No reuse, even when the reuse came too late to be one.
                 self.reuse_lines(caches=("miss", "miss", "miss")),
+                self.reuse_lines(caches=("miss", "miss", "miss"), gap=125),
+                self.reuse_lines(caches=("miss", "hit", "miss"), gap=119.97),
                 self.reuse_lines(caches=("hit", "hit", "miss")),
                 # A reuse after Reconnect, or the old login presented.
                 self.reuse_lines(caches=("miss", "hit", "hit")),
-                self.reuse_lines(presented=(2, 2, 2)),
-                self.reuse_lines(presented=(0, 0, 0)),
-                self.reuse_lines(presented=(2, 1, 0)),
-                self.reuse_lines(caches=("miss", "hit", "miss"), admitted_between=True),
-                self.reuse_lines(caches=("miss", "hit", "miss"), gap=125),
-                self.reuse_lines(caches=("miss", "miss", "miss"), gap=119.9),
+                self.reuse_lines(presented=(2, 2, 2, 2)),
+                self.reuse_lines(presented=(0, 0, 0, 0)),
+                self.reuse_lines(presented=(2, 2, 1, 0)),
                 self.reuse_lines()[:-1]):
             with self.subTest(lines=lines):
                 result = self.material_reuse(lines)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("reused a login after Reconnect", result.stderr)
+
+    # The authority journey's probes in order: (mode, final status, requests,
+    # bound). Changes are polled within the bound.
+    WITHIN = 5000
+    JOURNEY = (("success", 200, 1, None), ("success", 200, 1, None),
+               ("denied", 403, 1, WITHIN), ("success", 200, 1, WITHIN),
+               ("success", 200, 1, None), ("denied", 403, 1, WITHIN),
+               ("success", 200, 1, WITHIN), ("success", 200, 1, None),
+               ("revoked", 403, 1, WITHIN))
+
+    @classmethod
+    def authority_lines(cls, journey=None, outcomes=None, admitted_before=(), waited=40,
+                        earlier=3):
+        """`earlier` codex requests before the journey, then the journey's
+        requests as its probes saw them, with an admission before the journey
+        request numbers in `admitted_before`; `outcomes` overrides logged
+        outcomes by journey request number."""
+        journey = list(cls.JOURNEY if journey is None else journey)
+        outcomes = outcomes or {}
+        probes, statuses = [], []
+        for mode, status, requests, within in journey:
+            served = 0
+            for _ in range(requests - 1):
+                before = 403 if status == 200 else 200
+                statuses.append((before, "before"))
+                served += before == 200
+            statuses.append((status, mode))
+            served += status == 200
+            probes.append({"event": "daemon_probe", "mode": mode, "status": status,
+                           "requests": requests, "served": served,
+                           "waited_ms": waited if within else 30, "within_ms": within})
+        def timed(fields):
+            return {"timestamp": "2026-10-04T01:00:00.000000Z",
+                    "target": "codewire_credential_broker::timing",
+                    "fields": {"event": "proxied_request", "slot": "codex",
+                               "route": "openai-api", "total_ms": 40, **fields}}
+        lines = [timed({"outcome": "response", "status": 200}) for _ in range(earlier)]
+        for number, (status, mode) in enumerate(statuses, start=1):
+            if number in admitted_before:
+                lines.append({"timestamp": "2026-10-04T01:00:00.000000Z",
+                              "target": "codewire_credential_broker::timing",
+                              "fields": {"event": "epoch_admission", "outcome": "admitted"}})
+            if status == 200:
+                fields = {"outcome": "response", "status": 200}
+            elif mode == "revoked":
+                # The fixed 403 Reconnect explanation, as the service logs it.
+                fields = {"outcome": "response", "status": 403}
+            else:
+                fields = {"outcome": "denied", "status": 0}
+            fields.update(outcomes.get(number, {}))
+            lines.append(timed(fields))
+        return lines, probes
+
+    def authority_changes(self, lines, probes, earlier=3):
+        directory = tempfile.TemporaryDirectory(prefix="kind-authority-changes-")
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "probes.jsonl"
+        path.write_text("".join(json.dumps(probe) + "\n" for probe in probes))
+        logs = "\n".join(json.dumps(line) for line in lines)
+        return self.shell('''
+NS=codewire-e2e
+kubectl() {
+  [ "$*" = '-n codewire-e2e logs deployment/codewire-credential-service -c credential-service' ] ||
+    return 99
+  printf '%%s\\n' '%s'
+}
+assert_kind_credential_authority_changes %d '%s'
+''' % (logs, earlier, path))
+
+    def test_authority_changes_reach_the_connected_epoch_within_the_bound(self):
+        result = self.authority_changes(*self.authority_lines())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        accepted = []
+        # A change may take effect after some served requests, within the
+        # bound, and a restore after some denied ones.
+        slow = list(self.JOURNEY)
+        slow[2] = ("denied", 403, 3, self.WITHIN)
+        slow[3] = ("success", 200, 2, self.WITHIN)
+        slow[8] = ("revoked", 403, 4, self.WITHIN)
+        accepted.append(self.authority_lines(slow, waited=4999))
+        # A restore, or a request between changes, may cross a new epoch.
+        accepted.append(self.authority_lines(admitted_before=(4, 5)))
+        for lines, probes in accepted:
+            with self.subTest(probes=probes):
+                result = self.authority_changes(lines, probes)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        rejected = []
+        # A denial that landed on a new epoch, not the connected one.
+        for number in (3, 6, 9):
+            rejected.append(self.authority_lines(admitted_before=(number,)))
+        rejected.append(self.authority_lines(slow, admitted_before=(5,)))
+        # A change that took longer than the bound.
+        rejected.append(self.authority_lines(waited=5001))
+        # The service saw something else than the probe.
+        for number, outcome in ((3, {"outcome": "response", "status": 200}),
+                                (3, {"outcome": "response", "status": 403}),
+                                (9, {"outcome": "denied", "status": 0}),
+                                (9, {"outcome": "response", "status": 200}),
+                                (1, {"outcome": "denied", "status": 0}),
+                                (6, {"outcome": "response", "status": 200})):
+            rejected.append(self.authority_lines(outcomes={number: outcome}))
+        # A missing or extra request.
+        lines, probes = self.authority_lines()
+        rejected.append((lines[:-1], probes))
+        rejected.append((lines + lines[-1:], probes))
+        rejected.append((lines, probes[:-1]))
+        rejected.append((lines, []))
+        for lines, probes in rejected:
+            with self.subTest(probes=probes):
+                result = self.authority_changes(lines, probes)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("did not reach the connected daemon epoch in time", result.stderr)
+        # The journey starts after the requests before it.
+        lines, probes = self.authority_lines(earlier=5)
+        self.assertEqual(self.authority_changes(lines, probes, earlier=5).returncode, 0)
+        self.assertNotEqual(self.authority_changes(lines, probes, earlier=4).returncode, 0)
+
+    def test_daemon_probe_runs_the_daemon_path_script_in_the_exact_workspace(self):
+        directory = tempfile.TemporaryDirectory(prefix="kind-daemon-probe-")
+        self.addCleanup(directory.cleanup)
+        log = Path(directory.name) / "probes.jsonl"
+        for mode, within in (("success", ""), ("denied", "5000"), ("revoked", "5000")):
+            with self.subTest(mode=mode, within=within):
+                result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+KIND_DAEMON_PROBE_LOG='%s'
+kind_credential_workspace() { [ "$1" = '%s' ] || return 97; printf 'workspace-pod\\n'; }
+kubectl() {
+  [ "$*" = '-n dev-sandboxes exec -i workspace-pod -c workspace -- python3 -B -u - %s%s' ] || return 99
+  cmp -s - "$ROOT/scripts/ci/verify/kind/daemon_probe.py" || return 98
+  printf '{"event":"daemon_probe","mode":"%s"}\\n'
+}
+kind_credential_daemon_probe '%s' %s %s
+''' % (log, ENVIRONMENT, mode, " " + within if within else "", mode, ENVIRONMENT, mode, within))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["mode"], mode)
+        self.assertEqual([json.loads(line)["mode"] for line in log.read_text().splitlines()],
+                         ["success", "denied", "revoked"])
+        for arguments in ("unbound", "success 0", "success 05000", "success 123456", "denied x"):
+            with self.subTest(arguments=arguments):
+                result = self.shell('''
+kind_credential_workspace() { echo unexpected-workspace >&2; return 97; }
+kubectl() { echo unexpected-kubectl >&2; return 99; }
+kind_credential_daemon_probe '%s' %s
+''' % (ENVIRONMENT, arguments))
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stderr, "")
+        # A failed or foreign probe event fails the step and is still kept.
+        for output, status in (('{"event":"daemon_probe_failed"}', 1),
+                               ('{"event":"daemon_probe","mode":"denied"}', 0)):
+            with self.subTest(output=output):
+                result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+kind_credential_workspace() { printf 'workspace-pod\\n'; }
+kubectl() { cat >/dev/null; printf '%%s\\n' '%s'; return %d; }
+kind_credential_daemon_probe '%s' success
+''' % (output, status, ENVIRONMENT))
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("the daemon-path success request failed", result.stderr)
+
+    def test_membership_role_change_is_exact_and_fails_closed(self):
+        for changed, expected in (("synthetic-membership\n", 0), ("", 1),
+                                  ("one\ntwo\n", 1)):
+            with self.subTest(changed=changed):
+                result = self.shell('''
+NS=codewire-e2e
+kubectl() {
+  [ "$*" = '-n codewire-e2e exec -i deploy/postgres -- psql -U codewire -d codewire -v ON_ERROR_STOP=1 -v environment=%s -v role=admin -qAt' ] ||
+    return 99
+  grep -Fq "UPDATE org_members AS m SET role = :'role'" || return 98
+  printf '%%s' '%s'
+}
+set_kind_credential_member_role '%s' admin
+''' % (ENVIRONMENT, changed, ENVIRONMENT))
+                self.assertEqual(result.returncode, expected, result.stderr)
+        for environment, role in ((ENVIRONMENT, "owner"), (ENVIRONMENT, "admin;"),
+                                  ("foreign", "admin")):
+            with self.subTest(environment=environment, role=role):
+                result = self.shell('''
+kubectl() { echo unexpected-kubectl >&2; return 99; }
+set_kind_credential_member_role '%s' '%s'
+''' % (environment, role))
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stderr, "")
+
+    def test_rebind_moves_the_binding_to_the_current_or_an_exact_revision_once(self):
+        for revision in ("", "7"):
+            for rebound, expected in (("4\n", 0), ("", 1), ("4\n5\n", 1), ("x\n", 1)):
+                with self.subTest(revision=revision, rebound=rebound):
+                    result = self.shell('''
+NS=codewire-e2e
+kubectl() {
+  [ "$*" = '-n codewire-e2e exec -i deploy/postgres -- psql -U codewire -d codewire -v ON_ERROR_STOP=1 -v environment=%s -v revision=%s -qAt' ] ||
+    return 99
+  sql="$(cat)"
+  grep -Fq "COALESCE(NULLIF(:'revision', '')::bigint, p.current_revision)" <<<"$sql" || return 98
+  grep -Fq "b.profile_revision <> COALESCE" <<<"$sql" || return 97
+  printf '%%s' '%s'
+}
+rebind_kind_credential_environment '%s' %s
+''' % (ENVIRONMENT, revision, rebound, ENVIRONMENT, revision))
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    if expected:
+                        self.assertIn("was not rebound to another profile revision", result.stderr)
+        for arguments in ("foreign", "%s 0" % ENVIRONMENT, "%s x" % ENVIRONMENT):
+            with self.subTest(arguments=arguments):
+                result = self.shell('''
+kubectl() { echo unexpected-kubectl >&2; return 99; }
+rebind_kind_credential_environment %s
+''' % arguments)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stderr, "")
+        for found, expected in (("3\n", 0), ("", 1), ("0\n", 1)):
+            with self.subTest(found=found):
+                result = self.shell('''
+NS=codewire-e2e
+kubectl() {
+  [ "$*" = '-n codewire-e2e exec -i deploy/postgres -- psql -U codewire -d codewire -v ON_ERROR_STOP=1 -v environment=%s -qAt' ] ||
+    return 99
+  grep -Fq "SELECT profile_revision FROM platform_environment_access_bindings" || return 98
+  printf '%%s' '%s'
+}
+kind_credential_bound_revision '%s'
+''' % (ENVIRONMENT, found, ENVIRONMENT))
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if not expected:
+                    self.assertEqual(result.stdout, "3\n")
 
     def test_provider_audit_rejects_old_third_request_missing_refresh_and_extra_replay(self):
         correct = self.provider_events()
@@ -748,24 +997,57 @@ kind_credential_codex_login '%s' %s %s
         stop = index('env --platform stop "$environment"')
         start = index('env --platform start "$environment"')
         redelivered = index('kind_credential_codex_login "$environment" redelivered || return $?')
-        success = index('kind_credential_probe "$environment" success')
-        warm = index("assert_kind_credential_provider_counts 3")
-        reuse = index('kind_credential_probe "$environment" success', warm)
+        daemon = 'kind_credential_daemon_probe "$environment" '
+        bounded = ' "$KIND_AUTHORITY_CHANGE_WITHIN_MS"'
+        gateway = index('kind_credential_probe "$environment" success')
+        counted = index("assert_kind_credential_provider_counts 3")
+        warm = index(daemon + "success\n", counted)
+        reuse = index(daemon + "success\n", warm + 1)
         reconnect = index('credentials --platform connect codex --name "$credential_name" --yes')
-        reconnected = index('kind_credential_probe "$environment" success', reconnect)
+        reconnected = index(daemon + "success\n", reconnect)
+        six = index("assert_kind_credential_provider_counts 6")
         reused = index("assert_kind_credential_material_reuse")
+        anchor = index('journey_from="$(kind_credential_codex_request_count)" || return $?')
+        logged = index('KIND_DAEMON_PROBE_LOG="$(mktemp "$RUN_DIR/credential-daemon-authority.XXXXXX")"')
+        repeated = index(daemon + "success\n", logged)
+        member = index('set_kind_credential_member_role "$environment" admin')
+        denied = index(daemon + "denied" + bounded, member)
+        restored = index('set_kind_credential_member_role "$environment" member', denied)
+        readmitted = index(daemon + "success" + bounded, restored)
+        bound = index('bound_revision="$(kind_credential_bound_revision "$environment")" || return $?')
+        unset = index('--profile "$profile_name" unset codex')
+        rebind = index('rebind_kind_credential_environment "$environment"\n')
+        unbound = index(daemon + "denied" + bounded, rebind)
+        rebound = index('rebind_kind_credential_environment "$environment" "$bound_revision"')
+        recovered = index(daemon + "success" + bounded, rebound)
         revoke = index('credentials --platform revoke "$credential_name"')
+        revoked_daemon = index(daemon + "revoked" + bounded)
+        changes = index('assert_kind_credential_authority_changes "$journey_from" "$KIND_DAEMON_PROBE_LOG"')
+        revoked_gateway = index('kind_credential_probe "$environment" revoked')
         revoked = index('kind_credential_codex_login "$environment" revoked || return $?')
+        served = index('served="$(jq -s \'map(.served) | add\' "$KIND_DAEMON_PROBE_LOG")" || return $?')
+        final = index('assert_kind_credential_provider_counts "$((6 + served))"')
         destroy = index('env --platform rm "$environment"')
         # Delivery before the proxy session whose refreshes rotate it; the
         # user's own login and logout after rotation; a new container forgets
-        # the logout; a cached request then Reconnect precede revocation, which
-        # removes the login before destroy.
+        # the logout; one gateway request; on the daemon's epoch a warm-up, a
+        # reuse and Reconnect; then each authority change on that connected
+        # epoch, revocation last, which removes the login before destroy.
         order = [deliver, session, counts, rotation, own, logout, stop, start, redelivered,
-                 success, warm, reuse, reconnect, reconnected, reused, revoke, revoked, destroy]
+                 gateway, counted, warm, reuse, reconnect, reconnected, six, reused, anchor,
+                 logged, repeated, member, denied, restored, readmitted, bound, unset, rebind,
+                 unbound, rebound, recovered, revoke, revoked_daemon, changes, revoked_gateway,
+                 revoked, served, final, destroy]
         self.assertEqual(sorted(order), order)
-        self.assertEqual(flow.count('kind_credential_probe "$environment" success'), 3)
-        self.assertEqual(flow.count("assert_kind_credential_provider_counts 5"), 2)
+        # Reuse and a connected epoch's authority changes are proven only on
+        # the daemon path; the gateway path admits an epoch per request.
+        self.assertNotIn("kind_credential_probe ", flow[counted:revoked_gateway])
+        self.assertEqual(flow.count('kind_credential_probe "$environment" success'), 1)
+        self.assertEqual(flow.count(daemon + "denied" + bounded), 2)
+        self.assertEqual(flow.count(daemon + "revoked" + bounded), 1)
+        self.assertEqual(flow.count(daemon + "success" + bounded), 2)
+        # Three daemon requests before the journey, each served once.
+        self.assertEqual(flow[counted:anchor].count(daemon + "success\n"), 3)
         self.assertIn('login_events="$(kind_credential_codex_login "$environment" deliver)" || return $?',
                       flow)
 
@@ -1508,6 +1790,17 @@ exit 0
                       '"$pod" "$renewal_stop" "$renewal_pid"', trap)
         self.assertIn('renewal_stop="/tmp/codewire-kind-bridge-renewal-${RANDOM}${RANDOM}"', flow)
 
+    def test_a_failure_while_the_creator_is_an_admin_restores_the_member_role(self):
+        flow = HELPERS.read_text().split("kind_credential_native_smoke() (", 1)[1]
+        trap = flow.split("trap '", 1)[1].split("' EXIT", 1)[0]
+        self.assertIn('[ -z "$member_role_changed" ] || set_kind_credential_member_role '
+                      '"$environment" member >/dev/null 2>&1 || true', trap)
+        armed = flow.index('member_role_changed=1')
+        admin = flow.index('set_kind_credential_member_role "$environment" admin', armed)
+        member = flow.index('set_kind_credential_member_role "$environment" member', admin)
+        cleared = flow.index('member_role_changed=""\n', member)
+        self.assertEqual(sorted([armed, admin, member, cleared]), [armed, admin, member, cleared])
+
 
 class BridgeRenewalProbe(unittest.TestCase):
     STOP = "/tmp/codewire-kind-bridge-renewal-123"
@@ -1615,6 +1908,112 @@ class BridgeRenewalProbe(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             self.assertEqual(RENEWAL.main(["probe", "/tmp/other", "60"]), 1)
         self.assertEqual(output.getvalue(), '{"event":"bridge_renewal_probe_failed"}\n')
+
+
+class DaemonProbe(unittest.TestCase):
+    """Proxied Codex requests on the daemon's loopback ingress."""
+
+    def setUp(self):
+        self.statuses = []
+        self.connections = []
+        self.payload = b"data: CWCODEX149 kind"
+        self.clock = [0.0]
+        def connection(*args, **kwargs):
+            result = Mock()
+            result.args = (args, kwargs)
+            status = self.statuses.pop(0) if self.statuses else 200
+            result.getresponse.return_value.status = status
+            result.getresponse.return_value.read.return_value = (
+                self.payload if status == 200 else b"denied")
+            self.clock[0] += 0.05
+            self.connections.append(result)
+            return result
+        def sleep(seconds):
+            self.assertEqual(seconds, DAEMON.POLL_SECONDS)
+            self.clock[0] += seconds
+        self.output = io.StringIO()
+        for fixture in (
+            patch.object(DAEMON.http.client, "HTTPConnection", side_effect=connection),
+            patch.object(DAEMON.time, "sleep", side_effect=sleep),
+            patch.object(DAEMON.time, "monotonic", side_effect=lambda: self.clock[0]),
+            contextlib.redirect_stdout(self.output),
+        ):
+            fixture.__enter__()
+            self.addCleanup(fixture.__exit__, None, None, None)
+
+    def event(self):
+        return json.loads(self.output.getvalue())
+
+    def test_one_request_uses_the_daemon_loopback_codex_route_without_a_credential(self):
+        DAEMON.probe("success")
+        (connection,) = self.connections
+        self.assertEqual(connection.args, (("127.0.0.1", 38081), {"timeout": 20}))
+        request = connection.request.call_args
+        self.assertEqual(request.args, ("POST", "/v1/responses"))
+        self.assertEqual(request.kwargs["headers"],
+                         {"Host": "localhost", "Content-Type": "application/json"})
+        # A baseline request: no fixture scenario marker.
+        self.assertEqual(json.loads(request.kwargs["body"])["input"], "CW_KIND_DAEMON_PATH")
+        connection.close.assert_called_once()
+        self.assertEqual(self.event(), {"event": "daemon_probe", "mode": "success", "status": 200,
+                                        "requests": 1, "served": 1, "waited_ms": 50,
+                                        "within_ms": None})
+
+    def test_one_request_must_answer_its_mode_at_once(self):
+        for mode, status, wrong in (("denied", 403, 200), ("revoked", 403, 200),
+                                    ("success", 200, 403), ("success", 200, 503)):
+            with self.subTest(mode=mode, wrong=wrong):
+                self.statuses = [wrong, status]
+                with self.assertRaises(ValueError):
+                    DAEMON.probe(mode)
+
+    def test_a_change_is_awaited_within_its_bound_and_counts_what_was_served(self):
+        self.statuses = [200, 200, 403]
+        DAEMON.probe("denied", 5000)
+        event = self.event()
+        self.assertEqual((event["status"], event["requests"], event["served"], event["within_ms"]),
+                         (403, 3, 2, 5000))
+        self.assertEqual(event["waited_ms"], 550)
+        self.output.truncate(0)
+        self.output.seek(0)
+        self.statuses = [403, 200]
+        DAEMON.probe("success", 5000)
+        self.assertEqual((self.event()["requests"], self.event()["served"]), (2, 1))
+
+    def test_a_change_that_misses_its_bound_or_answers_otherwise_fails(self):
+        for mode, statuses, within in (("denied", [200] * 40, 1000),
+                                       ("denied", [200, 503, 403], 5000),
+                                       ("success", [403, 200], 100),
+                                       ("revoked", [403], 0)):
+            with self.subTest(mode=mode, statuses=statuses, within=within):
+                self.statuses = list(statuses)
+                with self.assertRaises(ValueError):
+                    DAEMON.probe(mode, within)
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_unknown_mode_never_reaches_the_network(self):
+        for mode in ("unbound", "missing", "", "success "):
+            with self.assertRaises(ValueError):
+                DAEMON.probe(mode)
+        self.assertEqual(self.connections, [])
+
+    def test_provider_material_missing_marker_and_oversize_are_rejected(self):
+        for payload in (b"CW_KIND_SYNTHETIC_REFRESH_private CWCODEX149 kind",
+                        b"synthetic-kind-signature CWCODEX149 kind",
+                        b"CWCODEX149 kind" + b"x" * (64 * 1024), b"no marker"):
+            with self.subTest(size=len(payload)):
+                self.payload = payload
+                with self.assertRaises(ValueError):
+                    DAEMON.probe("success")
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_arguments_are_a_mode_and_an_optional_positive_bound(self):
+        self.assertEqual(DAEMON.arguments(["probe", "denied"]), ("denied", None))
+        self.assertEqual(DAEMON.arguments(["probe", "denied", "5000"]), ("denied", 5000))
+        for argv in (["probe"], ["probe", "denied", "0"], ["probe", "denied", "05"],
+                     ["probe", "denied", "-5"], ["probe", "denied", "5", "6"]):
+            with self.subTest(argv=argv), self.assertRaises(ValueError):
+                DAEMON.arguments(argv)
 
 
 if __name__ == "__main__":
