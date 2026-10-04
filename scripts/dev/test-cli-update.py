@@ -514,6 +514,7 @@ def main():
             identity["source_revision"], source, identity["rustc"])
         assert admitted == identity, "executable build record differs from its complete source identity"
         cw_release.toolchain_rustc(source_root, identity["rustc"])
+    host.arm_owned_family()
     journey = Journey(a, b, args.mesh)
     passed = False
     try:
@@ -532,6 +533,7 @@ def main():
                 print(f"cli-update: pre-environment evidence retained: {journey.root}", file=sys.stderr)
                 journey.sentinel.terminate()
                 journey.sentinel.wait(timeout=5)
+                host.reap_owned_family()
             else:
                 journey.cleanup(preserve=not passed)
         finally:

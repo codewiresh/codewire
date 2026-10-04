@@ -1482,6 +1482,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-kind-codex-session.py|scripts/ci/tests/test-kind-codex-login.py|\
       scripts/ci/tests/test-kind-credentials.py|scripts/ci/tests/test-kind-cluster-profiles.py|\
       scripts/ci/tests/test-kind-dev-profile.py|scripts/ci/tests/test-kind-profile-artifacts.py|\
+      scripts/ci/tests/test-kind-cw-runtime.py|scripts/ci/tests/test-kind-cw-runtime-probe.py|\
       scripts/ci/tests/test-kind-profile-gate.py)
         # These hermetic fixtures exercise the dispatcher and cleanup contract
         # without provisioning a cluster. A real harness/runtime path in the

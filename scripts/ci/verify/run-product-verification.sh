@@ -744,6 +744,7 @@ run_edge() {
   python3 scripts/checks/repo_checks.py connect-edge-routing --self-test
   scripts/ci/tests/test-kind-e2e-cleanup.sh
   scripts/ci/tests/test-kind-e2e-suites.sh
+  python3 -B scripts/ci/tests/test-kind-cw-runtime-probe.py
   python3 -B scripts/ci/tests/test-kind-cluster-profiles.py
   python3 -B scripts/ci/tests/test-kind-dev-profile.py
   python3 -B scripts/ci/tests/test-kind-profile-artifacts.py

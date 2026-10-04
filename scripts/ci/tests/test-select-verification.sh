@@ -708,6 +708,19 @@ run_paths_case kind_fixture_only pull_request refs/pull/847/head false \
   'policy' \
   scripts/ci/tests/test-kind-e2e-suites.sh \
   scripts/ci/tests/test-kind-forwards.sh
+for kind_runtime_fixture in test-kind-cw-runtime.py test-kind-cw-runtime-probe.py; do
+  run_paths_case "${kind_runtime_fixture%.py}_pr" pull_request refs/pull/8471/head false \
+    'policy' "scripts/ci/tests/$kind_runtime_fixture"
+  run_paths_case "${kind_runtime_fixture%.py}_opt_in" pull_request refs/pull/8472/head true \
+    'edge_kind policy' "scripts/ci/tests/$kind_runtime_fixture"
+  run_paths_case "${kind_runtime_fixture%.py}_main" push refs/heads/main false \
+    'edge_kind policy' "scripts/ci/tests/$kind_runtime_fixture"
+done
+run_paths_case kind_runtime_fixture_mixed_opt_in pull_request refs/pull/8473/head true \
+  'edge_kind kind policy' \
+  scripts/ci/tests/test-kind-cw-runtime.py \
+  scripts/ci/tests/test-kind-cw-runtime-probe.py \
+  scripts/ci/verify/kind/suites/integrated.sh
 run_paths_case temporal_shared_fixture pull_request refs/pull/841/head false \
   'policy service_billing service_integration service_orchestration service_temporal' \
   tests/e2e/flip-state.env
@@ -1275,6 +1288,8 @@ run_paths_case rust_cache_unlisted pull_request refs/pull/201/head false "$all_p
   scripts/ci/cache/unlisted-cache-helper.sh
 rm -f "$NEGATIVE_CACHE_PATH"
 rmdir "$ROOT/scripts/ci/cache" 2>/dev/null || true
+run_present_paths_case kind_runtime_fixture_unknown pull_request refs/pull/1801/head false \
+  "$all_product_pr" scripts/ci/tests/test-kind-cw-runtime-future.py
 run_paths_case unknown pull_request refs/pull/18/head false "$all_product_pr" \
   unexplained/new-surface.txt
 run_paths_case mesh_policy_unknown pull_request refs/pull/181/head false "$all_product_pr" \
@@ -1313,6 +1328,21 @@ contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1913/head \
   KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
 assert_contract_field kind_fixture_mixed "$contract_output" required_local_mode kind
+printf '%s\n' scripts/ci/tests/test-kind-cw-runtime.py \
+  scripts/ci/tests/test-kind-cw-runtime-probe.py > "$contract_paths"
+contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/19131/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
+assert_contract_field kind_runtime_fixtures "$contract_output" classification changed
+assert_contract_field kind_runtime_fixtures "$contract_output" required_local_mode default
+printf '%s\n' scripts/ci/tests/test-kind-cw-runtime.py \
+  scripts/ci/tests/test-kind-cw-runtime-probe.py \
+  scripts/ci/verify/kind/suites/integrated.sh > "$contract_paths"
+contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/19132/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
+assert_contract_field kind_runtime_fixtures_mixed "$contract_output" classification changed
+assert_contract_field kind_runtime_fixtures_mixed "$contract_output" required_local_mode kind
 printf '%s\n' scripts/ci/tests/test-dashboard-browser-gate.sh \
   scripts/ci/verify/kind/suites/dashboard-browser.sh > "$contract_paths"
 contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
@@ -2736,6 +2766,20 @@ fi
 edge_kind_block="$TMP/edge-kind.yaml"
 grep -qF 'run: scripts/ci/verify/run-product-verification.sh edge' "$edge_kind_block"
 grep -qF 'scripts/ci/verify/kind-e2e.sh shard "${suites[@]}"' "$edge_kind_block"
+edge_fixture_runner="$TMP/edge-fixture-runner.sh"
+awk '
+  /^run_edge\(\) \{/ { capture = 1 }
+  capture { print }
+  capture && $0 == "}" { exit }
+' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$edge_fixture_runner"
+for edge_fixture_command in \
+    '  scripts/ci/tests/test-kind-e2e-suites.sh' \
+    '  python3 -B scripts/ci/tests/test-kind-cw-runtime-probe.py'; do
+  [ "$(grep -cFx "$edge_fixture_command" "$edge_fixture_runner")" -eq 1 ] || {
+    echo "shared edge route must invoke the owning fixture once: $edge_fixture_command" >&2
+    exit 1
+  }
+done
 
 if grep -qF '    name: Manual diagnostics' "$WORKFLOW" \
   || grep -qF '  diagnostics:' "$WORKFLOW" \

@@ -201,6 +201,7 @@ class ReleaseStoreCleanupTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.addCleanup(self.dispose_fixture)
         self.module = load_candidate()
+        self.module.host.arm_owned_family()
         self.journey = self.module.Journey.__new__(self.module.Journey)
         self.journey.root = self.root
         metadata = self.root.lstat()
