@@ -2123,6 +2123,7 @@ dependencies = [
  "reqwest 0.12.28",
  "russh",
  "russh-sftp",
+ "rustix",
  "schemars",
  "serde",
  "serde_json",

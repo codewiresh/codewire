@@ -89,6 +89,7 @@ prometheus = { workspace = true }
 # same path the Go worker's CheckSidecarReady takes.
 russh = { workspace = true }
 russh-sftp = { workspace = true }
+rustix = { workspace = true }
 uuid = { workspace = true }
 # Temporal worker (#36 Stage D1): EnvironmentWorkflow + activities.
 temporalio-sdk = { workspace = true }

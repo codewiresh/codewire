@@ -490,7 +490,7 @@ PY
     fi
   done
   (cd libs/sdk-python && PYTHONPATH="$repository_root/libs/gen-python${PYTHONPATH:+:$PYTHONPATH}" \
-    "$repository_root/.venv-sdk/bin/python" -m unittest test_sdk test_transport -v)
+    "$repository_root/.venv-sdk/bin/python" -m unittest test_sdk test_transport test_cw_runtime -v)
   (cd /tmp && "$repository_root/.venv-sdk/bin/python" -c \
     'from codewire._transport import ConnectTransport; from codewire.errors import CodewireError; from codewire.v1.api_key_connect import ApiKeyServiceClientSync; from google.rpc.error_details_pb2 import BadRequest; assert CodewireError and BadRequest and isinstance(ConnectTransport("https://codewire.example", "").client(ApiKeyServiceClientSync), ApiKeyServiceClientSync)')
   scripts/runtime/tests/test-run-sdk-python-e2e.sh

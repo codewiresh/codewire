@@ -6,8 +6,14 @@
 //! credential/channel. No latest-binding credential lookup, repair, lifecycle
 //! effect or legacy environment-token fallback occurs here.
 
+mod execute;
+mod intake;
 pub mod model;
 pub mod owner;
+pub mod service;
+#[cfg(test)]
+mod service_test_support;
+mod wire;
 
 use std::net::IpAddr;
 use std::time::Duration;

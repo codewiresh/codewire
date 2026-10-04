@@ -15,6 +15,7 @@ from codewire.environment_ops import (
     poll_interval_seconds,
 )
 from codewire.files import Files
+from codewire.cw_runtime import CwRuntime
 from codewire.v1.environment_connect import EnvironmentServiceClientSync
 from codewire.v1.environment_pb2 import (
     DeleteEnvironmentRequest,
@@ -53,6 +54,7 @@ class Environment:
         for key, value in data.items():
             setattr(self, key, value)
         self.files = Files(context, self.id)
+        self.runtime = CwRuntime(context, self.id)
 
     def exec(
         self,

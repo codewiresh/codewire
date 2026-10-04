@@ -566,7 +566,7 @@ test-sdk-go:
 	cd libs/sdk-go && GOWORK=off go build ./... && GOWORK=off go vet ./... && GOWORK=off go test ./... -count=1 -timeout 60s
 
 test-sdk-ts:
-	cd libs/sdk-ts && npm ci --silent --ignore-scripts && npm run typecheck && npm test
+	cd libs/sdk-ts && npm ci --silent --install-links --ignore-scripts && npm run typecheck && npm test
 
 test-sdk-python:
 	cd libs/sdk-python && \
@@ -574,7 +574,7 @@ test-sdk-python:
 	  .venv/bin/pip install --require-hashes -r requirements.lock -q && \
 	  .venv/bin/pip install --no-deps . -q && \
 	  env -u CODEWIRE_API_KEY -u CODEWIRE_ORG_ID -u CODEWIRE_BASE_URL \
-	    PYTHONPATH="$(CURDIR)/libs/gen-python$${PYTHONPATH:+:$$PYTHONPATH}" .venv/bin/python -m unittest test_sdk test_transport -v && \
+	    PYTHONPATH="$(CURDIR)/libs/gen-python$${PYTHONPATH:+:$$PYTHONPATH}" .venv/bin/python -m unittest test_sdk test_transport test_cw_runtime -v && \
 	  (cd /tmp && $(CURDIR)/libs/sdk-python/.venv/bin/python -c 'from codewire._transport import ConnectTransport; from codewire.errors import CodewireError; from codewire.v1.api_key_connect import ApiKeyServiceClientSync; from google.rpc.error_details_pb2 import BadRequest; assert CodewireError and BadRequest and isinstance(ConnectTransport("https://codewire.example", "").client(ApiKeyServiceClientSync), ApiKeyServiceClientSync)')
 	scripts/runtime/tests/test-run-sdk-python-e2e.sh
 
@@ -589,4 +589,4 @@ sdk-e2e-python: test-sdk-python
 	  .venv/bin/python -m unittest e2e_test -v
 
 sdk-e2e-ts:
-	cd libs/sdk-ts && npm ci --silent --ignore-scripts && ./node_modules/.bin/tsx src/e2e.ts
+	cd libs/sdk-ts && npm ci --silent --install-links --ignore-scripts && ./node_modules/.bin/tsx src/e2e.ts

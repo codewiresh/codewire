@@ -13,6 +13,7 @@ import (
 type Environment struct {
 	EnvironmentData
 	Files *Files
+	Runtime *CwRuntime
 
 	client       *Client
 	orgID        string

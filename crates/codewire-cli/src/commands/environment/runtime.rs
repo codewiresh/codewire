@@ -1,13 +1,16 @@
-//! Explicit Linux-native runtime changes; never environment lifecycle effects.
+//! Explicit runtime changes; never environment lifecycle effects.
 use super::*;
 
+mod platform;
+
 pub(super) async fn handle(
-    _globals: &Globals,
+    globals: &Globals,
     placement: Option<EnvironmentPlacement>,
     command: EnvRuntimeCommand,
 ) -> anyhow::Result<()> {
+    validate_placement(placement, &command)?;
     if placement == Some(EnvironmentPlacement::Platform) {
-        anyhow::bail!("cw env runtime supports only native Linux VMs");
+        return platform::handle(globals, command).await;
     }
     #[cfg(target_os = "linux")]
     {
@@ -20,6 +23,44 @@ pub(super) async fn handle(
             "live cw runtime updates require native Linux protocol9; this host is unsupported"
         )
     }
+}
+
+fn validate_placement(
+    placement: Option<EnvironmentPlacement>,
+    command: &EnvRuntimeCommand,
+) -> anyhow::Result<()> {
+    let platform = placement == Some(EnvironmentPlacement::Platform);
+    match command {
+        EnvRuntimeCommand::Update(args) => anyhow::ensure!(
+            if platform {
+                args.from.is_some()
+                    && args.expected_generation.is_some()
+                    && args.source.is_none()
+                    && args.image_sha256.is_none()
+                    && args.expected_revision.is_none()
+            } else {
+                args.from.is_none()
+                    && args.expected_generation.is_none()
+                    && args.source.is_some()
+                    && args.image_sha256.is_some()
+                    && args.expected_revision.is_some()
+            },
+            "platform updates require --platform --from DIR --expected-generation; native updates require --source --image-sha256 --expected-revision"
+        ),
+        EnvRuntimeCommand::Rollback(args) => anyhow::ensure!(
+            if platform {
+                args.expected_generation.is_some() && args.expected_revision.is_none()
+            } else {
+                args.expected_revision.is_some() && args.expected_generation.is_none()
+            },
+            "platform rollback requires --platform --expected-generation; native rollback requires --expected-revision"
+        ),
+        EnvRuntimeCommand::Cancel(_) if platform => anyhow::bail!(
+            "platform runtime requests are observe-only after dispatch; use observe with the original request UUID"
+        ),
+        _ => {}
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -122,16 +163,19 @@ async fn handle_linux(command: EnvRuntimeCommand) -> anyhow::Result<()> {
             let current = client.runtime_info(&id).await?;
             let selected = selection(&current)?;
             let request_id = args.request_id.unwrap_or_else(Uuid::new_v4);
-            let source = fs::canonicalize(&args.source)
-                .context("resolve admitted local image source lock")?;
+            let source =
+                fs::canonicalize(args.source.as_ref().context("native source is required")?)
+                    .context("resolve admitted local image source lock")?;
             let request = v1::LinuxCwRuntimeMutation {
                 environment_id: id.clone(),
                 generation: current.generation,
                 bootstrap_catalog_sha256: selected.bootstrap_catalog_sha256,
                 request_id: request_id.to_string(),
-                expected_revision: args.expected_revision,
+                expected_revision: args
+                    .expected_revision
+                    .context("native revision is required")?,
                 target_sha256: args.target_sha256,
-                image_index_sha256: args.image_sha256,
+                image_index_sha256: args.image_sha256.context("native image pin is required")?,
                 source_lock: source
                     .into_os_string()
                     .into_string()
@@ -155,7 +199,9 @@ async fn handle_linux(command: EnvRuntimeCommand) -> anyhow::Result<()> {
                 generation: current.generation,
                 bootstrap_catalog_sha256: selected.bootstrap_catalog_sha256,
                 request_id: request_id.to_string(),
-                expected_revision: args.expected_revision,
+                expected_revision: args
+                    .expected_revision
+                    .context("native revision is required")?,
                 target_sha256: selected
                     .previous_sha256
                     .context("no retained previous cw runtime")?,

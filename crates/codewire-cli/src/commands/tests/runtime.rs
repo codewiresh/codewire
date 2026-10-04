@@ -38,8 +38,8 @@ fn live_runtime_cli_requires_explicit_environment_pins_revision_and_stable_reque
     assert!(local);
     assert!(!platform);
     assert_eq!(update.environment, "vm-a");
-    assert_eq!(update.expected_revision, 7);
-    assert_eq!(update.image_sha256, image);
+    assert_eq!(update.expected_revision, Some(7));
+    assert_eq!(update.image_sha256, Some(image.clone()));
     assert_eq!(update.target_sha256, payload);
     assert_eq!(update.request_id.unwrap().to_string(), request);
     assert_eq!(update.output, OutputFormat::Json);

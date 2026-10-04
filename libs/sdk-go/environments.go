@@ -409,6 +409,7 @@ func (s *EnvironmentService) wrap(orgID string, data EnvironmentData, pollInterv
 	return &Environment{
 		EnvironmentData: data,
 		Files:           newFiles(s.client, orgID, data.Id),
+		Runtime:         newCwRuntime(s.client, orgID, data.Id),
 		client:          s.client,
 		orgID:           orgID,
 		pollInterval:    pollInterval,

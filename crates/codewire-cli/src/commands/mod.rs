@@ -728,7 +728,7 @@ pub(crate) struct EnvironmentRunArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum EnvCommand {
-    #[command(about = "Inspect or change cw in a running native Linux VM")]
+    #[command(about = "Inspect or change cw defaults in a running environment")]
     Runtime(EnvRuntimeArgs),
     #[command(
         about = "Create a new environment",
@@ -807,10 +807,13 @@ pub(crate) struct EnvRuntimeArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum EnvRuntimeCommand {
-    #[command(about = "Show the running VM's bootstrap and live cw selection")]
+    #[command(
+        alias = "status",
+        about = "Show the bootstrap and current cw selection"
+    )]
     Info(EnvRuntimeQueryArgs),
     #[command(
-        about = "Select a pinned local cw image without restarting the VM or existing processes"
+        about = "Select a pinned cw without restarting the environment or existing processes"
     )]
     Update(EnvRuntimeUpdateArgs),
     #[command(about = "Select the retained previous cw without restarting existing processes")]
@@ -822,7 +825,7 @@ pub(crate) enum EnvRuntimeCommand {
 }
 #[derive(Debug, Args)]
 pub(crate) struct EnvRuntimeQueryArgs {
-    #[arg(value_name = "ENV", help = "Explicit native environment name or UUID")]
+    #[arg(value_name = "ENV", help = "Explicit environment name or UUID")]
     environment: String,
     #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
     output: OutputFormat,
@@ -834,16 +837,23 @@ pub(crate) struct EnvRuntimeUpdateArgs {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Already admitted image-derived cw-runtime.lock.json"
+        help = "Native: already admitted image-derived cw-runtime.lock.json",
+        required_unless_present = "from",
+        requires_all = ["image_sha256", "expected_revision"],
+        conflicts_with = "from"
     )]
-    source: PathBuf,
+    source: Option<PathBuf>,
+    #[arg(long = "from", value_name = "DIR", help = "Platform: admitted cw and cw-runtime.json release directory",
+        required_unless_present = "source", requires = "expected_generation", conflicts_with_all = ["source", "image_sha256", "expected_revision"])]
+    from: Option<PathBuf>,
     #[arg(
         long,
         value_name = "SHA256",
         help = "Exact lowercase cw image index SHA256",
-        value_parser = parse_runtime_sha256
+        value_parser = parse_runtime_sha256,
+        requires = "source"
     )]
-    image_sha256: String,
+    image_sha256: Option<String>,
     #[arg(
         long,
         value_name = "SHA256",
@@ -851,8 +861,10 @@ pub(crate) struct EnvRuntimeUpdateArgs {
         value_parser = parse_runtime_sha256
     )]
     target_sha256: String,
-    #[arg(long, help = "Observed live selector revision", value_parser = parse_runtime_revision)]
-    expected_revision: u64,
+    #[arg(long, help = "Native: observed live selector revision", value_parser = parse_runtime_revision, requires = "source", conflicts_with = "expected_generation")]
+    expected_revision: Option<u64>,
+    #[arg(long, help = "Platform: observed Store generation (zero for first bootstrap)", value_parser = parse_runtime_generation, requires = "from", conflicts_with = "expected_revision")]
+    expected_generation: Option<u64>,
     #[arg(
         long,
         value_name = "UUID",
@@ -867,8 +879,10 @@ pub(crate) struct EnvRuntimeUpdateArgs {
 pub(crate) struct EnvRuntimeRollbackArgs {
     #[arg(value_name = "ENV")]
     environment: String,
-    #[arg(long, help = "Observed live selector revision", value_parser = parse_runtime_revision)]
-    expected_revision: u64,
+    #[arg(long, help = "Native: observed live selector revision", value_parser = parse_runtime_revision, required_unless_present = "expected_generation", conflicts_with = "expected_generation")]
+    expected_revision: Option<u64>,
+    #[arg(long, help = "Platform: observed Store generation", value_parser = parse_runtime_generation, required_unless_present = "expected_revision", conflicts_with = "expected_revision")]
+    expected_generation: Option<u64>,
     #[arg(long, value_name = "UUID", value_parser = parse_runtime_request_id)]
     request_id: Option<uuid::Uuid>,
     #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
@@ -901,6 +915,13 @@ fn parse_runtime_revision(value: &str) -> Result<u64, String> {
         .ok()
         .filter(|revision| *revision > 0)
         .ok_or_else(|| "runtime selection revision must be a nonzero integer".into())
+}
+fn parse_runtime_generation(value: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|number| number.to_string() == value)
+        .ok_or_else(|| "runtime Store generation must be a canonical unsigned integer".into())
 }
 fn parse_runtime_request_id(value: &str) -> Result<uuid::Uuid, String> {
     uuid::Uuid::parse_str(value)

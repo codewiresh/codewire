@@ -10,6 +10,7 @@ mod config;
 mod coordinator;
 mod credential_delegation;
 mod credentials;
+pub mod cw_runtime;
 mod error;
 mod mesh;
 mod tailnet;
