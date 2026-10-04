@@ -6,6 +6,8 @@ readonly ROOT
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 readonly PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
 readonly PUBLISH_REGISTRY_HOST='registry.example.invalid'
+readonly PROTECTED_SCCACHE_BUCKET='example-ci-cache-protected'
+readonly PROTECTED_SCCACHE_ENDPOINT='https://00000000000000000000000000000000.r2.cloudflarestorage.com'
 source "$ROOT/scripts/ci/images/nexus-publication-retry-contract.sh"
 
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
@@ -13,8 +15,28 @@ source "$ROOT/scripts/ci/images/nexus-publication-retry-contract.sh"
 
 case "${CODEWIRE_SCCACHE_MODE:-local}" in
   disabled|local) ;;
+  r2)
+    # The shared cache is admitted only in the dedicated protected bucket,
+    # below the protected prefix: that bucket's R2 credential is readable
+    # solely by this canonical-main deploy lane's own publisher identity, so
+    # untrusted builds can never poison the objects protected builds consume.
+    # build-push-image.sh re-validates the full r2 contract (bucket, endpoint,
+    # prefix, private credentials file) per image.
+    case "${CODEWIRE_SCCACHE_PREFIX:-}" in
+      protected/codewire/*) ;;
+      *)
+        echo 'Protected runtime builds may use only the protected R2 compiler-cache prefix' >&2
+        exit 2
+        ;;
+    esac
+    if [ "${SCCACHE_BUCKET:-}" != "$PROTECTED_SCCACHE_BUCKET" ] \
+        || [ "${SCCACHE_ENDPOINT:-}" != "$PROTECTED_SCCACHE_ENDPOINT" ]; then
+      echo 'Protected runtime builds may use only the protected R2 compiler-cache bucket' >&2
+      exit 2
+    fi
+    ;;
   *)
-    echo 'Protected runtime builds may use only job-local or disabled sccache' >&2
+    echo 'Protected runtime builds may use only job-local, disabled, or protected-prefix R2 sccache' >&2
     exit 2
     ;;
 esac
