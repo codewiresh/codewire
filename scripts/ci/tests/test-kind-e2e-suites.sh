@@ -30,7 +30,7 @@ FIXTURE="$(mktemp -d "$ROOT/.tmp/kind-e2e-suites.XXXXXX")"
 CALLS="$FIXTURE/calls"
 readonly SEALED_CONTROLLER_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
 readonly SEALED_CERTGEN_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
-readonly SEALED_AGENT_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125'
+readonly SEALED_AGENT_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:872d7c1d2d3e01d3c5f5ec1509ea3620408f588547a355625ee00a0f63181615'
 readonly SEALED_WORKSPACE_IMAGE='registry.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510'
 readonly SEALED_DIND_IMAGE='registry.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e'
 
@@ -679,6 +679,17 @@ common_client_source="$(cat "$COMMON")"
 overlay_renderer_source="$(workspace_smoke_definition render_kind_overlay_manifest)"
 [ -n "$overlay_renderer_source" ] || fail 'overlay renderer source is missing'
 common_client_source="${common_client_source/"$overlay_renderer_source"/}"
+
+# Smoke binaries default to the default host ports, which belong to another
+# cluster whenever this one runs shifted: every Temporal smoke names this
+# cluster's frontend.
+for temporal_smoke in temporal-smoke temporal-fencing-smoke; do
+  invocations="$(grep -c "\"\$CARGO_CI_DIR/${temporal_smoke}\"" "$COMMON" || true)"
+  addressed="$({ grep -B3 "\"\$CARGO_CI_DIR/${temporal_smoke}\"" "$COMMON" || true; } |
+    grep -Fc 'TEMPORAL_ADDRESS="$KIND_TEMPORAL_FRONTEND_URL"' || true)"
+  [ "$invocations" -ge 1 ] && [ "$addressed" -eq "$invocations" ] ||
+    fail "${temporal_smoke} can fall back to another cluster's Temporal (${addressed}/${invocations} addressed)"
+done
 for hardcoded_loopback in '127.0.0.1:7233' '127.0.0.1:8084' '127.0.0.1:18092' '127.0.0.1:8090' 'localhost:10443'; do
   if grep -Fq "$hardcoded_loopback" <<<"$common_client_source"; then
     fail "Kind harness still hardcodes client address ${hardcoded_loopback}"
@@ -1517,6 +1528,82 @@ printf preserved >"$FIXTURE/kind-config-rejected.yaml"
 [ "$(cat "$FIXTURE/kind-config-rejected.yaml")" = preserved ] ||
   fail 'rejected Kind rendering changed an existing output'
 
+# The overlay and the credential fixture follow the requested ingress origin
+# (#2395): the default port renders byte-identically, a shifted port replaces
+# every pinned occurrence, and drift, foreign origins or bad ports fail.
+grep -Fq 'render_kind_ingress_origin "$rendered" "$KIND_OVERLAY_INGRESS_ORIGINS" || return $?' "$COMMON" ||
+  fail 'Kind overlay render does not render its ingress origin'
+source_origins="$(cat "$ROOT/tests/e2e/kind/support.yaml" "$ROOT/tests/e2e/kind/kustomization.yaml" |
+  grep -oE 'http://127\.0\.0\.1:8090([^0-9]|$)' | wc -l)"
+[ "$source_origins" -eq "$KIND_OVERLAY_INGRESS_ORIGINS" ] ||
+  fail "overlay sources carry ${source_origins} ingress origins, but ${KIND_OVERLAY_INGRESS_ORIGINS} are pinned"
+(
+  RUN_DIR="$FIXTURE/ingress-origin-default"
+  rendered="$(render_kind_credential_fixture_patch)"
+  cmp -s "$rendered" "$ROOT/tests/e2e/kind/credential-fixture-patch.yaml"
+) || fail 'default ingress origin changed the credential fixture patch'
+(
+  RUN_DIR="$FIXTURE/ingress-origin-shifted"
+  KIND_INGRESS_URL=http://127.0.0.1:18090
+  rendered="$(render_kind_credential_fixture_patch)"
+  grep -Fxq '              value: http://127.0.0.1:18090' "$rendered" &&
+    ! grep -Fq '127.0.0.1:8090' "$rendered"
+) || fail 'shifted ingress origin was not rendered into the credential fixture patch'
+# A conditional caller suppresses errexit inside the renderer. Neither a
+# failed directory check nor a failed copy may admit an existing valid patch.
+for failing_step in mkdir cp; do
+  (
+    RUN_DIR="$FIXTURE/ingress-origin-${failing_step}-failure"
+    mkdir -p "$RUN_DIR"
+    cp "$ROOT/tests/e2e/kind/credential-fixture-patch.yaml" "$RUN_DIR/credential-fixture-patch.yaml"
+    if [ "$failing_step" = mkdir ]; then
+      mkdir() { return 41; }
+      expected_status=41
+    else
+      cp() { return 42; }
+      expected_status=42
+    fi
+    if rendered="$(render_kind_credential_fixture_patch)"; then
+      exit 1
+    else
+      status=$?
+    fi
+    [ "$status" -eq "$expected_status" ] && [ -z "$rendered" ] &&
+      cmp -s "$RUN_DIR/credential-fixture-patch.yaml" "$ROOT/tests/e2e/kind/credential-fixture-patch.yaml"
+  ) || fail "credential renderer admitted a stale patch after ${failing_step} failed"
+done
+printf '%s\n' 'FRONTEND_URL: http://127.0.0.1:8090' 'ISSUER: http://127.0.0.1:8090' \
+  '- value: http://127.0.0.1:8090' '- value: http://127.0.0.1:8090' 'decoy: http://127.0.0.1:80901' \
+  >"$FIXTURE/overlay-origins.yaml"
+cp "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-default.yaml"
+render_kind_ingress_origin "$FIXTURE/overlay-origins-default.yaml" 4 ||
+  fail 'default ingress origin render failed'
+cmp -s "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-default.yaml" ||
+  fail 'default ingress origin render was not byte-identical'
+cp "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-shifted.yaml"
+KIND_INGRESS_URL=http://127.0.0.1:9090 render_kind_ingress_origin "$FIXTURE/overlay-origins-shifted.yaml" 4 ||
+  fail 'shifted ingress origin render failed'
+[ "$(grep -c 'http://127.0.0.1:9090$' "$FIXTURE/overlay-origins-shifted.yaml")" -eq 4 ] &&
+  grep -Fxq 'decoy: http://127.0.0.1:80901' "$FIXTURE/overlay-origins-shifted.yaml" ||
+  fail 'shifted ingress origin render missed an origin or rewrote a longer port'
+for refused in '3:http://127.0.0.1:9090' '4:http://localhost:9090' '4:https://127.0.0.1:9090' \
+  '4:http://127.0.0.1:99999' '4:http://127.0.0.1:80' '4:http://127.0.0.1:9090/'; do
+  cp "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-refused.yaml"
+  if KIND_INGRESS_URL="${refused#*:}" render_kind_ingress_origin \
+    "$FIXTURE/overlay-origins-refused.yaml" "${refused%%:*}" 2>"$FIXTURE/overlay-origins.err"; then
+    fail "ingress origin render accepted ${refused}"
+  fi
+  cmp -s "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-refused.yaml" ||
+    fail "refused ingress origin render ${refused} still rewrote its file"
+done
+cp "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-drift.yaml"
+if KIND_INGRESS_URL=http://127.0.0.1:9090 render_kind_ingress_origin \
+  "$FIXTURE/overlay-origins-drift.yaml" 5 2>"$FIXTURE/overlay-origins-drift.err"; then
+  fail 'ingress origin render accepted a count drift'
+fi
+grep -Fq 'Kind ingress origin occurrence mismatch in overlay-origins-drift.yaml: expected 5, got 4' \
+  "$FIXTURE/overlay-origins-drift.err" || fail 'ingress origin count drift was not explained'
+
 # A held requested port fails fast and names the owning cluster; shifted
 # assignments pass. Ignoring a selected holder here does not authorize replacing
 # an existing cluster; create_cluster independently refuses that operation.
@@ -2110,7 +2197,7 @@ grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
 expect_failure substituted-agent-image env \
   KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
   KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
-  KIND_AGENT_SANDBOX_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:555146af2337dd5d8baf0844d7f5de9a3cd8fc7b032b85756ae244bc2583fb41' \
+  KIND_AGENT_SANDBOX_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:199efbb13e4af3fff69eaba218e5d36d3103568b2fa73e8606e7ad7da8c28609' \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
   KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
@@ -2150,7 +2237,7 @@ grep -Fq "docker:image tag $SEALED_CERTGEN_IMAGE localhost/codewire-ci/ingress-k
   fail 'sealed certgen was not assigned its disposable Kind reference'
 grep -Fq "docker:image inspect $SEALED_AGENT_IMAGE" "$CALLS" ||
   fail 'sealed agent-sandbox controller was not proven in the runner-preloaded Docker store'
-grep -Fq "docker:image tag $SEALED_AGENT_IMAGE localhost/codewire-ci/agent-sandbox-controller:verified-6081ae66b4134ebc6b170d965741b8dae09442ec74563b6c1ac999c366dac125" "$CALLS" ||
+grep -Fq "docker:image tag $SEALED_AGENT_IMAGE localhost/codewire-ci/agent-sandbox-controller:verified-872d7c1d2d3e01d3c5f5ec1509ea3620408f588547a355625ee00a0f63181615" "$CALLS" ||
   fail 'sealed agent-sandbox controller was not assigned its disposable Kind reference'
 grep -Fq "docker:image inspect $SEALED_WORKSPACE_IMAGE" "$CALLS" ||
   fail 'sealed workspace was not proven in the runner-preloaded Docker store'

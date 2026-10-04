@@ -81,6 +81,11 @@ pub const CREDENTIAL_BRIDGE_MAX_IN_FLIGHT: usize = 16;
 /// value per optional operation this broker serves. The gateway copies the
 /// known values into the daemon's `CredentialBridgeOpen.capabilities`.
 pub const CREDENTIAL_BRIDGE_CAPABILITIES_HEADER: &str = "x-codewire-credential-bridge-capabilities";
+/// Response header on the broker's admitted `CredentialBridge` stream: the
+/// epoch's verified identity expiry, in decimal Unix seconds. The broker ends
+/// the epoch then. The gateway uses it only to schedule and check the next
+/// epoch's admission before this one ends; an older broker omits it.
+pub const CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER: &str = "x-codewire-credential-bridge-expires-at";
 /// The broker serves `CodexLoginRequest` on this epoch. A daemon sends that
 /// frame only when its epoch's Open lists this value: an older broker or
 /// gateway ends the epoch on an unknown frame.

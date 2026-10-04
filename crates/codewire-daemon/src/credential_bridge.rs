@@ -10,7 +10,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Request, Response};
 use codewire_credential_bridge::{
-    CredentialBridge as SharedCredentialBridge, CredentialBridgeOutput,
+    CredentialBridge as SharedCredentialBridge, CredentialBridgeOutput, EpochReplacement,
 };
 use codewire_gateway_proto::codewire::bridge::v1;
 use codewire_gateway_proto::{CREDENTIAL_BRIDGE_LOOPBACK_PORT, CREDENTIAL_BRIDGE_PROTOCOL_VERSION};
@@ -44,7 +44,8 @@ pub(crate) struct CredentialBridge {
 
 struct BridgeOwner {
     accepting: Mutex<bool>,
-    // One active epoch and one prepared replacement; no unbounded Open waiters.
+    // One active epoch, the hosted epoch draining behind it and one prepared
+    // replacement; no unbounded Open waiters.
     permits: Arc<Semaphore>,
     tasks: TaskTracker,
     shutdown: CancellationToken,
@@ -131,7 +132,7 @@ impl CredentialBridge {
             inner,
             owner: Arc::new(BridgeOwner {
                 accepting: Mutex::new(true),
-                permits: Arc::new(Semaphore::new(2)),
+                permits: Arc::new(Semaphore::new(3)),
                 tasks: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
             }),
@@ -265,8 +266,12 @@ impl CredentialBridge {
             if !*accepting || owner.shutdown.is_cancelled() {
                 return;
             }
+            // The gateway admits the next epoch before the current identity
+            // expires and ends the replaced one itself: that epoch finishes
+            // only the requests already sent on it, for at most 90 seconds,
+            // and new ones go here.
             let Ok(connection) = prepared
-                .activate_with_capabilities(input, &capabilities)
+                .activate_with_replacement(input, &capabilities, EpochReplacement::Drain)
                 .await
             else {
                 return;
@@ -1338,8 +1343,11 @@ mod tests {
         harness.stop().await;
     }
 
+    /// Local transport keeps fail-pending replacement; the hosted transport
+    /// drains instead (`hosted_replacement_completes_the_request_pending_on_
+    /// the_replaced_epoch`).
     #[tokio::test]
-    async fn replacement_closes_stale_stream_and_fails_its_pending_request() {
+    async fn local_replacement_closes_stale_stream_and_fails_its_pending_request() {
         let harness = Harness::start().await;
         let client = harness.client(TEST_TOKEN).await;
         let mut first = client

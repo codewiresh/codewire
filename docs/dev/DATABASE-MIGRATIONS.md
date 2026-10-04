@@ -906,6 +906,214 @@ schema survives. Other databases, schemas, cluster roles and external key
 material remain outside this boundary. These tests and instructions authorize
 no live reset.
 
+### Authority stamp
+
+Migration `0035_platform_authority_stamp.sql` is additive. It changes no
+existing row, helper, column or earlier migration. It is phase 12b of the
+credential plan's authority stamp: every write to a row that runtime
+credential authority reads advances a generation for that row's own scope, in
+the writer's transaction. A broker can later read the generations of the
+scopes behind one decision before and after it, and reuse the decision while
+they are unchanged. Nothing reads the stamp yet; phase 12c adds that reader
+behind a flag.
+
+**Objects.**
+
+- `platform_authority_generations(scope_kind, scope_id, generation)`, keyed by
+  `(scope_kind, scope_id)`, and the sequence
+  `platform_authority_generation_seq`. An absent row reads as 0.
+- `codewire_platform_authority_row_changed()`, the SECURITY DEFINER trigger
+  function. It keys only on the written row's own columns: no join, no
+  fan-out. A bump is an upsert with a fresh sequence value
+  (`ON CONFLICT DO UPDATE SET generation = nextval(...)`), not an append-log
+  row, because sequence order is not commit order. An UPDATE that moves a row
+  to another scope bumps the old and the new scope, in sorted order.
+- `codewire_platform_authority_stamp(text[], text[])`, the SECURITY DEFINER
+  reader. It returns the generations in request order, 0 for a scope never
+  bumped, and `clock_timestamp()`. Malformed input returns no row: unequal or
+  empty arrays, more than 16 scopes, a NULL, or any (kind, id) pair the
+  generation table's scope CHECK would reject (an unknown kind, an empty id,
+  a `global` id that is not empty, a `creds` id without its `user:` or
+  `organization:` owner prefix). A wrongly built key is refused instead of
+  reading a generation of 0 that never changes. A well-formed key of the wrong
+  scope cannot be told apart by shape; 12c's end-to-end test covers that.
+- `codewire_platform_authority_generation_retained()`, a plain invoker
+  function behind BEFORE DELETE and BEFORE TRUNCATE triggers on the
+  generation table. Rows are never deleted, so no scope can read 0 again
+  after a bump.
+
+Every function has a fixed `pg_catalog, pg_temp` search path and no PUBLIC
+EXECUTE. Writers need no grant on the table or sequence. Only the credential
+broker is granted EXECUTE on the reader: `tests/e2e/kind/credential-broker.sql`
+here, and infra's `scripts/sql/codewire-dev-credential-database-grants.sql`
+with its audit allowlist and preflight pins. That infra grant can apply only
+after this migration has run in the target database.
+
+**Scopes.** The trigger inventory is `STAMPED_TABLES` in
+`codewire_server_core::authority_stamp`:
+
+| Table | Scope bumped |
+|---|---|
+| `environments` | `env(id)` |
+| `sandbox_environment_backend`, `sandbox_workspace_bindings`, `platform_environment_access_bindings` | `env(environment_id)` |
+| `users` | `user(id)` |
+| `org_members` | `user(user_id)` |
+| `organizations` | `org(id)` |
+| `secret_projects` | `org(org_id)` |
+| `platform_access_profiles` | `profile(id)` |
+| `platform_access_profile_revisions`, `platform_access_profile_entries` | `profile(profile_id)` |
+| `platform_credentials` | `creds(user:<user_id>)` or `creds(organization:<organization_id>)` |
+| TRUNCATE of any of them | `global` |
+
+Each table has three triggers: `codewire_stamp_authority_row` (AFTER INSERT
+OR DELETE), `codewire_stamp_authority_update` (AFTER UPDATE, only when a
+column changed) and `codewire_stamp_authority_truncate` (statement level).
+An UPDATE that changes no column bumps nothing. On `environments`, an UPDATE
+that changes only billing's `last_billing_event_at` and
+`total_running_seconds` bumps nothing either. That is a deny-list: any other
+column, including one added later, bumps.
+
+**Inventory guard.** The credential-service test
+`every_relation_runtime_authority_reads_is_stamped` captures every statement
+of a real resolve, `evaluate_grants` and the credential record read at the
+wire, with and without a profile. It plans each with
+`EXPLAIN (GENERIC_PLAN, VERBOSE)`, follows SQL-language SECURITY DEFINER bodies,
+and pins PL/pgSQL helpers (`codewire_platform_lock_owner`) by source digest and
+a reviewed relation list. It requires the relations read to equal
+`STAMPED_TABLES` exactly, and no plan to name a billing column or read a whole
+`environments` row. A new table or helper on that path fails it until the
+stamp covers it.
+
+**Lock order.** The triggers are AFTER triggers named to sort after every
+other AFTER trigger on their tables, so for each row the generation row is the
+last lock its triggers take. That holds per row, not per statement: a
+statement that writes several rows bumps for each row as its events fire, and
+holds each generation row while it goes on to lock later rows. Writers that keep the program-wide order (environment row,
+then its backend and binding rows) already hold the environment row before any
+`env` bump. The orchestration fixture
+`db_stamp_triggers_never_deadlock_the_bind_transaction` runs the claim-time
+bind transaction (`write_binding` under the recorder's fence) against
+generation bumps, state-then-backend writes, backend-only writes, billing
+updates and another user's credential and profile writes. It forces both lock
+orders and runs 100 staggered concurrent iterations of each.
+`db_stamp_triggers_add_under_a_millisecond_to_the_bind_transaction` bounds what
+the three bumps per bind add.
+
+**Compatibility.** Version-34 binaries never read the new objects, and their
+writes fire the triggers without new grants. As with every migration, a
+version-34 binary cannot restart against a version-35 ledger.
+
+**Deploying.** The migration sets `lock_timeout` to 5 s, so it fails instead of
+queueing every writer of a stamped table behind it while it waits for a long
+transaction; the next service start retries it. It then takes every stamped
+table's trigger lock in one `LOCK TABLE`, one table at a time in the
+application's lock order (users, organizations, memberships, environments,
+backends, bindings, environment profile bindings, profiles, revisions,
+entries, credentials, projects), and creates the triggers in that order, so a
+version-34 writer that keeps that order cannot deadlock with it.
+
+**Fixtures.** The 34→35 fixtures pin migration 34's SHA-384 and the history
+1–34 from accepted canonical main `a4d598aca65c1ffcfffa57cdae775df29e99473a`.
+The version-34 fingerprint stays pinned as
+`ACCEPTED_PRE_AUTHORITY_STAMP_SCHEMA_FINGERPRINT`. Earlier fixtures that compare
+every `codewire_` helper or a table's triggers exclude this migration's
+functions and triggers, which have their own proof. The fixtures prove:
+
+- fresh apply, every trigger's exact definition and enabled state, function
+  ownership, search path and ACL, the reader's order, zeros and malformed
+  input, the retained-row guards, and that a missing key column fails the
+  write;
+- that every input row and column change, insert and delete advances exactly
+  its own scope and nothing else, that a billing-only or no-op update advances
+  nothing, and that TRUNCATE advances only `global`;
+- that a restricted writer needs no grant, cannot read or write the
+  generations, and that the startup probe reports a missing EXECUTE grant, a
+  disabled trigger, and a login that could write the table or use the
+  sequence;
+- that the reader accepts exactly the (kind, id) pairs the table's CHECK
+  accepts;
+- upgrade from version 34 with rows, helpers and triggers unchanged, no scope
+  backfilled, and a second startup that is a no-op;
+- a forced failure after the last trigger, which rolls back every object and
+  the ledger, followed by a clean retry.
+
+**Startup probe.** `codewire_server_core::authority_stamp::verify_authority_stamp_schema`
+reads only the catalog. It checks that the reader and trigger functions exist,
+are SECURITY DEFINER with a pinned search path and have the exact source
+migration 35 installed (SHA-256 of `prosrc`), that the calling login may
+execute the reader but cannot write the generation table or use, read or set
+its sequence, and that every expected trigger is present, enabled (`O` or
+`A`) and has the exact definition `pg_get_triggerdef` gives with
+`search_path = pg_catalog`. A PostgreSQL version that deparses a trigger
+differently fails it closed until the expected text is reviewed. The broker
+will call it before relying on a stamp (12c). It cannot detect writes made
+while triggers were bypassed. The broker's audit (infra's
+`codewire-dev-credential-database-audit.sql`) and the Kind ACL guard also deny
+the broker every privilege on every `public` sequence: a broker that could
+`setval` the generation sequence backwards could make a changed scope read an
+old value again.
+
+**When triggers were bypassed.** These writes do not bump: writes under
+`session_replication_role = replica`, writes while a stamp trigger was
+disabled with `ALTER TABLE ... DISABLE TRIGGER`, and a restore of the data
+(including restores that disable triggers). Treat a point-in-time recovery and
+a CloudNativePG asynchronous failover promotion as a restore: the promoted
+replica can lack commits, and generation values, that a broker already saw.
+A later migration that rewrites stamped data through DDL (a table rewrite, a
+column default backfilled without row triggers) or that disables triggers must
+bump the global scope in the same migration; phase 12d's AGENTS invariant
+should say so. After such a write, either restart
+every credential broker, which drops every cached decision, or, as the
+migration owner, bump the global scope once the last such write has committed.
+Every stamp includes the global scope. After a restore, first move the
+sequence past every value it may have issued since the backup:
+
+```sql
+-- Only after a restore: values issued after the backup were lost with it.
+SELECT pg_catalog.setval('public.platform_authority_generation_seq',
+    GREATEST((SELECT last_value FROM public.platform_authority_generation_seq),
+             (pg_catalog.date_part('epoch', pg_catalog.clock_timestamp()) * 1000000)::bigint));
+-- Then, and after any bypassed write:
+INSERT INTO public.platform_authority_generations (scope_kind, scope_id, generation)
+VALUES ('global', '', pg_catalog.nextval('public.platform_authority_generation_seq'))
+ON CONFLICT (scope_kind, scope_id) DO UPDATE
+SET generation = pg_catalog.nextval('public.platform_authority_generation_seq');
+```
+
+Then confirm the triggers with the startup probe. The migration starts the
+sequence at the database clock in microseconds, and bumps are far rarer than
+microseconds, so the clock stays ahead of every issued value.
+
+**For phase 12c.** These fixtures prove that every mutation changes the
+generation of its own scope. 12c must also run each of the mutation fixture's
+cases through its own tuple builder, for the environment whose decision it
+caches, and assert that the built tuple changes, end to end, so a key built
+for the wrong scope is caught.
+
+**Rollback.** The migration adds only derived state, so it has an in-place
+rollback that keeps every other row:
+
+1. Stop the version-35 binaries.
+2. In one transaction, drop the 36 `codewire_stamp_authority_*` triggers, the
+   generation table (which removes its two guards), the three functions and
+   the sequence, and delete ledger version 35 from `_sqlx_migrations`.
+3. Start the version-34 binaries.
+
+The fixture `authority_stamp_down_restores34_in_place_and_keeps_every_other_row`
+runs that exact statement (`AUTHORITY_STAMP_DOWN`). It proves the version-34
+fingerprint, unchanged rows, helpers, triggers and ledger, that version-34
+writers keep working, and a clean roll-forward. Rolling forward starts the
+sequence at the clock again and bumps the global scope at installation, so
+every tuple read after it differs from every tuple read before the rollback,
+although writes in between were not stamped. A broker reading the stamp must
+fail closed while the reader is missing. Rolling forward recreates the reader
+without the broker's EXECUTE grant, so run the infra grant reconcile again
+afterwards; the startup probe reports the missing grant until then. The full recovery also remains
+available: replay the selected version-34 source into only an empty,
+disposable application `public` schema. Its fixture proves the ledger and
+migration 34 checksum are restored, records are discarded, and a separate
+schema survives. These tests and instructions authorize no live reset.
+
 ## Mesh Database
 
 Issue #823 was implemented by PR #835. Mesh uses:

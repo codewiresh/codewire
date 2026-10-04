@@ -166,6 +166,7 @@ kind_credential_bootstrap_smoke() (
 )
 
 start_kind_credential_fixture() {
+  local fixture_patch
   if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
     # A release-image gate must never load or execute a synthetic authority.
     # The dedicated synthetic composition is owned by the services-ci gate.
@@ -189,26 +190,6 @@ start_kind_credential_fixture() {
     --patch-file "$fixture_patch" || return $?
   kubectl -n "$NS" scale deployment/codewire-credential-service --replicas=1 || return $?
   kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s || return $?
-}
-
-render_kind_credential_fixture_patch() {
-  local source="$ROOT/tests/e2e/kind/credential-fixture-patch.yaml"
-  if [ "${KIND_PROFILE:-0}" != 1 ]; then
-    printf '%s\n' "$source"
-    return 0
-  fi
-  local rendered="$RUN_DIR/credential-fixture-patch.yaml"
-  python3 - "$source" "$rendered" "$KIND_INGRESS_URL" <<'PY' || return $?
-from pathlib import Path
-import sys
-
-source, destination, origin = sys.argv[1:]
-text = Path(source).read_text()
-if text.count("value: http://127.0.0.1:8090") != 1:
-    raise SystemExit("Kind credential fixture public origin inventory changed")
-Path(destination).write_text(text.replace("value: http://127.0.0.1:8090", f"value: {origin}"))
-PY
-  printf '%s\n' "$rendered"
 }
 
 prepare_kind_credential_cli() (
@@ -357,6 +338,108 @@ kind_credential_codex_login() {
   fi
 }
 
+# Proxied requests through the bridge while a natural epoch renewal happens.
+# The probe stops at its stop file, or after this bound as a backstop only: an
+# overlap happens within the first ten minutes, and the Codex session it spans
+# normally ends within twelve.
+KIND_BRIDGE_RENEWAL_MAX_SECONDS=900
+# About one request a second; a window spanning one renewal sees hundreds.
+KIND_BRIDGE_RENEWAL_MIN_REQUESTS=60
+# Bound on asking the in-Pod probe to stop.
+KIND_BRIDGE_RENEWAL_STOP_TIMEOUT=15s
+
+# Start bridge_renewal.py in the exact workspace, in the background of the
+# calling shell, and set KIND_BRIDGE_RENEWAL_PID. Its stdout is the closed
+# event stream, kept in the run directory.
+start_kind_credential_bridge_renewal() {
+  local pod="$1" stop="$2"
+  [[ "$stop" =~ ^/tmp/codewire-kind-bridge-renewal-[0-9]{1,12}$ ]] || return 1
+  kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- \
+    python3 -B -u - "$stop" "$KIND_BRIDGE_RENEWAL_MAX_SECONDS" \
+    < "$ROOT/scripts/ci/verify/kind/bridge_renewal.py" \
+    > "$RUN_DIR/credential-bridge-renewal.jsonl" &
+  KIND_BRIDGE_RENEWAL_PID=$!
+}
+
+# Ask the in-Pod probe to stop, within a bounded request.
+signal_kind_credential_bridge_renewal() {
+  local pod="$1" stop="$2"
+  [[ "$stop" =~ ^/tmp/codewire-kind-bridge-renewal-[0-9]{1,12}$ ]] || return 1
+  kubectl --request-timeout="$KIND_BRIDGE_RENEWAL_STOP_TIMEOUT" -n "$SANDBOX_NS" \
+    exec "$pod" -c workspace -- touch "$stop"
+}
+
+# Failure path: ask the in-Pod probe to stop, best effort, then end the local
+# exec. Killing only the local kubectl could leave the probe running in the
+# Pod until its backstop.
+abandon_kind_credential_bridge_renewal() {
+  local pod="$1" stop="$2" pid="$3"
+  signal_kind_credential_bridge_renewal "$pod" "$stop" >/dev/null 2>&1 || true
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+# Ask the probe to stop, await its own exit status, then remove the stop file.
+# The first failure wins; the probe is never left running locally.
+stop_kind_credential_bridge_renewal() {
+  local pod="$1" stop="$2" pid="$3" status=0
+  [[ "$stop" =~ ^/tmp/codewire-kind-bridge-renewal-[0-9]{1,12}$ ]] || return 1
+  if ! signal_kind_credential_bridge_renewal "$pod" "$stop"; then
+    abandon_kind_credential_bridge_renewal "$pod" "$stop" "$pid"
+    echo '::error::could not stop the bridge renewal probe' >&2
+    return 1
+  fi
+  wait "$pid" || status=$?
+  kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- rm -f "$stop" || {
+    [ "$status" -ne 0 ] || status=1
+  }
+  if [ "$status" -ne 0 ]; then
+    echo '::error::bridge renewal probe failed' >&2
+  fi
+  return "$status"
+}
+
+# Every proxied request through the renewal window was answered by the broker
+# (the unselected slot's 403): none failed with 503 for want of an epoch. The
+# gateway also logged admitting a successor while its predecessor drained,
+# inside that same window. Log timestamps have one-second resolution after
+# their fraction is dropped; allow two seconds of slack at each end.
+assert_kind_credential_bridge_renewal() {
+  local probe="$1" gateway_pod="$2" window logs
+  [[ "$gateway_pod" =~ ^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$ ]] || return 1
+  window="$(jq -sce --argjson minimum "$KIND_BRIDGE_RENEWAL_MIN_REQUESTS" '
+    def count: type == "number" and . >= 0 and . <= 9007199254740991 and floor == .;
+    if length == 1 and (.[0] | type == "object")
+        and (.[0] | keys == ["ended_unix_ms", "event", "requests", "started_unix_ms", "statuses"])
+        and .[0].event == "bridge_renewal_probe"
+        and (.[0].started_unix_ms | count) and (.[0].ended_unix_ms | count)
+        and .[0].ended_unix_ms > .[0].started_unix_ms
+        and (.[0].requests | count) and .[0].requests >= $minimum
+        and .[0].statuses == {"403": .[0].requests}
+    then {started: .[0].started_unix_ms, ended: .[0].ended_unix_ms}
+    else error("bridge renewal probe evidence is invalid") end
+  ' "$probe" 2>/dev/null)" || {
+    echo "::error::a proxied request failed or the probe was incomplete across the bridge renewal; probe record: $probe" >&2
+    return 1
+  }
+  logs="$(kubectl -n "$SANDBOX_NS" logs "pod/$gateway_pod" -c codewire-gateway)" || {
+    echo '::error::could not read the gateway log for bridge renewal evidence' >&2
+    return 1
+  }
+  jq -Rne --argjson window "$window" '
+    [inputs | fromjson? | select(type == "object"
+        and .target == "codewire_gateway::hosted_bridge"
+        and (.fields | type == "object")
+        and .fields.event == "credential_bridge_epoch_overlap")
+      | .timestamp | strings | sub("\\.[0-9]+Z$"; "Z") | (fromdateiso8601? // empty)
+      | . * 1000]
+    | any(.[]; . >= $window.started - 2000 and . <= $window.ended + 2000)
+  ' <<<"$logs" >/dev/null || {
+    echo '::error::the gateway logged no epoch overlap while proxied requests were running' >&2
+    return 1
+  }
+}
+
 kind_credential_fixture_events() {
   # This test-only subscriber disables all SQL/HTTP/material diagnostics.
   # Do not turn on a generic debug logger to obtain acceptance evidence.
@@ -374,7 +457,7 @@ assert_kind_credential_provider_counts() {
     # forwarding and the broker-only retry bound have separate runtime proof.
     [.[] | select(.event == "provider_response" or .event == "provider_refresh") |
       [.event, .scenario, .attempt, .status, .response_calls, .refresh_calls]] as $observed |
-    ($baseline == 2 or $baseline == 3) and
+    ($baseline == 2 or $baseline == 3 or $baseline == 5) and
     ($observed == ([
       ["provider_response", "baseline", 1, 200, 1, 0],
       ["provider_response", "baseline", 2, 200, 2, 0],
@@ -384,7 +467,9 @@ assert_kind_credential_provider_counts() {
       ["provider_response", "broker_retry_exhausted", 1, 401, 5, 1],
       ["provider_refresh", null, null, null, 5, 2],
       ["provider_response", "broker_retry_exhausted", 2, 400, 6, 2]
-    ] + if $baseline == 3 then [["provider_response", "baseline", 3, 200, 7, 2]] else [] end))
+    ] + if $baseline >= 3 then [["provider_response", "baseline", 3, 200, 7, 2]] else [] end
+      + if $baseline == 5 then [["provider_response", "baseline", 4, 200, 8, 2],
+        ["provider_response", "baseline", 5, 200, 9, 2]] else [] end))
   ' <<<"$counts" >/dev/null || {
     echo '::error::synthetic provider retry/refresh counts differ from the exact hosted scenarios' >&2
     return 1
@@ -393,6 +478,52 @@ assert_kind_credential_provider_counts() {
     [.items[] | select(.metadata.deletionTimestamp == null)] |
     length == 1 and .[0].status.containerStatuses[0].restartCount == 0
   ' >/dev/null || { echo '::error::credential fixture restarted during acceptance' >&2; return 1; }
+}
+
+assert_kind_credential_material_reuse() {
+  # Two requests in one epoch, then Reconnect, then one more. Inside the
+  # two-minute reuse window the second request reuses the first one's login
+  # without a material read; the request after Reconnect reads and presents
+  # the new login.
+  local logs
+  logs="$(kubectl -n "$NS" logs deployment/codewire-credential-service -c credential-service)" ||
+    return $?
+  jq -Rse '
+    def seconds: capture("^(?<whole>[^.Z]+)(?<fraction>[.][0-9]+)?Z$")
+      | ((.whole + "Z") | fromdateiso8601) + ("0" + (.fraction // ".0") | tonumber);
+    [split("\n")[] | fromjson? | select(type == "object")] as $lines |
+    [$lines[] | select(.target == "codewire_kind_credential_fixture"
+      and .fields.event == "provider_response" and .fields.scenario == "baseline"
+      and .fields.attempt >= 3) | .fields | [.attempt, .status, .generation]] as $presented |
+    [$lines[] | select(.target == "codewire_credential_broker::timing")
+      | select((.fields.event == "proxied_request" and .fields.slot == "codex")
+        or (.fields.event == "epoch_admission" and .fields.outcome == "admitted"))
+      | .fields + {at: (.timestamp | seconds)}] as $timed |
+    [$timed | to_entries[] | select(.value.event == "proxied_request")] as $requests |
+    ($requests[-3].value // {}) as $warm | ($requests[-2].value // {}) as $reuse |
+    # The warm-up and the reuse present the refreshed login; Reconnect
+    # published a newly enrolled one, the fixture login generation 0.
+    ($presented | map(.[0:2])) == [[3, 200], [4, 200], [5, 200]] and
+    ($presented[0][2] | type == "number" and . > 0) and
+    $presented[1][2] == $presented[0][2] and $presented[2][2] == 0 and
+    ($requests | length >= 3) and
+    ($requests[-3:] | map(.value | [.outcome, .status])) == [["response", 200],
+      ["response", 200], ["response", 200]] and
+    ($requests[-3].value | .cache == "miss" and .material_reads >= 1) and
+    ($requests[-1].value | .cache == "miss" and .material_reads >= 1) and
+    # The warm-up filled before its line, at most its total time earlier, and
+    # the reuse leased before its own line. The value can have expired only
+    # if that bound reaches the two-minute reuse window; a new epoch admitted
+    # between them also starts cold.
+    (if (($reuse.at - $warm.at + $warm.total_ms / 1000) >= 120)
+        or any($timed[$requests[-3].key:$requests[-2].key][]; .event == "epoch_admission")
+     then $reuse.cache == "miss"
+     else ($reuse | .cache == "hit" and .material_reads == 0 and .unwraps == 0)
+     end)
+  ' <<<"$logs" >/dev/null || {
+    echo '::error::the epoch material cache did not reuse, or reused a login after Reconnect' >&2
+    return 1
+  }
 }
 
 save_kind_credential_rotation_evidence() (
@@ -507,7 +638,7 @@ kind_credential_native_smoke() (
   log "running public platform enrollment/profile/native Codex acceptance with synthetic credentials"
   local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation gateway gateway_uid
   local certificate certificate_uid after_certificate_uid workspace_image marker
-  local login_events login_generation update restart_generation pair
+  local login_events login_generation update restart_generation pair renewal_stop renewal_pid=""
   # The acceptance must never die with a bare exit status again (runs 10381,
   # 10459, 10465 all lost the failing command to a silent jq exit 4). Report
   # the exact failing command before errexit unwinds the suite.
@@ -515,7 +646,8 @@ kind_credential_native_smoke() (
   trap 'echo "::error::native Codex acceptance failed: command=${BASH_COMMAND} status=$?" >&2' ERR
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-credentials.XXXXXX)"
-  trap 'rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
+  # A failed step must not leave the renewal probe running, here or in the Pod.
+  trap 'rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"; [ -z "$renewal_pid" ] || abandon_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid"' EXIT
   [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ] || return 1
   credential_name="kind-codex-${RANDOM}-${RANDOM}"
   profile_name="kind-profile-${RANDOM}-${RANDOM}"
@@ -579,12 +711,21 @@ kind_credential_native_smoke() (
     echo '::error::the delivered Codex login event is missing its generation' >&2
     return 1
   }
+  # The session idles past a projected-token rotation, so at least one natural
+  # bridge epoch renewal happens under it. Proxied requests run throughout.
+  renewal_stop="/tmp/codewire-kind-bridge-renewal-${RANDOM}${RANDOM}"
+  start_kind_credential_bridge_renewal "$pod" "$renewal_stop" || return $?
+  renewal_pid="$KIND_BRIDGE_RENEWAL_PID"
   # The proxy session forces the proxy provider; its broker refreshes rotate
   # the delivered login too.
   kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- python3 -B -u - \
     < "$ROOT/scripts/ci/verify/kind/codex_session.py" | tee "$RUN_DIR/credential-native-session.jsonl"
+  stop_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid" || return $?
+  renewal_pid=""
   assert_kind_credential_rotation "$environment" "$generation" "$pod_uid" "$gateway_uid" \
     "$RUN_DIR/credential-native-session.jsonl"
+  assert_kind_credential_bridge_renewal "$RUN_DIR/credential-bridge-renewal.jsonl" \
+    "$(jq -er '.metadata.name' <<<"$gateway")" || return $?
   [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')" = "$pod_uid" ] || {
     echo '::error::native Codex rotation proof changed workspace Pod identity' >&2
     return 1
@@ -626,14 +767,23 @@ kind_credential_native_smoke() (
     return $?
   # A new container forgets the logout and receives the login again.
   kind_credential_codex_login "$environment" redelivered || return $?
+  # The new epoch's first proxied request reads the login and fills its
+  # material cache; the next one, inside two minutes, reuses it. Reconnect
+  # then replaces the login: the next request must present the new one.
   kind_credential_probe "$environment" success
   assert_kind_credential_provider_counts 3
+  kind_credential_probe "$environment" success
+  kind_credential_cli credentials --platform connect codex --name "$credential_name" --yes
+  kind_credential_probe "$environment" success
+  assert_kind_credential_provider_counts 5
+  assert_kind_credential_material_reuse
+  # Revoking right after a cached use still denies the very next request.
   kind_credential_cli credentials --platform revoke "$credential_name" --output json
   kind_credential_probe "$environment" revoked
   # Revocation is an explicit denial: the daemon removes Codewire's login and
   # restores its proxy config.toml at the next check.
   kind_credential_codex_login "$environment" revoked || return $?
-  assert_kind_credential_provider_counts 3
+  assert_kind_credential_provider_counts 5
 
   # Do not unbind before destroy: terminal cleanup itself must remove the
   # binding, so a tombstone cannot permanently pin the profile and credential.

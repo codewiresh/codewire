@@ -44,6 +44,7 @@ pub async fn ensure_schema_logged(database_url: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod authority_stamp;
     mod github_singleton;
     mod owner_sources;
     mod preview_browser;
@@ -61,14 +62,19 @@ mod tests {
 
     use super::*;
 
-    // Measured in isolated PostgreSQL after composing account access,
-    // environment projection, typed SSH metadata, the GitHub singleton that
+    // The schema36 union must be measured in isolated PostgreSQL after
+    // composing account access, environment projection, typed SSH metadata,
+    // the GitHub singleton that
     // every personal profile includes, the per-session two-factor setup skip,
-    // preview browser authorization, pending authenticator replacement and
-    // the runtime-dispatch lease environment scope and claim-time workspace
-    // binding and the durable cw runtime request journal, through version35.
+    // preview browser authorization, pending authenticator replacement, the
+    // runtime-dispatch lease environment scope, claim-time workspace binding,
+    // authority stamp and durable cw runtime request journal, through
+    // version36. Neither independently accepted schema35 is this union.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "eb216d37412b9af558ccdc5ab618783713ba289cf0409c97abf68fd83d084637";
+        "96daaf4c0f9e867834ecca0ad6fcb7a87d807e2d85b5b61d92fbf003c6c2c6e0";
+    // Accepted table schema through version34, before the authority stamp.
+    const ACCEPTED_PRE_AUTHORITY_STAMP_SCHEMA_FINGERPRINT: &str =
+        "218a3ea293e6023d9023b3b133534bfeba823dd68e17818196d609032ccca1b5";
     // Accepted table schema through version33, before claim-time workspace
     // binding.
     const ACCEPTED_PRE_WORKSPACE_BINDING_SCHEMA_FINGERPRINT: &str =
@@ -5062,6 +5068,9 @@ mod tests {
         }
         if version > 33 {
             workspace_binding::assert_accepted_prior33()?;
+        }
+        if version > 34 {
+            authority_stamp::assert_accepted_prior34()?;
         }
         if version > PLATFORM_BINDING_CONSENT_VERSION {
             let consent = MIGRATOR

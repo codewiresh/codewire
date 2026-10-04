@@ -59,6 +59,10 @@ struct Harness {
 
 impl Harness {
     async fn new(bridge: CredentialBridge) -> Self {
+        Self::with_replacement(bridge, EpochReplacement::FailPending).await
+    }
+
+    async fn with_replacement(bridge: CredentialBridge, replacement: EpochReplacement) -> Self {
         let (prepared, mut output) = bridge.prepare_connection().unwrap();
         assert!(matches!(
             output.next().await.unwrap().unwrap().payload,
@@ -66,7 +70,7 @@ impl Harness {
         ));
         let (input, receiver) = mpsc::channel(8);
         let connection = prepared
-            .activate(ReceiverStream::new(receiver))
+            .activate_with_replacement(ReceiverStream::new(receiver), &[], replacement)
             .await
             .unwrap();
         Self {
@@ -662,5 +666,79 @@ async fn ssh_replacement_disconnect_and_old_epoch_never_replay_or_release() {
         HOST_OUTPUT_BUFFER
     );
     current.stop().await;
+    old.stop().await;
+}
+
+fn sign_request() -> v1::CredentialSshRequest {
+    v1::CredentialSshRequest {
+        operation: Some(v1::credential_ssh_request::Operation::Sign(
+            v1::CredentialSshSignRequest {
+                public_key_blob: b"synthetic-public-key".to_vec(),
+                data: b"synthetic-signing-data".to_vec(),
+                flags: 4,
+            },
+        )),
+        ..ssh_request()
+    }
+}
+
+#[tokio::test]
+async fn ssh_signature_is_released_from_a_draining_epoch_within_its_deadline() {
+    let shared = bridge();
+    let mut old = Harness::new(shared.clone()).await;
+    let released = sign_request();
+    let released_task = old.submit(released.clone()).await;
+    let expired = sign_request();
+    let expired_relay = shared.relay_ssh(expired.clone());
+    tokio::pin!(expired_relay);
+    std::future::poll_fn(|cx| {
+        assert!(expired_relay.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    bounded(old.output.next()).await.unwrap().unwrap();
+    let mut successor = Harness::with_replacement(shared.clone(), EpochReplacement::Drain).await;
+    // A signature answered on the draining epoch is still released.
+    old.reply(signature(&released.request_id)).await;
+    assert_eq!(
+        bounded(released_task).await.unwrap().unwrap(),
+        signature(&released.request_id)
+    );
+    // Its original deadline still applies there.
+    shared
+        .inner
+        .lock()
+        .await
+        .ssh
+        .get_mut(&expired.request_id)
+        .unwrap()
+        .deadline = tokio::time::Instant::now();
+    old.reply(signature(&expired.request_id)).await;
+    assert_eq!(
+        bounded(expired_relay).await.unwrap_err().code(),
+        tonic::Code::DeadlineExceeded
+    );
+    assert_eq!(shared.inner.lock().await.in_flight(), 0);
+    // New work goes only to the successor.
+    let next = ssh_request();
+    let task = successor.submit(next.clone()).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), old.output.next())
+            .await
+            .is_err()
+    );
+    successor.reply(identity(&next.request_id)).await;
+    bounded(task).await.unwrap().unwrap();
+    assert_eq!(
+        shared
+            .inner
+            .lock()
+            .await
+            .draining
+            .as_ref()
+            .map(|host| host.epoch),
+        Some(old.epoch)
+    );
+    successor.stop().await;
     old.stop().await;
 }

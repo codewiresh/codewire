@@ -247,6 +247,7 @@ run_policy_core() {
   python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
   python3 scripts/checks/repo_checks.py design-tokens --self-test
   python3 scripts/checks/repo_checks.py identity-free-workspace --self-test
+  python3 scripts/checks/repo_checks.py epoch-material-cache-owner --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source
   python3 scripts/checks/source/check-native-desktop-ui.py
@@ -514,6 +515,7 @@ run_runtime_dev_smoke() {
   scripts/runtime/tests/test-smoke-dev-commodity.sh
   scripts/runtime/tests/test-workspace-binding-proof.sh
   scripts/runtime/tests/test-warm-pool-proof.sh
+  scripts/runtime/tests/test-drop-crd-conversion.sh
   scripts/runtime/tests/test-local-platform-sources-smoke.sh
   scripts/runtime/tests/test-private-checkout-smoke.sh
   scripts/runtime/tests/test-dev-initial-private-checkout.sh

@@ -331,3 +331,11 @@ weakening of the required local hardware gate.
   bearer token for the creator's ChatGPT account, usable from anywhere, and
   stays valid at the provider until its `exp`; every process in the Sandbox,
   and anyone who can open the Sandbox's terminal, can read it.
+- Decrypted provider material may be reused only within one platform broker
+  bridge epoch (hosted or owner-local delegation), for at most two minutes,
+  for the exact credential record the request's own checks observe before and
+  after. Every request still runs its authority, grant and record checks. SSH
+  signing, OAuth keep-alive refresh and direct delivery never reuse material;
+  an on-demand OAuth refresh uses the request's own lease, whose exact
+  generation refresh admission rechecks. Do not add a process-wide or
+  persistent material cache.

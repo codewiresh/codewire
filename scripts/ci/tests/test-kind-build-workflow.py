@@ -911,6 +911,12 @@ class CommonConsumerContractTests(unittest.TestCase):
                 }
                 kubectl() { record "kubectl $*"; cat >/dev/null || true; }
                 kubectl_apply() { record "kubectl-apply $*"; }
+                # The ingress-origin render has its own fixtures; here only
+                # the rendered copy, not the checked-in patch, may be applied.
+                render_kind_credential_fixture_patch() {
+                  record render-credential-fixture-patch
+                  printf '%s\n' "$RUN_DIR/credential-fixture-patch.yaml"
+                }
                 for mode in build-ci prebuilt-ci; do
                   : >"$CALLS"
                   CODEWIRE_KIND_PRODUCT_IMAGE_MODE="$mode" start_kind_credential_fixture
@@ -918,6 +924,8 @@ class CommonConsumerContractTests(unittest.TestCase):
                     fail "$mode skipped credential image proof"
                   grep -q '^kubectl .*deployment/codewire-credential-service' "$CALLS" ||
                     fail "$mode skipped synthetic credential fixture"
+                  grep -Fq -- "--patch-file $RUN_DIR/credential-fixture-patch.yaml" "$CALLS" ||
+                    fail "$mode did not apply the rendered credential fixture patch"
                 done
                 : >"$CALLS"
                 CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release start_kind_credential_fixture

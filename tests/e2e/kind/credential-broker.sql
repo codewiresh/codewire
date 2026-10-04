@@ -54,4 +54,8 @@ GRANT EXECUTE ON FUNCTION public.codewire_authenticate_credential_session(text)
 TO codewire_credential_broker;
 GRANT EXECUTE ON FUNCTION public.codewire_lock_credential_session_authority(text,text,text,timestamptz)
 TO codewire_credential_broker;
+-- Authority stamp (Codewire migration 35): the broker reads scope generations
+-- only through the fixed reader, never the generation table or sequence.
+GRANT EXECUTE ON FUNCTION public.codewire_platform_authority_stamp(text[],text[])
+TO codewire_credential_broker;
 COMMIT;

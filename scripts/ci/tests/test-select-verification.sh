@@ -947,7 +947,9 @@ run_paths_case runtime_dev_proofs pull_request refs/pull/2411/head false \
   scripts/runtime/dev/prove-dev-workspace-binding.sh \
   scripts/runtime/dev/prove-dev-warm-pools.sh \
   scripts/runtime/tests/test-workspace-binding-proof.sh \
-  scripts/runtime/tests/test-warm-pool-proof.sh
+  scripts/runtime/tests/test-warm-pool-proof.sh \
+  scripts/runtime/agent-sandbox/drop-crd-conversion.sh \
+  scripts/runtime/tests/test-drop-crd-conversion.sh
 run_paths_case runtime_dev_auth pull_request refs/pull/1517/head false \
   'policy runtime_dev_smoke security security_dev_smoke_auth' \
   scripts/runtime/dev/provision-dev-smoke-user.sh \
@@ -1524,14 +1526,14 @@ grep -qF -- '-- --ignored --exact --nocapture' <<<"$destroy_hint_block"
 grep -qF 'assert_passed_count "environment destroy template hint matrix" "$logfile" 1' <<<"$destroy_hint_block"
 grep -qF 'cargo test --locked -p codewire-credential-broker --no-default-features --features platform' "$integration_runner"
 grep -qF -- '--lib platform::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 23' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 30' "$integration_runner"
 grep -qF -- '--features platform,ssh-agent --lib platform::tests::ssh::' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker SSH matrix" "$logfile" 4' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker SSH matrix" "$logfile" 5' "$integration_runner"
 grep -qF -- '--lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 3' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 4' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-credential-service' "$integration_runner"
 grep -qF -- '--skip tests::database::projection::' "$integration_runner"
-grep -qF 'assert_passed_count "platform runtime restricted identity matrix" "$logfile" 6' "$integration_runner"
+grep -qF 'assert_passed_count "platform runtime restricted identity matrix" "$logfile" 7' "$integration_runner"
 grep -qF -- '--lib tests::database::projection::' "$integration_runner"
 grep -qF 'assert_passed_count "platform runtime projection matrix" "$logfile" 12' "$integration_runner"
 grep -qF -- '--lib delegation::authority::tests::' "$integration_runner"
@@ -1548,7 +1550,7 @@ grep -qF 'cargo test --locked -p codewire-credential-service --features enrollme
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' "$integration_runner"
 grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
-grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 77' "$integration_runner"
+grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 84' "$integration_runner"
 grep -qF 'assert_passed_count "idp db_flow" "$logfile" 13' "$integration_runner"
 grep -qF 'assert_passed_count "idp two-factor replacement" "$logfile" 11' "$integration_runner"
 grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 22' "$integration_runner"
@@ -1560,7 +1562,7 @@ grep -qF 'assert_passed_count "environment projection capture matrix" "$logfile"
 grep -qF -- "'api::admin::startup_database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "admin startup summary matrix" "$logfile" 2' "$integration_runner"
 grep -qF -- "'worker::workspace_binding::database_tests::'" "$integration_runner"
-grep -qF 'assert_passed_count "workspace binding recorder matrix" "$logfile" 21' "$integration_runner"
+grep -qF 'assert_passed_count "workspace binding recorder matrix" "$logfile" 23' "$integration_runner"
 grep -qF -- "'api::environment_resize::tests::db_'" "$integration_runner"
 grep -qF 'assert_passed_count "environment resize admission matrix" "$logfile" 2' "$integration_runner"
 grep -qF -- "'api::ssh_proxy::database_tests::'" "$integration_runner"
@@ -2867,6 +2869,7 @@ for policy_owner in \
     'scripts/checks/repo_checks.py license-map' \
     'scripts/checks/repo_checks.py permanent-raw-surface --self-test' \
     'scripts/checks/repo_checks.py design-tokens --self-test' \
+    'scripts/checks/repo_checks.py epoch-material-cache-owner --self-test' \
     'scripts/checks/repo_checks.py rust-validation-source' \
     'scripts/checks/repo_checks.py retired-reference-source' \
     'scripts/checks/source/check-native-desktop-ui.py' \

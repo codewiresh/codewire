@@ -12,12 +12,17 @@ use super::super::{Listeners, RuntimeError};
 pub(super) const NAMESPACE: &str = "codewire-e2e";
 const DATABASE_URL: &str = "postgres://codewire_credential_broker:kind-credential-broker-synthetic-only@postgres.codewire-e2e.svc.cluster.local:5432/codewire?sslmode=disable";
 const ROLE: &str = "codewire_credential_broker";
+/// The harness's default host ingress. A Kind cluster on shifted host ports
+/// (`KIND_INGRESS_HOST_PORT`) renders its own loopback port instead.
+pub(super) const DEFAULT_PUBLIC_ORIGIN: &str = "http://127.0.0.1:8090";
 
 pub(super) struct Config {
     pub(super) database_url: Zeroizing<String>,
     pub(super) listeners: Listeners,
     pub(super) runtime_directory: PathBuf,
     pub(super) oauth_keepalive: Option<OAuthKeepAliveConfig>,
+    /// The browser origin of the harness ingress, `http://127.0.0.1:<port>`.
+    pub(super) public_origin: String,
 }
 
 impl Config {
@@ -77,12 +82,14 @@ impl Config {
             path("CREDENTIAL_BROKER_TLS_KEY_FILE")?,
         )
         .map_err(|_| RuntimeError::Tls)?;
-        let public_origin = parse_kind_public_origin(&required("CREDENTIAL_PUBLIC_ORIGIN")?)?;
+        let public_origin = kind_public_origin(&required("CREDENTIAL_PUBLIC_ORIGIN")?)?;
         Ok(Self {
             database_url,
             listeners: Listeners {
                 public: ([0, 0, 0, 0], 8086).into(),
-                public_origin,
+                public_origin: http::HeaderValue::from_str(&public_origin).map_err(|_| {
+                    RuntimeError::Configuration("managed Kind credential public origin")
+                })?,
                 private: ([0, 0, 0, 0], 9443).into(),
                 tls,
             },
@@ -90,27 +97,25 @@ impl Config {
             oauth_keepalive: super::super::config::oauth_keepalive_config(&|name| {
                 std::env::var_os(name)
             })?,
+            public_origin,
         })
     }
 }
 
-fn parse_kind_public_origin(value: &str) -> Result<http::HeaderValue, RuntimeError> {
-    // Saved profiles vary only the host ingress port. Do not normalize URLs:
-    // other hosts, aliases, userinfo and trailing components are not admitted.
+/// Accept only the harness's own loopback ingress on an unprivileged port, in
+/// the exact form the harness renders: `http://127.0.0.1:<port>`.
+pub(super) fn kind_public_origin(value: &str) -> Result<String, RuntimeError> {
+    let invalid = || RuntimeError::Configuration("managed Kind credential public origin");
     let port = value
         .strip_prefix("http://127.0.0.1:")
-        .and_then(|port| port.parse::<u16>().ok())
-        .filter(|port| *port != 0)
-        .ok_or(RuntimeError::Configuration(
-            "managed Kind credential public origin",
-        ))?;
-    if value != format!("http://127.0.0.1:{port}") {
-        return Err(RuntimeError::Configuration(
-            "managed Kind credential public origin",
-        ));
+        .ok_or_else(invalid)?;
+    if port.is_empty() || port.starts_with('0') || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid());
     }
-    http::HeaderValue::from_str(value)
-        .map_err(|_| RuntimeError::Configuration("managed Kind credential public origin"))
+    match port.parse::<u16>() {
+        Ok(port) if port >= 1024 => Ok(value.to_owned()),
+        _ => Err(invalid()),
+    }
 }
 
 fn required(name: &'static str) -> Result<String, RuntimeError> {
@@ -157,13 +162,17 @@ async fn assert_restricted_role(pool: &PgPool, expected_role: &str) -> Result<()
                  'oidc_access_tokens','oidc_clients', \
                  'platform_access_profiles','platform_access_profile_revisions', \
                  'platform_access_profile_entries','platform_environment_access_bindings', \
-                 'tenant_secrets','tenant_secret_deks','secret_projects' \
+                 'tenant_secrets','tenant_secret_deks','secret_projects', \
+                 'platform_authority_generations' \
              ]::text[]) AS authority(name) \
              WHERE pg_catalog.has_table_privilege(current_user,'public.'||authority.name, \
                  'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') \
                 OR pg_catalog.has_any_column_privilege(current_user,'public.'||authority.name, \
                  'INSERT,UPDATE,REFERENCES') \
          ) \
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class s \
+             WHERE s.relnamespace='public'::regnamespace AND s.relkind='S' \
+             AND pg_catalog.has_sequence_privilege(current_user,s.oid,'USAGE,SELECT,UPDATE')) \
          AND NOT EXISTS ( \
              SELECT 1 FROM unnest(ARRAY[ \
                  'tenant_secret_kek_canary', \
@@ -205,18 +214,14 @@ async fn assert_restricted_role(pool: &PgPool, expected_role: &str) -> Result<()
 mod tests {
     #[test]
     fn kind_public_origin_accepts_saved_ports_and_rejects_unmanaged_origins() {
-        for port in [1, 8090, 32767, 65535] {
+        for port in [1024, 8090, 32767, 65535] {
             let origin = format!("http://127.0.0.1:{port}");
-            assert_eq!(
-                super::parse_kind_public_origin(&origin)
-                    .unwrap()
-                    .to_str()
-                    .unwrap(),
-                origin
-            );
+            assert_eq!(super::kind_public_origin(&origin).unwrap(), origin);
         }
         for origin in [
             "http://127.0.0.1:0",
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:1023",
             "http://127.0.0.1:65536",
             "http://127.0.0.1:08090",
             "http://127.0.0.1:+8090",
@@ -235,7 +240,7 @@ mod tests {
             "http://127.0.0.1:8090\n",
         ] {
             assert!(
-                super::parse_kind_public_origin(origin).is_err(),
+                super::kind_public_origin(origin).is_err(),
                 "accepted {origin:?}"
             );
         }
@@ -245,6 +250,33 @@ mod tests {
 
     use super::*;
     use crate::platform_test_support::{TIMEOUT, TestDatabase, quote_ident};
+
+    #[test]
+    fn public_origin_accepts_only_the_harness_loopback_ingress() {
+        for origin in [
+            DEFAULT_PUBLIC_ORIGIN,
+            "http://127.0.0.1:9090",
+            "http://127.0.0.1:65535",
+        ] {
+            assert_eq!(kind_public_origin(origin).unwrap(), origin);
+        }
+        for origin in [
+            "https://127.0.0.1:8090",
+            "http://localhost:8090",
+            "http://127.0.0.2:8090",
+            "http://127.0.0.1",
+            "http://127.0.0.1:",
+            "http://127.0.0.1:80",
+            "http://127.0.0.1:08090",
+            "http://127.0.0.1:65536",
+            "http://127.0.0.1:8090/",
+            "http://127.0.0.1:8090/path",
+            "http://127.0.0.1:8090@example.com",
+            "http://user@127.0.0.1:8090",
+        ] {
+            assert!(kind_public_origin(origin).is_err(), "{origin} was accepted");
+        }
+    }
 
     async fn execute(pool: &PgPool, statement: &str) -> Result<()> {
         tokio::time::timeout(TIMEOUT, sqlx::query(statement).execute(pool))
@@ -287,6 +319,13 @@ mod tests {
                     "UPDATE (released_at) ON public.sandbox_workspace_bindings",
                     "INSERT ON public.sandbox_workspace_bindings",
                     "UPDATE (pod_uid) ON public.sandbox_environment_backend",
+                    "UPDATE ON public.platform_authority_generations",
+                    "INSERT (generation) ON public.platform_authority_generations",
+                    // The broker uses no sequence. One it could set could move
+                    // the authority stamp's generations backwards.
+                    "UPDATE ON SEQUENCE public.platform_authority_generation_seq",
+                    "USAGE ON SEQUENCE public.platform_authority_generation_seq",
+                    "SELECT ON SEQUENCE public.billing_events_id_seq",
                 ] {
                     execute(
                         &database.pool,

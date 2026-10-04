@@ -45,10 +45,15 @@ async fn fingerprint(pool: &PgPool) -> anyhow::Result<String> {
     .await?)
 }
 
+/// Every helper except migration35's authority-stamp functions and
+/// migration36's cw-runtime trigger function, which have their own proof and
+/// replace no prior helper.
 async fn helpers(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n \
         ON n.oid=p.pronamespace WHERE n.nspname='public' AND starts_with(p.proname,'codewire_') \
+        AND p.proname <> 'codewire_cw_runtime_request_immutable' \
+        AND NOT starts_with(p.proname,'codewire_platform_authority_') \
         ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)",
     )
     .fetch_all(pool)
@@ -433,9 +438,11 @@ async fn workspace_binding_fresh_schema_constrains_rows_pointer_trigger_and_inde
         }
 
         let triggers: Vec<String> = sqlx::query_scalar(
+            // Every trigger but migration35's authority-stamp triggers, which
+            // have their own proof; any other trigger still fails this check.
             "SELECT pg_get_triggerdef(oid) FROM pg_trigger \
              WHERE tgrelid='public.sandbox_workspace_bindings'::regclass AND NOT tgisinternal \
-             ORDER BY tgname",
+             AND NOT starts_with(tgname,'codewire_stamp_authority_') ORDER BY tgname",
         )
         .fetch_all(&pool)
         .await?;
