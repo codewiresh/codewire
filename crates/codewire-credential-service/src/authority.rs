@@ -34,7 +34,10 @@ use tonic::metadata::MetadataMap;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::objects::{Lineage, gateway_environment, live_pod, validate_lineage, verified_shape};
+use crate::objects::{
+    Lineage, LineageNames, LineageReads, gateway_environment, live_pod, validate_lineage,
+    verified_shape,
+};
 use crate::projection::ProjectionMetadata;
 
 pub(crate) const WORKSPACE_AUTHORIZATION: &str = "x-codewire-workspace-authorization-bin";
@@ -215,7 +218,7 @@ impl PlatformBridgeAuthenticator for KubernetesPlatformBridgeAuthenticator {
                 ),
             };
             let initial = identities
-                .bounded(authority.resolve(&identities))
+                .bounded(authority.resolve(&identities, None))
                 .await
                 .map_err(runtime_auth_error)?;
             Ok(Arc::new(KubernetesPlatformRuntimeAuthority {
@@ -231,7 +234,9 @@ impl PlatformBridgeAuthenticator for KubernetesPlatformBridgeAuthenticator {
 
 /// Captures the original verified Pod identities, finite deadline and exact
 /// initial database/profile/controller selection. No public constructor, wire
-/// deserializer, credential value or protected-material cache exists.
+/// deserializer, credential value or protected-material cache exists. Each
+/// later resolve reads every Kubernetes object again; from the initial one it
+/// takes only the environment and two object names to read under.
 pub struct KubernetesPlatformRuntimeAuthority {
     pub(crate) authority: AuthoritySource,
     pub(crate) identities: Identities,
@@ -250,7 +255,10 @@ impl PlatformRuntimeAuthority for KubernetesPlatformRuntimeAuthority {
     async fn current_session(&self) -> Result<PlatformRuntimeSession, Error> {
         let current = self
             .identities
-            .bounded(self.authority.resolve(&self.identities))
+            .bounded(
+                self.authority
+                    .resolve(&self.identities, Some(&self.initial)),
+            )
             .await?;
         if !self.initial.same_authority(&current) {
             return Err(Error::Denied);
@@ -407,6 +415,9 @@ pub(crate) struct Resolved {
     binding: Option<PlatformBindingMetadata>,
     profile: Option<AccessProfile>,
     lineage: Lineage,
+    /// The names this resolve read its ReplicaSet and Sandbox under, which
+    /// the epoch's later resolves start their reads from. Not authority.
+    names: LineageNames,
 }
 
 impl Resolved {
@@ -421,6 +432,9 @@ impl Resolved {
             binding,
             profile,
             lineage,
+            // Only where later reads start: each re-reads every object, and
+            // `lineage` compares what they found.
+            names: _,
         } = self;
         session.same_authority(&current.session)
             && *scope == current.scope
@@ -517,11 +531,18 @@ impl AuthoritySource {
     }
 
     /// Record each completed resolve's Kubernetes and SQL time for the timing
-    /// line of the request or epoch admission that asked for it.
-    async fn resolve(&self, identities: &Identities) -> Result<Resolved, Error> {
+    /// line of the request or epoch admission that asked for it. `admission`
+    /// is the epoch's admission resolve, for every resolve after it.
+    async fn resolve(
+        &self,
+        identities: &Identities,
+        admission: Option<&Resolved>,
+    ) -> Result<Resolved, Error> {
         let started = std::time::Instant::now();
         let mut kubernetes = Duration::ZERO;
-        let resolved = self.resolve_timed(identities, &mut kubernetes).await;
+        let resolved = self
+            .resolve_timed(identities, admission, &mut kubernetes)
+            .await;
         timing::record_resolve(kubernetes, started.elapsed());
         resolved
     }
@@ -529,18 +550,53 @@ impl AuthoritySource {
     async fn resolve_timed(
         &self,
         identities: &Identities,
+        admission: Option<&Resolved>,
         kubernetes: &mut Duration,
     ) -> Result<Resolved, Error> {
         identities.ensure_live()?;
-        let gateway: Pod = kubernetes_read(
-            kubernetes,
-            Api::namespaced(self.client.clone(), identities.gateway.namespace())
-                .get(identities.gateway.pod_name()),
-        )
-        .await
-        .map_err(kube_error)?;
-        live_pod(&gateway, &identities.gateway)?;
-        let environment = gateway_environment(&gateway)?;
+        // The scope query needs the environment. At admission only the gateway
+        // Pod's label names it, so that Pod is read and checked first. Every
+        // later resolve in the epoch must reach the admission's scope anyway
+        // (`same_authority` compares whole scopes), so it queries the
+        // admission's environment and reads the gateway Pod with its lineage,
+        // where the same checks hold for the fresh Pod.
+        //
+        // Residual differences, which fail closed: a later resolve's gateway
+        // Pod is now checked after the SQL and alongside the other reads, not
+        // before them.
+        // - Which error a request gets can change when two failures coincide:
+        //   a gateway Pod that would be Denied, with the database or another
+        //   read Unavailable, may now return Unavailable.
+        // - A request whose gateway Pod would be denied now still runs the
+        //   scope SQL first and, with a profile, the binding transaction's
+        //   short `FOR SHARE` owner and environment locks (migration 0021).
+        //   Both only read, under the transaction's timeouts, and only for
+        //   the environment this admitted epoch already holds, until its
+        //   deadline.
+        let admission_gateway: Pod;
+        let (environment, reads) = match admission {
+            None => {
+                admission_gateway = kubernetes_read(
+                    kubernetes,
+                    Api::namespaced(self.client.clone(), identities.gateway.namespace())
+                        .get(identities.gateway.pod_name()),
+                )
+                .await
+                .map_err(kube_error)?;
+                live_pod(&admission_gateway, &identities.gateway)?;
+                (
+                    gateway_environment(&admission_gateway)?,
+                    LineageReads::Admission(&admission_gateway),
+                )
+            }
+            Some(admission) => (
+                admission.scope.environment_id.clone(),
+                LineageReads::Epoch {
+                    gateway: &identities.gateway,
+                    names: &admission.names,
+                },
+            ),
+        };
         let ScopeAndMetadata { scope, metadata } = self.scope_and_metadata(&environment).await?;
         if scope.namespace != identities.gateway.namespace() {
             return Err(Error::Denied);
@@ -615,9 +671,9 @@ impl AuthoritySource {
         let selection = metadata.selection(&scope, reserved_keys)?;
         // The lineage reads run concurrently, so this adds their wall time,
         // not their sum.
-        let lineage = kubernetes_read(
+        let (lineage, names) = kubernetes_read(
             kubernetes,
-            validate_lineage(&self.client, &scope, &gateway, &identities.workspace),
+            validate_lineage(&self.client, &scope, reads, &identities.workspace),
         )
         .await?;
         // Selecting a GitHub repository needs no profile. Orchestration records
@@ -655,6 +711,7 @@ impl AuthoritySource {
             binding,
             profile,
             lineage,
+            names,
         })
     }
 }

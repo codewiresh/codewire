@@ -285,7 +285,7 @@ run_database() {
       --lib tests::database:: -- --ignored \
       --skip tests::database::projection:: \
       --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform runtime restricted identity matrix" "$logfile" 5
+  assert_passed_count "platform runtime restricted identity matrix" "$logfile" 6
 
   logfile="$RUN_DIR/platform-runtime-projection.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
