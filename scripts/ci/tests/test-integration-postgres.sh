@@ -225,6 +225,7 @@ suites = [
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--test', 'environment_sources', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment source admission matrix', 'count': 6},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::admin::startup_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'admin startup summary matrix', 'count': 2},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::workspace_binding::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'workspace binding recorder matrix', 'count': 21},
+    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::cw_runtime::owner::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform cw runtime journal matrix', 'count': 35},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environment_resize::tests::db_', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'environment resize admission matrix', 'count': 2},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::ssh_proxy::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'SSH proxy runtime lease matrix', 'count': 2},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environment_daemon::repair_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment daemon repair lease matrix', 'count': 2},
@@ -309,7 +310,7 @@ assert all(command['target'] == environment['CARGO_TARGET_DIR'] and
            command['test_database'] == environment['DATABASE_URL_RUST'] for command in actual_batches)
 executions = [command for command in commands if command['args'][0] == 'test'
               and '--no-run' not in command['args']]
-assert len(executions) == len(suites) == 38
+assert len(executions) == len(suites) == 39
 for expected, actual in zip(suites, executions):
     assert actual['args'] == expected['args'], expected['label']
     assert actual['target'] == environment['CODEWIRE_CARGO_CI_TARGET_DIR' if expected['ci']
@@ -325,13 +326,18 @@ for batch in actual_batches:
 for index in range(len(suites)):
     failed, _, _ = run_case('count:' + str(index))
     assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout, index
+journal_index = next(i for i, item in enumerate(suites)
+                     if item['label'] == 'platform cw runtime journal matrix')
+failed, trace, _ = run_case('test:' + str(journal_index))
+assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout
+assert trace[-1]['args'] == suites[journal_index]['args']
 for failure in ['compile:codewire-server-core', 'compile:codewire-platform-credentials',
                 'compile:codewire-orchestration', 'test:0', 'test:22', 'skip:20', 'skip:21', 'skip:24']:
     failed, trace, _ = run_case(failure)
     assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout, failure
     if failure.startswith('compile:'):
         assert '--no-run' in trace[-1]['args'], failure
-print(f'Database batching: {len(suites) + 8} trace/failure cases; '
+print(f'Database batching: {len(suites) + 10} trace/failure cases; '
       f'all {len(suites)} suite contracts and {sum(suite["count"] for suite in suites)} required tests preserved')
 PYTHON
 

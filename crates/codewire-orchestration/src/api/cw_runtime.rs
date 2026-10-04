@@ -1,10 +1,13 @@
-//! Read-only admission of one existing platform runtime incarnation.
+//! Incarnation capture and a durable, bounded metadata owner for cw updates.
 //!
-//! This is the capture component for Program #2255, not a runtime publisher or
-//! durable request owner. It preserves the existing operator/lifecycle gates,
+//! The journal component has no external command dispatch. Capture preserves
+//! the existing operator/lifecycle gates,
 //! then joins the exact B2 binding, checks the running Pod and pins that Pod's
 //! credential/channel. No latest-binding credential lookup, repair, lifecycle
 //! effect or legacy environment-token fallback occurs here.
+
+pub mod model;
+pub mod owner;
 
 use std::net::IpAddr;
 use std::time::Duration;

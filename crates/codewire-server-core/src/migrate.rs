@@ -66,9 +66,9 @@ mod tests {
     // every personal profile includes, the per-session two-factor setup skip,
     // preview browser authorization, pending authenticator replacement and
     // the runtime-dispatch lease environment scope and claim-time workspace
-    // binding, through version34.
+    // binding and the durable cw runtime request journal, through version35.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "218a3ea293e6023d9023b3b133534bfeba823dd68e17818196d609032ccca1b5";
+        "eb216d37412b9af558ccdc5ab618783713ba289cf0409c97abf68fd83d084637";
     // Accepted table schema through version33, before claim-time workspace
     // binding.
     const ACCEPTED_PRE_WORKSPACE_BINDING_SCHEMA_FINGERPRINT: &str =

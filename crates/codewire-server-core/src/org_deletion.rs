@@ -173,10 +173,22 @@ async fn admit_organization_mutation_lease(
     environment_id: Option<&str>,
 ) -> Result<OrganizationMutationLease, AppError> {
     let mut tx = pool.begin().await.map_err(AppError::from)?;
+    let lease =
+        admit_mutation_lease_in(&mut tx, organization_id, mutation_class, environment_id).await?;
+    tx.commit().await.map_err(AppError::from)?;
+    Ok(lease)
+}
+
+async fn admit_mutation_lease_in(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: &str,
+    mutation_class: OrganizationMutationClass,
+    environment_id: Option<&str>,
+) -> Result<OrganizationMutationLease, AppError> {
     let deletion_state: Option<String> =
         sqlx::query_scalar(r#"SELECT deletion_state FROM organizations WHERE id = $1 FOR UPDATE"#)
             .bind(organization_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(AppError::from)?;
 
@@ -207,11 +219,113 @@ async fn admit_organization_mutation_lease(
     .bind(mutation_class.as_str())
     .bind(mutation_class.deadline_seconds())
     .bind(environment_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(AppError::from)?;
-    tx.commit().await.map_err(AppError::from)?;
     Ok(lease)
+}
+
+/// Clamp server-side transaction bounds without lengthening a caller's
+/// shorter bound. A dropped Rust future alone does not cancel a locked SQL
+/// statement or establish a known COMMIT outcome.
+pub async fn bound_environment_runtime_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<(), AppError> {
+    let settings: Vec<String> = sqlx::query_scalar(
+        "SELECT pg_catalog.set_config(name, \
+         LEAST(5000::bigint, CASE WHEN setting::bigint=0 THEN 5000::bigint ELSE setting::bigint END)::text, true) \
+         FROM pg_catalog.pg_settings \
+         WHERE name IN ('lock_timeout','statement_timeout','idle_in_transaction_session_timeout') AND unit='ms'",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    if settings.len() != 3 {
+        return Err(AppError::ServiceUnavailable(
+            "environment runtime transaction bounds unavailable".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Add a lease to the caller's journal transaction; this never commits it.
+/// The caller first locks its enabled user and then the organization, retaining
+/// that order through current environment/operator/incarnation admission.
+pub async fn acquire_environment_runtime_mutation_lease_in(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: &str,
+    environment_id: &str,
+) -> Result<OrganizationMutationLease, AppError> {
+    bound_environment_runtime_transaction(tx).await?;
+    let lease = admit_mutation_lease_in(
+        tx,
+        organization_id,
+        OrganizationMutationClass::EnvironmentRuntimeDispatch,
+        Some(environment_id),
+    )
+    .await?;
+    let mutable: Option<bool> = sqlx::query_scalar(
+        "SELECT state NOT IN ('destroying','destroyed') AND desired_state<>'destroyed' \
+         AND external_cleanup_completed_at IS NULL AND deletion_requested_at IS NULL \
+         FROM environments WHERE id=$1 AND org_id=$2 FOR UPDATE",
+    )
+    .bind(environment_id)
+    .bind(organization_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if mutable != Some(true) {
+        return Err(state_conflict("environment destruction is in progress"));
+    }
+    Ok(lease)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnvironmentRuntimeLeaseSettlement {
+    Known,
+    Unknown,
+}
+
+/// Settle only the exact environment-scoped runtime lease in the same
+/// transaction as its journal. No current authorization is required to record
+/// an already issued outcome, and no deadline or current digest resolves it.
+pub async fn settle_environment_runtime_mutation_lease_in(
+    tx: &mut Transaction<'_, Postgres>,
+    lease_id: &str,
+    organization_id: &str,
+    environment_id: &str,
+    settlement: EnvironmentRuntimeLeaseSettlement,
+) -> Result<OrganizationMutationLease, AppError> {
+    bound_environment_runtime_transaction(tx).await?;
+    let lease = lock_mutation_lease(tx, lease_id).await?;
+    if lease.organization_id != organization_id
+        || lease.environment_id.as_deref() != Some(environment_id)
+        || lease.mutation_class != OrganizationMutationClass::EnvironmentRuntimeDispatch.as_str()
+    {
+        return Err(mutation_lease_conflict("runtime lease identity changed"));
+    }
+    let (state, code) = match settlement {
+        EnvironmentRuntimeLeaseSettlement::Known => ("released", None),
+        EnvironmentRuntimeLeaseSettlement::Unknown => {
+            ("resolution_required", Some("cw_runtime_dispatch_unknown"))
+        }
+    };
+    if lease.state == "active" {
+        sqlx::query(
+            "UPDATE organization_mutation_leases SET state=$2, recovery_code=$3, \
+             released_at=CASE WHEN $2='released' THEN NOW() ELSE NULL END, \
+             resolution_required_at=CASE WHEN $2='resolution_required' THEN NOW() ELSE NULL END, \
+             updated_at=NOW() WHERE id=$1 AND state='active'",
+        )
+        .bind(lease_id)
+        .bind(state)
+        .bind(code)
+        .execute(&mut **tx)
+        .await?;
+    } else if lease.state != state || lease.recovery_code.as_deref() != code {
+        return Err(mutation_lease_conflict(
+            "runtime lease requires reconciliation",
+        ));
+    }
+    load_mutation_lease(tx, lease_id).await
 }
 
 /// Record a known mutation outcome. Rows are retained as value-blind

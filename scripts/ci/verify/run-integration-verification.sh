@@ -418,6 +418,13 @@ run_database() {
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "workspace binding recorder matrix" "$logfile" 21
 
+  logfile="$RUN_DIR/platform-cw-runtime-journal.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::cw_runtime::owner::database_tests::' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform cw runtime journal matrix" "$logfile" 35
+
   logfile="$RUN_DIR/environment-resize-admission.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-orchestration --lib \

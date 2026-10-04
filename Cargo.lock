@@ -2097,6 +2097,7 @@ dependencies = [
  "codewire-access",
  "codewire-admin-proto",
  "codewire-daemon",
+ "codewire-cw-release",
  "codewire-daemon-bridge",
  "codewire-gateway-proto",
  "codewire-platform-credentials",

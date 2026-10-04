@@ -54,6 +54,7 @@ required-features = ["kind-e2e"]
 [dependencies]
 codewire-access = { workspace = true }
 codewire-admin-proto = { workspace = true }
+codewire-cw-release = { workspace = true }
 codewire-daemon-bridge = { workspace = true }
 codewire-gateway-proto = { workspace = true }
 codewire-platform-credentials = { workspace = true }
