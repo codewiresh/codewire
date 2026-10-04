@@ -751,6 +751,23 @@ wait_kind_credential_environment '%s' running
             '::error::credential fixture environment observation failed while waiting for running',
             result.stderr)
 
+    def test_environment_observation_failure_survives_an_empty_successful_jq(self):
+        # Older jq variants exit 0 with no output on empty input (the job
+        # image's jq, where -e does not cover the empty stream). The empty
+        # state must still fail as a named observation error, not burn the
+        # whole budget into 'did not reach running'.
+        result = self.shell('''
+kind_credential_cli() { return 0; }
+jq() { cat >/dev/null; }
+sleep() { :; }
+wait_kind_credential_environment '%s' running
+''' % ENVIRONMENT)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(
+            '::error::credential fixture environment observation failed while waiting for running',
+            result.stderr)
+        self.assertNotIn('did not reach running', result.stderr)
+
     @staticmethod
     def _sandbox_pair_pods(workspace_phase, gateway_generation, gateway_uid=GATEWAY_UID):
         return json.dumps({"items": [

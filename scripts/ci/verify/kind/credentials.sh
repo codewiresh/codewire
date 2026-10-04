@@ -239,9 +239,11 @@ WHERE id = :'environment' AND org_id = 'org_contract_1';
 SQL
       )"
     elif ! state="$(kind_credential_cli env --platform info "$environment" --output json |
-        jq -er '.state')"; then
-      # A failed observation must name itself: jq exits 4 without a word when
-      # its input is empty, which would otherwise kill the suite silently.
+        jq -er '.state')" || [ -z "$state" ]; then
+      # A failed observation must name itself. jq exits 4 without a word when
+      # its input is empty, and older jq variants return success with no
+      # output there, so an empty state is an observation failure too —
+      # otherwise the suite either dies silently or burns its whole budget.
       echo "::error::credential fixture environment observation failed while waiting for ${expected}" >&2
       return 1
     fi
