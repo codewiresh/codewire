@@ -1511,6 +1511,25 @@ if [ "$event_selected" = false ]; then
         select_token security
         recognized=true
         ;;
+      scripts/ci/images/prepare-cw-source-context.py|\
+      scripts/ci/images/build-cw-runtime-source.py|\
+      scripts/ci/images/finalize-cw-runtime-source.py|\
+      scripts/ci/images/prepare-cw-image-context.py|\
+      scripts/ci/images/cw-image-consumer.py|\
+      scripts/ci/images/cw-image-consumer.sh|\
+      scripts/ci/images/cw-image-source.py|\
+      scripts/ci/images/build-product-images.sh|\
+      scripts/ci/tests/test-cw-image-context.py|\
+      scripts/ci/tests/test-cw-runtime-source.py|\
+      scripts/ci/tests/test-cw-image-consumer.py|\
+      scripts/ci/tests/test-cw-image-source.py|\
+      scripts/ci/tests/cw_image_fixtures.py)
+        # Image consumers are selected by the artifact graph. Their source,
+        # process and asset admission boundaries also require policy guards.
+        select_token policy
+        select_token security
+        recognized=true
+        ;;
       scripts/ci/setup/select-untrusted-workspace-cache.sh|\
       scripts/ci/images/workspace-cache.sh|\
       scripts/ci/tests/test-select-untrusted-workspace-cache.sh|\

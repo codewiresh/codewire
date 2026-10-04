@@ -152,7 +152,7 @@ workspace_cache_cleanup_builder() {
 workspace_cache_layer_args() {
   local target="$1" source_tree="$2" architecture="$3" name common alias
   layer_args=()
-  [[ "$target" =~ ^(base|workspace|canary-[a-z0-9-]+)$ ]] || return 2
+  [[ "$target" =~ ^(base|workspace|cw-runtime|canary-[a-z0-9-]+)$ ]] || return 2
   [[ "$source_tree" =~ ^[0-9a-f]{40}$ && "$architecture" =~ ^(amd64|arm64)$ ]] || return 2
   if [[ "$layer_cache_mode" == disabled ]]; then
     layer_args+=(--no-cache)
@@ -162,7 +162,7 @@ workspace_cache_layer_args() {
   if [[ "$layer_cache_mode" == r2 ]]; then
     common="type=s3,bucket=$WORKSPACE_CACHE_BUCKET,region=auto,endpoint_url=$WORKSPACE_CACHE_ENDPOINT,use_path_style=true,prefix=$WORKSPACE_CACHE_PREFIX"
     if [[ -n "$workspace_measurement_case" ]]; then
-      [[ "$target" == base || "$target" == workspace ]] || return 2
+      [[ "$target" == base || "$target" == workspace || "$target" == cw-runtime ]] || return 2
       [[ "${CODEWIRE_WORKSPACE_CACHE_SEED_ID:-}" =~ ^run-[0-9]+/tree-[0-9a-f]{40}/seed-[0-9a-f]{64}$ \
           && "$CODEWIRE_WORKSPACE_CACHE_SEED_ID" == "run-${GITHUB_RUN_ID:?}/tree-$source_tree/"* \
           && "$builder_container" =~ ^[0-9a-f]{64}$ ]] || return 2
@@ -238,8 +238,16 @@ workspace_cache_logged_command() {
   workspace_cache_command bash -c '
     set +e
     log=$1; shift
+    # GNU timeout signals the whole pipeline. Keep its Bash parent alive long
+    # enough to reap the Docker client and logger after they handle the signal.
+    cancelled=0
+    trap "cancelled=143" TERM
+    trap "cancelled=130" INT
     "$@" 2>&1 | tee "$log"
     statuses=("${PIPESTATUS[@]}")
+    if [[ "$cancelled" != 0 ]]; then
+      exit "$cancelled"
+    fi
     if [[ "${statuses[1]}" != 0 ]]; then
       echo "workspace cache build: log capture failed" >&2
       exit 74
@@ -251,9 +259,18 @@ workspace_cache_logged_command() {
 workspace_cache_build() {
   local target="$1" source_tree="$2" architecture="$3" log="$4" status=0 original_mode="$layer_cache_mode"
   shift 4
+  local -a producer_cache=() consumer_cache=() command=()
+  local cw_work="${log%/*}/cw-image-work"
   workspace_cache_layer_args "$target" "$source_tree" "$architecture" || return
-  workspace_cache_logged_command "$log" "$docker_bin" buildx build --builder "$builder" --progress plain \
-    "${layer_args[@]}" "$@" || status=$?
+  consumer_cache=("${layer_args[@]}")
+  command=("$docker_bin" buildx build --builder "$builder" --progress plain --platform "linux/$architecture" "${consumer_cache[@]}" "$@")
+  if [[ "$target" == workspace ]]; then
+    workspace_cache_layer_args cw-runtime "$source_tree" "$architecture" || return
+    producer_cache=("${layer_args[@]}")
+    mkdir -p -m 0700 "$cw_work"
+    command=(bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$ROOT" "$cw_work" "${producer_cache[@]}" -- "${command[@]}")
+  fi
+  workspace_cache_logged_command "$log" "${command[@]}" || status=$?
   if [[ "$original_mode" == r2 ]] \
       && workspace_cache_retryable_read_failure "$status" "$log"; then
     echo '::warning::Remote layer read failed; retrying this build once without external cache'
@@ -262,7 +279,11 @@ workspace_cache_build() {
     # A broken remote descriptor can remain in the daemon's local metadata.
     # Force computation on retry, preserving fresh floating tools without
     # combining the mutually exclusive no-cache and no-cache-filter flags.
-    workspace_cache_logged_command "$log.retry" "$docker_bin" buildx build --builder "$builder" --progress plain --no-cache "$@"
+    command=("$docker_bin" buildx build --builder "$builder" --progress plain --platform "linux/$architecture" --no-cache "$@")
+    if [[ "$target" == workspace ]]; then
+      command=(bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$ROOT" "$cw_work" --no-cache -- "${command[@]}")
+    fi
+    workspace_cache_logged_command "$log.retry" "${command[@]}"
     return
   fi
   return "$status"

@@ -67,6 +67,7 @@ workspace_id=''
 base_digest=''
 contract_container=''
 sampler_pid=''
+cw_copy_started=false
 
 stop_sampler() {
   local sampler_status=0 wait_status=0
@@ -99,7 +100,11 @@ cleanup() {
     timeout --signal=TERM --kill-after=3s 10s \
       "$docker_bin" rm --force "$contract_container" >/dev/null 2>&1 || cleanup_status=$?
   fi
-  rm -rf "$work"
+  if [[ "$cw_copy_started" == false ]]; then
+    rm -rf "$work"
+  else
+    printf 'workspace image verification: failed CW copy evidence retained at %s\n' "$work" >&2
+  fi
 
   if [[ "$status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
     printf 'workspace image verification: failed to remove ephemeral builder %s\n' \
@@ -228,6 +233,14 @@ workspace_cache_cleanup_builder
 workspace_cache_command "$docker_bin" image inspect "$workspace_tag" --format '{{.Id}}' >"$work/workspace-id"
 workspace_id="$(<"$work/workspace-id")"
 [[ "$workspace_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'invalid workspace image ID' >&2; exit 1; }
+if [[ "$architecture" == amd64 ]]; then
+  # Keep original source provenance and prove the installed bytes after the
+  # owning builder/provider file is gone. This never executes incoming CW.
+  cw_copy_started=true
+  python3 "$artifact_tool" verify-cw "$ROOT" "$workspace_id" \
+    "$build_log_root/cw-image-work/cw-producer-result.json"
+  cw_copy_started=false
+fi
 contract_container="$builder-full"
 workspace_cache_logged_command "$build_log_root/agents.log" "$docker_bin" run --rm --interactive --pids-limit=2048 \
   --name "$contract_container" --user 1000:1000 --entrypoint bash \

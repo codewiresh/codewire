@@ -2,11 +2,16 @@
 # Execute owned-daemon handling with a fake remote Docker API and synthetic key.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+PRIMARY_ROOT="$ROOT"
 mkdir -p "$ROOT/.tmp"
 work="$(mktemp -d "$ROOT/.tmp/workspace-cache-test.MixedCase.XXXXXX")"
 credential_work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-workspace-cache-data.XXXXXX")"
 trap 'rm -rf "$work" "$credential_work"' EXIT
 mkdir "$work/bin"
+export CW_IMAGE_FIXTURES="$PRIMARY_ROOT/scripts/ci/tests/cw_image_fixtures.py"
+python3 -B "$CW_IMAGE_FIXTURES" source "$work/source" >"$work/source-identity.json"
+ROOT="$work/source"
+source_tree="$(jq -er .source_tree "$work/source-identity.json")"
 umask 077
 printf '%s\n' '[default]' 'aws_access_key_id = synthetic-workspace-key' \
   'aws_secret_access_key = synthetic-workspace-secret' >"$credential_work/r2.aws"
@@ -36,6 +41,13 @@ case "$1 $2" in
     [[ "${FAKE_FAILURE:-}" != copy ]] || exit 41 ;;
   'buildx rm') [[ "${FAKE_FAILURE:-}" != cleanup ]] || exit 42 ;;
   'buildx build')
+    if [[ " $* " == *' --target cw-runtime-export '* ]]; then
+      printf 'producer\n' >>"$FAKE_CW_BUILDS"
+      if [[ "${FAKE_FAILURE:-}" == compile ]]; then
+        echo 'ERROR cargo compilation failed' >&2; exit 44
+      fi
+      exec python3 -B "$CW_IMAGE_FIXTURES" export -- "$@"
+    fi
     printf 'build\n' >>"$FAKE_BUILDS"
     if [[ "${FAKE_CANARY:-}" == hang ]]; then
       printf '%s\n' "$$" >"$FAKE_CANARY_PROCESS"
@@ -85,7 +97,10 @@ case "$1 $2" in
           exit "$FAKE_RETRY_STATUS"
         fi ;;
       compile) echo 'ERROR cargo compilation failed' >&2; exit 44 ;;
-    esac ;;
+    esac
+    if [[ -z "${FAKE_CANARY:-}" ]]; then
+      printf '#7 [cw-builder 1/1] COPY admitted cw /usr/local/bin/cw\n#7 DONE 0.1s\n'
+    fi ;;
   *)
     [[ "$1" == exec && "$3 $4 $5" == 'rm -f /run/codewire-cache/aws-credentials' ]] || exit 99
     [[ "${FAKE_FAILURE:-}" != erase ]] || exit 45
@@ -114,6 +129,7 @@ exec /usr/bin/tee "$@"
 SH
 chmod 0755 "$work/bin/tee"
 export FAKE_LOG="$work/docker.log" FAKE_FILE="$work/daemon.aws" FAKE_BUILDS="$work/builds"
+export FAKE_CW_BUILDS="$work/cw-builds"
 export FAKE_NODE="$work/node-name"
 export FAKE_BUILD_DIAGNOSTIC="$work/diagnostic.log"
 export FAKE_TEE_BIN="$work/bin/tee" FAKE_TEE_CALLS="$work/tee-calls" FAKE_TEE_FIRST_LOG="$work/build.log"
@@ -127,10 +143,13 @@ export PATH="$work/bin:$PATH"
 export CODEWIRE_DOCKER_BIN="$work/bin/docker"
 # The helper's Bash child resolves this function to an absolute fake executable;
 # a missing/non-executable fake must not fall through to another PATH entry.
-tee() { "$FAKE_TEE_BIN" "$@"; }
+tee() { exec "$FAKE_TEE_BIN" "$@"; }
 export -f tee
 exercise() (
   set -euo pipefail
+  # Retries in one exercise share the admitted producer. A new owner exercise
+  # gets fresh producer custody and cannot qualify from an earlier receipt.
+  rm -rf "$work/cw-image-work"
   rm -f "$work/exercise-success" "$work/exercise-status" "$work/fallback" "$work/build.log.retry"
   source "$ROOT/scripts/ci/images/workspace-cache.sh"
   workspace_cache_validate
@@ -150,16 +169,21 @@ exercise() (
   trap finish_exercise EXIT
   workspace_cache_create_builder "$work"
   if [[ "$layer_cache_mode" == r2 ]]; then cmp "$credential_work/r2.aws" "$FAKE_FILE"; fi
-  workspace_cache_layer_args workspace 1111111111111111111111111111111111111111 amd64
+  workspace_cache_layer_args workspace "$source_tree" amd64
   printf '%s\n' "${layer_args[@]}" >"$work/layer-args"
   workspace_cache_compiler_args
   printf '%s\n' "${compiler_args[@]}" >"$work/compiler-args"
-  workspace_cache_build workspace 1111111111111111111111111111111111111111 amd64 "$work/build.log" --file synthetic .
+  workspace_cache_build workspace "$source_tree" amd64 "$work/build.log" \
+    --file "$ROOT/images/workspace/Dockerfile" "$ROOT"
 )
 for compiler in disabled local r2; do
   for layers in disabled local r2; do
-    : >"$FAKE_LOG"; : >"$FAKE_BUILDS"
-    CODEWIRE_SCCACHE_MODE="$compiler" CODEWIRE_BUILDKIT_CACHE_MODE="$layers" exercise >"$work/out"
+    : >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_CW_BUILDS"
+    CODEWIRE_SCCACHE_MODE="$compiler" CODEWIRE_BUILDKIT_CACHE_MODE="$layers" exercise >"$work/out" 2>&1 || {
+      cat "$work/out" >&2; exit 1;
+    }
+    [[ "$(wc -l <"$FAKE_CW_BUILDS")" == 1 && "$(wc -l <"$FAKE_BUILDS")" == 1 ]]
+    [[ -s "$work/cw-image-work/cw-producer-result.json" ]]
     [[ -f "$credential_work/r2.aws" && ! -e "$FAKE_FILE" ]]
     grep -Fq -- '--driver-opt image=docker.io/moby/buildkit:v0.29.0@sha256:' "$FAKE_LOG"
     grep -q '^buildx rm --force codewire-workspace-' "$FAKE_LOG"
@@ -223,19 +247,20 @@ for failure in mode run tree; do
   ) >/dev/null 2>&1; then echo "accepted invalid measurement $failure" >&2; exit 1; fi
 done
 for failure in copy pin erase cleanup compile; do
-  : >"$FAKE_LOG"; : >"$FAKE_BUILDS"
+  : >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_CW_BUILDS"
   set +e
   CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 FAKE_FAILURE="$failure" exercise >"$work/out" 2>&1
   status=$?
   set -e
   [[ "$status" != 0 ]] || { echo "accepted $failure failure" >&2; exit 1; }
   [[ -s "$credential_work/r2.aws" ]]
-  [[ "$failure" != compile || "$(wc -l <"$FAKE_BUILDS")" == 1 ]]
+  [[ "$failure" != compile || ( "$(wc -l <"$FAKE_CW_BUILDS")" == 1 && ! -s "$FAKE_BUILDS" ) ]]
 done
-: >"$FAKE_LOG"; : >"$FAKE_BUILDS"
+: >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_CW_BUILDS"
 CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_BUILDKIT_CACHE_MODE=r2 FAKE_FAILURE=cache exercise >"$work/out"
 [[ "$(wc -l <"$FAKE_BUILDS")" == 2 && "$(cat "$work/fallback")" == true ]]
-tail -n 3 "$FAKE_LOG" | grep -q -- '--progress plain --no-cache --file synthetic'
+[[ "$(wc -l <"$FAKE_CW_BUILDS")" == 1 ]]
+grep '^buildx build ' "$FAKE_LOG" | tail -1 | grep -q -- '--progress plain --platform linux/amd64 --no-cache --file '
 
 # Exercise the actual command wrapper, not only its diagnostic predicate. A
 # rejected first attempt must retain its status and still erase/remove its
@@ -244,7 +269,7 @@ diagnostic_cases=0
 read_failure_case() {
   local name="$1" first_status="$2" expected_status="$3" expected_builds="$4" expected_fallback="$5"
   local diagnostic="$6" retry_status="${7:-0}" tee_failure="${8:-}" status
-  : >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_TEE_CALLS"
+  : >"$FAKE_LOG"; : >"$FAKE_BUILDS"; : >"$FAKE_CW_BUILDS"; : >"$FAKE_TEE_CALLS"
   printf '%s' "$diagnostic" >"$FAKE_BUILD_DIAGNOSTIC"
   set +e
   CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_BUILDKIT_CACHE_MODE=r2 FAKE_FAILURE=diagnostic \
@@ -263,7 +288,14 @@ read_failure_case() {
   [[ "$(grep -c '^buildx create ' "$FAKE_LOG")" == 1 && "$(grep -c '^buildx rm --force ' "$FAKE_LOG")" == 1 ]]
   [[ "$(grep -c 'exec .* rm -f /run/codewire-cache/aws-credentials' "$FAKE_LOG")" == 1 ]]
   [[ "$(wc -l <"$FAKE_TEE_CALLS")" == "$expected_builds" ]]
-  cmp "$FAKE_BUILD_DIAGNOSTIC" "$work/build.log"
+  [[ "$(wc -l <"$FAKE_CW_BUILDS")" == 1 ]]
+  # The outer log also contains producer/bridge diagnostics. Preserve the
+  # exact original diagnostic bytes in the actual owned consumer log.
+  diagnostic_retained=false
+  while IFS= read -r consumer_log; do
+    if cmp -s "$FAKE_BUILD_DIAGNOSTIC" "$consumer_log"; then diagnostic_retained=true; fi
+  done < <(find "$work/cw-image-work" -path '*/solve/build.log' -type f)
+  [[ "$diagnostic_retained" == true ]]
   [[ -s "$credential_work/r2.aws" && ! -e "$FAKE_FILE" ]]
   if [[ -n "$tee_failure" ]]; then
     grep -Fxq 'workspace cache build: log capture failed' "$work/out"
@@ -276,7 +308,7 @@ read_failure_case() {
   if [[ "$expected_fallback" == true ]]; then
     [[ -f "$work/build.log.retry" ]]
     grep '^buildx build ' "$FAKE_LOG" | tail -n 1 >"$work/retry-command"
-    grep -q -- '--progress plain --no-cache --file synthetic' "$work/retry-command"
+    grep -q -- '--progress plain --platform linux/amd64 --no-cache --file ' "$work/retry-command"
     ! grep -Eq -- '--cache-(from|to)|--no-cache-filter' "$work/retry-command" || exit 1
   else
     [[ ! -e "$work/build.log.retry" ]]
@@ -352,11 +384,11 @@ for failure in mode scope symlink permissions; do
   ) >/dev/null 2>&1; then echo "accepted $failure configuration" >&2; exit 1; fi
 done
 chmod 0600 "$credential_work/r2.aws"
-cp "$credential_work/r2.aws" "$work/in-context.aws"
-chmod 0600 "$work/in-context.aws"
+cp "$credential_work/r2.aws" "$ROOT/in-context.aws"
+chmod 0600 "$ROOT/in-context.aws"
 if (
   source "$ROOT/scripts/ci/images/workspace-cache.sh"
-  CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$work/in-context.aws"
+  CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$ROOT/in-context.aws"
   workspace_cache_validate
 ) >"$work/context-rejection.out" 2>&1; then exit 1; fi
 grep -q 'outside the build context' "$work/context-rejection.out"

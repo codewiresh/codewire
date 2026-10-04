@@ -173,6 +173,7 @@ fi
 
 umask 077
 work="$(mktemp -d)"
+cw_image_work="${CODEWIRE_CW_IMAGE_WORK:-$work/cw-images}"
 registry_username_file="$work/harbor-username"
 registry_password_file="$work/harbor-password"
 build_metadata="$work/build-metadata.json"
@@ -652,12 +653,19 @@ if [ "$build_runtime_set" = 1 ]; then
     if [ "${#missing_runtime_targets[@]}" -eq 5 ]; then
       bake_targets=(default)
     fi
+    cw_selected_source_dir="$(cd "$source_dir" && pwd -P)"
+    [ "$(cd "$context" && pwd -P)" = "$cw_selected_source_dir" ] || {
+      echo 'Protected CW image context differs from the selected release source' >&2
+      exit 2
+    }
+    mkdir -p -m 0700 "$cw_image_work"
     run_buildx_with_nexus_retry env \
       DOCKER_CONFIG="$docker_config" \
       CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
       CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
       CODEWIRE_RUST_PROFILE=release \
       CODEWIRE_SCCACHE_MODE="$sccache_mode" \
+      bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$cw_selected_source_dir" "$cw_image_work" -- \
       docker buildx bake --builder "$buildx_builder" "${bake_args[@]}" \
         "${bake_targets[@]}"
 
@@ -720,12 +728,19 @@ else
         --set "$product_bake_target.secrets+=id=aws_shared_credentials,src=$credentials_file"
       )
     fi
+    cw_selected_source_dir="$(cd "$source_dir" && pwd -P)"
+    [ "$(cd "$context" && pwd -P)" = "$cw_selected_source_dir" ] || {
+      echo 'Protected CW image context differs from the selected release source' >&2
+      exit 2
+    }
+    mkdir -p -m 0700 "$cw_image_work"
     run_buildx_with_nexus_retry env \
       DOCKER_CONFIG="$docker_config" \
       CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
       CODEWIRE_IMAGE_SOURCE_URL="$public_source_url" \
       CODEWIRE_RUST_PROFILE=release \
       CODEWIRE_SCCACHE_MODE="$sccache_mode" \
+      bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$cw_selected_source_dir" "$cw_image_work" -- \
       docker buildx bake --builder "$buildx_builder" "${bake_args[@]}" \
         "$product_bake_target"
     jq -e --arg target "$product_bake_target" '
@@ -737,12 +752,24 @@ else
       exit 1
     }
   else
-    run_buildx_with_nexus_retry env DOCKER_CONFIG="$docker_config" \
-      docker buildx build --builder "$buildx_builder" --push \
+    image_command=(docker buildx build --builder "$buildx_builder" --push
       --provenance="$provenance" \
       --sbom="generator=$SBOM_GENERATOR_IMAGE" \
       --metadata-file "$build_metadata" "${build_args[@]}" \
-      -f "$dockerfile" --tag "$source_tag" "${label_args[@]}" "$context"
+      -f "$dockerfile" --tag "$source_tag" "${label_args[@]}" "$context")
+    if [ "$image_name:$dockerfile_from_context" = workspace:images/workspace/Dockerfile ]; then
+      cw_selected_source_dir="$(cd "$source_dir" && pwd -P)"
+      [ "$(cd "$context" && pwd -P)" = "$cw_selected_source_dir" ] || {
+        echo 'Protected CW image context differs from the selected release source' >&2
+        exit 2
+      }
+      mkdir -p -m 0700 "$cw_image_work"
+      run_buildx_with_nexus_retry env DOCKER_CONFIG="$docker_config" \
+        bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$cw_selected_source_dir" "$cw_image_work" -- \
+        "${image_command[@]}"
+    else
+      run_buildx_with_nexus_retry env DOCKER_CONFIG="$docker_config" "${image_command[@]}"
+    fi
   fi
   if ! source_digest="$(jq -er '."containerimage.digest" | select(type == "string")' "$build_metadata")" \
     || [[ ! "$source_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then

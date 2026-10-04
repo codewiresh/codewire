@@ -2,16 +2,22 @@
 """Local, non-publishing workspace-image identity; never accept a caller image override."""
 
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import platform
 import re
+import selectors
+import signal
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
+import uuid
+from contextlib import closing
 
 
 INPUTS = (
@@ -25,9 +31,30 @@ INPUTS = (
     "scripts/ci/setup/select-workspace-cache-experiment.py",
     "scripts/ci/setup/prepare-workspace-cache-measurement.sh",
     "scripts/ci/verify/workspace-cache-report.py",
+    "images/cw-runtime/Dockerfile",
+    "rust-toolchain.toml",
+    "scripts/ci/release/cw_release.py",
+    "scripts/dev/cw-runtime-image.py",
+    "scripts/ci/images/prepare-cw-source-context.py",
+    "scripts/ci/images/build-cw-runtime-source.py",
+    "scripts/ci/images/finalize-cw-runtime-source.py",
+    "scripts/ci/images/prepare-cw-image-context.py",
+    "scripts/ci/images/cw-image-consumer.py",
+    "scripts/ci/images/cw-image-consumer.sh",
+    "scripts/ci/images/cw-image-source.py",
+    "scripts/ci/images/build-product-images.sh",
+    "scripts/ci/verify/build-linux-vmm-kernel.py",
+    "images/base/apt-transport.conf",
+    "images/base/apt-get-with-retry",
+    "images/workspace/debian.sources",
+    ".gitignore",
 )
 MAXIMUM_ARCHIVE_BYTES = 80 * 1024 * 1024 * 1024
 MAXIMUM_DOCUMENT_BYTES = 4 * 1024 * 1024
+CW_COPY_SECONDS = 180
+CW_CLEANUP_SECONDS = 30
+CW_STDERR_BYTES = 64 * 1024
+CW_COPY_LABEL = "dev.codewire.workspace-cw-verification"
 MANIFEST_TYPES = {
     "application/vnd.oci.image.manifest.v1+json",
     "application/vnd.docker.distribution.manifest.v2+json",
@@ -81,6 +108,10 @@ def alias_for(image_id):
 
 def validate_image(identity, image_id):
     image = inspect(digest(image_id))
+    validate_image_value(identity, image_id, image)
+
+
+def validate_image_value(identity, image_id, image):
     config = image.get("Config", {})
     if not isinstance(config, dict):
         raise ValueError("invalid image configuration")
@@ -98,6 +129,346 @@ def validate_image(identity, image_id):
         raise ValueError("image source identity mismatch")
     if image.get("Os") != identity["os"] or image.get("Architecture") != identity["architecture"]:
         raise ValueError("image architecture mismatch")
+
+
+def cw_consumer(root):
+    # Loading is confined to this operation. Receipt/OCI-only callers do not
+    # import a producer or execute any incoming payload.
+    path = root / "scripts/ci/images/cw-image-consumer.py"
+    spec = importlib.util.spec_from_file_location("workspace_cw_consumer", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def cw_docker_environment(directory):
+    environment = {"PATH": "/usr/bin:/bin", "HOME": str(directory / "home"),
+                   "DOCKER_CONFIG": str(directory / "docker"), "TMPDIR": str(directory / "tmp"),
+                   "LC_ALL": "C", "TZ": "UTC"}
+    # This uses the caller's existing daemon transport, never its registry
+    # login, cache credentials, proxy, provider environment or Docker context.
+    if os.environ.get("DOCKER_CONTEXT", "default") not in ("", "default"):
+        raise ValueError("workspace CW copy requires an explicit Docker transport")
+    for key in ("DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_API_VERSION"):
+        if key in os.environ:
+            value = os.environ[key]
+            if not value or len(value.encode()) > 4096 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+                raise ValueError("workspace CW Docker transport is invalid")
+            environment[key] = value
+    return environment
+
+
+class CwCopyOwner:
+    """One fixed image read; separate bounded pipes and kernel family custody.
+
+    Docker's container is owned separately from its CLI process. Failure does
+    not grant name-prefix cleanup authority or imply that the container died.
+    """
+
+    def __init__(self, consumer, directory, image_id, deadline):
+        self.consumer, self.owner, self.asset = consumer, consumer.owner, consumer.asset
+        self.directory, self.image_id, self.deadline = directory, image_id, deadline
+        self.token = uuid.uuid4().hex
+        self.name = "codewire-workspace-cw-" + self.token
+        self.cidfile = directory / "cid"
+        self.docker = os.environ.get("CODEWIRE_DOCKER_BIN", "docker")
+        if (not self.docker or len(self.docker.encode()) > 4096
+                or any(ord(c) < 32 or ord(c) == 127 for c in self.docker)):
+            raise ValueError("workspace CW Docker executable is invalid")
+        self.environment = cw_docker_environment(directory)
+        self.outcomes = []
+        self.started = False
+        self.container_clean = False
+        self.cleanup_deadline = None
+        self.private_directories = {}
+        self.parent = self.asset.Parent(directory)
+        try:
+            info = os.fstat(self.parent.fd)
+            if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                raise ValueError("workspace CW copy directory is not private")
+            for name in ("home", "docker", "tmp"):
+                os.mkdir(name, mode=0o700, dir_fd=self.parent.fd)
+                self.private_directories[name] = self.asset.Parent(directory / name)
+        except BaseException:
+            self.close()
+            raise
+
+    def revalidate(self):
+        self.parent.revalidate()
+        info = os.fstat(self.parent.fd)
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ValueError("workspace CW copy directory changed")
+        for name, held in self.private_directories.items():
+            held.revalidate()
+            info = os.fstat(held.fd)
+            if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                raise ValueError("workspace CW private environment directory changed")
+            if name == "docker" and os.listdir(held.fd):
+                raise ValueError("workspace CW Docker configuration is not empty")
+
+    def run(self, arguments, maximum, consume=None, *, cleanup_deadline=None):
+        self.revalidate()
+        deadline = cleanup_deadline if cleanup_deadline is not None else self.deadline
+        if time.monotonic() >= deadline or cleanup_deadline is None and self.owner.STOP is not None:
+            raise ValueError("workspace CW copy was cancelled or timed out")
+        command = [self.docker, *arguments]
+        output, count, error_count = bytearray(), 0, 0
+        output_sha, error_sha = hashlib.sha256(), hashlib.sha256()
+        adopted, leader, process = {}, None, None
+        selector = selectors.DefaultSelector()
+        try:
+            process = subprocess.Popen(command, cwd=self.directory, env=self.environment,
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, start_new_session=True, umask=0o077)
+            leader = self.owner.bind_child(process.pid)
+            for stream, kind in ((process.stdout, "out"), (process.stderr, "err")):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, kind)
+            while True:
+                terminal = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                if terminal and not selector.get_map():
+                    break
+                if time.monotonic() >= deadline or cleanup_deadline is None and self.owner.STOP is not None:
+                    raise ValueError("workspace CW command was cancelled or timed out")
+                for event, _ in selector.select(min(0.05, max(0, deadline - time.monotonic()))):
+                    block = os.read(event.fileobj.fileno(), 64 * 1024)
+                    if not block:
+                        selector.unregister(event.fileobj)
+                    elif event.data == "out":
+                        count += len(block)
+                        if count > maximum:
+                            raise ValueError("workspace CW command stdout exceeded its bound")
+                        output_sha.update(block)
+                        if consume is None:
+                            output.extend(block)
+                        else:
+                            consume(block)
+                    else:
+                        error_count += len(block)
+                        if error_count > CW_STDERR_BYTES:
+                            raise ValueError("workspace CW command stderr exceeded its bound")
+                        error_sha.update(block)
+            # Keep the unreaped leader until every possible group signal is
+            # finished. Normal completion with an adopted child is a failure.
+            if self.owner.children() != {process.pid}:
+                raise ValueError("workspace CW command left an unexpected family")
+            status = process.wait()
+            try:
+                os.waitpid(-1, os.WNOHANG | self.owner.WALL)
+            except ChildProcessError:
+                pass
+            else:
+                raise ValueError("workspace CW command did not prove ECHILD")
+            self.outcomes.append({"action": arguments[0], "exit": status, "stdout_size": count,
+                                  "stdout_sha256": output_sha.hexdigest(), "stderr_size": error_count,
+                                  "stderr_sha256": error_sha.hexdigest(), "family_cleanup_known": True})
+            if status != 0:
+                raise ValueError("workspace CW command failed")
+            return bytes(output), count, output_sha.hexdigest()
+        except BaseException:
+            if self.cleanup_deadline is None:
+                self.cleanup_deadline = time.monotonic() + CW_CLEANUP_SECONDS
+            raise
+        finally:
+            try:
+                if process is not None:
+                    remaining = (CW_CLEANUP_SECONDS if self.cleanup_deadline is None
+                                 else max(0.001, self.cleanup_deadline - time.monotonic()))
+                    self.owner.abort_family(process, adopted, remaining)
+            finally:
+                if leader is not None:
+                    os.close(leader)
+                for fd in adopted.values():
+                    os.close(fd)
+                selector.close()
+                if process is not None:
+                    process.stdout.close()
+                    process.stderr.close()
+                self.revalidate()
+
+    def image(self):
+        raw, _, _ = self.run(["image", "inspect", self.image_id], 512 * 1024)
+        images = json.loads(raw)
+        if type(images) is not list or len(images) != 1 or type(images[0]) is not dict:
+            raise ValueError("workspace CW requires one image")
+        return images[0]
+
+    def cid(self):
+        with closing(self.asset.HeldFile(self.cidfile, 65)) as held:
+            if held.metadata["uid"] != os.geteuid() or stat.S_IMODE(held.metadata["mode"]) != 0o600:
+                raise ValueError("workspace CW CID file is not private")
+            value = held.data.decode("ascii")
+            if not re.fullmatch(r"[0-9a-f]{64}\n?", value):
+                raise ValueError("workspace CW CID is invalid")
+            held.revalidate(content=True)
+            return value.rstrip("\n")
+
+    def copy(self, expected_size):
+        self.started = True
+        _, size, sha256 = self.run([
+            "run", "--rm", "--pull=never", "--network=none", "--read-only", "--user", "1000:1000",
+            "--name", self.name, "--cidfile", str(self.cidfile),
+            "--label", CW_COPY_LABEL + "=" + self.token,
+            "--entrypoint", "/usr/bin/cat", self.image_id, "/usr/local/bin/cw",
+        ], expected_size + 1, lambda _: None)
+        self.cid()
+        if size != expected_size:
+            raise ValueError("workspace image CW length differs from its producer")
+        return sha256
+
+    def cleanup_container(self):
+        if not self.started:
+            self.container_clean = True
+            return
+        if self.cleanup_deadline is None:
+            self.cleanup_deadline = time.monotonic() + CW_CLEANUP_SECONDS
+        deadline = self.cleanup_deadline
+        arguments = ["container", "ls", "--all", "--no-trunc", "--filter",
+                     "name=^/" + self.name + "$", "--format", "{{.ID}}"]
+        raw, _, _ = self.run(arguments, 65, cleanup_deadline=deadline)
+        if not raw:
+            self.container_clean = True
+            return
+        if not re.fullmatch(rb"[0-9a-f]{64}\n", raw):
+            raise ValueError("workspace CW container cleanup is unknown")
+        cid = raw.decode().rstrip("\n")
+        if os.path.lexists(self.cidfile) and self.cid() != cid:
+            raise ValueError("workspace CW container CID changed")
+        raw, _, _ = self.run(["container", "inspect", cid], 512 * 1024, cleanup_deadline=deadline)
+        values = json.loads(raw)
+        if type(values) is not list or len(values) != 1 or type(values[0]) is not dict:
+            raise ValueError("workspace CW container identity is unknown")
+        value = values[0]
+        config = value.get("Config", {})
+        if (value.get("Id") != cid or value.get("Image") != self.image_id
+                or value.get("Name") != "/" + self.name or type(config) is not dict
+                or config.get("Image") != self.image_id or type(config.get("Labels")) is not dict
+                or config["Labels"].get(CW_COPY_LABEL) != self.token):
+            raise ValueError("workspace CW container identity changed")
+        raw, _, _ = self.run(["rm", "--force", cid], 65, cleanup_deadline=deadline)
+        if raw != (cid + "\n").encode():
+            raise ValueError("workspace CW container removal is unknown")
+        raw, _, _ = self.run(arguments, 65, cleanup_deadline=deadline)
+        if raw:
+            raise ValueError("workspace CW container remained after cleanup")
+        self.container_clean = True
+
+    def evidence(self, accepted):
+        self.revalidate()
+        data = json.dumps({"accepted": accepted, "container_cleanup_known": self.container_clean,
+                           "image_id": self.image_id, "container_name": self.name,
+                           "operation_id": self.token, "commands": self.outcomes}, sort_keys=True).encode() + b"\n"
+        fd = os.open("outcome.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o400, dir_fd=self.parent.fd)
+        with os.fdopen(fd, "wb") as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        os.fsync(self.parent.fd)
+
+    def close(self):
+        for held in self.private_directories.values():
+            held.close()
+        self.parent.close()
+
+
+def verify_cw(root, image_id, result_path):
+    """Reopen the original compiler proof, then compare actual image bytes.
+
+    This makes no cache claim, executes no incoming CW, and does not rewrite
+    the original source identity or create a reusable independent acceptance.
+    """
+    previous_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        consumer = cw_consumer(root)
+        try:
+            return verify_cw_admitted(consumer, root, image_id, result_path)
+        except consumer.release.ReleaseError:
+            raise ValueError("workspace CW producer admission failed") from None
+    finally:
+        sys.dont_write_bytecode = previous_bytecode
+
+
+def verify_cw_admitted(consumer, root, image_id, result_path):
+    producer, asset = consumer.producer, consumer.asset
+    deadline = time.monotonic() + CW_COPY_SECONDS
+    result_path = asset.path_arg(str(result_path))
+    if result_path.name != "cw-producer-result.json" or result_path.parent.name != "cw-image-work":
+        raise ValueError("workspace CW producer reference path is invalid")
+    with closing(asset.HeldFile(result_path, producer.release.MAX_JSON)) as held:
+        if held.metadata["uid"] != os.geteuid() or stat.S_IMODE(held.metadata["mode"]) != 0o400:
+            raise ValueError("workspace CW producer reference is not private")
+        parent_info = os.fstat(held.parent.fd)
+        if parent_info.st_uid != os.geteuid() or stat.S_IMODE(parent_info.st_mode) != 0o700:
+            raise ValueError("workspace CW producer reference directory is not private")
+        value = producer.release.parse_canonical(held.data)
+        fields = {"status", "receipt", "producer_receipt", "image", "index_sha256", "payload", "source",
+                  "profile", "version", "build_ref", "cache_qualified", "image_qualified"}
+        if type(value) is not dict or set(value) != fields or value["status"] != "producer-admitted":
+            raise ValueError("workspace CW producer reference is invalid")
+        version = consumer.effective_version(root, os.environ.get("CODEWIRE_VERSION"))
+        with producer.source.git_scope():
+            identity = source_identity(root)
+        if identity["architecture"] != "amd64":
+            raise ValueError("workspace static CW verification requires AMD64")
+        selected_image = digest(image_id)
+        old_deadline = producer.source.DEADLINE
+        producer.source.DEADLINE = deadline
+        saved_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        old_stop = consumer.owner.STOP
+        for sig in saved_handlers:
+            signal.signal(sig, consumer.owner.on_signal)
+        owner = None
+        accepted = False
+        try:
+            with producer.reopen(value["receipt"]["path"], value["receipt"]["sha256"], root,
+                                 identity["source_sha"], "release", version) as admitted:
+                summary = admitted.summary
+                if any(producer.release.canonical(value[key]) != producer.release.canonical(summary[key])
+                       for key in fields):
+                    raise ValueError("workspace CW reference differs from its original producer")
+                held.revalidate(content=True)
+                admitted.revalidate()
+                consumer.owner.arm_custody()
+                directory = Path(tempfile.mkdtemp(prefix=".workspace-cw-copy-", dir=result_path.parent))
+                owner = CwCopyOwner(consumer, directory, selected_image, deadline)
+                try:
+                    validate_image_value(identity, selected_image, owner.image())
+                    actual_sha = owner.copy(summary["payload"]["size"])
+                    if actual_sha != summary["payload"]["sha256"]:
+                        raise ValueError("workspace image CW differs from its producer")
+                    admitted.revalidate()
+                    held.revalidate(content=True)
+                    with producer.source.git_scope():
+                        if source_identity(root) != identity:
+                            raise ValueError("workspace source changed during CW verification")
+                    if consumer.owner.STOP is not None or time.monotonic() >= deadline:
+                        raise ValueError("workspace CW copy was cancelled or timed out")
+                finally:
+                    owner.cleanup_container()
+                admitted.revalidate()
+                held.revalidate(content=True)
+                if consumer.owner.STOP is not None or time.monotonic() >= deadline:
+                    raise ValueError("workspace CW copy was cancelled or timed out")
+                accepted = True
+                return {"status": "workspace-cw-verified", "workspace_image_id": selected_image,
+                        "payload": summary["payload"], "source": summary["source"],
+                        "current_source": summary["current_source"], "profile": "release", "version": version,
+                        "producer_receipt_sha256": summary["receipt"]["sha256"],
+                        "family_cleanup_known": True, "container_cleanup_known": True}
+        finally:
+            try:
+                if owner is not None:
+                    try:
+                        owner.evidence(accepted and owner.container_clean)
+                    finally:
+                        owner.close()
+            finally:
+                producer.source.DEADLINE = old_deadline
+                consumer.owner.STOP = old_stop
+                for sig, handler in saved_handlers.items():
+                    signal.signal(sig, handler)
 
 
 def archive_identity(path, image_id, architecture):
@@ -362,6 +733,8 @@ def main(argv):
         print(json.dumps(reuse(root, Path(args[0]), native=True), sort_keys=True))
     elif mode == "reuse-for-build" and len(args) == 1:
         print(reuse(root, Path(args[0]), for_build=True))
+    elif mode == "verify-cw" and len(args) == 2:
+        print(json.dumps(verify_cw(root, args[0], Path(args[1])), sort_keys=True))
     elif mode == "seal" and len(args) in (4, 5):
         prior = Path(args[4]) if len(args) == 5 else None
         print(seal(root, Path(args[0]), args[1], args[2], Path(args[3]), prior))

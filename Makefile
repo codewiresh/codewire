@@ -390,7 +390,7 @@ cli-install-system:
 # Build the Rust gateway image for kind/local runtime smoke.
 build-gateway:
 	@echo "Building gateway image via deployments/docker/gateway.Dockerfile..."
-	docker buildx bake --file docker-bake.hcl --pull --load --set 'gateway.tags=$(REGISTRY)/codewire/gateway:local' gateway
+	scripts/ci/images/build-product-images.sh --pull --load --set 'gateway.tags=$(REGISTRY)/codewire/gateway:local' gateway
 
 # Deploy the local Rust runtime into kind.
 deploy-local: local-runtime build-dashboard-local

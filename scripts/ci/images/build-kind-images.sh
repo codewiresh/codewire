@@ -4,6 +4,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+source "$ROOT/scripts/ci/images/cw-image-consumer.sh"
 readonly BUILDKIT_IMAGE='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 docker_bin="${CODEWIRE_DOCKER_BIN:-docker}"
 metadata_file="${CODEWIRE_BAKE_METADATA_FILE:-$ROOT/.tmp/kind-image-build-metadata.json}"
@@ -113,7 +114,7 @@ if [ "$sccache_mode" = r2 ]; then
   done
 fi
 CODEWIRE_SCCACHE_MODE="$sccache_mode" \
-  "$docker_bin" buildx bake "${bake_args[@]}" kind
+  cw_image_run ci "$ROOT" "$work" "$docker_bin" buildx bake "${bake_args[@]}" kind
 elapsed="$(( $(date +%s) - started_at ))"
 
 for image in dashboard services mesh gateway; do

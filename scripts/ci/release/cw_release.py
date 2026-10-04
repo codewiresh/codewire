@@ -74,7 +74,13 @@ SOURCE_PATHSPEC = ("*.rs", "*.toml", "*.lock", "*.proto",
                    "crates/codewire-proto/codewire_descriptor.bin",
                    "crates/codewire-server-core/migrations", "scripts/ci/release/cw_release.py",
                    "scripts/dev/build-cw.py", "scripts/dev/build-native-managed-agent.py",
-                   "scripts/dev/cw-runtime-image.py")
+                   "scripts/dev/cw-runtime-image.py", "images/cw-runtime/Dockerfile",
+                   "scripts/ci/images/prepare-cw-source-context.py",
+                   "scripts/ci/images/build-cw-runtime-source.py",
+                   "scripts/ci/images/finalize-cw-runtime-source.py",
+                   "scripts/ci/images/prepare-cw-image-context.py",
+                   "scripts/ci/images/run-rust-build.sh",
+                   "scripts/ci/verify/build-linux-vmm-kernel.py")
 # Cargo's server-core rerun-if-changed rule names this directory. Its leaves,
 # rather than the directory name, are source-digest inputs. No other directory
 # dependency is admitted by this exception.

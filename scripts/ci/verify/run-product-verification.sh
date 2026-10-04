@@ -216,6 +216,10 @@ run_policy_core() {
   scripts/ci/tests/test-build-local-image.sh
   scripts/ci/tests/test-dashboard-image-network-probe.sh
   scripts/ci/tests/test-workspace-agent-contract.sh
+  python3 -I -B scripts/ci/tests/test-cw-image-context.py
+  python3 -I -B scripts/ci/tests/test-cw-runtime-source.py
+  python3 -I -B scripts/ci/tests/test-cw-image-source.py
+  python3 -I -B scripts/ci/tests/test-cw-image-consumer.py
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
   scripts/ci/tests/test-build-kind-smokes.sh
   python3 -B scripts/ci/tests/test-kind-build-artifacts.py

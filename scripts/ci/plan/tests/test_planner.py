@@ -26,6 +26,7 @@ PRODUCTION_GRAPH = json.loads(
     (PLANNER_PATH.parent / "artifact-graph.json").read_text()
 )
 WORKSPACE_VERIFICATION_SPEC = PRODUCTION_GRAPH["artifacts"]["workspace_image_verification"]
+CW_RUNTIME_ASSET_SPEC = PRODUCTION_GRAPH["artifacts"]["cw_runtime_image_asset"]
 DEV_ACCEPTANCE_HARNESS_SPEC = PRODUCTION_GRAPH["artifacts"]["dev_acceptance_harness"]
 CREDENTIAL_ACCEPTANCE_PATHS = (
     "scripts/runtime/dev/provider-anthropic-output.py",
@@ -102,6 +103,10 @@ def fixture_cargo_metadata(tree: Path, manifest: Path, _cargo_env: dict[str, str
 
 
 def run(argv: list[str], cwd: Path) -> str:
+    if argv and argv[0] == "git":
+        # Synthetic planner repositories have no maintenance daemon lifetime.
+        # Keep ordinary Git behavior while their owner reaps every child.
+        argv = ["git", "-c", "maintenance.auto=false", "-c", "gc.auto=0", *argv[1:]]
     completed = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False)
     if completed.returncode:
         raise AssertionError(f"command failed: {argv}\n{completed.stderr}")
@@ -141,6 +146,8 @@ class FixtureRepository:
         self._write_policy()
         self._write_workspace()
         run(["git", "init", "-q"], root)
+        run(["git", "config", "maintenance.auto", "false"], root)
+        run(["git", "config", "gc.auto", "0"], root)
         run(["git", "config", "user.name", "CI fixture"], root)
         run(["git", "config", "user.email", "ci-fixture@codewire.invalid"], root)
         # Fixture commits are planner inputs, not a signing-path test.  Keep
@@ -232,6 +239,7 @@ class FixtureRepository:
                     "package_inputs": {"core": ["generated/descriptor.bin"]},
                     "explicit_inputs": [],
                 },
+                "cw_runtime_image_asset": CW_RUNTIME_ASSET_SPEC,
                 "rust_cache_cli": {
                     "kind": "rust-cache",
                     "manifest": "Cargo.toml",
@@ -280,7 +288,8 @@ class FixtureRepository:
                     ],
                 },
                 "gateway_image": {
-                    "kind": "file-set",
+                    "kind": "composite",
+                    "dependencies": ["cw_runtime_image_asset"],
                     "inputs": [
                         "Cargo.toml",
                         "Cargo.lock",
@@ -355,7 +364,7 @@ class FixtureRepository:
                     "kind": "composite",
                     "dependencies": [
                         "base_image",
-                        "workspace_cw_binary",
+                        "cw_runtime_image_asset",
                         "confidential_workspace_acceptance_contract",
                         "dev_release_tree",
                         "dev_acceptance_harness",
@@ -372,6 +381,7 @@ class FixtureRepository:
         self.write("scripts/ci/plan/artifact-graph.json", json.dumps(graph, sort_keys=True, indent=2) + "\n")
 
     def _write_workspace(self) -> None:
+        self.write("rust-toolchain.toml", (PLANNER_PATH.parents[3] / "rust-toolchain.toml").read_text())
         self.write(
             "deployments/k8s/base/runtime-profile.yaml",
             "apiVersion: v1\nkind: ConfigMap\n",
@@ -623,6 +633,11 @@ dependencies = ["core"]
         for path in WORKSPACE_VERIFICATION_SPEC["inputs"]:
             if "*" not in path and not (self.root / path).exists():
                 self.write(path, "# Synthetic workspace verification input\n")
+        for pattern in CW_RUNTIME_ASSET_SPEC["inputs"]:
+            if pattern.endswith("/**"):
+                self.write(pattern[:-3] + "/synthetic-input", "Synthetic identity input\n")
+            elif "*" not in pattern and not (self.root / pattern).exists():
+                self.write(pattern, "Synthetic identity input\n")
         for path in DEV_ACCEPTANCE_HARNESS_SPEC["inputs"]:
             if "*" not in path and not (self.root / path).exists():
                 self.write(path, "# Synthetic Dev acceptance harness input\n")
@@ -855,12 +870,13 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(self.states(document), ("unaffected", "unaffected"))
         self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "unaffected")
 
-    def test_runtime_source_keeps_exact_publication_without_workspace_verification(self) -> None:
+    def test_runtime_source_changes_cw_transport_identity_without_packaging_rust(self) -> None:
         self.repo.change("crates/unrelated/src/lib.rs", "pub fn runtime_only() {}\n")
         document = self.repo.plan()
         self.assertEqual(self.states(document), ("unaffected", "unaffected"))
         self.assertEqual(document["artifacts"]["workspace_image"]["state"], "affected")
-        self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "unaffected")
+        self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "affected")
+        self.assertEqual(document["artifacts"]["cw_runtime_image_asset"]["state"], "affected")
 
     def test_workspace_verification_owns_raw_manifest_even_when_cargo_metadata_is_unchanged(self) -> None:
         manifest = (self.repo.root / "Cargo.toml").read_text()
@@ -951,7 +967,7 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(artifact["state"], "unaffected")
         self.assertRegex(artifact["head_cache_fingerprint"], r"^[0-9a-f]{64}$")
 
-    def test_each_runtime_direct_input_affects_only_its_image(self) -> None:
+    def test_each_runtime_direct_input_and_cw_identity_select_its_consumers(self) -> None:
         cases = (
             ("apps/dashboard/runtime-inventory.json", '{"changed":true}\n', 0),
             ("deployments/docker/gateway.Dockerfile", "FROM changed-gateway\n", 1),
@@ -971,6 +987,8 @@ class PlannerFixtureTests(unittest.TestCase):
                 repository.change(path, content)
                 expected = ["unaffected"] * 5
                 expected[affected_index] = "affected"
+                if path.endswith(".lock"):
+                    expected[1] = "affected"  # Gateway contains the source-bound CW asset.
                 document = repository.plan()
                 self.assertEqual(self.runtime_states(document), tuple(expected))
                 self.assertEqual(
@@ -1091,7 +1109,10 @@ class PlannerFixtureTests(unittest.TestCase):
                     document["artifacts"]["dev_acceptance_harness"]["state"], "affected"
                 )
                 self.assertEqual(self.dev_release_state(document), "unaffected")
-                self.assertEqual(self.runtime_states(document), ("unaffected",) * 5)
+                expected = ["unaffected"] * 5
+                if path.endswith(".lock"):
+                    expected[1] = "affected"
+                self.assertEqual(self.runtime_states(document), tuple(expected))
                 self.assertEqual(self.states(document), ("unaffected", "unaffected"))
                 # Every Dev-selected source still publishes its exact workspace.
                 self.assertEqual(
@@ -1100,11 +1121,12 @@ class PlannerFixtureTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     document["artifacts"]["workspace_image_verification"]["state"],
-                    "unaffected",
+                    "affected" if path.endswith(".lock") else "unaffected",
                 )
                 outputs = self.deploy_outputs(repository, document, head)
                 self.assertEqual(outputs["deploy_dev"], "true")
-                self.assertEqual(outputs["reason"], "dev_acceptance_affected")
+                self.assertEqual(outputs["reason"],
+                                 "artifact_affected" if path.endswith(".lock") else "dev_acceptance_affected")
                 self.assertEqual(outputs["dev_acceptance_harness_state"], "affected")
 
     def test_unrelated_dashboard_script_and_docs_edits_still_skip_deployment(self) -> None:
@@ -1147,6 +1169,8 @@ class PlannerFixtureTests(unittest.TestCase):
                 candidate = repository.deployed_source_candidate(repository.base, head)
                 expected = ["unaffected"] * 5
                 expected[affected_index] = "affected"
+                if path.endswith(".lock"):
+                    expected[1] = "affected"
                 document = repository.deployed_source_plan(candidate, head)
                 self.assertEqual(
                     tuple(
@@ -1339,7 +1363,8 @@ class PlannerFixtureTests(unittest.TestCase):
         self.repo.commit("billing and isolated admin contract")
         document = self.repo.plan()
         self.assertEqual(self.states(document), ("unaffected", "unaffected"))
-        self.assertEqual(self.workspace_states(document), ("unaffected", "unaffected", "unaffected"))
+        self.assertEqual(self.workspace_states(document), ("unaffected", "unaffected", "affected"))
+        self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "affected")
 
     def test_relevant_generated_input_affects_both_packages(self) -> None:
         self.repo.change("generated/descriptor.bin", "descriptor-v2\n")
@@ -1426,11 +1451,62 @@ class PlannerFixtureTests(unittest.TestCase):
                 head = self.repo.change(path, "changed producer input\n")
                 document = self.repo.plan()
                 self.assertEqual(document["artifacts"]["cw_cli_release_assets"]["state"], "affected")
-                # Unknown producer paths remain conservative for consumers that
-                # do not declare them; this binding is only for CLI assets.
-                self.assertEqual(document["artifacts"]["desktop_package"]["state"],
-                    "unclassified" if path.startswith("scripts/dev/") else "unaffected")
+                # Declared source producers belong to the CW transport; they
+                # do not change the desktop package's compiled closure.
+                self.assertEqual(document["artifacts"]["desktop_package"]["state"], "unaffected")
             self.repo.base = head
+
+    def test_cw_runtime_source_identity_and_producer_select_both_consumers(self) -> None:
+        graph_path = "scripts/ci/plan/artifact-graph.json"
+        graph = json.loads((self.repo.root / graph_path).read_text())
+        graph["artifacts"]["cw_cli_release_assets"]["explicit_inputs"] = list(
+            PRODUCTION_GRAPH["artifacts"]["cw_cli_release_assets"]["explicit_inputs"])
+        self.repo.write(graph_path, json.dumps(graph, sort_keys=True, indent=2) + "\n")
+        self.repo.base = self.repo.commit("Full CW release source identity")
+        paths = (
+            "scripts/ci/images/build-cw-runtime-source.py",
+            "scripts/ci/images/prepare-cw-source-context.py",
+            "scripts/ci/images/finalize-cw-runtime-source.py",
+            "images/cw-runtime/Dockerfile",
+            "scripts/ci/verify/build-linux-vmm-kernel.py",
+            "images/base/apt-get-with-retry",
+            "scripts/dev/build-native-managed-agent.py",
+            "crates/unrelated/src/lib.rs",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                head = self.repo.change(path, "Changed source identity input\n")
+                document = self.repo.plan()
+                for artifact in ("cw_cli_release_assets", "cw_runtime_image_asset", "gateway_image",
+                                 "workspace_image_verification", "workspace_image"):
+                    self.assertEqual(document["artifacts"][artifact]["state"], "affected")
+                # The new transport binds the full declared source digest;
+                # the Rust dependency closure still describes compiled code.
+                self.assertEqual(document["artifacts"]["workspace_cw_binary"]["state"], "unaffected")
+            self.repo.base = head
+
+    def test_cw_runtime_asset_graph_tracks_the_shared_source_contract(self) -> None:
+        import ast
+
+        release_path = PLANNER_PATH.parents[3] / "scripts/ci/release/cw_release.py"
+        declaration = next(node for node in ast.parse(release_path.read_text()).body
+                           if isinstance(node, ast.Assign)
+                           and any(isinstance(target, ast.Name) and target.id == "SOURCE_PATHSPEC"
+                                   for target in node.targets))
+        patterns = ast.literal_eval(declaration.value)
+        expected = [pattern + "/**" if (PLANNER_PATH.parents[3] / pattern).is_dir() else pattern
+                    for pattern in patterns]
+        prepare_path = PLANNER_PATH.parents[3] / "scripts/ci/images/prepare-cw-source-context.py"
+        declaration = next(node for node in ast.parse(prepare_path.read_text()).body
+                           if isinstance(node, ast.Assign)
+                           and any(isinstance(target, ast.Name) and target.id == "PREREQUISITES"
+                                   for target in node.targets))
+        expected.extend(path for path in ast.literal_eval(declaration.value) if path not in expected)
+        self.assertEqual(CW_RUNTIME_ASSET_SPEC["inputs"], expected)
+        self.assertTrue(set(expected) <= set(PRODUCTION_GRAPH["artifacts"]["cw_cli_release_assets"]["explicit_inputs"]))
+        self.assertEqual(PRODUCTION_GRAPH["artifacts"]["workspace_cw_binary"]["profiles"], ["release", "ci"])
+        self.assertIn("x86_64-unknown-linux-musl",
+                      PRODUCTION_GRAPH["artifacts"]["workspace_cw_binary"]["release_targets"])
 
     def test_compile_time_package_metadata_change_affects_cli(self) -> None:
         manifest = (self.repo.root / "cli/Cargo.toml").read_text().replace(

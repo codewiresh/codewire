@@ -73,6 +73,7 @@ run_protected_build() {
     GITHUB_OUTPUT="$output" \
       CODEWIRE_EXTERNAL_BUILDX_BUILDER="$builder" \
       CODEWIRE_EXTERNAL_DOCKER_CONFIG="$docker_config" \
+      CODEWIRE_CW_IMAGE_WORK="$work/cw-images" \
       CODEWIRE_PROVENANCE_BUILDER_ID="$PROVENANCE_BUILDER_ID" \
       CODEWIRE_SCCACHE_MODE="${CODEWIRE_SCCACHE_MODE:-local}" \
       CODEWIRE_BUILD_RUNTIME_SET="$build_runtime_set" \

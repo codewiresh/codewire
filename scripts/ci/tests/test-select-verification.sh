@@ -351,6 +351,21 @@ run_paths_case workspace_cache_consumers pull_request refs/pull/2047/head false 
   scripts/ci/tests/test-workspace-cache-probes.py \
   scripts/ci/verify/workspace-cache-probes.py \
   scripts/ci/tests/canary-workspace-r2-cache.sh
+run_paths_case cw_image_source_consumers pull_request refs/pull/2255/head false \
+  'policy security' \
+  scripts/ci/images/prepare-cw-source-context.py \
+  scripts/ci/images/build-cw-runtime-source.py \
+  scripts/ci/images/finalize-cw-runtime-source.py \
+  scripts/ci/images/prepare-cw-image-context.py \
+  scripts/ci/images/cw-image-consumer.py \
+  scripts/ci/images/cw-image-consumer.sh \
+  scripts/ci/images/cw-image-source.py \
+  scripts/ci/images/build-product-images.sh \
+  scripts/ci/tests/test-cw-image-context.py \
+  scripts/ci/tests/test-cw-runtime-source.py \
+  scripts/ci/tests/test-cw-image-consumer.py \
+  scripts/ci/tests/test-cw-image-source.py \
+  scripts/ci/tests/cw_image_fixtures.py
 run_present_paths_case workspace_cache_experiment_consumers pull_request refs/pull/2047/head false \
   'policy policy_shell security' \
   scripts/ci/setup/select-workspace-cache-experiment.py \
@@ -1717,6 +1732,8 @@ assert_tokens github_output \
 # Exercise changed-range discovery, including fail-closed missing PR state.
 repo="$TMP/ranges"
 git init -q -b main "$repo"
+git -C "$repo" config maintenance.auto false
+git -C "$repo" config gc.auto 0
 git -C "$repo" config user.name 'Selector Test'
 git -C "$repo" config user.email selector@example.invalid
 mkdir -p "$repo/docs"

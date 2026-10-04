@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Synthetic receipt checks: no Docker, Git subprocesses, network, or host auth."""
+"""Synthetic receipts and real admission/custody over never-executed CW bytes.
+
+The copy cases use private synthetic Git and a fake Docker API. No compiler,
+Docker daemon, incoming CW, provider network or host login is used.
+"""
 
 import copy
 import hashlib
@@ -9,8 +13,10 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -639,6 +645,351 @@ class InspectionTests(SyntheticSource):
                 self.command.return_value = raw
                 with self.assertRaises(ValueError):
                     artifact.inspect(IMAGE_ID)
+
+
+class CwCopyTests(unittest.TestCase):
+    def setUp(self):
+        path = Path(__file__).with_name("cw_image_fixtures.py")
+        spec = importlib.util.spec_from_file_location("workspace_cw_real_fixture", path)
+        self.fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.fixture)
+        temporary = tempfile.TemporaryDirectory(prefix="workspace-cw-copy-test-", dir=HELPER.parents[3] / ".tmp")
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name)
+        self.root = self.base / "source"
+        self.source = self.fixture.create_source(self.root)
+        self.work = self.base / "cw-image-work"
+        self.work.mkdir(mode=0o700)
+        self.original = self.fixture.make_producer(self.root, self.work / "build")
+        self.reference = self.work / "cw-producer-result.json"
+        self.fixture.write(self.reference, self.fixture.release.canonical(self.original), 0o400)
+        self.settings = self.base / "settings.json"
+        self.log = self.base / "docker.jsonl"
+        self.fake = self.base / "docker"
+        self.image = {"Id": IMAGE_ID, "Os": "linux", "Architecture": "amd64", "Config": {"Labels": {
+            "org.opencontainers.image.revision": self.source["source_sha"],
+            "dev.codewire.source-tree": self.source["source_tree"],
+            "dev.codewire.workspace-contract": hashlib.sha256(
+                (self.root / "scripts/ci/verify/workspace-agent-contract.sh").read_bytes()).hexdigest(),
+            "dev.codewire.promotable": "false", "dev.codewire.build.profile": "workspace-verify",
+        }}}
+        self.options = {"mode": "ok", "active": False, "image": self.image}
+        self.configure()
+        self.fake.write_text("#!/usr/bin/python3\n" + FAKE_CW_DOCKER.replace(
+            "SETTINGS_PATH", repr(str(self.settings))).replace("LOG_PATH", repr(str(self.log))).replace(
+            "PAYLOAD_PATH", repr(str(self.work / "build/assets/cw"))).replace(
+            "REFERENCE_PATH", repr(str(self.reference))), encoding="utf-8")
+        self.fake.chmod(0o700)
+        environment = {"PATH": "/usr/bin:/bin", "HOME": str(self.base), "LC_ALL": "C", "TZ": "UTC",
+                       "CODEWIRE_DOCKER_BIN": str(self.fake), "PYTHONDONTWRITEBYTECODE": "1"}
+        patch = mock.patch.dict(os.environ, environment, clear=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def configure(self, **changes):
+        self.options.update(changes)
+        self.settings.write_text(json.dumps(self.options), encoding="utf-8")
+        self.settings.chmod(0o600)
+
+    def verify(self):
+        return artifact.verify_cw(self.root, IMAGE_ID, self.reference)
+
+    def commands(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def assert_no_effects(self):
+        self.assertFalse(self.log.exists())
+        self.assertEqual(list(self.work.glob(".workspace-cw-copy-*")), [])
+
+    def assert_closed(self):
+        try:
+            os.waitpid(-1, os.WNOHANG | 0x40000000)
+        except ChildProcessError:
+            return
+        self.fail("copy did not prove all-child ECHILD")
+
+    def test_real_reopen_and_installed_bytes_preserve_original_and_current_source(self):
+        before = self.reference.read_bytes()
+        result = self.verify()
+        self.assertEqual(result["status"], "workspace-cw-verified")
+        self.assertEqual(result["payload"], self.original["payload"])
+        self.assertEqual(result["source"], self.original["source"])
+        self.assertEqual(result["current_source"]["revision"], self.source["source_sha"])
+        self.assertEqual(result["producer_receipt_sha256"], self.original["receipt"]["sha256"])
+        self.assertEqual(self.reference.read_bytes(), before)
+        self.assertTrue(result["family_cleanup_known"] and result["container_cleanup_known"])
+        commands = self.commands()
+        self.assertEqual([c["arguments"][0] for c in commands], ["image", "run", "container"])
+        run = commands[1]
+        self.assertIn("--pull=never", run["arguments"])
+        self.assertIn("--network=none", run["arguments"])
+        self.assertIn("--read-only", run["arguments"])
+        self.assertEqual(run["arguments"][-2:], [IMAGE_ID, "/usr/local/bin/cw"])
+        self.assertEqual(run["arguments"][run["arguments"].index("--entrypoint") + 1], "/usr/bin/cat")
+        self.assertEqual(run["arguments"][run["arguments"].index("--user") + 1], "1000:1000")
+        self.assert_closed()
+
+    def test_normal_python_default_cannot_write_bytecode_into_admitted_source(self):
+        self.assertEqual(list(self.root.rglob("__pycache__")), [])
+        self.assertEqual(list((self.work / "build").rglob("__pycache__")), [])
+        with mock.patch.object(sys, "dont_write_bytecode", False):
+            self.assertEqual(self.verify()["status"], "workspace-cw-verified")
+            self.assertFalse(sys.dont_write_bytecode)
+        self.assertEqual(list(self.root.rglob("__pycache__")), [])
+        self.assertEqual(list((self.work / "build").rglob("__pycache__")), [])
+        self.assert_closed()
+
+    def test_copied_wrong_truncated_extended_and_oversize_bytes_fail(self):
+        for mode in ("wrong", "short", "long", "oversize"):
+            with self.subTest(mode=mode):
+                self.configure(mode=mode)
+                with self.assertRaises(ValueError):
+                    self.verify()
+                self.assert_closed()
+                outcome = json.loads(sorted(self.work.glob(".workspace-cw-copy-*"),
+                                            key=lambda p: p.stat().st_mtime_ns)[-1].joinpath("outcome.json").read_bytes())
+                self.assertFalse(outcome["accepted"])
+                self.assertTrue(outcome["container_cleanup_known"])
+
+    def test_bad_original_receipt_pin_refuses_before_copy(self):
+        value = copy.deepcopy(self.original)
+        value["receipt"]["sha256"] = "0" * 64
+        self.reference.chmod(0o600)
+        self.reference.write_bytes(self.fixture.release.canonical(value))
+        self.reference.chmod(0o400)
+        with self.assertRaises(ValueError):
+            self.verify()
+        self.assert_no_effects()
+
+    def test_reference_closed_fields_and_profile_version_are_not_authority(self):
+        for key, value in (("profile", "ci"), ("version", "1.0.0"),
+                           ("cache_qualified", True), ("unexpected", True)):
+            changed = self.original | {key: value}
+            self.reference.chmod(0o600)
+            self.reference.write_bytes(self.fixture.release.canonical(changed))
+            self.reference.chmod(0o400)
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.verify()
+            self.assert_no_effects()
+
+    def test_effective_version_and_current_source_are_reopened(self):
+        with mock.patch.dict(os.environ, {"CODEWIRE_VERSION": "2.0.0"}), self.assertRaises(ValueError):
+            self.verify()
+        self.assert_no_effects()
+        changed = self.root / "crates/demo/src/lib.rs"
+        changed.write_bytes(b"pub fn changed() {}\n")
+        with self.assertRaises(ValueError):
+            self.verify()
+        self.assert_no_effects()
+
+    def test_docs_only_head_preserves_original_compilation_identity(self):
+        self.fixture.write(self.root / "README.fixture", b"not a compiler input\n", 0o644)
+        self.fixture.source.git(self.root, ["add", "README.fixture"])
+        self.fixture.source.git(self.root, ["-c", "user.name=Synthetic", "-c",
+            "user.email=synthetic@example.invalid", "commit", "-q", "-m", "docs-only fixture"])
+        head = self.fixture.source.git(self.root, ["rev-parse", "HEAD"]).strip().decode()
+        tree = self.fixture.source.git(self.root, ["rev-parse", "HEAD^{tree}"]).strip().decode()
+        self.image["Config"]["Labels"].update({"org.opencontainers.image.revision": head,
+                                              "dev.codewire.source-tree": tree})
+        self.configure(image=self.image)
+        result = self.verify()
+        self.assertNotEqual(head, self.original["source"]["revision"])
+        self.assertEqual(result["source"], self.original["source"])
+        self.assertEqual(result["payload"]["source_revision"], self.original["source"]["revision"])
+        self.assertEqual(result["current_source"]["revision"], head)
+        self.assert_closed()
+
+    def test_changed_original_export_cannot_become_a_fresh_admission(self):
+        cw = self.work / "build/assets/cw"
+        cw.chmod(0o600)
+        cw.write_bytes(cw.read_bytes() + b"x")
+        cw.chmod(0o500)
+        with self.assertRaises(ValueError):
+            self.verify()
+        self.assert_no_effects()
+
+    def test_wrong_image_source_label_is_refused_before_copy(self):
+        self.image["Config"]["Labels"]["org.opencontainers.image.revision"] = "0" * 40
+        self.configure(image=self.image)
+        with self.assertRaisesRegex(ValueError, "source identity mismatch"):
+            self.verify()
+        self.assertEqual([c["arguments"][0] for c in self.commands()], ["image"])
+        self.assert_closed()
+
+    def test_reference_nofollow_single_link_and_private_mode(self):
+        self.reference.chmod(0o600)
+        with self.assertRaises(ValueError):
+            self.verify()
+        self.reference.chmod(0o400)
+        alias = self.base / "alias"
+        os.link(self.reference, alias)
+        with self.assertRaises(ValueError):
+            self.verify()
+        alias.unlink()
+        self.reference.rename(alias)
+        self.reference.symlink_to(alias)
+        with self.assertRaises((ValueError, OSError)):
+            self.verify()
+        self.assert_no_effects()
+
+    def test_reference_replacement_during_copy_is_refused(self):
+        self.configure(mode="replace-reference")
+        with self.assertRaises(ValueError):
+            self.verify()
+        self.assert_closed()
+
+    def test_missing_malformed_and_symlink_cid_cannot_qualify_copy(self):
+        for mode in ("missing-cid", "bad-cid", "symlink-cid"):
+            self.configure(mode=mode)
+            with self.subTest(mode=mode), self.assertRaises((ValueError, OSError)):
+                self.verify()
+            self.assert_closed()
+
+    def test_arm_static_claim_refuses_before_docker(self):
+        with mock.patch.object(artifact.platform, "machine", return_value="aarch64"), self.assertRaises(ValueError):
+            self.verify()
+        self.assert_no_effects()
+
+    def test_failed_and_excess_stderr_commands_fail_without_rendering_content(self):
+        for mode in ("fail", "stderr-oversize"):
+            self.configure(mode=mode)
+            with self.subTest(mode=mode), self.assertRaises(ValueError) as error:
+                self.verify()
+            self.assertNotIn("CW_SYNTHETIC_SECRET_MUST_NOT_RENDER", str(error.exception))
+            self.assert_closed()
+
+    def test_deadline_kills_only_owned_command_and_proves_cleanup(self):
+        self.configure(mode="stall")
+        started = time.monotonic()
+        with mock.patch.object(artifact, "CW_COPY_SECONDS", 0.5), self.assertRaises(ValueError):
+            self.verify()
+        self.assertLess(time.monotonic() - started, 5)
+        self.assert_closed()
+
+    def test_cancelled_copy_cannot_publish_positive_outcome(self):
+        self.configure(mode="cancel")
+        with self.assertRaises(ValueError):
+            self.verify()
+        self.assert_closed()
+        for path in self.work.glob(".workspace-cw-copy-*/outcome.json"):
+            self.assertFalse(json.loads(path.read_bytes())["accepted"])
+
+    def test_detached_term_resistant_descendant_is_failure_even_after_reaping(self):
+        self.configure(mode="detach")
+        with self.assertRaisesRegex(ValueError, "unexpected family"):
+            self.verify()
+        self.assert_closed()
+
+    def test_private_docker_config_cannot_be_replaced_or_populated(self):
+        self.configure(mode="tamper-config")
+        with self.assertRaisesRegex(ValueError, "configuration is not empty"):
+            self.verify()
+        self.assert_closed()
+
+    def test_exact_owned_leftover_is_removed_before_success(self):
+        self.configure(mode="leftover")
+        self.verify()
+        commands = self.commands()
+        self.assertEqual([c["arguments"][0] for c in commands],
+                         ["image", "run", "container", "container", "rm", "container"])
+        self.assertEqual(commands[4]["arguments"], ["rm", "--force", "a" * 64])
+        self.assert_closed()
+
+    def test_foreign_container_and_unknown_cleanup_refuse_without_deleting(self):
+        for mode in ("foreign", "cleanup-fail"):
+            self.configure(mode=mode, active=False)
+            before = len(self.commands())
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                self.verify()
+            self.assertFalse(any(c["arguments"][0] == "rm" for c in self.commands()[before:]))
+            self.assert_closed()
+            outcome = json.loads(sorted(self.work.glob(".workspace-cw-copy-*"),
+                                        key=lambda p: p.stat().st_mtime_ns)[-1].joinpath("outcome.json").read_bytes())
+            self.assertFalse(outcome["accepted"] or outcome["container_cleanup_known"])
+
+    def test_docker_environment_has_only_private_config_and_selected_transport(self):
+        with mock.patch.dict(os.environ, {"CODEWIRE_SCCACHE_CREDENTIALS_FILE": "CW_SYNTHETIC_SECRET_MUST_NOT_RENDER",
+                                         "ANTHROPIC_API_KEY": "CW_SYNTHETIC_SECRET_MUST_NOT_RENDER",
+                                         "HTTP_PROXY": "http://synthetic.invalid", "DOCKER_HOST": "unix:///run/docker.sock"}):
+            self.verify()
+        for command in self.commands():
+            env = command["environment"]
+            self.assertEqual(set(env), {"PATH", "HOME", "DOCKER_CONFIG", "TMPDIR", "LC_ALL", "TZ", "DOCKER_HOST"})
+            self.assertEqual(env["DOCKER_HOST"], "unix:///run/docker.sock")
+            self.assertEqual(list(Path(env["DOCKER_CONFIG"]).iterdir()), [])
+            self.assertTrue(str(Path(env["HOME"]).parent).startswith(str(self.work)))
+
+
+FAKE_CW_DOCKER = r'''
+import hashlib,json,os,re,signal,sys,time
+from pathlib import Path
+settings_path=Path(SETTINGS_PATH)
+settings=json.loads(settings_path.read_bytes())
+arguments=sys.argv[1:]
+with Path(LOG_PATH).open('a') as log:
+    log.write(json.dumps({'arguments':arguments,'environment':dict(os.environ)},sort_keys=True)+'\n')
+mode=settings['mode']
+cid='a'*64
+if arguments[:2]==['image','inspect']:
+    assert arguments==['image','inspect',settings['image']['Id']]
+    print(json.dumps([settings['image']]))
+elif arguments[:1]==['run']:
+    assert len(arguments)==17
+    assert arguments[:7]==['run','--rm','--pull=never','--network=none','--read-only','--user','1000:1000']
+    assert arguments[7]=='--name' and re.fullmatch('codewire-workspace-cw-[0-9a-f]{32}',arguments[8])
+    assert arguments[9]=='--cidfile' and arguments[11]=='--label'
+    assert arguments[12]=='dev.codewire.workspace-cw-verification='+arguments[8].split('-')[-1]
+    assert arguments[13:]==['--entrypoint','/usr/bin/cat',settings['image']['Id'],'/usr/local/bin/cw']
+    path=Path(arguments[10])
+    if mode=='symlink-cid': path.symlink_to(PAYLOAD_PATH)
+    elif mode!='missing-cid':
+        fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        os.write(fd,b'malformed' if mode=='bad-cid' else cid.encode());os.close(fd)
+    settings.update(name=arguments[8],token=arguments[8].split('-')[-1],active=mode in ('leftover','foreign'))
+    settings_path.write_text(json.dumps(settings))
+    data=Path(PAYLOAD_PATH).read_bytes()
+    if mode=='wrong': data=data[:-1]+bytes([data[-1]^1])
+    if mode=='short': data=data[:-1]
+    if mode=='long': data+=b'x'
+    if mode=='oversize': data+=b'xx'
+    if mode=='fail':
+        print('CW_SYNTHETIC_SECRET_MUST_NOT_RENDER',file=sys.stderr);sys.exit(47)
+    if mode=='stderr-oversize':
+        sys.stderr.buffer.write(b'e'*(64*1024+1));sys.stderr.buffer.flush()
+    if mode=='stall': time.sleep(60)
+    if mode=='detach':
+        child=os.fork()
+        if child==0:
+            os.setsid()
+            grandchild=os.fork()
+            if grandchild: os._exit(0)
+            signal.signal(signal.SIGTERM,signal.SIG_IGN)
+            for fd in (0,1,2): os.close(fd)
+            time.sleep(60);os._exit(0)
+        os.waitpid(child,0)
+    if mode=='tamper-config':
+        Path(os.environ['DOCKER_CONFIG']).joinpath('config.json').write_text('{"auths":{}}')
+    if mode=='replace-reference':
+        reference=Path(REFERENCE_PATH);other=reference.with_name('replaced.json')
+        other.write_bytes(reference.read_bytes());other.chmod(0o400);other.replace(reference)
+    if mode=='cancel': os.kill(os.getppid(),signal.SIGTERM)
+    sys.stdout.buffer.write(data)
+elif arguments[:2]==['container','ls']:
+    assert arguments[2:5]==['--all','--no-trunc','--filter']
+    assert arguments[5]=='name=^/'+settings['name']+'$' and arguments[6:]==['--format','{{.ID}}']
+    if mode=='cleanup-fail': sys.exit(48)
+    if settings['active']: print(cid)
+elif arguments[:2]==['container','inspect']:
+    assert arguments==['container','inspect',cid]
+    print(json.dumps([{'Id':cid,'Image':settings['image']['Id'],'Name':'/'+settings['name'],
+        'Config':{'Image':settings['image']['Id'],'Labels':{'dev.codewire.workspace-cw-verification':
+            'foreign' if mode=='foreign' else settings['token']}}}]))
+elif arguments[:1]==['rm']:
+    assert arguments==['rm','--force',cid] and mode=='leftover'
+    settings['active']=False;settings_path.write_text(json.dumps(settings));print(cid)
+else:
+    raise AssertionError('unsupported fake Docker operation')
+'''
 
 
 if __name__ == "__main__":

@@ -848,16 +848,16 @@ build_image() {
   fi
 
   require_cmd docker
-  build_args=(docker buildx build)
+  build_args=(bash "$ROOT/scripts/ci/images/build-product-images.sh")
   if [[ "$DOCKER_BUILD_NO_CACHE" == "1" ]]; then
     build_args+=(--no-cache)
   fi
   if [[ "$SKIP_PUSH" == "1" ]]; then
     log "building local candidate image $ref from $dockerfile"
-    run_or_log "${build_args[@]}" --load -f "$dockerfile" --tag "$ref" "$ROOT"
+    run_or_log "${build_args[@]}" --load --set "$image.tags=$ref" "$image"
   else
     log "building and pushing candidate image $ref from $dockerfile"
-    run_or_log "${build_args[@]}" --push -f "$dockerfile" --tag "$ref" "$ROOT"
+    run_or_log "${build_args[@]}" --push --set "$image.tags=$ref" "$image"
   fi
 }
 

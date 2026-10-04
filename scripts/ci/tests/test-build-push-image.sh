@@ -17,6 +17,7 @@ readonly DASHBOARD_DOCKERFILE="$ROOT/apps/dashboard/Dockerfile"
 readonly MESH_DOCKERFILE="$ROOT/deployments/docker/mesh.Dockerfile"
 readonly GATEWAY_DOCKERFILE="$ROOT/deployments/docker/gateway.Dockerfile"
 readonly DERP_DOCKERFILE="$ROOT/deployments/docker/derp.Dockerfile"
+readonly CW_FIXTURE="$ROOT/scripts/ci/tests/cw_image_fixtures.py"
 readonly SERVICES_BINARY_ARTIFACTS=(
   codewire-idp:codewire-idp
   codewire-orchestration:codewire-orchestration
@@ -59,7 +60,23 @@ grep -Fq 'docker buildx inspect "$buildx_builder"' "$BUILDER" ||
   fail 'published-image builder does not validate an external BuildKit daemon'
 
 build_invocation_count() {
-  grep -Ec ' buildx (bake|build) ' "$FAKE_DOCKER_CALLS" || true
+  { grep -E ' buildx (bake|build) ' "$FAKE_DOCKER_CALLS" || true; } |
+    { grep -vc ' CW_PRODUCER=true ' || true; }
+}
+
+cw_producer_invocation_count() {
+  grep -Ec ' CW_PRODUCER=true .* buildx build ' "$FAKE_DOCKER_CALLS" || true
+}
+
+assert_cw_context() {
+  python3 -B - "$FAKE_CW_CONTEXTS" "$source_sha" "$1" <<'PY'
+import json
+from pathlib import Path
+import sys
+value = json.loads(Path(sys.argv[1]).read_text().splitlines()[-1])
+assert value['source_revision'] == sys.argv[2] and value['profile'] == sys.argv[3]
+assert len(value['payload_sha256']) == len(value['producer_receipt_sha256']) == 64
+PY
 }
 
 mkdir -p "$ROOT/.tmp"
@@ -307,27 +324,36 @@ verify_services_dockerfile_contract
 verify_kind_build_cache_contract
 [[ "$#" -eq 0 ]] || fail "unknown test mode: $1"
 
+work="$(mktemp -d "$ROOT/.tmp/build-push-image.XXXXXX")"
+mkdir -p "$work/bin"
+cleanup() {
+  local status=$?
+  if [[ "$status" -eq 0 ]]; then
+    rm -rf "$work"
+  else
+    printf '[test-build-push-image] retained failed fixture at %s\n' "$work" >&2
+  fi
+}
+trap cleanup EXIT
+
 if ! CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_RUST_PROFILE=ci \
-  "$RUST_BUILD_WRAPPER" true >"$ROOT/.tmp/rust-build-wrapper.out"; then
+  "$RUST_BUILD_WRAPPER" true >"$work/rust-build-wrapper.out"; then
   fail 'disabled sccache mode did not execute the requested command'
 fi
 grep -qF 'CODEWIRE_CI_PHASE name=rust-compile-link mode=disabled' \
-  "$ROOT/.tmp/rust-build-wrapper.out" ||
+  "$work/rust-build-wrapper.out" ||
   fail 'Rust build wrapper omitted its structured phase result'
 if CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_RUST_PROFILE=debug \
-  "$RUST_BUILD_WRAPPER" true >"$ROOT/.tmp/rust-build-wrapper-invalid.out" 2>&1; then
+  "$RUST_BUILD_WRAPPER" true >"$work/rust-build-wrapper-invalid.out" 2>&1; then
   fail 'Rust build wrapper accepted an undeclared build profile'
 fi
 if CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_RUST_PROFILE=ci \
   SCCACHE_BUCKET=test SCCACHE_ENDPOINT=https://test.invalid \
   CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/test \
   AWS_SHARED_CREDENTIALS_FILE=relative/credentials \
-  "$RUST_BUILD_WRAPPER" true >"$ROOT/.tmp/rust-build-wrapper-relative-credentials.out" 2>&1; then
+  "$RUST_BUILD_WRAPPER" true >"$work/rust-build-wrapper-relative-credentials.out" 2>&1; then
   fail 'Rust build wrapper accepted a relative shared-credentials path'
 fi
-
-work="$(mktemp -d "$ROOT/.tmp/build-push-image.XXXXXX")"
-mkdir -p "$work/bin"
 
 r2_credentials_file="$work/aws-shared-credentials"
 cat >"$r2_credentials_file" <<'EOF'
@@ -342,15 +368,39 @@ registry_password='registry-test-value'
 digest="sha256:$(printf 'd%.0s' {1..64})"
 second_digest="sha256:$(printf 'f%.0s' {1..64})"
 mismatch_digest="sha256:$(printf 'c%.0s' {1..64})"
-source_sha="$(git -C "$ROOT" rev-parse HEAD)"
-source_remote_before="$(git -C "$ROOT" remote get-url origin)"
-source_worktree="$work/clean-source"
-git -C "$ROOT" worktree add --detach "$source_worktree" "$source_sha" >/dev/null
-cleanup() {
-  git -C "$ROOT" worktree remove --force "$source_worktree" >/dev/null 2>&1 || true
-  rm -rf "$work"
-}
-trap cleanup EXIT
+source_fixture="$work/source"
+python3 -B - "$CW_FIXTURE" "$ROOT" "$source_fixture" <<'PY'
+from contextlib import closing
+import importlib.util
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location('push_image_fixture', sys.argv[1])
+fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture)
+root, destination = Path(sys.argv[2]), Path(sys.argv[3])
+fixture.create_source(destination)
+# Exact additional production callers/recipes used below. This remains a
+# private synthetic source, with no linked checkout or delivery-repo mutation.
+for name in (
+    'apps/dashboard/Dockerfile', 'deployments/docker/services.Dockerfile',
+    'deployments/docker/services.Dockerfile.dockerignore',
+    'deployments/docker/mesh.Dockerfile', 'deployments/docker/derp.Dockerfile',
+    'docker-compose.yml', 'scripts/ci/images/build-kind-images.sh',
+    'scripts/ci/images/build-push-image.sh', 'scripts/ci/images/build-push-runtime-images.sh',
+    'scripts/ci/images/nexus-publication-retry-contract.sh', 'scripts/ci/images/image-bundle.py',
+    'scripts/ci/images/compute-image-tags.sh',
+):
+    with closing(fixture.source.HeldSourceFile(root / name, fixture.source.MAX_FILE)) as held:
+        fixture.write(destination / name, held.data, 0o755 if held.metadata['mode'] & 0o111 else 0o644)
+        held.revalidate(content=True)
+fixture.source.git(destination, ['add', '-A'])
+fixture.source.git(destination, ['-c', 'user.name=Synthetic', '-c',
+    'user.email=synthetic@example.invalid', 'commit', '-q', '-m', 'synthetic image callers'])
+fixture.source.git(destination, ['remote', 'add', 'origin', 'https://fixture.invalid/codewire.git'])
+PY
+source_sha="$(git -C "$source_fixture" rev-parse HEAD)"
+source_remote_before="$(git -C "$source_fixture" remote get-url origin)"
 base_digest="sha256:$(printf 'e%.0s' {1..64})"
 base_ref="registry.example.invalid/codewire/base@$base_digest"
 
@@ -373,12 +423,55 @@ cat >"$work/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'DOCKER_CONFIG=%q ' "${DOCKER_CONFIG:-}" >>"${FAKE_DOCKER_CALLS:?}"
+cw_producer=false
+for argument in "$@"; do
+  if [[ "$argument" == cw-source=* ]]; then cw_producer=true; fi
+done
+printf 'CW_PRODUCER=%s ' "$cw_producer" >>"$FAKE_DOCKER_CALLS"
 printf 'CODEWIRE_IMAGE_SOURCE_SHA=%q CODEWIRE_RUST_PROFILE=%q CODEWIRE_SCCACHE_MODE=%q GIT_REMOTE=%q ' \
   "${CODEWIRE_IMAGE_SOURCE_SHA:-}" "${CODEWIRE_RUST_PROFILE:-}" "${CODEWIRE_SCCACHE_MODE:-}" \
   "$(git -C "${CODEWIRE_SOURCE_DIR:-.}" remote get-url origin)" \
   >>"$FAKE_DOCKER_CALLS"
 printf '%q ' "$@" >>"$FAKE_DOCKER_CALLS"
 printf '\n' >>"$FAKE_DOCKER_CALLS"
+
+if [[ "$cw_producer" == true ]]; then
+  exec python3 -B "${FAKE_CW_FIXTURE:?}" export -- "$@"
+fi
+
+# Reopen the real original producer and compare its payload with every actual
+# verified context handed to the image solve. No incoming CW is executed.
+for argument in "$@"; do
+  case "$argument" in
+    codewire-verified-cw=*|*.contexts.codewire-verified-cw=*)
+      python3 -B - "$FAKE_CW_FIXTURE" "$CODEWIRE_SOURCE_DIR" \
+        "${argument#*=}" "$FAKE_CW_CONTEXTS" <<'PY'
+from contextlib import closing
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import sys
+spec = importlib.util.spec_from_file_location('push_context_fixture', sys.argv[1])
+fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture)
+source, context = Path(sys.argv[2]), Path(sys.argv[3])
+result = context.parents[2] / 'cw-producer-result.json'
+expected = fixture.selected_asset(source, result)
+with closing(fixture.source.HeldSourceFile(context / 'cw', fixture.release.MAX_EXECUTABLE)) as held:
+    assert held.data == expected
+    held.revalidate(content=True)
+with closing(fixture.source.HeldSourceFile(result, fixture.release.MAX_JSON)) as held:
+    summary = fixture.release.parse_canonical(held.data)
+    held.revalidate(content=True)
+with Path(sys.argv[4]).open('a') as output:
+    output.write(json.dumps({'context': str(context), 'profile': summary['profile'],
+        'source_revision': summary['source']['revision'], 'payload_sha256': hashlib.sha256(expected).hexdigest(),
+        'producer_receipt_sha256': summary['receipt']['sha256']}, sort_keys=True) + '\n')
+PY
+      ;;
+  esac
+done
 
 set_manifest() {
   local reference="$1"
@@ -545,6 +638,7 @@ case "${1:-} ${2:-} ${3:-}" in
       echo 'non-retryable BuildKit failure' >&2
       exit 1
     fi
+    printf '#1 synthetic image Bake solve; no Docker/CW execution\n'
     metadata=''
     targets=()
     declare -A tags_by_target=()
@@ -567,7 +661,7 @@ case "${1:-} ${2:-} ${3:-}" in
           esac
           shift 2
           ;;
-        --file|--provenance|--progress)
+        --file|--provenance|--progress|--sbom)
           shift 2
           ;;
         --push|--pull|--load|--sbom=generator=*)
@@ -622,6 +716,7 @@ case "${1:-} ${2:-} ${3:-}" in
       echo 'non-retryable BuildKit failure' >&2
       exit 1
     fi
+    printf '#1 synthetic image build solve; no Docker/CW execution\n'
     metadata=''
     tags=()
     shift 2
@@ -638,10 +733,10 @@ case "${1:-} ${2:-} ${3:-}" in
           tags+=("$2")
           shift 2
           ;;
-        --build-arg|--label|-f)
+        --build-arg|--label|-f|--file|--platform|--build-context|--no-cache-filter|--provenance|--sbom)
           shift 2
           ;;
-        --push|--provenance=*|--sbom=generator=*)
+        --push|--pull|--load|--no-cache|--provenance=*|--sbom=generator=*)
           shift
           ;;
         *)
@@ -692,12 +787,15 @@ export FAKE_SLEEP_CALLS="$work/sleep-calls"
 export FAKE_MANIFESTS="$work/manifests"
 export FAKE_DIGEST="$digest"
 export FAKE_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
+export FAKE_CW_FIXTURE="$CW_FIXTURE"
+export FAKE_CW_CONTEXTS="$work/cw-contexts.jsonl"
 export FAKE_SOURCE_SHA="$source_sha"
-export CODEWIRE_SOURCE_DIR="$source_worktree"
+export CODEWIRE_SOURCE_DIR="$source_fixture"
 export GITHUB_SHA="$source_sha"
 export GITHUB_REF='refs/heads/main'
 export GITHUB_REF_NAME='main'
 export GITHUB_OUTPUT="$work/output"
+cd "$source_fixture"
 : >"$FAKE_MANIFESTS"
 
 CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_RUST_PROFILE=ci \
@@ -718,7 +816,7 @@ grep -qF 'SCCACHE_DIR=/var/cache/sccache MULTILEVEL=disk,s3' "$FAKE_SCCACHE_CALL
   fail 'Rust build wrapper did not bind the disk cache level to its BuildKit cache mount'
 
 (
-  cd "$ROOT"
+  cd "$source_fixture"
   "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
 )
 
@@ -747,8 +845,10 @@ grep -qF -- 'GIT_REMOTE=https://git.example.invalid/codewire/codewire.git' \
   "$FAKE_DOCKER_CALLS" || fail 'protected provenance does not build from the canonical source remote'
 grep -qF -- 'Provenance.SLSA' \
   "$FAKE_DOCKER_CALLS" || fail 'protected publication did not verify its emitted SLSA predicate'
-grep -qF -- '--sbom=generator=registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7' \
+{ grep -qF -- '--sbom=generator=registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7' \
   "$FAKE_DOCKER_CALLS" ||
+  grep -qF -- '--sbom generator=registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7' \
+    "$FAKE_DOCKER_CALLS"; } ||
   fail 'protected publication did not request an SBOM from the approved exact generator'
 grep -qF ' login registry.example.invalid ' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not use its scoped promoted-output login'
@@ -770,11 +870,14 @@ grep -qF -- 'buildx rm --force codewire-publish-' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not remove its isolated BuildKit builder'
 [[ "$(build_invocation_count)" -eq 1 ]] ||
   fail 'image was not built exactly once'
-[[ "$(git -C "$ROOT" remote get-url origin)" == "$source_remote_before" ]] ||
+[[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
+  fail 'gateway did not use exactly one original CW producer'
+assert_cw_context release
+[[ "$(git -C "$source_fixture" remote get-url origin)" == "$source_remote_before" ]] ||
   fail 'protected image publication did not restore the checkout origin remote'
 
 if ! (
-  cd "$ROOT"
+  cd "$source_fixture"
   FAKE_PROVENANCE_ENVELOPE=true \
     "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
 ); then
@@ -784,7 +887,7 @@ fi
   fail 'SLSA statement-envelope verification rebuilt an immutable source image'
 
 if (
-  cd "$ROOT"
+  cd "$source_fixture"
   CODEWIRE_PROVENANCE_BUILDER_ID=https://attacker.invalid/builder \
     "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
 ) >"$work/unrecognized-builder.out" 2>"$work/unrecognized-builder.err"; then
@@ -795,7 +898,7 @@ grep -qF 'unrecognized provenance builder identity' \
   fail 'unrecognized provenance builder rejection was not attributable'
 
 if (
-  cd "$ROOT"
+  cd "$source_fixture"
   FAKE_PROVENANCE_BUILDER_ID=https://attacker.invalid/builder \
     "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
 ) >"$work/invalid-provenance.out" 2>"$work/invalid-provenance.err"; then
@@ -808,7 +911,7 @@ grep -qF 'Protected image provenance is invalid' \
   fail 'provenance rejection rebuilt an immutable source image'
 
 if (
-  cd "$ROOT"
+  cd "$source_fixture"
   FAKE_SBOM_INVALID=1 \
     "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
 ) >"$work/invalid-sbom.out" 2>"$work/invalid-sbom.err"; then
@@ -823,7 +926,7 @@ grep -qF 'Protected image SBOM is invalid' \
 printf '0\n' >"$work/login-state"
 login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 (
-  cd "$ROOT"
+  cd "$source_fixture"
   FAKE_LOGIN_FAILURES=1 FAKE_LOGIN_STATE="$work/login-state" \
     "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
 ) >"$work/transient-login.out" 2>&1
@@ -836,7 +939,7 @@ printf '0\n' >"$work/login-nexus-state"
 : >"$FAKE_SLEEP_CALLS"
 login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 (
-  cd "$ROOT"
+  cd "$source_fixture"
   FAKE_LOGIN_NEXUS_FAILURES=2 \
   FAKE_LOGIN_NEXUS_STATE="$work/login-nexus-state" \
     "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
@@ -853,18 +956,20 @@ grep -qF 'retrying registry.example.invalid (2/61)' \
 
 : >"$GITHUB_OUTPUT"
 (
-  cd "$ROOT"
+  cd "$source_fixture"
   FAKE_DIGEST="$second_digest" \
     "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
 )
 [[ "$(build_invocation_count)" -eq 1 ]] ||
   fail 'existing source-SHA image was rebuilt'
+[[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
+  fail 'source-SHA reuse needlessly rebuilt CW'
 grep -qxF "candidate_ref=registry.example.invalid/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
   fail 'source-SHA rerun did not preserve the original digest'
 
 : >"$GITHUB_OUTPUT"
 (
-  cd "$ROOT"
+  cd "$source_fixture"
   FAKE_DIGEST="$second_digest" \
   CODEWIRE_BASE_IMAGE_REF="$base_ref" \
     "$BUILDER" workspace images/workspace/Dockerfile .
@@ -875,13 +980,16 @@ grep -qF -- "--build-arg BASE_IMAGE_REF=$base_ref" "$FAKE_DOCKER_CALLS" ||
   fail 'exact base digest did not reach the workspace build'
 [[ "$(build_invocation_count)" -eq 2 ]] ||
   fail 'workspace image was not built exactly once'
+[[ "$(cw_producer_invocation_count)" -eq 2 ]] ||
+  fail 'workspace did not use exactly one additional original CW producer'
+assert_cw_context release
 grep -qF -- '--no-cache-filter workspace-floating-tools' "$FAKE_DOCKER_CALLS" ||
   fail 'published workspace could reuse floating developer tools'
 
 : >"$GITHUB_OUTPUT"
 create_calls_before="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" || true)"
 (
-  cd "$ROOT"
+  cd "$source_fixture"
   REQUIRE_EXISTING_SOURCE_IMAGE=1 \
   CODEWIRE_RELEASE_TAG='v0.3.999' \
   CODEWIRE_SOURCE_SHA="$source_sha" \
@@ -902,7 +1010,7 @@ awk -F '\t' \
 
 build_calls_before="$(build_invocation_count)"
 if (
-  cd "$ROOT"
+  cd "$source_fixture"
   REQUIRE_EXISTING_SOURCE_IMAGE=1 \
   CODEWIRE_RELEASE_TAG='v0.3.999' \
   CODEWIRE_SOURCE_SHA="$source_sha" \
@@ -918,7 +1026,7 @@ grep -qF 'Required immutable source image is missing' \
 
 : >"$GITHUB_OUTPUT"
 (
-  cd "$ROOT"
+  cd "$source_fixture"
   CODEWIRE_RELEASE_TAG='v0.3.999' \
   CODEWIRE_SOURCE_SHA="$source_sha" \
     "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
@@ -930,7 +1038,7 @@ printf '0\n' >"$work/inspect-auth-state"
 login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 create_calls_before_auth="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" || true)"
 (
-  cd "$ROOT"
+  cd "$source_fixture"
   FAKE_INSPECT_AUTH_ONCE_REF='registry.example.invalid/codewire/gateway:v0.3.997' \
   FAKE_INSPECT_AUTH_STATE="$work/inspect-auth-state" \
   CODEWIRE_RELEASE_TAG='v0.3.997' \
@@ -948,7 +1056,7 @@ printf '0\n' >"$work/create-auth-state"
 login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 create_calls_before_auth="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" || true)"
 (
-  cd "$ROOT"
+  cd "$source_fixture"
   FAKE_CREATE_AUTH_ONCE_REF='registry.example.invalid/codewire/gateway:v0.3.996' \
   FAKE_CREATE_AUTH_STATE="$work/create-auth-state" \
   CODEWIRE_RELEASE_TAG='v0.3.996' \
@@ -966,7 +1074,7 @@ printf '%s\t%s\n' \
   'registry.example.invalid/codewire/gateway:v0.3.998' "$mismatch_digest" \
   >>"$FAKE_MANIFESTS"
 if (
-  cd "$ROOT"
+  cd "$source_fixture"
   CODEWIRE_RELEASE_TAG='v0.3.998' \
   CODEWIRE_SOURCE_SHA="$source_sha" \
     "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
@@ -981,7 +1089,7 @@ grep -qF 'Refusing to replace immutable image tag' "$work/mismatched-alias.out" 
 export FAKE_INSPECT_ERROR_REF="registry.example.invalid/codewire/mesh:$source_sha"
 login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 if (
-  cd "$ROOT"
+  cd "$source_fixture"
   "$BUILDER" mesh deployments/docker/mesh.Dockerfile .
 ) >"$work/inspect-error.out" 2>&1; then
   fail 'registry inspection error was treated as a missing image'
@@ -996,7 +1104,7 @@ grep -qF 'Unable to determine whether immutable image tag exists' \
 
 fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"
 if (
-  cd "$ROOT"
+  cd "$source_fixture"
   REQUIRE_EXISTING_SOURCE_IMAGE=yes \
     "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
 ) >"$work/invalid-require-existing.out" 2>&1; then
@@ -1009,7 +1117,7 @@ grep -qF 'REQUIRE_EXISTING_SOURCE_IMAGE must be 0 or 1' \
   fail 'invalid existing-source requirement reached credential retrieval'
 
 if (
-  cd "$ROOT"
+  cd "$source_fixture"
   CODEWIRE_BASE_IMAGE_REF='registry.example.invalid/codewire/base:latest' \
     "$BUILDER" workspace images/workspace/Dockerfile .
 ) >"$work/moving-base.out" 2>&1; then
@@ -1019,7 +1127,7 @@ fi
   fail 'invalid workspace base reached credential retrieval'
 
 if (
-  cd "$ROOT"
+  cd "$source_fixture"
   CODEWIRE_BASE_IMAGE_REF="$base_ref" \
     "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
 ) >"$work/non-workspace-base.out" 2>&1; then
@@ -1041,7 +1149,7 @@ docker_config="$(sed -nE 's/^DOCKER_CONFIG=([^ ]+).* login.*/\1/p' \
 
 : >"$FAKE_DOCKER_CALLS"
 (
-  cd "$ROOT"
+  cd "$source_fixture"
   CODEWIRE_DOCKER_BIN="$work/bin/docker" \
   CODEWIRE_BAKE_METADATA_FILE="$work/kind-r2-metadata.json" \
   CODEWIRE_SCCACHE_MODE=r2 \
@@ -1049,16 +1157,19 @@ docker_config="$(sed -nE 's/^DOCKER_CONFIG=([^ ]+).* login.*/\1/p' \
   SCCACHE_BUCKET=codewire-ci \
   SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
   CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/test \
-    "$KIND_BUILDER"
+    "$source_fixture/scripts/ci/images/build-kind-images.sh"
 )
 [[ "$(grep -oF 'secrets+=id=aws_shared_credentials\,src=' "$FAKE_DOCKER_CALLS" | wc -l)" -eq 4 ]] ||
   fail 'Kind did not bind and append the private credential file to all four Bake targets'
 grep -qF "src=$r2_credentials_file" "$FAKE_DOCKER_CALLS" ||
   fail 'Kind did not pass the exact private credential file path to Bake'
+[[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
+  fail 'Kind R2 caller did not use one CI-profile original CW producer'
+assert_cw_context ci
 
 : >"$FAKE_DOCKER_CALLS"
 (
-  cd "$ROOT"
+  cd "$source_fixture"
   CODEWIRE_SCCACHE_MODE=r2 \
   CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
   SCCACHE_BUCKET=codewire-ci \
@@ -1083,7 +1194,7 @@ done
 runtime_builds_before="$(build_invocation_count)"
 : >"$GITHUB_OUTPUT"
 (
-  cd "$ROOT"
+  cd "$source_fixture"
   CODEWIRE_BUILD_RUNTIME_SET=1 \
   CODEWIRE_SCCACHE_MODE=r2 \
   CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
@@ -1094,6 +1205,9 @@ runtime_builds_before="$(build_invocation_count)"
 )
 [[ "$(build_invocation_count)" -eq $((runtime_builds_before + 1)) ]] ||
   fail 'protected runtime set did not issue exactly one additional Bake build'
+[[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
+  fail 'protected runtime set did not share one original CW producer'
+assert_cw_context release
 grep -Eq ' buildx bake .* default $' "$FAKE_DOCKER_CALLS" ||
   fail 'protected runtime set did not execute the canonical five-target Bake group'
 runtime_set_call="$(grep -E ' buildx bake .* default $' "$FAKE_DOCKER_CALLS" | tail -1)"
@@ -1117,7 +1231,7 @@ awk -F '\t' \
 mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
 partial_runtime_builds_before="$(build_invocation_count)"
 if (
-  cd "$ROOT"
+  cd "$source_fixture"
   CODEWIRE_BUILD_RUNTIME_SET=1 \
   REQUIRE_EXISTING_SOURCE_IMAGE=1 \
     "$BUILDER" services deployments/docker/services.Dockerfile .
@@ -1130,12 +1244,14 @@ grep -qF 'Required immutable runtime-set source images are missing: mesh' \
 [[ "$(build_invocation_count)" -eq "$partial_runtime_builds_before" ]] ||
   fail 'missing required runtime-set image reached a build'
 (
-  cd "$ROOT"
+  cd "$source_fixture"
   CODEWIRE_BUILD_RUNTIME_SET=1 \
     "$BUILDER" services deployments/docker/services.Dockerfile .
 )
 [[ "$(build_invocation_count)" -eq $((partial_runtime_builds_before + 1)) ]] ||
   fail 'partial protected runtime retry did not issue exactly one Bake build'
+[[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
+  fail 'a mesh-only retry needlessly rebuilt CW'
 partial_runtime_call="$(grep -E ' buildx bake ' "$FAKE_DOCKER_CALLS" | tail -1)"
 [[ "$partial_runtime_call" == *' mesh ' ]] ||
   fail 'partial protected runtime retry did not rebuild only the missing target'
@@ -1144,7 +1260,7 @@ partial_runtime_call="$(grep -E ' buildx bake ' "$FAKE_DOCKER_CALLS" | tail -1)"
 
 fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"
 if (
-  cd "$ROOT"
+  cd "$source_fixture"
   CODEWIRE_BUILD_RUNTIME_SET=2 \
     "$BUILDER" services deployments/docker/services.Dockerfile .
 ) >"$work/invalid-runtime-set.out" 2>&1; then
@@ -1157,10 +1273,10 @@ grep -qF 'CODEWIRE_BUILD_RUNTIME_SET must be 0 or 1' \
 
 kind_builds_before="$(grep -Ec ' buildx bake .* kind $' "$FAKE_DOCKER_CALLS" || true)"
 (
-  cd "$ROOT"
+  cd "$source_fixture"
   CODEWIRE_DOCKER_BIN="$work/bin/docker" \
   CODEWIRE_BAKE_METADATA_FILE="$work/kind-metadata.json" \
-    "$KIND_BUILDER"
+    "$source_fixture/scripts/ci/images/build-kind-images.sh"
 ) >"$work/kind-build.out"
 [[ "$(grep -Ec ' buildx bake .* kind $' "$FAKE_DOCKER_CALLS" || true)" -eq \
   $((kind_builds_before + 1)) ]] || fail 'Kind did not issue exactly one Bake graph build'
@@ -1168,7 +1284,7 @@ grep -Eq ' buildx create --name codewire-kind-.* --driver docker-container .* --
   "$FAKE_DOCKER_CALLS" || fail 'Kind did not create its bounded transient BuildKit daemon'
 grep -qF -- '--driver-opt image=docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5' \
   "$FAKE_DOCKER_CALLS" || fail 'Kind did not use the pinned BuildKit daemon image'
-grep -Eq ' buildx bake --builder codewire-kind-.* kind $' "$FAKE_DOCKER_CALLS" ||
+grep -Eq ' buildx bake .*--builder codewire-kind-.* kind $' "$FAKE_DOCKER_CALLS" ||
   fail 'Kind Bake did not use its bounded transient builder'
 grep -Eq ' buildx rm --force codewire-kind-' "$FAKE_DOCKER_CALLS" ||
   fail 'Kind did not destroy its transient BuildKit daemon'
@@ -1176,6 +1292,9 @@ grep -Eq ' buildx rm --force codewire-kind-' "$FAKE_DOCKER_CALLS" ||
   fail 'Kind did not verify existence and trust labels for all four loaded images'
 grep -qF 'CODEWIRE_CI_PHASE name=product-image-build' "$work/kind-build.out" ||
   fail 'Kind image builder omitted its structured phase result'
+[[ "$(cw_producer_invocation_count)" -eq 2 ]] ||
+  fail 'local Kind caller did not use one additional CI-profile original CW producer'
+assert_cw_context ci
 
 base_source_tag="registry.example.invalid/codewire/base:$source_sha"
 awk -F '\t' -v reference="$base_source_tag" \
@@ -1185,7 +1304,7 @@ printf '0\n' >"$work/build-state"
 : >"$FAKE_SLEEP_CALLS"
 retry_builds_before="$(build_invocation_count)"
 (
-  cd "$ROOT"
+  cd "$source_fixture"
   FAKE_BUILD_NEXUS_FAILURES=2 \
     FAKE_BUILD_STATE="$work/build-state" \
     "$BUILDER" base images/base/Dockerfile images/base
@@ -1205,7 +1324,7 @@ mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
 : >"$FAKE_SLEEP_CALLS"
 fatal_builds_before="$(build_invocation_count)"
 if (
-  cd "$ROOT"
+  cd "$source_fixture"
   FAKE_BUILD_FATAL=1 "$BUILDER" base images/base/Dockerfile images/base
 ) >"$work/non-retryable-build.out" 2>&1; then
   fail 'non-Nexus BuildKit failure was retried to success'
@@ -1254,6 +1373,12 @@ for variant in legacy disabled protected; do
         "$BUILDER" workspace images/workspace/Dockerfile . ;;
   esac
   [[ "$(build_invocation_count)" == 1 ]] || fail "$variant workspace was not built exactly once"
+  if [[ "$variant" == legacy ]]; then
+    [[ "$(cw_producer_invocation_count)" -eq 0 ]] || fail 'legacy noncanonical recipe claimed verified CW'
+  else
+    [[ "$(cw_producer_invocation_count)" -eq 1 ]] || fail "$variant workspace did not use one original CW producer"
+    assert_cw_context release
+  fi
   if [[ "$variant" == protected ]]; then
     grep -qF -- '--no-cache-filter workspace-floating-tools' "$FAKE_DOCKER_CALLS" || fail 'protected compiler cache omitted freshness'
     grep -qF -- '--build-arg CODEWIRE_SCCACHE_MODE=r2' "$FAKE_DOCKER_CALLS" || fail 'protected workspace compiler API was lost'
@@ -1265,10 +1390,10 @@ for variant in legacy disabled protected; do
   if grep -qE -- '--cache-(from|to)|untrusted-(access-key|secret-key)' "$FAKE_DOCKER_CALLS"; then fail 'publisher exported candidate cache or credential material'; fi
 done
 
-printf 'untrusted build input\n' >"$source_worktree/forbidden-untracked-input"
+printf 'untrusted build input\n' >"$source_fixture/forbidden-untracked-input"
 fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"
 if (
-  cd "$ROOT"
+  cd "$source_fixture"
   "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
 ) >"$work/dirty-source.out" 2>&1; then
   fail 'protected image build accepted an untracked source input'
@@ -1277,5 +1402,17 @@ grep -qF 'Protected image build requires no untracked source files' \
   "$work/dirty-source.out" || fail 'dirty source rejection was not attributable'
 [[ "$(wc -l <"$FAKE_FETCH_CALLS")" -eq "$fetch_calls_before" ]] ||
   fail 'dirty source rejection reached credential retrieval'
+
+python3 -B - "$FAKE_CW_CONTEXTS" "$source_sha" <<'PY'
+from collections import Counter
+import json
+from pathlib import Path
+import sys
+records = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
+assert len(records) == 7 and Counter(record['profile'] for record in records) == {'release': 5, 'ci': 2}
+assert all(record['source_revision'] == sys.argv[2] for record in records)
+assert len({record['producer_receipt_sha256'] for record in records}) == 7
+print('protected/runtime/Kind CW original-producer contexts: 7 verified')
+PY
 
 echo 'build-push immutable source image tests passed'

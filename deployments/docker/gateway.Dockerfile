@@ -1,9 +1,9 @@
+# syntax=docker/dockerfile:1.20
 # Canonical sandbox gateway image.
 #
 # The image runs the Rust `codewire-gateway` startup path and ships the Rust
 # workspace daemon used inside sandbox pods.
 
-# syntax=docker/dockerfile:1.20
 ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 FROM codewire-rust-base AS rust-builder
@@ -43,7 +43,18 @@ RUN --mount=type=cache,id=codewire-gateway-cargo-registry,target=/usr/local/carg
     && mkdir -p /out \
     && cp "target/$CODEWIRE_RUST_PROFILE/codewire-gateway" /out/codewire-gateway
 
-FROM codewire-rust-base AS cw-builder
+# The checked-in host wrapper binds this reserved context after admitting the
+# complete static CW record and OCI archive. Without that binding it stays an
+# empty local stage; BuildKit cannot turn the name into a registry pull.
+FROM scratch AS codewire-verified-cw
+
+FROM scratch AS cw-builder-amd64
+COPY --from=codewire-verified-cw --chown=0:0 --chmod=0555 /cw /out/cw
+COPY --from=codewire-verified-cw --chown=0:0 --chmod=0444 /provenance.json /out/provenance/provenance.json
+
+# ARM retains its existing native build. It does not claim the verified amd64
+# startup asset or the platform updater capability.
+FROM codewire-rust-base AS cw-builder-arm64
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -60,14 +71,17 @@ RUN --mount=type=cache,id=codewire-gateway-cw-cargo-registry,target=/usr/local/c
     --mount=type=secret,id=aws_shared_credentials \
     find Cargo.toml Cargo.lock crates proto libs/gateway-proto -type f -exec touch {} + && \
     codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" -p codewire-cli-bin --bin cw \
-    && mkdir -p /out \
+    && mkdir -p /out/provenance \
     && cp "target/$CODEWIRE_RUST_PROFILE/cw" /out/cw
+
+FROM cw-builder-${TARGETARCH} AS cw-builder
 
 FROM ${DEBIAN_IMAGE}
 LABEL org.opencontainers.image.source="https://github.com/codewiresh/codewire" \
       org.opencontainers.image.title="codewire-gateway"
 COPY --from=rust-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=rust-builder /out/codewire-gateway /usr/local/bin/codewire-gateway
-COPY --from=cw-builder /out/cw /usr/local/bin/cw
+COPY --from=cw-builder --chown=0:0 --chmod=0555 /out/cw /usr/local/bin/cw
+COPY --from=cw-builder --chown=0:0 /out/provenance/ /usr/local/share/codewire/cw-runtime/
 RUN /usr/local/bin/cw --version
 ENTRYPOINT ["/usr/local/bin/codewire-gateway"]

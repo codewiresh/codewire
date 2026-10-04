@@ -99,6 +99,9 @@ target "mesh" {
 }
 
 target "gateway" {
+  # Build through scripts/ci/images/build-product-images.sh (or the owning
+  # Kind/protected wrapper). It admits and binds codewire-verified-cw before
+  # this target runs; an unbound recipe has only an empty local scratch stage.
   inherits   = ["_rust-product"]
   dockerfile = "deployments/docker/gateway.Dockerfile"
   tags       = ["${IMAGE_PREFIX}-gateway:${IMAGE_TAG}"]

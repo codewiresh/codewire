@@ -38,7 +38,16 @@ RUN mkdir /tmp/sccache && \
     test "$(sccache --version)" = 'sccache 0.17.0'
 COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-rust-build
 
-FROM cw-toolchain AS cw-builder
+FROM scratch AS codewire-verified-cw
+
+FROM scratch AS cw-builder-amd64
+COPY --from=codewire-verified-cw --chown=0:0 --chmod=0555 /cw /out/cw
+COPY --from=codewire-verified-cw --chown=0:0 --chmod=0444 /provenance.json /out/provenance/provenance.json
+
+# Keep the native ARM compiler path and the developer toolchain. Only amd64
+# receives the separately admitted static startup asset and its provenance.
+FROM cw-toolchain AS cw-builder-arm64
+ARG CODEWIRE_RUST_PROFILE=release
 ARG CODEWIRE_SCCACHE_MODE=disabled
 ARG SCCACHE_BUCKET
 ARG SCCACHE_ENDPOINT
@@ -52,10 +61,13 @@ RUN --mount=type=bind,target=/src,readonly \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,id=codewire-workspace-sccache-v1,target=/var/cache/sccache,sharing=shared \
     --mount=type=secret,id=aws_shared_credentials \
-    SCCACHE_BASEDIRS=/src codewire-rust-build cargo build --manifest-path /src/Cargo.toml --locked --release \
+    SCCACHE_BASEDIRS=/src codewire-rust-build cargo build --manifest-path /src/Cargo.toml --locked --profile "$CODEWIRE_RUST_PROFILE" \
       -p codewire-cli-bin --bin cw --target-dir /tmp/cargo-target && \
-    install -D -m 0755 /tmp/cargo-target/release/cw /out/cw && \
+    mkdir -p /out/provenance && \
+    install -D -m 0755 "/tmp/cargo-target/$CODEWIRE_RUST_PROFILE/cw" /out/cw && \
     rm -rf /tmp/cargo-target
+
+FROM cw-builder-${TARGETARCH} AS cw-builder
 
 # Prepare the loopback SSH acceptance target once, at image-build time. Extract
 # signed, version-pinned packages without executing maintainer scripts: this
@@ -196,7 +208,8 @@ RUN chown -R -h root:root /opt/codewire/agents && chmod -R go-w /opt/codewire/ag
 # Keep the source-built CLI after the moving developer tools. The final image proves
 # and exposes the exact binary built from this source tree.
 COPY --from=stock-ssh-fixture /out/ /opt/codewire/fixtures/openssh/
-COPY --from=cw-builder /out/cw /usr/local/bin/cw
+COPY --from=cw-builder --chown=0:0 --chmod=0555 /out/cw /usr/local/bin/cw
+COPY --from=cw-builder --chown=0:0 /out/provenance/ /usr/local/share/codewire/cw-runtime/
 RUN /usr/local/bin/cw --version
 
 USER codewire
