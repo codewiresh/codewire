@@ -144,6 +144,71 @@ impl Fixture {
 }
 
 #[test]
+fn member_helper_intake_preserves_escaped_text_and_refuses_excess_or_trailing_data() {
+    let f = Fixture::new();
+    let text = "\u{1}".repeat(MAX_TEXT_BYTES);
+    let origin = f.origin();
+    let driver = origin.request_id.clone();
+    let prepare = json!({"op":"prepare","origin":origin,"agent":"codex",
+        "model":"synthetic-codex","effort":"max","working_dir":f.environment.root(),
+        "name":"worker","prompt":text,"parent_session_id":"",
+        "expected_parent_launch_generation":0});
+    let encoded = serde_json::to_vec(&prepare).unwrap();
+    assert!(encoded.len() > 256 * 1024);
+    f.run(read_request(encoded.as_slice()).unwrap()).unwrap();
+    assert_eq!(load_message(&f.dir(&driver), &driver).unwrap().text, text);
+
+    let queue = |text: &str| {
+        let origin = f.origin();
+        let id = origin.request_id.clone();
+        let value = json!({"op":"queue","origin":origin,"driver_id":driver,
+            "session_id":format!("session-{driver}"),"action":"message","text":text,
+            "reply_to":null,"expected_turn_id":null,"expected_active_message_id":null,
+            "launch_generation":1});
+        (id, value)
+    };
+    let (id, request) = queue(&text);
+    let encoded = serde_json::to_vec(&request).unwrap();
+    f.run(read_request(encoded.as_slice()).unwrap()).unwrap();
+    let record = load_message(&f.dir(&driver), &id).unwrap();
+    assert_eq!(record.text, text);
+    assert_eq!(record.member_launch_generation, Some(1));
+    let before: Vec<_> = message_ids(&f.dir(&driver))
+        .unwrap()
+        .into_iter()
+        .map(|id| {
+            let bytes = fs::read(message_path(&f.dir(&driver), &id)).unwrap();
+            (id, bytes)
+        })
+        .collect();
+
+    let (_, oversized) = queue(&"x".repeat(REQUEST_BYTES));
+    let mut input = std::io::Cursor::new(serde_json::to_vec(&oversized).unwrap());
+    assert!(read_request(&mut input).is_err());
+    assert_eq!(input.position(), REQUEST_BYTES as u64 + 1);
+    let (_, request) = queue(&text);
+    let mut trailing = serde_json::to_vec(&request).unwrap();
+    trailing.extend_from_slice(b" {}");
+    assert!(read_request(trailing.as_slice()).is_err());
+    for text in [
+        "\u{1}".repeat(MAX_TEXT_BYTES + 1),
+        String::new(),
+        "\0".into(),
+    ] {
+        let (_, request) = queue(&text);
+        let bytes = serde_json::to_vec(&request).unwrap();
+        assert!(f.run(read_request(bytes.as_slice()).unwrap()).is_err());
+    }
+    assert_eq!(
+        message_ids(&f.dir(&driver)).unwrap(),
+        before.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>()
+    );
+    for (id, bytes) in before {
+        assert_eq!(fs::read(message_path(&f.dir(&driver), &id)).unwrap(), bytes);
+    }
+}
+
+#[test]
 fn member_helper_closed_grammar_never_admits_program_registry_or_zero_generation() {
     let f = Fixture::new();
     let id = f.prepare(None, false);

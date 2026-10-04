@@ -11,7 +11,8 @@ use std::ffi::OsString;
 pub(super) const PROTOCOL: u32 = 1;
 const MARKER: &str = "member-origin.json";
 const GENERATION: &str = "member-generation.json";
-const REQUEST_BYTES: usize = 256 * 1024;
+// Match the daemon's bounded envelope for sixfold-escaped 64 KiB text.
+const REQUEST_BYTES: usize = 512 * 1024;
 const RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 const SUMMARY_BYTES: usize = 192 * 1024;
 
@@ -193,14 +194,7 @@ fn run(arguments: Vec<OsString>) -> anyhow::Result<()> {
         "member environment differs"
     );
     let environment = DriverEnvironment::Host(environment);
-    let mut bytes = Vec::new();
-    std::io::stdin()
-        .lock()
-        .take(REQUEST_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= REQUEST_BYTES, "managed request too large");
-    let request: Request = serde_json::from_slice(&bytes)
-        .map_err(|_| anyhow::anyhow!("invalid managed record request"))?;
+    let request = read_request(std::io::stdin().lock())?;
     let value = handle(&environment, request, &|agent| find_program(agent.name()))?;
     let mut bytes = serde_json::to_vec(&value)?;
     bytes.push(b'\n');
@@ -213,6 +207,15 @@ fn run(arguments: Vec<OsString>) -> anyhow::Result<()> {
     output.write_all(&bytes)?;
     output.flush()?;
     Ok(())
+}
+
+fn read_request(input: impl std::io::Read) -> anyhow::Result<Request> {
+    let mut bytes = Vec::new();
+    input
+        .take(REQUEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= REQUEST_BYTES, "managed request too large");
+    serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("invalid managed record request"))
 }
 
 fn nonnil_id(value: &str) -> anyhow::Result<()> {

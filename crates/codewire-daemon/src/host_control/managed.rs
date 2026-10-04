@@ -11,7 +11,9 @@ pub(crate) const PROTOCOL: u32 = 1;
 pub(crate) const MAX_RECORD_REPLY: usize = 5 * 1024 * 1024;
 pub(crate) const CHUNK_DATA: usize = 240 * 1024;
 pub(crate) const MAX_CHUNK: usize = 256 * 1024;
-const MAX_REQUEST: usize = 256 * 1024;
+// A legal 64 KiB text can expand sixfold in JSON. The closed metadata,
+// including a 4 KiB working directory, fits in the remaining 128 KiB.
+const MAX_REQUEST: usize = 512 * 1024;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) fn is_managed(value: i32) -> bool {
@@ -247,6 +249,14 @@ pub(crate) fn driver_command_shape(command: &[String], environment: &str, driver
         && Path::new(&command[7]).is_absolute()
 }
 
+fn encode_request(request: &Value) -> Result<Vec<u8>, Error> {
+    let request = serde_json::to_vec(request).map_err(|_| Error::Invalid)?;
+    if request.len() > MAX_REQUEST {
+        return Err(Error::Capacity);
+    }
+    Ok(request)
+}
+
 pub(crate) async fn helper(
     config: &crate::Config,
     environment: &str,
@@ -257,10 +267,7 @@ pub(crate) async fn helper(
         return Err(Error::Denied);
     }
     retained_executable()?;
-    let request = serde_json::to_vec(&request).map_err(|_| Error::Invalid)?;
-    if request.len() > MAX_REQUEST {
-        return Err(Error::Capacity);
-    }
+    let request = encode_request(&request)?;
     let mut child = tokio::process::Command::new("/proc/self/exe")
         .arg("__host-agent-control")
         .arg("--environment")
@@ -394,13 +401,18 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn managed_pipe_complete_frame_delivers_eof_before_waiting_for_reply() {
+        let origin =
+            crate::host_control::tests::launch(3, &crate::host_control::tests::scope(), "exit 0")
+                .origin();
+        let mut control = control(v1::HostManagedAction::Message);
+        control.text = "\u{1}".repeat(64 * 1024);
+        validate_control(&control).unwrap();
+        let request = encode_request(&queue(&origin, &control)).unwrap();
         let mut child = pipe_child(
-            "raw = sys.stdin.buffer.read(262145)\nvalue = json.loads(raw)\nassert len(value['frame']) == 196608\nos.write(1, json.dumps({'bytes': len(raw), 'complete': True}).encode())",
+            "raw = sys.stdin.buffer.read(524289)\nvalue = json.loads(raw)\nassert value['op'] == 'queue'\nassert value['text'] == '\\x01' * 65536\nos.write(1, json.dumps({'bytes': len(raw), 'complete': True}).encode())",
         )
         .await;
         small_pipe(&child);
-        let request = serde_json::to_vec(&json!({"frame": "x".repeat(192 * 1024)})).unwrap();
-        assert!(request.len() < MAX_REQUEST);
         let result = tokio::time::timeout(
             Duration::from_secs(2),
             exchange_record_pipe(&mut child, &request),
@@ -506,6 +518,45 @@ mod tests {
             ..Default::default()
         }
     }
+    #[test]
+    fn managed_helper_serialization_preserves_maximally_escaped_legal_text() {
+        let mut scope = crate::host_control::tests::scope();
+        scope.org_id = "\"".repeat(256);
+        scope.network_id = "\\".repeat(256);
+        scope.grant_revision = u64::MAX;
+        scope.validate().unwrap();
+        let origin = crate::host_control::tests::launch(3, &scope, "exit 0").origin();
+        let text = "\u{1}".repeat(64 * 1024);
+        let mut launch = v1::HostControlManagedLaunch {
+            agent: v1::HostManagedAgent::Codex as i32,
+            model: "m".repeat(128),
+            effort: Some("max".into()),
+            working_dir: format!("/{}", "\u{1}".repeat(4095)),
+            name: "n".repeat(64),
+            prompt: Some(text.clone()),
+            ..Default::default()
+        };
+        let mut control = control(v1::HostManagedAction::Message);
+        control.text = text;
+        control.expected_launch_generation = u64::MAX;
+        validate_launch(&launch).unwrap();
+        validate_control(&control).unwrap();
+        for request in [prepare(&origin, &launch), queue(&origin, &control)] {
+            let encoded = encode_request(&request).unwrap();
+            assert!(encoded.len() > 256 * 1024);
+            assert_eq!(serde_json::from_slice::<Value>(&encoded).unwrap(), request);
+        }
+        launch.prompt.as_mut().unwrap().push('\u{1}');
+        control.text.push('\u{1}');
+        assert!(validate_launch(&launch).is_err());
+        assert!(validate_control(&control).is_err());
+        control.text = "x".repeat(MAX_REQUEST);
+        assert!(matches!(
+            encode_request(&queue(&origin, &control)),
+            Err(Error::Capacity)
+        ));
+    }
+
     #[test]
     fn managed_protocol_refuses_unbounded_or_ambiguous_agent_controls_before_dispatch() {
         let mut launch = v1::HostControlManagedLaunch {

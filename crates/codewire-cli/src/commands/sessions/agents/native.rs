@@ -11,9 +11,10 @@ use super::*;
 use serde_json::{Value, json};
 use std::path::{Component, Path};
 
-const MAX_REQUEST_BYTES: usize = 256 * 1024;
+// Sixfold JSON escaping of legal 64 KiB text plus its closed metadata.
+const MAX_REQUEST_BYTES: usize = 512 * 1024;
 // Preserve every admitted 4 MiB journal record, including response framing
-// and a config/binding whose input is itself bounded to 256 KiB.
+// and a config/binding whose input is itself bounded to 512 KiB.
 const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 const RESPONSE_FRAMING_BYTES: usize = 4 * 1024;
 const MAX_ERROR_BYTES: usize = 4 * 1024;
@@ -1290,6 +1291,77 @@ mod tests {
         .unwrap();
         assert_eq!(history["messages"], json!([]));
         assert_eq!(history["peer"], Value::Null);
+    }
+
+    #[test]
+    fn guest_intake_preserves_escaped_text_and_refuses_excess_or_trailing_data() {
+        let guest = guest();
+        let environment = &guest.environment;
+        let intake = |bytes: &[u8]| -> anyhow::Result<Value> {
+            let request = parse_request(&read_request(bytes)?)?;
+            handle(environment, request, &resolve_in_guest)
+        };
+        let config = launch(environment, AgentKind::Codex, true);
+        let prepared = serde_json::to_vec(&ControlRequest::Prepare {
+            config: config.clone(),
+        })
+        .unwrap();
+        intake(&prepared).unwrap();
+        let text = "\u{1}".repeat(MAX_TEXT_BYTES);
+        let bind = ControlRequest::Bind {
+            driver_id: config.driver_id.clone(),
+            session_id: SESSION.into(),
+            prompt: Some(text.clone()),
+        };
+        let encoded = serde_json::to_vec(&bind).unwrap();
+        assert!(encoded.len() > 256 * 1024);
+        let bound = intake(&encoded).unwrap();
+        assert_eq!(bound["message"]["text"], text);
+        let queue = |text: &str| ControlRequest::Queue {
+            driver_id: config.driver_id.clone(),
+            session_id: SESSION.into(),
+            message_id: new_id(),
+            action: MessageAction::Message,
+            text: text.into(),
+            reply_to: None,
+            turn_id: None,
+        };
+        let encoded = serde_json::to_vec(&queue(&text)).unwrap();
+        let queued = record(&intake(&encoded).unwrap());
+        assert_eq!(queued.text, text);
+        assert_eq!(queued.target_session_id, SESSION);
+        let dir = agents_root(environment).join(&config.driver_id);
+        let before: Vec<_> = message_ids(&dir)
+            .unwrap()
+            .into_iter()
+            .map(|id| {
+                let bytes = fs::read(message_path(&dir, &id)).unwrap();
+                (id, bytes)
+            })
+            .collect();
+
+        let mut input = std::io::Cursor::new(
+            serde_json::to_vec(&queue(&"x".repeat(MAX_REQUEST_BYTES))).unwrap(),
+        );
+        assert!(read_request(&mut input).is_err());
+        assert_eq!(input.position(), MAX_REQUEST_BYTES as u64 + 1);
+        let mut trailing = serde_json::to_vec(&queue(&text)).unwrap();
+        trailing.extend_from_slice(b" {}");
+        assert!(intake(&trailing).is_err());
+        for text in [
+            "\u{1}".repeat(MAX_TEXT_BYTES + 1),
+            String::new(),
+            "\0".into(),
+        ] {
+            assert!(intake(&serde_json::to_vec(&queue(&text)).unwrap()).is_err());
+        }
+        assert_eq!(
+            message_ids(&dir).unwrap(),
+            before.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>()
+        );
+        for (id, bytes) in before {
+            assert_eq!(fs::read(message_path(&dir, &id)).unwrap(), bytes);
+        }
     }
 
     #[test]

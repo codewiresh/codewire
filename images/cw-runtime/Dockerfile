@@ -31,7 +31,7 @@ RUN rm -f /etc/apt/sources.list && \
     test "$(/opt/zig/zig version)" = '0.15.2' && \
     rustup target add --toolchain 1.93.0 x86_64-unknown-linux-musl && \
     cargo install --locked cargo-zigbuild --version 0.23.0 && \
-    test "$(cargo zigbuild --version)" = 'cargo-zigbuild 0.23.0'
+    test "$(cargo-zigbuild --version)" = 'cargo-zigbuild 0.23.0'
 COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-rust-build
 ENV PATH="/opt/zig:/opt/protoc/bin:${PATH}" PROTOC=/opt/protoc/bin/protoc PYTHONDONTWRITEBYTECODE=1
 

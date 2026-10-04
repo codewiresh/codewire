@@ -32,7 +32,8 @@ const LOCAL_AUTHORITY: &str = "http://codewire-local-control";
 const FILE_CHUNK_BYTES: usize = 64 * 1024;
 const MAXIMUM_DAEMON_LOG_BYTES: usize = 64 * 1024;
 const STDIN_CHUNK_BYTES: usize = 64 * 1024;
-const MAXIMUM_EXEC_STDIN_BYTES: usize = 256 * 1024;
+// Legal 64 KiB managed text may expand sixfold in its closed JSON envelope.
+const MAXIMUM_EXEC_STDIN_BYTES: usize = 512 * 1024;
 // A maximum4MiB managed record plus its bounded JSON response framing.
 const MAXIMUM_EXEC_OUTPUT_BYTES: usize = 5 * 1024 * 1024;
 const MINIMUM_EXEC_TIMEOUT: Duration = Duration::from_secs(1);
@@ -567,7 +568,7 @@ fn validate_exec_with_stdin(
 ) -> Result<(), NativePublicClientError> {
     if stdin_len > MAXIMUM_EXEC_STDIN_BYTES {
         return Err(NativePublicClientError::InvalidRequest(
-            "stdin must not exceed 256 KiB",
+            "stdin must not exceed 512 KiB",
         ));
     }
     if !(MINIMUM_EXEC_TIMEOUT..=MAXIMUM_EXEC_TIMEOUT).contains(&timeout) {
@@ -800,6 +801,68 @@ mod tests {
             select_environment(environments(), "missing"),
             Err(NativePublicClientError::NotFound)
         ));
+    }
+
+    #[test]
+    fn exec_with_stdin_preserves_escaped_managed_envelope_in_bounded_run_frames() {
+        let text = "\u{1}".repeat(64 * 1024);
+        let request = serde_json::json!({
+            "op": "queue",
+            "driver_id": OLD_ID,
+            "session_id": format!("session-{OLD_ID}"),
+            "message_id": LIVE_ID,
+            "action": "message",
+            "text": text,
+        });
+        let stdin = serde_json::to_vec(&request).unwrap();
+        assert!(stdin.len() > 256 * 1024);
+        validate_exec_with_stdin(stdin.len(), Duration::from_secs(30))
+            .expect("legal escaped managed request is admitted before transport");
+        let command = vec![
+            "/synthetic/retained-cw".to_owned(),
+            "_agent-control".to_owned(),
+        ];
+        let start = RunStart {
+            command: command.clone(),
+            working_dir: "/workspace".into(),
+            allocate_tty: false,
+            ..Default::default()
+        };
+        let inputs: Vec<_> = run_requests(start, &stdin)
+            .map(|frame| frame.input.expect("Run input"))
+            .collect();
+        assert_eq!(inputs.len(), stdin.len().div_ceil(STDIN_CHUNK_BYTES) + 2);
+        assert!(matches!(
+            &inputs[0],
+            run_request::Input::Start(start)
+                if !start.allocate_tty && start.command == command && start.working_dir == "/workspace"
+        ));
+        assert!(matches!(
+            inputs.last(),
+            Some(run_request::Input::CloseStdin(_))
+        ));
+        assert_eq!(
+            inputs
+                .iter()
+                .filter(|input| matches!(input, run_request::Input::CloseStdin(_)))
+                .count(),
+            1
+        );
+        let mut received = Vec::new();
+        for input in &inputs[1..inputs.len() - 1] {
+            let run_request::Input::Stdin(chunk) = input else {
+                panic!("only stdin chunks may occur before the explicit close");
+            };
+            assert!(!chunk.is_empty() && chunk.len() <= 64 * 1024);
+            received.extend_from_slice(chunk);
+        }
+        assert_eq!(received, stdin);
+        let decoded: serde_json::Value = serde_json::from_slice(&received).unwrap();
+        assert_eq!(decoded, request);
+        assert_eq!(
+            decoded["text"].as_str().unwrap().as_bytes(),
+            text.as_bytes()
+        );
     }
 
     #[test]
