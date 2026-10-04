@@ -152,7 +152,23 @@ async fn the_credential_fetch_waits_for_a_binding_without_ever_giving_up() {
 
 #[test]
 fn the_credential_fetch_shares_the_daemon_connect_schedule() {
-    assert_eq!(DAEMON_CREDENTIAL_BACKOFF, DAEMON_CONNECT_BACKOFF);
+    // Same retry cadence; only the per-attempt timeout differs (a same-node
+    // daemon connect against a cross-node orchestration RPC).
+    assert_eq!(
+        DaemonConnectBackoff {
+            attempt_timeout: DAEMON_CONNECT_BACKOFF.attempt_timeout,
+            ..DAEMON_CREDENTIAL_BACKOFF
+        },
+        DAEMON_CONNECT_BACKOFF
+    );
+    assert_eq!(
+        DAEMON_CONNECT_BACKOFF.attempt_timeout,
+        Duration::from_secs(1)
+    );
+    assert_eq!(
+        DAEMON_CREDENTIAL_BACKOFF.attempt_timeout,
+        Duration::from_secs(5)
+    );
     assert_eq!(
         DAEMON_CREDENTIAL_BACKOFF.delay_after(Duration::ZERO),
         Duration::from_millis(250)
