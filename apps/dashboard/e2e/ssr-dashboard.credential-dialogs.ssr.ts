@@ -53,7 +53,7 @@ const footer = async (owner: Locator, primary?: string, dismissal = "Cancel") =>
   }
 };
 
-test("five full-row choices open focused provider editors with Back and one footer", async ({ page }) => {
+test("six full-row choices open focused provider editors with Back and one footer", async ({ page }) => {
   const errors: string[] = [];
   const posts: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -61,7 +61,7 @@ test("five full-row choices open focused provider editors with Back and one foot
   const add = action(page, "Add credential");
   await add.click();
   const chooser = dialog(page, "Add credential");
-  await expect(chooser.locator(".cw-credential-types > li")).toHaveCount(5);
+  await expect(chooser.locator(".cw-credential-types > li")).toHaveCount(6);
   await footer(chooser);
   await fits(page, chooser);
   await page.screenshot({ path: test.info().outputPath("credential-chooser.png") });
@@ -72,6 +72,7 @@ test("five full-row choices open focused provider editors with Back and one foot
     ["Codex", "Connect Codex", "Connect Codex", "codex"],
     ["OpenAI API key", "Add OpenAI API key", "Add API key", "openai"],
     ["Anthropic API key", "Add Anthropic API key", "Add API key", "anthropic"],
+    ["Claude subscription token", "Add Claude subscription token", "Add token", ""],
   ]) {
     const row = action(chooser, name);
     // The description itself is inside the action, not detached underneath it.
@@ -100,6 +101,17 @@ test("five full-row choices open focused provider editors with Back and one foot
       await expect(editor.getByRole("combobox")).toHaveCount(0);
       await expect(editor.getByLabel("Credential name", { exact: true })).toBeFocused();
       await expect(editor.getByLabel("Hard expiry (UTC)", { exact: true })).not.toBeVisible();
+    }
+    if (name === "Claude subscription token") {
+      // Paste only: the owner runs claude setup-token; the service sets the expiry.
+      await expect(editor.getByLabel("Credential name", { exact: true })).toBeFocused();
+      await expect(editor.getByLabel("Token", { exact: true })).toHaveAttribute("type", "password");
+      await expect(editor.locator('[name="provider"], [name="expiration_utc"], [name="credential_id"]')).toHaveCount(0);
+      await expect(editor.locator("code")).toHaveText("claude setup-token");
+      await expect(editor).toContainText("Run claude setup-token, then paste the token here.");
+      await expect(editor).toContainText("Requires a Claude Pro, Max, Team or Enterprise plan.");
+      await expect(editor).toContainText("never delivered to a Sandbox");
+      await page.screenshot({ path: test.info().outputPath("claude-subscription-token-dialog.png") });
     }
     await fits(page, editor);
     await action(editor, "Back").click();
@@ -201,6 +213,49 @@ test("rows keep status and expiry visible and open focused editors straight from
   await action(row, "Rename").click();
   await rename.getByRole("heading").evaluate((node) => { node.textContent = `Rename ${"a".repeat(256)}`; });
   await fits(page, page.locator("#credential-fixture-openai-rename"));
+});
+
+test("a Claude subscription token reads its expiry and is replaced by paste from its menu", async ({ page }) => {
+  const posts: { path: string; fields: Record<string, string> }[] = [];
+  await page.route("**/settings/credentials/_actions/**", async (route) => {
+    const request = route.request();
+    posts.push({ path: new URL(request.url()).pathname, fields: Object.fromEntries(new URLSearchParams(request.postData() || "")) });
+    await route.fulfill({ status: 204 });
+  });
+  const row = page.locator(".cw-credential-row").filter({ has: page.locator('summary[aria-label="Actions for Claude Max"]') });
+  await expect(row.locator(".cw-credential-identity")).toContainText("Anthropic · Claude subscription token");
+  await expect(row.locator(".cw-credential-identity")).toContainText("Expires October 20, 2026");
+  await expect(row.locator(".cw-credential-status")).toHaveText("Expires soon");
+  await expect(row.locator(".cw-credential-status")).toHaveAttribute("data-tone", "warning");
+  // Expiring soon still works, so its actions stay in the menu.
+  await expect(row.locator(":scope > form > .cw-credential-reconnect")).toHaveCount(0);
+  const menu = await rowMenu(row);
+  await expect(menuItems(menu)).toHaveText(["Rename", "Replace token", "Revoke"]);
+  await action(menu, "Replace token").click();
+  const replace = dialog(page, "Replace Claude Max");
+  await footer(replace, "Replace token");
+  await expect(page.locator("dialog[open]")).toHaveCount(1);
+  await expect(replace).toContainText("Run claude setup-token, then paste the new token here.");
+  await expect(replace).toContainText("its one-year expiry restarts");
+  const token = replace.getByLabel("Token", { exact: true });
+  await expect(token).toBeFocused();
+  await expect(token).toHaveAttribute("type", "password");
+  await expect(replace.locator('[name="expiration_utc"]')).toHaveCount(0);
+  await token.fill("synthetic-subscription-token-canary");
+  await action(replace, "Cancel").click();
+  await action(prompt(page), "Keep editing").click();
+  await expect(token).toHaveValue("synthetic-subscription-token-canary");
+  await fits(page, replace);
+  await page.screenshot({ path: test.info().outputPath("claude-subscription-token-replace.png") });
+  expect(posts).toEqual([]);
+  await action(replace, "Replace token").click();
+  await expect.poll(() => posts.length).toBe(1);
+  expect(posts[0]).toEqual({ path: "/settings/credentials/_actions/credentials/claude-subscription-token/add", fields: {
+    _csrf: "design-fixture-only", credential_id: "fixture-claude", expected_revocation_generation: "2",
+    name: "Claude Max", token: "synthetic-subscription-token-canary",
+  } });
+  expect(await page.locator("a[href]").evaluateAll((links) => links.map((link) => link.getAttribute("href")).join("\n")))
+    .not.toContain("synthetic-subscription-token-canary");
 });
 
 test("a credential whose refresh failed says Reconnect needed and reconnects from its row", async ({ page }) => {

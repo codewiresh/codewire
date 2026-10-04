@@ -37,7 +37,8 @@ use crate::{
         CredentialProfileUpdateSubmission, CredentialRenameSubmission,
         CredentialRevisionSubmission, CredentialRotateSubmission, CredentialSettingsView,
         CredentialSshGenerateSubmission, CredentialSshImportSubmission,
-        GitHubAppAuthorizationSubmission, GitIdentitySubmission,
+        CredentialSubscriptionTokenSubmission, GitHubAppAuthorizationSubmission,
+        GitIdentitySubmission,
     },
 };
 
@@ -366,6 +367,71 @@ pub(super) async fn add_api_key_action(
         Ok(()) => page_redirect("credential-added", false, &query, &headers),
         Err(error) => credential_mutation_error(error.code, false, dialog, &query, &headers),
     }
+}
+
+/// Add a pasted Claude subscription token, or replace the exact one a row's
+/// dialog observed. The owner ran `claude setup-token`; Codewire never runs
+/// Claude Code's OAuth client. The token is never echoed back.
+pub(super) async fn add_claude_subscription_token_action(
+    State(state): State<AppState>,
+    CredentialQuery(query): CredentialQuery,
+    headers: HeaderMap,
+    Form(form): Form<CredentialSubscriptionTokenSubmission>,
+) -> Response {
+    let replace = !form.credential_id.is_empty() || form.expected_revocation_generation.is_some();
+    let dialog = if replace {
+        row_action_dialog("credential", &form.credential_id, "replace")
+    } else {
+        "add-claude-subscription-token".to_owned()
+    };
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
+        Ok(cookie) => cookie,
+        Err(response) => return response,
+    };
+    let name = form.name.trim();
+    let token = form.token.into_bytes();
+    let replacement = match (replace, form.expected_revocation_generation) {
+        (false, None) => Some(None),
+        (true, Some(generation))
+            if exact_id(&form.credential_id).is_ok() && valid_generation(generation, true) =>
+        {
+            Some(Some((form.credential_id, generation)))
+        }
+        _ => None,
+    };
+    let Some(replacement) = replacement else {
+        return page_error_redirect("credential-invalid", &dialog, &query, &headers);
+    };
+    if !valid_credential_name(name) || !valid_subscription_token(&token) {
+        return page_error_redirect("credential-invalid", &dialog, &query, &headers);
+    }
+    match credentials_connect::add_claude_subscription_token(
+        &state,
+        cookie,
+        name.into(),
+        token,
+        replacement,
+    )
+    .await
+    {
+        Ok(()) => page_redirect(
+            if replace {
+                "claude-token-replaced"
+            } else {
+                "claude-token-added"
+            },
+            false,
+            &query,
+            &headers,
+        ),
+        Err(error) => credential_mutation_error(error.code, false, &dialog, &query, &headers),
+    }
+}
+
+/// The token's shape only: printable ASCII without whitespace, within the
+/// service's bounds. No provider is asked whether it is valid.
+fn valid_subscription_token(token: &[u8]) -> bool {
+    (16..=1024).contains(&token.len()) && token.iter().all(u8::is_ascii_graphic)
 }
 
 pub(super) async fn generate_ssh_action(
@@ -1305,7 +1371,7 @@ fn valid_row_action(kind: &str, action: &str) -> bool {
     match kind {
         "credential" => matches!(
             action,
-            "rename" | "reconnect" | "rotate" | "revoke" | "delete"
+            "rename" | "reconnect" | "rotate" | "replace" | "revoke" | "delete"
         ),
         "profile" => matches!(action, "rename" | "edit" | "delete"),
         _ => false,
@@ -1329,6 +1395,7 @@ fn approved_dialog(requested: &str, data: &credentials_connect::CredentialSettin
             | "connect-codex"
             | "add-openai-api-key"
             | "add-anthropic-api-key"
+            | "add-claude-subscription-token"
             | "add-ssh"
             | "generate-ssh"
             | "import-ssh"
@@ -1342,6 +1409,8 @@ fn approved_dialog(requested: &str, data: &credentials_connect::CredentialSettin
                         && credential.oauth
                     || requested == row_action_dialog("credential", id, "rotate")
                         && credential.api_key
+                    || requested == row_action_dialog("credential", id, "replace")
+                        && credential.subscription_token
                     || requested == row_action_dialog("credential", id, "revoke")
                         && !credential.revoked
                         && credential.oauth_provider != "github"
@@ -1380,6 +1449,8 @@ fn approved_message(code: &str) -> &'static str {
         "credential-imported" => "SSH identity imported.",
         "credential-renamed" => "Credential renamed.",
         "credential-rotated" => "API key credential rotated.",
+        "claude-token-added" => "Claude subscription token added.",
+        "claude-token-replaced" => "Claude subscription token replaced.",
         "credential-revoked" => "Credential revoked.",
         "credential-deleted" => "Credential deleted.",
         "credential-connected" => "Credential connected.",
@@ -1467,6 +1538,7 @@ mod tests {
                 public_key_id: "public-key-1".into(),
                 api_key: false,
                 oauth: true,
+                subscription_token: false,
                 reconnect_needed: false,
                 revoked: false,
                 oauth_provider: "github",
@@ -1576,6 +1648,7 @@ mod tests {
             "github/authorize",
             "credentials/oauth/enroll",
             "credentials/api-key/add",
+            "credentials/claude-subscription-token/add",
             "credentials/ssh/generate",
             "credentials/ssh/import",
             "profiles/create",
@@ -1674,6 +1747,144 @@ mod tests {
         assert_eq!(html.matches("cw-credential-reconnect").count(), 1);
     }
 
+    fn subscription_row(id: &str, reconnect_needed: bool) -> CredentialRowView {
+        CredentialRowView {
+            id: id.into(),
+            name: "Claude Max".into(),
+            provider: "Anthropic",
+            authentication: "Claude subscription token",
+            account_hint: String::new(),
+            status: if reconnect_needed {
+                "Expired"
+            } else {
+                "Expires soon"
+            },
+            status_tone: "warning",
+            expires: "October 20, 2027".into(),
+            generation: 3,
+            ssh_public_key: String::new(),
+            ssh_fingerprint: String::new(),
+            public_key_id: "public-key-2".into(),
+            api_key: false,
+            oauth: false,
+            subscription_token: true,
+            reconnect_needed,
+            revoked: false,
+            oauth_provider: "",
+        }
+    }
+
+    #[test]
+    fn claude_subscription_tokens_are_added_and_replaced_by_paste_only() {
+        let id = "00000000-0000-4000-8000-000000000006";
+        let mut data = dialog_data();
+        data.credentials.push(subscription_row(id, false));
+        assert_eq!(
+            approved_dialog(&format!("credential-{id}-replace"), &data),
+            format!("credential-{id}-replace")
+        );
+        for denied in ["reconnect", "rotate"] {
+            assert!(approved_dialog(&format!("credential-{id}-{denied}"), &data).is_empty());
+        }
+        let html = rendered_dialogs_with_data("", "", data);
+        let row = html
+            .split("<li class=\"cw-credential-row\">")
+            .find(|row| row.contains("Claude Max"))
+            .unwrap();
+        let (primary, dialogs) = row.split_once("<dialog").unwrap();
+        assert!(primary.contains("<span>Anthropic · Claude subscription token</span>"));
+        assert!(primary.contains("<span>Expires October 20, 2027</span>"));
+        assert!(primary.contains("data-tone=\"warning\">Expires soon</span>"));
+        let items: Vec<_> = primary
+            .split("class=\"cw-menu-item")
+            .skip(1)
+            .map(|item| item.split('>').nth(1).unwrap().split('<').next().unwrap())
+            .collect();
+        assert_eq!(items, ["Rename", "Replace token", "Revoke"]);
+        // Expiring soon still works: no row-level action yet.
+        assert!(!primary.contains("cw-credential-reconnect"));
+        let replace = dialogs
+            .split(&format!("id=\"credential-{id}-replace\""))
+            .nth(1)
+            .unwrap()
+            .split("</dialog>")
+            .next()
+            .unwrap();
+        assert!(replace.contains(&format!(
+            "<h2 id=\"credential-{id}-replace-title\">Replace Claude Max</h2>"
+        )));
+        assert!(replace.contains(
+            "<p>Run <code>claude setup-token</code>, then paste the new token here. Profiles that use it keep working, and its one-year expiry restarts.</p>"
+        ));
+        assert!(replace.contains(&format!(
+            "action=\"{PATH}_actions/credentials/claude-subscription-token/add?org=sample-org\""
+        )));
+        for hidden in [
+            format!("name=\"credential_id\" value=\"{id}\""),
+            "name=\"expected_revocation_generation\" value=\"3\"".into(),
+            "name=\"name\" value=\"Claude Max\"".into(),
+        ] {
+            assert!(replace.contains(&hidden), "{hidden}");
+        }
+        assert!(replace.contains(&format!(
+            "<label class=\"cw-label\" for=\"credential-{id}-token\">Token</label><input class=\"cw-input\" id=\"credential-{id}-token\" name=\"token\" autofocus type=\"password\" data-dialog-private maxlength=\"1024\""
+        )));
+        assert!(replace.contains(">Replace token</button></footer>"));
+        assert!(!replace.contains("expiration_utc"));
+
+        let add = html
+            .split("id=\"add-claude-subscription-token\"")
+            .nth(1)
+            .unwrap()
+            .split("</dialog>")
+            .next()
+            .unwrap();
+        assert!(add.contains(
+            "<h2 id=\"add-claude-subscription-token-title\">Add Claude subscription token</h2>"
+        ));
+        assert!(add.contains("<p>Run <code>claude setup-token</code>, then paste the token here.</p><p class=\"cw-settings-muted\">Requires a Claude Pro, Max, Team or Enterprise plan. Codewire records an expiry one year from when you add the token. It stays in Codewire and is never delivered to a Sandbox.</p>"));
+        assert!(add.contains("<label class=\"cw-label\" for=\"claude-subscription-token-name\">Credential name</label>"));
+        assert!(add.contains("<label class=\"cw-label\" for=\"claude-subscription-token-value\">Token</label><input class=\"cw-input\" id=\"claude-subscription-token-value\" name=\"token\" type=\"password\" data-dialog-private maxlength=\"1024\" autocomplete=\"new-password\" autocapitalize=\"none\" spellcheck=\"false\" required>"));
+        assert!(add.contains(">Add token</button></footer>"));
+        assert!(!add.contains("name=\"provider\""));
+        assert!(!add.contains("name=\"credential_id\""));
+        assert!(html.contains("<strong id=\"add-claude-subscription-token-choice-name\">Claude subscription token</strong><span id=\"add-claude-subscription-token-choice-description\">Use your Claude plan with Claude Code. Paste a token from claude setup-token.</span>"));
+
+        // A refused or expired token offers its replacement on the row itself.
+        let mut data = dialog_data();
+        data.credentials.push(subscription_row(id, true));
+        let html = rendered_dialogs_with_data("", "", data);
+        let row = html
+            .split("<li class=\"cw-credential-row\">")
+            .find(|row| row.contains("Claude Max"))
+            .unwrap()
+            .split("<dialog")
+            .next()
+            .unwrap();
+        assert!(row.split("</details>").nth(1).unwrap().contains(&format!(
+            "<button class=\"cw-button cw-credential-reconnect\" type=\"submit\" data-dialog-open=\"credential-{id}-replace\" aria-haspopup=\"dialog\" aria-controls=\"credential-{id}-replace\">Replace token<span class=\"cw-sr-only\"> Claude Max</span></button>"
+        )));
+        assert!(!row.contains(&format!("credential-{id}-reconnect")));
+
+        assert_eq!(
+            approved_message("claude-token-added"),
+            "Claude subscription token added."
+        );
+        assert_eq!(
+            approved_message("claude-token-replaced"),
+            "Claude subscription token replaced."
+        );
+        assert!(valid_subscription_token(b"sk-ant-oat01-synthetic-token"));
+        for token in [
+            b"short".as_slice(),
+            b"sk-ant-oat01 with space",
+            b"sk-ant-oat01-trailing-newline\n",
+            &[b'x'; 1025],
+        ] {
+            assert!(!valid_subscription_token(token));
+        }
+    }
+
     #[test]
     fn github_connect_dialog_shows_the_one_connection_instead_of_a_new_authorization() {
         let mut data = dialog_data();
@@ -1739,6 +1950,7 @@ mod tests {
             "connect-codex",
             "add-openai-api-key",
             "add-anthropic-api-key",
+            "add-claude-subscription-token",
             "add-ssh",
             "generate-ssh",
             "import-ssh",
@@ -1766,6 +1978,9 @@ mod tests {
             "credential-00000000-0000-4000-8000-000000000001-edit",
             "credential-00000000-0000-4000-8000-000000000001-rename",
             "credential-00000000-0000-4000-8000-000000000001-rotate",
+            // Only a Claude subscription token is replaced with a new token.
+            "credential-00000000-0000-4000-8000-000000000001-replace",
+            "credential-00000000-0000-4000-8000-000000000001-replace-token",
             // GitHub has no user-visible revoke step; Delete replaces it.
             "credential-00000000-0000-4000-8000-000000000001-revoke",
             "profile-00000000-0000-4000-8000-000000000002-reconnect",
@@ -1794,7 +2009,7 @@ mod tests {
         );
         // Rows open their actions from a menu with no per-row manage dialog;
         // the profile row has Rename, Edit identities and Delete dialogs.
-        assert_eq!(html.matches("data-dialog id=").count(), 14);
+        assert_eq!(html.matches("data-dialog id=").count(), 15);
         assert!(!html.contains("data-dialog-auto-open"));
         assert!(!html.contains("<dialog open"));
         assert!(html.contains("name=\"expected_revocation_generation\" value=\"7\""));

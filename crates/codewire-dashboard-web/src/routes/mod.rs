@@ -352,6 +352,11 @@ pub(crate) fn router() -> Router<AppState> {
             post(credentials::rotate_api_key_action).layer(DefaultBodyLimit::max(8 * 1024)),
         )
         .route(
+            "/settings/credentials/_actions/credentials/claude-subscription-token/add",
+            post(credentials::add_claude_subscription_token_action)
+                .layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
             "/settings/credentials/_actions/credentials/ssh/generate",
             post(credentials::generate_ssh_action).layer(DefaultBodyLimit::max(8 * 1024)),
         )

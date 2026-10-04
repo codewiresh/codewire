@@ -390,7 +390,10 @@ pub(crate) struct CredentialRowView {
     pub(crate) public_key_id: String,
     pub(crate) api_key: bool,
     pub(crate) oauth: bool,
-    /// A rotating OAuth refresh failed; only the owner's Reconnect restores it.
+    /// A Claude subscription token, replaced by pasting a new token.
+    pub(crate) subscription_token: bool,
+    /// A rotating OAuth refresh failed, or a Claude subscription token was
+    /// refused or expired; only the owner's Reconnect or Replace restores it.
     pub(crate) reconnect_needed: bool,
     pub(crate) revoked: bool,
     pub(crate) oauth_provider: &'static str,
@@ -566,6 +569,20 @@ pub(crate) struct CredentialRenameSubmission {
     pub(crate) expected_revocation_generation: u64,
     pub(crate) expected_name: String,
     pub(crate) name: String,
+}
+
+// Deliberately not Debug: a pasted Claude subscription token is write-only.
+// Both replacement fields are present together to replace an exact token.
+#[derive(Deserialize)]
+pub(crate) struct CredentialSubscriptionTokenSubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
+    pub(crate) name: String,
+    pub(crate) token: String,
+    #[serde(default)]
+    pub(crate) credential_id: String,
+    #[serde(default)]
+    pub(crate) expected_revocation_generation: Option<u64>,
 }
 
 // Deliberately not Debug: replacement API-key material is write-only.

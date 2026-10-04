@@ -265,13 +265,12 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await page.getByRole("dialog", { name: "Create profile", exact: true })
       .getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(page.locator('form[action$="/credentials/api-key/add"]')).toHaveCount(2);
+    await expect(page.locator('#add-claude-subscription-token form[action$="/credentials/claude-subscription-token/add"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/credentials/ssh/generate"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/credentials/ssh/import"]')).toHaveCount(1);
-    const protectedInputs = page.locator('#add-openai-api-key input[type="password"], #add-anthropic-api-key input[type="password"], #import-ssh input[type="password"]');
-    await expect(protectedInputs).toHaveCount(3);
-    await expect(protectedInputs.nth(0)).toHaveValue("");
-    await expect(protectedInputs.nth(1)).toHaveValue("");
-    await expect(protectedInputs.nth(2)).toHaveValue("");
+    const protectedInputs = page.locator('#add-openai-api-key input[type="password"], #add-anthropic-api-key input[type="password"], #add-claude-subscription-token input[type="password"], #import-ssh input[type="password"]');
+    await expect(protectedInputs).toHaveCount(4);
+    for (let index = 0; index < 4; index += 1) await expect(protectedInputs.nth(index)).toHaveValue("");
     await expect(page.locator('textarea[name="private_key"]')).toHaveValue("");
   });
 
