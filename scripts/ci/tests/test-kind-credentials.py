@@ -1398,6 +1398,12 @@ kubectl() {
   esac
 }
 start_kind_credential_bridge_renewal workspace-pod /tmp/codewire-kind-bridge-renewal-42
+# The probe starts in the background; the suite stops it minutes later, so
+# wait for its exec to be recorded before stopping it here.
+for _ in $(seq 1 400); do
+  grep -q ' -- python3 ' "$calls" 2>/dev/null && break
+  sleep 0.05
+done
 stop_kind_credential_bridge_renewal workspace-pod /tmp/codewire-kind-bridge-renewal-42 "$KIND_BRIDGE_RENEWAL_PID"
 cat "$RUN_DIR/credential-bridge-renewal.jsonl"
 ''' % directory.name)
