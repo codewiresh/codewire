@@ -3494,7 +3494,10 @@ VALUES ('$env_id', 'org_contract_1', 'usr_contract_admin', 'sandbox', 'pending',
         2000, 4096, 10, 'preset_contract_1',
         '{"schema_version":1,"working_directory":"/workspace"}'::jsonb);
 SQL
+  # Name this cluster's frontend: the binary's default-port frontend is
+  # another cluster's Temporal whenever the host ports are shifted.
   if ! DATABASE_URL="$KIND_DATABASE_URL" \
+    TEMPORAL_ADDRESS="$KIND_TEMPORAL_FRONTEND_URL" \
     SMOKE_ENV_ID="$env_id" "$CARGO_CI_DIR/temporal-smoke"; then
     kubectl -n "$NS" logs deploy/codewire-orchestration --tail=80 || true
     kubectl -n "$NS" logs deploy/temporal --tail=50 || true

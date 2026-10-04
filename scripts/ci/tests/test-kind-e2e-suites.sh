@@ -400,6 +400,16 @@ grep -Fq 'configure_remote_dind_kind_network' "$COMMON" ||
 if grep -Fq '127.0.0.1:25432/codewire' "$COMMON"; then
   fail 'Kind smoke callers bypass the configurable Postgres URL'
 fi
+# Smoke binaries default to the default host ports, which belong to another
+# cluster whenever this one runs shifted: every Temporal smoke names this
+# cluster's frontend.
+for temporal_smoke in temporal-smoke temporal-fencing-smoke; do
+  invocations="$(grep -c "\"\$CARGO_CI_DIR/${temporal_smoke}\"" "$COMMON" || true)"
+  addressed="$({ grep -B3 "\"\$CARGO_CI_DIR/${temporal_smoke}\"" "$COMMON" || true; } |
+    grep -Fc 'TEMPORAL_ADDRESS="$KIND_TEMPORAL_FRONTEND_URL"' || true)"
+  [ "$invocations" -ge 1 ] && [ "$addressed" -eq "$invocations" ] ||
+    fail "${temporal_smoke} can fall back to another cluster's Temporal (${addressed}/${invocations} addressed)"
+done
 for hardcoded_loopback in '127.0.0.1:7233' '127.0.0.1:8084' '127.0.0.1:18092' '127.0.0.1:8090' 'localhost:10443'; do
   if grep -Fq "$hardcoded_loopback" "$COMMON"; then
     fail "Kind harness still hardcodes client address ${hardcoded_loopback}"
