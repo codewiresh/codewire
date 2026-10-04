@@ -17,7 +17,6 @@ const browserApiOrigin = process.env.CODEWIRE_BROWSER_API_ORIGIN || apiOrigin;
 const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
 const useDevShm = process.env.CODEWIRE_PLAYWRIGHT_USE_DEV_SHM === "1";
 const snapshotEnvironment = process.env.CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV || "{platform}";
-const authState = path.join(dashboardDir, "playwright/.auth/user.json");
 const skipSharedSetup = process.env.PLAYWRIGHT_SKIP_SHARED_SETUP === "1";
 const localOnlyResolverRule = "--host-resolver-rules=MAP * ^NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1";
 const designFixtureProjects = [
@@ -77,7 +76,6 @@ export default defineConfig({
       use: {
         ...devices["Desktop Chrome"],
         baseURL: dashboardUrl,
-        storageState: authState,
         viewport: { width: 1440, height: 900 },
         trace: "on-first-retry",
         screenshot: "only-on-failure",
@@ -91,7 +89,6 @@ export default defineConfig({
       use: {
         ...devices["Pixel 5"],
         baseURL: dashboardUrl,
-        storageState: authState,
         viewport: { width: 390, height: 844 },
         trace: "on-first-retry",
       },

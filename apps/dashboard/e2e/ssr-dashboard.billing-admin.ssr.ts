@@ -1,15 +1,16 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "./helpers/test";
+import type { Page } from "@playwright/test";
 import { fillField } from "./helpers/auth-flow";
 import {
   bypassTwoFactor,
   cleanupUser,
   clearRateLimits,
   disableTwoFactor,
-  getUserId,
   seedSyntheticUser,
 } from "./helpers/db";
+import { ensureWorkerIdentity } from "./helpers/worker-identity";
 import { ACCOUNT_HOME, cleanupTestOrg, ensureTestOrg } from "./helpers/org";
-import { TEST_PASSWORD, USERS } from "./helpers/seed";
+import { TEST_PASSWORD } from "./helpers/seed";
 
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 const slug = `ssr-billing-${Date.now()}`;
@@ -43,9 +44,8 @@ async function followAdminNavigation(page: Page, isMobile: boolean | undefined, 
 }
 
 test.describe.serial("server-rendered billing and administration", () => {
-  test.beforeAll(async () => {
-    const ownerId = await getUserId(USERS.master.email);
-    if (!ownerId) throw new Error("E2E master user was not seeded");
+  test.beforeAll(async ({}, testInfo) => {
+    const ownerId = await ensureWorkerIdentity(testInfo.workerIndex);
     await ensureTestOrg("SSR Billing", slug, ownerId);
     await seedSyntheticUser(adminEmail, "E2E Admin", true);
   });

@@ -1,15 +1,11 @@
-import { expect, test, type APIResponse, type Page } from "@playwright/test";
+import { expect, test } from "./helpers/test";
+import type { APIResponse, Page } from "@playwright/test";
 import postgres from "postgres";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { getUserId } from "./helpers/db";
+import { ensureWorkerIdentity } from "./helpers/worker-identity";
 import { ensureTestSandboxPreset } from "./helpers/environment";
 import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
-import { USERS } from "./helpers/seed";
 
 const sql = postgres(process.env.DATABASE_URL!);
-const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const authState = path.join(dashboardDir, "playwright/.auth/user.json");
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 const runId = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 const slug = `ssr-secrets-${runId}`;
@@ -132,10 +128,8 @@ async function renameAndDeleteSecret(page: Page, bucket: string, key: string, re
 }
 
 test.describe.serial("server-rendered secrets and presets", () => {
-  test.beforeAll(async () => {
-    const seededOwnerId = await getUserId(USERS.master.email);
-    if (!seededOwnerId) throw new Error("E2E owner was not seeded");
-    ownerId = seededOwnerId;
+  test.beforeAll(async ({}, testInfo) => {
+    ownerId = await ensureWorkerIdentity(testInfo.workerIndex);
     orgId = await ensureTestOrg(orgName, slug, ownerId);
     presetId = await ensureTestSandboxPreset(orgId, presetName);
   });
@@ -314,12 +308,12 @@ test.describe.serial("server-rendered secrets and presets", () => {
     expect(browserRequests.some((request) => request.includes("/api/v1/organizations/"))).toBe(false);
   });
 
-  test("normal form secret submission works with JavaScript disabled", async ({ browser, isMobile }) => {
+  test("normal form secret submission works with JavaScript disabled", async ({ browser, isMobile, workerStorageState }) => {
     test.skip(!!isMobile, "desktop no-JavaScript contract");
     const context = await browser.newContext({
       baseURL: ssrUrl,
       javaScriptEnabled: false,
-      storageState: authState,
+      storageState: workerStorageState,
     });
     const page = await context.newPage();
     const key = `${secretPrefix}_NO_JS`;
