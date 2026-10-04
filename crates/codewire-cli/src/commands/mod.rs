@@ -433,7 +433,10 @@ pub(crate) enum CredentialConnectProviderArg {
 
 #[derive(Debug, Args)]
 pub(crate) struct CredentialAddArgs {
-    #[arg(value_name = "PROVIDER")]
+    #[arg(
+        value_name = "PROVIDER",
+        help = "openai or anthropic (API key read from stdin), claude-subscription (token from `claude setup-token`, read from stdin; platform only), or ssh"
+    )]
     pub(crate) provider: String,
     #[arg(long, value_name = "NAME")]
     pub(crate) name: String,
@@ -510,7 +513,7 @@ pub(crate) struct CredentialRotateArgs {
     #[arg(
         long,
         value_name = "UNIX_SECONDS",
-        help = "New hard expiry; omission clears it. Explicit API-key rotation sets status Active, including if revoked"
+        help = "New hard expiry; omission clears it. Explicit API-key rotation sets status Active, including if revoked. Not accepted for a Claude subscription token, whose replacement restarts its one-year expiry"
     )]
     pub(crate) expires_at: Option<u64>,
 }

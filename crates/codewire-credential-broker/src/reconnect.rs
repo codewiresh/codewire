@@ -23,11 +23,13 @@ pub(crate) fn reconnect_required_response(slot: &CapabilitySlot) -> BrokerHttpRe
         "openai" => openai_error(
             "The OpenAI API key needs replacing: rotate it in Codewire Settings → Credentials.",
         ),
+        // The slot holds an API key or a Claude subscription token; both are
+        // replaced by their owner, never refreshed.
         "anthropic" => serde_json::json!({
             "type": "error",
             "error": {
                 "type": "permission_error",
-                "message": "The Anthropic API key needs replacing: rotate it in Codewire Settings → Credentials.",
+                "message": "The Anthropic credential needs replacing: rotate the API key or add a new Claude subscription token in Codewire Settings → Credentials.",
             },
         }),
         "github" => serde_json::json!({

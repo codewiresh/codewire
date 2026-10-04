@@ -42,8 +42,8 @@ use uuid::Uuid;
 use crate::timing::{self, AuthorityUse, MaterialCacheUse, Phase};
 use crate::{
     BrokerCredentialLease, BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest,
-    BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError,
-    CanonicalCodexOAuthBundle, GitHubAppUserOAuthBundle,
+    BrokerCredentialRejection, BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission,
+    BrokerRefreshError, CanonicalCodexOAuthBundle, GitHubAppUserOAuthBundle,
 };
 pub use decision::AUTHORITY_DECISION_REUSE;
 use decision::EpochDecision;
@@ -1261,6 +1261,53 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
         self.credentials
             .fail_oauth_refresh(permit.started)
             .await
+            .map_err(refresh_store_error)
+    }
+
+    /// Rederive the refused request's grant through the same two-check
+    /// admission as a lease. Only the same Active Anthropic OAuth version still
+    /// selected by that exact grant is marked; the storage CAS repeats the
+    /// version check under the credential lock.
+    async fn reject_credential(
+        &self,
+        rejection: BrokerCredentialRejection,
+    ) -> Result<(), BrokerRefreshError> {
+        if rejection.request_id.is_nil() || rejection.material_generation == 0 {
+            return Err(BrokerRefreshError::InvalidRequest);
+        }
+        let admission = self
+            .admit(
+                &rejection.grant.capability_slot,
+                GrantPermission {
+                    operation: rejection.operation.clone(),
+                    route: rejection.route.clone(),
+                },
+            )
+            .await
+            .map_err(refresh_lease_error)?;
+        let version = CredentialVersion {
+            revocation_generation: rejection.grant.credential_revocation_generation,
+            material_generation: rejection.material_generation,
+        };
+        if rejection.grant.capability_slot != CapabilitySlot::anthropic()
+            || admission.record.metadata.provider.as_str() != "anthropic"
+            || admission.record.metadata.authentication_kind != CredentialAuthKind::OAuth
+            || !same_grant_binding(&admission.grant, &rejection.grant)
+        {
+            return Err(BrokerRefreshError::Denied);
+        }
+        if admission.record.version != version {
+            return Err(BrokerRefreshError::Stale);
+        }
+        self.forget_material(&rejection.grant.credential_id);
+        self.credentials
+            .reject_subscription_token(
+                &self.session.credential_owner,
+                &rejection.grant.credential_id,
+                version,
+            )
+            .await
+            .map(|_| ())
             .map_err(refresh_store_error)
     }
 

@@ -340,3 +340,159 @@ fn managed_client_projection_covers_all_owned_names_without_environment_lookup()
         }
     }
 }
+
+#[test]
+fn anthropic_subscription_form_adds_16_canonical_encodings_and_keeps_the_api_key_bytes() {
+    for slots in [vec![], vec!["codex"], vec!["openai", "ssh", "github"]] {
+        assert_eq!(
+            clients(&slots).with_anthropic_subscription_token(),
+            Err(ProjectionError::InvalidManagedClientSelection)
+        );
+        assert!(!clients(&slots).anthropic_subscription_token());
+    }
+    // From slot names alone the Anthropic client is always the API-key form.
+    assert!(!clients(&["anthropic"]).anthropic_subscription_token());
+    let others = ["codex", "openai", "ssh", "github"];
+    let expected = [
+        "v2:24", "v2:25", "v2:26", "v2:27", "v2:2c", "v2:2d", "v2:2e", "v2:2f", "v2:34", "v2:35",
+        "v2:36", "v2:37", "v2:3c", "v2:3d", "v2:3e", "v2:3f",
+    ];
+    let mut unique = BTreeSet::new();
+    for (index, encoding) in expected.into_iter().enumerate() {
+        let api_key = clients(
+            &std::iter::once("anthropic")
+                .chain(
+                    others
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(bit, slot)| (index & (1 << bit) != 0).then_some(*slot)),
+                )
+                .collect::<Vec<_>>(),
+        );
+        let subscription = api_key.with_anthropic_subscription_token().unwrap();
+        assert_eq!(subscription.encode(), encoding);
+        assert!(subscription.encode().len() < 32);
+        assert_eq!(
+            ManagedCredentialClients::decode(encoding).unwrap(),
+            subscription
+        );
+        assert!(subscription.anthropic_subscription_token());
+        assert!(subscription.contains(ManagedCredentialClient::Anthropic));
+        assert_eq!(
+            subscription.with_anthropic_subscription_token(),
+            Ok(subscription)
+        );
+        assert_ne!(subscription, api_key);
+        assert_ne!(subscription.encode(), api_key.encode());
+        for client in [
+            ManagedCredentialClient::Codex,
+            ManagedCredentialClient::OpenAi,
+            ManagedCredentialClient::Ssh,
+            ManagedCredentialClient::GitHub,
+        ] {
+            assert_eq!(subscription.contains(client), api_key.contains(client));
+        }
+        // The same names are owned in both forms; only their values differ.
+        assert_eq!(
+            subscription.reserved_environment_keys(),
+            api_key.reserved_environment_keys()
+        );
+        for placement in [
+            ManagedCredentialClientPlacement::Native,
+            ManagedCredentialClientPlacement::Platform,
+        ] {
+            let projection = subscription.for_placement(placement);
+            let reference = api_key.for_placement(placement);
+            assert_eq!(projection.codex, reference.codex);
+            assert_eq!(
+                projection
+                    .environment
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>(),
+                subscription.reserved_environment_keys()
+            );
+            for (name, value) in &reference.environment {
+                if !name.starts_with("ANTHROPIC_") && name != "CLAUDE_CODE_OAUTH_TOKEN" {
+                    assert_eq!(projection.environment.get(name), Some(value), "{name}");
+                }
+            }
+        }
+        assert!(unique.insert(encoding));
+    }
+    for bits in 0..32 {
+        let slots = ["codex", "openai", "anthropic", "ssh", "github"];
+        let selected = ManagedCredentialClients::from_profile_slots(
+            slots
+                .iter()
+                .enumerate()
+                .filter_map(|(index, slot)| (bits & (1 << index) != 0).then_some(*slot)),
+        )
+        .unwrap();
+        assert!(unique.insert(selected.encode()));
+    }
+    assert_eq!(unique.len(), 48);
+    for invalid in [
+        "v2:20",
+        "v2:21",
+        "v2:22",
+        "v2:23",
+        "v2:28",
+        "v2:30",
+        "v2:3b",
+        "v2:3F",
+        "v2:40",
+        "v2:024",
+        "v3:24",
+        "v1:anthropic",
+        "v1:anthropic-subscription",
+        "v2:24\n",
+    ] {
+        if invalid == "v1:anthropic" {
+            assert!(
+                !ManagedCredentialClients::decode(invalid)
+                    .unwrap()
+                    .anthropic_subscription_token()
+            );
+            continue;
+        }
+        assert_eq!(
+            ManagedCredentialClients::decode(invalid),
+            Err(ProjectionError::InvalidManagedClientSelection),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn anthropic_subscription_projection_is_the_exact_claude_code_oauth_placeholder() {
+    for placement in [
+        ManagedCredentialClientPlacement::Native,
+        ManagedCredentialClientPlacement::Platform,
+    ] {
+        let projection = clients(&["anthropic"])
+            .with_anthropic_subscription_token()
+            .unwrap()
+            .for_placement(placement);
+        assert!(projection.codex.is_none());
+        assert_eq!(
+            projection.environment,
+            BTreeMap::from([
+                ("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:38081".into()),
+                ("CLAUDE_CODE_OAUTH_TOKEN".into(), "codewire-managed".into()),
+                ("ANTHROPIC_AUTH_TOKEN".into(), String::new()),
+                ("ANTHROPIC_API_KEY".into(), String::new()),
+            ])
+        );
+        // The API-key form keeps its exact projection.
+        assert_eq!(
+            clients(&["anthropic"]).for_placement(placement).environment,
+            BTreeMap::from([
+                ("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:38081".into()),
+                ("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into()),
+                ("ANTHROPIC_API_KEY".into(), String::new()),
+                ("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new()),
+            ])
+        );
+    }
+}

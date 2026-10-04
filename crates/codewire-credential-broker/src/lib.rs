@@ -50,10 +50,10 @@ pub use openai::{
 #[cfg(feature = "local-broker-synthetic-smoke")]
 pub use runtime::SyntheticOpenAiSmokeTransport;
 pub use runtime::{
-    BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest, BrokerHttpResponse,
-    BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError,
-    BrokerRequestError, BrokerResponseBody, BrokerUpstreamError, BrokerUpstreamRequest,
-    BrokerUpstreamResponse, BrokerUpstreamTransport, OpenAiBroker,
+    BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest, BrokerCredentialRejection,
+    BrokerHttpResponse, BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission,
+    BrokerRefreshError, BrokerRequestError, BrokerResponseBody, BrokerUpstreamError,
+    BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport, OpenAiBroker,
 };
 
 use codewire_access::{CredentialMetadata, DerivedGrant, GrantPermission};

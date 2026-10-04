@@ -225,6 +225,36 @@ impl CredentialMutationService for Service {
         })
     }
 
+    async fn add_claude_subscription_token_credential(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::AddClaudeSubscriptionTokenCredentialRequest>,
+    ) -> ServiceResult<proto::AddClaudeSubscriptionTokenCredentialResponse> {
+        let authority = authority(&ctx)?;
+        let mut request = request.to_owned_message();
+        // Write-only token at the isolated authority. Never Debug/serialize
+        // the request into an error or log.
+        let bytes = zeroize::Zeroizing::new(std::mem::take(&mut request.token));
+        let material =
+            ProtectedValue::from_slice(&bytes).map_err(|_| error(Error::InvalidInput))?;
+        drop(bytes);
+        let metadata = self
+            .owner
+            .add_claude_subscription_token(
+                authority,
+                request.name,
+                material,
+                request.credential_id,
+                request.expected_revocation_generation,
+            )
+            .await
+            .map_err(error)?;
+        connectrpc::Response::ok(proto::AddClaudeSubscriptionTokenCredentialResponse {
+            credential: Some(credential(metadata)).into(),
+            ..Default::default()
+        })
+    }
+
     async fn revoke_credential(
         &self,
         ctx: RequestContext,

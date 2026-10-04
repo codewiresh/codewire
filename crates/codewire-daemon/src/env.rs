@@ -366,6 +366,48 @@ mod tests {
     }
 
     #[test]
+    fn a_selected_claude_subscription_token_projects_the_claude_code_oauth_placeholder() {
+        for transport in [
+            CredentialBridgeTransport::Local,
+            CredentialBridgeTransport::Hosted,
+        ] {
+            let mut config =
+                selected_config(PathBuf::from("/home/codewire"), &["anthropic"], transport);
+            config.managed_credential_clients = config
+                .managed_credential_clients
+                .with_anthropic_subscription_token()
+                .unwrap();
+            let environment = build_managed_process_env_from(
+                &config,
+                Vec::new(),
+                &[],
+                "",
+                [
+                    ("ANTHROPIC_API_KEY".into(), "image-anthropic".into()),
+                    ("ANTHROPIC_AUTH_TOKEN".into(), "image-token".into()),
+                    (
+                        "ANTHROPIC_BASE_URL".into(),
+                        "https://image.anthropic".into(),
+                    ),
+                    ("CLAUDE_CODE_OAUTH_TOKEN".into(), "image-oauth".into()),
+                    (MANAGED_CREDENTIAL_CLIENTS_ENV.into(), "v2:24".into()),
+                ],
+                "/bin/sh",
+            )
+            .unwrap();
+            let values = env_map(&environment.entries);
+            // Claude Code's subscription mode reaches the managed route with
+            // only the placeholder; the empty higher-precedence names unset.
+            assert_eq!(values["CLAUDE_CODE_OAUTH_TOKEN"], "codewire-managed");
+            assert_eq!(values["ANTHROPIC_AUTH_TOKEN"], "");
+            assert_eq!(values["ANTHROPIC_API_KEY"], "");
+            assert_eq!(values["ANTHROPIC_BASE_URL"], "http://127.0.0.1:38081");
+            assert!(!values.contains_key(MANAGED_CREDENTIAL_CLIENTS_ENV));
+            assert!(!values.values().any(|value| value.starts_with("image-")));
+        }
+    }
+
+    #[test]
     fn managed_routing_rejects_declared_and_explicit_collisions_before_merge() {
         let config = selected_config(
             PathBuf::from("/home/codewire"),

@@ -82,6 +82,7 @@ class CredentialFixture:
     enroll_github = unsupported_mutation
     complete_github_app_authorization = unsupported_mutation
     add_api_key_credential = unsupported_mutation
+    add_claude_subscription_token_credential = unsupported_mutation
     rename_credential = unsupported_mutation
     rotate_api_key_credential = unsupported_mutation
     generate_ssh_credential = unsupported_mutation

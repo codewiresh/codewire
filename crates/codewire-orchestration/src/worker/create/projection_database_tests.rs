@@ -441,6 +441,149 @@ async fn database_capture_selects_github_client_only_while_connected() -> Result
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn database_capture_selects_the_anthropic_form_of_the_pinned_credential() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed_environment(&db).await?;
+        let api_key = uuid::Uuid::new_v4().to_string();
+        let subscription = uuid::Uuid::new_v4().to_string();
+        for (credential, kind, name) in [
+            (api_key.as_str(), "api_key", "Synthetic Anthropic key"),
+            (subscription.as_str(), "oauth", "Synthetic Claude subscription"),
+        ] {
+            sqlx::query(
+                "INSERT INTO platform_credentials \
+                 (id,user_id,provider,authentication_kind,display_name,status,revocation_generation,material_generation) \
+                 VALUES ($1,$2,'anthropic',$3,$4,'active',1,1)",
+            )
+            .bind(credential)
+            .bind(CREATOR)
+            .bind(kind)
+            .bind(name)
+            .execute(&db.pool)
+            .await?;
+        }
+        let mut tx = db.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO platform_access_profiles(id,user_id,name,current_revision) \
+             VALUES ($1,$2,'synthetic',2)",
+        )
+        .bind(PROFILE)
+        .bind(CREATOR)
+        .execute(&mut *tx)
+        .await?;
+        for (revision, credential) in [(1_i64, &api_key), (2, &subscription)] {
+            sqlx::query(
+                "INSERT INTO platform_access_profile_revisions(profile_id,revision) VALUES ($1,$2)",
+            )
+            .bind(PROFILE)
+            .bind(revision)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT INTO platform_access_profile_entries \
+                 (profile_id,revision,capability_slot,credential_id) VALUES ($1,$2,'anthropic',$3)",
+            )
+            .bind(PROFILE)
+            .bind(revision)
+            .bind(credential)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO platform_environment_access_bindings \
+             (environment_id,profile_id,profile_revision,personal_owner_confirmed_by) \
+             VALUES ($1,$2,1,$3)",
+        )
+        .bind(ENVIRONMENT)
+        .bind(PROFILE)
+        .bind(CREATOR)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        store_project(
+            &db,
+            &ProjectSpec {
+                credentials: Some(CredentialBinding {
+                    profile: format!("platform:id:{PROFILE}"),
+                }),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        let capture = |label: &'static str| {
+            let pool = db.pool.clone();
+            async move {
+                let row = load_environment(&pool, ENVIRONMENT).await?;
+                let selection = row
+                    .projection_selection
+                    .clone()
+                    .map_err(|_| anyhow::anyhow!("{label}: selection was rejected"))?
+                    .with_context(|| format!("{label}: profile produced no selection"))?;
+                let clients = row
+                    .managed_credential_clients
+                    .map_err(|_| anyhow::anyhow!("{label}: managed clients were rejected"))?;
+                let environment = template_opts(&row)?
+                    .managed_credential_clients
+                    .for_placement(
+                        codewire_access::ManagedCredentialClientPlacement::Platform,
+                    )
+                    .environment;
+                anyhow::Ok((selection.reserved_keys, clients.encode(), environment))
+            }
+        };
+        let reserved = codewire_project::platform_projection_reserved_keys(["anthropic", "github"])?;
+
+        // The pinned API key keeps the API-key form and its exact projection.
+        let (key_reserved, key_clients, key_environment) = capture("api key").await?;
+        ensure!(key_clients == "v1:anthropic", "api key: {key_clients}");
+        ensure!(key_reserved == reserved);
+        ensure!(key_environment.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str) == Some("codewire-managed"));
+        ensure!(key_environment.get("CLAUDE_CODE_OAUTH_TOKEN").map(String::as_str) == Some(""));
+
+        // The pinned subscription token selects Claude Code's subscription
+        // form; the reserved names are unchanged.
+        sqlx::query(
+            "UPDATE platform_environment_access_bindings SET profile_revision=2 WHERE environment_id=$1",
+        )
+        .bind(ENVIRONMENT)
+        .execute(&db.pool)
+        .await?;
+        let (token_reserved, token_clients, token_environment) =
+            capture("subscription").await?;
+        ensure!(token_clients == "v2:24", "subscription: {token_clients}");
+        ensure!(token_reserved == reserved);
+        ensure!(
+            token_environment.get("CLAUDE_CODE_OAUTH_TOKEN").map(String::as_str)
+                == Some("codewire-managed")
+        );
+        for name in ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"] {
+            ensure!(token_environment.get(name).map(String::as_str) == Some(""), "{name}");
+        }
+        ensure!(
+            token_environment.get("ANTHROPIC_BASE_URL").map(String::as_str)
+                == Some("http://127.0.0.1:38081")
+        );
+
+        // The form follows the pinned revision, never the profile's current
+        // one: binding revision 1 again restores the API-key form.
+        sqlx::query(
+            "UPDATE platform_environment_access_bindings SET profile_revision=1 WHERE environment_id=$1",
+        )
+        .bind(ENVIRONMENT)
+        .execute(&db.pool)
+        .await?;
+        let (_, restored, _) = capture("pinned api key").await?;
+        ensure!(restored == "v1:anthropic", "pinned api key: {restored}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn template_publication_revalidates_capture_before_poll_and_holds_row_lock() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {

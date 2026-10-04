@@ -39,7 +39,9 @@ pub const MANAGED_OPENAI_API_PREFIX: &str = "/_codewire/openai/v1";
 /// GitHub adapter may resolve this route to an upstream provider.
 pub const MANAGED_GITHUB_GIT_PREFIX: &str = "/_codewire/github/";
 
-/// Stock clients configured by selected profile slots, not credential auth kinds.
+/// Stock clients configured by selected profile slots, not credential auth
+/// kinds. The Anthropic client alone has two forms: see
+/// [`ManagedCredentialClients::with_anthropic_subscription_token`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManagedCredentialClient {
     Codex,
@@ -123,6 +125,35 @@ const MANAGED_CLIENT_ENCODINGS: [&str; 32] = [
     "v2:1f",
 ];
 
+/// The Anthropic client's subscription-token form, valid only with the
+/// Anthropic client itself. It is never set from slot names alone.
+const ANTHROPIC_SUBSCRIPTION_TOKEN_BIT: u8 = 32;
+/// Every bit a selection may set.
+const ALL_CLIENT_BITS: u8 = 63;
+
+/// The 16 selections with the Anthropic client in its subscription-token form,
+/// in the same finite v2 hexadecimal bitset. Every earlier encoding keeps its
+/// exact bytes; each of these fits the native seed's 32-byte field.
+const ANTHROPIC_SUBSCRIPTION_ENCODINGS: [&str; 16] = [
+    "v2:24", "v2:25", "v2:26", "v2:27", "v2:2c", "v2:2d", "v2:2e", "v2:2f", "v2:34", "v2:35",
+    "v2:36", "v2:37", "v2:3c", "v2:3d", "v2:3e", "v2:3f",
+];
+
+/// Index into [`ANTHROPIC_SUBSCRIPTION_ENCODINGS`] of a selection with both
+/// the Anthropic and subscription-token bits: the four other client bits.
+const fn anthropic_subscription_index(bits: u8) -> usize {
+    ((bits & 0b0000_0011) | ((bits & 0b0001_1000) >> 1)) as usize
+}
+
+/// Inverse of [`anthropic_subscription_index`].
+const fn anthropic_subscription_bits(index: usize) -> u8 {
+    let index = index as u8;
+    ManagedCredentialClient::Anthropic.bit()
+        | ANTHROPIC_SUBSCRIPTION_TOKEN_BIT
+        | (index & 0b0011)
+        | ((index & 0b1100) << 1)
+}
+
 /// Material-free stock-client selection. This is not a grant, a credential,
 /// or an upstream transport selection. The caller supplies an authenticated,
 /// exact bound profile revision; neither names nor this encoding prove authority.
@@ -156,18 +187,51 @@ impl ManagedCredentialClients {
         Ok(Self(clients))
     }
 
-    /// One of 32 canonical tokens for private bootstrap metadata. Empty
+    /// The same selection with its Anthropic client in the subscription-token
+    /// form: the bound profile revision's Anthropic slot holds a Claude
+    /// subscription token (the provider's OAuth kind) rather than an API key.
+    /// The caller derives this from the exact bound revision's credential,
+    /// whose kind never changes; it is client configuration, not authority.
+    /// Selections without the Anthropic client are rejected.
+    pub fn with_anthropic_subscription_token(self) -> Result<Self, ProjectionError> {
+        if !self.contains(ManagedCredentialClient::Anthropic) {
+            return Err(ProjectionError::InvalidManagedClientSelection);
+        }
+        Ok(Self(self.0 | ANTHROPIC_SUBSCRIPTION_TOKEN_BIT))
+    }
+
+    /// Whether the Anthropic client uses its subscription-token form.
+    pub fn anthropic_subscription_token(self) -> bool {
+        self.0 & ANTHROPIC_SUBSCRIPTION_TOKEN_BIT != 0
+    }
+
+    /// One of 48 canonical tokens for private bootstrap metadata. Empty
     /// selection is explicit; unversioned or reordered forms are not aliases.
     pub fn encode(self) -> &'static str {
-        MANAGED_CLIENT_ENCODINGS[usize::from(self.0)]
+        debug_assert!(
+            self.0 & !ALL_CLIENT_BITS == 0
+                && (!self.anthropic_subscription_token()
+                    || self.contains(ManagedCredentialClient::Anthropic))
+        );
+        if self.anthropic_subscription_token() {
+            ANTHROPIC_SUBSCRIPTION_ENCODINGS[anthropic_subscription_index(self.0)]
+        } else {
+            MANAGED_CLIENT_ENCODINGS[usize::from(self.0)]
+        }
     }
 
     /// Accept only the current exact private encoding, without legacy fallback.
     pub fn decode(value: &str) -> Result<Self, ProjectionError> {
-        MANAGED_CLIENT_ENCODINGS
+        if let Some(bits) = MANAGED_CLIENT_ENCODINGS
             .iter()
             .position(|candidate| *candidate == value)
-            .map(|bits| Self(bits as u8))
+        {
+            return Ok(Self(bits as u8));
+        }
+        ANTHROPIC_SUBSCRIPTION_ENCODINGS
+            .iter()
+            .position(|candidate| *candidate == value)
+            .map(|index| Self(anthropic_subscription_bits(index)))
             .ok_or(ProjectionError::InvalidManagedClientSelection)
     }
 
@@ -237,12 +301,24 @@ impl ManagedCredentialClients {
         }
         if self.contains(ManagedCredentialClient::Anthropic) {
             environment.insert("ANTHROPIC_BASE_URL".into(), origin);
-            environment.insert("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into());
-            // Clear competing inherited auth inputs; do not import or read a
-            // saved login. The stock client's exact precedence needs its own
-            // pinned-client proof, not a claim from this pure renderer.
-            environment.insert("ANTHROPIC_API_KEY".into(), String::new());
-            environment.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new());
+            if self.anthropic_subscription_token() {
+                // Claude Code's subscription mode: the placeholder makes it
+                // send its own OAuth form (bearer plus the OAuth beta) to
+                // the managed route, where the broker replaces it with the
+                // owner's Claude subscription token. The token itself never
+                // enters the Sandbox. Claude Code 2.1.238 treats the empty
+                // higher-precedence names as unset (pinned-client probe).
+                environment.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "codewire-managed".into());
+                environment.insert("ANTHROPIC_AUTH_TOKEN".into(), String::new());
+                environment.insert("ANTHROPIC_API_KEY".into(), String::new());
+            } else {
+                environment.insert("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into());
+                // Clear competing inherited auth inputs; do not import or read
+                // a saved login. The stock client's exact precedence needs its
+                // own pinned-client proof, not a claim from this pure renderer.
+                environment.insert("ANTHROPIC_API_KEY".into(), String::new());
+                environment.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new());
+            }
         }
         if self.contains(ManagedCredentialClient::Ssh) {
             let socket = match placement {

@@ -8,6 +8,7 @@ mod keepalive;
 mod material_cache;
 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
 mod ssh;
+mod subscription;
 
 #[path = "../../../codewire-platform-credentials/tests/support/mod.rs"]
 #[allow(dead_code)]

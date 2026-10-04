@@ -38,6 +38,13 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
 
 const MAX_OPERATIONS: usize = 8;
+/// `claude setup-token` prints a token valid for one year and does not say
+/// when it was issued, so a pasted token's hard expiry is one year after it
+/// is added. An earlier provider expiry is detected when the provider refuses it.
+pub(crate) const CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS: u64 = 365 * 24 * 60 * 60;
+/// Token shape only: no provider call is made at enrollment.
+const MIN_CLAUDE_SUBSCRIPTION_TOKEN_BYTES: usize = 16;
+const MAX_CLAUDE_SUBSCRIPTION_TOKEN_BYTES: usize = 1024;
 const ENROLLMENT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MUTATION_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -210,6 +217,54 @@ impl CredentialMutationOwner {
                 let _permit = permit;
                 let result =
                     publication::add_api_key(&shared, &scope, registration, material).await;
+                let _ = sender.send(result);
+            });
+        }
+        tokio::select! {
+            biased;
+            _ = cancelled.cancelled() => Err(Error::Cancelled),
+            _ = tokio::time::sleep_until(deadline) => Err(Error::PublicationUnknown),
+            result = receiver => result.map_err(|_| Error::PublicationUnknown)?,
+        }
+    }
+
+    /// Store a pasted Claude subscription token as the anthropic provider's
+    /// OAuth kind, or replace the exact named existing one. The owner ran
+    /// `claude setup-token`; no provider call is made here.
+    async fn add_claude_subscription_token(
+        &self,
+        authority: CredentialMutationAuthority,
+        name: String,
+        material: ProtectedValue,
+        credential_id: Option<String>,
+        expected_revision: Option<u64>,
+    ) -> Result<CredentialMetadata, Error> {
+        validate_name(&name)?;
+        validate_claude_subscription_token(material.expose_secret())?;
+        let replacement = replacement_selector(credential_id, expected_revision)?;
+        let expires_at_unix = unix_now()?
+            .checked_add(CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS)
+            .ok_or(Error::Unavailable)?;
+        let scope = Scope::new(authority, self.stop.child_token(), MUTATION_TIMEOUT)?;
+        let deadline = scope.deadline;
+        let cancelled = scope.cancel.clone();
+        let _guard = cancelled.clone().drop_guard();
+        let (sender, receiver) = oneshot::channel();
+        {
+            let accepting = self.accepting.lock().map_err(|_| Error::Unavailable)?;
+            let permit = self.admit(*accepting)?;
+            let shared = self.shared.clone();
+            self.workers.spawn(async move {
+                let _permit = permit;
+                let result = publication::add_claude_subscription_token(
+                    &shared,
+                    &scope,
+                    name,
+                    material,
+                    replacement,
+                    expires_at_unix,
+                )
+                .await;
                 let _ = sender.send(result);
             });
         }
@@ -519,6 +574,19 @@ fn validate_api_key(
         _ => false,
     };
     if valid {
+        Ok(())
+    } else {
+        Err(Error::InvalidInput)
+    }
+}
+
+/// A pasted `claude setup-token` value: bounded, printable ASCII without
+/// whitespace. Its format is the provider's and is not otherwise interpreted.
+fn validate_claude_subscription_token(material: &[u8]) -> Result<(), Error> {
+    if (MIN_CLAUDE_SUBSCRIPTION_TOKEN_BYTES..=MAX_CLAUDE_SUBSCRIPTION_TOKEN_BYTES)
+        .contains(&material.len())
+        && material.iter().all(u8::is_ascii_graphic)
+    {
         Ok(())
     } else {
         Err(Error::InvalidInput)
