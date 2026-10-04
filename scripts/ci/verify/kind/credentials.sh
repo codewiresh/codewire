@@ -166,6 +166,7 @@ kind_credential_bootstrap_smoke() (
 )
 
 start_kind_credential_fixture() {
+  local fixture_patch
   if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
     # A release-image gate must never load or execute a synthetic authority.
     # The dedicated synthetic composition is owned by the services-ci gate.
@@ -183,8 +184,9 @@ start_kind_credential_fixture() {
   kubectl -n "$NS" exec -i deploy/postgres -- psql -U codewire -d codewire \
     -v ON_ERROR_STOP=1 < "$ROOT/tests/e2e/kind/credential-broker.sql"
   kubectl_apply -f "$ROOT/tests/e2e/kind/credential-fixture-config.yaml"
+  fixture_patch="$(render_kind_credential_fixture_patch)"
   kubectl -n "$NS" patch deployment codewire-credential-service --type=strategic \
-    --patch-file "$ROOT/tests/e2e/kind/credential-fixture-patch.yaml"
+    --patch-file "$fixture_patch"
   kubectl -n "$NS" scale deployment/codewire-credential-service --replicas=1
   kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s
 }

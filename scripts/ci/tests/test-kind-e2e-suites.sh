@@ -1209,6 +1209,59 @@ if grep -Eq 'hostPort: (8090|7233|25432)$' "$FIXTURE/kind-config-rendered.yaml";
   fail 'default Kind host ports survived requested-port rendering'
 fi
 
+# The overlay and the credential fixture follow the requested ingress origin
+# (#2395): the default port renders byte-identically, a shifted port replaces
+# every pinned occurrence, and drift, foreign origins or bad ports fail.
+grep -Fq 'render_kind_ingress_origin "$rendered" "$KIND_OVERLAY_INGRESS_ORIGINS" || return $?' "$COMMON" ||
+  fail 'Kind overlay render does not render its ingress origin'
+source_origins="$(cat "$ROOT/tests/e2e/kind/support.yaml" "$ROOT/tests/e2e/kind/kustomization.yaml" |
+  grep -oE 'http://127\.0\.0\.1:8090([^0-9]|$)' | wc -l)"
+[ "$source_origins" -eq "$KIND_OVERLAY_INGRESS_ORIGINS" ] ||
+  fail "overlay sources carry ${source_origins} ingress origins, but ${KIND_OVERLAY_INGRESS_ORIGINS} are pinned"
+(
+  RUN_DIR="$FIXTURE/ingress-origin-default"
+  rendered="$(render_kind_credential_fixture_patch)"
+  cmp -s "$rendered" "$ROOT/tests/e2e/kind/credential-fixture-patch.yaml"
+) || fail 'default ingress origin changed the credential fixture patch'
+(
+  RUN_DIR="$FIXTURE/ingress-origin-shifted"
+  KIND_INGRESS_URL=http://127.0.0.1:18090
+  rendered="$(render_kind_credential_fixture_patch)"
+  grep -Fxq '              value: http://127.0.0.1:18090' "$rendered" &&
+    ! grep -Fq '127.0.0.1:8090' "$rendered"
+) || fail 'shifted ingress origin was not rendered into the credential fixture patch'
+printf '%s\n' 'FRONTEND_URL: http://127.0.0.1:8090' 'ISSUER: http://127.0.0.1:8090' \
+  '- value: http://127.0.0.1:8090' '- value: http://127.0.0.1:8090' 'decoy: http://127.0.0.1:80901' \
+  >"$FIXTURE/overlay-origins.yaml"
+cp "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-default.yaml"
+render_kind_ingress_origin "$FIXTURE/overlay-origins-default.yaml" 4 ||
+  fail 'default ingress origin render failed'
+cmp -s "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-default.yaml" ||
+  fail 'default ingress origin render was not byte-identical'
+cp "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-shifted.yaml"
+KIND_INGRESS_URL=http://127.0.0.1:9090 render_kind_ingress_origin "$FIXTURE/overlay-origins-shifted.yaml" 4 ||
+  fail 'shifted ingress origin render failed'
+[ "$(grep -c 'http://127.0.0.1:9090$' "$FIXTURE/overlay-origins-shifted.yaml")" -eq 4 ] &&
+  grep -Fxq 'decoy: http://127.0.0.1:80901' "$FIXTURE/overlay-origins-shifted.yaml" ||
+  fail 'shifted ingress origin render missed an origin or rewrote a longer port'
+for refused in '3:http://127.0.0.1:9090' '4:http://localhost:9090' '4:https://127.0.0.1:9090' \
+  '4:http://127.0.0.1:99999' '4:http://127.0.0.1:80' '4:http://127.0.0.1:9090/'; do
+  cp "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-refused.yaml"
+  if KIND_INGRESS_URL="${refused#*:}" render_kind_ingress_origin \
+    "$FIXTURE/overlay-origins-refused.yaml" "${refused%%:*}" 2>"$FIXTURE/overlay-origins.err"; then
+    fail "ingress origin render accepted ${refused}"
+  fi
+  cmp -s "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-refused.yaml" ||
+    fail "refused ingress origin render ${refused} still rewrote its file"
+done
+cp "$FIXTURE/overlay-origins.yaml" "$FIXTURE/overlay-origins-drift.yaml"
+if KIND_INGRESS_URL=http://127.0.0.1:9090 render_kind_ingress_origin \
+  "$FIXTURE/overlay-origins-drift.yaml" 5 2>"$FIXTURE/overlay-origins-drift.err"; then
+  fail 'ingress origin render accepted a count drift'
+fi
+grep -Fq 'Kind ingress origin occurrence mismatch in overlay-origins-drift.yaml: expected 5, got 4' \
+  "$FIXTURE/overlay-origins-drift.err" || fail 'ingress origin count drift was not explained'
+
 # A held requested port fails fast and names the owning cluster; shifted
 # assignments pass, and the cluster being recreated ignores its own holders.
 docker() {

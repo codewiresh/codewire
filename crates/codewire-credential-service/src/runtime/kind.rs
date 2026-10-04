@@ -66,12 +66,12 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
         config::assert_restricted_login(&pool).await?;
         let git = git::Fixture::create(&config.runtime_directory).await
             .map_err(|_| RuntimeError::Configuration("Kind Git fixture"))?;
-        let provider = provider::SyntheticProvider::with_git(git.clone());
+        let provider = provider::SyntheticProvider::with_git(git.clone(), &config.public_origin);
         let github_app = GitHubAppAuthorizationConfig::new(
             provider::GITHUB_APP_CLIENT_ID.into(),
             Zeroizing::new(provider::GITHUB_APP_CLIENT_SECRET.into()),
             provider::GITHUB_APP_SLUG.into(),
-            provider::GITHUB_APP_CALLBACK_URL.into(),
+            provider::github_app_callback_url(&config.public_origin),
         )
         .map_err(|_| RuntimeError::Configuration("Kind GitHub App fixture"))?;
         // Keep the private tmpfs fixture alive through both owner drains.

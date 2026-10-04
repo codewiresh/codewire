@@ -246,6 +246,48 @@ render_kind_host_port_mappings() {
   done < <(kind_host_port_mappings)
 }
 
+# The checked-in overlay and credential fixture name the default host ingress
+# origin. A cluster on a shifted KIND_INGRESS_HOST_PORT serves the same routes
+# on its own loopback port, so their rendered copies carry KIND_INGRESS_URL
+# instead. Each occurrence count is pinned so a new hard-coded origin fails here
+# rather than splitting the browser and IdP origins.
+KIND_OVERLAY_INGRESS_ORIGINS=4
+KIND_CREDENTIAL_FIXTURE_INGRESS_ORIGINS=1
+
+render_kind_ingress_origin() {
+  local file="$1" expected="$2" default_port
+  # The checked-in origin is the default ingress host port's (the first
+  # templated mapping), on the loopback address the harness clients dial.
+  default_port="$(kind_host_port_mappings | awk -F: 'NR == 1 { print $1 }')"
+  [ -n "$default_port" ] || return 1
+  python3 - "$file" "$expected" "http://127.0.0.1:${default_port}" "$KIND_INGRESS_URL" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+file, expected, default, origin = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+if not re.fullmatch(r"http://127\.0\.0\.1:[1-9][0-9]{3,4}", origin) or int(origin.rsplit(":", 1)[1]) > 65535:
+    raise SystemExit(f"KIND_INGRESS_URL must be http://127.0.0.1:<port> for the Kind overlay, got {origin}")
+path = Path(file)
+pattern = re.compile(re.escape(default) + r"(?![0-9])")
+text, count = pattern.subn(origin, path.read_text())
+if count != expected:
+    raise SystemExit(
+        f"Kind ingress origin occurrence mismatch in {path.name}: expected {expected}, got {count}"
+    )
+path.write_text(text)
+PY
+}
+
+# The credential fixture patch with this cluster's ingress origin, as a path.
+render_kind_credential_fixture_patch() {
+  local rendered="$RUN_DIR/credential-fixture-patch.yaml"
+  mkdir -p "$RUN_DIR"
+  cp "$ROOT/tests/e2e/kind/credential-fixture-patch.yaml" "$rendered"
+  render_kind_ingress_origin "$rendered" "$KIND_CREDENTIAL_FIXTURE_INGRESS_ORIGINS" >&2 || return $?
+  printf '%s\n' "$rendered"
+}
+
 acquire_kind_host_lock() {
   # One process owns one transaction: a suite nested under an `up` or gate
   # invocation (e.g. `kind-e2e.sh shard ... runtime-acceptance`) must not
@@ -1266,6 +1308,7 @@ for public, (local, expected) in replacements.items():
         )
 path.write_text(text)
 PY
+  render_kind_ingress_origin "$rendered" "$KIND_OVERLAY_INGRESS_ORIGINS" || return $?
   if validate_sealed_kind_images; then
     python3 - "$rendered" "$KIND_DIND_LOCAL_IMAGE" <<'PY' || return $?
 from pathlib import Path

@@ -12,13 +12,17 @@ use super::super::{Listeners, RuntimeError};
 pub(super) const NAMESPACE: &str = "codewire-e2e";
 const DATABASE_URL: &str = "postgres://codewire_credential_broker:kind-credential-broker-synthetic-only@postgres.codewire-e2e.svc.cluster.local:5432/codewire?sslmode=disable";
 const ROLE: &str = "codewire_credential_broker";
-const PUBLIC_ORIGIN: &str = "http://127.0.0.1:8090";
+/// The harness's default host ingress. A Kind cluster on shifted host ports
+/// (`KIND_INGRESS_HOST_PORT`) renders its own loopback port instead.
+pub(super) const DEFAULT_PUBLIC_ORIGIN: &str = "http://127.0.0.1:8090";
 
 pub(super) struct Config {
     pub(super) database_url: Zeroizing<String>,
     pub(super) listeners: Listeners,
     pub(super) runtime_directory: PathBuf,
     pub(super) oauth_keepalive: Option<OAuthKeepAliveConfig>,
+    /// The browser origin of the harness ingress, `http://127.0.0.1:<port>`.
+    pub(super) public_origin: String,
 }
 
 impl Config {
@@ -78,16 +82,14 @@ impl Config {
             path("CREDENTIAL_BROKER_TLS_KEY_FILE")?,
         )
         .map_err(|_| RuntimeError::Tls)?;
-        if required("CREDENTIAL_PUBLIC_ORIGIN")? != PUBLIC_ORIGIN {
-            return Err(RuntimeError::Configuration(
-                "managed Kind credential public origin",
-            ));
-        }
+        let public_origin = kind_public_origin(&required("CREDENTIAL_PUBLIC_ORIGIN")?)?;
         Ok(Self {
             database_url,
             listeners: Listeners {
                 public: ([0, 0, 0, 0], 8086).into(),
-                public_origin: http::HeaderValue::from_static(PUBLIC_ORIGIN),
+                public_origin: http::HeaderValue::from_str(&public_origin).map_err(|_| {
+                    RuntimeError::Configuration("managed Kind credential public origin")
+                })?,
                 private: ([0, 0, 0, 0], 9443).into(),
                 tls,
             },
@@ -95,7 +97,24 @@ impl Config {
             oauth_keepalive: super::super::config::oauth_keepalive_config(&|name| {
                 std::env::var_os(name)
             })?,
+            public_origin,
         })
+    }
+}
+
+/// Accept only the harness's own loopback ingress on an unprivileged port, in
+/// the exact form the harness renders: `http://127.0.0.1:<port>`.
+pub(super) fn kind_public_origin(value: &str) -> Result<String, RuntimeError> {
+    let invalid = || RuntimeError::Configuration("managed Kind credential public origin");
+    let port = value
+        .strip_prefix("http://127.0.0.1:")
+        .ok_or_else(invalid)?;
+    if port.is_empty() || port.starts_with('0') || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    match port.parse::<u16>() {
+        Ok(port) if port >= 1024 => Ok(value.to_owned()),
+        _ => Err(invalid()),
     }
 }
 
@@ -193,6 +212,33 @@ mod tests {
 
     use super::*;
     use crate::platform_test_support::{TIMEOUT, TestDatabase, quote_ident};
+
+    #[test]
+    fn public_origin_accepts_only_the_harness_loopback_ingress() {
+        for origin in [
+            DEFAULT_PUBLIC_ORIGIN,
+            "http://127.0.0.1:9090",
+            "http://127.0.0.1:65535",
+        ] {
+            assert_eq!(kind_public_origin(origin).unwrap(), origin);
+        }
+        for origin in [
+            "https://127.0.0.1:8090",
+            "http://localhost:8090",
+            "http://127.0.0.2:8090",
+            "http://127.0.0.1",
+            "http://127.0.0.1:",
+            "http://127.0.0.1:80",
+            "http://127.0.0.1:08090",
+            "http://127.0.0.1:65536",
+            "http://127.0.0.1:8090/",
+            "http://127.0.0.1:8090/path",
+            "http://127.0.0.1:8090@example.com",
+            "http://user@127.0.0.1:8090",
+        ] {
+            assert!(kind_public_origin(origin).is_err(), "{origin} was accepted");
+        }
+    }
 
     async fn execute(pool: &PgPool, statement: &str) -> Result<()> {
         tokio::time::timeout(TIMEOUT, sqlx::query(statement).execute(pool))
