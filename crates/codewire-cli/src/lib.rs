@@ -7,6 +7,8 @@ mod hosted_binding;
 mod hosted_exec;
 mod mesh;
 mod organization_client;
+#[cfg(target_os = "linux")]
+mod platform_cw_runtime;
 mod presentation;
 mod public_fetch;
 mod secret_client;
@@ -15,6 +17,8 @@ mod terminal_attach;
 mod update;
 
 pub use hosted_exec::run_hosted_exec_from;
+#[cfg(target_os = "linux")]
+pub use platform_cw_runtime::run_from as run_platform_cw_runtime_from;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;

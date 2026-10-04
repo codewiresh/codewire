@@ -2,6 +2,15 @@
 mod local_mesh_helper;
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "__platform-cw-runtime")
+    {
+        std::process::exit(codewire_cli::run_platform_cw_runtime_from(
+            std::env::args_os(),
+        ));
+    }
     // Helper roles must not resolve ordinary CLI settings, credentials or the
     // mutable managed entry. The parent already selected this exact executable.
     #[cfg(target_os = "linux")]
