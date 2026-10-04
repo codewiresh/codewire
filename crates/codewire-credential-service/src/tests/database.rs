@@ -155,6 +155,35 @@ impl Fixture {
         tx.commit().await?;
         Ok(())
     }
+    /// Point the workspace Pod's binding at another Sandbox. Only a test can:
+    /// the binding's immutability trigger is suspended for this one update,
+    /// inside its transaction.
+    async fn bind_sandbox(&self, sandbox_uid: &str) -> Result<()> {
+        let mut tx = self.db.pool.begin().await?;
+        sqlx::query(
+            "ALTER TABLE public.sandbox_workspace_bindings \
+             DISABLE TRIGGER codewire_workspace_binding_immutable",
+        )
+        .execute(&mut *tx)
+        .await?;
+        let updated = sqlx::query(
+            "UPDATE public.sandbox_workspace_bindings SET sandbox_uid=$1 WHERE pod_uid=$2",
+        )
+        .bind(sandbox_uid)
+        .bind(&self.scope.pod_uid)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        ensure!(updated == 1, "the workspace Pod's binding was not updated");
+        sqlx::query(
+            "ALTER TABLE public.sandbox_workspace_bindings \
+             ENABLE TRIGGER codewire_workspace_binding_immutable",
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
     async fn restore_membership(&self) -> Result<()> {
         sqlx::query("INSERT INTO org_members(id,org_id,user_id,role) VALUES ($1,$2,$3,'member')")
             .bind(&self.scope.member_id)
@@ -186,12 +215,42 @@ async fn restricted_metadata_login_admits_personal_scope_and_pins_exact_binding(
         ensure!(admission.token_review.count == 2 && admission.resolve.count == 1);
         let (session, timings) = timing::measure(authority.current_session()).await;
         session?;
-        // One resolve, split into its Kubernetes reads (the gateway Pod, then
-        // the concurrent lineage reads) and its SQL.
+        // One resolve, split into its Kubernetes reads and its SQL.
         ensure!(timings.resolve.count == 1);
         ensure!(timings.resolve_kubernetes > std::time::Duration::ZERO);
         ensure!(timings.resolve_sql() > std::time::Duration::ZERO);
         ensure!(timings.token_review.count == 0);
+        // A later resolve issues every Kubernetes read at once, the gateway
+        // Pod's included: delaying each costs it one delay, where reading the
+        // gateway Pod, then the Claim, then its Sandbox cost three. The time
+        // recorded is that wall time.
+        const DELAY: Duration = Duration::from_millis(300);
+        let delayed: BTreeMap<String, Duration> = fixture
+            .kube
+            .objects
+            .lock()
+            .unwrap()
+            .keys()
+            .map(|path| (path.clone(), DELAY))
+            .collect();
+        ensure!(
+            delayed.len() == 6,
+            "the gateway Pod and five lineage objects"
+        );
+        *fixture.kube.delays.lock().unwrap() = delayed;
+        let (session, timings) = timing::measure(authority.current_session()).await;
+        fixture.kube.delays.lock().unwrap().clear();
+        session?;
+        eprintln!(
+            "later resolve: Kubernetes {:?} of {:?} total, each read delayed {DELAY:?}",
+            timings.resolve_kubernetes, timings.resolve.elapsed
+        );
+        ensure!(
+            timings.resolve_kubernetes >= DELAY && timings.resolve_kubernetes < DELAY * 2,
+            "a later resolve's Kubernetes reads took {:?}, not one round trip",
+            timings.resolve_kubernetes
+        );
+        ensure!(timings.resolve_kubernetes <= timings.resolve.elapsed);
         for sql in [
             "UPDATE public.environments SET state=state",
             "UPDATE public.org_members SET role=role",
@@ -281,6 +340,26 @@ async fn live_revalidation_denies_membership_consent_backend_lifecycle_and_pod_c
             *fixture.kube.objects.lock().unwrap()=original.clone();
             authority.current_session().await?;
         }
+        // A later resolve reads the gateway Pod with its lineage, after the
+        // scope query, and checks the fresh Pod as admission did: its identity,
+        // liveness and environment label, and the ReplicaSet it now names.
+        for fault in 0..6 {
+            {
+                let mut values=fixture.kube.objects.lock().unwrap();
+                let pod=values.get_mut(&pod_path(GATEWAY)).unwrap();
+                match fault {
+                    0 => pod["metadata"]["uid"]=json!(Uuid::new_v4().to_string()),
+                    1 => pod["metadata"]["deletionTimestamp"]=json!("2026-01-01T00:00:00Z"),
+                    2 => pod["status"]["conditions"][0]["status"]=json!("False"),
+                    3 => pod["metadata"]["labels"]["codewire.sh/environment-id"]=json!(Uuid::new_v4().to_string()),
+                    4 => pod["metadata"]["labels"]["codewire.sh/type"]=json!("workspace"),
+                    _ => pod["metadata"]["ownerReferences"][0]["name"]=json!("synthetic-rs-2"),
+                }
+            }
+            ensure!(matches!(authority.current_session().await,Err(PlatformRuntimeError::Denied)),"gateway fault {fault}");
+            *fixture.kube.objects.lock().unwrap()=original.clone();
+            authority.current_session().await?;
+        }
         // A released binding never scopes again (a release is final), and a
         // pointer moved to the next Pod's binding does not admit this Pod.
         sqlx::query("UPDATE sandbox_workspace_bindings SET released_at=now() WHERE pod_uid=$1")
@@ -344,6 +423,95 @@ async fn final_scope_reread_and_original_expiry_fence_pending_kubernetes() -> Re
         fixture.kube.gate.release();
         ensure!(matches!(task.await?, Err(PlatformRuntimeError::Denied)));
         ensure!(fixture.kube.reviews.load(Ordering::SeqCst) == reviews);
+        Ok(())
+    }
+    .await;
+    fixture.finish(result).await
+}
+
+/// The read order's backstop. Kubernetes names are immutable and UIDs unique,
+/// so whatever a later resolve finds under a name other than its admission's
+/// is another object, and the epoch's lineage equality denies the request even
+/// when that successor is fully valid: a newly admitted epoch over the same
+/// objects is admitted.
+#[tokio::test]
+#[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
+async fn later_resolves_deny_a_valid_successor_replica_set_or_sandbox() -> Result<()> {
+    let fixture = Fixture::create().await?;
+    let result = async {
+        let authority = fixture.admitted().await?;
+        let admitted = authority.current_session().await?;
+        let original = fixture.kube.objects.lock().unwrap().clone();
+        let replica_set_path =
+            |name: &str| format!("/apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{name}");
+        let sandbox_path = |name: &str| {
+            format!("/apis/agents.x-k8s.io/v1beta1/namespaces/{NAMESPACE}/sandboxes/{name}")
+        };
+        let claim_path = format!(
+            "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/{NAMESPACE}/sandboxclaims/{}",
+            fixture.scope.claim_name
+        );
+
+        // A successor ReplicaSet of the same Deployment now controls the
+        // gateway Pod. The database is unchanged, so the scope is too, and
+        // only the lineage's ReplicaSet UID differs.
+        let successor_replica_set = Uuid::new_v4().to_string();
+        {
+            let mut objects = fixture.kube.objects.lock().unwrap();
+            let mut replica_set = objects[&replica_set_path("synthetic-rs")].clone();
+            replica_set["metadata"]["name"] = json!("synthetic-rs-2");
+            replica_set["metadata"]["uid"] = json!(successor_replica_set);
+            objects.insert(replica_set_path("synthetic-rs-2"), replica_set);
+            let owner = &mut objects.get_mut(&pod_path(GATEWAY)).unwrap()["metadata"]
+                ["ownerReferences"][0];
+            owner["name"] = json!("synthetic-rs-2");
+            owner["uid"] = json!(successor_replica_set);
+        }
+        ensure!(
+            matches!(
+                authority.current_session().await,
+                Err(PlatformRuntimeError::Denied)
+            ),
+            "the epoch admitted a successor ReplicaSet"
+        );
+        let successor_epoch = fixture.admitted().await?;
+        successor_epoch.current_session().await?;
+
+        // The Claim and the binding also name a successor Sandbox, which owns
+        // the workspace Pod. A binding is insert-only (migration 0034), so its
+        // trigger is suspended for this one update: the state cannot arise in
+        // production, and is built here only so that every check but lineage
+        // equality admits it. Here the scope's binding Sandbox differs too.
+        let successor_sandbox = Uuid::new_v4().to_string();
+        {
+            let mut objects = fixture.kube.objects.lock().unwrap();
+            let mut sandbox = objects[&sandbox_path("synthetic-sandbox")].clone();
+            sandbox["metadata"]["name"] = json!("synthetic-sandbox-2");
+            sandbox["metadata"]["uid"] = json!(successor_sandbox);
+            objects.insert(sandbox_path("synthetic-sandbox-2"), sandbox);
+            objects.get_mut(&claim_path).unwrap()["status"]["sandbox"]["name"] =
+                json!("synthetic-sandbox-2");
+            let owner = &mut objects.get_mut(&pod_path(WORKSPACE)).unwrap()["metadata"]
+                ["ownerReferences"][0];
+            owner["name"] = json!("synthetic-sandbox-2");
+            owner["uid"] = json!(successor_sandbox);
+        }
+        fixture.bind_sandbox(&successor_sandbox).await?;
+        for (epoch, case) in [(&authority, "first"), (&successor_epoch, "second")] {
+            ensure!(
+                matches!(
+                    epoch.current_session().await,
+                    Err(PlatformRuntimeError::Denied)
+                ),
+                "the {case} epoch admitted a successor Sandbox"
+            );
+        }
+        fixture.admitted().await?.current_session().await?;
+
+        // Restored, the first epoch's lineage is its own again.
+        fixture.bind_sandbox(&fixture.scope.binding_sandbox_uid).await?;
+        *fixture.kube.objects.lock().unwrap() = original;
+        ensure!(authority.current_session().await? == admitted);
         Ok(())
     }
     .await;
