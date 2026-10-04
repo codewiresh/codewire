@@ -25,7 +25,7 @@
 //!
 //! A successful material read establishes one storage admission point. It does
 //! not revoke bytes already returned, authenticate a sandbox, or replace the
-//! broker's per-operation grant, lifecycle, expiry and revocation checks.
+//! broker's grant, lifecycle, expiry and revocation checks.
 //! [`EpochMaterialCache`] is the only retained copy: one platform broker
 //! bridge epoch (hosted or owner-local delegation) may reuse a value for at
 //! most two minutes, for its exact credential record.

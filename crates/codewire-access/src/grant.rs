@@ -168,12 +168,13 @@ pub fn validate_profile_entries(
 ///
 /// A selected credential whose lifecycle withholds it now (refresh failed,
 /// revoked or expired) withholds only its own capability: the slot is listed
-/// in `reconnect_required` and receives no grant. Every structural, owner,
-/// authorization and catalog failure still rejects the whole selection.
+/// in `reconnect_required`, with the credential that needs Reconnect, and
+/// receives no grant. Every structural, owner, authorization and catalog
+/// failure still rejects the whole selection.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AvailableGrants {
     pub grants: Vec<DerivedGrant>,
-    pub reconnect_required: BTreeSet<CapabilitySlot>,
+    pub reconnect_required: BTreeMap<CapabilitySlot, CredentialId>,
 }
 
 /// Admit every profile entry, or fail the whole selection. Local and
@@ -209,7 +210,7 @@ pub fn derive_available_grants(
     catalog: &ProviderCatalog,
     now_unix: u64,
 ) -> Result<AvailableGrants, AccessError> {
-    let mut reconnect_required = BTreeSet::new();
+    let mut reconnect_required = BTreeMap::new();
     let grants = derive_profile_grants(
         context,
         binding,
@@ -232,7 +233,7 @@ fn derive_profile_grants(
     credentials: &BTreeMap<CredentialId, CredentialMetadata>,
     catalog: &ProviderCatalog,
     now_unix: u64,
-    mut reconnect_required: Option<&mut BTreeSet<CapabilitySlot>>,
+    mut reconnect_required: Option<&mut BTreeMap<CapabilitySlot, CredentialId>>,
 ) -> Result<Vec<DerivedGrant>, AccessError> {
     context.validate()?;
     binding.validate()?;
@@ -253,18 +254,19 @@ fn derive_profile_grants(
 
     // Only credential lifecycle is per capability. Without a withheld set,
     // as for derive_grants, every failure still rejects the whole selection.
-    let mut withhold = |slot: &CapabilitySlot, error: AccessError| {
-        let lifecycle = matches!(
-            error,
-            AccessError::CredentialInactive { .. } | AccessError::CredentialExpired { .. }
-        );
-        match reconnect_required.as_deref_mut() {
-            Some(withheld) if lifecycle => {
-                withheld.insert(slot.clone());
-                Ok(())
-            }
-            _ => Err(error),
+    let mut withhold = |slot: &CapabilitySlot, error: AccessError| match (
+        reconnect_required.as_deref_mut(),
+        error,
+    ) {
+        (
+            Some(withheld),
+            AccessError::CredentialInactive { credential }
+            | AccessError::CredentialExpired { credential },
+        ) => {
+            withheld.insert(slot.clone(), credential);
+            Ok(())
         }
+        (_, error) => Err(error),
     };
     let mut grants =
         Vec::with_capacity(profile.entries.len() + usize::from(profile.includes_github()));

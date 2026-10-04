@@ -1,44 +1,23 @@
 //! Reuse of decrypted material within one bridge epoch, against real
 //! restricted PostgreSQL and a synthetic runtime authority and KEK. A reuse
-//! skips only the protected-material read; every authority, grant and record
-//! check still runs and still denies.
+//! skips only the protected-material read. A hosted lease still rereads its
+//! credential's record and reuses a value only for exactly that record; a
+//! lease with full per-request checks still runs every check around it.
 
-use crate::codex_oauth::CodexOAuthCredential;
-use crate::timing::{self, MaterialCacheUse, Timings};
+use crate::timing::{self, AuthorityUse, MaterialCacheUse, Timings};
 
 use super::*;
 
-/// A provider as one admitted bridge epoch holds it: its own empty cache.
-async fn epoch(f: &Fixture) -> Result<Arc<Adapter>> {
-    Ok(Arc::new(Adapter {
-        material: Some(EpochMaterialCache::new()),
-        ..Adapter::connect(
-            f.authority.clone(),
-            f.store.clone(),
-            PlatformAccessProfileStore::new(f.pool.clone(), builtin_provider_catalog()),
-        )
-        .await?
-    }))
-}
-
-fn retained(adapter: &Adapter) -> usize {
+pub(super) fn retained(adapter: &Adapter) -> usize {
     adapter.material.as_ref().map_or(0, EpochMaterialCache::len)
 }
 
-fn unwraps(f: &Fixture) -> usize {
+pub(super) fn unwraps(f: &Fixture) -> usize {
     f.provider.unwrap_calls.load(Ordering::SeqCst)
 }
 
-fn refresh_token(lease: PlatformCredentialLease) -> Result<String> {
-    lease.with_material(|bytes| {
-        Ok(CodexOAuthCredential::parse(bytes)?
-            .refresh_token()
-            .to_owned())
-    })
-}
-
 /// Authority checks, grant evaluations, record reads and material reads.
-fn steps(timings: &Timings) -> (u32, u32, u32, u32) {
+pub(super) fn steps(timings: &Timings) -> (u32, u32, u32, u32) {
     (
         timings.authority.count,
         timings.grants.count,
@@ -52,185 +31,47 @@ fn steps(timings: &Timings) -> (u32, u32, u32, u32) {
 async fn a_second_lease_in_an_epoch_reuses_material_without_a_material_read() -> Result<()> {
     let f = Fixture::create().await?;
     let result = async {
-        let adapter = epoch(&f).await?;
+        let adapter = f.epoch().await?;
         let initial = unwraps(&f);
         let (first, miss) = timing::measure(lease(&adapter)).await;
         let first = first?;
-        // The miss path is today's lease: two authority checks bracket two
-        // grant evaluations and record reads around one material read.
+        // The epoch's admission evaluated authority: the first lease rereads
+        // its credential's record and reads the material through the store.
         ensure!(
-            steps(&miss) == (2, 2, 2, 1),
+            steps(&miss) == (0, 0, 1, 1),
             "miss steps {:?}",
             steps(&miss)
         );
         ensure!(miss.material_cache == MaterialCacheUse::Miss);
+        ensure!(miss.authority_decision == AuthorityUse::Reused);
         ensure!(unwraps(&f) == initial + 1);
         ensure!(retained(&adapter) == 1);
         let (second, hit) = timing::measure(lease(&adapter)).await;
         let second = second?;
-        // The hit path skips only the material read: its two SQL reads, the
+        // The hit path skips the material read too: its two SQL reads, the
         // unwrap and the final fence transaction.
-        ensure!(steps(&hit) == (2, 2, 2, 0), "hit steps {:?}", steps(&hit));
+        ensure!(steps(&hit) == (0, 0, 1, 0), "hit steps {:?}", steps(&hit));
         ensure!(hit.material_read.elapsed == Duration::ZERO);
         ensure!(hit.material_cache == MaterialCacheUse::Hit);
+        ensure!(hit.authority_decision == AuthorityUse::Reused);
         ensure!(unwraps(&f) == initial + 1, "a reuse unwrapped again");
         ensure!(second.grant() == first.grant());
         ensure!(second.material_generation() == first.material_generation());
         ensure!(refresh_token(first)? == refresh_token(second)?);
         ensure!(refresh_token(lease(&adapter).await?)? == "synthetic-refresh-old");
         ensure!(unwraps(&f) == initial + 1);
-        // A provider outside a bridge epoch has no cache and reads through.
-        let (_, bypass) = timing::measure(lease(&f.adapter)).await;
+        // A provider outside a bridge epoch has no cache and no decision: it
+        // runs the full per-request checks and reads through.
+        let (_pool, outside) = f.second().await?;
+        let (_, bypass) = timing::measure(lease(&outside)).await;
         ensure!(steps(&bypass) == (2, 2, 2, 1));
         ensure!(bypass.material_cache == MaterialCacheUse::Bypass);
+        ensure!(bypass.authority_decision == AuthorityUse::Evaluated);
         ensure!(unwraps(&f) == initial + 2);
         Ok(())
     }
     .await;
     f.finish(result).await
-}
-
-/// Warm `adapter`'s cache, then pause its next lease between its record reads
-/// and apply `mutation` there. That lease must be a reuse, must fail with
-/// exactly `denial`, and must drop its credential's value.
-async fn deny_mutated_hit(
-    f: &Fixture,
-    mutation: &str,
-    denial: BrokerLeaseError,
-    mutate: impl AsyncFnOnce() -> Result<()>,
-) -> Result<()> {
-    let adapter = epoch(f).await?;
-    lease(&adapter).await?;
-    ensure!(retained(&adapter) == 1);
-    let initial = unwraps(f);
-    let gate = Arc::new(SessionGate::default());
-    gate.arm(1);
-    let operation = spawn(BETWEEN_RECORD_READS.scope(gate.clone(), {
-        let adapter = adapter.clone();
-        async move { timing::measure(lease(&adapter)).await }
-    }));
-    gate.wait().await?;
-    mutate().await?;
-    gate.release();
-    let (leased, timings) = finish_task(operation).await?;
-    ensure!(
-        timings.material_cache == MaterialCacheUse::Hit,
-        "{mutation}: the gated lease was not a reuse"
-    );
-    ensure!(
-        leased.as_ref().err() == Some(&denial),
-        "{mutation} released reused material ({:?})",
-        leased.err()
-    );
-    ensure!(unwraps(f) == initial, "{mutation}: a reuse unwrapped");
-    ensure!(
-        retained(&adapter) == 0,
-        "{mutation}: a denied lease kept its value"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn cache_hit_rechecks_replacement_revocation_rebinding_stop_generation_expiry_and_owner_deletion()
--> Result<()> {
-    for mutation in [
-        "replace",
-        "revoke",
-        "rebind",
-        "stop",
-        "generation",
-        "expiry",
-        "owner deletion",
-    ] {
-        let f = Fixture::create().await?;
-        // A revoked or expired credential withholds only its own capability:
-        // the second grant evaluation reports Reconnect instead of a grant.
-        let denial = if matches!(mutation, "revoke" | "expiry") {
-            BrokerLeaseError::ReconnectRequired
-        } else {
-            BrokerLeaseError::Denied
-        };
-        let result = deny_mutated_hit(&f, mutation, denial, async || {
-            match mutation {
-                "replace" => {
-                    f.store
-                        .replace(
-                            &f.owner,
-                            &f.record.metadata.id,
-                            f.record.version,
-                            &value(bundle(false, "replacement").as_bytes()),
-                            None,
-                        )
-                        .await?;
-                }
-                "revoke" => {
-                    f.store
-                        .revoke(&f.owner, &f.record.metadata.id, f.record.version)
-                        .await?;
-                }
-                "rebind" => f.rebind().await?,
-                "stop" => f.stop().await?,
-                "generation" => {
-                    sqlx::query(
-                        "UPDATE environments SET environment_operation_generation=8 WHERE id=$1",
-                    )
-                    .bind(f.context.environment_id.as_str())
-                    .execute(&f.db.pool)
-                    .await?;
-                }
-                "expiry" => {
-                    sqlx::query("UPDATE platform_credentials SET expires_at_unix=0 WHERE id=$1")
-                        .bind(f.record.metadata.id.as_str())
-                        .execute(&f.db.pool)
-                        .await?;
-                }
-                // The owner's lifecycle removes the environment it created,
-                // then the owner, whose credential rows cascade with it.
-                "owner deletion" => {
-                    let mut tx = f.db.pool.begin().await?;
-                    sqlx::query("DELETE FROM environments WHERE id=$1")
-                        .bind(f.context.environment_id.as_str())
-                        .execute(&mut *tx)
-                        .await?;
-                    sqlx::query("DELETE FROM users WHERE id=$1")
-                        .bind(f.owner.id().as_str())
-                        .execute(&mut *tx)
-                        .await?;
-                    tx.commit().await?;
-                }
-                _ => unreachable!(),
-            }
-            Ok(())
-        })
-        .await;
-        f.finish(result).await?;
-    }
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn cache_hit_rechecks_authenticated_gateway_workspace_policy_and_identity_expiry()
--> Result<()> {
-    for mutation in [
-        "gateway",
-        "workspace",
-        "policy",
-        "authorized set replaced",
-        "personal-policy",
-        "expiry",
-    ] {
-        let f = Fixture::create().await?;
-        let result = deny_mutated_hit(&f, mutation, BrokerLeaseError::Denied, async || {
-            f.authority
-                .change(|session| change_authority(session, mutation));
-            Ok(())
-        })
-        .await;
-        f.finish(result).await?;
-    }
-    Ok(())
 }
 
 #[tokio::test]
@@ -239,7 +80,7 @@ async fn replacement_refresh_and_reconnect_make_the_next_lease_read_the_new_valu
     for change in ["replace", "refresh", "reconnect"] {
         let f = Fixture::create().await?;
         let result = async {
-            let adapter = epoch(&f).await?;
+            let adapter = f.epoch().await?;
             let warm = lease(&adapter).await?;
             ensure!(refresh_token(warm)? == "synthetic-refresh-old");
             ensure!(refresh_token(lease(&adapter).await?)? == "synthetic-refresh-old");
@@ -298,6 +139,8 @@ async fn replacement_refresh_and_reconnect_make_the_next_lease_read_the_new_valu
                 timings.material_cache == MaterialCacheUse::Miss,
                 "{change}: the next lease reused the old value"
             );
+            // The changed record made this very lease evaluate again.
+            ensure!(timings.authority_decision == AuthorityUse::Evaluated);
             ensure!(unwraps(&f) == initial + 1);
             ensure!(next.material_generation() == current.version.material_generation + 1);
             ensure!(
@@ -322,43 +165,49 @@ async fn replacement_refresh_and_reconnect_make_the_next_lease_read_the_new_valu
 async fn a_denied_lease_never_fills_its_cache() -> Result<()> {
     let f = Fixture::create().await?;
     let result = async {
-        let adapter = epoch(&f).await?;
-        let admitted = f.authority.session.lock().unwrap().clone();
+        let adapter = f.epoch().await?;
         let initial = unwraps(&f);
-        // The lease's last authority check follows its only unwrap.
-        f.authority.gate.arm(2);
+        // A replacement during each of the lease's two unwraps fails the
+        // store's version fence twice: the lease evaluates and retries once,
+        // then fails, never filling a value it read.
+        f.provider.unwrap_gate.arm();
         let operation = spawn({
             let adapter = adapter.clone();
             async move { lease(&adapter).await }
         });
-        f.authority.gate.wait().await?;
-        ensure!(unwraps(&f) == initial + 1);
-        f.authority
-            .change(|session| session.workspace_mut().uid = Uuid::new_v4());
-        f.authority.gate.release();
+        for _ in 0..2 {
+            f.provider.unwrap_gate.wait().await?;
+            mutate(&f, "replace").await?;
+            f.provider.unwrap_gate.release();
+            // Re-armed before this task yields, so the retry's unwrap waits.
+            f.provider.unwrap_gate.arm();
+        }
         ensure!(matches!(
             finish_task(operation).await?,
             Err(BrokerLeaseError::Denied)
         ));
-        ensure!(retained(&adapter) == 0, "a denied lease filled the cache");
-        // Restored authority admits again, and the lease must read through:
-        // the denied lease left nothing to reuse.
-        f.authority.change(|session| *session = admitted);
-        let (leased, timings) = timing::measure(lease(&adapter)).await;
-        leased?;
-        ensure!(timings.material_cache == MaterialCacheUse::Miss);
         ensure!(unwraps(&f) == initial + 2);
+        ensure!(retained(&adapter) == 0, "a denied lease filled the cache");
+        // The gate is still armed: let the next lease's single unwrap pass.
+        let operation = spawn({
+            let adapter = adapter.clone();
+            async move { timing::measure(lease(&adapter)).await }
+        });
+        f.provider.unwrap_gate.wait().await?;
+        f.provider.unwrap_gate.release();
+        let (leased, timings) = finish_task(operation).await?;
+        ensure!(leased?.material_generation() == 3);
+        ensure!(timings.material_cache == MaterialCacheUse::Miss);
+        ensure!(unwraps(&f) == initial + 3);
         ensure!(retained(&adapter) == 1);
         // A denial before any material step also drops the credential's value.
-        f.store
-            .revoke(&f.owner, &f.record.metadata.id, f.record.version)
-            .await?;
+        mutate(&f, "revoke").await?;
         ensure!(lease(&adapter).await.is_err());
         ensure!(
             retained(&adapter) == 0,
             "a revoked credential kept its value"
         );
-        ensure!(unwraps(&f) == initial + 2);
+        ensure!(unwraps(&f) == initial + 3);
         Ok(())
     }
     .await;
@@ -370,7 +219,7 @@ async fn a_denied_lease_never_fills_its_cache() -> Result<()> {
 async fn every_codex_login_reads_through_and_fills_nothing() -> Result<()> {
     let f = Fixture::create_for_bridge().await?;
     let result = async {
-        let adapter = epoch(&f).await?;
+        let adapter = f.epoch().await?;
         let initial = unwraps(&f);
         const LOGINS: usize = 3;
         for login in 1..=LOGINS {

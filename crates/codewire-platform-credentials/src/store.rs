@@ -163,6 +163,15 @@ impl PlatformCredentialStore {
         load_record(&self.reader.pool, owner, id, false, &self.reader.catalog).await
     }
 
+    /// The account's one active GitHub connection, read exactly as runtime
+    /// authority reads it: one statement, no lock and no material.
+    pub async fn active_github_connection(
+        &self,
+        owner: &Owner,
+    ) -> Result<Option<CredentialId>, Error> {
+        active_github_connection(&self.reader.pool, owner).await
+    }
+
     /// Lock the current exact-owner record in an already-authorized caller
     /// transaction. Internal material versions stay authority-side; a public
     /// lifecycle command may compare its observed metadata revision here, then

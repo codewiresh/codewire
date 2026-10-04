@@ -29,9 +29,10 @@ pub enum Phase {
     /// One broker runtime-authority check (`current_session`), including any
     /// `resolve()` the authority performs.
     Authority,
-    /// One current-grant evaluation for the selected capability slot.
+    /// One current-grant evaluation: every capability slot of the session.
     Grants,
-    /// One read of the selected credential's metadata record.
+    /// One read of a credential's metadata record: the leased or withheld
+    /// credential's, or the account's active GitHub connection.
     Record,
     /// One protected-material read: its database reads, the KEK unwrap and
     /// the final database fence.
@@ -76,6 +77,32 @@ impl MaterialCacheUse {
     }
 }
 
+/// Whether a request's leases reused their hosted epoch's authority decision.
+/// A request with several leases reports the most expensive.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AuthorityUse {
+    /// No lease reached an authority decision, such as a request refused
+    /// before it leased.
+    #[default]
+    None,
+    /// Every lease reused its epoch's decision and reread only its
+    /// credential's record: no runtime authority resolve or grant evaluation.
+    Reused,
+    /// At least one lease ran an authority evaluation, or ran full
+    /// per-request checks.
+    Evaluated,
+}
+
+impl AuthorityUse {
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Reused => "reused",
+            Self::Evaluated => "evaluated",
+        }
+    }
+}
+
 /// How often one phase ran and its summed wall time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Sample {
@@ -110,6 +137,7 @@ pub struct Timings {
     pub ready: Sample,
     pub lease_wait: Sample,
     pub material_cache: MaterialCacheUse,
+    pub authority_decision: AuthorityUse,
 }
 
 impl Timings {
@@ -162,6 +190,11 @@ pub fn record(phase: Phase, count: u32, elapsed: Duration) {
 /// Record one lease's material-cache decision in the current record.
 pub fn material_cache(decision: MaterialCacheUse) {
     update(|timings| timings.material_cache = timings.material_cache.max(decision));
+}
+
+/// Record whether one lease reused or evaluated authority in the current record.
+pub fn authority(decision: AuthorityUse) {
+    update(|timings| timings.authority_decision = timings.authority_decision.max(decision));
 }
 
 /// Add one runtime-authority `resolve()`: its total time and the part spent in
@@ -268,6 +301,7 @@ pub(crate) fn proxied_request(
         status,
         total_ms = ms(timings.total),
         lease_wait_ms = ms(timings.lease_wait.elapsed),
+        authority = timings.authority_decision.label(),
         authority_checks = timings.authority.count,
         authority_ms = ms(timings.authority.elapsed),
         resolves = timings.resolve.count,
@@ -454,6 +488,7 @@ pub(crate) mod tests {
         "status",
         "total_ms",
         "lease_wait_ms",
+        "authority",
         "authority_checks",
         "authority_ms",
         "resolves",
@@ -547,6 +582,9 @@ pub(crate) mod tests {
         "hit",
         "miss",
         "bypass",
+        "none",
+        "reused",
+        "evaluated",
     ];
 
     /// The whole contract of a timing line: the dedicated target, exactly its
@@ -624,6 +662,7 @@ pub(crate) mod tests {
         assert_eq!(timings.refresh.count, 1);
         assert_eq!(timings.provider, Sample::default());
         assert_eq!(timings.material_cache, MaterialCacheUse::Bypass);
+        assert_eq!(timings.authority_decision, AuthorityUse::None);
         assert!(timings.total < millis(1_000));
     }
 
@@ -654,6 +693,35 @@ pub(crate) mod tests {
             })
             .await;
             assert_eq!(timings.material_cache, expected, "{decisions:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_reports_whether_any_lease_evaluated_authority() {
+        authority(AuthorityUse::Evaluated);
+        for (decisions, expected) in [
+            (&[][..], AuthorityUse::None),
+            (&[AuthorityUse::Reused][..], AuthorityUse::Reused),
+            (
+                &[AuthorityUse::Reused, AuthorityUse::Reused][..],
+                AuthorityUse::Reused,
+            ),
+            (
+                &[AuthorityUse::Reused, AuthorityUse::Evaluated][..],
+                AuthorityUse::Evaluated,
+            ),
+            (
+                &[AuthorityUse::Evaluated, AuthorityUse::Reused][..],
+                AuthorityUse::Evaluated,
+            ),
+        ] {
+            let ((), timings) = measure(async {
+                for decision in decisions {
+                    authority(*decision);
+                }
+            })
+            .await;
+            assert_eq!(timings.authority_decision, expected, "{decisions:?}");
         }
     }
 
@@ -709,6 +777,7 @@ pub(crate) mod tests {
         timings.provider.add(1, millis(240));
         timings.lease_wait.add(1, millis(7));
         timings.material_cache = MaterialCacheUse::Miss;
+        timings.authority_decision = AuthorityUse::Reused;
         let canonical = Uuid::new_v4().to_string();
         let response = Ok(BrokerHttpResponse::new(
             StatusCode::UNAUTHORIZED,
@@ -750,6 +819,7 @@ pub(crate) mod tests {
         assert_eq!(first["refresh"], false);
         assert_eq!(first["lease_wait_ms"], 7.0);
         assert_eq!(first["cache"], "miss");
+        assert_eq!(first["authority"], "reused");
         let second = &lines[1]["fields"];
         assert_eq!(second["request_id"], Uuid::nil().to_string().as_str());
         assert_eq!(second["slot"], "invalid");

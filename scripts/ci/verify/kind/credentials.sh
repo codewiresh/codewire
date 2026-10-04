@@ -323,9 +323,11 @@ kind_credential_probe() {
     python3 -B -u - "$environment" "$mode" < "$ROOT/scripts/ci/verify/kind/credential_probe.py"
 }
 
-# An authority change must take effect on the daemon's connected epoch within
-# this many milliseconds of the first request after it.
-KIND_AUTHORITY_CHANGE_WITHIN_MS=5000
+# The broker reuses a hosted epoch's authority decision for at most 60
+# seconds. A membership or binding change must take effect on the daemon's
+# connected epoch within this many milliseconds of the first request after it,
+# polled once a second. A credential change applies to the very next request.
+KIND_AUTHORITY_CHANGE_WITHIN_MS=65000
 
 # Proxied Codex requests through the workspace daemon's loopback ingress, on
 # its long-lived bridge epoch: the path stock Codex's proxy provider uses, and
@@ -426,6 +428,26 @@ SQL
     echo "::error::the credential fixture environment was not rebound to another profile revision" >&2
     return 1
   }
+}
+
+# Replace the environment's sandbox Pods through Stop/Start. The new workspace
+# daemon admits a new bridge epoch, which evaluates authority afresh; the
+# login it delivers again proves that epoch serves.
+replace_kind_credential_sandbox() {
+  local environment="$1" before after
+  before="$(kubectl -n "$SANDBOX_NS" get pod "$(kind_credential_workspace "$environment")" \
+    -o 'jsonpath={.metadata.uid}')" || return $?
+  kind_credential_cli env --platform stop "$environment" --output json >/dev/null || return $?
+  wait_kind_credential_environment "$environment" stopped || return $?
+  kind_credential_cli env --platform start "$environment" --output json >/dev/null || return $?
+  wait_kind_credential_environment "$environment" running || return $?
+  after="$(kubectl -n "$SANDBOX_NS" get pod "$(kind_credential_workspace "$environment")" \
+    -o 'jsonpath={.metadata.uid}')" || return $?
+  [ -n "$after" ] && [ "$after" != "$before" ] || {
+    echo '::error::Stop/Start did not replace the workspace Pod' >&2
+    return 1
+  }
+  kind_credential_codex_login "$environment" redelivered >/dev/null || return $?
 }
 
 # One codex_login.py mode in the exact workspace. Its stdout is closed events
@@ -571,7 +593,7 @@ assert_kind_credential_provider_counts() {
       [.event, .scenario, .attempt, .status, .response_calls, .refresh_calls]] as $observed |
     # After the retry scenarios of the session, every baseline response is
     # one more served request, numbered in order.
-    ($baseline | type == "number" and . == floor and . >= 2 and . <= 64) and
+    ($baseline | type == "number" and . == floor and . >= 2 and . <= 256) and
     ($observed == ([
       ["provider_response", "baseline", 1, 200, 1, 0],
       ["provider_response", "baseline", 2, 200, 2, 0],
@@ -596,9 +618,12 @@ assert_kind_credential_provider_counts() {
 assert_kind_credential_material_reuse() {
   # On the daemon's bridge epoch: a request, a second one, then Reconnect,
   # then one more, all on that one epoch. The second request reuses the first
-  # one's login without a material read; the request after Reconnect reads
-  # and presents the new login. A new epoch admitted between them is a
-  # failure, never an excuse: it would make the reuse proof vacuous.
+  # one's authority decision and login: no resolve or grant evaluation, one
+  # record read and no material read, unless that decision reached its minute
+  # in between. Reconnect changed the record, so the very next request
+  # evaluates again, reads and presents the new login. A new epoch admitted
+  # between them is a failure, never an excuse: it would make the reuse proof
+  # vacuous.
   local logs
   logs="$(kubectl -n "$NS" logs deployment/codewire-credential-service -c credential-service)" ||
     return $?
@@ -639,7 +664,10 @@ assert_kind_credential_material_reuse() {
     # The warm-up filled before its line, at most its total time earlier.
     ($reuse.at - $warm.at + $warm.total_ms / 1000) < $window and
     ($reuse | .cache == "hit" and .material_reads == 0 and .unwraps == 0) and
-    ($requests[-1] | .cache == "miss" and .material_reads >= 1)
+    (($reuse | .authority == "reused" and .record_reads == 1 and .authority_checks == 0
+        and .grant_evaluations == 0 and .resolves == 0)
+      or ($warm.authority == "reused" and $reuse.authority == "evaluated")) and
+    ($requests[-1] | .cache == "miss" and .material_reads >= 1 and .authority == "evaluated")
   ' <<<"$logs" >/dev/null || {
     echo '::error::the epoch material cache did not reuse, or reused a login after Reconnect' >&2
     return 1
@@ -651,9 +679,19 @@ assert_kind_credential_material_reuse() {
 # its proxied Codex request number FROM on. The two must agree request by
 # request: a 200 is a served response, and a 403 a denial (after revocation,
 # the fixed 403 Reconnect explanation). A change's probe ends at its first
-# denial, which must follow the request before it on the same,
-# still-connected epoch: no epoch was admitted between them. Each change took
-# effect within the bound.
+# denial, and a revocation's single request is refused; each must follow the
+# request before it on the same, still-connected epoch: no epoch was admitted
+# between them. Each change took effect within the bound. Requests served
+# while a refusal was awaited, and repeated requests, reused the epoch's
+# authority decision: no authority check, resolve or grant evaluation, and
+# one record read. Repeated requests also reused the login, with no material
+# read. A request served while a refusal is awaited may read it again, at
+# most once per change: a full-check lease that the same change refuses on
+# that epoch, such as the daemon's Codex login check, clears the epoch's
+# material cache. A refusal, a restore and a revocation evaluated the
+# decision; a refusal answered while a restore was awaited may come from
+# either. A `sandbox_replaced` record marks the next request as the first on
+# a new epoch: one was admitted before it, cold.
 assert_kind_credential_authority_changes() {
   local from="$1" probes="$2" logs
   [[ "$from" =~ ^[0-9]+$ ]] || return 1
@@ -669,11 +707,14 @@ assert_kind_credential_authority_changes() {
     [$timed | to_entries[] | select(.value.event == "proxied_request")][$from:] as $logged |
     # What each probe saw, request by request. A change probe saw the answer
     # from before the change until its last request.
-    [$probes[] | . as $probe
+    [range(0; $probes | length) as $at | $probes[$at] | select(.event == "daemon_probe")
+      | . as $probe
+      | ($at > 0 and $probes[$at - 1].event == "sandbox_replaced") as $replaced
       | (if $probe.within_ms == null then [] else
           [range(1; $probe.requests) | {status: (if $probe.status == 200 then 403 else 200 end),
             mode: "before", change: false}] end)
         + [{status: $probe.status, mode: $probe.mode, change: ($probe.within_ms != null)}]
+      | map(. + {replaced: false}) | .[0].replaced = $replaced
       | .[]] as $seen |
     # A credential that needs Reconnect answers with its fixed 403
     # explanation, without a provider call.
@@ -682,15 +723,33 @@ assert_kind_credential_authority_changes() {
       elif $seen.mode == "revoked" then .outcome == "response" and .status == 403
       elif $seen.mode == "denied" then .outcome == "denied"
       else .outcome == "denied" or (.outcome == "response" and .status == 403) end;
-    ($probes | length) > 0 and ($logged | length) == ($seen | length) and
-    all($probes[]; .event == "daemon_probe"
-      and (.within_ms == null or (.within_ms == $within and .waited_ms <= $within))) and
+    def hit: .cache == "hit" and .material_reads == 0 and .unwraps == 0;
+    def decision_reused: .authority == "reused" and .authority_checks == 0
+      and .resolves == 0 and .grant_evaluations == 0 and .record_reads == 1
+      and (hit or (.cache == "miss" and .material_reads == 1));
+    def decided($seen):
+      if $seen.replaced then .cache == "miss"
+      elif $seen.mode == "before" and $seen.status == 403 then true
+      elif $seen.mode == "before" then decision_reused
+      elif $seen.status == 200 and ($seen.change | not) then decision_reused and hit
+      else .authority == "evaluated" end;
+    def admitted($from; $to): any($timed[($from + 1):$to][]; .event == "epoch_admission");
+    ($seen | length) > 0 and ($logged | length) == ($seen | length) and
+    ($probes[-1].event == "daemon_probe") and
+    ([range(0; $seen | length) as $index
+      | select($seen[$index].mode == "before" and $seen[$index].status == 200
+          and $logged[$index].value.cache != "hit")] | length)
+      <= ([$probes[] | select(.within_ms != null and .status == 403)] | length) and
+    all($probes[]; .event == "sandbox_replaced" or (.event == "daemon_probe"
+      and (.within_ms == null or (.within_ms == $within and .waited_ms <= $within)))) and
     all(range(0; $seen | length);
       . as $index | $seen[$index] as $now | $logged[$index] as $log |
-      ($log.value | agrees($now)) and
-      (if $now.change and $now.status == 403 then
+      ($log.value | agrees($now) and decided($now)) and
+      (if ($now.change or $now.mode == "revoked") and $now.status == 403 then
          $index > 0 and ($logged[$index - 1].value | .outcome == "response" and .status == 200) and
-         all($timed[($logged[$index - 1].key + 1):$log.key][]; .event != "epoch_admission")
+         (admitted($logged[$index - 1].key; $log.key) | not)
+       elif $now.replaced then
+         $index > 0 and admitted($logged[$index - 1].key; $log.key)
        else true end))
   ' <<<"$logs" >/dev/null || {
     echo '::error::an authority change did not reach the connected daemon epoch in time, or the service logs disagree with the probes' >&2
@@ -956,8 +1015,10 @@ kind_credential_native_smoke() (
   kind_credential_daemon_probe "$environment" success
   assert_kind_credential_provider_counts 6
   assert_kind_credential_material_reuse
-  # Authority changes on that same, still-connected epoch: each must deny its
-  # requests within the bound, and repeated requests between them are served.
+  # Authority changes on that same, still-connected epoch, while it is minutes
+  # from a natural renewal: repeated requests reuse its authority decision;
+  # each change refuses requests once that decision reaches its minute, and
+  # each restore serves them again, within the bound.
   journey_from="$(kind_credential_codex_request_count)" || return $?
   KIND_DAEMON_PROBE_LOG="$(mktemp "$RUN_DIR/credential-daemon-authority.XXXXXX")" || return $?
   kind_credential_daemon_probe "$environment" success
@@ -978,8 +1039,13 @@ kind_credential_native_smoke() (
   rebind_kind_credential_environment "$environment" "$bound_revision"
   kind_credential_daemon_probe "$environment" success "$KIND_AUTHORITY_CHANGE_WITHIN_MS"
   kind_credential_daemon_probe "$environment" success
+  # Pod replacement admits a new epoch, which serves at once.
+  replace_kind_credential_sandbox "$environment"
+  printf '%s\n' '{"event":"sandbox_replaced"}' >> "$KIND_DAEMON_PROBE_LOG"
+  kind_credential_daemon_probe "$environment" success
+  # Revocation refuses the very next request on that epoch.
   kind_credential_cli credentials --platform revoke "$credential_name" --output json
-  kind_credential_daemon_probe "$environment" revoked "$KIND_AUTHORITY_CHANGE_WITHIN_MS"
+  kind_credential_daemon_probe "$environment" revoked
   assert_kind_credential_authority_changes "$journey_from" "$KIND_DAEMON_PROBE_LOG"
   # The gateway capability path denies the revoked credential too.
   kind_credential_probe "$environment" revoked
@@ -987,7 +1053,7 @@ kind_credential_native_smoke() (
   # restores its proxy config.toml at the next check.
   kind_credential_codex_login "$environment" revoked || return $?
   # Every daemon request the provider served is one more baseline response.
-  served="$(jq -s 'map(.served) | add' "$KIND_DAEMON_PROBE_LOG")" || return $?
+  served="$(jq -s 'map(.served // 0) | add' "$KIND_DAEMON_PROBE_LOG")" || return $?
   assert_kind_credential_provider_counts "$((6 + served))"
 
   # Do not unbind before destroy: terminal cleanup itself must remove the

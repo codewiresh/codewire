@@ -557,11 +557,13 @@ async fn completed_response(
     .context("synthetic response did not complete")?
 }
 
-/// Each admitted epoch gets its own empty material cache: the first proxied
-/// request of every epoch unwraps, and later requests in that epoch reuse.
+/// Each admitted hosted epoch evaluates authority at admission and gets its
+/// own empty material cache: the first proxied request of every epoch unwraps,
+/// and no request in that epoch resolves runtime authority again.
 #[tokio::test]
 #[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
-async fn each_admitted_epoch_starts_with_a_cold_material_cache() -> Result<()> {
+async fn each_admitted_epoch_evaluates_authority_once_and_starts_with_a_cold_material_cache()
+-> Result<()> {
     let fixture = DatabaseFixture::create_for_bridge().await?;
     let upstream = ResponsesUpstream::default();
     let service = PlatformCredentialBridgeService::new(
@@ -587,6 +589,7 @@ async fn each_admitted_epoch_starts_with_a_cold_material_cache() -> Result<()> {
         let unwraps = || fixture.provider.unwrap_calls.load(Ordering::SeqCst);
         let initial = unwraps();
         for epoch in 1..=2 {
+            let resolves = fixture.authority.calls();
             let (input, receiver) = mpsc::channel(4);
             input
                 .send(v1::CredentialBridgeGuestMessage {
@@ -610,6 +613,8 @@ async fn each_admitted_epoch_starts_with_a_cold_material_cache() -> Result<()> {
             )
             .await
             .context("typed database bridge admission timed out")??;
+            // Connect, then the evaluation after Ready.
+            ensure!(fixture.authority.calls() == resolves + 2);
             for request in 1..=3 {
                 let (request_id, frame) = request_frame();
                 input.send(frame).await?;
@@ -617,6 +622,10 @@ async fn each_admitted_epoch_starts_with_a_cold_material_cache() -> Result<()> {
                 ensure!(
                     unwraps() == initial + epoch,
                     "epoch {epoch} request {request}: expected one unwrap per epoch"
+                );
+                ensure!(
+                    fixture.authority.calls() == resolves + 2,
+                    "epoch {epoch} request {request}: a request resolved authority"
                 );
             }
             drop((input, output));

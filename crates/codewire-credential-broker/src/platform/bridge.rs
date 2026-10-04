@@ -34,7 +34,8 @@ use tonic::{Request, Response, Status, Streaming, metadata::MetadataMap};
 use uuid::Uuid;
 
 use super::{
-    LeaseBudget, PlatformBrokerLeaseProvider, PlatformRuntimeAuthority, PlatformRuntimeError,
+    EpochDecision, LeaseBudget, PlatformBrokerLeaseProvider, PlatformRuntimeAuthority,
+    PlatformRuntimeError, RuntimeIdentity,
 };
 use crate::timing::{self, Phase};
 use crate::{
@@ -53,14 +54,15 @@ use crate::{
 /// An idle epoch is one TLS connection and its tasks; its response buffer is
 /// bounded.
 pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS: usize = 1024;
-/// Concurrent leases across all epochs: authority checks, grant and record
-/// reads and the protected-material read (SQL and KEK unwrap), or a reuse from
-/// this epoch's material cache. A lease runs its statements one at a time, so
-/// it holds at most one of the credential service's 16 pool connections and
-/// none during its Kubernetes reads or the unwrap. Sixty-four leases queue at
-/// most four per connection for a few statement times, far inside the pool's
-/// 5-second acquire timeout, whose expiry would end the epoch, and bound
-/// Kubernetes and OpenBao concurrency.
+/// Concurrent leases across all epochs: a record read, any authority
+/// evaluation (or full per-request checks), and the protected-material read
+/// (SQL and KEK unwrap) or a reuse from the epoch's material cache. A lease
+/// runs its statements one at a time, so it holds at most one of the
+/// credential service's 16 pool connections and none during its Kubernetes
+/// reads or the unwrap. Sixty-four leases queue at most four per connection
+/// for a few statement times, far inside the pool's 5-second acquire timeout,
+/// whose expiry would end the epoch, and bound Kubernetes and OpenBao
+/// concurrency.
 pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES: usize = 64;
 /// Optional operations this broker serves, listed in the admitted stream's
 /// response headers. The gateway copies them into the daemon's Open, and the
@@ -400,6 +402,13 @@ where
             .await
             .map_err(runtime_status)?
         };
+        // A hosted epoch reuses one authority decision for at most a minute;
+        // an owner-local delegation epoch keeps full per-request checks.
+        let hosted = matches!(provider.session.identity, RuntimeIdentity::Hosted { .. });
+        let provider = PlatformBrokerLeaseProvider {
+            decision: hosted.then(EpochDecision::new),
+            ..provider
+        };
         #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
         let provider = PlatformBrokerLeaseProvider {
             ssh: self.state.ssh.as_ref().map(|ssh| ssh.epoch()),
@@ -434,8 +443,9 @@ where
             .map_err(bridge_status)?;
             // Waiting for Ready cannot substitute another session or carry
             // revoked/stale authority through admission. This reread does not
-            // unwrap or lease credential material.
-            provider.session().await.map_err(lease_status)?;
+            // unwrap or lease credential material; a hosted epoch evaluates
+            // its first authority decision from it.
+            provider.admit_authority().await.map_err(lease_status)?;
             Ok::<_, Status>(admitted)
         })
         .await

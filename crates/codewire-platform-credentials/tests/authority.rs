@@ -267,7 +267,10 @@ async fn restricted_broker_enrolls_refreshes_and_uses_exact_bound_grants() -> Re
         // Revocation withholds this capability (and only it); nothing is granted.
         let admitted = runtime.evaluate_grants(&context).await?;
         ensure!(admitted.grants.is_empty());
-        ensure!(admitted.reconnect_required == BTreeSet::from([CapabilitySlot::codex()]));
+        ensure!(
+            admitted.reconnect_required
+                == BTreeMap::from([(CapabilitySlot::codex(), initial.metadata.id.clone())])
+        );
         ensure!(
             broker
                 .delete_revoked(&user, &initial.metadata.id, revoked.version)

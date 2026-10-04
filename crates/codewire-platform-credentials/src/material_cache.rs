@@ -9,13 +9,17 @@
 //! replacement, refresh and Reconnect change a generation, so a value filled
 //! for an earlier record can never match a later one.
 //!
-//! The cache authorizes nothing. Its caller still runs every authority, grant
-//! and record check for each use, and reuses a value only when the record it
-//! reads before and after the reuse equals this key. A hit never extends a
-//! value's life: every method drops values older than [`MATERIAL_REUSE_TTL`],
-//! and while any value remains, one sweeper task per cache drops each at its
-//! expiry even if the epoch makes no further call. Dropping the cache drops
-//! every value at once and stops its sweeper.
+//! The cache authorizes nothing, and reuses a value only for the record its
+//! caller admitted for this use. A hosted epoch's lease rereads its
+//! credential's record and admits it against the epoch's authority decision,
+//! which it evaluates again whenever that record changed and reuses for at
+//! most a minute; a lease with full per-request checks (owner-local
+//! delegation) still runs every authority, grant and record check before and
+//! after the reuse. Either way the admitted record must equal this key. A hit
+//! never extends a value's life: every method drops values older than
+//! [`MATERIAL_REUSE_TTL`], and while any value remains, one sweeper task per
+//! cache drops each at its expiry even if the epoch makes no further call.
+//! Dropping the cache drops every value at once and stops its sweeper.
 
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
