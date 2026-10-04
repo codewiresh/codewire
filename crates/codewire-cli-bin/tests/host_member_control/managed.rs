@@ -649,6 +649,17 @@ async fn parent_once(
     result
 }
 
+fn held_owner_tuple(value: &Value, conversation: &Conversation) {
+    assert_eq!(value["session"]["session_id"], conversation.session);
+    assert_eq!(
+        value["session"]["launch_generation"].as_u64(),
+        Some(conversation.generation)
+    );
+    assert_eq!(value["driver"]["driver_id"], conversation.driver);
+    assert_eq!(value["driver"]["agent"], conversation.agent);
+    assert_eq!(value["driver"]["native_thread_id"], conversation.thread);
+}
+
 async fn held(caller: &Endpoint, conversation: &Conversation, id: &str) -> Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(35);
     let mut since = None;
@@ -667,9 +678,7 @@ async fn held(caller: &Endpoint, conversation: &Conversation, id: &str) -> Value
             .collect::<Vec<_>>();
         assert_eq!(records.len(), 1);
         let record = records[0];
-        assert_eq!(record["driver_id"], conversation.driver);
-        assert_eq!(record["target_session_id"], conversation.session);
-        assert_eq!(value["driver"]["native_thread_id"], conversation.thread);
+        held_owner_tuple(&value, conversation);
         assert!(
             !["completed", "error", "interrupted", "unknown"]
                 .contains(&record["state"].as_str().unwrap())
@@ -1930,4 +1939,65 @@ fn managed_fixture_actual_actor_birth_path_and_terminal_refusals_do_not_signal()
     assert!(terminal(&owned.fd));
     assert!(std::panic::catch_unwind(|| actor.verify()).is_err());
     assert!(fs::symlink_metadata(&other).unwrap().is_file());
+}
+
+#[test]
+fn managed_fixture_held_owner_uses_public_session_driver_tuple() {
+    let conversation = Conversation {
+        session: "session-11111111-1111-4111-8111-111111111111".into(),
+        driver: "11111111-1111-4111-8111-111111111111".into(),
+        agent: "codex",
+        generation: 7,
+        thread: "22222222-2222-4222-8222-222222222222".into(),
+        actors: Vec::new(),
+        peer: Value::Null,
+    };
+    // Member inbox publishes owner metadata beside bounded message summaries.
+    // The summaries intentionally do not contain full-record identity fields.
+    let projection = json!({
+        "session": {
+            "session_id": conversation.session,
+            "launch_generation": conversation.generation,
+        },
+        "driver": {
+            "driver_id": conversation.driver,
+            "agent": conversation.agent,
+            "native_thread_id": conversation.thread,
+        },
+        "messages": [{
+            "id": "33333333-3333-4333-8333-333333333333",
+            "action": "message",
+            "state": "running",
+            "native_acknowledged": true,
+            "turn_id": "44444444-4444-4444-8444-444444444444",
+            "expected_turn_id": null,
+            "created_at": "2026-10-04T14:03:42Z",
+            "member_launch_generation": 7,
+            "notification": null,
+            "source": null,
+        }],
+    });
+    assert!(projection["messages"][0].get("driver_id").is_none());
+    assert!(projection["messages"][0].get("target_session_id").is_none());
+    held_owner_tuple(&projection, &conversation);
+    for (path, foreign) in [
+        ("/session/session_id", json!("session-other")),
+        ("/session/launch_generation", json!(8)),
+        ("/driver/driver_id", json!("other-driver")),
+        ("/driver/agent", json!("claude")),
+        ("/driver/native_thread_id", json!("other-thread")),
+    ] {
+        for replacement in [foreign, Value::Null] {
+            let mut wrong = projection.clone();
+            *wrong.pointer_mut(path).unwrap() = replacement;
+            // The original message ID is insufficient with a foreign owner.
+            assert_eq!(wrong["messages"], projection["messages"]);
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    held_owner_tuple(&wrong, &conversation);
+                }))
+                .is_err()
+            );
+        }
+    }
 }

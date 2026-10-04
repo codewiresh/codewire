@@ -987,7 +987,7 @@ run_paths_case cli_host_journey pull_request refs/pull/2255/head false \
   scripts/dev/test-cli-host.py
 run_paths_case source_approval_policy pull_request refs/pull/2255/head false \
   'policy' .supplychain/source-policy.json
-for host_input in scripts/dev/test-cli-host-managed.py scripts/ci/tests/test-cli-host-managed.py; do
+for host_input in scripts/dev/test-cli-host-managed.py scripts/ci/tests/test-cli-host-managed.py scripts/dev/fixtures/host-member-managed-assets.py; do
   run_paths_case "host_managed_${host_input//\//_}" pull_request refs/pull/2255/head false \
     'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' "$host_input"
 done
@@ -998,7 +998,8 @@ run_paths_case host_managed_and_source_policy pull_request refs/pull/2255/head f
 # Nearby unrecognized files retain conservative fallback; do not broaden
 # either the protected source-policy name or the exact harness path cases.
 for neighbor in .supplychain/source-policy-unlisted.json \
-    scripts/dev/test-cli-host-managed-unlisted.py scripts/ci/tests/test-cli-host-managed-unlisted.py; do
+    scripts/dev/test-cli-host-managed-unlisted.py scripts/ci/tests/test-cli-host-managed-unlisted.py \
+    scripts/dev/fixtures/host-member-managed-assets-unlisted.py; do
   if ! (set -C; printf '%s\n' '# classifier fixture, never executed' > "$ROOT/$neighbor"); then
     echo "classification neighbor already exists: $neighbor" >&2; exit 1
   fi

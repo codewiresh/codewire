@@ -1,4 +1,5 @@
 .git
+**/.claude
 .gitea
 target
 node_modules

@@ -59,6 +59,26 @@ class Inventory(unittest.TestCase):
         with self.admit() as admitted:
             self.assertIn("public", self.members(admitted))
 
+    def test_checked_in_root_policy_omits_claude_without_opening_it(self):
+        # The real image context contains this project directory. Its bytes
+        # are outside the image/credential contract, including when cached.
+        write(self.policy, (ROOT / ".dockerignore").read_bytes())
+        write(self.checkout / ".claude/synthetic-fixture", b"synthetic-unread-bytes\n")
+        real_open, real_stat = os.open, os.stat
+        with mock.patch.object(source.os, "open", wraps=real_open) as opened, \
+                mock.patch.object(source.os, "stat", wraps=real_stat) as inspected:
+            with self.admit() as admitted:
+                self.assertIn("src/main.rs", self.members(admitted))
+                self.assertFalse(any(".claude" in Path(name).parts for name in self.members(admitted)))
+                admitted.revalidate()
+            for calls in (opened.call_args_list, inspected.call_args_list):
+                self.assertFalse(any(".claude" in Path(os.fspath(call.args[0])).parts
+                                     for call in calls
+                                     if isinstance(call.args[0], (str, os.PathLike))))
+        write(self.policy, (ROOT / ".dockerignore").read_bytes() + b"!.claude\n")
+        with self.assertRaises(source.Refused):
+            self.admit()
+
     def test_complete_context_not_only_recipe_copy_paths_and_repeat_enumeration(self):
         write(self.checkout / "unreferenced/public.txt", b"readonly context mounts can consume this\n")
         with self.admit() as admitted:
