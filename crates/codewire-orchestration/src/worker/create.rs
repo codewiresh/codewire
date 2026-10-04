@@ -36,6 +36,7 @@ use crate::sandbox::{
 use crate::start_metrics::{self, StartPath, StartProfile, StartStage};
 
 mod pool_route;
+mod warm_bridge;
 
 #[cfg(test)]
 mod projection_tests;
@@ -2232,7 +2233,10 @@ pub(super) async fn reconcile_runtime_identity(
 /// chain is bind-ready (design §10, amended). The wait decides the outcome:
 /// a recorded or skipped bind lets it continue, a refused bind fails it, and
 /// the bind is dropped once the wait ends. The post-ready runtime-identity
-/// reconcile still binds, idempotently, before MarkRunning and setup.
+/// reconcile still binds, idempotently, before MarkRunning and setup. A
+/// recorded warm bind gets its warm-member bridge (#2434) at once, after the
+/// binding committed, so the gateway's connects need not wait for the
+/// relabelled member's new Cilium identity.
 pub(super) async fn wait_with_early_bind<T>(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
@@ -2252,15 +2256,17 @@ pub(super) async fn wait_with_early_bind<T>(
             result = &mut wait => return result,
             result = &mut bind, if binding => {
                 binding = false;
-                if let Some(recorded) = result?
-                    && matches!(env.state.as_str(), "creating" | "starting")
-                {
-                    observe_create_stage(
-                        StartStage::WorkspaceBind,
-                        recorded.path,
-                        start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
-                        recorded.elapsed,
-                    );
+                if let Some(recorded) = result? {
+                    if matches!(env.state.as_str(), "creating" | "starting") {
+                        observe_create_stage(
+                            StartStage::WorkspaceBind,
+                            recorded.path,
+                            start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
+                            recorded.elapsed,
+                        );
+                    }
+                    warm_bridge::bridge_warm_member(ctx, env, authority, states, &recorded)
+                        .await?;
                 }
             }
         }
@@ -2375,14 +2381,18 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
         &observation,
     )
     .await?
-        && matches!(env.state.as_str(), "creating" | "starting")
     {
-        observe_create_stage(
-            StartStage::WorkspaceBind,
-            recorded.path,
-            start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
-            recorded.elapsed,
-        );
+        if matches!(env.state.as_str(), "creating" | "starting") {
+            observe_create_stage(
+                StartStage::WorkspaceBind,
+                recorded.path,
+                start_profile(&ctx.sandbox_cfg, &env.isolation_tier),
+                recorded.elapsed,
+            );
+        }
+        // The early bind lost the race to the Claim Ready wait: bridge now,
+        // still before the gateway wait below.
+        warm_bridge::bridge_warm_member(ctx, env, authority, states, &recorded).await?;
     }
 
     // Create's `gateway_ready` stage (A0a) is the CreateClaim wait, which the
@@ -2520,11 +2530,15 @@ async fn try_reclaim_cold(
         return Ok(false);
     }
     let started = std::time::Instant::now();
+    // A never-bound member never had a warm-member bridge (#2434); removing
+    // any name-addressed residue keeps the cold re-claim from inheriting one.
     authority
-        .run_external_mutation(
-            CREATE_MUTATION_STATES,
-            client.delete_pool_born_claim(&env.id, &observed, RECLAIM_TIMEOUT),
-        )
+        .run_external_mutation(CREATE_MUTATION_STATES, async {
+            client.delete_warm_member_bridge(&env.id).await?;
+            client
+                .delete_pool_born_claim(&env.id, &observed, RECLAIM_TIMEOUT)
+                .await
+        })
         .await?;
     emit_create_log(
         authority,

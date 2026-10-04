@@ -32,6 +32,21 @@ pub fn workspace_daemon_network_policy_name(env_id: &str) -> String {
     dns_name("cw-daemon-net", env_id)
 }
 
+/// The Pod label the agent-sandbox fork stamps at birth with the owning
+/// Sandbox's UID and re-enforces like `sandbox-name-hash` (#2434). Unlike the
+/// 32-bit name hash, a UID is never shared by two Sandboxes.
+pub const SANDBOX_UID_LABEL: &str = "agents.x-k8s.io/sandbox-uid";
+
+/// `cw-daemon-warm-<env>`: the adopted warm member's half of the bridge.
+pub fn warm_member_daemon_bridge_name(env_id: &str) -> String {
+    dns_name("cw-daemon-warm", env_id)
+}
+
+/// `cw-gw-warm-<env>`: the environment gateway's half of the bridge.
+pub fn warm_member_gateway_bridge_name(env_id: &str) -> String {
+    dns_name("cw-gw-warm", env_id)
+}
+
 fn dns_name(prefix: &str, suffix: &str) -> String {
     let suffix = suffix
         .chars()
@@ -68,6 +83,16 @@ pub fn workspace_daemon_service_addr(env_id: &str) -> String {
 pub(super) fn workspace_selector(opts: &TemplateOpts) -> Value {
     json!({
         "codewire.sh/environment-id": opts.environment_id,
+        "codewire.sh/type": "workspace",
+    })
+}
+
+/// Exactly one adopted warm-pool member: the Sandbox UID its committed
+/// binding recorded, and the workspace type. No other label, so neither the
+/// claim-time relabel nor a name-hash collision changes what it selects.
+pub(super) fn warm_member_selector(sandbox_uid: &str) -> Value {
+    json!({
+        SANDBOX_UID_LABEL: sandbox_uid,
         "codewire.sh/type": "workspace",
     })
 }

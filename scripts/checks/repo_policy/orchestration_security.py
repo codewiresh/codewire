@@ -452,6 +452,248 @@ def assert_workspace_binding_ingress(resources: list[str], target: dict[str, str
         output.append(f"{label}: another NetworkPolicy also selects orchestration Pods")
 
 
+# Program #2238 C6 (#2434): the warm-member bridge. Orchestration renders
+# every NetworkPolicy it creates in template/network.rs; the Rust test pins the
+# renderer to these goldens, and this guard pins every rendered policy that
+# selects through an agents.x-k8s.io label against the bridge invariant, so
+# neither can drift alone.
+WARM_BRIDGE_FIXTURE_DIR = "crates/codewire-orchestration/tests/fixtures/sandbox"
+WARM_BRIDGE_FIXTURES = {
+    "daemon": f"{WARM_BRIDGE_FIXTURE_DIR}/warm-member-bridge-daemon-networkpolicy.golden.json",
+    "gw": f"{WARM_BRIDGE_FIXTURE_DIR}/warm-member-bridge-gateway-networkpolicy.golden.json",
+}
+WARM_BRIDGE_RENDERER = "crates/codewire-orchestration/src/sandbox/template/network.rs"
+WARM_BRIDGE_NAMING = "crates/codewire-orchestration/src/sandbox/template/naming.rs"
+AGENTS_LABEL_PREFIX = "agents.x-k8s.io/"
+SANDBOX_UID_LABEL = "agents.x-k8s.io/sandbox-uid"
+CANONICAL_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+WARM_BRIDGE_NAME = re.compile(rf"cw-(daemon|gw)-warm-({CANONICAL_UUID})")
+ORCHESTRATION_PEER_POD = {"app.kubernetes.io/name": "codewire", "app.kubernetes.io/component": "orchestration"}
+
+
+def label_selectors(policy: dict[str, Any]) -> list[Any]:
+    """Every label selector of a NetworkPolicy: its own and each peer's."""
+    spec = policy.get("spec") if isinstance(policy.get("spec"), dict) else {}
+    found: list[Any] = [spec.get("podSelector")]
+    for direction, peers_key in (("ingress", "from"), ("egress", "to")):
+        for rule in spec.get(direction) or []:
+            for peer in (rule or {}).get(peers_key) or []:
+                for key in ("podSelector", "namespaceSelector"):
+                    if isinstance(peer, dict) and key in peer:
+                        found.append(peer[key])
+    return found
+
+
+def selector_keys(selector: Any) -> list[str]:
+    if not isinstance(selector, dict):
+        return []
+    keys = list((selector.get("matchLabels") or {}).keys())
+    keys += [expression.get("key", "") for expression in selector.get("matchExpressions") or [] if isinstance(expression, dict)]
+    return [str(key) for key in keys]
+
+
+def uses_agents_selector(policy: dict[str, Any]) -> bool:
+    return any(key.startswith(AGENTS_LABEL_PREFIX) for selector in label_selectors(policy) for key in selector_keys(selector))
+
+
+def warm_bridge_violations(policy: dict[str, Any], label: str) -> list[str]:
+    """A NetworkPolicy selecting through any agents.x-k8s.io label must be one
+    half of one environment's warm-member bridge: named cw-daemon-warm-<env>
+    or cw-gw-warm-<env>, selecting the member by exactly its Sandbox UID and
+    the workspace type, and peering only that environment's gateway (plus,
+    on the member half, the orchestration source cw-daemon-net-<env> admits)."""
+    if not uses_agents_selector(policy):
+        return []
+    output: list[str] = []
+    name = str((policy.get("metadata") or {}).get("name", ""))
+    matched = WARM_BRIDGE_NAME.fullmatch(name)
+    if policy.get("kind") != "NetworkPolicy" or not matched:
+        return [f"{label}: {name!r} selects through an agents.x-k8s.io label but is not cw-daemon-warm-<env> or cw-gw-warm-<env>"]
+    half, environment = matched.groups()
+    gateway = {"matchLabels": {"codewire.sh/environment-id": environment, "codewire.sh/type": "gateway"}}
+    members = [selector for selector in label_selectors(policy) if any(key.startswith(AGENTS_LABEL_PREFIX) for key in selector_keys(selector))]
+    uids = set()
+    for selector in members:
+        labels = selector.get("matchLabels") if isinstance(selector, dict) else None
+        if (set(selector) != {"matchLabels"} or not isinstance(labels, dict) or set(labels) != {SANDBOX_UID_LABEL, "codewire.sh/type"}
+                or labels.get("codewire.sh/type") != "workspace" or not re.fullmatch(CANONICAL_UUID, str(labels.get(SANDBOX_UID_LABEL)))):
+            output.append(f"{label}: a member selector is not exactly {{{SANDBOX_UID_LABEL}: <uid>, codewire.sh/type: workspace}}: {selector}")
+        else:
+            uids.add(labels[SANDBOX_UID_LABEL])
+    if len(uids) > 1:
+        output.append(f"{label}: the bridge names more than one Sandbox UID: {sorted(uids)}")
+    member = members[0] if len(members) > 0 else None
+    spec = policy.get("spec") if isinstance(policy.get("spec"), dict) else {}
+    expected_selected = member if half == "daemon" else gateway
+    if spec.get("podSelector") != expected_selected:
+        output.append(f"{label}: the {half} half must apply to {'the member' if half == 'daemon' else 'its own gateway'} alone: {spec.get('podSelector')}")
+    expected_types = [direction.capitalize() for direction in ("ingress", "egress") if spec.get(direction)]
+    if spec.get("policyTypes") != expected_types:
+        output.append(f"{label}: policyTypes must be exactly the granted directions {expected_types}: {spec.get('policyTypes')}")
+    for direction, peers_key in (("ingress", "from"), ("egress", "to")):
+        for rule in spec.get(direction) or []:
+            peers = (rule or {}).get(peers_key)
+            if not peers:
+                output.append(f"{label}: a {direction} rule without {peers_key!r} peers admits every source or destination")
+                continue
+            for peer in peers:
+                if half == "gw":
+                    allowed = peer == {"podSelector": member}
+                else:
+                    allowed = peer == {"podSelector": gateway} or (
+                        direction == "ingress"
+                        and set(peer) == {"namespaceSelector", "podSelector"}
+                        and set((peer["namespaceSelector"] or {}).get("matchLabels") or {}) == {"kubernetes.io/metadata.name"}
+                        and set(peer["namespaceSelector"]) == {"matchLabels"}
+                        and peer["podSelector"] == {"matchLabels": ORCHESTRATION_PEER_POD}
+                    )
+                if not allowed:
+                    output.append(f"{label}: the {half} half peers something other than environment {environment}'s gateway: {peer}")
+    return output
+
+
+def warm_bridge_manifest_violations(resources: list[str], label: str) -> list[str]:
+    """Bridges are per environment and created only by orchestration at
+    runtime: no deployment manifest may select through agents.x-k8s.io."""
+    return [
+        f"{label}: NetworkPolicy {metadata_field(resource, 'name')} selects through an agents.x-k8s.io label in a manifest"
+        for resource in resources
+        if top_level_field(resource, "kind") == "NetworkPolicy" and AGENTS_LABEL_PREFIX in top_level_block(resource, "spec")
+    ]
+
+
+def warm_bridge_source_violations(renderer: str, naming: str) -> list[str]:
+    """The renderer names no agents.x-k8s.io label key itself; the naming
+    leaf's only one is the Sandbox UID the bridge selects by."""
+    output: list[str] = []
+    if re.search(r'"agents\.x-k8s\.io/', renderer):
+        output.append(f"{WARM_BRIDGE_RENDERER}: names an agents.x-k8s.io label key directly")
+    keys = re.findall(r'"(agents\.x-k8s\.io/[^"]*)"', naming)
+    if keys != [SANDBOX_UID_LABEL]:
+        output.append(f"{WARM_BRIDGE_NAMING}: agents.x-k8s.io label keys must be exactly [{SANDBOX_UID_LABEL!r}]: {keys}")
+    return output
+
+
+def warm_bridge_golden_violations(goldens: dict[str, Any], others: list[tuple[str, Any]]) -> list[str]:
+    output: list[str] = []
+    for half, policy in goldens.items():
+        rel = WARM_BRIDGE_FIXTURES[half]
+        if not uses_agents_selector(policy):
+            output.append(f"{rel}: the {half} bridge golden does not select through the Sandbox UID")
+        name = str((policy.get("metadata") or {}).get("name", ""))
+        matched = WARM_BRIDGE_NAME.fullmatch(name)
+        if not matched or matched.group(1) != half:
+            output.append(f"{rel}: is not the {half} half: {name!r}")
+        output.extend(warm_bridge_violations(policy, rel))
+    for rel, document in others:
+        if isinstance(document, dict) and document.get("kind") == "NetworkPolicy":
+            output.extend(warm_bridge_violations(document, rel))
+    return output
+
+
+def warm_bridge_self_test(goldens: dict[str, Any], manifests: list[str]) -> None:
+    other_environment = "3d6bb495-efac-419f-bf3a-91696e7c7ca4"
+
+    def rejected(name: str, half: str, mutate: Callable[[dict[str, Any]], Any]) -> None:
+        fixture = copy.deepcopy(goldens[half])
+        mutate(fixture)
+        if not warm_bridge_violations(fixture, f"negative bridge fixture {name}"):
+            raise RuntimeError(f"negative bridge fixture {name} was accepted")
+
+    def member_labels(fixture: dict[str, Any]) -> dict[str, Any]:
+        return fixture["spec"]["podSelector"]["matchLabels"]
+
+    def name_hash(labels: dict[str, Any]) -> None:
+        labels.pop(SANDBOX_UID_LABEL)
+        labels["agents.x-k8s.io/sandbox-name-hash"] = "d0258436"
+
+    # Old and new: the reviewed UID bridge and the unchanged environment
+    # policies pass, while the issue's first design (a name-hash selector)
+    # fails both as a bridge and as an extra cw-daemon-net term.
+    for half, policy in goldens.items():
+        if warm_bridge_violations(policy, f"positive bridge fixture {half}"):
+            raise RuntimeError(f"positive bridge fixture {half} was rejected")
+    legacy = copy.deepcopy(goldens["daemon"])
+    legacy["metadata"]["name"] = legacy["metadata"]["name"].replace("cw-daemon-warm-", "cw-daemon-net-")
+    legacy["spec"]["podSelector"] = {"matchLabels": {"codewire.sh/environment-id": legacy["metadata"]["labels"]["codewire.sh/environment-id"], "codewire.sh/type": "workspace"}}
+    if warm_bridge_violations(legacy, "unchanged cw-daemon-net"):
+        raise RuntimeError("an environment policy without agents.x-k8s.io selectors was rejected")
+    rejected("name-hash bridge (old design)", "daemon", lambda f: name_hash(member_labels(f)))
+    rejected("name-hash gateway peer (old design)", "gw", lambda f: name_hash(f["spec"]["egress"][0]["to"][0]["podSelector"]["matchLabels"]))
+
+    def name_hash_term(f: dict[str, Any]) -> None:
+        f["metadata"]["name"] = f["metadata"]["name"].replace("cw-daemon-warm-", "cw-daemon-net-")
+        name_hash(member_labels(f))
+
+    rejected("name-hash term on cw-daemon-net (old design)", "daemon", name_hash_term)
+    rejected("name hash beside the UID", "daemon", lambda f: member_labels(f).__setitem__("agents.x-k8s.io/sandbox-name-hash", "d0258436"))
+    rejected("claim UID instead of the Sandbox UID", "daemon", lambda f: member_labels(f).__setitem__(
+        "agents.x-k8s.io/claim-uid", member_labels(f).pop(SANDBOX_UID_LABEL)))
+    rejected("UID without the workspace type", "daemon", lambda f: member_labels(f).pop("codewire.sh/type"))
+    rejected("gateway type", "daemon", lambda f: member_labels(f).__setitem__("codewire.sh/type", "gateway"))
+    rejected("uppercase UID", "daemon", lambda f: member_labels(f).__setitem__(SANDBOX_UID_LABEL, member_labels(f)[SANDBOX_UID_LABEL].upper()))
+    rejected("UID expression", "daemon", lambda f: f["spec"].__setitem__("podSelector", {
+        "matchExpressions": [{"key": SANDBOX_UID_LABEL, "operator": "Exists"}], "matchLabels": {"codewire.sh/type": "workspace"}}))
+    rejected("another name", "daemon", lambda f: f["metadata"].__setitem__("name", "cw-pool-member-bridge"))
+    rejected("unsuffixed name", "daemon", lambda f: f["metadata"].__setitem__("name", "cw-daemon-warm"))
+    rejected("another environment's gateway", "daemon", lambda f: f["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"].__setitem__(
+        "codewire.sh/environment-id", other_environment))
+    rejected("name for another environment", "daemon", lambda f: f["metadata"].__setitem__(
+        "name", f"cw-daemon-warm-{other_environment}"))
+    rejected("any gateway", "daemon", lambda f: f["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"].pop("codewire.sh/environment-id"))
+    rejected("every Pod in the namespace", "daemon", lambda f: f["spec"]["ingress"][0]["from"].append({"podSelector": {}}))
+    rejected("every namespace", "daemon", lambda f: f["spec"]["ingress"][0]["from"].append({"namespaceSelector": {}}))
+    rejected("an address block", "daemon", lambda f: f["spec"]["ingress"][0]["from"].append({"ipBlock": {"cidr": "10.0.0.0/8"}}))
+    rejected("every source", "daemon", lambda f: f["spec"]["ingress"][0].pop("from"))
+    rejected("orchestration egress", "daemon", lambda f: f["spec"]["egress"].append(
+        {"to": f["spec"]["ingress"][1]["from"], "ports": [{"port": 8084, "protocol": "TCP"}]}))
+    rejected("isolating an ungranted direction", "daemon", lambda f: f["spec"].pop("egress"))
+    rejected("gateway half on every gateway", "gw", lambda f: f["spec"]["podSelector"]["matchLabels"].pop("codewire.sh/environment-id"))
+    rejected("gateway half on another environment's gateway", "gw", lambda f: f["spec"]["podSelector"]["matchLabels"].__setitem__(
+        "codewire.sh/environment-id", other_environment))
+    rejected("gateway half on the member", "gw", lambda f: f["spec"].__setitem__("podSelector", f["spec"]["egress"][0]["to"][0]["podSelector"]))
+    rejected("gateway half to another member", "gw", lambda f: f["spec"]["egress"].append(
+        {"to": [{"podSelector": {"matchLabels": {SANDBOX_UID_LABEL: "5e2d8c41-7a3b-4f90-b6e1-2c9d0a8f7b34", "codewire.sh/type": "workspace"}}}]}))
+    rejected("gateway half to the environment's workspaces", "gw", lambda f: f["spec"]["egress"][0]["to"].append(
+        {"podSelector": {"matchLabels": {"codewire.sh/environment-id": f["metadata"]["labels"]["codewire.sh/environment-id"], "codewire.sh/type": "workspace"}}}))
+    rejected("gateway half from orchestration", "gw", lambda f: f["spec"]["ingress"][0]["from"].append(
+        {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "dev"}}, "podSelector": {"matchLabels": ORCHESTRATION_PEER_POD}}))
+    if not warm_bridge_source_violations('json!({"agents.x-k8s.io/sandbox-name-hash": hash})', 'pub const SANDBOX_UID_LABEL: &str = "agents.x-k8s.io/sandbox-uid";'):
+        raise RuntimeError("negative bridge source fixture (renderer names a label key) was accepted")
+    if not warm_bridge_source_violations("", 'pub const SANDBOX_UID_LABEL: &str = "agents.x-k8s.io/sandbox-name-hash";'):
+        raise RuntimeError("negative bridge source fixture (name-hash constant) was accepted")
+    manifest = next(resource for resource in manifests if top_level_field(resource, "kind") == "NetworkPolicy")
+    if not warm_bridge_manifest_violations([manifest.replace("spec:\n", "spec:\n  podSelector:\n    matchLabels:\n      agents.x-k8s.io/sandbox-name-hash: d0258436\n", 1)], "negative manifest"):
+        raise RuntimeError("negative bridge manifest fixture was accepted")
+
+
+def check_warm_member_bridge(self_test: bool, manifests: list[str]) -> list[str]:
+    failures: list[str] = []
+    goldens: dict[str, Any] = {}
+    for half, rel in WARM_BRIDGE_FIXTURES.items():
+        try:
+            goldens[half] = json.loads((ROOT / rel).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            failures.append(f"{rel}: unreadable ({error})")
+    others: list[tuple[str, Any]] = []
+    for path in sorted((ROOT / WARM_BRIDGE_FIXTURE_DIR).glob("*.json")):
+        rel = str(path.relative_to(ROOT))
+        if rel not in WARM_BRIDGE_FIXTURES.values():
+            try:
+                others.append((rel, json.loads(path.read_text(encoding="utf-8"))))
+            except (OSError, ValueError) as error:
+                failures.append(f"{rel}: unreadable ({error})")
+    if len(goldens) == len(WARM_BRIDGE_FIXTURES):
+        failures.extend(warm_bridge_golden_violations(goldens, others))
+    failures.extend(warm_bridge_source_violations(read_text(WARM_BRIDGE_RENDERER), read_text(WARM_BRIDGE_NAMING)))
+    if self_test and len(goldens) == len(WARM_BRIDGE_FIXTURES):
+        try:
+            warm_bridge_self_test(goldens, manifests)
+        except (RuntimeError, KeyError, IndexError, TypeError, StopIteration) as error:
+            failures.append(f"warm member bridge self-test: {error!r}")
+    return failures
+
+
 def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
     name = "codewire-orchestration-gateway-host-key"
     orchestration = "codewire-orchestration"
@@ -664,6 +906,7 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         assert_warm_pool(resources, target, label, output)
         assert_gateway_replicaset(resources, target, label, output)
         assert_workspace_binding_ingress(resources, target, label, output)
+        output.extend(warm_bridge_manifest_violations(resources, label))
         if target["path"] != "deployments/k8s/orchestration":
             assert_credential_service(resources, target, label, output)
         return output
@@ -939,9 +1182,12 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         credential_target = {"subject_namespace": "prod", "role_namespace": "prod-sandboxes"}
         credential_resources = documents(run(["kustomize", "build", "deployments/k8s/credential-service"]).stdout)
         assert_credential_service(credential_resources, credential_target, "credential-service (rendered)", failures)
+        manifests: list[str] = []
         for target in targets:
             rendered = run(["kustomize", "build", target["path"]]).stdout
+            manifests.extend(documents(rendered))
             failures.extend(verify_resources(documents(rendered), target, f"{target['path']} (rendered)"))
+        failures.extend(check_warm_member_bridge(args.self_test, manifests))
         if args.self_test:
             self_test()
             credential_service_self_test(credential_resources, credential_target)

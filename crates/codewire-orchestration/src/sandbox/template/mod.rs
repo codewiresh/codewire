@@ -34,11 +34,16 @@ pub use gateway::{
     render_gateway_service,
 };
 pub use naming::{
-    gateway_direct_udp_service_name, gateway_host_key_secret_name, gateway_network_policy_name,
-    gateway_service_name, gateway_workload_name, workspace_daemon_network_policy_name,
-    workspace_daemon_service_addr, workspace_daemon_service_name,
+    SANDBOX_UID_LABEL, gateway_direct_udp_service_name, gateway_host_key_secret_name,
+    gateway_network_policy_name, gateway_service_name, gateway_workload_name,
+    warm_member_daemon_bridge_name, warm_member_gateway_bridge_name,
+    workspace_daemon_network_policy_name, workspace_daemon_service_addr,
+    workspace_daemon_service_name,
 };
-pub use network::{render_gateway_network_policy, render_workspace_daemon_network_policy};
+pub use network::{
+    render_gateway_network_policy, render_warm_member_bridge,
+    render_workspace_daemon_network_policy,
+};
 pub use runtime_policy::{
     DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, DOCKER_MODE_NONE,
     DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_CONFIDENTIAL,
@@ -369,3 +374,6 @@ pub fn render_sandbox_shadow_pool(
 }
 
 include!("tests.rs");
+
+#[cfg(test)]
+mod bridge_tests;
