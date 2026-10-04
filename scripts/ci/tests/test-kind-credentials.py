@@ -796,6 +796,7 @@ wait_kind_credential_environment '%s' running
 SANDBOX_NS=dev-sandboxes
 sleep() { :; }
 kubectl() {
+  if [ "$*" = "-n dev-sandboxes exec sandbox-workspace -c workspace -- true" ]; then return 0; fi
   count="$(( $(cat '%(dir)s/count' 2>/dev/null || printf 0) + 1 ))"
   printf '%%s\\n' "$count" > '%(dir)s/count'
   if [ "$count" -lt 2 ]; then printf '%%s' '%(pending)s'; else printf '%%s' '%(ready)s'; fi
@@ -810,6 +811,35 @@ wait_kind_credential_sandbox_pair '%(env)s' 2
         with open(os.path.join(directory.name, "count"), encoding="utf-8") as handle:
             self.assertEqual(int(handle.read()), 2)
 
+    def test_sandbox_pair_wait_holds_through_the_suspended_recreate_transition(self):
+        directory = tempfile.TemporaryDirectory(prefix="kind-sandbox-pair-exec-")
+        self.addCleanup(directory.cleanup)
+        # The recreated pair is Running immediately, but the Suspended/recreate
+        # transition has not finished inside the workspace container: execs
+        # fail twice before the container accepts them. The wait must hold
+        # instead of handing the suite a pod it cannot use yet.
+        ready = self._sandbox_pair_pods("Running", 2)
+        result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+sleep() { :; }
+kubectl() {
+  if [ "$*" = "-n dev-sandboxes exec sandbox-workspace -c workspace -- true" ]; then
+    attempts="$(( $(cat '%(dir)s/attempts' 2>/dev/null || printf 0) + 1 ))"
+    printf '%%s\\n' "$attempts" > '%(dir)s/attempts'
+    [ "$attempts" -ge 3 ]
+    return $?
+  fi
+  printf '%%s' '%(ready)s'
+}
+wait_kind_credential_sandbox_pair '%(env)s' 2
+''' % {"dir": directory.name, "ready": ready, "env": ENVIRONMENT})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 2, result.stdout)
+        self.assertEqual(lines[0], "sandbox-workspace")
+        with open(os.path.join(directory.name, "attempts"), encoding="utf-8") as handle:
+            self.assertEqual(int(handle.read()), 3)
+
     def test_sandbox_pair_wait_exhaustion_names_environment_and_generation(self):
         pending = self._sandbox_pair_pods("Pending", 1)
         result = self.shell('''
@@ -821,8 +851,22 @@ wait_kind_credential_sandbox_pair '%s' 2
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn(
             '::error::credential fixture environment %s did not materialize its '
-            'generation-2 workspace and gateway Pods after the managed restart' % ENVIRONMENT,
+            'generation-2 workspace and gateway Pods exec-ready after the managed restart' % ENVIRONMENT,
             result.stderr)
+
+    def test_sandbox_pair_wait_exhaustion_when_exec_never_opens(self):
+        ready = self._sandbox_pair_pods("Running", 2)
+        result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+sleep() { :; }
+kubectl() {
+  if [ "$*" = "-n dev-sandboxes exec sandbox-workspace -c workspace -- true" ]; then return 1; fi
+  printf '%%s' '%s'
+}
+wait_kind_credential_sandbox_pair '%s' 2
+''' % (ready, ENVIRONMENT))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('exec-ready', result.stderr)
 
     def test_native_restart_wait_binds_the_update_generation_before_pod_assertions(self):
         source = HELPERS.read_text()

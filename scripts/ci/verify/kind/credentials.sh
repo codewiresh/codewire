@@ -262,12 +262,16 @@ SQL
 # The environment state can read running again while the new Pods are still
 # Pending, and one-shot selectors then miss them: a jq empty result exits 4
 # without printing anything, which is how the failure reaches the log as a
-# bare exit code. Wait for exactly one exact workspace and one exact gateway
-# rendering the restart's operation generation, then print the workspace name
-# and the gateway document on two lines. Binding the gateway to the update's
-# generation keeps the pre-restart Pods from satisfying the wait.
+# bare exit code. A recreated Pod is also Running before its workspace
+# container accepts execs, so phase alone cannot gate the suite's next
+# commands — every one of them selects or execs into exactly that container.
+# Wait for exactly one exact workspace and one exact gateway rendering the
+# restart's operation generation, with the workspace answering an exec,
+# then print the workspace name and the gateway document on two lines.
+# Binding the gateway to the update's generation keeps the pre-restart Pods
+# from satisfying the wait.
 wait_kind_credential_sandbox_pair() {
-  local environment="$1" generation="$2" attempt pair
+  local environment="$1" generation="$2" attempt pair candidate
   [[ "$generation" =~ ^[1-9][0-9]*$ ]] || return 1
   for ((attempt = 0; attempt < 90; attempt++)); do
     if pair="$(kubectl -n "$SANDBOX_NS" get pods \
@@ -285,12 +289,15 @@ wait_kind_credential_sandbox_pair() {
       if ($workspace | length) == 1 and ($gateway | length) == 1 then
         $workspace[0].metadata.name + "\n" + ($gateway[0] | tojson)
       else empty end')" && [ -n "$pair" ]; then
-      printf '%s\n' "$pair"
-      return 0
+      candidate="$(sed -n '1p' <<<"$pair")"
+      if kubectl -n "$SANDBOX_NS" exec "$candidate" -c workspace -- true 2>/dev/null; then
+        printf '%s\n' "$pair"
+        return 0
+      fi
     fi
     sleep 2
   done
-  echo "::error::credential fixture environment ${environment} did not materialize its generation-${generation} workspace and gateway Pods after the managed restart" >&2
+  echo "::error::credential fixture environment ${environment} did not materialize its generation-${generation} workspace and gateway Pods exec-ready after the managed restart" >&2
   return 1
 }
 
