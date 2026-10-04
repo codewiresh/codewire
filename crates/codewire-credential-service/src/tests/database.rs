@@ -3,6 +3,7 @@ use super::*;
 use crate::platform_test_support as support;
 use support::{StatementCounter, TestDatabase, ensure_cheap_plans, quote_ident};
 
+mod authority_stamp;
 mod projection;
 
 struct Fixture {

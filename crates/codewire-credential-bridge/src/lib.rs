@@ -57,6 +57,10 @@ pub use ssh_ingress::{SshAgentRelay, serve_ssh_agent};
 const HOST_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 const FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const HOST_OUTPUT_BUFFER: usize = 32;
+/// How long a replaced epoch may drain. Its host leads the successor by about
+/// this much and then ends it anyway; the bound also keeps a half-open old
+/// transport from holding the shared request budget.
+const DRAINING_LIFETIME: Duration = Duration::from_secs(90);
 const RESPONSE_BODY_BUFFER: usize = 16;
 /// How long one response's reader may leave its full buffer unread while the
 /// host stream waits. Git reads a pack more slowly than a provider sends it.
@@ -79,6 +83,8 @@ pub struct CredentialBridgeOutput {
 
 /// One fixed environment generation's material-free request/response state.
 /// Copies share the active connection, request budget and replacement epoch.
+/// A [`EpochReplacement::Drain`] activation keeps the replaced epoch, the
+/// draining one, relaying only the requests already sent on it.
 #[derive(Clone)]
 pub struct CredentialBridge {
     environment_id: Uuid,
@@ -90,6 +96,10 @@ pub struct CredentialBridge {
 struct BridgeState {
     next_epoch: u64,
     active: Option<ActiveHost>,
+    /// The epoch a [`EpochReplacement::Drain`] activation replaced. It keeps
+    /// its pending entries and finishes them; new work goes only to `active`.
+    /// A later Drain activation loses it, failing its requests as before.
+    draining: Option<ActiveHost>,
     pending: BTreeMap<String, PendingResponse>,
     projections: BTreeMap<String, PendingProjection>,
     ssh: BTreeMap<String, PendingSsh>,
@@ -107,6 +117,72 @@ impl BridgeState {
             || self.ssh.contains_key(request_id)
             || self.codex_logins.contains_key(request_id)
     }
+
+    /// The active or draining host of `epoch`: either may still answer, and
+    /// be told to cancel, the requests registered on it.
+    fn live_host(&self, epoch: u64) -> Option<&ActiveHost> {
+        self.active
+            .as_ref()
+            .filter(|host| host.epoch == epoch)
+            .or_else(|| self.draining.as_ref().filter(|host| host.epoch == epoch))
+    }
+
+    /// Remove every request registered on `epoch`, of every family.
+    fn take_epoch(&mut self, epoch: u64) -> LostRequests {
+        LostRequests {
+            pending: take_pending(self, |pending| pending.epoch == epoch),
+            projections: take_projections(self, epoch),
+            ssh: take_ssh(self, epoch),
+            codex_logins: take_codex_logins(self, epoch),
+        }
+    }
+
+    /// Remove every request of every epoch.
+    fn take_all(&mut self) -> LostRequests {
+        LostRequests {
+            pending: take_pending(self, |_| true),
+            projections: std::mem::take(&mut self.projections)
+                .into_values()
+                .collect(),
+            ssh: std::mem::take(&mut self.ssh).into_values().collect(),
+            codex_logins: std::mem::take(&mut self.codex_logins)
+                .into_values()
+                .collect(),
+        }
+    }
+}
+
+/// Requests whose epoch was lost. Fail them only after releasing the lock.
+#[derive(Default)]
+struct LostRequests {
+    pending: Vec<PendingResponse>,
+    projections: Vec<PendingProjection>,
+    ssh: Vec<PendingSsh>,
+    codex_logins: Vec<PendingCodexLogin>,
+}
+
+impl LostRequests {
+    fn fail(self) {
+        fail_pending(self.pending, BridgeFailure::Unavailable);
+        fail_projections(self.projections);
+        fail_ssh(self.ssh);
+        fail_codex_logins(self.codex_logins);
+    }
+}
+
+/// What activating a successor does to the epoch it replaces.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EpochReplacement {
+    /// Fail every pending request and close the replaced epoch at once.
+    #[default]
+    FailPending,
+    /// Make before break: the replaced epoch keeps relaying the requests
+    /// already sent on it until each is answered or the epoch is lost, while
+    /// all new work goes to the successor. Only one epoch drains: a further
+    /// Drain activation fails the older draining epoch's requests and closes
+    /// it, and so do 90 seconds of draining. The shared in-flight budget
+    /// counts both epochs' requests.
+    Drain,
 }
 
 struct ActiveHost {
@@ -202,6 +278,7 @@ impl CredentialBridge {
             inner: Arc::new(Mutex::new(BridgeState {
                 next_epoch: 0,
                 active: None,
+                draining: None,
                 pending: BTreeMap::new(),
                 projections: BTreeMap::new(),
                 ssh: BTreeMap::new(),
@@ -283,7 +360,7 @@ impl CredentialBridge {
                 let headers = headers_from_proto(&response.headers)?;
                 let sender = {
                     let mut state = self.inner.lock().await;
-                    require_active_epoch(&state, epoch)?;
+                    require_live_epoch(&state, epoch)?;
                     let pending = state
                         .pending
                         .get_mut(&response.request_id)
@@ -317,7 +394,7 @@ impl CredentialBridge {
                 }
                 let sender = {
                     let mut state = self.inner.lock().await;
-                    require_active_epoch(&state, epoch)?;
+                    require_live_epoch(&state, epoch)?;
                     let pending = state
                         .pending
                         .get_mut(&response.request_id)
@@ -355,15 +432,10 @@ impl CredentialBridge {
             Some(Payload::ResponseEnd(response)) => {
                 let pending = {
                     let mut state = self.inner.lock().await;
-                    require_active_epoch(&state, epoch)?;
-                    let pending = state
-                        .pending
-                        .remove(&response.request_id)
-                        .ok_or_else(invalid_host_frame)?;
-                    if pending.epoch != epoch || pending.phase == ResponsePhase::AwaitingStart {
-                        return Err(invalid_host_frame());
-                    }
-                    pending
+                    require_live_epoch(&state, epoch)?;
+                    take_registered(&mut state.pending, &response.request_id, |pending| {
+                        pending.epoch == epoch && pending.phase != ResponsePhase::AwaitingStart
+                    })?
                 };
                 // An abandoned response ends without completion, as an error.
                 if pending.phase == ResponsePhase::Streaming {
@@ -388,15 +460,10 @@ impl CredentialBridge {
                 };
                 let pending = {
                     let mut state = self.inner.lock().await;
-                    require_active_epoch(&state, epoch)?;
-                    let pending = state
-                        .pending
-                        .remove(&response.request_id)
-                        .ok_or_else(invalid_host_frame)?;
-                    if pending.epoch != epoch {
-                        return Err(invalid_host_frame());
-                    }
-                    pending
+                    require_live_epoch(&state, epoch)?;
+                    take_registered(&mut state.pending, &response.request_id, |pending| {
+                        pending.epoch == epoch
+                    })?
                 };
                 fail_pending(vec![pending], reason);
                 Ok(())
@@ -412,24 +479,28 @@ impl CredentialBridge {
         }
     }
 
+    /// Lose `epoch`, active or draining, and fail only its own requests.
     async fn detach(&self, epoch: u64) {
-        let (stale, projections, ssh, codex_logins) = {
+        let lost = {
             let mut state = self.inner.lock().await;
-            if state.active.as_ref().map(|active| active.epoch) != Some(epoch) {
+            if state
+                .active
+                .as_ref()
+                .is_some_and(|host| host.epoch == epoch)
+            {
+                state.active = None;
+            } else if state
+                .draining
+                .as_ref()
+                .is_some_and(|host| host.epoch == epoch)
+            {
+                state.draining = None;
+            } else {
                 return;
             }
-            state.active = None;
-            (
-                take_pending(&mut state, |pending| pending.epoch == epoch),
-                take_projections(&mut state, epoch),
-                take_ssh(&mut state, epoch),
-                take_codex_logins(&mut state, epoch),
-            )
+            state.take_epoch(epoch)
         };
-        fail_pending(stale, BridgeFailure::Unavailable);
-        fail_projections(projections);
-        fail_ssh(ssh);
-        fail_codex_logins(codex_logins);
+        lost.fail();
     }
 
     async fn submit(
@@ -544,11 +615,8 @@ impl CredentialBridge {
             } else {
                 return;
             }
-            state
-                .active
-                .as_ref()
-                .filter(|active| active.epoch == epoch)
-                .map(|active| active.output.clone())
+            // A draining epoch still carries its own requests' cancellations.
+            state.live_host(epoch).map(|host| host.output.clone())
         };
         if let Some(output) = output {
             let _ = output.try_send(Ok(guest_message(
@@ -575,11 +643,29 @@ impl PreparedBridgeConnection {
     /// Activate with the optional operations the admitted host's Open listed.
     /// Only a listed operation is ever sent on this epoch: an older host ends
     /// its epoch on an unknown frame. Unknown names are ignored; malformed or
-    /// too many names refuse activation.
+    /// too many names refuse activation. The replaced epoch fails its pending
+    /// requests; see [`Self::activate_with_replacement`].
     pub async fn activate_with_capabilities<S>(
         self,
         input: S,
         capabilities: &[String],
+    ) -> Result<CredentialBridgeConnection, Status>
+    where
+        S: Stream<Item = Result<v1::CredentialBridgeHostMessage, Status>> + Send + 'static,
+    {
+        self.activate_with_replacement(input, capabilities, EpochReplacement::FailPending)
+            .await
+    }
+
+    /// Activate like [`Self::activate_with_capabilities`], choosing what
+    /// happens to the epoch this one replaces. Only a transport whose owner
+    /// overlaps epochs, ending the replaced one itself, should choose
+    /// [`EpochReplacement::Drain`].
+    pub async fn activate_with_replacement<S>(
+        self,
+        input: S,
+        capabilities: &[String],
+        replacement: EpochReplacement,
     ) -> Result<CredentialBridgeConnection, Status>
     where
         S: Stream<Item = Result<v1::CredentialBridgeHostMessage, Status>> + Send + 'static,
@@ -595,7 +681,8 @@ impl PreparedBridgeConnection {
             capability == codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN
         });
         let (cancel, cancelled) = oneshot::channel();
-        let (epoch, replaced, stale, projections, ssh, codex_logins) = {
+        let mut draining = None;
+        let (epoch, closed, lost) = {
             let mut state = self.bridge.inner.lock().await;
             if self.output.is_closed() {
                 return Err(Status::unavailable(
@@ -613,24 +700,45 @@ impl PreparedBridgeConnection {
                 cancel,
                 codex_login,
             });
-            let stale = take_pending(&mut state, |_| true);
-            let projections = std::mem::take(&mut state.projections)
-                .into_values()
-                .collect();
-            let ssh = std::mem::take(&mut state.ssh).into_values().collect();
-            let codex_logins = std::mem::take(&mut state.codex_logins)
-                .into_values()
-                .collect();
-            (epoch, replaced, stale, projections, ssh, codex_logins)
+            match (replacement, replaced) {
+                (EpochReplacement::Drain, Some(replaced)) => {
+                    draining = Some(replaced.epoch);
+                    // Only one epoch drains; an older draining one is lost.
+                    match state.draining.replace(replaced) {
+                        Some(older) => {
+                            let lost = state.take_epoch(older.epoch);
+                            (epoch, vec![older], lost)
+                        }
+                        None => (epoch, Vec::new(), LostRequests::default()),
+                    }
+                }
+                // The active epoch was already lost; a draining one goes on.
+                (EpochReplacement::Drain, None) => (epoch, Vec::new(), LostRequests::default()),
+                (EpochReplacement::FailPending, replaced) => {
+                    let closed = replaced.into_iter().chain(state.draining.take()).collect();
+                    (epoch, closed, state.take_all())
+                }
+            }
         };
         self.bridge.host_admitted.notify_waiters();
-        if let Some(replaced) = replaced {
-            let _ = replaced.cancel.send(());
+        for host in closed {
+            let _ = host.cancel.send(());
         }
-        fail_pending(stale, BridgeFailure::Unavailable);
-        fail_projections(projections);
-        fail_ssh(ssh);
-        fail_codex_logins(codex_logins);
+        lost.fail();
+        if let Some(draining) = draining
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            // Measured from this activation, not from the task's first poll.
+            // Holds no strong reference: a dropped bridge needs no expiry.
+            let deadline = tokio::time::Instant::now() + DRAINING_LIFETIME;
+            let state = Arc::downgrade(&self.bridge.inner);
+            drop(runtime.spawn(async move {
+                tokio::time::sleep_until(deadline).await;
+                if let Some(state) = state.upgrade() {
+                    expire_draining(&state, draining).await;
+                }
+            }));
+        }
         Ok(CredentialBridgeConnection {
             bridge: self.bridge,
             epoch,
@@ -644,13 +752,16 @@ impl PreparedBridgeConnection {
 }
 
 impl CredentialBridgeConnection {
-    /// Process responses until the peer closes or this epoch is replaced.
+    /// Process responses until the peer closes or this epoch is closed: a
+    /// fail-pending replacement closes it at once, and a draining epoch
+    /// closes when a further replacement loses it.
     pub async fn run(self) {
         self.run_until(std::future::pending()).await;
     }
 
-    /// Process responses until the peer closes, this epoch is replaced, or the
-    /// owner's shutdown completes. Await this method for orderly local cleanup.
+    /// Process responses until the peer closes, this epoch is closed (see
+    /// [`Self::run`]), or the owner's shutdown completes. Await this method
+    /// for orderly local cleanup.
     pub async fn run_until<F>(mut self, shutdown: F)
     where
         F: Future<Output = ()> + Send,
@@ -836,12 +947,55 @@ fn invalid_host_frame() -> Status {
     Status::invalid_argument("credential bridge host frame is invalid")
 }
 
+/// End a draining epoch whose time ran out: fail its remaining requests and
+/// close it. A no-op once it was answered empty, lost or replaced.
+async fn expire_draining(state: &Mutex<BridgeState>, epoch: u64) {
+    let (host, lost) = {
+        let mut state = state.lock().await;
+        if state
+            .draining
+            .as_ref()
+            .is_none_or(|host| host.epoch != epoch)
+        {
+            return;
+        }
+        (state.draining.take(), state.take_epoch(epoch))
+    };
+    if let Some(host) = host {
+        let _ = host.cancel.send(());
+    }
+    lost.fail();
+}
+
+/// New work and strict releases: only the active epoch.
 fn require_active_epoch(state: &BridgeState, epoch: u64) -> Result<(), Status> {
     if state.active.as_ref().map(|active| active.epoch) == Some(epoch) {
         Ok(())
     } else {
         Err(Status::aborted("credential bridge was replaced"))
     }
+}
+
+/// Frames answering registered requests: the active or the draining epoch.
+fn require_live_epoch(state: &BridgeState, epoch: u64) -> Result<(), Status> {
+    if state.live_host(epoch).is_some() {
+        Ok(())
+    } else {
+        Err(Status::aborted("credential bridge was replaced"))
+    }
+}
+
+/// Remove one registered request only after `owned` accepts it. A frame on
+/// the wrong epoch is invalid and leaves the other epoch's entry untouched.
+fn take_registered<T>(
+    requests: &mut BTreeMap<String, T>,
+    request_id: &str,
+    owned: impl FnOnce(&T) -> bool,
+) -> Result<T, Status> {
+    if !requests.get(request_id).is_some_and(owned) {
+        return Err(invalid_host_frame());
+    }
+    requests.remove(request_id).ok_or_else(invalid_host_frame)
 }
 
 fn take_pending(

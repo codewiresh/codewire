@@ -18,7 +18,8 @@
 #   host alias or node pin; its revision in the workspace container's
 #   immutable environment; no environment identity label; and no ingress
 #   before adoption (the controller's template-owned NetworkPolicy then denies
-#   all ingress to unclaimed members);
+#   all ingress to unclaimed members). The Kind e2e overlay also admits its
+#   one side-loaded gateway image, which has no registry digest;
 # - orchestration never creates or changes an unclaimed member Sandbox; only
 #   the agent-sandbox controller writes those.
 #
@@ -114,6 +115,11 @@ spec:
     # runtimes; keep it first. '' is a Pod without runtimeClassName.
     - name: runtimeClasses
       expression: "['commodity']"
+    # The Kind e2e overlay replaces this second variable with its side-loaded
+    # gateway image, which has no registry digest; keep it second. Every
+    # deployed cluster admits only digest-pinned images.
+    - name: localImages
+      expression: "[]"
     - name: pod
       expression: object.spec.podTemplate.spec
     - name: containers
@@ -151,11 +157,13 @@ spec:
         !variables.identity.exists(k, k in object.spec.podTemplate.metadata.labels)
       message: warm-pool members carry no environment, organization, generation or tier label until a claim adopts them
     - expression: >-
-        variables.containers.all(c, c.image.matches('^[^@ ]+@sha256:[0-9a-f]{64}$')) &&
+        variables.containers.all(c, c.image.matches('^[^@ ]+@sha256:[0-9a-f]{64}$') ||
+        c.image in variables.localImages) &&
         variables.volumes.all(v, !has(v.image) ||
-        (has(v.image.reference) && v.image.reference.matches('^[^@ ]+@sha256:[0-9a-f]{64}$'))) &&
+        (has(v.image.reference) && (v.image.reference.matches('^[^@ ]+@sha256:[0-9a-f]{64}$') ||
+        v.image.reference in variables.localImages))) &&
         !has(variables.pod.ephemeralContainers)
-      message: a warm-pool template runs and mounts only digest-pinned images
+      message: a warm-pool template runs and mounts only digest-pinned images (Kind adds its side-loaded gateway image)
     - expression: >-
         variables.containers.all(c, !has(c.envFrom) &&
         (!has(c.env) || c.env.all(e, e.name in variables.environment &&

@@ -115,12 +115,14 @@ switch_kind_credentials_real() {
 }
 
 switch_kind_credentials_fake() {
+  local fixture_patch
   require_kind_services_ci_image
   log "restoring the gate's synthetic credential fixture"
   kubectl_apply -f "$ROOT/tests/e2e/kind/credential-fixture-config.yaml"
   patch_kind_credential_container '[]'
+  fixture_patch="$(render_kind_credential_fixture_patch)"
   kubectl -n "$NS" patch deployment codewire-credential-service --type=strategic \
-    --patch-file "$ROOT/tests/e2e/kind/credential-fixture-patch.yaml"
+    --patch-file "$fixture_patch"
   kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s
   set_kind_frontend_url "$KIND_INGRESS_URL"
 }

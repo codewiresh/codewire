@@ -3,6 +3,7 @@
 
 mod codex_login;
 mod keepalive;
+mod material_cache;
 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
 mod ssh;
 
@@ -72,6 +73,20 @@ impl SessionGate {
     }
     fn release(&self) {
         self.released.notify_one();
+    }
+}
+
+tokio::task_local! {
+    /// Armed by a test to pause one lease between its two record reads.
+    static BETWEEN_RECORD_READS: Arc<SessionGate>;
+}
+
+/// A lease's test-only barrier between its two record reads: after the unwrap
+/// of a read through the store, or where that unwrap would be on a reuse.
+/// Outside a test's scope it does nothing.
+pub(super) async fn between_record_reads() {
+    if let Ok(gate) = BETWEEN_RECORD_READS.try_with(Arc::clone) {
+        gate.pass().await;
     }
 }
 
@@ -154,7 +169,7 @@ fn id_token() -> String {
     )
 }
 
-fn bundle(access_expired: bool, label: &str) -> CanonicalCodexOAuthBundle {
+pub(super) fn bundle(access_expired: bool, label: &str) -> CanonicalCodexOAuthBundle {
     let access = token(
         serde_json::json!({"exp": if access_expired {1} else {unix_now().unwrap()+7_200}, "synthetic":label}),
     );

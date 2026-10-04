@@ -1370,6 +1370,8 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/tests/test-workspace-binding-proof.sh|\
       scripts/runtime/dev/prove-dev-warm-pools.sh|\
       scripts/runtime/tests/test-warm-pool-proof.sh|\
+      scripts/runtime/agent-sandbox/drop-crd-conversion.sh|\
+      scripts/runtime/tests/test-drop-crd-conversion.sh|\
       scripts/runtime/tests/test-with-dev-smoke-auth.sh)
         select_token runtime_dev_smoke
         case "$path" in

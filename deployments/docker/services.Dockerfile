@@ -119,32 +119,34 @@ ARG SCCACHE_ENDPOINT
 ARG CODEWIRE_SCCACHE_PREFIX
 ARG CODEWIRE_RUST_PROFILE=release
 ARG CODEWIRE_ORCHESTRATION_FEATURES=
+# One Cargo invocation builds every shipped binary: the three historical
+# invocations shared one target tree and lockfile, so their common dependency
+# graph (including codewire-server-core, which differed only by the additive
+# kubernetes-identity feature) compiled up to three times. Feature flags here
+# enable only optional dependencies, so Cargo's additive unification keeps
+# each binary's behavior identical while every dependency compiles once.
 RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=codewire-services-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=codewire-sccache-v2,target=/var/cache/sccache,sharing=shared \
     --mount=type=secret,id=aws_shared_credentials \
     find Cargo.toml Cargo.lock crates proto libs/gateway-proto -type f -exec touch {} + && \
+    feature_args='codewire-credential-service/enrollment' && \
+    case "$CODEWIRE_ORCHESTRATION_FEATURES" in \
+      '') ;; \
+      kind-e2e) \
+        feature_args="$feature_args codewire-orchestration/kind-e2e codewire-credential-service/kind-e2e" ;; \
+      *) \
+        feature_args="$feature_args codewire-orchestration/$CODEWIRE_ORCHESTRATION_FEATURES" ;; \
+    esac && \
     codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" \
-      --bin codewire-idp \
-      --bin sidecar-smoke \
-      --bin codewire-billing \
-      --bin billing-runtime-smoke \
-      --bin codewire-coordinator \
-      --bin codewire-db-migrate \
-      --bin codewire-udp-relay && \
-    set -- && \
-    if [ -n "$CODEWIRE_ORCHESTRATION_FEATURES" ]; then \
-      set -- --features "$CODEWIRE_ORCHESTRATION_FEATURES"; \
-    fi && \
-    codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" \
-      -p codewire-orchestration --bin codewire-orchestration "$@" && \
-    credential_features=enrollment && \
-    if [ "$CODEWIRE_ORCHESTRATION_FEATURES" = kind-e2e ]; then \
-      credential_features=enrollment,kind-e2e; \
-    fi && \
-    codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" \
-      -p codewire-credential-service --features "$credential_features" \
-      --bin codewire-credential-service && \
+      -p codewire-idp --bin codewire-idp \
+      -p codewire-orchestration --bin codewire-orchestration --bin sidecar-smoke \
+      -p codewire-billing --bin codewire-billing --bin billing-runtime-smoke \
+      -p codewire-coordinator --bin codewire-coordinator \
+      -p codewire-server-core --bin codewire-db-migrate \
+      -p codewire-udp-relay --bin codewire-udp-relay \
+      -p codewire-credential-service --bin codewire-credential-service \
+      --features "$feature_args" && \
     mkdir -p /out && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-idp" /out/codewire-idp && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-orchestration" /out/codewire-orchestration && \

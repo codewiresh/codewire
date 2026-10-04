@@ -94,6 +94,36 @@ jq -e --arg sha "$GITHUB_SHA" '.source.sha == $sha' "$bundle" >/dev/null || {
   exit 1
 }
 
+# A carried-forward image keeps the provenance of the protected build that
+# produced its bits, which is the planner-certified deployed baseline, not the
+# workflow head. Callers pass each family's exact built-from source; any value
+# other than the head must equal the trusted deploy-selection baseline so the
+# relaxation can never reach an arbitrary revision.
+deploy_baseline="${CODEWIRE_DEPLOY_BASELINE_SHA:-}"
+if [ -n "$deploy_baseline" ]; then
+  [[ "$deploy_baseline" =~ ^[0-9a-f]{40}$ \
+    && "$deploy_baseline" != 0000000000000000000000000000000000000000 ]] || {
+    echo 'Runtime signing baseline source is invalid' >&2
+    exit 1
+  }
+fi
+
+built_from_for() {
+  local family="$1"
+  local value_var="CODEWIRE_BUILT_FROM_${family^^}" value
+  value="${!value_var:-$GITHUB_SHA}"
+  [[ "$value" =~ ^[0-9a-f]{40}$ \
+    && "$value" != 0000000000000000000000000000000000000000 ]] || {
+    echo "Runtime built-from source for $family is invalid" >&2
+    return 1
+  }
+  if [ "$value" != "$GITHUB_SHA" ] && [ "$value" != "$deploy_baseline" ]; then
+    echo "Runtime built-from source for $family is neither the workflow source nor the certified deployed baseline" >&2
+    return 1
+  fi
+  printf '%s\n' "$value"
+}
+
 refresh_openbao_token() {
   {
     printf 'header = "Authorization: bearer '
@@ -168,14 +198,14 @@ chmod 0500 "$cosign_binary"
 "$cosign_binary" version >/dev/null
 
 verify_native_attestations() {
-  local family="$1" reference="$2" provenance_output sbom_output
+  local family="$1" reference="$2" expected_revision="$3" provenance_output sbom_output
   provenance_output="$work/${family}.$(printf '%s' "$reference" | sha256sum | cut -d' ' -f1).provenance.json"
   sbom_output="$work/${family}.$(printf '%s' "$reference" | sha256sum | cut -d' ' -f1).sbom.json"
   DOCKER_CONFIG="$docker_config" docker buildx imagetools inspect \
     --format '{{json .Provenance.SLSA}}' "$reference" >"$provenance_output"
   jq -e \
     --arg builder "$PROVENANCE_BUILDER_ID" \
-    --arg revision "$GITHUB_SHA" \
+    --arg revision "$expected_revision" \
     --arg source "$PROVENANCE_SOURCE_URL" '
       .buildDefinition.buildType
         == "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md"
@@ -218,19 +248,20 @@ run_cosign() {
 }
 
 verify_signature() {
-  local family="$1" reference="$2"
+  local family="$1" reference="$2" built_from="$3"
   run_cosign false verify \
     --key "$public_key" \
     --insecure-ignore-tlog \
     --new-bundle-format=true \
     --annotations "dev.codewire.image-family=$family" \
     --annotations "dev.codewire.source-sha=$GITHUB_SHA" \
+    --annotations "dev.codewire.built-from-sha=$built_from" \
     "$reference"
 }
 
 sign_reference() {
-  local family="$1" reference="$2"
-  if verify_signature "$family" "$reference" >/dev/null 2>&1; then
+  local family="$1" reference="$2" built_from="$3"
+  if verify_signature "$family" "$reference" "$built_from" >/dev/null 2>&1; then
     printf 'Runtime signature already accepted: family=%s ref=%s\n' "$family" "$reference"
     return
   fi
@@ -245,21 +276,23 @@ sign_reference() {
     --new-bundle-format=true \
     --annotations "dev.codewire.image-family=$family" \
     --annotations "dev.codewire.source-sha=$GITHUB_SHA" \
+    --annotations "dev.codewire.built-from-sha=$built_from" \
     "$reference" >/dev/null
-  verify_signature "$family" "$reference" >/dev/null
+  verify_signature "$family" "$reference" "$built_from" >/dev/null
   printf 'Runtime signature accepted: family=%s ref=%s\n' "$family" "$reference"
 }
 
 while IFS=$'\t' read -r family harbor_ref; do
   digest="${harbor_ref##*@}"
+  built_from="$(built_from_for "$family")"
   if [[ "$sign_target" == delivery ]]; then
     references=("$harbor_ref")
   else
     references=("$GHCR_HOST/codewiresh/${family}@${digest}")
   fi
   for reference in "${references[@]}"; do
-    verify_native_attestations "$family" "$reference"
-    sign_reference "$family" "$reference"
+    verify_native_attestations "$family" "$reference" "$built_from"
+    sign_reference "$family" "$reference" "$built_from"
   done
 done < <(jq -r '.images[] | [.family, .ref] | @tsv' "$bundle")
 

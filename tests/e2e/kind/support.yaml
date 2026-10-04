@@ -25,6 +25,12 @@ data:
   # it out of the disposable overlay until the tool image follows the
   # configured runtime image.
   SANDBOX_IMAGE_CACHE: disabled
+  # No warm pool here (Program #2238 C4). A member runs the canonical
+  # workspace image, which only `make kind-runtime-images` preloads, while
+  # every other suite creates with the side-loaded verified image, so a pool
+  # here could never serve them and would only churn failed members. The
+  # warm-pools suite configures its own shape on orchestration and removes it.
+  SANDBOX_WARM_POOL_SHAPES: ""
   # Commodity workspaces bind through WorkspaceBindingService (Program #2238
   # B2), so orchestration refuses to start without these. Workspace Pods run
   # in dev-sandboxes, so both are fully qualified.

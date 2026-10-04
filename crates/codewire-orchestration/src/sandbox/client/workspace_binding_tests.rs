@@ -172,7 +172,7 @@ fn a_recorded_uid_decides_and_a_same_name_substitute_fails() {
     ));
 }
 
-/// The exact PVC the pinned agent-sandbox fork (4c528d39,
+/// The exact PVC the pinned agent-sandbox fork (aacf9ba1,
 /// `controllers/sandbox_controller.go` `reconcilePVCs`) creates from the
 /// `workspace` volume claim template: named `workspace-<sandbox>`, labelled
 /// with the Sandbox name hash, and owned through

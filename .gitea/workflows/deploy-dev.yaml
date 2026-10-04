@@ -88,6 +88,18 @@ jobs:
         id: build
         env:
           CODEWIRE_SCCACHE_MODE: local
+          # Trusted planner change context for selective rebuilds. A family
+          # the planner certifies unaffected carries its exact deployed
+          # digest forward instead of rebuilding. The gate stays 0 until
+          # codewire/deploy accepts carried provenance (issue #2353); every
+          # ambiguity fails closed to a full source build.
+          CODEWIRE_RUNTIME_CARRY_FORWARD: '0'
+          CODEWIRE_DEPLOY_BASELINE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}
+          CODEWIRE_IMAGE_STATE_DASHBOARD: ${{ needs.deploy-selection.outputs.dashboard_image_state }}
+          CODEWIRE_IMAGE_STATE_DERP: ${{ needs.deploy-selection.outputs.derp_image_state }}
+          CODEWIRE_IMAGE_STATE_GATEWAY: ${{ needs.deploy-selection.outputs.gateway_image_state }}
+          CODEWIRE_IMAGE_STATE_SERVICES: ${{ needs.deploy-selection.outputs.services_image_state }}
+          CODEWIRE_IMAGE_STATE_MESH: ${{ needs.deploy-selection.outputs.mesh_image_state }}
         run: scripts/ci/images/build-push-runtime-images.sh
 
       - name: Publish the complete runtime set to Harbor without rebuilding
@@ -114,6 +126,13 @@ jobs:
           scripts/ci/images/publish-image-to-harbor.sh --pinned-defaults
 
       - name: Sign the exact runtime set
+        env:
+          CODEWIRE_DEPLOY_BASELINE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}
+          CODEWIRE_BUILT_FROM_DASHBOARD: ${{ steps.build.outputs.dashboard_built_from }}
+          CODEWIRE_BUILT_FROM_DERP: ${{ steps.build.outputs.derp_built_from }}
+          CODEWIRE_BUILT_FROM_GATEWAY: ${{ steps.build.outputs.gateway_built_from }}
+          CODEWIRE_BUILT_FROM_SERVICES: ${{ steps.build.outputs.services_built_from }}
+          CODEWIRE_BUILT_FROM_MESH: ${{ steps.build.outputs.mesh_built_from }}
         run: |
           scripts/ci/images/sign-runtime-image-set.sh \
             "${RUNNER_TEMP:?}/codewire-dev-image-bundle.json" \
@@ -144,6 +163,13 @@ jobs:
       - name: Sign the GHCR mirror without gating delivery
         if: ${{ steps.ghcr-mirror.outcome == 'success' }}
         continue-on-error: true
+        env:
+          CODEWIRE_DEPLOY_BASELINE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}
+          CODEWIRE_BUILT_FROM_DASHBOARD: ${{ steps.build.outputs.dashboard_built_from }}
+          CODEWIRE_BUILT_FROM_DERP: ${{ steps.build.outputs.derp_built_from }}
+          CODEWIRE_BUILT_FROM_GATEWAY: ${{ steps.build.outputs.gateway_built_from }}
+          CODEWIRE_BUILT_FROM_SERVICES: ${{ steps.build.outputs.services_built_from }}
+          CODEWIRE_BUILT_FROM_MESH: ${{ steps.build.outputs.mesh_built_from }}
         run: |
           scripts/ci/images/sign-runtime-image-set.sh --ghcr-mirror \
             "${RUNNER_TEMP:?}/codewire-dev-image-bundle.json" \

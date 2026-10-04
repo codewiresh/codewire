@@ -325,6 +325,10 @@ pvc_uid_absent() {
 sandbox_absent() { ! kubectl_ro get sandbox -n "$SANDBOX_NAMESPACE" "$1" >/dev/null 2>&1; }
 
 # one_of VALUE PATTERN...: VALUE matches one of the glob patterns.
+within_ms() {
+  [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= $2 && $1 <= $3 ))
+}
+
 one_of() {
   local value="$1" pattern
   shift
@@ -452,6 +456,8 @@ if IFS= read -r -t 5 line <&4; then echo "h2_first_line=\$(printf '%s' "\$line" 
 exec 4<&- 4>&-
 # Two connections per peer: the third is refused at accept.
 exec 5<>"/dev/tcp/\$host/\$port"; printf 'POST / HTTP/1.1\r\n' >&5
+# The header timeout runs from this connection, not from the read below.
+slow_start=\$(date +%s%3N)
 exec 6<>"/dev/tcp/\$host/\$port"; printf 'POST / HTTP/1.1\r\n' >&6
 sleep 0.5
 if exec 7<>"/dev/tcp/\$host/\$port" 2>/dev/null; then
@@ -461,9 +467,9 @@ else
   echo "third_connection=refused"
 fi
 # A slow header is closed at the 5 s header timeout.
-start=\$(date +%s)
 IFS= read -r -t 9 line <&5; rc=\$?
-echo "slow_header_closed_after=\$(( \$(date +%s) - start ))s rc=\$rc"
+echo "slow_header_closed_after_ms=\$(( \$(date +%s%3N) - slow_start ))"
+echo "slow_header_read_rc=\$rc"
 exec 5<&- 5>&- 6<&- 6>&-
 # Other orchestration ports stay unreachable from a workspace.
 for other in 8084 8085; do
@@ -487,7 +493,8 @@ journey_negatives() {
   check "negatives: gateway binding path is absent on 8087 (404)" test "$(value gateway_path)" = 404
   check "negatives: HTTP/2 prior knowledge refused" one_of "$(value h2_first_line)" closed 'HTTP/1.1*'
   check "negatives: third concurrent connection refused" one_of "$(value third_connection)" closed refused
-  check "negatives: slow header closed within 5-8 s" one_of "$(value slow_header_closed_after)" '5s*' '6s*' '7s*' '8s*'
+  check "negatives: slow header closed at the 5 s timeout (4.9-8 s after connect)" \
+    within_ms "$(value slow_header_closed_after_ms)" 4900 8000
   check "negatives: 8084 unreachable from a workspace" test "$(value port_8084)" = blocked
   check "negatives: 8085 unreachable from a workspace" test "$(value port_8085)" = blocked
   # The volume asks for 0440, but kubelet writes service account tokens 0600

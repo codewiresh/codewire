@@ -50,6 +50,7 @@ fn end(id: &str) -> HostPayload {
 
 struct Harness {
     bridge: CredentialBridge,
+    epoch: u64,
     input: mpsc::Sender<Result<v1::CredentialBridgeHostMessage, Status>>,
     output: CredentialBridgeOutput,
     shutdown: oneshot::Sender<()>,
@@ -62,6 +63,15 @@ impl Harness {
     }
 
     async fn for_bridge(bridge: CredentialBridge) -> Self {
+        Self::with_replacement(bridge, EpochReplacement::FailPending).await
+    }
+
+    /// A successor that leaves the epoch it replaces draining.
+    async fn draining(bridge: CredentialBridge) -> Self {
+        Self::with_replacement(bridge, EpochReplacement::Drain).await
+    }
+
+    async fn with_replacement(bridge: CredentialBridge, replacement: EpochReplacement) -> Self {
         let (prepared, mut output) = bridge.prepare_connection().unwrap();
         let ready = bounded(output.next()).await.unwrap().unwrap();
         let Some(GuestPayload::Ready(ready)) = ready.payload else {
@@ -72,15 +82,17 @@ impl Harness {
         assert_eq!(ready.environment_generation, bridge.environment_generation);
         let (input, receiver) = mpsc::channel(32);
         let connection = prepared
-            .activate(ReceiverStream::new(receiver))
+            .activate_with_replacement(ReceiverStream::new(receiver), &[], replacement)
             .await
             .unwrap();
+        let epoch = connection.epoch;
         let (shutdown, shutdown_rx) = oneshot::channel();
         let task = tokio::spawn(connection.run_until(async {
             let _ = shutdown_rx.await;
         }));
         Self {
             bridge,
+            epoch,
             input,
             output,
             shutdown,
@@ -123,6 +135,24 @@ impl Harness {
     async fn stop(self) {
         let _ = self.shutdown.send(());
         bounded(self.task).await.unwrap();
+    }
+
+    /// The host ends this epoch's stream, as a broker does at its expiry.
+    async fn end_stream(self) -> CredentialBridgeOutput {
+        drop(self.input);
+        bounded(self.task).await.unwrap();
+        drop(self.shutdown);
+        self.output
+    }
+
+    /// Nothing more is sent on this epoch for now.
+    async fn quiet(&mut self) {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), self.output.next())
+                .await
+                .is_err(),
+            "unexpected frame on this epoch"
+        );
     }
 }
 
@@ -666,4 +696,419 @@ fn response_headers_require_canonical_names_no_framing_and_bounded_values() {
         }])
         .is_err()
     );
+}
+
+async fn in_flight(bridge: &CredentialBridge) -> usize {
+    bridge.inner.lock().await.in_flight()
+}
+
+/// Wait, with bounded scheduler yields, until the shared budget reaches `count`.
+async fn in_flight_reaches(bridge: &CredentialBridge, count: usize) {
+    bounded(async {
+        while in_flight(bridge).await != count {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+}
+
+async fn complete(harness: &Harness, request: &v1::CredentialBridgeRequest, data: &[u8]) {
+    harness.send(start(&request.request_id)).await;
+    harness.send(body(&request.request_id, data)).await;
+    harness.send(end(&request.request_id)).await;
+}
+
+async fn body_of(task: tokio::task::JoinHandle<Response<Body>>) -> WireBytes {
+    let response = bounded(task).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    bounded(to_bytes(response.into_body(), 100)).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_draining_epoch_finishes_its_request_while_new_work_uses_the_successor() {
+    let mut first = Harness::new().await;
+    let (old_task, old_request) = first.submit().await;
+    let mut second = Harness::draining(first.bridge.clone()).await;
+    {
+        let state = second.bridge.inner.lock().await;
+        assert_eq!(state.active.as_ref().unwrap().epoch, second.epoch);
+        assert_eq!(state.draining.as_ref().unwrap().epoch, first.epoch);
+    }
+    // New work reaches only the successor, never the draining epoch.
+    let (new_task, new_request) = second.submit().await;
+    first.quiet().await;
+    // The draining epoch answers what was already sent on it, after the
+    // successor activated, and the successor answers its own.
+    complete(&first, &old_request, b"old epoch").await;
+    complete(&second, &new_request, b"new epoch").await;
+    assert_eq!(body_of(old_task).await, "old epoch");
+    assert_eq!(body_of(new_task).await, "new epoch");
+    second.quiet().await;
+    assert_eq!(in_flight(&second.bridge).await, 0);
+    // The host then ends the draining epoch; the successor stays active.
+    assert!(bounded(first.end_stream().await.next()).await.is_none());
+    {
+        let state = second.bridge.inner.lock().await;
+        assert!(state.draining.is_none());
+        assert_eq!(state.active.as_ref().unwrap().epoch, second.epoch);
+    }
+    second.stop().await;
+}
+
+#[tokio::test]
+async fn losing_the_draining_epoch_fails_only_its_own_requests() {
+    let mut first = Harness::new().await;
+    let (old_task, _) = first.submit().await;
+    let mut second = Harness::draining(first.bridge.clone()).await;
+    let (new_task, new_request) = second.submit().await;
+    let bridge = second.bridge.clone();
+    // The broker ends the draining epoch before answering.
+    drop(first.end_stream().await);
+    assert_eq!(
+        bounded(old_task).await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(in_flight(&bridge).await, 1);
+    complete(&second, &new_request, b"kept").await;
+    assert_eq!(body_of(new_task).await, "kept");
+
+    // Losing the active epoch likewise fails only its own requests.
+    let (draining_task, draining_request) = second.submit().await;
+    let mut third = Harness::draining(bridge.clone()).await;
+    let (active_task, _) = third.submit().await;
+    drop(third.end_stream().await);
+    assert_eq!(
+        bounded(active_task).await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    // No epoch is active now: new work fails at once, as before.
+    assert_eq!(
+        bounded(bridge.respond(request())).await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    // A later activation finds no active epoch and keeps the draining one.
+    let mut fourth = Harness::draining(bridge.clone()).await;
+    assert_eq!(
+        bridge
+            .inner
+            .lock()
+            .await
+            .draining
+            .as_ref()
+            .map(|host| host.epoch),
+        Some(second.epoch)
+    );
+    complete(&second, &draining_request, b"still draining").await;
+    assert_eq!(body_of(draining_task).await, "still draining");
+    let (task, request) = fourth.submit().await;
+    second.quiet().await;
+    complete(&fourth, &request, b"fourth").await;
+    assert_eq!(body_of(task).await, "fourth");
+    second.stop().await;
+    fourth.stop().await;
+    assert_eq!(in_flight(&bridge).await, 0);
+}
+
+#[tokio::test]
+async fn cancelling_a_draining_request_reaches_its_own_epoch() {
+    let mut first = Harness::new().await;
+    let (waiting, waiting_request) = first.submit().await;
+    let (streaming, streaming_request) = first.submit().await;
+    first.send(start(&streaming_request.request_id)).await;
+    let streaming = bounded(streaming).await.unwrap();
+    let mut second = Harness::draining(first.bridge.clone()).await;
+    // A caller leaving before the response starts, and a reader leaving
+    // mid-body, each ask the draining epoch, not the successor, to stop.
+    waiting.abort();
+    assert!(bounded(waiting).await.unwrap_err().is_cancelled());
+    let Some(GuestPayload::Cancel(cancel)) = first.next().await.payload else {
+        panic!("cancel frame required on the draining epoch");
+    };
+    assert_eq!(cancel.request_id, waiting_request.request_id);
+    drop(streaming);
+    let Some(GuestPayload::Cancel(cancel)) = first.next().await.payload else {
+        panic!("cancel frame required on the draining epoch");
+    };
+    assert_eq!(cancel.request_id, streaming_request.request_id);
+    second.quiet().await;
+    // Late frames for both are tolerated and drain their tombstones.
+    first.send(start(&waiting_request.request_id)).await;
+    first.send(end(&waiting_request.request_id)).await;
+    first
+        .send(body(&streaming_request.request_id, b"late"))
+        .await;
+    first.send(end(&streaming_request.request_id)).await;
+    in_flight_reaches(&first.bridge, 0).await;
+    assert_eq!(
+        first
+            .bridge
+            .inner
+            .lock()
+            .await
+            .draining
+            .as_ref()
+            .map(|host| host.epoch),
+        Some(first.epoch)
+    );
+    first.stop().await;
+    second.stop().await;
+}
+
+#[tokio::test]
+async fn draining_tombstones_hold_the_shared_budget_until_answered_or_lost() {
+    let mut first = Harness::new().await;
+    let mut pending = Vec::new();
+    for _ in 0..CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
+        pending.push(first.submit().await);
+    }
+    let mut second = Harness::draining(first.bridge.clone()).await;
+    let bridge = second.bridge.clone();
+    let (answered_task, answered) = pending.pop().unwrap();
+    let (lost_task, lost) = pending.pop().unwrap();
+    for task in [answered_task, lost_task] {
+        task.abort();
+        assert!(bounded(task).await.unwrap_err().is_cancelled());
+    }
+    for _ in 0..2 {
+        assert!(matches!(
+            first.next().await.payload,
+            Some(GuestPayload::Cancel(_))
+        ));
+    }
+    // Both cancelled requests still count, so the successor is refused.
+    assert_eq!(in_flight(&bridge).await, CREDENTIAL_BRIDGE_MAX_IN_FLIGHT);
+    assert_eq!(
+        bounded(bridge.respond(request())).await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    second.quiet().await;
+    // A response drains one tombstone and frees its slot for the successor.
+    first
+        .send(HostPayload::ResponseFailure(
+            v1::CredentialBridgeResponseFailure {
+                request_id: answered.request_id,
+                reason: v1::CredentialBridgeFailureReason::Denied as i32,
+            },
+        ))
+        .await;
+    in_flight_reaches(&bridge, CREDENTIAL_BRIDGE_MAX_IN_FLIGHT - 1).await;
+    assert!(
+        bridge
+            .inner
+            .lock()
+            .await
+            .pending
+            .contains_key(&lost.request_id)
+    );
+    let (task, request) = second.submit().await;
+    // Losing the draining epoch removes the other tombstone with the rest.
+    drop(first.end_stream().await);
+    in_flight_reaches(&bridge, 1).await;
+    assert!(
+        !bridge
+            .inner
+            .lock()
+            .await
+            .pending
+            .contains_key(&lost.request_id)
+    );
+    for (task, _) in pending {
+        assert_eq!(
+            bounded(task).await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+    complete(&second, &request, b"successor").await;
+    assert_eq!(body_of(task).await, "successor");
+    second.stop().await;
+}
+
+#[tokio::test]
+async fn a_third_activation_loses_only_the_oldest_epoch() {
+    let mut first = Harness::new().await;
+    let bridge = first.bridge.clone();
+    let (oldest_task, _) = first.submit().await;
+    let mut second = Harness::draining(bridge.clone()).await;
+    let (middle_task, middle_request) = second.submit().await;
+    let (doomed_task, _) = second.submit().await;
+    let mut third = Harness::draining(bridge.clone()).await;
+    // The oldest epoch is closed and fails its request...
+    assert_eq!(
+        bounded(oldest_task).await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert!(bounded(first.output.next()).await.is_none());
+    {
+        let state = bridge.inner.lock().await;
+        assert_eq!(state.active.as_ref().unwrap().epoch, third.epoch);
+        assert_eq!(state.draining.as_ref().unwrap().epoch, second.epoch);
+    }
+    // ...while the previous successor drains its own.
+    let (newest_task, newest_request) = third.submit().await;
+    second.quiet().await;
+    complete(&second, &middle_request, b"middle").await;
+    complete(&third, &newest_request, b"newest").await;
+    assert_eq!(body_of(middle_task).await, "middle");
+    assert_eq!(body_of(newest_task).await, "newest");
+
+    // A fail-pending activation still closes both epochs and all requests.
+    let (active_task, _) = third.submit().await;
+    let fourth = Harness::for_bridge(bridge.clone()).await;
+    for task in [doomed_task, active_task] {
+        assert_eq!(
+            bounded(task).await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+    assert!(bounded(second.output.next()).await.is_none());
+    assert!(bounded(third.output.next()).await.is_none());
+    {
+        let state = bridge.inner.lock().await;
+        assert_eq!(state.active.as_ref().unwrap().epoch, fourth.epoch);
+        assert!(state.draining.is_none());
+        assert_eq!(state.in_flight(), 0);
+    }
+    for harness in [first, second, third, fourth] {
+        harness.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_frame_for_the_other_epochs_request_ends_only_its_sender() {
+    let failure = |id: &str| {
+        HostPayload::ResponseFailure(v1::CredentialBridgeResponseFailure {
+            request_id: id.to_owned(),
+            reason: v1::CredentialBridgeFailureReason::Denied as i32,
+        })
+    };
+    for frame in ["start", "end", "failure"] {
+        for draining_sends in [true, false] {
+            let mut first = Harness::new().await;
+            let bridge = first.bridge.clone();
+            let (old_task, old_request) = first.submit().await;
+            let mut second = Harness::draining(bridge.clone()).await;
+            let (new_task, new_request) = second.submit().await;
+            let (wrong, kept, kept_request, kept_task, ended_task) = if draining_sends {
+                (&mut first, &second, &new_request, new_task, old_task)
+            } else {
+                (&mut second, &first, &old_request, old_task, new_task)
+            };
+            let id = kept_request.request_id.as_str();
+            kept.send(start(id)).await;
+            let kept_response = bounded(kept_task).await.unwrap();
+            assert_eq!(kept_response.status(), StatusCode::OK);
+            wrong
+                .send(match frame {
+                    "start" => start(id),
+                    "end" => end(id),
+                    _ => failure(id),
+                })
+                .await;
+            wrong.terminal(tonic::Code::InvalidArgument).await;
+            assert_eq!(
+                bounded(ended_task).await.unwrap().status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{frame}"
+            );
+            // The other epoch's request, and its slot, are untouched...
+            assert!(
+                bridge
+                    .inner
+                    .lock()
+                    .await
+                    .pending
+                    .get(id)
+                    .is_some_and(|pending| pending.epoch == kept.epoch),
+                "{frame}"
+            );
+            // ...so its own epoch still completes it.
+            kept.send(body(id, b"kept")).await;
+            kept.send(end(id)).await;
+            assert_eq!(
+                bounded(to_bytes(kept_response.into_body(), 100))
+                    .await
+                    .unwrap(),
+                "kept",
+                "{frame}"
+            );
+            assert_eq!(in_flight(&bridge).await, 0);
+            first.stop().await;
+            second.stop().await;
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_draining_epoch_fails_what_it_still_holds_after_ninety_seconds() {
+    let mut first = Harness::new().await;
+    let bridge = first.bridge.clone();
+    let (old_task, _) = first.submit().await;
+    let (cancelled, _) = first.submit().await;
+    cancelled.abort();
+    assert!(bounded(cancelled).await.unwrap_err().is_cancelled());
+    assert!(matches!(
+        first.next().await.payload,
+        Some(GuestPayload::Cancel(_))
+    ));
+    let mut second = Harness::draining(bridge.clone()).await;
+    let (new_task, new_request) = second.submit().await;
+    tokio::time::advance(DRAINING_LIFETIME - Duration::from_secs(1)).await;
+    // Still draining: its request and its cancelled tombstone hold slots.
+    assert_eq!(in_flight(&bridge).await, 3);
+    assert!(bridge.inner.lock().await.draining.is_some());
+    tokio::time::advance(Duration::from_secs(2)).await;
+    // A half-open old transport then loses its requests, slots and epoch.
+    assert_eq!(
+        bounded(old_task).await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert!(bounded(first.output.next()).await.is_none());
+    assert!(bridge.inner.lock().await.draining.is_none());
+    assert_eq!(in_flight(&bridge).await, 1);
+    // The successor is untouched.
+    complete(&second, &new_request, b"successor").await;
+    assert_eq!(body_of(new_task).await, "successor");
+    first.stop().await;
+    second.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_draining_deadline_never_touches_a_later_draining_epoch() {
+    let first = Harness::new().await;
+    let bridge = first.bridge.clone();
+    tokio::time::advance(Duration::from_secs(60)).await;
+    let mut second = Harness::draining(bridge.clone()).await;
+    let (task, request) = second.submit().await;
+    tokio::time::advance(Duration::from_secs(60)).await;
+    // The second epoch now drains: the first epoch's deadline passes without
+    // affecting it, and its own runs from its own replacement.
+    let third = Harness::draining(bridge.clone()).await;
+    tokio::time::advance(Duration::from_secs(45)).await;
+    assert_eq!(
+        bridge
+            .inner
+            .lock()
+            .await
+            .draining
+            .as_ref()
+            .map(|host| host.epoch),
+        Some(second.epoch)
+    );
+    complete(&second, &request, b"second").await;
+    assert_eq!(body_of(task).await, "second");
+    tokio::time::advance(Duration::from_secs(50)).await;
+    assert!(bounded(second.output.next()).await.is_none());
+    assert_eq!(
+        bridge
+            .inner
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .map(|host| host.epoch),
+        Some(third.epoch)
+    );
+    for harness in [first, second, third] {
+        harness.stop().await;
+    }
 }

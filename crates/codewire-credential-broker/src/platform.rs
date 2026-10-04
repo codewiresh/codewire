@@ -31,14 +31,14 @@ use codewire_access::{
     Placement, codex_login_permission,
 };
 use codewire_platform_credentials::{
-    CredentialRecord, CredentialVersion, OAuthRefreshState, PlatformAccessProfileStore,
-    PlatformCredentialError, PlatformCredentialStore, PlatformProfileError, PreparedOAuthRefresh,
-    StartedOAuthRefresh,
+    CredentialRecord, CredentialVersion, EpochMaterialCache, OAuthRefreshState,
+    PlatformAccessProfileStore, PlatformCredentialError, PlatformCredentialStore,
+    PlatformProfileError, PreparedOAuthRefresh, StartedOAuthRefresh,
 };
 use codewire_protected_store::ProtectedValue;
 use uuid::Uuid;
 
-use crate::timing::{self, Phase};
+use crate::timing::{self, MaterialCacheUse, Phase};
 use crate::{
     BrokerCredentialLease, BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest,
     BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError,
@@ -319,16 +319,21 @@ pub struct PlatformBrokerLeaseProvider<A> {
     profiles: PlatformAccessProfileStore,
     /// The bridge service's shared concurrent-lease budget, if any.
     leases: Option<LeaseBudget>,
+    /// This epoch's reusable decrypted values. Only a bridge epoch has one;
+    /// it is created at admission and dropped with the epoch, and is never
+    /// shared with another epoch or the SSH signer.
+    material: Option<EpochMaterialCache>,
     #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
     ssh: Option<ssh::Epoch>,
 }
 
 /// One process-wide budget of concurrent leases, shared by every epoch of one
 /// bridge service. A slot covers exactly one lease's authority checks, grant
-/// and record reads and protected-material read (SQL and the KEK unwrap); never
-/// provider I/O, a refresh or a response body. A lease waits for a slot in
-/// arrival order until its connected identity's original expiry, the deadline
-/// that already bounds that lease, so a burst queues instead of failing.
+/// and record reads and protected-material read (SQL and the KEK unwrap), or a
+/// reuse from this epoch's material cache; never provider I/O, a refresh or a
+/// response body. A lease waits for a slot in arrival order until its connected
+/// identity's original expiry, the deadline that already bounds that lease, so
+/// a burst queues instead of failing.
 #[derive(Clone)]
 pub(crate) struct LeaseBudget {
     permits: Arc<tokio::sync::Semaphore>,
@@ -451,9 +456,28 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             credentials,
             profiles,
             leases: None,
+            material: None,
             #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
             ssh: None,
         })
+    }
+
+    /// Drop any value this epoch reuses for `credential`.
+    fn forget_material(&self, credential: &CredentialId) {
+        if let Some(material) = &self.material {
+            material.evict(credential);
+        }
+    }
+
+    /// A runtime that authority or grant evaluation denies may reuse nothing.
+    fn forget_material_on_denial<T>(
+        &self,
+        result: Result<T, BrokerLeaseError>,
+    ) -> Result<T, BrokerLeaseError> {
+        if let (Err(BrokerLeaseError::Denied), Some(material)) = (&result, &self.material) {
+            material.clear();
+        }
+        result
     }
 
     async fn session(&self) -> Result<PlatformRuntimeSession, BrokerLeaseError> {
@@ -500,48 +524,56 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         slot: &CapabilitySlot,
         permission: GrantPermission,
     ) -> Result<Admission, BrokerLeaseError> {
+        let available = async {
+            match &session.identity {
+                RuntimeIdentity::Hosted { .. } => timing::timed(
+                    Phase::Grants,
+                    self.profiles.evaluate_grants(&session.context),
+                )
+                .await
+                .map_err(profile_error),
+                RuntimeIdentity::OwnerLocal {
+                    profile: Some(profile),
+                    ..
+                } => {
+                    let grants =
+                        timing::timed(Phase::Grants, self.authority.owner_local_grants(session))
+                            .await
+                            .map_err(runtime_error)?;
+                    if grants.iter().any(|grant| {
+                        grant.environment_id != session.context.environment_id
+                            || grant.environment_generation
+                                != session.context.environment_generation
+                            || grant.profile.as_ref().is_none_or(|granted| {
+                                granted.id != profile.profile_id
+                                    || granted.revision != profile.profile_revision
+                            })
+                            || !session
+                                .context
+                                .authorized_credentials
+                                .contains(&grant.credential_id)
+                    }) {
+                        return Err(BrokerLeaseError::Denied);
+                    }
+                    // An owner-local selection is admitted whole; nothing is withheld.
+                    Ok(AvailableGrants {
+                        grants,
+                        reconnect_required: Default::default(),
+                    })
+                }
+                RuntimeIdentity::OwnerLocal { profile: None, .. } => Err(BrokerLeaseError::Denied),
+            }
+        }
+        .await;
         let AvailableGrants {
             grants,
             reconnect_required,
-        } = match &session.identity {
-            RuntimeIdentity::Hosted { .. } => timing::timed(
-                Phase::Grants,
-                self.profiles.evaluate_grants(&session.context),
-            )
-            .await
-            .map_err(profile_error)?,
-            RuntimeIdentity::OwnerLocal {
-                profile: Some(profile),
-                ..
-            } => {
-                let grants =
-                    timing::timed(Phase::Grants, self.authority.owner_local_grants(session))
-                        .await
-                        .map_err(runtime_error)?;
-                if grants.iter().any(|grant| {
-                    grant.environment_id != session.context.environment_id
-                        || grant.environment_generation != session.context.environment_generation
-                        || grant.profile.as_ref().is_none_or(|granted| {
-                            granted.id != profile.profile_id
-                                || granted.revision != profile.profile_revision
-                        })
-                        || !session
-                            .context
-                            .authorized_credentials
-                            .contains(&grant.credential_id)
-                }) {
-                    return Err(BrokerLeaseError::Denied);
-                }
-                // An owner-local selection is admitted whole; nothing is withheld.
-                AvailableGrants {
-                    grants,
-                    reconnect_required: Default::default(),
-                }
-            }
-            RuntimeIdentity::OwnerLocal { profile: None, .. } => {
-                return Err(BrokerLeaseError::Denied);
-            }
-        };
+        } = self.forget_material_on_denial(available)?;
+        // A value whose credential no current grant names, such as one that
+        // was revoked, rebound or now needs Reconnect, is never reused again.
+        if let Some(material) = &self.material {
+            material.retain_credentials(|id| grants.iter().any(|grant| grant.credential_id == *id));
+        }
         // A credential that needs Reconnect withholds only its own slot. Say so
         // for exactly that selected slot; every other absence stays a denial.
         let Some(mut grant) = grants
@@ -563,13 +595,19 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                 .unwrap_or(session.identity_expires_at_unix)
                 .min(session.identity_expires_at_unix),
         );
-        let record = timing::timed(
+        let record = match timing::timed(
             Phase::Record,
             self.credentials
                 .record(&session.credential_owner, &grant.credential_id),
         )
         .await
-        .map_err(credential_error)?;
+        {
+            Ok(record) => record,
+            Err(error) => {
+                self.forget_material(&grant.credential_id);
+                return Err(credential_error(error));
+            }
+        };
         if record.metadata.placement != Placement::Platform
             || record.metadata.owner != session.credential_owner
             || record.version.revocation_generation == 0
@@ -577,6 +615,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             || record.metadata.revocation_generation != grant.credential_revocation_generation
             || record.version.revocation_generation != grant.credential_revocation_generation
         {
+            self.forget_material(&grant.credential_id);
             return Err(BrokerLeaseError::Denied);
         }
         Ok(Admission {
@@ -590,6 +629,16 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
     /// reads, the protected-material read, and a second grant and record read.
     /// `admissible`, when present, is a delivery predicate applied to the
     /// session and to both record reads.
+    ///
+    /// In a bridge epoch, a value this epoch read for exactly the record the
+    /// first read returns may replace the protected-material read, and only
+    /// that read. Every other step still runs, and the unchanged check that
+    /// both record reads are equal is the version fence around the reuse. A
+    /// value is retained only at the end of a lease that succeeded. A lease
+    /// that fails after selecting a credential drops that credential's value;
+    /// a runtime authority or grant denial, or a credential no longer granted,
+    /// drops what it can no longer use. Direct delivery (a lease with a
+    /// delivery predicate) and SSH keys never reuse or retain material.
     async fn lease(
         &self,
         request_id: Uuid,
@@ -615,7 +664,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         // exactly that one apart from its expiry, so nothing either evaluation
         // relied on can have changed without denying the lease. The response is
         // never kept beyond this lease.
-        let initial = self.session().await?;
+        let initial = self.forget_material_on_denial(self.session().await)?;
         // A delivery predicate refuses before any grant, record or material
         // read it cannot pass, and again for each record read.
         if let Some(admissible) = admissible {
@@ -624,47 +673,79 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         let before = self
             .grant_and_record(&initial, &slot, permission.clone())
             .await?;
-        ensure_live(&before.record.metadata, &before.grant)?;
-        if let Some(admissible) = admissible {
-            admissible(&initial, Some(&before))?;
+        let credential = before.record.metadata.id.clone();
+        let leased = async {
+            ensure_live(&before.record.metadata, &before.grant)?;
+            if let Some(admissible) = admissible {
+                admissible(&initial, Some(&before))?;
+            }
+            let cache = self.material.as_ref().filter(|_| {
+                admissible.is_none()
+                    && before.record.metadata.authentication_kind != CredentialAuthKind::SshKey
+            });
+            // Reuse only a value read for exactly this record: owner, id,
+            // provider, kind, status, expiry and both generations.
+            let reused = cache.and_then(|cache| cache.get(&before.record));
+            timing::material_cache(match (cache, &reused) {
+                (None, _) => MaterialCacheUse::Bypass,
+                (Some(_), Some(_)) => MaterialCacheUse::Hit,
+                (Some(_), None) => MaterialCacheUse::Miss,
+            });
+            let read = reused.is_none();
+            let material = match reused {
+                Some(material) => material,
+                None => timing::timed(
+                    Phase::MaterialRead,
+                    self.credentials.read_for_broker(
+                        &before.record.metadata.owner,
+                        &before.record.metadata.id,
+                        before.record.version,
+                    ),
+                )
+                .await
+                .map_err(credential_error)?,
+            };
+            #[cfg(test)]
+            tests::between_record_reads().await;
+            // OpenBao unwrap and SQL lock waits may outlive the original
+            // authority. Recheck the exact profile selection and current
+            // record, then runtime authority last. Nothing below awaits, so no
+            // wait follows that check. A reused value passes this same fence:
+            // the record read now must equal the record it was retained for.
+            let mut after = self.grant_and_record(&initial, &slot, permission).await?;
+            let current = self.forget_material_on_denial(self.session().await)?;
+            if !initial.same_except_expiry(&current)
+                || before.record != after.record
+                || before.permission != after.permission
+                || !same_grant_binding(&before.grant, &after.grant)
+            {
+                return Err(BrokerLeaseError::Denied);
+            }
+            after.grant.expires_at_unix = before
+                .grant
+                .expires_at_unix
+                .min(after.grant.expires_at_unix)
+                .map(|deadline| deadline.min(current.identity_expires_at_unix));
+            ensure_live(&after.record.metadata, &after.grant)?;
+            if let Some(admissible) = admissible {
+                admissible(&current, Some(&after))?;
+            }
+            // Retain only a value this successful lease read itself.
+            if let Some(cache) = cache.filter(|_| read) {
+                cache.fill(&after.record, &material);
+            }
+            Ok(PlatformCredentialLease {
+                record: after.record,
+                grant: after.grant,
+                permission: after.permission,
+                material,
+            })
         }
-        let material = timing::timed(
-            Phase::MaterialRead,
-            self.credentials.read_for_broker(
-                &before.record.metadata.owner,
-                &before.record.metadata.id,
-                before.record.version,
-            ),
-        )
-        .await
-        .map_err(credential_error)?;
-        // OpenBao unwrap and SQL lock waits may outlive the original authority.
-        // Recheck the exact profile selection and current record, then runtime
-        // authority last. Nothing below awaits, so no wait follows that check.
-        let mut after = self.grant_and_record(&initial, &slot, permission).await?;
-        let current = self.session().await?;
-        if !initial.same_except_expiry(&current)
-            || before.record != after.record
-            || before.permission != after.permission
-            || !same_grant_binding(&before.grant, &after.grant)
-        {
-            return Err(BrokerLeaseError::Denied);
+        .await;
+        if leased.is_err() {
+            self.forget_material(&credential);
         }
-        after.grant.expires_at_unix = before
-            .grant
-            .expires_at_unix
-            .min(after.grant.expires_at_unix)
-            .map(|deadline| deadline.min(current.identity_expires_at_unix));
-        ensure_live(&after.record.metadata, &after.grant)?;
-        if let Some(admissible) = admissible {
-            admissible(&current, Some(&after))?;
-        }
-        Ok(PlatformCredentialLease {
-            record: after.record,
-            grant: after.grant,
-            permission: after.permission,
-            material,
-        })
+        leased
     }
 
     async fn admit_request(
@@ -780,7 +861,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         // Do not discard rotated output merely because a guest disconnected or
         // its grant expired. Publication preserves storage's hard deadline; the
         // shared runtime separately obtains fresh authority before consuming it.
-        publish_started_refresh(
+        let published = publish_started_refresh(
             &self.credentials,
             &self.session.credential_owner,
             &permit.request.grant.credential_id,
@@ -789,7 +870,11 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             permit.started,
             value,
         )
-        .await
+        .await;
+        // The published generation no longer matches the retained value's
+        // record; drop it now rather than at its expiry.
+        self.forget_material(&permit.request.grant.credential_id);
+        published
     }
 }
 

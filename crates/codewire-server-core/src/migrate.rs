@@ -44,6 +44,7 @@ pub async fn ensure_schema_logged(database_url: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod authority_stamp;
     mod github_singleton;
     mod owner_sources;
     mod preview_browser;
@@ -64,10 +65,13 @@ mod tests {
     // Measured in isolated PostgreSQL after composing account access,
     // environment projection, typed SSH metadata, the GitHub singleton that
     // every personal profile includes, the per-session two-factor setup skip,
-    // preview browser authorization, pending authenticator replacement and
-    // the runtime-dispatch lease environment scope and claim-time workspace
-    // binding, through version34.
+    // preview browser authorization, pending authenticator replacement, the
+    // runtime-dispatch lease environment scope, claim-time workspace binding
+    // and the authority stamp, through version35.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
+        "14d3d5ac233de6dbd7f98e9a3f638e2983c84768d238fc3f54d74c29f84f617f";
+    // Accepted table schema through version34, before the authority stamp.
+    const ACCEPTED_PRE_AUTHORITY_STAMP_SCHEMA_FINGERPRINT: &str =
         "218a3ea293e6023d9023b3b133534bfeba823dd68e17818196d609032ccca1b5";
     // Accepted table schema through version33, before claim-time workspace
     // binding.
@@ -5062,6 +5066,9 @@ mod tests {
         }
         if version > 33 {
             workspace_binding::assert_accepted_prior33()?;
+        }
+        if version > 34 {
+            authority_stamp::assert_accepted_prior34()?;
         }
         if version > PLATFORM_BINDING_CONSENT_VERSION {
             let consent = MIGRATOR
