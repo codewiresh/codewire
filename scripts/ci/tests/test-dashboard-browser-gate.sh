@@ -226,6 +226,10 @@ grep -Fq 'PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE="$credential_fixture"' "$COMMON" ||
   fail 'Kind browser wrapper does not overwrite the credential fixture selection'
 grep -Fq 'runtime::kind::serve_kind_credential_fixture' "$COMMON" ||
   fail 'Kind browser wrapper does not verify the selected synthetic credential runtime'
+grep -Fq 'workers="${CODEWIRE_KIND_DASHBOARD_WORKERS:-1}"' "$COMMON" ||
+  fail 'Kind browser wrapper does not keep the single-worker default'
+grep -Fq -- '"$playwright" test --config "$ROOT/apps/dashboard/playwright.config.ts" --workers="$workers"' "$COMMON" ||
+  fail 'Kind browser wrapper does not thread the dashboard worker count'
 
 grep -Fq 'creates, runs, exposes a port, stops, starts, and destroys through real Kind' \
   "$ENVIRONMENTS" || fail 'real environment lifecycle browser proof is missing'

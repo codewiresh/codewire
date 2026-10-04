@@ -258,7 +258,11 @@ class WorkflowContractTests(unittest.TestCase):
         )
         expected_shards = [
             {"slug": "environment", "suites": "runtime-acceptance"},
-            {"slug": "dashboard", "suites": "dashboard-browser"},
+            {
+                "slug": "dashboard",
+                "suites": "dashboard-browser",
+                "playwright_workers": 4,
+            },
             {
                 "slug": "workspace",
                 "suites": "workspace-services final-fencing credentials",
@@ -281,6 +285,10 @@ class WorkflowContractTests(unittest.TestCase):
                 self.assertEqual(step["env"]["KIND_CLUSTER_NAME"], cluster_name)
         shard = named_step(edge, "Run the shard Kind gate")
         self.assertIn('scripts/ci/verify/kind-e2e.sh shard "${suites[@]}"', shard["run"])
+        self.assertEqual(
+            shard["env"]["CODEWIRE_KIND_DASHBOARD_WORKERS"],
+            "${{ matrix.shard.playwright_workers }}",
+        )
         indices = [edge["steps"].index(named_step(edge, name)) for name in kind_step_names]
         self.assertEqual(indices, sorted(indices))
         self.assertEqual(
@@ -749,6 +757,7 @@ class CommonConsumerContractTests(unittest.TestCase):
                     set -euo pipefail
                     printf 'browser-credential-fixture %s\n' \
                       "$PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE" >>"$CALLS"
+                    printf 'browser-playwright %s\n' "$*" >>"$CALLS"
                 """,
                 "bin/chromium": """
                     #!/usr/bin/env bash
@@ -931,7 +940,13 @@ class CommonConsumerContractTests(unittest.TestCase):
                     fail "$mode omitted the browser credential fixture"
                   grep -q '^dashboard-kubectl ' "$CALLS" ||
                     fail "$mode skipped exact synthetic deployment admission"
+                  grep -Fq -- '--workers=1' "$CALLS" ||
+                    fail "$mode did not keep the single-worker default"
                 done
+                : >"$CALLS"
+                CODEWIRE_KIND_DASHBOARD_WORKERS=4 dashboard_browser_e2e
+                grep -Fq -- '--workers=4' "$CALLS" ||
+                  fail 'dashboard leg does not thread CODEWIRE_KIND_DASHBOARD_WORKERS'
                 : >"$CALLS"
                 CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release dashboard_browser_e2e
                 grep -Fxq 'browser-credential-fixture 0' "$CALLS"
