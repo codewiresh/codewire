@@ -33,6 +33,8 @@ source "$ROOT/scripts/ci/verify/kind/suites/dashboard-browser.sh"
 source "$ROOT/scripts/ci/verify/kind/suites/final-fencing.sh"
 # shellcheck source=scripts/ci/verify/kind/suites/environment-session.sh
 source "$ROOT/scripts/ci/verify/kind/suites/environment-session.sh"
+# shellcheck source=scripts/ci/verify/kind/suites/cw-runtime.sh
+source "$ROOT/scripts/ci/verify/kind/suites/cw-runtime.sh"
 # shellcheck source=scripts/ci/verify/kind/suites/sandbox-supply-chain.sh
 source "$ROOT/scripts/ci/verify/kind/suites/sandbox-supply-chain.sh"
 # shellcheck source=scripts/ci/verify/kind/suites/runtime-acceptance.sh
@@ -66,6 +68,7 @@ usage:
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite dashboard-browser
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite final-fencing
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite environment-session
+  CLUSTER=<profile> scripts/ci/verify/kind-e2e.sh suite cw-runtime
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite sandbox-supply-chain
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite runtime-acceptance
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite warm-pools
@@ -164,6 +167,9 @@ dispatch_kind_e2e() {
       ;;
     environment-session)
       run_retained_environment_session_suite
+      ;;
+    cw-runtime)
+      run_retained_cw_runtime_suite
       ;;
     final-fencing)
       run_retained_final_fencing_suite

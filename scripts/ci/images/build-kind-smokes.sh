@@ -19,7 +19,7 @@ started_at="$(date +%s)"
   cd "$ROOT"
   "$ROOT/scripts/ci/verify/run-host-rust-build.sh" bash -ceu '
     cargo build --profile ci -p codewire-orchestration --bin crd-smoke --bin environment-setup-smoke --bin exec-smoke --bin exec-stream-smoke --bin file-service-smoke --bin prepare-stream-smoke --bin log-stream-smoke --bin temporal-smoke --bin temporal-fencing-smoke --bin reconciler-ttl-smoke --bin sidecar-smoke --features kind-e2e
-    cargo build --profile ci -p codewire-client --example platform-run-smoke --example environment-session-smoke
+    cargo build --profile ci -p codewire-client --example platform-run-smoke --example environment-session-smoke --example environment-cw-runtime-smoke
     cargo build --profile ci -p codewire-client --example coordinator-ingress-smoke --features kind-e2e
     cargo build --locked --profile ci -p codewire-cli-bin --bin cw
     cargo test --locked --profile ci -p codewire-orchestration --lib --no-run --message-format=json >"$1"

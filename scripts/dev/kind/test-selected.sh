@@ -16,7 +16,7 @@ kind_profile_load "$ROOT" || exit $?
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
 # warm-pools runs only when named (KIND_TEST_SUITES): it needs the C0
 # agent-sandbox controller and the canonical image (make kind-runtime-images).
-ORDER=(edge-contract credentials workspace-services dashboard-browser final-fencing runtime-acceptance warm-pools)
+ORDER=(edge-contract credentials workspace-services dashboard-browser final-fencing runtime-acceptance cw-runtime warm-pools)
 
 log() { printf '[kind-test] %s\n' "$*" >&2; }
 die() { printf '[kind-test] error: %s\n' "$*" >&2; exit 1; }

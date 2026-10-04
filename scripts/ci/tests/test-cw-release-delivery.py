@@ -155,61 +155,11 @@ class DeliveryTest(unittest.TestCase):
             self.assertIn(name, release.build_environment(fx.VERSION, fx.REVISION, fx.TREE))
         self.assertNotIn('Command::new("git")', build)
 
-    def test_source_digest_covers_every_compiled_input_kind(self):
-        source, _ = fx.source_repo(self.base / "digest")
-        spec = importlib.util.spec_from_file_location(
-            "build_native_managed_agent", ROOT / "scripts/dev/build-native-managed-agent.py")
-        native = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(native)
-        self.assertIs(native.release, release, "the native producer must use the shared identity producer")
-        inputs = {
-            "crates/codewire-mesh/migrations/001_initial_schema.sql": "create table mesh(id int);\n",
-            "crates/codewire-server-core/migrations/0001_init.sql": "create table core(id int);\n",
-            "crates/codewire-proto/codewire_descriptor.bin": "descriptor\n",
-            "crates/codewire-credential-broker/src/ssh_agent/askpass.sh": "#!/bin/sh\n",
-        }
-        for name, text in inputs.items():
-            (source / name).parent.mkdir(parents=True, exist_ok=True)
-            (source / name).write_text(text)
-        before = release.source_tree_sha256(source)
-        for name in [*inputs, "crates/demo/src/lib.rs", "Cargo.lock", "crates/demo/demo.proto"]:
-            with self.subTest(name):
-                path = source / name
-                original = path.read_bytes()
-                path.write_bytes(original + b"-- changed\n")
-                self.assertNotEqual(release.source_tree_sha256(source), before)
-                path.write_bytes(original)
-                self.assertEqual(release.source_tree_sha256(source), before)
-        (source / "README.md").write_text("still not an input\n")
-        self.assertEqual(release.source_tree_sha256(source), before)
-
     def depinfo(self, base, paths):
         rule = base / "cw.d"
         escaped = " ".join(str(path).replace(" ", "\\ ") for path in paths)
         rule.write_text(f"{base}/target/release/cw: {escaped}\n\n")
         return rule
-
-    def test_compiled_inputs_must_all_be_in_the_source_digest(self):
-        base = self.base / "depinfo"
-        base.mkdir()
-        source, _ = fx.source_repo(base)
-        target, cargo = base / "target", base / "cargo home"
-        (cargo / "registry/src").mkdir(parents=True)
-        (target / "out").mkdir(parents=True)
-        (source / "crates/demo/odd name.sql").write_text("select 1;\n")
-        (source / "crates/demo/schema.sql").write_text("select 2;\n")
-        covered = [source / "crates/demo/src/lib.rs", source / "Cargo.lock", target / "out/generated.rs",
-                   cargo / "registry/src/dependency.rs"]
-        self.assertEqual(release.check_build_inputs(source, self.depinfo(base, covered), (target, cargo)), 2)
-        for name, extra in {
-            "undigested repository file": source / "crates/demo/schema.sql",
-            "undigested path with a space": source / "crates/demo/odd name.sql",
-            "file outside the repository": Path("/etc/hostname"),
-        }.items():
-            with self.subTest(name), self.assertRaises(release.ReleaseError):
-                release.check_build_inputs(source, self.depinfo(base, [*covered, extra]), (target, cargo))
-        with self.assertRaises(release.ReleaseError):
-            release.check_build_inputs(source, self.depinfo(base, [target / "out/generated.rs"]), (target, cargo))
 
     def directory_source(self, name):
         base = self.base / name
@@ -549,6 +499,110 @@ class DeliveryTest(unittest.TestCase):
         (dist / "extra").write_text("x")
         self.assertNotEqual(release.tree_digest(dist), before)
         shutil.rmtree(dist)
+
+
+class SourceDigestTest(unittest.TestCase):
+    """Compiled input policy uses only a disposable source tree."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = fx.scratch("cw-source-digest.")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.base)
+
+    depinfo = DeliveryTest.depinfo
+
+    def test_source_digest_covers_every_compiled_input_kind(self):
+        source, _ = fx.source_repo(self.base / "digest")
+        spec = importlib.util.spec_from_file_location(
+            "build_native_managed_agent", ROOT / "scripts/dev/build-native-managed-agent.py")
+        native = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native)
+        self.assertIs(native.release, release, "the native producer must use the shared identity producer")
+        inputs = {
+            "crates/codewire-mesh/migrations/001_initial_schema.sql": "create table mesh(id int);\n",
+            "crates/codewire-server-core/migrations/0001_init.sql": "create table core(id int);\n",
+            "crates/codewire-proto/codewire_descriptor.bin": "descriptor\n",
+            "crates/codewire-credential-broker/src/ssh_agent/askpass.sh": "#!/bin/sh\n",
+            "scripts/ci/verify/kind/cw_runtime_probe.py": "print('embedded observer')\n",
+        }
+        for name, text in inputs.items():
+            (source / name).parent.mkdir(parents=True, exist_ok=True)
+            (source / name).write_text(text)
+        before = release.source_tree_sha256(source)
+        for name in [*inputs, "crates/demo/src/lib.rs", "Cargo.lock", "crates/demo/demo.proto"]:
+            with self.subTest(name):
+                path = source / name
+                original = path.read_bytes()
+                path.write_bytes(original + b"-- changed\n")
+                self.assertNotEqual(release.source_tree_sha256(source), before)
+                path.write_bytes(original)
+                self.assertEqual(release.source_tree_sha256(source), before)
+        (source / "README.md").write_text("still not an input\n")
+        self.assertEqual(release.source_tree_sha256(source), before)
+
+
+    def test_compiled_inputs_must_all_be_in_the_source_digest(self):
+        base = self.base / "depinfo"
+        base.mkdir()
+        source, _ = fx.source_repo(base)
+        target, cargo = base / "target", base / "cargo home"
+        (cargo / "registry/src").mkdir(parents=True)
+        (target / "out").mkdir(parents=True)
+        (source / "crates/demo/odd name.sql").write_text("select 1;\n")
+        (source / "crates/demo/schema.sql").write_text("select 2;\n")
+        covered = [source / "crates/demo/src/lib.rs", source / "Cargo.lock", target / "out/generated.rs",
+                   cargo / "registry/src/dependency.rs"]
+        self.assertEqual(release.check_build_inputs(source, self.depinfo(base, covered), (target, cargo)), 2)
+        for name, extra in {
+            "undigested repository file": source / "crates/demo/schema.sql",
+            "undigested path with a space": source / "crates/demo/odd name.sql",
+            "file outside the repository": Path("/etc/hostname"),
+        }.items():
+            with self.subTest(name), self.assertRaises(release.ReleaseError):
+                release.check_build_inputs(source, self.depinfo(base, [*covered, extra]), (target, cargo))
+        with self.assertRaises(release.ReleaseError):
+            release.check_build_inputs(source, self.depinfo(base, [target / "out/generated.rs"]), (target, cargo))
+
+
+    def test_embedded_runtime_probe_is_digested_and_admitted_without_other_python(self):
+        base = self.base / "embedded-runtime-probe"
+        base.mkdir()
+        source, _ = fx.source_repo(base)
+        relative = "scripts/ci/verify/kind/cw_runtime_probe.py"
+        probe = source / relative
+        probe.parent.mkdir(parents=True)
+        probe.write_text("print('embedded observer')\n")
+        other = probe.with_name("unrelated_probe.py")
+        other.write_text("print('not compiled')\n")
+        depinfo = self.depinfo(base, [source / "crates/demo/src/lib.rs", probe])
+        before = release.source_tree_sha256(source)
+        self.assertEqual(release.check_build_inputs(source, depinfo, (base / "target",)), 2)
+        original = probe.read_bytes()
+        probe.write_bytes(original + b"# changed compiled input\n")
+        self.assertNotEqual(release.source_tree_sha256(source), before)
+        probe.write_bytes(original)
+        self.assertEqual(release.source_tree_sha256(source), before)
+
+        # The previous policy could not admit this embedded non-Rust input.
+        legacy = tuple(name for name in release.SOURCE_PATHSPEC if name != relative)
+        with mock.patch.object(release, "SOURCE_PATHSPEC", legacy):
+            legacy_digest = release.source_tree_sha256(source)
+            probe.write_bytes(original + b"# invisible to the previous policy\n")
+            self.assertEqual(release.source_tree_sha256(source), legacy_digest)
+            with self.assertRaisesRegex(release.ReleaseError, "compiled inputs missing from the source digest"):
+                release.check_build_inputs(source, depinfo, (base / "target",))
+        probe.write_bytes(original)
+        self.assertEqual(release.source_tree_sha256(source), before)
+
+        # Admission is limited to the one embedded probe, not every Python file.
+        other.write_text("print('still not compiled')\n")
+        self.assertEqual(release.source_tree_sha256(source), before)
+        with self.assertRaisesRegex(release.ReleaseError, "compiled inputs missing from the source digest"):
+            release.check_build_inputs(source, self.depinfo(base, [probe, other]), (base / "target",))
+
 
 
 if __name__ == "__main__":

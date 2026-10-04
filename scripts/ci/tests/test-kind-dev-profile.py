@@ -164,8 +164,18 @@ class DeveloperProfileTests(unittest.TestCase):
         # A Bash builtin kill is mocked too: a regression must never signal a
         # real PID, even when the old watcher code recognizes a synthetic name.
         self.bash_env = self.directory / "bash-env"
-        self.bash_env.write_text('kill() { printf "signal attempted\\n" >>"$FAKE_STATE/signals"; return 1; }\n')
+        self.bash_env.write_text(
+            'kill() { printf "signal attempted\\n" >>"$FAKE_STATE/signals"; return 1; }\n'
+            # The copied adapter uses process substitutions. Join each test
+            # shell's children before exit without changing its command status.
+            'trap \'fixture_status=$?; wait || :; exit "$fixture_status"\' EXIT\n'
+        )
+        self.home = self.directory / "home"
+        self.home.mkdir(mode=0o700)
         self.env = {"PATH": f"{self.tools}:{os.environ['PATH']}", "FAKE_STATE": str(self.state),
+                    "HOME": str(self.home), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "maintenance.auto", "GIT_CONFIG_VALUE_0": "false",
+                    "GIT_CONFIG_KEY_1": "gc.auto", "GIT_CONFIG_VALUE_1": "0",
                     "BASH_ENV": str(self.bash_env), "CLUSTER": "dev-a", "KIND_PROFILE_LOCK_TIMEOUT_SECONDS": "1"}
         for name, offset in (("dev-a", 0), ("dev-b", 20)):
             self.create_profile(name, offset)
@@ -403,6 +413,23 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
                 result = self.run_script(script, *args, KIND_TEST_SUITES="credentials", FAKE_ARTIFACT_STATUS="44")
                 self.assertEqual(result.returncode, 44, result.stderr)
         self.assert_no_runtime_calls()
+
+    def test_cw_runtime_selects_only_explicit_retained_route(self) -> None:
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="cw-runtime")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launch, = self.calls("suite")
+        self.assertEqual(launch["args"], ["suite", "cw-runtime"])
+        self.assertEqual(launch["profile"], "dev-a")
+        self.assertEqual(launch["kubeconfig"], self.values["KUBECONFIG"])
+        self.assertEqual(launch["smokes"], self.values["KIND_PROFILE_SMOKE_DIR"])
+        self.assertIsNotNone(launch["lock_fd"])
+        self.assertFalse(self.calls("docker"))
+
+    def test_cw_runtime_failure_stops_selected_tail(self) -> None:
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="cw-runtime warm-pools", FAKE_SUITE_STATUS="28")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual([call["args"] for call in self.calls("suite")], [["suite", "cw-runtime"]])
+        self.assertNotIn("all selected suites green", result.stderr)
 
     def test_shared_smoke_override_is_rejected(self) -> None:
         result = self.run_script("test-selected.sh", KIND_TEST_SUITES="credentials", CARGO_CI_DIR="/synthetic/shared-target/ci")

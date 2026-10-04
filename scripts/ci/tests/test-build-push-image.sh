@@ -436,6 +436,10 @@ printf '%q ' "$@" >>"$FAKE_DOCKER_CALLS"
 printf '\n' >>"$FAKE_DOCKER_CALLS"
 
 if [[ "$cw_producer" == true ]]; then
+  if [[ "${FAKE_KIND_PRODUCER_FAILURE:-0}" = 1 ]]; then
+    echo 'synthetic Kind CW producer failure' >&2
+    exit 67
+  fi
   exec python3 -B "${FAKE_CW_FIXTURE:?}" export -- "$@"
 fi
 
@@ -620,9 +624,23 @@ case "${1:-} ${2:-} ${3:-}" in
     [[ "$*" == *' --driver docker-container '* ]]
     [[ "$*" == *' --driver-opt image=docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5 '* ]]
     [[ "$*" == *' --bootstrap'* ]]
+    if [[ -n "${FAKE_KIND_WORK_FILE:-}" ]]; then
+      arguments=("$@")
+      buildkit_config=''
+      for ((index = 0; index + 1 < ${#arguments[@]}; index++)); do
+        if [[ "${arguments[index]}" == --buildkitd-config ]]; then
+          buildkit_config="${arguments[index + 1]}"
+        fi
+      done
+      [[ "$buildkit_config" == */buildkitd.toml ]]
+      printf '%s\n' "${buildkit_config%/buildkitd.toml}" >"$FAKE_KIND_WORK_FILE"
+    fi
     ;;
   buildx\ rm\ *)
     [[ "$*" == *' --force '* ]]
+    if [[ "${FAKE_KIND_BUILDER_REMOVE_FAILURE:-0}" = 1 && "${4:-}" == codewire-kind-* ]]; then
+      exit 73
+    fi
     ;;
   buildx\ bake\ *)
     if [ -n "${FAKE_BUILD_NEXUS_FAILURES:-}" ]; then
@@ -698,7 +716,9 @@ case "${1:-} ${2:-} ${3:-}" in
     ;;
   image\ inspect\ *)
     case "$*" in
-      *dev.codewire.build.profile*) printf 'ci\n' ;;
+      *dev.codewire.build.profile*)
+        if [[ "${FAKE_KIND_IMAGE_INVALID:-0}" = 1 ]]; then printf 'release\n'; else printf 'ci\n'; fi
+        ;;
       *dev.codewire.promotable*) printf 'false\n' ;;
     esac
     ;;
@@ -1272,8 +1292,12 @@ grep -qF 'CODEWIRE_BUILD_RUNTIME_SET must be 0 or 1' \
   fail 'invalid runtime-set selector reached credential retrieval'
 
 kind_builds_before="$(grep -Ec ' buildx bake .* kind $' "$FAKE_DOCKER_CALLS" || true)"
+mkdir -m 0700 "$work/kind-default"
 (
   cd "$source_fixture"
+  unset CODEWIRE_KIND_RETAIN_CW_ASSETS
+  RUNNER_TEMP="$work/kind-default" \
+  FAKE_KIND_WORK_FILE="$work/kind-default-work" \
   CODEWIRE_DOCKER_BIN="$work/bin/docker" \
   CODEWIRE_BAKE_METADATA_FILE="$work/kind-metadata.json" \
     "$source_fixture/scripts/ci/images/build-kind-images.sh"
@@ -1295,6 +1319,144 @@ grep -qF 'CODEWIRE_CI_PHASE name=product-image-build' "$work/kind-build.out" ||
 [[ "$(cw_producer_invocation_count)" -eq 2 ]] ||
   fail 'local Kind caller did not use one additional CI-profile original CW producer'
 assert_cw_context ci
+kind_default_work="$(cat "$work/kind-default-work")"
+[[ "$kind_default_work" == "$work/kind-default/"codewire-kind-images.* \
+    && ! -e "$kind_default_work" && ! -L "$kind_default_work" ]] ||
+  fail 'default Kind cleanup retained or retargeted the original work'
+if grep -qF 'CODEWIRE_KIND_CW_' "$work/kind-build.out"; then
+  fail 'default Kind cleanup emitted an opt-in asset locator'
+fi
+
+# Every case invokes the unchanged consumer/producer with its real admission
+# leaves. Only existing synthetic Docker effects vary. A locator cannot turn
+# failed produce/solve/image checks or EXIT cleanup into qualification.
+kind_retention_case() {
+  local name="$1" mode="$2" failure="$3" expected="$4" case_dir status owned_work build_status cleanup_status
+  case_dir="$work/kind-retention-$name"
+  mkdir -m 0700 "$case_dir" "$case_dir/temp"
+  : >"$case_dir/docker-calls"
+  set +e
+  (
+    set -e
+    unset CODEWIRE_KIND_RETAIN_CW_ASSETS FAKE_KIND_PRODUCER_FAILURE \
+      FAKE_KIND_IMAGE_INVALID FAKE_KIND_BUILDER_REMOVE_FAILURE FAKE_BUILD_FATAL
+    if [[ "$mode" != unset ]]; then export CODEWIRE_KIND_RETAIN_CW_ASSETS="$mode"; fi
+    case "$failure" in
+      producer) export FAKE_KIND_PRODUCER_FAILURE=1 ;;
+      solve) export FAKE_BUILD_FATAL=1 ;;
+      image) export FAKE_KIND_IMAGE_INVALID=1 ;;
+      cleanup) export FAKE_KIND_BUILDER_REMOVE_FAILURE=1 ;;
+      none) ;;
+      *) exit 99 ;;
+    esac
+    RUNNER_TEMP="$case_dir/temp" \
+    CODEWIRE_DOCKER_BIN="$work/bin/docker" \
+    CODEWIRE_BAKE_METADATA_FILE="$case_dir/metadata.json" \
+    FAKE_DOCKER_CALLS="$case_dir/docker-calls" \
+    FAKE_CW_CONTEXTS="$case_dir/cw-contexts.jsonl" \
+    FAKE_KIND_WORK_FILE="$case_dir/original-work" \
+      "$source_fixture/scripts/ci/images/build-kind-images.sh"
+  ) >"$case_dir/output" 2>&1
+  status=$?
+  set -e
+  if [[ "$expected" == nonzero ]]; then
+    [[ "$status" -ne 0 ]] || fail "retained Kind $name accepted its failed effect"
+  else
+    [[ "$status" -eq "$expected" ]] || fail "Kind $name exited $status, expected $expected"
+  fi
+  if [[ "$name" == invalid ]]; then
+    [[ ! -s "$case_dir/docker-calls" && ! -e "$case_dir/original-work" \
+        && ! -e "$case_dir/metadata.json" ]] || fail 'invalid retention selector reached effects'
+    grep -qF 'CODEWIRE_KIND_RETAIN_CW_ASSETS must be 0 or 1' "$case_dir/output" ||
+      fail 'invalid retention selector has no attributable refusal'
+    [[ -z "$(find "$case_dir/temp" -mindepth 1 -print -quit)" ]] ||
+      fail 'invalid retention selector created original work'
+    return
+  fi
+  owned_work="$(cat "$case_dir/original-work")"
+  [[ "$owned_work" == "$case_dir/temp/"codewire-kind-images.* ]] ||
+    fail "Kind $name work escaped its private parent"
+  [[ "$(grep -Ec ' buildx rm --force codewire-kind-' "$case_dir/docker-calls" || true)" -eq 1 ]] ||
+    fail "Kind $name did not attempt its one transient builder removal"
+  if [[ "$mode" == 1 ]]; then
+    [[ -d "$owned_work" && ! -L "$owned_work" && -f "$owned_work/buildkitd.toml" ]] ||
+      fail "retained Kind $name lost its original work"
+    build_status="$status" cleanup_status=0
+    if [[ "$failure" == cleanup ]]; then build_status=0; cleanup_status=73; fi
+    grep -Fxq "CODEWIRE_KIND_CW_ASSETS work=$owned_work build_status=$build_status cleanup_status=$cleanup_status" \
+      "$case_dir/output" || fail "Kind $name omitted exact terminal retention evidence"
+  else
+    [[ ! -e "$owned_work" && ! -L "$owned_work" ]] || fail "Kind $name retained work without opt-in"
+    if grep -qF 'CODEWIRE_KIND_CW_' "$case_dir/output"; then
+      fail "Kind $name emitted a retention locator without opt-in"
+    fi
+  fi
+  if [[ "$status" -eq 0 || "$failure" == cleanup ]]; then
+    if [[ "$mode" == 1 ]]; then
+      python3 -B - "$CW_FIXTURE" "$source_fixture" "$owned_work" "$case_dir/output" \
+        "$case_dir/cw-contexts.jsonl" <<'PY'
+from contextlib import closing
+import hashlib, importlib.util, json, re, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('kind_retention_fixture', sys.argv[1])
+fixture = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+source, work, output, contexts = map(Path, sys.argv[2:])
+locators = re.findall(r'^CODEWIRE_KIND_CW_PRODUCER path=(\S+) sha256=([0-9a-f]{64})$', output.read_text(), re.M)
+assert len(locators) == 1
+result_path = work / 'cw-producer-result.json'
+with closing(fixture.source.HeldSourceFile(result_path, fixture.release.MAX_JSON)) as held:
+    result = fixture.release.parse_canonical(held.data)
+    assert locators[0] == (result['receipt']['path'], result['receipt']['sha256'])
+    reference = Path(locators[0][0])
+    assert reference.is_relative_to(work) and reference.name == 'build.json'
+    assert hashlib.sha256(reference.read_bytes()).hexdigest() == locators[0][1]
+    payload = fixture.selected_asset(source, result_path)
+    context_rows = [json.loads(line) for line in contexts.read_text().splitlines()]
+    assert len(context_rows) == 1 and context_rows[0]['profile'] == 'ci'
+    assert context_rows[0]['payload_sha256'] == hashlib.sha256(payload).hexdigest()
+    assert context_rows[0]['producer_receipt_sha256'] == result['receipt']['sha256']
+    consumers = list(work.glob('.cw-consumer-parent.*/solve/consumer.json'))
+    assert len(consumers) == 1
+    consumer = fixture.release.parse_canonical(consumers[0].read_bytes())
+    assert consumer['status'] == 'consumer-built' and consumer['producer'] == result['receipt']
+    assert consumer['image_qualified'] is False and consumer['cache_qualified'] is False
+    held.revalidate(content=True)
+PY
+    fi
+  else
+    if grep -qF 'CODEWIRE_KIND_CW_PRODUCER' "$case_dir/output"; then
+      fail "Kind $name emitted its successful-solve locator after a failed effect"
+    fi
+    case "$failure" in
+      producer)
+        [[ ! -e "$owned_work/cw-producer-result.json" ]] || fail 'failed producer published admitted selection'
+        grep -qF 'synthetic Kind CW producer failure' "$case_dir/output" || fail 'producer failure lost its diagnostic'
+        ;;
+      solve|image)
+        [[ -f "$owned_work/cw-producer-result.json" ]] || fail 'failed image stage lost its original producer'
+        if [[ "$failure" == solve ]]; then
+          [[ -z "$(find "$owned_work" -name consumer.json -print -quit)" ]] ||
+            fail 'failed image solve published successful consumer evidence'
+          grep -qF 'non-retryable BuildKit failure' "$case_dir/output" || fail 'solve failure lost its diagnostic'
+        else
+          grep -qF 'Kind image is not marked with the ci profile' "$case_dir/output" || fail 'image-label failure lost its diagnostic'
+        fi
+        ;;
+    esac
+  fi
+  if [[ "$failure" == cleanup ]]; then
+    grep -qF 'failed to remove transient builder' "$case_dir/output" || fail 'cleanup failure was hidden'
+  fi
+}
+
+kind_retention_case explicit-zero 0 none 0
+kind_retention_case retained-success 1 none 0
+kind_retention_case producer-failure 1 producer nonzero
+kind_retention_case solve-failure 1 solve nonzero
+kind_retention_case image-check-failure 1 image nonzero
+kind_retention_case invalid 2 none 2
+kind_retention_case retained-cleanup-failure 1 cleanup 73
+kind_retention_case default-cleanup-failure unset cleanup 73
 
 base_source_tag="registry.example.invalid/codewire/base:$source_sha"
 awk -F '\t' -v reference="$base_source_tag" \

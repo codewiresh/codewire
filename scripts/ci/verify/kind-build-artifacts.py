@@ -48,6 +48,7 @@ SMOKE_FILES = {
     "bin-cw": "cw",
     "example-platform-run-smoke": "examples/platform-run-smoke",
     "example-environment-session-smoke": "examples/environment-session-smoke",
+    "example-environment-cw-runtime-smoke": "examples/environment-cw-runtime-smoke",
     "example-coordinator-ingress-smoke": "examples/coordinator-ingress-smoke",
 }
 TEST_FILES = {

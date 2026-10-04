@@ -10,6 +10,11 @@ docker_bin="${CODEWIRE_DOCKER_BIN:-docker}"
 metadata_file="${CODEWIRE_BAKE_METADATA_FILE:-$ROOT/.tmp/kind-image-build-metadata.json}"
 progress="${CODEWIRE_BUILDX_PROGRESS:-plain}"
 sccache_mode="${CODEWIRE_SCCACHE_MODE:-local}"
+retain_cw_assets="${CODEWIRE_KIND_RETAIN_CW_ASSETS:-0}"
+case "$retain_cw_assets" in
+  0|1) ;;
+  *) echo 'CODEWIRE_KIND_RETAIN_CW_ASSETS must be 0 or 1' >&2; exit 2 ;;
+esac
 
 case "$sccache_mode" in
   disabled|local) ;;
@@ -75,7 +80,14 @@ cleanup() {
   local status=$? cleanup_status=0
   trap - EXIT INT TERM
   "$docker_bin" buildx rm --force "$builder" >/dev/null 2>&1 || cleanup_status=$?
-  rm -rf "$work"
+  if [ "$retain_cw_assets" = 1 ]; then
+    # Retain original producer and consumer paths, including failed evidence.
+    # Only the actual complete caller exit can qualify a successful image build.
+    printf 'CODEWIRE_KIND_CW_ASSETS work=%s build_status=%s cleanup_status=%s\n' \
+      "$work" "$status" "$cleanup_status" >&2
+  else
+    rm -rf "$work"
+  fi
   if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
     echo "Kind image build: failed to remove transient builder $builder" >&2
     status="$cleanup_status"
@@ -132,3 +144,14 @@ done
 
 printf 'CODEWIRE_CI_PHASE name=product-image-build seconds=%s metadata=%s\n' \
   "$elapsed" "$metadata_file"
+
+if [ "$retain_cw_assets" = 1 ]; then
+  # These are the admitted original producer selected by cw_image_run, not a
+  # reconstructed receipt or proof of the later sandbox acceptance journey.
+  [ -n "${cw_image_reference:-}" ] && [ -n "${cw_image_reference_sha:-}" ] || {
+    echo 'retained Kind CW producer reference is missing' >&2
+    exit 1
+  }
+  printf 'CODEWIRE_KIND_CW_PRODUCER path=%s sha256=%s\n' \
+    "$cw_image_reference" "$cw_image_reference_sha"
+fi

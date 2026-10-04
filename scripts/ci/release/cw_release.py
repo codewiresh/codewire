@@ -80,6 +80,7 @@ SOURCE_PATHSPEC = ("*.rs", "*.toml", "*.lock", "*.proto",
                    "scripts/ci/images/finalize-cw-runtime-source.py",
                    "scripts/ci/images/prepare-cw-image-context.py",
                    "scripts/ci/images/run-rust-build.sh",
+                   "scripts/ci/verify/kind/cw_runtime_probe.py",
                    "scripts/ci/verify/build-linux-vmm-kernel.py")
 # Cargo's server-core rerun-if-changed rule names this directory. Its leaves,
 # rather than the directory name, are source-digest inputs. No other directory

@@ -802,6 +802,7 @@ run_retained_integrated_suite() { record integrated-retained; }
 run_retained_dashboard_browser_suite() { record dashboard-browser-retained; }
 run_retained_final_fencing_suite() { record final-fencing; }
 run_retained_environment_session_suite() { record environment-session; }
+run_retained_cw_runtime_suite() { record cw-runtime; }
 run_retained_sandbox_supply_chain_suite() { record sandbox-supply-chain; }
 run_retained_runtime_acceptance_suite() { record runtime-acceptance; }
 run_retained_warm_pools_suite() { record warm-pools; }
@@ -944,6 +945,17 @@ printf '%s\n' final-fencing | cmp -s - "$CALLS" || fail 'final-fencing dispatch 
 dispatch_kind_e2e suite environment-session
 printf '%s\n' environment-session | cmp -s - "$CALLS" ||
   fail 'environment-session dispatch changed'
+
+: >"$CALLS"
+dispatch_kind_e2e suite cw-runtime
+printf '%s\n' cw-runtime | cmp -s - "$CALLS" || fail 'cw-runtime dispatch changed'
+
+: >"$CALLS"
+run_retained_cw_runtime_suite() { record cw-runtime; return 45; }
+expect_live_failure failed-cw-runtime dispatch_kind_e2e suite cw-runtime
+[ "$live_status" -eq 45 ] || fail 'cw-runtime dispatch lost its failure status'
+printf '%s\n' cw-runtime | cmp -s - "$CALLS" || fail 'cw-runtime failure entered another suite'
+run_retained_cw_runtime_suite() { record cw-runtime; }
 
 : >"$CALLS"
 dispatch_kind_e2e suite sandbox-supply-chain
@@ -1131,6 +1143,8 @@ source "$DASHBOARD_BROWSER"
 source "$FINAL_FENCING"
 # shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$ENVIRONMENT_SESSION"
+# shellcheck source=/dev/null # Read through kind-e2e.sh above.
+source "$ROOT/scripts/ci/verify/kind/suites/cw-runtime.sh"
 # shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$SANDBOX_SUPPLY_CHAIN"
 # shellcheck source=/dev/null # Read through kind-e2e.sh above.
@@ -1372,6 +1386,7 @@ for consumed_binary in \
     file-service-smoke prepare-stream-smoke log-stream-smoke temporal-smoke \
     temporal-fencing-smoke reconciler-ttl-smoke cw \
     examples/platform-run-smoke examples/environment-session-smoke \
+    examples/environment-cw-runtime-smoke \
     examples/coordinator-ingress-smoke; do
   printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/consumed-ci/$consumed_binary"
   chmod +x "$FIXTURE/consumed-ci/$consumed_binary"
@@ -1390,13 +1405,15 @@ done
   RUN_DIR="$FIXTURE/consumed-run"
   CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-ci
   log() { :; }
-  rm -f "$FIXTURE/consumed-ci/temporal-fencing-smoke"
-  expect_failure missing-consumed-smoke build_retained_kind_smokes
-  grep -Fq 'consumed Kind smoke binary is missing' \
-    "$FIXTURE/missing-consumed-smoke.out" ||
-    fail 'missing consumed smoke binary was not decisive'
-  printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/consumed-ci/temporal-fencing-smoke"
-  chmod +x "$FIXTURE/consumed-ci/temporal-fencing-smoke"
+  for missing_consumed in temporal-fencing-smoke examples/environment-cw-runtime-smoke; do
+    rm -f "$FIXTURE/consumed-ci/$missing_consumed"
+    expect_failure missing-consumed-smoke build_retained_kind_smokes
+    grep -Fq "consumed Kind smoke binary is missing: $CARGO_CI_DIR/$missing_consumed" \
+      "$FIXTURE/missing-consumed-smoke.out" ||
+      fail "missing consumed smoke binary was not decisive: $missing_consumed"
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/consumed-ci/$missing_consumed"
+    chmod +x "$FIXTURE/consumed-ci/$missing_consumed"
+  done
   rm -f "$FIXTURE/consumed-run/billing-contract-build.jsonl"
   expect_failure missing-consumed-receipt build_retained_kind_smokes
   grep -Fq 'consumed Kind smoke build receipt is missing' \
@@ -2933,4 +2950,5 @@ if grep -Fq 'delete cluster' "$CALLS"; then
   fail 'retained suite tried to delete its cluster'
 fi
 
+python3 -B "$ROOT/scripts/ci/tests/test-kind-cw-runtime.py"
 printf '[test-kind-e2e-suites] dispatcher, order, prerequisites, and cleanup passed\n'

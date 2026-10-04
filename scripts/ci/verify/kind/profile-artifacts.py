@@ -35,6 +35,7 @@ SOURCE_INPUTS = (
     "scripts/ci/verify/verify-workspace-image.sh",
     "scripts/ci/images/build-kind-images.sh",
     "scripts/ci/images/build-kind-smokes.sh",
+    "scripts/ci/verify/kind/cw_runtime_probe.py",
     "scripts/ci/verify/kind-build-artifacts.py",
     "scripts/ci/verify/kind/profile-artifacts.py",
     "scripts/dev/kind/cluster-profile.py",

@@ -1149,6 +1149,7 @@ build_retained_kind_smokes() {
         file-service-smoke prepare-stream-smoke log-stream-smoke temporal-smoke \
         temporal-fencing-smoke reconciler-ttl-smoke cw \
         examples/platform-run-smoke examples/environment-session-smoke \
+        examples/environment-cw-runtime-smoke \
         examples/coordinator-ingress-smoke; do
       if [ ! -x "$CARGO_CI_DIR/$consumed" ]; then
         echo "::error::consumed Kind smoke binary is missing: ${CARGO_CI_DIR}/${consumed}; rerun kind-e2e.sh up"
