@@ -146,11 +146,14 @@ if [[ "${1:-}" == --version ]]; then
   exit 0
 fi
 
+# Shards run concurrently: record each invocation as one locked write, or
+# their partial writes interleave and the parser sees changed flags.
+line=analysis
+for arg in "$@"; do line+=$'\t'"$arg"; done
 {
-  printf 'analysis'
-  printf '\t%s' "$@"
-  printf '\n'
-} >> "${FAKE_SHELLCHECK_LOG:?}"
+  flock 9
+  printf '%s\n' "$line" >&9
+} 9>> "${FAKE_SHELLCHECK_LOG:?}"
 
 [[ "${1:-}" == --severity=warning && "${2:-}" == --format=json1 ]] || exit 4
 shift 2

@@ -34,6 +34,12 @@ WARM_POOL_CORDONED=()
 # EXIT trap can put them back ("<runtime profile>|<loops>"; "-" when unset).
 WARM_POOL_RESTORE_CONFIG=""
 WARM_POOL_RESULTS=()
+# The e2e overlay configures no pool: its other suites create with the
+# side-loaded verified workspace image, never the canonical one a member runs.
+# Unless the cluster already configures a shape with members, the suite sets
+# this one on orchestration and removes it again on exit.
+WARM_POOL_SUITE_SHAPES="500m/1024Mi/5Gi=1"
+WARM_POOL_RESTORE_SHAPES=0
 WP_CPU="" WP_MEMORY="" WP_DISK="" WP_MEMBERS="" WP_POOL="" WP_IMAGE=""
 WP_CODE="" WP_BODY="" WP_ID="" WP_HIT="" WP_COLD=""
 
@@ -52,6 +58,7 @@ run_retained_warm_pools_suite() {
   }
   trap warm_pools_suite_cleanup EXIT
   validate_retained_cluster_identity
+  warm_pool_configure_suite_shape
   warm_pool_preflight
   # A cold create first, kept until the pool fills: on a cluster with no
   # SandboxWarmPool, its shadow pool is where the controller can show its
@@ -85,6 +92,12 @@ warm_pools_suite_cleanup() {
     warm_pool_rpc DeleteEnvironment \
       "{\"orgId\":\"${WARM_POOL_ORG}\",\"environmentId\":\"${id}\"}" >/dev/null
   done
+  if [ "$WARM_POOL_RESTORE_SHAPES" = 1 ]; then
+    # Without its shape the reconciler drains the suite's pool.
+    kubectl -n "$NS" set env deploy/codewire-orchestration -c orchestration \
+      SANDBOX_WARM_POOL_SHAPES- >/dev/null
+    warm_pool_await_orchestration >/dev/null
+  fi
   (exit "$status")
   retained_suite_cleanup
 }
@@ -121,8 +134,7 @@ warm_pool_canonical_image() {
 # node, and the controller's pool CRD with status.observedGeneration.
 warm_pool_preflight() {
   local shapes entry node images
-  shapes="$(kubectl -n "$NS" get configmap codewire-config \
-    -o jsonpath='{.data.SANDBOX_WARM_POOL_SHAPES}')"
+  shapes="$(warm_pool_effective_shapes)"
   entry="$(tr ',' '\n' <<<"$shapes" | grep -E '^[1-9][0-9]*m/[1-9][0-9]*Mi/[1-9][0-9]*Gi=([1-9]|1[0-6])$' | head -n1 || true)"
   if [ -z "$entry" ]; then
     echo "::error::SANDBOX_WARM_POOL_SHAPES configures no pool with members: '${shapes}'"
@@ -580,7 +592,7 @@ warm_pool_metric() {
 # it) on its Deployment, wait for the rollout, and wait until the ingress
 # routes to the new replica.
 warm_pool_set_orchestration() {
-  local profile="$1" loops="$2" deadline
+  local profile="$1" loops="$2"
   local args=("SANDBOX_RUNTIME_PROFILE=${profile}")
   if [ "$loops" = - ]; then
     args+=("WORKER_LOOPS-")
@@ -588,6 +600,38 @@ warm_pool_set_orchestration() {
     args+=("WORKER_LOOPS=${loops}")
   fi
   kubectl -n "$NS" set env deploy/codewire-orchestration -c orchestration "${args[@]}" >/dev/null
+  warm_pool_await_orchestration
+}
+
+# The pool shapes orchestration runs with: its container's own setting
+# first, then the cluster ConfigMap it loads.
+warm_pool_effective_shapes() {
+  local shapes
+  shapes="$(warm_pool_orchestration_env SANDBOX_WARM_POOL_SHAPES)"
+  if [ "$shapes" = - ]; then
+    shapes="$(kubectl -n "$NS" get configmap codewire-config \
+      -o jsonpath='{.data.SANDBOX_WARM_POOL_SHAPES}')"
+  fi
+  printf '%s\n' "$shapes"
+}
+
+# Configure the suite's own shape unless the cluster already runs a pool.
+warm_pool_configure_suite_shape() {
+  if tr ',' '\n' <<<"$(warm_pool_effective_shapes)" |
+      grep -Eq '^[1-9][0-9]*m/[1-9][0-9]*Mi/[1-9][0-9]*Gi=([1-9]|1[0-6])$'; then
+    return 0
+  fi
+  log "configuring the suite pool ${WARM_POOL_SUITE_SHAPES} on orchestration"
+  WARM_POOL_RESTORE_SHAPES=1
+  kubectl -n "$NS" set env deploy/codewire-orchestration -c orchestration \
+    "SANDBOX_WARM_POOL_SHAPES=${WARM_POOL_SUITE_SHAPES}" >/dev/null
+  warm_pool_await_orchestration
+}
+
+# Wait for orchestration's rollout, for its old replica to exit, and until the
+# ingress routes to the new replica.
+warm_pool_await_orchestration() {
+  local deadline
   kubectl -n "$NS" rollout status deploy/codewire-orchestration --timeout=300s >/dev/null
   # A terminating replica still runs create activities with its old
   # settings until it exits; wait for it to be gone.

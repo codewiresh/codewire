@@ -37,4 +37,36 @@ if [ "$actual_manifests" != "$expected_manifests" ]; then
   exit 1
 fi
 
+# Shared warm pools (Program #2238 C4) run only on the C0 controller: it
+# records status.observedGeneration on every SandboxWarmPool, the evidence
+# the reconciler and create routing require of claim-safe adoption (review
+# H1). An earlier pin's CRD has no such field and the API server prunes it, so
+# a configured shape would hold forever. Configure shapes only with this pin.
+configured_shapes="$(
+  cd "$ROOT"
+  grep -rnoE 'SANDBOX_WARM_POOL_SHAPES(:|=)[[:space:]]*"?[^"[:space:]]+' deployments tests/e2e || true
+)"
+if [ -n "$configured_shapes" ]; then
+  if ! python3 - "$ROOT/deployments/k8s/agent-sandbox/base/crds/extensions.agents.x-k8s.io_sandboxwarmpools.yaml" <<'PY'
+import sys
+
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    crd = yaml.safe_load(handle)
+stored = [version for version in crd["spec"]["versions"] if version.get("storage")]
+status = (
+    stored[0]["schema"]["openAPIV3Schema"]["properties"].get("status", {}).get("properties", {})
+    if len(stored) == 1
+    else {}
+)
+raise SystemExit(0 if status.get("observedGeneration", {}).get("type") == "integer" else 1)
+PY
+  then
+    echo 'warm pool shapes are configured, but the vendored SandboxWarmPool CRD records no status.observedGeneration; pin the C0 controller first:' >&2
+    sed 's/^/  /' <<<"$configured_shapes" >&2
+    exit 1
+  fi
+fi
+
 echo 'agent-sandbox source, image, CRD, and RBAC pins: OK'

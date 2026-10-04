@@ -105,6 +105,11 @@ verify_services_dockerfile_contract() {
   # shellcheck disable=SC2016
   grep -qF 'codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE"' "$SERVICES_DOCKERFILE" ||
     fail 'services image does not build the selected locked profile'
+  # One workspace Cargo invocation compiles every shared dependency once; the
+  # historical three-invocation sequence rebuilt their common dependency graph.
+  # shellcheck disable=SC2016
+  [[ "$(grep -cF 'codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE"' "$SERVICES_DOCKERFILE")" -eq 1 ]] ||
+    fail 'services image must compile every shipped binary in one Cargo build'
   grep -qF 'FROM codewire-rust-base AS builder' "$SERVICES_DOCKERFILE" ||
     fail 'services does not consume the shared Rust build base'
   grep -qF 'ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818' \
