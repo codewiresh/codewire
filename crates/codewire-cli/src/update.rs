@@ -23,7 +23,7 @@ use codewire_cw_release::store::{
 use rustix::fs::{self as rfs, Mode, OFlags};
 use serde::Serialize;
 
-use crate::build_record::{BUILD_RECORD, BuildRecord};
+use crate::build_record::{BUILD_RECORD, embedded, executable_identity};
 use crate::public_fetch;
 
 /// Identity file beside `cw` in a pinned local release directory; the same
@@ -282,8 +282,7 @@ pub(crate) fn install(args: InstallArgs) -> anyhow::Result<()> {
     // running bytes, before any store or entry change.
     let host = Platform::host().ok_or(StoreError::UnsupportedHost)?;
     let executable = running_executable()?;
-    let identity = BuildRecord::embedded()?
-        .identity(&BUILD_RECORD, &executable, host)
+    let identity = executable_identity(&embedded()?, &BUILD_RECORD, &executable, host)
         .context("admit this cw for managed installation")?;
     install_identified(args, executable, &identity)
 }
@@ -913,7 +912,7 @@ mod tests {
             "candidate-cw",
             &executable(&[b"v1.2.3", &record]),
         );
-        let identity = decoded.identity(&record, &path, host()).unwrap();
+        let identity = executable_identity(&decoded, &record, &path, host()).unwrap();
         (path, identity)
     }
 
@@ -936,7 +935,7 @@ mod tests {
 
     #[test]
     fn self_install_without_source_provenance_changes_nothing() {
-        let record = BuildRecord::embedded().unwrap();
+        let record = embedded().unwrap();
         if record.source_revision.is_some() {
             // This test binary was built with explicit provenance.
             return;

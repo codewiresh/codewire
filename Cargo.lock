@@ -1672,6 +1672,7 @@ dependencies = [
 name = "codewire-cw-release"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "rustix",
  "serde",
  "serde_json",

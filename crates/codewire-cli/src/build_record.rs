@@ -8,19 +8,13 @@
 //! executable. The record never holds a digest of its own executable; the
 //! identity's `sha256` and `size` are always computed from the bytes.
 
-use std::fs::{File, Metadata, OpenOptions};
-use std::io::{self, Read as _, Seek as _, SeekFrom};
-use std::os::unix::fs::{FileExt as _, MetadataExt as _, OpenOptionsExt as _};
+use std::fs::{File, OpenOptions};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 
 use anyhow::Context as _;
-use codewire_cw_release::identity::{
-    Arch, CwPayloadIdentity, EXECUTABLE_HEADER_BYTES, MAX_EXECUTABLE_BYTES, Os,
-    PAYLOAD_SCHEMA_VERSION, PROTOCOL_VERSION, Platform, RECORD_VERSION, canonical_json,
-    is_sha256_hex, valid_package_version,
-};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
+use codewire_cw_release::build_record::{self as shared, BuildRecord};
+use codewire_cw_release::identity::{CwPayloadIdentity, Platform};
 
 include!(concat!(env!("OUT_DIR"), "/build_record.rs"));
 
@@ -37,175 +31,43 @@ const fn record_text(start: usize, end: usize) -> &'static str {
     }
 }
 
-const MAX_RECORD_JSON: usize = 1024;
-const MAX_TARGET: usize = 64;
-const MAX_RUSTC: usize = 128;
-const SCAN_CHUNK: usize = 1024 * 1024;
-
-/// A decoded build record. The source fields are absent only for a build
-/// that was not given explicit provenance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct BuildRecord {
-    pub(crate) package_version: String,
-    pub(crate) rustc: String,
-    pub(crate) source_revision: Option<String>,
-    pub(crate) source_tree_sha256: Option<String>,
-    pub(crate) target: String,
+fn marker() -> &'static [u8] {
+    &BUILD_RECORD[..BUILD_RECORD_JSON - 4]
 }
 
-impl BuildRecord {
-    /// This executable's own record.
-    pub(crate) fn embedded() -> anyhow::Result<Self> {
-        let record = Self::decode(&BUILD_RECORD, BUILD_RECORD_JSON)?;
-        anyhow::ensure!(
-            record.package_version == CLI_VERSION,
-            "the build record version differs from the reported version"
-        );
-        Ok(record)
-    }
-
-    /// Decode `record`, whose canonical JSON starts at `json_start` after its
-    /// little-endian length. Unknown, missing, duplicate and non-canonical
-    /// fields are refused.
-    fn decode(record: &[u8], json_start: usize) -> anyhow::Result<Self> {
-        let length = json_start
-            .checked_sub(4)
-            .and_then(|start| record.get(start..json_start))
-            .context("the build record has no length")?;
-        let length = u32::from_le_bytes(length.try_into().expect("four bytes")) as usize;
-        let json = record
-            .get(json_start..)
-            .filter(|json| json.len() == length && length <= MAX_RECORD_JSON)
-            .context("the build record length is inconsistent")?;
-        let decoded: Self =
-            serde_json::from_slice(json).context("the build record is malformed")?;
-        anyhow::ensure!(
-            canonical_json(&decoded)? == json,
-            "the build record is not canonical"
-        );
-        decoded.validate()?;
-        Ok(decoded)
-    }
-
-    fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            valid_package_version(&self.package_version),
-            "the build record version is invalid"
-        );
-        anyhow::ensure!(
-            !self.target.is_empty()
-                && self.target.len() <= MAX_TARGET
-                && self
-                    .target
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')),
-            "the build record target is invalid"
-        );
-        anyhow::ensure!(
-            self.rustc.starts_with("rustc ")
-                && self.rustc.len() <= MAX_RUSTC
-                && self.rustc.bytes().all(|byte| (0x20..=0x7e).contains(&byte)),
-            "the build record compiler is invalid"
-        );
-        match (&self.source_revision, &self.source_tree_sha256) {
-            (Some(revision), Some(tree)) => anyhow::ensure!(
-                revision.len() == 40
-                    && revision
-                        .bytes()
-                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-                    && is_sha256_hex(tree),
-                "the build record source provenance is invalid"
-            ),
-            (None, None) => {}
-            _ => anyhow::bail!("the build record has partial source provenance"),
-        }
-        Ok(())
-    }
-
-    /// The complete schema-2 identity of the executable at `path`: this
-    /// record's compile context plus the digest and size of those exact bytes.
-    /// Refuses a build without source provenance, a target for another
-    /// platform, and bytes that do not hold `record` and its marker exactly once.
-    pub(crate) fn identity(
-        &self,
-        record: &[u8],
-        path: &Path,
-        host: Platform,
-    ) -> anyhow::Result<CwPayloadIdentity> {
-        let (Some(source_revision), Some(source_tree_sha256)) =
-            (&self.source_revision, &self.source_tree_sha256)
-        else {
-            anyhow::bail!(
-                "this cw was built without source provenance, so it has no complete identity; \
-                 build and install it with `make cli-install` from an authorized source checkout"
-            );
-        };
-        anyhow::ensure!(
-            target_platform(&self.target) == Some(host),
-            "this cw was built for {}, which is not a supported {} target",
-            self.target,
-            host.as_str()
-        );
-        let scan = scan(path, record)?;
-        host.validate_executable_header(&scan.header)?;
-        anyhow::ensure!(
-            scan.records == 1,
-            "{} holds {} copies of this cw's build record, not exactly one",
-            path.display(),
-            scan.records
-        );
-        anyhow::ensure!(
-            scan.markers == 1,
-            "{} holds {} cw build record markers, not exactly one",
-            path.display(),
-            scan.markers
-        );
-        let identity = CwPayloadIdentity {
-            schema_version: PAYLOAD_SCHEMA_VERSION,
-            protocol_version: PROTOCOL_VERSION,
-            record_version: RECORD_VERSION,
-            package_version: self.package_version.clone(),
-            target: self.target.clone(),
-            source_revision: source_revision.clone(),
-            source_tree_sha256: source_tree_sha256.clone(),
-            rustc: self.rustc.clone(),
-            sha256: scan.sha256,
-            size: scan.size,
-        };
-        // The shared contract checks every field. A development host target
-        // such as x86_64-unknown-linux-gnu is not a release target, so the
-        // target alone is checked against this platform above instead.
-        let mut contract = identity.clone();
-        contract.target = host.release_target().as_str().to_owned();
-        contract.validate()?;
-        Ok(identity)
-    }
+/// This executable's own record and reported version share the same bytes.
+pub(crate) fn embedded() -> anyhow::Result<BuildRecord> {
+    let record = shared::BuildRecord::decode(&BUILD_RECORD, marker())?;
+    anyhow::ensure!(
+        record.package_version == CLI_VERSION,
+        "the build record version differs from the reported version"
+    );
+    Ok(record)
 }
 
-/// The platform a supported cw build target runs on.
-fn target_platform(target: &str) -> Option<Platform> {
-    let (os, arch) = match target {
-        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => (Os::Linux, Arch::X86_64),
-        "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl" => (Os::Linux, Arch::Aarch64),
-        "x86_64-apple-darwin" => (Os::Macos, Arch::X86_64),
-        "aarch64-apple-darwin" => (Os::Macos, Arch::Aarch64),
-        _ => return None,
-    };
-    Some(Platform::new(os, arch))
-}
-
-struct Scan {
-    sha256: String,
-    size: u64,
-    header: Vec<u8>,
-    records: usize,
-    markers: usize,
-}
-
-/// Hash the bounded regular file at `path` and count `record` and its marker.
-/// Only Linux `/proc/self/exe` may be followed; it names the running image.
-fn scan(path: &Path, record: &[u8]) -> anyhow::Result<Scan> {
+/// Open only this executable's image; Linux /proc/self/exe names the running
+/// inode. Incoming release admission always receives an already-held file.
+pub(crate) fn executable_identity(
+    decoded: &BuildRecord,
+    record: &[u8],
+    path: &Path,
+    host: Platform,
+) -> anyhow::Result<CwPayloadIdentity> {
+    decoded.validate()?;
+    anyhow::ensure!(
+        decoded.source_revision.is_some(),
+        "this cw was built without source provenance, so it has no complete identity; build and install it with `make cli-install` from an authorized source checkout"
+    );
+    anyhow::ensure!(
+        shared::target_platform(&decoded.target) == Some(host),
+        "this cw was built for {}, which is not a supported {} target",
+        decoded.target,
+        host.as_str()
+    );
+    anyhow::ensure!(
+        shared::BuildRecord::decode(record, marker())? == *decoded,
+        "the decoded build record differs from its framed bytes"
+    );
     let follow = cfg!(target_os = "linux") && path == Path::new("/proc/self/exe");
     let flags = libc::O_NONBLOCK | if follow { 0 } else { libc::O_NOFOLLOW };
     let mut file = OpenOptions::new()
@@ -213,240 +75,34 @@ fn scan(path: &Path, record: &[u8]) -> anyhow::Result<Scan> {
         .custom_flags(flags)
         .open(path)
         .with_context(|| format!("open the running cw executable {}", path.display()))?;
-    scan_file(&mut file, path, record)
+    shared::identify(&mut file, path, record, marker(), host)
 }
 
-/// Admit downloaded bytes without executing them. The expected record is
-/// assembled from the signed shared identity, borrowing this executable's
-/// marker instead of adding another compiled marker literal.
 pub(crate) fn admit_incoming(
     file: &mut File,
     path: &Path,
     expected: &CwPayloadIdentity,
     host: Platform,
 ) -> anyhow::Result<()> {
-    let target = expected.validate()?;
-    anyhow::ensure!(
-        target.platform() == host,
-        "release target differs from this host"
-    );
-    let record = BuildRecord {
-        package_version: expected.package_version.clone(),
-        rustc: expected.rustc.clone(),
-        source_revision: Some(expected.source_revision.clone()),
-        source_tree_sha256: Some(expected.source_tree_sha256.clone()),
-        target: expected.target.clone(),
-    };
-    let json = canonical_json(&record)?;
-    anyhow::ensure!(
-        json.len() <= MAX_RECORD_JSON,
-        "incoming build record exceeds its bound"
-    );
-    let mut framed = BUILD_RECORD[..BUILD_RECORD_JSON - 4].to_vec();
-    framed.extend_from_slice(&(json.len() as u32).to_le_bytes());
-    framed.extend_from_slice(&json);
-    let before = file.metadata().context("inspect incoming executable")?;
-    anyhow::ensure!(
-        before.is_file() && before.len() <= MAX_EXECUTABLE_BYTES,
-        "incoming executable is not a bounded regular file"
-    );
-    if target == codewire_cw_release::identity::ReleaseTarget::X86_64UnknownLinuxMusl {
-        admit_static_elf(file, before.len())?;
-    }
-    file.seek(SeekFrom::Start(0))
-        .context("rewind downloaded release executable")?;
-    let scan = scan_file(file, path, &framed)?;
-    host.validate_executable_header(&scan.header)?;
-    anyhow::ensure!(
-        scan.records == 1 && scan.markers == 1,
-        "incoming executable does not hold exactly one matching complete build record"
-    );
-    anyhow::ensure!(
-        scan.sha256 == expected.sha256 && scan.size == expected.size,
-        "incoming executable differs from its signed digest or size"
-    );
-    anyhow::ensure!(
-        unchanged(&before, &file.metadata()?),
-        "incoming executable changed during target admission"
-    );
-    Ok(())
+    shared::admit_incoming(file, path, expected, host, marker())
 }
 
-/// The release producer's musl contract: no interpreter or needed library.
-/// Read only bounded tables from the same held stream that is then hashed.
-fn admit_static_elf(file: &File, size: u64) -> anyhow::Result<()> {
-    let mut header = [0_u8; 64];
-    file.read_exact_at(&mut header, 0)
-        .context("read incoming ELF header")?;
-    let offset = u64::from_le_bytes(header[32..40].try_into().expect("ELF offset"));
-    let entry_size = u16::from_le_bytes(header[54..56].try_into().expect("ELF size"));
-    let count = u16::from_le_bytes(header[56..58].try_into().expect("ELF count"));
+#[cfg(test)]
+fn decode(record: &[u8], json_start: usize) -> anyhow::Result<BuildRecord> {
     anyhow::ensure!(
-        offset >= 64
-            && entry_size == 56
-            && (1..=128).contains(&count)
-            && offset
-                .checked_add(u64::from(entry_size) * u64::from(count))
-                .is_some_and(|end| end <= size),
-        "musl release has invalid ELF program headers"
+        json_start == BUILD_RECORD_JSON,
+        "the build record has no length"
     );
-    let mut dynamic_bytes = 0_u64;
-    for index in 0..u64::from(count) {
-        let mut entry = [0_u8; 56];
-        file.read_exact_at(&mut entry, offset + index * 56)?;
-        let kind = u32::from_le_bytes(entry[..4].try_into().expect("ELF kind"));
-        anyhow::ensure!(kind != 3, "musl release has a dynamic interpreter");
-        if kind == 2 {
-            let start = u64::from_le_bytes(entry[8..16].try_into().expect("dynamic offset"));
-            let length = u64::from_le_bytes(entry[32..40].try_into().expect("dynamic length"));
-            dynamic_bytes = dynamic_bytes
-                .checked_add(length)
-                .context("ELF table overflow")?;
-            anyhow::ensure!(
-                length % 16 == 0
-                    && dynamic_bytes <= MAX_EXECUTABLE_BYTES
-                    && start.checked_add(length).is_some_and(|end| end <= size),
-                "musl release has an invalid or unbounded dynamic table"
-            );
-            let mut buffer = [0_u8; 4096];
-            let mut position = 0;
-            'table: while position < length {
-                let n = (length - position).min(buffer.len() as u64) as usize;
-                file.read_exact_at(&mut buffer[..n], start + position)?;
-                for entry in buffer[..n].chunks_exact(16) {
-                    let tag = i64::from_le_bytes(entry[..8].try_into().expect("dynamic tag"));
-                    if tag == 0 {
-                        break 'table;
-                    }
-                    anyhow::ensure!(tag != 1, "musl release names a shared library");
-                }
-                position += n as u64;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn scan_file(file: &mut File, path: &Path, record: &[u8]) -> anyhow::Result<Scan> {
-    let before = file
-        .metadata()
-        .with_context(|| format!("inspect {}", path.display()))?;
-    anyhow::ensure!(
-        before.is_file() && before.len() <= MAX_EXECUTABLE_BYTES,
-        "{} is not a bounded regular file",
-        path.display()
-    );
-    let mut hasher = Sha256::new();
-    let mut header = Vec::with_capacity(EXECUTABLE_HEADER_BYTES);
-    let mut buffer = vec![0_u8; SCAN_CHUNK];
-    let mut window = Vec::with_capacity(SCAN_CHUNK + record.len());
-    // Borrow the generated record's marker so the executable does not embed
-    // a second literal marker solely for scanning itself.
-    let marker = &BUILD_RECORD[..BUILD_RECORD_JSON - 4];
-    let mut marker_window = Vec::with_capacity(SCAN_CHUNK + marker.len());
-    let mut size = 0_u64;
-    let mut records = 0;
-    let mut markers = 0;
-    loop {
-        let read = match read_some(file, &mut buffer) {
-            Ok(0) => break,
-            Ok(read) => read,
-            Err(error) => {
-                return Err(error).with_context(|| format!("read {}", path.display()));
-            }
-        };
-        size += read as u64;
-        anyhow::ensure!(
-            size <= MAX_EXECUTABLE_BYTES,
-            "{} exceeds its size bound",
-            path.display()
-        );
-        let chunk = &buffer[..read];
-        hasher.update(chunk);
-        let wanted = EXECUTABLE_HEADER_BYTES
-            .saturating_sub(header.len())
-            .min(read);
-        header.extend_from_slice(&chunk[..wanted]);
-        // The retained tail is shorter than a record, so every match ends in
-        // this chunk and is counted once.
-        window.extend_from_slice(chunk);
-        records += occurrences(&window, record);
-        let keep = record.len().saturating_sub(1);
-        window.drain(..window.len().saturating_sub(keep));
-        // This shorter tail counts every marker once, including a different
-        // or truncated record, without recounting markers in the record tail.
-        marker_window.extend_from_slice(chunk);
-        markers += occurrences(&marker_window, marker);
-        let keep = marker.len().saturating_sub(1);
-        marker_window.drain(..marker_window.len().saturating_sub(keep));
-    }
-    let after = file
-        .metadata()
-        .with_context(|| format!("recheck {}", path.display()))?;
-    anyhow::ensure!(
-        unchanged(&before, &after) && size == before.len(),
-        "{} changed while it was read",
-        path.display()
-    );
-    Ok(Scan {
-        sha256: format!("{:x}", hasher.finalize()),
-        size,
-        header,
-        records,
-        markers,
-    })
-}
-
-fn read_some(file: &mut File, buffer: &mut [u8]) -> io::Result<usize> {
-    loop {
-        match file.read(buffer) {
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            result => return result,
-        }
-    }
-}
-
-fn unchanged(before: &Metadata, after: &Metadata) -> bool {
-    (
-        before.dev(),
-        before.ino(),
-        before.len(),
-        before.mtime(),
-        before.mtime_nsec(),
-        before.ctime(),
-        before.ctime_nsec(),
-    ) == (
-        after.dev(),
-        after.ino(),
-        after.len(),
-        after.mtime(),
-        after.mtime_nsec(),
-        after.ctime(),
-        after.ctime_nsec(),
-    )
-}
-
-fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {
-    const PREFIX: usize = 8;
-    let Some(last) = haystack.len().checked_sub(needle.len()) else {
-        return 0;
-    };
-    if needle.len() < PREFIX {
-        return 0;
-    }
-    let prefix = u64::from_ne_bytes(needle[..PREFIX].try_into().expect("prefix"));
-    (0..=last)
-        .filter(|&start| {
-            u64::from_ne_bytes(haystack[start..start + PREFIX].try_into().expect("prefix"))
-                == prefix
-                && haystack[start..start + needle.len()] == *needle
-        })
-        .count()
+    BuildRecord::decode(record, marker())
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use codewire_cw_release::build_record::target_platform;
+    use codewire_cw_release::identity::{Arch, EXECUTABLE_HEADER_BYTES, Os};
+    use sha2::{Digest as _, Sha256};
     use std::fs;
+    const SCAN_CHUNK: usize = 1024 * 1024;
 
     use super::*;
 
@@ -463,7 +119,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn decoded(record: &[u8]) -> BuildRecord {
-        BuildRecord::decode(record, BUILD_RECORD_JSON).unwrap()
+        decode(record, BUILD_RECORD_JSON).unwrap()
     }
 
     pub(crate) fn json(version: &str, target: &str, source: bool) -> String {
@@ -541,7 +197,7 @@ pub(crate) mod tests {
     #[test]
     fn reported_version_is_borrowed_from_the_embedded_record() {
         use clap::CommandFactory as _;
-        let record = BuildRecord::embedded().unwrap();
+        let record = embedded().unwrap();
         assert_eq!(record.package_version, CLI_VERSION);
         assert!(
             BUILD_RECORD
@@ -560,11 +216,11 @@ pub(crate) mod tests {
     fn decode_refuses_unknown_missing_duplicate_partial_and_noncanonical_records() {
         let valid = json("v1.2.3", host_target(), true);
         let start = BUILD_RECORD_JSON;
-        let decoded = BuildRecord::decode(&framed(&valid), start).unwrap();
+        let decoded = decode(&framed(&valid), start).unwrap();
         assert_eq!(decoded.package_version, "v1.2.3");
         assert_eq!(decoded.source_revision.as_deref(), Some(REVISION));
         assert!(
-            BuildRecord::decode(&framed(&json("v1.2.3", host_target(), false)), start)
+            decode(&framed(&json("v1.2.3", host_target(), false)), start)
                 .unwrap()
                 .source_revision
                 .is_none()
@@ -588,26 +244,23 @@ pub(crate) mod tests {
             valid.trim_end().to_owned(),
         ];
         for json in refused {
-            assert!(
-                BuildRecord::decode(&framed(&json), start).is_err(),
-                "{json}"
-            );
+            assert!(decode(&framed(&json), start).is_err(), "{json}");
         }
         let mut truncated = framed(&valid);
         truncated.pop();
-        assert!(BuildRecord::decode(&truncated, start).is_err());
-        assert!(BuildRecord::decode(&framed(&valid), 2).is_err());
+        assert!(decode(&truncated, start).is_err());
+        assert!(decode(&framed(&valid), 2).is_err());
     }
 
     #[test]
     fn identity_binds_the_record_and_exact_bytes() {
         let directory = tempfile::tempdir().unwrap();
         let record = framed(&json("v1.2.30", host_target(), true));
-        let decoded = BuildRecord::decode(&record, BUILD_RECORD_JSON).unwrap();
+        let decoded = decode(&record, BUILD_RECORD_JSON).unwrap();
         // Incidental text naming another version does not change the record's.
         let bytes = executable(&[b"cw v1.2.3 compatibility note", &record]);
         let path = write(directory.path(), "cw", &bytes);
-        let identity = decoded.identity(&record, &path, host()).unwrap();
+        let identity = executable_identity(&decoded, &record, &path, host()).unwrap();
         assert_eq!(identity.package_version, "v1.2.30");
         assert_eq!(identity.target, host_target());
         assert_eq!(identity.source_revision, REVISION);
@@ -630,7 +283,9 @@ pub(crate) mod tests {
         large.extend_from_slice(&[0x42; 4096]);
         let path = write(directory.path(), "cw-large", &large);
         assert_eq!(
-            decoded.identity(&record, &path, host()).unwrap().size,
+            executable_identity(&decoded, &record, &path, host())
+                .unwrap()
+                .size,
             large.len() as u64
         );
     }
@@ -739,7 +394,14 @@ pub(crate) mod tests {
         let record = framed(&json("v1.2.3", host().release_target().as_str(), true));
         let good = release_executable(&[&record]);
         let path = write(directory.path(), "candidate", &good);
-        admit_static_elf(&File::open(&path).unwrap(), good.len() as u64).unwrap();
+        let expected = executable_identity(
+            &decode(&record, BUILD_RECORD_JSON).unwrap(),
+            &record,
+            &path,
+            host(),
+        )
+        .unwrap();
+        admit_incoming(&mut File::open(&path).unwrap(), &path, &expected, host()).unwrap();
         for mode in [
             "interp",
             "needed",
@@ -770,7 +432,13 @@ pub(crate) mod tests {
             }
             let path = write(directory.path(), "candidate", &bytes);
             assert!(
-                admit_static_elf(&File::open(&path).unwrap(), bytes.len() as u64).is_err(),
+                {
+                    let mut expected = expected.clone();
+                    expected.sha256 = format!("{:x}", Sha256::digest(&bytes));
+                    expected.size = bytes.len() as u64;
+                    admit_incoming(&mut File::open(&path).unwrap(), &path, &expected, host())
+                        .is_err()
+                },
                 "{mode}"
             );
         }
@@ -780,14 +448,14 @@ pub(crate) mod tests {
     fn identity_refuses_any_additional_build_record() {
         let directory = tempfile::tempdir().unwrap();
         let record = framed(&json("v1.2.3", host_target(), true));
-        let decoded = BuildRecord::decode(&record, BUILD_RECORD_JSON).unwrap();
+        let decoded = decode(&record, BUILD_RECORD_JSON).unwrap();
         let other = framed(&json("v9.9.9", host_target(), true));
         let path = write(
             directory.path(),
             "candidate",
             &executable(&[&record, &other]),
         );
-        let error = decoded.identity(&record, &path, host()).unwrap_err();
+        let error = executable_identity(&decoded, &record, &path, host()).unwrap_err();
         assert!(
             error.to_string().contains("2 cw build record markers"),
             "{error:#}"
@@ -798,14 +466,14 @@ pub(crate) mod tests {
     fn identity_refuses_trailing_build_record_marker() {
         let directory = tempfile::tempdir().unwrap();
         let record = framed(&json("v1.2.3", host_target(), true));
-        let decoded = BuildRecord::decode(&record, BUILD_RECORD_JSON).unwrap();
+        let decoded = decode(&record, BUILD_RECORD_JSON).unwrap();
         let marker = &record[..BUILD_RECORD_JSON - 4];
         let path = write(
             directory.path(),
             "candidate",
             &executable(&[&record, marker]),
         );
-        let error = decoded.identity(&record, &path, host()).unwrap_err();
+        let error = executable_identity(&decoded, &record, &path, host()).unwrap_err();
         assert!(
             error.to_string().contains("2 cw build record markers"),
             "{error:#}"
@@ -816,12 +484,12 @@ pub(crate) mod tests {
     fn identity_refuses_missing_corrupt_repeated_and_foreign_provenance() {
         let directory = tempfile::tempdir().unwrap();
         let record = framed(&json("v1.2.3", host_target(), true));
-        let decoded = BuildRecord::decode(&record, BUILD_RECORD_JSON).unwrap();
+        let decoded = decode(&record, BUILD_RECORD_JSON).unwrap();
         let refused = |bytes: Vec<u8>, decoded: &BuildRecord, expected: &str| {
             let path = write(directory.path(), "candidate", &bytes);
             let error = format!(
                 "{:#}",
-                decoded.identity(&record, &path, host()).unwrap_err()
+                executable_identity(decoded, &record, &path, host()).unwrap_err()
             );
             assert!(error.contains(expected), "{error}");
             fs::remove_file(path).unwrap();
@@ -845,7 +513,7 @@ pub(crate) mod tests {
         let mut foreign = executable(&[&record]);
         foreign[..4].copy_from_slice(b"\0\0\0\0");
         let path = write(directory.path(), "foreign", &foreign);
-        assert!(decoded.identity(&record, &path, host()).is_err());
+        assert!(executable_identity(&decoded, &record, &path, host()).is_err());
         let other = BuildRecord {
             target: match host().os {
                 Os::Linux => "aarch64-apple-darwin".into(),
@@ -860,16 +528,6 @@ pub(crate) mod tests {
             &link,
         )
         .unwrap();
-        assert!(decoded.identity(&record, &link, host()).is_err());
-    }
-
-    #[test]
-    fn occurrences_counts_every_exact_match() {
-        let needle = b"0123456789";
-        assert_eq!(occurrences(b"", needle), 0);
-        assert_eq!(occurrences(b"012345678", needle), 0);
-        assert_eq!(occurrences(b"x0123456789y0123456789", needle), 2);
-        assert_eq!(occurrences(b"01234567890123456789", needle), 2);
-        assert_eq!(occurrences(b"0123456788", needle), 0);
+        assert!(executable_identity(&decoded, &record, &link, host()).is_err());
     }
 }

@@ -9,6 +9,8 @@
 //! An ordinary store is writable by its owner. It is not an OS-enforced
 //! immutable boundary and is never a trusted managed-helper source.
 
+#[cfg(unix)]
+pub mod build_record;
 pub mod identity;
 pub mod release;
 #[cfg(unix)]
