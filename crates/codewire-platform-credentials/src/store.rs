@@ -644,8 +644,10 @@ impl PlatformCredentialStore {
     }
 
     /// Return protected material to the trusted broker for an exact version.
-    /// No material/DEK cache is retained. The final fence rejects revocation,
-    /// expiry, replacement or owner deletion that occurred during unwrap.
+    /// This store retains no material or DEK; the platform broker may reuse the
+    /// returned value within one epoch only for this exact record. The final
+    /// fence rejects revocation, expiry, replacement or owner deletion that
+    /// occurred during unwrap.
     pub async fn read_for_broker(
         &self,
         owner: &Owner,

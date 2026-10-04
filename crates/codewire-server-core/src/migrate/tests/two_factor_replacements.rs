@@ -45,13 +45,15 @@ async fn fingerprint(pool: &PgPool) -> anyhow::Result<String> {
     .await?)
 }
 
-/// Every helper except migration34's workspace-binding trigger function, which
-/// has its own proof and replaces no prior helper.
+/// Every helper except migration34's workspace-binding trigger function and
+/// migration35's authority-stamp functions, which have their own proof and
+/// replace no prior helper.
 async fn helpers(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n \
         ON n.oid=p.pronamespace WHERE n.nspname='public' AND starts_with(p.proname,'codewire_') \
         AND p.proname <> 'codewire_workspace_binding_immutable' \
+        AND NOT starts_with(p.proname,'codewire_platform_authority_') \
         ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)",
     )
     .fetch_all(pool)

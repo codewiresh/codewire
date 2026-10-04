@@ -229,6 +229,7 @@ run_policy_core() {
   python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
   python3 scripts/checks/repo_checks.py design-tokens --self-test
   python3 scripts/checks/repo_checks.py identity-free-workspace --self-test
+  python3 scripts/checks/repo_checks.py epoch-material-cache-owner --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source
   python3 scripts/checks/source/check-native-desktop-ui.py

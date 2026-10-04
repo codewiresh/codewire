@@ -51,6 +51,31 @@ pub enum Phase {
     LeaseWait,
 }
 
+/// Whether a request's material came from its bridge epoch's cache. A
+/// request with several leases reports the most expensive: one read through
+/// the store is a `miss` even if another lease reused a value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MaterialCacheUse {
+    /// No lease consulted a cache: no lease reached its material step, or
+    /// the provider, lease or credential kind never reuses material.
+    #[default]
+    Bypass,
+    /// Every consulting lease reused a value and read no material.
+    Hit,
+    /// At least one consulting lease read its material through the store.
+    Miss,
+}
+
+impl MaterialCacheUse {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Bypass => "bypass",
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+        }
+    }
+}
+
 /// How often one phase ran and its summed wall time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Sample {
@@ -84,6 +109,7 @@ pub struct Timings {
     pub token_review: Sample,
     pub ready: Sample,
     pub lease_wait: Sample,
+    pub material_cache: MaterialCacheUse,
 }
 
 impl Timings {
@@ -131,6 +157,11 @@ fn update(change: impl FnOnce(&mut Timings)) {
 /// Add `count` runs of `phase` taking `elapsed` in total to the current record.
 pub fn record(phase: Phase, count: u32, elapsed: Duration) {
     update(|timings| timings.sample(phase).add(count, elapsed));
+}
+
+/// Record one lease's material-cache decision in the current record.
+pub fn material_cache(decision: MaterialCacheUse) {
+    update(|timings| timings.material_cache = timings.material_cache.max(decision));
 }
 
 /// Add one runtime-authority `resolve()`: its total time and the part spent in
@@ -247,6 +278,7 @@ pub(crate) fn proxied_request(
         record_reads = timings.record.count,
         record_ms = ms(timings.record.elapsed),
         material_reads = timings.material_read.count,
+        cache = timings.material_cache.label(),
         read_db_ms = ms(timings.material_database()),
         unwraps = timings.unwrap.count,
         unwrap_ms = ms(timings.unwrap.elapsed),
@@ -432,6 +464,7 @@ pub(crate) mod tests {
         "record_reads",
         "record_ms",
         "material_reads",
+        "cache",
         "read_db_ms",
         "unwraps",
         "unwrap_ms",
@@ -511,6 +544,9 @@ pub(crate) mod tests {
         "deadline_passed",
         "deadline_too_far",
         "deadline_passed_before_seal",
+        "hit",
+        "miss",
+        "bypass",
     ];
 
     /// The whole contract of a timing line: the dedicated target, exactly its
@@ -587,7 +623,38 @@ pub(crate) mod tests {
         assert_eq!(timings.material_database(), millis(5));
         assert_eq!(timings.refresh.count, 1);
         assert_eq!(timings.provider, Sample::default());
+        assert_eq!(timings.material_cache, MaterialCacheUse::Bypass);
         assert!(timings.total < millis(1_000));
+    }
+
+    #[tokio::test]
+    async fn a_request_reports_its_most_expensive_material_cache_decision() {
+        material_cache(MaterialCacheUse::Miss);
+        for (decisions, expected) in [
+            (&[][..], MaterialCacheUse::Bypass),
+            (&[MaterialCacheUse::Bypass][..], MaterialCacheUse::Bypass),
+            (&[MaterialCacheUse::Hit][..], MaterialCacheUse::Hit),
+            (
+                &[MaterialCacheUse::Hit, MaterialCacheUse::Bypass][..],
+                MaterialCacheUse::Hit,
+            ),
+            (
+                &[MaterialCacheUse::Miss, MaterialCacheUse::Hit][..],
+                MaterialCacheUse::Miss,
+            ),
+            (
+                &[MaterialCacheUse::Hit, MaterialCacheUse::Miss][..],
+                MaterialCacheUse::Miss,
+            ),
+        ] {
+            let ((), timings) = measure(async {
+                for decision in decisions {
+                    material_cache(*decision);
+                }
+            })
+            .await;
+            assert_eq!(timings.material_cache, expected, "{decisions:?}");
+        }
     }
 
     #[tokio::test]
@@ -641,6 +708,7 @@ pub(crate) mod tests {
         timings.unwrap.add(1, millis(12));
         timings.provider.add(1, millis(240));
         timings.lease_wait.add(1, millis(7));
+        timings.material_cache = MaterialCacheUse::Miss;
         let canonical = Uuid::new_v4().to_string();
         let response = Ok(BrokerHttpResponse::new(
             StatusCode::UNAUTHORIZED,
@@ -681,6 +749,7 @@ pub(crate) mod tests {
         assert_eq!(first["provider_connect_ttfb_ms"], 240.0);
         assert_eq!(first["refresh"], false);
         assert_eq!(first["lease_wait_ms"], 7.0);
+        assert_eq!(first["cache"], "miss");
         let second = &lines[1]["fields"];
         assert_eq!(second["request_id"], Uuid::nil().to_string().as_str());
         assert_eq!(second["slot"], "invalid");

@@ -150,7 +150,7 @@ impl CredentialBridge {
             }
         };
         cancellation.disarm();
-        // A login from a replaced or lost epoch is not released.
+        // A login from a replaced (draining) or lost epoch is not released.
         require_active_epoch(&*self.inner.lock().await, epoch)
             .map_err(|_| CodexLoginFailure::Unavailable)?;
         recipient
@@ -185,15 +185,10 @@ impl CredentialBridge {
         };
         let pending = {
             let mut state = self.inner.lock().await;
-            require_active_epoch(&state, epoch)?;
-            let pending = state
-                .codex_logins
-                .remove(&response.request_id)
-                .ok_or_else(invalid_host_frame)?;
-            if pending.epoch != epoch {
-                return Err(invalid_host_frame());
-            }
-            pending
+            require_live_epoch(&state, epoch)?;
+            take_registered(&mut state.codex_logins, &response.request_id, |pending| {
+                pending.epoch == epoch
+            })?
         };
         if let Some(sender) = pending.response {
             // A cancelled caller is normal and does not poison the epoch.

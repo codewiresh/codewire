@@ -19,4 +19,5 @@ tonic = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 zeroize = { workspace = true }

@@ -424,9 +424,11 @@ impl SyntheticProvider {
             counters.responses = increment(counters.responses)?;
             counters.attempts[scenario.index()] = attempt;
             let status = scenario.status(attempt);
+            // `generation` is the fixture's public synthetic token counter: it
+            // shows which login a request presented, never a token value.
             tracing::info!(target: TARGET, event = "provider_response", scenario = scenario.name(), attempt,
-                status = status.as_u16(), response_calls = counters.responses, refresh_calls = counters.refreshes,
-                "provider_response");
+                status = status.as_u16(), generation, response_calls = counters.responses,
+                refresh_calls = counters.refreshes, "provider_response");
             status
         };
         let (content_type, body) = if status == StatusCode::OK {

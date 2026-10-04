@@ -26,6 +26,9 @@
 //! A successful material read establishes one storage admission point. It does
 //! not revoke bytes already returned, authenticate a sandbox, or replace the
 //! broker's per-operation grant, lifecycle, expiry and revocation checks.
+//! [`EpochMaterialCache`] is the only retained copy: one platform broker
+//! bridge epoch (hosted or owner-local delegation) may reuse a value for at
+//! most two minutes, for its exact credential record.
 
 /// The account's active, unexpired GitHub OAuth connections for the user `$1`.
 /// At most two, so that a second connection is reported instead of a winner
@@ -41,11 +44,15 @@ macro_rules! active_github_connection_ids {
     };
 }
 
+mod material_cache;
 mod model;
 mod profiles;
 mod refresh;
 mod store;
 
+pub use material_cache::{
+    EpochMaterialCache, MATERIAL_REUSE_TTL, MAX_REUSED_MATERIAL_BYTES, MAX_REUSED_MATERIALS,
+};
 pub use model::{CredentialRecord, CredentialRegistration, CredentialVersion};
 pub use profiles::{PlatformAccessProfileStore, PlatformBindingMetadata, PlatformProfileError};
 pub use refresh::{

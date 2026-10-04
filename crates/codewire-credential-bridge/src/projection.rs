@@ -203,6 +203,8 @@ impl CredentialBridge {
         context
             .validate_at(now_unix_ms()?)
             .map_err(|_| invalid_projection_context())?;
+        // Strict, like `validate`: ciphertext answered on a draining epoch is
+        // not released, since its fence could never validate afterwards.
         require_active_epoch(&*self.inner.lock().await, epoch)?;
         Ok(RelayedEnvironmentProjection {
             ciphertext: encrypted,
@@ -242,15 +244,10 @@ impl CredentialBridge {
         };
         let pending = {
             let mut state = self.inner.lock().await;
-            require_active_epoch(&state, epoch)?;
-            let pending = state
-                .projections
-                .remove(&response.request_id)
-                .ok_or_else(invalid_host_frame)?;
-            if pending.epoch != epoch {
-                return Err(invalid_host_frame());
-            }
-            pending
+            require_live_epoch(&state, epoch)?;
+            take_registered(&mut state.projections, &response.request_id, |pending| {
+                pending.epoch == epoch
+            })?
         };
         if let Some(sender) = pending.response {
             // Caller cancellation is normal; it does not invalidate other

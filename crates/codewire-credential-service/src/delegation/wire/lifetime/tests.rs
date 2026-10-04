@@ -94,7 +94,7 @@ impl CredentialDelegationService for Probe {
             "fixture middleware missing"
         );
         drop(ctx);
-        let output = self
+        let (output, _expires_at_unix) = self
             .bridge
             .serve_authenticated(async {
                 self.lazy_calls.fetch_add(1, Ordering::SeqCst);

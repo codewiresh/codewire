@@ -53,7 +53,8 @@ async fn open_direct(fixture: &Fixture, authority: Arc<OwnerAuthority>) -> (Inpu
     )
     .await
     .unwrap()
-    .unwrap();
+    .unwrap()
+    .0;
     (input, output)
 }
 

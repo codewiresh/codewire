@@ -193,8 +193,10 @@ async fn prepared_replacement_and_invalid_open_do_not_replace_active_epoch() {
 #[tokio::test]
 async fn pending_admission_budget_and_shutdown_include_deferred_open_tasks() {
     let (_temp, bridge, path) = fixture();
+    // Three permits: an active, a draining and a prepared epoch.
     let (_first_sender, mut first) = prepared(&bridge, &path).await;
     let (_second_sender, mut second) = prepared(&bridge, &path).await;
+    let (_third_sender, mut third) = prepared(&bridge, &path).await;
     let (_sender, receiver) = mpsc::channel(1);
     assert_eq!(
         bridge
@@ -210,6 +212,7 @@ async fn pending_admission_budget_and_shutdown_include_deferred_open_tasks() {
         .unwrap();
     assert!(first.output.next().await.is_none());
     assert!(second.output.next().await.is_none());
+    assert!(third.output.next().await.is_none());
     let (_sender, receiver) = mpsc::channel(1);
     assert_eq!(
         bridge
