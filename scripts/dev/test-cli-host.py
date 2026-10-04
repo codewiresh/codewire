@@ -10,6 +10,7 @@ lead can invoke cw itself and a Claude worker's result starts a parent turn.
 All runtime/config/workspace files and processes belong to this invocation.
 """
 import argparse
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,44 @@ import subprocess
 import sys
 import tempfile
 import time
+
+
+WALL = 0x40000000  # Linux __WALL includes non-SIGCHLD clone children.
+
+
+def require_owned_subreaper():
+    libc = ctypes.CDLL(None, use_errno=True)
+    enabled = ctypes.c_int()
+    if libc.prctl(37, ctypes.byref(enabled), 0, 0, 0) != 0 or enabled.value != 1:
+        raise AssertionError("host journey lost its owned-family subreaper")
+
+
+def arm_owned_family():
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:
+        raise AssertionError("cannot enable host journey owned-family subreaper")
+    require_owned_subreaper()
+    Path("/proc/thread-self/children").read_text()
+    try:
+        os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT | WALL)
+    except ChildProcessError:
+        return
+    raise AssertionError("host journey must begin without existing children")
+
+
+def reap_owned_family(timeout=10):
+    """Join only kernel-owned children; live or unknown custody stays failure."""
+    require_owned_subreaper()
+    deadline = time.monotonic() + timeout
+    while True:
+        if time.monotonic() >= deadline:
+            raise AssertionError("host journey owned-family cleanup remains unknown")
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG | WALL)
+        except ChildProcessError:
+            return
+        if not pid:
+            time.sleep(0.02)
 
 
 class Journey:
@@ -350,21 +389,24 @@ class Journey:
 
     def cleanup(self, preserve=False):
         try:
-            if self.environment:
-                if preserve:
-                    self.call("env", "stop", "--local", self.environment)
-                    print(f"cli-host: failed-journey evidence retained: {self.root}", file=sys.stderr)
-                    return
-                result = self.call("env", "rm", "--local", self.environment, "--yes")
-                assert (self.workspace / "child.pid").exists(), "workspace removed with runtime"
-                self.check("remove-runtime/preserve-project")
-            self.remove_files()
+            try:
+                if self.environment:
+                    if preserve:
+                        self.call("env", "stop", "--local", self.environment)
+                        print(f"cli-host: failed-journey evidence retained: {self.root}", file=sys.stderr)
+                    else:
+                        result = self.call("env", "rm", "--local", self.environment, "--yes")
+                        assert (self.workspace / "child.pid").exists(), "workspace removed with runtime"
+                        self.check("remove-runtime/preserve-project")
+            finally:
+                self.sentinel.terminate()
+                self.sentinel.wait(timeout=5)
+                reap_owned_family()
+            if not preserve:
+                self.remove_files()
         except Exception:
             print(f"cli-host: runtime retained for diagnosis: {self.root}", file=sys.stderr)
             raise
-        finally:
-            self.sentinel.terminate()
-            self.sentinel.wait(timeout=5)
 
     def remove_files(self):
         shutil.rmtree(self.root)
@@ -386,6 +428,7 @@ def main():
     args = parser.parse_args()
     if not sys.platform.startswith("linux"):
         parser.error("trusted host placement is currently qualified on Linux")
+    arm_owned_family()
     journey = Journey(args.cw, args.native_agents)
     passed = False
     try:
