@@ -1421,7 +1421,7 @@ grep -qF -- '--lib platform::bridge::tests::rotation:: -- --ignored --nocapture 
 grep -qF 'assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 3' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-credential-service' "$integration_runner"
 grep -qF -- '--skip tests::database::projection::' "$integration_runner"
-grep -qF 'assert_passed_count "platform runtime restricted identity matrix" "$logfile" 5' "$integration_runner"
+grep -qF 'assert_passed_count "platform runtime restricted identity matrix" "$logfile" 6' "$integration_runner"
 grep -qF -- '--lib tests::database::projection::' "$integration_runner"
 grep -qF 'assert_passed_count "platform runtime projection matrix" "$logfile" 12' "$integration_runner"
 grep -qF -- '--lib delegation::authority::tests::' "$integration_runner"

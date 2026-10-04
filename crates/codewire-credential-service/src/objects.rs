@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::future::Future;
 
 use codewire_access::{
     MANAGED_CREDENTIAL_CLIENTS_ENV, ManagedCredentialClient, ManagedCredentialClients,
@@ -40,6 +41,42 @@ impl Lineage {
     pub(crate) fn managed_github(&self) -> bool {
         self.managed_github
     }
+}
+
+/// The names one resolve read the gateway's ReplicaSet and its Claim's Sandbox
+/// under: the two lineage objects whose names only another object's fresh read
+/// gives. An epoch keeps its admission resolve's names, as strings and never as
+/// objects, so that each later resolve can issue every lineage read at once.
+/// They are read hints, not authority: every object is still read fresh and
+/// checked, and an object whose fresh parent names another is read again under
+/// that name.
+///
+/// Backstop: Kubernetes names are immutable and UIDs unique, so a fresh name
+/// that differs from the admission's always means a different UID. The
+/// epoch's `lineage` equality (`same_authority`) then denies that request
+/// whatever the re-read finds; the re-read only selects the error.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct LineageNames {
+    pub(crate) replica_set: String,
+    pub(crate) sandbox: String,
+}
+
+/// How one resolve reads the gateway Pod, and the names its ReplicaSet and
+/// Sandbox reads start from.
+pub(crate) enum LineageReads<'a> {
+    /// Epoch admission. Only the gateway Pod's environment label names the
+    /// scope to query, so that Pod was read and checked before the scope query,
+    /// and its controller names the ReplicaSet. No Sandbox name is known yet,
+    /// so the Sandbox read follows its Claim's.
+    Admission(&'a Pod),
+    /// A later resolve in the epoch. The epoch's admission fixed the
+    /// environment, so the scope query needed no Pod and the gateway Pod is
+    /// read with the rest, by its verified name. The ReplicaSet and Sandbox are
+    /// read at the same time under the admission resolve's names.
+    Epoch {
+        gateway: &'a VerifiedPodIdentity,
+        names: &'a LineageNames,
+    },
 }
 
 /// Credential scope of a claim-time binding (Program #2238 B2): the Pod
@@ -399,47 +436,63 @@ where
         .map_err(kube_error)
 }
 
-/// The scope's Claim, then the Sandbox its status names: the one lineage read
-/// that depends on another object.
-async fn claim_and_sandbox(
-    client: &Client,
-    scope: &Scope,
-) -> Result<(DynamicObject, DynamicObject), Error> {
-    let claim = dynamic(
-        client.clone(),
-        &scope.namespace,
-        "extensions.agents.x-k8s.io",
-        "SandboxClaim",
-        "sandboxclaims",
-    )
-    .get(&scope.claim_name)
-    .await
-    .map_err(kube_error)?;
-    let sandbox_name = claim
+/// The ReplicaSet the gateway Pod's controller reference names.
+fn replica_set_name(gateway: &Pod) -> Result<&str, Error> {
+    controller(&gateway.metadata, "apps/v1", "ReplicaSet").map(|owner| owner.name.as_str())
+}
+
+/// The Sandbox the Claim's status names.
+fn sandbox_name(claim: &DynamicObject) -> Result<&str, Error> {
+    claim
         .data
         .pointer("/status/sandbox/name")
         .and_then(Value::as_str)
         .filter(|name| valid_name(name, false))
-        .ok_or(Error::Denied)?;
-    let sandbox = dynamic(
-        client.clone(),
-        &scope.namespace,
-        "agents.x-k8s.io",
-        "Sandbox",
-        "sandboxes",
-    )
-    .get(sandbox_name)
-    .await
-    .map_err(kube_error)?;
-    Ok((claim, sandbox))
+        .ok_or(Error::Denied)
+}
+
+/// A parent object, then the object it names.
+///
+/// Without an `earlier` name the read follows the parent's, under the name the
+/// fresh parent gives. With one, it runs at the same time as the parent's,
+/// under that name, and its result, object or error, is kept unexamined until
+/// the fresh parent arrives: it is used only when the parent names the same
+/// object, and otherwise dropped for a read under the fresh name. So a stale
+/// name costs one more read, never a decision. That re-read starts only after
+/// the read under the stale name has finished, so a slow stale read delays it.
+/// A failed parent read ends this at once; a failed read under the earlier
+/// name fails only once the parent confirms that name.
+async fn named_by<P, K, F>(
+    parent: impl Future<Output = Result<P, Error>>,
+    name: fn(&P) -> Result<&str, Error>,
+    earlier: Option<&str>,
+    read: impl Fn(String) -> F,
+) -> Result<(P, K), Error>
+where
+    F: Future<Output = Result<K, Error>>,
+{
+    let Some(earlier) = earlier else {
+        let parent = parent.await?;
+        let object = read(name(&parent)?.to_owned()).await?;
+        return Ok((parent, object));
+    };
+    let (parent, under_earlier) =
+        tokio::try_join!(parent, async { Ok(read(earlier.to_owned()).await) })?;
+    let fresh = name(&parent)?;
+    let object = if fresh == earlier {
+        under_earlier?
+    } else {
+        read(fresh.to_owned()).await?
+    };
+    Ok((parent, object))
 }
 
 pub(crate) async fn validate_lineage(
     client: &Client,
     scope: &Scope,
-    gateway: &Pod,
+    reads: LineageReads<'_>,
     workspace_identity: &VerifiedPodIdentity,
-) -> Result<Lineage, Error> {
+) -> Result<(Lineage, LineageNames), Error> {
     // The reviewed workspace Pod must be the one orchestration bound, by UID,
     // and the live binding must name the backend's Claim. Checked before any
     // Kubernetes read.
@@ -454,20 +507,93 @@ pub(crate) async fn validate_lineage(
     {
         return Err(Error::Denied);
     }
-    let rs_owner = controller(&gateway.metadata, "apps/v1", "ReplicaSet")?;
+    let namespace = scope.namespace.as_str();
     let deployment_name = format!("cw-gateway-{}", scope.environment_id);
-    // Every name below is fixed before any request (the ReplicaSet by the
-    // verified gateway Pod's controller, the Deployment, Claim and workspace
-    // Pod by the scope), except the Sandbox's, which only its Claim's status
-    // names. So four reads run concurrently and the Sandbox read follows its
-    // Claim. The first failed read ends the resolve and drops the rest; no
-    // object is compared with another until all five are fetched.
-    let (replica_set, deployment, (claim, sandbox), workspace) = tokio::try_join!(
-        read::<ReplicaSet>(client, &scope.namespace, &rs_owner.name),
-        read::<Deployment>(client, &scope.namespace, &deployment_name),
-        claim_and_sandbox(client, scope),
-        read::<Pod>(client, &scope.namespace, &scope.pod_name),
-    )?;
+    let deployment = read::<Deployment>(client, namespace, &deployment_name);
+    let workspace = read::<Pod>(client, namespace, &scope.pod_name);
+    let claim = async {
+        dynamic(
+            client.clone(),
+            namespace,
+            "extensions.agents.x-k8s.io",
+            "SandboxClaim",
+            "sandboxclaims",
+        )
+        .get(&scope.claim_name)
+        .await
+        .map_err(kube_error)
+    };
+    let sandbox = move |name: String| async move {
+        dynamic(
+            client.clone(),
+            namespace,
+            "agents.x-k8s.io",
+            "Sandbox",
+            "sandboxes",
+        )
+        .get(&name)
+        .await
+        .map_err(kube_error)
+    };
+    // The Deployment, Claim and workspace Pod names are fixed by the scope, and
+    // the gateway Pod's by its verified identity. The ReplicaSet's and the
+    // Sandbox's are named only by the gateway Pod's controller and the Claim's
+    // status. At admission the gateway Pod is already read, so four reads run
+    // at once and the Sandbox read follows its Claim. Later in the epoch all
+    // six run at once, the ReplicaSet and Sandbox under the admission's names.
+    // A failed read ends the resolve and drops the rest, except that a read
+    // under an admission's name fails only once its fresh parent names the
+    // same object. No object is compared with another until all are fetched.
+    let read_gateway;
+    let (gateway, replica_set, deployment, (claim, sandbox), workspace) = match reads {
+        LineageReads::Admission(gateway) => {
+            let replica_set = replica_set_name(gateway)?;
+            let (replica_set, deployment, claim_and_sandbox, workspace) = tokio::try_join!(
+                read::<ReplicaSet>(client, namespace, replica_set),
+                deployment,
+                named_by(claim, sandbox_name, None, sandbox),
+                workspace,
+            )?;
+            (
+                gateway,
+                replica_set,
+                deployment,
+                claim_and_sandbox,
+                workspace,
+            )
+        }
+        LineageReads::Epoch { gateway, names } => {
+            let replica_set = move |name: String| async move {
+                read::<ReplicaSet>(client, namespace, &name).await
+            };
+            let ((pod, replica_set), deployment, claim_and_sandbox, workspace) = tokio::try_join!(
+                named_by(
+                    read::<Pod>(client, gateway.namespace(), gateway.pod_name()),
+                    replica_set_name,
+                    Some(&names.replica_set),
+                    replica_set,
+                ),
+                deployment,
+                named_by(claim, sandbox_name, Some(&names.sandbox), sandbox),
+                workspace,
+            )?;
+            // The fresh gateway Pod's own checks, which admission ran before
+            // its scope query: the verified, live Pod, still labelled with the
+            // environment whose scope this resolve read.
+            live_pod(&pod, gateway)?;
+            if gateway_environment(&pod)? != scope.environment_id {
+                return Err(Error::Denied);
+            }
+            read_gateway = pod;
+            (
+                &read_gateway,
+                replica_set,
+                deployment,
+                claim_and_sandbox,
+                workspace,
+            )
+        }
+    };
     let (replica_set_uid, deployment_uid) =
         gateway_chain(scope, gateway, &replica_set, &deployment)?;
     live_pod(&workspace, workspace_identity)?;
@@ -479,13 +605,20 @@ pub(crate) async fn validate_lineage(
     }
     let managed_github =
         binding_managed_clients(scope, &workspace)?.contains(ManagedCredentialClient::GitHub);
-    Ok(Lineage {
-        replica_set_uid,
-        deployment_uid,
-        sandbox_uid,
-        claim_uid,
-        managed_github,
-    })
+    let names = LineageNames {
+        replica_set: replica_set_name(gateway)?.to_owned(),
+        sandbox: sandbox_name(&claim)?.to_owned(),
+    };
+    Ok((
+        Lineage {
+            replica_set_uid,
+            deployment_uid,
+            sandbox_uid,
+            claim_uid,
+            managed_github,
+        },
+        names,
+    ))
 }
 
 #[cfg(test)]
