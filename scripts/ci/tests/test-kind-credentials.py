@@ -732,6 +732,95 @@ wait_kind_credential_environment '%s' destroyed
             self.assertEqual(result.returncode, expected, result.stderr)
             self.assertNotIn("unexpected-cli", result.stderr)
 
+    def test_environment_observation_failure_names_itself_instead_of_a_silent_jq_exit(self):
+        result = self.shell('''
+kind_credential_cli() { printf '{%%s}' '"state":"running"'; }
+sleep() { :; }
+wait_kind_credential_environment '%s' running
+''' % ENVIRONMENT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # jq exits 4 without a word on empty input; the wait must convert any
+        # observation failure into a named error instead of dying silently.
+        result = self.shell('''
+kind_credential_cli() { return 0; }
+sleep() { :; }
+wait_kind_credential_environment '%s' running
+''' % ENVIRONMENT)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(
+            '::error::credential fixture environment observation failed while waiting for running',
+            result.stderr)
+
+    @staticmethod
+    def _sandbox_pair_pods(workspace_phase, gateway_generation, gateway_uid=GATEWAY_UID):
+        return json.dumps({"items": [
+            {"metadata": {"name": "sandbox-workspace",
+                          "labels": {"codewire.sh/type": "workspace"}},
+             "spec": {"serviceAccountName": "codewire-sandbox",
+                      "automountServiceAccountToken": False,
+                      "containers": [{"name": "workspace"}]},
+             "status": {"phase": workspace_phase}},
+            {"metadata": {"name": "cw-gateway-restart",
+                          "labels": {"codewire.sh/type": "gateway"},
+                          "uid": gateway_uid},
+             "spec": {"containers": [{"name": "gateway", "env": [
+                 {"name": "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
+                  "value": str(gateway_generation)}]}]},
+             "status": {"phase": "Running"}}]})
+
+    def test_sandbox_pair_wait_retries_until_the_restart_pair_is_running(self):
+        directory = tempfile.TemporaryDirectory(prefix="kind-sandbox-pair-")
+        self.addCleanup(directory.cleanup)
+        # The first observation has the workspace still Pending and only the
+        # pre-restart (generation 1) gateway Running; neither may satisfy it.
+        pending = self._sandbox_pair_pods("Pending", 1)
+        ready = self._sandbox_pair_pods("Running", 2)
+        result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+sleep() { :; }
+kubectl() {
+  count="$(( $(cat '%(dir)s/count' 2>/dev/null || printf 0) + 1 ))"
+  printf '%%s\\n' "$count" > '%(dir)s/count'
+  if [ "$count" -lt 2 ]; then printf '%%s' '%(pending)s'; else printf '%%s' '%(ready)s'; fi
+}
+wait_kind_credential_sandbox_pair '%(env)s' 2
+''' % {"dir": directory.name, "pending": pending, "ready": ready, "env": ENVIRONMENT})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 2, result.stdout)
+        self.assertEqual(lines[0], "sandbox-workspace")
+        self.assertEqual(json.loads(lines[1])["metadata"]["uid"], GATEWAY_UID)
+        with open(os.path.join(directory.name, "count"), encoding="utf-8") as handle:
+            self.assertEqual(int(handle.read()), 2)
+
+    def test_sandbox_pair_wait_exhaustion_names_environment_and_generation(self):
+        pending = self._sandbox_pair_pods("Pending", 1)
+        result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+sleep() { :; }
+kubectl() { printf '%%s' '%s'; }
+wait_kind_credential_sandbox_pair '%s' 2
+''' % (pending, ENVIRONMENT))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(
+            '::error::credential fixture environment %s did not materialize its '
+            'generation-2 workspace and gateway Pods after the managed restart' % ENVIRONMENT,
+            result.stderr)
+
+    def test_native_restart_wait_binds_the_update_generation_before_pod_assertions(self):
+        source = HELPERS.read_text()
+        flow = source.split("kind_credential_native_smoke() (", 1)[1]
+        self.assertNotIn("expected one exact managed gateway", flow)
+        update = flow.index('update="$(kind_credential_cli env --platform update "$environment"')
+        generation = flow.index('restart_generation="$(jq -er')
+        pair = flow.index('pair="$(wait_kind_credential_sandbox_pair '
+                          '"$environment" "$restart_generation")"')
+        gateway_uid = flow.index('gateway_uid="$(jq -er')
+        self.assertLess(update, generation)
+        self.assertLess(generation, pair)
+        self.assertLess(pair, gateway_uid)
+        self.assertIn('wait_kind_credential_environment "$environment" running\n  pair=', flow)
+
     def test_host_cli_build_selects_its_actual_binary_package(self):
         manifest = tomllib.loads((ROOT / "crates/codewire-cli-bin/Cargo.toml").read_text())
         self.assertIn("cw", [binary["name"] for binary in manifest["bin"]])

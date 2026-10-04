@@ -309,6 +309,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
@@ -434,6 +441,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
@@ -485,6 +499,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
@@ -602,6 +623,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
@@ -690,6 +718,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
@@ -767,6 +802,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
@@ -847,6 +889,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
@@ -927,6 +976,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
@@ -1049,6 +1105,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
@@ -1168,6 +1231,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
@@ -1309,6 +1379,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
@@ -1453,6 +1530,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
@@ -1542,6 +1626,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
@@ -1610,6 +1701,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
@@ -1694,6 +1792,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"
@@ -1884,6 +1989,13 @@ jobs:
             echo 'fail-fast: run identity or token unavailable; run not cancelled' >&2
             exit 0
           fi
+          echo "fail-fast: job ${GITHUB_JOB:-unknown} failed; requesting cancellation of run ${GITHUB_RUN_ID}" >&2
+          # The cancel revokes this ephemeral runner's registration in the
+          # same transaction, severing log upload: lines echoed after the
+          # POST below never reach the job log (infra#1229). The runner
+          # ships buffered rows once a second; hold the cancel briefly so
+          # this evidence stays durable.
+          sleep "${FAIL_FAST_FLUSH_SECONDS:-5}"
           umask 077
           auth="$(mktemp)"
           printf 'header = "Authorization: token %s"\n' "$GITEA_TOKEN" > "$auth"

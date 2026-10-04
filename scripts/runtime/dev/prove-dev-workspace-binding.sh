@@ -230,11 +230,24 @@ wait_state() {
 }
 
 create_env() {
-  local name out="$TMPDIR_PROOF/create.out" id
+  local name out="$TMPDIR_PROOF/create.out" id attempt
   name="binding-proof-$(date +%s)-$RANDOM"
-  cw env create --image "$PROOF_IMAGE" --name "$name" --cpu "$PROOF_CPU" \
-    --memory "$PROOF_MEMORY" --disk "$PROOF_DISK" --isolation standard --ttl "$PROOF_TTL" \
-    --no-network --no-wait --yes >"$out" 2>&1 || { sed 's/[[:cntrl:]]//g' "$out" >&2; return 1; }
+  # The per-user create limit (10 per 60 s) resets only after 60 s without a
+  # create, so a long run waits out the window instead of failing a journey.
+  for attempt in 1 2 3; do
+    if cw env create --image "$PROOF_IMAGE" --name "$name" --cpu "$PROOF_CPU" \
+      --memory "$PROOF_MEMORY" --disk "$PROOF_DISK" --isolation standard --ttl "$PROOF_TTL" \
+      --no-network --no-wait --yes >"$out" 2>&1; then
+      break
+    fi
+    if ((attempt < 3)) && grep -q 'too many environment creates' "$out"; then
+      log "create rate limited; waiting 65 s"
+      sleep 65
+      continue
+    fi
+    sed 's/[[:cntrl:]]//g' "$out" >&2
+    return 1
+  done
   id="$(awk '/^[[:space:]]*ID:/ {print $2; exit}' "$out")"
   [[ "$id" =~ ^[0-9a-f-]{36}$ ]] || return 1
   CREATED_ENVS+=("$id")
@@ -373,7 +386,8 @@ sql_stage_ms() {
 stage_order_ok() {
   # workspace_bind completes before gateway_ready completes (design §10).
   local id="$1" logs="$TMPDIR_PROOF/logs-$1.txt"
-  cw env logs "$id" >"$logs" 2>/dev/null || return 1
+  # The CLI renders setup progress on stderr.
+  cw env logs --follow false "$id" >"$logs" 2>&1 || return 1
   local bind gateway
   bind="$(grep -n -i 'Binding workspace\|workspace_bind' "$logs" | head -n1 | cut -d: -f1)"
   gateway="$(grep -n -i 'Gateway ready\|gateway_ready' "$logs" | tail -n1 | cut -d: -f1)"
@@ -456,6 +470,7 @@ for other in 8084 8085; do
   if timeout 4 bash -c "exec 8<>/dev/tcp/codewire-orchestration.${SERVER_NAMESPACE}.svc.cluster.local/\$other" 2>/dev/null; then echo "port_\$other=open"; else echo "port_\$other=blocked"; fi
 done
 echo "token_mode=\$(stat -L -c %a "\$token_file")"
+echo "token_group=\$(stat -L -c %g "\$token_file")"
 echo "credential_mode=\$(stat -c %a '$CREDENTIAL_PATH' 2>/dev/null || echo missing)"
 if env | grep -q '^CODEWIRE_DAEMON_AUTH_TOKEN='; then echo env_token=present; else echo env_token=absent; fi
 SCRIPT
@@ -475,7 +490,11 @@ journey_negatives() {
   check "negatives: slow header closed within 5-8 s" one_of "$(value slow_header_closed_after)" '5s*' '6s*' '7s*' '8s*'
   check "negatives: 8084 unreachable from a workspace" test "$(value port_8084)" = blocked
   check "negatives: 8085 unreachable from a workspace" test "$(value port_8085)" = blocked
-  check "negatives: binding token is 0440" test "$(value token_mode)" = 440
+  # The volume asks for 0440, but kubelet writes service account tokens 0600
+  # when the Pod sets fsGroup and then adds group read: 0640, group fsGroup,
+  # no access for others, on a read-only mount.
+  check "negatives: binding token is 0640 with group 1000" \
+    test "$(value token_mode):$(value token_group)" = 640:1000
   check "negatives: daemon credential file is 0400" test "$(value credential_mode)" = 400
   check "negatives: no environment token in the workspace" test "$(value env_token)" = absent
   remove_env "$id" || true
