@@ -1067,3 +1067,163 @@ kind_credential_native_smoke() (
   kind_credential_cli credentials --platform delete "$credential_name" --yes
   log "public synthetic Codex flow, ChatGPT login delivery, native rotation/retry, revocation and terminal cleanup passed"
 )
+
+# Fixed, public synthetic Anthropic credentials accepted only by the Kind
+# fixture's in-process provider (credential-service runtime/kind/provider.rs).
+# They are entered through the public CLI exactly as a user pastes an API key
+# or a `claude setup-token` value; claude_session.py proves neither reaches a
+# Sandbox.
+KIND_ANTHROPIC_API_KEY='sk-ant-api03-CW_KIND_SYNTHETIC_ANTHROPIC_KEY-0123456789abcdef'
+KIND_CLAUDE_SUBSCRIPTION_TOKEN='sk-ant-oat01-CW_KIND_SYNTHETIC_CLAUDE_TOKEN-0123456789abcdef'
+
+# The managed client selection recorded for the live binding of one exact
+# workspace Pod: the record launch authority reads. Waits briefly for the
+# binding writer; prints exactly one value or fails.
+kind_credential_managed_clients() {
+  local environment="$1" pod_uid="$2" attempt rows
+  local -r uuid='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  [[ "$environment" =~ $uuid && "$pod_uid" =~ $uuid ]] || return 1
+  for ((attempt = 0; attempt < 30; attempt++)); do
+    rows="$(kubectl -n "$NS" exec -i deploy/postgres -- psql -U codewire -d codewire \
+      -v ON_ERROR_STOP=1 -v environment="$environment" -v pod_uid="$pod_uid" -At <<'SQL'
+SELECT managed_credential_clients FROM sandbox_workspace_bindings
+WHERE environment_id = :'environment' AND pod_uid = :'pod_uid' AND released_at IS NULL;
+SQL
+    )" || return $?
+    if [[ "$rows" =~ ^v[12]:[a-z0-9,]{1,40}$ ]]; then
+      printf '%s\n' "$rows"
+      return 0
+    fi
+    [ -z "$rows" ] || break
+    sleep 2
+  done
+  echo "::error::environment ${environment} has no single live workspace binding selection" >&2
+  return 1
+}
+
+# One claude_session.py run in the exact workspace Pod. Its stdout is closed
+# events only; the run passes only when its last event is its own completion.
+kind_credential_claude_run() {
+  local pod="$1" form="$2" clients="$3" output status=0
+  [[ "$pod" =~ ^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$ ]] || return 1
+  case "$form" in api_key | subscription_token) ;; *) return 1 ;; esac
+  output="$(kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- \
+    python3 -B -u - "$form" "$clients" < "$ROOT/scripts/ci/verify/kind/claude_session.py")" ||
+    status=$?
+  printf '%s\n' "$output" >> "$RUN_DIR/credential-claude-session.jsonl" || return $?
+  printf '%s\n' "$output"
+  if [ "$status" -ne 0 ] || ! jq -se --arg kind "$form" '
+      length == 3 and .[0].event == "claude_projection" and .[0].kind == $kind
+      and (.[0].source == "container" or .[0].source == "binding")
+      and .[1].event == "claude_session" and .[1].kind == $kind and .[1].marker == true
+      and .[2] == {event: "complete", kind: $kind}' <<<"$output" >/dev/null; then
+    echo "::error::stock Claude Code acceptance failed for the ${form} form" >&2
+    return 1
+  fi
+}
+
+# The fixture's Anthropic events since its pod started. Prints their count
+# after asserting that every event after the first `baseline` ones is a 200
+# answered for exactly `kind`, with at least one. A refusal of any kind,
+# including the Sandbox placeholder reaching the provider, fails.
+assert_kind_credential_anthropic_events() {
+  local baseline="$1" form="$2"
+  [[ "$baseline" =~ ^[0-9]+$ ]] || return 1
+  case "$form" in api_key | subscription_token) ;; *) return 1 ;; esac
+  kind_credential_fixture_events | jq -er --argjson baseline "$baseline" --arg kind "$form" '
+    [.[] | select(.event == "anthropic_response" or .event == "anthropic_rejected")] as $all
+    | if ($all | length) > $baseline
+        and all($all[$baseline:][]; .event == "anthropic_response" and .kind == $kind
+          and .status == 200 and (.route == "messages" or .route == "count_tokens"))
+      then ($all | length) else error("unexpected Anthropic provider events") end' || {
+    echo "::error::the synthetic provider did not see only the real ${form} credential" >&2
+    return 1
+  }
+}
+
+# Stock Claude Code in a hosted workspace through the managed Anthropic route,
+# first with an Anthropic API key and then, after rebinding the same
+# environment, with a Claude subscription token, both entered through the
+# public CLI. The provider accepts only the real synthetic credential in each
+# form and refuses the placeholder, so completed sessions prove the broker
+# substituted it while the Sandbox held only the placeholder.
+kind_credential_claude_session() (
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
+    log "release-image gate: synthetic Claude Code credential composition is not selected"
+    return 0
+  fi
+  log "running public Anthropic API key and Claude subscription token acceptance with stock Claude Code"
+  local KIND_CREDENTIAL_CLI_HOME suffix key_name token_name key_profile token_profile environment
+  local workspace_image form profile credential update generation pair pod pod_uid clients baseline
+  set -E
+  trap 'echo "::error::Claude Code credential acceptance failed: command=${BASH_COMMAND} status=$?" >&2' ERR
+  workspace_image="$(kind_workspace_runtime_image)" || return $?
+  KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-claude.XXXXXX)"
+  trap 'rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
+  [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ] || return 1
+  suffix="${RANDOM}-${RANDOM}"
+  key_name="kind-anthropic-key-$suffix"
+  token_name="kind-claude-token-$suffix"
+  key_profile="kind-claude-key-$suffix"
+  token_profile="kind-claude-token-$suffix"
+  prepare_kind_credential_cli
+  kind_credential_cli org set org_contract_1
+  kind_credential_cli org current | awk '
+    $1 == "ID:" { id = $2; count++ }
+    END { exit !(count == 1 && id == "org_contract_1") }'
+  # Material only through stdin, as a user pastes it; never an argument.
+  printf '%s' "$KIND_ANTHROPIC_API_KEY" |
+    kind_credential_cli credentials --platform add anthropic --name "$key_name"
+  printf '%s' "$KIND_CLAUDE_SUBSCRIPTION_TOKEN" |
+    kind_credential_cli credentials --platform add claude-subscription --name "$token_name"
+  kind_credential_cli credentials --platform get "$key_name" --output json | jq -e \
+    --arg name "$key_name" '.[0] as $c | length == 1 and $c.name == $name
+      and $c.provider == "anthropic" and $c.status == "CREDENTIAL_STATUS_ACTIVE"
+      and ($c.authenticationKind // $c.authentication_kind) == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' \
+    >/dev/null
+  # The subscription token is the provider's OAuth kind with a hard expiry one
+  # year after it was added.
+  kind_credential_cli credentials --platform get "$token_name" --output json | jq -e \
+    --arg name "$token_name" '.[0] as $c
+      | (($c.expiresAtUnix // $c.expires_at_unix) | tonumber) - (now | floor) as $left
+      | length == 1 and $c.name == $name and $c.provider == "anthropic"
+        and $c.status == "CREDENTIAL_STATUS_ACTIVE"
+        and ($c.authenticationKind // $c.authentication_kind) == "CREDENTIAL_AUTHENTICATION_KIND_OAUTH"
+        and $left > 364 * 86400 and $left <= 365 * 86400' >/dev/null
+  kind_credential_cli credentials --platform --profile "$key_profile" set anthropic "$key_name"
+  kind_credential_cli credentials --platform --profile "$token_profile" set anthropic "$token_name"
+  environment="$(kind_credential_cli env --platform create --name "$key_profile" \
+    --image "$workspace_image" \
+    --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
+  [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
+  wait_kind_credential_environment "$environment" running
+  baseline="$(kind_credential_fixture_events | jq -er \
+    '[.[] | select(.event == "anthropic_response" or .event == "anthropic_rejected")] | length')"
+  for form in api_key subscription_token; do
+    profile="$key_profile"
+    [ "$form" = api_key ] || profile="$token_profile"
+    update="$(kind_credential_cli env --platform update "$environment" \
+      --profile "platform:$profile" --yes --output json)"
+    generation="$(jq -er '.operation_generation |
+      if type == "number" and . > 0 and . == floor then .
+      else error("expected a positive operation generation") end' <<<"$update")"
+    wait_kind_credential_environment "$environment" running
+    pair="$(wait_kind_credential_sandbox_pair "$environment" "$generation")"
+    pod="$(sed -n '1p' <<<"$pair")"
+    pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')"
+    clients="$(kind_credential_managed_clients "$environment" "$pod_uid")"
+    kind_credential_claude_run "$pod" "$form" "$clients"
+    baseline="$(assert_kind_credential_anthropic_events "$baseline" "$form")"
+  done
+
+  kind_credential_cli env --platform rm "$environment" --yes --output json
+  wait_kind_credential_environment "$environment" destroyed
+  for profile in "$key_profile" "$token_profile"; do
+    kind_credential_cli credentials --platform --profile "$profile" delete --yes
+  done
+  for credential in "$key_name" "$token_name"; do
+    kind_credential_cli credentials --platform revoke "$credential" --output json
+    kind_credential_cli credentials --platform delete "$credential" --yes
+  done
+  log "stock Claude Code passed with an Anthropic API key and a Claude subscription token; neither reached the Sandbox"
+)
