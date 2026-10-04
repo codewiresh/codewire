@@ -1,6 +1,6 @@
 //! The broker's Claude subscription token dispatch: the lease's credential
-//! kind selects the form, and a provider 401 marks that exact generation as
-//! needing a new token instead of being refreshed or replayed.
+//! kind selects the form, and a provider 401 is answered unchanged. Nothing
+//! refreshes, replays, marks or withholds the token; its owner replaces it.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,7 +11,6 @@ use codewire_access::CapabilitySlot;
 
 struct Authority {
     kind: CredentialAuthKind,
-    rejections: Arc<Mutex<Vec<BrokerCredentialRejection>>>,
     reads: Arc<AtomicUsize>,
 }
 
@@ -37,13 +36,6 @@ impl BrokerLeaseProvider for Authority {
         );
         lease.reads = self.reads.clone();
         Ok(lease)
-    }
-    async fn reject_credential(
-        &self,
-        rejection: BrokerCredentialRejection,
-    ) -> Result<(), BrokerRefreshError> {
-        self.rejections.lock().unwrap().push(rejection);
-        Ok(())
     }
     async fn begin_credential_refresh(
         &self,
@@ -123,7 +115,6 @@ fn broker_with(
     OpenAiBroker::new(
         Authority {
             kind,
-            rejections: Arc::new(Mutex::new(Vec::new())),
             reads: Arc::new(AtomicUsize::new(0)),
         },
         Upstream {
@@ -194,59 +185,20 @@ async fn an_oauth_lease_selects_the_subscription_form_with_the_stored_bearer() {
     );
     assert_eq!(headers["x-app"], "cli");
     assert_eq!(broker.leases.reads.load(Ordering::Relaxed), 1);
-    assert!(broker.leases.rejections.lock().unwrap().is_empty());
     let (status, _, body) = response.into_parts();
     assert_eq!(status, StatusCode::OK);
     assert_eq!(read(body).await, redacted_error("authentication_error"));
 }
 
+/// A Sandbox process shapes the request, so a provider refusal never decides
+/// the token's fate: every 401, including `authentication_error`, is answered
+/// unchanged after redaction, with one provider call and no refresh.
 #[tokio::test]
-async fn a_provider_401_marks_the_exact_generation_and_answers_reconnect_without_retry() {
-    let broker = broker(CredentialAuthKind::OAuth, StatusCode::UNAUTHORIZED);
-    let request_id = Uuid::new_v4();
-    let response = broker
-        .execute(request(request_id))
-        .await
-        .expect("a refused token still answers its route");
-    // One provider call: there is no refresh and no replay.
-    assert_eq!(broker.upstream.requests.lock().unwrap().len(), 1);
-    let rejections = broker.leases.rejections.lock().unwrap().clone();
-    assert_eq!(rejections.len(), 1);
-    let rejection = &rejections[0];
-    let lease = Lease::new(
-        "anthropic",
-        CredentialAuthKind::OAuth,
-        "anthropic",
-        "messages",
-        "anthropic-api",
-    );
-    assert_eq!(rejection.request_id, request_id);
-    assert_eq!(rejection.grant, lease.grant);
-    assert_eq!(rejection.operation.as_str(), "messages");
-    assert_eq!(rejection.route.as_str(), "anthropic-api");
-    assert_eq!(rejection.material_generation, 2);
-    let (status, headers, body) = response.into_parts();
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(headers["content-type"], "application/json");
-    let bytes = read(body).await;
-    assert!(!bytes.windows(TOKEN.len()).any(|window| window == TOKEN));
-    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(json["type"], "error");
-    assert_eq!(json["error"]["type"], "permission_error");
-    assert!(
-        json["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("Codewire Settings → Credentials")
-    );
-}
-
-#[tokio::test]
-async fn a_401_that_is_not_an_authentication_refusal_is_returned_and_marks_nothing() {
+async fn a_provider_401_is_answered_unchanged_without_retry_or_refresh() {
     for error_type in [
+        "authentication_error",
         "invalid_request_error",
         "permission_error",
-        "rate_limit_error",
     ] {
         let broker = broker_with(
             CredentialAuthKind::OAuth,
@@ -254,11 +206,13 @@ async fn a_401_that_is_not_an_authentication_refusal_is_returned_and_marks_nothi
             error_type,
         );
         let response = broker.execute(request(Uuid::new_v4())).await.unwrap();
-        assert!(broker.leases.rejections.lock().unwrap().is_empty());
         assert_eq!(broker.upstream.requests.lock().unwrap().len(), 1);
+        assert_eq!(broker.leases.reads.load(Ordering::Relaxed), 1);
         let (status, _, body) = response.into_parts();
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(read(body).await, redacted_error(error_type));
+        let bytes = read(body).await;
+        assert!(!bytes.windows(TOKEN.len()).any(|window| window == TOKEN));
+        assert_eq!(bytes, redacted_error(error_type));
     }
 }
 
@@ -272,7 +226,6 @@ async fn an_api_key_401_is_returned_unchanged_and_marks_nothing() {
     assert!(!headers.contains_key("authorization"));
     assert!(!headers.contains_key("x-app"));
     assert_eq!(headers["anthropic-beta"], "claude-code-20250219");
-    assert!(broker.leases.rejections.lock().unwrap().is_empty());
     let (status, _, body) = response.into_parts();
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(read(body).await, redacted_error("authentication_error"));

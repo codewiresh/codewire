@@ -519,13 +519,10 @@ async fn generated_claude_subscription_token_import_is_personal_write_only_and_r
         }
         ensure!(h.store.record(&owner, &id).await? == record);
 
-        // A token the provider refused is replaced in place, reactivated and
-        // given a new one-year expiry; profile references keep its identity.
-        let rejected = h
-            .store
-            .reject_subscription_token(&owner, &id, record.version)
-            .await?;
-        ensure!(rejected.metadata.status == codewire_access::CredentialStatus::RefreshFailed);
+        // A revoked token is replaced in place, reactivated and given a new
+        // one-year expiry; profile references keep its identity.
+        let revoked = h.store.revoke(&owner, &id, record.version).await?;
+        ensure!(revoked.metadata.status == codewire_access::CredentialStatus::Revoked);
         let (status, response) = h
             .rpc
             .add_claude_subscription_token(

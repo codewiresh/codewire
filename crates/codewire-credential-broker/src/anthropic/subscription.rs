@@ -13,8 +13,9 @@
 //! lease), size limits, identity-only codings and AV redaction of the injected
 //! token and its derived encodings. The differences, all for this form only:
 //!
-//! - `Authorization` replaces `x-api-key`. The caller's own `Authorization` may
-//!   only be absent or exactly the placeholder; it is never forwarded.
+//! - `Authorization` replaces `x-api-key`. The caller must present exactly one
+//!   `Authorization: Bearer codewire-managed`, the placeholder Claude Code
+//!   sends in subscription mode; it is never forwarded.
 //! - `anthropic-beta` always carries `oauth-2025-04-20`, which the provider
 //!   requires for an OAuth bearer; it is appended when the caller omitted it.
 //! - Claude Code's bounded client-identity headers are forwarded. Probed
@@ -25,7 +26,8 @@
 //!   without them differently, and Claude Code sends the same values when it
 //!   talks to the provider directly, so forwarding them discloses nothing a
 //!   stock login would not. They are non-secret, length-bounded and exactly
-//!   named; a malformed or repeated one is denied rather than dropped.
+//!   named. A malformed or repeated one is dropped, never forwarded, so a
+//!   Claude Code release that changes one degrades instead of failing.
 //!   Claude Code's SDK telemetry (`x-stainless-*`) is still dropped.
 //! - The provider's unified subscription rate-limit headers, which Claude Code
 //!   reads to show plan usage limits, are returned after redaction.
@@ -37,7 +39,7 @@ use av_credential_proxy::{
     prepare_credentials, prepare_outbound_headers, validate_proxy_route,
 };
 use codewire_access::CredentialAuthKind;
-use http::{HeaderMap, HeaderValue, header};
+use http::{HeaderMap, HeaderName, HeaderValue, header};
 
 use super::{
     AnthropicOperation, MAX_COUNT_RESPONSE_BYTES, MAX_KEY_BYTES, MAX_REQUEST_BYTES,
@@ -52,13 +54,6 @@ const CREDENTIAL_KEY: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 pub(crate) const OAUTH_BETA: &str = "oauth-2025-04-20";
 /// The Sandbox's projected `CLAUDE_CODE_OAUTH_TOKEN`, as Claude Code sends it.
 const PLACEHOLDER_AUTHORIZATION: &[u8] = b"Bearer codewire-managed";
-/// Claude Code's client identity headers forwarded for this form. `user-agent`
-/// is constructed separately because AV never allowlists it.
-const IDENTITY_HEADERS: &[&str] = &[
-    "x-app",
-    "anthropic-dangerous-direct-browser-access",
-    "x-claude-code-session-id",
-];
 const MAX_USER_AGENT_BYTES: usize = 256;
 const MAX_APP_BYTES: usize = 32;
 const MAX_SESSION_ID_BYTES: usize = 64;
@@ -118,15 +113,16 @@ impl AnthropicSubscriptionTokenAdapter {
     }
 
     /// Consume one exact operation lease for an Active Claude subscription
-    /// token. Every lease coordinate and the caller's placeholder and identity
-    /// headers are checked before the material is borrowed.
+    /// token. Every lease coordinate and the caller's placeholder are checked,
+    /// and its identity headers selected, before the material is borrowed.
     pub fn prepare_validated<L: BrokerCredentialLease>(
         &self,
         lease: L,
         request: ValidatedAnthropicRequest,
     ) -> Result<PreparedAnthropicRequest, CredentialBrokerError> {
         validate_lease_kind(&lease, request.operation, CredentialAuthKind::OAuth)?;
-        let user_agent = client_identity(&request.headers)?;
+        require_placeholder(&request.headers)?;
+        let identity = client_identity(&request.headers);
         let beta = with_oauth_beta(request.headers.get("anthropic-beta"))?;
         let target = build_target_url(&self.route, &request.request)
             .map_err(|_| CredentialBrokerError::InvalidProviderPolicy)?;
@@ -143,8 +139,10 @@ impl AnthropicSubscriptionTokenAdapter {
                 .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
             let mut headers = prepare_outbound_headers(&self.route, &request.headers, &prepared)
                 .map_err(|_| CredentialBrokerError::RequestDenied)?;
-            if let Some(user_agent) = user_agent {
-                headers.insert(header::USER_AGENT, user_agent);
+            // AV copies none of these; only the bounded values selected above
+            // are forwarded.
+            for (name, value) in identity {
+                headers.insert(name, value);
             }
             headers.insert("anthropic-beta", beta);
             headers.insert(
@@ -185,56 +183,59 @@ impl CredentialSource for Token<'_> {
     }
 }
 
-/// Accept only the projected placeholder as the caller's bearer, and admit
-/// Claude Code's identity headers only in their exact bounded forms. Returns
-/// the validated `user-agent`, which is forwarded outside AV's allowlist.
-fn client_identity(headers: &HeaderMap) -> Result<Option<HeaderValue>, CredentialBrokerError> {
-    let denied = CredentialBrokerError::RequestDenied;
-    let single = |name: &str| -> Result<Option<&HeaderValue>, CredentialBrokerError> {
-        let mut values = headers.get_all(name).iter();
-        let value = values.next();
-        if values.next().is_some() {
-            return Err(denied);
-        }
-        Ok(value)
-    };
-    if single(header::AUTHORIZATION.as_str())?
-        .is_some_and(|value| value.as_bytes() != PLACEHOLDER_AUTHORIZATION)
-    {
-        return Err(denied);
+/// The caller's one bearer must be exactly the projected placeholder: a
+/// missing, repeated or different `Authorization` is denied.
+fn require_placeholder(headers: &HeaderMap) -> Result<(), CredentialBrokerError> {
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    match (values.next(), values.next()) {
+        (Some(value), None) if value.as_bytes() == PLACEHOLDER_AUTHORIZATION => Ok(()),
+        _ => Err(CredentialBrokerError::RequestDenied),
     }
-    let visible = |value: &HeaderValue, maximum: usize, allowed: fn(u8) -> bool| {
+}
+
+/// Claude Code's identity headers that are present exactly once in their
+/// bounded form. Anything else is dropped, never forwarded, and never fails
+/// the request.
+fn client_identity(headers: &HeaderMap) -> Vec<(HeaderName, HeaderValue)> {
+    fn visible(value: &HeaderValue, maximum: usize, allowed: fn(u8) -> bool) -> bool {
         let bytes = value.as_bytes();
         !bytes.is_empty() && bytes.len() <= maximum && bytes.iter().copied().all(allowed)
-    };
-    let user_agent = single(header::USER_AGENT.as_str())?;
-    if user_agent.is_some_and(|value| {
-        !visible(value, MAX_USER_AGENT_BYTES, |byte| {
-            (0x20..0x7f).contains(&byte)
+    }
+    type Check = fn(&HeaderValue) -> bool;
+    let checks: [(HeaderName, Check); 4] = [
+        (header::USER_AGENT, |value| {
+            visible(value, MAX_USER_AGENT_BYTES, |byte| {
+                (0x20..0x7f).contains(&byte)
+            })
+        }),
+        (HeaderName::from_static("x-app"), |value| {
+            visible(value, MAX_APP_BYTES, |byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+            })
+        }),
+        (
+            HeaderName::from_static("anthropic-dangerous-direct-browser-access"),
+            |value| value.as_bytes() == b"true",
+        ),
+        (
+            HeaderName::from_static("x-claude-code-session-id"),
+            |value| {
+                visible(value, MAX_SESSION_ID_BYTES, |byte| {
+                    byte.is_ascii_alphanumeric() || byte == b'-'
+                })
+            },
+        ),
+    ];
+    checks
+        .into_iter()
+        .filter_map(|(name, valid)| {
+            let mut values = headers.get_all(&name).iter();
+            match (values.next(), values.next()) {
+                (Some(value), None) if valid(value) => Some((name, value.clone())),
+                _ => None,
+            }
         })
-    }) {
-        return Err(denied);
-    }
-    if single("x-app")?.is_some_and(|value| {
-        !visible(value, MAX_APP_BYTES, |byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-        })
-    }) {
-        return Err(denied);
-    }
-    if single("anthropic-dangerous-direct-browser-access")?
-        .is_some_and(|value| value.as_bytes() != b"true")
-    {
-        return Err(denied);
-    }
-    if single("x-claude-code-session-id")?.is_some_and(|value| {
-        !visible(value, MAX_SESSION_ID_BYTES, |byte| {
-            byte.is_ascii_alphanumeric() || byte == b'-'
-        })
-    }) {
-        return Err(denied);
-    }
-    Ok(user_agent.cloned())
+        .collect()
 }
 
 /// The caller's already validated beta list with the OAuth flag present
@@ -271,11 +272,7 @@ fn route() -> ProxyRouteConfig {
         allowed_methods: vec!["POST".into()],
         allowed_exact_paths: vec!["/messages".into(), "/messages/count_tokens".into()],
         allowed_path_prefixes: Vec::new(),
-        allowed_request_headers: REQUEST_HEADERS
-            .iter()
-            .chain(IDENTITY_HEADERS)
-            .map(|name| (*name).into())
-            .collect(),
+        allowed_request_headers: REQUEST_HEADERS.iter().map(|name| (*name).into()).collect(),
         allowed_response_headers: response_headers()
             .iter()
             .map(|name| (*name).into())

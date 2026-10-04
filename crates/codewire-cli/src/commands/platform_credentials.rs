@@ -8,11 +8,11 @@ use super::credential_input::{
     ParsedCredentialSelector, parse_credential_selector, prompt_credential_material,
     prompt_named_material, read_ssh_import, validate_ssh_generation, validate_ssh_import,
 };
+use super::*;
 
 /// The `add` provider word for a Claude subscription token: the anthropic
 /// provider's OAuth kind, enrolled by paste.
 const CLAUDE_SUBSCRIPTION: &str = "claude-subscription";
-use super::*;
 
 pub(super) async fn handle(
     client: &CodewireClient,
@@ -544,18 +544,11 @@ fn print(credentials: &[rpc::Credential], output: OutputFormat) -> anyhow::Resul
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(credentials)?),
         OutputFormat::Text => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
             for credential in credentials {
-                let status = if credential.status == rpc::CredentialStatus::Active {
-                    "active"
-                } else if credential.status == rpc::CredentialStatus::Revoked {
-                    "revoked"
-                } else if credential.status == rpc::CredentialStatus::Expired {
-                    "expired"
-                } else if credential.status == rpc::CredentialStatus::RefreshFailed {
-                    "refresh_failed"
-                } else {
-                    anyhow::bail!("platform returned an unsupported credential status")
-                };
+                let status = text_status(credential, now)?;
                 let provider = if is_subscription_token(credential) {
                     "anthropic (Claude subscription token)"
                 } else {
@@ -569,10 +562,8 @@ fn print(credentials: &[rpc::Credential], output: OutputFormat) -> anyhow::Resul
                     status,
                     credential.revocation_generation
                 );
-                if is_subscription_token(credential)
-                    && let Some(expiry) = credential.expires_at_unix
-                {
-                    println!("  expires at Unix timestamp {expiry}");
+                if let Some(expiry) = credential.expires_at_unix.and_then(expiry_date) {
+                    println!("  expires {expiry}");
                 }
                 if let Some(key) = credential.ssh_public_key.as_option() {
                     println!("  {}\n  {}", key.openssh, key.fingerprint);
@@ -581,6 +572,37 @@ fn print(credentials: &[rpc::Credential], output: OutputFormat) -> anyhow::Resul
         }
     }
     Ok(())
+}
+
+/// The status `list` and `get` print. The broker withholds a credential past
+/// its recorded hard expiry whatever its stored status, so an Active one past
+/// that moment reads expired.
+fn text_status(credential: &rpc::Credential, now: u64) -> anyhow::Result<&'static str> {
+    Ok(if credential.status == rpc::CredentialStatus::Active {
+        if credential
+            .expires_at_unix
+            .is_some_and(|expiry| expiry <= now)
+        {
+            "expired"
+        } else {
+            "active"
+        }
+    } else if credential.status == rpc::CredentialStatus::Revoked {
+        "revoked"
+    } else if credential.status == rpc::CredentialStatus::Expired {
+        "expired"
+    } else if credential.status == rpc::CredentialStatus::RefreshFailed {
+        "refresh_failed"
+    } else {
+        anyhow::bail!("platform returned an unsupported credential status")
+    })
+}
+
+/// A recorded hard expiry as a UTC date and time.
+fn expiry_date(expiry: u64) -> Option<String> {
+    let expiry = i64::try_from(expiry).ok()?;
+    chrono::DateTime::<chrono::Utc>::from_timestamp(expiry, 0)
+        .map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string())
 }
 
 #[cfg(test)]
@@ -691,6 +713,26 @@ mod tests {
         // An API-key add never accepts the subscription provider word.
         assert!(validate_key_arguments(&args(None, None, false)).is_err());
         assert!(CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE.contains("claude setup-token"));
+    }
+
+    #[test]
+    fn listed_status_reads_expired_past_the_recorded_expiry_with_a_date() {
+        let mut credential = metadata(rpc::CredentialStatus::Active);
+        credential.provider = "anthropic".into();
+        credential.authentication_kind = rpc::CredentialAuthenticationKind::Oauth.into();
+        credential.expires_at_unix = Some(1_800_000_000);
+        assert_eq!(text_status(&credential, 1_799_999_999).unwrap(), "active");
+        assert_eq!(text_status(&credential, 1_800_000_000).unwrap(), "expired");
+        credential.status = rpc::CredentialStatus::Revoked.into();
+        assert_eq!(text_status(&credential, 1_900_000_000).unwrap(), "revoked");
+        credential.expires_at_unix = None;
+        credential.status = rpc::CredentialStatus::Active.into();
+        assert_eq!(text_status(&credential, u64::MAX).unwrap(), "active");
+        assert_eq!(
+            expiry_date(1_800_000_000).as_deref(),
+            Some("2027-01-15 08:00 UTC")
+        );
+        assert_eq!(expiry_date(u64::MAX), None);
     }
 
     #[tokio::test]

@@ -89,18 +89,6 @@ pub enum BrokerCredentialRefreshKind {
     GitHubAppUserOAuth,
 }
 
-/// Metadata-only description of one exact Claude subscription token
-/// generation the provider refused. It names the admitted request and grant;
-/// it carries no material and is not itself authority to change anything.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BrokerCredentialRejection {
-    pub request_id: Uuid,
-    pub grant: DerivedGrant,
-    pub operation: BrokerOperationId,
-    pub route: BrokerRouteId,
-    pub material_generation: u64,
-}
-
 /// Refresh ownership or completion of a previously staged result.
 /// Recovery carries no material or authority to execute a provider operation.
 pub enum BrokerRefreshAdmission<R> {
@@ -195,18 +183,6 @@ pub trait BrokerLeaseProvider: Send + Sync {
         &self,
         _permit: Self::StartedRefresh,
         _material: GitHubAppUserOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
-        Err(BrokerRefreshError::Denied)
-    }
-
-    /// Mark the exact admitted generation of a Claude subscription token as
-    /// needing a new token after the provider refused it with 401. Such a token
-    /// has no refresh: the placement rederives the original grant, requires
-    /// the same Active Anthropic OAuth version, and marks it Reconnect needed.
-    /// Placements that hold no subscription tokens deny.
-    async fn reject_credential(
-        &self,
-        _rejection: BrokerCredentialRejection,
     ) -> Result<(), BrokerRefreshError> {
         Err(BrokerRefreshError::Denied)
     }
@@ -1352,28 +1328,17 @@ where
         validate_http_lease_coordinates(&lease, &request.slot, &operation, &request.route)?;
         // The validated request is form-independent; the lease's credential
         // kind selects the API key or the Claude subscription token adapter.
-        let (prepared, rejection) = match lease.credential_metadata().authentication_kind {
-            CredentialAuthKind::ApiKey => (
-                self.anthropic_adapter
-                    .prepare_validated(lease, validated)
-                    .map_err(map_adapter_error)?,
-                None,
-            ),
-            CredentialAuthKind::OAuth => {
-                let rejection = BrokerCredentialRejection {
-                    request_id: request.request_id,
-                    grant: lease.grant().clone(),
-                    operation: operation.clone(),
-                    route: request.route.clone(),
-                    material_generation: lease.material_generation(),
-                };
-                (
-                    self.anthropic_subscription_adapter
-                        .prepare_validated(lease, validated)
-                        .map_err(map_adapter_error)?,
-                    Some(rejection),
-                )
-            }
+        // Neither form is refreshed, and no provider response marks, deletes
+        // or withholds either: its owner replaces it.
+        let prepared = match lease.credential_metadata().authentication_kind {
+            CredentialAuthKind::ApiKey => self
+                .anthropic_adapter
+                .prepare_validated(lease, validated)
+                .map_err(map_adapter_error)?,
+            CredentialAuthKind::OAuth => self
+                .anthropic_subscription_adapter
+                .prepare_validated(lease, validated)
+                .map_err(map_adapter_error)?,
             _ => return Err(BrokerRequestError::Denied),
         };
         let (method, target, headers, body, policy) = prepared.into_parts();
@@ -1388,37 +1353,9 @@ where
         )
         .await
         .map_err(map_upstream_error)?;
-        let (status, headers, mut body) = response.into_parts();
+        let (status, headers, body) = response.into_parts();
         if status.is_informational() {
             return Err(BrokerRequestError::UpstreamFailed);
-        }
-        if status == StatusCode::UNAUTHORIZED
-            && let Some(rejection) = rejection
-        {
-            let (refused, replay) = subscription_token_refused(body).await;
-            body = replay;
-            if refused {
-                // A subscription token has no refresh. The provider refused
-                // this exact generation (expired early or revoked at
-                // claude.ai), so only its owner can supply a new one: mark it
-                // Reconnect needed and answer with the fixed explanation,
-                // never a 401 the stock client would read as its own login
-                // having expired. The provider body is dropped. A concurrent
-                // request may already have marked it.
-                drop(body);
-                match self.leases.reject_credential(rejection).await {
-                    Ok(()) => tracing::warn!(
-                        provider = "anthropic",
-                        "provider refused a Claude subscription token; it needs a new token"
-                    ),
-                    Err(error) => tracing::warn!(
-                        provider = "anthropic",
-                        error = %error,
-                        "provider refused a Claude subscription token; marking it could not be recorded"
-                    ),
-                }
-                return Err(BrokerRequestError::ReconnectRequired);
-            }
         }
         let (headers, redactor) = policy.begin(&headers).map_err(map_adapter_error)?;
         Ok(BrokerHttpResponse::new(
@@ -2220,51 +2157,6 @@ impl ValidatedGuestRequest {
             body: request.body,
         })
     }
-}
-
-/// Upper bound on the provider body inspected after a subscription-token 401.
-/// The provider's error object is far smaller; a longer body is not a refusal.
-const MAX_SUBSCRIPTION_REFUSAL_BYTES: usize = 64 * 1024;
-
-/// Whether a 401 body is the provider's authentication refusal of the token
-/// itself (`{"type":"error","error":{"type":"authentication_error",...}}`),
-/// and the same body for ordinary delivery when it is not. Only that exact
-/// error type marks the credential; any other 401 is answered unchanged, so a
-/// request a Sandbox process shapes cannot disable its owner's token. Nothing
-/// read here is logged, and the inspected copy is zeroized.
-async fn subscription_token_refused(mut body: BrokerUpstreamBody) -> (bool, BrokerUpstreamBody) {
-    let mut inspected = Zeroizing::new(Vec::new());
-    let mut chunks = Vec::new();
-    let mut ended = false;
-    while inspected.len() <= MAX_SUBSCRIPTION_REFUSAL_BYTES {
-        match body.next().await {
-            Some(Ok(chunk)) => {
-                inspected.extend_from_slice(&chunk);
-                chunks.push(Ok(chunk));
-            }
-            Some(Err(error)) => {
-                chunks.push(Err(error));
-                ended = true;
-                break;
-            }
-            None => {
-                ended = true;
-                break;
-            }
-        }
-    }
-    let refused = ended
-        && !chunks.iter().any(Result::is_err)
-        && serde_json::from_slice::<serde_json::Value>(&inspected).is_ok_and(|value| {
-            value["type"] == "error" && value["error"]["type"] == "authentication_error"
-        });
-    let buffered = futures::stream::iter(chunks);
-    let replay: BrokerUpstreamBody = if ended {
-        Box::pin(buffered)
-    } else {
-        Box::pin(buffered.chain(body))
-    };
-    (refused, replay)
 }
 
 fn validate_http_lease_coordinates(

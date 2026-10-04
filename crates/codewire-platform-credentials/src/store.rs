@@ -463,44 +463,6 @@ impl PlatformCredentialStore {
         })
     }
 
-    /// A Claude subscription token has no refresh. When the provider refuses
-    /// the exact admitted version, only its owner can supply a new token: mark
-    /// that version `refresh_failed` (Reconnect needed), advance its revocation
-    /// generation so no admitted lease or reused epoch value survives, and
-    /// remove the refused material. Another version, kind or status is stale
-    /// and changes nothing. This is not a provider call or logout.
-    pub async fn reject_subscription_token(
-        &self,
-        owner: &Owner,
-        id: &CredentialId,
-        expected: CredentialVersion,
-    ) -> Result<CredentialRecord, Error> {
-        expected.validate()?;
-        let mut tx = self.reader.pool.begin().await.map_err(database_error)?;
-        let current = self.record_for_update_in(&mut tx, owner, id).await?;
-        if !is_subscription_token(&current.metadata) {
-            return Err(Error::UnsupportedCredential);
-        }
-        compare_version(&current, expected)?;
-        if current.metadata.status != CredentialStatus::Active {
-            return Err(Error::StaleVersion);
-        }
-        let next = expected.revoked()?;
-        delete_material(&mut tx, id).await?;
-        sqlx::query(
-            "UPDATE platform_credentials SET status='refresh_failed', revocation_generation=$2, \
-             updated_at=now() WHERE id=$1",
-        )
-        .bind(id.as_str())
-        .bind(generation(next.revocation_generation)?)
-        .execute(&mut *tx)
-        .await
-        .map_err(database_error)?;
-        let record = load_record(&mut *tx, owner, id, false, &self.reader.catalog).await?;
-        tx.commit().await.map_err(database_error)?;
-        Ok(record)
-    }
-
     /// Publish an already obtained OAuth refresh result, not a provider refresh
     /// operation or a cross-replica refresh lock. A broker must serialize its
     /// external refresh operation separately. Stale results never reactivate a

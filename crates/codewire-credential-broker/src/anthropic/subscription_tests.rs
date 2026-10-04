@@ -258,16 +258,15 @@ fn the_oauth_beta_is_added_once_when_the_caller_omits_it() {
 }
 
 #[test]
-fn only_an_absent_or_exact_placeholder_bearer_is_accepted_and_never_forwarded() {
-    let mut absent = claude_code_headers();
-    absent.remove(header::AUTHORIZATION);
+fn only_the_exact_placeholder_bearer_is_accepted_and_never_forwarded() {
     // A caller's API key header is dropped, never forwarded or substituted.
-    absent.insert("x-api-key", HeaderValue::from_static("guest-controlled"));
+    let mut headers = claude_code_headers();
+    headers.insert("x-api-key", HeaderValue::from_static("guest-controlled"));
     let (_, _, outbound, _, _) = prepare(
         Lease::new(AnthropicOperation::Messages),
         "/messages",
         None,
-        absent,
+        headers,
     )
     .unwrap()
     .into_parts();
@@ -278,6 +277,11 @@ fn only_an_absent_or_exact_placeholder_bearer_is_accepted_and_never_forwarded() 
     assert!(!outbound.contains_key("x-api-key"));
     assert!(!outbound.values().any(|value| value == "guest-controlled"));
 
+    // Claude Code in subscription mode always sends the placeholder; a
+    // request without it is not from the projected client and is denied.
+    let mut absent = claude_code_headers();
+    absent.remove(header::AUTHORIZATION);
+    denied_before_material(absent);
     for value in [
         "Bearer sk-ant-oat01-guest-supplied",
         "Bearer codewire-managed ",
@@ -298,8 +302,38 @@ fn only_an_absent_or_exact_placeholder_bearer_is_accepted_and_never_forwarded() 
     denied_before_material(duplicate);
 }
 
+/// The forwarded identity headers after preparing `headers`.
+fn forwarded_identity(headers: HeaderMap) -> BTreeSet<String> {
+    let lease = Lease::new(AnthropicOperation::Messages);
+    let accessed = lease.accessed.clone();
+    let (_, _, outbound, _, _) = prepare(lease, "/messages", None, headers)
+        .unwrap()
+        .into_parts();
+    assert_eq!(accessed.get(), 1);
+    [
+        "user-agent",
+        "x-app",
+        "anthropic-dangerous-direct-browser-access",
+        "x-claude-code-session-id",
+    ]
+    .into_iter()
+    .filter(|name| outbound.contains_key(*name))
+    .map(str::to_owned)
+    .collect()
+}
+
 #[test]
-fn claude_code_identity_headers_are_exact_bounded_single_values() {
+fn malformed_or_repeated_identity_headers_are_dropped_and_the_request_proceeds() {
+    let all = BTreeSet::from(
+        [
+            "anthropic-dangerous-direct-browser-access",
+            "user-agent",
+            "x-app",
+            "x-claude-code-session-id",
+        ]
+        .map(str::to_owned),
+    );
+    assert_eq!(forwarded_identity(claude_code_headers()), all);
     let long_user_agent = format!("claude-cli/{}", "9".repeat(MAX_USER_AGENT_BYTES));
     let long_session = "a".repeat(MAX_SESSION_ID_BYTES + 1);
     let long_app = "a".repeat(MAX_APP_BYTES + 1);
@@ -320,14 +354,18 @@ fn claude_code_identity_headers_are_exact_bounded_single_values() {
             HeaderName::from_static(name),
             HeaderValue::from_str(value).unwrap(),
         );
-        denied_before_material(headers);
+        let mut expected = all.clone();
+        expected.remove(name);
+        assert_eq!(forwarded_identity(headers), expected, "{name}: {value:?}");
     }
     let mut non_ascii = claude_code_headers();
     non_ascii.insert(
         header::USER_AGENT,
         HeaderValue::from_bytes(b"claude-cli/\x80").unwrap(),
     );
-    denied_before_material(non_ascii);
+    let mut expected = all.clone();
+    expected.remove("user-agent");
+    assert_eq!(forwarded_identity(non_ascii), expected);
     for name in [
         "user-agent",
         "x-app",
@@ -337,17 +375,14 @@ fn claude_code_identity_headers_are_exact_bounded_single_values() {
         let mut duplicate = claude_code_headers();
         let value = duplicate[name].clone();
         duplicate.append(HeaderName::from_static(name), value);
-        denied_before_material(duplicate);
+        let mut expected = all.clone();
+        expected.remove(name);
+        assert_eq!(forwarded_identity(duplicate), expected, "{name}");
     }
     // Each identity header is optional; absent ones are simply not sent.
     let mut minimal = claude_code_headers();
-    for name in [
-        "user-agent",
-        "x-app",
-        "anthropic-dangerous-direct-browser-access",
-        "x-claude-code-session-id",
-    ] {
-        minimal.remove(name);
+    for name in &all {
+        minimal.remove(name.as_str());
     }
     let (_, _, outbound, _, _) = prepare(
         Lease::new(AnthropicOperation::Messages),

@@ -1850,7 +1850,7 @@ mod tests {
         assert!(!add.contains("name=\"credential_id\""));
         assert!(html.contains("<strong id=\"add-claude-subscription-token-choice-name\">Claude subscription token</strong><span id=\"add-claude-subscription-token-choice-description\">Use your Claude plan with Claude Code. Paste a token from claude setup-token.</span>"));
 
-        // A refused or expired token offers its replacement on the row itself.
+        // An expired token offers its replacement on the row itself.
         let mut data = dialog_data();
         data.credentials.push(subscription_row(id, true));
         let html = rendered_dialogs_with_data("", "", data);

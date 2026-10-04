@@ -1355,8 +1355,7 @@ async fn invalid_registration_versions_and_database_inputs_are_value_blind() -> 
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn claude_subscription_token_rejection_needs_its_owner_and_replacement_resets_expiry()
--> Result<()> {
+async fn claude_subscription_token_has_no_refresh_and_only_its_owner_replaces_it() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
         let owner = db.user("claude-subscription-owner").await?;
@@ -1380,27 +1379,18 @@ async fn claude_subscription_token_rejection_needs_its_owner_and_replacement_res
         let id = &token.metadata.id;
         ensure!(token.metadata.status == CredentialStatus::Active);
 
-        // Neither another owner nor a stale version can mark it.
+        // There is no refresh: the refresh publication path refuses it.
         ensure!(
             store
-                .reject_subscription_token(&other, id, token.version)
+                .publish_oauth_refresh(&owner, id, token.version, &value(NEW_VALUE))
                 .await
                 .err()
-                == Some(Error::NotFound)
+                == Some(Error::UnsupportedCredential)
         );
-        let stale = CredentialVersion {
-            revocation_generation: token.version.revocation_generation + 1,
-            ..token.version
-        };
-        ensure!(
-            store
-                .reject_subscription_token(&owner, id, stale)
-                .await
-                .err()
-                == Some(Error::StaleVersion)
-        );
-        // Other kinds are never marked this way, and none of this is a
-        // refresh: a subscription token has no refresh path.
+        ensure!(store.record(&owner, id).await? == token);
+
+        // Replacement is the owner's: another owner, a past expiry and an API
+        // key are refused before any change.
         let api_key = store
             .create(
                 &owner,
@@ -1414,62 +1404,9 @@ async fn claude_subscription_token_rejection_needs_its_owner_and_replacement_res
             .await?;
         ensure!(
             store
-                .reject_subscription_token(&owner, &api_key.metadata.id, api_key.version)
-                .await
-                .err()
-                == Some(Error::UnsupportedCredential)
-        );
-        ensure!(
-            store
-                .publish_oauth_refresh(&owner, id, token.version, &value(NEW_VALUE))
-                .await
-                .err()
-                == Some(Error::UnsupportedCredential)
-        );
-
-        // The provider refused the exact admitted version.
-        let rejected = store
-            .reject_subscription_token(&owner, id, token.version)
-            .await?;
-        ensure!(rejected.metadata.status == CredentialStatus::RefreshFailed);
-        ensure!(rejected.version.revocation_generation == token.version.revocation_generation + 1);
-        ensure!(rejected.version.material_generation == token.version.material_generation);
-        ensure!(rejected.metadata.expires_at_unix == token.metadata.expires_at_unix);
-        ensure!(
-            store
-                .read_for_broker(&owner, id, token.version)
-                .await
-                .is_err()
-        );
-        ensure!(
-            store
-                .read_for_broker(&owner, id, rejected.version)
-                .await
-                .is_err()
-        );
-        // Repeating it changes nothing.
-        ensure!(
-            store
-                .reject_subscription_token(&owner, id, token.version)
-                .await
-                .err()
-                == Some(Error::StaleVersion)
-        );
-        ensure!(
-            store
-                .reject_subscription_token(&owner, id, rejected.version)
-                .await
-                .err()
-                == Some(Error::StaleVersion)
-        );
-
-        // Its owner pastes a new token: the same identity is reactivated with
-        // the new token's expiry, and only that token is readable.
-        ensure!(
-            store
                 .prepare_subscription_token_replacement(
                     &other,
-                    &rejected,
+                    &token,
                     &value(NEW_VALUE),
                     4_100_000_000
                 )
@@ -1479,7 +1416,7 @@ async fn claude_subscription_token_rejection_needs_its_owner_and_replacement_res
         );
         ensure!(
             store
-                .prepare_subscription_token_replacement(&owner, &rejected, &value(NEW_VALUE), 1)
+                .prepare_subscription_token_replacement(&owner, &token, &value(NEW_VALUE), 1)
                 .await
                 .err()
                 == Some(Error::InvalidInput)
@@ -1496,10 +1433,14 @@ async fn claude_subscription_token_rejection_needs_its_owner_and_replacement_res
                 .err()
                 == Some(Error::UnsupportedCredential)
         );
+
+        // Even a revoked token is replaced in place: the same identity is
+        // reactivated with the new token's expiry, and only that token reads.
+        let revoked = store.revoke(&owner, id, token.version).await?;
         let prepared = store
             .prepare_subscription_token_replacement(
                 &owner,
-                &rejected,
+                &revoked,
                 &value(NEW_VALUE),
                 4_100_000_000,
             )
@@ -1512,7 +1453,13 @@ async fn claude_subscription_token_rejection_needs_its_owner_and_replacement_res
         ensure!(replaced.metadata.status == CredentialStatus::Active);
         ensure!(replaced.metadata.expires_at_unix == Some(4_100_000_000));
         ensure!(
-            replaced.version.revocation_generation == rejected.version.revocation_generation + 1
+            replaced.version.revocation_generation == revoked.version.revocation_generation + 1
+        );
+        ensure!(
+            store
+                .read_for_broker(&owner, id, token.version)
+                .await
+                .is_err()
         );
         ensure!(
             store

@@ -1140,11 +1140,11 @@ fn build_settings_data_at(
             api_key: matches!(form, "openai" | "anthropic"),
             oauth: matches!(form, "codex" | "github"),
             subscription_token: form == "claude",
-            // A subscription token has no refresh: only a new token from its
-            // owner restores one the provider refused or that has expired.
+            // A subscription token has no refresh and no provider answer
+            // marks it: only its recorded expiry asks its owner for a new one.
             reconnect_needed: (matches!(form, "codex" | "github")
                 && credential.status == CredentialStatus::RefreshFailed)
-                || (form == "claude" && withheld && !revoked),
+                || (form == "claude" && credential.status == CredentialStatus::Active && withheld),
             revoked,
             expires,
             generation: credential.revocation_generation,
@@ -1846,8 +1846,6 @@ mod tests {
         soon.expires_at_unix = Some(NOW + 10 * DAY);
         let mut expired = token(3, "Claude expired");
         expired.expires_at_unix = Some(NOW - 1);
-        let mut refused = token(4, "Claude refused");
-        refused.status = CredentialStatus::RefreshFailed.into();
         let mut revoked = token(5, "Claude revoked");
         revoked.status = CredentialStatus::Revoked.into();
         let key = credential(
@@ -1871,8 +1869,8 @@ mod tests {
             ..Default::default()
         };
         let data = build_settings_data_at(
-            vec![active.clone(), soon, expired, refused, revoked, key.clone()],
-            (1..=6).map(|n| profile(10 + n, n)).collect(),
+            vec![active.clone(), soon, expired, revoked, key.clone()],
+            [1, 2, 3, 5, 6].map(|n| profile(10 + n, n)).into(),
             NOW,
         )
         .unwrap();
@@ -1882,7 +1880,7 @@ mod tests {
                 .find(|row| row.id == id(n))
                 .expect("credential row")
         };
-        for n in 1..=5 {
+        for n in [1, 2, 3, 5] {
             let row = row(n);
             assert_eq!(row.provider, "Anthropic");
             assert_eq!(row.authentication, "Claude subscription token");
@@ -1899,7 +1897,6 @@ mod tests {
             (1, "Active", "success", false),
             (2, "Expires soon", "warning", false),
             (3, "Expired", "warning", true),
-            (4, "Reconnect needed", "warning", true),
             (5, "Revoked", "danger", false),
         ] {
             assert_eq!((row(n).status, row(n).status_tone), (status, tone), "{n}");
@@ -1908,7 +1905,7 @@ mod tests {
         assert!(row(1).expires.contains("2027"));
         // Tokens are Anthropic choices beside the API key; none is offered
         // for another slot.
-        assert_eq!(data.choices.anthropic.len(), 6);
+        assert_eq!(data.choices.anthropic.len(), 5);
         assert!(data.choices.codex.is_empty() && data.choices.openai.is_empty());
         let attention = |n: u8| {
             data.profiles
@@ -1920,10 +1917,9 @@ mod tests {
         };
         let notice = ["Claude subscription token needs replacing"];
         assert!(attention(1).is_empty());
-        // Expiring soon still works; expired, refused and revoked do not.
+        // Expiring soon still works; expired and revoked do not.
         assert!(attention(2).is_empty());
         assert_eq!(attention(3), notice);
-        assert_eq!(attention(4), notice);
         assert_eq!(attention(5), notice);
         assert!(attention(6).is_empty());
         let entry = data
