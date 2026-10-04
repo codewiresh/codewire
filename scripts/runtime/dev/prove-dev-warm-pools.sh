@@ -254,11 +254,24 @@ wait_ready() {
 }
 
 create_env() { # CPU -> environment id
-  local cpu="$1" name out="$TMPDIR_PROOF/create-$RANDOM.out" id
+  local cpu="$1" name out="$TMPDIR_PROOF/create-$RANDOM.out" id attempt
   name="warm-pool-proof-$(date +%s)-$RANDOM"
-  cw env create --image "$PROOF_IMAGE" --name "$name" --cpu "$cpu" \
-    --memory "$PROOF_MEMORY" --disk "$PROOF_DISK" --isolation standard --ttl "$PROOF_TTL" \
-    --no-network --no-wait --yes >"$out" 2>&1 || { sed 's/[[:cntrl:]]//g' "$out" >&2; return 1; }
+  # The per-user create limit (10 per 60 s) resets only after 60 s without a
+  # create; twenty hits exhaust it, so later journeys wait out the window.
+  for attempt in 1 2 3; do
+    if cw env create --image "$PROOF_IMAGE" --name "$name" --cpu "$cpu" \
+      --memory "$PROOF_MEMORY" --disk "$PROOF_DISK" --isolation standard --ttl "$PROOF_TTL" \
+      --no-network --no-wait --yes >"$out" 2>&1; then
+      break
+    fi
+    if ((attempt < 3)) && grep -q 'too many environment creates' "$out"; then
+      log "create rate limited; waiting 65 s"
+      sleep 65
+      continue
+    fi
+    sed 's/[[:cntrl:]]//g' "$out" >&2
+    return 1
+  done
   id="$(awk '/^[[:space:]]*ID:/ {print $2; exit}' "$out")"
   [[ "$id" =~ ^[0-9a-f-]{36}$ ]] || return 1
   CREATED_ENVS+=("$id")

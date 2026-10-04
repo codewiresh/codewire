@@ -68,13 +68,16 @@ impl DaemonConnectBackoff {
 /// gateway reach the daemon within a quarter second of its Service gaining
 /// the endpoint, since this wait sits on every create. Starts slower than the
 /// window (image pulls, confidential storage) retry every 2 s. One attempt is
-/// an in-cluster TCP and HTTP/2 handshake; its timeout only bounds a dropped
-/// connection.
+/// an in-cluster TCP and HTTP/2 handshake between Pods on the same node; its
+/// timeout only bounds a dropped connection. A warm-pool claim relabels the
+/// workspace Pod, and its NetworkPolicy drops the first connections until the
+/// new identity propagates, so each dropped attempt must cost about a second,
+/// not five (Program #2238: a warm hit waited 7-20 s here on Dev).
 const DAEMON_CONNECT_BACKOFF: DaemonConnectBackoff = DaemonConnectBackoff {
     fast_delay: Duration::from_millis(250),
     fast_window: Duration::from_secs(60),
     slow_delay: Duration::from_secs(2),
-    attempt_timeout: Duration::from_secs(5),
+    attempt_timeout: Duration::from_secs(1),
 };
 /// Failed attempts are logged at debug; this interval bounds the warnings.
 const DAEMON_WAIT_WARN_INTERVAL: Duration = Duration::from_secs(30);
@@ -82,7 +85,12 @@ const DAEMON_WAIT_WARN_INTERVAL: Duration = Duration::from_secs(30);
 /// critical path (Program #2238 B2): orchestration records the binding, the
 /// daemon starts listening at once, and this fetch must follow within a
 /// quarter second. The schedule matches the daemon connect retry.
-const DAEMON_CREDENTIAL_BACKOFF: DaemonConnectBackoff = DAEMON_CONNECT_BACKOFF;
+/// One attempt is an RPC to orchestration on another node, so it keeps a
+/// longer timeout than the same-node daemon connect.
+const DAEMON_CREDENTIAL_BACKOFF: DaemonConnectBackoff = DaemonConnectBackoff {
+    attempt_timeout: Duration::from_secs(5),
+    ..DAEMON_CONNECT_BACKOFF
+};
 /// Refusal-driven refresh spacing. The daemon answering Unauthenticated is
 /// enough to trigger a refresh, and a workspace tenant controls what answers
 /// on the daemon address, so every refresh that finds nothing new (the same
