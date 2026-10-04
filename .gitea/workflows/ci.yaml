@@ -1825,9 +1825,12 @@ jobs:
           # TTL gate with its nested sandbox supply-chain observation.
           - slug: environment
             suites: runtime-acceptance
-          # dashboard: the full Rust dashboard Playwright suite.
+          # dashboard: the full Rust dashboard Playwright suite. Its per-worker
+          # identities (#2381) let the suite run four workers in this leg;
+          # the config default stays 1 for local runs.
           - slug: dashboard
             suites: dashboard-browser
+            playwright_workers: 4
           # workspace: service/exec/FileService/resize, Temporal workflow and
           # final fencing, and the synthetic credential journey (bootstrap
           # plus native acceptance). Sandbox supply-chain provenance is
@@ -1943,6 +1946,7 @@ jobs:
         env:
           KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}
           KIND_SHARD_SUITES: ${{ matrix.shard.suites }}
+          CODEWIRE_KIND_DASHBOARD_WORKERS: ${{ matrix.shard.playwright_workers }}
         run: |
           set -euo pipefail
           read -r -a suites <<<"$KIND_SHARD_SUITES"

@@ -1457,7 +1457,7 @@ require_dashboard_browser_host_dependencies() {
 }
 
 dashboard_browser_e2e() {
-  local playwright chromium workspace_image credential_fixture
+  local playwright chromium workspace_image credential_fixture workers
   require_dashboard_browser_host_dependencies || return $?
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   credential_fixture=0
@@ -1493,7 +1493,8 @@ dashboard_browser_e2e() {
 
   prepare_playwright_browser_runtime "$chromium" "$ROOT" || return $?
 
-  log "running full Rust dashboard Playwright suite through Kind ingress"
+  workers="${CODEWIRE_KIND_DASHBOARD_WORKERS:-1}"
+  log "running full Rust dashboard Playwright suite through Kind ingress (workers: ${workers})"
   require_get_code /healthz 204 "dashboard health"
   require_get_code /login 200 "dashboard login page"
   DATABASE_URL="${KIND_DATABASE_URL}?sslmode=disable" \
@@ -1506,7 +1507,7 @@ dashboard_browser_e2e() {
     PLAYWRIGHT_KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}" \
     PLAYWRIGHT_SANDBOX_NAMESPACE="$SANDBOX_NS" \
     PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE="$credential_fixture" \
-    "$playwright" test --config "$ROOT/apps/dashboard/playwright.config.ts"
+    "$playwright" test --config "$ROOT/apps/dashboard/playwright.config.ts" --workers="$workers"
 }
 
 mesh_product_connect_ownership_smoke() {
