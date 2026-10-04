@@ -117,6 +117,30 @@ grep -Fq '        run: scripts/ci/images/build-push-runtime-images.sh' <<<"$buil
   fail "runtime set does not use the bounded shared-builder entrypoint"
 grep -Fq '          CODEWIRE_SCCACHE_MODE: local' <<<"$build_job" ||
   fail "protected runtime build does not keep compiler objects job-local"
+# shellcheck disable=SC2016 # Match the literal gated workflow environment.
+grep -Fq "          CODEWIRE_RUNTIME_CARRY_FORWARD: '0'" <<<"$build_job" ||
+  fail "runtime carry-forward must stay gated until codewire/deploy accepts carried provenance"
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+grep -Fq '          CODEWIRE_DEPLOY_BASELINE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}' \
+  <<<"$build_job" ||
+  fail "runtime build does not receive the planner-certified deployed baseline"
+for family in DASHBOARD DERP GATEWAY SERVICES MESH; do
+  lc="$(tr 'A-Z' 'a-z' <<<"$family")"
+  # shellcheck disable=SC2016 # Match the literal workflow expression.
+  grep -Fq "          CODEWIRE_IMAGE_STATE_${family}: \${{ needs.deploy-selection.outputs.${lc}_image_state }}" \
+    <<<"$build_job" ||
+    fail "runtime build does not receive the trusted ${lc} planner state"
+done
+[[ "$(grep -Fc 'scripts/ci/images/sign-runtime-image-set.sh' <<<"$build_job")" -eq 2 ]] ||
+  fail "runtime workflow does not sign the Harbor set and GHCR mirror exactly once each"
+for family in DASHBOARD DERP GATEWAY SERVICES MESH; do
+  lc="$(tr 'A-Z' 'a-z' <<<"$family")"
+  # shellcheck disable=SC2016 # Match the literal workflow expression.
+  [[ "$(grep -Fc "          CODEWIRE_BUILT_FROM_${family}: \${{ steps.build.outputs.${lc}_built_from }}" <<<"$build_job")" -eq 2 ]] ||
+    fail "runtime signing does not receive the exact ${lc} built-from source for both registries"
+done
+[[ "$(grep -Fc '          CODEWIRE_DEPLOY_BASELINE_SHA:' <<<"$build_job")" -eq 3 ]] ||
+  fail "certified deployed baseline does not reach the build and both signing steps"
 if grep -Fq 'scripts/ci/verify/kind-e2e.sh' <<<"$build_job"; then
   fail "protected delivery duplicates the locally required Kind gate"
 fi
