@@ -591,6 +591,43 @@ impl PlatformAccessProfileStore {
         Ok(binding)
     }
 
+    /// `get_binding_metadata`, then `get_revision(owner, bound profile, bound
+    /// revision)`, in one transaction: the two profile reads of runtime
+    /// authority. The outer error is the binding read's. The inner result is
+    /// the revision read's, which a caller consults only after it has compared
+    /// the binding with its own scope, as when the reads were separate.
+    ///
+    /// `owner` must be the context's user or organization. Both are already
+    /// locked by the binding read, so the revision read takes no new lock: it
+    /// re-locks rows this transaction holds and reads the same immutable
+    /// revision, which is the separate reads when nothing commits between them.
+    ///
+    /// Runtime authority calls this on every resolve, so it uses the merged
+    /// statements `ENVIRONMENT_FENCE` and `BOUND_PROFILE`, whose residual
+    /// differences from the separate statements are documented there. Every
+    /// other caller keeps `get_binding_metadata` and `get_revision`.
+    pub async fn get_binding_metadata_and_revision(
+        &self,
+        context: &GrantContext,
+        owner: &Owner,
+    ) -> Result<(PlatformBindingMetadata, Result<AccessProfile, Error>), Error> {
+        let context_owner = match owner {
+            Owner::User(id) => *id == context.user_id,
+            Owner::Organization(id) => context.organization_id.as_ref() == Some(id),
+        };
+        if !context_owner {
+            return Err(Error::InvalidInput);
+        }
+        let mut tx = self.begin_transaction().await?;
+        lock_runtime_environment(&mut tx, context, false).await?;
+        let bound = load_bound_profile(&mut tx, context, Some(owner))
+            .await?
+            .ok_or(Error::NotFound)?;
+        tx.commit().await.map_err(database_error)?;
+        let revision = bound.owner_revision.ok_or(Error::InvalidInput)?;
+        Ok((bound.binding, revision))
+    }
+
     pub async fn delete_binding(
         &self,
         context: &GrantContext,
@@ -627,18 +664,35 @@ impl PlatformAccessProfileStore {
     /// consuming material. A stopped or superseded runtime cannot derive grants.
     /// Each capability is admitted separately: a selected credential that needs
     /// Reconnect is reported, without a grant, and never withholds the others.
+    ///
+    /// It runs twice per proxied request, so it uses the merged statements
+    /// `ENVIRONMENT_FENCE`, `BOUND_PROFILE` and `LOCK_CREDENTIALS_IN_ORDER`,
+    /// whose residual differences from one statement per lock and read are
+    /// documented there. Binding writes and owner-local admission keep
+    /// `bound_profile` and its one statement per lock.
     pub async fn evaluate_grants(&self, context: &GrantContext) -> Result<AvailableGrants, Error> {
         let mut tx = self.begin_transaction().await?;
-        lock_environment(&mut tx, context, true, false).await?;
-        let grants = match find_binding(&mut tx, context).await? {
-            Some(binding) => {
-                self.admit_binding(
-                    &mut tx,
+        lock_runtime_environment(&mut tx, context, true).await?;
+        let grants = match load_bound_profile(&mut tx, context, None).await? {
+            // Hosted runtime admission. A selected credential that needs
+            // Reconnect withholds only its own capability; every other fence
+            // still rejects the whole binding.
+            Some(bound) => {
+                validate_personal_confirmation(
                     context,
-                    &binding.binding,
-                    binding.personal_owner_confirmed_by.as_ref(),
+                    &bound.profile,
+                    bound.binding.personal_owner_confirmed_by.as_ref(),
+                )?;
+                let credentials = lock_profile_credentials(&mut tx, &bound.profile).await?;
+                derive_available_grants(
+                    context,
+                    &bound.binding.binding,
+                    &bound.profile,
+                    &credentials,
+                    &self.catalog,
+                    unix_now()?,
                 )
-                .await?
+                .map_err(access_error)?
             }
             // Selecting a GitHub repository needs no profile: without a
             // binding, the creator's one GitHub connection is the only grant.
@@ -656,13 +710,8 @@ impl PlatformAccessProfileStore {
         tx: &mut Transaction<'_, Postgres>,
         context: &GrantContext,
     ) -> Result<Vec<DerivedGrant>, Error> {
-        let owner = Owner::User(context.user_id.clone());
         let mut credentials = BTreeMap::new();
-        if let Some(id) = crate::store::active_github_connection(&mut **tx, &owner)
-            .await
-            .map_err(credential_error)?
-        {
-            let metadata = lock_credential(tx, &owner, &id).await?;
+        if let Some((id, metadata)) = lock_github_connection(tx, &context.user_id).await? {
             credentials.insert(id, metadata);
         }
         Ok(
@@ -733,9 +782,10 @@ impl PlatformAccessProfileStore {
         .map_err(access_error)
     }
 
-    /// Hosted binding writes and runtime admission. A selected credential that
-    /// needs Reconnect withholds only its own capability; every other fence
-    /// still rejects the whole binding.
+    /// Hosted binding writes. A selected credential that needs Reconnect
+    /// withholds only its own capability; every other fence still rejects the
+    /// whole binding. Runtime admission composes the same checks in
+    /// `evaluate_grants`.
     async fn admit_binding(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -889,6 +939,13 @@ async fn insert_revision(
     Ok(())
 }
 
+/// One statement per credential: each is locked and fully validated before
+/// the next is locked, so the first missing or corrupt credential returns its
+/// error with no later credential locked, and every lock wait has its own
+/// statement timeout. Profile writes, binding writes and owner-local admission
+/// use this. Runtime grant evaluation, which runs twice per proxied request,
+/// uses `lock_profile_credentials` instead and accepts the residual
+/// differences documented at `LOCK_CREDENTIALS_IN_ORDER`.
 async fn load_credentials(
     tx: &mut Transaction<'_, Postgres>,
     profile: &AccessProfile,
@@ -919,7 +976,7 @@ async fn lock_credential(
     id: &CredentialId,
 ) -> Result<CredentialMetadata, Error> {
     let (user_id, organization_id) = owner_columns(owner);
-    let row = sqlx::query(
+    let row: CredentialMetadataRow = sqlx::query_as(
         "SELECT provider,authentication_kind,display_name,account_hint,status, \
              expires_at_unix,revocation_generation FROM \
              public.codewire_platform_lock_credential($1::text,$2::text,$3::text)",
@@ -945,34 +1002,46 @@ async fn lock_credential(
     .await
     .map_err(database_error)?
     .ok_or(Error::NotFound)?;
-    let expires: Option<i64> = row.try_get("expires_at_unix").map_err(database_error)?;
+    credential_metadata(owner, id, row, ssh_public_key, ssh_fingerprint)
+}
+
+/// The columns `codewire_platform_lock_credential` returns for a locked row.
+#[derive(sqlx::FromRow)]
+struct CredentialMetadataRow {
+    provider: String,
+    authentication_kind: String,
+    display_name: String,
+    account_hint: Option<String>,
+    status: String,
+    expires_at_unix: Option<i64>,
+    revocation_generation: i64,
+}
+
+/// Validated metadata of one locked credential row and its public SSH key.
+fn credential_metadata(
+    owner: &Owner,
+    id: &CredentialId,
+    row: CredentialMetadataRow,
+    ssh_public_key: Option<String>,
+    ssh_fingerprint: Option<String>,
+) -> Result<CredentialMetadata, Error> {
     let metadata = CredentialMetadata {
         id: id.clone(),
         placement: Placement::Platform,
         owner: owner.clone(),
-        provider: ProviderId::parse(
-            row.try_get::<String, _>("provider")
-                .map_err(database_error)?,
-        )
-        .map_err(|_| Error::CorruptRecord)?,
-        authentication_kind: parse_auth_kind(
-            &row.try_get::<String, _>("authentication_kind")
-                .map_err(database_error)?,
-        )
-        .map_err(|_| Error::CorruptRecord)?,
-        display_name: row.try_get("display_name").map_err(database_error)?,
-        account_hint: row.try_get("account_hint").map_err(database_error)?,
+        provider: ProviderId::parse(row.provider).map_err(|_| Error::CorruptRecord)?,
+        authentication_kind: parse_auth_kind(&row.authentication_kind)
+            .map_err(|_| Error::CorruptRecord)?,
+        display_name: row.display_name,
+        account_hint: row.account_hint,
         ssh_public_key: parse_ssh_public_key(ssh_public_key, ssh_fingerprint)
             .map_err(|_| Error::CorruptRecord)?,
-        status: parse_status(&row.try_get::<String, _>("status").map_err(database_error)?)
-            .map_err(|_| Error::CorruptRecord)?,
-        expires_at_unix: expires
+        status: parse_status(&row.status).map_err(|_| Error::CorruptRecord)?,
+        expires_at_unix: row
+            .expires_at_unix
             .map(|value| u64::try_from(value).map_err(|_| Error::CorruptRecord))
             .transpose()?,
-        revocation_generation: positive(
-            row.try_get("revocation_generation")
-                .map_err(database_error)?,
-        )?,
+        revocation_generation: positive(row.revocation_generation)?,
     };
     metadata.validate().map_err(|_| Error::CorruptRecord)?;
     Ok(metadata)
@@ -999,14 +1068,7 @@ async fn lock_environment(
     runtime: bool,
     write: bool,
 ) -> Result<(), Error> {
-    generation(context.environment_generation)?;
-    let org = context
-        .organization_id
-        .as_ref()
-        .ok_or(Error::InvalidInput)?;
-    if context.placement != GrantPlacement::Platform {
-        return Err(Error::InvalidInput);
-    }
+    let org = environment_organization(context)?;
     lock_owner(tx, &Owner::User(context.user_id.clone())).await?;
     lock_owner(tx, &Owner::Organization(org.clone())).await?;
     // Only orchestration's binding writers need the UPDATE branch. The broker
@@ -1025,6 +1087,61 @@ async fn lock_environment(
         .fetch_optional(&mut **tx)
         .await
         .map_err(database_error)?;
+    current_environment(context, row, runtime)
+}
+
+/// `lock_environment(tx, context, runtime, false)` for the two runtime
+/// authority paths, with its three locks in the one statement
+/// `ENVIRONMENT_FENCE`.
+async fn lock_runtime_environment(
+    tx: &mut Transaction<'_, Postgres>,
+    context: &GrantContext,
+    runtime: bool,
+) -> Result<(), Error> {
+    let org = environment_organization(context)?;
+    let fence: EnvironmentFenceRow = sqlx::query_as(ENVIRONMENT_FENCE)
+        .bind(context.environment_id.as_str())
+        .bind(context.user_id.as_str())
+        .bind(org.as_str())
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(database_error)?;
+    if !fence.user_found || !fence.organization_found {
+        return Err(Error::NotFound);
+    }
+    let row = if fence.environment_found == Some(true) {
+        Some((
+            fence
+                .environment_operation_generation
+                .ok_or(Error::DatabaseUnavailable)?,
+            fence.desired_state.ok_or(Error::DatabaseUnavailable)?,
+            fence.state.ok_or(Error::DatabaseUnavailable)?,
+        ))
+    } else {
+        None
+    };
+    current_environment(context, row, runtime)
+}
+
+/// The checks `lock_environment` makes before it locks anything.
+fn environment_organization(context: &GrantContext) -> Result<&OwnerId, Error> {
+    generation(context.environment_generation)?;
+    let org = context
+        .organization_id
+        .as_ref()
+        .ok_or(Error::InvalidInput)?;
+    if context.placement != GrantPlacement::Platform {
+        return Err(Error::InvalidInput);
+    }
+    Ok(org)
+}
+
+/// The checks `lock_environment` makes on the locked environment row.
+fn current_environment(
+    context: &GrantContext,
+    row: Option<(i64, String, String)>,
+    runtime: bool,
+) -> Result<(), Error> {
     let (current, desired, state) = row.ok_or(Error::NotFound)?;
     if current != generation(context.environment_generation)?
         || desired == "destroyed"
@@ -1040,26 +1157,25 @@ async fn load_binding(
     tx: &mut Transaction<'_, Postgres>,
     context: &GrantContext,
 ) -> Result<PlatformBindingMetadata, Error> {
-    find_binding(tx, context).await?.ok_or(Error::NotFound)
+    let row: Option<(String, i64, Option<String>)> = sqlx::query_as(
+        "SELECT profile_id,profile_revision,personal_owner_confirmed_by FROM platform_environment_access_bindings \
+         WHERE environment_id=$1",
+    )
+    .bind(context.environment_id.as_str())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    let (id, revision, confirmed_by) = row.ok_or(Error::NotFound)?;
+    binding_metadata(context, id, revision, confirmed_by)
 }
 
-async fn find_binding(
-    tx: &mut Transaction<'_, Postgres>,
+fn binding_metadata(
     context: &GrantContext,
-) -> Result<Option<PlatformBindingMetadata>, Error> {
-    let Some((id, revision, confirmed_by)): Option<(String, i64, Option<String>)> =
-        sqlx::query_as(
-            "SELECT profile_id,profile_revision,personal_owner_confirmed_by FROM platform_environment_access_bindings \
-             WHERE environment_id=$1",
-        )
-        .bind(context.environment_id.as_str())
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(database_error)?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(PlatformBindingMetadata {
+    id: String,
+    revision: i64,
+    confirmed_by: Option<String>,
+) -> Result<PlatformBindingMetadata, Error> {
+    Ok(PlatformBindingMetadata {
         binding: EnvironmentAccessBinding {
             environment_id: context.environment_id.clone(),
             profile_id: AccessProfileId::parse(id).map_err(|_| Error::CorruptRecord)?,
@@ -1068,7 +1184,7 @@ async fn find_binding(
         personal_owner_confirmed_by: confirmed_by
             .map(|id| OwnerId::parse(id).map_err(|_| Error::CorruptRecord))
             .transpose()?,
-    }))
+    })
 }
 
 async fn profile_for_context(
@@ -1101,6 +1217,426 @@ async fn profile_for_context(
         false,
     )
     .await
+}
+
+/// The broker's environment fence in one statement: `lock_owner` for the
+/// user, then for the organization, then `codewire_platform_lock_environment`,
+/// in the order three statements took them. Each helper is VOLATILE, so each
+/// of its queries reads a fresh snapshot, as a separate statement did. A
+/// LATERAL argument orders every call after the one before it, and a failed
+/// owner lock passes NULL to the next call, which then matches and locks no
+/// row. Both owner results are booleans that SQL decides, so no lock here is
+/// taken after the point where the separate statements stopped.
+///
+/// Residual difference, which fails closed: `statement_timeout` (at most 5 s,
+/// set by `begin_transaction`) now bounds all three lock waits together, where
+/// each statement had its own. Under lock contention this returns
+/// DatabaseUnavailable (Unavailable) sooner than before; it never admits more.
+///
+/// Each table-returning helper is read through `LIMIT 1`, as here and in the
+/// statements below. That changes nothing that runs: a function in FROM runs
+/// to completion before its first row is returned, and every helper matches
+/// at most one row by primary key, which `fetch_optional` read before. It only
+/// keeps the planner's estimate at one row instead of the default 1000 per
+/// function, so nested calls are not planned as billions of rows, which made
+/// PostgreSQL JIT-compile every execution.
+const ENVIRONMENT_FENCE: &str = "SELECT u.found AS user_found, o.found AS organization_found, \
+    e.found AS environment_found, e.environment_operation_generation, e.desired_state, e.state \
+    FROM public.codewire_platform_lock_owner('user', $2::text) AS u(found) \
+    CROSS JOIN LATERAL public.codewire_platform_lock_owner( \
+        'organization', CASE WHEN u.found THEN $3::text END) AS o(found) \
+    LEFT JOIN LATERAL (SELECT true AS found, f.* FROM public.codewire_platform_lock_environment( \
+        CASE WHEN o.found THEN $1::text END, $2::text, $3::text) AS f LIMIT 1) AS e ON true";
+
+#[derive(sqlx::FromRow)]
+struct EnvironmentFenceRow {
+    user_found: bool,
+    organization_found: bool,
+    environment_found: Option<bool>,
+    environment_operation_generation: Option<i64>,
+    desired_state: Option<String>,
+    state: Option<String>,
+}
+
+/// The binding read, then `profile_for_context` of the bound revision, and,
+/// for runtime authority's owner (`$4` kind, `$5` id), `get_revision` of it,
+/// in one statement. It runs after `ENVIRONMENT_FENCE`, so the binding is read
+/// in a snapshot taken after binding writers were fenced, as before.
+///
+/// Every call is ordered by a LATERAL argument and gated by NULL on the SQL
+/// result before it, as in `ENVIRONMENT_FENCE`. The first profile lock is the
+/// only lock that can wait: the second re-locks that same row with its own
+/// owner, and the owner and profile locks for `$4`/`$5` re-lock rows this
+/// transaction already holds. The revision and entries are read in the
+/// statement's snapshot. That is the same data: a binding names its revision
+/// through a RESTRICT foreign key, so the revision exists in any snapshot
+/// where the binding does, and a revision and its entries are never changed
+/// after they are inserted.
+///
+/// Residual difference, which fails closed: the binding row's values are
+/// validated in Rust (`binding_metadata`: profile ID, positive revision,
+/// confirming owner ID), after this statement returns, where the separate code
+/// validated them before it locked the profile. A binding row that fails that
+/// validation now has its profile SHARE-locked first, and the statement may
+/// wait for a profile writer within its `statement_timeout`, turning that
+/// CorruptRecord (Denied) into DatabaseUnavailable (Unavailable). The same
+/// holds for the profile's owner IDs, name and entries, which are parsed after
+/// the re-locks; those take no new lock. Every such value is constrained by
+/// the schema or written only by validated code.
+const BOUND_PROFILE: &str = "SELECT b.profile_id, b.profile_revision, b.personal_owner_confirmed_by, \
+    p.found AS profile_found, p.user_id AS profile_user, p.organization_id AS profile_organization, \
+    q.found AS revision_profile_found, q.name AS profile_name, \
+    q.current_revision AS profile_current_revision, \
+    r.revision_exists, r.slots, r.credentials, \
+    o.found AS owner_found, s.found AS owner_profile_found, s.name AS owner_profile_name, \
+    s.current_revision AS owner_profile_current_revision \
+    FROM public.platform_environment_access_bindings AS b \
+    LEFT JOIN LATERAL (SELECT true AS found, f.* FROM public.codewire_platform_lock_profile( \
+        b.profile_id, $2::text, $3::text) AS f LIMIT 1) AS p ON true \
+    LEFT JOIN LATERAL (SELECT true AS found, f.* FROM public.codewire_platform_lock_profile( \
+        CASE WHEN p.found AND (p.user_id IS NULL) <> (p.organization_id IS NULL) \
+             THEN b.profile_id END, p.user_id, p.organization_id) AS f LIMIT 1) AS q ON true \
+    LEFT JOIN LATERAL (SELECT EXISTS (SELECT 1 FROM public.platform_access_profile_revisions AS v \
+            WHERE v.profile_id=b.profile_id AND v.revision=b.profile_revision) AS revision_exists, \
+        n.slots, n.credentials \
+        FROM (SELECT coalesce(array_agg(e.capability_slot ORDER BY e.capability_slot), '{}') AS slots, \
+            coalesce(array_agg(e.credential_id ORDER BY e.capability_slot), '{}') AS credentials \
+            FROM public.platform_access_profile_entries AS e \
+            WHERE e.profile_id=b.profile_id AND e.revision=b.profile_revision) AS n \
+        WHERE q.found) AS r ON true \
+    LEFT JOIN LATERAL public.codewire_platform_lock_owner( \
+        $4::text, CASE WHEN r.revision_exists THEN $5::text END) AS o(found) ON true \
+    LEFT JOIN LATERAL (SELECT true AS found, f.* FROM public.codewire_platform_lock_profile( \
+        CASE WHEN o.found THEN b.profile_id END, \
+        CASE WHEN $4::text = 'user' THEN $5::text END, \
+        CASE WHEN $4::text = 'organization' THEN $5::text END) AS f LIMIT 1) AS s ON true \
+    WHERE b.environment_id=$1::text";
+
+#[derive(sqlx::FromRow)]
+struct BoundProfileRow {
+    profile_id: String,
+    profile_revision: i64,
+    personal_owner_confirmed_by: Option<String>,
+    profile_found: Option<bool>,
+    profile_user: Option<String>,
+    profile_organization: Option<String>,
+    revision_profile_found: Option<bool>,
+    profile_name: Option<String>,
+    profile_current_revision: Option<i64>,
+    revision_exists: Option<bool>,
+    slots: Option<Vec<String>>,
+    credentials: Option<Vec<String>>,
+    owner_found: Option<bool>,
+    owner_profile_found: Option<bool>,
+    owner_profile_name: Option<String>,
+    owner_profile_current_revision: Option<i64>,
+}
+
+struct BoundProfile {
+    binding: PlatformBindingMetadata,
+    /// `profile_for_context` of the bound revision.
+    profile: AccessProfile,
+    /// `get_revision` of the bound revision for the requested owner.
+    owner_revision: Option<Result<AccessProfile, Error>>,
+}
+
+/// The binding read, then `profile_for_context`, with their errors in their
+/// order; `None` when the environment has no binding.
+async fn load_bound_profile(
+    tx: &mut Transaction<'_, Postgres>,
+    context: &GrantContext,
+    owner: Option<&Owner>,
+) -> Result<Option<BoundProfile>, Error> {
+    let (owner_kind, owner_id) = match owner {
+        Some(Owner::User(id)) => (Some("user"), Some(id.as_str())),
+        Some(Owner::Organization(id)) => (Some("organization"), Some(id.as_str())),
+        None => (None, None),
+    };
+    let Some(row): Option<BoundProfileRow> = sqlx::query_as(BOUND_PROFILE)
+        .bind(context.environment_id.as_str())
+        .bind(context.user_id.as_str())
+        .bind(context.organization_id.as_ref().map(OwnerId::as_str))
+        .bind(owner_kind)
+        .bind(owner_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?
+    else {
+        return Ok(None);
+    };
+    let binding = binding_metadata(
+        context,
+        row.profile_id,
+        row.profile_revision,
+        row.personal_owner_confirmed_by,
+    )?;
+    if row.profile_found != Some(true) {
+        return Err(Error::NotFound);
+    }
+    let profile_owner = match (row.profile_user, row.profile_organization) {
+        (Some(user), None) => Owner::User(OwnerId::parse(user).map_err(|_| Error::CorruptRecord)?),
+        (None, Some(org)) => {
+            Owner::Organization(OwnerId::parse(org).map_err(|_| Error::CorruptRecord)?)
+        }
+        _ => return Err(Error::CorruptRecord),
+    };
+    let revision = PinnedRevision {
+        binding: &binding.binding,
+        exists: row.revision_exists,
+        slots: row.slots.unwrap_or_default(),
+        credentials: row.credentials.unwrap_or_default(),
+    };
+    let profile = revision.profile(
+        &profile_owner,
+        row.revision_profile_found,
+        row.profile_name,
+        row.profile_current_revision,
+    )?;
+    let owner_revision = owner.map(|owner| {
+        // `get_revision` checks the revision before it opens its transaction.
+        generation(binding.binding.profile_revision)?;
+        if row.owner_found != Some(true) {
+            return Err(Error::NotFound);
+        }
+        revision.profile(
+            owner,
+            row.owner_profile_found,
+            row.owner_profile_name,
+            row.owner_profile_current_revision,
+        )
+    });
+    Ok(Some(BoundProfile {
+        binding,
+        profile,
+        owner_revision,
+    }))
+}
+
+/// One bound revision as `load_profile` reads it after its profile lock.
+struct PinnedRevision<'a> {
+    binding: &'a EnvironmentAccessBinding,
+    exists: Option<bool>,
+    slots: Vec<String>,
+    credentials: Vec<String>,
+}
+
+impl PinnedRevision<'_> {
+    /// `load_profile(owner, id, Some(revision))` from its profile lock's row,
+    /// with its checks in its order.
+    fn profile(
+        &self,
+        owner: &Owner,
+        found: Option<bool>,
+        name: Option<String>,
+        current_revision: Option<i64>,
+    ) -> Result<AccessProfile, Error> {
+        if found != Some(true) {
+            return Err(Error::NotFound);
+        }
+        let current = current_revision.ok_or(Error::DatabaseUnavailable)?;
+        positive(current)?;
+        let revision = self.binding.profile_revision;
+        generation(revision)?;
+        if self.exists != Some(true) {
+            return Err(Error::NotFound);
+        }
+        // Both arrays aggregate the same scan of entries, each ordered by
+        // capability slot, which the primary key makes unique per revision,
+        // so the Nth slot and the Nth credential come from the same entry.
+        if self.slots.len() != self.credentials.len() {
+            return Err(Error::DatabaseUnavailable);
+        }
+        let mut entries = BTreeMap::new();
+        for (slot, credential) in self.slots.iter().zip(&self.credentials) {
+            entries.insert(
+                CapabilitySlot::parse(slot.as_str()).map_err(|_| Error::CorruptRecord)?,
+                CredentialId::parse(credential.as_str()).map_err(|_| Error::CorruptRecord)?,
+            );
+        }
+        Ok(AccessProfile {
+            id: self.binding.profile_id.clone(),
+            placement: Placement::Platform,
+            owner: owner.clone(),
+            name: AccessProfileName::parse(name.ok_or(Error::DatabaseUnavailable)?)
+                .map_err(|_| Error::CorruptRecord)?,
+            revision,
+            entries,
+        })
+    }
+}
+
+/// `lock_credential` for each ID of `$1` in array order: each recursion step
+/// makes the next call, strictly in sequence, and the recursion stops at the
+/// first ID the helper does not find, so no later credential is locked after
+/// a missing one, as in `load_credentials`. Each call reads a fresh snapshot
+/// and takes the same SHARE lock. The public SSH key of each row is read in the
+/// statement's snapshot. That is the same data: the key is written only when a
+/// credential is inserted, and every ID here was read by an earlier statement
+/// (a profile entry or the GitHub connection), so its row was already
+/// committed when this statement began.
+///
+/// Residual differences from `load_credentials`, which all fail closed:
+/// - Each row is validated in Rust (`credential_metadata`: provider,
+///   authentication kind, status, expiry, revocation generation, SSH key)
+///   after the statement returns. `load_credentials` stopped at the first
+///   corrupt credential before locking the next; here the later credentials
+///   are already SHARE-locked, and the statement may have waited for a writer
+///   holding one, turning that CorruptRecord (Denied) into DatabaseUnavailable
+///   (Unavailable). The checked values are constrained by the schema or
+///   written only by validated code.
+/// - `statement_timeout` (at most 5 s) bounds all the lock waits together (one
+///   per entry; a profile has one entry per catalog slot, four today), where
+///   each credential's statement had its own. Under contention this returns
+///   Unavailable sooner.
+///
+/// Exact parity is cheap to restore if it is wanted: one statement per
+/// credential, each this lock and SSH key read for one ID, validated in Rust
+/// before the next. That is one round trip per entry (most profiles have one),
+/// where `load_credentials` takes two and this statement takes one in all.
+const LOCK_CREDENTIALS_IN_ORDER: &str = "WITH RECURSIVE locked AS ( \
+    SELECT 1 AS ordinal, l.provider, l.authentication_kind, l.display_name, l.account_hint, \
+        l.status, l.expires_at_unix, l.revocation_generation \
+    FROM (SELECT f.* FROM public.codewire_platform_lock_credential( \
+        ($1::text[])[1], $2::text, $3::text) AS f LIMIT 1) AS l \
+    UNION ALL \
+    SELECT previous.ordinal + 1, l.provider, l.authentication_kind, l.display_name, \
+        l.account_hint, l.status, l.expires_at_unix, l.revocation_generation \
+    FROM locked AS previous \
+    CROSS JOIN LATERAL (SELECT f.* FROM public.codewire_platform_lock_credential( \
+        ($1::text[])[previous.ordinal + 1], $2::text, $3::text) AS f LIMIT 1) AS l \
+    WHERE previous.ordinal < cardinality($1::text[])) \
+    SELECT locked.*, k.found AS public_key_found, k.ssh_public_key, k.ssh_fingerprint \
+    FROM locked \
+    LEFT JOIN LATERAL (SELECT true AS found, c.ssh_public_key, c.ssh_fingerprint \
+        FROM public.platform_credentials AS c \
+        WHERE c.id=($1::text[])[locked.ordinal] \
+        AND (c.user_id=$2::text OR c.organization_id=$3::text)) AS k ON true \
+    ORDER BY locked.ordinal";
+
+/// One `lock_credential` outcome: no locked row, no public key row, or both.
+#[derive(sqlx::FromRow)]
+struct LockedCredentialRow {
+    provider: Option<String>,
+    authentication_kind: Option<String>,
+    display_name: Option<String>,
+    account_hint: Option<String>,
+    status: Option<String>,
+    expires_at_unix: Option<i64>,
+    revocation_generation: Option<i64>,
+    public_key_found: Option<bool>,
+    ssh_public_key: Option<String>,
+    ssh_fingerprint: Option<String>,
+}
+
+impl LockedCredentialRow {
+    /// `lock_credential`'s result for `id`, with its checks in its order.
+    fn metadata(self, owner: &Owner, id: &CredentialId) -> Result<CredentialMetadata, Error> {
+        let Some(provider) = self.provider else {
+            return Err(Error::NotFound);
+        };
+        if self.public_key_found != Some(true) {
+            return Err(Error::NotFound);
+        }
+        let row = CredentialMetadataRow {
+            provider,
+            authentication_kind: self.authentication_kind.ok_or(Error::DatabaseUnavailable)?,
+            display_name: self.display_name.ok_or(Error::DatabaseUnavailable)?,
+            account_hint: self.account_hint,
+            status: self.status.ok_or(Error::DatabaseUnavailable)?,
+            expires_at_unix: self.expires_at_unix,
+            revocation_generation: self
+                .revocation_generation
+                .ok_or(Error::DatabaseUnavailable)?,
+        };
+        credential_metadata(owner, id, row, self.ssh_public_key, self.ssh_fingerprint)
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct OrderedCredentialRow {
+    ordinal: i32,
+    #[sqlx(flatten)]
+    credential: LockedCredentialRow,
+}
+
+/// `load_credentials` for an admitted profile: its credentials locked in one
+/// statement, then its owner's GitHub connection read and, when there is one,
+/// locked in another.
+async fn lock_profile_credentials(
+    tx: &mut Transaction<'_, Postgres>,
+    profile: &AccessProfile,
+) -> Result<BTreeMap<CredentialId, CredentialMetadata>, Error> {
+    // A shared lock fences replacement/revocation/deletion through admission.
+    // Deterministic order avoids opposite-order locks across multi-slot profiles.
+    let ids: Vec<&CredentialId> = profile
+        .entries
+        .values()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut credentials: BTreeMap<_, _> = lock_credentials_in_order(tx, &profile.owner, &ids)
+        .await?
+        .into_iter()
+        .collect();
+    // Every personal profile includes the owner's one GitHub connection when
+    // it can be used now; a missing connection is omitted.
+    if profile.includes_github()
+        && let Owner::User(user) = &profile.owner
+        && let Some((id, metadata)) = lock_github_connection(tx, user).await?
+    {
+        credentials.insert(id, metadata);
+    }
+    Ok(credentials)
+}
+
+/// `active_github_connection` for `user`, then, when there is a connection,
+/// `lock_credential` of it. Two statements, as before, so a role reads only
+/// what it read before when the account has no connection.
+async fn lock_github_connection(
+    tx: &mut Transaction<'_, Postgres>,
+    user: &OwnerId,
+) -> Result<Option<(CredentialId, CredentialMetadata)>, Error> {
+    let owner = Owner::User(user.clone());
+    let Some(id) = crate::store::active_github_connection(&mut **tx, &owner)
+        .await
+        .map_err(credential_error)?
+    else {
+        return Ok(None);
+    };
+    Ok(lock_credentials_in_order(tx, &owner, &[&id]).await?.pop())
+}
+
+/// `lock_credential` of each of `ids` in order, in one statement. An empty
+/// list runs no statement.
+async fn lock_credentials_in_order(
+    tx: &mut Transaction<'_, Postgres>,
+    owner: &Owner,
+    ids: &[&CredentialId],
+) -> Result<Vec<(CredentialId, CredentialMetadata)>, Error> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (user_id, organization_id) = owner_columns(owner);
+    let rows: Vec<OrderedCredentialRow> = sqlx::query_as(LOCK_CREDENTIALS_IN_ORDER)
+        .bind(ids.iter().map(|id| id.as_str()).collect::<Vec<_>>())
+        .bind(user_id)
+        .bind(organization_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(database_error)?;
+    let mut rows = rows.into_iter();
+    let mut locked = Vec::with_capacity(ids.len());
+    for (index, id) in ids.iter().enumerate() {
+        // The recursion stops at the first ID it does not find.
+        let Some(row) = rows.next() else {
+            return Err(Error::NotFound);
+        };
+        if usize::try_from(row.ordinal).ok() != Some(index + 1) {
+            return Err(Error::DatabaseUnavailable);
+        }
+        locked.push(((*id).clone(), row.credential.metadata(owner, id)?));
+    }
+    Ok(locked)
 }
 
 fn validate_binding(

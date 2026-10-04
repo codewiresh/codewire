@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -882,17 +883,16 @@ pub async fn active_github_connection<'e, E: Executor<'e, Database = Postgres>>(
     let Owner::User(user_id) = owner else {
         return Ok(None);
     };
-    let ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM platform_credentials \
-         WHERE user_id=$1 AND organization_id IS NULL \
-           AND provider='github' AND authentication_kind='oauth' AND status='active' \
-           AND (expires_at_unix IS NULL OR expires_at_unix>extract(epoch FROM clock_timestamp())) \
-         ORDER BY id LIMIT 2",
-    )
-    .bind(user_id.as_str())
-    .fetch_all(executor)
-    .await
-    .map_err(database_error)?;
+    let ids: Vec<String> = sqlx::query_scalar(active_github_connection_ids!())
+        .bind(user_id.as_str())
+        .fetch_all(executor)
+        .await
+        .map_err(database_error)?;
+    github_connection(ids)
+}
+
+/// The connection among the rows `active_github_connection_ids!` read.
+pub(crate) fn github_connection(ids: Vec<String>) -> Result<Option<CredentialId>, Error> {
     match ids.as_slice() {
         [] => Ok(None),
         [id] => CredentialId::parse(id.as_str())
@@ -902,6 +902,64 @@ pub async fn active_github_connection<'e, E: Executor<'e, Database = Postgres>>(
         _ => Err(Error::CorruptRecord),
     }
 }
+
+/// The account's GitHub connection, read exactly as `active_github_connection`
+/// reads it, and which of `ids` and that connection exist and belong to
+/// `owner`.
+pub struct OwnedCredentials {
+    /// The connection, or why none could be chosen. Always `Ok(None)` when it
+    /// was not requested or `owner` is an organization.
+    pub github: Result<Option<CredentialId>, Error>,
+    /// The requested IDs and the connection that belong to `owner`.
+    pub owned: BTreeSet<String>,
+}
+
+/// One statement for two reads that runtime authority makes back to back:
+/// the owner's GitHub connection (only when `github` is set) and the
+/// ownership of `ids` plus that connection. Neither read locks a row. Both now
+/// share one snapshot, which is the original sequence when nothing commits
+/// between them. A caller must check `github` before `owned`, as it did when
+/// the ownership read could only follow a usable connection.
+///
+/// The statement always names the GitHub filter columns (`provider`,
+/// `authentication_kind`, `status`, `expires_at_unix`), even when `github` is
+/// false and the filter matches nothing, and PostgreSQL checks SELECT on every
+/// named column. The caller's role therefore needs those columns where the
+/// separate ownership read needed only `id`, `user_id` and `organization_id`.
+/// Runtime authority's role has them: it read them for the GitHub connection.
+pub async fn owned_credentials_and_github_connection<'e, E: Executor<'e, Database = Postgres>>(
+    executor: E,
+    owner: &Owner,
+    ids: &[String],
+    github: bool,
+) -> Result<OwnedCredentials, Error> {
+    let (user_id, organization_id) = match owner {
+        Owner::User(id) => (Some(id.as_str()), None),
+        Owner::Organization(id) => (None, Some(id.as_str())),
+    };
+    let (connection, owned): (Vec<String>, Vec<String>) =
+        sqlx::query_as(OWNED_WITH_GITHUB_CONNECTION)
+            .bind(user_id.filter(|_| github))
+            .bind(user_id)
+            .bind(organization_id)
+            .bind(ids)
+            .fetch_one(executor)
+            .await
+            .map_err(database_error)?;
+    Ok(OwnedCredentials {
+        github: github_connection(connection),
+        owned: owned.into_iter().collect(),
+    })
+}
+
+const OWNED_WITH_GITHUB_CONNECTION: &str = concat!(
+    "WITH github AS (",
+    active_github_connection_ids!(),
+    ") SELECT ARRAY(SELECT id FROM github ORDER BY id) AS github, \
+     ARRAY(SELECT id FROM public.platform_credentials WHERE \
+     ((user_id=$2 AND organization_id IS NULL) OR (organization_id=$3 AND user_id IS NULL)) \
+     AND (id=ANY($4) OR id IN (SELECT id FROM github))) AS owned"
+);
 
 pub(crate) async fn load_record<'e, E: Executor<'e, Database = Postgres>>(
     executor: E,

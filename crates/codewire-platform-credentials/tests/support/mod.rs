@@ -1,5 +1,7 @@
 //! Synthetic, exact-database fixtures. No live OpenBao or product credentials.
 
+use std::collections::BTreeSet;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,7 +17,9 @@ use codewire_protected_store::secret_envelope::{
 };
 use codewire_server_core::auth::AuthUser;
 use sqlx::PgPool;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgPoolOptions, PgSslMode};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use zeroize::Zeroizing;
 
@@ -388,5 +392,173 @@ pub async fn wait_for_advisory_waiter(pool: &PgPool, key: i32) -> Result<()> {
     })
     .await
     .context("publication did not reach the SQL barrier")??;
+    Ok(())
+}
+
+/// Counts the statements a pool sends to PostgreSQL, at the wire. SQLx waits
+/// for each statement's ReadyForQuery before it sends the next one, so every
+/// simple Query ('Q') and every extended-protocol Execute ('E') is exactly one
+/// sequential round trip. Statement preparation (Parse/Describe/Sync) and the
+/// pool's connection pings (Sync alone) execute nothing and are not counted.
+/// The text of every statement prepared or sent is kept for `ensure_cheap_plans`.
+#[allow(dead_code)] // Only the round-trip tests use it.
+pub struct StatementCounter {
+    statements: Arc<AtomicUsize>,
+    texts: Arc<Mutex<BTreeSet<String>>>,
+    accept: tokio::task::JoinHandle<()>,
+}
+
+#[allow(dead_code)]
+impl StatementCounter {
+    /// A pool with `pool`'s exact login and database whose connections all
+    /// pass through this counter. Plaintext keeps the protocol readable; the
+    /// disposable synthetic database never carries a real credential.
+    pub async fn pool(pool: &PgPool, max_connections: u32) -> Result<(Self, PgPool)> {
+        let options = pool.connect_options().as_ref().clone();
+        let upstream = format!("{}:{}", options.get_host(), options.get_port());
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let statements = Arc::new(AtomicUsize::new(0));
+        let texts = Arc::new(Mutex::new(BTreeSet::new()));
+        let (counted, seen) = (statements.clone(), texts.clone());
+        let accept = tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let upstream = upstream.clone();
+                let (counted, seen) = (counted.clone(), seen.clone());
+                tokio::spawn(async move {
+                    if let Ok(server) = TcpStream::connect(&upstream).await {
+                        let _ = relay_counting_statements(client, server, counted, seen).await;
+                    }
+                });
+            }
+        });
+        let counter = Self {
+            statements,
+            texts,
+            accept,
+        };
+        let counted_pool = PgPoolOptions::new()
+            .max_connections(max_connections)
+            .connect_with(
+                options
+                    .host("127.0.0.1")
+                    .port(port)
+                    .ssl_mode(PgSslMode::Disable),
+            )
+            .await?;
+        Ok((counter, counted_pool))
+    }
+
+    /// The statements `work` sent, and its output.
+    pub async fn count<T>(&self, work: impl Future<Output = T>) -> (T, usize) {
+        self.statements.store(0, Ordering::SeqCst);
+        let output = work.await;
+        (output, self.statements.swap(0, Ordering::SeqCst))
+    }
+
+    /// Every statement text prepared or sent through this counter so far.
+    pub fn texts(&self) -> Vec<String> {
+        self.texts
+            .lock()
+            .expect("statement text registry")
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
+/// The largest estimated cost any statement on a runtime authority path may
+/// have. Each lock helper is a table function that PostgreSQL estimates at
+/// 1000 rows; nested calls multiply that, and above `jit_above_cost` (100000
+/// by default) every execution is JIT-compiled, which costs far more than the
+/// round trips a merged statement saves. The current statements stay below 100.
+#[allow(dead_code)]
+pub const MAX_PLANNED_COST: f64 = 1000.0;
+
+/// Plan every query in `texts` generically as `admin` and require each total
+/// cost to stay at or below `MAX_PLANNED_COST`. Returns the largest cost.
+#[allow(dead_code)]
+pub async fn ensure_cheap_plans(admin: &PgPool, texts: &[String]) -> Result<f64> {
+    let mut largest: f64 = 0.0;
+    for text in texts {
+        let keyword = text
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        if !matches!(keyword.as_str(), "SELECT" | "WITH") {
+            continue;
+        }
+        // The simple protocol: a generic plan keeps `$n` unbound.
+        let explain = format!("EXPLAIN (GENERIC_PLAN, FORMAT JSON) {text}");
+        let plan: serde_json::Value = sqlx::raw_sql(&explain)
+            .fetch_one(admin)
+            .await
+            .and_then(|row| sqlx::Row::try_get(&row, 0))
+            .with_context(|| format!("plan {text}"))?;
+        let cost = plan[0]["Plan"]["Total Cost"]
+            .as_f64()
+            .context("plan total cost")?;
+        ensure!(
+            cost <= MAX_PLANNED_COST,
+            "statement planned at cost {cost}, above {MAX_PLANNED_COST}: {text}"
+        );
+        largest = largest.max(cost);
+    }
+    Ok(largest)
+}
+
+impl Drop for StatementCounter {
+    fn drop(&mut self) {
+        self.accept.abort();
+    }
+}
+
+async fn relay_counting_statements(
+    client: TcpStream,
+    server: TcpStream,
+    statements: Arc<AtomicUsize>,
+    texts: Arc<Mutex<BTreeSet<String>>>,
+) -> std::io::Result<()> {
+    let (mut client_read, mut client_write) = client.into_split();
+    let (mut server_read, mut server_write) = server.into_split();
+    let downstream =
+        tokio::spawn(async move { tokio::io::copy(&mut server_read, &mut client_write).await });
+    // The StartupMessage is the only untyped frontend message without TLS.
+    let mut length = [0_u8; 4];
+    client_read.read_exact(&mut length).await?;
+    let mut startup = vec![0_u8; (u32::from_be_bytes(length) as usize).saturating_sub(4)];
+    client_read.read_exact(&mut startup).await?;
+    server_write.write_all(&length).await?;
+    server_write.write_all(&startup).await?;
+    let mut header = [0_u8; 5];
+    while client_read.read_exact(&mut header).await.is_ok() {
+        let length = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
+        let mut message = header.to_vec();
+        message.resize(1 + length.max(4), 0);
+        client_read.read_exact(&mut message[5..]).await?;
+        // Counted before it is forwarded, so its reply cannot precede it.
+        if matches!(header[0], b'Q' | b'E') {
+            statements.fetch_add(1, Ordering::SeqCst);
+        }
+        // Parse carries a statement name, then its text; Query only its text.
+        let body = &message[5..];
+        let text = match header[0] {
+            b'P' => body
+                .iter()
+                .position(|byte| *byte == 0)
+                .map(|end| &body[end + 1..]),
+            b'Q' => Some(body),
+            _ => None,
+        };
+        if let Some(text) = text.and_then(|text| text.split(|byte| *byte == 0).next()) {
+            texts
+                .lock()
+                .expect("statement text registry")
+                .insert(String::from_utf8_lossy(text).into_owned());
+        }
+        server_write.write_all(&message).await?;
+    }
+    downstream.abort();
     Ok(())
 }

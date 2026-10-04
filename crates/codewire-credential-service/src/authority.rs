@@ -35,7 +35,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::objects::{Lineage, gateway_environment, live_pod, validate_lineage, verified_shape};
-use crate::projection::{self, ProjectionMetadata};
+use crate::projection::ProjectionMetadata;
 
 pub(crate) const WORKSPACE_AUTHORIZATION: &str = "x-codewire-workspace-authorization-bin";
 const ASCII_WORKSPACE_AUTHORIZATION: &str = "x-codewire-workspace-authorization";
@@ -440,7 +440,9 @@ impl Resolved {
 // Pod scopes (Program #2238 B2, design section 11). An unbound or released
 // runtime is never inferred from names. Every column read here is granted to
 // the restricted role, and nothing else of the binding is.
-pub(crate) const SCOPE_QUERY: &str = "SELECT e.id AS environment_id,e.created_by AS creator,e.org_id AS organization, \
+macro_rules! scope_query {
+    () => {
+        "SELECT e.id AS environment_id,e.created_by AS creator,e.org_id AS organization, \
      e.environment_operation_generation AS generation,s.namespace,s.sandbox_claim_name AS claim_name, \
      s.sandbox_claim_uid AS claim_uid,s.pod_name,s.pod_uid, \
      w.claim_uid AS binding_claim_uid,w.sandbox_uid AS binding_sandbox_uid, \
@@ -460,13 +462,53 @@ pub(crate) const SCOPE_QUERY: &str = "SELECT e.id AS environment_id,e.created_by
      WHERE e.id=$1 AND e.type='sandbox' AND e.state='running' AND e.desired_state='started' \
      AND e.deletion_requested_at IS NULL AND e.environment_operation_generation>0 \
      AND s.sandbox_claim_name IS NOT NULL AND s.sandbox_claim_uid IS NOT NULL AND s.pod_name IS NOT NULL \
-     AND s.pod_uid IS NOT NULL AND s.bound_at IS NOT NULL";
+     AND s.pod_uid IS NOT NULL AND s.bound_at IS NOT NULL"
+    };
+}
+pub(crate) const SCOPE_QUERY: &str = scope_query!();
+
+/// One statement in place of `SCOPE_QUERY` followed by `METADATA_QUERY`. Both
+/// are plain reads that lock nothing, so one snapshot for both is the separate
+/// reads when nothing commits between them.
+///
+/// `OFFSET 0` keeps PostgreSQL from flattening the scope subquery, so the
+/// metadata function runs only for a complete scope row, after the
+/// membership, backend and binding joins have matched, and never for an
+/// environment row that one of them rejects.
+///
+/// Residual difference, which fails closed: for a scope row, the metadata is
+/// now read before the namespace, `context()` and `owner()` checks, where the
+/// separate code read it only after they passed. The read locks nothing, so
+/// it can change only which error is returned: a database failure in it now
+/// returns Unavailable where one of those checks would have returned Denied.
+const SCOPE_AND_METADATA_QUERY: &str = concat!(
+    "SELECT scope.environment_id, scope.creator, scope.organization, scope.generation, \
+     scope.namespace, scope.claim_name, scope.claim_uid, scope.pod_name, scope.pod_uid, \
+     scope.binding_claim_uid, scope.binding_sandbox_uid, scope.managed_credential_clients, \
+     scope.credential_scope, scope.member_id, scope.member_role, scope.profile_id, \
+     scope.profile_revision, scope.confirmed_by, scope.profile_user, scope.profile_organization, \
+     metadata.organization_selected, metadata.user_placement, metadata.project_reference, \
+     metadata.credential_reference, metadata.ordinary_keys, metadata.selection_valid \
+     FROM (",
+    scope_query!(),
+    " OFFSET 0) AS scope CROSS JOIN LATERAL \
+     public.codewire_platform_projection_metadata(scope.environment_id) AS metadata"
+);
+
+#[derive(sqlx::FromRow)]
+struct ScopeAndMetadata {
+    #[sqlx(flatten)]
+    scope: Scope,
+    #[sqlx(flatten)]
+    metadata: ProjectionMetadata,
+}
 
 impl AuthoritySource {
-    async fn scope(&self, environment: &str) -> Result<Scope, Error> {
+    /// The scope and its projection metadata, read together.
+    async fn scope_and_metadata(&self, environment: &str) -> Result<ScopeAndMetadata, Error> {
         // Membership is an INNER JOIN, never the public environment API's
         // creator shortcut. Incomplete backend or consent never infers scope.
-        sqlx::query_as(SCOPE_QUERY)
+        sqlx::query_as(SCOPE_AND_METADATA_QUERY)
             .bind(environment)
             .fetch_optional(&self.pool)
             .await
@@ -499,17 +541,18 @@ impl AuthoritySource {
         .map_err(kube_error)?;
         live_pod(&gateway, &identities.gateway)?;
         let environment = gateway_environment(&gateway)?;
-        let scope = self.scope(&environment).await?;
+        let ScopeAndMetadata { scope, metadata } = self.scope_and_metadata(&environment).await?;
         if scope.namespace != identities.gateway.namespace() {
             return Err(Error::Denied);
         }
         let mut context = scope.context()?;
         let owner = scope.owner()?;
-        let metadata = projection::metadata(&self.pool, &environment).await?;
         let (binding, profile) = if scope.profile_id.is_some() {
-            let binding = self
+            // The binding read, then the bound revision for the scope's owner,
+            // in one transaction; the revision is checked only after the binding.
+            let (binding, profile) = self
                 .profiles
-                .get_binding_metadata(&context)
+                .get_binding_metadata_and_revision(&context, &owner)
                 .await
                 .map_err(profile_error)?;
             if Some(binding.binding.profile_id.as_str()) != scope.profile_id.as_deref()
@@ -522,15 +565,7 @@ impl AuthoritySource {
             {
                 return Err(Error::Denied);
             }
-            let profile = self
-                .profiles
-                .get_revision(
-                    &owner,
-                    &binding.binding.profile_id,
-                    binding.binding.profile_revision,
-                )
-                .await
-                .map_err(profile_error)?;
+            let profile = profile.map_err(profile_error)?;
             if profile.owner != owner
                 || profile.placement != Placement::Platform
                 || profile.entries.is_empty() && !profile.includes_github()
@@ -540,14 +575,20 @@ impl AuthoritySource {
             }
             let mut authorized: BTreeSet<codewire_access::CredentialId> =
                 profile.entries.values().cloned().collect();
+            let entries: Vec<String> = authorized.iter().map(ToString::to_string).collect();
+            // The GitHub connection and the ownership of every selected
+            // credential, read together; the connection is checked first.
+            let found = codewire_platform_credentials::owned_credentials_and_github_connection(
+                &self.pool,
+                &owner,
+                &entries,
+                profile.includes_github(),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)?;
             // Every personal profile includes the account's current GitHub
             // connection. When it is missing, GitHub is omitted, not fabricated.
-            if profile.includes_github()
-                && let Some(github) =
-                    codewire_platform_credentials::active_github_connection(&self.pool, &owner)
-                        .await
-                        .map_err(|_| Error::Unavailable)?
-            {
+            if let Some(github) = found.github.map_err(|_| Error::Unavailable)? {
                 authorized.insert(github);
             }
             // Every selected credential must still exist and belong to the
@@ -555,19 +596,8 @@ impl AuthoritySource {
             // environment fence: one that needs Reconnect (refresh failed,
             // revoked or expired) withholds only its own capability, at each
             // broker admission, so sessions and the projection still launch.
-            let ids: Vec<String> = authorized.iter().map(ToString::to_string).collect();
-            let owned: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM public.platform_credentials WHERE \
-             ((user_id=$1 AND organization_id IS NULL) OR (organization_id=$2 AND user_id IS NULL)) \
-             AND id=ANY($3)",
-        )
-        .bind(match &owner { Owner::User(id) => Some(id.as_str()), _ => None })
-        .bind(match &owner { Owner::Organization(id) => Some(id.as_str()), _ => None })
-        .bind(&ids)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|_| Error::Unavailable)?;
-            if owned.into_iter().collect::<BTreeSet<_>>() != ids.into_iter().collect() {
+            let ids: BTreeSet<String> = authorized.iter().map(ToString::to_string).collect();
+            if found.owned != ids {
                 return Err(Error::Denied);
             }
             context.authorized_credentials = authorized;
@@ -605,9 +635,8 @@ impl AuthoritySource {
         }
         // No profile/Kube await follows the final database scope reread. A
         // different binding with identical entry IDs still changes Scope.
-        if self.scope(&environment).await? != scope
-            || projection::metadata(&self.pool, &environment).await? != metadata
-        {
+        let current = self.scope_and_metadata(&environment).await?;
+        if current.scope != scope || current.metadata != metadata {
             return Err(Error::Denied);
         }
         identities.ensure_live()?;
