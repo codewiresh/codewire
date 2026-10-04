@@ -660,6 +660,39 @@ fn held_owner_tuple(value: &Value, conversation: &Conversation) {
     assert_eq!(value["driver"]["native_thread_id"], conversation.thread);
 }
 
+fn clean_stopped_session(value: &Value, session: &str, generation: u64) {
+    let rows = value.as_array().expect("public stopped session results");
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row["session_id"], session);
+    assert_eq!(row["launch_generation"].as_u64(), Some(generation));
+    assert_eq!(row["cleanup_unknown"], false);
+    // Managed shutdown lets the controlled driver exit normally; ordinary
+    // daemon Stop records Stopped. Both require the original known family.
+    assert!(
+        row["state"] == "Stopped"
+            || (row["state"] == "Exited" && row["exit_code"].as_i64() == Some(0))
+    );
+}
+
+fn caller_active(value: &Value, session: &str, driver: &str) -> bool {
+    value["session"]["session_id"] == session
+        && value["session"]["launch_generation"].as_u64() == Some(1)
+        && value["driver"]["driver_id"] == driver
+        && value["driver"]["agent"] == "codex"
+        && value["driver"]["native_thread_id"]
+            .as_str()
+            .is_some_and(|thread| !thread.is_empty())
+        && value["driver"]["phase"] == "busy"
+        && value["driver"]["current_turn_id"].as_str().is_some()
+        && value["messages"].as_array().unwrap().iter().any(|message| {
+            message["id"] == value["driver"]["active_message_id"]
+                && message["state"] == "running"
+                && message["native_acknowledged"] == true
+                && message["turn_id"] == value["driver"]["current_turn_id"]
+        })
+}
+
 async fn held(caller: &Endpoint, conversation: &Conversation, id: &str) -> Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(35);
     let mut since = None;
@@ -1192,8 +1225,7 @@ async fn actual(root: &Path, artifacts: &Path, direct: bool) -> Value {
             None,
         )
         .await;
-    assert_eq!(stopped[0]["state"], "Stopped");
-    assert_eq!(stopped[0]["cleanup_unknown"], false);
+    clean_stopped_session(&stopped, &worker.session, worker.generation);
     for actor in &worker.actors {
         assert!(terminal(&actor.fd));
     }
@@ -1560,19 +1592,7 @@ async fn caller_loss(
     })
     .await
     .expect("original managed caller's own Mutate witness");
-    let active = until(caller, &session, |v| {
-        v["driver"]["phase"] == "busy"
-            && v["driver"]["current_turn_id"].as_str().is_some()
-            && v["messages"].as_array().unwrap().iter().any(|m| {
-                m["id"] == v["driver"]["active_message_id"]
-                    && m["state"] == "running"
-                    && m["driver_id"] == request
-                    && m["target_session_id"] == session
-                    && m["native_acknowledged"] == true
-                    && m["turn_id"] == v["driver"]["current_turn_id"]
-            })
-    })
-    .await;
+    let active = until(caller, &session, |v| caller_active(v, &session, &request)).await;
     let original_id = active["driver"]["active_message_id"].clone();
     let original_turn = active["driver"]["current_turn_id"].clone();
     assert!(!terminal(&owned.fd));
@@ -2000,4 +2020,87 @@ fn managed_fixture_held_owner_uses_public_session_driver_tuple() {
             );
         }
     }
+}
+
+#[test]
+fn managed_fixture_stop_requires_one_original_clean_terminal_session() {
+    let session = "session-11111111-1111-4111-8111-111111111111";
+    let stopped = json!([{
+        "session_id": session, "launch_generation": 1,
+        "cleanup_unknown": false, "state": "Stopped", "exit_code": null,
+    }]);
+    clean_stopped_session(&stopped, session, 1);
+    let mut exited = stopped.clone();
+    exited[0]["state"] = json!("Exited");
+    exited[0]["exit_code"] = json!(0);
+    clean_stopped_session(&exited, session, 1);
+    for (field, wrong) in [
+        ("session_id", json!("session-other")),
+        ("session_id", Value::Null),
+        ("launch_generation", json!(2)),
+        ("launch_generation", json!(true)),
+        ("launch_generation", Value::Null),
+        ("cleanup_unknown", json!(true)),
+        ("cleanup_unknown", Value::Null),
+        ("state", json!("Failed")),
+        ("state", json!("Interrupted")),
+        ("state", json!("Unknown")),
+        ("state", json!("Starting")),
+        ("state", json!("Running")),
+        ("state", json!("Stopping")),
+        ("state", Value::Null),
+        ("exit_code", json!(1)),
+        ("exit_code", Value::Null),
+    ] {
+        let mut wrong_result = exited.clone();
+        wrong_result[0][field] = wrong;
+        assert!(
+            std::panic::catch_unwind(|| clean_stopped_session(&wrong_result, session, 1)).is_err()
+        );
+    }
+    for wrong_result in [Value::Null, json!([]), json!([stopped[0], stopped[0]])] {
+        assert!(
+            std::panic::catch_unwind(|| clean_stopped_session(&wrong_result, session, 1)).is_err()
+        );
+    }
+}
+
+#[test]
+fn managed_fixture_caller_active_uses_public_owner_and_native_turn_pair() {
+    let driver = "11111111-1111-4111-8111-111111111111";
+    let session = format!("session-{driver}");
+    let value = json!({
+        "session": {"session_id": session, "launch_generation": 1},
+        "driver": {"driver_id": driver, "agent": "codex", "native_thread_id": "thread",
+            "phase": "busy", "current_turn_id": "turn", "active_message_id": "message"},
+        "messages": [{"id": "message", "action": "message", "state": "running",
+            "native_acknowledged": true, "turn_id": "turn", "expected_turn_id": null,
+            "member_launch_generation": 1, "notification": null, "source": null}],
+    });
+    assert!(value["messages"][0].get("driver_id").is_none());
+    assert!(value["messages"][0].get("target_session_id").is_none());
+    assert!(caller_active(&value, &session, driver));
+    for (path, wrong) in [
+        ("/session/session_id", json!("session-other")),
+        ("/session/launch_generation", json!(2)),
+        ("/driver/driver_id", json!("other-driver")),
+        ("/driver/agent", json!("claude")),
+        ("/driver/native_thread_id", json!("")),
+        ("/driver/phase", json!("idle")),
+        ("/driver/active_message_id", json!("other-message")),
+        ("/driver/current_turn_id", json!("other-turn")),
+        ("/messages/0/id", json!("other-message")),
+        ("/messages/0/state", json!("completed")),
+        ("/messages/0/native_acknowledged", json!(false)),
+        ("/messages/0/turn_id", json!("other-turn")),
+    ] {
+        for replacement in [wrong, Value::Null] {
+            let mut refused = value.clone();
+            *refused.pointer_mut(path).unwrap() = replacement;
+            assert!(!caller_active(&refused, &session, driver), "{path}");
+        }
+    }
+    let mut empty = value;
+    empty["messages"] = json!([]);
+    assert!(!caller_active(&empty, &session, driver));
 }

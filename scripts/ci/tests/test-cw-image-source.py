@@ -79,6 +79,63 @@ class Inventory(unittest.TestCase):
         with self.assertRaises(source.Refused):
             self.admit()
 
+    def test_checked_in_root_policy_omits_proto_environment_without_inspection(self):
+        root_policy = (ROOT / ".dockerignore").read_bytes()
+        write(self.policy, root_policy)
+        outside = self.base / "owned-proto-environment"
+        write(outside / "synthetic-fixture", b"synthetic-unread-tool-bytes\n")
+        (self.checkout / ".venv-proto").symlink_to(outside, target_is_directory=True)
+        real_open, real_stat, real_readlink = os.open, os.stat, os.readlink
+        with mock.patch.object(source.os, "open", wraps=real_open) as opened, \
+                mock.patch.object(source.os, "stat", wraps=real_stat) as inspected, \
+                mock.patch.object(source.os, "readlink", wraps=real_readlink) as links:
+            with self.admit() as admitted:
+                self.assertIn("src/main.rs", self.members(admitted))
+                self.assertNotIn(".venv-proto", self.members(admitted))
+                admitted.revalidate()
+            for calls in (opened.call_args_list, inspected.call_args_list, links.call_args_list):
+                self.assertFalse(any(".venv-proto" in Path(os.fspath(call.args[0])).parts
+                                     or Path(os.fspath(call.args[0])).is_relative_to(outside)
+                                     for call in calls
+                                     if isinstance(call.args[0], (str, os.PathLike))))
+        # Explicitly exposing the absolute link retains the original refusal;
+        # its target is an owned synthetic directory and is never followed.
+        write(self.policy, root_policy + b"!.venv-proto\n")
+        with mock.patch.object(source.os, "open", wraps=real_open) as opened, \
+                self.assertRaisesRegex(source.Refused, "symlink points outside the context"):
+            self.admit()
+        self.assertFalse(any(".venv-proto" in Path(os.fspath(call.args[0])).parts
+                             or Path(os.fspath(call.args[0])).is_relative_to(outside)
+                             for call in opened.call_args_list
+                             if isinstance(call.args[0], (str, os.PathLike))))
+
+    def test_checked_in_root_policy_omits_nested_npmrc_without_inspection(self):
+        root_policy = (ROOT / ".dockerignore").read_bytes()
+        write(self.policy, root_policy)
+        write(self.checkout / "libs/sdk-ts/.npmrc", b"synthetic-unread-client-config\n")
+        real_open, real_stat, real_readlink = os.open, os.stat, os.readlink
+        with mock.patch.object(source.os, "open", wraps=real_open) as opened, \
+                mock.patch.object(source.os, "stat", wraps=real_stat) as inspected, \
+                mock.patch.object(source.os, "readlink", wraps=real_readlink) as links:
+            with self.admit() as admitted:
+                self.assertIn("src/main.rs", self.members(admitted))
+                self.assertNotIn("libs/sdk-ts/.npmrc", self.members(admitted))
+                admitted.revalidate()
+            for calls in (opened.call_args_list, inspected.call_args_list, links.call_args_list):
+                self.assertFalse(any(".npmrc" in Path(os.fspath(call.args[0])).parts
+                                     for call in calls
+                                     if isinstance(call.args[0], (str, os.PathLike))))
+        write(self.policy, root_policy + b"!libs/sdk-ts/.npmrc\n")
+        with mock.patch.object(source.os, "open", wraps=real_open) as opened, \
+                mock.patch.object(source.os, "stat", wraps=real_stat) as inspected, \
+                mock.patch.object(source.os, "readlink", wraps=real_readlink) as links:
+            with self.assertRaisesRegex(source.Refused, "protected credential/cache tree"):
+                self.admit()
+            for calls in (opened.call_args_list, inspected.call_args_list, links.call_args_list):
+                self.assertFalse(any(".npmrc" in Path(os.fspath(call.args[0])).parts
+                                     for call in calls
+                                     if isinstance(call.args[0], (str, os.PathLike))))
+
     def test_complete_context_not_only_recipe_copy_paths_and_repeat_enumeration(self):
         write(self.checkout / "unreferenced/public.txt", b"readonly context mounts can consume this\n")
         with self.admit() as admitted:

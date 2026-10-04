@@ -29,3 +29,5 @@ go-server/.tmp
 **/__pycache__
 **/*.pyc
 **/*.pyo
+.venv-proto
+**/.npmrc
