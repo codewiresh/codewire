@@ -1963,7 +1963,7 @@ run_fail_fast_case() {
     GITHUB_REPOSITORY=codewire/codewire GITHUB_SERVER_URL=https://forgejo.example \
     GITEA_TOKEN=synthetic-fail-fast-token FAIL_FAST_STATUS="$status" \
     FAIL_FAST_EXIT="$curl_exit" FAIL_FAST_ARGS="$fail_fast_probe/args" \
-    FAIL_FAST_CONFIG="$fail_fast_probe/config" \
+    FAIL_FAST_CONFIG="$fail_fast_probe/config" FAIL_FAST_FLUSH_SECONDS=0 \
     bash "$fail_fast_step" > "$out" 2>&1 || rc=$?
   [ "$rc" = 0 ] || { echo "fail-fast $name: step exited $rc" >&2; cat "$out" >&2; exit 1; }
   grep -qF "$expected" "$out" || { echo "fail-fast $name: missing '$expected'" >&2; cat "$out" >&2; exit 1; }
@@ -1976,6 +1976,10 @@ run_fail_fast_case() {
     [ ! -e "$fail_fast_probe/args" ] || { echo 'fail-fast: called curl without a run id' >&2; exit 1; }
     return 0
   fi
+  # The pre-cancel evidence line must land before the POST so the runner's
+  # report daemon can ship it before the cancel revokes log upload.
+  grep -qF "fail-fast: job unknown failed; requesting cancellation of run $run_id" "$out" \
+    || { echo "fail-fast $name: missing the pre-cancel evidence line" >&2; cat "$out" >&2; exit 1; }
   grep -qxF 'https://forgejo.example/api/v1/repos/codewire/codewire/actions/runs/8185/cancel' "$fail_fast_probe/args"
   grep -qxF POST "$fail_fast_probe/args"
   grep -qxF 'header = "Authorization: token synthetic-fail-fast-token"' "$fail_fast_probe/config"
