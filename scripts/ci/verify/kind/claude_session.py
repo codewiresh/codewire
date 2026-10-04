@@ -1,33 +1,29 @@
 #!/usr/bin/env python3
-"""Managed Kind only: stock Claude Code through the managed Anthropic route.
+"""Managed Kind only: stock Claude Code in a session the workspace daemon launched.
 
-The caller pipes this file into the actual workspace's python3 with two
-arguments: the expected credential form (`api_key` or `subscription_token`)
-and the managed client selection the workspace binding recorded for this exact
-Pod (sandbox_workspace_bindings.managed_credential_clients, the record launch
-authority also reads). Never print raw output, stderr, environment values or
-credential bytes: stdout is the closed acceptance event stream.
+credentials.sh stages this file in the workspace and launches it through the
+public `cw run` path: orchestration's EnvironmentSessionService asks the
+workspace daemon to start the session, and the daemon projects the managed
+client environment into it exactly as it does for a user's terminal. This
+driver therefore observes what the Sandbox actually receives; it never writes,
+derives or repairs any of the four Anthropic names. It checks those values,
+runs the stock pinned `claude -p` with them inherited unchanged, and reports
+the outcome as a closed event stream on stdout. Never print raw output,
+stderr, environment values or credential bytes.
 
-How the projected environment reaches this process. An environment-token
-workspace Pod renders the managed client environment (codewire-access
-`ManagedCredentialClients::for_placement`) and its selection into the
-container, so a kubectl-exec'd process inherits them: the driver uses those
-exact rendered values and requires the rendered selection to equal the
-recorded one. An identity-free Pod (the default binding mode) renders neither;
-its daemon projects the same values only into the sessions it launches, and a
-kubectl exec is not one. There the driver applies the values the renderer
-defines for the recorded selection, after requiring that the container itself
-carries none of those names. Either way every value is the fixed loopback
-route or the `codewire-managed` placeholder; nothing here reads, invents or
-receives a credential. The form decision is the product's: orchestration
-recorded the bound credential's kind in the selection, and the synthetic
-provider answers only when the broker presented the real synthetic credential
-in exactly that form and never the placeholder.
+Arguments: the expected credential form (`api_key` or `subscription_token`)
+and the expected outcome:
+
+    success   Claude Code exits 0 and prints the fixture's reply marker.
+    refused   Claude Code reports the provider's 401 and exits non-zero. The
+              fixture refuses a well-formed synthetic subscription token this
+              way, as a real provider refuses an expired or revoked one.
 
 Pinned to Claude Code 2.1.238, whose probe showed that `claude -p` sends only
 POST /v1/messages?beta=true to the base URL, that CLAUDE_CODE_OAUTH_TOKEN
-selects its subscription mode, and that the empty ANTHROPIC_AUTH_TOKEN and
-ANTHROPIC_API_KEY are treated as unset. The fresh HOME and
+selects its subscription mode, that the empty ANTHROPIC_AUTH_TOKEN and
+ANTHROPIC_API_KEY are treated as unset, and that a 401 `authentication_error`
+prints "API Error: 401" and exits 1 at once. The fresh HOME and
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC are harness-local: no saved login,
 telemetry or update call. Neither changes authentication.
 """
@@ -47,14 +43,13 @@ BASE_URL = "http://127.0.0.1:38081"
 PLACEHOLDER = "codewire-managed"
 MARKER = "CWCLAUDE kind"
 PROMPT = "Reply with the Codewire Kind marker."
-SELECTION_ENV = "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS"
 NAMES = (
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
 )
-# The renderer's exact values for each form (codewire-access projection.rs).
+# The daemon's exact values for each form (codewire-access projection.rs).
 PROJECTIONS = {
     "api_key": {
         "ANTHROPIC_BASE_URL": BASE_URL,
@@ -69,19 +64,16 @@ PROJECTIONS = {
         "ANTHROPIC_API_KEY": "",
     },
 }
-# An Anthropic-only personal profile selects the Anthropic client, plus GitHub
-# while the creator's connection is active. Bit 0x20 is the subscription form.
-SELECTIONS = {
-    "api_key": frozenset({"v1:anthropic", "v2:14"}),
-    "subscription_token": frozenset({"v2:24", "v2:34"}),
-}
+OUTCOMES = ("success", "refused")
 # Distinctive parts of the fixture's synthetic credentials
-# (credential-service runtime/kind/provider.rs). Neither may appear anywhere in
-# the Sandbox, Claude Code's environment or its output.
+# (credential-service runtime/kind/provider.rs). None may appear anywhere in
+# the session's environment, Claude Code's environment or its output.
 CREDENTIAL_MARKERS = (
     "CW_KIND_SYNTHETIC_ANTHROPIC_KEY",
     "CW_KIND_SYNTHETIC_CLAUDE_TOKEN",
+    "CW_KIND_SYNTHETIC_REFUSED_TOKEN",
 )
+REFUSAL = b"401"
 SESSION_TIMEOUT = 120.0
 VERSION_TIMEOUT = 30.0
 MAX_OUTPUT = 256 * 1024
@@ -97,7 +89,7 @@ def emit(event, **fields):
 
 
 def parse_arguments(argv):
-    if len(argv) != 2 or argv[0] not in PROJECTIONS:
+    if len(argv) != 2 or argv[0] not in PROJECTIONS or argv[1] not in OUTCOMES:
         raise Failure("arguments")
     return argv[0], argv[1]
 
@@ -107,26 +99,21 @@ def exposed(environ):
                for name, value in environ.items() for marker in CREDENTIAL_MARKERS)
 
 
-def projection(kind, selection, environ):
-    """The exact projected values and where they came from."""
-    if selection not in SELECTIONS[kind]:
-        raise Failure("unexpected_selection")
-    rendered = environ.get(SELECTION_ENV)
-    if rendered is not None:
-        if rendered != selection:
-            raise Failure("selection_mismatch")
-        values = {name: environ.get(name) for name in NAMES}
-        if values != PROJECTIONS[kind]:
-            raise Failure("projection_values")
-        return values, "container"
-    if any(name in environ for name in NAMES):
-        raise Failure("unexpected_inherited_auth")
-    return dict(PROJECTIONS[kind]), "binding"
+def projection(form, environ):
+    """The four values the daemon projected, which must be exactly the form's."""
+    values = {name: environ.get(name) for name in NAMES}
+    if any(value is None for value in values.values()):
+        raise Failure("projection_missing")
+    if values != PROJECTIONS[form]:
+        other = next(name for name in PROJECTIONS if name != form)
+        raise Failure("projection_other_form" if values == PROJECTIONS[other]
+                      else "projection_values")
+    return values
 
 
-def child_environment(environ, values, home):
+def child_environment(environ, home):
+    """The session's own environment with a fresh harness-local home only."""
     child = dict(environ)
-    child.update(values)
     child.update({
         "HOME": home,
         "XDG_CONFIG_HOME": os.path.join(home, ".config"),
@@ -134,6 +121,8 @@ def child_environment(environ, values, home):
         "XDG_DATA_HOME": os.path.join(home, ".local", "share"),
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     })
+    if any(child.get(name) != environ.get(name) for name in NAMES):
+        raise Failure("projection_rewritten")
     if exposed(child):
         raise Failure("credential_in_child_environment")
     return child
@@ -169,36 +158,44 @@ def run(argv, env, cwd, timeout, reason):
     if any(marker.encode() in output
            for output in (stdout, stderr) for marker in CREDENTIAL_MARKERS):
         raise Failure("credential_in_output")
-    return process.returncode, stdout
+    return process.returncode, stdout, stderr
 
 
 def client_version(env, cwd):
-    status, stdout = run([*CLAUDE_ARGV, "--version"], env, cwd, VERSION_TIMEOUT,
-                         "claude_version")
+    status, stdout, _ = run([*CLAUDE_ARGV, "--version"], env, cwd, VERSION_TIMEOUT,
+                            "claude_version")
     match = VERSION.match(stdout.decode("utf-8", "replace").strip())
     if status != 0 or match is None:
         raise Failure("claude_version")
     return match.group(1)
 
 
-def session(kind, selection, environ):
+def session(form, outcome, environ):
     if exposed(environ):
         raise Failure("credential_in_environment")
-    values, source = projection(kind, selection, environ)
-    emit("claude_projection", kind=kind, selection=selection, source=source)
+    projection(form, environ)
+    emit("claude_projection", form=form, source="daemon_session")
     with tempfile.TemporaryDirectory(prefix="kind-claude-") as home:
-        env = child_environment(environ, values, home)
+        env = child_environment(environ, home)
         version = client_version(env, home)
-        status, stdout = run([*CLAUDE_ARGV, "-p", PROMPT], env, home, SESSION_TIMEOUT, "claude")
+        status, stdout, stderr = run([*CLAUDE_ARGV, "-p", PROMPT], env, home,
+                                     SESSION_TIMEOUT, "claude")
+    marker = MARKER.encode() in stdout
+    if outcome == "success":
         if status != 0:
             raise Failure("claude_exit")
-        if MARKER.encode() not in stdout:
+        if not marker:
             raise Failure("missing_marker")
-    emit("claude_session", kind=kind, client_version=version, marker=True)
+    else:
+        if status == 0 or marker:
+            raise Failure("refusal_not_reported")
+        if REFUSAL not in stdout + stderr:
+            raise Failure("refusal_status_missing")
+    emit("claude_session", form=form, outcome=outcome, client_version=version)
 
 
 def main(argv=None, environ=None):
-    kind = None
+    form = outcome = None
 
     def interrupted(_signum, _frame):
         raise Failure("interrupted")
@@ -206,15 +203,15 @@ def main(argv=None, environ=None):
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     try:
-        kind, selection = parse_arguments(sys.argv[1:] if argv is None else argv)
-        session(kind, selection, dict(os.environ if environ is None else environ))
+        form, outcome = parse_arguments(sys.argv[1:] if argv is None else argv)
+        session(form, outcome, dict(os.environ if environ is None else environ))
     except Failure as error:
-        emit("failed", kind=kind, reason=str(error))
+        emit("failed", form=form, outcome=outcome, reason=str(error))
         return 1
     except Exception:
-        emit("failed", kind=kind, reason="driver_failure")
+        emit("failed", form=form, outcome=outcome, reason="driver_failure")
         return 1
-    emit("complete", kind=kind)
+    emit("complete", form=form, outcome=outcome)
     return 0
 
 
