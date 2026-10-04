@@ -868,6 +868,78 @@ wait_kind_credential_sandbox_pair '%s' 2
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn('exec-ready', result.stderr)
 
+    def test_native_acceptance_reports_the_failing_command_instead_of_a_bare_exit(self):
+        # prepare_kind_credential_cli is the first fallible plain command after
+        # the trap is armed; its failure must be reported, never a bare exit.
+        result = self.shell('''
+log() { :; }
+kind_workspace_runtime_image() { printf 'localhost/synthetic:latest\\n'; }
+prepare_kind_credential_cli() { synthetic_prepare_failure_marker; }
+kind_credential_native_smoke
+''')
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertIn('::error::native Codex acceptance failed:', result.stderr)
+        self.assertIn('command=synthetic_prepare_failure_marker', result.stderr)
+        self.assertIn('status=127', result.stderr)
+
+    def test_native_acceptance_names_a_delivered_login_without_a_generation(self):
+        # Drive the whole post-update window with stubs and hand the flow a
+        # deliver completion whose event stream lacks the delivered event.
+        # jq's select-miss exit code differs between jq 1.8 and the job image,
+        # so the missing generation must be a named error on content.
+        gateway = json.dumps({"metadata": {"uid": GATEWAY_UID},
+                              "spec": {"containers": [{"name": "gateway", "env": [
+                                  {"name": "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
+                                   "value": "1"}]}]}}) .replace("'", "'\\''")
+        workspace = json.dumps({"metadata": {"uid": WORKSPACE_UID},
+                                "spec": {"containers": [{"name": "workspace"}]}}).replace("'", "'\\''")
+        result = self.shell('''
+log() { :; }
+SANDBOX_NS=dev-sandboxes
+kind_workspace_runtime_image() { printf 'localhost/synthetic:latest\\n'; }
+prepare_kind_credential_cli() { :; }
+kind_credential_cli() {
+  case "$*" in
+    'org list --output json')
+      printf '[{"id":"org_contract_1","role":"member"},{"id":"org_contract_2","role":"owner"}]\\n' ;;
+    'org current') printf 'ID: org_contract_1\\n' ;;
+    'credentials --platform get'*)
+      printf '[{"name":"%%s","provider":"openai","status":"CREDENTIAL_STATUS_ACTIVE"}]\\n' "$4" ;;
+    'env --platform create'*) printf '{"id":"%%s"}\\n' '%(env)s' ;;
+    'env --platform update'*) printf '{"operation_generation":1}\\n' ;;
+    *) return 0 ;;
+  esac
+}
+wait_kind_credential_environment() { return 0; }
+kind_credential_probe() { :; }
+wait_kind_credential_sandbox_pair() { printf 'sandbox-x\\n%%s\\n' '%(gateway)s'; }
+kubectl() {
+  case "$*" in
+    "-n dev-sandboxes get pod sandbox-x -o jsonpath={.metadata.uid}") printf '%%s\\n' '%(uid)s' ;;
+    "-n dev-sandboxes get pod sandbox-x -o json") printf '%%s\\n' '%(workspace)s' ;;
+    *) return 99 ;;
+  esac
+}
+kind_credential_codex_login() { printf '{"event":"complete","mode":"deliver"}\\n'; }
+kind_credential_native_smoke
+''' % {"env": ENVIRONMENT, "gateway": gateway, "workspace": workspace, "uid": WORKSPACE_UID})
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('::error::the delivered Codex login event is missing its generation',
+                      result.stderr)
+
+    def test_native_acceptance_arms_its_error_trap_before_io(self):
+        source = HELPERS.read_text()
+        flow = source.split("kind_credential_native_smoke() (", 1)[1]
+        trap = flow.index("trap 'echo \"::error::native Codex acceptance failed:")
+        self.assertLess(trap, flow.index('workspace_image="$(kind_workspace_runtime_image)"'))
+        self.assertLess(trap, flow.index('prepare_kind_credential_cli'))
+        self.assertIn("set -E", flow[:trap])
+        generation = flow.index('login_generation="$(jq -er')
+        guard = flow.index('::error::the delivered Codex login event is missing its generation')
+        self.assertLess(generation, guard)
+        self.assertNotIn('login_generation="$(jq -er \'select(.event == "delivered") | .generation\' <<<"$login_events")" ||',
+                         flow)
+
     def test_native_restart_wait_binds_the_update_generation_before_pod_assertions(self):
         source = HELPERS.read_text()
         flow = source.split("kind_credential_native_smoke() (", 1)[1]

@@ -486,6 +486,11 @@ kind_credential_native_smoke() (
   local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation gateway gateway_uid
   local certificate certificate_uid after_certificate_uid workspace_image marker
   local login_events login_generation update restart_generation pair
+  # The acceptance must never die with a bare exit status again (runs 10381,
+  # 10459, 10465 all lost the failing command to a silent jq exit 4). Report
+  # the exact failing command before errexit unwinds the suite.
+  set -E
+  trap 'echo "::error::native Codex acceptance failed: command=${BASH_COMMAND} status=$?" >&2' ERR
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-credentials.XXXXXX)"
   trap 'rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
@@ -544,8 +549,14 @@ kind_credential_native_smoke() (
   # The creator's own login reaches Codex's auth.json; stock Codex reads it as
   # ChatGPT, reads usage and completes a turn against a synthetic backend.
   login_events="$(kind_credential_codex_login "$environment" deliver)" || return $?
-  login_generation="$(jq -er 'select(.event == "delivered") | .generation' <<<"$login_events")" ||
-    return $?
+  # jq's empty-result exit code is image-dependent (4 in jq 1.8, success with
+  # no output in the job image), and either way a failing assignment would
+  # outrun the content check, so disarm the exit status and test the content.
+  login_generation="$(jq -er 'select(.event == "delivered") | .generation' <<<"$login_events" || true)"
+  [[ "$login_generation" =~ ^[0-9]+$ ]] || {
+    echo '::error::the delivered Codex login event is missing its generation' >&2
+    return 1
+  }
   # The proxy session forces the proxy provider; its broker refreshes rotate
   # the delivered login too.
   kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- python3 -B -u - \
