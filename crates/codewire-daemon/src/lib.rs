@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+pub mod claude_home;
 pub mod client;
 #[cfg(unix)]
 pub mod codex_home;

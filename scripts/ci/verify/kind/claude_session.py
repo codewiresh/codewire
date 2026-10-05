@@ -6,10 +6,12 @@ public `cw run` path: orchestration's EnvironmentSessionService asks the
 workspace daemon to start the session, and the daemon projects the managed
 client environment into it exactly as it does for a user's terminal. This
 driver therefore observes what the Sandbox actually receives; it never writes,
-derives or repairs any of the four Anthropic names. It checks those values,
-runs the stock pinned `claude -p` with them inherited unchanged, and reports
-the outcome as a closed event stream on stdout. Never print raw output,
-stderr, environment values or credential bytes.
+derives or repairs any of the four Anthropic names. It checks those values
+and that the daemon marked Claude Code's onboarding complete in the
+workspace user's own `~/.claude.json`, runs the stock pinned `claude -p` with
+the values inherited unchanged, and reports the outcome as a closed event
+stream on stdout. Never print raw output, stderr, environment values,
+file contents or credential bytes.
 
 Arguments: the expected credential form (`api_key` or `subscription_token`)
 and the expected outcome:
@@ -32,6 +34,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -65,6 +68,11 @@ PROJECTIONS = {
     },
 }
 OUTCOMES = ("success", "refused")
+# What the daemon sets in the workspace user's own Claude Code configuration
+# while the Anthropic client is selected (codewire-daemon claude_home.rs).
+CLAUDE_CONFIG = ".claude.json"
+ONBOARDING_KEYS = ("hasCompletedOnboarding", "hasAcknowledgedCostThreshold")
+MAX_CLAUDE_CONFIG = 1024 * 1024
 # Distinctive parts of the fixture's synthetic credentials
 # (credential-service runtime/kind/provider.rs). None may appear anywhere in
 # the session's environment, Claude Code's environment or its output.
@@ -109,6 +117,43 @@ def projection(form, environ):
         raise Failure("projection_other_form" if values == PROJECTIONS[other]
                       else "projection_values")
     return values
+
+
+def onboarding(environ):
+    """The session user's own ~/.claude.json, as the daemon left it: a private
+    regular file of this uid, never a symlink, that marks onboarding complete
+    and holds no credential or placeholder. Read only, never repaired."""
+    home = environ.get("HOME", "")
+    if not os.path.isabs(home):
+        raise Failure("onboarding_home")
+    try:
+        descriptor = os.open(os.path.join(home, CLAUDE_CONFIG),
+                             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise Failure("onboarding_missing") from None
+    except OSError:
+        # ELOOP: a symlink, refused by O_NOFOLLOW and never read through.
+        raise Failure("onboarding_file") from None
+    try:
+        status = os.fstat(descriptor)
+        if (not stat.S_ISREG(status.st_mode) or status.st_uid != os.geteuid()
+                or status.st_mode & 0o077):
+            raise Failure("onboarding_file")
+        with os.fdopen(descriptor, "rb", closefd=False) as config:
+            contents = config.read(MAX_CLAUDE_CONFIG + 1)
+    finally:
+        os.close(descriptor)
+    if len(contents) > MAX_CLAUDE_CONFIG:
+        raise Failure("onboarding_file")
+    if any(marker.encode() in contents for marker in (*CREDENTIAL_MARKERS, PLACEHOLDER)):
+        raise Failure("credential_in_claude_config")
+    try:
+        document = json.loads(contents)
+    except ValueError:
+        raise Failure("onboarding_not_marked") from None
+    if not isinstance(document, dict) or any(document.get(key) is not True
+                                             for key in ONBOARDING_KEYS):
+        raise Failure("onboarding_not_marked")
 
 
 def child_environment(environ, home):
@@ -174,6 +219,7 @@ def session(form, outcome, environ):
     if exposed(environ):
         raise Failure("credential_in_environment")
     projection(form, environ)
+    onboarding(environ)
     emit("claude_projection", form=form, source="daemon_session")
     with tempfile.TemporaryDirectory(prefix="kind-claude-") as home:
         env = child_environment(environ, home)
