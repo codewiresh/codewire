@@ -181,9 +181,12 @@ assert all(feature.startswith("dep:") for feature in protected["features"]["plat
 assert orchestration["dependencies"]["codewire-protected-store"]["features"] == ["platform"]
 assert orchestration["dev-dependencies"]["codewire-protected-store"]["features"] == ["platform-test-support"]
 assert orchestration["features"]["kind-e2e"].count("codewire-protected-store/platform-test-support") == 1
-# The production credential-service may use the synthetic KEK only through the
+# The credential-service's synthetic KEK and broker transport use only the
 # same non-promotable Kind feature (`kind-e2e.sh credentials real`).
-assert credential_service["features"]["kind-e2e"] == ["codewire-protected-store/platform-test-support"]
+assert credential_service["features"]["kind-e2e"] == [
+    "codewire-protected-store/platform-test-support",
+    "codewire-credential-broker/local-broker-synthetic-smoke",
+]
 assert broker["features"]["default"] == ["local"]
 assert set(broker["features"]["platform"]) == {"dep:codewire-platform-credentials", "dep:codewire-protected-store", "dep:tonic"}
 assert broker["dependencies"]["codewire-platform-credentials"]["optional"] is True

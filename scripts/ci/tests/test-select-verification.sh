@@ -1580,7 +1580,7 @@ grep -qF 'cargo test --locked -p codewire-credential-service --features enrollme
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' "$integration_runner"
 grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
-grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 83' "$integration_runner"
+grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 84' "$integration_runner"
 grep -qF 'assert_passed_count "idp db_flow" "$logfile" 13' "$integration_runner"
 grep -qF 'assert_passed_count "idp two-factor replacement" "$logfile" 11' "$integration_runner"
 grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 23' "$integration_runner"
@@ -2968,7 +2968,11 @@ primitive_cargo_command="$(PATH="$primitive_probe/bin:$PATH" bash -c 'command -v
 primitive_guard="$ROOT/scripts/ci/tests/test-openbao-only-secret-authority.sh"
 : > "$primitive_probe/default.log"
 PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$primitive_probe/default.log" \
-  PRIMITIVE_CARGO_FAIL=all "$primitive_guard" > "$primitive_probe/default.out" 2>&1
+  PRIMITIVE_CARGO_FAIL=all "$primitive_guard" > "$primitive_probe/default.out" 2>&1 || {
+  status=$?
+  cat "$primitive_probe/default.out" >&2
+  exit "$status"
+}
 [[ ! -s "$primitive_probe/default.log" ]] || {
   echo 'default authority policy must not invoke Cargo' >&2
   exit 1

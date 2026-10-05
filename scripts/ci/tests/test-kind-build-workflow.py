@@ -195,6 +195,7 @@ class WorkflowContractTests(unittest.TestCase):
             "CLUSTER": "codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}",
             "CODEWIRE_KIND_PROFILE_ROOT": "${{ runner.temp }}/kind-profiles",
             "KIND_SHARD_SUITES": "${{ matrix.shard.suites }}",
+            "CODEWIRE_KIND_DASHBOARD_WORKERS": "${{ matrix.shard.playwright_workers }}",
         })
         self.assertNotIn("CLUSTER", edge["env"],
                          "static fixtures must not inherit an uncreated profile")
@@ -1006,6 +1007,9 @@ class CommonConsumerContractTests(unittest.TestCase):
             harness.chmod(0o755)
             calls = fixture / "calls"
             environment = os.environ.copy()
+            # This consumer fixture selects the legacy cluster above; a caller's
+            # saved-profile selector belongs to its separate profile fixtures.
+            environment.pop("CLUSTER", None)
             environment.update({"FIXTURE_ROOT": str(fixture), "CALLS": str(calls)})
             result = subprocess.run(
                 ["bash", str(harness)],
