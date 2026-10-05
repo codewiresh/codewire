@@ -60,9 +60,6 @@ with closing(module.asset.HeldFile(pathlib.Path(sys.argv[2]), module.release.MAX
         held.revalidate(content=True)
         module.asset.write_new(parent.fd, pathlib.Path(sys.argv[3]).name, held.data, 0o400)
 PY
-    cw_image_compilation=new
-  else
-    cw_image_compilation=reused
   fi
   local reference
   reference="$(python3 -B - "$ROOT" "$result_file" "$profile" <<'PY'

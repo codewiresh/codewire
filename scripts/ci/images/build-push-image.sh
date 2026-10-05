@@ -658,7 +658,7 @@ if [ "$build_runtime_set" = 1 ]; then
       echo 'Protected CW image context differs from the selected release source' >&2
       exit 2
     }
-    mkdir -p -m 0700 "$cw_image_work"
+    mkdir -p -- "$cw_image_work"
     run_buildx_with_nexus_retry env \
       DOCKER_CONFIG="$docker_config" \
       CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
@@ -733,7 +733,7 @@ else
       echo 'Protected CW image context differs from the selected release source' >&2
       exit 2
     }
-    mkdir -p -m 0700 "$cw_image_work"
+    mkdir -p -- "$cw_image_work"
     run_buildx_with_nexus_retry env \
       DOCKER_CONFIG="$docker_config" \
       CODEWIRE_IMAGE_SOURCE_SHA="$source_sha" \
@@ -763,7 +763,7 @@ else
         echo 'Protected CW image context differs from the selected release source' >&2
         exit 2
       }
-      mkdir -p -m 0700 "$cw_image_work"
+      mkdir -p -- "$cw_image_work"
       run_buildx_with_nexus_retry env DOCKER_CONFIG="$docker_config" \
         bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$cw_selected_source_dir" "$cw_image_work" -- \
         "${image_command[@]}"

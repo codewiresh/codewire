@@ -267,7 +267,7 @@ workspace_cache_build() {
   if [[ "$target" == workspace ]]; then
     workspace_cache_layer_args cw-runtime "$source_tree" "$architecture" || return
     producer_cache=("${layer_args[@]}")
-    mkdir -p -m 0700 "$cw_work"
+    (umask 077; mkdir -p -- "$cw_work") || return
     command=(bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$ROOT" "$cw_work" "${producer_cache[@]}" -- "${command[@]}")
   fi
   workspace_cache_logged_command "$log" "${command[@]}" || status=$?
