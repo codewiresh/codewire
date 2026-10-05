@@ -2595,6 +2595,38 @@ kind_credential_claude_stage workspace-pod
         self.assertEqual(result.returncode, 1)
         self.assertNotIn("unexpected-kubectl", result.stdout)
 
+    def test_anthropic_requests_never_join_the_daemon_authority_pairing(self):
+        # The Claude journey runs after the native smoke's authority check, so
+        # none of its epoch admissions can land inside that journey. Its
+        # Anthropic requests, logged anywhere, are not the Codex requests the
+        # check pairs with its probes or counts toward the journey's start.
+        lines, probes = HarnessGuards.authority_lines()
+        anthropic = {"timestamp": "2026-10-04T01:00:00.000000Z",
+                     "target": "codewire_credential_broker::timing",
+                     "fields": {"event": "proxied_request", "slot": "anthropic",
+                                "route": "anthropic-api", "total_ms": 40,
+                                "outcome": "response", "status": 200,
+                                "authority": "evaluated", "cache": "miss"}}
+        mixed = [anthropic] + [entry for line in lines for entry in (line, anthropic)]
+        result = HarnessGuards.authority_changes(self, mixed, probes)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        logs = "\n".join(json.dumps(line) for line in mixed[:7])
+        result = self.shell('''
+NS=codewire-e2e
+kubectl() {
+  [ "$*" = '-n codewire-e2e logs deployment/codewire-credential-service -c credential-service' ] ||
+    return 99
+  printf '%%s\\n' '%s'
+}
+kind_credential_codex_request_count
+''' % logs)
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, "3"), result.stderr)
+        # The check runs inside the native smoke, which the suite and the full
+        # gate run before the Claude journey.
+        native = HELPERS.read_text().split("kind_credential_native_smoke() (", 1)[1]
+        self.assertIn("assert_kind_credential_authority_changes",
+                      native.split("\n)\n", 1)[0])
+
     def test_release_mode_never_runs_the_synthetic_claude_journey(self):
         result = self.shell(
             "log() { :; }\n"
