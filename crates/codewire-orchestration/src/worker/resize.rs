@@ -444,7 +444,12 @@ pub async fn handle_environment_resize(
     authority
         .run_external_mutation(
             RESIZE_MUTATION_STATES,
-            client.delete_workspace_pod_if_uid(&backend.pod_name, &previous_pod_uid),
+            client.replace_workspace_pod_if_uid(
+                environment_id,
+                &backend.pod_name,
+                &previous_pod_uid,
+                ctx.sandbox_cfg.support_image(),
+            ),
         )
         .await?;
     let replacement = authority

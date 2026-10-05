@@ -651,6 +651,12 @@ impl WorkerSetupOps<'_> {
             .ok_or_else(|| anyhow::anyhow!("workspace setup: sandbox backend not configured"))
     }
 
+    /// The support image a recovery resume re-pins the daemon to: the one
+    /// create renders.
+    fn support_image(&self) -> &str {
+        self.ctx.sandbox_cfg.support_image()
+    }
+
     fn cancellation_requested(&self) -> bool {
         self.activity_ctx.is_cancelled()
     }
@@ -753,7 +759,7 @@ impl WorkerSetupOps<'_> {
         let guard = self.phase_authority.begin_reap(old_owner).await?;
         let suspend_result = tokio::time::timeout(
             Duration::from_secs(30),
-            sandbox.set_replicas(&input.environment_id, 0),
+            sandbox.set_replicas(&input.environment_id, 0, self.support_image()),
         )
         .await;
         guard.commit().await?;
@@ -875,7 +881,7 @@ impl WorkerSetupOps<'_> {
         let sandbox = self.sandbox_client(&input.namespace)?;
         let resume_result = tokio::time::timeout(
             Duration::from_secs(30),
-            sandbox.set_replicas(&input.environment_id, 1),
+            sandbox.set_replicas(&input.environment_id, 1, self.support_image()),
         )
         .await;
         resume_guard.commit().await?;

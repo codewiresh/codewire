@@ -996,6 +996,9 @@ apply_candidate_images() {
   fi
   if [[ -n "${IMAGE_SELECTED[gateway]:-}" ]]; then
     ref="$(image_ref gateway)"
+    # Every Start re-pins an existing Sandbox's daemon to the configured
+    # support image, so Sandboxes started during this smoke run the candidate
+    # daemon until their first Start after the restore re-pins them back.
     patch_config_key SANDBOX_GATEWAY_IMAGE "$ref"
     set_deployment_env codewire-orchestration orchestration SANDBOX_GATEWAY_IMAGE "$ref"
   fi
