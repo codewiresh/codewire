@@ -950,7 +950,7 @@ class MainFinalizationCase(unittest.TestCase):
             coordinator = mock.Mock()
             coordinator.diagnostic_state.return_value = {"nativeStarted": False}
             observed: list[object] = []
-            output = mock.Mock(buffer=io.BytesIO())
+            output = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
 
             def fail_after_attachment(_arguments: object, run: fixture.Run) -> None:
                 run.coordinator = coordinator
@@ -979,7 +979,7 @@ class MainFinalizationCase(unittest.TestCase):
             parent = Path(temporary)
             parent.chmod(0o700)
             root = parent / "evidence"
-            output = mock.Mock(buffer=io.BytesIO())
+            output = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
 
             def succeed(_arguments: object, run: fixture.Run) -> None:
                 run.result.update(
