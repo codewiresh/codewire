@@ -84,10 +84,23 @@ jobs:
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
+      # The protected R2 compiler cache is best effort: when this job cannot
+      # obtain its protected credential, the selector chooses the job-local
+      # cache, and run-rust-build.sh compiles locally on any R2 outage.
+      - name: Select the protected R2 compiler cache
+        id: compiler-cache
+        run: |
+          scripts/ci/setup/select-protected-rust-cache.sh \
+            "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"
+
       - name: Build and push the exact runtime image set
         id: build
         env:
-          CODEWIRE_SCCACHE_MODE: local
+          CODEWIRE_SCCACHE_MODE: ${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}
+          SCCACHE_BUCKET: example-ci-cache-protected
+          SCCACHE_ENDPOINT: https://00000000000000000000000000000000.r2.cloudflarestorage.com
+          CODEWIRE_SCCACHE_PREFIX: protected/codewire/v1
+          CODEWIRE_SCCACHE_CREDENTIALS_FILE: ${{ runner.temp }}/codewire-sccache-r2-protected.aws
           # Trusted planner change context for selective rebuilds. A family
           # the planner certifies unaffected carries its exact deployed
           # digest forward instead of rebuilding. The gate stays 0 until
@@ -101,6 +114,12 @@ jobs:
           CODEWIRE_IMAGE_STATE_SERVICES: ${{ needs.deploy-selection.outputs.services_image_state }}
           CODEWIRE_IMAGE_STATE_MESH: ${{ needs.deploy-selection.outputs.mesh_image_state }}
         run: scripts/ci/images/build-push-runtime-images.sh
+
+      - name: Remove the protected R2 compiler-cache credential
+        if: ${{ always() }}
+        run: |
+          shred -u -- "$RUNNER_TEMP/codewire-sccache-r2-protected.aws" 2>/dev/null ||
+            rm -f -- "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"
 
       - name: Publish the complete runtime set to Harbor without rebuilding
         run: |

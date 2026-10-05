@@ -230,6 +230,8 @@ run_policy_core() {
   scripts/ci/tests/test-source-approval-workflow.sh
   scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh
   scripts/ci/tests/test-select-untrusted-rust-cache.sh
+  scripts/ci/tests/test-fetch-openbao-sccache-r2-protected-credentials.sh
+  scripts/ci/tests/test-select-protected-rust-cache.sh
   scripts/ci/tests/test-retired-local-sdk-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
   scripts/runtime/tests/test-storage-measure.sh

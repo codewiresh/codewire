@@ -115,8 +115,55 @@ grep -Fq '    timeout-minutes: 110' <<<"$build_job" ||
   fail "runtime set exceeds the protected runner lifetime"
 grep -Fq '        run: scripts/ci/images/build-push-runtime-images.sh' <<<"$build_job" ||
   fail "runtime set does not use the bounded shared-builder entrypoint"
-grep -Fq '          CODEWIRE_SCCACHE_MODE: local' <<<"$build_job" ||
-  fail "protected runtime build does not keep compiler objects job-local"
+# The shared protected compiler cache is best effort: the selector's step
+# output admits exactly r2 or the job-local fallback, and nothing else.
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+grep -Fxq "          CODEWIRE_SCCACHE_MODE: \${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}" \
+  <<<"$build_job" ||
+  fail "protected runtime build does not select the shared protected compiler cache with a local fallback"
+[[ "$(grep -Fc 'CODEWIRE_SCCACHE_MODE:' <<<"$build_job")" -eq 1 ]] ||
+  fail "protected runtime build fixes its compiler-cache mode outside the fail-open selector"
+# shellcheck disable=SC2016 # Match the literal workflow environment.
+grep -Fq '          SCCACHE_BUCKET: example-ci-cache-protected' <<<"$build_job" ||
+  fail "protected runtime build does not use the dedicated protected cache bucket"
+# shellcheck disable=SC2016 # Match the literal workflow environment.
+grep -Fq '          CODEWIRE_SCCACHE_PREFIX: protected/codewire/v1' <<<"$build_job" ||
+  fail "protected runtime build does not stay below the protected cache prefix"
+# shellcheck disable=SC2016 # Match the literal workflow environment.
+grep -Fq '          CODEWIRE_SCCACHE_CREDENTIALS_FILE: ${{ runner.temp }}/codewire-sccache-r2-protected.aws' \
+  <<<"$build_job" ||
+  fail "protected runtime build does not receive its private cache credential file"
+grep -Fq '      - name: Select the protected R2 compiler cache' <<<"$build_job" ||
+  fail "protected runtime build does not select its compiler cache"
+grep -Fq '          scripts/ci/setup/select-protected-rust-cache.sh \' <<<"$build_job" ||
+  fail "protected runtime build does not fetch its job-scoped cache credential through the fail-open selector"
+# shellcheck disable=SC2016 # Match the literal workflow command.
+grep -Fq '            "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"' <<<"$build_job" ||
+  fail "protected runtime build does not keep its cache credential below RUNNER_TEMP"
+if grep -Fq 'scripts/ci/setup/fetch-openbao-sccache-r2-protected-credentials.sh' <<<"$build_job"; then
+  fail "protected runtime build fetches its cache credential outside the fail-open selector"
+fi
+cache_steps="$(grep -E '^      - name: ' <<<"$build_job" | sed -n '1,3p')"
+[[ "$cache_steps" == "$(printf '%s\n' \
+    '      - name: Select the protected R2 compiler cache' \
+    '      - name: Build and push the exact runtime image set' \
+    '      - name: Remove the protected R2 compiler-cache credential')" ]] ||
+  fail "protected cache credential is not selected before, and removed right after, the build"
+cleanup_step="$(awk '
+  /^      - name: / { capture = ($0 == "      - name: Remove the protected R2 compiler-cache credential") }
+  capture { print }
+' <<<"$build_job")"
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+grep -Fxq '        if: ${{ always() }}' <<<"$cleanup_step" ||
+  fail "protected cache credential removal is not unconditional"
+if grep -Fq 'scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh' <<<"$build_job"; then
+  fail "protected runtime build consumes the untrusted cache credential"
+fi
+if grep -Fq 'example-ci-cache-untrusted' <<<"$build_job"; then
+  fail "protected runtime build consumes the disposable untrusted cache bucket"
+fi
+grep -Fq 'shred -u -- "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"' <<<"$build_job" ||
+  fail "protected runtime build does not remove its cache credential"
 # shellcheck disable=SC2016 # Match the literal gated workflow environment.
 grep -Fq "          CODEWIRE_RUNTIME_CARRY_FORWARD: '0'" <<<"$build_job" ||
   fail "runtime carry-forward must stay gated until codewire/deploy accepts carried provenance"
@@ -162,8 +209,12 @@ grep -Fq "'  max-parallelism = 2'" "$RUNTIME_BUILDER" ||
 # shellcheck disable=SC2016 # Match the literal runtime-builder assignment.
 grep -Fq 'CODEWIRE_EXTERNAL_BUILDX_BUILDER="$builder"' "$RUNTIME_BUILDER" ||
   fail "runtime image-set builder does not share its transient BuildKit daemon"
-grep -Fq 'Protected runtime builds may use only job-local or disabled sccache' \
-  "$RUNTIME_BUILDER" || fail "protected runtime build does not reject shared R2 cache"
+grep -Fq 'Protected runtime builds may use only the protected R2 compiler-cache prefix' \
+  "$RUNTIME_BUILDER" || fail "protected runtime build does not confine the shared cache to its protected prefix"
+grep -Fq 'Protected runtime builds may use only job-local, disabled, or protected-prefix R2 sccache' \
+  "$RUNTIME_BUILDER" || fail "protected runtime build does not reject unknown compiler-cache modes"
+grep -Fq 'Protected runtime builds may use only the protected R2 compiler-cache bucket' \
+  "$RUNTIME_BUILDER" || fail "protected runtime build does not confine the shared cache to its protected bucket"
 
 publish_job="$build_job"
 grep -Fq 'OPENBAO_GHCR_ROLE: codewire-source-dev-publisher' \
