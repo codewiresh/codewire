@@ -175,7 +175,7 @@ async fn reconcile_running_runtime_identity(
         authority,
         RUNNING_MUTATION_STATES,
         &probe,
-        &mut Default::default(),
+        true,
     )
     .await
     .map(|_| ())

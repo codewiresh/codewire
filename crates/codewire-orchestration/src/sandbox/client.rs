@@ -882,21 +882,6 @@ fn require_daemon_image_current(
     Ok(())
 }
 
-/// The digest of the daemon image a Pod mounts, or `None` when it copies its
-/// daemon, names no digest or is malformed. The bootstrap-mismatch restart
-/// guard keys on it.
-pub(crate) fn pod_daemon_image_digest(pod: &Pod) -> Option<String> {
-    let spec = serde_json::to_value(pod.spec.as_ref()?).ok()?;
-    let reference = workspace_daemon_image(&spec).ok()??;
-    super::warm_pool::digest_pinned(reference)
-        .then(|| {
-            reference
-                .rsplit_once('@')
-                .map(|(_, digest)| digest.to_owned())
-        })
-        .flatten()
-}
-
 /// Whether a SandboxTemplate or Sandbox renders an identity-free workspace:
 /// its workspace container names the binding listener and carries no
 /// environment token. Both at once is refused as ambiguous; neither is the

@@ -15,7 +15,6 @@
 pub mod activity_authority;
 pub mod agents;
 pub mod billing_sessions;
-mod bootstrap_restart;
 pub mod cloudflare;
 pub mod create;
 pub mod env_data;

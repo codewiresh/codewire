@@ -2,8 +2,7 @@
 # Shared warm pools (Program #2238 C5) on an explicitly named retained Kind
 # cluster: pool hits timed against cold creates, a forced pool-empty miss, an
 # off-shape create going cold, stale-revision refusal during a rotation,
-# stop/start keeping the pool-born PVC on the configured support image,
-# destroy, the cordoned-node reap, and
+# stop/start keeping the pool-born PVC, destroy, the cordoned-node reap, and
 # the unbound-member negatives (no daemon listener, no binding for any
 # environment, no credential, no billing).
 #
@@ -553,7 +552,6 @@ warm_pool_stop_start_destroy() {
     echo "::error::stop/start did not release the first Pod's binding and bind the second"
     return 1
   fi
-  warm_pool_assert_daemon_image "$id" "$sandbox"
   log "stop/start kept PVC ${pvc_after} and its data on a new Pod"
   warm_pool_destroy "$id"
   local deadline=$(( $(date +%s) + 180 ))
@@ -571,40 +569,6 @@ warm_pool_stop_start_destroy() {
     return 1
   fi
   log "destroy removed pool-born Sandbox ${sandbox}, PVC ${pvc_before} and released its binding"
-}
-
-# The image a Pod spec (JSON on stdin) runs its daemon from: its
-# `codewire-bin` image volume, or the codewire-daemon-init image where the
-# daemon is copied into an emptyDir. Empty when it has neither.
-warm_pool_daemon_source() {
-  jq -r '([.volumes[]? | select(.name == "codewire-bin") | .image.reference // empty] | first)
-    // ([.initContainers[]? | select(.name == "codewire-daemon-init") | .image] | first)
-    // ""'
-}
-
-# A Start re-pins a Sandbox's `codewire-bin` image volume to the current
-# support image (owner decision 2026-10-05), so a restarted Pod never keeps
-# the daemon its Sandbox was created with. Kind's diagnostic runtimes copy
-# the daemon into an emptyDir, and its side-loaded gateway has no registry
-# digest, so Kind never re-pins: this proves only that the restarted Pod and
-# its Sandbox run orchestration's configured support image. Dev proves an
-# old-to-new re-pin.
-warm_pool_assert_daemon_image() {
-  local id="$1" sandbox="$2" configured pod_source sandbox_source
-  configured="$(warm_pool_orchestration_env SANDBOX_GATEWAY_IMAGE)"
-  if [ "$configured" = - ]; then
-    configured="$(kubectl -n "$NS" get configmap codewire-config \
-      -o jsonpath='{.data.SANDBOX_GATEWAY_IMAGE}')"
-  fi
-  pod_source="$(warm_pool_pod "$id" | jq '.spec' | warm_pool_daemon_source)"
-  sandbox_source="$(kubectl -n "$SANDBOX_NS" get sandbox "$sandbox" -o json |
-    jq '.spec.podTemplate.spec' | warm_pool_daemon_source)"
-  if [ -z "$configured" ] || [ "$pod_source" != "$configured" ] ||
-      [ "$sandbox_source" != "$configured" ]; then
-    echo "::error::the restarted Pod runs its daemon from ${pod_source:-nothing} and its Sandbox renders ${sandbox_source:-nothing}; orchestration's support image is ${configured:-unset}"
-    return 1
-  fi
-  log "the restarted Pod and its Sandbox run the configured support image ${configured}"
 }
 
 # The sum of one orchestration counter's series carrying every given

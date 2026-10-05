@@ -2305,33 +2305,56 @@ fn daemon_image_plan_compares_repositories_not_tags_or_digests() {
     );
 }
 
-#[test]
-fn the_restart_guard_reads_the_digest_a_pod_mounts() {
-    let pod = |volume: Value| -> Pod {
-        serde_json::from_value(json!({
-            "metadata":{"name":POD},
-            "spec":{"containers":[{"name":"workspace"}],"volumes":[
-                {"name":"workspace","persistentVolumeClaim":{"claimName":"saved-pvc"}},
-                volume,
-            ]},
-        }))
-        .unwrap()
-    };
-    assert_eq!(
-        pod_daemon_image_digest(&pod(
-            json!({"name":"codewire-bin","image":{"reference":OLD_DAEMON_IMAGE}})
-        )),
-        Some("sha256:a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0".into())
+/// #2364 keeps one bootstrap-mismatch restart per attempt. The restart
+/// resumes through the re-pinning writer, and the bootstrap check never reads
+/// the daemon image, so the replacement a re-pin produces certifies and the
+/// restart cannot repeat because of it.
+#[tokio::test]
+async fn a_re_pinned_replacement_certifies_its_bootstrap() {
+    let (client, state) = client(stale_daemon_fixture());
+    assert!(
+        !client
+            .workspace_bootstrap_matches(&opts(), &claim_name(ENV), CLAIM_UID, &expected_pod())
+            .await
+            .unwrap(),
+        "the stale Pod must be the one restart's trigger"
     );
-    for unpinned in [
-        json!({"name":"codewire-bin","emptyDir":{}}),
-        json!({"name":"codewire-bin","image":{"reference":"codewire-gateway:e2e"}}),
-        json!({"name":"other","image":{"reference":OLD_DAEMON_IMAGE}}),
-    ] {
+    client
+        .reconcile_workspace_bootstrap(&opts(), &claim_name(ENV), CLAIM_UID, &expected_sandbox())
+        .await
+        .unwrap();
+    client
+        .set_replicas_for_identity(
+            &claim_opts(),
+            &claim_name(ENV),
+            CLAIM_UID,
+            &expected_sandbox(),
+            1,
+            DAEMON_IMAGE,
+        )
+        .await
+        .unwrap();
+    {
+        let mut state = state.lock().unwrap();
         assert_eq!(
-            pod_daemon_image_digest(&pod(unpinned.clone())),
-            None,
-            "{unpinned}"
+            *daemon_reference_mut(&mut state.sandbox),
+            json!(DAEMON_IMAGE)
         );
+        state.pod["spec"] = state.sandbox["spec"]["podTemplate"]["spec"].clone();
+        state.pod["metadata"]["uid"] = json!("replacement-pod");
     }
+    assert!(
+        client
+            .workspace_bootstrap_matches(
+                &opts(),
+                &claim_name(ENV),
+                CLAIM_UID,
+                &WorkspacePodIdentity {
+                    name: POD.into(),
+                    uid: "replacement-pod".into(),
+                },
+            )
+            .await
+            .unwrap()
+    );
 }
