@@ -901,6 +901,25 @@ fn plan_daemon_image<'a>(
 /// Reads and fenced writes one Pod-replacement re-pin may make.
 const DAEMON_REPIN_ATTEMPTS: usize = 3;
 
+/// How [`SandboxClient::replace_workspace_pod_if_uid`] ended. Callers treat
+/// both as a replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspacePodReplacement {
+    /// This call re-pinned as needed and deleted the observed incarnation.
+    Replaced,
+    /// The incarnation was already gone or replaced; nothing was written.
+    AlreadyReplaced,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonImageRepinOutcome {
+    /// Current or kept: nothing to write.
+    Unchanged,
+    Repinned,
+    /// The Pod about to be replaced was gone or replaced before the write.
+    PodReplaced,
+}
+
 static DAEMON_IMAGE_PLANS: OnceLock<IntCounterVec> = OnceLock::new();
 
 /// Count one daemon-image decision by its outcome.
@@ -1840,32 +1859,69 @@ impl SandboxClient {
     }
 
     /// Replace one running workspace Pod incarnation on the current daemon:
-    /// observe it, re-pin its Sandbox's daemon image
-    /// ([`Self::repin_daemon_image`]), then delete it with its UID
-    /// precondition. The controller builds the replacement from the re-pinned
-    /// spec. A Pod already gone or replaced is left alone, and is not re-pinned
-    /// for. Daemon repair, restart-mode resize and terminal-Pod replacement
-    /// replace Pods this way.
+    /// re-pin its Sandbox's daemon image ([`Self::repin_daemon_image`]), then
+    /// delete the Pod with its UID precondition, so the controller builds the
+    /// replacement from the re-pinned spec. Daemon repair, restart-mode resize
+    /// and terminal-Pod replacement replace Pods this way.
+    ///
+    /// The Pod is read again immediately before the re-pin patch. Gone, or
+    /// carrying another UID, it was already replaced from the Sandbox's
+    /// current spec: neither the re-pin nor the delete happens, and the
+    /// caller treats [`WorkspacePodReplacement::AlreadyReplaced`] as a
+    /// replacement. The next Start or repair re-pins.
     pub async fn replace_workspace_pod_if_uid(
         &self,
         env_id: &str,
         pod_name: &str,
         previous_uid: &str,
         support_image: &str,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<WorkspacePodReplacement> {
         if pod_name.trim().is_empty() {
             anyhow::bail!("workspace Pod name is required");
         }
         if previous_uid.trim().is_empty() {
             anyhow::bail!("previous workspace Pod UID is required");
         }
-        match self.get_workspace_pod_identity_by_name(pod_name).await? {
-            Some(current) if current.uid == previous_uid => {}
-            _ => return Ok(()),
+        if !self.workspace_pod_has_uid(pod_name, previous_uid).await? {
+            return Ok(WorkspacePodReplacement::AlreadyReplaced);
         }
-        self.repin_daemon_image(env_id, support_image).await?;
-        self.delete_workspace_pod_if_uid(pod_name, previous_uid)
-            .await
+        let repin = self
+            .repin_daemon_image_before_replacement(
+                env_id,
+                support_image,
+                Some((pod_name, previous_uid)),
+            )
+            .await?;
+        if repin == DaemonImageRepinOutcome::PodReplaced {
+            return Ok(WorkspacePodReplacement::AlreadyReplaced);
+        }
+        if self
+            .delete_observed_workspace_pod(pod_name, previous_uid)
+            .await?
+        {
+            return Ok(WorkspacePodReplacement::Replaced);
+        }
+        if repin == DaemonImageRepinOutcome::Repinned {
+            // The Pod went between the read above and the re-pin: its
+            // replacement may have been built from the earlier spec. Its
+            // daemon copy then differs from the Sandbox, so an unbound one
+            // fails its binding check and is rebuilt once; an image-volume
+            // daemon runs until the next Start or repair re-pins.
+            tracing::info!(
+                pod = pod_name,
+                previous_uid,
+                "workspace Pod was replaced while its Sandbox's daemon image was re-pinned"
+            );
+        }
+        Ok(WorkspacePodReplacement::AlreadyReplaced)
+    }
+
+    /// Whether the workspace Pod named `pod_name` exists with `uid`.
+    async fn workspace_pod_has_uid(&self, pod_name: &str, uid: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .get_workspace_pod_identity_by_name(pod_name)
+            .await?
+            .is_some_and(|pod| pod.uid == uid))
     }
 
     /// Re-pin the bound Sandbox's daemon image ([`plan_daemon_image`]) while it
@@ -1881,6 +1937,19 @@ impl SandboxClient {
         env_id: &str,
         support_image: &str,
     ) -> anyhow::Result<()> {
+        self.repin_daemon_image_before_replacement(env_id, support_image, None)
+            .await
+            .map(|_| ())
+    }
+
+    /// [`Self::repin_daemon_image`], and when `pod` names the incarnation
+    /// about to be replaced, a read of that Pod immediately before each patch.
+    async fn repin_daemon_image_before_replacement(
+        &self,
+        env_id: &str,
+        support_image: &str,
+        pod: Option<(&str, &str)>,
+    ) -> anyhow::Result<DaemonImageRepinOutcome> {
         let name = self.bound_sandbox_name(env_id).await?;
         let sandboxes = self.sandboxes();
         let mut incarnation: Option<String> = None;
@@ -1902,8 +1971,13 @@ impl SandboxClient {
                 .filter(|version| !version.is_empty())
                 .ok_or_else(|| anyhow::anyhow!("Sandbox {name} has no resource version"))?;
             let Some(repin) = daemon_image_repin(&sandbox, support_image)? else {
-                return Ok(());
+                return Ok(DaemonImageRepinOutcome::Unchanged);
             };
+            if let Some((pod_name, pod_uid)) = pod
+                && !self.workspace_pod_has_uid(pod_name, pod_uid).await?
+            {
+                return Ok(DaemonImageRepinOutcome::PodReplaced);
+            }
             let mut operations = vec![
                 serde_json::json!({"op":"test","path":"/metadata/uid","value":uid}),
                 serde_json::json!({"op":"test","path":"/metadata/resourceVersion","value":version}),
@@ -1920,7 +1994,7 @@ impl SandboxClient {
                         "Sandbox {name} was replaced during its daemon image re-pin"
                     );
                     log_daemon_image_repin(&updated, &name, &repin, support_image);
-                    return Ok(());
+                    return Ok(DaemonImageRepinOutcome::Repinned);
                 }
                 // A failed `test` is 422; an apiserver conflict is 409.
                 Err(kube::Error::Api(status)) if matches!(status.code, 409 | 422) => {
@@ -1947,29 +2021,39 @@ impl SandboxClient {
         if previous_uid.trim().is_empty() {
             anyhow::bail!("previous workspace Pod UID is required");
         }
+        self.delete_observed_workspace_pod(pod_name, previous_uid)
+            .await
+            .map(|_| ())
+    }
+
+    /// Delete the Pod only when it still has `previous_uid`. True when this
+    /// call deleted that incarnation; false when it was already gone or
+    /// replaced.
+    async fn delete_observed_workspace_pod(
+        &self,
+        pod_name: &str,
+        previous_uid: &str,
+    ) -> anyhow::Result<bool> {
         let Some(current) = self.get_workspace_pod_identity_by_name(pod_name).await? else {
-            return Ok(());
+            return Ok(false);
         };
         if current.uid != previous_uid {
-            return Ok(());
+            return Ok(false);
         }
 
         let delete_params = delete_params_for_observed_uid(previous_uid);
         match self.pods().delete(&current.name, &delete_params).await {
-            Ok(_) => {}
-            Err(kube::Error::Api(error)) if error.code == 404 => {}
+            Ok(_) => Ok(true),
+            Err(kube::Error::Api(error)) if error.code == 404 => Ok(false),
             // A replacement won the race after the observation above. The
             // UID precondition prevented deleting it; the caller can now
             // observe that replacement normally.
-            Err(kube::Error::Api(error)) if error.code == 409 => {}
-            Err(error) => {
-                return Err(anyhow::anyhow!(
-                    "restart workspace Pod {}: {error}",
-                    current.name
-                ));
-            }
+            Err(kube::Error::Api(error)) if error.code == 409 => Ok(false),
+            Err(error) => Err(anyhow::anyhow!(
+                "restart workspace Pod {}: {error}",
+                current.name
+            )),
         }
-        Ok(())
     }
 
     /// Wait until the owning Sandbox controller has produced a ready

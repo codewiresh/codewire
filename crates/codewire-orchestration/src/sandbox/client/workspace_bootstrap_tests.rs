@@ -77,6 +77,10 @@ enum Race {
     DaemonVolumeMoved,
     /// The controller updates the Sandbox before every write.
     SandboxVersionEveryPatch,
+    /// Another writer replaces the workspace Pod once the Sandbox is read.
+    PodReplacedOnSandboxRead,
+    /// Another writer deletes the workspace Pod once the Sandbox is read.
+    PodGoneOnSandboxRead,
 }
 struct Fixture {
     claim: Value,
@@ -219,6 +223,17 @@ fn client(fixture: Fixture) -> (SandboxClient, Arc<Mutex<Fixture>>) {
                 assert!(path.ends_with(&format!("/pods/{POD}")), "only the workspace Pod is ever deleted");
                 return Response::builder().status(StatusCode::OK).header("content-type","application/json")
                     .body(Body::from(json!({"apiVersion":"v1","kind":"Status","status":"Success","code":200}).to_string())).unwrap();
+            }
+            if is_sandbox && method == Method::GET {
+                match state.race {
+                    Some(Race::PodReplacedOnSandboxRead) => state.pod["metadata"]["uid"] = json!("replacement-pod"),
+                    Some(Race::PodGoneOnSandboxRead) => state.pod = Value::Null,
+                    _ => {}
+                }
+            }
+            if path.contains("/pods/") && state.pod.is_null() {
+                return Response::builder().status(StatusCode::NOT_FOUND).header("content-type","application/json")
+                    .body(Body::from(json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404}).to_string())).unwrap();
             }
             let object = if path.contains("/sandboxclaims/") { &mut state.claim }
                 else if path.contains("/sandboxwarmpools/") { &mut state.pool }
@@ -2641,7 +2656,7 @@ fn writes(state: &Fixture) -> Vec<(Method, String)> {
 async fn replace_pod(
     before: Fixture,
     support_image: &str,
-) -> (anyhow::Result<()>, Arc<Mutex<Fixture>>) {
+) -> (anyhow::Result<WorkspacePodReplacement>, Arc<Mutex<Fixture>>) {
     let (client, state) = client(before);
     let result = client
         .replace_workspace_pod_if_uid(ENV, POD, "pod-incarnation", support_image)
@@ -2665,7 +2680,7 @@ async fn a_pod_replacement_re_pins_the_running_sandbox_first() {
         });
         let sandbox = before.sandbox.clone();
         let (result, state) = replace_pod(before, DAEMON_IMAGE).await;
-        result.unwrap();
+        assert_eq!(result.unwrap(), WorkspacePodReplacement::Replaced);
         let state = state.lock().unwrap();
         assert_eq!(patches(&state), [&replacement_patch("30", repin)]);
         assert_eq!(
@@ -2717,7 +2732,7 @@ async fn a_pod_replacement_writes_only_a_re_pinnable_daemon() {
     let mut replaced = running(stale_daemon_fixture());
     replaced.pod["metadata"]["uid"] = json!("replacement-pod");
     let (result, state) = replace_pod(replaced, DAEMON_IMAGE).await;
-    result.unwrap();
+    assert_eq!(result.unwrap(), WorkspacePodReplacement::AlreadyReplaced);
     let state = state.lock().unwrap();
     assert!(writes(&state).is_empty());
     assert!(
@@ -2779,4 +2794,39 @@ async fn a_pod_replacement_re_pin_retries_conflicts_within_its_bound() {
             .iter()
             .all(|(method, _)| *method != Method::DELETE)
     );
+}
+
+/// The Pod is read again immediately before the re-pin patch. Gone, or
+/// carrying another UID, it was already replaced from the Sandbox's current
+/// spec: no re-pin, no delete, and the outcome counts as a replacement.
+#[tokio::test]
+async fn a_pod_replaced_before_the_re_pin_is_neither_re_pinned_nor_deleted() {
+    for race in [Race::PodGoneOnSandboxRead, Race::PodReplacedOnSandboxRead] {
+        for copy in [false, true] {
+            let mut before = running(if copy {
+                stale_copy_fixture(None)
+            } else {
+                stale_daemon_fixture()
+            });
+            before.race = Some(race);
+            let sandbox = before.sandbox.clone();
+            let (result, state) = replace_pod(before, DAEMON_IMAGE).await;
+            assert_eq!(
+                result.unwrap(),
+                WorkspacePodReplacement::AlreadyReplaced,
+                "copy={copy}"
+            );
+            let state = state.lock().unwrap();
+            assert!(writes(&state).is_empty(), "copy={copy}");
+            assert_eq!(state.sandbox, sandbox, "copy={copy}");
+            // The second Pod read follows the Sandbox read and precedes any
+            // write.
+            let reads: Vec<_> = state
+                .requests
+                .iter()
+                .map(|(_, path, _)| path.rsplit('/').nth(1).unwrap().to_owned())
+                .collect();
+            assert_eq!(reads, ["pods", "sandboxclaims", "sandboxes", "pods"]);
+        }
+    }
 }
