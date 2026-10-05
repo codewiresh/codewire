@@ -2673,4 +2673,74 @@ if grep -Fq 'delete cluster' "$CALLS"; then
   fail 'retained suite tried to delete its cluster'
 fi
 
+# The native gRPC upstream check reads only its own smoke's requests. The
+# controller-log stub answers like the kubelet: the lines logged at or after
+# --since-time, and every line for any other window. An earlier ordinary HTTP
+# LaunchSession to a Pod endpoint is outside the window; a native gRPC
+# LaunchSession to a Pod endpoint inside it still fails.
+(
+  NS=codewire-e2e
+  GRPC_LOGS="$FIXTURE/grpc-ingress.log"
+  launch() {
+    printf '%s\t10.244.0.1 - - [05/Oct/2026:%s +0000] "POST /codewire.v1.EnvironmentSessionService/LaunchSession HTTP/2.0" 200 96 "-" "smoke" 310 0.020 [%s] [] %s 96 0.020 200 req\n' \
+      "$1" "$2" "$3" "$4" >>"$GRPC_LOGS"
+  }
+  kubectl() {
+    case "$*" in
+      '-n codewire-e2e get secret/codewire-kind-ingress-ca -o jsonpath={.data.ca\.crt}')
+        printf 'c3ludGhldGljLWNh' ;;
+      '-n codewire-e2e get service/codewire-orchestration-grpc -o jsonpath={.spec.clusterIP}')
+        printf '10.96.0.50' ;;
+      '-n codewire-e2e get pods -l app.kubernetes.io/name=codewire,app.kubernetes.io/component=orchestration -o '*)
+        printf '10.244.0.22\n10.244.0.23\n' ;;
+      '-n ingress-nginx logs deploy/ingress-nginx-controller --since-time='*)
+        record "logs:$5"
+        awk -F '\t' -v since="${5#--since-time=}" '$1 >= since { print $2 }' "$GRPC_LOGS" ;;
+      '-n ingress-nginx logs deploy/ingress-nginx-controller '*)
+        cut -f 2 "$GRPC_LOGS" ;;
+      *) echo "unexpected kubectl $*" >&2; return 99 ;;
+    esac
+  }
+  sleep() { :; }
+  log() { :; }
+  : >"$GRPC_LOGS"
+  launch 2026-10-05T05:01:22Z 05:01:22 codewire-e2e-codewire-orchestration-8084 10.244.0.22:8084
+  launch 2026-10-05T05:02:06Z 05:02:06 codewire-e2e-codewire-orchestration-grpc-grpc 10.96.0.50:8084
+  launch 2026-10-05T05:02:06Z 05:02:06 codewire-e2e-codewire-orchestration-grpc-grpc 10.96.0.50:8084
+  assert_environment_session_grpc_service_upstream 2026-10-05T05:02:05Z >"$FIXTURE/grpc-window.out" 2>&1 ||
+    fail "an earlier HTTP LaunchSession to a Pod endpoint failed the native gRPC check: $(cat "$FIXTURE/grpc-window.out")"
+  launch 2026-10-05T05:02:07Z 05:02:07 codewire-e2e-codewire-orchestration-grpc-grpc 10.244.0.23:8084
+  expect_failure grpc-pod-endpoint \
+    assert_environment_session_grpc_service_upstream 2026-10-05T05:02:05Z
+  grep -Fq 'reused orchestration pod endpoint 10.244.0.23:8084' "$FIXTURE/grpc-pod-endpoint.out" ||
+    fail 'a native gRPC LaunchSession to a Pod endpoint passed the upstream check'
+  expect_failure grpc-empty-window \
+    assert_environment_session_grpc_service_upstream 2026-10-05T05:03:00Z
+  grep -Fq 'recorded no EnvironmentSessionService LaunchSession upstream' \
+    "$FIXTURE/grpc-empty-window.out" || fail 'an empty native gRPC window passed the upstream check'
+  expect_failure grpc-no-window assert_environment_session_grpc_service_upstream ''
+  expect_failure grpc-bad-window assert_environment_session_grpc_service_upstream 10m
+
+  # The smoke starts that window after its direct Connect run and HTTP warm-up,
+  # on the next whole second, then sends its native gRPC requests.
+  : >"$CALLS"
+  CARGO_CI_DIR="$FIXTURE/grpc-smoke"
+  mkdir -p "$CARGO_CI_DIR/examples"
+  printf '#!/usr/bin/env bash\nprintf "smoke:%%s\\n" "$SMOKE_SESSION_BASE_URL" >>"%s"\n' "$CALLS" \
+    >"$CARGO_CI_DIR/examples/environment-session-smoke"
+  chmod +x "$CARGO_CI_DIR/examples/environment-session-smoke"
+  : >"$GRPC_LOGS"
+  launch 2026-10-05T05:01:22Z 05:01:22 codewire-e2e-codewire-orchestration-8084 10.244.0.22:8084
+  launch 2026-10-05T05:02:06Z 05:02:06 codewire-e2e-codewire-orchestration-grpc-grpc 10.96.0.50:8084
+  warm_environment_session_http_upstream() { record warm; }
+  sleep() { record "sleep:$*"; }
+  date() { record "date:$*"; printf '2026-10-05T05:02:05Z\n'; }
+  environment_session_protocol_smoke 00000000-0000-4000-8000-000000000001 >/dev/null ||
+    fail 'the native gRPC smoke failed on its own ClusterIP requests'
+  diff -u <(printf '%s\n' "smoke:$KIND_ORCHESTRATION_HTTP_URL" warm sleep:1 \
+      'date:-u +%Y-%m-%dT%H:%M:%SZ' "smoke:$KIND_INGRESS_TLS_URL" \
+      logs:--since-time=2026-10-05T05:02:05Z) "$CALLS" ||
+    fail 'the native gRPC smoke did not start its upstream window after the HTTP requests'
+)
+
 printf '[test-kind-e2e-suites] dispatcher, order, prerequisites, and cleanup passed\n'

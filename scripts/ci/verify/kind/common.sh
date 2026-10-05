@@ -3018,9 +3018,18 @@ warm_environment_session_http_upstream() {
   log "ordinary orchestration HTTP/Connect upstream warm green"
 }
 
+# Prove the native gRPC LaunchSession requests sent since SINCE, an RFC 3339
+# UTC second, used the gRPC Service ClusterIP and never an orchestration Pod
+# endpoint. Earlier stages launch sessions through the ordinary HTTP ingress,
+# which correctly upstreams to a Pod endpoint, so the controller's log is read
+# only from SINCE on.
 assert_environment_session_grpc_service_upstream() {
-  local service_ip pod_ips controller_logs matching_lines i pod_ip
+  local since="$1" service_ip pod_ips controller_logs matching_lines i pod_ip
 
+  if ! [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+    echo "::error::the native gRPC upstream check needs the RFC 3339 second its smoke began"
+    return 1
+  fi
   service_ip="$(
     kubectl -n "$NS" get service/codewire-orchestration-grpc \
       -o jsonpath='{.spec.clusterIP}'
@@ -3034,7 +3043,7 @@ assert_environment_session_grpc_service_upstream() {
   controller_logs=""
   for i in $(seq 1 15); do
     controller_logs="$(
-      kubectl -n ingress-nginx logs deploy/ingress-nginx-controller --since=10m
+      kubectl -n ingress-nginx logs deploy/ingress-nginx-controller --since-time="$since"
     )"
     matching_lines="$(
       printf '%s\n' "$controller_logs" \
@@ -3075,7 +3084,7 @@ assert_environment_session_grpc_service_upstream() {
 
 environment_session_protocol_smoke() {
   local environment_id="$1"
-  local certificate_dir certificate_pem
+  local certificate_dir certificate_pem grpc_since
 
   log "running EnvironmentSessionService direct Connect + public native-gRPC smoke"
   certificate_dir="$(mktemp -d)"
@@ -3097,6 +3106,11 @@ environment_session_protocol_smoke() {
     return 1
   }
 
+  # The upstream check reads only this smoke's native gRPC requests. A log
+  # query's start is a whole second, so begin it on the second after every
+  # earlier request: the ordinary HTTP launches before it go to Pod endpoints.
+  sleep 1
+  grpc_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   if ! SMOKE_SESSION_BASE_URL="$KIND_INGRESS_TLS_URL" \
     SMOKE_CA_CERT_FILE="$certificate_pem" \
     SMOKE_ORG_ID=org_contract_1 \
@@ -3106,7 +3120,7 @@ environment_session_protocol_smoke() {
     rm -rf "$certificate_dir"
     return 1
   fi
-  if ! assert_environment_session_grpc_service_upstream; then
+  if ! assert_environment_session_grpc_service_upstream "$grpc_since"; then
     rm -rf "$certificate_dir"
     return 1
   fi
