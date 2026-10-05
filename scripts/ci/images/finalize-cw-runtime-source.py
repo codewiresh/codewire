@@ -53,7 +53,9 @@ COMPLETION_FIELDS = {"command", "exit", "elapsed_seconds", "log", "log_sha256", 
 
 
 DIAGNOSTIC_PHASES = frozenset({"arguments", "custody", "capsule", "profile", "readonly", "home",
-                              "environment", "rustc", "compile", "export", "result"})
+                              "environment", "rustc", "compile", "export", "result",
+                              "export-admission", "export-binary", "export-depinfo", "export-log",
+                              "export-directory", "export-transports", "export-retained", "export-verify"})
 DIAGNOSTIC_ERRNOS = {errno.EPERM: "permission", errno.EACCES: "permission", errno.EROFS: "readonly",
                      errno.EMFILE: "process_fd_limit", errno.ENFILE: "system_fd_limit",
                      errno.ENOENT: "not_found", errno.ENOTDIR: "not_directory", errno.ELOOP: "link",
@@ -206,26 +208,109 @@ def pin(raw):
     return {"sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
 
 
+# Cargo may retain one hardlink at deps/cw-<16 lowercase hex>. Only this
+# compiled-output holder accounts for that exact alias; source/Git/export
+# HeldSourceFile keeps its original single-link contract.
+MAX_COMPILER_DEPS = source.MAX_FILES
+
+
+class HeldCompilerOutput(source.HeldSourceFile):
+    def __init__(self, path, maximum):
+        self.path, self.maximum = source.asset.path_arg(str(path)), maximum
+        self.parent, self.fd, self.deps, self.aliases = None, None, None, ()
+        try:
+            source.require(self.path.name == "cw", "compiler output name refused")
+            self.parent = source.asset.Parent(self.path.parent)
+            before = os.stat(self.path.name, dir_fd=self.parent.fd, follow_symlinks=False)
+            self.fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                              dir_fd=self.parent.fd)
+            info = os.fstat(self.fd)
+            source.require(source.asset.stamp(before) == source.asset.stamp(info)
+                           and stat.S_ISREG(info.st_mode) and info.st_nlink in (1, 2)
+                           and info.st_uid in (0, os.geteuid()) and not info.st_mode & 0o022
+                           and 0 <= info.st_size <= maximum,
+                           "compiler output is not a bounded owned regular file")
+            self.metadata = source.asset.stamp(info)
+            if info.st_nlink == 2:
+                try:
+                    self.deps = source.asset.Parent(self.path.parent / "deps")
+                except FileNotFoundError:
+                    raise source.Refused("compiler output has an unaccounted link") from None
+                fresh = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                dir_fd=self.deps.fd)
+                aliases = []
+                try:
+                    source.require(source.asset.stamp(os.fstat(fresh), source.asset.DIR_FIELDS)
+                                   == source.asset.stamp(os.fstat(self.deps.fd), source.asset.DIR_FIELDS),
+                                   "compiler alias directory changed")
+                    with os.scandir(fresh) as entries:
+                        for count, entry in enumerate(entries, 1):
+                            source.asset.active()
+                            source.require(count <= MAX_COMPILER_DEPS, "compiler alias inventory exceeds its bound")
+                            name = entry.name
+                            if not (name.startswith("cw-") and source.release.is_hex(name[3:], 16)):
+                                continue
+                            alias = os.stat(name, dir_fd=self.deps.fd, follow_symlinks=False)
+                            if (alias.st_dev, alias.st_ino) == (info.st_dev, info.st_ino):
+                                source.require(source.asset.stamp(alias) == self.metadata,
+                                               "compiler alias differs from the held output")
+                                aliases.append(name)
+                    source.require(len(aliases) == 1, "compiler output has an unaccounted link")
+                    self.aliases = tuple(aliases)
+                finally:
+                    os.close(fresh)
+            self.data = self.read()
+            self.sha256 = hashlib.sha256(self.data).hexdigest()
+            self.revalidate(content=True)
+        except BaseException:
+            self.close()
+            raise
+
+    def revalidate(self, content=False):
+        if self.deps is not None:
+            self.deps.revalidate()
+            for name in self.aliases:
+                source.require(source.asset.stamp(os.stat(name, dir_fd=self.deps.fd, follow_symlinks=False))
+                               == self.metadata, "held compiler alias changed")
+        super().revalidate(content=content)
+        if self.deps is not None:
+            for name in self.aliases:
+                source.require(source.asset.stamp(os.stat(name, dir_fd=self.deps.fd, follow_symlinks=False))
+                               == self.metadata, "held compiler alias changed")
+            self.deps.revalidate()
+
+    def close(self):
+        if self.deps is not None:
+            self.deps.close()
+            self.deps = None
+        super().close()
+
+
 def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_root, cargo_home):
     """Admission/export leaf, also exercised with never-executed fixture bytes."""
     model = admitted.model
     completion(compile_result, command(model["profile"]))
     admitted.revalidate()
     selected = admitted.selected
+    _DIAGNOSTIC["phase"] = "export-admission"
     with source.git_scope(admitted.git_dir, admitted.source):
         rustc = selected.toolchain_rustc(admitted.source, rustc)
         data, identity, count = selected.admit_build(
             admitted.source, executable, depinfo, source.TARGET, model["version"], model["source"]["revision"],
             model["source"]["source_tree_sha256"], rustc,
             (target_root, cargo_home / "registry", cargo_home / "git"))
-    binary = dependencies = log = None
+    binary = dependencies = log = exported_binary = None
     try:
-        binary = source.HeldSourceFile(executable, selected.MAX_EXECUTABLE)
+        _DIAGNOSTIC["phase"] = "export-binary"
+        binary = HeldCompilerOutput(executable, selected.MAX_EXECUTABLE)
+        _DIAGNOSTIC["phase"] = "export-depinfo"
         dependencies = source.HeldSourceFile(depinfo, 8 * 1024 * 1024)
+        _DIAGNOSTIC["phase"] = "export-log"
         log = source.HeldSourceFile(compile_result["log"], 32 * 1024 * 1024)
         source.require(binary.data == data and count > 0 and log.sha256 == compile_result["log_sha256"],
                        "retained built input or compiler log changed")
         admitted.revalidate()
+        _DIAGNOSTIC["phase"] = "export-directory"
         output = source.asset.path_arg(str(work))
         source.require(not os.path.lexists(output), "producer export already exists")
         parent = source.asset.Parent(output.parent)
@@ -239,8 +324,11 @@ def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_
                 source.asset.write_new(root_fd, "compile.log", log.data, 0o400)
             finally:
                 os.close(root_fd)
+            exported_binary = source.HeldSourceFile(output / "cw", selected.MAX_EXECUTABLE)
+            source.require(exported_binary.data == data, "exclusive compiler copy differs from admitted bytes")
             # The unchanged shared producer invokes only its checked-in Python
             # transport tool; these synthetic/actual bytes are not executed.
+            _DIAGNOSTIC["phase"] = "export-transports"
             image_dir, pack_dir, image_receipt, lock = selected.runtime_transports(
                 output / "cw", identity, output / ".transports", tool=admitted.source / "scripts/dev/cw-runtime-image.py")
             transport_paths = {"cw.oci.tar": image_dir / "cw.oci.tar", "image.json": image_dir / "image.json",
@@ -250,6 +338,7 @@ def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_
             selected.check_transports(data, identity, transport_bytes["cw.oci.tar"], image_receipt,
                                       transport_bytes["runtime.pack"], transport_bytes["cw-runtime.lock.json"],
                                       tool=admitted.source / "scripts/dev/cw-runtime-image.py")
+            _DIAGNOSTIC["phase"] = "export-retained"
             root_fd = os.open(output.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent.fd)
             try:
                 for name, raw in transport_bytes.items():
@@ -259,6 +348,7 @@ def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_
                 import shutil
                 shutil.rmtree(output / ".transports")
                 binary.revalidate(content=True)
+                exported_binary.revalidate(content=True)
                 dependencies.revalidate(content=True)
                 log.revalidate(content=True)
                 admitted.revalidate()
@@ -278,19 +368,21 @@ def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_
                 os.fsync(root_fd)
             finally:
                 os.close(root_fd)
+            _DIAGNOSTIC["phase"] = "export-verify"
             verify_export(output, model, admitted.files["request"].sha256)
             parent.revalidate()
             return receipt
         finally:
             parent.close()
     finally:
-        for file in (binary, dependencies, log):
+        for file in (binary, dependencies, log, exported_binary):
             if file is not None:
                 file.close()
 
 
 def verify_export(output, model, request_sha256):
     """Join actual exporter bytes to the producer and selected request."""
+    _DIAGNOSTIC["phase"] = "export-verify"
     held = {}
     try:
         source.validate_inventory(output, FILES, ())
@@ -358,7 +450,7 @@ def main(argv=None):
         source.require(all(os.fstatvfs(held.fd).f_flag & os.ST_RDONLY for held in admitted.files.values()),
                        "compiler source/Git/request must be mounted readonly")
         _DIAGNOSTIC["phase"] = "home"
-        home = Path("/tmp/cw-runtime-build-home")
+        home = WORK / "compiler-home"
         owner.admit_output(home)
         owner.private_directory(home)
         _DIAGNOSTIC["phase"] = "environment"

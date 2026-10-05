@@ -841,6 +841,16 @@ fn ready_frame(ready: &Value, environment: &str) {
     );
 }
 
+async fn wait_terminal(fd: &OwnedFd, bound: Duration) -> bool {
+    tokio::time::timeout(bound, async {
+        while !terminal(fd) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
 async fn actual(root: &Path, artifacts: &Path, direct: bool) -> Value {
     let staged = json_file(&artifacts.join("managed-assets.json"), 1024 * 1024);
     assert_eq!(staged["status"], "staged");
@@ -900,6 +910,10 @@ async fn actual(root: &Path, artifacts: &Path, direct: bool) -> Value {
     target
         .json(&["env", "stop", "--local", &env, "--output", "json"], None)
         .await;
+    assert!(
+        wait_terminal(&initial.fd, Duration::from_secs(10)).await,
+        "original setup daemon death remained unknown after public Stop"
+    );
     assert!(terminal(&initial.fd));
     private(&target.root.join("authority"));
     let mut command = Command::new(staged["broker_path"].as_str().unwrap());
@@ -1910,6 +1924,120 @@ fn managed_fixture_ready_is_closed_synthetic_and_exact_loopback() {
     let mut bad = value;
     bad["auth"] = json!(true);
     assert!(std::panic::catch_unwind(|| ready_frame(&bad, "owned")).is_err());
+}
+
+#[test]
+#[ignore = "fixed source-bound child for the two original-pidfd kernel fixtures"]
+fn managed_fixture_pidfd_wait_child() {
+    assert_eq!(
+        std::env::var("CW_MEMBER_PIDFD_WAIT_CHILD").as_deref(),
+        Ok("1")
+    );
+    println!("CW_MEMBER_PIDFD_WAIT_READY");
+    std::io::Write::flush(&mut std::io::stdout()).unwrap();
+    let mut release = [0];
+    std::io::stdin().read_exact(&mut release).unwrap();
+    assert_eq!(release, [b'X']);
+}
+
+async fn pidfd_wait_child() -> (tokio::process::Child, OwnedChild) {
+    let image = std::env::current_exe().unwrap();
+    let mut child = tokio::process::Command::new(&image)
+        .args([
+            "--ignored",
+            "--exact",
+            "managed::managed_fixture_pidfd_wait_child",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env("CW_MEMBER_PIDFD_WAIT_CHILD", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut line = Vec::new();
+        for _ in 0..4096 {
+            let byte = child.stdout.as_mut().unwrap().read_u8().await.unwrap();
+            line.push(byte);
+            assert!(line.len() <= 1024);
+            if byte == b'\n' {
+                if line.ends_with(b"CW_MEMBER_PIDFD_WAIT_READY\n") {
+                    return;
+                }
+                line.clear();
+            }
+        }
+        panic!("fixed pidfd child did not publish its ready marker");
+    })
+    .await
+    .unwrap();
+    let owned = OwnedChild::capture(child.id().unwrap(), Some(&image)).unwrap();
+    assert!(!terminal(&owned.fd));
+    (child, owned)
+}
+
+#[tokio::test]
+async fn managed_fixture_original_pidfd_waits_for_delayed_exit() {
+    let (mut child, owned) = pidfd_wait_child().await;
+    owned.validate().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        input.write_all(b"X").await.unwrap();
+    });
+    let waited = wait_terminal(&owned.fd, Duration::from_secs(2)).await;
+    release.await.unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(2), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.success());
+    assert!(terminal(&owned.fd));
+    assert!(waited, "one immediate pidfd poll misses the delayed exit");
+}
+
+#[tokio::test]
+async fn managed_fixture_original_pidfd_wait_refuses_live_or_other_pidfd() {
+    let (mut live_child, live) = pidfd_wait_child().await;
+    let (mut other_child, other) = pidfd_wait_child().await;
+    other_child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"X")
+        .await
+        .unwrap();
+    let other_status = tokio::time::timeout(Duration::from_secs(2), other_child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(other_status.success());
+    assert!(terminal(&other.fd));
+    live.validate().unwrap();
+    assert!(!terminal(&live.fd));
+    let refused = !wait_terminal(&live.fd, Duration::from_millis(80)).await;
+    live.validate().unwrap();
+    assert!(!terminal(&live.fd));
+    live_child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"X")
+        .await
+        .unwrap();
+    let live_status = tokio::time::timeout(Duration::from_secs(2), live_child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(live_status.success());
+    assert!(terminal(&live.fd));
+    assert!(
+        refused,
+        "another terminal pidfd cannot prove original death"
+    );
 }
 
 #[test]

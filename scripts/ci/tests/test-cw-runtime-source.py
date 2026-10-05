@@ -661,10 +661,254 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
                     driver.main(flags + extra)
                 prepare.assert_not_called()
 
+    def test_real_cargo_alias_normalizes_exact_bytes_without_mutating_original_inode(self):
+        with self.prepare() as capsule:
+            binary, depinfo, target, cargo, result = self.build_bytes(capsule)
+            alias = target / "deps/cw-0123456789abcdef"
+            alias.parent.mkdir(mode=0o700)
+            os.link(binary, alias)
+            before = source.asset.stamp(binary.stat())
+            self.assertEqual(before["nlink"], 2)
+            with self.admits(capsule) as admitted:
+                receipt = finalizer.finalize(admitted, binary, depinfo, fixture.RUSTC, result,
+                                             self.base / "cargo-export", target, cargo)
+                admitted.revalidate()
+            exported = self.base / "cargo-export/cw"
+            self.assertEqual(source.asset.stamp(binary.stat()), before)
+            self.assertEqual(source.asset.stamp(alias.stat()), before)
+            self.assertEqual(exported.read_bytes(), binary.read_bytes())
+            self.assertEqual((exported.stat().st_nlink, stat.S_IMODE(exported.stat().st_mode)), (1, 0o500))
+            self.assertNotEqual((exported.stat().st_dev, exported.stat().st_ino), (before["dev"], before["ino"]))
+            self.assertEqual(receipt["payload"]["sha256"], sha(binary.read_bytes()))
+            self.assertEqual(receipt["payload"]["size"], before["size"])
+            self.assertEqual(set(os.listdir(self.base / "cargo-export")), finalizer.FILES)
+            checked = finalizer.verify_export(self.base / "cargo-export", capsule.model,
+                                              capsule.outputs["request.json"].sha256)
+            self.assertEqual(checked, receipt)
+
+    def test_compiler_alias_normalization_refuses_unknown_links_metadata_and_directory(self):
+        with self.prepare() as capsule:
+            binary, depinfo, target, cargo, result = self.build_bytes(capsule)
+            raw = binary.read_bytes()
+            deps = target / "deps"
+            deps.mkdir(mode=0o700)
+            alias = deps / "cw-0123456789abcdef"
+            unknown = deps / "DIAGNOSTIC_SECRET_CANARY"
+            external = target / "outside-alias"
+            replacement = target / "replacement"
+            spare = deps / "unrelated"
+            for kind in ("outside", "unknown", "extra", "writable", "symlink", "special", "bound", "deps-symlink"):
+                for path in (binary, alias, unknown, external, replacement, spare):
+                    if os.path.lexists(path):
+                        path.unlink()
+                write(binary, raw, 0o500)
+                if kind == "outside":
+                    os.link(binary, external)
+                elif kind == "unknown":
+                    os.link(binary, unknown)
+                else:
+                    os.link(binary, alias)
+                if kind == "extra":
+                    os.link(binary, external)
+                elif kind == "writable":
+                    binary.chmod(0o522)
+                elif kind == "symlink":
+                    binary.unlink()
+                    binary.symlink_to(alias)
+                elif kind == "special":
+                    binary.unlink()
+                    os.mkfifo(binary, 0o600)
+                elif kind == "bound":
+                    write(spare, b"not a candidate", 0o400)
+                elif kind == "deps-symlink":
+                    moved = target / "moved-deps"
+                    deps.rename(moved)
+                    deps.symlink_to(moved)
+                output = self.base / ("refused-" + kind)
+                try:
+                    with self.subTest(kind=kind), self.admits(capsule) as admitted, \
+                            mock.patch.object(finalizer, "MAX_COMPILER_DEPS", 1 if kind == "bound" else source.MAX_FILES), \
+                            self.assertRaises(FAILURES):
+                        finalizer.finalize(admitted, binary, depinfo, fixture.RUSTC, result, output, target, cargo)
+                    self.assertFalse(output.exists())
+                finally:
+                    if kind == "deps-symlink":
+                        deps.unlink()
+                        moved.rename(deps)
+
+    def test_replaced_cargo_alias_refuses_before_receipt_after_exclusive_copy(self):
+        with self.prepare() as capsule:
+            binary, depinfo, target, cargo, result = self.build_bytes(capsule)
+            alias = target / "deps/cw-0123456789abcdef"
+            alias.parent.mkdir(mode=0o700)
+            os.link(binary, alias)
+            replacement = target / "replacement"
+            write(replacement, binary.read_bytes(), 0o500)
+            output = self.base / "race-export"
+            with self.admits(capsule) as admitted:
+                original = admitted.selected.runtime_transports
+                def replace_after_copy(*args, **kwargs):
+                    exported = output / "cw"
+                    self.assertEqual((exported.stat().st_nlink, stat.S_IMODE(exported.stat().st_mode)), (1, 0o500))
+                    os.replace(replacement, alias)
+                    return original(*args, **kwargs)
+                with mock.patch.object(admitted.selected, "runtime_transports", side_effect=replace_after_copy), \
+                        self.assertRaises(FAILURES):
+                    finalizer.finalize(admitted, binary, depinfo, fixture.RUSTC, result, output, target, cargo)
+                self.assertFalse((output / "producer.json").exists())
+                self.assertNotEqual((alias.stat().st_dev, alias.stat().st_ino), (binary.stat().st_dev, binary.stat().st_ino))
+
+    def test_real_hardlinked_compiler_output_reports_binary_phase_before_export(self):
+        with self.prepare() as capsule:
+            binary, depinfo, target, cargo, result = self.build_bytes(capsule)
+            alias = target / "DIAGNOSTIC_SECRET_CANARY"
+            os.link(binary, alias)
+            self.assertEqual(binary.stat().st_nlink, 2)
+            with self.admits(capsule) as admitted, self.assertRaises(FAILURES) as refused:
+                # Real shared record/dep-info admission succeeds; the original
+                # single-link held-file guard refuses this compiler output.
+                finalizer.finalize(admitted, binary, depinfo, fixture.RUSTC, result,
+                                   self.base / "export", target, cargo)
+            value = json.loads(finalizer.failure_diagnostic(refused.exception)
+                               [len(finalizer.DIAGNOSTIC_PREFIX):])
+            self.assertEqual((value["phase"], value["exception"], value["errno"]),
+                             ("export-binary", "value", "none"))
+            self.assertNotIn("DIAGNOSTIC_SECRET_CANARY", json.dumps(value))
+            self.assertFalse((self.base / "export").exists())
+
+    def test_export_boundary_refusals_render_closed_phase_without_source_chain(self):
+        canary = "DIAGNOSTIC_SECRET_CANARY"
+        cases = (("export-admission", "admit_build"),
+                 ("export-transports", "runtime_transports"),
+                 ("export-verify", "verify_export"))
+        with self.prepare() as capsule:
+            binary, depinfo, target, cargo, result = self.build_bytes(capsule)
+            with self.admits(capsule) as admitted:
+                for phase, method in cases:
+                    error = source.Refused(canary)
+                    error.__cause__ = RuntimeError(canary)
+                    error.__context__ = RuntimeError(canary)
+                    owner = finalizer if method == "verify_export" else admitted.selected
+                    output = self.base / phase
+                    with self.subTest(phase=phase), \
+                            mock.patch.object(owner, method, side_effect=error) as boundary, \
+                            contextlib.redirect_stdout(io.StringIO()) as stdout, \
+                            self.assertRaises(source.Refused) as refused:
+                        finalizer.finalize(admitted, binary, depinfo, fixture.RUSTC, result,
+                                           output, target, cargo)
+                    self.assertIs(refused.exception, error)
+                    boundary.assert_called_once()
+                    self.assertEqual(stdout.getvalue(), "")
+                    text = finalizer.failure_diagnostic(refused.exception)
+                    value = json.loads(text[len(finalizer.DIAGNOSTIC_PREFIX):])
+                    self.assertEqual((value["phase"], value["exception"], value["errno"]),
+                                     (phase, "value", "none"))
+                    self.assertNotIn(canary, text)
+                    self.assertLess(len(text.encode("ascii")), 1024)
+                    if phase != "export-verify":
+                        self.assertFalse((output / "producer.json").exists())
+                admitted.revalidate()
+
+    def test_finalizer_fixed_home_uses_created_export_parent_before_compiler(self):
+        work = self.base / "compiler-output"
+        work.mkdir(mode=0o755)
+        work.chmod(0o755)
+        expected_home = work / "compiler-home"
+        original_admit = finalizer.owner.admit_output
+        boundary = RuntimeError("fixed compiler boundary reached")
+
+        def admit_home(path):
+            # Old shared-/tmp placement fails here without creating any host path.
+            self.assertEqual(path, expected_home)
+            original_admit(path)
+
+        with self.prepare() as capsule, \
+                mock.patch.object(finalizer, "SOURCE_ROOT", capsule.path / "source"), \
+                mock.patch.object(finalizer, "GIT_ROOT", capsule.path / "git"), \
+                mock.patch.object(finalizer, "REQUEST", capsule.path / "request.json"), \
+                mock.patch.object(finalizer, "WORK", work), \
+                mock.patch.object(finalizer.signal, "signal"), \
+                mock.patch.object(finalizer.owner, "arm_custody"), \
+                mock.patch.object(finalizer, "prepare_descriptor_capacity"), \
+                mock.patch.dict(os.environ, {"CODEWIRE_RUST_PROFILE": "ci"}), \
+                mock.patch.object(finalizer.os, "fstatvfs", return_value=mock.Mock(f_flag=os.ST_RDONLY)), \
+                mock.patch.object(finalizer.owner, "admit_output", side_effect=admit_home) as admitted_home, \
+                mock.patch.object(finalizer, "subprocess", mock.Mock(SubprocessError=finalizer.subprocess.SubprocessError, check_output=mock.Mock(side_effect=boundary))) as compiler_process, \
+                mock.patch.object(finalizer.owner, "run_owned") as compile_command, \
+                mock.patch.object(finalizer, "finalize") as export, \
+                self.assertRaises(RuntimeError) as reached:
+            # Real source admission and original output/private-directory guards;
+            # readonly mount and process custody are existing separate components.
+            finalizer.main(["--request-sha256", capsule.outputs["request.json"].sha256])
+        self.assertIs(reached.exception, boundary)
+        admitted_home.assert_called_once_with(expected_home)
+        metadata = expected_home.lstat()
+        self.assertTrue(stat.S_ISDIR(metadata.st_mode))
+        self.assertEqual(metadata.st_uid, os.geteuid())
+        self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o700)
+        self.assertEqual(expected_home.resolve(), expected_home)
+        self.assertEqual(compiler_process.check_output.call_args.kwargs["env"]["HOME"], str(expected_home))
+        self.assertEqual(compiler_process.check_output.call_args.kwargs["env"]["TMPDIR"], str(expected_home))
+        self.assertEqual(finalizer._DIAGNOSTIC["phase"], "rustc")
+        compile_command.assert_not_called()
+        export.assert_not_called()
+
+    def test_finalizer_home_retains_output_refusals_before_compiler(self):
+        original_admit = finalizer.owner.admit_output
+        original_directory = finalizer.owner.private_directory
+        with self.prepare() as capsule:
+            for variant in ("writable-parent", "symlink-parent", "existing-home", "missing-parent"):
+                with self.subTest(variant=variant):
+                    work = self.base / variant
+                    if variant == "symlink-parent":
+                        target = self.base / "actual-output"
+                        target.mkdir(mode=0o700)
+                        work.symlink_to(target, target_is_directory=True)
+                    elif variant != "missing-parent":
+                        work.mkdir(mode=0o700)
+                        if variant == "writable-parent":
+                            work.chmod(0o777)
+                    expected_home = work / "compiler-home"
+                    if variant == "existing-home":
+                        expected_home.mkdir(mode=0o700)
+                    before = finalizer.owner.stamp(work.lstat()) if work.exists() else None
+
+                    def admit_home(path):
+                        self.assertEqual(path, expected_home)
+                        original_admit(path)
+
+                    with mock.patch.object(finalizer, "SOURCE_ROOT", capsule.path / "source"), \
+                            mock.patch.object(finalizer, "GIT_ROOT", capsule.path / "git"), \
+                            mock.patch.object(finalizer, "REQUEST", capsule.path / "request.json"), \
+                            mock.patch.object(finalizer, "WORK", work), \
+                            mock.patch.object(finalizer.signal, "signal"), \
+                            mock.patch.object(finalizer.owner, "arm_custody"), \
+                            mock.patch.object(finalizer, "prepare_descriptor_capacity"), \
+                            mock.patch.dict(os.environ, {"CODEWIRE_RUST_PROFILE": "ci"}), \
+                            mock.patch.object(finalizer.os, "fstatvfs", return_value=mock.Mock(f_flag=os.ST_RDONLY)), \
+                            mock.patch.object(finalizer.owner, "admit_output", side_effect=admit_home), \
+                            mock.patch.object(finalizer.owner, "private_directory", wraps=original_directory) as private, \
+                            mock.patch.object(finalizer, "subprocess", mock.Mock(SubprocessError=finalizer.subprocess.SubprocessError, check_output=mock.Mock())) as compiler_process, \
+                            mock.patch.object(finalizer.owner, "run_owned") as compile_command, \
+                            mock.patch.object(finalizer, "finalize") as export, \
+                            self.assertRaises(FAILURES):
+                        finalizer.main(["--request-sha256", capsule.outputs["request.json"].sha256])
+                    private.assert_not_called()
+                    compiler_process.check_output.assert_not_called()
+                    compile_command.assert_not_called()
+                    export.assert_not_called()
+                    self.assertEqual(finalizer._DIAGNOSTIC["phase"], "home")
+                    self.assertEqual(finalizer.owner.stamp(work.lstat()) if work.exists() else None, before)
+                    if variant != "existing-home":
+                        self.assertFalse(os.path.lexists(expected_home))
+            capsule.revalidate()
+
     def test_docker_recipe_one_real_compiler_run_and_closed_pins(self):
         text = (ROOT / "images/cw-runtime/Dockerfile").read_text()
         stage = text.split(" AS cw-builder\n", 1)[1].split("\nFROM ", 1)[0]
         self.assertEqual(sum(line.startswith("RUN ") for line in stage.splitlines()), 1)
+        self.assertLess(stage.index("mkdir /out &&"), stage.index("codewire-rust-build python3"))
+        self.assertEqual(finalizer.WORK, Path("/out"))
         self.assertIn("codewire-rust-build python3 /src/scripts/ci/images/finalize-cw-runtime-source.py", stage)
         self.assertIn("from=cw-source,source=git,target=/source-git,readonly", stage)
         self.assertIn("from=cw-source,source=source,target=/src,readonly", stage)
