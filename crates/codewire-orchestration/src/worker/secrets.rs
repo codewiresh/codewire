@@ -68,8 +68,12 @@ impl SecretStore {
     }
 
     pub async fn verify_readiness(&self) -> anyhow::Result<()> {
-        self.0.initialize_canary().await?;
-        self.0.verify_canary().await
+        // Initialization already verifies an existing canary; only one it
+        // just created still needs its first verification.
+        if self.0.initialize_canary().await? {
+            self.0.verify_canary().await?;
+        }
+        Ok(())
     }
 
     #[cfg(feature = "kind-e2e")]
