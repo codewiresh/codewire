@@ -7,6 +7,7 @@ resources:
   - rbac.yaml
   - certificate.yaml
   - network-policy.yaml
+  - pdb.yaml
 transformers:
   - runtime-namespace.transformer.yaml
 labels:

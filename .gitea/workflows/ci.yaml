@@ -33,7 +33,7 @@ env:
   KIND_VERSION: v0.30.0
   KUBECTL_VERSION: v1.34.0
   CARGO_INCREMENTAL: '0'
-  AGENT_SANDBOX_SHA: aacf9ba1069569da19cf4f6af5c4e83c0ae6a308
+  AGENT_SANDBOX_SHA: c94d9c62aef662d8445fbce487d9b1c889ed7ff6
   ZIG_VERSION: 0.15.2
   ZIG_X86_64_LINUX_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
   CARGO_ZIGBUILD_VERSION: 0.23.0
@@ -1853,7 +1853,7 @@ jobs:
       CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV: ubuntu24-cft145
       KIND_INGRESS_CONTROLLER_IMAGE: registry.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180
       KIND_INGRESS_CERTGEN_IMAGE: registry.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053
-      KIND_AGENT_SANDBOX_IMAGE: registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:872d7c1d2d3e01d3c5f5ec1509ea3620408f588547a355625ee00a0f63181615
+      KIND_AGENT_SANDBOX_IMAGE: registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:fb3b81ff40a5ef07a455f1e81f2af3a9b0884ed801238e018008184520044595
       KIND_WORKSPACE_IMAGE: registry.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510
       KIND_DIND_IMAGE: registry.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/kind-ci

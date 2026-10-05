@@ -30,7 +30,7 @@ FIXTURE="$(mktemp -d "$ROOT/.tmp/kind-e2e-suites.XXXXXX")"
 CALLS="$FIXTURE/calls"
 readonly SEALED_CONTROLLER_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180'
 readonly SEALED_CERTGEN_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
-readonly SEALED_AGENT_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:872d7c1d2d3e01d3c5f5ec1509ea3620408f588547a355625ee00a0f63181615'
+readonly SEALED_AGENT_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:fb3b81ff40a5ef07a455f1e81f2af3a9b0884ed801238e018008184520044595'
 readonly SEALED_WORKSPACE_IMAGE='registry.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510'
 readonly SEALED_DIND_IMAGE='registry.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e'
 
@@ -102,6 +102,85 @@ expect_live_failure() {
   set -e
   [ "$live_status" -ne 0 ] || fail "$label unexpectedly succeeded"
 }
+
+# The standard SQLx migrator applies simple/up files, never explicit down files.
+# Exercise the exact live row-census/query/refusal fragment with synthetic input;
+# its success marker is written only after the original guard returns normally.
+migration_fixture="$FIXTURE/sqlx-application-ledger"
+mkdir -p "$migration_fixture/simple/crates/codewire-server-core/migrations" \
+  "$migration_fixture/reversible/crates/codewire-server-core/migrations/nested"
+: >"$migration_fixture/simple/crates/codewire-server-core/migrations/0001_simple.sql"
+: >"$migration_fixture/reversible/crates/codewire-server-core/migrations/0001_simple.sql"
+: >"$migration_fixture/reversible/crates/codewire-server-core/migrations/0002_reversible.up.sql"
+: >"$migration_fixture/reversible/crates/codewire-server-core/migrations/0002_reversible.down.sql"
+: >"$migration_fixture/reversible/crates/codewire-server-core/migrations/ignored.txt"
+: >"$migration_fixture/reversible/crates/codewire-server-core/migrations/nested/0009_ignored.sql"
+migration_guard="$(awk '
+  /^  local expected_migration_rows migration_rows$/ { capture = 1 }
+  capture { print }
+  capture && /^  fi$/ { exit }
+' "$COMMON")"
+[ -n "$migration_guard" ] || fail 'the actual SQLx ledger guard fragment is absent'
+{
+  cat <<'LEDGER_HEAD'
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$1"
+NS=sqlx-ledger-fixture
+MIGRATION_ROWS="$2"
+MIGRATION_QUERY_EXIT="$3"
+MIGRATION_RECEIPT="$4"
+kubectl() {
+  [ "$*" = '-n sqlx-ledger-fixture exec deploy/postgres -- psql -U codewire -d codewire -tAc SELECT count(*) FILTER (WHERE success = true), count(*) FROM _sqlx_migrations' ] || return 91
+  printf 'query\n' >>"$MIGRATION_RECEIPT.query"
+  printf '%s\n' "$MIGRATION_ROWS"
+  return "$MIGRATION_QUERY_EXIT"
+}
+check_application_ledger() {
+LEDGER_HEAD
+  printf '%s\n' "$migration_guard"
+  cat <<'LEDGER_TAIL'
+}
+# A plain call preserves production errexit for a failed query; this child is
+# joined by the fixture's synchronous Bash invocation even for refusal cases.
+check_application_ledger
+printf 'SQLx ledger accepted\n' >"$MIGRATION_RECEIPT"
+LEDGER_TAIL
+} >"$migration_fixture/check-ledger.sh"
+
+run_sqlx_migration_ledger_case() {
+  local label="$1" case_root="$2" rows="$3" query_exit="$4" expected="$5"
+  local receipt="$migration_fixture/$label.receipt" status=0
+  if bash "$migration_fixture/check-ledger.sh" "$case_root" "$rows" "$query_exit" "$receipt" \
+      >"$migration_fixture/$label.log" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$(wc -l <"$receipt.query" | tr -d '[:space:]')" = 1 ] ||
+    fail "$label did not use exactly the original SQLx ledger query"
+  if [ "$expected" = accepted ]; then
+    [ "$status" = 0 ] && grep -Fxq 'SQLx ledger accepted' "$receipt" ||
+      fail "$label refused a correct up-only SQLx ledger"
+  else
+    [ "$status" != 0 ] && [ ! -e "$receipt" ] ||
+      fail "$label accepted or emitted success for a refused SQLx ledger"
+    if [ "$query_exit" = 0 ]; then
+      grep -Fq 'successful SQLx migration rows and no other ledger rows' \
+        "$migration_fixture/$label.log" || fail "$label lost the actual ledger refusal"
+    else
+      [ "$status" = "$query_exit" ] || fail "$label lost the original query failure status"
+    fi
+  fi
+}
+run_sqlx_migration_ledger_case simple-correct "$migration_fixture/simple" '1|1' 0 accepted
+run_sqlx_migration_ledger_case reversible-correct "$migration_fixture/reversible" '2|2' 0 accepted
+run_sqlx_migration_ledger_case extra "$migration_fixture/reversible" '3|3' 0 refused
+run_sqlx_migration_ledger_case failed-row "$migration_fixture/reversible" '1|2' 0 refused
+run_sqlx_migration_ledger_case missing "$migration_fixture/reversible" '1|1' 0 refused
+run_sqlx_migration_ledger_case empty "$migration_fixture/reversible" '' 0 refused
+run_sqlx_migration_ledger_case query-failed "$migration_fixture/reversible" '2|2' 47 refused
+printf '[test-kind-e2e-suites] SQLx ledger guard cases=7 passed\n'
 
 # Workspace exec uses the production private adapter and authenticated daemon,
 # not a bare container shell. Reuse the gateway fixture without giving the host
@@ -1231,7 +1310,7 @@ dashboard_browser_e2e() { record dashboard-browser; }
 assert_sandbox_supply_chain() { record sandbox-supply-chain; }
 rust_reconciler_ttl_e2e() { record ttl; }
 log() { record "log:$*"; }
-run_integrated_kind_suite
+KEEP_KIND_CLUSTER=0 run_integrated_kind_suite
 trap - EXIT
 trap cleanup_fixture EXIT
 cat >"$FIXTURE/want-order" <<'EOF'
@@ -2272,7 +2351,7 @@ grep -Fq 'sealed Kind inputs must match the five approved Harbor digests' \
 expect_failure substituted-agent-image env \
   KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
   KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
-  KIND_AGENT_SANDBOX_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:199efbb13e4af3fff69eaba218e5d36d3103568b2fa73e8606e7ad7da8c28609' \
+  KIND_AGENT_SANDBOX_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:b00759b0efbf2c654078d30573d3830841d8cbe7896655704bc8268948d72177' \
   KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
   KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
   bash -seuc 'source "$1"; validate_sealed_kind_images' _ "$COMMON"
@@ -2312,7 +2391,7 @@ grep -Fq "docker:image tag $SEALED_CERTGEN_IMAGE localhost/codewire-ci/ingress-k
   fail 'sealed certgen was not assigned its disposable Kind reference'
 grep -Fq "docker:image inspect $SEALED_AGENT_IMAGE" "$CALLS" ||
   fail 'sealed agent-sandbox controller was not proven in the runner-preloaded Docker store'
-grep -Fq "docker:image tag $SEALED_AGENT_IMAGE localhost/codewire-ci/agent-sandbox-controller:verified-872d7c1d2d3e01d3c5f5ec1509ea3620408f588547a355625ee00a0f63181615" "$CALLS" ||
+grep -Fq "docker:image tag $SEALED_AGENT_IMAGE localhost/codewire-ci/agent-sandbox-controller:verified-fb3b81ff40a5ef07a455f1e81f2af3a9b0884ed801238e018008184520044595" "$CALLS" ||
   fail 'sealed agent-sandbox controller was not assigned its disposable Kind reference'
 grep -Fq "docker:image inspect $SEALED_WORKSPACE_IMAGE" "$CALLS" ||
   fail 'sealed workspace was not proven in the runner-preloaded Docker store'

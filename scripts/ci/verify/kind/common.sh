@@ -163,7 +163,7 @@ if [ -z "${APPROVED_KIND_INGRESS_CERTGEN_IMAGE+x}" ]; then
   APPROVED_KIND_INGRESS_CERTGEN_IMAGE='registry.example.invalid/oci-approved/ingress-nginx/kube-webhook-certgen@sha256:334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
 fi
 if [ -z "${APPROVED_KIND_AGENT_SANDBOX_IMAGE+x}" ]; then
-  APPROVED_KIND_AGENT_SANDBOX_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:872d7c1d2d3e01d3c5f5ec1509ea3620408f588547a355625ee00a0f63181615'
+  APPROVED_KIND_AGENT_SANDBOX_IMAGE='registry.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:fb3b81ff40a5ef07a455f1e81f2af3a9b0884ed801238e018008184520044595'
 fi
 if [ -z "${APPROVED_KIND_WORKSPACE_IMAGE+x}" ]; then
   APPROVED_KIND_WORKSPACE_IMAGE='registry.example.invalid/oci-approved/codewire/workspace@sha256:cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510'
@@ -178,7 +178,7 @@ if [ -z "${KIND_INGRESS_CERTGEN_LOCAL_IMAGE+x}" ]; then
   KIND_INGRESS_CERTGEN_LOCAL_IMAGE='localhost/codewire-ci/ingress-kube-webhook-certgen:verified-334191231352856e1ec0c3e50f966edb59ec94a51906453d09f5820789e8b053'
 fi
 if [ -z "${KIND_AGENT_SANDBOX_LOCAL_IMAGE+x}" ]; then
-  KIND_AGENT_SANDBOX_LOCAL_IMAGE='localhost/codewire-ci/agent-sandbox-controller:verified-872d7c1d2d3e01d3c5f5ec1509ea3620408f588547a355625ee00a0f63181615'
+  KIND_AGENT_SANDBOX_LOCAL_IMAGE='localhost/codewire-ci/agent-sandbox-controller:verified-fb3b81ff40a5ef07a455f1e81f2af3a9b0884ed801238e018008184520044595'
 fi
 if [ -z "${KIND_WORKSPACE_LOCAL_IMAGE+x}" ]; then
   KIND_WORKSPACE_LOCAL_IMAGE='localhost/codewire-ci/workspace:verified-cf91240f0706a5b3da81485fbf87d65973b18d4f1067f630bc5fd513b38d1510'
@@ -1567,7 +1567,7 @@ import sys
 rendered, local_image = sys.argv[1:]
 path = Path(rendered)
 text = path.read_text()
-public_image = "ghcr.io/noeljackson/agent-sandbox-controller@sha256:199efbb13e4af3fff69eaba218e5d36d3103568b2fa73e8606e7ad7da8c28609"
+public_image = "ghcr.io/noeljackson/agent-sandbox-controller@sha256:b00759b0efbf2c654078d30573d3830841d8cbe7896655704bc8268948d72177"
 pattern = re.compile(rf"(?m)^(?P<indent>[ ]*)image: {re.escape(public_image)}$")
 
 def replace(match: re.Match[str]) -> str:
@@ -1754,7 +1754,7 @@ deploy_overlay() {
   kubectl -n "$NS" logs job/codewire-db-migrate --all-containers=true || return $?
   local expected_migration_rows migration_rows
   expected_migration_rows="$(find "$ROOT/crates/codewire-server-core/migrations" \
-    -maxdepth 1 -type f -name '*.sql' -print | wc -l | tr -d '[:space:]')"
+    -maxdepth 1 -type f -name '*.sql' ! -name '*.down.sql' -print | wc -l | tr -d '[:space:]')"
   migration_rows="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire -tAc \
       'SELECT count(*) FILTER (WHERE success = true), count(*) FROM _sqlx_migrations')"
