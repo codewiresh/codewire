@@ -5,9 +5,10 @@ The caller pipes this file into the actual workspace's python3. Each request
 crosses the daemon's loopback ingress and its long-lived bridge epoch, then
 the gateway and the broker, exactly as stock Codex's proxy provider does. It
 is the path on which one bridge epoch serves many requests, so it is the one
-that can reuse that epoch's decrypted material, and the one on which an
-authority change must reach an epoch that is still connected. The gateway
-capability path (credential_probe.py) admits a new epoch for every request.
+on which the broker reuses that epoch's authority decision and decrypted
+material, and the one on which an authority change must reach an epoch that
+is still connected. The gateway capability path (credential_probe.py) admits
+a new epoch for every request.
 The daemon supplies the epoch: no capability, token or provider credential is
 read or sent here.
 
@@ -15,10 +16,12 @@ read or sent here.
     daemon_probe.py MODE WITHIN_MS    requests until one answers MODE
 
 With WITHIN_MS the probe waits for an authority change to take effect: it
-repeats the request until one answers MODE, and fails unless that happens
-within WITHIN_MS of the first request. Until then a request may only answer
-what it did before the change: 200 while a denial is awaited, 403 while
-success is awaited.
+repeats the request once a second until one answers MODE, and fails unless
+that happens within WITHIN_MS of the first request. The broker reuses an
+epoch's authority decision for up to a minute, so a membership or binding
+change can take that long. Until then a request may only answer what it did
+before the change: 200 while a denial is awaited, 403 while success is
+awaited.
 
 The input carries no fixture scenario marker, so the synthetic provider
 answers every served request as a baseline request. stdout is one closed
@@ -44,8 +47,8 @@ MODES = {"success": 200, "denied": 403, "revoked": 403}
 MARKER = b"CWCODEX149 kind"
 MAX_RESPONSE = 64 * 1024
 REQUEST_TIMEOUT = 20
-POLL_SECONDS = 0.2
-MAX_WITHIN_MS = 30_000
+POLL_SECONDS = 1.0
+MAX_WITHIN_MS = 70_000
 
 
 def request():

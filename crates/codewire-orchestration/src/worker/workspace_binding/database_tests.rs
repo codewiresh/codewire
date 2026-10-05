@@ -15,8 +15,6 @@ use crate::start_metrics::StartPath;
 use crate::test_database_support::TestDatabase;
 use crate::workspace_binding::{BindingStore, PgBindingStore, WORKSPACE_BINDINGS_CHANNEL};
 
-mod authority_stamp;
-
 const CREATOR: &str = "workspace-binding-creator";
 const ORGANIZATION: &str = "workspace-binding-organization";
 const PRESET: &str = "workspace-binding-preset";

@@ -370,7 +370,10 @@ fn hosted_admission_withholds_only_the_capability_whose_credential_needs_reconne
     past_deadline.expires_at_unix = Some(NOW);
     for unusable in [refresh_failed, revoked, expired, past_deadline] {
         let admitted = available(&context, &unusable).unwrap();
-        assert_eq!(admitted.reconnect_required, BTreeSet::from([slot("codex")]));
+        assert_eq!(
+            admitted.reconnect_required,
+            BTreeMap::from([(slot("codex"), unusable.id.clone())])
+        );
         // The other capability keeps its exact grant; the withheld one has none.
         assert_eq!(
             admitted.grants,

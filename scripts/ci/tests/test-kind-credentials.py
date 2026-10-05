@@ -546,7 +546,7 @@ assert_kind_credential_provider_counts %d
 ''' % (logs, pods, baseline))
 
     def test_provider_audit_accepts_one_refresh_retry_and_closed_exhaustion(self):
-        for baseline in (2, 3, 6, 12, 15):
+        for baseline in (2, 3, 6, 12, 15, 64, 65, 130, 256):
             with self.subTest(baseline=baseline):
                 result = self.provider_counts(self.provider_events(baseline), baseline)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -556,14 +556,15 @@ assert_kind_credential_provider_counts %d
                 self.assertNotEqual(
                     self.provider_counts(self.provider_events(events), baseline).returncode, 0)
         # A baseline outside the session's own count or the journey's bound.
-        for baseline in (1, 65):
+        for baseline in (1, 257):
             with self.subTest(baseline=baseline):
                 self.assertNotEqual(
                     self.provider_counts(self.provider_events(baseline), baseline).returncode, 0)
 
     @staticmethod
     def reuse_lines(presented=(2, 2, 2, 0), caches=("miss", "hit", "miss"), admitted_at=None,
-                    gap=1.5, total_ms=40):
+                    gap=1.5, total_ms=40, authorities=("evaluated", "reused", "evaluated"),
+                    record_reads=1):
         """The gateway request (attempt 3), then the daemon epoch's warm-up at
         10 s, its reuse `gap` later, and the request after Reconnect at 20 s +
         `gap`, with an epoch admission at `admitted_at` seconds if given."""
@@ -574,20 +575,24 @@ assert_kind_credential_provider_counts %d
         def at(seconds):
             whole, fraction = divmod(round(seconds * 1_000_000), 1_000_000)
             return f"2026-10-04T00:{whole // 60:02d}:{whole % 60:02d}.{fraction:06d}Z"
-        def timed(cache, seconds):
+        def timed(cache, seconds, authority="evaluated"):
             read = 0 if cache == "hit" else 1
+            evaluated = int(authority != "reused")
             return {"timestamp": at(seconds), "target": "codewire_credential_broker::timing",
                     "fields": {"event": "proxied_request", "slot": "codex", "route": "openai-api",
                                "outcome": "response", "status": 200, "cache": cache,
-                               "total_ms": total_ms, "material_reads": read, "unwraps": read}}
+                               "total_ms": total_ms, "material_reads": read, "unwraps": read,
+                               "authority": authority, "record_reads": record_reads,
+                               "authority_checks": evaluated, "grant_evaluations": evaluated,
+                               "resolves": evaluated}}
         def admission(seconds):
             return {"timestamp": at(seconds), "target": "codewire_credential_broker::timing",
                     "fields": {"event": "epoch_admission", "outcome": "admitted"}}
         # The gateway request is its own epoch.
         timeline = [(5, admission(5)), (5.1, fixture[0]), (5.2, timed("miss", 5.2)),
-                    (10, fixture[1]), (10, timed(caches[0], 10)),
-                    (10 + gap, fixture[2]), (10 + gap, timed(caches[1], 10 + gap)),
-                    (20 + gap, fixture[3]), (20 + gap, timed(caches[2], 20 + gap))]
+                    (10, fixture[1]), (10, timed(caches[0], 10, authorities[0])),
+                    (10 + gap, fixture[2]), (10 + gap, timed(caches[1], 10 + gap, authorities[1])),
+                    (20 + gap, fixture[3]), (20 + gap, timed(caches[2], 20 + gap, authorities[2]))]
         if admitted_at is not None:
             timeline.append((admitted_at, admission(admitted_at)))
         return [line for _, line in sorted(timeline, key=lambda item: item[0])]
@@ -607,6 +612,13 @@ assert_kind_credential_material_reuse
     def test_material_reuse_requires_a_real_hit_on_one_epoch_then_the_reconnected_login(self):
         result = self.material_reuse(self.reuse_lines())
         self.assertEqual(result.returncode, 0, result.stderr)
+        # The warm-up may reuse a decision that reaches its minute before the
+        # reuse, which then evaluates again; its login is still reused.
+        for authorities in (("reused", "reused", "evaluated"),
+                            ("reused", "evaluated", "evaluated")):
+            with self.subTest(authorities=authorities):
+                result = self.material_reuse(self.reuse_lines(authorities=authorities))
+                self.assertEqual(result.returncode, 0, result.stderr)
         # A new epoch admitted before the warm-up or after the last request is
         # outside the window.
         for admitted_at in (9.9, 30):
@@ -633,60 +645,96 @@ assert_kind_credential_material_reuse
                 self.reuse_lines(presented=(2, 2, 2, 2)),
                 self.reuse_lines(presented=(0, 0, 0, 0)),
                 self.reuse_lines(presented=(2, 2, 1, 0)),
+                # The reuse resolved authority right after an evaluation, or
+                # read more than its record; Reconnect reused the decision.
+                self.reuse_lines(authorities=("evaluated", "evaluated", "evaluated")),
+                self.reuse_lines(authorities=("evaluated", "none", "evaluated")),
+                self.reuse_lines(record_reads=2),
+                self.reuse_lines(authorities=("evaluated", "reused", "reused")),
+                # A reused label on a line that still resolved authority.
+                [dict(line, fields=dict(line["fields"], resolves=1))
+                 if line.get("fields", {}).get("cache") == "hit" else line
+                 for line in self.reuse_lines()],
                 self.reuse_lines()[:-1]):
             with self.subTest(lines=lines):
                 result = self.material_reuse(lines)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("reused a login after Reconnect", result.stderr)
+                self.assertNotIn("jq: error", result.stderr)
 
     # The authority journey's probes in order: (mode, final status, requests,
-    # bound). Changes are polled within the bound.
-    WITHIN = 5000
+    # bound). Changes are polled within the bound; a `sandbox_replaced` record
+    # precedes the replaced Pod's first request. Request numbers: 1, 2 served;
+    # 3 the role change's refusal; 4 its restore; 5 served; 6 the rebind's
+    # refusal; 7 its restore; 8 served; 9 the replaced Pod's first; 10 revoked.
+    WITHIN = 65000
     JOURNEY = (("success", 200, 1, None), ("success", 200, 1, None),
                ("denied", 403, 1, WITHIN), ("success", 200, 1, WITHIN),
                ("success", 200, 1, None), ("denied", 403, 1, WITHIN),
                ("success", 200, 1, WITHIN), ("success", 200, 1, None),
-               ("revoked", 403, 1, WITHIN))
+               ("sandbox_replaced", None, 0, None),
+               ("success", 200, 1, None), ("revoked", 403, 1, None))
 
     @classmethod
     def authority_lines(cls, journey=None, outcomes=None, admitted_before=(), waited=40,
-                        earlier=3):
+                        earlier=3, replaced_admission=True):
         """`earlier` codex requests before the journey, then the journey's
-        requests as its probes saw them, with an admission before the journey
-        request numbers in `admitted_before`; `outcomes` overrides logged
-        outcomes by journey request number."""
+        requests as its probes saw them and as the decision path logs them,
+        with an admission before the journey request numbers in
+        `admitted_before` and, unless `replaced_admission` is false, before a
+        replaced Pod's first request; `outcomes` overrides logged fields by
+        journey request number."""
         journey = list(cls.JOURNEY if journey is None else journey)
         outcomes = outcomes or {}
         probes, statuses = [], []
+        replaced = False
         for mode, status, requests, within in journey:
+            if mode == "sandbox_replaced":
+                probes.append({"event": "sandbox_replaced"})
+                replaced = True
+                continue
             served = 0
             for _ in range(requests - 1):
                 before = 403 if status == 200 else 200
-                statuses.append((before, "before"))
+                statuses.append((before, "before", False, False))
                 served += before == 200
-            statuses.append((status, mode))
+            statuses.append((status, mode, within is not None, replaced))
+            replaced = False
             served += status == 200
             probes.append({"event": "daemon_probe", "mode": mode, "status": status,
                            "requests": requests, "served": served,
                            "waited_ms": waited if within else 30, "within_ms": within})
+        if replaced_admission:
+            first = [number for number, entry in enumerate(statuses, start=1) if entry[3]]
+            admitted_before = tuple(admitted_before) + tuple(first)
         def timed(fields):
             return {"timestamp": "2026-10-04T01:00:00.000000Z",
                     "target": "codewire_credential_broker::timing",
                     "fields": {"event": "proxied_request", "slot": "codex",
                                "route": "openai-api", "total_ms": 40, **fields}}
         lines = [timed({"outcome": "response", "status": 200}) for _ in range(earlier)]
-        for number, (status, mode) in enumerate(statuses, start=1):
+        reused = {"authority": "reused", "authority_checks": 0, "resolves": 0,
+                  "grant_evaluations": 0, "record_reads": 1, "cache": "hit",
+                  "material_reads": 0, "unwraps": 0}
+        evaluated = {"authority": "evaluated", "authority_checks": 1, "resolves": 1,
+                     "grant_evaluations": 1, "record_reads": 1, "cache": "miss",
+                     "material_reads": 1, "unwraps": 1}
+        for number, (status, mode, change, first) in enumerate(statuses, start=1):
             if number in admitted_before:
                 lines.append({"timestamp": "2026-10-04T01:00:00.000000Z",
                               "target": "codewire_credential_broker::timing",
                               "fields": {"event": "epoch_admission", "outcome": "admitted"}})
             if status == 200:
-                fields = {"outcome": "response", "status": 200}
+                # A repeated request, or one served while a refusal is
+                # awaited, reuses the decision; a restore or a new epoch's
+                # first request evaluates it and reads the login again.
+                fields = {"outcome": "response", "status": 200,
+                          **(evaluated if change or first else reused)}
             elif mode == "revoked":
                 # The fixed 403 Reconnect explanation, as the service logs it.
-                fields = {"outcome": "response", "status": 403}
+                fields = {"outcome": "response", "status": 403, "authority": "evaluated"}
             else:
-                fields = {"outcome": "denied", "status": 0}
+                fields = {"outcome": "denied", "status": 0, "authority": "evaluated"}
             fields.update(outcomes.get(number, {}))
             lines.append(timed(fields))
         return lines, probes
@@ -714,42 +762,81 @@ assert_kind_credential_authority_changes %d '%s'
         # A change may take effect after some served requests, within the
         # bound, and a restore after some denied ones.
         slow = list(self.JOURNEY)
-        slow[2] = ("denied", 403, 3, self.WITHIN)
+        slow[2] = ("denied", 403, 61, self.WITHIN)
         slow[3] = ("success", 200, 2, self.WITHIN)
-        slow[8] = ("revoked", 403, 4, self.WITHIN)
-        accepted.append(self.authority_lines(slow, waited=4999))
+        accepted.append(self.authority_lines(slow, waited=64999))
         # A restore, or a request between changes, may cross a new epoch.
         accepted.append(self.authority_lines(admitted_before=(4, 5)))
+        # A request served while a refusal is awaited may read the login again
+        # once per change: a full-check lease the same change refuses, such as
+        # the daemon's Codex login check, clears the epoch's material cache.
+        reread = {"cache": "miss", "material_reads": 1, "unwraps": 1}
+        accepted.append(self.authority_lines(slow, outcomes={10: reread, 40: reread}))
+        # A replaced Pod's first request may reuse its new epoch's admission.
+        accepted.append(self.authority_lines(outcomes={9: {"authority": "reused",
+                                                           "record_reads": 1}}))
+        # A rebind's restore is refused from the decision until it ages out.
+        late = list(self.JOURNEY)
+        late[6] = ("success", 200, 40, self.WITHIN)
+        accepted.append(self.authority_lines(
+            late, waited=40000,
+            outcomes={number: {"authority": "reused"} for number in range(7, 46)}))
         for lines, probes in accepted:
             with self.subTest(probes=probes):
                 result = self.authority_changes(lines, probes)
                 self.assertEqual(result.returncode, 0, result.stderr)
         rejected = []
-        # A denial that landed on a new epoch, not the connected one.
-        for number in (3, 6, 9):
+        # A refusal or the revocation that landed on a new epoch, not the
+        # connected one, or a replaced Pod that admitted no new epoch.
+        for number in (3, 6, 10):
             rejected.append(self.authority_lines(admitted_before=(number,)))
-        rejected.append(self.authority_lines(slow, admitted_before=(5,)))
+        rejected.append(self.authority_lines(slow, admitted_before=(63,)))
+        rejected.append(self.authority_lines(replaced_admission=False))
         # A change that took longer than the bound.
-        rejected.append(self.authority_lines(waited=5001))
+        rejected.append(self.authority_lines(waited=65001))
         # The service saw something else than the probe.
         for number, outcome in ((3, {"outcome": "response", "status": 200}),
                                 (3, {"outcome": "response", "status": 403}),
-                                (9, {"outcome": "denied", "status": 0}),
-                                (9, {"outcome": "response", "status": 200}),
+                                (10, {"outcome": "denied", "status": 0}),
+                                (10, {"outcome": "response", "status": 200}),
                                 (1, {"outcome": "denied", "status": 0}),
                                 (6, {"outcome": "response", "status": 200})):
             rejected.append(self.authority_lines(outcomes={number: outcome}))
-        # A missing or extra request.
+        # A repeated request that resolved authority, read more than its
+        # record, or read material; a refusal, restore or revocation that
+        # reused a decision; a replaced Pod whose first request was warm.
+        for number, outcome in ((1, {"authority": "evaluated"}),
+                                (2, {"resolves": 1}),
+                                (2, {"authority_checks": 1}),
+                                (5, {"grant_evaluations": 1}),
+                                (5, {"record_reads": 2}),
+                                (8, {"cache": "miss", "material_reads": 1, "unwraps": 1}),
+                                (3, {"authority": "reused"}),
+                                (4, {"authority": "reused"}),
+                                (10, {"authority": "reused"}),
+                                (9, {"cache": "hit"})):
+            rejected.append(self.authority_lines(outcomes={number: outcome}))
+        # A request served while the role change was awaited that evaluated,
+        # or more re-reads of the login than changes.
+        rejected.append(self.authority_lines(slow, outcomes={4: {"authority": "evaluated"}}))
+        rejected.append(self.authority_lines(
+            slow, outcomes={number: reread for number in (10, 20, 30)}))
+        rejected.append(self.authority_lines(
+            slow, outcomes={10: dict(reread, material_reads=2)}))
+        # A missing or extra request, or a replacement record without a request.
         lines, probes = self.authority_lines()
         rejected.append((lines[:-1], probes))
         rejected.append((lines + lines[-1:], probes))
         rejected.append((lines, probes[:-1]))
+        rejected.append((lines, probes + [{"event": "sandbox_replaced"}]))
         rejected.append((lines, []))
         for lines, probes in rejected:
             with self.subTest(probes=probes):
                 result = self.authority_changes(lines, probes)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("did not reach the connected daemon epoch in time", result.stderr)
+                # A rejection, never a jq failure that would reject anything.
+                self.assertNotIn("jq: error", result.stderr)
         # The journey starts after the requests before it.
         lines, probes = self.authority_lines(earlier=5)
         self.assertEqual(self.authority_changes(lines, probes, earlier=5).returncode, 0)
@@ -759,7 +846,7 @@ assert_kind_credential_authority_changes %d '%s'
         directory = tempfile.TemporaryDirectory(prefix="kind-daemon-probe-")
         self.addCleanup(directory.cleanup)
         log = Path(directory.name) / "probes.jsonl"
-        for mode, within in (("success", ""), ("denied", "5000"), ("revoked", "5000")):
+        for mode, within in (("success", ""), ("denied", "65000"), ("revoked", "")):
             with self.subTest(mode=mode, within=within):
                 result = self.shell('''
 SANDBOX_NS=dev-sandboxes
@@ -822,6 +909,39 @@ set_kind_credential_member_role '%s' '%s'
 ''' % (environment, role))
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertEqual(result.stderr, "")
+
+    def test_sandbox_replacement_requires_a_new_workspace_pod_and_a_redelivered_login(self):
+        for after, expected in (("uid-2", 0), ("uid-1", 1), ("", 1)):
+            with self.subTest(after=after):
+                result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+uids=(uid-1 '%s')
+COUNT="$(mktemp)"; echo 0 > "$COUNT"
+CALLS="$(mktemp)"
+kind_credential_workspace() { [ "$1" = '%s' ] || return 97; printf 'workspace-pod\\n'; }
+kubectl() {
+  [ "$*" = '-n dev-sandboxes get pod workspace-pod -o jsonpath={.metadata.uid}' ] || return 99
+  local seen; seen="$(cat "$COUNT")"; echo "$((seen + 1))" > "$COUNT"
+  printf '%%s' "${uids[$seen]}"
+}
+kind_credential_cli() { printf '%%s\\n' "$*" >> "$CALLS"; }
+wait_kind_credential_environment() { printf 'wait %%s\\n' "$2" >> "$CALLS"; }
+kind_credential_codex_login() { printf 'login %%s\\n' "$2" >> "$CALLS"; }
+rc=0
+replace_kind_credential_sandbox '%s' || rc=$?
+cat "$CALLS"; rm -f "$CALLS" "$COUNT"
+exit "$rc"
+''' % (after, ENVIRONMENT, ENVIRONMENT))
+                self.assertEqual(result.returncode, expected, result.stderr)
+                steps = result.stdout.splitlines()
+                self.assertEqual(steps[:4], [
+                    f"env --platform stop {ENVIRONMENT} --output json", "wait stopped",
+                    f"env --platform start {ENVIRONMENT} --output json", "wait running"])
+                # The new epoch must deliver the login again before the
+                # journey uses it.
+                self.assertEqual(steps[4:], ["login redelivered"] if expected == 0 else [])
+                if expected:
+                    self.assertIn("Stop/Start did not replace the workspace Pod", result.stderr)
 
     def test_rebind_moves_the_binding_to_the_current_or_an_exact_revision_once(self):
         for revision in ("", "7"):
@@ -1020,32 +1140,39 @@ kind_credential_codex_login '%s' %s %s
         unbound = index(daemon + "denied" + bounded, rebind)
         rebound = index('rebind_kind_credential_environment "$environment" "$bound_revision"')
         recovered = index(daemon + "success" + bounded, rebound)
+        replaced = index('replace_kind_credential_sandbox "$environment"', recovered)
+        marker = index("printf '%s\\n' '{\"event\":\"sandbox_replaced\"}' >> \"$KIND_DAEMON_PROBE_LOG\"", replaced)
+        fresh = index(daemon + "success\n", marker)
         revoke = index('credentials --platform revoke "$credential_name"')
-        revoked_daemon = index(daemon + "revoked" + bounded)
+        revoked_daemon = index(daemon + "revoked\n", revoke)
         changes = index('assert_kind_credential_authority_changes "$journey_from" "$KIND_DAEMON_PROBE_LOG"')
         revoked_gateway = index('kind_credential_probe "$environment" revoked')
         revoked = index('kind_credential_codex_login "$environment" revoked || return $?')
-        served = index('served="$(jq -s \'map(.served) | add\' "$KIND_DAEMON_PROBE_LOG")" || return $?')
+        served = index('served="$(jq -s \'map(.served // 0) | add\' "$KIND_DAEMON_PROBE_LOG")" || return $?')
         final = index('assert_kind_credential_provider_counts "$((6 + served))"')
         destroy = index('env --platform rm "$environment"')
         # Delivery before the proxy session whose refreshes rotate it; the
         # user's own login and logout after rotation; a new container forgets
         # the logout; one gateway request; on the daemon's epoch a warm-up, a
         # reuse and Reconnect; then each authority change on that connected
-        # epoch, revocation last, which removes the login before destroy.
+        # epoch; a replaced Pod's new epoch; revocation last, on that epoch,
+        # which removes the login before destroy.
         order = [deliver, session, counts, rotation, own, logout, stop, start, redelivered,
                  gateway, counted, warm, reuse, reconnect, reconnected, six, reused, anchor,
                  logged, repeated, member, denied, restored, readmitted, bound, unset, rebind,
-                 unbound, rebound, recovered, revoke, revoked_daemon, changes, revoked_gateway,
-                 revoked, served, final, destroy]
+                 unbound, rebound, recovered, replaced, marker, fresh, revoke, revoked_daemon,
+                 changes, revoked_gateway, revoked, served, final, destroy]
         self.assertEqual(sorted(order), order)
         # Reuse and a connected epoch's authority changes are proven only on
         # the daemon path; the gateway path admits an epoch per request.
         self.assertNotIn("kind_credential_probe ", flow[counted:revoked_gateway])
         self.assertEqual(flow.count('kind_credential_probe "$environment" success'), 1)
         self.assertEqual(flow.count(daemon + "denied" + bounded), 2)
-        self.assertEqual(flow.count(daemon + "revoked" + bounded), 1)
         self.assertEqual(flow.count(daemon + "success" + bounded), 2)
+        # A credential change applies to the very next request: no bound.
+        self.assertEqual(flow.count(daemon + "revoked"), 1)
+        self.assertEqual(flow.count(daemon + "revoked\n"), 1)
+        self.assertEqual(flow.count("replace_kind_credential_sandbox"), 1)
         # Three daemon requests before the journey, each served once.
         self.assertEqual(flow[counted:anchor].count(daemon + "success\n"), 3)
         self.assertIn('login_events="$(kind_credential_codex_login "$environment" deliver)" || return $?',
@@ -1968,23 +2095,34 @@ class DaemonProbe(unittest.TestCase):
                     DAEMON.probe(mode)
 
     def test_a_change_is_awaited_within_its_bound_and_counts_what_was_served(self):
+        # Once a second, for up to the broker's one-minute decision window.
+        self.assertEqual(DAEMON.POLL_SECONDS, 1.0)
         self.statuses = [200, 200, 403]
-        DAEMON.probe("denied", 5000)
+        DAEMON.probe("denied", 65000)
         event = self.event()
         self.assertEqual((event["status"], event["requests"], event["served"], event["within_ms"]),
-                         (403, 3, 2, 5000))
-        self.assertEqual(event["waited_ms"], 550)
+                         (403, 3, 2, 65000))
+        self.assertEqual(event["waited_ms"], 2150)
         self.output.truncate(0)
         self.output.seek(0)
         self.statuses = [403, 200]
-        DAEMON.probe("success", 5000)
+        DAEMON.probe("success", 65000)
         self.assertEqual((self.event()["requests"], self.event()["served"]), (2, 1))
+        # A change that lands as its decision reaches its minute.
+        self.output.truncate(0)
+        self.output.seek(0)
+        self.statuses = [200] * 61 + [403]
+        DAEMON.probe("denied", 65000)
+        self.assertEqual((self.event()["requests"], self.event()["served"]), (62, 61))
+        self.assertLessEqual(self.event()["waited_ms"], 65000)
 
     def test_a_change_that_misses_its_bound_or_answers_otherwise_fails(self):
         for mode, statuses, within in (("denied", [200] * 40, 1000),
-                                       ("denied", [200, 503, 403], 5000),
+                                       ("denied", [200] * 70, 65000),
+                                       ("denied", [200, 503, 403], 65000),
                                        ("success", [403, 200], 100),
-                                       ("revoked", [403], 0)):
+                                       ("revoked", [403], 0),
+                                       ("denied", [403], 70001)):
             with self.subTest(mode=mode, statuses=statuses, within=within):
                 self.statuses = list(statuses)
                 with self.assertRaises(ValueError):

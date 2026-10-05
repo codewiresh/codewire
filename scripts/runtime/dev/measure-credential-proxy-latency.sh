@@ -46,7 +46,9 @@ Requirements:
   - --phases also reads the credential service's secret-free timing lines for
     the run window with kubectl (read-only). Every proxied OpenAI API-key
     request the service handled in that window is included. Its summary
-    counts the requests whose material cache use was hit, miss or bypass.
+    counts the requests whose material cache use was hit, miss or bypass, and
+    those that reused their epoch's authority decision (reused: no resolve or
+    grant evaluation, one record read) or evaluated it (evaluated).
 
 Options:
   --env ID              Environment to run in (required)
@@ -235,6 +237,7 @@ jq -s --arg finished "$finished_at" '
         authority_checks: ($requests | map(.authority_checks) | pct(0.5)),
         resolves: ($requests | map(.resolves) | pct(0.5)),
         grant_evaluations: ($requests | map(.grant_evaluations) | pct(0.5)),
+        record_reads: ($requests | map(.record_reads) | pct(0.5)),
         material_reads: ($requests | map(.material_reads) | pct(0.5)),
         provider_requests: ($requests | map(.provider_requests) | pct(0.5))
       }),
@@ -242,6 +245,10 @@ jq -s --arg finished "$finished_at" '
       # read it through the store (miss) or never consulted a cache (bypass).
       cache: ($requests | group_by(.cache // "unreported")
         | map({key: (.[0].cache // "unreported"), value: length}) | from_entries),
+      # How many requests reused the authority decision of their epoch (reused),
+      # ran or waited for an evaluation (evaluated), or never leased (none).
+      authority: ($requests | group_by(.authority // "unreported")
+        | map({key: (.[0].authority // "unreported"), value: length}) | from_entries),
       phases_ms: ([$phases[] as $phase | {
         key: $phase,
         value: {p50: ($requests | map(.[$phase]) | pct(0.5) | round1),
