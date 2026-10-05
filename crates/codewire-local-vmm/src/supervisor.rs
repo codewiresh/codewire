@@ -771,6 +771,10 @@ impl SupervisorCore {
         {
             return Err(SupervisorError::EnvironmentAccessUnavailable);
         }
+        // Local profiles never hold a Claude subscription token: the local
+        // authority refuses Anthropic OAuth, so slot names fix every form here.
+        // TODO(native-claude-subscription-form): revisit with the platform
+        // source path in sources::platform::managed_clients.
         let clients = codewire_access::ManagedCredentialClients::from_profile_slots(
             revision.profile.entries.keys().map(|slot| slot.as_str()),
         )

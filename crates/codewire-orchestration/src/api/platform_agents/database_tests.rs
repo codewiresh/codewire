@@ -13,8 +13,11 @@ const POD: &str = "7e7b20f6-0bd2-4f11-8b16-9c239851eb52";
 const CLAIM: &str = "c0ffee00-e29b-41d4-a716-446655440000";
 const SANDBOX: &str = "5a4db0c5-e29b-41d4-a716-446655440000";
 const PVC: &str = "9d8c7b6a-2222-4f5e-8d4c-3b2a1f0e9d8c";
-const SCHEMA36: &str = "96daaf4c0f9e867834ecca0ad6fcb7a87d807e2d85b5b61d92fbf003c6c2c6e0";
-const HISTORY36: &str = "d6a1ecbf8b7c26b05521ed55741bbe20a44c01262a82b6a43524e6270e79aba02a7ebd7a820e48c4db2c1295860382a2";
+// Canonical1..36 plus byte-identical CW37; the schema pin is measured
+// independently before qualifying the additive managed38 upgrade/rollback.
+const SCHEMA37: &str = "eb216d37412b9af558ccdc5ab618783713ba289cf0409c97abf68fd83d084637";
+const SCHEMA38: &str = "a7be80c974514b42721d43a6d08efc00349dc0711abbe6356e109189cc215879";
+const HISTORY37: &str = "f4063eab7e06d4c22615d89c470d5219c1455c46215927410fc4a33ce4ea8e22609ad93ba19c2c529fe58d810ded0840";
 struct Fixture {
     pool: PgPool,
     journal: ManagedJournal,
@@ -1189,20 +1192,20 @@ database_case!(
 
 #[tokio::test]
 #[ignore = "requires checked-in disposable TEST_DATABASE_URL"]
-async fn db_migration37_fresh_upgrade_rollback_and_retained_evidence_refusal() -> Result<()> {
+async fn db_migration38_fresh_upgrade_rollback_and_retained_evidence_refusal() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
         let migrator = application_migrator();
         let fresh = schema(&db.pool).await?;
-        ensure!(fresh.len() == 64);
-        println!("MEASURED_PLATFORM_MANAGED_SCHEMA37={fresh}");
-        migrator.undo(&db.pool, 36).await?;
-        ensure!(schema(&db.pool).await? == SCHEMA36);
+        ensure!(fresh == SCHEMA38);
+        println!("MEASURED_PLATFORM_MANAGED_SCHEMA38={fresh}");
+        migrator.undo(&db.pool, 37).await?;
+        ensure!(schema(&db.pool).await? == SCHEMA37);
         let mut h = Sha384::new();
-        for m in migrator.iter().filter(|m| m.version <= 36) {
+        for m in migrator.iter().filter(|m| m.version <= 37) {
             h.update(Sha384::digest(m.sql.as_bytes()));
         }
-        ensure!(format!("{:x}", h.finalize()) == HISTORY36);
+        ensure!(format!("{:x}", h.finalize()) == HISTORY37);
         let f = Fixture::seed(&db.pool).await?;
         let before: Vec<String> =
             sqlx::query_scalar("SELECT row_to_json(e)::text FROM environments e ORDER BY id")
@@ -1220,7 +1223,7 @@ async fn db_migration37_fresh_upgrade_rollback_and_retained_evidence_refusal() -
         f.journal
             .mark_unknown(i, "platform-agent-dispatch-unknown")
             .await?;
-        ensure!(migrator.undo(&db.pool, 36).await.is_err());
+        ensure!(migrator.undo(&db.pool, 37).await.is_err());
         ensure!(
             f.observe(m.request_id).await?.phase == ManagedPhase::Unknown
                 && schema(&db.pool).await? == fresh
@@ -1229,7 +1232,7 @@ async fn db_migration37_fresh_upgrade_rollback_and_retained_evidence_refusal() -
             sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
                 .fetch_one(&db.pool)
                 .await?;
-        ensure!(latest == 37);
+        ensure!(latest == 38);
         Ok(())
     }
     .await;

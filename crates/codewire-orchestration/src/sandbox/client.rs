@@ -32,8 +32,9 @@ use super::template::{
     gateway_network_policy_name, gateway_workload_name, render_gateway_deployment,
     render_gateway_direct_udp_service, render_gateway_host_key_secret,
     render_gateway_network_policy, render_gateway_service, render_sandbox_shadow_pool,
-    render_sandbox_template, render_workspace_daemon_network_policy,
-    render_workspace_daemon_service, workspace_daemon_network_policy_name,
+    render_sandbox_template, render_warm_member_bridge, render_workspace_daemon_network_policy,
+    render_workspace_daemon_service, warm_member_daemon_bridge_name,
+    warm_member_gateway_bridge_name, workspace_daemon_network_policy_name,
     workspace_daemon_service_name,
 };
 use super::{
@@ -3222,6 +3223,44 @@ impl SandboxClient {
         Ok(())
     }
 
+    /// Program #2238 C6 (#2434): apply `cw-daemon-warm-<env>` and
+    /// `cw-gw-warm-<env>` for the adopted warm member whose Sandbox UID a
+    /// committed warm binding recorded. The caller proves that binding inside
+    /// its fence; nothing else may call this. Managed like the environment's
+    /// own policies, and removed with them by [`Self::delete_gateway_stack`].
+    pub async fn ensure_warm_member_bridge(
+        &self,
+        opts: &TemplateOpts,
+        sandbox_uid: &str,
+    ) -> anyhow::Result<()> {
+        if !(opts.network_policy_management.is_empty()
+            || opts.network_policy_management == "Managed")
+        {
+            return Ok(());
+        }
+        let [daemon, gateway] = render_warm_member_bridge(&self.namespace, opts, sandbox_uid)?;
+        self.ensure_dynamic(
+            self.network_policies(),
+            &warm_member_daemon_bridge_name(&opts.environment_id),
+            daemon,
+        )
+        .await?;
+        self.ensure_dynamic(
+            self.network_policies(),
+            &warm_member_gateway_bridge_name(&opts.environment_id),
+            gateway,
+        )
+        .await
+    }
+
+    /// Remove both halves of an environment's warm-member bridge. NotFound
+    /// is success.
+    pub async fn delete_warm_member_bridge(&self, env_id: &str) -> anyhow::Result<()> {
+        let policies = self.network_policies();
+        delete_dynamic(&policies, &warm_member_daemon_bridge_name(env_id)).await?;
+        delete_dynamic(&policies, &warm_member_gateway_bridge_name(env_id)).await
+    }
+
     pub async fn ensure_gateway_host_key_secret(&self, opts: &TemplateOpts) -> anyhow::Result<()> {
         if opts.environment_id.trim().is_empty() {
             anyhow::bail!("ensure gateway host key secret: environment_id is required");
@@ -3249,6 +3288,7 @@ impl SandboxClient {
         delete_dynamic(&services, &super::template::gateway_service_name(env_id)).await?;
         delete_dynamic(&services, &gateway_direct_udp_service_name(env_id)).await?;
         delete_dynamic(&self.deployments(), &gateway_workload_name(env_id)).await?;
+        self.delete_warm_member_bridge(env_id).await?;
         delete_dynamic(
             &self.network_policies(),
             &workspace_daemon_network_policy_name(env_id),
@@ -3584,6 +3624,16 @@ impl SandboxClient {
                 "NetworkPolicy",
                 self.network_policies(),
                 gateway_network_policy_name(env_id),
+            ),
+            (
+                "NetworkPolicy",
+                self.network_policies(),
+                warm_member_daemon_bridge_name(env_id),
+            ),
+            (
+                "NetworkPolicy",
+                self.network_policies(),
+                warm_member_gateway_bridge_name(env_id),
             ),
         ] {
             if dynamic_exists(&api, &name).await? {

@@ -202,6 +202,7 @@ async fn run_connected(
         HttpProvider::OpenAiApiKey,
         HttpProvider::CodexOAuth,
         HttpProvider::AnthropicApiKey,
+        HttpProvider::AnthropicSubscriptionToken,
         HttpProvider::GitHubOAuth,
     ]))
     .await

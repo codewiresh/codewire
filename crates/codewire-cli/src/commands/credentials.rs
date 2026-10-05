@@ -1009,6 +1009,9 @@ fn optional_profile_by_name<'a>(
 fn api_key_enrollment_kind(provider: &str) -> anyhow::Result<CredentialAuthKind> {
     match provider {
         "openai" | "anthropic" => Ok(CredentialAuthKind::ApiKey),
+        "claude-subscription" => anyhow::bail!(
+            "Claude subscription tokens are stored only on the Codewire platform; add one with --platform"
+        ),
         "codex" | "github" => {
             anyhow::bail!("use connect {provider} --name NAME for OAuth credentials")
         }
@@ -1844,6 +1847,40 @@ mod tests {
         for provider in ["codex", "github", "ssh", "unknown"] {
             assert!(api_key_enrollment_kind(provider).is_err());
         }
+    }
+
+    #[test]
+    fn claude_subscription_tokens_parse_as_an_add_provider_and_are_platform_only() {
+        let parsed = Cli::try_parse_from([
+            "cw",
+            "credentials",
+            "--platform",
+            "add",
+            "claude-subscription",
+            "--name=claude",
+        ])
+        .unwrap();
+        assert!(
+            matches!(parsed.command, Command::Credentials(CredentialsArgs {
+            platform: true,
+            command: CredentialsCommand::Add(CredentialAddArgs { provider, name, .. }), ..
+        }) if provider == "claude-subscription" && name == "claude")
+        );
+        // The token is never an argument.
+        assert!(
+            Cli::try_parse_from([
+                "cw",
+                "credentials",
+                "--platform",
+                "add",
+                "claude-subscription",
+                "--name=claude",
+                "--token=sk-ant-oat01-must-not-be-argv",
+            ])
+            .is_err()
+        );
+        let error = api_key_enrollment_kind("claude-subscription").unwrap_err();
+        assert!(error.to_string().contains("--platform"));
     }
 
     #[test]

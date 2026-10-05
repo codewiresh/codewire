@@ -331,11 +331,22 @@ weakening of the required local hardware gate.
   bearer token for the creator's ChatGPT account, usable from anywhere, and
   stays valid at the provider until its `exp`; every process in the Sandbox,
   and anyone who can open the Sandbox's terminal, can read it.
-- Decrypted provider material may be reused only within one platform broker
-  bridge epoch (hosted or owner-local delegation), for at most two minutes,
-  for the exact credential record the request's own checks observe before and
-  after. Every request still runs its authority, grant and record checks. SSH
-  signing, OAuth keep-alive refresh and direct delivery never reuse material;
-  an on-demand OAuth refresh uses the request's own lease, whose exact
-  generation refresh admission rechecks. Do not add a process-wide or
-  persistent material cache.
+- A hosted platform broker bridge epoch may reuse one authority decision (its
+  runtime session and derived grants, never material) for at most 60 seconds,
+  and releases nothing under an older one. Only epoch admission creates it, and
+  a lease evaluates it again inline, one evaluation at a time. Every lease of a
+  granted slot rereads its credential's record by id and owner, and evaluates
+  again at once when that record is missing, inactive or of another revocation
+  generation than its grant. A refused slot is answered from the decision unless
+  its withheld credential is usable again or the GitHub connection it follows
+  changed. So a credential change applies to the next request, and a membership,
+  organization, environment, binding, personal-credential confirmation or Pod
+  lineage change within 60 seconds. Decrypted provider material may be reused
+  only within one bridge epoch (hosted or owner-local delegation), for at most
+  two minutes, for exactly the record that lease admitted. Codex login delivery,
+  owner-local delegation leases, SSH signing, OAuth refresh admission and
+  keep-alive, and environment projection keep full per-call authority checks.
+  SSH signing, OAuth keep-alive refresh and direct delivery never reuse
+  material; an on-demand OAuth refresh uses the request's own lease, whose exact
+  generation refresh admission rechecks. Do not add a process-wide or persistent
+  material or decision cache.

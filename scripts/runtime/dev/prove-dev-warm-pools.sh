@@ -43,6 +43,11 @@ MEMBER_LABEL="agents.x-k8s.io/warm-pool-sandbox"
 LAUNCH_TYPE_LABEL="agents.x-k8s.io/launch-type"
 REVISION_ANNOTATION="codewire.sh/pool-revision"
 REVISION_ENV="CODEWIRE_WORKSPACE_POOL_REVISION"
+# Program #2238 C6 (#2434): the agent-sandbox fork's birth label, and the two
+# bridge policies orchestration applies after a warm bind.
+SANDBOX_UID_LABEL="agents.x-k8s.io/sandbox-uid"
+DAEMON_BRIDGE_PREFIX="cw-daemon-warm-"
+GATEWAY_BRIDGE_PREFIX="cw-gw-warm-"
 
 TMPDIR_PROOF=""
 CREATED_ENVS=()
@@ -69,7 +74,10 @@ Journeys (default: preflight hits miss off-shape invariants, then stats when
   hits        N sequential creates of the pool shape, each after the pool
               holds a ready member; each must adopt a warm member
               (warmPoolRef cw-pool-*, launch-type warm), run identity-free,
-              carry the pool revision and reach its daemon; timed client side
+              carry the pool revision and reach its daemon, and its
+              warm-member bridge must select exactly the bound Pod (skipped,
+              with a message, while the fork's sandbox-uid label is absent);
+              timed client side
   miss        with the pool full, members + 1 creates at once: at least one
               finds the pool empty, gets a fresh Sandbox and still starts
   off-shape   a shape no pool holds goes cold through its own shadow pool
@@ -123,6 +131,11 @@ check() {
   local label="$1"
   shift
   if "$@"; then pass "$label"; else fail "$label"; fi
+}
+
+skip() {
+  RESULTS+=("SKIP $*")
+  log "SKIP $*"
 }
 
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
@@ -391,7 +404,61 @@ discover_pool() {
   POOL_MEMBERS="$(pool_json | jq -r '.spec.replicas // 0')"
 }
 
+# C6 (#2434): after a warm hit, both bridge halves name exactly the bound
+# Pod's Sandbox UID and this environment's gateway, and the member selector
+# matches exactly one Pod in the namespace: the bound one.
+bridge_selects_bound_pod() {
+  local id="$1" pod="$2" sandbox sandbox_uid pod_uid selected
+  sandbox="$(claim_sandbox "$id")" || return 1
+  [[ -n "$sandbox" ]] || return 1
+  sandbox_uid="$(kubectl_ro get sandbox -n "$SANDBOX_NAMESPACE" "$sandbox" -o json | jq -r '.metadata.uid // ""')" ||
+    return 1
+  pod_uid="$(jq -r '.metadata.uid // ""' <<<"$pod")"
+  [[ -n "$sandbox_uid" && -n "$pod_uid" ]] || return 1
+  jq -e --arg key "$SANDBOX_UID_LABEL" --arg uid "$sandbox_uid" '.metadata.labels[$key] == $uid' <<<"$pod" >/dev/null ||
+    { log "bridge: $id Pod's $SANDBOX_UID_LABEL is not its Sandbox's UID"; return 1; }
+  kubectl_ro get networkpolicy -n "$SANDBOX_NAMESPACE" "${DAEMON_BRIDGE_PREFIX}${id}" -o json |
+    jq -e --arg key "$SANDBOX_UID_LABEL" --arg uid "$sandbox_uid" '
+      .spec.podSelector == {matchLabels: {($key): $uid, "codewire.sh/type": "workspace"}}' >/dev/null ||
+    { log "bridge: ${DAEMON_BRIDGE_PREFIX}${id} is missing or does not select exactly the bound Sandbox"; return 1; }
+  kubectl_ro get networkpolicy -n "$SANDBOX_NAMESPACE" "${GATEWAY_BRIDGE_PREFIX}${id}" -o json |
+    jq -e --arg key "$SANDBOX_UID_LABEL" --arg uid "$sandbox_uid" --arg env "$id" '
+      {podSelector: {matchLabels: {($key): $uid, "codewire.sh/type": "workspace"}}} as $member
+      | .spec.podSelector == {matchLabels: {"codewire.sh/environment-id": $env, "codewire.sh/type": "gateway"}}
+      and ([(.spec.egress // [])[].to[], (.spec.ingress // [])[].from[]] | length > 0 and all(. == $member))' >/dev/null ||
+    { log "bridge: ${GATEWAY_BRIDGE_PREFIX}${id} is missing or peers anything but the bound Sandbox"; return 1; }
+  selected="$(kubectl_ro get pod -n "$SANDBOX_NAMESPACE" -l "${SANDBOX_UID_LABEL}=${sandbox_uid},codewire.sh/type=workspace" -o json |
+    jq -c '[.items[].metadata.uid]')" || return 1
+  [[ "$selected" == "[\"$pod_uid\"]" ]] || { log "bridge: $id member selector matches $selected, not exactly the bound Pod"; return 1; }
+  [[ -z "$SQL_CMD" ]] || sql_binding_sandbox "$id" "$sandbox_uid"
+}
+
+check_bridge() { # N ID
+  local n="$1" id="$2" pod
+  pod="$(workspace_pod_json "$id" 2>/dev/null)" || { fail "hit $n: read the bound Pod for the warm-member bridge"; return; }
+  if ! jq -e --arg key "$SANDBOX_UID_LABEL" '(.metadata.labels[$key] // "") != ""' <<<"$pod" >/dev/null; then
+    skip "hit $n: warm-member bridge not checked: the bound Pod has no $SANDBOX_UID_LABEL label, so the agent-sandbox fork label is not deployed on this cluster and the bridge selects nothing yet"
+    return
+  fi
+  check "hit $n: the warm-member bridge selects exactly the bound Pod" bridge_selects_bound_pod "$id" "$pod"
+}
+
+bridge_absent() {
+  local id="$1" present
+  present="$(kubectl_ro get networkpolicy -n "$SANDBOX_NAMESPACE" --ignore-not-found -o name \
+    "${DAEMON_BRIDGE_PREFIX}${id}" "${GATEWAY_BRIDGE_PREFIX}${id}")" || return 1
+  [[ -z "$present" ]] || { log "bridge: $id still has $present"; return 1; }
+}
+
 # -------------------------------------------------------------------- SQL
+
+sql_binding_sandbox() {
+  # The live binding recorded the Sandbox the bridge selects.
+  local id="$1" sandbox_uid="$2" out
+  out="$(printf "SELECT w.sandbox_uid FROM sandbox_workspace_bindings w JOIN sandbox_environment_backend b ON b.environment_id = w.environment_id AND b.pod_uid = w.pod_uid WHERE w.environment_id = '%s' AND w.released_at IS NULL;\n" "$id" |
+    sql_rows | tr -d '[:space:]')" || return 1
+  [[ "$out" == "$sandbox_uid" ]] || { log "bridge: $id live binding records $out, not $sandbox_uid"; return 1; }
+}
 
 sql_binding() {
   # One live binding for the environment's current Pod with Pod scope.
@@ -485,6 +552,7 @@ journey_hits() {
       HIT_TIMES+=("$elapsed")
       pass "hit $n: $id adopted a warm member, ready in ${elapsed} ms (client side)"
       check "hit $n: Pod carries the pool's current revision" pod_carries_pool_revision "$id"
+      check_bridge "$n" "$id"
     else
       COLD_IDS+=("$id")
       fail "hit $n: $id was not warm ($path), ready in ${elapsed} ms"
@@ -497,7 +565,10 @@ journey_hits() {
       check "hit $n: billing starts at or after the bind" sql_billing_at_bind "$id"
     fi
     if remove_env "$id"; then
-      [[ -z "$SQL_CMD" ]] || check "hit $n: no live binding once destroyed" sql_released_after_destroy "$id"
+      if [[ -n "$SQL_CMD" ]]; then
+        check "hit $n: no live binding once destroyed" sql_released_after_destroy "$id"
+        check "hit $n: no warm-member bridge once destroyed" bridge_absent "$id"
+      fi
     else
       log "hit $n: remove failed"
     fi

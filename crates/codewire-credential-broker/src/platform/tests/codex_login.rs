@@ -56,10 +56,7 @@ async fn connect(
     session: PlatformRuntimeSession,
     catalog: ProviderCatalog,
 ) -> Result<Adapter, PlatformRuntimeError> {
-    let authority = Arc::new(SyntheticAuthority {
-        session: Mutex::new(session),
-        gate: SessionGate::default(),
-    });
+    let authority = Arc::new(SyntheticAuthority::new(session));
     Adapter::connect(
         authority,
         f.store.clone(),
@@ -135,11 +132,16 @@ async fn codex_login_admits_only_the_creators_own_active_personal_oauth_login() 
                             &value(b"sk-synthetic-codex-login-api-key-never-delivered"),
                         )
                         .await?;
-                    select(&f, BTreeMap::from([(CapabilitySlot::codex(), key.metadata.id)]))
-                        .await?;
-                    // The same selection still serves proxied requests.
-                    ensure!(lease(&f.adapter).await.is_ok());
-                    login(&f.adapter).await
+                    select(
+                        &f,
+                        BTreeMap::from([(CapabilitySlot::codex(), key.metadata.id.clone())]),
+                    )
+                    .await?;
+                    // The same selection still serves proxied requests with
+                    // the API key: an epoch admitted after it leases it.
+                    let selected = f.epoch().await?;
+                    ensure!(lease(&selected).await?.credential_metadata().id == key.metadata.id);
+                    login(&selected).await
                 }
                 "reconnect needed" => {
                     sqlx::query(

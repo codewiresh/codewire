@@ -526,7 +526,8 @@ async fn binding_cas_and_each_runtime_admission_recheck_credentials_and_catalog(
                 .bind(credential.metadata.id.as_str()).bind(status).bind(expires).execute(&db.pool).await?;
             let admitted = profiles.evaluate_grants(&context).await?;
             ensure!(admitted.grants.is_empty());
-            ensure!(admitted.reconnect_required == BTreeSet::from([CapabilitySlot::codex()]));
+            ensure!(admitted.reconnect_required
+                == BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]));
             ensure!(profiles.replace_binding(&context, &selected, selected.clone(), None).await? == selected);
         }
         sqlx::query("UPDATE platform_credentials SET status='active',expires_at_unix=NULL,revocation_generation=2 WHERE id=$1")

@@ -162,8 +162,7 @@ async fn assert_restricted_role(pool: &PgPool, expected_role: &str) -> Result<()
                  'oidc_access_tokens','oidc_clients', \
                  'platform_access_profiles','platform_access_profile_revisions', \
                  'platform_access_profile_entries','platform_environment_access_bindings', \
-                 'tenant_secrets','tenant_secret_deks','secret_projects', \
-                 'platform_authority_generations' \
+                 'tenant_secrets','tenant_secret_deks','secret_projects' \
              ]::text[]) AS authority(name) \
              WHERE pg_catalog.has_table_privilege(current_user,'public.'||authority.name, \
                  'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') \
@@ -319,12 +318,10 @@ mod tests {
                     "UPDATE (released_at) ON public.sandbox_workspace_bindings",
                     "INSERT ON public.sandbox_workspace_bindings",
                     "UPDATE (pod_uid) ON public.sandbox_environment_backend",
-                    "UPDATE ON public.platform_authority_generations",
-                    "INSERT (generation) ON public.platform_authority_generations",
-                    // The broker uses no sequence. One it could set could move
-                    // the authority stamp's generations backwards.
-                    "UPDATE ON SEQUENCE public.platform_authority_generation_seq",
-                    "USAGE ON SEQUENCE public.platform_authority_generation_seq",
+                    // The broker uses no sequence, so the guard denies every
+                    // privilege on every public sequence.
+                    "USAGE ON SEQUENCE public.billing_events_id_seq",
+                    "UPDATE ON SEQUENCE public.billing_events_id_seq",
                     "SELECT ON SEQUENCE public.billing_events_id_seq",
                 ] {
                     execute(

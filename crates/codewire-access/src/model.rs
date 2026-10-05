@@ -45,8 +45,9 @@ impl Owner {
         matches!(self, Self::Organization(_))
     }
 
-    /// OAuth logins (Codex ChatGPT and GitHub) are personal: an organization
-    /// may hold API keys and SSH keys, but never an OAuth credential.
+    /// OAuth logins (Codex ChatGPT, GitHub and the Claude subscription token)
+    /// are personal: an organization may hold API keys and SSH keys, but never
+    /// an OAuth credential.
     pub fn may_hold(&self, kind: CredentialAuthKind) -> bool {
         !(self.is_organization() && kind == CredentialAuthKind::OAuth)
     }
@@ -265,6 +266,10 @@ pub enum HttpProvider {
     OpenAiApiKey,
     CodexOAuth,
     AnthropicApiKey,
+    /// The Anthropic slot's OAuth form: a Claude subscription token from
+    /// `claude setup-token`, pasted by its owner. It has no refresh; the broker
+    /// injects it as a bearer and never delivers it to a Sandbox.
+    AnthropicSubscriptionToken,
     GitHubOAuth,
     /// Isolated GitHub App user-to-server authorization only. This is never
     /// selected by a Sandbox profile or exposed as a managed client route.
@@ -280,7 +285,7 @@ impl HttpProvider {
             Self::OpenAiApiKey | Self::CodexOAuth => {
                 &["CODEX_HOME", "OPENAI_BASE_URL", "OPENAI_API_KEY"]
             }
-            Self::AnthropicApiKey => &[
+            Self::AnthropicApiKey | Self::AnthropicSubscriptionToken => &[
                 "ANTHROPIC_BASE_URL",
                 "ANTHROPIC_API_KEY",
                 "ANTHROPIC_AUTH_TOKEN",
@@ -303,6 +308,7 @@ impl HttpProvider {
             Self::OpenAiApiKey => "openai-api-key",
             Self::CodexOAuth => "codex-oauth",
             Self::AnthropicApiKey => "anthropic-api-key",
+            Self::AnthropicSubscriptionToken => "anthropic-subscription-token",
             Self::GitHubOAuth => "github-oauth",
             Self::GitHubAppAuthorization => "github-app-authorization",
         }
@@ -317,6 +323,7 @@ impl HttpProvider {
             "openai-api-key" => Some(Self::OpenAiApiKey),
             "codex-oauth" => Some(Self::CodexOAuth),
             "anthropic-api-key" => Some(Self::AnthropicApiKey),
+            "anthropic-subscription-token" => Some(Self::AnthropicSubscriptionToken),
             "github-oauth" => Some(Self::GitHubOAuth),
             _ => None,
         }
@@ -333,6 +340,9 @@ impl HttpProvider {
             ("codex" | "openai", "openai", CredentialAuthKind::ApiKey) => Some(Self::OpenAiApiKey),
             ("codex", "openai", CredentialAuthKind::OAuth) => Some(Self::CodexOAuth),
             ("anthropic", "anthropic", CredentialAuthKind::ApiKey) => Some(Self::AnthropicApiKey),
+            ("anthropic", "anthropic", CredentialAuthKind::OAuth) => {
+                Some(Self::AnthropicSubscriptionToken)
+            }
             ("github", "github", CredentialAuthKind::OAuth) => Some(Self::GitHubOAuth),
             _ => None,
         }

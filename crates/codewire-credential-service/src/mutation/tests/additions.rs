@@ -366,3 +366,191 @@ async fn generated_api_key_import_is_oauth_only_write_only_and_create_only() -> 
     .await;
     h.finish(result).await
 }
+
+/// Synthetic only; shaped like a `claude setup-token` value.
+const SUBSCRIPTION_TOKEN: &[u8] = b"sk-ant-oat01-private-subscription-canary-one";
+const REPLACEMENT_TOKEN: &[u8] = b"sk-ant-oat01-private-subscription-canary-two";
+
+#[test]
+fn claude_subscription_token_shape_is_bounded_printable_without_whitespace() {
+    assert!(validate_claude_subscription_token(SUBSCRIPTION_TOKEN).is_ok());
+    assert!(validate_claude_subscription_token(&[b'x'; 16]).is_ok());
+    assert!(validate_claude_subscription_token(&[b'x'; 1024]).is_ok());
+    for value in [
+        Vec::new(),
+        vec![b'x'; 15],
+        vec![b'x'; 1025],
+        b"sk-ant-oat01 with-space".to_vec(),
+        b"sk-ant-oat01-trailing\n".to_vec(),
+        b"sk-ant-oat01\ttabbed-token".to_vec(),
+        vec![0xff; 32],
+    ] {
+        assert!(validate_claude_subscription_token(&value).is_err());
+    }
+    let request = codewire_proto::codewire::v1::AddClaudeSubscriptionTokenCredentialRequest {
+        name: "claude".into(),
+        token: SUBSCRIPTION_TOKEN.to_vec(),
+        ..Default::default()
+    };
+    let debug = format!("{request:?}");
+    assert!(debug.contains("REDACTED"));
+    assert!(!debug.contains("canary"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn generated_claude_subscription_token_import_is_personal_write_only_and_replaces_exactly()
+-> Result<()> {
+    let h = Harness::new().await?;
+    let result = async {
+        let owner = Owner::User(OwnerId::parse(ALICE)?);
+        for auth in [Auth::Missing, Auth::CookieWrongOrigin, Auth::ApiKey] {
+            let (status, response) = h
+                .rpc
+                .add_claude_subscription_token(auth, json!({"name":"denied"}), SUBSCRIPTION_TOKEN)
+                .await?;
+            ensure!(!status.is_success() && response["code"] == auth.denial_code());
+        }
+        for (body, token) in [
+            (json!({"name":"short"}), b"sk-ant-short".as_slice()),
+            (json!({"name":"space"}), b"sk-ant-oat01 contains-a-space".as_slice()),
+            (json!({"name":"newline"}), b"sk-ant-oat01-has-a-newline\n".as_slice()),
+            (json!({"name":"empty"}), b"".as_slice()),
+            (json!({"name":" padded"}), SUBSCRIPTION_TOKEN),
+            (json!({"name":"half","credentialId":"x"}), SUBSCRIPTION_TOKEN),
+            (json!({"name":"half","expectedRevocationGeneration":"1"}), SUBSCRIPTION_TOKEN),
+        ] {
+            let (status, response) = h
+                .rpc
+                .add_claude_subscription_token(Auth::Alice, body, token)
+                .await?;
+            ensure!(
+                !status.is_success() && response["code"] == "invalid_argument",
+                "{response}"
+            );
+        }
+        let (status, response) = h
+            .rpc
+            .add_claude_subscription_token(
+                Auth::Alice,
+                json!({"name":"oversized"}),
+                &[b'x'; 1025],
+            )
+            .await?;
+        ensure!(!status.is_success() && response["code"] == "invalid_argument");
+        ensure!(h.count().await? == 0 && h.provider.generate_calls.load(Ordering::SeqCst) == 0);
+
+        // Create: the anthropic provider's OAuth kind, a one-year expiry from
+        // now, no account hint, and nothing echoed.
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        let (status, response) = h
+            .rpc
+            .add_claude_subscription_token(Auth::Alice, json!({"name":"Claude"}), SUBSCRIPTION_TOKEN)
+            .await?;
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        ensure!(status.is_success(), "{response}");
+        let metadata = &response["credential"];
+        ensure!(
+            metadata["provider"] == "anthropic"
+                && metadata["authenticationKind"] == "CREDENTIAL_AUTHENTICATION_KIND_OAUTH"
+                && metadata["status"] == "CREDENTIAL_STATUS_ACTIVE"
+                && metadata["revocationGeneration"] == "1"
+                && metadata["name"] == "Claude"
+        );
+        ensure!(metadata.get("accountHint").is_none() && metadata.get("token").is_none());
+        let lifetime = super::super::CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS;
+        let expiry: u64 = metadata["expiresAtUnix"]
+            .as_str()
+            .context("expiry")?
+            .parse()?;
+        ensure!(before + lifetime <= expiry && expiry <= after + lifetime);
+        let id = CredentialId::parse(id(metadata)?)?;
+        let record = h.store.record(&owner, &id).await?;
+        ensure!(
+            h.store
+                .read_for_broker(&owner, &id, record.version)
+                .await?
+                .expose_secret()
+                == SUBSCRIPTION_TOKEN
+        );
+        let (status, duplicate) = h
+            .rpc
+            .add_claude_subscription_token(Auth::Alice, json!({"name":"claude"}), REPLACEMENT_TOKEN)
+            .await?;
+        ensure!(!status.is_success() && duplicate["code"] == "already_exists");
+
+        // Replacement names the exact identity, name and generation.
+        let api_key = h
+            .store
+            .create(
+                &owner,
+                CredentialRegistration {
+                    provider: codewire_access::ProviderId::parse("anthropic")?,
+                    authentication_kind: CredentialAuthKind::ApiKey,
+                    display_name: "Anthropic key".into(),
+                    account_hint: None,
+                    expires_at_unix: None,
+                },
+                &ProtectedValue::from_slice(b"synthetic-anthropic-api-key")?,
+            )
+            .await?;
+        let replace = |name: &str, credential: &str, generation: &str| {
+            json!({"name":name,"credentialId":credential,"expectedRevocationGeneration":generation})
+        };
+        for (auth, body, code) in [
+            (Auth::Bob, replace("Claude", id.as_str(), "1"), "not_found"),
+            (Auth::Alice, replace("Renamed", id.as_str(), "1"), "invalid_argument"),
+            (Auth::Alice, replace("Claude", id.as_str(), "2"), "failed_precondition"),
+            (
+                Auth::Alice,
+                replace("Anthropic key", api_key.metadata.id.as_str(), "1"),
+                "invalid_argument",
+            ),
+        ] {
+            let (status, response) = h
+                .rpc
+                .add_claude_subscription_token(auth, body, REPLACEMENT_TOKEN)
+                .await?;
+            ensure!(!status.is_success() && response["code"] == code, "{response}");
+        }
+        ensure!(h.store.record(&owner, &id).await? == record);
+
+        // A revoked token is replaced in place, reactivated and given a new
+        // one-year expiry; profile references keep its identity.
+        let revoked = h.store.revoke(&owner, &id, record.version).await?;
+        ensure!(revoked.metadata.status == codewire_access::CredentialStatus::Revoked);
+        let (status, response) = h
+            .rpc
+            .add_claude_subscription_token(
+                Auth::Alice,
+                replace("Claude", id.as_str(), "2"),
+                REPLACEMENT_TOKEN,
+            )
+            .await?;
+        ensure!(status.is_success(), "{response}");
+        let replaced = &response["credential"];
+        ensure!(
+            replaced["id"] == id.as_str()
+                && replaced["status"] == "CREDENTIAL_STATUS_ACTIVE"
+                && replaced["revocationGeneration"] == "3"
+        );
+        let stored = h.store.record(&owner, &id).await?;
+        ensure!(stored.metadata.expires_at_unix >= Some(expiry));
+        ensure!(
+            h.store
+                .read_for_broker(&owner, &id, stored.version)
+                .await?
+                .expose_secret()
+                == REPLACEMENT_TOKEN
+        );
+        h.drained().await?;
+        ensure!(h.count().await? == 2 && !h.control("native.pid").exists());
+        Ok(())
+    }
+    .await;
+    h.finish(result).await
+}

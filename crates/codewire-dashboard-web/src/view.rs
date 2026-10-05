@@ -390,7 +390,10 @@ pub(crate) struct CredentialRowView {
     pub(crate) public_key_id: String,
     pub(crate) api_key: bool,
     pub(crate) oauth: bool,
-    /// A rotating OAuth refresh failed; only the owner's Reconnect restores it.
+    /// A Claude subscription token, replaced by pasting a new token.
+    pub(crate) subscription_token: bool,
+    /// A rotating OAuth refresh failed, or a Claude subscription token was
+    /// refused or expired; only the owner's Reconnect or Replace restores it.
     pub(crate) reconnect_needed: bool,
     pub(crate) revoked: bool,
     pub(crate) oauth_provider: &'static str,
@@ -442,9 +445,21 @@ pub(crate) struct CredentialSettingsView {
     pub(crate) csrf_token: String,
     pub(crate) message: String,
     pub(crate) error: String,
+    /// The credential name a failed addition keeps for its reopened dialog.
+    /// No secret field has a retained value; those always render empty.
+    pub(crate) retained_name: String,
 }
 
 impl CredentialSettingsView {
+    /// The retained name, only inside the dialog whose addition failed.
+    pub(crate) fn retained_name_for(&self, dialog: &str) -> &str {
+        if self.active_dialog == dialog {
+            &self.retained_name
+        } else {
+            ""
+        }
+    }
+
     /// The exact Create draft this page returns to, carried by the GET forms
     /// that open a dialog without scripting.
     pub(crate) fn creation_draft(&self) -> String {
@@ -470,6 +485,7 @@ impl fmt::Debug for CredentialSettingsView {
             .field("csrf_token", &redacted(&self.csrf_token))
             .field("message", &self.message)
             .field("error", &self.error)
+            .field("has_retained_name", &!self.retained_name.is_empty())
             .finish()
     }
 }
@@ -566,6 +582,20 @@ pub(crate) struct CredentialRenameSubmission {
     pub(crate) expected_revocation_generation: u64,
     pub(crate) expected_name: String,
     pub(crate) name: String,
+}
+
+// Deliberately not Debug: a pasted Claude subscription token is write-only.
+// Both replacement fields are present together to replace an exact token.
+#[derive(Deserialize)]
+pub(crate) struct CredentialSubscriptionTokenSubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
+    pub(crate) name: String,
+    pub(crate) token: String,
+    #[serde(default)]
+    pub(crate) credential_id: String,
+    #[serde(default)]
+    pub(crate) expected_revocation_generation: Option<u64>,
 }
 
 // Deliberately not Debug: replacement API-key material is write-only.
@@ -2461,6 +2491,7 @@ mod secret_debug_tests {
             csrf_token: MARKER.into(),
             message: String::new(),
             error: String::new(),
+            retained_name: MARKER.into(),
         };
 
         assert_value_blind(&format!("{page:?}"));

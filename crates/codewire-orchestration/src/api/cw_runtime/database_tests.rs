@@ -22,12 +22,12 @@ const NEXT_POD: &str = "a1560db3-8899-40c9-b521-500f223b04fb";
 const CLAIM: &str = "c0ffee00-e29b-41d4-a716-446655440000";
 const SANDBOX: &str = "5a4db0c5-e29b-41d4-a716-446655440000";
 const PVC: &str = "9d8c7b6a-2222-4f5e-8d4c-3b2a1f0e9d8c";
-// Accepted canonical main80345573f6, independently read before allocating the
-// journal as migration36 in migration-0036-reconciliation-design-220.json.
-// These accepted history1..35 and authority35 pins are not branch-derived.
-const HISTORY35: &str = "997389d904a7411aad52b04b735731daa3dd22f369b3558f48be517722cce638e2f464a900de9534bac1de87250a32ab";
-const MIGRATION35: &str = "28d8713c5ea4a390fce5ceb9de39b06ffc129e26970b172119d6a6d8873411c65a3222ca65a6f84830650928398a8d0a";
-const SCHEMA35: &str = "14d3d5ac233de6dbd7f98e9a3f638e2983c84768d238fc3f54d74c29f84f617f";
+// Independently pinned committed canonical main0cb47fbd history1..36 and
+// authority-stamp removal36, before the unchanged CW journal moves to37.
+const HISTORY36: &str = "d93e9473a13019377f7cc71ae0327aa1bb0e7d1951d57dc45deeab0746e5a1d51e859523d963a0dde16059dbd8ce0383";
+const MIGRATION36: &str = "32b0848765fb6892efe547f652316061c530b60e68607d20bce9dbd23f4ab37cb0008095a5fe3a86f9cfcdd5ecebbb8d";
+const SCHEMA36: &str = "218a3ea293e6023d9023b3b133534bfeba823dd68e17818196d609032ccca1b5";
+const SCHEMA37: &str = "eb216d37412b9af558ccdc5ab618783713ba289cf0409c97abf68fd83d084637";
 const DATABASE_TIMEOUT: Duration = Duration::from_secs(15);
 
 struct Fixture {
@@ -1372,20 +1372,33 @@ database_case!(
     }
 );
 
-fn accepted_prior35() -> Result<()> {
+fn accepted_prior36() -> Result<()> {
     let migrations: Vec<_> = application_migrator()
         .iter()
-        .filter(|m| m.version <= 35)
+        .filter(|m| m.version <= 36)
         .collect();
-    ensure!(migrations.len() == 35);
+    ensure!(migrations.len() == 36);
     let mut hash = Sha384::new();
     for (i, m) in migrations.iter().enumerate() {
         ensure!(m.version == i as i64 + 1);
         hash.update(Sha384::digest(m.sql.as_bytes()));
     }
-    ensure!(format!("{:x}", hash.finalize()) == HISTORY35);
-    ensure!(format!("{:x}", Sha384::digest(migrations[34].sql.as_bytes())) == MIGRATION35);
+    ensure!(format!("{:x}", hash.finalize()) == HISTORY36);
+    ensure!(format!("{:x}", Sha384::digest(migrations[35].sql.as_bytes())) == MIGRATION36);
     Ok(())
+}
+
+fn cw_boundary_migrator() -> Migrator {
+    Migrator {
+        migrations: Cow::Owned(
+            application_migrator()
+                .iter()
+                .filter(|m| m.version <= 37 && m.migration_type.is_up_migration())
+                .cloned()
+                .collect(),
+        ),
+        ..Migrator::DEFAULT
+    }
 }
 
 async fn fingerprint_schema(pool: &PgPool) -> Result<String> {
@@ -1396,8 +1409,8 @@ async fn fingerprint_schema(pool: &PgPool) -> Result<String> {
     .await?)
 }
 
-async fn install_prior35(pool: &PgPool) -> Result<()> {
-    accepted_prior35()?;
+async fn install_prior36(pool: &PgPool) -> Result<()> {
+    accepted_prior36()?;
     // This pool belongs to the newly generated exact fixture database only.
     sqlx::raw_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
         .execute(pool)
@@ -1406,14 +1419,14 @@ async fn install_prior35(pool: &PgPool) -> Result<()> {
         migrations: Cow::Owned(
             application_migrator()
                 .iter()
-                .filter(|m| m.version <= 35)
+                .filter(|m| m.version <= 36)
                 .cloned()
                 .collect(),
         ),
         ..Migrator::DEFAULT
     };
     prior.run(pool).await?;
-    ensure!(fingerprint_schema(pool).await? == SCHEMA35);
+    ensure!(fingerprint_schema(pool).await? == SCHEMA36);
     Ok(())
 }
 
@@ -1440,10 +1453,10 @@ async fn existing_rows_and_helpers(pool: &PgPool) -> Result<(Vec<String>, Vec<St
 
 #[tokio::test]
 #[ignore = "requires checked-in disposable TEST_DATABASE_URL"]
-async fn db_migration_upgrade_preserves_accepted35_rows_helpers_and_ledger() -> Result<()> {
+async fn db_migration_upgrade_preserves_accepted36_rows_helpers_and_ledger() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
-        install_prior35(&db.pool).await?;
+        install_prior36(&db.pool).await?;
         sqlx::query(
             "INSERT INTO users(id,email) VALUES('fixture-admin','fixture-admin@example.test')",
         )
@@ -1461,17 +1474,17 @@ async fn db_migration_upgrade_preserves_accepted35_rows_helpers_and_ledger() -> 
             sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version")
                 .fetch_all(&db.pool)
                 .await?;
-        application_migrator().run(&db.pool).await?;
+        cw_boundary_migrator().run(&db.pool).await?;
         ensure!(existing_rows_and_helpers(&db.pool).await? == before);
         let after: Vec<(i64, Vec<u8>)> =
             sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version")
                 .fetch_all(&db.pool)
                 .await?;
-        ensure!(after.len() == 36 && after[..35] == history);
-        ensure!(after[35].0 == 36);
+        ensure!(after.len() == 37 && after[..36] == history);
+        ensure!(after[36].0 == 37);
         let measured = fingerprint_schema(&db.pool).await?;
-        ensure!(measured != SCHEMA35);
-        println!("CW_RUNTIME_SCHEMA36_FINGERPRINT={measured}");
+        ensure!(measured != SCHEMA36 && measured == SCHEMA37);
+        println!("CW_RUNTIME_SCHEMA37_FINGERPRINT={measured}");
         let sentinel: String = sqlx::query_scalar("SELECT value FROM unrelated_fixture.sentinel")
             .fetch_one(&db.pool)
             .await?;
@@ -1487,12 +1500,19 @@ async fn db_migration_upgrade_preserves_accepted35_rows_helpers_and_ledger() -> 
 async fn db_migration_fresh_matches_upgrade_and_reapplication_is_idempotent() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
-        accepted_prior35()?;
+        accepted_prior36()?;
+        // TestDatabase starts at the whole current history. Recreate only its
+        // own public schema so this is a genuine fresh CW37 boundary proof.
+        sqlx::raw_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+            .execute(&db.pool)
+            .await?;
+        cw_boundary_migrator().run(&db.pool).await?;
         let fresh = fingerprint_schema(&db.pool).await?;
-        application_migrator().run(&db.pool).await?;
+        ensure!(fresh == SCHEMA37);
+        cw_boundary_migrator().run(&db.pool).await?;
         ensure!(fingerprint_schema(&db.pool).await? == fresh);
-        install_prior35(&db.pool).await?;
-        application_migrator().run(&db.pool).await?;
+        install_prior36(&db.pool).await?;
+        cw_boundary_migrator().run(&db.pool).await?;
         ensure!(fingerprint_schema(&db.pool).await? == fresh);
         Ok(())
     }
@@ -1505,12 +1525,12 @@ async fn db_migration_fresh_matches_upgrade_and_reapplication_is_idempotent() ->
 async fn db_migration_failed_forward_rolls_back_all_new_objects() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
-        install_prior35(&db.pool).await?;
+        install_prior36(&db.pool).await?;
         let before = fingerprint_schema(&db.pool).await?;
         let sql = application_migrator()
             .iter()
-            .find(|m| m.version == 36)
-            .context("migration36")?
+            .find(|m| m.version == 37 && m.migration_type.is_up_migration())
+            .context("migration37")?
             .sql
             .as_ref();
         let mut tx = db.pool.begin().await?;
@@ -1525,7 +1545,7 @@ async fn db_migration_failed_forward_rolls_back_all_new_objects() -> Result<()> 
         .fetch_one(&db.pool)
         .await?;
         ensure!(!exists);
-        application_migrator().run(&db.pool).await?;
+        cw_boundary_migrator().run(&db.pool).await?;
         Ok(())
     }
     .await;
@@ -1539,17 +1559,25 @@ const EMPTY_ROLLBACK: &str = "DO $$ BEGIN \
     END $$; \
     DROP TABLE environment_cw_runtime_requests; \
     DROP FUNCTION codewire_cw_runtime_request_immutable(); \
-    DELETE FROM _sqlx_migrations WHERE version=36";
+    DELETE FROM _sqlx_migrations WHERE version=37";
 
 #[tokio::test]
 #[ignore = "requires checked-in disposable TEST_DATABASE_URL"]
-async fn db_migration_empty_rollback_restores35_and_nonempty_rollback_refuses() -> Result<()> {
+async fn db_migration_empty_rollback_restores36_and_nonempty_rollback_refuses() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
+        install_prior36(&db.pool).await?;
+        cw_boundary_migrator().run(&db.pool).await?;
+        sqlx::query(
+            "INSERT INTO users(id,email) VALUES('fixture-admin','fixture-admin@example.test')",
+        )
+        .execute(&db.pool)
+        .await?;
         let f = Fixture::seed(&db.pool).await?;
         let (_, owner) = f.admit(mutation()).await?;
         f.journal.cancel(&owner).await?;
         let schema = fingerprint_schema(&db.pool).await?;
+        ensure!(schema == SCHEMA37);
         let mut tx = db.pool.begin().await?;
         ensure!(
             sqlx::raw_sql(EMPTY_ROLLBACK)
@@ -1562,24 +1590,24 @@ async fn db_migration_empty_rollback_restores35_and_nonempty_rollback_refuses() 
         // No production rollback is promised. This exact fixture proves the
         // additive source-revert and an empty-only operator SQL reversal;
         // retained requests (even known terminal ones) forbid schema removal.
-        install_prior35(&db.pool).await?;
+        install_prior36(&db.pool).await?;
         let prior_rows_and_helpers = existing_rows_and_helpers(&db.pool).await?;
         let prior_history: Vec<(i64, Vec<u8>)> =
             sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version")
                 .fetch_all(&db.pool)
                 .await?;
-        application_migrator().run(&db.pool).await?;
+        cw_boundary_migrator().run(&db.pool).await?;
         let mut tx = db.pool.begin().await?;
         sqlx::raw_sql(EMPTY_ROLLBACK).execute(&mut *tx).await?;
         tx.commit().await?;
-        ensure!(fingerprint_schema(&db.pool).await? == SCHEMA35);
+        ensure!(fingerprint_schema(&db.pool).await? == SCHEMA36);
         ensure!(existing_rows_and_helpers(&db.pool).await? == prior_rows_and_helpers);
         let restored_history: Vec<(i64, Vec<u8>)> =
             sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version")
                 .fetch_all(&db.pool)
                 .await?;
         ensure!(restored_history == prior_history);
-        application_migrator().run(&db.pool).await?;
+        cw_boundary_migrator().run(&db.pool).await?;
         ensure!(fingerprint_schema(&db.pool).await? == schema);
         Ok(())
     }
@@ -1621,9 +1649,9 @@ fn model_decimal_generation_and_intent_bounds_are_closed() -> Result<()> {
     let start = Instant::now();
     let prior = application_migrator()
         .iter()
-        .filter(|m| m.version <= 35)
+        .filter(|m| m.version <= 36)
         .count();
-    accepted_prior35()?;
-    ensure!(prior == 35 && start.elapsed() < DATABASE_TIMEOUT);
+    accepted_prior36()?;
+    ensure!(prior == 36 && start.elapsed() < DATABASE_TIMEOUT);
     Ok(())
 }

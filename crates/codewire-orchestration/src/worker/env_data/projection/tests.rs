@@ -13,6 +13,7 @@ fn capture() -> ProjectionCapture {
         profile_slots: Vec::new(),
         profile_slots_overflow: false,
         github_connected: true,
+        anthropic_subscription_token: false,
     }
 }
 
@@ -266,6 +267,51 @@ fn captured_clients_are_exact_slots_not_provider_families_or_global_configuratio
             .encode(),
         "v1:none"
     );
+}
+
+#[test]
+fn a_claude_subscription_token_selects_the_anthropic_subscription_form_only() {
+    for (slots, encoded) in [
+        (vec!["anthropic"], "v2:24"),
+        (vec!["codex", "anthropic"], "v2:25"),
+        (vec!["anthropic", "github"], "v2:34"),
+        (
+            vec!["codex", "openai", "anthropic", "github", "ssh"],
+            "v2:3f",
+        ),
+    ] {
+        let (project, mut captured) = selected_profile();
+        captured.profile_slots = slots.into_iter().map(str::to_owned).collect();
+        let api_key = captured
+            .selection(&project, "synthetic-org", 7)
+            .unwrap()
+            .unwrap();
+        captured.anthropic_subscription_token = true;
+        let subscription = captured
+            .selection(&project, "synthetic-org", 7)
+            .unwrap()
+            .unwrap();
+        let clients = captured.managed_credential_clients(&project).unwrap();
+        assert_eq!(clients.encode(), encoded);
+        assert!(clients.anthropic_subscription_token());
+        // The form changes client values only: the reserved names and so the
+        // bound selection digest are those of the API-key form.
+        assert_eq!(subscription.reserved_keys, api_key.reserved_keys);
+        assert_eq!(subscription.sha256().unwrap(), api_key.sha256().unwrap());
+    }
+    // A subscription capture without an Anthropic slot is not a selection.
+    let (project, mut captured) = selected_profile();
+    captured.anthropic_subscription_token = true;
+    assert!(captured.managed_credential_clients(&project).is_err());
+    assert!(captured.selection(&project, "synthetic-org", 7).is_err());
+    // Its stock-client names still reject declared ordinary collisions.
+    let (mut project, mut captured) = selected_profile();
+    captured.profile_slots = vec!["anthropic".into()];
+    captured.anthropic_subscription_token = true;
+    project
+        .environment
+        .insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "must-not-appear".into());
+    assert!(captured.selection(&project, "synthetic-org", 7).is_err());
 }
 
 #[test]

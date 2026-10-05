@@ -303,6 +303,39 @@ impl Rpc {
         Ok((status, value))
     }
 
+    /// The JSON Connect form of AddClaudeSubscriptionTokenCredential. `body`
+    /// carries every field except the base64 token.
+    pub async fn add_claude_subscription_token(
+        &self,
+        auth: Auth,
+        mut body: Value,
+        token: &[u8],
+    ) -> Result<(StatusCode, Value)> {
+        body["token"] = json!(base64::engine::general_purpose::STANDARD.encode(token));
+        let request = self
+            .client
+            .post(format!(
+                "{}/{SERVICE}/AddClaudeSubscriptionTokenCredential",
+                self.url
+            ))
+            .header("connect-protocol-version", "1")
+            .json(&body);
+        let response = tokio::time::timeout(TIMEOUT, authenticate(request, auth).send()).await??;
+        let status = response.status();
+        let value: Value = response.json().await?;
+        blind(&value)?;
+        let rendered = value.to_string();
+        ensure!(
+            token.is_empty()
+                || !rendered
+                    .as_bytes()
+                    .windows(token.len())
+                    .any(|window| window == token),
+            "response echoed the subscription token"
+        );
+        Ok((status, value))
+    }
+
     pub async fn denied_enrollment(&self, auth: Auth) -> Result<()> {
         // Connect streaming errors retain HTTP 200 and reject in the first
         // END_STREAM envelope. A Challenge before this error must fail.

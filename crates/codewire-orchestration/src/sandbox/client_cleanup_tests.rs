@@ -41,7 +41,17 @@ fn fixture(
             assert!(path.contains(&"dev-sandboxes"), "cleanup escaped its namespace");
             let list = method == Method::GET && uri.query().is_some();
             let mut objects = stored.lock().unwrap();
-            let (status, body) = if list {
+            let (status, body) = if method == Method::POST {
+                // Create: the fallback stores the object under its plural.
+                let key = (path[path.len()-1].to_owned(), body["metadata"]["name"].as_str().unwrap().to_owned());
+                match objects.entry(key) {
+                    std::collections::btree_map::Entry::Occupied(_) => (StatusCode::CONFLICT, json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"AlreadyExists","code":409})),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(body.clone());
+                        (StatusCode::CREATED, body)
+                    }
+                }
+            } else if list {
                 let plural = *path.last().unwrap();
                 if matches!(plural, "sandboxtemplates" | "sandboxwarmpools") {
                     assert!(uri.query().unwrap().contains("labelSelector=codewire.sh%2Fenvironment-id%3Denv-test"));
@@ -239,4 +249,112 @@ async fn destroy_proves_the_recorded_workspace_pvc_gone_even_before_adoption() {
         "persistentvolumeclaims".into(),
         "workspace-unrelated".into()
     )));
+}
+
+fn insert_bridge(objects: &Arc<Mutex<Objects>>, environment: &str) {
+    for name in [
+        warm_member_daemon_bridge_name(environment),
+        warm_member_gateway_bridge_name(environment),
+    ] {
+        objects.lock().unwrap().insert(
+            ("networkpolicies".into(), name.clone()),
+            json!({"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+                "metadata":{"name":name,"namespace":"dev-sandboxes","uid":format!("uid-{name}"),
+                    "labels":{LABEL_ENV_ID:environment}}}),
+        );
+    }
+}
+
+fn has_bridge(objects: &Arc<Mutex<Objects>>, environment: &str) -> [bool; 2] {
+    let objects = objects.lock().unwrap();
+    [
+        warm_member_daemon_bridge_name(environment),
+        warm_member_gateway_bridge_name(environment),
+    ]
+    .map(|name| objects.contains_key(&("networkpolicies".into(), name)))
+}
+
+/// Program #2238 C6 (#2434): both bridge halves are environment residue and
+/// leave with the gateway stack, which stop, destroy and every cleanup path
+/// delete; a cold re-claim deletes them by name. Another environment's
+/// bridge is never touched.
+#[tokio::test]
+async fn warm_member_bridge_is_residue_and_leaves_with_the_gateway_stack() {
+    let (client, objects) = fixture(false, false, false);
+    insert_bridge(&objects, "env-test");
+    insert_bridge(&objects, "env-foreign");
+    let residue = client
+        .environment_residue("env-test", "", None, false)
+        .await
+        .unwrap();
+    for name in ["cw-daemon-warm-env-test", "cw-gw-warm-env-test"] {
+        assert!(
+            residue.resources.contains(&format!("NetworkPolicy/{name}")),
+            "{name} is not residue: {:?}",
+            residue.resources
+        );
+    }
+    client.delete_gateway_stack("env-test").await.unwrap();
+    assert_eq!(has_bridge(&objects, "env-test"), [false, false]);
+    assert_eq!(has_bridge(&objects, "env-foreign"), [true, true]);
+
+    insert_bridge(&objects, "env-test");
+    client.delete_warm_member_bridge("env-test").await.unwrap();
+    assert_eq!(has_bridge(&objects, "env-test"), [false, false]);
+    // NotFound is success.
+    client.delete_warm_member_bridge("env-test").await.unwrap();
+
+    insert_bridge(&objects, "env-test");
+    client
+        .delete_environment_resources("env-test", "", None, false, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(has_bridge(&objects, "env-test"), [false, false]);
+    assert_eq!(has_bridge(&objects, "env-foreign"), [true, true]);
+}
+
+/// The bridge is created only through the renderer: a recorded Sandbox UID
+/// that is not a canonical UUID writes nothing, and unmanaged network
+/// policies are left alone.
+#[tokio::test]
+async fn warm_member_bridge_applies_both_halves_for_a_canonical_uid_only() {
+    const ENVIRONMENT: &str = "be31063a-8ec8-46d5-aa17-75cda1729370";
+    const SANDBOX: &str = "0b6f4a52-5d1e-4c2a-9a4e-3f1d2c7b8e90";
+    let (client, objects) = fixture(false, false, false);
+    let opts = TemplateOpts {
+        environment_id: ENVIRONMENT.into(),
+        organization_id: "org-test".into(),
+        operation_generation: 7,
+        server_namespace: "dev".into(),
+        ..Default::default()
+    };
+    assert!(
+        client
+            .ensure_warm_member_bridge(&opts, "d0258436")
+            .await
+            .is_err()
+    );
+    let unmanaged = TemplateOpts {
+        network_policy_management: "Unmanaged".into(),
+        ..opts.clone()
+    };
+    client
+        .ensure_warm_member_bridge(&unmanaged, SANDBOX)
+        .await
+        .unwrap();
+    assert_eq!(has_bridge(&objects, ENVIRONMENT), [false, false]);
+    client
+        .ensure_warm_member_bridge(&opts, SANDBOX)
+        .await
+        .unwrap();
+    assert_eq!(has_bridge(&objects, ENVIRONMENT), [true, true]);
+    let daemon = objects.lock().unwrap()[&(
+        "networkpolicies".into(),
+        warm_member_daemon_bridge_name(ENVIRONMENT),
+    )]
+        .clone();
+    assert_eq!(
+        daemon["spec"]["podSelector"],
+        json!({"matchLabels": {"agents.x-k8s.io/sandbox-uid": SANDBOX, "codewire.sh/type": "workspace"}})
+    );
 }

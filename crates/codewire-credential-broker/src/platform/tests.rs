@@ -1,11 +1,14 @@
 //! Real restricted PostgreSQL plus synthetic, process-local runtime identity.
 //! No Kubernetes, provider network, ambient configuration or real credentials.
 
+mod checked;
 mod codex_login;
+mod decision;
 mod keepalive;
 mod material_cache;
 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
 mod ssh;
+mod subscription;
 
 #[path = "../../../codewire-platform-credentials/tests/support/mod.rs"]
 #[allow(dead_code)]
@@ -13,7 +16,7 @@ pub(super) mod support;
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
@@ -93,19 +96,41 @@ pub(super) async fn between_record_reads() {
 pub(super) struct SyntheticAuthority {
     session: Mutex<PlatformRuntimeSession>,
     gate: SessionGate,
+    /// Every `current_session` call: one runtime authority resolve.
+    calls: AtomicUsize,
+    /// Deny every resolve, as the hosted authority does once the creator's
+    /// membership or role, the organization, or the Pod lineage changed.
+    deny: AtomicBool,
 }
 
 #[async_trait]
 impl PlatformRuntimeAuthority for SyntheticAuthority {
     async fn current_session(&self) -> Result<PlatformRuntimeSession, PlatformRuntimeError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         self.gate.pass().await;
+        if self.deny.load(Ordering::SeqCst) {
+            return Err(PlatformRuntimeError::Denied);
+        }
         Ok(self.session.lock().expect("synthetic session").clone())
     }
 }
 
 impl SyntheticAuthority {
+    pub(super) fn new(session: PlatformRuntimeSession) -> Self {
+        Self {
+            session: Mutex::new(session),
+            gate: SessionGate::default(),
+            calls: AtomicUsize::new(0),
+            deny: AtomicBool::new(false),
+        }
+    }
+
     fn change(&self, change: impl FnOnce(&mut PlatformRuntimeSession)) {
         change(&mut self.session.lock().expect("synthetic session"));
+    }
+
+    pub(super) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
     }
 }
 
@@ -266,9 +291,8 @@ impl Fixture {
             }, Some(&context.user_id)).await?;
             let mut session = session();
             session.context = context.clone();
-            let authority = Arc::new(SyntheticAuthority { session: Mutex::new(session), gate: SessionGate::default() });
-            let adapter = Arc::new(Adapter::connect(authority.clone(), store.clone(),
-                PlatformAccessProfileStore::new(pool.clone(), builtin_provider_catalog())).await?);
+            let authority = Arc::new(SyntheticAuthority::new(session));
+            let adapter = epoch(&authority, &store, &pool).await?;
             Ok::<_, anyhow::Error>((pool, provider, store, authority, adapter, record, profile, context, owner))
         }.await;
         match setup {
@@ -293,6 +317,16 @@ impl Fixture {
         }
     }
 
+    /// Another hosted epoch of this fixture's runtime, admitted as the bridge
+    /// admits one: its own empty material cache and its first authority
+    /// decision, evaluated at admission.
+    pub(super) async fn epoch(&self) -> Result<Arc<Adapter>> {
+        epoch(&self.authority, &self.store, &self.pool).await
+    }
+
+    /// Another replica's provider outside any hosted bridge epoch: no
+    /// material cache and no authority decision, so every lease runs the
+    /// full per-request checks.
     async fn second(&self) -> Result<(PgPool, Adapter)> {
         let (pool, _) = self.db.broker_pool().await?;
         let store = Arc::new(PlatformCredentialStore::new(
@@ -372,6 +406,26 @@ impl Fixture {
         self.pool.close().await;
         self.db.finish(result).await
     }
+}
+
+/// A hosted bridge epoch as `admit` in `platform/bridge.rs` builds one.
+async fn epoch(
+    authority: &Arc<SyntheticAuthority>,
+    store: &Arc<PlatformCredentialStore>,
+    pool: &PgPool,
+) -> Result<Arc<Adapter>> {
+    let adapter = Adapter {
+        material: Some(EpochMaterialCache::new()),
+        decision: Some(EpochDecision::new()),
+        ..Adapter::connect(
+            authority.clone(),
+            store.clone(),
+            PlatformAccessProfileStore::new(pool.clone(), builtin_provider_catalog()),
+        )
+        .await?
+    };
+    adapter.admit_authority().await?;
+    Ok(Arc::new(adapter))
 }
 
 #[test]
@@ -465,17 +519,18 @@ async fn restricted_role_leases_refreshes_and_admits_only_the_published_generati
     let result = async {
         let (initial, timings) = crate::timing::measure(lease(&f.adapter)).await;
         let initial = initial?;
-        // One authority check, a grant evaluation and record read, the
-        // material read, a second grant evaluation and record read, then the
-        // final authority check.
+        // The epoch's admission evaluated authority. The lease reuses that
+        // decision, rereads only its credential's record, then reads the
+        // material.
         ensure!(
             (
                 timings.authority.count,
                 timings.grants.count,
                 timings.record.count,
                 timings.material_read.count
-            ) == (2, 2, 2, 1)
+            ) == (0, 0, 1, 1)
         );
+        ensure!(timings.authority_decision == crate::timing::AuthorityUse::Reused);
         ensure!(
             initial.grant().expires_at_unix == Some(f.adapter.session.identity_expires_at_unix)
         );
@@ -496,7 +551,11 @@ async fn restricted_role_leases_refreshes_and_admits_only_the_published_generati
         f.adapter
             .commit_credential_refresh(started, bundle(false, "new"))
             .await?;
-        let current = lease(&f.adapter).await?;
+        // The published generation changed the record: the very next lease
+        // evaluates again and reads the new value.
+        let (current, timings) = crate::timing::measure(lease(&f.adapter)).await;
+        let current = current?;
+        ensure!(timings.authority_decision == crate::timing::AuthorityUse::Evaluated);
         ensure!(current.material_generation() == 2);
         ensure!(current.grant().credential_revocation_generation == 2);
         current.with_material(|bytes| {
@@ -523,66 +582,111 @@ async fn restricted_role_leases_refreshes_and_admits_only_the_published_generati
     f.finish(result).await
 }
 
+/// Apply one credential or runtime state change through the database.
+pub(super) async fn mutate(f: &Fixture, mutation: &str) -> Result<()> {
+    match mutation {
+        // A rotation: new material for the same credential.
+        "replace" => {
+            let current = f.store.record(&f.owner, &f.record.metadata.id).await?;
+            f.store
+                .replace(
+                    &f.owner,
+                    &current.metadata.id,
+                    current.version,
+                    &value(bundle(false, "replacement").as_bytes()),
+                    None,
+                )
+                .await?;
+        }
+        "revoke" => {
+            let current = f.store.record(&f.owner, &f.record.metadata.id).await?;
+            f.store
+                .revoke(&f.owner, &f.record.metadata.id, current.version)
+                .await?;
+        }
+        "expiry" => {
+            sqlx::query("UPDATE platform_credentials SET expires_at_unix=0 WHERE id=$1")
+                .bind(f.record.metadata.id.as_str())
+                .execute(&f.db.pool)
+                .await?;
+        }
+        "rebind" => f.rebind().await?,
+        "stop" => f.stop().await?,
+        "generation" => {
+            sqlx::query("UPDATE environments SET environment_operation_generation=8 WHERE id=$1")
+                .bind(f.context.environment_id.as_str())
+                .execute(&f.db.pool)
+                .await?;
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+pub(super) fn refresh_token(lease: PlatformCredentialLease) -> Result<String> {
+    lease.with_material(|bytes| {
+        Ok(crate::codex_oauth::CodexOAuthCredential::parse(bytes)?
+            .refresh_token()
+            .to_owned())
+    })
+}
+
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn unwrap_rechecks_replacement_revocation_rebinding_stop_generation_and_hard_expiry()
+async fn the_material_fence_follows_replacement_and_rejects_revocation_and_expiry_during_unwrap()
 -> Result<()> {
     for mutation in [
         "replace",
         "revoke",
+        "expiry",
         "rebind",
         "stop",
         "generation",
-        "expiry",
     ] {
         let f = Fixture::create().await?;
         let result = async {
+            let calls = f.authority.calls();
             f.provider.unwrap_gate.arm();
             let operation = spawn({
                 let adapter = f.adapter.clone();
-                async move { lease(&adapter).await }
+                async move { crate::timing::measure(lease(&adapter)).await }
             });
             f.provider.unwrap_gate.wait().await?;
-            match mutation {
-                "replace" => {
-                    f.store
-                        .replace(
-                            &f.owner,
-                            &f.record.metadata.id,
-                            f.record.version,
-                            &value(bundle(false, "replacement").as_bytes()),
-                            None,
-                        )
-                        .await?;
-                }
-                "revoke" => {
-                    f.store
-                        .revoke(&f.owner, &f.record.metadata.id, f.record.version)
-                        .await?;
-                }
-                "rebind" => f.rebind().await?,
-                "stop" => f.stop().await?,
-                "generation" => {
-                    sqlx::query(
-                        "UPDATE environments SET environment_operation_generation=8 WHERE id=$1",
-                    )
-                    .bind(f.context.environment_id.as_str())
-                    .execute(&f.db.pool)
-                    .await?;
-                }
-                "expiry" => {
-                    sqlx::query("UPDATE platform_credentials SET expires_at_unix=0 WHERE id=$1")
-                        .bind(f.record.metadata.id.as_str())
-                        .execute(&f.db.pool)
-                        .await?;
-                }
-                _ => unreachable!(),
-            }
+            mutate(&f, mutation).await?;
             f.provider.unwrap_gate.release();
-            ensure!(
-                matches!(finish_task(operation).await?, Err(BrokerLeaseError::Denied)),
-                "{mutation} exposed stale material"
-            );
+            let (leased, timings) = finish_task(operation).await?;
+            match mutation {
+                // The store's final fence fails the stale version; the lease
+                // evaluates once and retries with the replacement.
+                "replace" => {
+                    let leased = leased?;
+                    ensure!(leased.material_generation() == 2);
+                    ensure!(refresh_token(leased)? == "synthetic-refresh-replacement");
+                    ensure!((timings.grants.count, timings.material_read.count) == (1, 2));
+                    ensure!(f.authority.calls() == calls + 1);
+                }
+                // Revocation withholds only this capability until Reconnect.
+                "revoke" => ensure!(
+                    matches!(leased, Err(BrokerLeaseError::ReconnectRequired)),
+                    "revoke exposed stale material ({:?})",
+                    leased.err()
+                ),
+                "expiry" => ensure!(
+                    matches!(leased, Err(BrokerLeaseError::Denied)),
+                    "expiry exposed stale material ({:?})",
+                    leased.err()
+                ),
+                // Runtime and environment authority may take up to a minute
+                // to apply: the epoch's decision still stands for this lease.
+                _ => {
+                    ensure!(
+                        leased.is_ok(),
+                        "{mutation} was not served from the decision ({:?})",
+                        leased.err()
+                    );
+                    ensure!(f.authority.calls() == calls);
+                }
+            }
             Ok(())
         }
         .await;
@@ -607,41 +711,6 @@ fn change_authority(session: &mut PlatformRuntimeSession, mutation: &str) {
         "expiry" => session.identity_expires_at_unix = 0,
         _ => unreachable!(),
     }
-}
-
-#[tokio::test]
-#[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn unwrap_rechecks_authenticated_gateway_workspace_policy_and_identity_expiry() -> Result<()>
-{
-    for mutation in [
-        "gateway",
-        "workspace",
-        "policy",
-        "authorized set replaced",
-        "personal-policy",
-        "expiry",
-    ] {
-        let f = Fixture::create().await?;
-        let result = async {
-            f.provider.unwrap_gate.arm();
-            let operation = spawn({
-                let adapter = f.adapter.clone();
-                async move { lease(&adapter).await }
-            });
-            f.provider.unwrap_gate.wait().await?;
-            f.authority
-                .change(|session| change_authority(session, mutation));
-            f.provider.unwrap_gate.release();
-            ensure!(
-                matches!(finish_task(operation).await?, Err(BrokerLeaseError::Denied)),
-                "{mutation} exposed stale material"
-            );
-            Ok(())
-        }
-        .await;
-        f.finish(result).await?;
-    }
-    Ok(())
 }
 
 #[tokio::test]
@@ -732,179 +801,45 @@ async fn wait_for_database_blocker(pool: &PgPool, holder: i32) -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn final_lease_and_started_admission_recheck_pod_identity_after_sql_lock_waits() -> Result<()>
-{
-    for phase in ["lease", "start"] {
-        let f = Fixture::create().await?;
-        let result = async {
-            let reservation = if phase == "start" {
-                Some(reserve(&f.adapter, request(&f.adapter).await?).await?)
-            } else {
-                None
-            };
-            // Pause immediately before the final admission's first runtime
-            // read, or at unwrap before that admission exists.
-            if phase == "start" {
-                f.authority.gate.arm(3);
-            } else {
-                f.provider.unwrap_gate.arm();
+async fn started_admission_rechecks_pod_identity_after_sql_lock_waits() -> Result<()> {
+    let f = Fixture::create().await?;
+    let result = async {
+        let reservation = reserve(&f.adapter, request(&f.adapter).await?).await?;
+        // Pause immediately before the final admission's first runtime read.
+        f.authority.gate.arm(3);
+        let operation = spawn({
+            let adapter = f.adapter.clone();
+            async move {
+                adapter
+                    .start_credential_refresh(reservation)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| format!("{error:?}"))
             }
-            let operation = spawn({
-                let adapter = f.adapter.clone();
-                async move {
-                    if let Some(reservation) = reservation {
-                        adapter
-                            .start_credential_refresh(reservation)
-                            .await
-                            .map(|_| ())
-                            .map_err(|error| format!("{error:?}"))
-                    } else {
-                        lease(&adapter)
-                            .await
-                            .map(|_| ())
-                            .map_err(|error| format!("{error:?}"))
-                    }
-                }
-            });
-            if phase == "start" {
-                f.authority.gate.wait().await?;
-            } else {
-                f.provider.unwrap_gate.wait().await?;
-            }
-            let mut holder = f.db.pool.begin().await?;
-            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(&mut *holder)
-                .await?;
-            sqlx::query("SELECT id FROM environments WHERE id=$1 FOR UPDATE")
-                .bind(f.context.environment_id.as_str())
-                .fetch_one(&mut *holder)
-                .await?;
-            if phase == "start" {
-                f.authority.gate.release();
-            } else {
-                f.provider.unwrap_gate.release();
-            }
-            wait_for_database_blocker(&f.db.pool, pid).await?;
-            f.authority
-                .change(|session| session.workspace_mut().uid = Uuid::new_v4());
-            holder.commit().await?;
-            ensure!(
-                finish_task(operation).await? == Err("Denied".into()),
-                "{phase} retained identity across a SQL wait"
-            );
-            if phase == "start" {
-                ensure!(f.state().await? == OAuthRefreshState::Unknown);
-            }
-            Ok(())
-        }
-        .await;
-        f.finish(result).await?;
+        });
+        f.authority.gate.wait().await?;
+        let mut holder = f.db.pool.begin().await?;
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await?;
+        sqlx::query("SELECT id FROM environments WHERE id=$1 FOR UPDATE")
+            .bind(f.context.environment_id.as_str())
+            .fetch_one(&mut *holder)
+            .await?;
+        f.authority.gate.release();
+        wait_for_database_blocker(&f.db.pool, pid).await?;
+        f.authority
+            .change(|session| session.workspace_mut().uid = Uuid::new_v4());
+        holder.commit().await?;
+        ensure!(
+            finish_task(operation).await? == Err("Denied".into()),
+            "start retained identity across a SQL wait"
+        );
+        ensure!(f.state().await? == OAuthRefreshState::Unknown);
+        Ok(())
     }
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn lease_denies_authority_changed_before_its_first_grant_evaluation() -> Result<()> {
-    for mutation in [
-        "gateway",
-        "workspace",
-        "policy",
-        "authorized set replaced",
-        "expiry",
-        "personal-policy",
-    ] {
-        let f = Fixture::create().await?;
-        let result = async {
-            // Hold the environment row: the lease's first grant evaluation
-            // waits for it after the lease's first runtime authority check.
-            let mut holder = f.db.pool.begin().await?;
-            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(&mut *holder)
-                .await?;
-            sqlx::query("SELECT id FROM environments WHERE id=$1 FOR UPDATE")
-                .bind(f.context.environment_id.as_str())
-                .fetch_one(&mut *holder)
-                .await?;
-            let unwraps = f.provider.unwrap_calls.load(Ordering::SeqCst);
-            let operation = spawn({
-                let adapter = f.adapter.clone();
-                async move { lease(&adapter).await }
-            });
-            wait_for_database_blocker(&f.db.pool, pid).await?;
-            f.authority
-                .change(|session| change_authority(session, mutation));
-            holder.commit().await?;
-            ensure!(
-                matches!(finish_task(operation).await?, Err(BrokerLeaseError::Denied)),
-                "{mutation} released material for a changed authority"
-            );
-            // Both grant evaluations use the first response, so only the final
-            // check sees the change. Material was unwrapped once and withheld.
-            ensure!(
-                f.provider.unwrap_calls.load(Ordering::SeqCst) == unwraps + 1,
-                "{mutation}: the lease did not reach its final authority check"
-            );
-            Ok(())
-        }
-        .await;
-        f.finish(result).await?;
-    }
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn final_lease_authority_denies_any_change_and_only_narrows_expiry() -> Result<()> {
-    for mutation in [
-        "gateway",
-        "workspace",
-        "policy",
-        "authorized set replaced",
-        "expiry",
-        "shorter expiry",
-        "longer expiry",
-    ] {
-        let f = Fixture::create().await?;
-        let result = async {
-            let connected = f.adapter.session.identity_expires_at_unix;
-            let unwraps = f.provider.unwrap_calls.load(Ordering::SeqCst);
-            // The lease's second runtime authority check is its last: it
-            // follows both grant evaluations and the only unwrap.
-            f.authority.gate.arm(2);
-            let operation = spawn({
-                let adapter = f.adapter.clone();
-                async move { lease(&adapter).await }
-            });
-            f.authority.gate.wait().await?;
-            ensure!(f.provider.unwrap_calls.load(Ordering::SeqCst) == unwraps + 1);
-            f.authority.change(|session| match mutation {
-                "shorter expiry" => session.identity_expires_at_unix = connected - 600,
-                "longer expiry" => session.identity_expires_at_unix = connected + 600,
-                _ => change_authority(session, mutation),
-            });
-            f.authority.gate.release();
-            let leased = finish_task(operation).await?;
-            match mutation {
-                "shorter expiry" => ensure!(
-                    leased?.grant().expires_at_unix == Some(connected - 600),
-                    "a shorter final expiry did not narrow the lease"
-                ),
-                "longer expiry" => ensure!(
-                    leased?.grant().expires_at_unix == Some(connected),
-                    "a longer final expiry extended the lease"
-                ),
-                _ => ensure!(
-                    matches!(leased, Err(BrokerLeaseError::Denied)),
-                    "{mutation} released material for a changed authority"
-                ),
-            }
-            Ok(())
-        }
-        .await;
-        f.finish(result).await?;
-    }
-    Ok(())
+    .await;
+    f.finish(result).await
 }
 
 #[tokio::test]

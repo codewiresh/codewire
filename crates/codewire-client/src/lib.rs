@@ -112,16 +112,18 @@ pub use codewire_proto::codewire::v1::{
     UpdateAccessProfileResponse, get_access_profile_request,
 };
 pub use codewire_proto::codewire::v1::{
-    AddApiKeyCredentialRequest, AddApiKeyCredentialResponse, AddSshCredentialRequest,
-    AddSshCredentialResponse, CodexDeviceChallenge, Credential, CredentialAuthenticationKind,
-    CredentialStatus, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest,
-    EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest,
-    GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse,
-    GithubDeviceChallenge, GithubRepository, ListCredentialsRequest, ListCredentialsResponse,
-    ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest,
-    RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse,
-    RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse, SshPublicKey,
-    enroll_codex_response, enroll_github_response, get_credential_request,
+    AddApiKeyCredentialRequest, AddApiKeyCredentialResponse,
+    AddClaudeSubscriptionTokenCredentialRequest, AddClaudeSubscriptionTokenCredentialResponse,
+    AddSshCredentialRequest, AddSshCredentialResponse, CodexDeviceChallenge, Credential,
+    CredentialAuthenticationKind, CredentialStatus, DeleteCredentialRequest,
+    DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest,
+    EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse,
+    GetCredentialRequest, GetCredentialResponse, GithubDeviceChallenge, GithubRepository,
+    ListCredentialsRequest, ListCredentialsResponse, ListGithubRepositoriesRequest,
+    ListGithubRepositoriesResponse, RenameCredentialRequest, RenameCredentialResponse,
+    RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest,
+    RotateApiKeyCredentialResponse, SshPublicKey, enroll_codex_response, enroll_github_response,
+    get_credential_request,
 };
 pub use codewire_proto::codewire::v1::{
     CreateMeshInviteRequest, CreateMeshInviteResponse, CreateMeshNetworkRequest,

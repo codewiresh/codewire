@@ -698,7 +698,7 @@ impl PlatformAccessProfileStore {
             // binding, the creator's one GitHub connection is the only grant.
             None => AvailableGrants {
                 grants: self.admit_account_github(&mut tx, context).await?,
-                reconnect_required: BTreeSet::new(),
+                reconnect_required: BTreeMap::new(),
             },
         };
         tx.commit().await.map_err(database_error)?;

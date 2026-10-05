@@ -240,7 +240,9 @@ fn selected_hosts(
         .flat_map(|provider| match provider {
             HttpProvider::OpenAiApiKey => &[OPENAI_HOST][..],
             HttpProvider::CodexOAuth => &[CHATGPT_HOST, OPENAI_AUTH_HOST][..],
-            HttpProvider::AnthropicApiKey => &[ANTHROPIC_HOST][..],
+            HttpProvider::AnthropicApiKey | HttpProvider::AnthropicSubscriptionToken => {
+                &[ANTHROPIC_HOST][..]
+            }
             HttpProvider::GitHubOAuth => &[GITHUB_API_HOST, GITHUB_GIT_HOST][..],
             HttpProvider::GitHubAppAuthorization => &[GITHUB_API_HOST, GITHUB_GIT_HOST][..],
         })
@@ -273,7 +275,8 @@ fn validate_target(
                 && target.query().is_none()
         }
         Some(ANTHROPIC_HOST) => {
-            selected.contains(&HttpProvider::AnthropicApiKey)
+            (selected.contains(&HttpProvider::AnthropicApiKey)
+                || selected.contains(&HttpProvider::AnthropicSubscriptionToken))
                 && method == Method::POST
                 && matches!(target.path(), "/v1/messages" | "/v1/messages/count_tokens")
                 && matches!(target.query(), None | Some("beta=true"))
@@ -561,6 +564,41 @@ mod tests {
             (Method::GET, "https://user:password@api.github.com/user"),
             (Method::GET, "https://api.github.com:444/user"),
             (Method::GET, "http://api.github.com/user"),
+        ] {
+            assert_eq!(
+                validate_target(&url::Url::parse(target).unwrap(), &method, &selected),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_subscription_token_transport_reaches_only_the_two_anthropic_routes() {
+        let selected = BTreeSet::from([HttpProvider::AnthropicSubscriptionToken]);
+        assert_eq!(
+            selected_hosts(&selected).unwrap(),
+            BTreeSet::from(["api.anthropic.com"])
+        );
+        for target in [
+            "https://api.anthropic.com/v1/messages",
+            "https://api.anthropic.com/v1/messages?beta=true",
+            "https://api.anthropic.com/v1/messages/count_tokens",
+            "https://api.anthropic.com/v1/messages/count_tokens?beta=true",
+        ] {
+            assert!(
+                validate_target(&url::Url::parse(target).unwrap(), &Method::POST, &selected)
+                    .is_ok(),
+                "{target}"
+            );
+        }
+        for (method, target) in [
+            (Method::GET, "https://api.anthropic.com/v1/messages"),
+            (Method::POST, "https://api.anthropic.com/v1/oauth/token"),
+            (Method::POST, "https://console.anthropic.com/v1/oauth/token"),
+            (Method::GET, "https://api.anthropic.com/api/oauth/usage"),
+            (Method::POST, "https://api.anthropic.com/v1/models"),
+            (Method::POST, "https://api.openai.com/v1/responses"),
         ] {
             assert_eq!(
                 validate_target(&url::Url::parse(target).unwrap(), &method, &selected),

@@ -44,15 +44,14 @@ async fn fingerprint(pool: &PgPool) -> anyhow::Result<String> {
 }
 
 /// Every helper except migration34's workspace-binding trigger function and
-/// migration35's authority-stamp functions and migration36's cw-runtime
-/// trigger function, which have their own proof and replace no prior helper.
+/// migration37's cw-runtime trigger function, which have their own proof and
+/// replace no prior helper.
 async fn helpers(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n \
         ON n.oid=p.pronamespace WHERE n.nspname='public' AND starts_with(p.proname,'codewire_') \
         AND p.proname <> 'codewire_workspace_binding_immutable' \
         AND p.proname <> 'codewire_cw_runtime_request_immutable' \
-        AND NOT starts_with(p.proname,'codewire_platform_authority_') \
         ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)",
     )
     .fetch_all(pool)
@@ -225,7 +224,11 @@ async fn runtime_dispatch_scope_upgrade_keeps32_leases_organization_wide_and_sec
             .await?;
         let after = applied_migrations(&pool).await?;
         anyhow::ensure!(
-            after.len() == MIGRATOR.iter().count()
+            after.len()
+                == MIGRATOR
+                    .iter()
+                    .filter(|m| m.migration_type.is_up_migration())
+                    .count()
                 && after[..32] == before
                 && after[32].0 == VERSION
         );
@@ -297,7 +300,7 @@ async fn runtime_dispatch_scope_failed_forward_rolls_back_column_and_ledger_then
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         anyhow::ensure!(
             !absent(&pool).await?
-                && applied_migrations(&pool).await?.len() == MIGRATOR.iter().count()
+                && applied_migrations(&pool).await?.len() == MIGRATOR.iter().filter(|m| m.migration_type.is_up_migration()).count()
                 && rows(&pool).await? == original
         );
         pool.close().await;
@@ -357,7 +360,13 @@ async fn runtime_dispatch_scope_down_restores32_in_place_and_keeps_every_lease()
             .max_connections(1)
             .connect(&db.url)
             .await?;
-        anyhow::ensure!(applied_migrations(&pool).await?.len() == MIGRATOR.iter().count());
+        anyhow::ensure!(
+            applied_migrations(&pool).await?.len()
+                == MIGRATOR
+                    .iter()
+                    .filter(|m| m.migration_type.is_up_migration())
+                    .count()
+        );
         anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
         anyhow::ensure!(rows(&pool).await? == original && scoped_leases(&pool).await? == 0);
         pool.close().await;

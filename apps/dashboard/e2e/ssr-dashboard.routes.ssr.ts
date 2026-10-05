@@ -265,14 +265,42 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await page.getByRole("dialog", { name: "Create profile", exact: true })
       .getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(page.locator('form[action$="/credentials/api-key/add"]')).toHaveCount(2);
+    await expect(page.locator('#add-claude-subscription-token form[action$="/credentials/claude-subscription-token/add"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/credentials/ssh/generate"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/credentials/ssh/import"]')).toHaveCount(1);
-    const protectedInputs = page.locator('#add-openai-api-key input[type="password"], #add-anthropic-api-key input[type="password"], #import-ssh input[type="password"]');
-    await expect(protectedInputs).toHaveCount(3);
-    await expect(protectedInputs.nth(0)).toHaveValue("");
-    await expect(protectedInputs.nth(1)).toHaveValue("");
-    await expect(protectedInputs.nth(2)).toHaveValue("");
+    const protectedInputs = page.locator('#add-openai-api-key input[type="password"], #add-anthropic-api-key input[type="password"], #add-claude-subscription-token input[type="password"], #import-ssh input[type="password"]');
+    await expect(protectedInputs).toHaveCount(4);
+    for (let index = 0; index < 4; index += 1) await expect(protectedInputs.nth(index)).toHaveValue("");
     await expect(page.locator('textarea[name="private_key"]')).toHaveValue("");
+  });
+
+  test("a malformed Claude subscription token reopens its dialog with the name kept and the token cleared", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop credential settings contract");
+    await page.goto("/settings/credentials/");
+    await page.getByRole("button", { name: "Add credential", exact: true }).click();
+    await page.getByRole("dialog", { name: "Add credential", exact: true })
+      .getByRole("button", { name: "Claude subscription token", exact: true }).click();
+    const editor = page.getByRole("dialog", { name: "Add Claude subscription token", exact: true });
+    await editor.getByLabel("Credential name", { exact: true }).fill("Synthetic Claude plan");
+    // Synthetic and malformed: whitespace is never part of a token.
+    const malformed = "synthetic malformed subscription token canary";
+    await editor.getByLabel("Token", { exact: true }).fill(malformed);
+    const [response] = await Promise.all([
+      page.waitForResponse((answer) => answer.request().method() === "POST"
+        && new URL(answer.url()).pathname === "/settings/credentials/_actions/credentials/claude-subscription-token/add"),
+      editor.getByRole("button", { name: "Add token", exact: true }).click(),
+    ]);
+    expect(response.status()).toBe(422);
+    expect(await response.text()).not.toContain(malformed);
+    await expect(editor).toBeVisible();
+    await expect(page.locator("dialog[open]")).toHaveCount(1);
+    await expect(editor.getByRole("alert")).toHaveText(
+      "That doesn't look like a Claude subscription token. Run claude setup-token and paste the whole token.",
+    );
+    await expect(editor.getByLabel("Credential name", { exact: true })).toHaveValue("Synthetic Claude plan");
+    await expect(editor.getByLabel("Token", { exact: true })).toHaveValue("");
+    // Nothing was saved, so the list gained no credential.
+    await expect(page.locator(".cw-credential-row").filter({ hasText: "Synthetic Claude plan" })).toHaveCount(0);
   });
 
   test("clean console routes redirect canonically and legacy paths stay retired", async ({ page, isMobile }) => {

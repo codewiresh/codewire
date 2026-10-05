@@ -186,7 +186,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test storage \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform credential storage matrix" "$logfile" 22
+  assert_passed_count "platform credential storage matrix" "$logfile" 23
 
   logfile="$RUN_DIR/platform-access-profiles.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -227,7 +227,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-service --features enrollment \
       --lib mutation::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "public credential mutation matrix" "$logfile" 26
+  assert_passed_count "public credential mutation matrix" "$logfile" 27
 
   logfile="$RUN_DIR/isolated-credential-runtime.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -264,7 +264,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
       --lib platform::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker admission matrix" "$logfile" 30
+  assert_passed_count "platform broker admission matrix" "$logfile" 43
 
   logfile="$RUN_DIR/platform-broker-ssh.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -285,7 +285,7 @@ run_database() {
       --lib tests::database:: -- --ignored \
       --skip tests::database::projection:: \
       --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform runtime restricted identity matrix" "$logfile" 7
+  assert_passed_count "platform runtime restricted identity matrix" "$logfile" 6
 
   logfile="$RUN_DIR/platform-runtime-projection.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -372,7 +372,7 @@ run_database() {
     cargo test --locked -p codewire-orchestration --lib \
       'worker::create::projection_database_tests::' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "environment projection capture matrix" "$logfile" 4
+  assert_passed_count "environment projection capture matrix" "$logfile" 5
 
   logfile="$RUN_DIR/organization-tenant-secret-teardown.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
@@ -416,7 +416,7 @@ run_database() {
     cargo test --locked -p codewire-orchestration --lib \
       'worker::workspace_binding::database_tests::' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "workspace binding recorder matrix" "$logfile" 23
+  assert_passed_count "workspace binding recorder matrix" "$logfile" 21
 
   logfile="$RUN_DIR/platform-cw-runtime-journal.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

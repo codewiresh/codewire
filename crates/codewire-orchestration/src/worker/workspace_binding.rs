@@ -1244,12 +1244,13 @@ pub(crate) async fn record_workspace_binding(
     Ok((outcome, checked.path))
 }
 
-/// A binding this call recorded: how long it took, and whether the Sandbox
-/// is an adopted warm-pool member.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A binding this call recorded: how long it took, whether the Sandbox is an
+/// adopted warm-pool member, and the Sandbox UID it recorded.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RecordedBind {
     pub elapsed: Duration,
     pub path: StartPath,
+    pub sandbox_uid: String,
 }
 
 /// [`record_workspace_binding`] with its environment log row
@@ -1285,7 +1286,13 @@ pub(crate) async fn bind_workspace_runtime(
                 metadata,
             )
             .await?;
-            Ok(Some(RecordedBind { elapsed, path }))
+            // The recorder refuses anything but the observed chain, so the
+            // recorded Sandbox is the observed one.
+            Ok(Some(RecordedBind {
+                elapsed,
+                path,
+                sandbox_uid: observation.sandbox_uid().to_owned(),
+            }))
         }
         Ok((WriteOutcome::Unchanged, _)) => {
             observe_record(RecordResult::Unchanged);
@@ -1715,6 +1722,25 @@ pub(crate) async fn live_environment_binding(
         .await?
         .map(environment_binding_from_row)
         .transpose()
+}
+
+/// The namespace and Sandbox UID of the live binding the backend pointer
+/// names, if any (#2434). Read inside the caller's fence, it proves a
+/// binding committed and is still current.
+pub(crate) async fn live_binding_sandbox(
+    executor: impl sqlx::PgExecutor<'_>,
+    environment_id: &str,
+) -> anyhow::Result<Option<(String, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT w.namespace, w.sandbox_uid
+           FROM sandbox_environment_backend b
+           JOIN sandbox_workspace_bindings w
+             ON w.environment_id = b.environment_id AND w.pod_uid = b.pod_uid
+          WHERE b.environment_id = $1 AND b.bound_at IS NOT NULL AND w.released_at IS NULL",
+    )
+    .bind(environment_id)
+    .fetch_optional(executor)
+    .await?)
 }
 
 /// The current workspace Pod is not bound yet and is not a legacy Pod, so

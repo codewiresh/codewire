@@ -16,7 +16,9 @@
 //! the upstream validates their model/tool schema.
 //!
 //! Only the two POST routes below are supported, with no query or exactly the
-//! official SDK's `beta=true` query. No subscription OAuth, federation, Bedrock,
+//! official SDK's `beta=true` query. The Claude subscription token form, the
+//! provider's OAuth kind, is [`AnthropicSubscriptionTokenAdapter`]; it shares
+//! these routes and this request validation. No federation, Bedrock,
 //! Vertex/Foundry, workspace/user-profile selection, models/files/batches/admin
 //! routes, or WebSockets. API keys needing explicit workspace selection are not
 //! supported. Beta names are bounded feature tokens forwarded to these same
@@ -38,6 +40,9 @@ use http::{HeaderMap, HeaderName, HeaderValue, Method, header};
 use url::Url;
 
 use crate::{BrokerCredentialLease, CredentialBrokerError};
+
+mod subscription;
+pub use subscription::AnthropicSubscriptionTokenAdapter;
 
 const PROVIDER: &str = "anthropic";
 const ROUTE: &str = "anthropic-api";
@@ -246,6 +251,7 @@ impl AnthropicApiKeyAdapter {
                     } else {
                         self.route.max_response_bytes
                     },
+                    response_headers: RESPONSE_HEADERS,
                 },
             })
         })
@@ -299,6 +305,8 @@ pub struct PreparedAnthropicResponse {
     operation: AnthropicOperation,
     redaction: RedactionSet,
     max_body_bytes: usize,
+    /// The credential form's finite response allowlist.
+    response_headers: &'static [&'static str],
 }
 
 impl PreparedAnthropicResponse {
@@ -313,7 +321,7 @@ impl PreparedAnthropicResponse {
             return Err(CredentialBrokerError::ResponseDenied);
         }
         let mut headers = HeaderMap::new();
-        for name in RESPONSE_HEADERS {
+        for name in self.response_headers {
             let mut values = upstream.get_all(*name).iter();
             let Some(value) = values.next() else {
                 continue;
@@ -384,6 +392,16 @@ fn validate_lease(
     lease: &impl BrokerCredentialLease,
     operation: AnthropicOperation,
 ) -> Result<(), CredentialBrokerError> {
+    validate_lease_kind(lease, operation, CredentialAuthKind::ApiKey)
+}
+
+/// The exact lease checks of both forms, which differ only in the credential
+/// kind each accepts.
+fn validate_lease_kind(
+    lease: &impl BrokerCredentialLease,
+    operation: AnthropicOperation,
+    kind: CredentialAuthKind,
+) -> Result<(), CredentialBrokerError> {
     let metadata = lease.credential_metadata();
     let grant = lease.grant();
     let permission = lease.permission();
@@ -392,7 +410,7 @@ fn validate_lease(
         .map_err(|_| CredentialBrokerError::UnsupportedLease)?
         .as_secs();
     if metadata.provider.as_str() != PROVIDER
-        || metadata.authentication_kind != CredentialAuthKind::ApiKey
+        || metadata.authentication_kind != kind
         || metadata.status != CredentialStatus::Active
         || metadata.revocation_generation == 0
         || metadata.revocation_generation != grant.credential_revocation_generation

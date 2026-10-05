@@ -38,15 +38,14 @@ async fn fingerprint(pool: &PgPool) -> anyhow::Result<String> {
 }
 
 /// Every helper except migration34's workspace-binding trigger function and
-/// migration35's authority-stamp functions and migration36's cw-runtime
-/// trigger function, which have their own proof and replace no prior helper.
+/// migration37's cw-runtime trigger function, which have their own proof and
+/// replace no prior helper.
 async fn helpers(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n \
         ON n.oid=p.pronamespace WHERE n.nspname='public' AND starts_with(p.proname,'codewire_') \
         AND p.proname <> 'codewire_workspace_binding_immutable' \
         AND p.proname <> 'codewire_cw_runtime_request_immutable' \
-        AND NOT starts_with(p.proname,'codewire_platform_authority_') \
         ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)",
     )
     .fetch_all(pool)
@@ -208,7 +207,7 @@ async fn preview_upgrade_preserves30_rows_helpers_and_second_startup() -> anyhow
         ensure_schema(&db.url).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let after = applied_migrations(&pool).await?;
-        anyhow::ensure!(after.len() == MIGRATOR.iter().count() && after[..30] == before && after[30].0 == VERSION);
+        anyhow::ensure!(after.len() == MIGRATOR.iter().filter(|m| m.migration_type.is_up_migration()).count() && after[..30] == before && after[30].0 == VERSION);
         anyhow::ensure!(rows(&pool, false).await? == original && helpers(&pool).await? == old_helpers);
         anyhow::ensure!(sqlx::query_scalar::<_, bool>("SELECT NOT EXISTS(SELECT 1 FROM preview_auth_challenges) AND NOT EXISTS(SELECT 1 FROM preview_browser_grants)").fetch_one(&pool).await?);
         seed_capabilities(&pool).await?;
@@ -285,7 +284,7 @@ async fn preview_failed_forward_rolls_back_both_tables_and_ledger_then_retries()
         pool.close().await;
         ensure_schema(&db.url).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
-        anyhow::ensure!(!absent(&pool).await? && applied_migrations(&pool).await?.len() == MIGRATOR.iter().count() && rows(&pool, false).await? == original);
+        anyhow::ensure!(!absent(&pool).await? && applied_migrations(&pool).await?.len() == MIGRATOR.iter().filter(|m| m.migration_type.is_up_migration()).count() && rows(&pool, false).await? == original);
         pool.close().await;
         Ok(())
     }.await;
@@ -330,7 +329,13 @@ async fn preview_down_restores30_in_place_and_keeps_every_other_row() -> anyhow:
             .max_connections(1)
             .connect(&db.url)
             .await?;
-        anyhow::ensure!(applied_migrations(&pool).await?.len() == MIGRATOR.iter().count());
+        anyhow::ensure!(
+            applied_migrations(&pool).await?.len()
+                == MIGRATOR
+                    .iter()
+                    .filter(|m| m.migration_type.is_up_migration())
+                    .count()
+        );
         anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
         anyhow::ensure!(rows(&pool, false).await? == original);
         pool.close().await;

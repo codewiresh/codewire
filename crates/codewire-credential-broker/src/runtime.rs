@@ -25,7 +25,9 @@ use url::Url;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::anthropic::{AnthropicApiKeyAdapter, AnthropicStreamingResponse};
+use crate::anthropic::{
+    AnthropicApiKeyAdapter, AnthropicStreamingResponse, AnthropicSubscriptionTokenAdapter,
+};
 use crate::codex_oauth::{
     ACCESS_TOKEN_REFRESH_WINDOW_SECONDS, CODEX_LOGIN_MINIMUM_VALIDITY_SECONDS,
     CanonicalCodexOAuthBundle, CodexOAuthCredential,
@@ -63,6 +65,9 @@ mod http_tests;
 #[path = "runtime/synthetic_smoke_tests.rs"]
 mod synthetic_smoke_tests;
 
+#[cfg(test)]
+#[path = "runtime/anthropic_subscription_tests.rs"]
+mod anthropic_subscription_tests;
 #[cfg(feature = "local-broker-synthetic-smoke")]
 #[path = "runtime/native_managed_smoke.rs"]
 mod native_managed_smoke;
@@ -673,6 +678,42 @@ impl SyntheticOpenAiSmokeTransport {
         }
     }
 
+    /// Distinguish only the three fixed, public Kind Claude canaries from
+    /// the CW API fixture. This is classification, not admission: the original
+    /// owned request must still pass the Kind provider's complete validator.
+    /// No protected value or request field leaves this borrowed predicate.
+    pub fn is_kind_anthropic_fixture(request: &BrokerUpstreamRequest) -> bool {
+        if request.method != Method::POST
+            || !matches!(
+                request.target.as_str(),
+                "https://api.anthropic.com/v1/messages"
+                    | "https://api.anthropic.com/v1/messages?beta=true"
+                    | "https://api.anthropic.com/v1/messages/count_tokens"
+                    | "https://api.anthropic.com/v1/messages/count_tokens?beta=true"
+            )
+        {
+            return false;
+        }
+        let mut authorization = request.headers.get_all("authorization").iter();
+        let bearer = authorization.next();
+        let mut api_key = request.headers.get_all("x-api-key").iter();
+        let key = api_key.next();
+        if authorization.next().is_some() || api_key.next().is_some() {
+            return false;
+        }
+        match (bearer, key) {
+            (None, Some(key)) => {
+                key.as_bytes() == b"sk-ant-api03-CW_KIND_SYNTHETIC_ANTHROPIC_KEY-0123456789abcdef"
+            }
+            (Some(bearer), None) => matches!(
+                bearer.as_bytes(),
+                b"Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_CLAUDE_TOKEN-0123456789abcdef"
+                    | b"Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_REFUSED_TOKEN-0123456789abcdef"
+            ),
+            _ => false,
+        }
+    }
+
     /// Validate a Kind fixture's exact selected synthetic credential in place.
     /// This borrows the broker-owned request; the caller then delegates that
     /// same owned request to `execute`, including the existing stream/redactor.
@@ -985,6 +1026,7 @@ pub struct OpenAiBroker<P, U> {
     api_key_adapter: OpenAiApiKeyAdapter,
     oauth_adapter: OpenAiChatGptOAuthAdapter,
     anthropic_adapter: AnthropicApiKeyAdapter,
+    anthropic_subscription_adapter: AnthropicSubscriptionTokenAdapter,
     github_adapter: GitHubOAuthAdapter,
     github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     oauth_refresh: tokio::sync::Mutex<()>,
@@ -1135,6 +1177,8 @@ where
             api_key_adapter: OpenAiApiKeyAdapter::new().map_err(map_adapter_error)?,
             oauth_adapter: OpenAiChatGptOAuthAdapter::new().map_err(map_adapter_error)?,
             anthropic_adapter: AnthropicApiKeyAdapter::new().map_err(map_adapter_error)?,
+            anthropic_subscription_adapter: AnthropicSubscriptionTokenAdapter::new()
+                .map_err(map_adapter_error)?,
             github_adapter: GitHubOAuthAdapter::new().map_err(map_adapter_error)?,
             github_app_authorization: None,
             oauth_refresh: tokio::sync::Mutex::new(()),
@@ -1450,11 +1494,22 @@ where
             .await
             .map_err(map_lease_error)?;
         validate_http_lease_coordinates(&lease, &request.slot, &operation, &request.route)?;
-        let (method, target, headers, body, policy) = self
-            .anthropic_adapter
-            .prepare_validated(lease, validated)
-            .map_err(map_adapter_error)?
-            .into_parts();
+        // The validated request is form-independent; the lease's credential
+        // kind selects the API key or the Claude subscription token adapter.
+        // Neither form is refreshed, and no provider response marks, deletes
+        // or withholds either: its owner replaces it.
+        let prepared = match lease.credential_metadata().authentication_kind {
+            CredentialAuthKind::ApiKey => self
+                .anthropic_adapter
+                .prepare_validated(lease, validated)
+                .map_err(map_adapter_error)?,
+            CredentialAuthKind::OAuth => self
+                .anthropic_subscription_adapter
+                .prepare_validated(lease, validated)
+                .map_err(map_adapter_error)?,
+            _ => return Err(BrokerRequestError::Denied),
+        };
+        let (method, target, headers, body, policy) = prepared.into_parts();
         let response = timing::timed(
             Phase::Provider,
             self.upstream.execute(BrokerUpstreamRequest {
@@ -2441,6 +2496,96 @@ mod tests {
     use crate::openai::response_admission_test_cases::{accepted_encodings, denied_encodings};
 
     mod codex_login;
+
+    #[cfg(feature = "local-broker-synthetic-smoke")]
+    #[test]
+    fn kind_anthropic_fixture_recognizer_has_closed_origin_and_auth_forms() {
+        let api_key = "sk-ant-api03-CW_KIND_SYNTHETIC_ANTHROPIC_KEY-0123456789abcdef";
+        let token = "Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_CLAUDE_TOKEN-0123456789abcdef";
+        let refused = "Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_REFUSED_TOKEN-0123456789abcdef";
+        let request = |url: &str, name: &str, value: &str| {
+            BrokerUpstreamRequest::new(
+                Method::POST,
+                Url::parse(url).unwrap(),
+                HeaderMap::from_iter([(
+                    HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                    HeaderValue::from_str(value).unwrap(),
+                )]),
+                b"{}".to_vec(),
+            )
+        };
+        let url = "https://api.anthropic.com/v1/messages";
+        for (name, value) in [
+            ("x-api-key", api_key),
+            ("authorization", token),
+            ("authorization", refused),
+        ] {
+            for url in [
+                url,
+                "https://api.anthropic.com/v1/messages?beta=true",
+                "https://api.anthropic.com/v1/messages/count_tokens",
+                "https://api.anthropic.com/v1/messages/count_tokens?beta=true",
+            ] {
+                assert!(SyntheticOpenAiSmokeTransport::is_kind_anthropic_fixture(
+                    &request(url, name, value)
+                ));
+            }
+            let mut duplicate = request(url, name, value);
+            duplicate.headers.append(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+            assert!(!SyntheticOpenAiSmokeTransport::is_kind_anthropic_fixture(
+                &duplicate
+            ));
+        }
+        for url in [
+            "http://api.anthropic.com/v1/messages",
+            "https://api.anthropic.com:444/v1/messages",
+            "https://user@api.anthropic.com/v1/messages",
+            "https://api.anthropic.com/v1/messages#fragment",
+            "https://api.anthropic.com/v1/messages?foreign=true",
+            "https://api.anthropic.com/v1/other",
+            "https://foreign.invalid/v1/messages",
+        ] {
+            assert!(!SyntheticOpenAiSmokeTransport::is_kind_anthropic_fixture(
+                &request(url, "x-api-key", api_key)
+            ));
+        }
+        for (name, value) in [
+            ("x-api-key", token),
+            ("authorization", api_key),
+            ("x-api-key", "codewire-managed"),
+            ("authorization", "Bearer codewire-managed"),
+            (
+                "x-api-key",
+                "cwlocalanthropic0123456789abcdef0123456789abcdef",
+            ),
+            (
+                "x-api-key",
+                "cwlocalanthropic00000000000000000000000000000000",
+            ),
+            ("x-api-key", "cwlocalopenai0123456789abcdef0123456789abcdef"),
+            ("authorization", "Bearer sk-ant-oat01-unknown"),
+        ] {
+            assert!(!SyntheticOpenAiSmokeTransport::is_kind_anthropic_fixture(
+                &request(url, name, value)
+            ));
+        }
+        let mut mixed = request(url, "x-api-key", api_key);
+        mixed.headers.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_str(token).unwrap(),
+        );
+        assert!(!SyntheticOpenAiSmokeTransport::is_kind_anthropic_fixture(
+            &mixed
+        ));
+        let mut wrong_method = request(url, "x-api-key", api_key);
+        wrong_method.method = Method::GET;
+        assert!(!SyntheticOpenAiSmokeTransport::is_kind_anthropic_fixture(
+            &wrong_method
+        ));
+    }
 
     const SYNTHETIC_KEY: &str = "CW_TEST_OPENAI_VALUE_123";
 

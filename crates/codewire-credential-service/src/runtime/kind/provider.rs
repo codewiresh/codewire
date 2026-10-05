@@ -53,6 +53,29 @@ const GITHUB_APP_REFRESHED_REFRESH_TOKEN: &str =
 const GITHUB_APP_AUTHORIZATION_CODES: [&str; 2] =
     ["kind-synthetic-code-one", "kind-synthetic-code-two"];
 
+// Fixed, public synthetic Anthropic credentials of the Kind Claude Code
+// journey (scripts/ci/verify/kind/credentials.sh adds them through the public
+// CLI). Each carries a distinctive marker that the in-workspace driver
+// searches for to prove neither value reached the Sandbox. They are accepted
+// only by this in-process provider, never by a listener or a real provider.
+pub(super) const KIND_ANTHROPIC_API_KEY: &str =
+    "sk-ant-api03-CW_KIND_SYNTHETIC_ANTHROPIC_KEY-0123456789abcdef";
+pub(super) const KIND_CLAUDE_SUBSCRIPTION_TOKEN: &str =
+    "sk-ant-oat01-CW_KIND_SYNTHETIC_CLAUDE_TOKEN-0123456789abcdef";
+/// A well-formed subscription token the fixture refuses as a real provider
+/// refuses an expired or revoked one: a 401 `authentication_error`. The
+/// journey proves the broker passes that answer through and leaves the
+/// credential Active until its owner replaces it.
+pub(super) const KIND_CLAUDE_REFUSED_TOKEN: &str =
+    "sk-ant-oat01-CW_KIND_SYNTHETIC_REFUSED_TOKEN-0123456789abcdef";
+/// The Sandbox's projected value. Reaching the provider means the broker did
+/// not replace it, so it is always rejected.
+const ANTHROPIC_PLACEHOLDER: &str = "codewire-managed";
+const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
+/// Fixed public reply text Claude Code prints for the Kind journey.
+const CLAUDE_MARKER: &str = "CWCLAUDE kind";
+const MAX_ANTHROPIC_MODEL: usize = 128;
+
 // Same minimal stock-Codex-compatible Responses SSE shape as the checked-in
 // local-vmm Codex bridge smoke. All text is fixed, public and synthetic.
 const SSE: &[u8] = concat!(
@@ -135,6 +158,76 @@ impl Scenario {
     }
 }
 
+/// Which Anthropic credential form a request presented. The broker selects
+/// it from the stored credential's kind; the provider only observes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnthropicKind {
+    ApiKey,
+    SubscriptionToken,
+}
+
+impl AnthropicKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::ApiKey => "api_key",
+            Self::SubscriptionToken => "subscription_token",
+        }
+    }
+}
+
+/// One admitted Anthropic request: the form and real synthetic credential it
+/// presented, and whether that credential is the one the fixture refuses.
+#[derive(Debug, PartialEq, Eq)]
+struct AdmittedAnthropic {
+    kind: AnthropicKind,
+    route: AnthropicRoute,
+    stream: bool,
+    model: String,
+    refused: bool,
+    client_identity: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnthropicRoute {
+    Messages,
+    CountTokens,
+}
+
+impl AnthropicRoute {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Messages => "messages",
+            Self::CountTokens => "count_tokens",
+        }
+    }
+}
+
+/// Closed reasons a presented Anthropic request is rejected as malformed. Each
+/// is a transport-level protocol failure, so a malformed request never looks
+/// like the provider's 401 for the refused token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnthropicRejection {
+    Route,
+    Placeholder,
+    Credential,
+    OAuthBeta,
+    Headers,
+    Body,
+}
+
+impl AnthropicRejection {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Route => "route",
+            Self::Placeholder => "placeholder",
+            Self::Credential => "credential",
+            Self::OAuthBeta => "oauth_beta",
+            Self::Headers => "headers",
+            Self::Body => "body",
+        }
+    }
+}
+
 #[derive(Default)]
 struct Counters {
     #[cfg(feature = "kind-e2e")]
@@ -151,6 +244,8 @@ struct Counters {
     github_app_refreshes: u64,
     github_refreshed_advertisements: u64,
     github_refreshed_upload_packs: u64,
+    anthropic_calls: u64,
+    anthropic_rejections: u64,
 }
 
 #[derive(Clone)]
@@ -393,8 +488,156 @@ impl SyntheticProvider {
                 github_app_refresh_calls = counters.github_app_refreshes,
                 github_refreshed_advertisement_calls = counters.github_refreshed_advertisements,
                 github_refreshed_upload_pack_calls = counters.github_refreshed_upload_packs,
+                anthropic_calls = counters.anthropic_calls,
+                anthropic_rejections = counters.anthropic_rejections,
                 "provider_totals");
         }
+    }
+
+    /// The Anthropic Messages and token-counting routes as the broker sends
+    /// them, for either credential form. An accepted request presented the
+    /// fixture's real synthetic credential in exactly its form: the API key
+    /// alone in `x-api-key`, or the subscription token alone as a bearer with
+    /// the OAuth beta. The placeholder or any other value is refused. Only the
+    /// closed form, route and counters are logged, never a header or body.
+    fn anthropic(
+        &self,
+        method: &Method,
+        target: &url::Url,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        match self.admit_anthropic(method, target, headers, body) {
+            Ok(admitted) => {
+                let calls = {
+                    let mut counters = self.0.lock().map_err(|_| BrokerUpstreamError::Protocol)?;
+                    counters.anthropic_calls = increment(counters.anthropic_calls)?;
+                    counters.anthropic_calls
+                };
+                let status = if admitted.refused { 401_u16 } else { 200 };
+                // `client_identity` is a closed boolean: whether Claude Code's
+                // own `x-app` and `user-agent` reached the provider, which the
+                // broker forwards for the subscription form only.
+                tracing::info!(target: TARGET, event = "anthropic_response",
+                    kind = admitted.kind.name(), route = admitted.route.name(),
+                    stream = admitted.stream, status, refused = admitted.refused,
+                    client_identity = admitted.client_identity, anthropic_calls = calls,
+                    "anthropic_response");
+                if admitted.refused {
+                    anthropic_refusal()
+                } else {
+                    anthropic_response(admitted.route, admitted.stream, &admitted.model)
+                }
+            }
+            Err(rejection) => {
+                let rejections = {
+                    let mut counters = self.0.lock().map_err(|_| BrokerUpstreamError::Protocol)?;
+                    counters.anthropic_rejections = increment(counters.anthropic_rejections)?;
+                    counters.anthropic_rejections
+                };
+                tracing::info!(target: TARGET, event = "anthropic_rejected",
+                    reason = rejection.name(), anthropic_rejections = rejections,
+                    "anthropic_rejected");
+                Err(BrokerUpstreamError::Protocol)
+            }
+        }
+    }
+
+    fn admit_anthropic(
+        &self,
+        method: &Method,
+        target: &url::Url,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<AdmittedAnthropic, AnthropicRejection> {
+        let route = match (target.path(), target.query()) {
+            ("/v1/messages", None | Some("beta=true")) => AnthropicRoute::Messages,
+            ("/v1/messages/count_tokens", None | Some("beta=true")) => AnthropicRoute::CountTokens,
+            _ => return Err(AnthropicRejection::Route),
+        };
+        if method != Method::POST {
+            return Err(AnthropicRejection::Route);
+        }
+        let authorization = headers.get_all("authorization").iter().collect::<Vec<_>>();
+        let api_key = headers.get_all("x-api-key").iter().collect::<Vec<_>>();
+        if authorization.iter().chain(api_key.iter()).any(|value| {
+            value
+                .as_bytes()
+                .windows(ANTHROPIC_PLACEHOLDER.len())
+                .any(|window| window == ANTHROPIC_PLACEHOLDER.as_bytes())
+        }) {
+            return Err(AnthropicRejection::Placeholder);
+        }
+        let (kind, refused) = match (authorization.as_slice(), api_key.as_slice()) {
+            ([], [key]) if key.as_bytes() == KIND_ANTHROPIC_API_KEY.as_bytes() => {
+                (AnthropicKind::ApiKey, false)
+            }
+            ([bearer], [])
+                if [KIND_CLAUDE_SUBSCRIPTION_TOKEN, KIND_CLAUDE_REFUSED_TOKEN]
+                    .iter()
+                    .any(|token| bearer.as_bytes() == format!("Bearer {token}").as_bytes()) =>
+            {
+                let mut betas = headers.get_all("anthropic-beta").iter();
+                let beta = betas.next().and_then(|value| value.to_str().ok());
+                if betas.next().is_some()
+                    || !beta.is_some_and(|beta| {
+                        beta.split(',')
+                            .any(|token| token.trim() == ANTHROPIC_OAUTH_BETA)
+                    })
+                {
+                    return Err(AnthropicRejection::OAuthBeta);
+                }
+                (
+                    AnthropicKind::SubscriptionToken,
+                    bearer.as_bytes() == format!("Bearer {KIND_CLAUDE_REFUSED_TOKEN}").as_bytes(),
+                )
+            }
+            _ => return Err(AnthropicRejection::Credential),
+        };
+        if headers.contains_key("proxy-authorization")
+            || headers.contains_key("cookie")
+            || !exact_single(headers, "anthropic-version", "2023-06-01")
+            || !exact_single(headers, "content-type", "application/json")
+            || !exact_single(headers, "accept-encoding", "identity")
+        {
+            return Err(AnthropicRejection::Headers);
+        }
+        if body.is_empty() || body.len() > MAX_BODY {
+            return Err(AnthropicRejection::Body);
+        }
+        let request: Value = serde_json::from_slice(body).map_err(|_| AnthropicRejection::Body)?;
+        let model = request
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| {
+                !model.is_empty()
+                    && model.len() <= MAX_ANTHROPIC_MODEL
+                    && model.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_')
+                    })
+            })
+            .ok_or(AnthropicRejection::Body)?
+            .to_owned();
+        if !request.get("messages").is_some_and(Value::is_array) {
+            return Err(AnthropicRejection::Body);
+        }
+        let stream = request.get("stream").and_then(Value::as_bool) == Some(true);
+        if route == AnthropicRoute::CountTokens && request.get("stream").is_some() {
+            return Err(AnthropicRejection::Body);
+        }
+        let client_identity = exact_single(headers, "x-app", "cli")
+            && headers.get_all("user-agent").iter().count() == 1
+            && headers
+                .get("user-agent")
+                .is_some_and(|value| value.as_bytes().starts_with(b"claude-cli/"));
+        Ok(AdmittedAnthropic {
+            kind,
+            route,
+            stream,
+            model,
+            refused,
+            client_identity,
+        })
     }
 
     fn responses(
@@ -517,7 +760,9 @@ impl BrokerUpstreamTransport for SyntheticProvider {
         request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
         #[cfg(feature = "kind-e2e")]
-        if let Some(family) = SyntheticOpenAiSmokeTransport::api_key_family(&request) {
+        if let Some(family) = SyntheticOpenAiSmokeTransport::api_key_family(&request)
+            && !SyntheticOpenAiSmokeTransport::is_kind_anthropic_fixture(&request)
+        {
             let key = {
                 let mut counters = self.0.lock().map_err(|_| BrokerUpstreamError::Protocol)?;
                 let (attempt, key) = match family {
@@ -555,6 +800,9 @@ impl BrokerUpstreamTransport for SyntheticProvider {
         if target.host_str() == Some("github.com") {
             return self.github_git(&method, &target, &headers, &body).await;
         }
+        if target.host_str() == Some("api.anthropic.com") {
+            return self.anthropic(&method, &target, &headers, &body);
+        }
         if method == Method::GET
             && target.origin().ascii_serialization() == "https://api.github.com"
         {
@@ -574,6 +822,113 @@ impl BrokerUpstreamTransport for SyntheticProvider {
             _ => Err(BrokerUpstreamError::Protocol),
         }
     }
+}
+
+fn exact_single(headers: &HeaderMap, name: &str, expected: &str) -> bool {
+    let mut values = headers.get_all(name).iter();
+    values
+        .next()
+        .is_some_and(|value| value.as_bytes() == expected.as_bytes())
+        && values.next().is_none()
+}
+
+/// Claude Code-compatible replies with fixed public text. The model is the
+/// request's own validated identifier; nothing else is reflected.
+fn anthropic_response(
+    route: AnthropicRoute,
+    stream: bool,
+    model: &str,
+) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+    let (content_type, mut body) = anthropic_reply(route, stream, model)?;
+    let second = body.split_off(body.len() / 2);
+    Ok(BrokerUpstreamResponse::new(
+        StatusCode::OK,
+        HeaderMap::from_iter([(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static(content_type),
+        )]),
+        Box::pin(futures::stream::iter([Ok(body.into()), Ok(second.into())])),
+    ))
+}
+
+/// The provider's refusal of an expired or revoked subscription token, with
+/// fixed public text.
+fn anthropic_refusal() -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+    let body = anthropic_refusal_body()?;
+    Ok(BrokerUpstreamResponse::new(
+        StatusCode::UNAUTHORIZED,
+        HeaderMap::from_iter([(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )]),
+        Box::pin(futures::stream::once(async move { Ok(body.into()) })),
+    ))
+}
+
+fn anthropic_refusal_body() -> Result<Vec<u8>, BrokerUpstreamError> {
+    serde_json::to_vec(&json!({
+        "type": "error",
+        "error": {"type": "authentication_error",
+                  "message": "Synthetic Kind subscription token refusal"},
+    }))
+    .map_err(|_| BrokerUpstreamError::Protocol)
+}
+
+fn anthropic_reply(
+    route: AnthropicRoute,
+    stream: bool,
+    model: &str,
+) -> Result<(&'static str, Vec<u8>), BrokerUpstreamError> {
+    let json = |value: Value| {
+        serde_json::to_vec(&value)
+            .map(|body| ("application/json", body))
+            .map_err(|_| BrokerUpstreamError::Protocol)
+    };
+    if route == AnthropicRoute::CountTokens {
+        return json(json!({"input_tokens": 1}));
+    }
+    let usage = json!({"input_tokens": 1, "output_tokens": 1});
+    if !stream {
+        return json(json!({
+            "id": "msg_codewire_kind", "type": "message", "role": "assistant", "model": model,
+            "content": [{"type": "text", "text": CLAUDE_MARKER}],
+            "stop_reason": "end_turn", "stop_sequence": null, "usage": usage,
+        }));
+    }
+    let events = [
+        (
+            "message_start",
+            json!({"type": "message_start", "message": {
+            "id": "msg_codewire_kind", "type": "message", "role": "assistant", "model": model,
+            "content": [], "stop_reason": null, "stop_sequence": null, "usage": usage}}),
+        ),
+        (
+            "content_block_start",
+            json!({"type": "content_block_start", "index": 0,
+            "content_block": {"type": "text", "text": ""}}),
+        ),
+        (
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": CLAUDE_MARKER}}),
+        ),
+        (
+            "content_block_stop",
+            json!({"type": "content_block_stop", "index": 0}),
+        ),
+        (
+            "message_delta",
+            json!({"type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+            "usage": {"output_tokens": 1}}),
+        ),
+        ("message_stop", json!({"type": "message_stop"})),
+    ];
+    let mut body = Vec::new();
+    for (name, data) in events {
+        body.extend_from_slice(format!("event: {name}\ndata: {data}\n\n").as_bytes());
+    }
+    Ok(("text/event-stream", body))
 }
 
 fn github_app_refresh_body() -> String {
@@ -728,6 +1083,8 @@ fn validate_access(token: &str) -> Result<u64, BrokerUpstreamError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[cfg(feature = "kind-e2e")]
@@ -759,6 +1116,7 @@ mod tests {
         struct Authority {
             slot: &'static str,
             material: &'static str,
+            kind: CredentialAuthKind,
             status: CredentialStatus,
             denied: bool,
             calls: Arc<Mutex<Vec<LeaseCoordinates>>>,
@@ -770,6 +1128,7 @@ mod tests {
                 Self {
                     slot,
                     material,
+                    kind: CredentialAuthKind::ApiKey,
                     status: CredentialStatus::Active,
                     denied: false,
                     calls: Arc::new(Mutex::new(Vec::new())),
@@ -835,7 +1194,7 @@ mod tests {
                         placement: Placement::Platform,
                         owner: Owner::User(OwnerId::parse("synthetic-owner").unwrap()),
                         provider: ProviderId::parse(self.slot).unwrap(),
-                        authentication_kind: CredentialAuthKind::ApiKey,
+                        authentication_kind: self.kind,
                         display_name: "synthetic-only".into(),
                         account_hint: None,
                         ssh_public_key: None,
@@ -1027,6 +1386,143 @@ mod tests {
             assert_eq!(counters.responses, 3);
             assert_eq!(counters.refreshes, 1);
             assert_eq!(counters.attempts[Scenario::BrokerRetryExhausted.index()], 3);
+        }
+
+        fn main_anthropic_request(path: &str) -> CredentialBridgeRequest {
+            let mut request = request("anthropic", path, "beta=true");
+            for (name, value) in [
+                ("authorization", "Bearer codewire-managed"),
+                ("anthropic-beta", "claude-code-20250219"),
+                ("user-agent", "claude-cli/2.1.238 (external, sdk-cli)"),
+                ("x-app", "cli"),
+            ] {
+                request.headers.push(CredentialHttpHeader {
+                    name: name.into(),
+                    value: value.as_bytes().to_vec(),
+                });
+            }
+            request
+        }
+
+        #[tokio::test]
+        async fn main_anthropic_modes_and_cw_api_dispatch_coexist_without_schedule_fallback() {
+            let provider = SyntheticProvider::new();
+            for (kind, material, status) in [
+                (
+                    CredentialAuthKind::ApiKey,
+                    KIND_ANTHROPIC_API_KEY,
+                    StatusCode::OK,
+                ),
+                (
+                    CredentialAuthKind::OAuth,
+                    KIND_CLAUDE_SUBSCRIPTION_TOKEN,
+                    StatusCode::OK,
+                ),
+                (
+                    CredentialAuthKind::OAuth,
+                    KIND_CLAUDE_REFUSED_TOKEN,
+                    StatusCode::UNAUTHORIZED,
+                ),
+            ] {
+                for path in ["/messages", "/messages/count_tokens"] {
+                    let mut authority = Authority::new("anthropic", material);
+                    authority.kind = kind;
+                    let broker = OpenAiBroker::new(authority.clone(), provider.clone()).unwrap();
+                    let guest_request = main_anthropic_request(path);
+                    let id = Uuid::parse_str(&guest_request.request_id).unwrap();
+                    let (actual_status, _, mut body) =
+                        broker.execute(guest_request).await.unwrap().into_parts();
+                    assert_eq!(actual_status, status);
+                    let mut bytes = Vec::new();
+                    while let Some(chunk) = body.next().await {
+                        bytes.extend(chunk.unwrap());
+                        assert!(bytes.len() <= 64 * 1024);
+                    }
+                    let output = String::from_utf8(bytes).unwrap();
+                    assert!(!output.contains(material));
+                    if status == StatusCode::UNAUTHORIZED {
+                        assert!(output.contains("authentication_error"));
+                    } else if path == "/messages" {
+                        assert!(output.contains(CLAUDE_MARKER));
+                        assert!(!output.contains("CWCLAUDE21238"));
+                    } else {
+                        assert!(output.contains("input_tokens"));
+                    }
+                    assert_eq!(authority.reads.load(Ordering::Relaxed), 1);
+                    assert_eq!(
+                        *authority.calls.lock().unwrap(),
+                        [(
+                            id,
+                            "anthropic".into(),
+                            if path == "/messages" {
+                                "messages".into()
+                            } else {
+                                "count-tokens".into()
+                            },
+                            "anthropic-api".into()
+                        )]
+                    );
+                    // Interleave the independent CW API mode. Neither a main
+                    // provider 401 nor a prior main success may select it.
+                    let cw_authority = Authority::new("anthropic", ANTHROPIC_API_KEY);
+                    let cw = OpenAiBroker::new(cw_authority, provider.clone()).unwrap();
+                    let (status, _, mut body) = cw
+                        .execute(request("anthropic", "/messages", ""))
+                        .await
+                        .unwrap()
+                        .into_parts();
+                    assert_eq!(status, StatusCode::OK);
+                    let mut bytes = Vec::new();
+                    while let Some(chunk) = body.next().await {
+                        bytes.extend(chunk.unwrap());
+                        assert!(bytes.len() <= 64 * 1024);
+                    }
+                    let output = String::from_utf8(bytes).unwrap();
+                    assert!(output.contains("CWCLAUDE21238 broker [REDACTED]"));
+                    assert!(!output.contains(ANTHROPIC_API_KEY));
+                }
+            }
+            assert_eq!(attempts(&provider), (0, 6));
+            let counters = provider.0.lock().unwrap();
+            assert_eq!(counters.anthropic_calls, 6);
+            assert_eq!(counters.anthropic_rejections, 0);
+            assert_eq!(counters.responses, 0);
+            assert_eq!(counters.refreshes, 0);
+            assert_eq!(counters.attempts, [0; 3]);
+        }
+
+        #[tokio::test]
+        async fn main_anthropic_lease_denial_or_revocation_never_reaches_material_or_dispatch() {
+            for (kind, material) in [
+                (CredentialAuthKind::ApiKey, KIND_ANTHROPIC_API_KEY),
+                (CredentialAuthKind::OAuth, KIND_CLAUDE_SUBSCRIPTION_TOKEN),
+                (CredentialAuthKind::OAuth, KIND_CLAUDE_REFUSED_TOKEN),
+            ] {
+                for (denied, status) in [
+                    (true, CredentialStatus::Active),
+                    (false, CredentialStatus::Revoked),
+                ] {
+                    let provider = SyntheticProvider::new();
+                    let mut authority = Authority::new("anthropic", material);
+                    authority.kind = kind;
+                    authority.denied = denied;
+                    authority.status = status;
+                    let broker = OpenAiBroker::new(authority.clone(), provider.clone()).unwrap();
+                    assert!(matches!(
+                        broker.execute(main_anthropic_request("/messages")).await,
+                        Err(BrokerRequestError::Denied)
+                    ));
+                    assert_eq!(authority.calls.lock().unwrap().len(), 1);
+                    assert_eq!(authority.reads.load(Ordering::Relaxed), 0);
+                    assert_eq!(attempts(&provider), (0, 0));
+                    let counters = provider.0.lock().unwrap();
+                    assert_eq!(counters.anthropic_calls, 0);
+                    assert_eq!(counters.anthropic_rejections, 0);
+                    assert_eq!(counters.responses, 0);
+                    assert_eq!(counters.refreshes, 0);
+                    assert_eq!(counters.attempts, [0; 3]);
+                }
+            }
         }
 
         #[tokio::test]
@@ -1517,6 +2013,325 @@ mod tests {
         assert_eq!(exhausted.status(2), StatusCode::BAD_REQUEST);
         assert_eq!(exhausted.status(3), StatusCode::BAD_REQUEST);
         assert_eq!(exhausted.status(u64::MAX), StatusCode::BAD_REQUEST);
+    }
+
+    fn anthropic_headers(kind: AnthropicKind) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            ("accept", "application/json"),
+            ("content-type", "application/json"),
+            ("anthropic-version", "2023-06-01"),
+            ("accept-encoding", "identity"),
+        ] {
+            headers.insert(name, HeaderValue::from_static(value));
+        }
+        match kind {
+            AnthropicKind::ApiKey => {
+                headers.insert(
+                    "x-api-key",
+                    HeaderValue::from_static(KIND_ANTHROPIC_API_KEY),
+                );
+                headers.insert(
+                    "anthropic-beta",
+                    HeaderValue::from_static("claude-code-20250219"),
+                );
+            }
+            AnthropicKind::SubscriptionToken => {
+                headers.insert(
+                    "authorization",
+                    HeaderValue::from_str(&format!("Bearer {KIND_CLAUDE_SUBSCRIPTION_TOKEN}"))
+                        .unwrap(),
+                );
+                headers.insert(
+                    "anthropic-beta",
+                    HeaderValue::from_static("claude-code-20250219,oauth-2025-04-20"),
+                );
+                headers.insert(
+                    "user-agent",
+                    HeaderValue::from_static("claude-cli/2.1.238 (external, sdk-cli)"),
+                );
+                headers.insert("x-app", HeaderValue::from_static("cli"));
+            }
+        }
+        headers
+    }
+
+    fn anthropic_body(stream: bool) -> Vec<u8> {
+        serde_json::to_vec(&json!({"model":"claude-sonnet-5","max_tokens":32,
+            "messages":[{"role":"user","content":"Reply"}],"stream":stream}))
+        .unwrap()
+    }
+
+    fn messages() -> url::Url {
+        "https://api.anthropic.com/v1/messages?beta=true"
+            .parse()
+            .unwrap()
+    }
+
+    /// Run `operation` with a JSON subscriber on the fixture's own target and
+    /// return what it logged.
+    fn logged<T>(operation: impl FnOnce() -> T) -> (T, String) {
+        #[derive(Clone, Default)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = Buffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(
+                "off,codewire_kind_credential_fixture=info",
+            ))
+            .with_writer(move || writer.clone())
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, operation);
+        let text = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        (result, text)
+    }
+
+    /// The refused token is answered as a real provider answers an expired
+    /// or revoked one: a 401 `authentication_error` with fixed text.
+    #[test]
+    fn anthropic_refuses_the_refused_token_with_an_authentication_error() {
+        let provider = SyntheticProvider::new();
+        let mut headers = anthropic_headers(AnthropicKind::SubscriptionToken);
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {KIND_CLAUDE_REFUSED_TOKEN}")).unwrap(),
+        );
+        let (response, log) = logged(|| {
+            provider.anthropic(&Method::POST, &messages(), &headers, &anthropic_body(true))
+        });
+        assert!(response.is_ok());
+        let admitted = provider
+            .admit_anthropic(&Method::POST, &messages(), &headers, &anthropic_body(true))
+            .unwrap();
+        assert!(admitted.refused && admitted.client_identity);
+        assert_eq!(admitted.kind, AnthropicKind::SubscriptionToken);
+        let bytes = anthropic_refusal_body().unwrap();
+        let error: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(error["error"]["type"], "authentication_error");
+        for secret in [KIND_CLAUDE_REFUSED_TOKEN, KIND_CLAUDE_SUBSCRIPTION_TOKEN] {
+            assert!(!String::from_utf8_lossy(&bytes).contains(secret));
+            assert!(!log.contains(secret));
+        }
+        let event: Value = serde_json::from_str(log.trim()).unwrap();
+        assert_eq!(event["fields"]["event"], "anthropic_response");
+        assert_eq!(event["fields"]["kind"], "subscription_token");
+        assert_eq!(event["fields"]["status"], 401);
+        assert_eq!(event["fields"]["refused"], true);
+        // Its placeholder is still refused as malformed, never a 401.
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer codewire-managed"),
+        );
+        assert!(
+            provider
+                .anthropic(&Method::POST, &messages(), &headers, &anthropic_body(true))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn anthropic_accepts_each_credential_form_and_replies_with_the_fixed_marker() {
+        for kind in [AnthropicKind::ApiKey, AnthropicKind::SubscriptionToken] {
+            let provider = SyntheticProvider::new();
+            for stream in [true, false] {
+                let (response, log) = logged(|| {
+                    provider.anthropic(
+                        &Method::POST,
+                        &messages(),
+                        &anthropic_headers(kind),
+                        &anthropic_body(stream),
+                    )
+                });
+                assert!(response.is_ok());
+                let (content_type, body) =
+                    anthropic_reply(AnthropicRoute::Messages, stream, "claude-sonnet-5").unwrap();
+                assert_eq!(
+                    content_type,
+                    if stream {
+                        "text/event-stream"
+                    } else {
+                        "application/json"
+                    }
+                );
+                let text = String::from_utf8(body).unwrap();
+                assert!(text.contains(CLAUDE_MARKER));
+                for secret in [KIND_ANTHROPIC_API_KEY, KIND_CLAUDE_SUBSCRIPTION_TOKEN] {
+                    assert!(!text.contains(secret));
+                    assert!(!log.contains(secret));
+                }
+                let event: Value = serde_json::from_str(log.trim()).unwrap();
+                let fields = &event["fields"];
+                assert_eq!(fields["event"], "anthropic_response");
+                assert_eq!(fields["kind"], kind.name());
+                assert_eq!(fields["route"], "messages");
+                assert_eq!(fields["stream"], stream);
+                assert_eq!(fields["status"], 200);
+                assert_eq!(fields["refused"], false);
+                assert_eq!(
+                    fields["client_identity"],
+                    kind == AnthropicKind::SubscriptionToken
+                );
+                assert_eq!(
+                    fields
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from([
+                        "anthropic_calls",
+                        "client_identity",
+                        "event",
+                        "kind",
+                        "message",
+                        "refused",
+                        "route",
+                        "status",
+                        "stream",
+                    ])
+                );
+            }
+            let count = "https://api.anthropic.com/v1/messages/count_tokens"
+                .parse()
+                .unwrap();
+            let mut body: Value = serde_json::from_slice(&anthropic_body(false)).unwrap();
+            body.as_object_mut().unwrap().remove("stream");
+            assert!(
+                provider
+                    .anthropic(
+                        &Method::POST,
+                        &count,
+                        &anthropic_headers(kind),
+                        &serde_json::to_vec(&body).unwrap(),
+                    )
+                    .is_ok()
+            );
+            assert_eq!(
+                anthropic_reply(AnthropicRoute::CountTokens, false, "claude-sonnet-5").unwrap(),
+                ("application/json", br#"{"input_tokens":1}"#.to_vec())
+            );
+            let counters = provider.0.lock().unwrap();
+            assert_eq!(
+                (counters.anthropic_calls, counters.anthropic_rejections),
+                (3, 0)
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_refuses_placeholders_mixed_or_wrong_credentials_and_a_missing_oauth_beta() {
+        let provider = SyntheticProvider::new();
+        let refused = |headers: HeaderMap, expected: AnthropicRejection| {
+            let (result, log) = logged(|| {
+                provider.anthropic(&Method::POST, &messages(), &headers, &anthropic_body(true))
+            });
+            assert!(result.is_err());
+            assert_eq!(
+                provider.admit_anthropic(
+                    &Method::POST,
+                    &messages(),
+                    &headers,
+                    &anthropic_body(true)
+                ),
+                Err(expected)
+            );
+            let event: Value = serde_json::from_str(log.trim()).unwrap();
+            assert_eq!(event["fields"]["event"], "anthropic_rejected");
+            assert_eq!(event["fields"]["reason"], expected.name());
+            for secret in [
+                KIND_ANTHROPIC_API_KEY,
+                KIND_CLAUDE_SUBSCRIPTION_TOKEN,
+                "codewire-managed",
+            ] {
+                assert!(!log.contains(secret));
+            }
+        };
+        // The Sandbox placeholder in either header never reaches a provider.
+        let mut placeholder = anthropic_headers(AnthropicKind::SubscriptionToken);
+        placeholder.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer codewire-managed"),
+        );
+        refused(placeholder, AnthropicRejection::Placeholder);
+        let mut placeholder = anthropic_headers(AnthropicKind::ApiKey);
+        placeholder.insert("x-api-key", HeaderValue::from_static("codewire-managed"));
+        refused(placeholder, AnthropicRejection::Placeholder);
+        // Both forms at once, or a form with the other's value, is refused.
+        let mut both = anthropic_headers(AnthropicKind::SubscriptionToken);
+        both.insert(
+            "x-api-key",
+            HeaderValue::from_static(KIND_ANTHROPIC_API_KEY),
+        );
+        refused(both, AnthropicRejection::Credential);
+        let mut swapped = anthropic_headers(AnthropicKind::ApiKey);
+        swapped.insert(
+            "x-api-key",
+            HeaderValue::from_static(KIND_CLAUDE_SUBSCRIPTION_TOKEN),
+        );
+        refused(swapped, AnthropicRejection::Credential);
+        let mut bearer_key = anthropic_headers(AnthropicKind::SubscriptionToken);
+        bearer_key.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {KIND_ANTHROPIC_API_KEY}")).unwrap(),
+        );
+        refused(bearer_key, AnthropicRejection::Credential);
+        refused(HeaderMap::new(), AnthropicRejection::Credential);
+        // An OAuth bearer requires the provider's OAuth beta.
+        for beta in [None, Some("claude-code-20250219"), Some("oauth-2025-04-21")] {
+            let mut headers = anthropic_headers(AnthropicKind::SubscriptionToken);
+            headers.remove("anthropic-beta");
+            if let Some(beta) = beta {
+                headers.insert("anthropic-beta", HeaderValue::from_static(beta));
+            }
+            refused(headers, AnthropicRejection::OAuthBeta);
+        }
+        let mut encoded = anthropic_headers(AnthropicKind::ApiKey);
+        encoded.insert("accept-encoding", HeaderValue::from_static("gzip"));
+        refused(encoded, AnthropicRejection::Headers);
+        assert_eq!(provider.0.lock().unwrap().anthropic_calls, 0);
+        assert_eq!(provider.0.lock().unwrap().anthropic_rejections, 10);
+
+        let headers = anthropic_headers(AnthropicKind::ApiKey);
+        for (method, target) in [
+            (Method::GET, "https://api.anthropic.com/v1/messages"),
+            (
+                Method::POST,
+                "https://api.anthropic.com/v1/messages?beta=false",
+            ),
+            (Method::POST, "https://api.anthropic.com/v1/models"),
+            (Method::POST, "https://api.anthropic.com/api/oauth/usage"),
+        ] {
+            assert_eq!(
+                provider.admit_anthropic(
+                    &method,
+                    &target.parse().unwrap(),
+                    &headers,
+                    &anthropic_body(true)
+                ),
+                Err(AnthropicRejection::Route),
+                "{target}"
+            );
+        }
+        for body in [
+            b"".to_vec(),
+            b"not json".to_vec(),
+            br#"{"messages":[]}"#.to_vec(),
+        ] {
+            assert_eq!(
+                provider.admit_anthropic(&Method::POST, &messages(), &headers, &body),
+                Err(AnthropicRejection::Body)
+            );
+        }
     }
 
     #[test]

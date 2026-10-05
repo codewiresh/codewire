@@ -1,7 +1,7 @@
 # Codewire Quick Start
 
-Codewire environments own durable sessions. The same session grammar works for
-native local environments and platform environments.
+Codewire environments own durable command and managed agent sessions. The same
+session grammar works for local hosts, local sandboxes and platform sandboxes.
 
 ## Install
 
@@ -21,9 +21,16 @@ Create a native local environment using the workspace image:
 
 ```bash
 cw env create --local \
+  --type sandbox \
   --name my-app \
   --image workspace \
   --path .
+```
+
+For execution directly on your host, use its project directory:
+
+```bash
+cw env create --local --type host --name host-work --path .
 ```
 
 Platform environments use the same `env` family without `--local`:
@@ -53,6 +60,14 @@ the image in place.
 Protected local provider accounts are enrolled on the host with
 `cw credentials --local` and exposed only through an explicit access profile.
 The managed credential value is never copied into the workspace.
+
+To use a Claude Pro, Max, Team or Enterprise plan with Claude Code in a hosted
+Sandbox, run `claude setup-token`, then paste the freshly printed token into
+`cw credentials --platform add claude-subscription --name NAME` and select it
+with `cw credentials --platform --profile=PROFILE set anthropic NAME`. The token
+stays in Codewire; the Sandbox receives only a placeholder. Codewire records an
+expiry one year after you add it; replace it with `cw credentials --platform
+rotate NAME`.
 
 ## Run durable sessions
 
@@ -86,6 +101,40 @@ cw shell my-app
 Detach from an interactive attachment with `Ctrl+B d`. Session navigation uses
 the other documented `Ctrl+B` actions.
 
+## Orchestrate managed agents
+
+Create or select an environment, then launch an orchestrator and its workers:
+
+```bash
+cw run host-work --name orchestrator --agent codex \
+  --prompt 'Coordinate the backlog review and collect worker results.'
+cw run host-work --name review --parent orchestrator --agent claude \
+  --prompt 'Review the assigned issues and report dependencies and acceptance criteria.'
+cw list host-work
+cw list --all
+cw msg host-work review 'Include the Linux sandbox dependencies in your report.'
+cw inbox host-work review
+cw logs host-work review
+```
+
+`--agent` launches a managed conversation. `cw msg` sends a task or follow-up
+through its driver. `cw steer` and `cw interrupt` control an active turn when
+the driver advertises that capability; unsupported controls return an error.
+Use `--model` and `--effort` to select settings supported by the chosen driver.
+Parent sessions receive worker completion notifications, and `cw inbox` keeps
+message results available after reconnecting.
+
+Run a normal shell command as another named session in the same environment:
+
+```bash
+cw run host-work --name checks --parent orchestrator -- cargo test
+cw attach host-work checks
+```
+
+For a local sandbox, create it with `--local --type sandbox`; for a platform
+sandbox, create it without `--local`. Pass that environment name to the same
+`run`, `list`, `msg`, `inbox`, `attach` and `logs` commands.
+
 ## Manage lifecycle
 
 ```bash
@@ -110,13 +159,23 @@ cw env rm my-app
 ## Mesh inventory
 
 Environment daemons own runtime participation. The CLI manages networks and
-shows registered nodes; it does not run a second host-owned node or session
-service.
+shows registered nodes. `cw member` manages explicitly pinned trusted hosts
+for remote control over the Mesh; execution requires the member's granted
+capability.
 
 ```bash
 cw network list
 cw network use project-alpha
 cw network nodes
+cw member identity
+cw member status
+```
+
+After enrolling and pinning a trusted member, target its environment explicitly:
+
+```bash
+cw --member build-linux list host-work
+cw --member build-linux run host-work --name checks -- cargo test
 ```
 
 Use `cw mesh up`, `cw mesh status`, and `cw mesh down` only to manage a local
@@ -130,7 +189,9 @@ guidance for removed commands:
 - `cw local ...` → `cw env COMMAND --local ...`
 - `cw exec ENV -- COMMAND` → `cw run ENV -- COMMAND`
 - `cw node` → environment daemon lifecycle or `cw network nodes`
-- `cw run --local` and `cw run --node` → create/select an environment, then
-  pass that environment to `cw run`
-- `--agent` → `--coding-agent`
+- `cw run --local` → `cw env create --local --type host|sandbox`, then pass
+  that environment to `cw run`
+- `cw run --node` → enroll and pin a trusted member, then use `--member`
+- `--agent` on environment creation → `--coding-agent`; `cw run --agent`
+  selects the managed conversation driver
 - `node:session` → separate `ENV SESSION` arguments

@@ -660,6 +660,99 @@ fn organizations_hold_api_keys_and_ssh_but_no_profile_selects_their_oauth() {
     }
 }
 
+/// A Claude subscription token is the Anthropic slot's OAuth form. It is a
+/// personal login: an organization can neither hold one nor have any profile
+/// select one, while a personal profile selects it for the same two routes as
+/// an Anthropic API key.
+#[test]
+fn claude_subscription_tokens_are_personal_anthropic_oauth_only() {
+    let user = Owner::User(owner_id("user-one"));
+    let org = Owner::Organization(owner_id("org-one"));
+    assert!(user.may_hold(CredentialAuthKind::OAuth));
+    assert!(!org.may_hold(CredentialAuthKind::OAuth));
+    assert!(org.may_hold(CredentialAuthKind::ApiKey));
+
+    let catalog = builtin_provider_catalog();
+    let anthropic = catalog
+        .get(&provider_id("anthropic"))
+        .expect("Anthropic provider");
+    assert!(anthropic.supports_authentication_kind(CredentialAuthKind::OAuth));
+    let token = |id: &str, owner: &Owner| CredentialMetadata {
+        placement: Placement::Platform,
+        provider: provider_id("anthropic"),
+        authentication_kind: CredentialAuthKind::OAuth,
+        account_hint: None,
+        ..credential(id, owner.clone())
+    };
+    let personal = token("claude-personal", &user);
+    let organization = token("claude-org", &org);
+    let platform_profile = |owner: &Owner, credential: &CredentialMetadata| AccessProfile {
+        placement: Placement::Platform,
+        entries: [(slot("anthropic"), credential.id.clone())]
+            .into_iter()
+            .collect(),
+        ..profile("work", owner.clone(), "unused")
+    };
+    let credentials: BTreeMap<_, _> = [&personal, &organization]
+        .into_iter()
+        .map(|credential| (credential.id.clone(), credential.clone()))
+        .collect();
+
+    // Neither an organization profile nor a personal one may select an
+    // organization's subscription token.
+    for owner in [&org, &user] {
+        assert_eq!(
+            validate_profile_entries(
+                &platform_profile(owner, &organization),
+                &credentials,
+                &catalog
+            ),
+            Err(AccessError::OrganizationOAuthUnsupported)
+        );
+    }
+
+    // The owner's own token is selectable in the Anthropic slot only, with
+    // exactly the Messages and token-counting permissions.
+    let selected = platform_profile(&user, &personal);
+    validate_profile_entries(&selected, &credentials, &catalog).unwrap();
+    let mut grant_context = context([personal.id.clone()]);
+    grant_context.placement = GrantPlacement::Platform;
+    grant_context.organization_id = Some(owner_id("org-one"));
+    grant_context.allow_personal_credentials = true;
+    let grants = derive_available_grants(
+        &grant_context,
+        &binding(&selected),
+        &selected,
+        &credentials,
+        &catalog,
+        1_800_000_000,
+    )
+    .unwrap();
+    assert!(grants.reconnect_required.is_empty());
+    let grant = grants
+        .grants
+        .iter()
+        .find(|grant| grant.capability_slot == slot("anthropic"))
+        .expect("Anthropic grant");
+    assert_eq!(
+        grant.permissions,
+        BTreeSet::from([
+            permission("messages", "anthropic-api"),
+            permission("count-tokens", "anthropic-api"),
+        ])
+    );
+    assert_eq!(
+        HttpProvider::for_credential(&slot("anthropic"), &personal),
+        Some(HttpProvider::AnthropicSubscriptionToken)
+    );
+    let mut misplaced = platform_profile(&user, &personal);
+    misplaced.entries = [(slot("codex"), personal.id.clone())].into_iter().collect();
+    assert!(matches!(
+        validate_profile_entries(&misplaced, &credentials, &catalog),
+        Err(AccessError::UnsupportedCapability { .. })
+    ));
+}
+
 #[test]
 fn duplicate_and_empty_provider_definitions_fail_closed() {
     let definition = ProviderDefinition {

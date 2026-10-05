@@ -324,9 +324,11 @@ kind_credential_probe() {
     python3 -B -u - "$environment" "$mode" < "$ROOT/scripts/ci/verify/kind/credential_probe.py"
 }
 
-# An authority change must take effect on the daemon's connected epoch within
-# this many milliseconds of the first request after it.
-KIND_AUTHORITY_CHANGE_WITHIN_MS=5000
+# The broker reuses a hosted epoch's authority decision for at most 60
+# seconds. A membership or binding change must take effect on the daemon's
+# connected epoch within this many milliseconds of the first request after it,
+# polled once a second. A credential change applies to the very next request.
+KIND_AUTHORITY_CHANGE_WITHIN_MS=65000
 
 # Proxied Codex requests through the workspace daemon's loopback ingress, on
 # its long-lived bridge epoch: the path stock Codex's proxy provider uses, and
@@ -427,6 +429,26 @@ SQL
     echo "::error::the credential fixture environment was not rebound to another profile revision" >&2
     return 1
   }
+}
+
+# Replace the environment's sandbox Pods through Stop/Start. The new workspace
+# daemon admits a new bridge epoch, which evaluates authority afresh; the
+# login it delivers again proves that epoch serves.
+replace_kind_credential_sandbox() {
+  local environment="$1" before after
+  before="$(kubectl -n "$SANDBOX_NS" get pod "$(kind_credential_workspace "$environment")" \
+    -o 'jsonpath={.metadata.uid}')" || return $?
+  kind_credential_cli env --platform stop "$environment" --output json >/dev/null || return $?
+  wait_kind_credential_environment "$environment" stopped || return $?
+  kind_credential_cli env --platform start "$environment" --output json >/dev/null || return $?
+  wait_kind_credential_environment "$environment" running || return $?
+  after="$(kubectl -n "$SANDBOX_NS" get pod "$(kind_credential_workspace "$environment")" \
+    -o 'jsonpath={.metadata.uid}')" || return $?
+  [ -n "$after" ] && [ "$after" != "$before" ] || {
+    echo '::error::Stop/Start did not replace the workspace Pod' >&2
+    return 1
+  }
+  kind_credential_codex_login "$environment" redelivered >/dev/null || return $?
 }
 
 # One codex_login.py mode in the exact workspace. Its stdout is closed events
@@ -572,7 +594,7 @@ assert_kind_credential_provider_counts() {
       [.event, .scenario, .attempt, .status, .response_calls, .refresh_calls]] as $observed |
     # After the retry scenarios of the session, every baseline response is
     # one more served request, numbered in order.
-    ($baseline | type == "number" and . == floor and . >= 2 and . <= 64) and
+    ($baseline | type == "number" and . == floor and . >= 2 and . <= 256) and
     ($observed == ([
       ["provider_response", "baseline", 1, 200, 1, 0],
       ["provider_response", "baseline", 2, 200, 2, 0],
@@ -597,9 +619,12 @@ assert_kind_credential_provider_counts() {
 assert_kind_credential_material_reuse() {
   # On the daemon's bridge epoch: a request, a second one, then Reconnect,
   # then one more, all on that one epoch. The second request reuses the first
-  # one's login without a material read; the request after Reconnect reads
-  # and presents the new login. A new epoch admitted between them is a
-  # failure, never an excuse: it would make the reuse proof vacuous.
+  # one's authority decision and login: no resolve or grant evaluation, one
+  # record read and no material read, unless that decision reached its minute
+  # in between. Reconnect changed the record, so the very next request
+  # evaluates again, reads and presents the new login. A new epoch admitted
+  # between them is a failure, never an excuse: it would make the reuse proof
+  # vacuous.
   local logs
   logs="$(kubectl -n "$NS" logs deployment/codewire-credential-service -c credential-service)" ||
     return $?
@@ -640,7 +665,10 @@ assert_kind_credential_material_reuse() {
     # The warm-up filled before its line, at most its total time earlier.
     ($reuse.at - $warm.at + $warm.total_ms / 1000) < $window and
     ($reuse | .cache == "hit" and .material_reads == 0 and .unwraps == 0) and
-    ($requests[-1] | .cache == "miss" and .material_reads >= 1)
+    (($reuse | .authority == "reused" and .record_reads == 1 and .authority_checks == 0
+        and .grant_evaluations == 0 and .resolves == 0)
+      or ($warm.authority == "reused" and $reuse.authority == "evaluated")) and
+    ($requests[-1] | .cache == "miss" and .material_reads >= 1 and .authority == "evaluated")
   ' <<<"$logs" >/dev/null || {
     echo '::error::the epoch material cache did not reuse, or reused a login after Reconnect' >&2
     return 1
@@ -652,9 +680,19 @@ assert_kind_credential_material_reuse() {
 # its proxied Codex request number FROM on. The two must agree request by
 # request: a 200 is a served response, and a 403 a denial (after revocation,
 # the fixed 403 Reconnect explanation). A change's probe ends at its first
-# denial, which must follow the request before it on the same,
-# still-connected epoch: no epoch was admitted between them. Each change took
-# effect within the bound.
+# denial, and a revocation's single request is refused; each must follow the
+# request before it on the same, still-connected epoch: no epoch was admitted
+# between them. Each change took effect within the bound. Requests served
+# while a refusal was awaited, and repeated requests, reused the epoch's
+# authority decision: no authority check, resolve or grant evaluation, and
+# one record read. Repeated requests also reused the login, with no material
+# read. A request served while a refusal is awaited may read it again, at
+# most once per change: a full-check lease that the same change refuses on
+# that epoch, such as the daemon's Codex login check, clears the epoch's
+# material cache. A refusal, a restore and a revocation evaluated the
+# decision; a refusal answered while a restore was awaited may come from
+# either. A `sandbox_replaced` record marks the next request as the first on
+# a new epoch: one was admitted before it, cold.
 assert_kind_credential_authority_changes() {
   local from="$1" probes="$2" logs
   [[ "$from" =~ ^[0-9]+$ ]] || return 1
@@ -670,11 +708,14 @@ assert_kind_credential_authority_changes() {
     [$timed | to_entries[] | select(.value.event == "proxied_request")][$from:] as $logged |
     # What each probe saw, request by request. A change probe saw the answer
     # from before the change until its last request.
-    [$probes[] | . as $probe
+    [range(0; $probes | length) as $at | $probes[$at] | select(.event == "daemon_probe")
+      | . as $probe
+      | ($at > 0 and $probes[$at - 1].event == "sandbox_replaced") as $replaced
       | (if $probe.within_ms == null then [] else
           [range(1; $probe.requests) | {status: (if $probe.status == 200 then 403 else 200 end),
             mode: "before", change: false}] end)
         + [{status: $probe.status, mode: $probe.mode, change: ($probe.within_ms != null)}]
+      | map(. + {replaced: false}) | .[0].replaced = $replaced
       | .[]] as $seen |
     # A credential that needs Reconnect answers with its fixed 403
     # explanation, without a provider call.
@@ -683,15 +724,33 @@ assert_kind_credential_authority_changes() {
       elif $seen.mode == "revoked" then .outcome == "response" and .status == 403
       elif $seen.mode == "denied" then .outcome == "denied"
       else .outcome == "denied" or (.outcome == "response" and .status == 403) end;
-    ($probes | length) > 0 and ($logged | length) == ($seen | length) and
-    all($probes[]; .event == "daemon_probe"
-      and (.within_ms == null or (.within_ms == $within and .waited_ms <= $within))) and
+    def hit: .cache == "hit" and .material_reads == 0 and .unwraps == 0;
+    def decision_reused: .authority == "reused" and .authority_checks == 0
+      and .resolves == 0 and .grant_evaluations == 0 and .record_reads == 1
+      and (hit or (.cache == "miss" and .material_reads == 1));
+    def decided($seen):
+      if $seen.replaced then .cache == "miss"
+      elif $seen.mode == "before" and $seen.status == 403 then true
+      elif $seen.mode == "before" then decision_reused
+      elif $seen.status == 200 and ($seen.change | not) then decision_reused and hit
+      else .authority == "evaluated" end;
+    def admitted($from; $to): any($timed[($from + 1):$to][]; .event == "epoch_admission");
+    ($seen | length) > 0 and ($logged | length) == ($seen | length) and
+    ($probes[-1].event == "daemon_probe") and
+    ([range(0; $seen | length) as $index
+      | select($seen[$index].mode == "before" and $seen[$index].status == 200
+          and $logged[$index].value.cache != "hit")] | length)
+      <= ([$probes[] | select(.within_ms != null and .status == 403)] | length) and
+    all($probes[]; .event == "sandbox_replaced" or (.event == "daemon_probe"
+      and (.within_ms == null or (.within_ms == $within and .waited_ms <= $within)))) and
     all(range(0; $seen | length);
       . as $index | $seen[$index] as $now | $logged[$index] as $log |
-      ($log.value | agrees($now)) and
-      (if $now.change and $now.status == 403 then
+      ($log.value | agrees($now) and decided($now)) and
+      (if ($now.change or $now.mode == "revoked") and $now.status == 403 then
          $index > 0 and ($logged[$index - 1].value | .outcome == "response" and .status == 200) and
-         all($timed[($logged[$index - 1].key + 1):$log.key][]; .event != "epoch_admission")
+         (admitted($logged[$index - 1].key; $log.key) | not)
+       elif $now.replaced then
+         $index > 0 and admitted($logged[$index - 1].key; $log.key)
        else true end))
   ' <<<"$logs" >/dev/null || {
     echo '::error::an authority change did not reach the connected daemon epoch in time, or the service logs disagree with the probes' >&2
@@ -957,8 +1016,10 @@ kind_credential_native_smoke() (
   kind_credential_daemon_probe "$environment" success
   assert_kind_credential_provider_counts 6
   assert_kind_credential_material_reuse
-  # Authority changes on that same, still-connected epoch: each must deny its
-  # requests within the bound, and repeated requests between them are served.
+  # Authority changes on that same, still-connected epoch, while it is minutes
+  # from a natural renewal: repeated requests reuse its authority decision;
+  # each change refuses requests once that decision reaches its minute, and
+  # each restore serves them again, within the bound.
   journey_from="$(kind_credential_codex_request_count)" || return $?
   KIND_DAEMON_PROBE_LOG="$(mktemp "$RUN_DIR/credential-daemon-authority.XXXXXX")" || return $?
   kind_credential_daemon_probe "$environment" success
@@ -979,8 +1040,13 @@ kind_credential_native_smoke() (
   rebind_kind_credential_environment "$environment" "$bound_revision"
   kind_credential_daemon_probe "$environment" success "$KIND_AUTHORITY_CHANGE_WITHIN_MS"
   kind_credential_daemon_probe "$environment" success
+  # Pod replacement admits a new epoch, which serves at once.
+  replace_kind_credential_sandbox "$environment"
+  printf '%s\n' '{"event":"sandbox_replaced"}' >> "$KIND_DAEMON_PROBE_LOG"
+  kind_credential_daemon_probe "$environment" success
+  # Revocation refuses the very next request on that epoch.
   kind_credential_cli credentials --platform revoke "$credential_name" --output json
-  kind_credential_daemon_probe "$environment" revoked "$KIND_AUTHORITY_CHANGE_WITHIN_MS"
+  kind_credential_daemon_probe "$environment" revoked
   assert_kind_credential_authority_changes "$journey_from" "$KIND_DAEMON_PROBE_LOG"
   # The gateway capability path denies the revoked credential too.
   kind_credential_probe "$environment" revoked
@@ -988,7 +1054,7 @@ kind_credential_native_smoke() (
   # restores its proxy config.toml at the next check.
   kind_credential_codex_login "$environment" revoked || return $?
   # Every daemon request the provider served is one more baseline response.
-  served="$(jq -s 'map(.served) | add' "$KIND_DAEMON_PROBE_LOG")" || return $?
+  served="$(jq -s 'map(.served // 0) | add' "$KIND_DAEMON_PROBE_LOG")" || return $?
   assert_kind_credential_provider_counts "$((6 + served))"
 
   # Do not unbind before destroy: terminal cleanup itself must remove the
@@ -1001,4 +1067,257 @@ kind_credential_native_smoke() (
   kind_credential_cli credentials --platform --profile "$profile_name" delete --yes
   kind_credential_cli credentials --platform delete "$credential_name" --yes
   log "public synthetic Codex flow, ChatGPT login delivery, native rotation/retry, revocation and terminal cleanup passed"
+)
+
+# Fixed, public synthetic Anthropic credentials accepted only by the Kind
+# fixture's in-process provider (credential-service runtime/kind/provider.rs).
+# They are entered through the public CLI exactly as a user pastes an API key
+# or a `claude setup-token` value; claude_session.py proves none reaches a
+# Sandbox. The provider answers the refused token with a 401
+# `authentication_error`, as a real provider answers an expired or revoked one.
+KIND_ANTHROPIC_API_KEY='sk-ant-api03-CW_KIND_SYNTHETIC_ANTHROPIC_KEY-0123456789abcdef'
+KIND_CLAUDE_SUBSCRIPTION_TOKEN='sk-ant-oat01-CW_KIND_SYNTHETIC_CLAUDE_TOKEN-0123456789abcdef'
+KIND_CLAUDE_REFUSED_TOKEN='sk-ant-oat01-CW_KIND_SYNTHETIC_REFUSED_TOKEN-0123456789abcdef'
+# Bound on one daemon-launched Claude Code session reaching a terminal state.
+KIND_CLAUDE_SESSION_ATTEMPTS=90
+
+# The managed client selection recorded for the live binding of one exact
+# workspace Pod: the record launch authority reads. Waits briefly for the
+# binding writer; prints exactly one value or fails.
+kind_credential_managed_clients() {
+  local environment="$1" pod_uid="$2" attempt rows
+  local -r uuid='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  [[ "$environment" =~ $uuid && "$pod_uid" =~ $uuid ]] || return 1
+  for ((attempt = 0; attempt < 30; attempt++)); do
+    rows="$(kubectl -n "$NS" exec -i deploy/postgres -- psql -U codewire -d codewire \
+      -v ON_ERROR_STOP=1 -v environment="$environment" -v pod_uid="$pod_uid" -At <<'SQL'
+SELECT managed_credential_clients FROM sandbox_workspace_bindings
+WHERE environment_id = :'environment' AND pod_uid = :'pod_uid' AND released_at IS NULL;
+SQL
+    )" || return $?
+    if [[ "$rows" =~ ^v[12]:[a-z0-9,]{1,40}$ ]]; then
+      printf '%s\n' "$rows"
+      return 0
+    fi
+    [ -z "$rows" ] || break
+    sleep 2
+  done
+  echo "::error::environment ${environment} has no single live workspace binding selection" >&2
+  return 1
+}
+
+# Orchestration recorded the form the bound credential's kind selects: the
+# Anthropic client alone, or with GitHub while the creator is connected. Bit
+# 0x20 is the subscription form.
+assert_kind_credential_claude_selection() {
+  local form="$1" clients="$2"
+  case "$form:$clients" in
+    api_key:v1:anthropic | api_key:v2:14 | subscription_token:v2:24 | subscription_token:v2:34) ;;
+    *)
+      echo "::error::the ${form} form recorded unexpected managed clients ${clients}" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Stage claude_session.py in the exact workspace Pod for a daemon-launched
+# session to run. Prints the staged path.
+kind_credential_claude_stage() {
+  local pod="$1" driver
+  [[ "$pod" =~ ^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$ ]] || return 1
+  driver="/tmp/codewire-kind-claude-session-${RANDOM}${RANDOM}.py"
+  kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- \
+    sh -c 'umask 022 && cat > "$1"' sh "$driver" \
+    < "$ROOT/scripts/ci/verify/kind/claude_session.py" || return $?
+  printf '%s\n' "$driver"
+}
+
+# One claude_session.py run in a session the workspace daemon launches
+# through the public `cw run` path, so it sees exactly the environment the
+# daemon projects. Launch, terminal state and saved output are all unary
+# calls. Its output is closed events only; the run passes only when its
+# session exited 0 and its last event is its own completion.
+kind_credential_claude_run() {
+  local environment="$1" driver="$2" form="$3" outcome="$4"
+  local launched session attempt state output
+  [[ "$driver" =~ ^/tmp/codewire-kind-claude-session-[0-9]{1,12}\.py$ ]] || return 1
+  case "$form" in api_key | subscription_token) ;; *) return 1 ;; esac
+  case "$outcome" in success | refused) ;; *) return 1 ;; esac
+  launched="$(kind_credential_cli run "$environment" --no-tty --detach --output json -- \
+    python3 -B -u "$driver" "$form" "$outcome")" || return $?
+  session="$(jq -er '.session_id | select(type == "string" and test("^[A-Za-z0-9_-]{1,128}$"))' \
+    <<<"$launched")" || {
+    echo "::error::cw run did not report a launched session for the ${form} form" >&2
+    return 1
+  }
+  for ((attempt = 0; attempt < KIND_CLAUDE_SESSION_ATTEMPTS; attempt++)); do
+    state="$(kind_credential_cli list "$environment" --output json | jq -er --arg id "$session" '
+      [.[] | select(.session_id == $id)] |
+      if length == 1 then .[0] | "\(.state) \(.exit_code // "none")"
+      else error("expected one launched session") end')" || return $?
+    case "$state" in
+      "Starting "* | "Running "*) sleep 2 ;;
+      *) break ;;
+    esac
+  done
+  output="$(kind_credential_cli logs "$environment" "$session" --raw)" || return $?
+  output="$(jq -Rc 'fromjson? | select(type == "object" and has("event"))' <<<"$output")"
+  printf '%s\n' "$output" >> "$RUN_DIR/credential-claude-session.jsonl" || return $?
+  printf '%s\n' "$output"
+  if [ "$state" != "Exited 0" ] || ! jq -se --arg form "$form" --arg outcome "$outcome" '
+      length == 3
+      and .[0] == {event: "claude_projection", form: $form, source: "daemon_session"}
+      and .[1].event == "claude_session" and .[1].form == $form and .[1].outcome == $outcome
+      and (.[1].client_version | type == "string")
+      and .[2] == {event: "complete", form: $form, outcome: $outcome}' <<<"$output" >/dev/null; then
+    echo "::error::stock Claude Code acceptance failed for the ${form} form (${outcome}); session ${state}" >&2
+    return 1
+  fi
+}
+
+# The fixture's Anthropic events since its pod started. Prints their count
+# after asserting that every event after the first `baseline` ones answered
+# exactly `form`, with at least one, and all with `status`. Claude Code's own
+# identity headers reach the provider for the subscription form only, so the
+# closed `client_identity` flag distinguishes the forms at the provider too.
+# A rejection of any kind, including the Sandbox placeholder reaching the
+# provider, fails.
+assert_kind_credential_anthropic_events() {
+  local baseline="$1" form="$2" status="$3"
+  [[ "$baseline" =~ ^[0-9]+$ ]] || return 1
+  case "$form" in api_key | subscription_token) ;; *) return 1 ;; esac
+  case "$status" in 200 | 401) ;; *) return 1 ;; esac
+  kind_credential_fixture_events | jq -er --argjson baseline "$baseline" --arg kind "$form" \
+    --argjson status "$status" '
+    [.[] | select(.event == "anthropic_response" or .event == "anthropic_rejected")] as $all
+    | if ($all | length) > $baseline
+        and all($all[$baseline:][]; .event == "anthropic_response" and .kind == $kind
+          and .status == $status and .refused == ($status == 401)
+          and .client_identity == ($kind == "subscription_token")
+          and (.route == "messages" or .route == "count_tokens"))
+      then ($all | length) else error("unexpected Anthropic provider events") end' || {
+    echo "::error::the synthetic provider did not see only the ${form} credential answering ${status}" >&2
+    return 1
+  }
+}
+
+# The token's metadata after a provider refusal and after each replacement:
+# the provider's anthropic OAuth kind, Active, with a hard expiry one year out.
+assert_kind_credential_claude_token() {
+  local name="$1" revision="$2"
+  [[ "$revision" =~ ^[1-9][0-9]*$ ]] || return 1
+  kind_credential_cli credentials --platform get "$name" --output json | jq -e \
+    --arg name "$name" --arg revision "$revision" '.[0] as $c
+      | (($c.expiresAtUnix // $c.expires_at_unix) | tonumber) - (now | floor) as $left
+      | length == 1 and $c.name == $name and $c.provider == "anthropic"
+        and $c.status == "CREDENTIAL_STATUS_ACTIVE"
+        and ($c.authenticationKind // $c.authentication_kind) == "CREDENTIAL_AUTHENTICATION_KIND_OAUTH"
+        and (($c.revocationGeneration // $c.revocation_generation) | tostring) == $revision
+        and $left > 364 * 86400 and $left <= 365 * 86400' >/dev/null || {
+    echo "::error::Claude subscription token ${name} is not Active at revision ${revision}" >&2
+    return 1
+  }
+}
+
+# Stock Claude Code in a hosted workspace through the managed Anthropic route,
+# launched as a daemon session: first with an Anthropic API key, then, after
+# rebinding the same environment, with a Claude subscription token, both
+# entered through the public CLI. The provider accepts only the real
+# synthetic credential in each form and refuses the placeholder, so completed
+# sessions prove the broker substituted it while the Sandbox held only the
+# placeholder. Then failure and recovery: the token is replaced with one the
+# provider refuses, Claude Code reports the 401, the credential stays Active,
+# and replacing it with a good token makes the next session succeed.
+kind_credential_claude_session() (
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
+    log "release-image gate: synthetic Claude Code credential composition is not selected"
+    return 0
+  fi
+  log "running public Anthropic API key and Claude subscription token acceptance with stock Claude Code"
+  local KIND_CREDENTIAL_CLI_HOME suffix key_name token_name key_profile token_profile environment
+  local workspace_image form profile credential update generation pair pod pod_uid clients baseline
+  local driver
+  set -E
+  trap 'echo "::error::Claude Code credential acceptance failed: command=${BASH_COMMAND} status=$?" >&2' ERR
+  workspace_image="$(kind_workspace_runtime_image)" || return $?
+  KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-claude.XXXXXX)"
+  trap 'rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
+  [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ] || return 1
+  suffix="${RANDOM}-${RANDOM}"
+  key_name="kind-anthropic-key-$suffix"
+  token_name="kind-claude-token-$suffix"
+  key_profile="kind-claude-key-$suffix"
+  token_profile="kind-claude-token-$suffix"
+  prepare_kind_credential_cli
+  kind_credential_cli org set org_contract_1
+  kind_credential_cli org current | awk '
+    $1 == "ID:" { id = $2; count++ }
+    END { exit !(count == 1 && id == "org_contract_1") }'
+  # Material only through stdin, as a user pastes it; never an argument.
+  printf '%s' "$KIND_ANTHROPIC_API_KEY" |
+    kind_credential_cli credentials --platform add anthropic --name "$key_name"
+  printf '%s' "$KIND_CLAUDE_SUBSCRIPTION_TOKEN" |
+    kind_credential_cli credentials --platform add claude-subscription --name "$token_name"
+  kind_credential_cli credentials --platform get "$key_name" --output json | jq -e \
+    --arg name "$key_name" '.[0] as $c | length == 1 and $c.name == $name
+      and $c.provider == "anthropic" and $c.status == "CREDENTIAL_STATUS_ACTIVE"
+      and ($c.authenticationKind // $c.authentication_kind) == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' \
+    >/dev/null
+  # The subscription token is the provider's OAuth kind with a hard expiry one
+  # year after it was added.
+  assert_kind_credential_claude_token "$token_name" 1
+  kind_credential_cli credentials --platform --profile "$key_profile" set anthropic "$key_name"
+  kind_credential_cli credentials --platform --profile "$token_profile" set anthropic "$token_name"
+  environment="$(kind_credential_cli env --platform create --name "$key_profile" \
+    --image "$workspace_image" \
+    --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
+  [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
+  wait_kind_credential_environment "$environment" running
+  baseline="$(kind_credential_fixture_events | jq -er \
+    '[.[] | select(.event == "anthropic_response" or .event == "anthropic_rejected")] | length')"
+  for form in api_key subscription_token; do
+    profile="$key_profile"
+    [ "$form" = api_key ] || profile="$token_profile"
+    update="$(kind_credential_cli env --platform update "$environment" \
+      --profile "platform:$profile" --yes --output json)"
+    generation="$(jq -er '.operation_generation |
+      if type == "number" and . > 0 and . == floor then .
+      else error("expected a positive operation generation") end' <<<"$update")"
+    wait_kind_credential_environment "$environment" running
+    pair="$(wait_kind_credential_sandbox_pair "$environment" "$generation")"
+    pod="$(sed -n '1p' <<<"$pair")"
+    pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')"
+    clients="$(kind_credential_managed_clients "$environment" "$pod_uid")"
+    assert_kind_credential_claude_selection "$form" "$clients"
+    driver="$(kind_credential_claude_stage "$pod")"
+    kind_credential_claude_run "$environment" "$driver" "$form" success
+    baseline="$(assert_kind_credential_anthropic_events "$baseline" "$form" 200)"
+  done
+
+  # Failure and recovery on the same bound credential, so no restart: the
+  # owner replaces the token with one the provider refuses. Claude Code
+  # reports the 401 and the credential stays Active; nothing marks or
+  # withholds it. Replacing it with a good token restores the next session.
+  printf '%s' "$KIND_CLAUDE_REFUSED_TOKEN" |
+    kind_credential_cli credentials --platform rotate "$token_name"
+  assert_kind_credential_claude_token "$token_name" 2
+  kind_credential_claude_run "$environment" "$driver" subscription_token refused
+  baseline="$(assert_kind_credential_anthropic_events "$baseline" subscription_token 401)"
+  assert_kind_credential_claude_token "$token_name" 2
+  printf '%s' "$KIND_CLAUDE_SUBSCRIPTION_TOKEN" |
+    kind_credential_cli credentials --platform rotate "$token_name"
+  assert_kind_credential_claude_token "$token_name" 3
+  kind_credential_claude_run "$environment" "$driver" subscription_token success
+  baseline="$(assert_kind_credential_anthropic_events "$baseline" subscription_token 200)"
+
+  kind_credential_cli env --platform rm "$environment" --yes --output json
+  wait_kind_credential_environment "$environment" destroyed
+  for profile in "$key_profile" "$token_profile"; do
+    kind_credential_cli credentials --platform --profile "$profile" delete --yes
+  done
+  for credential in "$key_name" "$token_name"; do
+    kind_credential_cli credentials --platform revoke "$credential" --output json
+    kind_credential_cli credentials --platform delete "$credential" --yes
+  done
+  log "stock Claude Code in daemon sessions passed with an Anthropic API key and a Claude subscription token, through a provider refusal and its replacement; none reached the Sandbox"
 )

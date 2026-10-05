@@ -266,8 +266,10 @@ impl<A: PlatformRuntimeAuthority + 'static> PlatformBrokerLeaseProvider<A> {
             credentials: self.credentials.clone(),
             profiles: self.profiles.clone(),
             leases: self.leases.clone(),
-            // The signer reads through the store for every signature.
+            // The signer reads through the store for every signature, and
+            // runs full authority checks for each one.
             material: None,
+            decision: None,
             ssh: None,
         };
         let admission = scope.clone();

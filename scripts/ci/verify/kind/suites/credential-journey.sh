@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Retained credential journey: certificate bootstrap and the public
-# enroll/profile/native Codex acceptance. The acceptance asserts the synthetic
+# Retained credential journey: certificate bootstrap, the public
+# enroll/profile/native Codex acceptance and stock Claude Code with an Anthropic
+# API key and a Claude subscription token. The acceptance asserts the synthetic
 # fixture's exact provider events since its pod started, so this suite needs
 # fake credential mode and restarts the credential-service first. 10+ minutes.
 set -euo pipefail
@@ -33,5 +34,6 @@ run_retained_credentials_suite() {
   kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s
   kind_credential_bootstrap_smoke
   kind_credential_native_smoke
+  kind_credential_claude_session
   log "retained credentials suite green"
 }

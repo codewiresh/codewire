@@ -313,8 +313,9 @@ mod tests {
             expires_at_unix: None,
         };
         let person = Owner::User(OwnerId::parse("synthetic-owner").unwrap());
-        // Codex (ChatGPT) and GitHub logins are personal.
-        for provider in ["openai", "github"] {
+        // Codex (ChatGPT) and GitHub logins and Claude subscription tokens
+        // (Anthropic OAuth) are personal.
+        for provider in ["openai", "github", "anthropic"] {
             assert_eq!(
                 CredentialRecord::registered(
                     &org,

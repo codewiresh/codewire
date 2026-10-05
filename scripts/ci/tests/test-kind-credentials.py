@@ -11,7 +11,9 @@ import json
 import os
 from pathlib import Path
 import ssl
+import shlex
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -32,6 +34,11 @@ DAEMON_SPEC = importlib.util.spec_from_file_location(
     "daemon_probe", ROOT / "scripts/ci/verify/kind/daemon_probe.py")
 DAEMON = importlib.util.module_from_spec(DAEMON_SPEC)
 DAEMON_SPEC.loader.exec_module(DAEMON)
+CLAUDE_SPEC = importlib.util.spec_from_file_location(
+    "claude_session", ROOT / "scripts/ci/verify/kind/claude_session.py")
+CLAUDE = importlib.util.module_from_spec(CLAUDE_SPEC)
+CLAUDE_SPEC.loader.exec_module(CLAUDE)
+PROVIDER = ROOT / "crates/codewire-credential-service/src/runtime/kind/provider.rs"
 ENVIRONMENT = "86fb3daa-dde0-4fb4-bf83-6e2399d78a5f"
 WORKSPACE_UID = "57f35d02-39f9-40ed-b9e1-bc4a64ad3b0e"
 GATEWAY_UID = "65d41c9c-510b-4c8a-961d-338a879c1fa4"
@@ -546,7 +553,7 @@ assert_kind_credential_provider_counts %d
 ''' % (logs, pods, baseline))
 
     def test_provider_audit_accepts_one_refresh_retry_and_closed_exhaustion(self):
-        for baseline in (2, 3, 6, 12, 15):
+        for baseline in (2, 3, 6, 12, 15, 64, 65, 130, 256):
             with self.subTest(baseline=baseline):
                 result = self.provider_counts(self.provider_events(baseline), baseline)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -556,14 +563,15 @@ assert_kind_credential_provider_counts %d
                 self.assertNotEqual(
                     self.provider_counts(self.provider_events(events), baseline).returncode, 0)
         # A baseline outside the session's own count or the journey's bound.
-        for baseline in (1, 65):
+        for baseline in (1, 257):
             with self.subTest(baseline=baseline):
                 self.assertNotEqual(
                     self.provider_counts(self.provider_events(baseline), baseline).returncode, 0)
 
     @staticmethod
     def reuse_lines(presented=(2, 2, 2, 0), caches=("miss", "hit", "miss"), admitted_at=None,
-                    gap=1.5, total_ms=40):
+                    gap=1.5, total_ms=40, authorities=("evaluated", "reused", "evaluated"),
+                    record_reads=1):
         """The gateway request (attempt 3), then the daemon epoch's warm-up at
         10 s, its reuse `gap` later, and the request after Reconnect at 20 s +
         `gap`, with an epoch admission at `admitted_at` seconds if given."""
@@ -574,20 +582,24 @@ assert_kind_credential_provider_counts %d
         def at(seconds):
             whole, fraction = divmod(round(seconds * 1_000_000), 1_000_000)
             return f"2026-10-04T00:{whole // 60:02d}:{whole % 60:02d}.{fraction:06d}Z"
-        def timed(cache, seconds):
+        def timed(cache, seconds, authority="evaluated"):
             read = 0 if cache == "hit" else 1
+            evaluated = int(authority != "reused")
             return {"timestamp": at(seconds), "target": "codewire_credential_broker::timing",
                     "fields": {"event": "proxied_request", "slot": "codex", "route": "openai-api",
                                "outcome": "response", "status": 200, "cache": cache,
-                               "total_ms": total_ms, "material_reads": read, "unwraps": read}}
+                               "total_ms": total_ms, "material_reads": read, "unwraps": read,
+                               "authority": authority, "record_reads": record_reads,
+                               "authority_checks": evaluated, "grant_evaluations": evaluated,
+                               "resolves": evaluated}}
         def admission(seconds):
             return {"timestamp": at(seconds), "target": "codewire_credential_broker::timing",
                     "fields": {"event": "epoch_admission", "outcome": "admitted"}}
         # The gateway request is its own epoch.
         timeline = [(5, admission(5)), (5.1, fixture[0]), (5.2, timed("miss", 5.2)),
-                    (10, fixture[1]), (10, timed(caches[0], 10)),
-                    (10 + gap, fixture[2]), (10 + gap, timed(caches[1], 10 + gap)),
-                    (20 + gap, fixture[3]), (20 + gap, timed(caches[2], 20 + gap))]
+                    (10, fixture[1]), (10, timed(caches[0], 10, authorities[0])),
+                    (10 + gap, fixture[2]), (10 + gap, timed(caches[1], 10 + gap, authorities[1])),
+                    (20 + gap, fixture[3]), (20 + gap, timed(caches[2], 20 + gap, authorities[2]))]
         if admitted_at is not None:
             timeline.append((admitted_at, admission(admitted_at)))
         return [line for _, line in sorted(timeline, key=lambda item: item[0])]
@@ -607,6 +619,13 @@ assert_kind_credential_material_reuse
     def test_material_reuse_requires_a_real_hit_on_one_epoch_then_the_reconnected_login(self):
         result = self.material_reuse(self.reuse_lines())
         self.assertEqual(result.returncode, 0, result.stderr)
+        # The warm-up may reuse a decision that reaches its minute before the
+        # reuse, which then evaluates again; its login is still reused.
+        for authorities in (("reused", "reused", "evaluated"),
+                            ("reused", "evaluated", "evaluated")):
+            with self.subTest(authorities=authorities):
+                result = self.material_reuse(self.reuse_lines(authorities=authorities))
+                self.assertEqual(result.returncode, 0, result.stderr)
         # A new epoch admitted before the warm-up or after the last request is
         # outside the window.
         for admitted_at in (9.9, 30):
@@ -633,60 +652,96 @@ assert_kind_credential_material_reuse
                 self.reuse_lines(presented=(2, 2, 2, 2)),
                 self.reuse_lines(presented=(0, 0, 0, 0)),
                 self.reuse_lines(presented=(2, 2, 1, 0)),
+                # The reuse resolved authority right after an evaluation, or
+                # read more than its record; Reconnect reused the decision.
+                self.reuse_lines(authorities=("evaluated", "evaluated", "evaluated")),
+                self.reuse_lines(authorities=("evaluated", "none", "evaluated")),
+                self.reuse_lines(record_reads=2),
+                self.reuse_lines(authorities=("evaluated", "reused", "reused")),
+                # A reused label on a line that still resolved authority.
+                [dict(line, fields=dict(line["fields"], resolves=1))
+                 if line.get("fields", {}).get("cache") == "hit" else line
+                 for line in self.reuse_lines()],
                 self.reuse_lines()[:-1]):
             with self.subTest(lines=lines):
                 result = self.material_reuse(lines)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("reused a login after Reconnect", result.stderr)
+                self.assertNotIn("jq: error", result.stderr)
 
     # The authority journey's probes in order: (mode, final status, requests,
-    # bound). Changes are polled within the bound.
-    WITHIN = 5000
+    # bound). Changes are polled within the bound; a `sandbox_replaced` record
+    # precedes the replaced Pod's first request. Request numbers: 1, 2 served;
+    # 3 the role change's refusal; 4 its restore; 5 served; 6 the rebind's
+    # refusal; 7 its restore; 8 served; 9 the replaced Pod's first; 10 revoked.
+    WITHIN = 65000
     JOURNEY = (("success", 200, 1, None), ("success", 200, 1, None),
                ("denied", 403, 1, WITHIN), ("success", 200, 1, WITHIN),
                ("success", 200, 1, None), ("denied", 403, 1, WITHIN),
                ("success", 200, 1, WITHIN), ("success", 200, 1, None),
-               ("revoked", 403, 1, WITHIN))
+               ("sandbox_replaced", None, 0, None),
+               ("success", 200, 1, None), ("revoked", 403, 1, None))
 
     @classmethod
     def authority_lines(cls, journey=None, outcomes=None, admitted_before=(), waited=40,
-                        earlier=3):
+                        earlier=3, replaced_admission=True):
         """`earlier` codex requests before the journey, then the journey's
-        requests as its probes saw them, with an admission before the journey
-        request numbers in `admitted_before`; `outcomes` overrides logged
-        outcomes by journey request number."""
+        requests as its probes saw them and as the decision path logs them,
+        with an admission before the journey request numbers in
+        `admitted_before` and, unless `replaced_admission` is false, before a
+        replaced Pod's first request; `outcomes` overrides logged fields by
+        journey request number."""
         journey = list(cls.JOURNEY if journey is None else journey)
         outcomes = outcomes or {}
         probes, statuses = [], []
+        replaced = False
         for mode, status, requests, within in journey:
+            if mode == "sandbox_replaced":
+                probes.append({"event": "sandbox_replaced"})
+                replaced = True
+                continue
             served = 0
             for _ in range(requests - 1):
                 before = 403 if status == 200 else 200
-                statuses.append((before, "before"))
+                statuses.append((before, "before", False, False))
                 served += before == 200
-            statuses.append((status, mode))
+            statuses.append((status, mode, within is not None, replaced))
+            replaced = False
             served += status == 200
             probes.append({"event": "daemon_probe", "mode": mode, "status": status,
                            "requests": requests, "served": served,
                            "waited_ms": waited if within else 30, "within_ms": within})
+        if replaced_admission:
+            first = [number for number, entry in enumerate(statuses, start=1) if entry[3]]
+            admitted_before = tuple(admitted_before) + tuple(first)
         def timed(fields):
             return {"timestamp": "2026-10-04T01:00:00.000000Z",
                     "target": "codewire_credential_broker::timing",
                     "fields": {"event": "proxied_request", "slot": "codex",
                                "route": "openai-api", "total_ms": 40, **fields}}
         lines = [timed({"outcome": "response", "status": 200}) for _ in range(earlier)]
-        for number, (status, mode) in enumerate(statuses, start=1):
+        reused = {"authority": "reused", "authority_checks": 0, "resolves": 0,
+                  "grant_evaluations": 0, "record_reads": 1, "cache": "hit",
+                  "material_reads": 0, "unwraps": 0}
+        evaluated = {"authority": "evaluated", "authority_checks": 1, "resolves": 1,
+                     "grant_evaluations": 1, "record_reads": 1, "cache": "miss",
+                     "material_reads": 1, "unwraps": 1}
+        for number, (status, mode, change, first) in enumerate(statuses, start=1):
             if number in admitted_before:
                 lines.append({"timestamp": "2026-10-04T01:00:00.000000Z",
                               "target": "codewire_credential_broker::timing",
                               "fields": {"event": "epoch_admission", "outcome": "admitted"}})
             if status == 200:
-                fields = {"outcome": "response", "status": 200}
+                # A repeated request, or one served while a refusal is
+                # awaited, reuses the decision; a restore or a new epoch's
+                # first request evaluates it and reads the login again.
+                fields = {"outcome": "response", "status": 200,
+                          **(evaluated if change or first else reused)}
             elif mode == "revoked":
                 # The fixed 403 Reconnect explanation, as the service logs it.
-                fields = {"outcome": "response", "status": 403}
+                fields = {"outcome": "response", "status": 403, "authority": "evaluated"}
             else:
-                fields = {"outcome": "denied", "status": 0}
+                fields = {"outcome": "denied", "status": 0, "authority": "evaluated"}
             fields.update(outcomes.get(number, {}))
             lines.append(timed(fields))
         return lines, probes
@@ -714,42 +769,81 @@ assert_kind_credential_authority_changes %d '%s'
         # A change may take effect after some served requests, within the
         # bound, and a restore after some denied ones.
         slow = list(self.JOURNEY)
-        slow[2] = ("denied", 403, 3, self.WITHIN)
+        slow[2] = ("denied", 403, 61, self.WITHIN)
         slow[3] = ("success", 200, 2, self.WITHIN)
-        slow[8] = ("revoked", 403, 4, self.WITHIN)
-        accepted.append(self.authority_lines(slow, waited=4999))
+        accepted.append(self.authority_lines(slow, waited=64999))
         # A restore, or a request between changes, may cross a new epoch.
         accepted.append(self.authority_lines(admitted_before=(4, 5)))
+        # A request served while a refusal is awaited may read the login again
+        # once per change: a full-check lease the same change refuses, such as
+        # the daemon's Codex login check, clears the epoch's material cache.
+        reread = {"cache": "miss", "material_reads": 1, "unwraps": 1}
+        accepted.append(self.authority_lines(slow, outcomes={10: reread, 40: reread}))
+        # A replaced Pod's first request may reuse its new epoch's admission.
+        accepted.append(self.authority_lines(outcomes={9: {"authority": "reused",
+                                                           "record_reads": 1}}))
+        # A rebind's restore is refused from the decision until it ages out.
+        late = list(self.JOURNEY)
+        late[6] = ("success", 200, 40, self.WITHIN)
+        accepted.append(self.authority_lines(
+            late, waited=40000,
+            outcomes={number: {"authority": "reused"} for number in range(7, 46)}))
         for lines, probes in accepted:
             with self.subTest(probes=probes):
                 result = self.authority_changes(lines, probes)
                 self.assertEqual(result.returncode, 0, result.stderr)
         rejected = []
-        # A denial that landed on a new epoch, not the connected one.
-        for number in (3, 6, 9):
+        # A refusal or the revocation that landed on a new epoch, not the
+        # connected one, or a replaced Pod that admitted no new epoch.
+        for number in (3, 6, 10):
             rejected.append(self.authority_lines(admitted_before=(number,)))
-        rejected.append(self.authority_lines(slow, admitted_before=(5,)))
+        rejected.append(self.authority_lines(slow, admitted_before=(63,)))
+        rejected.append(self.authority_lines(replaced_admission=False))
         # A change that took longer than the bound.
-        rejected.append(self.authority_lines(waited=5001))
+        rejected.append(self.authority_lines(waited=65001))
         # The service saw something else than the probe.
         for number, outcome in ((3, {"outcome": "response", "status": 200}),
                                 (3, {"outcome": "response", "status": 403}),
-                                (9, {"outcome": "denied", "status": 0}),
-                                (9, {"outcome": "response", "status": 200}),
+                                (10, {"outcome": "denied", "status": 0}),
+                                (10, {"outcome": "response", "status": 200}),
                                 (1, {"outcome": "denied", "status": 0}),
                                 (6, {"outcome": "response", "status": 200})):
             rejected.append(self.authority_lines(outcomes={number: outcome}))
-        # A missing or extra request.
+        # A repeated request that resolved authority, read more than its
+        # record, or read material; a refusal, restore or revocation that
+        # reused a decision; a replaced Pod whose first request was warm.
+        for number, outcome in ((1, {"authority": "evaluated"}),
+                                (2, {"resolves": 1}),
+                                (2, {"authority_checks": 1}),
+                                (5, {"grant_evaluations": 1}),
+                                (5, {"record_reads": 2}),
+                                (8, {"cache": "miss", "material_reads": 1, "unwraps": 1}),
+                                (3, {"authority": "reused"}),
+                                (4, {"authority": "reused"}),
+                                (10, {"authority": "reused"}),
+                                (9, {"cache": "hit"})):
+            rejected.append(self.authority_lines(outcomes={number: outcome}))
+        # A request served while the role change was awaited that evaluated,
+        # or more re-reads of the login than changes.
+        rejected.append(self.authority_lines(slow, outcomes={4: {"authority": "evaluated"}}))
+        rejected.append(self.authority_lines(
+            slow, outcomes={number: reread for number in (10, 20, 30)}))
+        rejected.append(self.authority_lines(
+            slow, outcomes={10: dict(reread, material_reads=2)}))
+        # A missing or extra request, or a replacement record without a request.
         lines, probes = self.authority_lines()
         rejected.append((lines[:-1], probes))
         rejected.append((lines + lines[-1:], probes))
         rejected.append((lines, probes[:-1]))
+        rejected.append((lines, probes + [{"event": "sandbox_replaced"}]))
         rejected.append((lines, []))
         for lines, probes in rejected:
             with self.subTest(probes=probes):
                 result = self.authority_changes(lines, probes)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("did not reach the connected daemon epoch in time", result.stderr)
+                # A rejection, never a jq failure that would reject anything.
+                self.assertNotIn("jq: error", result.stderr)
         # The journey starts after the requests before it.
         lines, probes = self.authority_lines(earlier=5)
         self.assertEqual(self.authority_changes(lines, probes, earlier=5).returncode, 0)
@@ -759,7 +853,7 @@ assert_kind_credential_authority_changes %d '%s'
         directory = tempfile.TemporaryDirectory(prefix="kind-daemon-probe-")
         self.addCleanup(directory.cleanup)
         log = Path(directory.name) / "probes.jsonl"
-        for mode, within in (("success", ""), ("denied", "5000"), ("revoked", "5000")):
+        for mode, within in (("success", ""), ("denied", "65000"), ("revoked", "")):
             with self.subTest(mode=mode, within=within):
                 result = self.shell('''
 SANDBOX_NS=dev-sandboxes
@@ -822,6 +916,39 @@ set_kind_credential_member_role '%s' '%s'
 ''' % (environment, role))
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertEqual(result.stderr, "")
+
+    def test_sandbox_replacement_requires_a_new_workspace_pod_and_a_redelivered_login(self):
+        for after, expected in (("uid-2", 0), ("uid-1", 1), ("", 1)):
+            with self.subTest(after=after):
+                result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+uids=(uid-1 '%s')
+COUNT="$(mktemp)"; echo 0 > "$COUNT"
+CALLS="$(mktemp)"
+kind_credential_workspace() { [ "$1" = '%s' ] || return 97; printf 'workspace-pod\\n'; }
+kubectl() {
+  [ "$*" = '-n dev-sandboxes get pod workspace-pod -o jsonpath={.metadata.uid}' ] || return 99
+  local seen; seen="$(cat "$COUNT")"; echo "$((seen + 1))" > "$COUNT"
+  printf '%%s' "${uids[$seen]}"
+}
+kind_credential_cli() { printf '%%s\\n' "$*" >> "$CALLS"; }
+wait_kind_credential_environment() { printf 'wait %%s\\n' "$2" >> "$CALLS"; }
+kind_credential_codex_login() { printf 'login %%s\\n' "$2" >> "$CALLS"; }
+rc=0
+replace_kind_credential_sandbox '%s' || rc=$?
+cat "$CALLS"; rm -f "$CALLS" "$COUNT"
+exit "$rc"
+''' % (after, ENVIRONMENT, ENVIRONMENT))
+                self.assertEqual(result.returncode, expected, result.stderr)
+                steps = result.stdout.splitlines()
+                self.assertEqual(steps[:4], [
+                    f"env --platform stop {ENVIRONMENT} --output json", "wait stopped",
+                    f"env --platform start {ENVIRONMENT} --output json", "wait running"])
+                # The new epoch must deliver the login again before the
+                # journey uses it.
+                self.assertEqual(steps[4:], ["login redelivered"] if expected == 0 else [])
+                if expected:
+                    self.assertIn("Stop/Start did not replace the workspace Pod", result.stderr)
 
     def test_rebind_moves_the_binding_to_the_current_or_an_exact_revision_once(self):
         for revision in ("", "7"):
@@ -1020,32 +1147,39 @@ kind_credential_codex_login '%s' %s %s
         unbound = index(daemon + "denied" + bounded, rebind)
         rebound = index('rebind_kind_credential_environment "$environment" "$bound_revision"')
         recovered = index(daemon + "success" + bounded, rebound)
+        replaced = index('replace_kind_credential_sandbox "$environment"', recovered)
+        marker = index("printf '%s\\n' '{\"event\":\"sandbox_replaced\"}' >> \"$KIND_DAEMON_PROBE_LOG\"", replaced)
+        fresh = index(daemon + "success\n", marker)
         revoke = index('credentials --platform revoke "$credential_name"')
-        revoked_daemon = index(daemon + "revoked" + bounded)
+        revoked_daemon = index(daemon + "revoked\n", revoke)
         changes = index('assert_kind_credential_authority_changes "$journey_from" "$KIND_DAEMON_PROBE_LOG"')
         revoked_gateway = index('kind_credential_probe "$environment" revoked')
         revoked = index('kind_credential_codex_login "$environment" revoked || return $?')
-        served = index('served="$(jq -s \'map(.served) | add\' "$KIND_DAEMON_PROBE_LOG")" || return $?')
+        served = index('served="$(jq -s \'map(.served // 0) | add\' "$KIND_DAEMON_PROBE_LOG")" || return $?')
         final = index('assert_kind_credential_provider_counts "$((6 + served))"')
         destroy = index('env --platform rm "$environment"')
         # Delivery before the proxy session whose refreshes rotate it; the
         # user's own login and logout after rotation; a new container forgets
         # the logout; one gateway request; on the daemon's epoch a warm-up, a
         # reuse and Reconnect; then each authority change on that connected
-        # epoch, revocation last, which removes the login before destroy.
+        # epoch; a replaced Pod's new epoch; revocation last, on that epoch,
+        # which removes the login before destroy.
         order = [deliver, session, counts, rotation, own, logout, stop, start, redelivered,
                  gateway, counted, warm, reuse, reconnect, reconnected, six, reused, anchor,
                  logged, repeated, member, denied, restored, readmitted, bound, unset, rebind,
-                 unbound, rebound, recovered, revoke, revoked_daemon, changes, revoked_gateway,
-                 revoked, served, final, destroy]
+                 unbound, rebound, recovered, replaced, marker, fresh, revoke, revoked_daemon,
+                 changes, revoked_gateway, revoked, served, final, destroy]
         self.assertEqual(sorted(order), order)
         # Reuse and a connected epoch's authority changes are proven only on
         # the daemon path; the gateway path admits an epoch per request.
         self.assertNotIn("kind_credential_probe ", flow[counted:revoked_gateway])
         self.assertEqual(flow.count('kind_credential_probe "$environment" success'), 1)
         self.assertEqual(flow.count(daemon + "denied" + bounded), 2)
-        self.assertEqual(flow.count(daemon + "revoked" + bounded), 1)
         self.assertEqual(flow.count(daemon + "success" + bounded), 2)
+        # A credential change applies to the very next request: no bound.
+        self.assertEqual(flow.count(daemon + "revoked"), 1)
+        self.assertEqual(flow.count(daemon + "revoked\n"), 1)
+        self.assertEqual(flow.count("replace_kind_credential_sandbox"), 1)
         # Three daemon requests before the journey, each served once.
         self.assertEqual(flow[counted:anchor].count(daemon + "success\n"), 3)
         self.assertIn('login_events="$(kind_credential_codex_login "$environment" deliver)" || return $?',
@@ -1968,23 +2102,34 @@ class DaemonProbe(unittest.TestCase):
                     DAEMON.probe(mode)
 
     def test_a_change_is_awaited_within_its_bound_and_counts_what_was_served(self):
+        # Once a second, for up to the broker's one-minute decision window.
+        self.assertEqual(DAEMON.POLL_SECONDS, 1.0)
         self.statuses = [200, 200, 403]
-        DAEMON.probe("denied", 5000)
+        DAEMON.probe("denied", 65000)
         event = self.event()
         self.assertEqual((event["status"], event["requests"], event["served"], event["within_ms"]),
-                         (403, 3, 2, 5000))
-        self.assertEqual(event["waited_ms"], 550)
+                         (403, 3, 2, 65000))
+        self.assertEqual(event["waited_ms"], 2150)
         self.output.truncate(0)
         self.output.seek(0)
         self.statuses = [403, 200]
-        DAEMON.probe("success", 5000)
+        DAEMON.probe("success", 65000)
         self.assertEqual((self.event()["requests"], self.event()["served"]), (2, 1))
+        # A change that lands as its decision reaches its minute.
+        self.output.truncate(0)
+        self.output.seek(0)
+        self.statuses = [200] * 61 + [403]
+        DAEMON.probe("denied", 65000)
+        self.assertEqual((self.event()["requests"], self.event()["served"]), (62, 61))
+        self.assertLessEqual(self.event()["waited_ms"], 65000)
 
     def test_a_change_that_misses_its_bound_or_answers_otherwise_fails(self):
         for mode, statuses, within in (("denied", [200] * 40, 1000),
-                                       ("denied", [200, 503, 403], 5000),
+                                       ("denied", [200] * 70, 65000),
+                                       ("denied", [200, 503, 403], 65000),
                                        ("success", [403, 200], 100),
-                                       ("revoked", [403], 0)):
+                                       ("revoked", [403], 0),
+                                       ("denied", [403], 70001)):
             with self.subTest(mode=mode, statuses=statuses, within=within):
                 self.statuses = list(statuses)
                 with self.assertRaises(ValueError):
@@ -2014,6 +2159,540 @@ class DaemonProbe(unittest.TestCase):
                      ["probe", "denied", "-5"], ["probe", "denied", "5", "6"]):
             with self.subTest(argv=argv), self.assertRaises(ValueError):
                 DAEMON.arguments(argv)
+
+
+# A stand-in for the pinned Claude Code binary: it records only the names the
+# driver must project (never a value outside them) and replies per FAKE_MODE.
+FAKE_CLAUDE = r"""
+import json, os, sys, time
+mode = os.environ.get("FAKE_CLAUDE_MODE", "ok")
+if sys.argv[1:] == ["--version"]:
+    print("9.9.9 (Not Claude)" if mode == "bad-version" else "2.1.238 (Claude Code)")
+    sys.exit(0)
+record = os.environ.get("FAKE_CLAUDE_RECORD")
+if record:
+    names = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
+             "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+    with open(record, "a") as output:
+        output.write(json.dumps({"argv": sys.argv[1:],
+                                 "env": {name: os.environ.get(name) for name in names},
+                                 "home": os.environ["HOME"], "cwd": os.getcwd(),
+                                 "stdin": sys.stdin.read()}) + "\n")
+if mode == "ok":
+    print("CWCLAUDE kind private-claude-output-canary")
+elif mode == "refused":
+    print("Failed to authenticate. API Error: 401 private-claude-output-canary")
+    sys.exit(1)
+elif mode == "refused-silent":
+    sys.exit(1)
+elif mode == "refused-exit-zero":
+    print("API Error: 401")
+elif mode == "exit":
+    print("CWCLAUDE kind")
+    sys.exit(3)
+elif mode == "no-marker":
+    print("private-claude-output-canary")
+elif mode == "leak":
+    print("CWCLAUDE kind CW_KIND_SYNTHETIC_CLAUDE_TOKEN")
+elif mode == "stderr-leak":
+    print("CWCLAUDE kind")
+    print("CW_KIND_SYNTHETIC_REFUSED_TOKEN", file=sys.stderr)
+elif mode == "huge":
+    sys.stdout.write("CWCLAUDE kind" + "x" * (300 * 1024))
+elif mode == "hang":
+    time.sleep(30)
+"""
+
+
+class ClaudeSessionDriver(unittest.TestCase):
+    """claude_session.py with a fake Claude Code; no cluster or provider I/O.
+
+    The environment passed in stands for what the workspace daemon projected
+    into the session; the driver must only observe it."""
+
+    SUBSCRIPTION = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081",
+                    "CLAUDE_CODE_OAUTH_TOKEN": "codewire-managed",
+                    "ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_API_KEY": ""}
+    API_KEY = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081",
+               "ANTHROPIC_AUTH_TOKEN": "codewire-managed",
+               "ANTHROPIC_API_KEY": "", "CLAUDE_CODE_OAUTH_TOKEN": ""}
+
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory(prefix="kind-claude-session-")
+        self.addCleanup(scratch.cleanup)
+        self.scratch = Path(scratch.name)
+        fake = self.scratch / "fake_claude.py"
+        fake.write_text(FAKE_CLAUDE)
+        self.record = self.scratch / "record.jsonl"
+        for fixture in (
+            patch.object(CLAUDE, "CLAUDE_ARGV", (sys.executable, str(fake))),
+            patch.object(CLAUDE, "SESSION_TIMEOUT", 5.0),
+            patch.object(CLAUDE.signal, "signal"),
+        ):
+            fixture.start()
+            self.addCleanup(fixture.stop)
+
+    def environ(self, mode="ok", projected=None, **extra):
+        return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "FAKE_CLAUDE_MODE": mode,
+                "FAKE_CLAUDE_RECORD": str(self.record),
+                **(self.SUBSCRIPTION if projected is None else projected), **extra}
+
+    def main(self, argv, environ):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = CLAUDE.main(argv, environ)
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        return status, events, output.getvalue()
+
+    def calls(self):
+        if not self.record.exists():
+            return []
+        return [json.loads(line) for line in self.record.read_text().splitlines()]
+
+    def test_claude_inherits_exactly_the_daemon_projection_for_each_form(self):
+        for form, projected in (("subscription_token", self.SUBSCRIPTION),
+                                ("api_key", self.API_KEY)):
+            with self.subTest(form=form):
+                self.record.unlink(missing_ok=True)
+                status, events, output = self.main([form, "success"],
+                                                   self.environ(projected=projected))
+                self.assertEqual(status, 0, output)
+                self.assertEqual(events, [
+                    {"event": "claude_projection", "form": form, "source": "daemon_session"},
+                    {"event": "claude_session", "form": form, "outcome": "success",
+                     "client_version": "2.1.238"},
+                    {"event": "complete", "form": form, "outcome": "success"},
+                ])
+                self.assertNotIn("canary", output)
+                [call] = self.calls()
+                self.assertEqual(call["argv"], ["-p", CLAUDE.PROMPT])
+                self.assertEqual(call["stdin"], "")
+                self.assertEqual(call["env"], {**projected,
+                                               "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"})
+                # A fresh private home, never the workspace user's own login.
+                self.assertEqual(call["cwd"], call["home"])
+                self.assertTrue(Path(call["home"]).name.startswith("kind-claude-"))
+                self.assertFalse(Path(call["home"]).exists())
+
+    def test_the_driver_never_supplies_a_missing_or_wrong_projection(self):
+        for name, value in (
+                ("CLAUDE_CODE_OAUTH_TOKEN", ""),
+                ("ANTHROPIC_AUTH_TOKEN", "codewire-managed"),
+                ("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+                ("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-other")):
+            with self.subTest(name=name, value=value):
+                status, events, _ = self.main(["subscription_token", "success"],
+                                              self.environ(**{name: value}))
+                self.assertEqual(status, 1)
+                self.assertEqual(events, [{"event": "failed", "form": "subscription_token",
+                                           "outcome": "success",
+                                           "reason": "projection_values"}])
+        for name in CLAUDE.NAMES:
+            with self.subTest(missing=name):
+                environ = self.environ()
+                del environ[name]
+                status, events, _ = self.main(["subscription_token", "success"], environ)
+                self.assertEqual(events[-1]["reason"], "projection_missing")
+        # The other form's exact projection is named as such.
+        status, events, _ = self.main(["subscription_token", "success"],
+                                      self.environ(projected=self.API_KEY))
+        self.assertEqual(events[-1]["reason"], "projection_other_form")
+        status, events, _ = self.main(["api_key", "success"], self.environ())
+        self.assertEqual(events[-1]["reason"], "projection_other_form")
+        self.assertEqual(self.calls(), [])
+
+    def test_a_refused_token_must_be_reported_by_claude_code(self):
+        status, events, output = self.main(["subscription_token", "refused"],
+                                           self.environ("refused"))
+        self.assertEqual(status, 0, output)
+        self.assertEqual(events[1], {"event": "claude_session", "form": "subscription_token",
+                                     "outcome": "refused", "client_version": "2.1.238"})
+        self.assertEqual(events[-1], {"event": "complete", "form": "subscription_token",
+                                      "outcome": "refused"})
+        self.assertNotIn("canary", output)
+        for mode, reason in (("ok", "refusal_not_reported"),
+                             ("refused-exit-zero", "refusal_not_reported"),
+                             ("refused-silent", "refusal_status_missing")):
+            with self.subTest(mode=mode):
+                status, events, _ = self.main(["subscription_token", "refused"],
+                                              self.environ(mode))
+                self.assertEqual(status, 1)
+                self.assertEqual(events[-1]["reason"], reason)
+        # A refusal where success is expected is Claude Code's failure.
+        status, events, _ = self.main(["subscription_token", "success"], self.environ("refused"))
+        self.assertEqual(events[-1]["reason"], "claude_exit")
+
+    def test_a_synthetic_credential_anywhere_in_the_session_fails_before_claude(self):
+        for name, value in (
+                ("UNRELATED", "prefix-CW_KIND_SYNTHETIC_CLAUDE_TOKEN-suffix"),
+                ("UNRELATED", "sk-ant-api03-CW_KIND_SYNTHETIC_ANTHROPIC_KEY-0123"),
+                ("UNRELATED", "sk-ant-oat01-CW_KIND_SYNTHETIC_REFUSED_TOKEN-0123"),
+                ("CW_KIND_SYNTHETIC_CLAUDE_TOKEN", "name")):
+            with self.subTest(name=name, value=value):
+                status, events, output = self.main(["subscription_token", "success"],
+                                                   self.environ(**{name: value}))
+                self.assertEqual(status, 1)
+                self.assertEqual(events, [{"event": "failed", "form": "subscription_token",
+                                           "outcome": "success",
+                                           "reason": "credential_in_environment"}])
+                self.assertNotIn("CW_KIND_SYNTHETIC", output)
+        self.assertEqual(self.calls(), [])
+
+    def test_claude_failures_are_closed_reasons_and_never_print_its_output(self):
+        for mode, reason in (
+                ("exit", "claude_exit"), ("no-marker", "missing_marker"),
+                ("leak", "credential_in_output"), ("stderr-leak", "credential_in_output"),
+                ("huge", "claude_output_limit"), ("bad-version", "claude_version")):
+            with self.subTest(mode=mode):
+                status, events, output = self.main(
+                    ["api_key", "success"], self.environ(mode, projected=self.API_KEY))
+                self.assertEqual(status, 1)
+                self.assertEqual(events[-1], {"event": "failed", "form": "api_key",
+                                              "outcome": "success", "reason": reason})
+                for private in ("canary", "CW_KIND_SYNTHETIC", "xxxx", "Not Claude"):
+                    self.assertNotIn(private, output)
+        with patch.object(CLAUDE, "SESSION_TIMEOUT", 0.5):
+            status, events, _ = self.main(["api_key", "success"],
+                                          self.environ("hang", projected=self.API_KEY))
+        self.assertEqual(status, 1)
+        self.assertEqual(events[-1]["reason"], "claude_timeout")
+        with patch.object(CLAUDE, "CLAUDE_ARGV", (str(self.scratch / "missing-claude"),)):
+            status, events, _ = self.main(["api_key", "success"],
+                                          self.environ(projected=self.API_KEY))
+        self.assertEqual(events[-1]["reason"], "claude_version_start")
+
+    def test_arguments_are_closed(self):
+        for argv in ([], ["subscription_token"], ["oauth", "success"],
+                     ["subscription_token", "maybe"],
+                     ["subscription_token", "success", "extra"]):
+            with self.subTest(argv=argv):
+                status, events, _ = self.main(argv, self.environ())
+                self.assertEqual(status, 1)
+                self.assertEqual(events, [{"event": "failed", "form": None, "outcome": None,
+                                           "reason": "arguments"}])
+
+    def test_driver_markers_match_the_fixture_and_the_journey(self):
+        provider = PROVIDER.read_text(encoding="utf-8")
+        helpers = HELPERS.read_text(encoding="utf-8")
+        for marker in CLAUDE.CREDENTIAL_MARKERS:
+            self.assertIn(marker, provider)
+            self.assertIn(marker, helpers)
+        self.assertIn(f'const CLAUDE_MARKER: &str = "{CLAUDE.MARKER}";', provider)
+        for name in ("KIND_ANTHROPIC_API_KEY", "KIND_CLAUDE_SUBSCRIPTION_TOKEN",
+                     "KIND_CLAUDE_REFUSED_TOKEN"):
+            value = provider.split(f"pub(super) const {name}: &str =", 1)[1].split(";", 1)[0]
+            value = value.strip().strip('"')
+            self.assertIn(f"{name}='{value}'\n", helpers)
+            # The public CLI's shape rule: printable ASCII without whitespace.
+            self.assertTrue(16 <= len(value) <= 1024 and value.isascii() and value.isprintable()
+                            and " " not in value)
+
+
+CLAUDE_RUN_STUB = r"""
+RUN_DIR='{run_dir}'
+KIND_CLAUDE_SESSION_ATTEMPTS=3
+sleep() {{ :; }}
+kind_credential_cli() {{
+  case "$*" in
+    "run env-1 --no-tty --detach --output json -- python3 -B -u {driver} {form} {outcome}")
+      printf '{{"session_id":"session-1","state":"Starting"}}\n' ;;
+    "list env-1 --output json") cat "$RUN_DIR/listing.json" ;;
+    "logs env-1 session-1 --raw") cat "$RUN_DIR/output.txt" ;;
+    *) echo "unexpected: $*" >&2; return 99 ;;
+  esac
+}}
+kind_credential_claude_run env-1 {driver} {form} {outcome}
+"""
+
+TOKEN_GET_STUB = r"""
+kind_credential_cli() {{
+  [ "$*" = "credentials --platform get claude --output json" ] || return 99
+  jq -nc --arg status {status} --arg revision {revision} --argjson left {left} '[{{
+    name: "claude", provider: "anthropic", status: $status,
+    authenticationKind: "CREDENTIAL_AUTHENTICATION_KIND_OAUTH",
+    revocationGeneration: $revision, expiresAtUnix: ((now | floor) + $left | tostring)}}]'
+}}
+assert_kind_credential_claude_token claude 2
+"""
+
+
+class ClaudeSessionHarness(unittest.TestCase):
+    """The host side of the Claude Code journey, against stubbed commands."""
+
+    DRIVER = "/tmp/codewire-kind-claude-session-123456.py"
+
+    def shell(self, body):
+        return subprocess.run(
+            ["/bin/bash", "-c", 'set -euo pipefail\nsource "$1"\n'
+             'validate_sealed_kind_images() { return 1; }\n' + body,
+             "kind-credential-fixture", str(HELPERS)],
+            env={"PATH": "/usr/bin:/bin", "ROOT": str(ROOT)},
+            capture_output=True, text=True, timeout=20,
+        )
+
+    def claude_run(self, output, state="Exited", exit_code=0, form="subscription_token",
+                   outcome="success"):
+        directory = tempfile.TemporaryDirectory(prefix="kind-claude-run-")
+        self.addCleanup(directory.cleanup)
+        run_dir = Path(directory.name)
+        (run_dir / "listing.json").write_text(json.dumps([
+            {"session_id": "other", "state": "Running", "exit_code": None},
+            {"session_id": "session-1", "state": state, "exit_code": exit_code}]))
+        (run_dir / "output.txt").write_text(output)
+        return self.shell(CLAUDE_RUN_STUB.format(run_dir=run_dir, driver=self.DRIVER,
+                                                 form=form, outcome=outcome))
+
+    def events(self, form="subscription_token", outcome="success"):
+        return (json.dumps({"event": "claude_projection", "form": form,
+                            "source": "daemon_session"}) + "\n"
+                + json.dumps({"event": "claude_session", "form": form, "outcome": outcome,
+                              "client_version": "2.1.238"}) + "\n"
+                + json.dumps({"event": "complete", "form": form, "outcome": outcome}) + "\n")
+
+    def test_claude_runs_in_a_daemon_session_and_passes_only_on_its_closed_events(self):
+        for form, outcome in (("subscription_token", "success"), ("api_key", "success"),
+                              ("subscription_token", "refused")):
+            with self.subTest(form=form, outcome=outcome):
+                result = self.claude_run(self.events(form, outcome), form=form,
+                                         outcome=outcome)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        good = self.events()
+        for output, state, exit_code in (
+                (good, "Exited", 1),
+                (good, "Failed", 0),
+                (good, "Running", 0),
+                (self.events(outcome="refused"), "Exited", 0),
+                (self.events("api_key"), "Exited", 0),
+                (good.replace("daemon_session", "binding"), "Exited", 0),
+                (good.split("\n", 1)[1], "Exited", 0),
+                ('{"event":"failed","form":"subscription_token","reason":"claude_exit"}\n',
+                 "Exited", 0),
+                ("", "Exited", 0)):
+            with self.subTest(output=output, state=state, exit_code=exit_code):
+                result = self.claude_run(output, state, exit_code)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("stock Claude Code acceptance failed for the subscription_token form",
+                              result.stderr)
+        # Non-event session output, such as a Python warning, is ignored.
+        result = self.claude_run("warning: something\n" + good)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for driver, form, outcome in (("/tmp/elsewhere.py", "subscription_token", "success"),
+                                      (self.DRIVER, "oauth", "success"),
+                                      (self.DRIVER, "api_key", "maybe")):
+            result = self.shell(
+                "kind_credential_cli() { echo unexpected-cli; return 97; }\n"
+                f"kind_credential_claude_run env-1 '{driver}' '{form}' '{outcome}'\n")
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn("unexpected-cli", result.stdout)
+
+    def test_the_driver_is_staged_into_the_exact_workspace_pod(self):
+        result = self.shell(r"""
+SANDBOX_NS=dev-sandboxes
+kubectl() {
+  [ "$#" = 13 ] || return 96
+  [ "$1 $2 $3 $4 $5 $6 $7 $8 $9 ${10} ${12}" = '-n dev-sandboxes exec -i workspace-pod -c workspace -- sh -c sh' ] || return 99
+  [ "${11}" = 'umask 022 && cat > "$1"' ] || return 95
+  [[ "${13}" =~ ^/tmp/codewire-kind-claude-session-[0-9]{1,12}\.py$ ]] || return 98
+  cmp -s - "$ROOT/scripts/ci/verify/kind/claude_session.py" || return 97
+}
+kind_credential_claude_stage workspace-pod
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout, r"^/tmp/codewire-kind-claude-session-[0-9]{1,12}\.py\n$")
+        result = self.shell("kubectl() { echo unexpected-kubectl; return 97; }\n"
+                            "kind_credential_claude_stage Workspace_Pod\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("unexpected-kubectl", result.stdout)
+
+    def anthropic_events(self, events, baseline, form, status=200):
+        return self.shell(
+            "kind_credential_fixture_events() { printf '%s\\n' "
+            + shlex.quote(json.dumps(events)) + "; }\n"
+            f"assert_kind_credential_anthropic_events {baseline} {form} {status}\n")
+
+    def test_provider_events_must_be_new_answers_for_exactly_the_expected_form(self):
+        api = {"event": "anthropic_response", "kind": "api_key", "route": "messages",
+               "stream": True, "status": 200, "refused": False, "client_identity": False,
+               "anthropic_calls": 1}
+        token = dict(api, kind="subscription_token", client_identity=True, anthropic_calls=3)
+        refused = dict(token, status=401, refused=True, anthropic_calls=5)
+        unrelated = {"event": "provider_response", "scenario": "baseline"}
+        events = [unrelated, api, dict(api, anthropic_calls=2), token,
+                  dict(token, anthropic_calls=4), refused]
+        result = self.anthropic_events(events, 0, "api_key")
+        self.assertEqual(result.returncode, 1)
+        result = self.anthropic_events(events[:3], 0, "api_key")
+        self.assertEqual((result.returncode, result.stdout), (0, "2\n"), result.stderr)
+        result = self.anthropic_events(events[:5], 2, "subscription_token")
+        self.assertEqual((result.returncode, result.stdout), (0, "4\n"), result.stderr)
+        result = self.anthropic_events(events, 4, "subscription_token", 401)
+        self.assertEqual((result.returncode, result.stdout), (0, "5\n"), result.stderr)
+        for later, baseline, form, status in (
+                ([], 2, "subscription_token", 200),
+                ([dict(token, status=500)], 2, "subscription_token", 200),
+                ([dict(token, client_identity=False)], 2, "subscription_token", 200),
+                ([dict(api, client_identity=True)], 2, "api_key", 200),
+                ([refused], 2, "subscription_token", 200),
+                ([dict(refused, refused=False)], 2, "subscription_token", 401),
+                ([{"event": "anthropic_rejected", "reason": "placeholder",
+                   "anthropic_rejections": 1}], 2, "subscription_token", 200),
+                ([token, {"event": "anthropic_rejected", "reason": "credential",
+                          "anthropic_rejections": 1}], 2, "subscription_token", 200),
+                ([dict(token, route="models")], 2, "subscription_token", 200),
+                ([api], 2, "subscription_token", 200)):
+            with self.subTest(later=later, status=status):
+                result = self.anthropic_events(events[:3] + later, baseline, form, status)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("did not see only the", result.stderr)
+        for baseline, form, status in (("-1", "api_key", 200), ("x", "api_key", 200),
+                                       ("0", "oauth", 200), ("0", "api_key", 500)):
+            result = self.anthropic_events(events, baseline, form, status)
+            self.assertEqual(result.returncode, 1)
+
+    def test_recorded_selections_name_the_expected_form(self):
+        for form, clients, valid in (
+                ("api_key", "v1:anthropic", True), ("api_key", "v2:14", True),
+                ("subscription_token", "v2:24", True), ("subscription_token", "v2:34", True),
+                ("api_key", "v2:24", False), ("subscription_token", "v1:anthropic", False),
+                ("subscription_token", "v2:3f", False), ("subscription_token", "", False)):
+            with self.subTest(form=form, clients=clients):
+                result = self.shell(f"assert_kind_credential_claude_selection '{form}' "
+                                    f"'{clients}'\n")
+                self.assertEqual(result.returncode == 0, valid, result.stderr)
+
+    def test_token_metadata_is_active_at_the_expected_revision_one_year_out(self):
+        def get(status="CREDENTIAL_STATUS_ACTIVE", revision="2", left=365 * 86400 - 60):
+            return self.shell(TOKEN_GET_STUB.format(status=status, revision=revision,
+                                                    left=left))
+        result = get()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for result in (get(status="CREDENTIAL_STATUS_REFRESH_FAILED"), get(revision="3"),
+                       get(left=100 * 86400)):
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("is not Active at revision 2", result.stderr)
+
+    def test_managed_clients_are_the_single_live_binding_record(self):
+        workspace = "57f35d02-39f9-40ed-b9e1-bc4a64ad3b0e"
+        expected = (f"-n codewire-e2e exec -i deploy/postgres -- psql -U codewire -d codewire "
+                    f"-v ON_ERROR_STOP=1 -v environment={ENVIRONMENT} -v pod_uid={workspace} -At")
+        result = self.shell(
+            "NS=codewire-e2e\nsleep() { :; }\nkubectl() {\n"
+            f"  [ \"$*\" = '{expected}' ] || return 99\n"
+            "  grep -Fq 'FROM sandbox_workspace_bindings' || return 98\n"
+            "  printf 'v2:24\\n'\n}\n"
+            f"kind_credential_managed_clients {ENVIRONMENT} {workspace}\n")
+        self.assertEqual((result.returncode, result.stdout), (0, "v2:24\n"), result.stderr)
+        for rows in ("", "v2:24\\nv2:24", "not-a-selection"):
+            with self.subTest(rows=rows):
+                result = self.shell(
+                    "NS=codewire-e2e\nsleep() { :; }\n"
+                    f"kubectl() {{ cat >/dev/null; printf '{rows}'; }}\n"
+                    f"kind_credential_managed_clients {ENVIRONMENT} {workspace}\n")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("no single live workspace binding selection", result.stderr)
+        result = self.shell("kubectl() { echo unexpected-kubectl; return 97; }\n"
+                            f"kind_credential_managed_clients not-a-uuid {workspace}\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("unexpected-kubectl", result.stdout)
+
+    def test_anthropic_requests_never_join_the_daemon_authority_pairing(self):
+        # The Claude journey runs after the native smoke's authority check, so
+        # none of its epoch admissions can land inside that journey. Its
+        # Anthropic requests, logged anywhere, are not the Codex requests the
+        # check pairs with its probes or counts toward the journey's start.
+        lines, probes = HarnessGuards.authority_lines()
+        anthropic = {"timestamp": "2026-10-04T01:00:00.000000Z",
+                     "target": "codewire_credential_broker::timing",
+                     "fields": {"event": "proxied_request", "slot": "anthropic",
+                                "route": "anthropic-api", "total_ms": 40,
+                                "outcome": "response", "status": 200,
+                                "authority": "evaluated", "cache": "miss"}}
+        mixed = [anthropic] + [entry for line in lines for entry in (line, anthropic)]
+        result = HarnessGuards.authority_changes(self, mixed, probes)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        logs = "\n".join(json.dumps(line) for line in mixed[:7])
+        result = self.shell('''
+NS=codewire-e2e
+kubectl() {
+  [ "$*" = '-n codewire-e2e logs deployment/codewire-credential-service -c credential-service' ] ||
+    return 99
+  printf '%%s\\n' '%s'
+}
+kind_credential_codex_request_count
+''' % logs)
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, "3"), result.stderr)
+        # The check runs inside the native smoke, which the suite and the full
+        # gate run before the Claude journey.
+        native = HELPERS.read_text().split("kind_credential_native_smoke() (", 1)[1]
+        self.assertIn("assert_kind_credential_authority_changes",
+                      native.split("\n)\n", 1)[0])
+
+    def test_release_mode_never_runs_the_synthetic_claude_journey(self):
+        result = self.shell(
+            "log() { :; }\n"
+            "kubectl() { echo unexpected-kubectl; return 98; }\n"
+            "kind_credential_cli() { echo unexpected-cli; return 97; }\n"
+            "CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release\n"
+            "kind_credential_claude_session\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_claude_journey_uses_stdin_material_daemon_sessions_and_proves_recovery(self):
+        flow = HELPERS.read_text().split("kind_credential_claude_session() (", 1)[1]
+        self.assertLess(flow.index("set -E"), flow.index("kind_workspace_runtime_image"))
+        self.assertIn('printf \'%s\' "$KIND_ANTHROPIC_API_KEY" |\n'
+                      '    kind_credential_cli credentials --platform add anthropic', flow)
+        self.assertIn('printf \'%s\' "$KIND_CLAUDE_SUBSCRIPTION_TOKEN" |\n'
+                      '    kind_credential_cli credentials --platform add claude-subscription',
+                      flow)
+        # No value is ever an argument of a command; each reaches stdin only.
+        self.assertEqual(flow.count('"$KIND_ANTHROPIC_API_KEY"'), 1)
+        self.assertEqual(flow.count('"$KIND_CLAUDE_SUBSCRIPTION_TOKEN"'), 2)
+        self.assertEqual(flow.count('"$KIND_CLAUDE_REFUSED_TOKEN"'), 1)
+        for name in ("KIND_ANTHROPIC_API_KEY", "KIND_CLAUDE_SUBSCRIPTION_TOKEN",
+                     "KIND_CLAUDE_REFUSED_TOKEN"):
+            for line in flow.splitlines():
+                if f'"${name}"' in line:
+                    self.assertTrue(line.strip().startswith("printf '%s' "), line)
+        self.assertIn("for form in api_key subscription_token; do", flow)
+        # Claude Code never runs through kubectl exec: only the driver is staged.
+        self.assertNotIn("python3 -B -u -", flow)
+        ordered = [
+            'update="$(kind_credential_cli env --platform update "$environment"',
+            'pair="$(wait_kind_credential_sandbox_pair "$environment" "$generation")"',
+            'clients="$(kind_credential_managed_clients "$environment" "$pod_uid")"',
+            'assert_kind_credential_claude_selection "$form" "$clients"',
+            'driver="$(kind_credential_claude_stage "$pod")"',
+            'kind_credential_claude_run "$environment" "$driver" "$form" success',
+            'baseline="$(assert_kind_credential_anthropic_events "$baseline" "$form" 200)"',
+            'printf \'%s\' "$KIND_CLAUDE_REFUSED_TOKEN" |\n'
+            '    kind_credential_cli credentials --platform rotate "$token_name"',
+            'assert_kind_credential_claude_token "$token_name" 2',
+            'kind_credential_claude_run "$environment" "$driver" subscription_token refused',
+            'assert_kind_credential_anthropic_events "$baseline" subscription_token 401',
+            'printf \'%s\' "$KIND_CLAUDE_SUBSCRIPTION_TOKEN" |\n'
+            '    kind_credential_cli credentials --platform rotate "$token_name"',
+            'assert_kind_credential_claude_token "$token_name" 3',
+            'kind_credential_claude_run "$environment" "$driver" subscription_token success',
+            'assert_kind_credential_anthropic_events "$baseline" subscription_token 200',
+            'kind_credential_cli env --platform rm "$environment"',
+            'wait_kind_credential_environment "$environment" destroyed',
+            'kind_credential_cli credentials --platform revoke "$credential"',
+            'kind_credential_cli credentials --platform delete "$credential" --yes',
+        ]
+        positions = [flow.index(step) for step in ordered]
+        self.assertEqual(positions, sorted(positions))
+        # The token stays Active after the provider refusal.
+        refusal = flow.index("subscription_token refused")
+        self.assertIn('assert_kind_credential_claude_token "$token_name" 2',
+                      flow[refusal:flow.index('"$KIND_CLAUDE_SUBSCRIPTION_TOKEN" |', refusal)])
+        suite = (ROOT / "scripts/ci/verify/kind/suites/credential-journey.sh").read_text()
+        self.assertLess(suite.index("\n  kind_credential_native_smoke\n"),
+                        suite.index("\n  kind_credential_claude_session\n"))
+        gate = (ROOT / "scripts/ci/verify/kind/common.sh").read_text().split(
+            "deploy_agent_sandbox_and_smoke() {", 1)[1].split("\n}", 1)[0]
+        self.assertLess(gate.index("kind_credential_native_smoke"),
+                        gate.index("kind_credential_claude_session"))
 
 
 if __name__ == "__main__":

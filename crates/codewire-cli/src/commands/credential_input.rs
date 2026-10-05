@@ -284,6 +284,10 @@ fn reject_unknown_selector_prefix(selector: &str, kind: &str) -> anyhow::Result<
     Ok(())
 }
 
+/// The one paste-based enrollment step for a Claude subscription token. The
+/// owner runs Claude Code's own command; Codewire never drives its OAuth.
+pub(super) const CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE: &str = "Run `claude setup-token` (requires a Claude Pro, Max, Team or Enterprise plan), then paste the freshly printed token here. Codewire records an expiry one year from now; the token stays in Codewire and is never delivered to a Sandbox.";
+
 /// Every profile includes the account's one GitHub connection, so GitHub is
 /// never set or unset on a profile.
 pub(super) const GITHUB_ALWAYS_INCLUDED: &str = "every profile includes your one GitHub connection; connect or reconnect it with `credentials connect github`";
@@ -321,9 +325,15 @@ pub(super) fn supported_profile_slot(
 }
 
 pub(super) fn prompt_credential_material() -> anyhow::Result<ProtectedValue> {
+    prompt_named_material("Credential material")
+}
+
+/// Read one write-only value from a no-echo terminal prompt, or all of a piped
+/// stdin. The value is never taken from argv.
+pub(super) fn prompt_named_material(label: &str) -> anyhow::Result<ProtectedValue> {
     let interactive = std::io::stdin().is_terminal();
     if interactive {
-        eprint!("Credential material: ");
+        eprint!("{label}: ");
         std::io::stderr()
             .flush()
             .context("flush credential prompt")?;
