@@ -260,6 +260,21 @@ SQL
   return 1
 }
 
+# A new environment reads running before its setup finishes, and a profile
+# update is refused until then ("environment setup is not ready").
+wait_kind_credential_setup_complete() {
+  local environment="$1" attempt
+  for ((attempt = 0; attempt < 180; attempt++)); do
+    if kind_credential_cli env --platform info "$environment" --output json |
+        jq -e '.state == "running" and .setup_complete == true' >/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo '::error::credential fixture environment setup did not complete' >&2
+  return 1
+}
+
 # A managed restart replaces both sandbox Pods after the update is accepted.
 # The environment state can read running again while the new Pods are still
 # Pending, and one-shot selectors then miss them: a jq empty result exits 4
@@ -1272,6 +1287,7 @@ kind_credential_claude_session() (
     --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
   wait_kind_credential_environment "$environment" running
+  wait_kind_credential_setup_complete "$environment"
   baseline="$(kind_credential_fixture_events | jq -er \
     '[.[] | select(.event == "anthropic_response" or .event == "anthropic_rejected")] | length')"
   for form in api_key subscription_token; do
