@@ -7,8 +7,8 @@ workspace daemon to start the session, and the daemon projects the managed
 client environment into it exactly as it does for a user's terminal. This
 driver therefore observes what the Sandbox actually receives; it never writes,
 derives or repairs any of the four Anthropic names. It checks those values
-and that the daemon marked Claude Code's onboarding complete in the
-workspace user's own `~/.claude.json`, runs the stock pinned `claude -p` with
+and that the daemon marked Claude Code's onboarding complete and the
+workspace root trusted in the workspace user's own `~/.claude.json`, runs the stock pinned `claude -p` with
 the values inherited unchanged, and reports the outcome as a closed event
 stream on stdout. Never print raw output, stderr, environment values,
 file contents or credential bytes.
@@ -72,6 +72,9 @@ OUTCOMES = ("success", "refused")
 # while the Anthropic client is selected (codewire-daemon claude_home.rs).
 CLAUDE_CONFIG = ".claude.json"
 ONBOARDING_KEYS = ("hasCompletedOnboarding", "hasAcknowledgedCostThreshold")
+# The workspace root, under which every repository is checked out; Claude Code
+# applies its trust to every folder beneath it.
+WORKSPACE_ROOT = "/workspace"
 MAX_CLAUDE_CONFIG = 1024 * 1024
 # Distinctive parts of the fixture's synthetic credentials
 # (credential-service runtime/kind/provider.rs). None may appear anywhere in
@@ -122,7 +125,8 @@ def projection(form, environ):
 def onboarding(environ):
     """The session user's own ~/.claude.json, as the daemon left it: a private
     regular file of this uid, never a symlink, that marks onboarding complete
-    and holds no credential or placeholder. Read only, never repaired."""
+    and the workspace root trusted, and holds no credential or placeholder.
+    Read only, never repaired."""
     home = environ.get("HOME", "")
     if not os.path.isabs(home):
         raise Failure("onboarding_home")
@@ -154,6 +158,10 @@ def onboarding(environ):
     if not isinstance(document, dict) or any(document.get(key) is not True
                                              for key in ONBOARDING_KEYS):
         raise Failure("onboarding_not_marked")
+    projects = document.get("projects")
+    workspace = projects.get(WORKSPACE_ROOT) if isinstance(projects, dict) else None
+    if not isinstance(workspace, dict) or workspace.get("hasTrustDialogAccepted") is not True:
+        raise Failure("workspace_not_trusted")
 
 
 def child_environment(environ, home):

@@ -2230,7 +2230,8 @@ class ClaudeSessionDriver(unittest.TestCase):
         self.claude_config = self.user_home / ".claude.json"
         self.write_claude_config(
             '{"numStartups": 1, "hasCompletedOnboarding": true, '
-            '"hasAcknowledgedCostThreshold": true}')
+            '"hasAcknowledgedCostThreshold": true, '
+            '"projects": {"/workspace": {"hasTrustDialogAccepted": true}}}')
         for fixture in (
             patch.object(CLAUDE, "CLAUDE_ARGV", (sys.executable, str(fake))),
             patch.object(CLAUDE, "SESSION_TIMEOUT", 5.0),
@@ -2398,6 +2399,21 @@ class ClaudeSessionDriver(unittest.TestCase):
                     '{"hasCompletedOnboarding": 1, "hasAcknowledgedCostThreshold": "true"}'),
                  "onboarding_not_marked"),
                 ("array", lambda: self.write_claude_config("[]"), "onboarding_not_marked"),
+                ("untrusted", lambda: self.write_claude_config(
+                    '{"hasCompletedOnboarding": true, "hasAcknowledgedCostThreshold": true}'),
+                 "workspace_not_trusted"),
+                ("trust declined", lambda: self.write_claude_config(
+                    '{"hasCompletedOnboarding": true, "hasAcknowledgedCostThreshold": true, '
+                    '"projects": {"/workspace": {"hasTrustDialogAccepted": false}}}'),
+                 "workspace_not_trusted"),
+                ("other folder", lambda: self.write_claude_config(
+                    '{"hasCompletedOnboarding": true, "hasAcknowledgedCostThreshold": true, '
+                    '"projects": {"/workspace/app": {"hasTrustDialogAccepted": true}}}'),
+                 "workspace_not_trusted"),
+                ("projects array", lambda: self.write_claude_config(
+                    '{"hasCompletedOnboarding": true, "hasAcknowledgedCostThreshold": true, '
+                    '"projects": []}'),
+                 "workspace_not_trusted"),
                 ("invalid", lambda: self.write_claude_config("{"), "onboarding_not_marked"),
                 ("wide mode", lambda: self.write_claude_config(marked, 0o644), "onboarding_file"),
                 ("symlink", replace_with(lambda: self.claude_config.symlink_to(outside)),
