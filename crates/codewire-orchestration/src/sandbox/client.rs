@@ -7,8 +7,10 @@
 //! Service, and their NetworkPolicies.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 use std::time::Duration;
 
+use codewire_server_core::runtime_images::SUPPORT_IMAGE_REPOSITORIES;
 use crc32fast::Hasher as Crc32Hasher;
 use k8s_openapi::api::core::v1::{
     ContainerStatus, Namespace, PersistentVolume, PersistentVolumeClaim, Pod,
@@ -22,15 +24,16 @@ use kube::api::{
     Preconditions,
 };
 use kube::core::GroupVersionKind;
+use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
 use russh::keys::ssh_key::private::Ed25519Keypair;
 use russh::keys::ssh_key::{LineEnding, PrivateKey};
 use serde_json::Value;
 
 use super::template::{
     CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
-    TemplateOpts, gateway_direct_udp_service_name, gateway_host_key_secret_name,
-    gateway_network_policy_name, gateway_workload_name, render_gateway_deployment,
-    render_gateway_direct_udp_service, render_gateway_host_key_secret,
+    RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts, gateway_direct_udp_service_name,
+    gateway_host_key_secret_name, gateway_network_policy_name, gateway_workload_name,
+    render_gateway_deployment, render_gateway_direct_udp_service, render_gateway_host_key_secret,
     render_gateway_network_policy, render_gateway_service, render_sandbox_shadow_pool,
     render_sandbox_template, render_warm_member_bridge, render_workspace_daemon_network_policy,
     render_workspace_daemon_service, warm_member_daemon_bridge_name,
@@ -744,142 +747,265 @@ fn image_repository(reference: &str) -> &str {
     }
 }
 
-/// Why a Running patch leaves a Sandbox's daemon image as it is.
+/// Why a resume or Pod replacement leaves a Sandbox's daemon image as it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonImageKept {
     /// The configured support image names no digest, so there is no exact
     /// image to pin (Kind's side-loaded gateway).
     UnpinnedSupportImage,
-    /// The Sandbox has no `codewire-bin` volume.
-    NoDaemonVolume,
-    /// `codewire-bin` is an emptyDir the daemon init container fills
-    /// (confidential, Kind and diagnostic profiles).
-    CopiedDaemon,
-    /// `codewire-bin` mounts an image from another repository.
-    ForeignRepository,
+    /// The Sandbox has neither a `codewire-bin` image volume nor a
+    /// `codewire-daemon-init` init container.
+    NoDaemonSource,
+    /// A runtime class other than none, runc or commodity. A confidential
+    /// guest's Pod is measured and attested: its policy admits exactly the
+    /// rendered containers, so its daemon image changes only with a new
+    /// measured rendering, never with a patch to an existing Sandbox.
+    ConfidentialRuntime,
+    /// The daemon image comes from a repository no release rendered the
+    /// support image from ([`SUPPORT_IMAGE_REPOSITORIES`]).
+    UnlistedRepository,
+}
+
+impl DaemonImageKept {
+    fn label(self) -> &'static str {
+        match self {
+            Self::UnpinnedSupportImage => "unpinned_support_image",
+            Self::NoDaemonSource => "no_daemon_source",
+            Self::ConfidentialRuntime => "confidential_runtime",
+            Self::UnlistedRepository => "unlisted_repository",
+        }
+    }
+}
+
+/// The one field a re-pin rewrites: the `codewire-bin` image volume's
+/// `image.reference`, or the `codewire-daemon-init` init container's `image`
+/// where the daemon is copied into an emptyDir.
+#[derive(Debug, PartialEq, Eq)]
+struct DaemonImageEntry<'a> {
+    /// The volume's or init container's JSON pointer.
+    path: String,
+    name: &'static str,
+    /// The image field under `path`.
+    field: &'static str,
+    from: &'a str,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum DaemonImagePlan<'a> {
-    /// `codewire-bin` already mounts the current support image.
+    /// The daemon already runs from the current support image.
     Current,
-    /// Rewrite `volumes[index].image.reference` from `from`.
-    Repin {
-        index: usize,
-        from: &'a str,
-    },
+    Repin(DaemonImageEntry<'a>),
     Kept(DaemonImageKept),
 }
 
-/// Owner decision 2026-10-05: on every Start or resume, a Sandbox whose
-/// daemon is the `codewire-bin` image volume mounts the current support
-/// image, not the one it was created with. The sandbox controller builds each
-/// new Pod from the Sandbox's own `spec.podTemplate.spec` and never rewrites a
-/// running Pod, so the Sandbox is what to re-pin; a claimed warm-pool member
-/// is re-pinned the same way. Only an image of the same repository is
-/// replaced, and only by a digest-pinned one. A duplicated or malformed
-/// daemon volume fails closed: no Pod can be built from it, and nothing here
-/// can tell which volume the daemon uses.
+/// The named entries of one Pod spec array, failing closed on a malformed
+/// array or a duplicated name.
+fn daemon_named_entry<'a>(
+    pod_spec: &'a Value,
+    array: &str,
+    name: &str,
+) -> anyhow::Result<Option<(usize, &'a Value)>> {
+    let entries = match pod_spec.get(array) {
+        None => return Ok(None),
+        Some(Value::Array(entries)) => entries,
+        Some(_) => anyhow::bail!("workspace {array} are malformed"),
+    };
+    let mut named = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.get("name").and_then(Value::as_str) == Some(name));
+    let first = named.next();
+    anyhow::ensure!(
+        named.next().is_none(),
+        "workspace daemon {array} entry is duplicated"
+    );
+    Ok(first)
+}
+
+/// Owner decision 2026-10-05: on every Start or resume, and before a running
+/// Sandbox's Pod is replaced, the Sandbox's daemon runs from the current
+/// support image, not the one it was created with. The sandbox controller
+/// builds each new Pod from the Sandbox's own `spec.podTemplate.spec` and
+/// never rewrites a running Pod, so the Sandbox is what to re-pin; a claimed
+/// warm-pool member is re-pinned the same way. The daemon reaches the
+/// workspace by one route: the `codewire-bin` image volume, or the
+/// `codewire-daemon-init` copy that commodity Sandboxes from before the image
+/// volume (e374b1f11), runc and Kind use. Either is re-pinned from an image in
+/// [`SUPPORT_IMAGE_REPOSITORIES`] to a digest-pinned support image, except on
+/// a confidential runtime. A Dev candidate smoke that swaps
+/// `SANDBOX_GATEWAY_IMAGE` (`scripts/runtime/dev/smoke-dev-candidate.sh`)
+/// therefore re-pins Sandboxes started while it runs, and their next Start
+/// after the restore re-pins them back. A malformed or ambiguous daemon
+/// source fails closed: no Pod can be built from it, and nothing here can
+/// tell which entry the daemon uses.
 fn plan_daemon_image<'a>(
     sandbox: &'a Value,
     support_image: &str,
 ) -> anyhow::Result<DaemonImagePlan<'a>> {
-    let volumes = match sandbox.pointer("/spec/podTemplate/spec/volumes") {
-        None => &[][..],
-        Some(Value::Array(volumes)) => volumes.as_slice(),
-        Some(_) => anyhow::bail!("workspace volumes are malformed"),
+    let spec_path = "/spec/podTemplate/spec";
+    let Some(pod_spec) = sandbox.pointer(spec_path) else {
+        return Ok(DaemonImagePlan::Kept(DaemonImageKept::NoDaemonSource));
     };
-    let mut daemon = volumes.iter().enumerate().filter(|(_, volume)| {
-        volume.get("name").and_then(Value::as_str) == Some(super::template::DAEMON_VOLUME)
-    });
-    let Some((index, volume)) = daemon.next() else {
-        return Ok(DaemonImagePlan::Kept(DaemonImageKept::NoDaemonVolume));
+    let volume = daemon_named_entry(pod_spec, "volumes", super::template::DAEMON_VOLUME)?
+        .filter(|(_, volume)| volume.get("image").is_some());
+    let init = daemon_named_entry(
+        pod_spec,
+        "initContainers",
+        super::template::DAEMON_INIT_CONTAINER,
+    )?;
+    let entry = match (volume, init) {
+        (Some(_), Some(_)) => anyhow::bail!("workspace daemon delivery is ambiguous"),
+        (Some((index, volume)), None) => DaemonImageEntry {
+            path: format!("{spec_path}/volumes/{index}"),
+            name: super::template::DAEMON_VOLUME,
+            field: "image/reference",
+            from: volume
+                .pointer("/image/reference")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        },
+        (None, Some((index, init))) => DaemonImageEntry {
+            path: format!("{spec_path}/initContainers/{index}"),
+            name: super::template::DAEMON_INIT_CONTAINER,
+            field: "image",
+            from: init
+                .get("image")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        },
+        (None, None) => return Ok(DaemonImagePlan::Kept(DaemonImageKept::NoDaemonSource)),
     };
     anyhow::ensure!(
-        daemon.next().is_none(),
-        "workspace daemon volume is duplicated"
+        !entry.from.is_empty(),
+        "workspace daemon image is malformed"
     );
-    let Some(image) = volume.get("image") else {
-        return Ok(DaemonImagePlan::Kept(DaemonImageKept::CopiedDaemon));
+    let runtime_class = match pod_spec.get("runtimeClassName") {
+        None | Some(Value::Null) => "",
+        Some(class) => class
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("workspace runtime class is malformed"))?,
     };
-    let from = image
-        .get("reference")
-        .and_then(Value::as_str)
-        .filter(|reference| !reference.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("workspace daemon image is malformed"))?;
-    if from == support_image {
-        Ok(DaemonImagePlan::Current)
+    Ok(if entry.from == support_image {
+        DaemonImagePlan::Current
+    } else if !["", RUNTIME_CLASS_RUNC, RUNTIME_CLASS_COMMODITY].contains(&runtime_class) {
+        DaemonImagePlan::Kept(DaemonImageKept::ConfidentialRuntime)
     } else if !super::warm_pool::digest_pinned(support_image) {
-        Ok(DaemonImagePlan::Kept(DaemonImageKept::UnpinnedSupportImage))
-    } else if image_repository(from) == image_repository(support_image) {
-        Ok(DaemonImagePlan::Repin { index, from })
+        DaemonImagePlan::Kept(DaemonImageKept::UnpinnedSupportImage)
+    } else if !SUPPORT_IMAGE_REPOSITORIES.contains(&image_repository(entry.from)) {
+        DaemonImagePlan::Kept(DaemonImageKept::UnlistedRepository)
     } else {
-        Ok(DaemonImagePlan::Kept(DaemonImageKept::ForeignRepository))
-    }
+        DaemonImagePlan::Repin(entry)
+    })
 }
 
-/// The re-pin one Running patch carries.
+static DAEMON_IMAGE_PLANS: OnceLock<IntCounterVec> = OnceLock::new();
+
+/// Count one daemon-image decision by its outcome.
+fn record_daemon_image_plan(outcome: &str) {
+    DAEMON_IMAGE_PLANS
+        .get_or_init(|| {
+            register_int_counter_vec!(
+                Opts::new(
+                    "codewire_sandbox_daemon_image_plans_total",
+                    "Sandbox daemon image decisions on a resume or Pod replacement: re-pinned, current, or kept for a closed reason."
+                ),
+                &["outcome"]
+            )
+            .expect("daemon image plan metric registration must be unique")
+        })
+        .with_label_values(&[outcome])
+        .inc();
+}
+
+/// The re-pin one patch carries.
 struct DaemonImageRepin {
     from: String,
     operations: [Value; 3],
 }
 
+/// The one helper behind every daemon re-pin: the resume writers and the
+/// fenced re-pin before a Pod replacement ([`SandboxClient::repin_daemon_image`]).
 /// JSON Patch operations, not a merge patch: a merge patch replaces the whole
-/// `volumes` array, while these `test` the daemon volume's index, name and old
-/// reference and `replace` only that reference. The surrounding patch keeps
-/// its own UID fence, and a concurrent change to the volume fails the whole
-/// patch, operating mode included, with no retry. `None` when the Sandbox is
-/// current or not re-pinnable.
+/// `volumes` or `initContainers` array, while these `test` the entry's index,
+/// name and old image and `replace` only that image. The surrounding patch
+/// keeps its own UID (and resourceVersion) fence, and a concurrent change to
+/// the entry fails the whole patch. `None` when the Sandbox is current or kept.
 fn daemon_image_repin(
     sandbox: &DynamicObject,
     support_image: &str,
 ) -> anyhow::Result<Option<DaemonImageRepin>> {
     let name = sandbox.metadata.name.as_deref().unwrap_or_default();
-    let (index, from) = match plan_daemon_image(&sandbox.data, support_image)? {
-        DaemonImagePlan::Current => return Ok(None),
-        DaemonImagePlan::Repin { index, from } => (index, from),
-        DaemonImagePlan::Kept(
-            reason @ (DaemonImageKept::UnpinnedSupportImage | DaemonImageKept::CopiedDaemon),
-        ) => {
-            tracing::debug!(
-                sandbox = name,
-                ?reason,
-                "Sandbox daemon image is not re-pinned"
-            );
+    let plan = plan_daemon_image(&sandbox.data, support_image).inspect_err(|_| {
+        record_daemon_image_plan("malformed");
+    })?;
+    let entry = match plan {
+        DaemonImagePlan::Current => {
+            record_daemon_image_plan("current");
             return Ok(None);
         }
+        DaemonImagePlan::Repin(entry) => entry,
         DaemonImagePlan::Kept(reason) => {
-            tracing::warn!(
-                sandbox = name,
-                ?reason,
-                support_image,
-                "Sandbox daemon image is not re-pinned"
-            );
+            record_daemon_image_plan(reason.label());
+            match reason {
+                DaemonImageKept::NoDaemonSource | DaemonImageKept::UnlistedRepository => {
+                    tracing::warn!(
+                        sandbox = name,
+                        reason = reason.label(),
+                        support_image,
+                        "Sandbox daemon image is not re-pinned"
+                    );
+                }
+                DaemonImageKept::UnpinnedSupportImage | DaemonImageKept::ConfidentialRuntime => {
+                    tracing::info!(
+                        sandbox = name,
+                        reason = reason.label(),
+                        "Sandbox daemon image is not re-pinned"
+                    );
+                }
+            }
             return Ok(None);
         }
     };
-    let path = format!("/spec/podTemplate/spec/volumes/{index}");
+    record_daemon_image_plan("repin");
+    let DaemonImageEntry {
+        path,
+        name: entry_name,
+        field,
+        from,
+    } = entry;
     Ok(Some(DaemonImageRepin {
         from: from.to_owned(),
         operations: [
-            serde_json::json!({"op":"test","path":format!("{path}/name"),"value":super::template::DAEMON_VOLUME}),
-            serde_json::json!({"op":"test","path":format!("{path}/image/reference"),"value":from}),
-            serde_json::json!({"op":"replace","path":format!("{path}/image/reference"),"value":support_image}),
+            serde_json::json!({"op":"test","path":format!("{path}/name"),"value":entry_name}),
+            serde_json::json!({"op":"test","path":format!("{path}/{field}"),"value":from}),
+            serde_json::json!({"op":"replace","path":format!("{path}/{field}"),"value":support_image}),
         ],
     }))
 }
 
-/// The admitted object must mount exactly the support image it was re-pinned
-/// to.
-fn require_daemon_image_current(
-    sandbox: &DynamicObject,
+/// Log the re-pin an admitted patch carried. The write is already accepted
+/// (a resume is already Running), so an unexpected reply is reported, not
+/// failed: the entry's own tests made the write exact.
+fn log_daemon_image_repin(
+    updated: &DynamicObject,
+    name: &str,
+    repin: &DaemonImageRepin,
     support_image: &str,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        plan_daemon_image(&sandbox.data, support_image)? == DaemonImagePlan::Current,
-        "Sandbox daemon image re-pin did not converge"
-    );
-    Ok(())
+) {
+    match plan_daemon_image(&updated.data, support_image) {
+        Ok(DaemonImagePlan::Current) => tracing::info!(
+            name,
+            from = repin.from,
+            to = support_image,
+            "re-pinned Sandbox daemon image"
+        ),
+        _ => tracing::warn!(
+            name,
+            from = repin.from,
+            to = support_image,
+            "admitted Sandbox daemon image re-pin did not return the support image"
+        ),
+    }
 }
 
 /// Whether a SandboxTemplate or Sandbox renders an identity-free workspace:
@@ -3153,13 +3279,7 @@ impl SandboxClient {
             "update Sandbox {name} operatingMode did not return the current live target"
         );
         if let Some(repin) = &repin {
-            require_daemon_image_current(&updated, support_image)?;
-            tracing::info!(
-                name,
-                from = repin.from,
-                to = support_image,
-                "re-pinned Sandbox daemon image"
-            );
+            log_daemon_image_repin(&updated, &name, repin, support_image);
         }
         tracing::info!(name, replicas, mode, "set Sandbox operating mode");
         Ok(())
@@ -3278,19 +3398,15 @@ impl SandboxClient {
             .sandboxes()
             .patch(name, &PatchParams::default(), &patch)
             .await
-            .map_err(|_| anyhow::anyhow!("workspace operating mode update was not admitted"))?;
+            .map_err(|error| {
+                anyhow::anyhow!("workspace operating mode update was not admitted: {error}")
+            })?;
         anyhow::ensure!(
             runtime_object_uid(&updated.metadata, &self.namespace, name)? == uid,
             "workspace Sandbox was replaced during operating mode publication"
         );
         if let Some((image, repin)) = &repin {
-            require_daemon_image_current(&updated, image)?;
-            tracing::info!(
-                name,
-                from = repin.from,
-                to = image,
-                "re-pinned Sandbox daemon image"
-            );
+            log_daemon_image_repin(&updated, name, repin, image);
         }
         require_runtime_controller(
             &updated.metadata,
