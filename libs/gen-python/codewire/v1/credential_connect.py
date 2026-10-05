@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .credential_pb2 import AddApiKeyCredentialRequest, AddApiKeyCredentialResponse, AddSshCredentialRequest, AddSshCredentialResponse, CompleteGithubAppAuthorizationRequest, CompleteGithubAppAuthorizationResponse, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse, ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest, RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse
+from .credential_pb2 import AddApiKeyCredentialRequest, AddApiKeyCredentialResponse, AddClaudeSubscriptionTokenCredentialRequest, AddClaudeSubscriptionTokenCredentialResponse, AddSshCredentialRequest, AddSshCredentialResponse, CompleteGithubAppAuthorizationRequest, CompleteGithubAppAuthorizationResponse, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse, ListGithubRepositoriesRequest, ListGithubRepositoriesResponse, RenameCredentialRequest, RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -462,6 +462,9 @@ class CredentialMutationService(Protocol):
     async def add_api_key_credential(self, request: AddApiKeyCredentialRequest, ctx: RequestContext[AddApiKeyCredentialRequest, AddApiKeyCredentialResponse]) -> AddApiKeyCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    async def add_claude_subscription_token_credential(self, request: AddClaudeSubscriptionTokenCredentialRequest, ctx: RequestContext[AddClaudeSubscriptionTokenCredentialRequest, AddClaudeSubscriptionTokenCredentialResponse]) -> AddClaudeSubscriptionTokenCredentialResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     async def rename_credential(self, request: RenameCredentialRequest, ctx: RequestContext[RenameCredentialRequest, RenameCredentialResponse]) -> RenameCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -533,6 +536,16 @@ class CredentialMutationServiceASGIApplication(ConnectASGIApplication[Credential
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.add_api_key_credential,
+                ),
+                "/codewire.v1.CredentialMutationService/AddClaudeSubscriptionTokenCredential": Endpoint.unary(
+                    method=MethodInfo(
+                        name="AddClaudeSubscriptionTokenCredential",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=AddClaudeSubscriptionTokenCredentialRequest,
+                        output=AddClaudeSubscriptionTokenCredentialResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.add_claude_subscription_token_credential,
                 ),
                 "/codewire.v1.CredentialMutationService/RenameCredential": Endpoint.unary(
                     method=MethodInfo(
@@ -712,6 +725,26 @@ class CredentialMutationServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def add_claude_subscription_token_credential(
+        self,
+        request: AddClaudeSubscriptionTokenCredentialRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AddClaudeSubscriptionTokenCredentialResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="AddClaudeSubscriptionTokenCredential",
+                service_name="codewire.v1.CredentialMutationService",
+                input=AddClaudeSubscriptionTokenCredentialRequest,
+                output=AddClaudeSubscriptionTokenCredentialResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def rename_credential(
         self,
         request: RenameCredentialRequest,
@@ -845,6 +878,9 @@ class CredentialMutationServiceSync(Protocol):
     def add_api_key_credential(self, request: AddApiKeyCredentialRequest, ctx: RequestContext[AddApiKeyCredentialRequest, AddApiKeyCredentialResponse]) -> AddApiKeyCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def add_claude_subscription_token_credential(self, request: AddClaudeSubscriptionTokenCredentialRequest, ctx: RequestContext[AddClaudeSubscriptionTokenCredentialRequest, AddClaudeSubscriptionTokenCredentialResponse]) -> AddClaudeSubscriptionTokenCredentialResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def rename_credential(self, request: RenameCredentialRequest, ctx: RequestContext[RenameCredentialRequest, RenameCredentialResponse]) -> RenameCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -914,6 +950,16 @@ class CredentialMutationServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.add_api_key_credential,
+                ),
+                "/codewire.v1.CredentialMutationService/AddClaudeSubscriptionTokenCredential": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="AddClaudeSubscriptionTokenCredential",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=AddClaudeSubscriptionTokenCredentialRequest,
+                        output=AddClaudeSubscriptionTokenCredentialResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.add_claude_subscription_token_credential,
                 ),
                 "/codewire.v1.CredentialMutationService/RenameCredential": EndpointSync.unary(
                     method=MethodInfo(
@@ -1084,6 +1130,25 @@ class CredentialMutationServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.CredentialMutationService",
                 input=AddApiKeyCredentialRequest,
                 output=AddApiKeyCredentialResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def add_claude_subscription_token_credential(
+        self,
+        request: AddClaudeSubscriptionTokenCredentialRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AddClaudeSubscriptionTokenCredentialResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="AddClaudeSubscriptionTokenCredential",
+                service_name="codewire.v1.CredentialMutationService",
+                input=AddClaudeSubscriptionTokenCredentialRequest,
+                output=AddClaudeSubscriptionTokenCredentialResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

@@ -1355,6 +1355,127 @@ async fn invalid_registration_versions_and_database_inputs_are_value_blind() -> 
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn claude_subscription_token_has_no_refresh_and_only_its_owner_replaces_it() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let owner = db.user("claude-subscription-owner").await?;
+        let other = db.user("claude-subscription-other").await?;
+        let provider = Arc::new(SyntheticKek::default());
+        let (pool, _) = db.broker_pool().await?;
+        let store = codewire_platform_credentials::PlatformCredentialStore::new(
+            pool.clone(),
+            provider,
+            builtin_provider_catalog(),
+        );
+        let subscription = |name: &str| codewire_platform_credentials::CredentialRegistration {
+            provider: ProviderId::parse("anthropic").expect("built-in provider"),
+            account_hint: None,
+            expires_at_unix: Some(4_000_000_000),
+            ..registration(name, Kind::OAuth)
+        };
+        let token = store
+            .create(&owner, subscription("Claude"), &value(OLD_VALUE))
+            .await?;
+        let id = &token.metadata.id;
+        ensure!(token.metadata.status == CredentialStatus::Active);
+
+        // There is no refresh: the refresh publication path refuses it.
+        ensure!(
+            store
+                .publish_oauth_refresh(&owner, id, token.version, &value(NEW_VALUE))
+                .await
+                .err()
+                == Some(Error::UnsupportedCredential)
+        );
+        ensure!(store.record(&owner, id).await? == token);
+
+        // Replacement is the owner's: another owner, a past expiry and an API
+        // key are refused before any change.
+        let api_key = store
+            .create(
+                &owner,
+                codewire_platform_credentials::CredentialRegistration {
+                    provider: ProviderId::parse("anthropic")?,
+                    account_hint: None,
+                    ..registration("Anthropic key", Kind::ApiKey)
+                },
+                &value(OLD_VALUE),
+            )
+            .await?;
+        ensure!(
+            store
+                .prepare_subscription_token_replacement(
+                    &other,
+                    &token,
+                    &value(NEW_VALUE),
+                    4_100_000_000
+                )
+                .await
+                .err()
+                == Some(Error::UnsupportedCredential)
+        );
+        ensure!(
+            store
+                .prepare_subscription_token_replacement(&owner, &token, &value(NEW_VALUE), 1)
+                .await
+                .err()
+                == Some(Error::InvalidInput)
+        );
+        ensure!(
+            store
+                .prepare_subscription_token_replacement(
+                    &owner,
+                    &api_key,
+                    &value(NEW_VALUE),
+                    4_100_000_000
+                )
+                .await
+                .err()
+                == Some(Error::UnsupportedCredential)
+        );
+
+        // Even a revoked token is replaced in place: the same identity is
+        // reactivated with the new token's expiry, and only that token reads.
+        let revoked = store.revoke(&owner, id, token.version).await?;
+        let prepared = store
+            .prepare_subscription_token_replacement(
+                &owner,
+                &revoked,
+                &value(NEW_VALUE),
+                4_100_000_000,
+            )
+            .await?;
+        let mut tx = pool.begin().await?;
+        let replaced = store.replace_prepared_in(&mut tx, &owner, prepared).await?;
+        tx.commit().await?;
+        ensure!(replaced.metadata.id == *id);
+        ensure!(replaced.metadata.display_name == "Claude");
+        ensure!(replaced.metadata.status == CredentialStatus::Active);
+        ensure!(replaced.metadata.expires_at_unix == Some(4_100_000_000));
+        ensure!(
+            replaced.version.revocation_generation == revoked.version.revocation_generation + 1
+        );
+        ensure!(
+            store
+                .read_for_broker(&owner, id, token.version)
+                .await
+                .is_err()
+        );
+        ensure!(
+            store
+                .read_for_broker(&owner, id, replaced.version)
+                .await?
+                .expose_secret()
+                == NEW_VALUE
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn organizations_hold_api_keys_and_ssh_but_never_register_or_reconnect_oauth() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
@@ -1371,8 +1492,9 @@ async fn organizations_hold_api_keys_and_ssh_but_never_register_or_reconnect_oau
             provider: ProviderId::parse(provider).expect("built-in provider"),
             ..registration("Shared login", Kind::OAuth)
         };
-        // Codex (ChatGPT) and GitHub logins are refused before any KEK work.
-        for name in ["openai", "github"] {
+        // Codex (ChatGPT) and GitHub logins and Claude subscription tokens
+        // (Anthropic OAuth) are refused before any KEK work.
+        for name in ["openai", "github", "anthropic"] {
             ensure!(
                 store.create(&org, oauth(name), &value(OLD_VALUE)).await
                     == Err(Error::UnsupportedCredential)

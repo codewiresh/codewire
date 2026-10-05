@@ -208,6 +208,69 @@ pub(super) async fn rotate_api_key(
         .ok_or(Error::PublicationUnknown)
 }
 
+/// Create, or replace the exact named existing, Claude subscription token.
+/// All protected-material work precedes the publication locks; replacement
+/// is fenced on the observed generation again at publication.
+pub(super) async fn add_claude_subscription_token(
+    shared: &Shared,
+    scope: &Scope,
+    name: String,
+    material: ProtectedValue,
+    replacement: Option<(CredentialId, u64)>,
+    expires_at_unix: u64,
+) -> Result<CredentialMetadata, Error> {
+    let mutation = match replacement {
+        None => {
+            let registration = CredentialRegistration {
+                provider: ProviderId::parse("anthropic").expect("built-in provider"),
+                authentication_kind: CredentialAuthKind::OAuth,
+                display_name: name,
+                account_hint: None,
+                expires_at_unix: Some(expires_at_unix),
+            };
+            let prepared = scope
+                .wait(
+                    shared
+                        .store
+                        .prepare_creation(&scope.owner, registration, &material),
+                )
+                .await?
+                .map_err(store_error)?;
+            Mutation::Create(Box::new(prepared))
+        }
+        Some((id, revision)) => {
+            let expected = scope
+                .wait(shared.store.record(&scope.owner, &id))
+                .await?
+                .map_err(store_error)?;
+            if expected.metadata.display_name != name
+                || expected.metadata.provider.as_str() != "anthropic"
+                || expected.metadata.authentication_kind != CredentialAuthKind::OAuth
+            {
+                return Err(Error::InvalidInput);
+            }
+            if expected.metadata.revocation_generation != revision {
+                return Err(Error::StaleRevision);
+            }
+            let prepared = scope
+                .wait(shared.store.prepare_subscription_token_replacement(
+                    &scope.owner,
+                    &expected,
+                    &material,
+                    expires_at_unix,
+                ))
+                .await?
+                .map_err(store_error)?;
+            Mutation::Replace(Box::new(prepared))
+        }
+    };
+    drop(material);
+    publish(shared, scope, None, mutation)
+        .await
+        .result?
+        .ok_or(Error::PublicationUnknown)
+}
+
 pub(super) async fn add_ssh(
     shared: &Shared,
     scope: &Scope,

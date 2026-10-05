@@ -199,6 +199,24 @@ class AddApiKeyCredentialResponse(_message.Message):
     credential: Credential
     def __init__(self, credential: _Optional[_Union[Credential, _Mapping]] = ...) -> None: ...
 
+class AddClaudeSubscriptionTokenCredentialRequest(_message.Message):
+    __slots__ = ("name", "token", "credential_id", "expected_revocation_generation")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    TOKEN_FIELD_NUMBER: _ClassVar[int]
+    CREDENTIAL_ID_FIELD_NUMBER: _ClassVar[int]
+    EXPECTED_REVOCATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    token: bytes
+    credential_id: str
+    expected_revocation_generation: int
+    def __init__(self, name: _Optional[str] = ..., token: _Optional[bytes] = ..., credential_id: _Optional[str] = ..., expected_revocation_generation: _Optional[int] = ...) -> None: ...
+
+class AddClaudeSubscriptionTokenCredentialResponse(_message.Message):
+    __slots__ = ("credential",)
+    CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
+    credential: Credential
+    def __init__(self, credential: _Optional[_Union[Credential, _Mapping]] = ...) -> None: ...
+
 class RenameCredentialRequest(_message.Message):
     __slots__ = ("credential_id", "expected_revocation_generation", "expected_name", "name")
     CREDENTIAL_ID_FIELD_NUMBER: _ClassVar[int]

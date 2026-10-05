@@ -78,6 +78,23 @@ impl CodewireClient {
             .map_err(ClientError::from)
     }
 
+    /// Submit a pasted Claude subscription token (`claude setup-token`) for
+    /// protected storage, or replace an exact existing one. There is no
+    /// read-back method; the reply contains only committed metadata.
+    pub async fn add_claude_subscription_token_credential(
+        &self,
+        request: AddClaudeSubscriptionTokenCredentialRequest,
+    ) -> Result<AddClaudeSubscriptionTokenCredentialResponse, ClientError> {
+        self.credential_mutations
+            .add_claude_subscription_token_credential_with_options(
+                request,
+                self.auth_options().await?,
+            )
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
     pub async fn list_credentials(
         &self,
         request: ListCredentialsRequest,
@@ -447,6 +464,30 @@ mod tests {
         )
         .await;
         client.add_api_key_credential(request).await.unwrap();
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn subscription_token_enrollment_uses_write_only_authenticated_mutation() {
+        let server = MockServer::start().await;
+        let client = client(&server);
+        let request = AddClaudeSubscriptionTokenCredentialRequest {
+            name: "claude".into(),
+            token: b"sk-ant-oat01-synthetic-token".to_vec(),
+            ..Default::default()
+        };
+        assert!(!format!("{request:?}").contains("synthetic-token"));
+        unary(
+            &server,
+            "/codewire.v1.CredentialMutationService/AddClaudeSubscriptionTokenCredential",
+            request.encode_to_vec(),
+            AddClaudeSubscriptionTokenCredentialResponse::default().encode_to_vec(),
+        )
+        .await;
+        client
+            .add_claude_subscription_token_credential(request)
+            .await
+            .unwrap();
         server.verify().await;
     }
 

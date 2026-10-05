@@ -423,6 +423,46 @@ impl PlatformCredentialStore {
         })
     }
 
+    /// Prepare an explicit owner-supplied replacement of a Claude subscription
+    /// token (the Anthropic provider's OAuth kind), which has no refresh. Like
+    /// API-key rotation, this may reactivate a revoked, rejected or expired
+    /// identity, and sets the new token's hard expiry; profile references are
+    /// kept. Token grammar is validated by the isolated mutation service.
+    pub async fn prepare_subscription_token_replacement(
+        &self,
+        owner: &Owner,
+        expected: &CredentialRecord,
+        value: &ProtectedValue,
+        expires_at_unix: u64,
+    ) -> Result<PreparedCredentialReplacement, Error> {
+        if !is_subscription_token(&expected.metadata) {
+            return Err(Error::UnsupportedCredential);
+        }
+        if expected.metadata.owner != *owner || !owner.may_hold(CredentialAuthKind::OAuth) {
+            return Err(Error::UnsupportedCredential);
+        }
+        expected.validate(&self.reader.catalog)?;
+        validate_api_key_replacement_expiry(Some(expires_at_unix))?;
+        let current = self.record(owner, &expected.metadata.id).await?;
+        compare_version(&current, expected.version)?;
+        if current != *expected {
+            return Err(Error::CorruptRecord);
+        }
+        let mut next = expected.clone();
+        next.version = expected.version.replaced()?;
+        next.metadata.revocation_generation = next.version.revocation_generation;
+        next.metadata.status = CredentialStatus::Active;
+        next.metadata.expires_at_unix = Some(expires_at_unix);
+        next.validate(&self.reader.catalog)?;
+        let material = self.prepare(&next, value).await?;
+        Ok(PreparedCredentialReplacement {
+            original: expected.clone(),
+            next,
+            material,
+            refresh: false,
+        })
+    }
+
     /// Publish an already obtained OAuth refresh result, not a provider refresh
     /// operation or a cross-replica refresh lock. A broker must serialize its
     /// external refresh operation separately. Stale results never reactivate a
@@ -519,7 +559,9 @@ impl PlatformCredentialStore {
         if refresh {
             require_oauth_refresh(&current)?;
         }
-        if next.metadata.authentication_kind == CredentialAuthKind::ApiKey {
+        if next.metadata.authentication_kind == CredentialAuthKind::ApiKey
+            || is_subscription_token(&next.metadata)
+        {
             // A valid future expiry at preparation may elapse while waiting
             // for publication locks. Runtime use still rechecks wall expiry;
             // this does not promise it cannot elapse during COMMIT itself.
@@ -1091,8 +1133,17 @@ pub(crate) fn compare_version(
     }
 }
 
+/// A Claude subscription token: the Anthropic provider's OAuth kind.
+pub(crate) fn is_subscription_token(metadata: &CredentialMetadata) -> bool {
+    metadata.provider.as_str() == "anthropic"
+        && metadata.authentication_kind == CredentialAuthKind::OAuth
+}
+
 pub(crate) fn require_oauth_refresh(record: &CredentialRecord) -> Result<(), Error> {
-    if record.metadata.authentication_kind != CredentialAuthKind::OAuth {
+    // A Claude subscription token has no refresh; only its owner replaces it.
+    if record.metadata.authentication_kind != CredentialAuthKind::OAuth
+        || is_subscription_token(&record.metadata)
+    {
         return Err(Error::UnsupportedCredential);
     }
     record.active(unix_now()?)

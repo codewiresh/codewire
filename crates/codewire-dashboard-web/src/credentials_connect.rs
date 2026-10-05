@@ -1,7 +1,7 @@
 //! Material-free personal credential and profile adapters for the dashboard.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::http::HeaderValue;
 use base64::{
@@ -11,10 +11,11 @@ use base64::{
 use buffa::Message as _;
 use codewire_proto::codewire::v1::{
     AccessProfile, AccessProfileEntry, AccessProfileServiceClient, AddApiKeyCredentialRequest,
-    AddSshCredentialRequest, CompleteGithubAppAuthorizationRequest, CreateAccessProfileRequest,
-    Credential, CredentialAuthenticationKind, CredentialMutationServiceClient,
-    CredentialServiceClient, CredentialStatus, DeleteAccessProfileRequest, DeleteCredentialRequest,
-    EnrollCodexRequest, EnrollCodexResponse, GenerateSshCredentialRequest, GetAccessProfileRequest,
+    AddClaudeSubscriptionTokenCredentialRequest, AddSshCredentialRequest,
+    CompleteGithubAppAuthorizationRequest, CreateAccessProfileRequest, Credential,
+    CredentialAuthenticationKind, CredentialMutationServiceClient, CredentialServiceClient,
+    CredentialStatus, DeleteAccessProfileRequest, DeleteCredentialRequest, EnrollCodexRequest,
+    EnrollCodexResponse, GenerateSshCredentialRequest, GetAccessProfileRequest,
     GetCredentialRequest, ListAccessProfilesRequest, ListCredentialsRequest,
     RenameAccessProfileRequest, RenameCredentialRequest, RevokeCredentialRequest,
     RotateApiKeyCredentialRequest, UpdateAccessProfileRequest, enroll_codex_response,
@@ -42,6 +43,14 @@ const ATTENTION_TIMEOUT: Duration = Duration::from_secs(3);
 const MUTATION_TIMEOUT: Duration = Duration::from_secs(45);
 const ENROLLMENT_TIMEOUT: Duration = Duration::from_secs(16 * 60);
 const MAX_MUTATION_RESPONSE_BYTES: usize = 16 * 1024;
+/// The credential service records a pasted Claude subscription token's hard
+/// expiry one year after it is added; `claude setup-token` names no issue time.
+const CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS: u64 = 365 * 24 * 60 * 60;
+/// Acknowledged expiry may differ from this page's clock by request time and
+/// ordinary clock skew, never by a different lifetime.
+const CLAUDE_SUBSCRIPTION_TOKEN_EXPIRY_TOLERANCE_SECONDS: u64 = 24 * 60 * 60;
+/// A subscription token this close to its recorded expiry reads Expires soon.
+const EXPIRES_SOON_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 #[derive(Clone, Copy)]
 pub(crate) enum OAuthProvider {
@@ -434,6 +443,94 @@ pub(crate) async fn add_api_key(
     )
 }
 
+/// Store a pasted Claude subscription token (`claude setup-token`), or
+/// replace the exact named one the dialog observed. The token is sent only to
+/// the isolated credential authority; the acknowledgement is metadata only.
+pub(crate) async fn add_claude_subscription_token(
+    state: &AppState,
+    cookie: HeaderValue,
+    name: String,
+    token: Vec<u8>,
+    replacement: Option<(String, u64)>,
+) -> Result<(), ConnectError> {
+    let current = match &replacement {
+        None => None,
+        Some((credential_id, generation)) => {
+            let current = get_exact_credential(state, cookie.clone(), credential_id).await?;
+            if current.revocation_generation != *generation
+                || current.name != name
+                || credential_form(&current)? != "claude"
+            {
+                return Err(ConnectError::aborted("credential metadata changed"));
+            }
+            Some(current)
+        }
+    };
+    let (credential_id, expected_revocation_generation) = replacement.unzip();
+    let response = mutation_client(state, cookie)
+        .add_claude_subscription_token_credential(AddClaudeSubscriptionTokenCredentialRequest {
+            name: name.clone(),
+            token,
+            credential_id,
+            expected_revocation_generation,
+            ..Default::default()
+        })
+        .await?
+        .into_owned();
+    let credential = response
+        .credential
+        .into_option()
+        .ok_or_else(invalid_metadata)?;
+    validate_subscription_token_ack(&credential, &name, current.as_ref(), unix_now()?)
+}
+
+/// A created token is a new Active personal Anthropic OAuth identity; a
+/// replaced one keeps its identity and name at the next generation. Either way
+/// its expiry restarts one year from now.
+fn validate_subscription_token_ack(
+    credential: &Credential,
+    expected_name: &str,
+    current: Option<&Credential>,
+    now: u64,
+) -> Result<(), ConnectError> {
+    validate_credential_metadata(credential)?;
+    let expected_expiry = now + CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS;
+    if credential_form(credential)? != "claude"
+        || credential.name != expected_name
+        || credential.account_hint.is_some()
+        || credential.status != CredentialStatus::Active
+        || credential.expires_at_unix.is_none_or(|expiry| {
+            expiry.abs_diff(expected_expiry) > CLAUDE_SUBSCRIPTION_TOKEN_EXPIRY_TOLERANCE_SECONDS
+        })
+    {
+        return Err(invalid_metadata());
+    }
+    let expected_generation = match current {
+        None => 1,
+        Some(current) => {
+            if credential.id != current.id {
+                return Err(invalid_metadata());
+            }
+            current
+                .revocation_generation
+                .checked_add(1)
+                .filter(|generation| *generation <= i64::MAX as u64)
+                .ok_or_else(invalid_metadata)?
+        }
+    };
+    if credential.revocation_generation != expected_generation {
+        return Err(invalid_metadata());
+    }
+    Ok(())
+}
+
+fn unix_now() -> Result<u64, ConnectError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .map_err(|_| invalid_metadata())
+}
+
 /// Complete the server-side GitHub App callback. The callback code is sent
 /// only to credential-service over the authenticated mutation connection; the
 /// browser receives no token, provider response, or installation metadata.
@@ -584,8 +681,10 @@ pub(crate) async fn rotate_api_key(
     expires_at_unix: Option<u64>,
 ) -> Result<(), ConnectError> {
     let current = get_exact_credential(state, cookie.clone(), &credential_id).await?;
+    // A Claude subscription token shares the Anthropic slot but is replaced
+    // with a new token, never rotated as an API key.
     if current.revocation_generation != expected_generation
-        || !matches!(credential_slot(&current)?, "openai" | "anthropic")
+        || !matches!(credential_form(&current)?, "openai" | "anthropic")
     {
         return Err(ConnectError::aborted("credential metadata changed"));
     }
@@ -704,6 +803,15 @@ pub(crate) async fn settings_data(
     .await
     .map_err(|_| ConnectError::deadline_exceeded("credential metadata request timed out"))??;
     build_settings_data(credentials, profiles)
+}
+
+/// The settings inventory as of now: a Claude subscription token's recorded
+/// expiry is a wall-clock fact the service does not restate as a status.
+fn build_settings_data(
+    credentials: Vec<Credential>,
+    profiles: Vec<AccessProfile>,
+) -> Result<CredentialSettingsData, ConnectError> {
+    build_settings_data_at(credentials, profiles, unix_now()?)
 }
 
 /// The viewer's own profiles at their current revisions, each with the
@@ -937,9 +1045,10 @@ pub(crate) async fn delete_profile(
     Ok(())
 }
 
-fn build_settings_data(
+fn build_settings_data_at(
     mut credentials: Vec<Credential>,
     mut profiles: Vec<AccessProfile>,
+    now: u64,
 ) -> Result<CredentialSettingsData, ConnectError> {
     credentials.sort_by(|a, b| {
         credential_display_name(a)
@@ -953,12 +1062,14 @@ fn build_settings_data(
     let mut choices = CredentialChoicesView::default();
     let mut rows = Vec::with_capacity(credentials.len());
     for (index, credential) in credentials.into_iter().enumerate() {
-        let slot = credential_slot(&credential)?;
+        let form = credential_form(&credential)?;
+        let slot = form_slot(form);
         if !seen_credentials.insert(credential.id.clone()) {
             return Err(invalid_metadata());
         }
         validate_credential_metadata(&credential)?;
-        let (status, status_tone) = credential_status(&credential)?;
+        let (status, status_tone) = credential_status_at(&credential, form, now)?;
+        let withheld = capability_withheld_at(&credential, form, now);
         let expires = credential
             .expires_at_unix
             .map(|expiry| calendar_date(expiry as i64))
@@ -1005,30 +1116,36 @@ fn build_settings_data(
             (
                 credential_display_name(&credential).to_owned(),
                 slot,
+                form,
                 status,
                 status_tone,
-                capability_withheld(&credential),
+                withheld,
             ),
         );
+        let revoked = credential.status == CredentialStatus::Revoked;
         rows.push(CredentialRowView {
             id: credential.id,
             name: credential.name,
-            provider: provider_label(slot),
-            oauth_provider: match slot {
+            provider: provider_label(form),
+            oauth_provider: match form {
                 "codex" => "codex",
                 "github" => "github",
-                "openai" | "anthropic" | "ssh" => "",
-                _ => unreachable!("credential_slot returns a closed slot"),
+                "openai" | "anthropic" | "claude" | "ssh" => "",
+                _ => unreachable!("credential_form returns a closed form"),
             },
-            authentication: authentication_label(slot),
+            authentication: authentication_label(form),
             account_hint: credential.account_hint.unwrap_or_default(),
             status,
             status_tone,
-            api_key: matches!(slot, "openai" | "anthropic"),
-            oauth: matches!(slot, "codex" | "github"),
-            reconnect_needed: matches!(slot, "codex" | "github")
-                && credential.status == CredentialStatus::RefreshFailed,
-            revoked: credential.status == CredentialStatus::Revoked,
+            api_key: matches!(form, "openai" | "anthropic"),
+            oauth: matches!(form, "codex" | "github"),
+            subscription_token: form == "claude",
+            // A subscription token has no refresh and no provider answer
+            // marks it: only its recorded expiry asks its owner for a new one.
+            reconnect_needed: (matches!(form, "codex" | "github")
+                && credential.status == CredentialStatus::RefreshFailed)
+                || (form == "claude" && credential.status == CredentialStatus::Active && withheld),
+            revoked,
             expires,
             generation: credential.revocation_generation,
             ssh_public_key,
@@ -1040,8 +1157,8 @@ fn build_settings_data(
     let mut seen_profiles = BTreeSet::new();
     let github_connection = credential_index
         .values()
-        .find(|(_, slot, _, _, _)| *slot == "github")
-        .map(|(name, _, status, tone, withheld)| (name.clone(), *status, *tone, *withheld));
+        .find(|(_, slot, _, _, _, _)| *slot == "github")
+        .map(|(name, _, _, status, tone, withheld)| (name.clone(), *status, *tone, *withheld));
     let mut profile_rows = Vec::with_capacity(profiles.len());
     for profile in profiles {
         if exact_id(&profile.id).is_err()
@@ -1057,7 +1174,7 @@ fn build_settings_data(
         let mut entries = Vec::with_capacity(profile.entries.len());
         let mut attention = Vec::new();
         for entry in profile.entries {
-            let Some((credential_name, credential_slot, status, status_tone, withheld)) =
+            let Some((credential_name, credential_slot, form, status, status_tone, withheld)) =
                 credential_index.get(&entry.credential_id)
             else {
                 return Err(invalid_metadata());
@@ -1076,7 +1193,7 @@ fn build_settings_data(
                 status_tone,
             });
             if *withheld {
-                attention.push(attention_notice(credential_slot));
+                attention.push(attention_notice(form));
             }
         }
         // Every profile includes the account's one GitHub connection. Show it,
@@ -1298,15 +1415,51 @@ fn validate_profile_rename_ack(
     )
 }
 
+/// The profile slot a credential can fill. The Anthropic slot holds either an
+/// API key or a Claude subscription token.
 pub(crate) fn credential_slot(credential: &Credential) -> Result<&'static str, ConnectError> {
+    credential_form(credential).map(form_slot)
+}
+
+/// The closed provider/authentication form a credential takes, which names
+/// its labels and actions: `claude` is a Claude subscription token, the
+/// anthropic provider's OAuth kind, pasted from `claude setup-token`.
+pub(crate) fn credential_form(credential: &Credential) -> Result<&'static str, ConnectError> {
     match (credential.provider.as_str(), credential.authentication_kind) {
         ("openai", kind) if kind == CredentialAuthenticationKind::Oauth => Ok("codex"),
         ("openai", kind) if kind == CredentialAuthenticationKind::ApiKey => Ok("openai"),
         ("github", kind) if kind == CredentialAuthenticationKind::Oauth => Ok("github"),
         ("anthropic", kind) if kind == CredentialAuthenticationKind::ApiKey => Ok("anthropic"),
+        ("anthropic", kind) if kind == CredentialAuthenticationKind::Oauth => Ok("claude"),
         ("ssh", kind) if kind == CredentialAuthenticationKind::SshKey => Ok("ssh"),
         _ => Err(invalid_metadata()),
     }
+}
+
+fn form_slot(form: &'static str) -> &'static str {
+    match form {
+        "claude" => "anthropic",
+        form => form,
+    }
+}
+
+/// The status a row and its profiles read. A Claude subscription token's
+/// recorded expiry is shown as Expired once it passes and as Expires soon in
+/// its last thirty days; every other form reads its service status alone.
+fn credential_status_at(
+    credential: &Credential,
+    form: &str,
+    now: u64,
+) -> Result<(&'static str, &'static str), ConnectError> {
+    let status = credential_status(credential)?;
+    if form != "claude" || credential.status != CredentialStatus::Active {
+        return Ok(status);
+    }
+    Ok(match credential.expires_at_unix {
+        Some(expiry) if expiry <= now => ("Expired", "warning"),
+        Some(expiry) if expiry - now <= EXPIRES_SOON_SECONDS => ("Expires soon", "warning"),
+        _ => status,
+    })
 }
 
 fn credential_status(
@@ -1334,36 +1487,48 @@ fn capability_withheld(credential: &Credential) -> bool {
     credential.status != CredentialStatus::Active
 }
 
+/// As [`capability_withheld`]; a Claude subscription token past its recorded
+/// expiry is withheld too, as the broker withholds any expired credential.
+fn capability_withheld_at(credential: &Credential, form: &str, now: u64) -> bool {
+    capability_withheld(credential)
+        || (form == "claude"
+            && credential
+                .expires_at_unix
+                .is_some_and(|expiry| expiry <= now))
+}
+
 /// What a withheld capability needs, in the words of the broker's 403 for the
 /// same slot: an OAuth identity is reconnected, a key is replaced.
-fn attention_notice(slot: &str) -> &'static str {
-    match slot {
+fn attention_notice(form: &str) -> &'static str {
+    match form {
         "codex" => "Codex needs Reconnect",
         "github" => "GitHub needs Reconnect",
         "openai" => "OpenAI API key needs replacing",
         "anthropic" => "Anthropic API key needs replacing",
+        "claude" => "Claude subscription token needs replacing",
         "ssh" => "SSH key needs replacing",
-        _ => unreachable!("closed slot"),
+        _ => unreachable!("closed form"),
     }
 }
 
-fn provider_label(slot: &str) -> &'static str {
-    match slot {
+fn provider_label(form: &str) -> &'static str {
+    match form {
         "codex" => "OpenAI Codex",
         "openai" => "OpenAI API",
         "github" => "GitHub",
-        "anthropic" => "Anthropic",
+        "anthropic" | "claude" => "Anthropic",
         "ssh" => "SSH",
-        _ => unreachable!("closed slot"),
+        _ => unreachable!("closed form"),
     }
 }
 
-fn authentication_label(slot: &str) -> &'static str {
-    match slot {
+fn authentication_label(form: &str) -> &'static str {
+    match form {
         "codex" | "github" => "OAuth",
         "openai" | "anthropic" => "API key",
+        "claude" => "Claude subscription token",
         "ssh" => "SSH key",
-        _ => unreachable!("closed slot"),
+        _ => unreachable!("closed form"),
     }
 }
 
@@ -1656,6 +1821,173 @@ mod tests {
             ["Codex needs Reconnect", "GitHub needs Reconnect"]
         );
         assert_eq!(attention(&data, 13), ["GitHub needs Reconnect"]);
+    }
+
+    /// A Claude subscription token fills the Anthropic slot like an API key,
+    /// with its own labels, a replace action and its recorded expiry read
+    /// against now, since it has no refresh.
+    #[test]
+    fn claude_subscription_tokens_share_the_anthropic_slot_with_their_own_states() {
+        const NOW: u64 = 1_800_000_000;
+        const DAY: u64 = 24 * 60 * 60;
+        let id = |n: u8| format!("00000000-0000-4000-8000-0000000000{n:02}");
+        let token = |n: u8, name: &str| {
+            let mut token = credential(
+                &id(n),
+                name,
+                "anthropic",
+                CredentialAuthenticationKind::Oauth,
+            );
+            token.expires_at_unix = Some(NOW + 200 * DAY);
+            token
+        };
+        let active = token(1, "Claude active");
+        let mut soon = token(2, "Claude soon");
+        soon.expires_at_unix = Some(NOW + 10 * DAY);
+        let mut expired = token(3, "Claude expired");
+        expired.expires_at_unix = Some(NOW - 1);
+        let mut revoked = token(5, "Claude revoked");
+        revoked.status = CredentialStatus::Revoked.into();
+        let key = credential(
+            &id(6),
+            "Work Anthropic",
+            "anthropic",
+            CredentialAuthenticationKind::ApiKey,
+        );
+        assert_eq!(credential_form(&active).unwrap(), "claude");
+        assert_eq!(credential_slot(&active).unwrap(), "anthropic");
+        assert_eq!(credential_form(&key).unwrap(), "anthropic");
+        let profile = |n: u8, credential: u8| AccessProfile {
+            id: id(n),
+            name: format!("profile-{n}"),
+            revision: 3,
+            entries: vec![AccessProfileEntry {
+                capability_slot: "anthropic".into(),
+                credential_id: id(credential),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let data = build_settings_data_at(
+            vec![active.clone(), soon, expired, revoked, key.clone()],
+            [1, 2, 3, 5, 6].map(|n| profile(10 + n, n)).into(),
+            NOW,
+        )
+        .unwrap();
+        let row = |n: u8| {
+            data.credentials
+                .iter()
+                .find(|row| row.id == id(n))
+                .expect("credential row")
+        };
+        for n in [1, 2, 3, 5] {
+            let row = row(n);
+            assert_eq!(row.provider, "Anthropic");
+            assert_eq!(row.authentication, "Claude subscription token");
+            assert!(row.subscription_token && !row.api_key && !row.oauth);
+            assert_eq!(row.oauth_provider, "");
+        }
+        let key_row = row(6);
+        assert_eq!(
+            (key_row.authentication, key_row.subscription_token),
+            ("API key", false)
+        );
+        assert!(key_row.api_key);
+        for (n, status, tone, reconnect) in [
+            (1, "Active", "success", false),
+            (2, "Expires soon", "warning", false),
+            (3, "Expired", "warning", true),
+            (5, "Revoked", "danger", false),
+        ] {
+            assert_eq!((row(n).status, row(n).status_tone), (status, tone), "{n}");
+            assert_eq!(row(n).reconnect_needed, reconnect, "{n}");
+        }
+        assert!(row(1).expires.contains("2027"));
+        // Tokens are Anthropic choices beside the API key; none is offered
+        // for another slot.
+        assert_eq!(data.choices.anthropic.len(), 5);
+        assert!(data.choices.codex.is_empty() && data.choices.openai.is_empty());
+        let attention = |n: u8| {
+            data.profiles
+                .iter()
+                .find(|profile| profile.id == id(10 + n))
+                .unwrap()
+                .attention
+                .clone()
+        };
+        let notice = ["Claude subscription token needs replacing"];
+        assert!(attention(1).is_empty());
+        // Expiring soon still works; expired and revoked do not.
+        assert!(attention(2).is_empty());
+        assert_eq!(attention(3), notice);
+        assert_eq!(attention(5), notice);
+        assert!(attention(6).is_empty());
+        let entry = data
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id(13))
+            .unwrap()
+            .entries
+            .iter()
+            .find(|entry| entry.slot == "Anthropic")
+            .unwrap();
+        assert_eq!((entry.status, entry.status_tone), ("Expired", "warning"));
+        // An API key past a hard expiry keeps its existing reading.
+        let mut old_key = key.clone();
+        old_key.expires_at_unix = Some(NOW - 1);
+        let data = build_settings_data_at(vec![old_key], Vec::new(), NOW).unwrap();
+        assert_eq!(data.credentials[0].status, "Active");
+        assert!(!data.credentials[0].reconnect_needed);
+        // A token never fills the Codex slot.
+        let mut cross = profile(20, 1);
+        cross.entries[0].capability_slot = "codex".into();
+        assert!(build_settings_data_at(vec![active], vec![cross], NOW).is_err());
+    }
+
+    #[test]
+    fn subscription_token_acknowledgements_are_exact_and_restart_the_year() {
+        const NOW: u64 = 1_800_000_000;
+        let id = "00000000-0000-4000-8000-000000000001";
+        let mut created = credential(
+            id,
+            "Claude",
+            "anthropic",
+            CredentialAuthenticationKind::Oauth,
+        );
+        created.expires_at_unix = Some(NOW + CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS + 5);
+        validate_subscription_token_ack(&created, "Claude", None, NOW).unwrap();
+        let invalid = |change: &dyn Fn(&mut Credential)| {
+            let mut changed = created.clone();
+            change(&mut changed);
+            validate_subscription_token_ack(&changed, "Claude", None, NOW).is_err()
+        };
+        assert!(invalid(&|c| c.provider = "openai".into()));
+        assert!(invalid(
+            &|c| c.authentication_kind = CredentialAuthenticationKind::ApiKey.into()
+        ));
+        assert!(invalid(&|c| c.name = "Other".into()));
+        assert!(invalid(&|c| c.account_hint = Some("account".into())));
+        assert!(invalid(
+            &|c| c.status = CredentialStatus::RefreshFailed.into()
+        ));
+        assert!(invalid(&|c| c.revocation_generation = 2));
+        assert!(invalid(&|c| c.expires_at_unix = None));
+        assert!(invalid(
+            &|c| c.expires_at_unix = Some(NOW + 30 * 24 * 60 * 60)
+        ));
+
+        let mut current = created.clone();
+        current.status = CredentialStatus::RefreshFailed.into();
+        current.revocation_generation = 4;
+        current.expires_at_unix = Some(NOW - 1);
+        let mut replaced = created.clone();
+        replaced.revocation_generation = 5;
+        validate_subscription_token_ack(&replaced, "Claude", Some(&current), NOW).unwrap();
+        let mut moved = replaced.clone();
+        moved.id = "00000000-0000-4000-8000-000000000002".into();
+        assert!(validate_subscription_token_ack(&moved, "Claude", Some(&current), NOW).is_err());
+        replaced.revocation_generation = 4;
+        assert!(validate_subscription_token_ack(&replaced, "Claude", Some(&current), NOW).is_err());
     }
 
     #[test]

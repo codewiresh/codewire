@@ -1413,6 +1413,51 @@ fn unsupported_authentication_kind_is_rejected_before_protected_store_access() {
     );
 }
 
+/// The shared catalog admits Anthropic OAuth for the platform's Claude
+/// subscription token; the local authority still refuses it before any
+/// protected-store access.
+#[test]
+fn a_claude_subscription_token_is_refused_by_the_local_authority() {
+    let temp = TempDir::new().expect("temporary directory");
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let catalog = codewire_access::builtin_provider_catalog();
+    assert!(
+        catalog
+            .get(&provider("anthropic"))
+            .expect("Anthropic provider")
+            .supports_authentication_kind(CredentialAuthKind::OAuth)
+    );
+    let authority = LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog)
+        .expect("open authority");
+    let mut input = new_credential("claude-subscription");
+    input.provider = provider("anthropic");
+    input.account_hint = None;
+    assert_eq!(
+        authority.add_credential(input, material(b"sk-ant-oat01-synthetic-local-token")),
+        Err(LocalCredentialError::Access(
+            AccessError::UnsupportedAuthenticationKind {
+                provider: provider("anthropic"),
+                kind: CredentialAuthKind::OAuth,
+            }
+        ))
+    );
+    assert_eq!(store.entry_count(), 0);
+    assert!(
+        authority
+            .list_credentials()
+            .expect("list credentials")
+            .is_empty()
+    );
+    // An Anthropic API key remains a local credential.
+    let mut api_key = new_credential("anthropic-api-key");
+    api_key.provider = provider("anthropic");
+    api_key.authentication_kind = CredentialAuthKind::ApiKey;
+    api_key.account_hint = None;
+    authority
+        .add_credential(api_key, material(b"synthetic-anthropic-api-key"))
+        .expect("local Anthropic API key");
+}
+
 #[test]
 fn names_are_unique_case_insensitively_and_metadata_lifecycle_is_explicit() {
     let temp = TempDir::new().expect("temporary directory");

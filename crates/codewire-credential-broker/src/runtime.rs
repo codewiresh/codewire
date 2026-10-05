@@ -25,7 +25,9 @@ use url::Url;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::anthropic::{AnthropicApiKeyAdapter, AnthropicStreamingResponse};
+use crate::anthropic::{
+    AnthropicApiKeyAdapter, AnthropicStreamingResponse, AnthropicSubscriptionTokenAdapter,
+};
 use crate::codex_oauth::{
     ACCESS_TOKEN_REFRESH_WINDOW_SECONDS, CODEX_LOGIN_MINIMUM_VALIDITY_SECONDS,
     CanonicalCodexOAuthBundle, CodexOAuthCredential,
@@ -62,6 +64,10 @@ mod http_tests;
 #[cfg(all(test, feature = "local-broker-synthetic-smoke"))]
 #[path = "runtime/synthetic_smoke_tests.rs"]
 mod synthetic_smoke_tests;
+
+#[cfg(test)]
+#[path = "runtime/anthropic_subscription_tests.rs"]
+mod anthropic_subscription_tests;
 
 /// Metadata-only description of one exact OAuth generation to refresh.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -852,6 +858,7 @@ pub struct OpenAiBroker<P, U> {
     api_key_adapter: OpenAiApiKeyAdapter,
     oauth_adapter: OpenAiChatGptOAuthAdapter,
     anthropic_adapter: AnthropicApiKeyAdapter,
+    anthropic_subscription_adapter: AnthropicSubscriptionTokenAdapter,
     github_adapter: GitHubOAuthAdapter,
     github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     oauth_refresh: tokio::sync::Mutex<()>,
@@ -1002,6 +1009,8 @@ where
             api_key_adapter: OpenAiApiKeyAdapter::new().map_err(map_adapter_error)?,
             oauth_adapter: OpenAiChatGptOAuthAdapter::new().map_err(map_adapter_error)?,
             anthropic_adapter: AnthropicApiKeyAdapter::new().map_err(map_adapter_error)?,
+            anthropic_subscription_adapter: AnthropicSubscriptionTokenAdapter::new()
+                .map_err(map_adapter_error)?,
             github_adapter: GitHubOAuthAdapter::new().map_err(map_adapter_error)?,
             github_app_authorization: None,
             oauth_refresh: tokio::sync::Mutex::new(()),
@@ -1317,11 +1326,22 @@ where
             .await
             .map_err(map_lease_error)?;
         validate_http_lease_coordinates(&lease, &request.slot, &operation, &request.route)?;
-        let (method, target, headers, body, policy) = self
-            .anthropic_adapter
-            .prepare_validated(lease, validated)
-            .map_err(map_adapter_error)?
-            .into_parts();
+        // The validated request is form-independent; the lease's credential
+        // kind selects the API key or the Claude subscription token adapter.
+        // Neither form is refreshed, and no provider response marks, deletes
+        // or withholds either: its owner replaces it.
+        let prepared = match lease.credential_metadata().authentication_kind {
+            CredentialAuthKind::ApiKey => self
+                .anthropic_adapter
+                .prepare_validated(lease, validated)
+                .map_err(map_adapter_error)?,
+            CredentialAuthKind::OAuth => self
+                .anthropic_subscription_adapter
+                .prepare_validated(lease, validated)
+                .map_err(map_adapter_error)?,
+            _ => return Err(BrokerRequestError::Denied),
+        };
+        let (method, target, headers, body, policy) = prepared.into_parts();
         let response = timing::timed(
             Phase::Provider,
             self.upstream.execute(BrokerUpstreamRequest {

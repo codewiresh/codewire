@@ -80,13 +80,19 @@ pub fn builtin_provider_catalog() -> ProviderCatalog {
                 ),
             ]),
         },
+        // One Anthropic slot holds either an API key or a Claude subscription
+        // token (`claude setup-token`), its OAuth form. Both reach only the
+        // same two Messages routes through the broker; neither is delivered.
         ProviderDefinition {
             id: ProviderId::parse("anthropic").expect("built-in Anthropic provider ID"),
-            authentication_kinds: BTreeSet::from([CredentialAuthKind::ApiKey]),
+            authentication_kinds: BTreeSet::from([
+                CredentialAuthKind::OAuth,
+                CredentialAuthKind::ApiKey,
+            ]),
             capabilities: BTreeMap::from([(
                 CapabilitySlot::anthropic(),
                 policy(
-                    &[CredentialAuthKind::ApiKey],
+                    &[CredentialAuthKind::OAuth, CredentialAuthKind::ApiKey],
                     &[
                         ("messages", "anthropic-api"),
                         ("count-tokens", "anthropic-api"),
@@ -176,7 +182,14 @@ mod tests {
                 CredentialAuthKind::ApiKey,
                 Some(HttpProvider::AnthropicApiKey),
             ),
-            ("anthropic", "anthropic", CredentialAuthKind::OAuth, None),
+            (
+                "anthropic",
+                "anthropic",
+                CredentialAuthKind::OAuth,
+                Some(HttpProvider::AnthropicSubscriptionToken),
+            ),
+            ("codex", "anthropic", CredentialAuthKind::OAuth, None),
+            ("anthropic", "openai", CredentialAuthKind::OAuth, None),
             (
                 "github",
                 "github",
@@ -196,6 +209,26 @@ mod tests {
         }
         assert!(serde_json::from_str::<HttpProvider>("\"unknown\"").is_err());
         assert!(HttpProvider::parse("github-app-authorization").is_none());
+        for provider in [
+            HttpProvider::AnthropicApiKey,
+            HttpProvider::AnthropicSubscriptionToken,
+        ] {
+            assert_eq!(HttpProvider::parse(provider.as_str()), Some(provider));
+            // Both Anthropic forms own the same stock-client names.
+            assert_eq!(
+                provider.reserved_environment_keys(),
+                [
+                    "ANTHROPIC_BASE_URL",
+                    "ANTHROPIC_API_KEY",
+                    "ANTHROPIC_AUTH_TOKEN",
+                    "CLAUDE_CODE_OAUTH_TOKEN",
+                ]
+            );
+        }
+        assert_eq!(
+            HttpProvider::AnthropicSubscriptionToken.as_str(),
+            "anthropic-subscription-token"
+        );
     }
 
     #[test]
@@ -297,12 +330,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             anthropic.authentication_kinds,
-            BTreeSet::from([CredentialAuthKind::ApiKey])
+            BTreeSet::from([CredentialAuthKind::OAuth, CredentialAuthKind::ApiKey])
         );
         assert_eq!(
             anthropic.capabilities[&CapabilitySlot::anthropic()],
             policy(
-                &[CredentialAuthKind::ApiKey],
+                &[CredentialAuthKind::OAuth, CredentialAuthKind::ApiKey],
                 &[
                     ("messages", "anthropic-api"),
                     ("count-tokens", "anthropic-api")

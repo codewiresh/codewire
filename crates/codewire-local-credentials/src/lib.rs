@@ -532,7 +532,15 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
                 .ok_or_else(|| AccessError::ProviderUnavailable {
                     provider: input.provider.clone(),
                 })?;
-        if !provider.supports_authentication_kind(input.authentication_kind) {
+        // A Claude subscription token (Anthropic OAuth) is a platform
+        // credential only, whatever the shared catalog admits. The native
+        // client projection has no subscription form.
+        // TODO(native-claude-subscription-form): admit it locally once native
+        // VMs project Claude Code's subscription mode.
+        if !provider.supports_authentication_kind(input.authentication_kind)
+            || (input.provider.as_str() == "anthropic"
+                && input.authentication_kind == CredentialAuthKind::OAuth)
+        {
             return Err(AccessError::UnsupportedAuthenticationKind {
                 provider: input.provider,
                 kind: input.authentication_kind,

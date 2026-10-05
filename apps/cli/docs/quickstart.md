@@ -54,6 +54,14 @@ Protected local provider accounts are enrolled on the host with
 `cw credentials --local` and exposed only through an explicit access profile.
 The managed credential value is never copied into the workspace.
 
+To use a Claude Pro, Max, Team or Enterprise plan with Claude Code in a hosted
+Sandbox, run `claude setup-token`, then paste the freshly printed token into
+`cw credentials --platform add claude-subscription --name NAME` and select it
+with `cw credentials --platform --profile=PROFILE set anthropic NAME`. The token
+stays in Codewire; the Sandbox receives only a placeholder. Codewire records an
+expiry one year after you add it; replace it with `cw credentials --platform
+rotate NAME`.
+
 ## Run durable sessions
 
 Pass the environment first and the command after `--`:
