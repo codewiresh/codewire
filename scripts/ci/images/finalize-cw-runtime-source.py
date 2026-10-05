@@ -99,6 +99,56 @@ def failure_diagnostic(error):
     return DIAGNOSTIC_PREFIX + json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
+# Original capsule inventory holds at most two walk descriptors per level,
+# plus the root ancestry. Four bounded depths cover those handles and the
+# simultaneous fixed export ancestries; 64 cover stdio, Git/transport pipes,
+# selectors, eight export members, and ordinary compiler-family bookkeeping.
+# Width adds no simultaneous walk handles. All original per-member FDs remain.
+CAPSULE_NOFILE_HEADROOM = 4 * source.asset.MAX_DEPTH + 64
+
+
+def prepare_descriptor_capacity(request_sha256):
+    """Raise only soft NOFILE for this exact pinned, bounded capsule.
+
+    This preflight never admits source or compilation. Full source.admit below
+    independently rereads the request and every inode/hash/Git member, then
+    main retains its existing readonly checks before the compiler dispatch.
+    """
+    source.require(release.is_hex(request_sha256, 64), "capsule request pin refused")
+    request = source.HeldSourceFile(REQUEST, source.MAX_DOCUMENT)
+    try:
+        source.require(request.sha256 == request_sha256, "capsule request differs from its external pin")
+        model = source.model(request.data)
+        # Parent holds one FD per absolute directory component, without
+        # deduplication, and HeldSourceFile retains one additional file FD.
+        retained = len(request.parent.fds) + 1
+        paths = [SOURCE_ROOT / name for name in model["files"]]
+        paths.extend(GIT_ROOT / "objects" / oid[:2] / oid[2:] for oid in model["objects"])
+        paths.extend(GIT_ROOT / name for name in ("HEAD", "index", "shallow"))
+        for path in paths:
+            retained += len(source.asset.path_arg(str(path)).parent.parts) + 1
+        request.revalidate(content=True)
+    finally:
+        request.close()
+    # Schema count/byte bounds and existing absolute-path depth bounds make
+    # this selected capacity finite; do not demand worst-schema capacity.
+    required = retained + CAPSULE_NOFILE_HEADROOM
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    valid = lambda value: type(value) is int and (value == resource.RLIM_INFINITY or 0 <= value <= (1 << 63) - 1)
+    source.require(valid(soft) and valid(hard)
+                   and (hard == resource.RLIM_INFINITY or soft != resource.RLIM_INFINITY and soft <= hard),
+                   "compiler descriptor limits refused")
+    source.require(hard == resource.RLIM_INFINITY or required <= hard,
+                   "selected capsule exceeds the unchanged descriptor hard limit")
+    if soft != resource.RLIM_INFINITY and soft < required:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (required, hard))
+        observed_soft, observed_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        source.require(type(observed_soft) is int and type(observed_hard) is int
+                       and observed_soft == required and observed_hard == hard,
+                       "compiler descriptor limit readback differs")
+    return required
+
+
 def export_bound(name):
     source.require(name in FILES, "unknown producer export")
     return (8 * 1024 * 1024 if name == "cw.d" else 32 * 1024 * 1024 if name == "compile.log" else
@@ -297,6 +347,7 @@ def main(argv=None):
     _DIAGNOSTIC["phase"] = "custody"
     owner.arm_custody()
     _DIAGNOSTIC["phase"] = "capsule"
+    prepare_descriptor_capacity(args.request_sha256)
     with source.admit(SOURCE_ROOT, GIT_ROOT, REQUEST, args.request_sha256) as admitted:
         _DIAGNOSTIC.update(source_held_files_at_admit=len(admitted.files),
                            source_held_fds_at_admit=sum((held.fd is not None) + len(held.parent.fds)

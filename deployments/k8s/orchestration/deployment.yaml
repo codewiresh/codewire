@@ -116,12 +116,18 @@ spec:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 10
+          # Orchestration runs one replica, so a probe failure empties the API
+          # Service. Ready stays a database round trip, but tolerates a brief
+          # stall: Dev saw sporadic >1 s /readyz stalls with the process idle and
+          # the database healthy, and one burst made the whole API return 503.
           readinessProbe:
             httpGet:
               path: /readyz
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
           volumeMounts:
             # Platform-only Trustee administration credential. This volume is
             # never projected into tenant Secrets or sandbox Pods.

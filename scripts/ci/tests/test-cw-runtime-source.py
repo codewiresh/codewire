@@ -313,6 +313,127 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
                   "unexpected_family": False, "cleanup_unknown": False}
         return binary, depinfo, target, cargo, result
 
+    def test_selected_descriptor_capacity_matches_real_held_members_and_mocked_limits(self):
+        real_limit = finalizer.resource.getrlimit(finalizer.resource.RLIMIT_NOFILE)
+        with self.prepare() as capsule, self.admits(capsule) as admitted:
+            expected = sum(len(held.parent.fds) + 1 for held in admitted.files.values())
+            expected += finalizer.CAPSULE_NOFILE_HEADROOM
+            pin = capsule.outputs["request.json"].sha256
+            with mock.patch.object(finalizer, "SOURCE_ROOT", capsule.path / "source"), \
+                    mock.patch.object(finalizer, "GIT_ROOT", capsule.path / "git"), \
+                    mock.patch.object(finalizer, "REQUEST", capsule.path / "request.json"):
+                hard = expected + 1024
+                cases = ((expected + 1, hard, False), (expected, hard, False),
+                         (64, hard, True), (64, finalizer.resource.RLIM_INFINITY, True),
+                         (finalizer.resource.RLIM_INFINITY, finalizer.resource.RLIM_INFINITY, False))
+                for soft, selected_hard, raises in cases:
+                    with self.subTest(soft=soft, hard=selected_hard), \
+                            mock.patch.object(finalizer.resource, "getrlimit", side_effect=
+                                              [(soft, selected_hard), (expected, selected_hard)]), \
+                            mock.patch.object(finalizer.resource, "setrlimit") as changed:
+                        self.assertEqual(finalizer.prepare_descriptor_capacity(pin), expected)
+                        if raises:
+                            changed.assert_called_once_with(finalizer.resource.RLIMIT_NOFILE,
+                                                            (expected, selected_hard))
+                        else:
+                            changed.assert_not_called()
+                admitted.revalidate()
+                capsule.revalidate()
+        self.assertEqual(finalizer.resource.getrlimit(finalizer.resource.RLIMIT_NOFILE), real_limit)
+
+    def test_descriptor_preflight_pin_and_schema_refuse_without_limit_effect(self):
+        real_limit = finalizer.resource.getrlimit(finalizer.resource.RLIMIT_NOFILE)
+        with self.prepare() as capsule, \
+                mock.patch.object(finalizer, "SOURCE_ROOT", capsule.path / "source"), \
+                mock.patch.object(finalizer, "GIT_ROOT", capsule.path / "git"), \
+                mock.patch.object(finalizer, "REQUEST", capsule.path / "request.json"), \
+                mock.patch.object(finalizer.resource, "getrlimit") as observed, \
+                mock.patch.object(finalizer.resource, "setrlimit") as changed:
+            pin = capsule.outputs["request.json"].sha256
+            for rejected in ("0" * 64, "bad", True):
+                with self.subTest(pin=rejected), self.assertRaises(FAILURES):
+                    finalizer.prepare_descriptor_capacity(rejected)
+            altered = copy.deepcopy(capsule.model)
+            altered["profile"] = "caller-invented-profile"
+            raw = source.release.canonical(altered)
+            write(capsule.path / "request.json", raw, 0o400)
+            with self.assertRaises(FAILURES):
+                finalizer.prepare_descriptor_capacity(sha(raw))
+            observed.assert_not_called()
+            changed.assert_not_called()
+        self.assertEqual(finalizer.resource.getrlimit(finalizer.resource.RLIMIT_NOFILE), real_limit)
+
+    def test_descriptor_preflight_insufficient_or_diverged_limits_never_reach_admit_or_effects(self):
+        real_limit = finalizer.resource.getrlimit(finalizer.resource.RLIMIT_NOFILE)
+        with self.prepare() as capsule, self.admits(capsule) as admitted:
+            required = sum(len(held.parent.fds) + 1 for held in admitted.files.values())
+            required += finalizer.CAPSULE_NOFILE_HEADROOM
+            pin = capsule.outputs["request.json"].sha256
+            cases = (([(64, required - 1)], False),
+                     ([(64, required + 1024), (required - 1, required + 1024)], True),
+                     ([(64, required + 1024), (required, required + 1025)], True),
+                     ([(True, required + 1024)], False),
+                     ([(64, -2)], False))
+            with mock.patch.object(finalizer, "SOURCE_ROOT", capsule.path / "source"), \
+                    mock.patch.object(finalizer, "GIT_ROOT", capsule.path / "git"), \
+                    mock.patch.object(finalizer, "REQUEST", capsule.path / "request.json"):
+                for limits, raises in cases:
+                    with self.subTest(limits=limits), mock.patch.object(finalizer.signal, "signal"), \
+                            mock.patch.object(finalizer.owner, "arm_custody"), \
+                            mock.patch.object(finalizer.resource, "getrlimit", side_effect=limits), \
+                            mock.patch.object(finalizer.resource, "setrlimit") as changed, \
+                            mock.patch.object(finalizer.source, "admit") as full_admit, \
+                            mock.patch.object(finalizer.owner, "admit_output") as output, \
+                            mock.patch.object(finalizer.subprocess, "check_output") as rustc, \
+                            mock.patch.object(finalizer.owner, "run_owned") as compile_command, \
+                            mock.patch.object(finalizer, "finalize") as export, \
+                            contextlib.redirect_stdout(io.StringIO()) as stdout, \
+                            self.assertRaises(FAILURES):
+                        finalizer.main(["--request-sha256", pin])
+                    for effect in (full_admit, output, rustc, compile_command, export):
+                        effect.assert_not_called()
+                    self.assertEqual(stdout.getvalue(), "")
+                    if raises:
+                        changed.assert_called_once_with(finalizer.resource.RLIMIT_NOFILE,
+                                                        (required, limits[0][1]))
+                    else:
+                        changed.assert_not_called()
+                    self.assertEqual(finalizer._DIAGNOSTIC["phase"], "capsule")
+                    self.assertIsNone(finalizer._DIAGNOSTIC["source_held_files_at_admit"])
+                    self.assertIsNone(finalizer._DIAGNOSTIC["source_held_fds_at_admit"])
+        self.assertEqual(finalizer.resource.getrlimit(finalizer.resource.RLIMIT_NOFILE), real_limit)
+
+    def test_full_capsule_reread_refuses_replacement_after_mocked_capacity_raise(self):
+        real_limit = finalizer.resource.getrlimit(finalizer.resource.RLIMIT_NOFILE)
+        with self.prepare() as capsule, self.admits(capsule) as admitted:
+            required = sum(len(held.parent.fds) + 1 for held in admitted.files.values())
+            required += finalizer.CAPSULE_NOFILE_HEADROOM
+            pin = capsule.outputs["request.json"].sha256
+            with mock.patch.object(finalizer, "SOURCE_ROOT", capsule.path / "source"), \
+                    mock.patch.object(finalizer, "GIT_ROOT", capsule.path / "git"), \
+                    mock.patch.object(finalizer, "REQUEST", capsule.path / "request.json"), \
+                    mock.patch.object(finalizer.resource, "getrlimit", side_effect=
+                                      [(64, required + 1024), (required, required + 1024)]), \
+                    mock.patch.object(finalizer.resource, "setrlimit") as changed:
+                self.assertEqual(finalizer.prepare_descriptor_capacity(pin), required)
+                changed.assert_called_once_with(finalizer.resource.RLIMIT_NOFILE, (required, required + 1024))
+            # Capacity is never authority: the original full reader still
+            # detects replaced source bytes and a changed externally pinned request.
+            target = capsule.path / "source/crates/demo/src/lib.rs"
+            original = target.read_bytes()
+            write(target, b"pub fn replacement() {}\n", 0o444)
+            with self.assertRaises(FAILURES):
+                with self.admits(capsule):
+                    pass
+            write(target, original, 0o444)
+            replacement = copy.deepcopy(capsule.model)
+            replacement["version"] = "0.0.0-replacement"
+            write(capsule.path / "request.json", source.release.canonical(replacement), 0o400)
+            with self.assertRaises(FAILURES):
+                with self.admits(capsule, pin):
+                    pass
+        self.assertEqual(finalizer.resource.getrlimit(finalizer.resource.RLIMIT_NOFILE), real_limit)
+
     def test_actual_shared_admission_transport_export_and_no_execution(self):
         with self.prepare() as capsule:
             binary, depinfo, target, cargo, result = self.build_bytes(capsule)
@@ -597,6 +718,7 @@ class FinalizerDiagnostic(unittest.TestCase):
         error = OSError(24, "DIAGNOSTIC_SECRET_CANARY", "/DIAGNOSTIC_SECRET_CANARY")
         with mock.patch.object(finalizer.signal, "signal"), \
                 mock.patch.object(finalizer.owner, "arm_custody"), \
+                mock.patch.object(finalizer, "prepare_descriptor_capacity") as capacity, \
                 mock.patch.object(finalizer.source, "admit", side_effect=error), \
                 mock.patch.object(finalizer.owner, "admit_output") as output, \
                 mock.patch.object(finalizer.subprocess, "check_output") as rustc, \
@@ -606,6 +728,7 @@ class FinalizerDiagnostic(unittest.TestCase):
                 self.assertRaises(OSError) as refused:
             finalizer.main(["--request-sha256", "a" * 64])
         self.assertIs(refused.exception, error)
+        capacity.assert_called_once_with("a" * 64)
         self.assertEqual(stdout.getvalue(), "")
         for effect in (output, rustc, compile_command, export):
             effect.assert_not_called()
