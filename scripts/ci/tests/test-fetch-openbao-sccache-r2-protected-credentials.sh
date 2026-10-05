@@ -124,6 +124,16 @@ fi
 [[ ! -e "$work/output/malformed-secret" ]] || fail 'malformed protected secret wrote credentials'
 [[ -z "$(find "$RUNNER_TEMP" -mindepth 1 -print -quit)" ]] ||
   fail 'malformed protected secret left temporary identity material'
+grep -Fq 'has no well-formed secretAccessKey' "$work/malformed-secret.out" ||
+  fail 'malformed protected secret was not attributable'
+
+if FAKE_ACCESS_KEY_ID='bad key' "$FETCHER" "$work/output/malformed-id" \
+    >"$work/malformed-id.out" 2>&1; then
+  fail 'malformed protected access-key ID was accepted'
+fi
+[[ ! -e "$work/output/malformed-id" ]] || fail 'malformed protected access-key ID wrote credentials'
+grep -Fq 'has no well-formed accessKeyId' "$work/malformed-id.out" ||
+  fail 'malformed protected access-key ID was not attributable'
 
 export FAKE_R2_FAIL=1
 if "$FETCHER" "$work/output/failed-fetch" >"$work/failed-fetch.out" 2>&1; then
@@ -132,6 +142,8 @@ fi
 [[ ! -e "$work/output/failed-fetch" ]] || fail 'failed protected R2 read left a credential file'
 [[ -z "$(find "$RUNNER_TEMP" -mindepth 1 -print -quit)" ]] ||
   fail 'failed protected R2 read left temporary identity material'
+grep -Fq 'protected cache document read failed' "$work/failed-fetch.out" ||
+  fail 'failed protected R2 read was not attributable'
 unset FAKE_R2_FAIL
 
 printf '[test-fetch-openbao-sccache-r2-protected-credentials] protected-main private-file contract passed\n'
