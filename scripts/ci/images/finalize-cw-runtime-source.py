@@ -358,7 +358,7 @@ def main(argv=None):
         source.require(all(os.fstatvfs(held.fd).f_flag & os.ST_RDONLY for held in admitted.files.values()),
                        "compiler source/Git/request must be mounted readonly")
         _DIAGNOSTIC["phase"] = "home"
-        home = Path("/tmp/cw-runtime-build-home")
+        home = WORK / "compiler-home"
         owner.admit_output(home)
         owner.private_directory(home)
         _DIAGNOSTIC["phase"] = "environment"

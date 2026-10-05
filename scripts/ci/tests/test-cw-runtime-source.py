@@ -661,10 +661,106 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
                     driver.main(flags + extra)
                 prepare.assert_not_called()
 
+    def test_finalizer_fixed_home_uses_created_export_parent_before_compiler(self):
+        work = self.base / "compiler-output"
+        work.mkdir(mode=0o755)
+        work.chmod(0o755)
+        expected_home = work / "compiler-home"
+        original_admit = finalizer.owner.admit_output
+        boundary = RuntimeError("fixed compiler boundary reached")
+
+        def admit_home(path):
+            # Old shared-/tmp placement fails here without creating any host path.
+            self.assertEqual(path, expected_home)
+            original_admit(path)
+
+        with self.prepare() as capsule, \
+                mock.patch.object(finalizer, "SOURCE_ROOT", capsule.path / "source"), \
+                mock.patch.object(finalizer, "GIT_ROOT", capsule.path / "git"), \
+                mock.patch.object(finalizer, "REQUEST", capsule.path / "request.json"), \
+                mock.patch.object(finalizer, "WORK", work), \
+                mock.patch.object(finalizer.signal, "signal"), \
+                mock.patch.object(finalizer.owner, "arm_custody"), \
+                mock.patch.object(finalizer, "prepare_descriptor_capacity"), \
+                mock.patch.dict(os.environ, {"CODEWIRE_RUST_PROFILE": "ci"}), \
+                mock.patch.object(finalizer.os, "fstatvfs", return_value=mock.Mock(f_flag=os.ST_RDONLY)), \
+                mock.patch.object(finalizer.owner, "admit_output", side_effect=admit_home) as admitted_home, \
+                mock.patch.object(finalizer, "subprocess", mock.Mock(SubprocessError=finalizer.subprocess.SubprocessError, check_output=mock.Mock(side_effect=boundary))) as compiler_process, \
+                mock.patch.object(finalizer.owner, "run_owned") as compile_command, \
+                mock.patch.object(finalizer, "finalize") as export, \
+                self.assertRaises(RuntimeError) as reached:
+            # Real source admission and original output/private-directory guards;
+            # readonly mount and process custody are existing separate components.
+            finalizer.main(["--request-sha256", capsule.outputs["request.json"].sha256])
+        self.assertIs(reached.exception, boundary)
+        admitted_home.assert_called_once_with(expected_home)
+        metadata = expected_home.lstat()
+        self.assertTrue(stat.S_ISDIR(metadata.st_mode))
+        self.assertEqual(metadata.st_uid, os.geteuid())
+        self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o700)
+        self.assertEqual(expected_home.resolve(), expected_home)
+        self.assertEqual(compiler_process.check_output.call_args.kwargs["env"]["HOME"], str(expected_home))
+        self.assertEqual(compiler_process.check_output.call_args.kwargs["env"]["TMPDIR"], str(expected_home))
+        self.assertEqual(finalizer._DIAGNOSTIC["phase"], "rustc")
+        compile_command.assert_not_called()
+        export.assert_not_called()
+
+    def test_finalizer_home_retains_output_refusals_before_compiler(self):
+        original_admit = finalizer.owner.admit_output
+        original_directory = finalizer.owner.private_directory
+        with self.prepare() as capsule:
+            for variant in ("writable-parent", "symlink-parent", "existing-home", "missing-parent"):
+                with self.subTest(variant=variant):
+                    work = self.base / variant
+                    if variant == "symlink-parent":
+                        target = self.base / "actual-output"
+                        target.mkdir(mode=0o700)
+                        work.symlink_to(target, target_is_directory=True)
+                    elif variant != "missing-parent":
+                        work.mkdir(mode=0o700)
+                        if variant == "writable-parent":
+                            work.chmod(0o777)
+                    expected_home = work / "compiler-home"
+                    if variant == "existing-home":
+                        expected_home.mkdir(mode=0o700)
+                    before = finalizer.owner.stamp(work.lstat()) if work.exists() else None
+
+                    def admit_home(path):
+                        self.assertEqual(path, expected_home)
+                        original_admit(path)
+
+                    with mock.patch.object(finalizer, "SOURCE_ROOT", capsule.path / "source"), \
+                            mock.patch.object(finalizer, "GIT_ROOT", capsule.path / "git"), \
+                            mock.patch.object(finalizer, "REQUEST", capsule.path / "request.json"), \
+                            mock.patch.object(finalizer, "WORK", work), \
+                            mock.patch.object(finalizer.signal, "signal"), \
+                            mock.patch.object(finalizer.owner, "arm_custody"), \
+                            mock.patch.object(finalizer, "prepare_descriptor_capacity"), \
+                            mock.patch.dict(os.environ, {"CODEWIRE_RUST_PROFILE": "ci"}), \
+                            mock.patch.object(finalizer.os, "fstatvfs", return_value=mock.Mock(f_flag=os.ST_RDONLY)), \
+                            mock.patch.object(finalizer.owner, "admit_output", side_effect=admit_home), \
+                            mock.patch.object(finalizer.owner, "private_directory", wraps=original_directory) as private, \
+                            mock.patch.object(finalizer, "subprocess", mock.Mock(SubprocessError=finalizer.subprocess.SubprocessError, check_output=mock.Mock())) as compiler_process, \
+                            mock.patch.object(finalizer.owner, "run_owned") as compile_command, \
+                            mock.patch.object(finalizer, "finalize") as export, \
+                            self.assertRaises(FAILURES):
+                        finalizer.main(["--request-sha256", capsule.outputs["request.json"].sha256])
+                    private.assert_not_called()
+                    compiler_process.check_output.assert_not_called()
+                    compile_command.assert_not_called()
+                    export.assert_not_called()
+                    self.assertEqual(finalizer._DIAGNOSTIC["phase"], "home")
+                    self.assertEqual(finalizer.owner.stamp(work.lstat()) if work.exists() else None, before)
+                    if variant != "existing-home":
+                        self.assertFalse(os.path.lexists(expected_home))
+            capsule.revalidate()
+
     def test_docker_recipe_one_real_compiler_run_and_closed_pins(self):
         text = (ROOT / "images/cw-runtime/Dockerfile").read_text()
         stage = text.split(" AS cw-builder\n", 1)[1].split("\nFROM ", 1)[0]
         self.assertEqual(sum(line.startswith("RUN ") for line in stage.splitlines()), 1)
+        self.assertLess(stage.index("mkdir /out &&"), stage.index("codewire-rust-build python3"))
+        self.assertEqual(finalizer.WORK, Path("/out"))
         self.assertIn("codewire-rust-build python3 /src/scripts/ci/images/finalize-cw-runtime-source.py", stage)
         self.assertIn("from=cw-source,source=git,target=/source-git,readonly", stage)
         self.assertIn("from=cw-source,source=source,target=/src,readonly", stage)
