@@ -7,7 +7,11 @@ metadata:
     app.kubernetes.io/name: codewire
     app.kubernetes.io/component: credential-service
 spec:
-  replicas: 1
+  # Two replicas so a restart, rollout or node loss never takes every
+  # Sandbox's proxied provider calls down at once. Each bridge epoch is pinned
+  # to one replica; authority, material and refresh are serialized in
+  # PostgreSQL, so replicas share no in-memory state.
+  replicas: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -27,6 +31,14 @@ spec:
         - name: nexus-registry
         - name: harbor-registry
       serviceAccountName: codewire-credential-service
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: codewire
+              app.kubernetes.io/component: credential-service
       # Required in-cluster Kubernetes identity, confined by the separate SA's
       # TokenReview/own-TokenRequest/exact sandbox metadata permissions.
       automountServiceAccountToken: true

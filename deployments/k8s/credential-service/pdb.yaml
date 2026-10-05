@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: codewire-credential-service
+  namespace: prod
+spec:
+  # Keep one broker serving through voluntary disruptions such as node drains.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: credential-service
