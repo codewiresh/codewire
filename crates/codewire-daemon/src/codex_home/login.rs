@@ -343,43 +343,25 @@ fn classify(home: &PrivateDirectory, name: &str) -> io::Result<AuthFile> {
 /// Install a new `auth.json` where there was none. A file that appeared since
 /// the inspection is the user's and stays: the rename never replaces.
 fn install_new(home: &PrivateDirectory, contents: &[u8]) -> io::Result<bool> {
-    let temporary = temporary_name("new");
-    home.write_new(&temporary, contents, AUTH_FILE_MODE)?;
-    let installed = home.rename_noreplace(&temporary, CODEX_AUTH_FILE_NAME);
-    if !matches!(installed, Ok(true)) {
-        let _ = home.unlink(&temporary);
-    }
-    let installed = installed?;
-    home.sync()?;
-    Ok(installed)
+    home.install_new(
+        &temporary_name("new"),
+        CODEX_AUTH_FILE_NAME,
+        contents,
+        AUTH_FILE_MODE,
+    )
 }
 
 /// Replace Codewire's `auth.json`, compared against the file on disk right
 /// before the rename: only the exact file inspected, unchanged, is replaced.
 fn replace(home: &PrivateDirectory, inspected: &OwnedEntry, contents: &[u8]) -> io::Result<bool> {
-    let temporary = temporary_name("new");
-    home.write_new(&temporary, contents, AUTH_FILE_MODE)?;
-    let unchanged = match home.read(CODEX_AUTH_FILE_NAME, MAX_AUTH_BYTES) {
-        Ok(Entry::Owned(current)) => {
-            current.identity == inspected.identity && current.contents == inspected.contents
-        }
-        Ok(_) => false,
-        Err(error) => {
-            let _ = home.unlink(&temporary);
-            return Err(error);
-        }
-    };
-    let replaced = if unchanged {
-        home.rename(&temporary, CODEX_AUTH_FILE_NAME).map(|()| true)
-    } else {
-        Ok(false)
-    };
-    if !matches!(replaced, Ok(true)) {
-        let _ = home.unlink(&temporary);
-    }
-    let replaced = replaced?;
-    home.sync()?;
-    Ok(replaced)
+    home.replace_unchanged(
+        &temporary_name("new"),
+        CODEX_AUTH_FILE_NAME,
+        inspected,
+        MAX_AUTH_BYTES,
+        contents,
+        AUTH_FILE_MODE,
+    )
 }
 
 /// Remove Codewire's `auth.json` when `select` chooses it: rename it aside,
