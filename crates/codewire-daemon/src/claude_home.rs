@@ -1,23 +1,29 @@
-//! Claude Code's first-run onboarding in a hosted Sandbox.
+//! Claude Code's first-run onboarding and workspace trust in a hosted Sandbox.
 //!
 //! While the Anthropic client is selected, in either form (API key or Claude
 //! subscription token), Claude Code already has Codewire's managed
 //! credential, yet on a fresh home it opens its first-run "Select login
-//! method" picker, because its `~/.claude.json` does not record onboarding.
-//! Before it listens, the hosted daemon therefore sets
-//! [`CLAUDE_ONBOARDING_KEYS`] to `true` in that file, in both identity modes.
-//! Claude Code still asks once per folder whether you trust it: no project
-//! trust and no updater setting is written, and no token, credential or
-//! placeholder ever enters the file.
+//! method" picker, because its `~/.claude.json` does not record onboarding,
+//! and then asks whether you trust the folder. Before it listens, the hosted
+//! daemon therefore sets [`CLAUDE_ONBOARDING_KEYS`] to `true` in that file and
+//! marks the workspace root trusted (`projects["/workspace"]
+//! .hasTrustDialogAccepted`), in both identity modes. Claude Code applies a
+//! folder's trust to everything beneath it, and every repository is checked
+//! out under the workspace root, so Claude Code starts in any of them without
+//! asking. Trust lets it load a repository's own project settings, such as
+//! hooks, without that question. Other folders, such as the
+//! home directory, still ask. No updater setting is written, and no token,
+//! credential or placeholder ever enters the file.
 //!
-//! - A missing file is created with exactly those two keys, mode 0600.
+//! - A missing file is created with exactly those keys, mode 0600.
 //! - A regular file of the daemon's uid that holds a JSON object gets the keys
 //!   that are not already `true`; every other member keeps its value. The file
 //!   is replaced atomically (an exclusive temporary beside it, fsync, rename)
 //!   with mode 0600, or its own mode where that is narrower, and only while it
 //!   is still the file that was read.
 //! - Anything else (a symlink, a special or another uid's file, an oversized
-//!   file, invalid JSON or a non-object) is the user's and is never touched.
+//!   file, invalid JSON, a non-object, or a `projects` member or workspace
+//!   entry that is not an object) is the user's and is never touched.
 //!   Every operation is relative to the home opened with `O_NOFOLLOW`, and the
 //!   file is opened with `O_NOFOLLOW`: nothing is followed through a symlink.
 //!
@@ -42,6 +48,8 @@ pub const CLAUDE_CONFIG_FILE_NAME: &str = ".claude.json";
 /// The members set to `true`.
 pub const CLAUDE_ONBOARDING_KEYS: [&str; 2] =
     ["hasCompletedOnboarding", "hasAcknowledgedCostThreshold"];
+/// The per-folder member, under `projects`, that records folder trust.
+pub const CLAUDE_TRUST_KEY: &str = "hasTrustDialogAccepted";
 const CLAUDE_CONFIG_MODE: u32 = 0o600;
 /// Claude Code keeps per-project state in the file, so it grows with use; a
 /// larger one is left alone.
@@ -52,26 +60,31 @@ const MAX_CLAUDE_CONFIG_BYTES: u64 = 32 * 1024 * 1024;
 pub enum ClaudeOnboardingSync {
     /// The Anthropic client is not selected: nothing was read or written.
     NotSelected,
-    /// `~/.claude.json` was missing and now holds exactly the two keys.
+    /// `~/.claude.json` was missing and now holds exactly the keys.
     Created,
     /// The keys that were not `true` were set in the existing file.
     Marked,
-    /// Both keys were already `true`: nothing was written.
+    /// Every key was already `true`: nothing was written.
     Current,
     /// The file or the home is the user's (see the module documentation), or
     /// the file changed while it was checked. Nothing was touched.
     UserOwned,
 }
 
-/// The workspace user's home, which holds Claude Code's `.claude.json`.
+/// The workspace user's home, which holds Claude Code's `.claude.json`, and
+/// the workspace root it trusts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClaudeHome {
     root: PathBuf,
+    workspace: String,
 }
 
 impl ClaudeHome {
-    pub fn at(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+    pub fn new(root: impl Into<PathBuf>, workspace: &Path) -> Self {
+        Self {
+            root: root.into(),
+            workspace: workspace.to_string_lossy().into_owned(),
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -82,8 +95,8 @@ impl ClaudeHome {
         self.root.join(CLAUDE_CONFIG_FILE_NAME)
     }
 
-    /// Mark Claude Code's onboarding complete while the served `clients`
-    /// select the Anthropic client, in either form.
+    /// Mark Claude Code's onboarding complete and the workspace trusted while
+    /// the served `clients` select the Anthropic client, in either form.
     pub fn sync(&self, clients: ManagedCredentialClients) -> io::Result<ClaudeOnboardingSync> {
         if !clients.contains(ManagedCredentialClient::Anthropic) {
             return Ok(ClaudeOnboardingSync::NotSelected);
@@ -100,7 +113,7 @@ impl ClaudeHome {
                 let created = home.install_new(
                     &temporary,
                     CLAUDE_CONFIG_FILE_NAME,
-                    &render(Map::new())?,
+                    &render(Map::new(), &self.workspace)?,
                     CLAUDE_CONFIG_MODE,
                 )?;
                 return Ok(if created {
@@ -112,7 +125,7 @@ impl ClaudeHome {
             Entry::Foreign => return Ok(ClaudeOnboardingSync::UserOwned),
             Entry::Owned(entry) => entry,
         };
-        let contents = match mark_onboarding(&entry.contents)? {
+        let contents = match mark_onboarding(&entry.contents, &self.workspace)? {
             Marking::NotAnObject => return Ok(ClaudeOnboardingSync::UserOwned),
             Marking::Current => return Ok(ClaudeOnboardingSync::Current),
             Marking::Marked(contents) => contents,
@@ -154,28 +167,49 @@ enum Marking {
     Marked(Vec<u8>),
 }
 
-/// The file with every onboarding key `true`. Claude Code rewrites the whole
-/// file itself, so its members keep their values but not their spelling or
-/// order. A repeated key counts by its last occurrence, as Claude Code reads
-/// it.
-fn mark_onboarding(contents: &[u8]) -> io::Result<Marking> {
+/// The file with every onboarding key `true` and `workspace` trusted. Claude
+/// Code rewrites the whole file itself, so its members keep their values but
+/// not their spelling or order. A repeated key counts by its last occurrence,
+/// as Claude Code reads it.
+fn mark_onboarding(contents: &[u8], workspace: &str) -> io::Result<Marking> {
     let Ok(Value::Object(config)) = serde_json::from_slice(contents) else {
         return Ok(Marking::NotAnObject);
     };
-    if CLAUDE_ONBOARDING_KEYS
-        .iter()
-        .all(|key| config.get(*key) == Some(&Value::Bool(true)))
+    let trust = match config.get("projects") {
+        None => None,
+        Some(Value::Object(projects)) => match projects.get(workspace) {
+            None => None,
+            Some(Value::Object(project)) => project.get(CLAUDE_TRUST_KEY),
+            Some(_) => return Ok(Marking::NotAnObject),
+        },
+        Some(_) => return Ok(Marking::NotAnObject),
+    };
+    if trust == Some(&Value::Bool(true))
+        && CLAUDE_ONBOARDING_KEYS
+            .iter()
+            .all(|key| config.get(*key) == Some(&Value::Bool(true)))
     {
         return Ok(Marking::Current);
     }
-    render(config).map(Marking::Marked)
+    render(config, workspace).map(Marking::Marked)
 }
 
-/// `config` with every onboarding key `true`, in Claude Code's two-space
-/// layout.
-fn render(mut config: Map<String, Value>) -> io::Result<Vec<u8>> {
+/// `config` with every onboarding key `true` and `workspace` trusted, in
+/// Claude Code's two-space layout. A `projects` member and a workspace entry
+/// that are present are objects ([`mark_onboarding`] checked them).
+fn render(mut config: Map<String, Value>, workspace: &str) -> io::Result<Vec<u8>> {
     for key in CLAUDE_ONBOARDING_KEYS {
         config.insert(key.to_owned(), Value::Bool(true));
+    }
+    let projects = config
+        .entry("projects")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if let Value::Object(projects) = projects
+        && let Value::Object(project) = projects
+            .entry(workspace)
+            .or_insert_with(|| Value::Object(Map::new()))
+    {
+        project.insert(CLAUDE_TRUST_KEY.to_owned(), Value::Bool(true));
     }
     let mut output = serde_json::to_vec_pretty(&config).map_err(io::Error::other)?;
     output.push(b'\n');
@@ -206,9 +240,20 @@ mod tests {
         ]
     }
 
+    const WORKSPACE: &str = "/workspace";
+
+    /// What a new file holds.
+    fn fresh() -> Value {
+        json!({
+            "hasCompletedOnboarding": true,
+            "hasAcknowledgedCostThreshold": true,
+            "projects": { "/workspace": { "hasTrustDialogAccepted": true } }
+        })
+    }
+
     fn home() -> (tempfile::TempDir, ClaudeHome) {
         let root = tempfile::tempdir().unwrap();
-        let home = ClaudeHome::at(root.path().join("codewire"));
+        let home = ClaudeHome::new(root.path().join("codewire"), Path::new(WORKSPACE));
         fs::create_dir(home.root()).unwrap();
         (root, home)
     }
@@ -261,10 +306,7 @@ mod tests {
             let (_root, home) = home();
             assert_eq!(home.sync(clients).unwrap(), ClaudeOnboardingSync::Created);
             let written = fs::read(home.config_path()).unwrap();
-            assert_eq!(
-                serde_json::from_slice::<Value>(&written).unwrap(),
-                json!({ "hasCompletedOnboarding": true, "hasAcknowledgedCostThreshold": true })
-            );
+            assert_eq!(serde_json::from_slice::<Value>(&written).unwrap(), fresh());
             assert!(written.ends_with(b"\n}\n"));
             assert_eq!(mode(&home.config_path()), 0o600);
             let metadata = fs::symlink_metadata(home.config_path()).unwrap();
@@ -278,12 +320,14 @@ mod tests {
         }
     }
 
-    /// `contents` with both onboarding keys `true`, as a value.
+    /// `contents` with both onboarding keys `true` and the workspace trusted,
+    /// as a value.
     fn marked(contents: &str) -> Value {
         let mut value: Value = serde_json::from_str(contents).unwrap();
         for key in CLAUDE_ONBOARDING_KEYS {
             value[key] = Value::Bool(true);
         }
+        value["projects"][WORKSPACE][CLAUDE_TRUST_KEY] = Value::Bool(true);
         value
     }
 
@@ -300,9 +344,10 @@ mod tests {
             ClaudeOnboardingSync::Marked
         );
         assert_eq!(written(&home), marked(USED));
+        // The workspace entry Claude Code recorded keeps its other members.
         assert_eq!(
-            written(&home)["projects"]["/workspace"]["hasTrustDialogAccepted"],
-            false
+            written(&home)["projects"]["/workspace"],
+            json!({ "allowedTools": [], "hasTrustDialogAccepted": true })
         );
         assert_eq!(mode(&home.config_path()), 0o600, "a wider mode is narrowed");
         assert!(other_entries(&home).is_empty());
@@ -329,10 +374,7 @@ mod tests {
                 ClaudeOnboardingSync::Marked,
                 "{before}"
             );
-            assert_eq!(
-                written(&home),
-                json!({ "hasCompletedOnboarding": true, "hasAcknowledgedCostThreshold": true })
-            );
+            assert_eq!(written(&home), fresh());
         }
         assert!(other_entries(&home).is_empty());
     }
@@ -341,10 +383,12 @@ mod tests {
     fn keys_already_true_are_never_rewritten() {
         let (_root, home) = home();
         for current in [
-            "{\"hasAcknowledgedCostThreshold\":true,\"hasCompletedOnboarding\":true}",
+            "{\"hasAcknowledgedCostThreshold\":true,\"hasCompletedOnboarding\":true,\
+             \"projects\":{\"/workspace\":{\"hasTrustDialogAccepted\":true}}}",
             // Claude Code reads the last of a repeated key.
             "{\"hasCompletedOnboarding\": false, \"hasCompletedOnboarding\": true, \
-             \"hasAcknowledgedCostThreshold\": true, \"other\": null}",
+             \"hasAcknowledgedCostThreshold\": true, \"other\": null, \
+             \"projects\": {\"/elsewhere\": {}, \"/workspace\": {\"hasTrustDialogAccepted\": true}}}",
         ] {
             write(&home.config_path(), current, 0o644);
             let before = fs::symlink_metadata(home.config_path()).unwrap();
@@ -368,10 +412,24 @@ mod tests {
             home.sync(clients(&["anthropic"])).unwrap(),
             ClaudeOnboardingSync::Marked
         );
-        assert_eq!(
-            written(&home),
-            json!({ "hasCompletedOnboarding": true, "hasAcknowledgedCostThreshold": true })
-        );
+        assert_eq!(written(&home), fresh());
+
+        // Onboarding recorded but the workspace not trusted, or another
+        // folder trusted only: the workspace is trusted.
+        for untrusted in [
+            "{\"hasCompletedOnboarding\": true, \"hasAcknowledgedCostThreshold\": true}",
+            "{\"hasCompletedOnboarding\": true, \"hasAcknowledgedCostThreshold\": true, \
+             \"projects\": {\"/home/codewire\": {\"hasTrustDialogAccepted\": true}, \
+             \"/workspace\": {\"hasTrustDialogAccepted\": false}}}",
+        ] {
+            write(&home.config_path(), untrusted, 0o600);
+            assert_eq!(
+                home.sync(clients(&["anthropic"])).unwrap(),
+                ClaudeOnboardingSync::Marked,
+                "{untrusted}"
+            );
+            assert_eq!(written(&home), marked(untrusted));
+        }
         assert!(other_entries(&home).is_empty());
     }
 
@@ -392,6 +450,10 @@ mod tests {
             "7",
             "\u{feff}{}",
             "// a comment\n{}",
+            // `projects`, or the workspace's entry, that Claude Code could not
+            // read as an object.
+            "{\"projects\": []}",
+            "{\"projects\": {\"/workspace\": true}}",
         ] {
             write(&home.config_path(), users, 0o644);
             let before = fs::symlink_metadata(home.config_path()).unwrap().ino();
@@ -436,7 +498,7 @@ mod tests {
         write(&dotfile, unmarked, 0o644);
         symlink(&dotfile, home.config_path()).unwrap();
         // A dangling link is not created through either.
-        let dangling = ClaudeHome::at(root.path().join("dangling"));
+        let dangling = ClaudeHome::new(root.path().join("dangling"), Path::new(WORKSPACE));
         fs::create_dir(dangling.root()).unwrap();
         let missing = root.path().join("never-created.json");
         symlink(&missing, dangling.config_path()).unwrap();
@@ -456,7 +518,7 @@ mod tests {
         assert!(fs::symlink_metadata(&missing).is_err());
 
         // A directory of that name is not a file to write.
-        let directory = ClaudeHome::at(root.path().join("directory"));
+        let directory = ClaudeHome::new(root.path().join("directory"), Path::new(WORKSPACE));
         fs::create_dir_all(directory.config_path()).unwrap();
         assert_eq!(
             directory.sync(clients(&["anthropic"])).unwrap(),
@@ -467,7 +529,7 @@ mod tests {
         // A symlinked home receives nothing.
         let target = root.path().join("elsewhere");
         fs::create_dir(&target).unwrap();
-        let linked = ClaudeHome::at(root.path().join("linked"));
+        let linked = ClaudeHome::new(root.path().join("linked"), Path::new(WORKSPACE));
         symlink(&target, linked.root()).unwrap();
         assert_eq!(
             linked.sync(clients(&["anthropic"])).unwrap(),
@@ -530,8 +592,13 @@ mod tests {
                 [
                     "hasAcknowledgedCostThreshold",
                     "hasCompletedOnboarding",
+                    "projects",
                     "theme"
                 ]
+            );
+            assert_eq!(
+                members["projects"],
+                json!({ "/workspace": { "hasTrustDialogAccepted": true } })
             );
             for value in clients
                 .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)
@@ -547,7 +614,7 @@ mod tests {
     #[test]
     fn a_missing_home_is_an_error_not_a_panic() {
         let root = tempfile::tempdir().unwrap();
-        let home = ClaudeHome::at(root.path().join("absent"));
+        let home = ClaudeHome::new(root.path().join("absent"), Path::new(WORKSPACE));
         assert_eq!(
             home.sync(clients(&["anthropic"])).unwrap_err().kind(),
             io::ErrorKind::NotFound

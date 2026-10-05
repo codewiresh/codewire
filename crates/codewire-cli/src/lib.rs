@@ -467,11 +467,13 @@ async fn serve_hosted_daemon(config: codewire_daemon::Config, bound: bool) -> an
     #[cfg(unix)]
     codewire_daemon::codex_home::CodexHome::default().prepare(config.managed_credential_clients);
     // Claude Code runs its first-run onboarding, including a login picker,
-    // unless `~/.claude.json` records it complete; while the Anthropic
-    // client is selected the daemon marks it, so the managed credential is
-    // used at once. A selection change restarts the Sandbox.
+    // unless `~/.claude.json` records it complete, and asks whether you trust
+    // each folder; while the Anthropic client is selected the daemon marks
+    // onboarding complete and the workspace root trusted, so Claude Code uses
+    // the managed credential at once in any checked-out repository. A
+    // selection change restarts the Sandbox.
     #[cfg(target_os = "linux")]
-    codewire_daemon::claude_home::ClaudeHome::at(&config.home_root)
+    codewire_daemon::claude_home::ClaudeHome::new(&config.home_root, &config.workspace_root)
         .prepare(config.managed_credential_clients);
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)
         .await
