@@ -14,6 +14,7 @@ COPY crates/codewire-access ./crates/codewire-access
 COPY crates/codewire-client ./crates/codewire-client
 COPY crates/codewire-credential-bridge ./crates/codewire-credential-bridge
 COPY crates/codewire-credential-broker ./crates/codewire-credential-broker
+COPY crates/codewire-cw-release ./crates/codewire-cw-release
 COPY crates/codewire-daemon ./crates/codewire-daemon
 COPY crates/codewire-tls ./crates/codewire-tls
 COPY crates/codewire-gateway ./crates/codewire-gateway

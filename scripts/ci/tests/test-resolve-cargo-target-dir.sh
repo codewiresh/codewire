@@ -35,7 +35,7 @@ git -C "$repo" config user.email 'cargo-target-fixture@codewire.test'
 git -C "$repo" config commit.gpgsign false
 printf 'fixture\n' > "$repo/fixture.txt"
 git -C "$repo" add fixture.txt
-git -C "$repo" commit -q -m fixture
+git -C "$repo" -c maintenance.autoDetach=false -c gc.autoDetach=false commit -q -m fixture
 git -C "$repo" worktree add -q -b linked-one "$worktree_one"
 git -C "$repo" worktree add -q -b linked-two "$worktree_two"
 

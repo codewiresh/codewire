@@ -150,14 +150,46 @@ unattended wake interface for the Codex application.
 
 ## Mesh members
 
-Today `cw mesh up/status/down` manages a local Mesh service, and
+`cw mesh up/status/down` manages a local Mesh service, and
 `cw network create/join/nodes/use` manages network membership. Native sandbox
 peers have the existing WireGuard direct/relay transport and declared ingress.
-These commands do not expose a host session daemon for remote execution.
 
-The next member-control design is in
-[CLI delivery backlog](plans/2026-09-29-cli-delivery-backlog.md).
-Proposed member selectors and remote grants there are future UX.
+Use `--member` to control sessions on an enrolled trusted Linux member after
+pinning its exact key and granting the required execution capabilities. Managed
+workers and their parent belong to the member's same pinned environment:
+
+```sh
+cw --member build-linux run --name lead --agent codex --detach \
+  --output json --prompt 'Coordinate the assigned work.'
+# Save the returned .session.session_id as LEAD_ID.
+cw --member build-linux run --name implement --parent "$LEAD_ID" \
+  --agent codex --detach --prompt 'Implement the assigned slice.'
+cw --member build-linux run --name review --parent "$LEAD_ID" \
+  --agent claude --detach --prompt 'Review the assigned slice.'
+
+cw --member build-linux list
+cw --member build-linux msg "$WORKER_ID" 'Include the recovery case.' --output json
+cw --member build-linux inbox "$LEAD_ID" --output json
+cw --member build-linux wait --message "$MESSAGE_ID" --timeout 10m
+cw --member build-linux steer "$WORKER_ID" 'Focus on cleanup.' --turn-id "$TURN_ID"
+cw --member build-linux stop "$WORKER_ID"
+```
+
+Use the Codex implement worker's canonical ID from `list` as `WORKER_ID`, the
+ID returned by `msg` as `MESSAGE_ID`, and its active turn ID from `inbox` as
+`TURN_ID`.
+
+Member controls use canonical `session-UUID` IDs. An explicit environment must
+match the pinned UUID. Reconnect through `logs`, `inbox` and `wait`; observe a
+lost control reply with `cw member observe build-linux REQUEST_UUID --output json`.
+Retain `--request-id` and the observed `--expected-launch-generation` when
+recovering a control operation. Parent notifications stay within that member's
+environment; a host coordinator reads the member's inbox explicitly.
+
+Ordinary member commands use `run --no-tty -- COMMAND`, followed by `wait` and
+`logs`. Member PTY attachment is unsupported. Run the host updater on the
+member owner; `--member` does not provide remote environment or updater controls.
+Provider steering and interruption follow the capabilities in the table above.
 
 ## Install local execution
 

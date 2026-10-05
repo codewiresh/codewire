@@ -738,6 +738,7 @@ fn running_record(output_end_offset: u64) -> v1::SessionRecord {
         name: String::new(),
         parent_session_id: None,
         cleanup_unknown: false,
+        launch_generation: 1,
         session_id: "session-00000000-0000-4000-8000-000000000001".to_owned(),
         state: v1::SessionLifecycleState::Running as i32,
         command: vec![

@@ -913,6 +913,7 @@ dependencies = [
  "buffa-types",
  "bytes",
  "chrono",
+ "codewire-cw-release",
  "codewire-proto",
  "codewire-tailnet",
  "connectrpc",
@@ -924,6 +925,7 @@ dependencies = [
  "open",
  "rand 0.8.6",
  "reqwest",
+ "rustix",
  "rustls",
  "rustls-pki-types",
  "serde",
@@ -977,13 +979,18 @@ dependencies = [
  "codewire-workload-secrets",
  "futures",
  "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "prost 0.14.4",
+ "rand 0.8.6",
  "reqwest",
  "rusqlite",
  "rustix",
  "serde",
  "serde_json",
  "sqlx",
+ "subtle",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -999,6 +1006,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire-cw-release"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "codewire-daemon"
 version = "0.1.0"
 dependencies = [
@@ -1011,11 +1032,13 @@ dependencies = [
  "filetime",
  "libc",
  "portable-pty",
+ "prost 0.14.4",
  "prost-types",
  "reqwest",
  "rustix",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "subtle",
  "tempfile",
  "thiserror 2.0.18",
@@ -1085,6 +1108,7 @@ dependencies = [
  "codewire-workload-secrets",
  "prost 0.14.4",
  "prost-types",
+ "sha2 0.10.9",
  "tonic 0.14.6",
  "tonic-prost",
  "tonic-prost-build",

@@ -5,6 +5,7 @@ members = [
     "crates/codewire-client",
     "crates/codewire-credential-bridge",
     "crates/codewire-credential-broker",
+    "crates/codewire-cw-release",
     "crates/codewire-daemon",
     "crates/codewire-gateway",
     "crates/codewire-gateway-proto",
@@ -31,6 +32,7 @@ authors = ["Sonica"]
 codewire-access = { path = "crates/codewire-access" }
 codewire-client = { path = "crates/codewire-client" }
 codewire-credential-bridge = { path = "crates/codewire-credential-bridge" }
+codewire-cw-release = { path = "crates/codewire-cw-release" }
 codewire-daemon = { path = "crates/codewire-daemon" }
 codewire-gateway-proto = { path = "crates/codewire-gateway-proto" }
 codewire-local-credentials = { path = "crates/codewire-local-credentials" }
