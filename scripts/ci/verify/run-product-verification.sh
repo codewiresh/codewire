@@ -169,9 +169,11 @@ run_verification_shell_syntax() {
     fi
   done
   if [ -d scripts/runtime ]; then
-    while IFS= read -r -d '' candidate; do
-      bash -n "$candidate"
-    done < <(find scripts/runtime -type f -name '*.sh' -print0)
+    find scripts/runtime -type f -name '*.sh' -exec bash -c '
+      for candidate; do
+        bash -n "$candidate" || exit "$?"
+      done
+    ' bash {} +
   fi
 }
 
