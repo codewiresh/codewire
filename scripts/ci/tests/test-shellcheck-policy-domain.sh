@@ -267,11 +267,12 @@ invocation_scripts() {
 assert_partition() {
   local repository="$1" context="$2"
   shift 2
-  local tracked invoked group
-  grep -q '^unexpected invocation: ' < <(invocation_scripts) \
+  local tracked invoked group invocations
+  invocations="$(invocation_scripts)"
+  grep -q '^unexpected invocation: ' <<<"$invocations" \
     && fail "$context: ShellCheck flags changed"
   tracked="$(env "${git_unset[@]}" git -C "$repository" ls-files -- '*.sh' | LC_ALL=C sort)"
-  invoked="$(invocation_scripts | tr '\t' '\n' | LC_ALL=C sort)"
+  invoked="$(printf '%s\n' "$invocations" | tr '\t' '\n' | LC_ALL=C sort)"
   [[ "$invoked" == "$tracked" ]] \
     || fail "$context: shards did not analyze each tracked script exactly once"
   for group in "$@"; do
@@ -283,7 +284,7 @@ assert_partition() {
         if (found == wanted) shared = 1
       }
       END { exit shared ? 0 : 1 }
-    ' < <(invocation_scripts) || fail "$context: source closure split across shards: $group"
+    ' <<<"$invocations" || fail "$context: source closure split across shards: $group"
   done
 }
 
