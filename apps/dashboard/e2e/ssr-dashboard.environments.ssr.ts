@@ -1083,6 +1083,18 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", await sourceDeletionDeadline());
     await expect(page.locator("[data-sandbox-lifetime] time")).toHaveText(/^\d{2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2} UTC$/);
     await page.setViewportSize({ width: 1440, height: 900 });
+    // The prompt wraps at phone width, so bash's SIGWINCH redraw back to the
+    // wide size moves the cursor up a row and clears it. When bash's
+    // narrow-width redraw reaches xterm only after it has reflowed back (time
+    // at 390 px shorter than a PTY round trip), that row is the line above
+    // the prompt. Output printed before this round trip therefore cannot
+    // witness Disconnect. Resize and input frames reach the PTY in order, so
+    // output printed now follows every redraw.
+    await terminalRoot.locator(".xterm").click();
+    await page.keyboard.type("printf '__DURABLE_DISCONNECT__%s__%s__%s__\\n' \"$CW_DURABLE_BROWSER\" \"$PWD\" \"$$\"");
+    await page.keyboard.press("Enter");
+    const beforeDisconnect = `__DURABLE_DISCONNECT__preserved-session__/tmp__${firstPid}__`;
+    await expect(terminalRows).toContainText(beforeDisconnect);
 
     const detailUrlBeforePorts = page.url();
     const terminalBeforePorts = await terminalRoot.elementHandle();
@@ -1123,9 +1135,14 @@ test.describe.serial("server-rendered environments", () => {
     expect(await terminalBeforePorts!.evaluate((element) => element === document.querySelector("[data-terminal-tab-panel]:not([hidden]) [data-terminal-root]"))).toBe(true);
     const csrfAfterPorts = (await page.context().cookies()).find((cookie) => cookie.name === "codewire_ssr_csrf")?.value;
     expect(Boolean(csrfBeforePorts) && csrfBeforePorts === csrfAfterPorts).toBe(true);
+    // Disconnect detaches the transport only: the settled terminal keeps this
+    // shell's rendered output exactly as it was.
+    const renderedBeforeDisconnect = await terminalRows.textContent();
+    expect(renderedBeforeDisconnect).toContain(beforeDisconnect);
     await page.getByRole("button", { name: "Disconnect" }).click();
     await expect(terminalRoot).toHaveAttribute("data-terminal-settled", "true");
-    await expect(terminalRoot.locator(".xterm-rows")).toContainText(resumed);
+    await expect(terminalRows).toContainText(beforeDisconnect);
+    await expect(terminalRows).toHaveText(renderedBeforeDisconnect!);
     await page.getByRole("button", { name: "Reconnect", exact: true }).click();
     await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstSessionId!);

@@ -20,8 +20,8 @@ use codewire_gateway_proto::{
 use crate::worker::workspace_binding::WORKSPACE_BINDING_VOLUME;
 
 use super::{
-    CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE,
-    DIND_SOCKET_PATH, EXTENSIONS_API_VERSION, HOME_ROOT, KATA_COCO_INIT_DATA_ANNOTATION_KEY,
+    CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DAEMON_AUTH_TOKEN_ENV, DIND_SOCKET_PATH,
+    EXTENSIONS_API_VERSION, HOME_ROOT, KATA_COCO_INIT_DATA_ANNOTATION_KEY,
     KATA_CONFIDENTIAL_VOLUME_ANNOTATION, KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH,
     KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, SANDBOX_SERVICE_ACCOUNT, TemplateOpts,
     WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR, WORKSPACE_DAEMON_PORT,
@@ -80,11 +80,7 @@ pub fn render_sandbox_template(namespace: &str, opts: &TemplateOpts) -> Value {
 
 /// Render the exact environment-scoped SandboxBlueprint.
 pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
-    let support_image = if opts.support_image.is_empty() {
-        DEFAULT_GATEWAY_IMAGE
-    } else {
-        &opts.support_image
-    };
+    let support_image = opts.effective_support_image();
 
     const ENSURE_USER_CMD: &str = "user_shell=/bin/bash; [ -x /bin/bash ] || user_shell=/bin/sh; grep -q '^[^:]*:[^:]*:1000:' /etc/passwd || echo \"codewire:x:1000:1000:codewire:/home/codewire:${user_shell}\" >> /etc/passwd; grep -q '^[^:]*:[^:]*:1000:' /etc/group || echo 'codewire:x:1000:' >> /etc/group;";
     const WAIT_DAEMON_CMD: &str = "while [ ! -x /codewire/bin/cw ]; do sleep 0.1; done;";

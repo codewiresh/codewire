@@ -186,6 +186,12 @@ impl WorkspaceIdentityMode {
 }
 
 impl SandboxWorkerCfg {
+    /// The support image this worker renders, which every resume and Pod
+    /// replacement re-pins a Sandbox's daemon to.
+    pub fn support_image(&self) -> &str {
+        crate::sandbox::template::effective_support_image(&self.gateway_image)
+    }
+
     /// Review L2: a commodity workspace binds through the binding Service in
     /// the orchestration namespace (`POD_NAMESPACE`), and its gateway fetches
     /// the daemon credential from the coordinator or API URL. Without them
@@ -1977,7 +1983,12 @@ async fn replace_terminal_workspace_pod(
         authority
             .run_external_mutation(
                 CREATE_MUTATION_STATES,
-                client.delete_workspace_pod_if_uid(&stale.name, &stale.uid),
+                client.replace_workspace_pod_if_uid(
+                    env_id,
+                    &stale.name,
+                    &stale.uid,
+                    ctx.sandbox_cfg.support_image(),
+                ),
             )
             .await?;
         authority

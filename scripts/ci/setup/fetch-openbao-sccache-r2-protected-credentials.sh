@@ -61,9 +61,13 @@ chmod 0600 "$work/forgejo.curl"
 oidc_request_token=''
 curl --config "$work/forgejo.curl" "${curl_bounds[@]}" \
   --output "$work/forgejo-response.json" \
-  "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${openbao_audience}"
+  "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${openbao_audience}" ||
+  fail 'Forgejo OIDC token request failed'
+# Each validation names its step: the selector only reports that the cache is
+# unavailable, so an unnamed jq failure leaves the cause invisible.
 jq -er '.value | strings | select(length > 0)' \
-  "$work/forgejo-response.json" >"$work/forgejo.jwt"
+  "$work/forgejo-response.json" >"$work/forgejo.jwt" ||
+  fail 'Forgejo OIDC response has no token'
 chmod 0600 "$work/forgejo.jwt"
 
 jq -n --arg role "$openbao_role" --rawfile jwt "$work/forgejo.jwt" \
@@ -72,9 +76,11 @@ curl --silent --show-error --fail "${curl_bounds[@]}" \
   --header 'Content-Type: application/json' \
   --data-binary @"$work/openbao-login.json" \
   --output "$work/openbao-response.json" \
-  "$openbao_addr/v1/auth/forgejo-jwt/login"
+  "$openbao_addr/v1/auth/forgejo-jwt/login" ||
+  fail 'OpenBao forgejo-jwt login failed'
 jq -er '.auth.client_token | strings | select(length > 0)' \
-  "$work/openbao-response.json" >"$work/openbao.token"
+  "$work/openbao-response.json" >"$work/openbao.token" ||
+  fail 'OpenBao login returned no client token'
 chmod 0600 "$work/openbao.token"
 
 {
@@ -85,12 +91,15 @@ chmod 0600 "$work/openbao.token"
 chmod 0600 "$work/openbao.curl"
 curl --config "$work/openbao.curl" "${curl_bounds[@]}" \
   --output "$work/r2.json" \
-  "$openbao_addr/v1/$secret_path"
+  "$openbao_addr/v1/$secret_path" ||
+  fail 'OpenBao protected cache document read failed'
 
 jq -er '.data.data.accessKeyId | strings | select(test("^[A-Za-z0-9_-]{16,256}$"))' \
-  "$work/r2.json" >"$work/access-key-id"
+  "$work/r2.json" >"$work/access-key-id" ||
+  fail 'protected cache document has no well-formed accessKeyId'
 jq -er '.data.data.secretAccessKey | strings | select(test("^[A-Za-z0-9_+/-]{32,512}$"))' \
-  "$work/r2.json" >"$work/secret-access-key"
+  "$work/r2.json" >"$work/secret-access-key" ||
+  fail 'protected cache document has no well-formed secretAccessKey'
 {
   printf '[default]\naws_access_key_id = '
   tr -d '\n' <"$work/access-key-id"

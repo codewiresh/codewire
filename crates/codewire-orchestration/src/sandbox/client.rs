@@ -7,8 +7,10 @@
 //! Service, and their NetworkPolicies.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 use std::time::Duration;
 
+use codewire_server_core::runtime_images::SUPPORT_IMAGE_REPOSITORIES;
 use crc32fast::Hasher as Crc32Hasher;
 use k8s_openapi::api::core::v1::{
     ContainerStatus, Namespace, PersistentVolume, PersistentVolumeClaim, Pod,
@@ -22,15 +24,16 @@ use kube::api::{
     Preconditions,
 };
 use kube::core::GroupVersionKind;
+use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
 use russh::keys::ssh_key::private::Ed25519Keypair;
 use russh::keys::ssh_key::{LineEnding, PrivateKey};
 use serde_json::Value;
 
 use super::template::{
     CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
-    TemplateOpts, gateway_direct_udp_service_name, gateway_host_key_secret_name,
-    gateway_network_policy_name, gateway_workload_name, render_gateway_deployment,
-    render_gateway_direct_udp_service, render_gateway_host_key_secret,
+    RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts, gateway_direct_udp_service_name,
+    gateway_host_key_secret_name, gateway_network_policy_name, gateway_workload_name,
+    render_gateway_deployment, render_gateway_direct_udp_service, render_gateway_host_key_secret,
     render_gateway_network_policy, render_gateway_service, render_sandbox_shadow_pool,
     render_sandbox_template, render_warm_member_bridge, render_workspace_daemon_network_policy,
     render_workspace_daemon_service, warm_member_daemon_bridge_name,
@@ -728,6 +731,303 @@ fn workspace_daemon_image(spec: &Value) -> anyhow::Result<Option<&str>> {
         .filter(|reference| !reference.is_empty())
         .map(Some)
         .ok_or_else(|| anyhow::anyhow!("workspace daemon image is malformed"))
+}
+
+/// The repository an image reference names, without its digest or tag:
+/// `registry.example.invalid/codewire/gateway` for
+/// `registry.example.invalid/codewire/gateway:v1@sha256:…`. A registry port's colon
+/// precedes a `/`, a tag's colon does not.
+fn image_repository(reference: &str) -> &str {
+    let name = reference
+        .split_once('@')
+        .map_or(reference, |(name, _)| name);
+    match name.rfind(':') {
+        Some(colon) if !name[colon..].contains('/') => &name[..colon],
+        _ => name,
+    }
+}
+
+/// Why a resume or Pod replacement leaves a Sandbox's daemon image as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonImageKept {
+    /// The configured support image names no digest, so there is no exact
+    /// image to pin (Kind's side-loaded gateway).
+    UnpinnedSupportImage,
+    /// The Sandbox has neither a `codewire-bin` image volume nor a
+    /// `codewire-daemon-init` init container.
+    NoDaemonSource,
+    /// A runtime class other than none, runc or commodity. A confidential
+    /// guest's Pod is measured and attested: its policy admits exactly the
+    /// rendered containers, so its daemon image changes only with a new
+    /// measured rendering, never with a patch to an existing Sandbox.
+    ConfidentialRuntime,
+    /// The daemon image comes from a repository no release rendered the
+    /// support image from ([`SUPPORT_IMAGE_REPOSITORIES`]).
+    UnlistedRepository,
+}
+
+impl DaemonImageKept {
+    fn label(self) -> &'static str {
+        match self {
+            Self::UnpinnedSupportImage => "unpinned_support_image",
+            Self::NoDaemonSource => "no_daemon_source",
+            Self::ConfidentialRuntime => "confidential_runtime",
+            Self::UnlistedRepository => "unlisted_repository",
+        }
+    }
+}
+
+/// The one field a re-pin rewrites: the `codewire-bin` image volume's
+/// `image.reference`, or the `codewire-daemon-init` init container's `image`
+/// where the daemon is copied into an emptyDir.
+#[derive(Debug, PartialEq, Eq)]
+struct DaemonImageEntry<'a> {
+    /// The volume's or init container's JSON pointer.
+    path: String,
+    name: &'static str,
+    /// The image field under `path`.
+    field: &'static str,
+    from: &'a str,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DaemonImagePlan<'a> {
+    /// The daemon already runs from the current support image.
+    Current,
+    Repin(DaemonImageEntry<'a>),
+    Kept(DaemonImageKept),
+}
+
+/// The named entries of one Pod spec array, failing closed on a malformed
+/// array or a duplicated name.
+fn daemon_named_entry<'a>(
+    pod_spec: &'a Value,
+    array: &str,
+    name: &str,
+) -> anyhow::Result<Option<(usize, &'a Value)>> {
+    let entries = match pod_spec.get(array) {
+        None => return Ok(None),
+        Some(Value::Array(entries)) => entries,
+        Some(_) => anyhow::bail!("workspace {array} are malformed"),
+    };
+    let mut named = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.get("name").and_then(Value::as_str) == Some(name));
+    let first = named.next();
+    anyhow::ensure!(
+        named.next().is_none(),
+        "workspace daemon {array} entry is duplicated"
+    );
+    Ok(first)
+}
+
+/// Owner decision 2026-10-05: on every Start or resume, and before a running
+/// Sandbox's Pod is replaced, the Sandbox's daemon runs from the current
+/// support image, not the one it was created with. The sandbox controller
+/// builds each new Pod from the Sandbox's own `spec.podTemplate.spec` and
+/// never rewrites a running Pod, so the Sandbox is what to re-pin; a claimed
+/// warm-pool member is re-pinned the same way. The daemon reaches the
+/// workspace by one route: the `codewire-bin` image volume, or the
+/// `codewire-daemon-init` copy that commodity Sandboxes from before the image
+/// volume (e374b1f11), runc and Kind use. Either is re-pinned from an image in
+/// [`SUPPORT_IMAGE_REPOSITORIES`] to a digest-pinned support image, except on
+/// a confidential runtime. A Dev candidate smoke that swaps
+/// `SANDBOX_GATEWAY_IMAGE` (`scripts/runtime/dev/smoke-dev-candidate.sh`)
+/// therefore re-pins Sandboxes started while it runs, and their next Start
+/// after the restore re-pins them back. A malformed or ambiguous daemon
+/// source fails closed: no Pod can be built from it, and nothing here can
+/// tell which entry the daemon uses.
+fn plan_daemon_image<'a>(
+    sandbox: &'a Value,
+    support_image: &str,
+) -> anyhow::Result<DaemonImagePlan<'a>> {
+    let spec_path = "/spec/podTemplate/spec";
+    let Some(pod_spec) = sandbox.pointer(spec_path) else {
+        return Ok(DaemonImagePlan::Kept(DaemonImageKept::NoDaemonSource));
+    };
+    let volume = daemon_named_entry(pod_spec, "volumes", super::template::DAEMON_VOLUME)?
+        .filter(|(_, volume)| volume.get("image").is_some());
+    let init = daemon_named_entry(
+        pod_spec,
+        "initContainers",
+        super::template::DAEMON_INIT_CONTAINER,
+    )?;
+    let entry = match (volume, init) {
+        (Some(_), Some(_)) => anyhow::bail!("workspace daemon delivery is ambiguous"),
+        (Some((index, volume)), None) => DaemonImageEntry {
+            path: format!("{spec_path}/volumes/{index}"),
+            name: super::template::DAEMON_VOLUME,
+            field: "image/reference",
+            from: volume
+                .pointer("/image/reference")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        },
+        (None, Some((index, init))) => DaemonImageEntry {
+            path: format!("{spec_path}/initContainers/{index}"),
+            name: super::template::DAEMON_INIT_CONTAINER,
+            field: "image",
+            from: init
+                .get("image")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        },
+        (None, None) => return Ok(DaemonImagePlan::Kept(DaemonImageKept::NoDaemonSource)),
+    };
+    anyhow::ensure!(
+        !entry.from.is_empty(),
+        "workspace daemon image is malformed"
+    );
+    let runtime_class = match pod_spec.get("runtimeClassName") {
+        None | Some(Value::Null) => "",
+        Some(class) => class
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("workspace runtime class is malformed"))?,
+    };
+    Ok(if entry.from == support_image {
+        DaemonImagePlan::Current
+    } else if !["", RUNTIME_CLASS_RUNC, RUNTIME_CLASS_COMMODITY].contains(&runtime_class) {
+        DaemonImagePlan::Kept(DaemonImageKept::ConfidentialRuntime)
+    } else if !super::warm_pool::digest_pinned(support_image) {
+        DaemonImagePlan::Kept(DaemonImageKept::UnpinnedSupportImage)
+    } else if !SUPPORT_IMAGE_REPOSITORIES.contains(&image_repository(entry.from)) {
+        DaemonImagePlan::Kept(DaemonImageKept::UnlistedRepository)
+    } else {
+        DaemonImagePlan::Repin(entry)
+    })
+}
+
+/// Reads and fenced writes one Pod-replacement re-pin may make.
+const DAEMON_REPIN_ATTEMPTS: usize = 3;
+
+/// How [`SandboxClient::replace_workspace_pod_if_uid`] ended. Callers treat
+/// both as a replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspacePodReplacement {
+    /// This call re-pinned as needed and deleted the observed incarnation.
+    Replaced,
+    /// The incarnation was already gone or replaced; nothing was written.
+    AlreadyReplaced,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonImageRepinOutcome {
+    /// Current or kept: nothing to write.
+    Unchanged,
+    Repinned,
+    /// The Pod about to be replaced was gone or replaced before the write.
+    PodReplaced,
+}
+
+static DAEMON_IMAGE_PLANS: OnceLock<IntCounterVec> = OnceLock::new();
+
+/// Count one daemon-image decision by its outcome.
+fn record_daemon_image_plan(outcome: &str) {
+    DAEMON_IMAGE_PLANS
+        .get_or_init(|| {
+            register_int_counter_vec!(
+                Opts::new(
+                    "codewire_sandbox_daemon_image_plans_total",
+                    "Sandbox daemon image decisions on a resume or Pod replacement: re-pinned, current, or kept for a closed reason."
+                ),
+                &["outcome"]
+            )
+            .expect("daemon image plan metric registration must be unique")
+        })
+        .with_label_values(&[outcome])
+        .inc();
+}
+
+/// The re-pin one patch carries.
+struct DaemonImageRepin {
+    from: String,
+    operations: [Value; 3],
+}
+
+/// The one helper behind every daemon re-pin: the resume writers and the
+/// fenced re-pin before a Pod replacement ([`SandboxClient::repin_daemon_image`]).
+/// JSON Patch operations, not a merge patch: a merge patch replaces the whole
+/// `volumes` or `initContainers` array, while these `test` the entry's index,
+/// name and old image and `replace` only that image. The surrounding patch
+/// keeps its own UID (and resourceVersion) fence, and a concurrent change to
+/// the entry fails the whole patch. `None` when the Sandbox is current or kept.
+fn daemon_image_repin(
+    sandbox: &DynamicObject,
+    support_image: &str,
+) -> anyhow::Result<Option<DaemonImageRepin>> {
+    let name = sandbox.metadata.name.as_deref().unwrap_or_default();
+    let plan = plan_daemon_image(&sandbox.data, support_image).inspect_err(|_| {
+        record_daemon_image_plan("malformed");
+    })?;
+    let entry = match plan {
+        DaemonImagePlan::Current => {
+            record_daemon_image_plan("current");
+            return Ok(None);
+        }
+        DaemonImagePlan::Repin(entry) => entry,
+        DaemonImagePlan::Kept(reason) => {
+            record_daemon_image_plan(reason.label());
+            match reason {
+                DaemonImageKept::NoDaemonSource | DaemonImageKept::UnlistedRepository => {
+                    tracing::warn!(
+                        sandbox = name,
+                        reason = reason.label(),
+                        support_image,
+                        "Sandbox daemon image is not re-pinned"
+                    );
+                }
+                DaemonImageKept::UnpinnedSupportImage | DaemonImageKept::ConfidentialRuntime => {
+                    tracing::info!(
+                        sandbox = name,
+                        reason = reason.label(),
+                        "Sandbox daemon image is not re-pinned"
+                    );
+                }
+            }
+            return Ok(None);
+        }
+    };
+    record_daemon_image_plan("repin");
+    let DaemonImageEntry {
+        path,
+        name: entry_name,
+        field,
+        from,
+    } = entry;
+    Ok(Some(DaemonImageRepin {
+        from: from.to_owned(),
+        operations: [
+            serde_json::json!({"op":"test","path":format!("{path}/name"),"value":entry_name}),
+            serde_json::json!({"op":"test","path":format!("{path}/{field}"),"value":from}),
+            serde_json::json!({"op":"replace","path":format!("{path}/{field}"),"value":support_image}),
+        ],
+    }))
+}
+
+/// Log the re-pin an admitted patch carried. The write is already accepted
+/// (a resume is already Running), so an unexpected reply is reported, not
+/// failed: the entry's own tests made the write exact.
+fn log_daemon_image_repin(
+    updated: &DynamicObject,
+    name: &str,
+    repin: &DaemonImageRepin,
+    support_image: &str,
+) {
+    match plan_daemon_image(&updated.data, support_image) {
+        Ok(DaemonImagePlan::Current) => tracing::info!(
+            name,
+            from = repin.from,
+            to = support_image,
+            "re-pinned Sandbox daemon image"
+        ),
+        _ => tracing::warn!(
+            name,
+            from = repin.from,
+            to = support_image,
+            "admitted Sandbox daemon image re-pin did not return the support image"
+        ),
+    }
 }
 
 /// Whether a SandboxTemplate or Sandbox renders an identity-free workspace:
@@ -1558,6 +1858,156 @@ impl SandboxClient {
             .await
     }
 
+    /// Replace one running workspace Pod incarnation on the current daemon:
+    /// re-pin its Sandbox's daemon image ([`Self::repin_daemon_image`]), then
+    /// delete the Pod with its UID precondition, so the controller builds the
+    /// replacement from the re-pinned spec. Daemon repair, restart-mode resize
+    /// and terminal-Pod replacement replace Pods this way.
+    ///
+    /// The Pod is read again immediately before the re-pin patch. Gone, or
+    /// carrying another UID, it was already replaced from the Sandbox's
+    /// current spec: neither the re-pin nor the delete happens, and the
+    /// caller treats [`WorkspacePodReplacement::AlreadyReplaced`] as a
+    /// replacement. The next Start or repair re-pins.
+    pub async fn replace_workspace_pod_if_uid(
+        &self,
+        env_id: &str,
+        pod_name: &str,
+        previous_uid: &str,
+        support_image: &str,
+    ) -> anyhow::Result<WorkspacePodReplacement> {
+        if pod_name.trim().is_empty() {
+            anyhow::bail!("workspace Pod name is required");
+        }
+        if previous_uid.trim().is_empty() {
+            anyhow::bail!("previous workspace Pod UID is required");
+        }
+        if !self.workspace_pod_has_uid(pod_name, previous_uid).await? {
+            return Ok(WorkspacePodReplacement::AlreadyReplaced);
+        }
+        let repin = self
+            .repin_daemon_image_before_replacement(
+                env_id,
+                support_image,
+                Some((pod_name, previous_uid)),
+            )
+            .await?;
+        if repin == DaemonImageRepinOutcome::PodReplaced {
+            return Ok(WorkspacePodReplacement::AlreadyReplaced);
+        }
+        if self
+            .delete_observed_workspace_pod(pod_name, previous_uid)
+            .await?
+        {
+            return Ok(WorkspacePodReplacement::Replaced);
+        }
+        if repin == DaemonImageRepinOutcome::Repinned {
+            // The Pod went between the read above and the re-pin: its
+            // replacement may have been built from the earlier spec. Its
+            // daemon copy then differs from the Sandbox, so an unbound one
+            // fails its binding check and is rebuilt once; an image-volume
+            // daemon runs until the next Start or repair re-pins.
+            tracing::info!(
+                pod = pod_name,
+                previous_uid,
+                "workspace Pod was replaced while its Sandbox's daemon image was re-pinned"
+            );
+        }
+        Ok(WorkspacePodReplacement::AlreadyReplaced)
+    }
+
+    /// Whether the workspace Pod named `pod_name` exists with `uid`.
+    async fn workspace_pod_has_uid(&self, pod_name: &str, uid: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .get_workspace_pod_identity_by_name(pod_name)
+            .await?
+            .is_some_and(|pod| pod.uid == uid))
+    }
+
+    /// Re-pin the bound Sandbox's daemon image ([`plan_daemon_image`]) while it
+    /// stays Running, before its Pod is replaced. The controller never
+    /// rewrites a running Pod, so this changes only the next one. The patch
+    /// carries no operating mode: it tests the Sandbox's UID and
+    /// resourceVersion and the daemon entry, then replaces only its image.
+    /// The controller keeps updating a running Sandbox's status, so a
+    /// conflicting write is read and planned again, at most
+    /// [`DAEMON_REPIN_ATTEMPTS`] times, and only for the first observed UID.
+    pub async fn repin_daemon_image(
+        &self,
+        env_id: &str,
+        support_image: &str,
+    ) -> anyhow::Result<()> {
+        self.repin_daemon_image_before_replacement(env_id, support_image, None)
+            .await
+            .map(|_| ())
+    }
+
+    /// [`Self::repin_daemon_image`], and when `pod` names the incarnation
+    /// about to be replaced, a read of that Pod immediately before each patch.
+    async fn repin_daemon_image_before_replacement(
+        &self,
+        env_id: &str,
+        support_image: &str,
+        pod: Option<(&str, &str)>,
+    ) -> anyhow::Result<DaemonImageRepinOutcome> {
+        let name = self.bound_sandbox_name(env_id).await?;
+        let sandboxes = self.sandboxes();
+        let mut incarnation: Option<String> = None;
+        let mut conflict = String::new();
+        for _ in 0..DAEMON_REPIN_ATTEMPTS {
+            let sandbox = sandboxes
+                .get(&name)
+                .await
+                .map_err(|e| anyhow::anyhow!("get Sandbox {name}: {e}"))?;
+            let uid = runtime_object_uid(&sandbox.metadata, &self.namespace, &name)?.to_owned();
+            anyhow::ensure!(
+                *incarnation.get_or_insert_with(|| uid.clone()) == uid,
+                "Sandbox {name} was replaced during its daemon image re-pin"
+            );
+            let version = sandbox
+                .metadata
+                .resource_version
+                .as_deref()
+                .filter(|version| !version.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("Sandbox {name} has no resource version"))?;
+            let Some(repin) = daemon_image_repin(&sandbox, support_image)? else {
+                return Ok(DaemonImageRepinOutcome::Unchanged);
+            };
+            if let Some((pod_name, pod_uid)) = pod
+                && !self.workspace_pod_has_uid(pod_name, pod_uid).await?
+            {
+                return Ok(DaemonImageRepinOutcome::PodReplaced);
+            }
+            let mut operations = vec![
+                serde_json::json!({"op":"test","path":"/metadata/uid","value":uid}),
+                serde_json::json!({"op":"test","path":"/metadata/resourceVersion","value":version}),
+            ];
+            operations.extend(repin.operations.iter().cloned());
+            let patch = Patch::Json::<()>(serde_json::from_value(Value::Array(operations))?);
+            match sandboxes
+                .patch(&name, &PatchParams::default(), &patch)
+                .await
+            {
+                Ok(updated) => {
+                    anyhow::ensure!(
+                        runtime_object_uid(&updated.metadata, &self.namespace, &name)? == uid,
+                        "Sandbox {name} was replaced during its daemon image re-pin"
+                    );
+                    log_daemon_image_repin(&updated, &name, &repin, support_image);
+                    return Ok(DaemonImageRepinOutcome::Repinned);
+                }
+                // A failed `test` is 422; an apiserver conflict is 409.
+                Err(kube::Error::Api(status)) if matches!(status.code, 409 | 422) => {
+                    conflict = kube::Error::Api(status).to_string();
+                }
+                Err(error) => {
+                    anyhow::bail!("re-pin Sandbox {name} daemon image: {error}")
+                }
+            }
+        }
+        anyhow::bail!("re-pin Sandbox {name} daemon image kept conflicting: {conflict}")
+    }
+
     /// Delete the old workspace incarnation only when it still has the
     /// checkpointed UID. A retried operation must never delete the replacement.
     pub async fn delete_workspace_pod_if_uid(
@@ -1571,29 +2021,39 @@ impl SandboxClient {
         if previous_uid.trim().is_empty() {
             anyhow::bail!("previous workspace Pod UID is required");
         }
+        self.delete_observed_workspace_pod(pod_name, previous_uid)
+            .await
+            .map(|_| ())
+    }
+
+    /// Delete the Pod only when it still has `previous_uid`. True when this
+    /// call deleted that incarnation; false when it was already gone or
+    /// replaced.
+    async fn delete_observed_workspace_pod(
+        &self,
+        pod_name: &str,
+        previous_uid: &str,
+    ) -> anyhow::Result<bool> {
         let Some(current) = self.get_workspace_pod_identity_by_name(pod_name).await? else {
-            return Ok(());
+            return Ok(false);
         };
         if current.uid != previous_uid {
-            return Ok(());
+            return Ok(false);
         }
 
         let delete_params = delete_params_for_observed_uid(previous_uid);
         match self.pods().delete(&current.name, &delete_params).await {
-            Ok(_) => {}
-            Err(kube::Error::Api(error)) if error.code == 404 => {}
+            Ok(_) => Ok(true),
+            Err(kube::Error::Api(error)) if error.code == 404 => Ok(false),
             // A replacement won the race after the observation above. The
             // UID precondition prevented deleting it; the caller can now
             // observe that replacement normally.
-            Err(kube::Error::Api(error)) if error.code == 409 => {}
-            Err(error) => {
-                return Err(anyhow::anyhow!(
-                    "restart workspace Pod {}: {error}",
-                    current.name
-                ));
-            }
+            Err(kube::Error::Api(error)) if error.code == 409 => Ok(false),
+            Err(error) => Err(anyhow::anyhow!(
+                "restart workspace Pod {}: {error}",
+                current.name
+            )),
         }
-        Ok(())
     }
 
     /// Wait until the owning Sandbox controller has produced a ready
@@ -2926,8 +3386,15 @@ impl SandboxClient {
     }
 
     /// Mirrors `SetReplicas`: resolve the Sandbox name from the claim
-    /// status, then update spec.operatingMode (Running/Suspended).
-    pub async fn set_replicas(&self, env_id: &str, replicas: i64) -> anyhow::Result<()> {
+    /// status, then update spec.operatingMode (Running/Suspended). The
+    /// Running patch also re-pins the Sandbox's daemon image volume to
+    /// `support_image` ([`plan_daemon_image`]); a suspend never re-pins.
+    pub async fn set_replicas(
+        &self,
+        env_id: &str,
+        replicas: i64,
+        support_image: &str,
+    ) -> anyhow::Result<()> {
         let name = self
             .bound_sandbox_name(env_id)
             .await
@@ -2958,12 +3425,23 @@ impl SandboxClient {
         } else {
             "Running"
         };
-        // Fence the exact incarnation without conditioning this one-field
-        // change on unrelated controller-owned status/annotation updates.
-        let patch = Patch::Json::<()>(serde_json::from_value(serde_json::json!([
-            {"op": "test", "path": "/metadata/uid", "value": uid},
+        let repin = if replicas > 0 {
+            daemon_image_repin(&sandbox, support_image)
+                .map_err(|e| anyhow::anyhow!("set operatingMode: Sandbox {name}: {e}"))?
+        } else {
+            None
+        };
+        // Fence the exact incarnation without conditioning the mode change on
+        // unrelated controller-owned status/annotation updates. A re-pin
+        // carries its own tests of the one volume it rewrites.
+        let mut operations = vec![serde_json::json!(
+            {"op": "test", "path": "/metadata/uid", "value": uid}
+        )];
+        operations.extend(repin.iter().flat_map(|repin| repin.operations.clone()));
+        operations.push(serde_json::json!(
             {"op": "add", "path": "/spec/operatingMode", "value": mode}
-        ]))?);
+        ));
+        let patch = Patch::Json::<()>(serde_json::from_value(Value::Array(operations))?);
         let updated = sandboxes
             .patch(&name, &PatchParams::default(), &patch)
             .await
@@ -2982,6 +3460,9 @@ impl SandboxClient {
                     == Some(mode),
             "update Sandbox {name} operatingMode did not return the current live target"
         );
+        if let Some(repin) = &repin {
+            log_daemon_image_repin(&updated, &name, repin, support_image);
+        }
         tracing::info!(name, replicas, mode, "set Sandbox operating mode");
         Ok(())
     }
@@ -3004,6 +3485,7 @@ impl SandboxClient {
             expected_claim_uid,
             &sandbox,
             0,
+            None,
         )
         .await
     }
@@ -3012,6 +3494,8 @@ impl SandboxClient {
     /// Unlike generic scale operations this completes a captured suspension /
     /// bootstrap sequence, so concurrent spec changes must reject publication.
     /// The caller owns the environment mutation fence and old/all-Pod absence.
+    /// A resume re-pins the daemon image volume to `support_image` in the
+    /// same patch ([`plan_daemon_image`]).
     pub async fn set_replicas_for_identity(
         &self,
         claim_opts: &ClaimOpts,
@@ -3019,6 +3503,7 @@ impl SandboxClient {
         expected_claim_uid: &str,
         expected_sandbox: &WorkspaceSandboxIdentity,
         replicas: i64,
+        support_image: &str,
     ) -> anyhow::Result<()> {
         let (_, sandbox) = self
             .read_owned_claim_sandbox(claim_opts, expected_claim_name, expected_claim_uid)
@@ -3030,6 +3515,7 @@ impl SandboxClient {
             expected_claim_uid,
             &sandbox,
             replicas,
+            Some(support_image),
         )
         .await
     }
@@ -3043,6 +3529,7 @@ impl SandboxClient {
         expected_claim_uid: &str,
         sandbox: &DynamicObject,
         replicas: i64,
+        support_image: Option<&str>,
     ) -> anyhow::Result<()> {
         let name = sandbox
             .metadata
@@ -3082,17 +3569,27 @@ impl SandboxClient {
                 serde_json::json!({"op":"test","path":"/spec/operatingMode","value":"Suspended"}),
             );
         }
+        let repin = match support_image.filter(|_| replicas > 0) {
+            Some(image) => daemon_image_repin(sandbox, image)?.map(|repin| (image, repin)),
+            None => None,
+        };
+        operations.extend(repin.iter().flat_map(|(_, repin)| repin.operations.clone()));
         operations.push(serde_json::json!({"op":"add","path":"/spec/operatingMode","value":mode}));
         let patch = Patch::Json::<()>(serde_json::from_value(Value::Array(operations))?);
         let updated = self
             .sandboxes()
             .patch(name, &PatchParams::default(), &patch)
             .await
-            .map_err(|_| anyhow::anyhow!("workspace operating mode update was not admitted"))?;
+            .map_err(|error| {
+                anyhow::anyhow!("workspace operating mode update was not admitted: {error}")
+            })?;
         anyhow::ensure!(
             runtime_object_uid(&updated.metadata, &self.namespace, name)? == uid,
             "workspace Sandbox was replaced during operating mode publication"
         );
+        if let Some((image, repin)) = &repin {
+            log_daemon_image_repin(&updated, name, repin, image);
+        }
         require_runtime_controller(
             &updated.metadata,
             super::EXTENSIONS_API_VERSION,
@@ -4903,6 +5400,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
+    const SUPPORT_IMAGE: &str = crate::sandbox::template::DEFAULT_GATEWAY_IMAGE;
     const MODE_CLAIM_PATH: &str = "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxclaims/sandbox-env-test";
     const MODE_SANDBOX_PATH: &str =
         "/apis/agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxes/workspace-env-test";
@@ -5108,7 +5606,7 @@ mod tests {
             let (client, state) = mode_client(mode_sandbox(), ModeInterleave::ControllerUpdate);
             tokio::time::timeout(
                 Duration::from_secs(2),
-                client.set_replicas("env-test", replicas),
+                client.set_replicas("env-test", replicas, SUPPORT_IMAGE),
             )
             .await
             .unwrap()
@@ -5146,10 +5644,13 @@ mod tests {
         ] {
             let (client, state) = mode_client(mode_sandbox(), interleave);
             assert!(
-                tokio::time::timeout(Duration::from_secs(2), client.set_replicas("env-test", 1))
-                    .await
-                    .unwrap()
-                    .is_err()
+                tokio::time::timeout(
+                    Duration::from_secs(2),
+                    client.set_replicas("env-test", 1, SUPPORT_IMAGE)
+                )
+                .await
+                .unwrap()
+                .is_err()
             );
             let state = state.lock().unwrap();
             assert_eq!(
@@ -5181,10 +5682,13 @@ mod tests {
             }
             let (client, state) = mode_client(sandbox, ModeInterleave::ControllerUpdate);
             assert!(
-                tokio::time::timeout(Duration::from_secs(2), client.set_replicas("env-test", 1))
-                    .await
-                    .unwrap()
-                    .is_err(),
+                tokio::time::timeout(
+                    Duration::from_secs(2),
+                    client.set_replicas("env-test", 1, SUPPORT_IMAGE)
+                )
+                .await
+                .unwrap()
+                .is_err(),
                 "case {invalid}"
             );
             assert!(
@@ -5200,10 +5704,13 @@ mod tests {
             let (client, state) =
                 mode_client(mode_sandbox(), ModeInterleave::InvalidReply(invalid));
             assert!(
-                tokio::time::timeout(Duration::from_secs(2), client.set_replicas("env-test", 1))
-                    .await
-                    .unwrap()
-                    .is_err(),
+                tokio::time::timeout(
+                    Duration::from_secs(2),
+                    client.set_replicas("env-test", 1, SUPPORT_IMAGE)
+                )
+                .await
+                .unwrap()
+                .is_err(),
                 "case {invalid} must not report a current live target"
             );
             let state = state.lock().unwrap();
@@ -5222,10 +5729,13 @@ mod tests {
             .unwrap()
             .remove("operatingMode");
         let (client, state) = mode_client(sandbox, ModeInterleave::ControllerUpdate);
-        tokio::time::timeout(Duration::from_secs(2), client.set_replicas("env-test", 1))
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            client.set_replicas("env-test", 1, SUPPORT_IMAGE),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let state = state.lock().unwrap();
         assert_eq!(state.writes.len(), 1);
         assert_eq!(state.object["spec"]["operatingMode"], "Running");

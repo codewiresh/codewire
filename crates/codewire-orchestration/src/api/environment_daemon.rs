@@ -680,6 +680,7 @@ pub async fn repair_environment_daemon_core(
             sandbox,
             authority,
             current,
+            support_image: state.sandbox_cfg.support_image().to_owned(),
         },
     )
     .await
@@ -697,6 +698,8 @@ struct DaemonRepair {
     sandbox: SandboxClient,
     authority: ActivityAuthority,
     current: WorkspacePodIdentity,
+    /// The support image the replacement's daemon is re-pinned to.
+    support_image: String,
 }
 
 /// Replace the workspace Pod behind the environment runtime fence.
@@ -731,6 +734,7 @@ impl DaemonRepair {
             environment_id,
             &self.current.name,
             &self.current.uid,
+            &self.support_image,
         )
         .await
         {
@@ -921,12 +925,16 @@ fn daemon_repair_setup_is_idle(setup_complete: bool, setup_owner_status: Option<
     setup_complete && setup_owner_status.is_none()
 }
 
+/// `cw env daemon repair` upgrades the daemon: the replacement is built from
+/// the Sandbox re-pinned to `support_image`, not from the one it was created
+/// with.
 async fn delete_workspace_pod_while_setup_idle(
     authority: &ActivityAuthority,
     sandbox: &SandboxClient,
     environment_id: &str,
     pod_name: &str,
     pod_uid: &str,
+    support_image: &str,
 ) -> anyhow::Result<()> {
     let mut guard = authority.begin_external_mutation(&["running"]).await?;
     // Setup lease transitions use this same lock order: environment first,
@@ -947,7 +955,7 @@ async fn delete_workspace_pod_while_setup_idle(
     await_external_mutation(delete_workspace_pod_after_setup_recheck(
         setup_complete,
         setup_owner_status,
-        sandbox.delete_workspace_pod_if_uid(pod_name, pod_uid),
+        sandbox.replace_workspace_pod_if_uid(environment_id, pod_name, pod_uid, support_image),
     ))
     .await?;
     guard.commit().await

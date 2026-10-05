@@ -683,6 +683,7 @@ pub(super) async fn restart_workspace_bootstrap(
             &backend.claim_uid,
             &suspended,
             1,
+            opts.effective_support_image(),
         ),
     )
     .await
