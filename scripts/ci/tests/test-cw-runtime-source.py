@@ -661,6 +661,103 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
                     driver.main(flags + extra)
                 prepare.assert_not_called()
 
+    def test_real_cargo_alias_normalizes_exact_bytes_without_mutating_original_inode(self):
+        with self.prepare() as capsule:
+            binary, depinfo, target, cargo, result = self.build_bytes(capsule)
+            alias = target / "deps/cw-0123456789abcdef"
+            alias.parent.mkdir(mode=0o700)
+            os.link(binary, alias)
+            before = source.asset.stamp(binary.stat())
+            self.assertEqual(before["nlink"], 2)
+            with self.admits(capsule) as admitted:
+                receipt = finalizer.finalize(admitted, binary, depinfo, fixture.RUSTC, result,
+                                             self.base / "cargo-export", target, cargo)
+                admitted.revalidate()
+            exported = self.base / "cargo-export/cw"
+            self.assertEqual(source.asset.stamp(binary.stat()), before)
+            self.assertEqual(source.asset.stamp(alias.stat()), before)
+            self.assertEqual(exported.read_bytes(), binary.read_bytes())
+            self.assertEqual((exported.stat().st_nlink, stat.S_IMODE(exported.stat().st_mode)), (1, 0o500))
+            self.assertNotEqual((exported.stat().st_dev, exported.stat().st_ino), (before["dev"], before["ino"]))
+            self.assertEqual(receipt["payload"]["sha256"], sha(binary.read_bytes()))
+            self.assertEqual(receipt["payload"]["size"], before["size"])
+            self.assertEqual(set(os.listdir(self.base / "cargo-export")), finalizer.FILES)
+            checked = finalizer.verify_export(self.base / "cargo-export", capsule.model,
+                                              capsule.outputs["request.json"].sha256)
+            self.assertEqual(checked, receipt)
+
+    def test_compiler_alias_normalization_refuses_unknown_links_metadata_and_directory(self):
+        with self.prepare() as capsule:
+            binary, depinfo, target, cargo, result = self.build_bytes(capsule)
+            raw = binary.read_bytes()
+            deps = target / "deps"
+            deps.mkdir(mode=0o700)
+            alias = deps / "cw-0123456789abcdef"
+            unknown = deps / "DIAGNOSTIC_SECRET_CANARY"
+            external = target / "outside-alias"
+            replacement = target / "replacement"
+            spare = deps / "unrelated"
+            for kind in ("outside", "unknown", "extra", "writable", "symlink", "special", "bound", "deps-symlink"):
+                for path in (binary, alias, unknown, external, replacement, spare):
+                    if os.path.lexists(path):
+                        path.unlink()
+                write(binary, raw, 0o500)
+                if kind == "outside":
+                    os.link(binary, external)
+                elif kind == "unknown":
+                    os.link(binary, unknown)
+                else:
+                    os.link(binary, alias)
+                if kind == "extra":
+                    os.link(binary, external)
+                elif kind == "writable":
+                    binary.chmod(0o522)
+                elif kind == "symlink":
+                    binary.unlink()
+                    binary.symlink_to(alias)
+                elif kind == "special":
+                    binary.unlink()
+                    os.mkfifo(binary, 0o600)
+                elif kind == "bound":
+                    write(spare, b"not a candidate", 0o400)
+                elif kind == "deps-symlink":
+                    moved = target / "moved-deps"
+                    deps.rename(moved)
+                    deps.symlink_to(moved)
+                output = self.base / ("refused-" + kind)
+                try:
+                    with self.subTest(kind=kind), self.admits(capsule) as admitted, \
+                            mock.patch.object(finalizer, "MAX_COMPILER_DEPS", 1 if kind == "bound" else source.MAX_FILES), \
+                            self.assertRaises(FAILURES):
+                        finalizer.finalize(admitted, binary, depinfo, fixture.RUSTC, result, output, target, cargo)
+                    self.assertFalse(output.exists())
+                finally:
+                    if kind == "deps-symlink":
+                        deps.unlink()
+                        moved.rename(deps)
+
+    def test_replaced_cargo_alias_refuses_before_receipt_after_exclusive_copy(self):
+        with self.prepare() as capsule:
+            binary, depinfo, target, cargo, result = self.build_bytes(capsule)
+            alias = target / "deps/cw-0123456789abcdef"
+            alias.parent.mkdir(mode=0o700)
+            os.link(binary, alias)
+            replacement = target / "replacement"
+            write(replacement, binary.read_bytes(), 0o500)
+            output = self.base / "race-export"
+            with self.admits(capsule) as admitted:
+                original = admitted.selected.runtime_transports
+                def replace_after_copy(*args, **kwargs):
+                    exported = output / "cw"
+                    self.assertEqual((exported.stat().st_nlink, stat.S_IMODE(exported.stat().st_mode)), (1, 0o500))
+                    os.replace(replacement, alias)
+                    return original(*args, **kwargs)
+                with mock.patch.object(admitted.selected, "runtime_transports", side_effect=replace_after_copy), \
+                        self.assertRaises(FAILURES):
+                    finalizer.finalize(admitted, binary, depinfo, fixture.RUSTC, result, output, target, cargo)
+                self.assertFalse((output / "producer.json").exists())
+                self.assertNotEqual((alias.stat().st_dev, alias.stat().st_ino), (binary.stat().st_dev, binary.stat().st_ino))
+
     def test_real_hardlinked_compiler_output_reports_binary_phase_before_export(self):
         with self.prepare() as capsule:
             binary, depinfo, target, cargo, result = self.build_bytes(capsule)

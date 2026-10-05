@@ -208,6 +208,84 @@ def pin(raw):
     return {"sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
 
 
+# Cargo may retain one hardlink at deps/cw-<16 lowercase hex>. Only this
+# compiled-output holder accounts for that exact alias; source/Git/export
+# HeldSourceFile keeps its original single-link contract.
+MAX_COMPILER_DEPS = source.MAX_FILES
+
+
+class HeldCompilerOutput(source.HeldSourceFile):
+    def __init__(self, path, maximum):
+        self.path, self.maximum = source.asset.path_arg(str(path)), maximum
+        self.parent, self.fd, self.deps, self.aliases = None, None, None, ()
+        try:
+            source.require(self.path.name == "cw", "compiler output name refused")
+            self.parent = source.asset.Parent(self.path.parent)
+            before = os.stat(self.path.name, dir_fd=self.parent.fd, follow_symlinks=False)
+            self.fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                              dir_fd=self.parent.fd)
+            info = os.fstat(self.fd)
+            source.require(source.asset.stamp(before) == source.asset.stamp(info)
+                           and stat.S_ISREG(info.st_mode) and info.st_nlink in (1, 2)
+                           and info.st_uid in (0, os.geteuid()) and not info.st_mode & 0o022
+                           and 0 <= info.st_size <= maximum,
+                           "compiler output is not a bounded owned regular file")
+            self.metadata = source.asset.stamp(info)
+            if info.st_nlink == 2:
+                try:
+                    self.deps = source.asset.Parent(self.path.parent / "deps")
+                except FileNotFoundError:
+                    raise source.Refused("compiler output has an unaccounted link") from None
+                fresh = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                dir_fd=self.deps.fd)
+                aliases = []
+                try:
+                    source.require(source.asset.stamp(os.fstat(fresh), source.asset.DIR_FIELDS)
+                                   == source.asset.stamp(os.fstat(self.deps.fd), source.asset.DIR_FIELDS),
+                                   "compiler alias directory changed")
+                    with os.scandir(fresh) as entries:
+                        for count, entry in enumerate(entries, 1):
+                            source.asset.active()
+                            source.require(count <= MAX_COMPILER_DEPS, "compiler alias inventory exceeds its bound")
+                            name = entry.name
+                            if not (name.startswith("cw-") and source.release.is_hex(name[3:], 16)):
+                                continue
+                            alias = os.stat(name, dir_fd=self.deps.fd, follow_symlinks=False)
+                            if (alias.st_dev, alias.st_ino) == (info.st_dev, info.st_ino):
+                                source.require(source.asset.stamp(alias) == self.metadata,
+                                               "compiler alias differs from the held output")
+                                aliases.append(name)
+                    source.require(len(aliases) == 1, "compiler output has an unaccounted link")
+                    self.aliases = tuple(aliases)
+                finally:
+                    os.close(fresh)
+            self.data = self.read()
+            self.sha256 = hashlib.sha256(self.data).hexdigest()
+            self.revalidate(content=True)
+        except BaseException:
+            self.close()
+            raise
+
+    def revalidate(self, content=False):
+        if self.deps is not None:
+            self.deps.revalidate()
+            for name in self.aliases:
+                source.require(source.asset.stamp(os.stat(name, dir_fd=self.deps.fd, follow_symlinks=False))
+                               == self.metadata, "held compiler alias changed")
+        super().revalidate(content=content)
+        if self.deps is not None:
+            for name in self.aliases:
+                source.require(source.asset.stamp(os.stat(name, dir_fd=self.deps.fd, follow_symlinks=False))
+                               == self.metadata, "held compiler alias changed")
+            self.deps.revalidate()
+
+    def close(self):
+        if self.deps is not None:
+            self.deps.close()
+            self.deps = None
+        super().close()
+
+
 def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_root, cargo_home):
     """Admission/export leaf, also exercised with never-executed fixture bytes."""
     model = admitted.model
@@ -221,10 +299,10 @@ def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_
             admitted.source, executable, depinfo, source.TARGET, model["version"], model["source"]["revision"],
             model["source"]["source_tree_sha256"], rustc,
             (target_root, cargo_home / "registry", cargo_home / "git"))
-    binary = dependencies = log = None
+    binary = dependencies = log = exported_binary = None
     try:
         _DIAGNOSTIC["phase"] = "export-binary"
-        binary = source.HeldSourceFile(executable, selected.MAX_EXECUTABLE)
+        binary = HeldCompilerOutput(executable, selected.MAX_EXECUTABLE)
         _DIAGNOSTIC["phase"] = "export-depinfo"
         dependencies = source.HeldSourceFile(depinfo, 8 * 1024 * 1024)
         _DIAGNOSTIC["phase"] = "export-log"
@@ -246,6 +324,8 @@ def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_
                 source.asset.write_new(root_fd, "compile.log", log.data, 0o400)
             finally:
                 os.close(root_fd)
+            exported_binary = source.HeldSourceFile(output / "cw", selected.MAX_EXECUTABLE)
+            source.require(exported_binary.data == data, "exclusive compiler copy differs from admitted bytes")
             # The unchanged shared producer invokes only its checked-in Python
             # transport tool; these synthetic/actual bytes are not executed.
             _DIAGNOSTIC["phase"] = "export-transports"
@@ -268,6 +348,7 @@ def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_
                 import shutil
                 shutil.rmtree(output / ".transports")
                 binary.revalidate(content=True)
+                exported_binary.revalidate(content=True)
                 dependencies.revalidate(content=True)
                 log.revalidate(content=True)
                 admitted.revalidate()
@@ -294,7 +375,7 @@ def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_
         finally:
             parent.close()
     finally:
-        for file in (binary, dependencies, log):
+        for file in (binary, dependencies, log, exported_binary):
             if file is not None:
                 file.close()
 
