@@ -661,6 +661,57 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
                     driver.main(flags + extra)
                 prepare.assert_not_called()
 
+    def test_real_hardlinked_compiler_output_reports_binary_phase_before_export(self):
+        with self.prepare() as capsule:
+            binary, depinfo, target, cargo, result = self.build_bytes(capsule)
+            alias = target / "DIAGNOSTIC_SECRET_CANARY"
+            os.link(binary, alias)
+            self.assertEqual(binary.stat().st_nlink, 2)
+            with self.admits(capsule) as admitted, self.assertRaises(FAILURES) as refused:
+                # Real shared record/dep-info admission succeeds; the original
+                # single-link held-file guard refuses this compiler output.
+                finalizer.finalize(admitted, binary, depinfo, fixture.RUSTC, result,
+                                   self.base / "export", target, cargo)
+            value = json.loads(finalizer.failure_diagnostic(refused.exception)
+                               [len(finalizer.DIAGNOSTIC_PREFIX):])
+            self.assertEqual((value["phase"], value["exception"], value["errno"]),
+                             ("export-binary", "value", "none"))
+            self.assertNotIn("DIAGNOSTIC_SECRET_CANARY", json.dumps(value))
+            self.assertFalse((self.base / "export").exists())
+
+    def test_export_boundary_refusals_render_closed_phase_without_source_chain(self):
+        canary = "DIAGNOSTIC_SECRET_CANARY"
+        cases = (("export-admission", "admit_build"),
+                 ("export-transports", "runtime_transports"),
+                 ("export-verify", "verify_export"))
+        with self.prepare() as capsule:
+            binary, depinfo, target, cargo, result = self.build_bytes(capsule)
+            with self.admits(capsule) as admitted:
+                for phase, method in cases:
+                    error = source.Refused(canary)
+                    error.__cause__ = RuntimeError(canary)
+                    error.__context__ = RuntimeError(canary)
+                    owner = finalizer if method == "verify_export" else admitted.selected
+                    output = self.base / phase
+                    with self.subTest(phase=phase), \
+                            mock.patch.object(owner, method, side_effect=error) as boundary, \
+                            contextlib.redirect_stdout(io.StringIO()) as stdout, \
+                            self.assertRaises(source.Refused) as refused:
+                        finalizer.finalize(admitted, binary, depinfo, fixture.RUSTC, result,
+                                           output, target, cargo)
+                    self.assertIs(refused.exception, error)
+                    boundary.assert_called_once()
+                    self.assertEqual(stdout.getvalue(), "")
+                    text = finalizer.failure_diagnostic(refused.exception)
+                    value = json.loads(text[len(finalizer.DIAGNOSTIC_PREFIX):])
+                    self.assertEqual((value["phase"], value["exception"], value["errno"]),
+                                     (phase, "value", "none"))
+                    self.assertNotIn(canary, text)
+                    self.assertLess(len(text.encode("ascii")), 1024)
+                    if phase != "export-verify":
+                        self.assertFalse((output / "producer.json").exists())
+                admitted.revalidate()
+
     def test_finalizer_fixed_home_uses_created_export_parent_before_compiler(self):
         work = self.base / "compiler-output"
         work.mkdir(mode=0o755)

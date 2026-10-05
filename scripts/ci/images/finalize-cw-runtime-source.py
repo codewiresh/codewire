@@ -53,7 +53,9 @@ COMPLETION_FIELDS = {"command", "exit", "elapsed_seconds", "log", "log_sha256", 
 
 
 DIAGNOSTIC_PHASES = frozenset({"arguments", "custody", "capsule", "profile", "readonly", "home",
-                              "environment", "rustc", "compile", "export", "result"})
+                              "environment", "rustc", "compile", "export", "result",
+                              "export-admission", "export-binary", "export-depinfo", "export-log",
+                              "export-directory", "export-transports", "export-retained", "export-verify"})
 DIAGNOSTIC_ERRNOS = {errno.EPERM: "permission", errno.EACCES: "permission", errno.EROFS: "readonly",
                      errno.EMFILE: "process_fd_limit", errno.ENFILE: "system_fd_limit",
                      errno.ENOENT: "not_found", errno.ENOTDIR: "not_directory", errno.ELOOP: "link",
@@ -212,6 +214,7 @@ def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_
     completion(compile_result, command(model["profile"]))
     admitted.revalidate()
     selected = admitted.selected
+    _DIAGNOSTIC["phase"] = "export-admission"
     with source.git_scope(admitted.git_dir, admitted.source):
         rustc = selected.toolchain_rustc(admitted.source, rustc)
         data, identity, count = selected.admit_build(
@@ -220,12 +223,16 @@ def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_
             (target_root, cargo_home / "registry", cargo_home / "git"))
     binary = dependencies = log = None
     try:
+        _DIAGNOSTIC["phase"] = "export-binary"
         binary = source.HeldSourceFile(executable, selected.MAX_EXECUTABLE)
+        _DIAGNOSTIC["phase"] = "export-depinfo"
         dependencies = source.HeldSourceFile(depinfo, 8 * 1024 * 1024)
+        _DIAGNOSTIC["phase"] = "export-log"
         log = source.HeldSourceFile(compile_result["log"], 32 * 1024 * 1024)
         source.require(binary.data == data and count > 0 and log.sha256 == compile_result["log_sha256"],
                        "retained built input or compiler log changed")
         admitted.revalidate()
+        _DIAGNOSTIC["phase"] = "export-directory"
         output = source.asset.path_arg(str(work))
         source.require(not os.path.lexists(output), "producer export already exists")
         parent = source.asset.Parent(output.parent)
@@ -241,6 +248,7 @@ def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_
                 os.close(root_fd)
             # The unchanged shared producer invokes only its checked-in Python
             # transport tool; these synthetic/actual bytes are not executed.
+            _DIAGNOSTIC["phase"] = "export-transports"
             image_dir, pack_dir, image_receipt, lock = selected.runtime_transports(
                 output / "cw", identity, output / ".transports", tool=admitted.source / "scripts/dev/cw-runtime-image.py")
             transport_paths = {"cw.oci.tar": image_dir / "cw.oci.tar", "image.json": image_dir / "image.json",
@@ -250,6 +258,7 @@ def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_
             selected.check_transports(data, identity, transport_bytes["cw.oci.tar"], image_receipt,
                                       transport_bytes["runtime.pack"], transport_bytes["cw-runtime.lock.json"],
                                       tool=admitted.source / "scripts/dev/cw-runtime-image.py")
+            _DIAGNOSTIC["phase"] = "export-retained"
             root_fd = os.open(output.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent.fd)
             try:
                 for name, raw in transport_bytes.items():
@@ -278,6 +287,7 @@ def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_
                 os.fsync(root_fd)
             finally:
                 os.close(root_fd)
+            _DIAGNOSTIC["phase"] = "export-verify"
             verify_export(output, model, admitted.files["request"].sha256)
             parent.revalidate()
             return receipt
@@ -291,6 +301,7 @@ def finalize(admitted, executable, depinfo, rustc, compile_result, work, target_
 
 def verify_export(output, model, request_sha256):
     """Join actual exporter bytes to the producer and selected request."""
+    _DIAGNOSTIC["phase"] = "export-verify"
     held = {}
     try:
         source.validate_inventory(output, FILES, ())
