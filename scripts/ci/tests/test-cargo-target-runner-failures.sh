@@ -372,6 +372,9 @@ def git(*args):
                           check=True, capture_output=True, text=True).stdout.strip()
 
 git('init', '-q', '-b', 'main')
+# The finite fixture environment must still join Git's automatic maintenance.
+git('config', 'maintenance.autoDetach', 'false')
+git('config', 'gc.autoDetach', 'false')
 git('config', 'user.name', 'Composition Fixture')
 git('config', 'user.email', 'composition@codewire.invalid')
 git('remote', 'add', 'origin', str(fixture))

@@ -3372,12 +3372,12 @@ if [ "$(grep -c '^run_selected_family edge_kind edge ' \
   echo 'local preflight must invoke edge static verification exactly once' >&2
   exit 1
 fi
-if grep -qF "find scripts/runtime -type f -name '*.sh' -print0" \
+if grep -qF "find scripts/runtime -type f -name '*.sh'" \
     "$ROOT/scripts/dev/preflight.sh"; then
   echo 'local preflight duplicates the shared runtime syntax owner' >&2
   exit 1
 fi
-grep -qF "find scripts/runtime -type f -name '*.sh' -print0" \
+grep -qF "find scripts/runtime -type f -name '*.sh' -exec bash -c '" \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 shared_shell_policy="$TMP/shared-shell-policy.sh"
 awk '

@@ -12,6 +12,9 @@ remote="$TMP/remote.git"
 mock_bin="$TMP/bin"
 mkdir -p "$repo" "$mock_bin"
 git init -q "$repo"
+# Keep automatic maintenance inside the disposable fixture's command lifetime.
+git -C "$repo" config maintenance.autoDetach false
+git -C "$repo" config gc.autoDetach false
 git -C "$repo" config user.name 'Receipt Test'
 git -C "$repo" config user.email 'receipt@test.invalid'
 # The fixture exercises receipt topology, not signing-agent availability.
@@ -51,6 +54,8 @@ control_tree="$(git -C "$repo" rev-parse 'HEAD^{tree}')"
 control_merge="$(printf 'control squash\n' | git -C "$repo" commit-tree "$control_tree" -p "$base_sha")"
 
 git init -q --bare "$remote"
+git -C "$remote" config maintenance.autoDetach false
+git -C "$remote" config gc.autoDetach false
 git -C "$repo" remote add origin "$remote"
 git -C "$repo" push -q origin \
   "${tested_head}:refs/pull/42/head" \
