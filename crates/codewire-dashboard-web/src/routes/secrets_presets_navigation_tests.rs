@@ -70,6 +70,10 @@ fn mutation(path: &str) -> bool {
         "/CreateAccessProfile",
         "/RenameAccessProfile",
         "/CompleteGithubAppAuthorization",
+        "/AddApiKeyCredential",
+        "/AddClaudeSubscriptionTokenCredential",
+        "/GenerateSshCredential",
+        "/AddSshCredential",
     ]
     .iter()
     .any(|suffix| path.ends_with(suffix))
@@ -133,10 +137,11 @@ async fn fixture(mode: &'static str) -> (TestServer, Calls) {
             } else if path.ends_with("/GetCredential") {
                 codewire_proto::codewire::v1::GetCredentialResponse { credential: Some(synthetic_github_credential(7)).into(), ..Default::default() }.encode_to_vec()
             } else if mutation(&path) {
-                if mode == "mutation denied" || mode == "mutation unauthenticated" || mode == "mutation conflict" {
+                if mode == "mutation denied" || mode == "mutation unauthenticated" || mode == "mutation conflict" || mode == "mutation unavailable" {
                     let (status, code) = match mode {
                         "mutation denied" => (StatusCode::FORBIDDEN, "permission_denied"),
                         "mutation conflict" => (StatusCode::CONFLICT, "already_exists"),
+                        "mutation unavailable" => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
                         _ => (StatusCode::UNAUTHORIZED, "unauthenticated"),
                     };
                     return (status, Json(serde_json::json!({"code": code, "message": "synthetic failure"}))).into_response();

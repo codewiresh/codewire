@@ -445,9 +445,21 @@ pub(crate) struct CredentialSettingsView {
     pub(crate) csrf_token: String,
     pub(crate) message: String,
     pub(crate) error: String,
+    /// The credential name a failed addition keeps for its reopened dialog.
+    /// No secret field has a retained value; those always render empty.
+    pub(crate) retained_name: String,
 }
 
 impl CredentialSettingsView {
+    /// The retained name, only inside the dialog whose addition failed.
+    pub(crate) fn retained_name_for(&self, dialog: &str) -> &str {
+        if self.active_dialog == dialog {
+            &self.retained_name
+        } else {
+            ""
+        }
+    }
+
     /// The exact Create draft this page returns to, carried by the GET forms
     /// that open a dialog without scripting.
     pub(crate) fn creation_draft(&self) -> String {
@@ -473,6 +485,7 @@ impl fmt::Debug for CredentialSettingsView {
             .field("csrf_token", &redacted(&self.csrf_token))
             .field("message", &self.message)
             .field("error", &self.error)
+            .field("has_retained_name", &!self.retained_name.is_empty())
             .finish()
     }
 }
@@ -2478,6 +2491,7 @@ mod secret_debug_tests {
             csrf_token: MARKER.into(),
             message: String::new(),
             error: String::new(),
+            retained_name: MARKER.into(),
         };
 
         assert_value_blind(&format!("{page:?}"));

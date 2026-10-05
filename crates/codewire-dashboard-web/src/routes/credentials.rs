@@ -96,37 +96,73 @@ pub(super) async fn page(
     headers: HeaderMap,
     CredentialQuery(query): CredentialQuery,
 ) -> Response {
-    let continuation = page_path(&query);
+    render_page(&state, &headers, &query, None).await
+}
+
+/// A credential addition the service never published, answered in place so
+/// its dialog reopens with the name the person typed. Only the name is kept;
+/// keys, tokens, private keys and passphrases always render empty.
+struct RejectedAddition<'a> {
+    dialog: &'a str,
+    error: &'static str,
+    name: &'a str,
+}
+
+async fn render_page(
+    state: &AppState,
+    headers: &HeaderMap,
+    query: &QueryParameters,
+    rejected: Option<RejectedAddition<'_>>,
+) -> Response {
+    let continuation = page_path(query);
     let dashboard =
-        match super::dashboard::personal_settings_shell_view(&state, &headers, &query.org).await {
+        match super::dashboard::personal_settings_shell_view(state, headers, &query.org).await {
             Ok(view) => view,
-            Err(WebError::Unauthorized) => return login_redirect(&continuation, &headers),
+            Err(WebError::Unauthorized) => return login_redirect(&continuation, headers),
             Err(WebError::TwoFactorRequired) => {
-                return two_factor_redirect(&continuation, &headers);
+                return two_factor_redirect(&continuation, headers);
             }
             Err(error) => return error_page(error),
         };
-    let cookie = match canonical_cookie(&headers) {
+    let cookie = match canonical_cookie(headers) {
         Ok(cookie) => cookie,
-        Err(()) => return login_redirect(&continuation, &headers),
+        Err(()) => return login_redirect(&continuation, headers),
     };
-    let git_identity = match git_identity_data(&state, cookie.clone()).await {
+    let git_identity = match git_identity_data(state, cookie.clone()).await {
         Ok(identity) => identity,
         Err(WebError::Connect(error)) if error.code == ErrorCode::Unauthenticated => {
-            return login_redirect(&continuation, &headers);
+            return login_redirect(&continuation, headers);
         }
         Err(error) => return error_page(error),
     };
-    let data = match credentials_connect::settings_data(&state, cookie).await {
+    let data = match credentials_connect::settings_data(state, cookie).await {
         Ok(data) => data,
         Err(error) if error.code == ErrorCode::Unauthenticated => {
-            return login_redirect(&continuation, &headers);
+            return login_redirect(&continuation, headers);
         }
         Err(error) => return error_page(WebError::Connect(error)),
     };
-    let csrf = page_csrf_token(&headers);
+    let csrf = page_csrf_token(headers);
+    let (dialog, message, error, retained_name) = match &rejected {
+        Some(rejected) => (
+            rejected.dialog,
+            "",
+            rejected.error,
+            if valid_credential_name(rejected.name) {
+                rejected.name
+            } else {
+                ""
+            },
+        ),
+        None => (
+            query.dialog.as_str(),
+            query.message.as_str(),
+            query.error.as_str(),
+            "",
+        ),
+    };
     let page = CredentialSettingsView {
-        navigation_query: page_query(&query),
+        navigation_query: page_query(query),
         creation_return_url: if dashboard.has_selected_organization {
             if let DraftReturn::Exact(id) = &query.draft {
                 format!(
@@ -140,27 +176,74 @@ pub(super) async fn page(
             String::new()
         },
         git_identity,
-        git_identity_feedback: query.message == "identity-saved"
-            || matches!(
-                query.error.as_str(),
-                "identity-invalid" | "identity-request-failed"
-            ),
-        active_dialog: approved_dialog(&query.dialog, &data),
+        git_identity_feedback: message == "identity-saved"
+            || matches!(error, "identity-invalid" | "identity-request-failed"),
+        active_dialog: approved_dialog(dialog, &data),
         github_install_url: github_app_installation_url(&state.github_app_slug),
         credentials: data.credentials,
         profiles: data.profiles,
         choices: data.choices,
         csrf_token: csrf.clone(),
-        message: approved_message(&query.message).into(),
-        error: approved_error(&query.error).into(),
+        message: approved_message(message).into(),
+        error: approved_error(error).into(),
+        retained_name: retained_name.into(),
     };
-    with_csrf_cookie(
+    let mut response = with_csrf_cookie(
         render_credential_settings_page(CredentialSettingsTemplate {
             view: &dashboard,
             page: &page,
         }),
         csrf_cookie(&state.public_origin, &csrf),
+    );
+    if rejected.is_some() && response.status() == StatusCode::OK {
+        *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+    }
+    response
+}
+
+/// Answer an addition the service never published by rendering the page in
+/// place. Reloading resends the submission, which is safe only because
+/// nothing was saved; the name is the only submitted value shown again.
+async fn reject_addition(
+    state: &AppState,
+    headers: &HeaderMap,
+    query: &QueryParameters,
+    dialog: &str,
+    error: &'static str,
+    name: &str,
+) -> Response {
+    render_page(
+        state,
+        headers,
+        query,
+        Some(RejectedAddition {
+            dialog,
+            error,
+            name,
+        }),
     )
+    .await
+}
+
+/// An addition the service answered with an error. A definite rejection
+/// keeps the dialog's name. An ended session signs in again, and an
+/// uncertain outcome keeps the redirect so a reload cannot resend a
+/// submission that may already have been saved.
+async fn addition_error(
+    state: &AppState,
+    headers: &HeaderMap,
+    query: &QueryParameters,
+    dialog: &str,
+    name: &str,
+    code: ErrorCode,
+) -> Response {
+    if code == ErrorCode::Unauthenticated {
+        return login_redirect(&page_path(query), headers);
+    }
+    match credential_error_code(code, false) {
+        error @ CREDENTIAL_UNCERTAIN => page_error_redirect(error, dialog, query, headers),
+        error => reject_addition(state, headers, query, dialog, error, name).await,
+    }
 }
 
 pub(super) async fn update_identity_action(
@@ -352,7 +435,7 @@ pub(super) async fn add_api_key_action(
         || value.len() > 1024
         || expiry.is_err()
     {
-        return page_error_redirect("credential-invalid", dialog, &query, &headers);
+        return reject_addition(&state, &headers, &query, dialog, "credential-invalid", name).await;
     }
     match credentials_connect::add_api_key(
         &state,
@@ -365,7 +448,7 @@ pub(super) async fn add_api_key_action(
     .await
     {
         Ok(()) => page_redirect("credential-added", false, &query, &headers),
-        Err(error) => credential_mutation_error(error.code, false, dialog, &query, &headers),
+        Err(error) => addition_error(&state, &headers, &query, dialog, name, error.code).await,
     }
 }
 
@@ -399,11 +482,21 @@ pub(super) async fn add_claude_subscription_token_action(
         }
         _ => None,
     };
-    let Some(replacement) = replacement else {
-        return page_error_redirect("credential-invalid", &dialog, &query, &headers);
+    let Some(replacement) = replacement.filter(|_| valid_credential_name(name)) else {
+        return reject_addition(
+            &state,
+            &headers,
+            &query,
+            &dialog,
+            "credential-invalid",
+            name,
+        )
+        .await;
     };
-    if !valid_credential_name(name) || !valid_subscription_token(&token) {
-        return page_error_redirect("credential-invalid", &dialog, &query, &headers);
+    if !valid_subscription_token(&token) {
+        // A static message: the submitted token is never echoed or described.
+        let error = "claude-token-invalid";
+        return reject_addition(&state, &headers, &query, &dialog, error, name).await;
     }
     match credentials_connect::add_claude_subscription_token(
         &state,
@@ -424,7 +517,7 @@ pub(super) async fn add_claude_subscription_token_action(
             &query,
             &headers,
         ),
-        Err(error) => credential_mutation_error(error.code, false, &dialog, &query, &headers),
+        Err(error) => addition_error(&state, &headers, &query, &dialog, name, error.code).await,
     }
 }
 
@@ -448,7 +541,7 @@ pub(super) async fn generate_ssh_action(
     let name = form.name.trim();
     let expiry = parse_expiration_utc(&form.expiration_utc);
     if !valid_credential_name(name) || expiry.is_err() {
-        return page_error_redirect("credential-invalid", dialog, &query, &headers);
+        return reject_addition(&state, &headers, &query, dialog, "credential-invalid", name).await;
     }
     match credentials_connect::generate_ssh(
         &state,
@@ -459,7 +552,7 @@ pub(super) async fn generate_ssh_action(
     .await
     {
         Ok(()) => page_redirect("credential-generated", false, &query, &headers),
-        Err(error) => credential_mutation_error(error.code, false, dialog, &query, &headers),
+        Err(error) => addition_error(&state, &headers, &query, dialog, name, error.code).await,
     }
 }
 
@@ -490,7 +583,7 @@ pub(super) async fn import_ssh_action(
         })
         || expiry.is_err()
     {
-        return page_error_redirect("credential-invalid", dialog, &query, &headers);
+        return reject_addition(&state, &headers, &query, dialog, "credential-invalid", name).await;
     }
     match credentials_connect::import_ssh(
         &state,
@@ -503,7 +596,7 @@ pub(super) async fn import_ssh_action(
     .await
     {
         Ok(()) => page_redirect("credential-imported", false, &query, &headers),
-        Err(error) => credential_mutation_error(error.code, false, dialog, &query, &headers),
+        Err(error) => addition_error(&state, &headers, &query, dialog, name, error.code).await,
     }
 }
 
@@ -1263,7 +1356,18 @@ fn credential_mutation_error(
     if code == ErrorCode::Unauthenticated {
         return login_redirect(&page_path(context), headers);
     }
-    let error = if matches!(
+    page_error_redirect(
+        credential_error_code(code, delete),
+        dialog,
+        context,
+        headers,
+    )
+}
+
+const CREDENTIAL_UNCERTAIN: &str = "credential-uncertain";
+
+fn credential_error_code(code: ErrorCode, delete: bool) -> &'static str {
+    if matches!(
         code,
         ErrorCode::Aborted | ErrorCode::AlreadyExists | ErrorCode::NotFound
     ) {
@@ -1278,9 +1382,8 @@ fn credential_mutation_error(
     } else {
         // Any transport/protocol failure can lose a successful publication
         // acknowledgement. Never encourage an automatic or blind retry.
-        "credential-uncertain"
-    };
-    page_error_redirect(error, dialog, context, headers)
+        CREDENTIAL_UNCERTAIN
+    }
 }
 
 // The service reports a taken name and a stale revision with one conflict
@@ -1470,6 +1573,9 @@ fn approved_error(code: &str) -> &'static str {
             "The Git commit identity change could not be confirmed. Reload before trying again."
         }
         "credential-invalid" => "The credential submission is invalid.",
+        "claude-token-invalid" => {
+            "That doesn't look like a Claude subscription token. Run claude setup-token and paste the whole token."
+        }
         "credential-conflict" => "The credential changed. Reload and try again.",
         "credential-in-use" => {
             "The credential is still referenced by a profile and cannot be deleted."
@@ -1589,6 +1695,16 @@ mod tests {
         data: credentials_connect::CredentialSettingsData,
         navigation: &str,
     ) -> String {
+        rendered_page(active_dialog, error, data, navigation, "")
+    }
+
+    fn rendered_page(
+        active_dialog: &str,
+        error: &str,
+        data: credentials_connect::CredentialSettingsData,
+        navigation: &str,
+        retained_name: &str,
+    ) -> String {
         let view = DashboardView {
             user_name: "Dashboard User".into(),
             csrf_token: Default::default(),
@@ -1630,6 +1746,7 @@ mod tests {
             csrf_token: "synthetic-csrf".into(),
             message: String::new(),
             error: error.into(),
+            retained_name: retained_name.into(),
         };
         CredentialSettingsTemplate {
             view: &view,
@@ -2185,6 +2302,71 @@ mod tests {
         assert_eq!(html.matches("data-dialog-auto-open").count(), 1);
         assert!(!html.contains("<unsafe>"));
         assert!(html.contains("&lt;unsafe&gt;") || html.contains("&#60;unsafe&#62;"));
+    }
+
+    #[test]
+    fn rejected_additions_keep_only_the_name_and_only_in_their_own_dialog() {
+        let name = "Team \"plan\" <one>";
+        let escaped = "value=\"Team &#34;plan&#34; &#60;one&#62;\"";
+        let additions = [
+            ("add-openai-api-key", "openai-api-key-name"),
+            ("add-anthropic-api-key", "anthropic-api-key-name"),
+            (
+                "add-claude-subscription-token",
+                "claude-subscription-token-name",
+            ),
+            ("generate-ssh", "ssh-generate-name"),
+            ("import-ssh", "ssh-import-name"),
+        ];
+        for (dialog, input) in additions {
+            let html = rendered_page(
+                dialog,
+                approved_error("credential-invalid"),
+                dialog_data(),
+                "",
+                name,
+            );
+            assert_eq!(html.matches("data-dialog-auto-open").count(), 1);
+            assert_eq!(html.matches(escaped).count(), 1, "{dialog}");
+            assert!(html.contains(&format!(
+                "id=\"{input}\" name=\"name\" autofocus maxlength=\"256\" {escaped} required>"
+            )));
+            for (_, other) in additions.iter().filter(|(other, _)| *other != dialog) {
+                assert!(html.contains(&format!(
+                    "id=\"{other}\" name=\"name\" autofocus maxlength=\"256\" value=\"\" required>"
+                )));
+            }
+            // Keys, tokens, private keys and passphrases never carry a value.
+            let secrets = html
+                .split('<')
+                .map(|tag| tag.split('>').next().unwrap())
+                .filter(|tag| tag.contains("data-dialog-private"))
+                .collect::<Vec<_>>();
+            assert_eq!(secrets.len(), 5);
+            for tag in secrets {
+                assert!(!tag.contains(" value="), "{dialog}: {tag}");
+            }
+        }
+        // A retained name never reaches another dialog, including a row's.
+        let html = rendered_page("create-profile", "", dialog_data(), "", name);
+        assert!(!html.contains(escaped));
+        assert!(!html.contains("Team &#34;plan"));
+
+        let message = approved_error("claude-token-invalid");
+        assert_eq!(
+            message,
+            "That doesn't look like a Claude subscription token. Run claude setup-token and paste the whole token."
+        );
+        let html = rendered_page(
+            "add-claude-subscription-token",
+            message,
+            dialog_data(),
+            "",
+            name,
+        );
+        assert!(html.contains(
+            "role=\"alert\">That doesn&#39;t look like a Claude subscription token. Run claude setup-token and paste the whole token.</p>"
+        ));
     }
 
     #[test]

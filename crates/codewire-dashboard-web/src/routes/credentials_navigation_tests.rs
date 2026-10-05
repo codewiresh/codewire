@@ -692,3 +692,165 @@ fn remembered_authority(csrf: &str) -> HeaderMap {
     );
     headers
 }
+
+const ADDITION_NAME: &str = "Synthetic \"plan\" <one>";
+const RETAINED_NAME: &str = "value=\"Synthetic &#34;plan&#34; &#60;one&#62;\"";
+const ADDITIONS: [&str; 5] = [
+    "add-openai-api-key",
+    "add-anthropic-api-key",
+    "add-claude-subscription-token",
+    "generate-ssh",
+    "import-ssh",
+];
+
+/// One addition's action and fields. Every secret field carries the private
+/// marker; an unusable submission has a past expiry or a malformed token.
+fn addition(dialog: &str, usable: bool) -> (&'static str, Vec<(&'static str, String)>) {
+    let expiry = if usable { "" } else { "2000-01-01T00:00" };
+    let (action, mut fields) = match dialog {
+        "add-openai-api-key" | "add-anthropic-api-key" => (
+            "api-key/add",
+            vec![
+                ("provider", dialog.split('-').nth(1).unwrap().into()),
+                ("value", PRIVATE_MARKER.into()),
+                ("expiration_utc", expiry.into()),
+            ],
+        ),
+        "add-claude-subscription-token" => (
+            "claude-subscription-token/add",
+            vec![(
+                "token",
+                if usable {
+                    PRIVATE_MARKER.into()
+                } else {
+                    format!("{PRIVATE_MARKER} pasted with spaces")
+                },
+            )],
+        ),
+        "generate-ssh" => ("ssh/generate", vec![("expiration_utc", expiry.into())]),
+        "import-ssh" => (
+            "ssh/import",
+            vec![
+                ("private_key", PRIVATE_MARKER.into()),
+                ("passphrase", PRIVATE_MARKER.into()),
+                ("expiration_utc", expiry.into()),
+            ],
+        ),
+        _ => unreachable!("{dialog}"),
+    };
+    fields.push(("name", ADDITION_NAME.into()));
+    (action, fields)
+}
+
+async fn submit_addition(
+    origin: &str,
+    dialog: &str,
+    usable: bool,
+) -> (StatusCode, HeaderMap, String) {
+    let csrf = crate::security::new_csrf_token();
+    let (action, mut fields) = addition(dialog, usable);
+    fields.push(("_csrf", csrf.clone()));
+    let response = client()
+        .post(format!(
+            "{origin}{PATH}_actions/credentials/{action}?org=synthetic"
+        ))
+        .headers(authority(&csrf))
+        .form(&fields)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    (status, headers, response.text().await.unwrap())
+}
+
+fn assert_rejected_in_place(dialog: &str, headers: &HeaderMap, html: &str, message: &str) {
+    assert!(
+        headers[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html")
+    );
+    // Still the Credentials page: its GitHub authorization keeps working.
+    assert!(
+        headers[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("form-action 'self' https://github.com")
+    );
+    assert_eq!(html.matches("data-dialog-auto-open").count(), 1, "{dialog}");
+    assert!(html.contains(&format!(
+        "id=\"{dialog}\" aria-labelledby=\"{dialog}-title\" data-dialog-auto-open"
+    )));
+    assert_eq!(html.matches(RETAINED_NAME).count(), 1, "{dialog}");
+    let message = message.replace('\'', "&#39;");
+    assert!(
+        html.contains(&format!("role=\"alert\">{message}</p>")),
+        "{dialog}"
+    );
+    assert!(!html.contains(PRIVATE_MARKER), "{dialog} echoed a secret");
+    assert!(!html.contains("synthetic-session"));
+}
+
+#[tokio::test]
+async fn unusable_additions_reopen_their_dialog_with_the_name_and_no_secret() {
+    let (upstream, calls) = fixture("success").await;
+    let dashboard = serve(crate::app(config(&upstream.origin))).await;
+    for dialog in ADDITIONS {
+        let (status, headers, html) = submit_addition(&dashboard.origin, dialog, false).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{dialog}");
+        let message = if dialog == "add-claude-subscription-token" {
+            "That doesn't look like a Claude subscription token. Run claude setup-token and paste the whole token."
+        } else {
+            "The credential submission is invalid."
+        };
+        assert_rejected_in_place(dialog, &headers, &html, message);
+    }
+    assert!(!calls.lock().unwrap().iter().any(|(path, _)| mutation(path)));
+}
+
+#[tokio::test]
+async fn service_rejections_keep_the_name_and_uncertain_outcomes_redirect_without_it() {
+    for mode in [
+        "mutation conflict",
+        "mutation denied",
+        "mutation unavailable",
+        "mutation unauthenticated",
+    ] {
+        let (upstream, calls) = fixture(mode).await;
+        let dashboard = serve(crate::app(config(&upstream.origin))).await;
+        for dialog in ADDITIONS {
+            let (status, headers, html) = submit_addition(&dashboard.origin, dialog, true).await;
+            match mode {
+                "mutation conflict" | "mutation denied" => {
+                    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{mode} {dialog}");
+                    let message = if mode == "mutation conflict" {
+                        "The credential changed. Reload and try again."
+                    } else {
+                        "The credential change could not be completed. Try again."
+                    };
+                    assert_rejected_in_place(dialog, &headers, &html, message);
+                }
+                _ => {
+                    // A possibly saved submission, or an ended session, is
+                    // never answered in place where a reload resends it.
+                    assert_eq!(status, StatusCode::SEE_OTHER, "{mode} {dialog}");
+                    let target = headers[header::LOCATION].to_str().unwrap();
+                    if mode == "mutation unavailable" {
+                        assert_eq!(
+                            target,
+                            format!("{PATH}?error=credential-uncertain&dialog={dialog}")
+                        );
+                    } else {
+                        assert!(target.starts_with("/login?"), "{target}");
+                    }
+                    assert!(!target.contains("Synthetic") && !target.contains(PRIVATE_MARKER));
+                    assert!(!html.contains(PRIVATE_MARKER));
+                }
+            }
+        }
+        let calls = calls.lock().unwrap();
+        let writes: Vec<_> = calls.iter().filter(|(path, _)| mutation(path)).collect();
+        assert_eq!(writes.len(), ADDITIONS.len(), "{mode}");
+    }
+}
