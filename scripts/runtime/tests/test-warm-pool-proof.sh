@@ -52,6 +52,15 @@ grep -qF 'w.bound_at <= s.started_at' "$PROOF" || fail 'no billing-at-bind check
 grep -q "e.state = 'destroyed'" "$PROOF" || fail 'no destroyed-environment binding check'
 grep -q 'check "hit \$n: no live binding once destroyed" sql_released_after_destroy' "$PROOF" ||
   fail 'hits do not check the release after destroy'
+# C6 (#2434): every warm hit checks that the warm-member bridge selects
+# exactly the bound Pod, and skips with a message, never a pass, while the
+# fork's sandbox-uid label is absent; destroy removes the bridge.
+grep -qF 'SANDBOX_UID_LABEL="agents.x-k8s.io/sandbox-uid"' "$PROOF" || fail 'no sandbox-uid bridge label'
+grep -qF 'check_bridge "$n" "$id"' "$PROOF" || fail 'hits do not check the warm-member bridge'
+grep -qF 'the warm-member bridge selects exactly the bound Pod' "$PROOF" || fail 'no exact-selection bridge check'
+grep -qF 'skip "hit $n: warm-member bridge not checked' "$PROOF" || fail 'no labelled skip without the fork label'
+grep -q 'check "hit \$n: no warm-member bridge once destroyed" bridge_absent' "$PROOF" ||
+  fail 'hits do not check the bridge is removed on destroy'
 # The SQL runner only ever receives statements on stdin; no write keyword.
 if grep -nE '\b(INSERT|UPDATE|DELETE|TRUNCATE|ALTER|DROP|GRANT|COPY)\b' "$PROOF" | grep -v '^[0-9]*:#'; then
   fail 'the proof contains a SQL write statement'
