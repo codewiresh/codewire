@@ -1,8 +1,8 @@
-//! Owner-only files a hosted daemon writes: its state under `/codewire/run`
-//! and Codewire's file in Codex's home. Every write goes through a temporary
-//! file created exclusively in the target directory with its final mode, so a
-//! reader never observes a partial file or a wider mode, and no write follows
-//! a symlink.
+//! Owner-only files a hosted daemon writes: its state under `/codewire/run`,
+//! Codewire's files in Codex's home and Claude Code's `~/.claude.json`. Every
+//! write goes through a temporary file created exclusively in the target
+//! directory with its final mode, so a reader never observes a partial file or
+//! a wider mode, and no write follows a symlink.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
@@ -105,8 +105,8 @@ mod at {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
     use zeroize::Zeroizing;
 
-    /// A directory owned by the effective uid, opened with
-    /// `O_DIRECTORY|O_NOFOLLOW`.
+    /// A directory opened with `O_DIRECTORY|O_NOFOLLOW`, owned by the
+    /// effective uid, or by root for [`PrivateDirectory::open_home`].
     #[derive(Debug)]
     pub(crate) struct PrivateDirectory(OwnedFd);
 
@@ -132,6 +132,19 @@ mod at {
         /// it is a symlink, not a directory, or another uid's; `NotFound`
         /// passes through.
         pub(crate) fn open(path: &Path) -> io::Result<Option<Self>> {
+            Self::open_owned(path, false)
+        }
+
+        /// [`Self::open`] for the workspace user's home, which root may also
+        /// own: kubelet leaves the root of the home volume to root and gives
+        /// the workspace group write access (`fsGroup`). Another unprivileged
+        /// uid's directory is still refused. Only entries of the effective uid
+        /// are ever read or replaced in it.
+        pub(crate) fn open_home(path: &Path) -> io::Result<Option<Self>> {
+            Self::open_owned(path, true)
+        }
+
+        fn open_owned(path: &Path, root_may_own: bool) -> io::Result<Option<Self>> {
             let descriptor = match rustix::fs::open(
                 path,
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
@@ -142,9 +155,9 @@ mod at {
                 Err(error) => return Err(error.into()),
             };
             let stat = rustix::fs::fstat(&descriptor)?;
-            if FileType::from_raw_mode(stat.st_mode) != FileType::Directory
-                || stat.st_uid != rustix::process::geteuid().as_raw()
-            {
+            let owned = stat.st_uid == rustix::process::geteuid().as_raw()
+                || (root_may_own && stat.st_uid == 0);
+            if FileType::from_raw_mode(stat.st_mode) != FileType::Directory || !owned {
                 return Ok(None);
             }
             Ok(Some(Self(descriptor)))
@@ -254,6 +267,63 @@ mod at {
                 Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
                 Err(error) => Err(error.into()),
             }
+        }
+
+        /// Install `contents` as `name` with exactly `mode` where the caller
+        /// found no `name`, through the exclusive `temporary`. `Ok(false)`
+        /// when one appeared since: it stays, as the rename never replaces.
+        pub(crate) fn install_new(
+            &self,
+            temporary: &str,
+            name: &str,
+            contents: &[u8],
+            mode: u32,
+        ) -> io::Result<bool> {
+            self.write_new(temporary, contents, mode)?;
+            let installed = self.rename_noreplace(temporary, name);
+            if !matches!(installed, Ok(true)) {
+                let _ = self.unlink(temporary);
+            }
+            let installed = installed?;
+            self.sync()?;
+            Ok(installed)
+        }
+
+        /// Replace `name` with `contents` and exactly `mode`, through the
+        /// exclusive `temporary`, only while it is still the `inspected` file
+        /// with the same bytes, compared right before the rename. `Ok(false)`
+        /// when it changed: the changed file stays.
+        pub(crate) fn replace_unchanged(
+            &self,
+            temporary: &str,
+            name: &str,
+            inspected: &OwnedEntry,
+            max_bytes: u64,
+            contents: &[u8],
+            mode: u32,
+        ) -> io::Result<bool> {
+            self.write_new(temporary, contents, mode)?;
+            let unchanged = match self.read(name, max_bytes) {
+                Ok(Entry::Owned(current)) => {
+                    current.identity == inspected.identity && current.contents == inspected.contents
+                }
+                Ok(_) => false,
+                Err(error) => {
+                    let _ = self.unlink(temporary);
+                    return Err(error);
+                }
+            };
+            let replaced = if unchanged {
+                self.rename(temporary, name).map(|()| true)
+            } else {
+                Ok(false)
+            };
+            if !matches!(replaced, Ok(true)) {
+                let _ = self.unlink(temporary);
+            }
+            let replaced = replaced?;
+            self.sync()?;
+            Ok(replaced)
         }
     }
 }

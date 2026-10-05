@@ -99,6 +99,10 @@ fn timing() -> BindTiming {
 }
 
 async fn fixture(answers: Vec<Answer>) -> Fixture {
+    fixture_with(answers, timing()).await
+}
+
+async fn fixture_with(answers: Vec<Answer>, timing: BindTiming) -> Fixture {
     let recorded = Arc::new(Mutex::new(Recorded::default()));
     let service = Arc::new(ScriptedService {
         answers: Mutex::new(answers.into()),
@@ -141,7 +145,7 @@ async fn fixture(answers: Vec<Answer>) -> Fixture {
     };
     let config = config.with_token_path(&token);
     Fixture {
-        client: BindingClient::new(&url, config.token_path(), timing()).unwrap(),
+        client: BindingClient::new(&url, config.token_path(), timing).unwrap(),
         config,
         recorded,
         token,
@@ -171,11 +175,22 @@ async fn an_accepted_binding_carries_the_credential_and_requested_wait() {
 
 #[tokio::test]
 async fn not_found_is_called_again_at_once_until_bound() {
-    let fixture = fixture(vec![
-        Answer::Error(ErrorCode::NotFound),
-        Answer::Error(ErrorCode::NotFound),
-        Answer::Bound,
-    ])
+    // A backoff this long makes any wrongful backoff (at least half of it,
+    // with jitter) unmistakable, so a loaded machine's slower attempts can
+    // never be mistaken for one.
+    let timing = BindTiming {
+        initial_backoff: Duration::from_secs(10),
+        max_backoff: Duration::from_secs(10),
+        ..timing()
+    };
+    let fixture = fixture_with(
+        vec![
+            Answer::Error(ErrorCode::NotFound),
+            Answer::Error(ErrorCode::NotFound),
+            Answer::Bound,
+        ],
+        timing,
+    )
     .await;
     let started = tokio::time::Instant::now();
     let binding = bind_until_accepted(&fixture.client, &fixture.config).await;
@@ -190,12 +205,12 @@ async fn not_found_is_called_again_at_once_until_bound() {
         let gap = pair[1] - pair[0];
         // Server-side stamps trail the client's attempt start slightly.
         assert!(
-            gap + Duration::from_millis(10) >= timing().minimum_attempt,
+            gap + Duration::from_millis(10) >= timing.minimum_attempt,
             "{gap:?}"
         );
-        assert!(gap < timing().initial_backoff, "{gap:?}");
+        assert!(gap < timing.initial_backoff / 2, "{gap:?}");
     }
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(started.elapsed() < timing.initial_backoff / 2);
 }
 
 #[tokio::test]

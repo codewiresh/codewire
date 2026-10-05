@@ -2224,6 +2224,14 @@ class ClaudeSessionDriver(unittest.TestCase):
         fake = self.scratch / "fake_claude.py"
         fake.write_text(FAKE_CLAUDE)
         self.record = self.scratch / "record.jsonl"
+        # The workspace user's own home, as the daemon left it.
+        self.user_home = self.scratch / "workspace-home"
+        self.user_home.mkdir()
+        self.claude_config = self.user_home / ".claude.json"
+        self.write_claude_config(
+            '{"numStartups": 1, "hasCompletedOnboarding": true, '
+            '"hasAcknowledgedCostThreshold": true, '
+            '"projects": {"/workspace": {"hasTrustDialogAccepted": true}}}')
         for fixture in (
             patch.object(CLAUDE, "CLAUDE_ARGV", (sys.executable, str(fake))),
             patch.object(CLAUDE, "SESSION_TIMEOUT", 5.0),
@@ -2234,8 +2242,15 @@ class ClaudeSessionDriver(unittest.TestCase):
 
     def environ(self, mode="ok", projected=None, **extra):
         return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "FAKE_CLAUDE_MODE": mode,
-                "FAKE_CLAUDE_RECORD": str(self.record),
+                "FAKE_CLAUDE_RECORD": str(self.record), "HOME": str(self.user_home),
                 **(self.SUBSCRIPTION if projected is None else projected), **extra}
+
+    def write_claude_config(self, contents, mode=0o600):
+        if self.claude_config.is_dir() and not self.claude_config.is_symlink():
+            self.claude_config.rmdir()
+        self.claude_config.unlink(missing_ok=True)
+        self.claude_config.write_text(contents)
+        self.claude_config.chmod(mode)
 
     def main(self, argv, environ):
         output = io.StringIO()
@@ -2360,6 +2375,80 @@ class ClaudeSessionDriver(unittest.TestCase):
             status, events, _ = self.main(["api_key", "success"],
                                           self.environ(projected=self.API_KEY))
         self.assertEqual(events[-1]["reason"], "claude_version_start")
+
+    def test_claude_runs_only_after_the_daemon_marked_onboarding_complete(self):
+        marked = self.claude_config.read_text()
+        outside = self.scratch / "dotfiles-claude.json"
+        outside.write_text(marked)
+        outside.chmod(0o600)
+
+        def replace_with(make):
+            def prepare():
+                self.claude_config.unlink()
+                make()
+            return prepare
+
+        for case, prepare, reason in (
+                ("missing", self.claude_config.unlink, "onboarding_missing"),
+                ("unmarked", lambda: self.write_claude_config(
+                    '{"hasCompletedOnboarding": true, "hasAcknowledgedCostThreshold": false}'),
+                 "onboarding_not_marked"),
+                ("one key", lambda: self.write_claude_config('{"hasCompletedOnboarding": true}'),
+                 "onboarding_not_marked"),
+                ("truthy", lambda: self.write_claude_config(
+                    '{"hasCompletedOnboarding": 1, "hasAcknowledgedCostThreshold": "true"}'),
+                 "onboarding_not_marked"),
+                ("array", lambda: self.write_claude_config("[]"), "onboarding_not_marked"),
+                ("untrusted", lambda: self.write_claude_config(
+                    '{"hasCompletedOnboarding": true, "hasAcknowledgedCostThreshold": true}'),
+                 "workspace_not_trusted"),
+                ("trust declined", lambda: self.write_claude_config(
+                    '{"hasCompletedOnboarding": true, "hasAcknowledgedCostThreshold": true, '
+                    '"projects": {"/workspace": {"hasTrustDialogAccepted": false}}}'),
+                 "workspace_not_trusted"),
+                ("other folder", lambda: self.write_claude_config(
+                    '{"hasCompletedOnboarding": true, "hasAcknowledgedCostThreshold": true, '
+                    '"projects": {"/workspace/app": {"hasTrustDialogAccepted": true}}}'),
+                 "workspace_not_trusted"),
+                ("projects array", lambda: self.write_claude_config(
+                    '{"hasCompletedOnboarding": true, "hasAcknowledgedCostThreshold": true, '
+                    '"projects": []}'),
+                 "workspace_not_trusted"),
+                ("invalid", lambda: self.write_claude_config("{"), "onboarding_not_marked"),
+                ("wide mode", lambda: self.write_claude_config(marked, 0o644), "onboarding_file"),
+                ("symlink", replace_with(lambda: self.claude_config.symlink_to(outside)),
+                 "onboarding_file"),
+                ("directory", replace_with(self.claude_config.mkdir), "onboarding_file"),
+                ("placeholder", lambda: self.write_claude_config(
+                    marked[:-1] + ', "primaryApiKey": "codewire-managed"}'),
+                 "credential_in_claude_config"),
+                ("credential", lambda: self.write_claude_config(
+                    marked[:-1] + ', "x": "CW_KIND_SYNTHETIC_CLAUDE_TOKEN"}'),
+                 "credential_in_claude_config")):
+            with self.subTest(case=case):
+                self.write_claude_config(marked)
+                prepare()
+                status, events, output = self.main(["subscription_token", "success"],
+                                                   self.environ())
+                self.assertEqual(status, 1)
+                self.assertEqual(events, [{"event": "failed", "form": "subscription_token",
+                                           "outcome": "success", "reason": reason}])
+                self.assertNotIn("CW_KIND_SYNTHETIC", output)
+                self.assertNotIn("numStartups", output)
+        self.write_claude_config(marked)
+        self.assertEqual(outside.read_text(), marked)
+        for home in ("", "relative/home"):
+            with self.subTest(home=home):
+                status, events, _ = self.main(["subscription_token", "success"],
+                                              self.environ(HOME=home))
+                self.assertEqual(events[-1]["reason"], "onboarding_home")
+        environ = self.environ()
+        del environ["HOME"]
+        status, events, _ = self.main(["subscription_token", "success"], environ)
+        self.assertEqual(events[-1]["reason"], "onboarding_home")
+        # The driver only reads the user's file, and Claude Code never runs.
+        self.assertEqual(self.claude_config.read_text(), marked)
+        self.assertEqual(self.calls(), [])
 
     def test_arguments_are_closed(self):
         for argv in ([], ["subscription_token"], ["oauth", "success"],
