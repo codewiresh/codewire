@@ -8,6 +8,7 @@ import { createConnectTransport as createWebConnectTransport } from "@connectrpc
 import { ApiKeyService } from "@codewire/proto-ts/gen/codewire/v1/api_key_pb";
 import { EnvironmentService } from "@codewire/proto-ts/gen/codewire/v1/environment_pb";
 import { EnvironmentCwRuntimeService } from "@codewire/proto-ts/gen/codewire/v1/environment_cw_runtime_pb";
+import { EnvironmentAgentService } from "@codewire/proto-ts/gen/codewire/v1/environment_agent_pb";
 import { ExecService } from "@codewire/proto-ts/gen/codewire/v1/exec_pb";
 import { FileService } from "@codewire/proto-ts/gen/codewire/v1/file_pb";
 import { PortService } from "@codewire/proto-ts/gen/codewire/v1/port_pb";
@@ -19,6 +20,7 @@ import { CredentialService, CredentialMutationService, GithubRepositoryService }
 export type ApiKeyClient = Client<typeof ApiKeyService>;
 export type EnvironmentClient = Client<typeof EnvironmentService>;
 export type CwRuntimeClient = Client<typeof EnvironmentCwRuntimeService>;
+export type EnvironmentAgentClient = Client<typeof EnvironmentAgentService>;
 export type ExecClient = Client<typeof ExecService>;
 export type FileClient = Client<typeof FileService>;
 export type PortClient = Client<typeof PortService>;
@@ -38,6 +40,7 @@ export interface CodewireClients {
   environments: EnvironmentClient;
   cwRuntime: CwRuntimeClient;
   cwRuntimeUpdates: CwRuntimeClient;
+  environmentAgents: EnvironmentAgentClient;
   exec: ExecClient;
   files: FileClient;
   fileUploads: FileClient;
@@ -55,6 +58,10 @@ interface ConnectClientOptions {
 
 /** Bound unary runtime responses before Connect's buffering decoder reads them. */
 export function boundedRuntimeFetch(fetcher: typeof globalThis.fetch): typeof globalThis.fetch {
+  return boundedResponseFetch(fetcher, 32 * 1024, "cw runtime");
+}
+
+function boundedResponseFetch(fetcher: typeof globalThis.fetch, maximum: number, operation: string): typeof globalThis.fetch {
   return async (input, init) => {
     const response = await fetcher(input, init);
     if (!response.body) return response;
@@ -66,9 +73,9 @@ export function boundedRuntimeFetch(fetcher: typeof globalThis.fetch): typeof gl
           const next = await reader.read();
           if (next.done) { controller.close(); return; }
           bytes += next.value.byteLength;
-          if (bytes > 32 * 1024) {
+          if (bytes > maximum) {
             await reader.cancel();
-            controller.error(new Error("cw runtime response exceeds its bound"));
+            controller.error(new Error(`${operation} response exceeds its bound`));
             return;
           }
           controller.enqueue(next.value);
@@ -123,6 +130,13 @@ export function createCodewireClients(
     readMaxBytes: 32 * 1024,
     writeMaxBytes: 64 * 1024 + 1024,
   });
+  const agentTransport = createWebConnectTransport({
+    baseUrl: options.baseUrl,
+    defaultTimeoutMs: options.timeout ?? 30_000,
+    fetch: boundedResponseFetch(options.fetch ?? globalThis.fetch, 5 * 1024 * 1024 + 32 * 1024, "agent"),
+    interceptors: [bearerInterceptor],
+    useBinaryFormat: true,
+  });
 
   return {
     credentials: createClient(CredentialService, fetchTransport),
@@ -133,6 +147,7 @@ export function createCodewireClients(
     environments: createClient(EnvironmentService, fetchTransport),
     cwRuntime: createClient(EnvironmentCwRuntimeService, runtimeUnaryTransport),
     cwRuntimeUpdates: createClient(EnvironmentCwRuntimeService, runtimeUpdateTransport),
+    environmentAgents: createClient(EnvironmentAgentService, agentTransport),
     exec: createClient(ExecService, fetchTransport),
     files: createClient(FileService, fetchTransport),
     fileUploads: createClient(FileService, uploadTransport),

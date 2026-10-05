@@ -606,3 +606,166 @@ message ReadlinkRequest {
 message ReadlinkResponse {
   string target = 1;
 }
+
+// Existing daemon.v1 package, imports and ordinary/Host services are unchanged.
+// Original captured Pod channel + existing daemon auth, never public user wire.
+service PlatformManagedService {
+  rpc GetPlatformManagedInfo(PlatformManagedInfoRequest) returns (PlatformManagedInfoResponse);
+  rpc MutatePlatformManagedSession(PlatformManagedMutationRequest) returns (PlatformManagedReceipt);
+  rpc ObservePlatformManagedRequest(PlatformManagedObserveRequest) returns (PlatformManagedReceipt);
+  rpc ListPlatformManagedSessions(PlatformManagedListRequest) returns (PlatformManagedListResponse);
+  rpc ReadPlatformManagedSession(PlatformManagedReadRequest) returns (stream PlatformManagedRecordChunk);
+}
+
+enum PlatformManagedAgent {
+  PLATFORM_MANAGED_AGENT_UNSPECIFIED = 0;
+  PLATFORM_MANAGED_AGENT_CODEX = 1;
+  PLATFORM_MANAGED_AGENT_CLAUDE = 2;
+}
+enum PlatformManagedAction {
+  PLATFORM_MANAGED_ACTION_UNSPECIFIED = 0;
+  PLATFORM_MANAGED_ACTION_MESSAGE = 1;
+  PLATFORM_MANAGED_ACTION_STEER = 2;
+  PLATFORM_MANAGED_ACTION_INTERRUPT = 3;
+  PLATFORM_MANAGED_ACTION_STOP = 4;
+  PLATFORM_MANAGED_ACTION_RESTART = 5;
+}
+enum PlatformManagedRequestPhase {
+  PLATFORM_MANAGED_REQUEST_PHASE_UNSPECIFIED = 0;
+  PLATFORM_MANAGED_REQUEST_PHASE_PENDING = 1;
+  PLATFORM_MANAGED_REQUEST_PHASE_ISSUED = 2;
+  PLATFORM_MANAGED_REQUEST_PHASE_COMPLETED = 3;
+  PLATFORM_MANAGED_REQUEST_PHASE_REJECTED = 4;
+  PLATFORM_MANAGED_REQUEST_PHASE_UNKNOWN = 5;
+}
+// Immutable platform correlation. The control-plane owner authenticates current
+// actor/grant/full DB row/actual PodUID; target Config does NOT discover PodUID.
+// Current environment generation is independently journaled by that owner,
+// never equated with immutable binding_generation or used as target evidence.
+message PlatformManagedScope {
+  string environment_id = 1;
+  string org_id = 2;
+  string pod_uid = 3;
+  uint64 binding_generation = 4;
+  bytes projection_selection_sha256 = 5; // exactly32 bytes
+  bytes support_image_sha256 = 6; // original support CI payload, exactly32
+  uint64 support_image_size = 7;
+}
+// All three values are already known from the original complete binding capture.
+// No endpoint/token/path or caller program; Info creates no managed state.
+message PlatformManagedInfoRequest {
+  string environment_id = 1;
+  uint64 binding_generation = 2;
+  bytes projection_selection_sha256 = 3;
+}
+message PlatformManagedAgentSupport {
+  PlatformManagedAgent agent = 1;
+  bytes provider_sha256 = 2;
+  uint64 provider_size = 3;
+  string provider_version = 4;
+  // True only for the implemented qualified private-home/proxy-only client.
+  // Unsupported/missing slots or unqualified clients are absent, not adopted.
+  bool proxy_only_qualified = 5;
+  bool steer = 6;
+  bool interrupt = 7;
+}
+message PlatformManagedInfoResponse {
+  uint32 protocol_version = 1; //1, separate additive managed capability
+  string environment_id = 2;
+  uint64 binding_generation = 3;
+  bytes projection_selection_sha256 = 4;
+  bytes support_image_sha256 = 5;
+  uint64 support_image_size = 6;
+  string support_image_version = 7;
+  repeated PlatformManagedAgentSupport agents = 8;
+}
+message PlatformManagedLaunch {
+  PlatformManagedAgent agent = 1;
+  string model = 2;
+  optional string effort = 3;
+  string working_dir = 4; //absolute<=4096 bytes, no caller env/path override
+  string name = 5;
+  optional string prompt = 6; //semantic<=64KiB, noNUL
+  string parent_session_id = 7;
+  uint64 expected_parent_launch_generation = 8;
+  // Info-derived original native payload, NEVER requested program/URL/home.
+  bytes expected_provider_sha256 = 9;
+  uint64 expected_provider_size = 10;
+  string expected_provider_version = 11;
+}
+message PlatformManagedControl {
+  PlatformManagedAction action = 1;
+  string session_id = 2;
+  uint64 expected_launch_generation = 3;
+  string driver_id = 4;
+  string text = 5; //<=64KiB; empty for interrupt/stop/restart
+  optional string reply_to = 6;
+  optional string expected_turn_id = 7;
+  optional string expected_active_message_id = 8;
+  // Explicit recovery link; only Stop. Never replay the original request.
+  optional string cleanup_of_request_id = 9;
+}
+message PlatformManagedMutationRequest {
+  string request_id = 1; //canonical nonnil UUID; unique target owner
+  PlatformManagedScope scope = 2;
+  oneof operation {
+    PlatformManagedLaunch launch = 3;
+    PlatformManagedControl control = 4;
+  }
+}
+message PlatformManagedObserveRequest {
+  string request_id = 1;
+  PlatformManagedScope scope = 2;
+}
+message PlatformManagedReceipt {
+  string request_id = 1;
+  PlatformManagedScope scope = 2;
+  string fingerprint_sha256 = 3;
+  PlatformManagedRequestPhase phase = 4;
+  string session_id = 5;
+  string driver_id = 6;
+  string message_id = 7;
+  uint64 launch_generation = 8;
+  SessionLifecycleState session_state = 9;
+  optional int32 exit_code = 10;
+  bool cleanup_unknown = 11;
+  bool pipe_acknowledged = 12;
+  bool native_acknowledged = 13;
+  string reason = 14; //fixed value-blind code, never provider error/output
+  optional string cleanup_of_request_id = 15;
+  uint64 cleanup_previous_generation = 16;
+  bool cleanup_previous_cleanup_known = 17;
+}
+message PlatformManagedListRequest {
+  PlatformManagedScope scope = 1;
+  string after_session_id = 2; //empty first page, otherwise canonical same scope
+  uint32 page_limit = 3; //0=>8, maximum8 plus total encoded bound
+}
+message PlatformManagedListResponse {
+  repeated SessionRecord sessions = 1;
+  string next_session_id = 2;
+}
+message PlatformManagedReadRequest {
+  PlatformManagedScope scope = 1;
+  string session_id = 2;
+  string driver_id = 3;
+  uint64 expected_launch_generation = 4;
+  // Empty => current bounded status/inbox; otherwise one exact saved record.
+  // Historical full records need their saved original platform generation;
+  // zero/unknown/foreign history cannot be adopted from current session state.
+  string message_id = 5;
+  uint32 limit = 6; //0=>20, maximum100; actual response byte bound applies
+}
+message PlatformManagedRecordChunk {
+  PlatformManagedScope scope = 1;
+  string session_id = 2;
+  string driver_id = 3;
+  uint64 launch_generation = 4;
+  string message_id = 5;
+  uint64 offset = 6;
+  uint64 total_bytes = 7;
+  string payload_sha256 = 8;
+  // Single admitted projection, total<=5MiB; each encoded frame<=256KiB.
+  // No empty/trailing/missing/retargeted/out-of-order/changed-header frame.
+  bytes data = 9;
+}

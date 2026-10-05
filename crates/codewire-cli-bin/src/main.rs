@@ -3,6 +3,35 @@ mod local_mesh_helper;
 
 fn main() {
     #[cfg(target_os = "linux")]
+    if let Some(role) = std::env::args_os()
+        .nth(1)
+        .and_then(|a| a.into_string().ok())
+        && matches!(
+            role.as_str(),
+            "__platform-agent-driver" | "__platform-agent-peer"
+        )
+    {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+        else {
+            eprintln!("platform agent role failed");
+            std::process::exit(1);
+        };
+        let arguments = std::env::args_os().skip(2).collect();
+        let result = if role == "__platform-agent-driver" {
+            runtime.block_on(codewire_cli::run_platform_agent_driver_from(arguments))
+        } else {
+            runtime.block_on(codewire_cli::run_platform_agent_peer_from(arguments))
+        };
+        if result.is_err() {
+            eprintln!("platform agent role failed");
+            std::process::exit(1);
+        }
+        return;
+    }
+    #[cfg(target_os = "linux")]
     if std::env::args_os()
         .nth(1)
         .is_some_and(|argument| argument == "__platform-cw-runtime")
@@ -10,6 +39,30 @@ fn main() {
         std::process::exit(codewire_cli::run_platform_cw_runtime_from(
             std::env::args_os(),
         ));
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "__platform-agent-control")
+    {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+        else {
+            eprintln!("platform agent control failed");
+            std::process::exit(1);
+        };
+        if runtime
+            .block_on(codewire_cli::run_platform_agent_control_from(
+                std::env::args_os().skip(2).collect(),
+            ))
+            .is_err()
+        {
+            eprintln!("platform agent control failed");
+            std::process::exit(1);
+        }
+        return;
     }
     #[cfg(target_os = "linux")]
     if std::env::args_os()

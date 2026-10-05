@@ -13,7 +13,7 @@ pub mod owner;
 pub mod service;
 #[cfg(test)]
 mod service_test_support;
-mod wire;
+pub(crate) mod wire;
 
 use std::net::IpAddr;
 use std::time::Duration;
@@ -68,6 +68,11 @@ pub struct CapturedPlatformCwRuntime {
 impl CapturedPlatformCwRuntime {
     pub fn incarnation(&self) -> &PlatformCwRuntimeIncarnation {
         &self.incarnation
+    }
+
+    /// Nonsecret facts of this original captured binding, never a new lookup.
+    pub(crate) fn binding_facts(&self) -> model::CapturedBindingFacts {
+        model::CapturedBindingFacts::from(&self.row)
     }
 
     /// Clones the same authenticated channel. Callers must supply their own

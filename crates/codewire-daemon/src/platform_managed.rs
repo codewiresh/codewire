@@ -1,0 +1,429 @@
+//! Fixed platform managed-agent target and original-channel ownership.
+//!
+//! Origin is material-free correlation from the original authenticated Pod
+//! channel. Config does not retain PodUID: the control-plane capture, current
+//! actor/grant check and durable Issued journal remain required authority.
+//! This module provides no Host/Mesh grants, arbitrary Exec, Store selection,
+//! ordinary-session adoption or replay mechanism.
+use std::fs::{File, OpenOptions};
+use std::io::Read;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::Path;
+
+use codewire_access::ManagedCredentialClient;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+use crate::{Config, CredentialBridgeTransport, execution::ProcessExecution};
+
+pub(crate) const IMAGE: &str = "/codewire/bin/cw";
+pub(crate) const HOME: &str = "/home/codewire";
+pub(crate) const STATE: &str = "/home/codewire/.local/state/codewire/platform-managed-agents-v1";
+const MAX_IMAGE: u64 = 256 * 1024 * 1024;
+const MAX_REQUEST: usize = 512 * 1024;
+mod files;
+pub(crate) use files::{Tree, publish_session};
+mod payload;
+pub use payload::{ProviderIdentity, ProviderPin};
+mod service;
+pub(crate) use service::{CleanupLink, Owner, RestartAdvance, Service};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Agent {
+    Codex,
+    Claude,
+}
+impl TryFrom<i32> for Agent {
+    type Error = Error;
+    fn try_from(value: i32) -> Result<Self, Error> {
+        match value {
+            1 => Ok(Self::Codex),
+            2 => Ok(Self::Claude),
+            _ => Err(Error::Refused),
+        }
+    }
+}
+impl Agent {
+    pub(crate) fn wire(self) -> i32 {
+        match self {
+            Self::Codex => 1,
+            Self::Claude => 2,
+        }
+    }
+}
+
+/// Bound by the next controlled-Start admission before process effects. Never
+/// read a token, infer a category from environment names, or recover a scope
+/// from whichever Pod/binding happens to be current later.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Origin {
+    pub version: u32,
+    pub environment_id: String,
+    pub org_id: String,
+    pub pod_uid: String,
+    pub binding_generation: u64,
+    pub projection_selection_sha256: [u8; 32],
+    pub driver_id: String,
+    pub agent: Agent,
+    pub support_image_sha256: [u8; 32],
+    pub support_image_size: u64,
+    pub provider: ProviderIdentity,
+    pub parent_generation: Option<u64>,
+}
+
+impl Origin {
+    pub(crate) fn validate(&self, session: &str) -> Result<(), Error> {
+        for value in [&self.environment_id, &self.pod_uid, &self.driver_id] {
+            canonical_uuid(value)?;
+        }
+        if self.version != 1
+            || self.org_id.is_empty()
+            || self.org_id.len() > 256
+            || self.org_id.trim() != self.org_id
+            || self.org_id.chars().any(char::is_control)
+            || self.binding_generation == 0
+            || self.projection_selection_sha256 == [0; 32]
+            || self.support_image_sha256 == [0; 32]
+            || !(4..=MAX_IMAGE).contains(&self.support_image_size)
+            || self.provider.sha256 == [0; 32]
+            || !(4..=512 * 1024 * 1024).contains(&self.provider.size)
+            || self.provider.version
+                != match self.agent {
+                    Agent::Codex => "0.157.0",
+                    Agent::Claude => "2.1.238",
+                }
+            || self.parent_generation == Some(0)
+            || session != format!("session-{}", self.driver_id)
+        {
+            return Err(Error::Refused);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn command(&self) -> Vec<String> {
+        vec![
+            IMAGE.into(),
+            "__platform-agent-driver".into(),
+            "--environment".into(),
+            self.environment_id.clone(),
+            "--driver-id".into(),
+            self.driver_id.clone(),
+        ]
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("platform managed incarnation refused")]
+    Refused,
+    #[error("platform managed outcome is unknown; observe the original request")]
+    Unknown,
+}
+
+fn canonical_uuid(value: &str) -> Result<(), Error> {
+    let id = uuid::Uuid::parse_str(value).map_err(|_| Error::Refused)?;
+    if id.is_nil() || id.to_string() != value {
+        return Err(Error::Refused);
+    }
+    Ok(())
+}
+
+pub(crate) fn peer_packet(origin: &Origin, session: &str) -> Value {
+    json!({"op":"peer_status", "driver_id":origin.driver_id,"session_id":session})
+}
+
+/// Keep original running bytes, not the mutable default or a PATH sibling.
+/// Incoming release-musl/full-record admission belongs to the producer and
+/// next Start seam. Here the independently admitted original support hash is
+/// compared against this fixed running image, with all reads held and bounded.
+pub(crate) struct ImagePin {
+    file: File,
+    stamp: Stamp,
+}
+
+type Stamp = (u64, u64, u32, u32, u32, u64, u64, i64, i64, i64, i64);
+fn stamp(m: &std::fs::Metadata) -> Stamp {
+    (
+        m.dev(),
+        m.ino(),
+        m.uid(),
+        m.gid(),
+        m.mode(),
+        m.nlink(),
+        m.len(),
+        m.mtime(),
+        m.mtime_nsec(),
+        m.ctime(),
+        m.ctime_nsec(),
+    )
+}
+
+fn safe_image(m: &std::fs::Metadata) -> bool {
+    m.is_file()
+        && m.uid() == 0
+        && m.nlink() == 1
+        && m.mode() & 0o6022 == 0
+        && m.mode() & 0o111 != 0
+        && (4..=MAX_IMAGE).contains(&m.len())
+}
+
+pub(crate) fn validate_selection(config: &Config, origin: &Origin) -> Result<(), Error> {
+    let bridge = config.credential_bridge.as_ref().ok_or(Error::Refused)?;
+    let projection = config.launch_projection.as_ref().ok_or(Error::Refused)?;
+    let selected = config.managed_credential_clients;
+    let proxy = match origin.agent {
+        Agent::Codex => selected.contains(ManagedCredentialClient::OpenAi),
+        Agent::Claude => selected.contains(ManagedCredentialClient::Anthropic),
+    };
+    if config.host.is_some()
+        || config.process_execution != ProcessExecution::Native
+        || config.home_root != Path::new(HOME)
+        || bridge.transport != CredentialBridgeTransport::Hosted
+        || bridge.environment_id.to_string() != origin.environment_id
+        // This is immutable binding generation, not the current DB env generation.
+        || bridge.environment_generation != origin.binding_generation
+        || bridge.ingress_uid != 1000 || bridge.ingress_gid != 1000
+        || projection.selection_sha256 != origin.projection_selection_sha256
+        || !proxy
+    {
+        return Err(Error::Refused);
+    }
+    Ok(())
+}
+
+impl ImagePin {
+    pub(crate) fn identity() -> Result<([u8; 32], u64), Error> {
+        for path in ["/", "/codewire", "/codewire/bin"] {
+            let m = std::fs::symlink_metadata(path).map_err(|_| Error::Refused)?;
+            if !m.is_dir() || m.uid() != 0 || m.mode() & 0o022 != 0 {
+                return Err(Error::Refused);
+            }
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(IMAGE)
+            .map_err(|_| Error::Refused)?;
+        let before = file.metadata().map_err(|_| Error::Refused)?;
+        if !safe_image(&before)
+            || stamp(&before)
+                != stamp(&std::fs::metadata("/proc/self/exe").map_err(|_| Error::Refused)?)
+        {
+            return Err(Error::Refused);
+        }
+        let mut hash = Sha256::new();
+        let mut bytes = [0; 64 * 1024];
+        let mut count = 0;
+        loop {
+            let n = file.read(&mut bytes).map_err(|_| Error::Refused)?;
+            if n == 0 {
+                break;
+            }
+            count += n as u64;
+            if count > MAX_IMAGE {
+                return Err(Error::Refused);
+            }
+            hash.update(&bytes[..n]);
+        }
+        let pin = Self {
+            file,
+            stamp: stamp(&before),
+        };
+        pin.check()?;
+        if count != before.len() {
+            return Err(Error::Refused);
+        }
+        Ok((hash.finalize().into(), count))
+    }
+    pub(crate) fn admit(config: &Config, origin: &Origin) -> Result<Self, Error> {
+        validate_selection(config, origin)?;
+        if unsafe { libc::geteuid() } != 1000 || unsafe { libc::getegid() } != 1000 {
+            return Err(Error::Refused);
+        }
+        // The fixed image ancestry cannot be replaced by a workload owner.
+        for path in ["/", "/codewire", "/codewire/bin"] {
+            let meta = std::fs::symlink_metadata(path).map_err(|_| Error::Refused)?;
+            if !meta.is_dir() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+                return Err(Error::Refused);
+            }
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(IMAGE)
+            .map_err(|_| Error::Refused)?;
+        let meta = file.metadata().map_err(|_| Error::Refused)?;
+        let running = std::fs::metadata("/proc/self/exe").map_err(|_| Error::Refused)?;
+        if !safe_image(&meta)
+            || stamp(&meta) != stamp(&running)
+            || meta.len() != origin.support_image_size
+        {
+            return Err(Error::Refused);
+        }
+        let mut hash = Sha256::new();
+        let mut buffer = [0; 64 * 1024];
+        let mut total = 0_u64;
+        loop {
+            let count = file.read(&mut buffer).map_err(|_| Error::Refused)?;
+            if count == 0 {
+                break;
+            }
+            total = total.checked_add(count as u64).ok_or(Error::Refused)?;
+            if total > MAX_IMAGE {
+                return Err(Error::Refused);
+            }
+            hash.update(&buffer[..count]);
+        }
+        let actual: [u8; 32] = hash.finalize().into();
+        if total != origin.support_image_size || actual != origin.support_image_sha256 {
+            return Err(Error::Refused);
+        }
+        let pin = Self {
+            file,
+            stamp: stamp(&meta),
+        };
+        pin.check()?;
+        Ok(pin)
+    }
+
+    pub(crate) fn check(&self) -> Result<(), Error> {
+        for meta in [
+            self.file.metadata().map_err(|_| Error::Unknown)?,
+            std::fs::symlink_metadata(IMAGE).map_err(|_| Error::Unknown)?,
+            std::fs::metadata("/proc/self/exe").map_err(|_| Error::Unknown)?,
+        ] {
+            if !safe_image(&meta) || stamp(&meta) != self.stamp {
+                return Err(Error::Unknown);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn helper(
+        &self,
+        origin: &Origin,
+        session: &str,
+        generation: u64,
+        packet: Value,
+    ) -> Result<Value, Error> {
+        self.check()?;
+        let bytes = serde_json::to_vec(&json!({
+            "version": 1, "origin": origin, "session_id": session,
+            "launch_generation": generation, "request": packet,
+        }))
+        .map_err(|_| Error::Refused)?;
+        if bytes.len() > MAX_REQUEST {
+            return Err(Error::Refused);
+        }
+        let parent = unsafe { libc::getpid() };
+        let mut command = tokio::process::Command::new("/proc/self/exe");
+        command
+            .args([
+                "__platform-agent-control",
+                "--environment",
+                &origin.environment_id,
+            ])
+            .env_clear()
+            .env("HOME", HOME)
+            .env("USER", "codewire")
+            .env("LOGNAME", "codewire")
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("LANG", "C.UTF-8")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        // Fixed lifetime confinement of this owned helper only. No target PID
+        // or signal argument is exposed, and no UID/capability elevation occurs.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0
+                    || libc::getppid() != parent
+                    || libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                {
+                    return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().map_err(|_| Error::Unknown)?;
+        // Reuse only the existing bounded write/EOF/read/exit/kill/wait exchange,
+        // never its Host executable selection, scope, grants, journal or owner.
+        let result = crate::host_control::managed::exchange_record_pipe(&mut child, &bytes)
+            .await
+            .map_err(|_| Error::Unknown)?;
+        self.check()?;
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn platform_managed_selection_requires_typed_proxy_slot_before_image_io() {
+        let environment = uuid::Uuid::new_v4();
+        let mut config = Config {
+            listen_addr: "unused:0".into(),
+            workspace_root: "/workspace".into(),
+            home_root: HOME.into(),
+            auth_token: crate::DaemonAuthToken::new("synthetic-platform-selection").unwrap(),
+            process_execution: ProcessExecution::Native,
+            host: None,
+            launch_projection: Some(crate::LaunchProjectionConfig {
+                selection_sha256: [7; 32],
+                native: None,
+            }),
+            credential_bridge: Some(crate::CredentialBridgeConfig {
+                transport: CredentialBridgeTransport::Hosted,
+                environment_id: environment,
+                environment_generation: u64::MAX,
+                ingress_socket: "/run/codewire/fixture-only.sock".into(),
+                ingress_uid: 1000,
+                ingress_gid: 1000,
+            }),
+            managed_credential_clients:
+                codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap(),
+        };
+        let mut origin = Origin {
+            version: 1,
+            environment_id: environment.to_string(),
+            org_id: "fixture".into(),
+            pod_uid: uuid::Uuid::new_v4().to_string(),
+            binding_generation: u64::MAX,
+            projection_selection_sha256: [7; 32],
+            driver_id: uuid::Uuid::new_v4().to_string(),
+            agent: Agent::Codex,
+            support_image_sha256: [8; 32],
+            support_image_size: 1024,
+            provider: ProviderIdentity {
+                sha256: [9; 32],
+                size: 1024,
+                version: "0.157.0".into(),
+            },
+            parent_generation: None,
+        };
+        // Selected Codex personal-login is not selected OpenAi typed proxy.
+        assert!(matches!(
+            validate_selection(&config, &origin),
+            Err(Error::Refused)
+        ));
+        config.managed_credential_clients =
+            codewire_access::ManagedCredentialClients::from_profile_slots(["openai"]).unwrap();
+        assert!(validate_selection(&config, &origin).is_ok());
+        origin.agent = Agent::Claude;
+        assert!(validate_selection(&config, &origin).is_err());
+        config.managed_credential_clients =
+            codewire_access::ManagedCredentialClients::from_profile_slots(["anthropic"]).unwrap();
+        assert!(validate_selection(&config, &origin).is_ok());
+        config
+            .credential_bridge
+            .as_mut()
+            .unwrap()
+            .environment_generation -= 1;
+        assert!(validate_selection(&config, &origin).is_err());
+    }
+}

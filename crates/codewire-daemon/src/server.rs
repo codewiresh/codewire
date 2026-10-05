@@ -280,6 +280,9 @@ where
     let startup_config = config.clone();
     let implementation = DaemonServiceImpl::with_runtime_state(config, runtime_state);
     let session_owner = implementation.session_engine();
+    #[cfg(target_os = "linux")]
+    let platform_managed =
+        crate::platform_managed::Service::new(startup_config.clone(), session_owner.clone());
     let _session_cancellation = session_owner.cancel_on_drop();
     #[cfg(target_os = "linux")]
     let host_control = match host_control_binding {
@@ -352,6 +355,11 @@ where
         codewire_gateway_proto::daemon::v1::host_control_service_server::HostControlServiceServer::new(service)
             .max_decoding_message_size(crate::host_control::HOST_CONTROL_MAX_MESSAGE_BYTES)
             .max_encoding_message_size(crate::host_control::HOST_CONTROL_MAX_MESSAGE_BYTES)));
+    #[cfg(target_os="linux")]
+    let router=router.add_optional_service(platform_managed.map(|service|
+        codewire_gateway_proto::daemon::v1::platform_managed_service_server::PlatformManagedServiceServer::new(service)
+            .max_decoding_message_size(codewire_gateway_proto::platform_managed::REQUEST_BYTES)
+            .max_encoding_message_size(codewire_gateway_proto::platform_managed::FRAME_BYTES)));
     let serving = router.serve_with_incoming_shutdown(incoming, observed_shutdown);
     let mut shutdown_started = shutdown_rx.clone();
     let ingress_shutdown = shutdown_rx.clone();

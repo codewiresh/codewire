@@ -478,3 +478,454 @@ async fn openai_and_chatgpt_route_and_account_negatives_remain_closed() {
         ));
     }
 }
+
+fn exact_api_request(family: &str) -> BrokerUpstreamRequest {
+    match family {
+        "openai" => BrokerUpstreamRequest {
+            method: Method::POST,
+            target: Url::parse("https://api.openai.com/v1/responses").unwrap(),
+            headers: HeaderMap::from_iter([
+                (http::header::CONTENT_TYPE, HeaderValue::from_static("application/json")),
+                (http::header::AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {OPENAI_KEY}")).unwrap()),
+            ]),
+            body: br#"{"model":"codewire-synthetic","input":"Return the synthetic smoke marker.","stream":true}"#.to_vec(),
+        },
+        "anthropic" => anthropic_request(),
+        _ => panic!("unknown test family"),
+    }
+}
+
+fn exact_api_key(family: &str) -> &'static str {
+    match family {
+        "openai" => OPENAI_KEY,
+        "anthropic" => ANTHROPIC_KEY,
+        _ => panic!("unknown test family"),
+    }
+}
+
+fn exact_api_denied(request: &BrokerUpstreamRequest, expected: &str) {
+    assert_eq!(
+        SyntheticOpenAiSmokeTransport::validate_exact_api_key_request(request, expected),
+        Err(BrokerUpstreamError::Protocol)
+    );
+}
+
+async fn exact_api_output(request: BrokerUpstreamRequest) -> String {
+    let response = SyntheticOpenAiSmokeTransport
+        .execute(request)
+        .await
+        .unwrap();
+    let (status, _, mut body) = response.into_parts();
+    assert_eq!(status, StatusCode::OK);
+    let mut output = Vec::new();
+    while let Some(chunk) = body.next().await {
+        output.extend_from_slice(&chunk.unwrap());
+        assert!(
+            output.len() <= 64 * 1024,
+            "unexpected fixture response size"
+        );
+    }
+    String::from_utf8(output).unwrap()
+}
+
+#[test]
+fn exact_api_family_keeps_invalid_api_urls_in_the_selected_branch() {
+    for (family, targets) in [
+        (
+            "openai",
+            vec![
+                "http://api.openai.com/v1/responses",
+                "https://api.openai.com:444/other",
+                "https://user@api.openai.com/v1/responses",
+                "https://api.openai.com/v1/responses#other",
+                "https://api.openai.com/v1/models",
+                "https://api.openai.com/v1/responses?other=true",
+            ],
+        ),
+        (
+            "anthropic",
+            vec![
+                "http://api.anthropic.com/v1/messages",
+                "https://api.anthropic.com:444/other",
+                "https://user@api.anthropic.com/v1/messages",
+                "https://api.anthropic.com/v1/messages#other",
+                "https://api.anthropic.com/v1/models",
+                "https://api.anthropic.com/v1/messages?beta=false",
+            ],
+        ),
+    ] {
+        for target in targets {
+            let mut request = exact_api_request(family);
+            request.target = Url::parse(target).unwrap();
+            assert_eq!(
+                SyntheticOpenAiSmokeTransport::api_key_family(&request),
+                Some(family)
+            );
+            exact_api_denied(&request, exact_api_key(family));
+        }
+    }
+    for target in [
+        "https://chatgpt.com/backend-api/codex/responses",
+        "https://auth.openai.com/oauth/token",
+        "https://api.github.com/user",
+        "https://api.openai.com.evil.test/v1/responses",
+        "https://other.example/v1/messages",
+    ] {
+        let mut request = exact_api_request("openai");
+        request.target = Url::parse(target).unwrap();
+        assert_eq!(
+            SyntheticOpenAiSmokeTransport::api_key_family(&request),
+            None
+        );
+        exact_api_denied(&request, OPENAI_KEY);
+    }
+}
+
+#[tokio::test]
+async fn exact_api_canned_routes_delegate_the_original_request_unchanged() {
+    for (family, target, messages) in [
+        ("openai", "https://api.openai.com/v1/responses", true),
+        ("anthropic", "https://api.anthropic.com/v1/messages", true),
+        (
+            "anthropic",
+            "https://api.anthropic.com/v1/messages?beta=true",
+            true,
+        ),
+        (
+            "anthropic",
+            "https://api.anthropic.com/v1/messages/count_tokens",
+            false,
+        ),
+        (
+            "anthropic",
+            "https://api.anthropic.com/v1/messages/count_tokens?beta=true",
+            false,
+        ),
+    ] {
+        let mut request = exact_api_request(family);
+        request.target = Url::parse(target).unwrap();
+        if family == "anthropic" {
+            request.body = anthropic_body(messages);
+        }
+        let body_pointer = request.body.as_ptr();
+        let target_pointer = request.target.as_str().as_ptr();
+        let authority = if family == "openai" {
+            "authorization"
+        } else {
+            "x-api-key"
+        };
+        let header_pointer = request.headers[authority].as_bytes().as_ptr();
+        assert_eq!(
+            SyntheticOpenAiSmokeTransport::api_key_family(&request),
+            Some(family)
+        );
+        assert_eq!(
+            SyntheticOpenAiSmokeTransport::validate_exact_api_key_request(
+                &request,
+                exact_api_key(family)
+            ),
+            Ok(())
+        );
+        assert_eq!(request.body.as_ptr(), body_pointer);
+        assert_eq!(request.target.as_str().as_ptr(), target_pointer);
+        assert_eq!(
+            request.headers[authority].as_bytes().as_ptr(),
+            header_pointer
+        );
+        let output = exact_api_output(request).await;
+        if family == "openai" {
+            assert!(output.contains("CWOPENAI"));
+        } else if messages {
+            assert!(output.contains("CWCLAUDE21238"));
+        } else {
+            assert_eq!(output, "{\"input_tokens\":42}");
+        }
+    }
+}
+
+#[test]
+fn exact_api_header_names_follow_the_owning_compiled_routes() {
+    for family in ["openai", "anthropic"] {
+        let route = if family == "openai" {
+            crate::openai::openai_responses_route()
+        } else {
+            crate::anthropic::route()
+        };
+        let mut request = exact_api_request(family);
+        for name in &route.allowed_request_headers {
+            let value = match name.as_str() {
+                "content-type" => "application/json",
+                "anthropic-version" => "2023-06-01",
+                "anthropic-beta" => "token-counting-2024-11-01",
+                _ => "synthetic",
+            };
+            request.headers.insert(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_static(value),
+            );
+        }
+        assert_eq!(
+            SyntheticOpenAiSmokeTransport::validate_exact_api_key_request(
+                &request,
+                exact_api_key(family)
+            ),
+            Ok(())
+        );
+        for name in request.headers.keys().cloned().collect::<Vec<_>>() {
+            let duplicate = request.headers[&name].clone();
+            request.headers.append(name.clone(), duplicate);
+            exact_api_denied(&request, exact_api_key(family));
+            request.headers.remove(&name);
+            // Restore one original value after the duplicate refusal.
+            let value = match name.as_str() {
+                "authorization" => HeaderValue::from_str(&format!("Bearer {OPENAI_KEY}")).unwrap(),
+                "x-api-key" => HeaderValue::from_static(ANTHROPIC_KEY),
+                "content-type" => HeaderValue::from_static("application/json"),
+                "anthropic-version" => HeaderValue::from_static("2023-06-01"),
+                "anthropic-beta" => HeaderValue::from_static("token-counting-2024-11-01"),
+                "accept-encoding" => HeaderValue::from_static("identity"),
+                _ => HeaderValue::from_static("synthetic"),
+            };
+            request.headers.insert(name, value);
+        }
+    }
+}
+
+#[tokio::test]
+async fn exact_api_selected_key_rejects_the_old_canary_shape_acceptance() {
+    for (family, alternate) in [
+        ("openai", "cwlocalopenai0123456789abcdef0123456789abcdee"),
+        (
+            "anthropic",
+            "cwlocalanthropic0123456789abcdef0123456789abcdee",
+        ),
+    ] {
+        let mut request = exact_api_request(family);
+        if family == "openai" {
+            request.headers.insert(
+                "authorization",
+                HeaderValue::from_str(&format!("Bearer {alternate}")).unwrap(),
+            );
+        } else {
+            request
+                .headers
+                .insert("x-api-key", HeaderValue::from_static(alternate));
+        }
+        exact_api_denied(&request, exact_api_key(family));
+        // The existing reusable transport deliberately accepts a random
+        // same-family canary. Exact selected-key admission is the new guard;
+        // retain the original transport behavior for other synthetic fixtures.
+        assert!(exact_api_output(request).await.contains(alternate));
+    }
+}
+
+#[test]
+fn exact_api_expected_argument_must_be_the_selected_synthetic_family() {
+    for family in ["openai", "anthropic"] {
+        let request = exact_api_request(family);
+        for expected in [
+            "",
+            "live-looking-key",
+            CODEX_KEY,
+            if family == "openai" {
+                ANTHROPIC_KEY
+            } else {
+                OPENAI_KEY
+            },
+            "cwlocalopenai0123456789abcdef0123456789abcdeF",
+            "cwlocalanthropic0123456789abcdef0123456789abcde",
+            "cwlocalopenai0123456789abcdef0123456789abcdee",
+        ] {
+            exact_api_denied(&request, expected);
+        }
+    }
+}
+
+#[test]
+fn exact_api_authority_is_single_and_foreign_headers_refuse() {
+    for family in ["openai", "anthropic"] {
+        let authority = if family == "openai" {
+            "authorization"
+        } else {
+            "x-api-key"
+        };
+        let mut request = exact_api_request(family);
+        request.headers.remove(authority);
+        exact_api_denied(&request, exact_api_key(family));
+        for foreign in [
+            "cookie",
+            "proxy-authorization",
+            "chatgpt-account-id",
+            "host",
+            "forwarded",
+            "x-error-json",
+            "connection",
+            "upgrade",
+            if family == "openai" {
+                "x-api-key"
+            } else {
+                "authorization"
+            },
+        ] {
+            let mut request = exact_api_request(family);
+            request.headers.insert(
+                HeaderName::from_static(foreign),
+                HeaderValue::from_static("caller"),
+            );
+            exact_api_denied(&request, exact_api_key(family));
+        }
+        for value in [
+            "caller",
+            "bearer invalid",
+            CODEX_KEY,
+            if family == "openai" {
+                ANTHROPIC_KEY
+            } else {
+                OPENAI_KEY
+            },
+        ] {
+            let mut request = exact_api_request(family);
+            request.headers.insert(
+                HeaderName::from_static(authority),
+                HeaderValue::from_static(value),
+            );
+            exact_api_denied(&request, exact_api_key(family));
+        }
+    }
+}
+
+#[test]
+fn exact_api_wrong_method_or_query_never_delegates() {
+    for family in ["openai", "anthropic"] {
+        for method in [Method::GET, Method::PUT, Method::DELETE, Method::HEAD] {
+            let mut request = exact_api_request(family);
+            request.method = method;
+            exact_api_denied(&request, exact_api_key(family));
+        }
+    }
+    for target in [
+        "https://api.openai.com/v1/responses?beta=true",
+        "https://api.openai.com/v1/responses/",
+        "https://api.anthropic.com/v1/messages?beta=%74rue",
+        "https://api.anthropic.com/v1/messages?beta=true&beta=true",
+        "https://api.anthropic.com/v1/messages/count_tokens?other=true",
+        "https://api.anthropic.com/v1/messages/batches",
+    ] {
+        let family = if target.contains("anthropic") {
+            "anthropic"
+        } else {
+            "openai"
+        };
+        let mut request = exact_api_request(family);
+        request.target = Url::parse(target).unwrap();
+        exact_api_denied(&request, exact_api_key(family));
+    }
+}
+
+#[tokio::test]
+async fn exact_api_body_bounds_precede_canned_parsing() {
+    for family in ["openai", "anthropic"] {
+        let mut request = exact_api_request(family);
+        request.body.clear();
+        exact_api_denied(&request, exact_api_key(family));
+        request.body.resize(4 * 1024 * 1024 + 1, b' ');
+        exact_api_denied(&request, exact_api_key(family));
+        let mut request = exact_api_request(family);
+        request.body.resize(4 * 1024 * 1024, b' ');
+        assert_eq!(
+            SyntheticOpenAiSmokeTransport::validate_exact_api_key_request(
+                &request,
+                exact_api_key(family)
+            ),
+            Ok(())
+        );
+        assert!(!exact_api_output(request).await.is_empty());
+    }
+}
+
+#[test]
+fn exact_api_headers_are_bounded_and_use_existing_content_policy() {
+    for family in ["openai", "anthropic"] {
+        let name = if family == "openai" {
+            "originator"
+        } else {
+            "anthropic-beta"
+        };
+        let mut request = exact_api_request(family);
+        request.headers.insert(
+            name,
+            HeaderValue::from_bytes(&vec![b'a'; 8 * 1024 + 1]).unwrap(),
+        );
+        exact_api_denied(&request, exact_api_key(family));
+        for content in [
+            None,
+            Some("text/plain"),
+            Some("application/json, application/json"),
+        ] {
+            let mut request = exact_api_request(family);
+            request.headers.remove("content-type");
+            if let Some(content) = content {
+                request
+                    .headers
+                    .insert("content-type", HeaderValue::from_static(content));
+            }
+            exact_api_denied(&request, exact_api_key(family));
+        }
+    }
+    let mut request = exact_api_request("openai");
+    for name in crate::openai::openai_responses_route()
+        .allowed_request_headers
+        .iter()
+        .filter(|name| name.as_str() != "content-type")
+        .take(8)
+    {
+        request.headers.insert(
+            HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            HeaderValue::from_bytes(&vec![b'a'; 8 * 1024]).unwrap(),
+        );
+    }
+    exact_api_denied(&request, OPENAI_KEY);
+}
+
+#[test]
+fn exact_api_identity_encoding_and_anthropic_version_stay_fixed() {
+    let mut openai = exact_api_request("openai");
+    // The owning OpenAI adapter does not add accept-encoding; do not invent a
+    // required field. If present it must still be one exact identity value.
+    assert!(!openai.headers.contains_key("accept-encoding"));
+    assert_eq!(
+        SyntheticOpenAiSmokeTransport::validate_exact_api_key_request(&openai, OPENAI_KEY),
+        Ok(())
+    );
+    openai
+        .headers
+        .insert("accept-encoding", HeaderValue::from_static("identity"));
+    assert_eq!(
+        SyntheticOpenAiSmokeTransport::validate_exact_api_key_request(&openai, OPENAI_KEY),
+        Ok(())
+    );
+    openai
+        .headers
+        .append("accept-encoding", HeaderValue::from_static("identity"));
+    exact_api_denied(&openai, OPENAI_KEY);
+    for family in ["openai", "anthropic"] {
+        let mut request = exact_api_request(family);
+        request
+            .headers
+            .insert("accept-encoding", HeaderValue::from_static("gzip"));
+        exact_api_denied(&request, exact_api_key(family));
+    }
+    for version in [None, Some("2020-01-01")] {
+        let mut request = exact_api_request("anthropic");
+        request.headers.remove("anthropic-version");
+        if let Some(version) = version {
+            request
+                .headers
+                .insert("anthropic-version", HeaderValue::from_static(version));
+        }
+        exact_api_denied(&request, ANTHROPIC_KEY);
+    }
+    let mut request = exact_api_request("anthropic");
+    request.headers.remove("accept-encoding");
+    exact_api_denied(&request, ANTHROPIC_KEY);
+}

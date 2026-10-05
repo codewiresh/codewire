@@ -129,6 +129,21 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
         return Ok(());
     }
     match args.command {
+        EnvCommand::Agent(args) => {
+            anyhow::ensure!(
+                placement != Some(EnvironmentPlacement::Local),
+                "cw env agent requires a platform environment"
+            );
+            #[cfg(unix)]
+            {
+                super::sessions::agents::platform_host::handle_metadata(globals, args.command).await
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = args;
+                anyhow::bail!("platform managed agent commands require a Unix client")
+            }
+        }
         EnvCommand::Runtime(args) => runtime::handle(globals, placement, args.command).await,
         EnvCommand::Create(create) => {
             handle_unified_environment_create(globals, placement, create).await
@@ -330,6 +345,18 @@ pub(crate) async fn handle_platform_env_command(
     let org_id = current_org_id(&platform, &orgs)?;
 
     match command {
+        EnvCommand::Agent(args) => {
+            #[cfg(unix)]
+            {
+                super::sessions::agents::platform_host::handle_metadata(globals, args.command)
+                    .await?
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = args;
+                anyhow::bail!("platform managed agent commands require a Unix client")
+            }
+        }
         EnvCommand::Runtime(_) => anyhow::bail!("cw env runtime supports only native Linux VMs"),
         EnvCommand::Create(args) => {
             let began = Instant::now();

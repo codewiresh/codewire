@@ -16,7 +16,10 @@ required-features = ["enrollment"]
 default = []
 # Non-promotable Kind image only: lets the production runtime use the
 # in-memory test KEK instead of OpenBao (CODEWIRE_KIND_CREDENTIAL_TEST_KEK).
-kind-e2e = ["codewire-protected-store/platform-test-support"]
+kind-e2e = [
+    "codewire-protected-store/platform-test-support",
+    "codewire-credential-broker/local-broker-synthetic-smoke",
+]
 enrollment = [
     "codewire-credential-broker/codex-enrollment",
     "dep:codewire-proto",

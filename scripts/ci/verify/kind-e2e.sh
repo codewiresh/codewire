@@ -69,6 +69,7 @@ usage:
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite final-fencing
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite environment-session
   CLUSTER=<profile> scripts/ci/verify/kind-e2e.sh suite cw-runtime
+  CLUSTER=<profile> scripts/ci/verify/kind-e2e.sh suite cw-managed-agents
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite sandbox-supply-chain
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite runtime-acceptance
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite warm-pools
@@ -170,6 +171,9 @@ dispatch_kind_e2e() {
       ;;
     cw-runtime)
       run_retained_cw_runtime_suite
+      ;;
+    cw-managed-agents)
+      run_retained_cw_managed_agents_suite
       ;;
     final-fencing)
       run_retained_final_fencing_suite

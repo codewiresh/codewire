@@ -599,7 +599,7 @@ async fn load_in(
         .map_err(|_| unavailable())
 }
 
-async fn lock_binding_in(
+pub(crate) async fn lock_binding_in(
     tx: &mut Transaction<'_, Postgres>,
     expected: &CapturedBindingFacts,
 ) -> AppResult<()> {

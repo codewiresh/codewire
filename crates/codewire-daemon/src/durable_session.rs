@@ -202,6 +202,10 @@ struct PersistedSession {
     #[cfg(target_os = "linux")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     control_origin: Option<crate::host_control::Origin>,
+    // A platform correlation never confers Host/Mesh grants or CW-update authority.
+    #[cfg(target_os = "linux")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    platform_managed_origin: Option<crate::platform_managed::Origin>,
     // Incarnation identity is admitted durably before launch effects. Zero is
     // an older record without a usable guarded-restart token.
     #[serde(default)]
@@ -475,6 +479,8 @@ impl SessionEngine {
             session_id: session_id.clone(),
             #[cfg(target_os = "linux")]
             control_origin: None,
+            #[cfg(target_os = "linux")]
+            platform_managed_origin: None,
             launch_generation: 1,
             name: request.name,
             parent_session_id: request.parent_session_id,
@@ -550,6 +556,8 @@ impl SessionEngine {
         self.ensure_initialized().await?;
         validate_session_id(session_id)?;
         let handle = self.handle(session_id)?;
+        #[cfg(target_os = "linux")]
+        refuse_platform_managed_bypass(&*handle.metadata.lock().await)?;
         // Interrupt a pending projection before waiting for the serial session
         // operation lock. A queued Stop must not wait for secret delivery.
         handle.launch_cancellation.send_replace(true);
@@ -632,6 +640,8 @@ impl SessionEngine {
         }
         {
             let metadata = handle.metadata.lock().await;
+            #[cfg(target_os = "linux")]
+            refuse_platform_managed_bypass(&metadata)?;
             #[cfg(target_os = "linux")]
             if metadata.control_origin.as_ref().is_some_and(|origin| {
                 metadata
@@ -752,6 +762,15 @@ impl SessionEngine {
         validate_session_id(session_id)?;
         if data.is_empty() {
             return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let retained = { lock(&self.inner.sessions).get(session_id).cloned() };
+            if let Some(handle) = retained {
+                // Origin is immutable once published. This also covers Attach
+                // input, which calls input directly rather than SendSessionInput.
+                refuse_platform_managed_bypass(&*handle.metadata.lock().await)?;
+            }
         }
         let control = lock(&self.inner.active)
             .get(session_id)
@@ -886,7 +905,8 @@ impl SessionEngine {
         use crate::host_control::Error;
         let metadata: PersistedSession =
             serde_json::from_slice(bytes).map_err(|_| Error::Storage)?;
-        if metadata.control_origin.as_ref() != Some(origin)
+        if metadata.platform_managed_origin.is_some()
+            || metadata.control_origin.as_ref() != Some(origin)
             || metadata.session_id != format!("session-{}", origin.request_id)
             || metadata.launch_generation != 1
             || metadata.state != v1::SessionLifecycleState::Starting as i32
@@ -1058,7 +1078,8 @@ impl SessionEngine {
         };
         if let (Some(parent), Some(managed)) = (&parent, &managed) {
             let metadata = parent.metadata.lock().await;
-            if metadata.launch_generation != managed.expected_parent_launch_generation
+            if metadata.platform_managed_origin.is_some()
+                || metadata.launch_generation != managed.expected_parent_launch_generation
                 || metadata.cleanup_unknown
                 || !metadata
                     .control_origin
@@ -1082,6 +1103,7 @@ impl SessionEngine {
             metadata: AsyncMutex::new(PersistedSession {
                 session_id: session_id.clone(),
                 control_origin: Some(request.origin()),
+                platform_managed_origin: None,
                 launch_generation: 1,
                 name: launch.name,
                 parent_session_id: managed
@@ -1176,10 +1198,11 @@ impl SessionEngine {
             operation = handle.operation.lock() => operation,
         };
         let metadata = handle.metadata.lock().await;
-        if !metadata
-            .control_origin
-            .as_ref()
-            .is_some_and(|origin| origin.scope.same_principal(&request.scope))
+        if metadata.platform_managed_origin.is_some()
+            || !metadata
+                .control_origin
+                .as_ref()
+                .is_some_and(|origin| origin.scope.same_principal(&request.scope))
         {
             return Err(Error::Denied);
         }
@@ -1277,10 +1300,11 @@ impl SessionEngine {
             operation=handle.operation.lock()=>operation,
         };
         let metadata = handle.metadata.lock().await;
-        if !metadata
-            .control_origin
-            .as_ref()
-            .is_some_and(|origin| origin.scope.same_principal(&request.scope))
+        if metadata.platform_managed_origin.is_some()
+            || !metadata
+                .control_origin
+                .as_ref()
+                .is_some_and(|origin| origin.scope.same_principal(&request.scope))
         {
             return Err(Error::Denied);
         }
@@ -1719,27 +1743,82 @@ impl SessionEngine {
         cancel: &CancellationToken,
     ) -> Result<v1::SessionRecord, SessionError> {
         let command = &snapshot.command;
-        let environment = match build_process_env(&self.inner.config, &snapshot.env, &snapshot.term)
-        {
-            Ok(environment) => environment,
-            Err(error) => {
-                return self
-                    .record_unspawned_failure(
-                        handle,
-                        format!("prepare session environment: {error}"),
-                    )
-                    .await;
+        #[cfg(target_os = "linux")]
+        let platform_image = match snapshot.platform_managed_origin.as_ref() {
+            Some(origin) => {
+                if origin.validate(&snapshot.session_id).is_err()
+                    || snapshot.command != origin.command()
+                    || snapshot.launch_generation == 0
+                    || !snapshot.env.is_empty()
+                    || snapshot.environment_projection_required
+                    || snapshot.pty
+                    || snapshot.control_origin.is_some()
+                {
+                    return self
+                        .record_unspawned_failure(handle, "platform managed process refused".into())
+                        .await;
+                }
+                match crate::platform_managed::ImagePin::admit(&self.inner.config, origin) {
+                    Ok(pin) => Some(pin),
+                    Err(_) => {
+                        return self
+                            .record_unspawned_failure(
+                                handle,
+                                "platform managed image refused".into(),
+                            )
+                            .await;
+                    }
+                }
             }
+            None => None,
         };
-        let mut prepared = match PreparedProcess::prepare_configured(
-            (&self.inner.config, &self.inner.credential_bridge),
-            command,
-            &snapshot.working_dir,
-            &environment,
-            false,
-            0,
-            0,
-        ) {
+        #[cfg(not(target_os = "linux"))]
+        let platform_image: Option<()> = None;
+        let prepare = if platform_image.is_some() {
+            // This driver never opens the inherited personal login home or
+            // launch projection. Its fixed peer builds a separate API-only
+            // private home; the original daemon owns the typed proxy slot.
+            let environment = [
+                "HOME=/home/codewire",
+                "USER=codewire",
+                "LOGNAME=codewire",
+                "PATH=/usr/local/bin:/usr/bin:/bin",
+                "LANG=C.UTF-8",
+            ]
+            .map(str::to_owned);
+            PreparedProcess::prepare(
+                &ProcessExecution::Native,
+                command,
+                &snapshot.working_dir,
+                &environment,
+                false,
+                0,
+                0,
+            )
+        } else {
+            let environment =
+                match build_process_env(&self.inner.config, &snapshot.env, &snapshot.term) {
+                    Ok(environment) => environment,
+                    Err(error) => {
+                        return self
+                            .record_unspawned_failure(
+                                handle,
+                                format!("prepare session environment: {error}"),
+                            )
+                            .await;
+                    }
+                };
+            PreparedProcess::prepare_configured(
+                (&self.inner.config, &self.inner.credential_bridge),
+                command,
+                &snapshot.working_dir,
+                &environment,
+                false,
+                0,
+                0,
+            )
+        };
+        let mut prepared = match prepare {
             Ok(prepared) => prepared,
             Err(error) => {
                 return self
@@ -1748,6 +1827,23 @@ impl SessionEngine {
             }
         };
         let mut process = prepared.tokio_command();
+        #[cfg(target_os = "linux")]
+        if platform_image.is_some() {
+            let parent = unsafe { libc::getpid() };
+            // Fixed owned-child confinement. No daemon/foreign PID signaling
+            // is exposed through the private service.
+            unsafe {
+                process.pre_exec(move || {
+                    if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                        || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0
+                        || libc::getppid() != parent
+                    {
+                        return Err(std::io::Error::other("platform driver parent changed"));
+                    }
+                    Ok(())
+                });
+            }
+        }
         #[cfg(unix)]
         if self.inner.config.host.is_some() {
             // SAFETY: setsid is async-signal-safe and does not touch allocator
@@ -2313,19 +2409,35 @@ impl SessionEngineInner {
                 "host session root must not be a symlink".into(),
             ));
         }
-        tokio::fs::create_dir_all(&self.root)
-            .await
-            .map_err(|error| {
-                SessionError::Internal(format!(
-                    "create session store {}: {error}",
-                    self.root.display()
-                ))
-            })?;
-        set_private_directory_permissions(&self.root).await?;
+        #[cfg(target_os = "linux")]
+        let platform_tree = if crate::platform_managed::Service::available(&self.config) {
+            Some(
+                crate::platform_managed::Tree::open(&self.root, true).map_err(|_| {
+                    SessionError::FailedPrecondition("platform session store refused".into())
+                })?,
+            )
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "linux"))]
+        let platform_tree: Option<()> = None;
+        if platform_tree.is_none() {
+            tokio::fs::create_dir_all(&self.root)
+                .await
+                .map_err(|error| {
+                    SessionError::Internal(format!(
+                        "create session store {}: {error}",
+                        self.root.display()
+                    ))
+                })?;
+            set_private_directory_permissions(&self.root).await?;
+        }
         if let Some(host) = &self.config.host {
             set_private_directory_permissions(&host.state_root).await?;
         }
-        drain_retired_records(&self.root).await?;
+        if platform_tree.is_none() {
+            drain_retired_records(&self.root).await?;
+        }
 
         let mut entries = tokio::fs::read_dir(&self.root).await.map_err(|error| {
             SessionError::Internal(format!(
@@ -2356,6 +2468,11 @@ impl SessionEngineInner {
             let session_id = entry.file_name().to_string_lossy().into_owned();
             if let Some(retired_id) = session_id.strip_prefix(RETIRED_SESSION_PREFIX) {
                 validate_session_id(retired_id)?;
+                if platform_tree.is_some() {
+                    return Err(SessionError::FailedPrecondition(
+                        "platform retired record requires identified cleanup".into(),
+                    ));
+                }
                 tokio::fs::remove_dir_all(entry.path())
                     .await
                     .map_err(|error| {
@@ -2381,9 +2498,51 @@ impl SessionEngineInner {
                 }
             }
             let path = entry.path().join(METADATA_FILE);
-            let bytes = tokio::fs::read(&path).await.map_err(|error| {
-                SessionError::Internal(format!("read session metadata {}: {error}", path.display()))
-            })?;
+            #[cfg(target_os = "linux")]
+            let private_bytes = if platform_tree.is_some() {
+                let tree =
+                    crate::platform_managed::Tree::open(&entry.path(), false).map_err(|_| {
+                        SessionError::FailedPrecondition(
+                            "platform session directory refused".into(),
+                        )
+                    })?;
+                let bytes = tree
+                    .read(METADATA_FILE, 128 * 1024)
+                    .map_err(|_| {
+                        SessionError::FailedPrecondition("platform session metadata refused".into())
+                    })?
+                    .ok_or_else(|| {
+                        SessionError::FailedPrecondition("platform session metadata missing".into())
+                    })?;
+                // Admission precedes the existing bounded output-index scan.
+                // No new recovery process or credential projection is started.
+                tree.read(
+                    OUTPUT_FILE,
+                    (2 * RETAINED_OUTPUT_BYTES
+                        + 2 * RETAINED_OUTPUT_FRAMES as u64 * OUTPUT_FRAME_HEADER_SIZE as u64
+                        + OUTPUT_BUFFER_SIZE as u64) as usize,
+                )
+                .map_err(|_| {
+                    SessionError::FailedPrecondition("platform session output refused".into())
+                })?
+                .ok_or_else(|| {
+                    SessionError::FailedPrecondition("platform session output missing".into())
+                })?;
+                Some(bytes)
+            } else {
+                None
+            };
+            #[cfg(not(target_os = "linux"))]
+            let private_bytes: Option<Vec<u8>> = None;
+            let bytes = match private_bytes {
+                Some(bytes) => bytes,
+                None => tokio::fs::read(&path).await.map_err(|error| {
+                    SessionError::Internal(format!(
+                        "read session metadata {}: {error}",
+                        path.display()
+                    ))
+                })?,
+            };
             let mut metadata =
                 serde_json::from_slice::<PersistedSession>(&bytes).map_err(|error| {
                     SessionError::Internal(format!(
@@ -2410,6 +2569,21 @@ impl SessionEngineInner {
                     ));
                 }
             }
+            #[cfg(target_os = "linux")]
+            if let Some(origin) = &metadata.platform_managed_origin
+                && (origin.validate(&session_id).is_err()
+                    || self.config.host.is_some()
+                    || metadata.control_origin.is_some()
+                    || metadata.command != origin.command()
+                    || metadata.launch_generation == 0
+                    || !metadata.env.is_empty()
+                    || metadata.environment_projection_required
+                    || metadata.pty)
+            {
+                return Err(SessionError::FailedPrecondition(
+                    "platform retained origin refused".into(),
+                ));
+            }
             let legacy_projection = !metadata.env.is_empty();
             if legacy_projection {
                 metadata.environment_projection_required = true;
@@ -2428,7 +2602,7 @@ impl SessionEngineInner {
                 metadata.exit_code = None;
                 metadata.status_message =
                     "session interrupted because the environment daemon restarted".into();
-                if self.config.host.is_some() {
+                if self.config.host.is_some() || platform_tree.is_some() {
                     // Persisted PIDs can never establish ownership after restart.
                     metadata.cleanup_unknown = true;
                     metadata.cleanup_confirmed = false;
@@ -2470,7 +2644,14 @@ impl SessionEngineInner {
         // Grandfather unresolved records from older unbounded stores rather
         // than deleting a possible live process's recovery obligation. New
         // admission remains blocked until enough safe records are available.
-        prune_session_records(self, MAX_SESSION_RECORDS, false).await
+        let result = prune_session_records(self, MAX_SESSION_RECORDS, false).await;
+        #[cfg(target_os = "linux")]
+        if let Some(tree) = platform_tree {
+            tree.check().map_err(|_| {
+                SessionError::FailedPrecondition("platform session store changed".into())
+            })?;
+        }
+        result
     }
 }
 
@@ -3703,6 +3884,22 @@ async fn persist_metadata(root: &Path, metadata: &PersistedSession) -> Result<()
     let temporary = directory.join(METADATA_TEMP_FILE);
     let bytes = serde_json::to_vec_pretty(metadata)
         .map_err(|error| SessionError::Internal(format!("encode session metadata: {error}")))?;
+    #[cfg(target_os = "linux")]
+    if metadata.platform_managed_origin.is_some() {
+        let tree = crate::platform_managed::Tree::open(&directory, false).map_err(|_| {
+            SessionError::FailedPrecondition("platform session directory refused".into())
+        })?;
+        tree.read(METADATA_FILE, 128 * 1024)
+            .map_err(|_| {
+                SessionError::FailedPrecondition("platform session metadata refused".into())
+            })?
+            .ok_or_else(|| {
+                SessionError::FailedPrecondition("platform session metadata missing".into())
+            })?;
+        return tree.write(METADATA_FILE, &bytes, true).map_err(|_| {
+            SessionError::Internal("platform session publication outcome unknown".into())
+        });
+    }
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -3937,6 +4134,8 @@ mod tests {
             session_id: session_id.clone(),
             #[cfg(target_os = "linux")]
             control_origin: None,
+            #[cfg(target_os = "linux")]
+            platform_managed_origin: None,
             launch_generation: 1,
             name: String::new(),
             parent_session_id: None,
@@ -4459,6 +4658,8 @@ mod tests {
             session_id: session_id.into(),
             #[cfg(target_os = "linux")]
             control_origin: None,
+            #[cfg(target_os = "linux")]
+            platform_managed_origin: None,
             launch_generation: 1,
             name: String::new(),
             parent_session_id: None,
@@ -4847,6 +5048,8 @@ mod tests {
             session_id: session_id.into(),
             #[cfg(target_os = "linux")]
             control_origin: None,
+            #[cfg(target_os = "linux")]
+            platform_managed_origin: None,
             launch_generation: 1,
             name: String::new(),
             parent_session_id: None,
@@ -4892,3 +5095,9 @@ mod tests {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "durable_session/host_tests.rs"]
 mod host_tests;
+
+#[cfg(target_os = "linux")]
+#[path = "durable_session/platform_managed.rs"]
+mod platform_managed;
+#[cfg(target_os = "linux")]
+use platform_managed::refuse_platform_managed_bypass;

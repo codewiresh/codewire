@@ -193,7 +193,7 @@ impl CapturedBindingFacts {
         }
     }
 
-    pub(super) fn validate(&self) -> AppResult<()> {
+    pub(crate) fn validate(&self) -> AppResult<()> {
         validate_expected(&self.incarnation())?;
         if self.organization_deletion_state != "active"
             || self.organization_deletion_generation < 0

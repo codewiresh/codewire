@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { compileTests, qualifyGeneratedImports, runSuite, runTests } from "./run-tests.mjs";
 
-const SUITES = ["test", "mesh.test", "cw-runtime.test"];
+const SUITES = ["test", "mesh.test", "cw-runtime.test", "platform-agents.test"];
 
 async function temporary(run) {
   const root = await fs.mkdtemp(path.join(tmpdir(), "cw-sdk-runner-fixture-"));
@@ -67,7 +67,7 @@ test("compiler emits both real source trees and the private generated package vi
     const fixture = await sourceFixture(root);
     const originalPackage = await fs.readFile(path.join(fixture.protoDir, "package.json"));
     const { result, workDir } = await compileFixture(root, fixture);
-    assert.equal(result.suites.length, 3);
+    assert.equal(result.suites.length, SUITES.length);
     const generated = await fs.readFile(
       path.join(workDir, "emitted", "packages", "codewire-proto-ts", "src", "index.js"), "utf8");
     assert.match(generated, /from "\.\/value\.js"/);
@@ -95,7 +95,7 @@ test("all three fixed suites run in order with an isolated child environment", a
     process.env.CW_RUNNER_SYNTHETIC_SECRET = "fixture-only";
     try {
       const result = await runTests({ ...fixture, stdio: "ignore" });
-      assert.equal(result.suites, 3);
+      assert.equal(result.suites, SUITES.length);
       assert.equal(await fs.readFile(fixture.marker, "utf8"), SUITES.join("\n") + "\n");
       assert.deepEqual(await fs.readdir(fixture.temporaryParent), []);
     } finally {

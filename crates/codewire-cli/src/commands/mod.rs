@@ -735,6 +735,8 @@ pub(crate) struct EnvironmentRunArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum EnvCommand {
+    #[command(about = "Inspect platform managed agent support and saved requests")]
+    Agent(EnvAgentArgs),
     #[command(about = "Inspect or change cw defaults in a running environment")]
     Runtime(EnvRuntimeArgs),
     #[command(
@@ -804,6 +806,38 @@ pub(crate) enum EnvCommand {
     Logs(EnvLogsArgs),
     #[command(about = "Inspect or repair the managed environment daemon")]
     Daemon(EnvDaemonArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct EnvAgentArgs {
+    #[command(subcommand)]
+    pub(crate) command: EnvAgentCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum EnvAgentCommand {
+    #[command(about = "Show qualified managed agents in a running platform environment")]
+    Info(EnvAgentInfoArgs),
+    #[command(about = "Observe the original managed request without replaying it")]
+    Observe(EnvAgentObserveArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct EnvAgentInfoArgs {
+    #[arg(value_name = "ENV")]
+    pub(crate) environment: String,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct EnvAgentObserveArgs {
+    #[arg(value_name = "ENV")]
+    pub(crate) environment: String,
+    #[arg(long, value_name = "UUID")]
+    pub(crate) request_id: uuid::Uuid,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -1965,6 +1999,9 @@ pub(crate) struct SessionTargetArgs {
     pub(crate) request_id: Option<String>,
     #[arg(long, help = "Exact positive member session generation")]
     pub(crate) expected_launch_generation: Option<u64>,
+    #[arg(long, value_name = "UUID", value_parser = parse_runtime_request_id,
+        help = "Platform Stop: original uncertain operation to clean up")]
+    pub(crate) cleanup_request_id: Option<uuid::Uuid>,
     #[arg(value_name = "TARGET", help = "SESSION, or ENV SESSION", num_args = 1..=2)]
     pub(crate) target: Vec<String>,
     #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Ordinary UID1000 CW bootstrap/update/rollback on one retained production-
 # created environment. The original support-image daemon stays separate from
-# the two admitted release producers; this is not a managed-agent adapter.
+# the two admitted release producers. The explicit cw-managed-agents suite
+# adds stock managed workers to this same retained-Pod journey.
 set -euo pipefail
 
 if [ "${KIND_E2E_COMMON_LOADED:-0}" != 1 ]; then
@@ -38,6 +39,10 @@ run_retained_cw_runtime_suite() {
     --b-sha256 "${CW_RUNTIME_B_SHA256:-}" \
     --support-build-json "${CW_RUNTIME_SUPPORT_BUILD_JSON:-}" \
     --support-build-sha256 "${CW_RUNTIME_SUPPORT_BUILD_SHA256:-}"
+}
+
+run_retained_cw_managed_agents_suite() {
+  CW_RUNTIME_MANAGED_AGENTS=1 run_retained_cw_runtime_suite
 }
 
 cw_runtime_require_synthetic_provider() {
@@ -98,11 +103,16 @@ cw_runtime_pod_identity() {
 
 run_admitted_cw_runtime_journey() {
   local task="$1" KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment
+  local managed="${CW_RUNTIME_MANAGED_AGENTS:-0}" anthropic_name=''
   local workspace_image update generation pair pod before after cli_sha256
   require_kind_errexit
   require_tool jq
   require_tool kind
   require_tool kubectl
+  [[ "$managed" =~ ^[01]$ ]] || {
+    echo '::error::managed CW journey selection must be exactly0 or1' >&2
+    return 2
+  }
   umask 077
   trap retained_suite_cleanup EXIT
   validate_retained_cluster
@@ -120,7 +130,12 @@ run_admitted_cw_runtime_journey() {
   [ "$(stat -c '%u:%a' "$KIND_CREDENTIAL_CLI_HOME")" = "$(id -u):700" ]
   printf '%s\n' "$KIND_CREDENTIAL_CLI_HOME" >"$task/cli-home-path"
   prepare_kind_credential_cli
-  credential_name="kind-cw-codex-${RANDOM}-${RANDOM}"
+  if [ "$managed" = 1 ]; then
+    credential_name="kind-cw-openai-${RANDOM}-${RANDOM}"
+    anthropic_name="kind-cw-anthropic-${RANDOM}-${RANDOM}"
+  else
+    credential_name="kind-cw-codex-${RANDOM}-${RANDOM}"
+  fi
   profile_name="kind-cw-profile-${RANDOM}-${RANDOM}"
   jq -cn --arg credential "$credential_name" --arg profile "$profile_name" \
     '{credential_name: $credential, profile_name: $profile}' >"$task/setup-names.json"
@@ -131,11 +146,30 @@ run_admitted_cw_runtime_journey() {
   kind_credential_cli org current | awk '
     $1 == "ID:" { id = $2; count++ }
     END { exit !(count == 1 && id == "org_contract_1") }'
-  kind_credential_cli credentials --platform connect codex --name "$credential_name"
+  if [ "$managed" = 1 ]; then
+    # Fixed public canaries go only to write-only platform enrollment. No
+    # provider token, keyring, auth file or value-read route enters the guest.
+    printf '%s\n' cwlocalopenai0123456789abcdef0123456789abcdef |
+      kind_credential_cli credentials --platform add openai --name "$credential_name"
+    printf '%s\n' cwlocalanthropic0123456789abcdef0123456789abcdef |
+      kind_credential_cli credentials --platform add anthropic --name "$anthropic_name"
+    kind_credential_cli credentials --platform get "$anthropic_name" --output json | jq -e \
+      --arg name "$anthropic_name" 'length == 1 and .[0].name == $name
+        and .[0].provider == "anthropic" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"
+        and .[0].authentication_kind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
+    kind_credential_cli credentials --platform --profile "$profile_name" set openai "$credential_name"
+    kind_credential_cli credentials --platform --profile "$profile_name" set anthropic "$anthropic_name"
+  else
+    kind_credential_cli credentials --platform connect codex --name "$credential_name"
+    kind_credential_cli credentials --platform --profile "$profile_name" set codex "$credential_name"
+  fi
   kind_credential_cli credentials --platform get "$credential_name" --output json | jq -e \
     --arg name "$credential_name" 'length == 1 and .[0].name == $name
       and .[0].provider == "openai" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"' >/dev/null
-  kind_credential_cli credentials --platform --profile "$profile_name" set codex "$credential_name"
+  if [ "$managed" = 1 ]; then
+    kind_credential_cli credentials --platform get "$credential_name" --output json | jq -e \
+      'length == 1 and .[0].authentication_kind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
+  fi
   environment="$(kind_credential_cli env --platform create --name "$profile_name" \
     --image "$workspace_image" --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h \
     --no-network --yes --output json | jq -er '.id')"
@@ -156,11 +190,19 @@ run_admitted_cw_runtime_journey() {
   wait_kind_credential_environment "$environment" running
   pair="$(wait_kind_credential_sandbox_pair "$environment" "$generation")"
   pod="$(sed -n '1p' <<<"$pair")"
-  kind_credential_probe "$environment" success
+  if [ "$managed" = 0 ]; then
+    kind_credential_probe "$environment" success
+  fi
   before="$(cw_runtime_pod_identity "$pod")"
   printf '%s\n' "$before" >"$task/pod-before.json"
   cli_sha256="$(sha256sum "$CARGO_CI_DIR/cw" | cut -d ' ' -f1)"
   log "starting one public same-Pod ordinary CW runtime journey for environment $environment"
+  local managed_projection=()
+  if [ "$managed" = 1 ]; then
+    managed_projection=(SMOKE_CW_MANAGED_AGENTS=1
+      "SMOKE_CW_MANAGED_OPENAI_CREDENTIAL=$credential_name"
+      "SMOKE_CW_MANAGED_ANTHROPIC_CREDENTIAL=$anthropic_name")
+  fi
   env -i PATH=/usr/bin:/bin HOME="$KIND_CREDENTIAL_CLI_HOME" \
     SMOKE_CW_RUNTIME_BASE_URL="$KIND_INGRESS_URL" \
     SMOKE_ORG_ID=org_contract_1 SMOKE_ENVIRONMENT_ID="$environment" \
@@ -171,6 +213,7 @@ run_admitted_cw_runtime_journey() {
     SMOKE_CW_SHA256_A="$SMOKE_CW_SHA256_A" SMOKE_CW_SHA256_B="$SMOKE_CW_SHA256_B" \
     SMOKE_CW_INPUT_WITNESS_FILE="$SMOKE_CW_INPUT_WITNESS_FILE" \
     SMOKE_CW_INPUT_WITNESS_SHA256="$SMOKE_CW_INPUT_WITNESS_SHA256" \
+    "${managed_projection[@]}" \
     "$CARGO_CI_DIR/examples/environment-cw-runtime-smoke"
   after="$(cw_runtime_pod_identity "$pod")"
   printf '%s\n' "$after" >"$task/pod-after.json"
@@ -178,7 +221,13 @@ run_admitted_cw_runtime_journey() {
     echo '::error::ordinary CW update changed the original Pod/container identity' >&2
     return 1
   }
-  kind_credential_probe "$environment" success
+  if [ "$managed" = 0 ]; then
+    kind_credential_probe "$environment" success
+  else
+    kind_credential_fixture_events | jq -e '
+      any(.[]; .event == "api_key_attempt" and .family == "openai" and .api_attempt > 0)
+      and any(.[]; .event == "api_key_attempt" and .family == "anthropic" and .api_attempt > 0)' >/dev/null
+  fi
   # Public cleanup runs only after the complete journey, including Observe,
   # stale-incarnation refusal and permanent Attach closure, has succeeded.
   kind_credential_cli env --platform rm "$environment" --yes --output json
@@ -187,6 +236,9 @@ run_admitted_cw_runtime_journey() {
   assert_no_kind_codex_config_map "$environment"
   kind_credential_cli credentials --platform --profile "$profile_name" delete --yes
   kind_credential_cli credentials --platform delete "$credential_name" --yes
+  if [ "$managed" = 1 ]; then
+    kind_credential_cli credentials --platform delete "$anthropic_name" --yes
+  fi
   rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"
   log "retained cw-runtime public create, original Attach/daemon/Pod, UID1000 A/B/A, CAS/Observe/refusal and cleanup green"
 }

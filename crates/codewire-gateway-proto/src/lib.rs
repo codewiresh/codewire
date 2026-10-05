@@ -376,3 +376,6 @@ mod tests {
         );
     }
 }
+
+/// Closed private platform managed-agent framing; authority remains with the caller.
+pub mod platform_managed;

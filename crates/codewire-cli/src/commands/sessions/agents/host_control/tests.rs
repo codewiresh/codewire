@@ -128,6 +128,8 @@ impl Fixture {
             updated_at: at.clone(),
         };
         Driver {
+            #[cfg(target_os = "linux")]
+            platform: None,
             environment: self.environment.clone(),
             dir,
             config,

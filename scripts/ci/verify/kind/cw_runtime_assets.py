@@ -270,6 +270,7 @@ def child_environment(task, witness, witness_path, witness_sha256, profile):
         "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH",
         "DOCKER_API_VERSION", "CODEWIRE_DOCKER_BIN", "CODEWIRE_KIND_SMOKE_DIR",
         "CODEWIRE_KIND_CREDENTIAL_FIXTURE", "CI", "GITHUB_ACTIONS",
+        "CW_RUNTIME_MANAGED_AGENTS",
     }
     environment = {key: os.environ[key] for key in allowed if key in os.environ}
     environment.update({

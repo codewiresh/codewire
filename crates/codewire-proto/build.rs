@@ -23,6 +23,7 @@ fn main() {
         "codewire/v1/credential.proto",
         "codewire/v1/credential_delegation.proto",
         "codewire/v1/environment.proto",
+        "codewire/v1/environment_agent.proto",
         "codewire/v1/environment_cw_runtime.proto",
         "codewire/v1/environment_session.proto",
         "codewire/v1/exec.proto",

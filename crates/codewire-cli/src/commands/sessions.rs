@@ -742,13 +742,32 @@ pub(crate) async fn handle_stop_command(
 ) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     if globals.member.is_some() {
+        anyhow::ensure!(
+            args.cleanup_request_id.is_none(),
+            "--cleanup-request-id requires a managed platform Stop"
+        );
         return super::member_control::managed::stop(globals, args).await;
     }
-    anyhow::ensure!(
-        args.request_id.is_none() && args.expected_launch_generation.is_none(),
-        "member mutation flags require --member"
-    );
     let (target, session) = resolve_selected_session(globals, &args.target).await?;
+    #[cfg(unix)]
+    if matches!(target, EnvironmentSessionTarget::Platform { .. }) && managed_session(&session) {
+        let stopped = agents::platform_host::control_session(
+            target,
+            &session,
+            args.request_id.as_deref(),
+            args.expected_launch_generation,
+            args.cleanup_request_id,
+            codewire_client::platform_agents::EnvironmentAgentAction::Stop,
+        )
+        .await?;
+        return print_environment_sessions(std::slice::from_ref(&stopped), args.output);
+    }
+    anyhow::ensure!(
+        args.request_id.is_none()
+            && args.expected_launch_generation.is_none()
+            && args.cleanup_request_id.is_none(),
+        "request and generation flags require --member or a managed platform session"
+    );
     #[cfg(target_os = "linux")]
     if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) && managed_session(&session) {
         let stopped = agents::stop_native_managed(&target, &session).await?;
@@ -766,6 +785,10 @@ pub(crate) async fn handle_restart_command(
     globals: &Globals,
     args: SessionTargetArgs,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        args.cleanup_request_id.is_none(),
+        "--cleanup-request-id requires Stop"
+    );
     #[cfg(target_os = "linux")]
     if globals.member.is_some() {
         return super::member_control::managed::action(
@@ -775,13 +798,26 @@ pub(crate) async fn handle_restart_command(
         )
         .await;
     }
+    let (target, session) = resolve_selected_session(globals, &args.target).await?;
+    #[cfg(unix)]
+    if matches!(target, EnvironmentSessionTarget::Platform { .. }) && managed_session(&session) {
+        let restarted = agents::platform_host::control_session(
+            target,
+            &session,
+            args.request_id.as_deref(),
+            args.expected_launch_generation,
+            None,
+            codewire_client::platform_agents::EnvironmentAgentAction::Restart,
+        )
+        .await?;
+        return print_environment_sessions(std::slice::from_ref(&restarted), args.output);
+    }
     anyhow::ensure!(
         globals.member.is_none()
             && args.request_id.is_none()
             && args.expected_launch_generation.is_none(),
-        "member restart is not admitted"
+        "request and generation flags require --member or a managed platform session"
     );
-    let (target, session) = resolve_selected_session(globals, &args.target).await?;
     if session.cleanup_unknown {
         anyhow::bail!("session cleanup is unknown; restart is fenced");
     }

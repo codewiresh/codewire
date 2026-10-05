@@ -438,6 +438,10 @@ async fn main() -> anyhow::Result<()> {
             codewire_orchestration::connect::environment_cw_runtime::router(api_state.clone()),
             connect_auth.clone(),
         )
+        .with_unary_connect_routes_auth(
+            codewire_orchestration::connect::environment_agent::router(api_state.clone()),
+            connect_auth.clone(),
+        )
         .with_connect_routes_auth(
             codewire_orchestration::connect::exec::router(api_state.clone()),
             connect_auth.clone(),

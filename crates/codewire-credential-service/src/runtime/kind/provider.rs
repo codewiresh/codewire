@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::Engine as _;
+#[cfg(feature = "kind-e2e")]
+use codewire_credential_broker::SyntheticOpenAiSmokeTransport;
 use codewire_credential_broker::{
     BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport,
 };
@@ -29,6 +31,10 @@ const LEGACY_REREAD_MARKER: &[u8] = b"CW_KIND_NATIVE_REREAD";
 // deliberately accepted only by this in-process provider, never a network
 // listener or production configuration path.
 pub(super) const GITHUB_DEVICE_TOKEN: &str = "gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+#[cfg(feature = "kind-e2e")]
+pub(super) const OPENAI_API_KEY: &str = "cwlocalopenai0123456789abcdef0123456789abcdef";
+#[cfg(feature = "kind-e2e")]
+pub(super) const ANTHROPIC_API_KEY: &str = "cwlocalanthropic0123456789abcdef0123456789abcdef";
 pub(super) const GITHUB_APP_CLIENT_ID: &str = "Iv1.kindsynthetic";
 pub(super) const GITHUB_APP_CLIENT_SECRET: &str = "kind-synthetic-secret";
 pub(super) const GITHUB_APP_SLUG: &str = "codewire-synthetic";
@@ -131,6 +137,10 @@ impl Scenario {
 
 #[derive(Default)]
 struct Counters {
+    #[cfg(feature = "kind-e2e")]
+    openai_api_attempts: u64,
+    #[cfg(feature = "kind-e2e")]
+    anthropic_api_attempts: u64,
     responses: u64,
     refreshes: u64,
     attempts: [u64; 3],
@@ -506,6 +516,33 @@ impl BrokerUpstreamTransport for SyntheticProvider {
         &self,
         request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        #[cfg(feature = "kind-e2e")]
+        if let Some(family) = SyntheticOpenAiSmokeTransport::api_key_family(&request) {
+            let key = {
+                let mut counters = self.0.lock().map_err(|_| BrokerUpstreamError::Protocol)?;
+                let (attempt, key) = match family {
+                    "openai" => {
+                        counters.openai_api_attempts = increment(counters.openai_api_attempts)?;
+                        (counters.openai_api_attempts, OPENAI_API_KEY)
+                    }
+                    "anthropic" => {
+                        counters.anthropic_api_attempts =
+                            increment(counters.anthropic_api_attempts)?;
+                        (counters.anthropic_api_attempts, ANTHROPIC_API_KEY)
+                    }
+                    _ => return Err(BrokerUpstreamError::Protocol),
+                };
+                // HTTP attempts are distinct from OAuth and GitHub calls and
+                // from the independently observed number of native launches.
+                tracing::info!(target: TARGET, event = "api_key_attempt", family,
+                    api_attempt = attempt, "api_key_attempt");
+                key
+            };
+            SyntheticOpenAiSmokeTransport::validate_exact_api_key_request(&request, key)?;
+            // Keep custody of the original request; no reconstruction, cloning
+            // or secret-bearing accessor crosses the broker's boundary.
+            return SyntheticOpenAiSmokeTransport.execute(request).await;
+        }
         let (method, target, headers, body) = request.into_parts();
         if headers.contains_key("proxy-authorization") || headers.contains_key("cookie") {
             return Err(BrokerUpstreamError::Protocol);
@@ -692,6 +729,411 @@ fn validate_access(token: &str) -> Result<u64, BrokerUpstreamError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "kind-e2e")]
+    mod api_key_tests {
+        use std::collections::BTreeSet;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use codewire_access::{
+            AccessProfileId, BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind,
+            CredentialId, CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentId,
+            GrantPermission, GrantProfile, Owner, OwnerId, Placement, ProviderId,
+        };
+        use codewire_credential_broker::{
+            BrokerCredentialLease, BrokerCredentialRefreshRequest, BrokerLeaseError,
+            BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError, BrokerRequestError,
+            CanonicalCodexOAuthBundle, OpenAiBroker,
+        };
+        use codewire_gateway_proto::codewire::bridge::v1::{
+            CredentialBridgeRequest, CredentialHttpHeader,
+        };
+        use futures::StreamExt;
+        use uuid::Uuid;
+
+        use super::*;
+
+        type LeaseCoordinates = (Uuid, String, String, String);
+
+        #[derive(Clone)]
+        struct Authority {
+            slot: &'static str,
+            material: &'static str,
+            status: CredentialStatus,
+            denied: bool,
+            calls: Arc<Mutex<Vec<LeaseCoordinates>>>,
+            reads: Arc<AtomicUsize>,
+        }
+
+        impl Authority {
+            fn new(slot: &'static str, material: &'static str) -> Self {
+                Self {
+                    slot,
+                    material,
+                    status: CredentialStatus::Active,
+                    denied: false,
+                    calls: Arc::new(Mutex::new(Vec::new())),
+                    reads: Arc::new(AtomicUsize::new(0)),
+                }
+            }
+        }
+
+        struct Lease {
+            metadata: CredentialMetadata,
+            grant: DerivedGrant,
+            permission: GrantPermission,
+            material: zeroize::Zeroizing<Vec<u8>>,
+            reads: Arc<AtomicUsize>,
+        }
+
+        impl BrokerCredentialLease for Lease {
+            fn credential_metadata(&self) -> &CredentialMetadata {
+                &self.metadata
+            }
+            fn grant(&self) -> &DerivedGrant {
+                &self.grant
+            }
+            fn permission(&self) -> &GrantPermission {
+                &self.permission
+            }
+            fn material_generation(&self) -> u64 {
+                1
+            }
+            fn with_material<T>(self, operation: impl FnOnce(&[u8]) -> T) -> T {
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                operation(&self.material)
+            }
+        }
+
+        #[async_trait]
+        impl BrokerLeaseProvider for Authority {
+            type Lease = Lease;
+            type RefreshReservation = ();
+            type StartedRefresh = ();
+
+            async fn lease_operation(
+                &self,
+                request_id: Uuid,
+                slot: CapabilitySlot,
+                operation: BrokerOperationId,
+                route: BrokerRouteId,
+            ) -> Result<Lease, BrokerLeaseError> {
+                self.calls.lock().unwrap().push((
+                    request_id,
+                    slot.to_string(),
+                    operation.to_string(),
+                    route.to_string(),
+                ));
+                if self.denied || slot.as_str() != self.slot {
+                    return Err(BrokerLeaseError::Denied);
+                }
+                let id = CredentialId::parse("11111111-1111-4111-8111-111111111111").unwrap();
+                let permission = GrantPermission { operation, route };
+                Ok(Lease {
+                    metadata: CredentialMetadata {
+                        id: id.clone(),
+                        placement: Placement::Platform,
+                        owner: Owner::User(OwnerId::parse("synthetic-owner").unwrap()),
+                        provider: ProviderId::parse(self.slot).unwrap(),
+                        authentication_kind: CredentialAuthKind::ApiKey,
+                        display_name: "synthetic-only".into(),
+                        account_hint: None,
+                        ssh_public_key: None,
+                        status: self.status,
+                        expires_at_unix: None,
+                        revocation_generation: 1,
+                    },
+                    grant: DerivedGrant {
+                        environment_id: EnvironmentId::parse("synthetic-environment").unwrap(),
+                        environment_generation: 1,
+                        profile: Some(GrantProfile {
+                            id: AccessProfileId::parse("22222222-2222-4222-8222-222222222222")
+                                .unwrap(),
+                            revision: 1,
+                        }),
+                        capability_slot: slot,
+                        credential_id: id,
+                        credential_revocation_generation: 1,
+                        expires_at_unix: None,
+                        permissions: BTreeSet::from([permission.clone()]),
+                    },
+                    permission,
+                    material: zeroize::Zeroizing::new(self.material.as_bytes().to_vec()),
+                    reads: self.reads.clone(),
+                })
+            }
+
+            async fn begin_credential_refresh(
+                &self,
+                _: BrokerCredentialRefreshRequest,
+            ) -> Result<BrokerRefreshAdmission<()>, BrokerRefreshError> {
+                panic!("API-key fixture must not refresh OAuth")
+            }
+            async fn start_credential_refresh(&self, _: ()) -> Result<(), BrokerRefreshError> {
+                panic!("API-key fixture must not refresh OAuth")
+            }
+            async fn commit_credential_refresh(
+                &self,
+                _: (),
+                _: CanonicalCodexOAuthBundle,
+            ) -> Result<(), BrokerRefreshError> {
+                panic!("API-key fixture must not refresh OAuth")
+            }
+            async fn abort_credential_refresh(&self, _: ()) -> Result<(), BrokerRefreshError> {
+                panic!("API-key fixture must not refresh OAuth")
+            }
+            async fn fail_credential_refresh(&self, _: ()) -> Result<(), BrokerRefreshError> {
+                panic!("API-key fixture must not refresh OAuth")
+            }
+            async fn wait_for_active_operations(&self) -> Result<(), BrokerRefreshError> {
+                Ok(())
+            }
+        }
+
+        fn key(slot: &str) -> &'static str {
+            match slot {
+                "openai" => OPENAI_API_KEY,
+                "anthropic" => ANTHROPIC_API_KEY,
+                _ => panic!("fixture API slot"),
+            }
+        }
+
+        fn request(slot: &str, path: &str, query: &str) -> CredentialBridgeRequest {
+            let mut headers = vec![CredentialHttpHeader {
+                name: "content-type".into(),
+                value: b"application/json".to_vec(),
+            }];
+            let body = if slot == "anthropic" {
+                headers.push(CredentialHttpHeader {
+                    name: "anthropic-version".into(),
+                    value: b"2023-06-01".to_vec(),
+                });
+                let mut body = json!({
+                    "model":"claude-sonnet-4-6",
+                    "messages":[{"role":"user","content":"canned fixture"}],
+                });
+                if path == "/messages" {
+                    body["stream"] = json!(true);
+                    body["max_tokens"] = json!(64);
+                }
+                body
+            } else {
+                json!({"input":"canned fixture"})
+            };
+            CredentialBridgeRequest {
+                request_id: Uuid::new_v4().to_string(),
+                capability_slot: slot.into(),
+                route: format!("{slot}-api"),
+                method: "POST".into(),
+                path: path.into(),
+                query: query.into(),
+                headers,
+                body: serde_json::to_vec(&body).unwrap(),
+            }
+        }
+
+        fn attempts(provider: &SyntheticProvider) -> (u64, u64) {
+            let counters = provider.0.lock().unwrap();
+            assert_eq!(counters.github_advertisements, 0);
+            assert_eq!(counters.github_upload_packs, 0);
+            assert_eq!(counters.github_app_refreshes, 0);
+            assert_eq!(counters.github_refreshed_advertisements, 0);
+            assert_eq!(counters.github_refreshed_upload_packs, 0);
+            (
+                counters.openai_api_attempts,
+                counters.anthropic_api_attempts,
+            )
+        }
+
+        #[tokio::test]
+        async fn typed_api_routes_redact_and_keep_legacy_schedules_independent() {
+            let provider = SyntheticProvider::new();
+            for (slot, path, query, operation) in [
+                ("openai", "/responses", "", "responses"),
+                ("anthropic", "/messages", "", "messages"),
+                ("anthropic", "/messages", "beta=true", "messages"),
+                ("anthropic", "/messages/count_tokens", "", "count-tokens"),
+                (
+                    "anthropic",
+                    "/messages/count_tokens",
+                    "beta=true",
+                    "count-tokens",
+                ),
+            ] {
+                let authority = Authority::new(slot, key(slot));
+                let broker = OpenAiBroker::new(authority.clone(), provider.clone()).unwrap();
+                let request = request(slot, path, query);
+                let id = Uuid::parse_str(&request.request_id).unwrap();
+                let (status, headers, mut body) =
+                    broker.execute(request).await.unwrap().into_parts();
+                assert_eq!(status, StatusCode::OK);
+                let request_header = if slot == "openai" {
+                    "x-request-id"
+                } else {
+                    "request-id"
+                };
+                assert_eq!(headers[request_header], "[REDACTED]");
+                assert!(!headers.contains_key("x-error-json"));
+                assert!(headers.values().all(|value| {
+                    !value
+                        .as_bytes()
+                        .windows(key(slot).len())
+                        .any(|bytes| bytes == key(slot).as_bytes())
+                }));
+                let mut bytes = Vec::new();
+                while let Some(chunk) = body.next().await {
+                    bytes.extend(chunk.unwrap());
+                    assert!(bytes.len() <= 64 * 1024);
+                }
+                let output = String::from_utf8(bytes).unwrap();
+                assert!(!output.contains(key(slot)));
+                if operation == "count-tokens" {
+                    assert_eq!(output, "{\"input_tokens\":42}");
+                } else {
+                    assert!(output.contains(if slot == "openai" {
+                        "CWOPENAI broker [REDACTED]"
+                    } else {
+                        "CWCLAUDE21238 broker [REDACTED]"
+                    }));
+                }
+                assert_eq!(authority.reads.load(Ordering::Relaxed), 1);
+                assert_eq!(
+                    *authority.calls.lock().unwrap(),
+                    [(id, slot.into(), operation.into(), format!("{slot}-api"))]
+                );
+            }
+            assert_eq!(attempts(&provider), (1, 4));
+            {
+                let counters = provider.0.lock().unwrap();
+                assert_eq!(counters.responses, 0);
+                assert_eq!(counters.refreshes, 0);
+                assert_eq!(counters.attempts, [0; 3]);
+                assert_eq!(counters.required_generation, [None; 3]);
+                assert_eq!(counters.last_refresh, None);
+            }
+            // API traffic must not consume or reset the retained OAuth schedule.
+            let exhausted = super::body("CW_KIND_BROKER_RETRY_EXHAUSTED");
+            provider.responses(super::headers(1), &exhausted).unwrap();
+            let refresh = serde_json::to_vec(&json!({
+                "grant_type":"refresh_token",
+                "refresh_token":refresh_token(1),
+            }))
+            .unwrap();
+            provider.refresh(HeaderMap::new(), &refresh).unwrap();
+            provider.responses(super::headers(2), &exhausted).unwrap();
+            provider.responses(super::headers(2), &exhausted).unwrap();
+            assert_eq!(attempts(&provider), (1, 4));
+            let counters = provider.0.lock().unwrap();
+            assert_eq!(counters.responses, 3);
+            assert_eq!(counters.refreshes, 1);
+            assert_eq!(counters.attempts[Scenario::BrokerRetryExhausted.index()], 3);
+        }
+
+        #[tokio::test]
+        async fn wrong_selected_api_material_refuses_without_fallback() {
+            for (slot, material) in [
+                ("openai", "cwlocalopenai00000000000000000000000000000000"),
+                ("openai", ANTHROPIC_API_KEY),
+                (
+                    "anthropic",
+                    "cwlocalanthropic00000000000000000000000000000000",
+                ),
+                ("anthropic", OPENAI_API_KEY),
+            ] {
+                let provider = SyntheticProvider::new();
+                let authority = Authority::new(slot, material);
+                let broker = OpenAiBroker::new(authority.clone(), provider.clone()).unwrap();
+                let path = if slot == "openai" {
+                    "/responses"
+                } else {
+                    "/messages"
+                };
+                assert!(matches!(
+                    broker.execute(request(slot, path, "")).await,
+                    Err(BrokerRequestError::UpstreamFailed)
+                ));
+                assert_eq!(authority.calls.lock().unwrap().len(), 1);
+                assert_eq!(authority.reads.load(Ordering::Relaxed), 1);
+                assert_eq!(
+                    attempts(&provider),
+                    if slot == "openai" { (1, 0) } else { (0, 1) }
+                );
+                let counters = provider.0.lock().unwrap();
+                assert_eq!(counters.responses, 0);
+                assert_eq!(counters.refreshes, 0);
+                assert_eq!(counters.attempts, [0; 3]);
+            }
+        }
+
+        #[tokio::test]
+        async fn revoked_or_denied_api_lease_never_reads_or_dispatches() {
+            for slot in ["openai", "anthropic"] {
+                for (denied, status) in [
+                    (true, CredentialStatus::Active),
+                    (false, CredentialStatus::Revoked),
+                ] {
+                    let provider = SyntheticProvider::new();
+                    let mut authority = Authority::new(slot, key(slot));
+                    authority.denied = denied;
+                    authority.status = status;
+                    let broker = OpenAiBroker::new(authority.clone(), provider.clone()).unwrap();
+                    let path = if slot == "openai" {
+                        "/responses"
+                    } else {
+                        "/messages"
+                    };
+                    assert!(matches!(
+                        broker.execute(request(slot, path, "")).await,
+                        Err(BrokerRequestError::Denied)
+                    ));
+                    assert_eq!(authority.calls.lock().unwrap().len(), 1);
+                    assert_eq!(authority.reads.load(Ordering::Relaxed), 0);
+                    assert_eq!(attempts(&provider), (0, 0));
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn invalid_typed_api_requests_refuse_before_lease_and_attempts() {
+            for slot in ["openai", "anthropic"] {
+                let provider = SyntheticProvider::new();
+                let authority = Authority::new(slot, key(slot));
+                let broker = OpenAiBroker::new(authority.clone(), provider.clone()).unwrap();
+                let path = if slot == "openai" {
+                    "/responses"
+                } else {
+                    "/messages"
+                };
+                for change in ["slot", "route", "method", "path", "query", "size"] {
+                    let mut request = request(slot, path, "");
+                    match change {
+                        "slot" => request.capability_slot = "foreign".into(),
+                        "route" => request.route = "github-https".into(),
+                        "method" => request.method = "GET".into(),
+                        "path" => request.path.push_str("/foreign"),
+                        "query" => request.query = "foreign=true".into(),
+                        "size" => request.body.resize(MAX_BODY + 1, b' '),
+                        _ => unreachable!(),
+                    }
+                    assert!(broker.execute(request).await.is_err(), "{slot}/{change}");
+                    assert!(authority.calls.lock().unwrap().is_empty());
+                    assert_eq!(authority.reads.load(Ordering::Relaxed), 0);
+                    assert_eq!(attempts(&provider), (0, 0));
+                }
+                if slot == "anthropic" {
+                    let mut duplicate = request(slot, path, "");
+                    duplicate.headers.push(CredentialHttpHeader {
+                        name: "anthropic-version".into(),
+                        value: b"2023-06-01".to_vec(),
+                    });
+                    assert!(broker.execute(duplicate).await.is_err());
+                    assert!(authority.calls.lock().unwrap().is_empty());
+                    assert_eq!(authority.reads.load(Ordering::Relaxed), 0);
+                    assert_eq!(attempts(&provider), (0, 0));
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn github_app_fixture_binds_all_exchange_branches_to_selected_origin() {

@@ -24,9 +24,16 @@ mod native;
 #[cfg(target_os = "linux")]
 mod native_host;
 #[cfg(target_os = "linux")]
+mod platform_control;
+pub(crate) mod platform_host;
+#[cfg(target_os = "linux")]
 pub(crate) use guest_peer::{AgentPeerArgs, run_agent_peer};
 #[cfg(target_os = "linux")]
 pub(crate) use native::{AgentControlArgs, run_agent_control};
+#[cfg(target_os = "linux")]
+pub(crate) use platform_control::run_platform_agent_control;
+#[cfg(target_os = "linux")]
+pub(crate) use platform_control::{run_platform_agent_driver, run_platform_agent_peer};
 
 #[cfg(target_os = "linux")]
 const GUEST_AGENT_PROTOCOL_VERSION: u32 = 1;
@@ -362,6 +369,9 @@ struct MessageRecord {
     /// their established wire bytes and do not acquire a guessed generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     member_launch_generation: Option<u64>,
+    /// Platform original Pod/session generation; never inferred from Host/Mesh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    platform_launch_generation: Option<u64>,
     result: Option<String>,
     result_truncated: bool,
     error: Option<String>,
@@ -375,6 +385,18 @@ fn member_message_generation_matches(current: Option<u64>, record: &MessageRecor
         Some(generation) => generation > 0 && record.member_launch_generation == Some(generation),
         None => record.member_launch_generation.is_none(),
     }
+}
+fn managed_message_generation_matches(
+    current: (Option<u64>, Option<u64>),
+    record: &MessageRecord,
+) -> bool {
+    member_message_generation_matches(current.0, record)
+        && match current.1 {
+            Some(generation) => {
+                generation > 0 && record.platform_launch_generation == Some(generation)
+            }
+            None => record.platform_launch_generation.is_none(),
+        }
 }
 
 impl MessageRecord {
@@ -399,6 +421,7 @@ impl MessageRecord {
             finished_at: None,
             native_acknowledged: false,
             member_launch_generation: None,
+            platform_launch_generation: None,
             result: None,
             result_truncated: false,
             error: None,
@@ -438,6 +461,9 @@ impl MessageRecord {
             || self.id != id
             || Some(self.driver_id.as_str()) != dir_driver_id(dir)
             || self.member_launch_generation == Some(0)
+            || self.platform_launch_generation == Some(0)
+            || (self.member_launch_generation.is_some()
+                && self.platform_launch_generation.is_some())
         {
             anyhow::bail!("message record {id} does not belong to this conversation");
         }
@@ -846,7 +872,9 @@ fn apply_delivery_failure(record: &mut MessageRecord, definitive: bool, error: &
 
 /// Managed drivers own their input; raw send and interactive attach must refuse.
 pub(crate) fn is_managed_session(view: &EnvironmentSessionView) -> bool {
-    view.command.iter().any(|arg| arg == DRIVER_COMMAND)
+    view.command.iter().any(|arg| {
+        arg == DRIVER_COMMAND || (cfg!(target_os = "linux") && arg == "__platform-agent-driver")
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -866,6 +894,23 @@ pub(super) async fn restart_native_managed(
 }
 
 fn driver_identity(command: &[String]) -> Option<(String, String)> {
+    #[cfg(target_os = "linux")]
+    if command
+        .get(1)
+        .is_some_and(|arg| arg == "__platform-agent-driver")
+    {
+        if command.len() != 6
+            || command[0] != "/codewire/bin/cw"
+            || command[2] != "--environment"
+            || command[4] != "--driver-id"
+        {
+            return None;
+        }
+        return Some((
+            canonical_uuid(&command[3]).ok()?,
+            canonical_uuid(&command[5]).ok()?,
+        ));
+    }
     let position = command.iter().position(|arg| arg == DRIVER_COMMAND)?;
     let rest = &command[position + 1..];
     let value = |flag: &str| {
@@ -1034,6 +1079,9 @@ pub(super) async fn handle_agent_run_command(
     target: EnvironmentSessionTarget,
     args: EnvironmentRunArgs,
 ) -> anyhow::Result<()> {
+    if matches!(target, EnvironmentSessionTarget::Platform { .. }) {
+        return platform_host::run(target, args).await;
+    }
     #[cfg(target_os = "linux")]
     if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
         return native_host::run(target, args).await;
@@ -1236,6 +1284,10 @@ pub(crate) async fn handle_agent_message_command(
     if let Some(turn) = &args.turn_id {
         validate_token("turn ID", turn)?;
     }
+    let target = resolve_environment_session_target(globals, environment).await?;
+    if matches!(target, EnvironmentSessionTarget::Platform { .. }) {
+        return platform_host::message(target, session, &args, text, steer).await;
+    }
     #[cfg(target_os = "linux")]
     {
         let target = resolve_environment_session_target(globals, environment).await?;
@@ -1305,6 +1357,16 @@ pub(crate) async fn handle_agent_interrupt_command(
         .await;
     }
     let (environment, session) = split_session_target(&args.target)?;
+    let target = resolve_environment_session_target(globals, environment).await?;
+    if matches!(target, EnvironmentSessionTarget::Platform { .. }) {
+        return platform_host::action(
+            target,
+            session,
+            &args,
+            codewire_client::platform_agents::EnvironmentAgentAction::Interrupt,
+        )
+        .await;
+    }
     #[cfg(target_os = "linux")]
     {
         let target = resolve_environment_session_target(globals, environment).await?;
@@ -1352,6 +1414,10 @@ pub(crate) async fn handle_agent_inbox_command(
         return super::super::member_control::managed::inbox(globals, args).await;
     }
     let (environment, session) = split_session_target(&args.target)?;
+    let target = resolve_environment_session_target(globals, environment).await?;
+    if matches!(target, EnvironmentSessionTarget::Platform { .. }) {
+        return platform_host::inbox(target, session, args.output).await;
+    }
     #[cfg(target_os = "linux")]
     {
         let target = resolve_environment_session_target(globals, environment).await?;
@@ -1465,6 +1531,9 @@ pub(crate) async fn wait_agent_message(
     output: OutputFormat,
 ) -> anyhow::Result<()> {
     let message_id = canonical_uuid(message_id)?;
+    if platform_host::wait(globals, &message_id, timeout, output).await? {
+        return Ok(());
+    }
     #[cfg(target_os = "linux")]
     if native_host::wait(globals, &message_id, timeout, output).await? {
         return Ok(());
@@ -1716,6 +1785,9 @@ pub(crate) struct AgentDriverArgs {
 }
 
 pub(crate) async fn run_agent_driver(args: AgentDriverArgs) -> anyhow::Result<()> {
+    run_agent_driver_inner(args, false).await
+}
+async fn run_agent_driver_inner(args: AgentDriverArgs, platform: bool) -> anyhow::Result<()> {
     // Records created before this process started can only name an earlier pipe.
     let started_at = now();
     let driver_id = canonical_uuid(&args.driver_id)?;
@@ -1745,6 +1817,21 @@ pub(crate) async fn run_agent_driver(args: AgentDriverArgs) -> anyhow::Result<()
         anyhow::bail!("the agent driver requires the canonical environment ID");
     }
     let dir = driver_dir(&environment, &driver_id)?;
+    #[cfg(target_os = "linux")]
+    let platform_context = if platform {
+        Some(platform_control::DriverContext::admit(
+            &environment,
+            &driver_id,
+        )?)
+    } else {
+        anyhow::ensure!(
+            platform_control::marker(&environment, &driver_id)?.is_none(),
+            "platform driver requires its fixed private role"
+        );
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    anyhow::ensure!(!platform, "platform driver is Linux only");
     // Crash fence: one live driver per conversation; released by the kernel on exit.
     let _instance = StateLock::try_acquire(&dir.join("driver.lock"))?
         .context("another driver already owns this managed conversation")?;
@@ -1792,6 +1879,8 @@ pub(crate) async fn run_agent_driver(args: AgentDriverArgs) -> anyhow::Result<()
         updated_at: started_at.clone(),
     };
     let mut driver = Driver {
+        #[cfg(target_os = "linux")]
+        platform: platform_context,
         environment,
         dir,
         config,
@@ -2078,7 +2167,11 @@ impl Peer {
             // verified sealed memfd, rather than reopening a mutable pathname.
             let mut command = tokio::process::Command::new("/proc/self/exe");
             command.args([
-                "_agent-peer",
+                if driver.platform.is_some() {
+                    "__platform-agent-peer"
+                } else {
+                    "_agent-peer"
+                },
                 "--environment",
                 &identity.environment_id,
                 "--driver-id",
@@ -2108,7 +2201,19 @@ impl Peer {
         };
         #[cfg(not(target_os = "linux"))]
         let mut command = tokio::process::Command::new(program);
-        command.args(args).current_dir(working_dir);
+        #[cfg(target_os = "linux")]
+        if let Some(context) = &driver.platform {
+            context.check(&driver.environment, &driver.config)?;
+            command.args(context.arguments(args)).env_clear();
+            for (name, value) in context.environment(&driver.dir)? {
+                command.env(name, value);
+            }
+        } else {
+            command.args(args);
+        }
+        #[cfg(not(target_os = "linux"))]
+        command.args(args);
+        command.current_dir(working_dir);
         let runtime_root = driver.environment.root();
         let registry_root = driver
             .environment
@@ -2402,6 +2507,8 @@ async fn wait_startup_shutdown(
 }
 
 struct Driver {
+    #[cfg(target_os = "linux")]
+    platform: Option<platform_control::DriverContext>,
     environment: DriverEnvironment,
     dir: PathBuf,
     config: AgentConfig,
@@ -2416,6 +2523,19 @@ struct Driver {
 }
 
 impl Driver {
+    fn message_generations(&self) -> anyhow::Result<(Option<u64>, Option<u64>)> {
+        #[cfg(target_os = "linux")]
+        let platform = match &self.platform {
+            Some(p) => {
+                p.check(&self.environment, &self.config)?;
+                Some(p.generation)
+            }
+            None => None,
+        };
+        #[cfg(not(target_os = "linux"))]
+        let platform = None;
+        Ok((self.member_generation()?, platform))
+    }
     fn member_generation(&self) -> anyhow::Result<Option<u64>> {
         #[cfg(target_os = "linux")]
         {
@@ -2680,7 +2800,7 @@ impl Driver {
     async fn recover(&mut self) -> anyhow::Result<()> {
         let initial = self.config.initial_message_id.clone();
         let started_at = self.started_at.clone();
-        let generation = self.member_generation()?;
+        let generation = self.message_generations()?;
         let mut unknown = Vec::new();
         for id in ordered_message_ids(&self.dir)? {
             let record = load_message(&self.dir, &id)?;
@@ -2693,7 +2813,7 @@ impl Driver {
                 }
                 continue;
             }
-            if !member_message_generation_matches(generation, &record) {
+            if !managed_message_generation_matches(generation, &record) {
                 let updated = update_message(&self.dir, &record.id, |r| {
                     r.fail(MessageState::Unknown,"the member incarnation changed; this message is retained and never replayed");
                 })?;
@@ -2763,7 +2883,7 @@ impl Driver {
     /// single accepted transition keeps delivery at most once.
     async fn adopt_notifications(&mut self) -> anyhow::Result<()> {
         let mut adopted = false;
-        let generation = self.member_generation()?;
+        let generation = self.message_generations()?;
         for id in message_ids(&self.dir)? {
             if self.settled.contains(&id) {
                 continue;
@@ -2778,7 +2898,7 @@ impl Driver {
             {
                 continue;
             }
-            if !member_message_generation_matches(generation, &record) {
+            if !managed_message_generation_matches(generation, &record) {
                 update_message(&self.dir, &id, |r| {
                     r.fail(
                         MessageState::Unknown,
@@ -2931,11 +3051,11 @@ impl Driver {
             let Some(id) = self.queue.pop_front() else {
                 break;
             };
-            let generation = self.member_generation()?;
+            let generation = self.message_generations()?;
             let mut issued = false;
             let record = update_message(&self.dir, &id, |r| {
                 if r.state == MessageState::Accepted {
-                    if member_message_generation_matches(generation, r) {
+                    if managed_message_generation_matches(generation, r) {
                         issued = r.transition(MessageState::Running);
                     } else {
                         r.fail(
@@ -3018,7 +3138,7 @@ impl Driver {
         let session_id = self.binding.session_id.clone();
         let capabilities = self.state.capabilities.clone();
         let agent = self.config.agent;
-        let generation = self.member_generation()?;
+        let generation = self.message_generations()?;
         let active = self
             .active
             .as_ref()
@@ -3029,7 +3149,7 @@ impl Driver {
                 decision = Decision::Duplicate;
                 return;
             }
-            if !member_message_generation_matches(generation, r) {
+            if !managed_message_generation_matches(generation, r) {
                 r.fail(
                     MessageState::Unknown,
                     "the member message has no current birth proof; it was not adopted",
@@ -3056,7 +3176,7 @@ impl Driver {
                         );
                     }
                     Some((message, Some(turn)))
-                        if generation.is_some()
+                        if (generation.0.is_some() || generation.1.is_some())
                             && (r.expected_turn_id.as_ref() != Some(turn)
                                 || r.expected_active_message_id.as_ref() != Some(message)) =>
                     {
@@ -3819,6 +3939,22 @@ impl Driver {
             &self.config.driver_id,
             &parent.driver_id,
         )?;
+        #[cfg(target_os = "linux")]
+        let platform_parent = platform_control::parent_generation(
+            &self.environment,
+            &self.config.driver_id,
+            &parent.driver_id,
+        )?;
+        #[cfg(target_os = "linux")]
+        if let Some(context) = &self.platform {
+            anyhow::ensure!(
+                source
+                    .platform_launch_generation
+                    .is_some_and(|g| g > 0 && g <= context.generation)
+                    && source.member_launch_generation.is_none(),
+                "platform child result has no original generation"
+            );
+        }
         // Deliver only to the canonical parent bound at launch; never via aliases.
         let binding: AgentBinding = read_record(&parent_dir.join("binding.json"))?;
         if binding.driver_id != parent.driver_id || binding.session_id != parent.session_id {
@@ -3840,6 +3976,7 @@ impl Driver {
                 &self.config.driver_id,
                 &parent.driver_id,
             )?;
+            record.platform_launch_generation = platform_parent;
         }
         record.source = Some(MessageSource {
             session_id: self.binding.session_id.clone(),

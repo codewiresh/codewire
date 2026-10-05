@@ -350,22 +350,36 @@ fn marker_line(line: &str) -> Option<Marker> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum UpdateFamily {
+    CodexOAuth,
+    OpenAiApiKey,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct UpdateKey {
     // The transport already validates this exact synthetic Codex credential
     // and fixed account. Keep the full scope, without a lossy hash or logs.
     scope: [u8; 32],
+    family: UpdateFamily,
     nonce: [u8; 8],
 }
 
 fn update_key(reflection: &str, nonce: &str) -> Result<UpdateKey, BrokerUpstreamError> {
-    let scope = reflection
-        .strip_prefix("cwlocalbroker")
-        .filter(|scope| scope.len() == 32 && hex(scope, b'a'))
-        .ok_or(BrokerUpstreamError::Protocol)?;
+    let (family, scope) = if let Some(scope) = reflection.strip_prefix("cwlocalbroker") {
+        (UpdateFamily::CodexOAuth, scope)
+    } else if let Some(scope) = reflection.strip_prefix("cwlocalopenai") {
+        (UpdateFamily::OpenAiApiKey, scope)
+    } else {
+        return Err(BrokerUpstreamError::Protocol);
+    };
+    if scope.len() != 32 || !hex(scope, b'a') {
+        return Err(BrokerUpstreamError::Protocol);
+    }
     if nonce.len() != 8 || !hex(nonce, b'a') {
         return Err(BrokerUpstreamError::Protocol);
     }
     Ok(UpdateKey {
+        family,
         scope: scope
             .as_bytes()
             .try_into()
@@ -1957,7 +1971,7 @@ with original_open(path, 'rb') as receipt:
                 let mut api_key = update_request(action, "9a1b2c3d");
                 api_key.target = Url::parse("https://api.openai.com/v1/responses").unwrap();
                 api_key.headers.remove("chatgpt-account-id");
-                assert!(rejected(with_codex_scope(api_key, OPENAI_KEY)).await);
+                assert!(rejected(with_codex_scope(api_key, CODEX_KEY)).await);
                 let claude = claude_body(
                     json!([{"role":"user", "content":format!("CW_FIXTURE_UPDATE_{action} 9a1b2c3d")}]),
                 );
@@ -1965,6 +1979,111 @@ with original_open(path, 'rb') as receipt:
             }
             // Every refused request above must leave the same nonce available.
             let held = Client::start(update_request("STEERABLE", "9a1b2c3d"), CODEX_KEY).await;
+            drop(held);
+        });
+    }
+
+    fn api_update_request(action: &str, nonce: &str) -> BrokerUpstreamRequest {
+        let mut request = update_request(action, nonce);
+        request.target = Url::parse("https://api.openai.com/v1/responses").unwrap();
+        request.headers.remove("chatgpt-account-id");
+        with_codex_scope(request, OPENAI_KEY)
+    }
+
+    #[test]
+    fn codex_update_api_and_oauth_families_do_not_join_the_same_suffix_and_nonce() {
+        update_test(async {
+            let nonce = "9a1b2c3d";
+            let oauth = Client::start(update_request("STEERABLE", nonce), CODEX_KEY).await;
+            // Exact same protected suffix and nonce still belong to different
+            // typed provider families. A fresh API request cannot release the
+            // existing OAuth registration.
+            assert!(rejected(api_update_request("RELEASE", nonce)).await);
+            assert!(rejected(api_update_request("STEER", nonce)).await);
+            let api = Client::start(api_update_request("STEERABLE", nonce), OPENAI_KEY).await;
+            let ack = Client::start(api_update_request("RELEASE", nonce), OPENAI_KEY)
+                .await
+                .finish()
+                .await;
+            assert_eq!(
+                reply_text(&events(&ack)),
+                ["CW_UPDATE_RELEASE_ACK 9a1b2c3d"]
+            );
+            let released = api.finish().await;
+            assert_eq!(
+                reply_text(&events(&released)),
+                ["CW_UPDATE_RELEASED 9a1b2c3d"]
+            );
+            let mut steer = update_steer_request(nonce);
+            steer.target = Url::parse("https://api.openai.com/v1/responses").unwrap();
+            steer.headers.remove("chatgpt-account-id");
+            let steered = Client::start(with_codex_scope(steer, OPENAI_KEY), OPENAI_KEY)
+                .await
+                .finish()
+                .await;
+            assert_eq!(
+                reply_text(&events(&steered)),
+                ["CW_UPDATE_STEERED 9a1b2c3d"]
+            );
+            assert!(rejected(api_update_request("RELEASE", nonce)).await);
+            // OAuth did not inherit API release or normal EOF. Its original
+            // stream still needs its own explicit release before steering.
+            assert!(rejected(update_steer_request(nonce)).await);
+            let oauth_ack = Client::start(update_request("RELEASE", nonce), CODEX_KEY)
+                .await
+                .finish()
+                .await;
+            assert_eq!(
+                reply_text(&events(&oauth_ack)),
+                ["CW_UPDATE_RELEASE_ACK 9a1b2c3d"]
+            );
+            let oauth_released = oauth.finish().await;
+            assert_eq!(
+                reply_text(&events(&oauth_released)),
+                ["CW_UPDATE_RELEASED 9a1b2c3d"]
+            );
+            let oauth_steered = Client::start(update_steer_request(nonce), CODEX_KEY)
+                .await
+                .finish()
+                .await;
+            assert_eq!(
+                reply_text(&events(&oauth_steered)),
+                ["CW_UPDATE_STEERED 9a1b2c3d"]
+            );
+        });
+    }
+
+    #[test]
+    fn codex_update_api_scope_and_route_grammar_refuse_before_registration() {
+        update_test(async {
+            for key in [
+                ANTHROPIC_KEY,
+                CODEX_KEY,
+                "cwlocalopenai0123456789abcdef0123456789abcdeg",
+                "cwlocalopenai0123456789ABCDEF0123456789ABCDEF",
+            ] {
+                assert!(
+                    rejected(with_codex_scope(
+                        api_update_request("STEERABLE", "9a1b2c3d"),
+                        key
+                    ))
+                    .await
+                );
+            }
+            let mut foreign_account = api_update_request("STEERABLE", "9a1b2c3d");
+            foreign_account.headers.insert(
+                "chatgpt-account-id",
+                HeaderValue::from_static(SYNTHETIC_CODEX_ACCOUNT_ID),
+            );
+            assert!(rejected(foreign_account).await);
+            let mut foreign_route = api_update_request("STEERABLE", "9a1b2c3d");
+            foreign_route.target =
+                Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap();
+            assert!(rejected(foreign_route).await);
+            for nonce in ["", "9a1b2c3", "9A1B2C3D", "9a1b2c3g", "9a1b2c3d\r\nWait."] {
+                assert!(rejected(api_update_request("STEERABLE", nonce)).await);
+            }
+            let held = Client::start(api_update_request("STEERABLE", "9a1b2c3d"), OPENAI_KEY).await;
             drop(held);
         });
     }

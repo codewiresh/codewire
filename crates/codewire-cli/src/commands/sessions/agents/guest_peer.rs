@@ -325,14 +325,36 @@ const CUSTODY: Custody = Custody {
 };
 
 pub(crate) async fn run_agent_peer(args: AgentPeerArgs) -> anyhow::Result<()> {
+    let environment = DriverEnvironment::Guest {
+        id: args.environment.clone(),
+        root: args.guest_root.clone(),
+    };
+    anyhow::ensure!(
+        super::platform_control::marker(&environment, &args.driver_id)?.is_none(),
+        "platform guardian requires its fixed private role"
+    );
     // Custody runs synchronously on this thread. The provider's parent-death
     // signal follows the thread that forks it, and this thread outlives it.
     agent_peer(args, CUSTODY).map_err(|error| anyhow::anyhow!(bounded_error(&format!("{error:#}"))))
+}
+pub(super) async fn run_platform_peer(
+    args: AgentPeerArgs,
+    environment: Vec<(String, String)>,
+) -> anyhow::Result<()> {
+    agent_peer_projected(args, CUSTODY, Some(&environment))
+        .map_err(|_| anyhow::anyhow!("platform guardian refused"))
 }
 
 /// Returns only after the family is reaped. A nonzero provider status exits
 /// this process with that status once the clean receipt is durable.
 fn agent_peer(args: AgentPeerArgs, custody: Custody) -> anyhow::Result<()> {
+    agent_peer_projected(args, custody, None)
+}
+fn agent_peer_projected(
+    args: AgentPeerArgs,
+    custody: Custody,
+    environment: Option<&[(String, String)]>,
+) -> anyhow::Result<()> {
     let mut guardian = Guardian::admit(&args, custody)?;
     if args.host_member_custody {
         super::host_control::admit_member_guardian(
@@ -348,10 +370,12 @@ fn agent_peer(args: AgentPeerArgs, custody: Custody) -> anyhow::Result<()> {
             return Err(io::Error::last_os_error().into());
         }
     }
-    let failure = guardian
-        .start(&args.program, &args.arguments)
-        .err()
-        .map(|error| bounded_error(&format!("{error:#}")));
+    let failure = match environment {
+        Some(values) => guardian.start_projected(&args.program, &args.arguments, Some(values)),
+        None => guardian.start(&args.program, &args.arguments),
+    }
+    .err()
+    .map(|error| bounded_error(&format!("{error:#}")));
     let reason = match &failure {
         Some(failure) => format!("startup failed: {failure}"),
         None => guardian.monitor(),
@@ -442,6 +466,14 @@ impl Guardian {
     /// Under the instance lock an unclaimed receipt proves no earlier family,
     /// so a failure here is still finished only after `ECHILD`.
     fn start(&mut self, program: &Path, arguments: &[String]) -> anyhow::Result<()> {
+        self.start_projected(program, arguments, None)
+    }
+    fn start_projected(
+        &mut self,
+        program: &Path,
+        arguments: &[String],
+        environment: Option<&[(String, String)]>,
+    ) -> anyhow::Result<()> {
         self.wake = Some(install_signal_handlers().context("install guardian signal handling")?);
         // Armed before the parent check: a driver exit in between still
         // reaches the installed handler instead of being missed.
@@ -461,7 +493,7 @@ impl Guardian {
             anyhow::bail!("guardian received {signal} before the provider started");
         }
         seal_inherited_descriptors().context("close private descriptors before the provider")?;
-        let pid = spawn_provider(program, arguments)?;
+        let pid = spawn_provider(program, arguments, environment)?;
         self.provider_pid = Some(pid);
         self.receipt.provider_pid = Some(pid);
         self.persist();
@@ -728,11 +760,21 @@ impl Guardian {
     }
 }
 
-fn spawn_provider(program: &Path, arguments: &[String]) -> anyhow::Result<u32> {
+fn spawn_provider(
+    program: &Path,
+    arguments: &[String],
+    environment: Option<&[(String, String)]>,
+) -> anyhow::Result<u32> {
     let guardian = std::process::id();
+    let platform = environment.is_some();
     let mut command = std::process::Command::new(program);
     // Native stdin, stdout and stderr are inherited unchanged.
     command.args(arguments);
+    if let Some(environment) = environment {
+        command
+            .env_clear()
+            .envs(environment.iter().map(|(k, v)| (k, v)));
+    }
     // SAFETY: the hook runs after fork and before exec. It calls only the
     // async-signal-safe prctl and getppid and allocates nothing.
     unsafe {
@@ -741,6 +783,9 @@ fn spawn_provider(program: &Path, arguments: &[String]) -> anyhow::Result<u32> {
             // The guardian may have exited before the signal was armed.
             if std::os::unix::process::parent_id() != guardian {
                 return Err(io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            if platform {
+                prctl_set(libc::PR_SET_NO_NEW_PRIVS, 1)?;
             }
             Ok(())
         });

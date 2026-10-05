@@ -286,7 +286,7 @@ pub(crate) async fn helper(
 // The production caller supplies only its admitted retained-image child. Keep
 // this private seam separate from executable selection so real pipe fixtures
 // can verify EOF and cancellation without a production helper override.
-async fn exchange_record_pipe(
+pub(crate) async fn exchange_record_pipe(
     child: &mut tokio::process::Child,
     request: &[u8],
 ) -> Result<Value, Error> {

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 const SDK_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const SUITES = ["test.js", "mesh.test.js", "cw-runtime.test.js"];
+const SUITES = ["test.js", "mesh.test.js", "cw-runtime.test.js", "platform-agents.test.js"];
 const MAX_FILES = 1024;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 64 * 1024 * 1024;

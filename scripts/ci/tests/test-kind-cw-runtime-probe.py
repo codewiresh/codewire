@@ -48,7 +48,7 @@ def args():
     return argparse.Namespace(environment_id=ENVIRONMENT, nonce=NONCE,
                               daemon_sha256="c" * 64, daemon_size=100, daemon_version="0.1.0-ci",
                               workspace_sha256="a" * 64, workspace_size=200,
-                              workspace_version="0.1.0-release-A")
+                              workspace_version="0.1.0-release-A", managed_peers_json=None)
 
 
 def own_fd_count():
@@ -56,6 +56,51 @@ def own_fd_count():
 
 
 class Guards(unittest.TestCase):
+    def test_managed_stop_order_cannot_skip_live_admission_or_terminal_proof(self):
+        ready, stopped, close = (b'{"op":"managed-stop-ready"}',
+                                 b'{"op":"managed-stopped"}', b'{"op":"close"}')
+        for state, accepted in ((None, close), ("live", ready), ("ready", stopped), ("complete", close)):
+            for raw in (ready, stopped, close):
+                if raw == accepted:
+                    self.assertEqual(probe.decode_request(raw, 3, state)["op"], json.loads(raw)["op"])
+                else:
+                    with self.assertRaises(probe.Refused):
+                        probe.decode_request(raw, 3, state)
+        for raw in (ready, stopped):
+            for index in (0, 1, 2, 4):
+                with self.assertRaises(probe.Refused):
+                    probe.decode_request(raw, index, "live")
+        for raw in (b'{"op":"managed-stop-ready","pid":1}',
+                    b'{"op":"managed-stopped","op":"managed-stopped"}'):
+            with self.assertRaises(probe.Refused):
+                probe.decode_request(raw, 3, "ready")
+
+    def test_managed_witness_invalid_json_types_and_births_refuse_before_process_effects(self):
+        driver = "22222222-2222-4222-8222-222222222222"
+        value = {"session_id": "session-" + driver, "driver_id": driver,
+                 "provider_sha256": "a" * 64, "provider_size": 1,
+                 "peer": {"version": 1, "identity": {
+                     "environment_id": ENVIRONMENT, "driver_id": driver,
+                     "session_id": "session-" + driver, "instance_id": ENVIRONMENT,
+                     "driver_started_at": "2026-10-05T00:00:00Z", "boot_id": ENVIRONMENT,
+                     "driver_pid": 100, "driver_start_ticks": 100},
+                     "guardian_pid": 101, "guardian_start_ticks": 101, "provider_pid": 102,
+                     "cleanup_unknown": True, "finished_at": None, "exit_code": None, "error": None}}
+        cases = ["é" * (16 * 1024 + 1), "[", "[]", '[{"peer":1,"peer":2}]']
+        for field, bad in (("version", True), ("guardian_start_ticks", True)):
+            changed = json.loads(json.dumps(value)); changed["peer"][field] = bad
+            cases.append(json.dumps([changed] * 3))
+        changed = json.loads(json.dumps(value)); changed["peer"]["identity"]["driver_start_ticks"] = True
+        cases.append(json.dumps([changed] * 3))
+        changed = json.loads(json.dumps(value)); changed["driver_id"] = "é"
+        cases.append(json.dumps([changed] * 3))
+        for raw in cases:
+            admitted = args(); admitted.managed_peers_json = raw
+            current = probe.Probe(admitted); current.boot = ENVIRONMENT
+            with mock.patch.object(probe, "Process", side_effect=AssertionError("process effect")):
+                with self.subTest(length=len(raw)), self.assertRaises(probe.Refused):
+                    current.admit_managed(None)
+
     def test_closed_phase_order_and_close(self):
         for index in range(3):
             value = frame(index)
@@ -216,6 +261,89 @@ class KernelAndFiles(unittest.TestCase):
                 os.close(fd)
                 current.stdout.close()
                 current.stderr.close()
+
+    @contextlib.contextmanager
+    def managed_family_fixture(self):
+        # Three synthetic driver/guardian/provider trees. Their only normal
+        # exit command is one byte through the original driver's stdin.
+        program = '''import json,os,subprocess,sys
+depth=int(sys.argv[1]); source=sys.argv[2]; child=None
+if depth:
+ child=subprocess.Popen([sys.executable,"-I","-u","-c",source,str(depth-1),source],stdin=subprocess.PIPE,stdout=subprocess.PIPE)
+ identities=json.loads(child.stdout.readline())
+else: identities=[]
+print(json.dumps([os.getpid()]+identities),flush=True)
+os.read(0,1)
+if child:
+ child.stdin.write(b"E"); child.stdin.flush(); child.stdin.close(); child.wait(timeout=3)
+'''
+        current = probe.Probe(args())
+        current.boot = ENVIRONMENT
+        current.directory = probe.Directory(NONCE)
+        current.index, current.sequence, current.phase = 3, 3, probe.PHASES[-1]
+        try:
+            with contextlib.ExitStack() as stack:
+                families = []
+                for index in range(3):
+                    child = stack.enter_context(self.child([sys.executable, "-I", "-u", "-c", program, "2", program]))
+                    self.assertTrue(select.select([child.stdout.fileno()], [], [], 3)[0])
+                    pids = json.loads(child.stdout.readline(256))
+                    self.assertEqual(len(pids), 3)
+                    parent = None
+                    for role, pid in zip(("driver", "guardian", "provider"), pids):
+                        actor = probe.Process(pid, f"managed{index}-{role}", current.deadline,
+                                              expected_parent=os.getpid() if parent is None else parent.pid,
+                                              parent=parent)
+                        current.managed[f"managed{index}-{role}"] = actor
+                        parent = actor
+                    families.append(child)
+                current.managed_cleanup = "live"
+                yield current, families
+        finally:
+            current.close()
+
+    def test_managed_stop_retains_nine_original_kernel_handles_until_normal_family_exit(self):
+        with self.managed_family_fixture() as (current, families):
+            events = []
+            original = {name: actor.identity.copy() for name, actor in current.managed.items()}
+            with mock.patch.object(current, "output", side_effect=events.append):
+                with self.assertRaises(probe.Refused):
+                    current.complete_managed_stop()
+                current.prepare_managed_stop()
+                self.assertFalse(events[-1].get("managed_terminal", False))
+                self.assertTrue(all(not actor.terminal() for actor in current.managed.values()))
+                for child in families:
+                    child.stdin.write(b"E"); child.stdin.flush()
+                current.complete_managed_stop()
+                self.assertTrue(events[-1]["managed_terminal"])
+                self.assertEqual(events[-1]["managed"], original)
+                self.assertTrue(all(actor.terminal() for actor in current.managed.values()))
+                for child in families:
+                    self.assertEqual(child.wait(timeout=3), 0)
+                with self.assertRaises(probe.Refused):
+                    current.prepare_managed_stop()
+
+    def test_managed_actor_exit_during_ready_output_refuses_before_ack_is_written(self):
+        with self.managed_family_fixture() as (current, families):
+            original_output = current.output
+            original_write = probe.os.write
+            def no_ready_bytes(fd, data):
+                if fd == 1:
+                    raise AssertionError("ready ACK written")
+                return original_write(fd, data)
+            def exit_before_write(body):
+                self.assertEqual(current.managed_cleanup, "live")
+                families[0].stdin.write(b"E"); families[0].stdin.flush()
+                self.assertEqual(families[0].wait(timeout=3), 0)
+                # Execute the real bounded output/verify path. No ready byte
+                # may be written after one of the original handles is dead.
+                original_output(body)
+            with mock.patch.object(current, "output", side_effect=exit_before_write), \
+                    mock.patch.object(probe.os, "write", side_effect=no_ready_bytes):
+                with self.assertRaises(probe.Refused) as caught:
+                    current.prepare_managed_stop()
+                self.assertEqual(caught.exception.check, "pidfd-live")
+                self.assertEqual(current.managed_cleanup, "live")
 
     def test_actual_child_identity_is_held_and_close_leaks_no_descriptors(self):
         before = own_fd_count()

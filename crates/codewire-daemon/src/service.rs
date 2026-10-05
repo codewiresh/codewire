@@ -774,6 +774,14 @@ impl DaemonServiceImpl {
             )
             .map(str::to_owned)
             .collect::<Vec<_>>();
+        #[cfg(target_os = "linux")]
+        let supported = if crate::platform_managed::Service::available(&self.config) {
+            let mut supported = supported;
+            supported.push(codewire_gateway_proto::platform_managed::CAPABILITY.into());
+            supported
+        } else {
+            supported
+        };
 
         let (state, message) = if request.protocol_version > DAEMON_PROTOCOL_VERSION {
             (

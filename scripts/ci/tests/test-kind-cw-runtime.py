@@ -323,13 +323,13 @@ class Registration(unittest.TestCase):
 
 
 class SuiteRoute(unittest.TestCase):
-    def run_suite(self, directory, **overrides):
+    def run_suite(self, directory, managed=False, **overrides):
         captured = directory / "intake-arguments"
         script = '''source "$1"
 require_kind_errexit() { :; }
 require_tool() { :; }
-python3() { printf '%s\\0' "$@" >"$CAPTURED"; return 46; }
-run_retained_cw_runtime_suite
+python3() { printf '%s\\0' "$@" >"$CAPTURED"; printf '%s' "${CW_RUNTIME_MANAGED_AGENTS-}" >"$CAPTURED.mode"; return 46; }
+if [ "$SELECT_MANAGED" = 1 ]; then run_retained_cw_managed_agents_suite; else run_retained_cw_runtime_suite; fi
 '''
         environment = {"PATH": "/usr/bin:/bin", "HOME": str(directory), "KIND_E2E_COMMON_LOADED": "1",
             "ROOT": str(ROOT), "KIND_PROFILE": "1", "CLUSTER": "owned-cw-proof", "CAPTURED": str(captured),
@@ -338,11 +338,27 @@ run_retained_cw_runtime_suite
             "CW_RUNTIME_A_SHA256": "c" * 64, "CW_RUNTIME_B_BUILD_JSON": "/owned/b/build.json",
             "CW_RUNTIME_B_BUILD_SHA256": "d" * 64, "CW_RUNTIME_B_SHA256": "e" * 64,
             "CW_RUNTIME_SUPPORT_BUILD_JSON": "/owned/ci/build.json", "CW_RUNTIME_SUPPORT_BUILD_SHA256": "f" * 64,
+            "SELECT_MANAGED": "1" if managed else "0",
             **overrides}
         result = subprocess.run(["/usr/bin/bash", "-ceu", script, "--",
             str(ROOT / "scripts/ci/verify/kind/suites/cw-runtime.sh")], env=environment,
             capture_output=True, text=True, timeout=10)
         return result, captured
+
+    def test_managed_mode_preserves_original_three_producer_intake_and_named_profile_guard(self):
+        with tempfile.TemporaryDirectory(prefix="kind-cw-managed-route-", dir=ROOT / ".tmp") as temporary:
+            ordinary = Path(temporary) / "ordinary"; ordinary.mkdir()
+            managed = Path(temporary) / "managed"; managed.mkdir()
+            original, original_capture = self.run_suite(ordinary)
+            selected, selected_capture = self.run_suite(managed, managed=True)
+            self.assertEqual((original.returncode, selected.returncode), (46, 46))
+            self.assertEqual(original_capture.read_bytes(), selected_capture.read_bytes())
+            self.assertEqual(Path(str(original_capture) + ".mode").read_bytes(), b"")
+            self.assertEqual(Path(str(selected_capture) + ".mode").read_bytes(), b"1")
+            refused = Path(temporary) / "refused"; refused.mkdir()
+            failure, no_capture = self.run_suite(refused, managed=True, KIND_PROFILE="0", CLUSTER="")
+            self.assertEqual(failure.returncode, 2)
+            self.assertFalse(no_capture.exists())
 
     def test_fixed_intake_route_forwards_three_pinned_producers_once(self):
         with tempfile.TemporaryDirectory(prefix="kind-cw-route-", dir=ROOT / ".tmp") as temporary:

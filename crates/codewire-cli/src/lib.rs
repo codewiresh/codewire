@@ -339,8 +339,54 @@ pub async fn run_host_member_helper_from(arguments: Vec<std::ffi::OsString>) -> 
     commands::run_host_member_helper(arguments).await
 }
 
-/// Run the fixed target-owned managed record adapter without ordinary CLI
-/// configuration, provider resolution or caller-selected executable paths.
+/// Fixed platform record helper. The binary dispatches it before ordinary
+/// configuration, credential resolution, Mesh paths or mutable CW selection.
+#[cfg(target_os = "linux")]
+pub async fn run_platform_agent_control_from(
+    arguments: Vec<std::ffi::OsString>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        unsafe { libc::geteuid() } == 1000 && unsafe { libc::getegid() } == 1000,
+        "platform agent helper requires its ordinary owner"
+    );
+    anyhow::ensure!(
+        arguments.len() == 2 && arguments[0] == "--environment",
+        "invalid fixed platform agent arguments"
+    );
+    let environment = arguments[1]
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid platform environment"))?;
+    let id = uuid::Uuid::parse_str(environment)?;
+    anyhow::ensure!(
+        !id.is_nil() && id.to_string() == environment,
+        "invalid platform environment"
+    );
+    // No registry, caller-selected root, command, URL, environment or token.
+    commands::run_platform_agent_control(id.to_string()).await
+}
+#[cfg(target_os = "linux")]
+pub async fn run_platform_agent_driver_from(
+    arguments: Vec<std::ffi::OsString>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        arguments.len() == 4 && arguments[0] == "--environment" && arguments[2] == "--driver-id",
+        "invalid fixed platform driver arguments"
+    );
+    let environment = arguments[1]
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid platform environment"))?;
+    let driver = arguments[3]
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid platform driver"))?;
+    commands::run_platform_agent_driver(environment.into(), driver.into()).await
+}
+#[cfg(target_os = "linux")]
+pub async fn run_platform_agent_peer_from(
+    arguments: Vec<std::ffi::OsString>,
+) -> anyhow::Result<()> {
+    commands::run_platform_agent_peer(arguments).await
+}
+
 #[cfg(target_os = "linux")]
 pub async fn run_host_agent_control_from(arguments: Vec<std::ffi::OsString>) -> anyhow::Result<()> {
     commands::run_host_agent_control(arguments).await

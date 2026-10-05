@@ -197,6 +197,16 @@ pub(super) fn handle(
     request: ControlRequest,
     resolve: ResolveProgram<'_>,
 ) -> anyhow::Result<Value> {
+    super::platform_control::refuse_native_bypass(environment, &request)?;
+    handle_platform(environment, request, resolve)
+}
+/// Internal seam called only after the fixed platform helper admits its saved
+/// original scope/generation. The ordinary `_agent-control` always fences it.
+pub(super) fn handle_platform(
+    environment: &DriverEnvironment,
+    request: ControlRequest,
+    resolve: ResolveProgram<'_>,
+) -> anyhow::Result<Value> {
     match request {
         ControlRequest::Prepare { config } => prepare(environment, config, resolve),
         ControlRequest::Bind {
@@ -564,7 +574,7 @@ fn create_or_reuse(
 // Operations
 // ---------------------------------------------------------------------------
 
-fn validate_launch(config: &AgentConfig) -> anyhow::Result<()> {
+pub(super) fn validate_launch(config: &AgentConfig) -> anyhow::Result<()> {
     if !config.program.as_os_str().is_empty() {
         anyhow::bail!(
             "the agent program is resolved inside the guest; prepare with an empty program"

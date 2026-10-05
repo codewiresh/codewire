@@ -848,6 +848,7 @@ async fn recovered_host_live_records_are_fenced_without_signaling_persisted_pid(
             session_id: session_id.clone(),
             #[cfg(target_os = "linux")]
             control_origin: None,
+            platform_managed_origin: None,
             launch_generation: 1,
             name: String::new(),
             parent_session_id: None,

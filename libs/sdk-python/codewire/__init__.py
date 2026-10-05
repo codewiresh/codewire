@@ -9,6 +9,7 @@ from codewire.environment import Environment
 from codewire.errors import CodewireError
 from codewire.files import Files
 from codewire.cw_runtime import CwRuntime, CwRuntimeOutcomeUnknownError
+from codewire.platform_agents import PlatformAgents, PlatformAgentOutcomeUnknownError
 from codewire.credentials import (
     Credentials, Credential, GithubRepository, GithubRepositoryPage, SshPublicKey, CodexDeviceChallenge, CodexEnrollmentEvent,
     EnrollmentOutcomeUnknownError,
@@ -45,6 +46,8 @@ __all__ = [
     "Files",
     "CwRuntime",
     "CwRuntimeOutcomeUnknownError",
+    "PlatformAgents",
+    "PlatformAgentOutcomeUnknownError",
     "Credentials",
     "Credential",
     "GithubRepository",

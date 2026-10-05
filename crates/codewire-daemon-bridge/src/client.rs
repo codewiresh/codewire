@@ -55,6 +55,7 @@ pub enum DaemonClientError {
 pub struct DaemonClient {
     inner: v1::daemon_service_client::DaemonServiceClient<Channel>,
     auth_token: MetadataValue<tonic::metadata::Ascii>,
+    platform: v1::platform_managed_service_client::PlatformManagedServiceClient<Channel>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,7 +123,12 @@ impl DaemonClient {
     ) -> Result<Self, DaemonClientError> {
         let auth_token = Self::parse_auth_token(daemon_token)?;
         Ok(Self {
-            inner: v1::daemon_service_client::DaemonServiceClient::new(channel),
+            inner: v1::daemon_service_client::DaemonServiceClient::new(channel.clone()),
+            platform: v1::platform_managed_service_client::PlatformManagedServiceClient::new(
+                channel,
+            )
+            .max_decoding_message_size(codewire_gateway_proto::platform_managed::FRAME_BYTES)
+            .max_encoding_message_size(codewire_gateway_proto::platform_managed::REQUEST_BYTES),
             auth_token,
         })
     }
@@ -746,3 +752,7 @@ mod tests {
         harness.shutdown().await;
     }
 }
+
+#[path = "platform_managed.rs"]
+mod platform_managed;
+pub use platform_managed::{PlatformManagedRecordStream, platform_managed_request_fingerprint};

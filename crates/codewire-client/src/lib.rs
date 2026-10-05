@@ -15,6 +15,7 @@ mod error;
 #[cfg(target_os = "linux")]
 pub mod member_tailnet;
 mod mesh;
+pub mod platform_agents;
 mod tailnet;
 
 use std::sync::Arc;

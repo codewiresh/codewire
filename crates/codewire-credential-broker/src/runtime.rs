@@ -662,6 +662,131 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
 
 #[cfg(feature = "local-broker-synthetic-smoke")]
 impl SyntheticOpenAiSmokeTransport {
+    /// Select only the fixed API family before route validation. An invalid
+    /// URL on either API host must stay in this branch and be refused instead
+    /// of falling through to an OAuth fixture.
+    pub fn api_key_family(request: &BrokerUpstreamRequest) -> Option<&'static str> {
+        match request.target.host_str() {
+            Some("api.openai.com") => Some("openai"),
+            Some("api.anthropic.com") => Some("anthropic"),
+            _ => None,
+        }
+    }
+
+    /// Validate a Kind fixture's exact selected synthetic credential in place.
+    /// This borrows the broker-owned request; the caller then delegates that
+    /// same owned request to `execute`, including the existing stream/redactor.
+    /// No request fields or protected values leave this method.
+    pub fn validate_exact_api_key_request(
+        request: &BrokerUpstreamRequest,
+        expected: &str,
+    ) -> Result<(), BrokerUpstreamError> {
+        let denied = BrokerUpstreamError::Protocol;
+        let (route, path, query, prefix, authority) = match request.target.as_str() {
+            "https://api.openai.com/v1/responses" => (
+                crate::openai::openai_responses_route(),
+                "/responses",
+                None,
+                "cwlocalopenai",
+                "authorization",
+            ),
+            "https://api.anthropic.com/v1/messages" => (
+                crate::anthropic::route(),
+                "/messages",
+                None,
+                "cwlocalanthropic",
+                "x-api-key",
+            ),
+            "https://api.anthropic.com/v1/messages?beta=true" => (
+                crate::anthropic::route(),
+                "/messages",
+                Some("beta=true"),
+                "cwlocalanthropic",
+                "x-api-key",
+            ),
+            "https://api.anthropic.com/v1/messages/count_tokens" => (
+                crate::anthropic::route(),
+                "/messages/count_tokens",
+                None,
+                "cwlocalanthropic",
+                "x-api-key",
+            ),
+            "https://api.anthropic.com/v1/messages/count_tokens?beta=true" => (
+                crate::anthropic::route(),
+                "/messages/count_tokens",
+                Some("beta=true"),
+                "cwlocalanthropic",
+                "x-api-key",
+            ),
+            _ => return Err(denied),
+        };
+        if !Self::canary(expected, prefix)
+            || request.method != Method::POST
+            || request.body.is_empty()
+            || request.body.len() > route.max_body_bytes
+            || request.headers.len() > 64
+        {
+            return Err(denied);
+        }
+        let mut header_bytes = 0_usize;
+        for (name, value) in &request.headers {
+            if request.headers.get_all(name).iter().count() != 1
+                || value.as_bytes().len() > 8 * 1024
+                || !(name.as_str() == authority
+                    || name == http::header::ACCEPT_ENCODING
+                    || route
+                        .allowed_request_headers
+                        .iter()
+                        .any(|allowed| allowed == name.as_str()))
+            {
+                return Err(denied);
+            }
+            header_bytes = header_bytes
+                .checked_add(name.as_str().len())
+                .and_then(|bytes| bytes.checked_add(value.as_bytes().len()))
+                .filter(|bytes| *bytes <= 64 * 1024)
+                .ok_or(denied)?;
+        }
+        let supplied = request
+            .headers
+            .get(authority)
+            .and_then(|value| value.to_str().ok());
+        let supplied = if authority == "authorization" {
+            supplied.and_then(|value| value.strip_prefix("Bearer "))
+        } else {
+            supplied
+        };
+        if supplied != Some(expected)
+            || request
+                .headers
+                .get(http::header::ACCEPT_ENCODING)
+                .is_some_and(|value| value.as_bytes() != b"identity")
+            || (authority == "x-api-key"
+                && (request
+                    .headers
+                    .get("anthropic-version")
+                    .map(HeaderValue::as_bytes)
+                    != Some(b"2023-06-01")
+                    || request
+                        .headers
+                        .get(http::header::ACCEPT_ENCODING)
+                        .map(HeaderValue::as_bytes)
+                        != Some(b"identity")))
+        {
+            return Err(denied);
+        }
+        av_credential_proxy::validate_proxy_request(
+            &route,
+            path,
+            query,
+            &request.method,
+            &request.headers,
+            request.body.len(),
+        )
+        .map_err(|_| denied)?;
+        Ok(())
+    }
+
     fn canary(value: &str, prefix: &str) -> bool {
         value.strip_prefix(prefix).is_some_and(|suffix| {
             suffix.len() == 32

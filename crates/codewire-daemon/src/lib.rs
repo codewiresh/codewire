@@ -14,6 +14,8 @@ mod host_process;
 #[cfg(unix)]
 pub mod hosted_state;
 mod lifecycle;
+#[cfg(target_os = "linux")]
+pub mod platform_managed;
 #[cfg(unix)]
 mod private_files;
 pub mod server;

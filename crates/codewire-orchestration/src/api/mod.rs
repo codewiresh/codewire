@@ -18,6 +18,7 @@ pub mod environments;
 pub mod internal;
 pub mod logs;
 pub mod organizations;
+pub mod platform_agents;
 pub mod ports;
 pub mod prepare;
 pub mod presets;

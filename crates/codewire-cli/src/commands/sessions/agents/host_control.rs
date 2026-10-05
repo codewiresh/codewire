@@ -230,9 +230,9 @@ fn nonnil_id(value: &str) -> anyhow::Result<()> {
 // Hold each nofollow directory in the authority chain through synchronous
 // helper work. Another UID cannot replace a writable ancestor; same-UID/root
 // adversaries are outside this trusted-host boundary.
-struct DirectoryPin(Vec<(PathBuf, fs::File)>);
+pub(super) struct DirectoryPin(Vec<(PathBuf, fs::File)>);
 impl DirectoryPin {
-    fn open(path: &Path) -> anyhow::Result<Self> {
+    pub(super) fn open(path: &Path) -> anyhow::Result<Self> {
         ensure!(
             path.is_absolute()
                 && path.components().all(|c| matches!(
@@ -273,7 +273,7 @@ impl DirectoryPin {
         pin.check()?;
         Ok(pin)
     }
-    fn check(&self) -> anyhow::Result<()> {
+    pub(super) fn check(&self) -> anyhow::Result<()> {
         for (path, file) in &self.0 {
             let a = file.metadata()?;
             let b = fs::symlink_metadata(path)?;
@@ -289,7 +289,7 @@ impl DirectoryPin {
         Ok(())
     }
 }
-fn private_record<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
+pub(super) fn private_record<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
     let directory = DirectoryPin::open(path.parent().context("managed record parent")?)?;
     let mut file = fs::OpenOptions::new()
         .read(true)

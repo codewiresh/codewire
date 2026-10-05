@@ -9,10 +9,10 @@ The image must already contain the ordinary dispatcher: UID1000 selection
 cannot retrofit it into a legacy immutable image. The observer never reads credentials or signals
 any process. Its one fixed child has kernel parent-death confinement only.
 
-No native runner, provider guardian, sealed-memfd or platform managed-agent
-claim is borrowed from the native update fixture. Kernel observations follow
-that fixture's Process pattern; public incarnation/Attach ownership remains
-the typed client's responsibility.
+The optional managed witness adds nine held driver/guardian/provider handles
+from the public managed records. It observes their original births and image
+bytes throughout A/B/A. Public scope, native conversations, message history
+and provider revocation remain the typed client's responsibility.
 """
 
 import argparse
@@ -108,7 +108,7 @@ def identifier(value):
         return False
 
 
-def decode_request(raw, index):
+def decode_request(raw, index, managed_cleanup=None):
     require(0 < len(raw) <= MAX_REQUEST, "request-bound")
     try:
         value = json.loads(raw, object_pairs_hook=unique,
@@ -116,8 +116,14 @@ def decode_request(raw, index):
     except (ValueError, UnicodeError):
         raise Refused("request-json") from None
     require(type(value) is dict, "request-fields")
-    if value.get("op") == "close":
+    if value.get("op") in {"managed-stop-ready", "managed-stopped"}:
         require(set(value) == {"op"} and index == len(PHASES), "request-order")
+        require(managed_cleanup == ("live" if value["op"] == "managed-stop-ready" else "ready"),
+                "managed-stop-order")
+        return value
+    if value.get("op") == "close":
+        require(set(value) == {"op"} and index == len(PHASES)
+                and managed_cleanup in {None, "complete"}, "request-order")
         return value
     require(set(value) == {"op", "phase", "sha256", "size", "version"}, "request-fields")
     require(value["op"] == "checkpoint" and index < len(PHASES)
@@ -188,7 +194,8 @@ class Process:
     """One held pidfd, proc directory and executable; never a signal API."""
 
     def __init__(self, pid, name, deadline, *, expected_parent=None, expected_path=None,
-                 expected_digest=None, expected_size=None, expected_argv=None, parent=None):
+                 expected_digest=None, expected_size=None, expected_argv=None, parent=None,
+                 maximum=MAX_EXECUTABLE):
         self.name, self.pid, self.pidfd, self.proc, self.exe = name, pid, None, None, None
         self.argv, self.parent = expected_argv, parent
         try:
@@ -205,7 +212,7 @@ class Process:
             if parent is not None:
                 require(parent.pid == parent_pid, "process-parent", name)
             self.exe = os.open("exe", os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=self.proc)
-            checksum, info = hash_file(self.exe, MAX_EXECUTABLE, deadline)
+            checksum, info = hash_file(self.exe, maximum, deadline)
             require(info.st_uid in {0, UID} and info.st_gid in {0, GID}
                     and info.st_nlink == 1 and not info.st_mode & 0o6022
                     and info.st_mode & 0o111, "executable-owner", name)
@@ -313,7 +320,7 @@ class Directory:
                     "proof-replaced")
 
     def write(self, name, body):
-        require(re.fullmatch(r"[0-9]{3}-(ready|checkpoint|closed|refused)\.json", name), "proof-name")
+        require(re.fullmatch(r"[0-9]{3}-(ready|checkpoint|managed-stop-ready|managed-stopped|closed|refused)\.json", name), "proof-name")
         raw = canonical(body) + b"\n"
         require(len(raw) <= MAX_LINE, "output-bound")
         self.verify()
@@ -465,6 +472,8 @@ class Probe:
     def __init__(self, args):
         self.args, self.deadline = args, time.monotonic() + SECONDS
         self.actors, self.child, self.directory = {}, None, None
+        self.managed = {}
+        self.managed_cleanup = None
         self.samples, self.sequence, self.index, self.written = 0, 0, 0, 0
         self.phase, self.selection, self.shell_terminal = "baseline", None, False
         self.pending, self.stdout = b"", b""
@@ -497,6 +506,7 @@ class Probe:
         self.actors["session"] = session
         require(session.identity["executable"] == os.path.realpath("/usr/bin/python3"),
                 "process-role", "session")
+        self.admit_managed(daemon)
         # No caller command, environment, cwd or signal target can enter this
         # fixed child. Actual HOME/PATH remain as the ordinary launch supplied.
         self.child = subprocess.Popen(["/bin/bash", "--noprofile", "--norc"],
@@ -518,6 +528,11 @@ class Probe:
         for name, actor in self.actors.items():
             if name != "shell" or not self.shell_terminal:
                 actor.verify()
+        for actor in self.managed.values():
+            if self.managed_cleanup == "live":
+                actor.verify()
+            elif self.managed_cleanup == "complete":
+                require(actor.terminal(), "managed-stop-terminal")
         self.directory.verify()
         if self.image is not None:
             self.image.verify()
@@ -535,6 +550,10 @@ class Probe:
                 "uid": UID, "gid": GID,
                 "actors": {name: actor.identity for name, actor in self.actors.items()},
                 "selection": self.selection, "shell_terminal": self.shell_terminal}
+        if self.managed:
+            body["managed"] = {name: actor.identity for name, actor in self.managed.items()}
+            if self.managed_cleanup == "complete":
+                body["managed_terminal"] = True
         proof = self.directory.write(f"{self.sequence:03}-{event}.json", body)
         self.output(body | {"evidence": proof})
 
@@ -572,7 +591,7 @@ class Probe:
                 self.pending += block
                 require(len(self.pending) <= MAX_REQUEST, "request-bound")
         raw, self.pending = self.pending.split(b"\n", 1)
-        return decode_request(raw, self.index)
+        return decode_request(raw, self.index, self.managed_cleanup)
 
     def write_shell(self, data):
         remaining = memoryview(data)
@@ -675,6 +694,12 @@ class Probe:
         self.admit()
         while True:
             request = self.request()
+            if request["op"] == "managed-stop-ready":
+                self.prepare_managed_stop()
+                continue
+            if request["op"] == "managed-stopped":
+                self.complete_managed_stop()
+                continue
             if request["op"] == "close":
                 self.finish()
                 return 0
@@ -683,6 +708,31 @@ class Probe:
             self.sequence += 1
             self.index += 1
             self.emit("checkpoint")
+
+    def prepare_managed_stop(self):
+        # This acknowledgement precedes the caller's public Stop. Verify all
+        # original handles live; only this closed phase permits their exit.
+        require(self.index == len(PHASES) and self.phase == PHASES[-1]
+                and self.managed_cleanup == "live" and len(self.managed) == 9,
+                "managed-stop-order")
+        self.settle()
+        self.sequence += 1
+        self.emit("managed-stop-ready")
+        self.managed_cleanup = "ready"
+
+    def complete_managed_stop(self):
+        require(self.index == len(PHASES) and self.phase == PHASES[-1]
+                and self.managed_cleanup == "ready" and len(self.managed) == 9,
+                "managed-stop-order")
+        deadline = min(self.deadline, time.monotonic() + 10)
+        while not all(actor.terminal() for actor in self.managed.values()):
+            self.verify()
+            require(time.monotonic() < deadline, "managed-stop-terminal")
+            time.sleep(INTERVAL)
+        self.managed_cleanup = "complete"
+        self.settle()
+        self.sequence += 1
+        self.emit("managed-stopped")
 
     def failed(self, error):
         actor = error.actor if isinstance(error, Refused) else None
@@ -714,10 +764,67 @@ class Probe:
                 stream.close()
         for actor in reversed(tuple(self.actors.values())):
             actor.close()
+        for actor in reversed(tuple(self.managed.values())):
+            actor.close()
         if self.image is not None:
             self.image.close()
         if self.directory is not None:
             self.directory.close()
+
+    def admit_managed(self, daemon):
+        if self.args.managed_peers_json is None:
+            return
+        raw = self.args.managed_peers_json
+        require(len(raw.encode("utf-8")) <= 16 * 1024, "managed-witness-bound")
+        try:
+            peers = json.loads(raw, object_pairs_hook=unique,
+                               parse_constant=lambda _: (_ for _ in ()).throw(Refused("managed-witness-json")))
+        except (ValueError, UnicodeError):
+            raise Refused("managed-witness-json") from None
+        require(type(peers) is list and len(peers) == 3, "managed-witness-count")
+        identities, pids = set(), set()
+        for index, value in enumerate(peers):
+            require(type(value) is dict and set(value) == {
+                "session_id", "driver_id", "peer", "provider_sha256", "provider_size"}, "managed-witness-fields")
+            driver_id, session_id, peer = value["driver_id"], value["session_id"], value["peer"]
+            require(identifier(driver_id) and session_id == "session-" + driver_id
+                    and driver_id not in identities, "managed-witness-identity")
+            identities.add(driver_id)
+            require(type(peer) is dict and set(peer) == {
+                "version", "identity", "guardian_pid", "guardian_start_ticks", "provider_pid",
+                "cleanup_unknown", "finished_at", "exit_code", "error"}, "managed-peer-fields")
+            identity = peer["identity"]
+            require(type(identity) is dict and set(identity) == {
+                "environment_id", "driver_id", "session_id", "instance_id", "driver_started_at",
+                "boot_id", "driver_pid", "driver_start_ticks"}, "managed-peer-identity")
+            require(type(peer["version"]) is int and peer["version"] == 1
+                    and identity["environment_id"] == self.args.environment_id
+                    and identity["driver_id"] == driver_id and identity["session_id"] == session_id
+                    and identity["boot_id"] == self.boot and identifier(identity["instance_id"])
+                    and peer["finished_at"] is None and peer["exit_code"] is None and peer["error"] is None
+                    and type(peer["cleanup_unknown"]) is bool,
+                    "managed-peer-live")
+            require(all(type(ticks) is int and ticks > 0 for ticks in
+                        (identity["driver_start_ticks"], peer["guardian_start_ticks"])),
+                    "managed-peer-birth")
+            require(digest(value["provider_sha256"]) and type(value["provider_size"]) is int
+                    and 0 < value["provider_size"] <= 512 * 1024 * 1024, "managed-provider-identity")
+            driver = Process(identity["driver_pid"], f"managed{index}-driver", self.deadline,
+                parent=daemon, expected_digest=self.args.daemon_sha256, expected_size=self.args.daemon_size)
+            self.managed[f"managed{index}-driver"] = driver
+            require(driver.identity["start_ticks"] == identity["driver_start_ticks"], "managed-driver-birth")
+            guardian = Process(peer["guardian_pid"], f"managed{index}-guardian", self.deadline,
+                parent=driver, expected_digest=self.args.daemon_sha256, expected_size=self.args.daemon_size)
+            self.managed[f"managed{index}-guardian"] = guardian
+            require(guardian.identity["start_ticks"] == peer["guardian_start_ticks"], "managed-guardian-birth")
+            provider = Process(peer["provider_pid"], f"managed{index}-provider", self.deadline,
+                parent=guardian, expected_digest=value["provider_sha256"], expected_size=value["provider_size"],
+                maximum=512 * 1024 * 1024)
+            self.managed[f"managed{index}-provider"] = provider
+            for process in (driver, guardian, provider):
+                require(process.pid not in pids, "managed-peer-overlap")
+                pids.add(process.pid)
+        self.managed_cleanup = "live"
 
 
 class SingleUse(argparse.Action):
@@ -734,6 +841,7 @@ def arguments(argv):
     for key in ("environment-id", "nonce", "daemon-sha256", "daemon-size", "daemon-version",
                 "workspace-sha256", "workspace-size", "workspace-version"):
         parser.add_argument("--" + key, required=True, action=SingleUse)
+    parser.add_argument("--managed-peers-json", action=SingleUse)
     args = parser.parse_args(argv)
     try:
         require(identifier(args.environment_id) and re.fullmatch(r"[0-9a-f]{32}", args.nonce), "option-identity")

@@ -163,6 +163,12 @@ shutil.copy(source_root / 'scripts/ci/verify/check-darwin-cross.sh',
             runner.parent / 'check-darwin-cross.sh')
 for helper in ('scripts/ci/tests/test-openbao-only-secret-authority.sh',
                'scripts/ci/tests/test-admin-proto-boundary.sh',
+               'scripts/ci/tests/test-cli-host-managed.py',
+               'scripts/ci/tests/test-cli-update-mesh-endpoints.py',
+               'scripts/dev/test-cw-runtime-image.py',
+               'scripts/dev/test-cli-native-managed.py',
+               'scripts/dev/test-cli-native-update.py',
+               'scripts/ci/tests/test-native-managed-update-entrypoint.py',
                'crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh',
                'crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py',
                'crates/codewire-local-vmm/macos-vz-runner/Tests/test_console_pair_static_contract.py',
@@ -228,6 +234,9 @@ assert generic(records) == expected('--workspace') + expected(
     *[a for p in sorted(packages) for a in ('-p', p)])
 assert any(r['args'] == ['--production-features'] for r in records)
 assert any('--features' in r['args'] and 'platform' in r['args'] for r in records)
+for helper in ('test-cli-host-managed.py', 'test-cli-update-mesh-endpoints.py'):
+    assert sum(r['tool'] == helper for r in records) == 1
+    run(['rust', 'rust_workspace'], fail_tool=helper, status=44)
 
 special = ['rust', 'transport', 'rust_pkg_codewire_alpha', 'transport_pkg_codewire_local_vmm',
            'transport_pkg_codewire_vmm_guest_probe', 'rust_pkg_codewire_desktop']
@@ -332,7 +341,10 @@ print(f'Rust/transport composition trace: {cases} cases passed')
 # Only terminal checks are synthetic; selection, preflight and receipt logic
 # are copied byte-for-byte. This isolated repository has no external remote or secrets.
 policy_body = production.split('run_policy_core() {', 1)[1].split('\n}\n', 1)[0]
-policy_helpers = re.findall(r'^  (?:python3 (?:-B )?)?((?:scripts|crates)/[\w/.-]+)', policy_body, re.M)
+policy_helpers = re.findall(r'^  (?:python3 (?:(?:-I|-B) )*)?((?:scripts|crates)/[\w/.-]+)', policy_body, re.M)
+image_guards = ('test-cw-image-context.py', 'test-cw-runtime-source.py',
+                'test-cw-image-source.py', 'test-cw-image-consumer.py')
+assert set(image_guards) <= {Path(helper).name for helper in policy_helpers}
 assert 'scripts/dev/test-macos-vz-workload-network.py' in policy_helpers
 assert 'scripts/ci/tests/test-darwin-cross-check.sh' in policy_helpers
 canary_guard = 'crates/codewire-local-vmm/macos-sandbox-canary-experiment/Tests/test_static_contract.py'
@@ -374,7 +386,7 @@ receipt_owner = fixture / 'scripts/ci/receipts/local-prepush-receipt.py'
 preflight = fixture / 'scripts/dev/preflight.sh'
 receipt_cases = [dict(COMPOSITION_FAIL_TOOL=name) for name in
                  (Path(canary_guard).name, 'test-macos-vz-workload-network.py',
-                  'test-darwin-cross-check.sh')]
+                  'test-darwin-cross-check.sh', *image_guards)]
 receipt_cases += [dict(COMPOSITION_FAIL_ARGS=json.dumps(command)) for command in
                  (darwin_check, workload_test, workload_clippy, client_test, client_clippy, transcript_test)]
 for injected in receipt_cases:

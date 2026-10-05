@@ -62,16 +62,34 @@ mod tests {
 
     use super::*;
 
-    // The schema36 union must be measured in isolated PostgreSQL after
-    // composing account access, environment projection, typed SSH metadata,
-    // the GitHub singleton that
-    // every personal profile includes, the per-session two-factor setup skip,
-    // preview browser authorization, pending authenticator replacement, the
-    // runtime-dispatch lease environment scope, claim-time workspace binding,
-    // authority stamp and durable cw runtime request journal, through
-    // version36. Neither independently accepted schema35 is this union.
+    // Measured in isolated PostgreSQL after the accepted canonical history36
+    // and the additive metadata-only platform managed-agent journal at 37.
+    // The prior schema36 fingerprint remains independently pinned below.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
+        "69d20b7bc397b5217a7747fdd57c88029c55cc7c6b28e05fc5d28b764c31290d";
+    // Accepted canonical0c446 history, before the additive managed journal.
+    const ACCEPTED_PRE_PLATFORM_AGENT_SCHEMA_FINGERPRINT: &str =
         "96daaf4c0f9e867834ecca0ad6fcb7a87d807e2d85b5b61d92fbf003c6c2c6e0";
+
+    #[test]
+    fn platform_managed_journal_pins_accepted_history36() -> anyhow::Result<()> {
+        let prior: Vec<_> = MIGRATOR.iter().filter(|m| m.version < 37).collect();
+        anyhow::ensure!(prior.len() == 36);
+        let mut digest = Sha384::new();
+        for (index, m) in prior.iter().enumerate() {
+            anyhow::ensure!(m.version == index as i64 + 1);
+            digest.update(Sha384::digest(m.sql.as_bytes()));
+        }
+        anyhow::ensure!(
+            format!("{:x}", digest.finalize())
+                == "d6a1ecbf8b7c26b05521ed55741bbe20a44c01262a82b6a43524e6270e79aba02a7ebd7a820e48c4db2c1295860382a2"
+        );
+        anyhow::ensure!(
+            ACCEPTED_PRE_PLATFORM_AGENT_SCHEMA_FINGERPRINT
+                == "96daaf4c0f9e867834ecca0ad6fcb7a87d807e2d85b5b61d92fbf003c6c2c6e0"
+        );
+        Ok(())
+    }
     // Accepted table schema through version34, before the authority stamp.
     const ACCEPTED_PRE_AUTHORITY_STAMP_SCHEMA_FINGERPRINT: &str =
         "218a3ea293e6023d9023b3b133534bfeba823dd68e17818196d609032ccca1b5";
@@ -234,7 +252,7 @@ mod tests {
                 .await?;
             let after = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                after.len() == MIGRATOR.iter().count()
+                after.len() == MIGRATOR.iter().filter(|m| !m.migration_type.is_down_migration()).count()
                     && after[..18] == before
                     && after[18].0 == 19
                     && after[19].0 == 20
@@ -819,7 +837,7 @@ mod tests {
                 .await?;
             let after = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                after.len() == MIGRATOR.iter().count()
+                after.len() == MIGRATOR.iter().filter(|m| !m.migration_type.is_down_migration()).count()
                     && after[..23] == before
                     && after[23].0 == ACCOUNT_ACCESS_VERSION
             );
@@ -1805,7 +1823,7 @@ mod tests {
             ensure_schema(&test_db.url).await?;
             let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
             let after = applied_migrations(&pool).await?;
-            anyhow::ensure!(after.len() == MIGRATOR.iter().count() && after[..21] == before && after[21].0 == 22);
+            anyhow::ensure!(after.len() == MIGRATOR.iter().filter(|m| !m.migration_type.is_down_migration()).count() && after[..21] == before && after[21].0 == 22);
             let definitions = assert_platform_broker_lock_authority(&pool, true).await?;
             let binding: (String, i64, Option<String>) = sqlx::query_as(
                 "SELECT profile_id,profile_revision,personal_owner_confirmed_by \
@@ -1935,6 +1953,7 @@ mod tests {
             let first = applied_migrations(&pool).await?;
             let embedded: Vec<_> = MIGRATOR
                 .iter()
+                .filter(|migration| !migration.migration_type.is_down_migration())
                 .map(|migration| {
                     (
                         migration.version,
@@ -2021,7 +2040,7 @@ mod tests {
             assert_platform_credential_schema(&pool).await?;
             let after = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                after.len() == MIGRATOR.iter().count()
+                after.len() == MIGRATOR.iter().filter(|m| !m.migration_type.is_down_migration()).count()
                     && after[..17] == before
                     && after[17].0 == 18,
                 "migration history did not append to the exact accepted version-17 ledger"
@@ -3194,7 +3213,11 @@ mod tests {
                 .connect(&test_db.url)
                 .await?;
             anyhow::ensure!(
-                applied_migrations(&pool).await?.len() == MIGRATOR.iter().count(),
+                applied_migrations(&pool).await?.len()
+                    == MIGRATOR
+                        .iter()
+                        .filter(|m| !m.migration_type.is_down_migration())
+                        .count(),
                 "deployed migration 12 ledger did not advance to current history"
             );
             pool.close().await;
@@ -4220,7 +4243,13 @@ mod tests {
                 .connect(&test_db.url)
                 .await?;
             let applied = applied_migrations(&pool).await?;
-            anyhow::ensure!(applied.len() == MIGRATOR.iter().count());
+            anyhow::ensure!(
+                applied.len()
+                    == MIGRATOR
+                        .iter()
+                        .filter(|m| !m.migration_type.is_down_migration())
+                        .count()
+            );
             pool.close().await;
             anyhow::Ok(())
         }

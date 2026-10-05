@@ -296,7 +296,7 @@ pub(super) fn expectation(
     Ok(result)
 }
 
-pub(super) fn incarnation(
+pub(crate) fn incarnation(
     value: &proto::EnvironmentCwRuntimeIncarnation,
 ) -> AppResult<PlatformCwRuntimeIncarnation> {
     if !value.__buffa_unknown_fields.is_empty() {
@@ -350,7 +350,7 @@ pub(super) fn incarnation(
     Ok(result)
 }
 
-pub(super) fn proto_incarnation(
+pub(crate) fn proto_incarnation(
     value: &PlatformCwRuntimeIncarnation,
 ) -> AppResult<proto::EnvironmentCwRuntimeIncarnation> {
     Ok(proto::EnvironmentCwRuntimeIncarnation {

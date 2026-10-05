@@ -1,9 +1,15 @@
 //! Mandatory retained-Pod CW bootstrap/update/rollback acceptance.
 //!
-//! This tool never creates a Pod, resolves another environment, reconnects an
-//! attachment, restarts a process, retries a mutation, or executes intake bytes.
+//! The ordinary journey retains its original Pod, attachment and processes.
+//! Managed mode explicitly restarts the lead after known-clean family Stop.
+//! Each mutation is sent once and observed under its original request UUID.
 //! The Kind owner supplies producer-reopened assets and a synthetic login.
-//! Ordinary UID1000 sessions are covered; managed platform agents are not.
+//! Ordinary UID1000 sessions are covered. The explicit managed Kind mode also
+//! retains the original stock worker families through the same update journey.
+
+#[cfg(target_os = "linux")]
+#[path = "support/platform_managed.rs"]
+mod platform_managed;
 
 #[cfg(not(target_os = "linux"))]
 fn main() -> anyhow::Result<()> {
@@ -84,6 +90,23 @@ mod linux {
         let original = initial.incarnation.as_option().unwrap().clone();
         let image = initial.bootstrap_identity.as_option().unwrap().clone();
         admit_original_image(&image, &inputs.support.identity)?;
+        let mut managed = match std::env::var("SMOKE_CW_MANAGED_AGENTS") {
+            Err(std::env::VarError::NotPresent) => None,
+            Ok(value) if value == "1" => {
+                let mut journey = super::platform_managed::Journey::launch(
+                    &client,
+                    &inputs.org,
+                    &inputs.environment,
+                    &original,
+                    &image,
+                )
+                .await?;
+                journey.validate_scope(&original, &image)?;
+                journey.begin_continuity(&client).await?;
+                Some(journey)
+            }
+            _ => anyhow::bail!("managed Kind mode must be absent or exactly1"),
+        };
         let original_images = OriginalImages {
             support: &image,
             workspace: &inputs.a.identity,
@@ -102,7 +125,7 @@ mod linux {
         );
         let nonce = Uuid::new_v4().simple().to_string();
         let mut journal = InputJournal::create(&inputs.home, &nonce)?;
-        let launch_request = LaunchSessionRequest {
+        let mut launch_request = LaunchSessionRequest {
             org_id: inputs.org.clone(),
             environment_id: inputs.environment.clone(),
             command: vec![
@@ -134,6 +157,12 @@ mod linux {
             name: format!("cw-runtime-{}", &nonce[..16]),
             ..Default::default()
         };
+        if let Some(journey) = &managed {
+            launch_request.command.extend([
+                "--managed-peers-json".into(),
+                serde_json::to_string(&journey.process_witness())?,
+            ]);
+        }
         let launched = client
             .launch_session(launch_request.clone())
             .await
@@ -214,6 +243,8 @@ mod linux {
         let result = tokio::time::timeout(JOURNEY_BUDGET, async {
             let baseline = next_event(&mut events_rx).await?;
             validate_probe(&baseline, 0, "ready", "baseline", None, &original_images, None)?;
+            ensure!(baseline.managed.len() == if managed.is_some() { 9 } else { 0 },
+                "observer omitted the selected original managed process handles");
             let session = get_session(&client, &inputs, &launched.session_id).await?;
             validate_session(&session, &launched, false)?;
             ensure!(session.started_at.as_option().is_some(), "original session has no settled birth");
@@ -249,6 +280,9 @@ mod linux {
                 ensure!(event.samples > previous_samples, "observer sample counter regressed");
                 previous_samples = event.samples;
                 unchanged(&client, &inputs, &current, &session, &reader).await?;
+                if let Some(journey) = &managed {
+                    journey.checkpoint(&client, phase).await?;
+                }
                 operations.push(operation);
                 if phase == "bootstrapped-a" {
                     // These are valid typed requests with a stale captured
@@ -298,10 +332,48 @@ mod linux {
             ensure!(returned.samples > previous_samples, "observer sample counter regressed");
             previous_samples = returned.samples;
             unchanged(&client, &inputs, &current, &session, &reader).await?;
+            if let Some(journey) = &managed {
+                journey.checkpoint(&client, "rolled-back-a").await?;
+            }
+            let mut close_sequence = 4;
+            if let Some(journey) = &mut managed {
+                stage = "managed-controls-and-revocation";
+                journey.controls(&client).await?;
+                for (variable, prefix, worker) in [
+                    ("SMOKE_CW_MANAGED_OPENAI_CREDENTIAL", "kind-cw-openai-", 1),
+                    ("SMOKE_CW_MANAGED_ANTHROPIC_CREDENTIAL", "kind-cw-anthropic-", 2),
+                ] {
+                    let name = env(variable)?;
+                    ensure!(name.starts_with(prefix) && name.len() <= 100
+                        && name[prefix.len()..].bytes().all(|b| b.is_ascii_digit() || b == b'-'),
+                        "managed fixture credential name is outside the owned synthetic namespace");
+                    inputs.cli_json::<serde_json::Value>(&[
+                        "credentials", "--platform", "revoke", &name, "--output", "json",
+                    ]).await.context("revoke the exact selected synthetic provider credential")?;
+                    journey.revoked(&client, worker).await?;
+                }
+                unchanged(&client, &inputs, &current, &session, &reader).await?;
+                send(&client, &inputs, &session.session_id, b"{\"op\":\"managed-stop-ready\"}\n".to_vec()).await?;
+                let ready = next_event(&mut events_rx).await?;
+                validate_probe(&ready, 4, "managed-stop-ready", "rolled-back-a",
+                    Some(&inputs.a.identity), &original_images, Some(&baseline))?;
+                ensure!(ready.samples > previous_samples, "managed live observer samples regressed");
+                previous_samples = ready.samples;
+                stage = "managed-known-clean-stop";
+                journey.stop(&client).await?;
+                send(&client, &inputs, &session.session_id, b"{\"op\":\"managed-stopped\"}\n".to_vec()).await?;
+                let stopped = next_event(&mut events_rx).await?;
+                validate_probe(&stopped, 5, "managed-stopped", "rolled-back-a",
+                    Some(&inputs.a.identity), &original_images, Some(&baseline))?;
+                ensure!(stopped.samples > previous_samples && stopped.managed_terminal,
+                    "the original nine held managed process handles did not terminate");
+                previous_samples = stopped.samples;
+                close_sequence = 6;
+            }
             send(&client, &inputs, &session.session_id, b"{\"op\":\"close\"}\n".to_vec()).await?;
             stage = "close-and-history";
             let closed = next_event(&mut events_rx).await?;
-            validate_probe(&closed, 4, "closed", "closed", Some(&inputs.a.identity), &original_images,
+            validate_probe(&closed, close_sequence, "closed", "closed", Some(&inputs.a.identity), &original_images,
                 Some(&baseline))?;
             ensure!(closed.samples > previous_samples, "observer sample counter regressed");
             let captured = tokio::time::timeout(READ_BUDGET, &mut reader).await
@@ -312,6 +384,11 @@ mod linux {
             ensure!(final_session.output_end_offset==captured.len() as u64,"original final output cursor changed");
             let retained = retained_history(&client, &inputs, &session.session_id).await?;
             ensure!(retained == captured, "original retained history differs from the one attachment");
+            if let Some(journey) = &mut managed {
+                stage = "managed-restart-and-reconnect";
+                let reconnected = inputs.client()?;
+                journey.restart(&client, &reconnected).await?;
+            }
             inputs.recheck()?;
             ensure!(status(&client, &inputs).await? == current, "selection/incarnation changed at handoff");
             operations.push(operation);
@@ -328,7 +405,8 @@ mod linux {
                 "original_requests": submitted, "request_journal": journal.path,
                 "claims": ["UID1000_same_Pod", "original_kernel_processes",
                     "original_session_and_Attach", "ordinary_CW_A_B_A", "public_journal_no_replay"],
-                "not_claimed": ["platform_managed_agents", "live_providers", "physical_Mac"]
+                "managed_agents_qualified": managed.is_some(),
+                "not_claimed": ["live_providers", "physical_Mac"]
             }))?);
             Ok::<_, anyhow::Error>(())
         }).await.context("bounded same-Pod runtime journey expired").and_then(|r| r);
@@ -1730,6 +1808,10 @@ mod linux {
         uid: u32,
         gid: u32,
         actors: Actors,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        managed: std::collections::BTreeMap<String, Actor>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        managed_terminal: bool,
         selection: Option<Selection>,
         shell_terminal: bool,
         evidence: Evidence,
@@ -1760,6 +1842,61 @@ mod linux {
             "observer phase/custody is incomplete"
         );
         uuid(&event.boot_id)?;
+        ensure!(
+            matches!(event.managed.len(), 0 | 9),
+            "managed kernel actor inventory is incomplete"
+        );
+        ensure!(
+            event.managed_terminal
+                == (!event.managed.is_empty() && matches!(kind, "managed-stopped" | "closed")),
+            "managed kernel terminal custody differs from the admitted Stop phase"
+        );
+        if let Some(baseline) = baseline {
+            ensure!(
+                event.managed == baseline.managed,
+                "managed original kernel process identity changed"
+            );
+        }
+        for index in 0..event.managed.len() / 3 {
+            let driver = event
+                .managed
+                .get(&format!("managed{index}-driver"))
+                .context("managed original driver actor is missing")?;
+            let guardian = event
+                .managed
+                .get(&format!("managed{index}-guardian"))
+                .context("managed original guardian actor is missing")?;
+            let provider = event
+                .managed
+                .get(&format!("managed{index}-provider"))
+                .context("managed original provider actor is missing")?;
+            ensure!(
+                driver.parent_pid == event.actors.daemon.pid
+                    && guardian.parent_pid == driver.pid
+                    && provider.parent_pid == guardian.pid
+                    && driver.sha256 == image.sha256
+                    && guardian.sha256 == image.sha256
+                    && driver.size == image.size
+                    && guardian.size == image.size,
+                "managed original driver/guardian/provider lineage differs"
+            );
+            for actor in [driver, guardian, provider] {
+                ensure!(
+                    actor.pid > 0
+                        && actor.start_ticks > 0
+                        && matches!(actor.uid, 0 | 1000)
+                        && matches!(actor.gid, 0 | 1000)
+                        && actor.inode > 0
+                        && actor.links == 1
+                        && actor.mode & 0o170000 == 0o100000
+                        && actor.mode & 0o6022 == 0
+                        && actor.mode & 0o111 != 0
+                        && (1..=512 * 1024 * 1024).contains(&actor.size),
+                    "managed actor birth/executable identity is incomplete"
+                );
+                sha256(&actor.sha256)?;
+            }
+        }
         let actors = [
             &event.actors.supervisor,
             &event.actors.daemon,
@@ -1885,6 +2022,7 @@ mod linux {
         captured: Vec<u8>,
         partial: Vec<u8>,
         sequence: u32,
+        managed: bool,
         closed: bool,
     }
     impl OutputDecoder {
@@ -1896,6 +2034,7 @@ mod linux {
                 captured: vec![],
                 partial: vec![],
                 sequence: 0,
+                managed: false,
                 closed: false,
             }
         }
@@ -1937,9 +2076,27 @@ mod linux {
                     event.sequence == self.sequence
                         && event.nonce == self.nonce
                         && event.environment_id == self.environment
-                        && self.sequence <= 4
+                        && self.sequence <= if self.managed { 6 } else { 4 }
                         && !self.closed,
                     "observer replay/order/scope changed"
+                );
+                if self.sequence == 0 {
+                    ensure!(
+                        matches!(event.managed.len(), 0 | 9),
+                        "observer initial managed inventory is incomplete"
+                    );
+                    self.managed = !event.managed.is_empty();
+                }
+                let expected = match self.sequence {
+                    0 => "ready",
+                    1..=3 => "checkpoint",
+                    4 if self.managed => "managed-stop-ready",
+                    5 if self.managed => "managed-stopped",
+                    _ => "closed",
+                };
+                ensure!(
+                    event.event == expected,
+                    "observer skipped or changed the admitted lifecycle phase"
                 );
                 self.closed = event.event == "closed";
                 self.sequence += 1;
@@ -1957,7 +2114,9 @@ mod linux {
             original: &EnvironmentSession,
         ) -> anyhow::Result<()> {
             ensure!(
-                self.closed && self.sequence == 5 && self.partial.is_empty(),
+                self.closed
+                    && self.sequence == if self.managed { 7 } else { 5 }
+                    && self.partial.is_empty(),
                 "observer terminal preceded closed proof"
             );
             validate_session(view, original, true)?;
@@ -2640,6 +2799,8 @@ mod linux {
                     session: actor(3, 2, "/usr/bin/python3.13", &"e".repeat(64), 64),
                     shell: actor(4, 3, "/usr/bin/bash", &"f".repeat(64), 64),
                 },
+                managed: std::collections::BTreeMap::new(),
+                managed_terminal: false,
                 selection: Some(Selection {
                     logical_path: "/usr/local/bin/cw".into(),
                     resolved_path: selected.map_or_else(
@@ -2852,6 +3013,163 @@ mod linux {
                 stream: codewire_client::EnvironmentSessionOutputStream::Stdout.into(),
                 data,
                 ..Default::default()
+            }
+        }
+        fn managed_probe(
+            sequence: u32,
+            image: &CwPayloadIdentity,
+            a: &CwPayloadIdentity,
+            selected: Option<&CwPayloadIdentity>,
+        ) -> ProbeEvent {
+            let mut event = probe(sequence, image, a, selected);
+            for index in 0..3 {
+                let pid = 10 + index * 3;
+                for (offset, role, parent) in [
+                    (0, "driver", event.actors.daemon.pid),
+                    (1, "guardian", pid),
+                    (2, "provider", pid + 1),
+                ] {
+                    let mut actor = event.actors.daemon.clone();
+                    actor.pid = pid + offset;
+                    actor.parent_pid = parent;
+                    actor.start_ticks = actor.pid as u64 + 5;
+                    actor.inode = actor.pid as u64 + 100;
+                    if role == "provider" {
+                        actor.executable = "/opt/codewire/agents/codex".into();
+                        actor.sha256 = "e".repeat(64);
+                        actor.size = 64;
+                    }
+                    event
+                        .managed
+                        .insert(format!("managed{index}-{role}"), actor);
+                }
+            }
+            if sequence >= 4 {
+                event.event = match sequence {
+                    4 => "managed-stop-ready",
+                    5 => "managed-stopped",
+                    _ => "closed",
+                }
+                .into();
+                event.phase = if sequence == 6 {
+                    "closed"
+                } else {
+                    "rolled-back-a"
+                }
+                .into();
+                event.shell_terminal = sequence == 6;
+                event.managed_terminal = sequence >= 5;
+            }
+            event.evidence.path = format!(
+                "/home/codewire/.local/state/codewire/cw-runtime-proof/{NONCE}/{sequence:03}-{}.json",
+                event.event
+            );
+            seal_evidence(&mut event);
+            event
+        }
+        #[test]
+        fn managed_attachment_requires_original_nine_handles_and_ack_before_terminal_then_close() {
+            let image = identity('c', "ci");
+            let a = identity('a', "a");
+            let b = identity('b', "b");
+            let baseline = managed_probe(0, &image, &a, None);
+            let images = OriginalImages {
+                support: &proto_identity(&image),
+                workspace: &a,
+            };
+            let mut decoder = OutputDecoder::new(NONCE, ENVIRONMENT);
+            for (sequence, selected) in [
+                (0, None),
+                (1, Some(&a)),
+                (2, Some(&b)),
+                (3, Some(&a)),
+                (4, Some(&a)),
+                (5, Some(&a)),
+                (6, Some(&a)),
+            ] {
+                let event = managed_probe(sequence, &image, &a, selected);
+                validate_probe(
+                    &event,
+                    sequence,
+                    &event.event,
+                    &event.phase,
+                    selected,
+                    &images,
+                    if sequence == 0 { None } else { Some(&baseline) },
+                )
+                .unwrap();
+                let frames = decoder
+                    .push(frame(&event, decoder.captured.len() as u64))
+                    .unwrap();
+                assert_eq!(frames.len(), 1);
+            }
+            let original = session();
+            let mut terminal = original.clone();
+            terminal.state = EnvironmentSessionState::Exited.into();
+            terminal.exit_code = Some(0);
+            terminal.finished_at = Some(buffa_types::Timestamp::from_unix(9, 0)).into();
+            terminal.output_end_offset = decoder.captured.len() as u64;
+            decoder.finish(&terminal, &original).unwrap();
+            for change in 0..5 {
+                let mut wrong = managed_probe(5, &image, &a, Some(&a));
+                match change {
+                    0 => wrong.managed_terminal = false,
+                    1 => {
+                        wrong.managed.remove("managed1-guardian");
+                    }
+                    2 => {
+                        wrong
+                            .managed
+                            .get_mut("managed1-provider")
+                            .unwrap()
+                            .start_ticks += 1
+                    }
+                    3 => {
+                        wrong
+                            .managed
+                            .get_mut("managed1-provider")
+                            .unwrap()
+                            .parent_pid = 1
+                    }
+                    _ => wrong.managed.get_mut("managed1-driver").unwrap().sha256 = "f".repeat(64),
+                }
+                seal_evidence(&mut wrong);
+                assert!(
+                    validate_probe(
+                        &wrong,
+                        5,
+                        "managed-stopped",
+                        "rolled-back-a",
+                        Some(&a),
+                        &images,
+                        Some(&baseline)
+                    )
+                    .is_err()
+                );
+            }
+            // An ordinary observer cannot opt into the extra lifecycle midway;
+            // a managed observer cannot skip its readiness acknowledgement.
+            for managed in [false, true] {
+                let mut decoder = OutputDecoder::new(NONCE, ENVIRONMENT);
+                for sequence in 0..4 {
+                    let selected = if sequence == 0 { None } else { Some(&a) };
+                    let event = if managed {
+                        managed_probe(sequence, &image, &a, selected)
+                    } else {
+                        probe(sequence, &image, &a, selected)
+                    };
+                    decoder
+                        .push(frame(&event, decoder.captured.len() as u64))
+                        .unwrap();
+                }
+                let mut skipped = managed_probe(5, &image, &a, Some(&a));
+                skipped.sequence = 4;
+                seal_evidence(&mut skipped);
+                assert!(
+                    decoder
+                        .push(frame(&skipped, decoder.captured.len() as u64))
+                        .is_err()
+                );
             }
         }
         #[test]
