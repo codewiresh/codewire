@@ -2071,6 +2071,16 @@ fn managed_fixture_actual_actor_birth_path_and_terminal_refusals_do_not_signal()
     let other = root.path().join("other");
     fs::copy(&image, &other).unwrap();
     fs::set_permissions(&other, fs::Permissions::from_mode(0o500)).unwrap();
+    // Equal bytes at another inode cannot identify the running child. Keep
+    // the failed admission's bounded kernel identity useful for diagnosis.
+    let mismatch = OwnedChild::capture(child.id(), Some(&other))
+        .err()
+        .expect("a different executable inode must be refused")
+        .to_string();
+    let actual_image = fs::symlink_metadata(&image).unwrap();
+    let expected_image = fs::symlink_metadata(&other).unwrap();
+    assert_eq!(fs::read(&image).unwrap(), fs::read(&other).unwrap());
+    assert_ne!(actual_image.ino(), expected_image.ino());
     assert!(
         std::panic::catch_unwind(|| Actor::capture(
             child.id(),
@@ -2087,6 +2097,33 @@ fn managed_fixture_actual_actor_birth_path_and_terminal_refusals_do_not_signal()
     assert!(terminal(&owned.fd));
     assert!(std::panic::catch_unwind(|| actor.verify()).is_err());
     assert!(fs::symlink_metadata(&other).unwrap().is_file());
+    // Check diagnostics only after the original child has been reaped, so a
+    // regression here cannot leave the controlled process running.
+    let fields = mismatch
+        .strip_prefix("owned process image changed: ")
+        .expect("image refusal must retain fixed numeric identity")
+        .split_whitespace()
+        .map(|field| {
+            let (key, value) = field.split_once('=').unwrap();
+            (key, value.parse::<u64>().unwrap())
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert!(mismatch.len() <= 512);
+    assert_eq!(fields.len(), 10);
+    for (key, value) in [
+        ("pid", u64::from(child.id())),
+        ("birth", owned.birth),
+        ("parent", u64::from(std::process::id())),
+        ("euid", u64::from(unsafe { libc::geteuid() })),
+        ("expected_dev", expected_image.dev()),
+        ("expected_ino", expected_image.ino()),
+        ("expected_len", expected_image.len()),
+        ("actual_dev", actual_image.dev()),
+        ("actual_ino", actual_image.ino()),
+        ("actual_len", actual_image.len()),
+    ] {
+        assert_eq!(fields.get(key), Some(&value), "missing identity {key}");
+    }
 }
 
 #[test]

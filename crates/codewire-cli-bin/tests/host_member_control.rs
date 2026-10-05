@@ -321,7 +321,18 @@ impl OwnedChild {
             if (actual.dev(), actual.ino(), actual.len())
                 != (expected.dev(), expected.ino(), expected.len())
             {
-                return Err(std::io::Error::other("owned process image changed"));
+                return Err(std::io::Error::other(format!(
+                    "owned process image changed: pid={pid} birth={birth} parent={parent} euid={} \
+                     expected_dev={} expected_ino={} expected_len={} \
+                     actual_dev={} actual_ino={} actual_len={}",
+                    unsafe { libc::geteuid() },
+                    expected.dev(),
+                    expected.ino(),
+                    expected.len(),
+                    actual.dev(),
+                    actual.ino(),
+                    actual.len(),
+                )));
             }
         }
         let value = Self { fd, proc, birth };
