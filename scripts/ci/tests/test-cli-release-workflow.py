@@ -2,13 +2,17 @@
 """Structural proof of the cw release workflow's capability boundaries.
 
 Compilation runs in a job with no OIDC, signing, mirror or R2 capability; the
-signing/publishing job needs a successful build; the R2 route is inactive by
-default and refuses before acquiring a credential; promotion defaults to none.
-Each property is also shown to reject a mutated workflow.
+signing/publishing job needs a successful build; R2 publication is opt-in and
+inactive or unknown route values refuse before acquiring a credential; promotion
+defaults to none. Each property rejects a mutated workflow. The exact route guard
+is also exercised with a private fake credential reader, without credentials.
 """
 
+import os
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -60,7 +64,8 @@ def check(text, ci_text):
 
     header = text.split("\njobs:\n", 1)[0]
     need("enable-openid-connect" not in header, "OIDC is enabled for every job")
-    need("  CW_RELEASE_R2_ROUTE_ADMITTED: 'false'" in header, "the R2 route is not inactive by default")
+    need(re.findall(r"^  CW_RELEASE_R2_ROUTE_ADMITTED: '([^'\n]*)'$", header, re.M) == ["true"],
+         "the R2 route is not exactly the admitted true value")
     need(re.search(r"r2_publication:\n(?:        .*\n)*?        default: none", header) is not None,
          "R2 publication does not default to none")
     need(re.search(r"r2_promote_channel:\n(?:        .*\n)*?        default: none", header) is not None,
@@ -133,7 +138,8 @@ MUTATIONS = {
                                            "          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}\n"
                                            "          CW_RELEASE_GPG_PRIVATE_KEY: ${{ secrets.CW_RELEASE_GPG_PRIVATE_KEY }}\n"
                                            "          CW_RELEASE_SOURCE_SHA", 1),
-    "route admitted": lambda t: t.replace("CW_RELEASE_R2_ROUTE_ADMITTED: 'false'", "CW_RELEASE_R2_ROUTE_ADMITTED: 'true'"),
+    "route inactive": lambda t: t.replace("CW_RELEASE_R2_ROUTE_ADMITTED: 'true'", "CW_RELEASE_R2_ROUTE_ADMITTED: 'false'"),
+    "route unknown": lambda t: t.replace("CW_RELEASE_R2_ROUTE_ADMITTED: 'true'", "CW_RELEASE_R2_ROUTE_ADMITTED: 'unknown'"),
     "promotion default": lambda t: t.replace("        default: none\n        options: [none, stable]",
                                              "        default: stable\n        options: [none, stable]"),
     "credential before admission": lambda t: t.replace(
@@ -150,6 +156,53 @@ MUTATIONS = {
 }
 
 
+def route_guard_cases(text):
+    """Run the existing pre-read shell through its first credential-reader call."""
+    probe = dict(steps(jobs(text)["package-release"]))["Reuse an already-published signed R2 release"]
+    shell = probe.split("        run: |\n", 1)[1]
+    lines = shell.splitlines()
+    fetch = '../scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh "$r2_work/aws-credentials"'
+    matches = [index for index, line in enumerate(lines) if line == "          " + fetch]
+    if len(matches) != 1 or any(not line.startswith("          ") for line in lines[:matches[0] + 1]):
+        raise ValueError("the exact pre-read route prefix was not found")
+    prefix = "\n".join(line[10:] for line in lines[:matches[0] + 1]) + "\n"
+    temp_root = ROOT / ".tmp"
+    temp_root.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="cw-release-route-", dir=temp_root) as directory:
+        work = Path(directory)
+        source = work / ".release-source"
+        source.mkdir(mode=0o700)
+        home = work / "home"
+        home.mkdir(mode=0o700)
+        fake = work / "scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh"
+        fake.parent.mkdir(parents=True)
+        fake.write_text('#!/bin/sh\nset -eu\n[ "$#" = 1 ]\nprintf \'%s\\n\' "$1" > "$CREDENTIAL_CALL"\n')
+        fake.chmod(0o700)
+        cases = (("true", "true"), ("false", "false"), ("unknown", "unknown"),
+                 ("empty", ""), ("unset", None))
+        for name, value in cases:
+            runner_temp = work / name
+            runner_temp.mkdir(mode=0o700)
+            witness = runner_temp / "credential-call"
+            env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "LC_ALL": "C",
+                   "RUNNER_TEMP": str(runner_temp), "CREDENTIAL_CALL": str(witness)}
+            if value is not None:
+                env["CW_RELEASE_R2_ROUTE_ADMITTED"] = value
+            result = subprocess.run(["/usr/bin/bash", "-c", prefix], cwd=source, env=env,
+                                    stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=False)
+            credential_dir = runner_temp / "codewire-release-r2"
+            if value == "true":
+                expected_call = str(credential_dir / "aws-credentials") + "\n"
+                if (result.returncode != 0 or not witness.is_file()
+                        or witness.read_text() != expected_call
+                        or credential_dir.stat().st_uid != os.geteuid()
+                        or credential_dir.stat().st_mode & 0o777 != 0o700):
+                    raise RuntimeError("the admitted route did not reach exactly one private reader")
+            elif result.returncode == 0 or witness.exists() or credential_dir.exists():
+                raise RuntimeError(f"route {name} did not refuse before credential setup/read")
+        return len(cases)
+
+
 def main():
     text, ci_text = WORKFLOW.read_text(), CI.read_text()
     errors = check(text, ci_text)
@@ -161,7 +214,13 @@ def main():
         if mutated == text or not check(mutated, ci_text):
             print(f"test-cli-release-workflow: FAIL mutation {name!r} was not rejected", file=sys.stderr)
             return 1
-    print(f"test-cli-release-workflow: PASS properties=accepted mutations_rejected={len(MUTATIONS)}")
+    try:
+        route_cases = route_guard_cases(text)
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+        print(f"test-cli-release-workflow: FAIL pre-read route proof: {error}", file=sys.stderr)
+        return 1
+    print(f"test-cli-release-workflow: PASS properties=accepted mutations_rejected={len(MUTATIONS)} "
+          f"pre_read_route_cases={route_cases}")
     return 0
 
 

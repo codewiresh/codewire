@@ -29,9 +29,9 @@ env:
   CARGO_ZIGBUILD_VERSION: 0.23.0
   OPENBAO_GITHUB_ROLE: codewire-source-cli-github-mirror
   OPENBAO_GITHUB_AUDIENCE: openbao-codewire-source-cli-github-mirror
-  # The R2 release route stays inactive until its OpenBao role, policy and
-  # runner egress are admitted (docs/runbooks/cw-release-delivery.md).
-  CW_RELEASE_R2_ROUTE_ADMITTED: 'false'
+  # The scoped R2 release route is admitted; publication and channel changes
+  # remain explicit dispatch inputs (docs/runbooks/cw-release-delivery.md).
+  CW_RELEASE_R2_ROUTE_ADMITTED: 'true'
 
 jobs:
   release-selection:

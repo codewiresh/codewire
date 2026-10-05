@@ -32,13 +32,18 @@ version can still be selected or reused, but a new version is refused.
 make cli-install                      # build, then `cw install --managed`
 cw update status [--json]
 cw update --from DIR --sha256 HEX     # pinned local release: DIR/cw + DIR/cw-runtime.json
+cw update --version v1.2.3           # explicit signed public release
+cw update --channel stable           # signed channel, with installed-version regression refusal
 cw update rollback [--to VERSION]     # previous, or a digest, 8+ digit prefix or package version
 ```
 
 `--expect-generation N` refuses a change unless the selection generation is
-still `N`. `cw update` without `--from` reports that public releases are not
-available. Public fetching stays disabled until a release signing key is
-admitted; a synthetic test key is never production trust.
+still `N`. Public fetching is implemented with the compiled release primary key;
+`--version` or `--channel stable` selects signed assets at the fixed public origin.
+Unavailable assets or origin refuse before selection; `cw update` alone requires
+an explicit source. Local `--from`/`--sha256` updates and retained rollback remain
+available. A synthetic test key is never production trust. See
+[cw release delivery](../runbooks/cw-release-delivery.md#explicit-public-updates).
 
 `cw-runtime.json` is the schema-2 cw identity (`schema_version`,
 `protocol_version`, `record_version`, `package_version`, `target`,

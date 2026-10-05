@@ -496,6 +496,7 @@ run_mock_verifier() {
   printf '%s\n' "${4:-}" >"$work/current-fixture-mode"
   printf '%s\n' "${MOCK_PRODUCER_RESULT:-}" >"$work/reuse-producer-result"
   local -a invocation=(env PATH="$work/bin:$PATH" \
+    CODEWIRE_VERSION=0.0.0-ci \
     CODEWIRE_DOCKER_BIN="$work/bin/docker" \
     CODEWIRE_SCCACHE_MODE="${MOCK_COMPILER:-local}" \
     CODEWIRE_BUILDKIT_CACHE_MODE="${MOCK_LAYERS:-local}" \
