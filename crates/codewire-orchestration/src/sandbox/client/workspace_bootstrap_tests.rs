@@ -75,6 +75,8 @@ enum Race {
     DaemonImage,
     /// Another writer inserts a volume ahead of the daemon volume.
     DaemonVolumeMoved,
+    /// The controller updates the Sandbox before every write.
+    SandboxVersionEveryPatch,
 }
 struct Fixture {
     claim: Value,
@@ -203,11 +205,20 @@ fn client(fixture: Fixture) -> (SandboxClient, Arc<Mutex<Fixture>>) {
                 if is_sandbox && matches!(state.race, Some(Race::SandboxVersion)) { state.sandbox["metadata"]["resourceVersion"] = json!("31"); }
                 if is_sandbox && matches!(state.race, Some(Race::SandboxMode)) { state.sandbox["spec"]["operatingMode"] = json!("Running"); }
                 if is_template && matches!(state.race, Some(Race::TemplateVersion)) { state.template["metadata"]["resourceVersion"] = json!("21"); }
+                if is_sandbox && matches!(state.race, Some(Race::SandboxVersionEveryPatch)) {
+                    let version: u64 = state.sandbox["metadata"]["resourceVersion"].as_str().unwrap().parse().unwrap();
+                    state.sandbox["metadata"]["resourceVersion"] = json!((version + 1).to_string());
+                }
                 if is_sandbox && matches!(state.race, Some(Race::DaemonImage)) { *daemon_reference_mut(&mut state.sandbox) = json!(CONCURRENT_DAEMON_IMAGE); }
                 if is_sandbox && matches!(state.race, Some(Race::DaemonVolumeMoved)) {
                     state.sandbox["spec"]["podTemplate"]["spec"]["volumes"].as_array_mut().unwrap()
                         .insert(0, json!({"name":"inserted","emptyDir":{}}));
                 }
+            }
+            if method == Method::DELETE {
+                assert!(path.ends_with(&format!("/pods/{POD}")), "only the workspace Pod is ever deleted");
+                return Response::builder().status(StatusCode::OK).header("content-type","application/json")
+                    .body(Body::from(json!({"apiVersion":"v1","kind":"Status","status":"Success","code":200}).to_string())).unwrap();
             }
             let object = if path.contains("/sandboxclaims/") { &mut state.claim }
                 else if path.contains("/sandboxwarmpools/") { &mut state.pool }
@@ -2595,5 +2606,177 @@ async fn a_re_pinned_replacement_certifies_its_bootstrap() {
             )
             .await
             .unwrap()
+    );
+}
+
+// ------------- daemon image re-pin before a Pod replacement (review of #2445)
+
+/// A running copy of `before`, whose Pod is the observed incarnation.
+fn running(mut before: Fixture) -> Fixture {
+    before.sandbox["spec"]["operatingMode"] = json!("Running");
+    before
+}
+
+/// The fenced re-pin a Pod replacement writes: UID and resourceVersion
+/// tests, then the entry's tests and replace. No operating mode.
+fn replacement_patch(version: &str, repin: [Value; 3]) -> Value {
+    let mut patch = vec![
+        json!({"op":"test","path":"/metadata/uid","value":"sandbox-incarnation"}),
+        json!({"op":"test","path":"/metadata/resourceVersion","value":version}),
+    ];
+    patch.extend(repin);
+    Value::Array(patch)
+}
+
+/// The methods and paths after the Claim and Pod reads, in order.
+fn writes(state: &Fixture) -> Vec<(Method, String)> {
+    state
+        .requests
+        .iter()
+        .filter(|(method, _, _)| *method != Method::GET)
+        .map(|(method, path, _)| (method.clone(), path.rsplit('/').next().unwrap().to_owned()))
+        .collect()
+}
+
+async fn replace_pod(
+    before: Fixture,
+    support_image: &str,
+) -> (anyhow::Result<()>, Arc<Mutex<Fixture>>) {
+    let (client, state) = client(before);
+    let result = client
+        .replace_workspace_pod_if_uid(ENV, POD, "pod-incarnation", support_image)
+        .await;
+    (result, state)
+}
+
+/// Daemon repair, restart-mode resize and terminal-Pod replacement rebuild
+/// the Pod from the Sandbox's spec: they re-pin it, with the fenced entry
+/// operations and no operating mode, before deleting the Pod.
+#[tokio::test]
+async fn a_pod_replacement_re_pins_the_running_sandbox_first() {
+    for (copy, repin) in [
+        (false, repin_operations(OLD_DAEMON_IMAGE, DAEMON_IMAGE)),
+        (true, init_repin_operations(OLD_DAEMON_IMAGE, DAEMON_IMAGE)),
+    ] {
+        let before = running(if copy {
+            stale_copy_fixture(Some("commodity"))
+        } else {
+            stale_daemon_fixture()
+        });
+        let sandbox = before.sandbox.clone();
+        let (result, state) = replace_pod(before, DAEMON_IMAGE).await;
+        result.unwrap();
+        let state = state.lock().unwrap();
+        assert_eq!(patches(&state), [&replacement_patch("30", repin)]);
+        assert_eq!(
+            writes(&state),
+            [
+                (Method::PATCH, SANDBOX.to_owned()),
+                (Method::DELETE, POD.to_owned())
+            ]
+        );
+        let mut expected = sandbox;
+        if copy {
+            expected["spec"]["podTemplate"]["spec"]["initContainers"][0]["image"] =
+                json!(DAEMON_IMAGE);
+        } else {
+            *daemon_reference_mut(&mut expected) = json!(DAEMON_IMAGE);
+        }
+        assert_eq!(state.sandbox, expected, "copy={copy}");
+        assert_eq!(state.sandbox["spec"]["operatingMode"], "Running");
+    }
+}
+
+/// A current, kept or confidential daemon is not written; the Pod is still
+/// replaced. A Pod already gone or replaced is neither re-pinned for nor
+/// deleted.
+#[tokio::test]
+async fn a_pod_replacement_writes_only_a_re_pinnable_daemon() {
+    for (label, before) in [
+        ("current", running(fixture())),
+        (
+            "confidential",
+            running(stale_copy_fixture(Some("confidential"))),
+        ),
+        ("unlisted", {
+            let mut fixture = running(stale_daemon_fixture());
+            *daemon_reference_mut(&mut fixture.sandbox) = json!(format!(
+                "registry.example/codewire/gateway@{OLD_DAEMON_DIGEST}"
+            ));
+            fixture
+        }),
+    ] {
+        let (result, state) = replace_pod(before, DAEMON_IMAGE).await;
+        result.unwrap();
+        assert_eq!(
+            writes(&state.lock().unwrap()),
+            [(Method::DELETE, POD.to_owned())],
+            "{label}"
+        );
+    }
+    let mut replaced = running(stale_daemon_fixture());
+    replaced.pod["metadata"]["uid"] = json!("replacement-pod");
+    let (result, state) = replace_pod(replaced, DAEMON_IMAGE).await;
+    result.unwrap();
+    let state = state.lock().unwrap();
+    assert!(writes(&state).is_empty());
+    assert!(
+        state
+            .requests
+            .iter()
+            .all(|(_, path, _)| path.contains("/pods/"))
+    );
+}
+
+/// The controller's status writes change a running Sandbox's
+/// resourceVersion: a conflicting re-pin is read and planned again, up to
+/// three times, and a re-pin that keeps conflicting or finds another
+/// Sandbox fails before the Pod is deleted, naming its cause.
+#[tokio::test]
+async fn a_pod_replacement_re_pin_retries_conflicts_within_its_bound() {
+    let mut once = running(stale_daemon_fixture());
+    once.race = Some(Race::SandboxVersion);
+    let (result, state) = replace_pod(once, DAEMON_IMAGE).await;
+    result.unwrap();
+    {
+        let state = state.lock().unwrap();
+        assert_eq!(
+            patches(&state),
+            [
+                &replacement_patch("30", repin_operations(OLD_DAEMON_IMAGE, DAEMON_IMAGE)),
+                &replacement_patch("31", repin_operations(OLD_DAEMON_IMAGE, DAEMON_IMAGE)),
+            ]
+        );
+        assert_eq!(writes(&state).last().unwrap().0, Method::DELETE);
+    }
+
+    let mut always = running(stale_daemon_fixture());
+    always.race = Some(Race::SandboxVersionEveryPatch);
+    let (result, state) = replace_pod(always, DAEMON_IMAGE).await;
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("daemon image kept conflicting") && error.contains("Conflict"),
+        "{error}"
+    );
+    {
+        let state = state.lock().unwrap();
+        assert_eq!(patches(&state).len(), 3);
+        assert!(
+            writes(&state)
+                .iter()
+                .all(|(method, _)| *method != Method::DELETE)
+        );
+    }
+
+    let mut replaced = running(stale_daemon_fixture());
+    replaced.race = Some(Race::SandboxUid);
+    let (result, state) = replace_pod(replaced, DAEMON_IMAGE).await;
+    assert!(result.unwrap_err().to_string().contains("was replaced"));
+    let state = state.lock().unwrap();
+    assert_eq!(patches(&state).len(), 1);
+    assert!(
+        writes(&state)
+            .iter()
+            .all(|(method, _)| *method != Method::DELETE)
     );
 }

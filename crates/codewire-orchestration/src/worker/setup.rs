@@ -654,7 +654,7 @@ impl WorkerSetupOps<'_> {
     /// The support image a recovery resume re-pins the daemon to: the one
     /// create renders.
     fn support_image(&self) -> &str {
-        crate::sandbox::template::effective_support_image(&self.ctx.sandbox_cfg.gateway_image)
+        self.ctx.sandbox_cfg.support_image()
     }
 
     fn cancellation_requested(&self) -> bool {

@@ -898,6 +898,9 @@ fn plan_daemon_image<'a>(
     })
 }
 
+/// Reads and fenced writes one Pod-replacement re-pin may make.
+const DAEMON_REPIN_ATTEMPTS: usize = 3;
+
 static DAEMON_IMAGE_PLANS: OnceLock<IntCounterVec> = OnceLock::new();
 
 /// Count one daemon-image decision by its outcome.
@@ -1834,6 +1837,101 @@ impl SandboxClient {
             .await?;
         self.wait_for_replacement_workspace_pod(&pod_name, &old.uid, timeout)
             .await
+    }
+
+    /// Replace one running workspace Pod incarnation on the current daemon:
+    /// observe it, re-pin its Sandbox's daemon image
+    /// ([`Self::repin_daemon_image`]), then delete it with its UID
+    /// precondition. The controller builds the replacement from the re-pinned
+    /// spec. A Pod already gone or replaced is left alone, and is not re-pinned
+    /// for. Daemon repair, restart-mode resize and terminal-Pod replacement
+    /// replace Pods this way.
+    pub async fn replace_workspace_pod_if_uid(
+        &self,
+        env_id: &str,
+        pod_name: &str,
+        previous_uid: &str,
+        support_image: &str,
+    ) -> anyhow::Result<()> {
+        if pod_name.trim().is_empty() {
+            anyhow::bail!("workspace Pod name is required");
+        }
+        if previous_uid.trim().is_empty() {
+            anyhow::bail!("previous workspace Pod UID is required");
+        }
+        match self.get_workspace_pod_identity_by_name(pod_name).await? {
+            Some(current) if current.uid == previous_uid => {}
+            _ => return Ok(()),
+        }
+        self.repin_daemon_image(env_id, support_image).await?;
+        self.delete_workspace_pod_if_uid(pod_name, previous_uid)
+            .await
+    }
+
+    /// Re-pin the bound Sandbox's daemon image ([`plan_daemon_image`]) while it
+    /// stays Running, before its Pod is replaced. The controller never
+    /// rewrites a running Pod, so this changes only the next one. The patch
+    /// carries no operating mode: it tests the Sandbox's UID and
+    /// resourceVersion and the daemon entry, then replaces only its image.
+    /// The controller keeps updating a running Sandbox's status, so a
+    /// conflicting write is read and planned again, at most
+    /// [`DAEMON_REPIN_ATTEMPTS`] times, and only for the first observed UID.
+    pub async fn repin_daemon_image(
+        &self,
+        env_id: &str,
+        support_image: &str,
+    ) -> anyhow::Result<()> {
+        let name = self.bound_sandbox_name(env_id).await?;
+        let sandboxes = self.sandboxes();
+        let mut incarnation: Option<String> = None;
+        let mut conflict = String::new();
+        for _ in 0..DAEMON_REPIN_ATTEMPTS {
+            let sandbox = sandboxes
+                .get(&name)
+                .await
+                .map_err(|e| anyhow::anyhow!("get Sandbox {name}: {e}"))?;
+            let uid = runtime_object_uid(&sandbox.metadata, &self.namespace, &name)?.to_owned();
+            anyhow::ensure!(
+                *incarnation.get_or_insert_with(|| uid.clone()) == uid,
+                "Sandbox {name} was replaced during its daemon image re-pin"
+            );
+            let version = sandbox
+                .metadata
+                .resource_version
+                .as_deref()
+                .filter(|version| !version.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("Sandbox {name} has no resource version"))?;
+            let Some(repin) = daemon_image_repin(&sandbox, support_image)? else {
+                return Ok(());
+            };
+            let mut operations = vec![
+                serde_json::json!({"op":"test","path":"/metadata/uid","value":uid}),
+                serde_json::json!({"op":"test","path":"/metadata/resourceVersion","value":version}),
+            ];
+            operations.extend(repin.operations.iter().cloned());
+            let patch = Patch::Json::<()>(serde_json::from_value(Value::Array(operations))?);
+            match sandboxes
+                .patch(&name, &PatchParams::default(), &patch)
+                .await
+            {
+                Ok(updated) => {
+                    anyhow::ensure!(
+                        runtime_object_uid(&updated.metadata, &self.namespace, &name)? == uid,
+                        "Sandbox {name} was replaced during its daemon image re-pin"
+                    );
+                    log_daemon_image_repin(&updated, &name, &repin, support_image);
+                    return Ok(());
+                }
+                // A failed `test` is 422; an apiserver conflict is 409.
+                Err(kube::Error::Api(status)) if matches!(status.code, 409 | 422) => {
+                    conflict = kube::Error::Api(status).to_string();
+                }
+                Err(error) => {
+                    anyhow::bail!("re-pin Sandbox {name} daemon image: {error}")
+                }
+            }
+        }
+        anyhow::bail!("re-pin Sandbox {name} daemon image kept conflicting: {conflict}")
     }
 
     /// Delete the old workspace incarnation only when it still has the

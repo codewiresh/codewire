@@ -61,6 +61,7 @@ async fn admitted_repair(fixture: &LeaseFixture, sandbox: SandboxClient) -> Daem
             name: "workspace-old".into(),
             uid: "uid-old".into(),
         },
+        support_image: crate::sandbox::template::DEFAULT_GATEWAY_IMAGE.into(),
     }
 }
 

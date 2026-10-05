@@ -1195,6 +1195,18 @@ pub(crate) async fn record_workspace_binding(
                 // §5.6: an unbound identity-free Pod that failed a check never
                 // serves. The UID precondition never deletes a replacement.
                 let pod = observation.pod();
+                // Its replacement starts on the current daemon. A failed
+                // re-pin never keeps the failed Pod serving.
+                if let Some(cfg) = cfg
+                    && let Err(error) = authority
+                        .run_external_mutation(
+                            states,
+                            client.repin_daemon_image(&env.id, cfg.support_image()),
+                        )
+                        .await
+                {
+                    tracing::warn!(env = %env.id, %error, "could not re-pin the daemon image of an unbound workspace Pod's Sandbox");
+                }
                 authority
                     .run_external_mutation(
                         states,
