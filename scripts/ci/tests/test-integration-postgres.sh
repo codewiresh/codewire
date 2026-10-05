@@ -150,6 +150,7 @@ export FAKE_CARGO_LOG
 : > "$FAKE_CARGO_LOG"
 if invalid_network_output="$(
   CARGO_TARGET_DIR="$TMP/target" \
+    CODEWIRE_CARGO_CI_TARGET_DIR="$TMP/target" \
     RUN_DIR="$TMP/invalid-network" \
     INTEGRATION_DOCKER_NETWORK='invalid/network' \
     DATABASE_URL='postgres://synthetic:synthetic@127.0.0.1:60003/synthetic' \
@@ -165,6 +166,7 @@ grep -Fq 'invalid integration Docker network or NATS alias' \
 
 if missing_scope_output="$(
   CARGO_TARGET_DIR="$TMP/target" \
+    CODEWIRE_CARGO_CI_TARGET_DIR="$TMP/target" \
     RUN_DIR="$TMP/missing-service-scope" \
     DATABASE_URL='postgres://synthetic:synthetic@127.0.0.1:60003/synthetic' \
     DATABASE_URL_RUST='postgres://synthetic:synthetic@127.0.0.1:60003/synthetic' \
