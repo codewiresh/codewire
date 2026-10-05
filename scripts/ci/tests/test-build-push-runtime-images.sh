@@ -299,10 +299,76 @@ if (
     CODEWIRE_SCCACHE_MODE=r2 \
     scripts/ci/images/build-push-runtime-images.sh
 ) >"$work/rejected.stdout" 2>"$work/rejected.stderr"; then
-  fail "protected runtime wrapper accepted shared R2 credentials"
+  fail "protected runtime wrapper accepted shared R2 credentials without a prefix"
 fi
-grep -Fq 'Protected runtime builds may use only job-local or disabled sccache' \
-  "$work/rejected.stderr" || fail "shared-cache rejection was not attributable"
+grep -Fq 'Protected runtime builds may use only the protected R2 compiler-cache prefix' \
+  "$work/rejected.stderr" || fail "prefix-less shared-cache rejection was not attributable"
+
+if (
+  cd "$fixture"
+  PATH="$fixture/bin:$PATH" \
+    RUNNER_TEMP="$fixture/tmp" \
+    DOCKER_LOG="$docker_log" \
+    BUILD_LOG="$build_log" \
+    SLEEP_LOG="$sleep_log" \
+    GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
+    GITHUB_OUTPUT="$work/untrusted-output" \
+    CODEWIRE_SCCACHE_MODE=r2 \
+    CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/v1 \
+    scripts/ci/images/build-push-runtime-images.sh
+) >"$work/untrusted.stdout" 2>"$work/untrusted.stderr"; then
+  fail "protected runtime wrapper accepted the untrusted R2 cache prefix"
+fi
+grep -Fq 'Protected runtime builds may use only the protected R2 compiler-cache prefix' \
+  "$work/untrusted.stderr" || fail "untrusted-prefix rejection was not attributable"
+
+# A protected prefix inside the untrusted bucket is writable by pull-request
+# builds, so the prefix alone never admits the shared cache.
+if (
+  cd "$fixture"
+  PATH="$fixture/bin:$PATH" \
+    RUNNER_TEMP="$fixture/tmp" \
+    DOCKER_LOG="$docker_log" \
+    BUILD_LOG="$build_log" \
+    SLEEP_LOG="$sleep_log" \
+    GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
+    GITHUB_OUTPUT="$work/untrusted-bucket-output" \
+    CODEWIRE_SCCACHE_MODE=r2 \
+    CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
+    SCCACHE_BUCKET=example-ci-cache-untrusted \
+    SCCACHE_ENDPOINT=https://00000000000000000000000000000000.r2.cloudflarestorage.com \
+    scripts/ci/images/build-push-runtime-images.sh
+) >"$work/untrusted-bucket.stdout" 2>"$work/untrusted-bucket.stderr"; then
+  fail "protected runtime wrapper accepted the untrusted R2 cache bucket"
+fi
+grep -Fq 'Protected runtime builds may use only the protected R2 compiler-cache bucket' \
+  "$work/untrusted-bucket.stderr" || fail "untrusted-bucket rejection was not attributable"
+[[ ! -s "$work/untrusted-bucket-output" ]] ||
+  fail "untrusted-bucket rejection emitted runtime image outputs"
+
+protected_r2_output="$work/protected-r2-output"
+protected_r2_build_log="$work/protected-r2-build.log"
+(
+  cd "$fixture"
+  PATH="$fixture/bin:$PATH" \
+    RUNNER_TEMP="$fixture/tmp" \
+    DOCKER_LOG="$work/protected-r2-docker.log" \
+    BUILD_LOG="$protected_r2_build_log" \
+    SLEEP_LOG="$work/protected-r2-sleep.log" \
+    GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
+    GITHUB_RUN_ID=46 \
+    GITHUB_RUN_ATTEMPT=1 \
+    GITHUB_OUTPUT="$protected_r2_output" \
+    CODEWIRE_SCCACHE_MODE=r2 \
+    CODEWIRE_SCCACHE_PREFIX=protected/codewire/v1 \
+    SCCACHE_BUCKET=example-ci-cache-protected \
+    SCCACHE_ENDPOINT=https://00000000000000000000000000000000.r2.cloudflarestorage.com \
+    scripts/ci/images/build-push-runtime-images.sh
+)
+[[ "$(wc -l <"$protected_r2_output" | tr -d ' ')" -eq 10 ]] ||
+  fail "protected-prefix R2 build did not emit the exact five-image set"
+[[ "$(cut -d'|' -f4 "$protected_r2_build_log" | sort -u)" = r2 ]] ||
+  fail "protected-prefix R2 mode did not reach every product build"
 
 # Selective rebuild: the trusted planner's per-family change context carries
 # certified-unaffected images forward from the deployed baseline source while

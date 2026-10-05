@@ -1505,6 +1505,16 @@ if [ "$event_selected" = false ]; then
         select_token security
         recognized=true
         ;;
+      scripts/ci/setup/fetch-openbao-sccache-r2-protected-credentials.sh|\
+      scripts/ci/setup/select-protected-rust-cache.sh|\
+      scripts/ci/tests/test-fetch-openbao-sccache-r2-protected-credentials.sh|\
+      scripts/ci/tests/test-select-protected-rust-cache.sh)
+        select_token deploy
+        select_token policy
+        select_token release
+        select_token security
+        recognized=true
+        ;;
       Dockerfile|docker-bake.hcl|apps/*/Dockerfile*|deployments/docker/*|\
       scripts/ci/images/build-kind-images.sh|scripts/ci/images/build-push-runtime-images.sh|\
       scripts/ci/images/run-rust-build.sh|scripts/ci/tests/test-run-rust-build.sh)
