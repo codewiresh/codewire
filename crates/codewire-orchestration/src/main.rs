@@ -376,19 +376,19 @@ async fn main() -> anyhow::Result<()> {
         )
         .into_router();
 
-    let readiness_secrets = secrets;
+    // The Transit canary costs OpenBao round trips, so a background loop
+    // verifies it and `/readyz` reads the latest fail-closed verdict (#2430).
+    let secret_readiness = worker::secret_readiness::SecretReadiness::spawn(
+        worker::secret_readiness::SecretReadinessPolicy::default(),
+        move || {
+            let secrets = secrets.clone();
+            async move { secrets.verify_readiness().await }
+        },
+    );
     let app = AppBuilder::new("codewire-orchestration")
         .with_health_and_db_probe(pool.clone(), move || {
-            let readiness_secrets = readiness_secrets.clone();
-            async move {
-                match readiness_secrets.verify_readiness().await {
-                    Ok(()) => true,
-                    Err(error) => {
-                        tracing::warn!(%error, "tenant secret dependency is not ready");
-                        false
-                    }
-                }
-            }
+            let ready = secret_readiness.is_ready();
+            async move { ready }
         })
         .with_unary_connect_routes_auth(
             codewire_orchestration::connect::api_keys::router(pool.clone()),
