@@ -710,6 +710,19 @@ dispatch_kind_e2e suite warm-pools
 printf '%s\n' warm-pools | cmp -s - "$CALLS" ||
   fail 'warm-pools dispatch changed'
 
+# The warm-pools stop/start reads the daemon image a restarted Pod runs from
+# its image volume, or from the init container that copies it.
+daemon_source_case() {
+  local want="$1" spec="$2" got
+  got="$(warm_pool_daemon_source <<<"$spec")"
+  [ "$got" = "$want" ] || fail "daemon source of ${spec} is '${got}', want '${want}'"
+}
+daemon_source_case registry.example.invalid/codewire/gateway@sha256:aa \
+  '{"volumes":[{"name":"workspace","emptyDir":{}},{"name":"codewire-bin","image":{"reference":"registry.example.invalid/codewire/gateway@sha256:aa"}}]}'
+daemon_source_case codewire-gateway:e2e \
+  '{"volumes":[{"name":"codewire-bin","emptyDir":{}}],"initContainers":[{"name":"other","image":"x"},{"name":"codewire-daemon-init","image":"codewire-gateway:e2e"}]}'
+daemon_source_case '' '{"volumes":[{"name":"other","image":{"reference":"x"}}]}'
+
 expect_failure missing-suite dispatch_kind_e2e suite
 grep -Fq 'requires exactly one suite name' "$FIXTURE/missing-suite.out" ||
   fail 'missing suite did not explain its failure'

@@ -7,6 +7,7 @@ use std::time::Duration;
 use sqlx::PgPool;
 
 use super::activity_authority::{ActivityAuthority, AuthorityLost, await_external_mutation};
+use super::bootstrap_restart::{BootstrapRestartGuard, check_or_restart};
 use super::env_data::{
     BackendRow, EnvironmentRow, load_backend_row, load_environment, load_environment_in,
 };
@@ -51,7 +52,10 @@ mod warm_pool_tests;
 /// Missing/replaced identities and storage errors must never select recovery.
 #[derive(Debug, thiserror::Error)]
 #[error("workspace Pod bootstrap does not match the current environment operation")]
-pub(super) struct WorkspaceBootstrapMismatch;
+pub(super) struct WorkspaceBootstrapMismatch {
+    /// The stale Pod's daemon image digest, which the restart guard keys on.
+    pub(super) daemon_image_digest: Option<String>,
+}
 
 /// Mirrors `sandbox.CanonicalWorkspaceRuntimeTemplateName`.
 pub const CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME: &str = "workspace";
@@ -1039,7 +1043,7 @@ async fn run_environment_create(
     tracing::info!(environment_id = env_id, "environment.create received");
     let svc = Service::<PgLifecycleStore>::for_activity(ctx.pool.clone(), authority.clone());
     let cfg = &ctx.sandbox_cfg;
-    let mut bootstrap_recovered = false;
+    let mut bootstrap_restarts = BootstrapRestartGuard::default();
     let mut workspace_resumed = false;
     let mut reconciled_runtime: Option<ReconciledRuntime> = None;
     // Program #2238 C3: after a pool-born Claim failed its first bind and
@@ -1107,12 +1111,11 @@ async fn run_environment_create(
                     authority,
                     &[env.state.as_str()],
                     &probe,
-                    !bootstrap_recovered,
+                    &mut bootstrap_restarts,
                 )
                 .await
                 {
                     Ok(true) => {
-                        bootstrap_recovered = true;
                         // The old probe must not overwrite the replacement's backend
                         // association or let setup act on the retired incarnation.
                         continue;
@@ -2129,7 +2132,10 @@ async fn ensure_gateway_stack_for_environment(
 }
 
 /// Recover one exactly owned, stale-bootstrap runtime through the same cold
-/// start path. A second mismatch, any ownership error or authority loss fails
+/// start path, whose resume re-pins the daemon image. `restarts` is the
+/// attempt's #2364 loop guard: a mismatch restarts only on a daemon digest no
+/// restart already replaced, at most twice per attempt
+/// ([`BootstrapRestartGuard`]). Any ownership error or authority loss fails
 /// this attempt; no relabel-only fallback and no unbounded retry loop.
 pub(super) async fn reconcile_or_refresh_runtime_identity(
     ctx: &WorkerContext,
@@ -2138,22 +2144,46 @@ pub(super) async fn reconcile_or_refresh_runtime_identity(
     authority: &ActivityAuthority,
     states: &[&str],
     probe: &ProbeResult,
-    allow_recovery: bool,
+    restarts: &mut BootstrapRestartGuard,
 ) -> anyhow::Result<bool> {
-    let expected = WorkspacePodIdentity {
-        name: probe.pod_name.clone(),
-        uid: probe.pod_uid.clone(),
-    };
-    match reconcile_runtime_identity_for_pod(ctx, env, backend, authority, states, Some(&expected))
-        .await
-    {
-        Ok(()) => {
-            publish_backend_probe(authority, states, probe).await?;
-            return Ok(false);
-        }
-        Err(error) if allow_recovery && error.is::<WorkspaceBootstrapMismatch>() => {}
-        Err(error) => return Err(error),
-    }
+    let (probe, restarted) = check_or_restart(
+        restarts,
+        probe.clone(),
+        |probe: &ProbeResult| {
+            // Verify the actual tuple, the replacement's too, before
+            // publishing its address.
+            let expected = WorkspacePodIdentity {
+                name: probe.pod_name.clone(),
+                uid: probe.pod_uid.clone(),
+            };
+            async move {
+                reconcile_runtime_identity_for_pod(
+                    ctx,
+                    env,
+                    backend,
+                    authority,
+                    states,
+                    Some(&expected),
+                )
+                .await
+            }
+        },
+        || restart_stale_bootstrap(ctx, env, backend, authority, states),
+    )
+    .await?;
+    publish_backend_probe(authority, states, &probe).await?;
+    Ok(restarted)
+}
+
+/// Suspend and resume a stale-bootstrap runtime, then observe its ready
+/// replacement.
+async fn restart_stale_bootstrap(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
+    backend: &BackendRow,
+    authority: &ActivityAuthority,
+    states: &[&str],
+) -> anyhow::Result<ProbeResult> {
     let mut opts =
         load_environment_template_opts(ctx, env, authority.operation_generation()).await?;
     if env.isolation_tier == "confidential" {
@@ -2169,7 +2199,7 @@ pub(super) async fn reconcile_or_refresh_runtime_identity(
         .await?;
     let client = require_client(ctx, &backend.namespace)?;
     let deadline = tokio::time::Instant::now() + ready_timeout_for_isolation(&env.isolation_tier);
-    let probe = authority
+    authority
         .run_while_authoritative_for_states(
             states,
             super::lifecycle::within_workspace_deadline(deadline, async {
@@ -2182,17 +2212,7 @@ pub(super) async fn reconcile_or_refresh_runtime_identity(
                 }
             }),
         )
-        .await?;
-    // Verify the actual replacement tuple before publishing its address. The
-    // strict second call intentionally cannot start another recovery.
-    let expected = WorkspacePodIdentity {
-        name: probe.pod_name.clone(),
-        uid: probe.pod_uid.clone(),
-    };
-    reconcile_runtime_identity_for_pod(ctx, env, backend, authority, states, Some(&expected))
-        .await?;
-    publish_backend_probe(authority, states, &probe).await?;
-    Ok(true)
+        .await
 }
 
 pub(super) async fn publish_backend_probe(
@@ -2324,7 +2344,7 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
             "workspace Pod changed after the ready observation"
         );
         let binding = live_environment_binding(&mut **guard.transaction(), &env.id).await?;
-        if !workspace_bootstrap_current(
+        if let Some(mismatch) = workspace_bootstrap_mismatch(
             &client,
             &template_opts,
             &claim_name,
@@ -2334,7 +2354,7 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
         )
         .await?
         {
-            return Err(WorkspaceBootstrapMismatch.into());
+            return Err(mismatch.into());
         }
         client
             .reconcile_claim_runtime_identity(&opts, &claim_name, &claim_uid)
@@ -2416,31 +2436,35 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
 /// clients; a legacy environment-scope Pod compares the environment it was
 /// rendered with, as before; an identity-free Pod that is not bound yet is
 /// current by construction, because its binding captures the current
-/// environment row under the same fence.
-async fn workspace_bootstrap_current(
+/// environment row under the same fence. A stale Pod's mismatch carries its
+/// daemon image digest for the restart guard.
+async fn workspace_bootstrap_mismatch(
     client: &SandboxClient,
     template_opts: &TemplateOpts,
     claim_name: &str,
     claim_uid: &str,
     pod: &WorkspacePodIdentity,
     binding: Option<&EnvironmentBinding>,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<WorkspaceBootstrapMismatch>> {
     let live_pod = client
         .get_workspace_pod(&pod.name)
         .await?
         .filter(|live| live.metadata.uid.as_deref() == Some(pod.uid.as_str()))
         .ok_or_else(|| anyhow::anyhow!("workspace bootstrap Pod was replaced"))?;
-    match credential_scope(&live_pod) {
+    let current = match credential_scope(&live_pod) {
         Some(WorkspaceCredentialScope::Environment) => {
             client
                 .workspace_bootstrap_matches(template_opts, claim_name, claim_uid, pod)
-                .await
+                .await?
         }
-        Some(WorkspaceCredentialScope::Pod) => Ok(binding
+        Some(WorkspaceCredentialScope::Pod) => binding
             .filter(|binding| binding.pod_uid == pod.uid)
-            .is_none_or(|binding| binding_bootstrap_current(binding, template_opts))),
+            .is_none_or(|binding| binding_bootstrap_current(binding, template_opts)),
         None => anyhow::bail!("workspace credential scope is ambiguous"),
-    }
+    };
+    Ok((!current).then(|| WorkspaceBootstrapMismatch {
+        daemon_image_digest: crate::sandbox::client::pod_daemon_image_digest(&live_pod),
+    }))
 }
 
 /// How long a cold re-claim waits for the pool-born Claim to be gone.

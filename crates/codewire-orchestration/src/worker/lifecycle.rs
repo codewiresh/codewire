@@ -175,7 +175,7 @@ async fn reconcile_running_runtime_identity(
         authority,
         RUNNING_MUTATION_STATES,
         &probe,
-        true,
+        &mut Default::default(),
     )
     .await
     .map(|_| ())
@@ -683,6 +683,7 @@ pub(super) async fn restart_workspace_bootstrap(
             &backend.claim_uid,
             &suspended,
             1,
+            opts.effective_support_image(),
         ),
     )
     .await

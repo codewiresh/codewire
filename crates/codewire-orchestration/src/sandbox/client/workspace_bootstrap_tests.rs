@@ -63,6 +63,10 @@ enum Race {
     SandboxMode,
     TemplateVersion,
     ClaimAfterPatch,
+    /// Another writer changes the daemon volume's image before the patch.
+    DaemonImage,
+    /// Another writer inserts a volume ahead of the daemon volume.
+    DaemonVolumeMoved,
 }
 struct Fixture {
     claim: Value,
@@ -191,6 +195,11 @@ fn client(fixture: Fixture) -> (SandboxClient, Arc<Mutex<Fixture>>) {
                 if is_sandbox && matches!(state.race, Some(Race::SandboxVersion)) { state.sandbox["metadata"]["resourceVersion"] = json!("31"); }
                 if is_sandbox && matches!(state.race, Some(Race::SandboxMode)) { state.sandbox["spec"]["operatingMode"] = json!("Running"); }
                 if is_template && matches!(state.race, Some(Race::TemplateVersion)) { state.template["metadata"]["resourceVersion"] = json!("21"); }
+                if is_sandbox && matches!(state.race, Some(Race::DaemonImage)) { *daemon_reference_mut(&mut state.sandbox) = json!(CONCURRENT_DAEMON_IMAGE); }
+                if is_sandbox && matches!(state.race, Some(Race::DaemonVolumeMoved)) {
+                    state.sandbox["spec"]["podTemplate"]["spec"]["volumes"].as_array_mut().unwrap()
+                        .insert(0, json!({"name":"inserted","emptyDir":{}}));
+                }
             }
             let object = if path.contains("/sandboxclaims/") { &mut state.claim }
                 else if path.contains("/sandboxwarmpools/") { &mut state.pool }
@@ -653,7 +662,14 @@ async fn pinned_resume_retains_completed_suspension_across_bootstrap_generation_
         assert!(!sandbox_suspension_observed(&dynamic(&state.sandbox)));
     }
     client
-        .set_replicas_for_identity(&claim_opts(), &claim_name(ENV), CLAIM_UID, &suspended, 1)
+        .set_replicas_for_identity(
+            &claim_opts(),
+            &claim_name(ENV),
+            CLAIM_UID,
+            &suspended,
+            1,
+            DAEMON_IMAGE,
+        )
         .await
         .unwrap();
     let state = state.lock().unwrap();
@@ -705,7 +721,8 @@ async fn pinned_resume_refuses_replaced_claim_sandbox_or_running_target_without_
                     &claim_name(ENV),
                     CLAIM_UID,
                     &suspended,
-                    1
+                    1,
+                    DAEMON_IMAGE,
                 )
                 .await
                 .is_err(),
@@ -745,7 +762,8 @@ async fn pinned_resume_conditional_races_fail_without_retry_or_replacement_succe
                     &claim_name(ENV),
                     CLAIM_UID,
                     &suspended,
-                    1
+                    1,
+                    DAEMON_IMAGE,
                 )
                 .await
                 .is_err()
@@ -1869,5 +1887,451 @@ async fn a_pool_born_restart_refuses_anything_but_codewires_identity_free_pool()
             "{label} was accepted"
         );
         assert!(patches(&state.lock().unwrap()).is_empty(), "{label} wrote");
+    }
+}
+
+// ------------------- daemon image re-pin on resume (owner decision 2026-10-05)
+
+/// The image a Sandbox was created with, before a support-image rollout.
+const OLD_DAEMON_IMAGE: &str = "registry.example.invalid/codewire/gateway@sha256:a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0";
+const CONCURRENT_DAEMON_IMAGE: &str = "registry.example.invalid/codewire/gateway@sha256:3333333333333333333333333333333333333333333333333333333333333333";
+
+fn daemon_reference_mut(object: &mut Value) -> &mut Value {
+    object["spec"]["podTemplate"]["spec"]["volumes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|volume| volume["name"] == "codewire-bin")
+        .map(|volume| &mut volume["image"]["reference"])
+        .unwrap()
+}
+
+/// A suspended image-volume Sandbox, its per-environment template and its
+/// old Pod, all still on the image the Sandbox was created with.
+fn stale_daemon_fixture() -> Fixture {
+    let mut fixture = image_volume_fixture();
+    for object in [&mut fixture.template, &mut fixture.sandbox] {
+        *daemon_reference_mut(object) = json!(OLD_DAEMON_IMAGE);
+    }
+    fixture.pod["spec"]["volumes"][1]["image"]["reference"] = json!(OLD_DAEMON_IMAGE);
+    fixture
+}
+
+/// The exact re-pin operations for the fixture's daemon volume, at index 1
+/// behind the workspace PVC.
+fn repin_operations(from: &str, to: &str) -> [Value; 3] {
+    [
+        json!({"op":"test","path":"/spec/podTemplate/spec/volumes/1/name","value":"codewire-bin"}),
+        json!({"op":"test","path":"/spec/podTemplate/spec/volumes/1/image/reference","value":from}),
+        json!({"op":"replace","path":"/spec/podTemplate/spec/volumes/1/image/reference","value":to}),
+    ]
+}
+
+/// The pinned resume's patch: its fences, then `between`, then the mode.
+fn pinned_resume_patch(version: &str, between: &[Value]) -> Value {
+    let mut patch = vec![
+        json!({"op":"test","path":"/metadata/uid","value":"sandbox-incarnation"}),
+        json!({"op":"test","path":"/metadata/resourceVersion","value":version}),
+        json!({"op":"test","path":"/spec/operatingMode","value":"Suspended"}),
+    ];
+    patch.extend_from_slice(between);
+    patch.push(json!({"op":"add","path":"/spec/operatingMode","value":"Running"}));
+    Value::Array(patch)
+}
+
+/// The generic writer's patch: its UID fence, then `between`, then the mode.
+fn generic_mode_patch(mode: &str, between: &[Value]) -> Value {
+    let mut patch = vec![json!({"op":"test","path":"/metadata/uid","value":"sandbox-incarnation"})];
+    patch.extend_from_slice(between);
+    patch.push(json!({"op":"add","path":"/spec/operatingMode","value":mode}));
+    Value::Array(patch)
+}
+
+/// Resume through the lifecycle's pinned writer, as Start and the
+/// bootstrap-mismatch restart do.
+async fn pinned_resume(
+    client: &SandboxClient,
+    state: &Arc<Mutex<Fixture>>,
+    support_image: &str,
+) -> anyhow::Result<()> {
+    let suspended = client
+        .workspace_suspension_observed(&claim_opts(), &claim_name(ENV), CLAIM_UID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(patches(&state.lock().unwrap()).is_empty());
+    client
+        .set_replicas_for_identity(
+            &claim_opts(),
+            &claim_name(ENV),
+            CLAIM_UID,
+            &suspended,
+            1,
+            support_image,
+        )
+        .await
+}
+
+/// The incident (Sandbox 1a67b6b2): a Sandbox created before a support-image
+/// rollout resumes on the current image. Start's one patch re-pins exactly
+/// the daemon volume's reference; every other volume, container and field,
+/// the per-environment template and the Pod are untouched.
+#[tokio::test]
+async fn resume_re_pins_only_the_daemon_image_reference() {
+    let before = stale_daemon_fixture();
+    let (template, sandbox) = (before.template.clone(), before.sandbox.clone());
+    let (client, state) = client(before);
+    pinned_resume(&client, &state, DAEMON_IMAGE).await.unwrap();
+    let state = state.lock().unwrap();
+    let written = patches(&state);
+    assert_eq!(written.len(), 1);
+    assert_eq!(
+        written[0],
+        &pinned_resume_patch("30", &repin_operations(OLD_DAEMON_IMAGE, DAEMON_IMAGE))
+    );
+    let mut expected = sandbox;
+    *daemon_reference_mut(&mut expected) = json!(DAEMON_IMAGE);
+    expected["spec"]["operatingMode"] = json!("Running");
+    assert_eq!(state.sandbox, expected);
+    assert_eq!(state.template, template);
+    assert!(
+        state
+            .requests
+            .iter()
+            .all(|(method, path, _)| *method == Method::GET
+                || path.ends_with(&format!("/sandboxes/{SANDBOX}")))
+    );
+}
+
+/// Setup recovery resumes through the generic writer; it re-pins the same
+/// way, under its UID fence and the volume's own tests.
+#[tokio::test]
+async fn generic_resume_re_pins_and_suspend_never_does() {
+    let mut before = stale_daemon_fixture();
+    before.sandbox["spec"]["operatingMode"] = json!("Suspended");
+    let sandbox = before.sandbox.clone();
+    let (sandboxes, state) = client(before);
+    sandboxes.set_replicas(ENV, 1, DAEMON_IMAGE).await.unwrap();
+    {
+        let state = state.lock().unwrap();
+        assert_eq!(
+            patches(&state),
+            [&generic_mode_patch(
+                "Running",
+                &repin_operations(OLD_DAEMON_IMAGE, DAEMON_IMAGE)
+            )]
+        );
+        let mut expected = sandbox.clone();
+        *daemon_reference_mut(&mut expected) = json!(DAEMON_IMAGE);
+        expected["spec"]["operatingMode"] = json!("Running");
+        assert_eq!(state.sandbox, expected);
+    }
+
+    // Suspending a stale Sandbox, through either writer, changes only its
+    // mode: the next resume re-pins.
+    let mut running = stale_daemon_fixture();
+    running.sandbox["spec"]["operatingMode"] = json!("Running");
+    let (sandboxes, state) = client(running);
+    sandboxes.set_replicas(ENV, 0, DAEMON_IMAGE).await.unwrap();
+    assert_eq!(
+        patches(&state.lock().unwrap()),
+        [&generic_mode_patch("Suspended", &[])]
+    );
+    let mut running = stale_daemon_fixture();
+    running.sandbox["spec"]["operatingMode"] = json!("Running");
+    let (sandboxes, state) = client(running);
+    sandboxes
+        .suspend_workspace(&claim_opts(), &claim_name(ENV), CLAIM_UID)
+        .await
+        .unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(
+        patches(&state),
+        [&json!([
+            {"op":"test","path":"/metadata/uid","value":"sandbox-incarnation"},
+            {"op":"test","path":"/metadata/resourceVersion","value":"30"},
+            {"op":"add","path":"/spec/operatingMode","value":"Suspended"}
+        ])]
+    );
+    assert_eq!(
+        *daemon_reference_mut(&mut state.sandbox.clone()),
+        json!(OLD_DAEMON_IMAGE)
+    );
+}
+
+/// A current Sandbox, or one this resume must not re-pin, gets exactly the
+/// mode patch it got before the re-pin existed, and keeps its daemon volume.
+#[tokio::test]
+async fn resume_keeps_a_current_or_foreign_daemon_image() {
+    type Case = (&'static str, fn(&mut Fixture), &'static str);
+    let cases: [Case; 6] = [
+        ("already current", |_| {}, DAEMON_IMAGE),
+        (
+            "another repository",
+            |fixture| {
+                *daemon_reference_mut(&mut fixture.sandbox) = json!(
+                    "registry.example.invalid/codewire/workspace@sha256:a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0"
+                );
+            },
+            DAEMON_IMAGE,
+        ),
+        (
+            "another registry",
+            |fixture| {
+                *daemon_reference_mut(&mut fixture.sandbox) = json!(
+                    "git.example.invalid/codewire/gateway:v0.3.359@sha256:1bc918a7c16ac72c4d3f84641efb12343372fa70a0e8839466ab26e660c81173"
+                );
+            },
+            DAEMON_IMAGE,
+        ),
+        (
+            "no daemon volume",
+            |fixture| {
+                fixture.sandbox["spec"]["podTemplate"]["spec"]["volumes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|volume| volume["name"] != "codewire-bin");
+            },
+            DAEMON_IMAGE,
+        ),
+        (
+            "copied daemon",
+            |fixture| {
+                fixture.sandbox["spec"]["podTemplate"]["spec"]["volumes"][1] =
+                    json!({"name":"codewire-bin","emptyDir":{}});
+            },
+            DAEMON_IMAGE,
+        ),
+        ("unpinned support image", |_| {}, "codewire-gateway:e2e"),
+    ];
+    for (label, mutate, support_image) in cases {
+        for generic in [false, true] {
+            let mut before = stale_daemon_fixture();
+            if label == "already current" {
+                *daemon_reference_mut(&mut before.sandbox) = json!(DAEMON_IMAGE);
+            }
+            mutate(&mut before);
+            let sandbox = before.sandbox.clone();
+            let (client, state) = client(before);
+            if generic {
+                client.set_replicas(ENV, 1, support_image).await.unwrap();
+            } else {
+                pinned_resume(&client, &state, support_image).await.unwrap();
+            }
+            let state = state.lock().unwrap();
+            let expected_patch = if generic {
+                generic_mode_patch("Running", &[])
+            } else {
+                pinned_resume_patch("30", &[])
+            };
+            assert_eq!(patches(&state), [&expected_patch], "{label}");
+            let mut expected = sandbox;
+            expected["spec"]["operatingMode"] = json!("Running");
+            assert_eq!(state.sandbox, expected, "{label}");
+        }
+    }
+}
+
+/// A daemon volume no Pod could be built from fails closed: the resume
+/// writes nothing, operating mode included.
+#[tokio::test]
+async fn resume_refuses_an_ambiguous_daemon_volume_without_writes() {
+    type Case = (&'static str, fn(&mut Value));
+    let cases: [Case; 4] = [
+        ("duplicated", |spec| {
+            let daemon = spec["volumes"][1].clone();
+            spec["volumes"].as_array_mut().unwrap().push(daemon);
+        }),
+        ("no reference", |spec| {
+            spec["volumes"][1]["image"] = json!({"pullPolicy":"IfNotPresent"});
+        }),
+        ("empty reference", |spec| {
+            spec["volumes"][1]["image"]["reference"] = json!("");
+        }),
+        ("volumes not a list", |spec| {
+            spec["volumes"] = json!({"codewire-bin": {}});
+        }),
+    ];
+    for (label, mutate) in cases {
+        for generic in [false, true] {
+            let mut before = stale_daemon_fixture();
+            mutate(&mut before.sandbox["spec"]["podTemplate"]["spec"]);
+            let (client, state) = client(before);
+            let result = if generic {
+                client.set_replicas(ENV, 1, DAEMON_IMAGE).await
+            } else {
+                pinned_resume(&client, &state, DAEMON_IMAGE).await
+            };
+            assert!(result.is_err(), "{label}");
+            let state = state.lock().unwrap();
+            assert!(patches(&state).is_empty(), "{label}");
+            assert_eq!(state.sandbox["spec"]["operatingMode"], "Suspended");
+        }
+    }
+}
+
+/// The generic writer has no resourceVersion fence; the volume's own tests
+/// refuse a concurrent change to its image or index, and the whole patch,
+/// operating mode included, fails without a retry.
+#[tokio::test]
+async fn a_concurrent_daemon_volume_change_fails_the_whole_resume() {
+    for race in [Race::DaemonImage, Race::DaemonVolumeMoved] {
+        let mut before = stale_daemon_fixture();
+        before.race = Some(race);
+        let (client, state) = client(before);
+        assert!(client.set_replicas(ENV, 1, DAEMON_IMAGE).await.is_err());
+        let state = state.lock().unwrap();
+        assert_eq!(patches(&state).len(), 1);
+        assert_eq!(state.sandbox["spec"]["operatingMode"], "Suspended");
+        let volumes = state.sandbox["spec"]["podTemplate"]["spec"]["volumes"]
+            .as_array()
+            .unwrap();
+        assert!(
+            volumes
+                .iter()
+                .all(|volume| volume["image"]["reference"] != DAEMON_IMAGE)
+        );
+    }
+}
+
+/// A claimed warm-pool member resumes the same way: its own Sandbox is
+/// re-pinned, and the shared pool template is never written.
+#[tokio::test]
+async fn a_claimed_warm_member_is_re_pinned_and_its_pool_template_is_not() {
+    let commodity = |support_image: &str| TemplateOpts {
+        runtime_profile: super::super::template::RUNTIME_PROFILE_COMMODITY.into(),
+        support_image: support_image.into(),
+        ..binding_opts()
+    };
+    let mut before = pool_born_fixture();
+    // The pool rotated to the current image after this member was claimed.
+    before.template["spec"] = render_sandbox_template(NS, &commodity(DAEMON_IMAGE))["spec"].clone();
+    before.sandbox["spec"]["podTemplate"]["spec"] =
+        render_sandbox_template(NS, &commodity(OLD_DAEMON_IMAGE))["spec"]["podTemplate"]["spec"]
+            .clone();
+    let index = before.sandbox["spec"]["podTemplate"]["spec"]["volumes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|volume| volume["name"] == "codewire-bin")
+        .unwrap();
+    let (template, sandbox) = (before.template.clone(), before.sandbox.clone());
+    let (client, state) = client(before);
+    pinned_resume(&client, &state, DAEMON_IMAGE).await.unwrap();
+    let state = state.lock().unwrap();
+    let path = format!("/spec/podTemplate/spec/volumes/{index}");
+    assert_eq!(
+        patches(&state),
+        [&pinned_resume_patch(
+            "30",
+            &[
+                json!({"op":"test","path":format!("{path}/name"),"value":"codewire-bin"}),
+                json!({"op":"test","path":format!("{path}/image/reference"),"value":OLD_DAEMON_IMAGE}),
+                json!({"op":"replace","path":format!("{path}/image/reference"),"value":DAEMON_IMAGE}),
+            ]
+        )]
+    );
+    let mut expected = sandbox;
+    *daemon_reference_mut(&mut expected) = json!(DAEMON_IMAGE);
+    expected["spec"]["operatingMode"] = json!("Running");
+    assert_eq!(state.sandbox, expected);
+    assert_eq!(state.template, template);
+    assert!(
+        state
+            .requests
+            .iter()
+            .all(|(method, path, _)| *method == Method::GET || path.contains("/sandboxes/"))
+    );
+}
+
+#[test]
+fn daemon_image_plan_compares_repositories_not_tags_or_digests() {
+    for (reference, repository) in [
+        (
+            "registry.example.invalid/codewire/gateway@sha256:aa",
+            "registry.example.invalid/codewire/gateway",
+        ),
+        (
+            "git.example.invalid/codewire/gateway:v0.3.359@sha256:aa",
+            "git.example.invalid/codewire/gateway",
+        ),
+        (
+            "registry.example.invalid/codewire/gateway:main-4b5b65d",
+            "registry.example.invalid/codewire/gateway",
+        ),
+        (
+            "localhost:5000/codewire/gateway:local",
+            "localhost:5000/codewire/gateway",
+        ),
+        (
+            "localhost:5000/codewire/gateway",
+            "localhost:5000/codewire/gateway",
+        ),
+        ("codewire-gateway:e2e", "codewire-gateway"),
+    ] {
+        assert_eq!(image_repository(reference), repository, "{reference}");
+    }
+    let tagged_current = "registry.example.invalid/codewire/gateway:v0.3.400@sha256:1f5972c44d7063815d4d5163f06fc8db5428a5a57dacc4816841cc5cd97ce190";
+    let sandbox = |reference: &str| {
+        json!({"spec":{"podTemplate":{"spec":{"volumes":[
+            {"name":"workspace","persistentVolumeClaim":{"claimName":"saved-pvc"}},
+            {"name":"codewire-bin","image":{"reference":reference,"pullPolicy":"IfNotPresent"}},
+        ]}}}})
+    };
+    let old = sandbox(OLD_DAEMON_IMAGE);
+    assert_eq!(
+        plan_daemon_image(&old, tagged_current).unwrap(),
+        DaemonImagePlan::Repin {
+            index: 1,
+            from: OLD_DAEMON_IMAGE
+        }
+    );
+    let tag_only = sandbox("registry.example.invalid/codewire/gateway:main-4b5b65d");
+    assert!(matches!(
+        plan_daemon_image(&tag_only, DAEMON_IMAGE).unwrap(),
+        DaemonImagePlan::Repin { index: 1, .. }
+    ));
+    assert_eq!(
+        plan_daemon_image(&old, OLD_DAEMON_IMAGE).unwrap(),
+        DaemonImagePlan::Current
+    );
+    assert_eq!(
+        plan_daemon_image(&old, "registry.example.invalid/codewire/gateway:v0.3.400").unwrap(),
+        DaemonImagePlan::Kept(DaemonImageKept::UnpinnedSupportImage)
+    );
+    assert_eq!(
+        plan_daemon_image(&old, "registry.example.invalid/codewire/gateway@sha256:1f59").unwrap(),
+        DaemonImagePlan::Kept(DaemonImageKept::UnpinnedSupportImage)
+    );
+}
+
+#[test]
+fn the_restart_guard_reads_the_digest_a_pod_mounts() {
+    let pod = |volume: Value| -> Pod {
+        serde_json::from_value(json!({
+            "metadata":{"name":POD},
+            "spec":{"containers":[{"name":"workspace"}],"volumes":[
+                {"name":"workspace","persistentVolumeClaim":{"claimName":"saved-pvc"}},
+                volume,
+            ]},
+        }))
+        .unwrap()
+    };
+    assert_eq!(
+        pod_daemon_image_digest(&pod(
+            json!({"name":"codewire-bin","image":{"reference":OLD_DAEMON_IMAGE}})
+        )),
+        Some("sha256:a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0".into())
+    );
+    for unpinned in [
+        json!({"name":"codewire-bin","emptyDir":{}}),
+        json!({"name":"codewire-bin","image":{"reference":"codewire-gateway:e2e"}}),
+        json!({"name":"other","image":{"reference":OLD_DAEMON_IMAGE}}),
+    ] {
+        assert_eq!(
+            pod_daemon_image_digest(&pod(unpinned.clone())),
+            None,
+            "{unpinned}"
+        );
     }
 }

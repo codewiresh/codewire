@@ -619,7 +619,9 @@ pub fn pod_template_images(pod_spec: &Value) -> Vec<&str> {
     containers.chain(volumes).collect()
 }
 
-fn digest_pinned(image: &str) -> bool {
+/// An image reference that names an exact `@sha256:` manifest digest, with or
+/// without a tag.
+pub(crate) fn digest_pinned(image: &str) -> bool {
     image.split_once("@sha256:").is_some_and(|(name, digest)| {
         !name.is_empty()
             && !name.contains(char::is_whitespace)

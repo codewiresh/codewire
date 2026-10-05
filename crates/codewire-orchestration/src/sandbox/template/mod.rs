@@ -305,6 +305,17 @@ impl fmt::Debug for TemplateOpts {
     }
 }
 
+/// The support image a rendering uses for the gateway and the workspace
+/// daemon: the configured one, or this release's default. A resume re-pins a
+/// Sandbox's daemon image volume to this same value.
+pub fn effective_support_image(configured: &str) -> &str {
+    if configured.is_empty() {
+        DEFAULT_GATEWAY_IMAGE
+    } else {
+        configured
+    }
+}
+
 impl TemplateOpts {
     pub fn runtime_profile_spec(&self) -> RuntimeProfileSpec {
         runtime_profile_spec(&self.runtime_profile, &self.docker_mode, self.dind_enabled)
@@ -321,6 +332,11 @@ impl TemplateOpts {
 
     pub fn identity_free(&self) -> bool {
         self.workspace_binding_url().is_some()
+    }
+
+    /// The support image this rendering mounts or copies the daemon from.
+    pub fn effective_support_image(&self) -> &str {
+        effective_support_image(&self.support_image)
     }
 
     /// The StorageClass the workspace volume claim template names.

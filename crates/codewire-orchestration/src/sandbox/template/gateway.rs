@@ -16,9 +16,9 @@ use super::runtime_policy::{
     RUNTIME_PROFILE_CONFIDENTIAL, kata_coco_kernel_params_annotation, uses_kata_policy_init_data,
 };
 use super::{
-    CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE,
-    DEFAULT_GATEWAY_READYZ_PORT, DEFAULT_GATEWAY_SSH_PORT, GATEWAY_BINDING_URL_ENV,
-    GATEWAY_HOST_KEY_PATH, GATEWAY_HOST_KEY_SECRET_KEY, GATEWAY_HOST_KEY_SECRET_MOUNT_PATH,
+    CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_READYZ_PORT,
+    DEFAULT_GATEWAY_SSH_PORT, GATEWAY_BINDING_URL_ENV, GATEWAY_HOST_KEY_PATH,
+    GATEWAY_HOST_KEY_SECRET_KEY, GATEWAY_HOST_KEY_SECRET_MOUNT_PATH,
     GATEWAY_TAILNET_DIRECT_UDP_ADVERTISE_ENDPOINTS_ENV, GATEWAY_TAILNET_UDP_LISTEN_ADDR,
     GATEWAY_TAILNET_UDP_LISTEN_ADDR_ENV, GATEWAY_TAILNET_UDP_PORT,
     GATEWAY_UDP_RELAY_ALLOCATOR_TOKEN_ENV, GATEWAY_UDP_RELAY_ALLOCATOR_URL_ENV,
@@ -333,11 +333,7 @@ fn gateway_host_key_init_container(support_image: &str) -> Value {
 
 pub fn render_gateway_deployment(namespace: &str, opts: &TemplateOpts) -> Value {
     let runtime_spec = opts.runtime_profile_spec();
-    let support_image = if opts.support_image.is_empty() {
-        DEFAULT_GATEWAY_IMAGE
-    } else {
-        &opts.support_image
-    };
+    let support_image = opts.effective_support_image();
     let labels = gateway_labels(opts);
     let mut gateway_container = json!({
         "name": "codewire-gateway",
