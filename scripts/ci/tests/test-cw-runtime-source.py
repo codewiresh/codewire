@@ -554,6 +554,68 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
         self.assertNotIn("COPY .git", text)
 
 
+class FinalizerDiagnostic(unittest.TestCase):
+    def test_closed_refusal_diagnostic_never_renders_secret_exception_fields(self):
+        canary = "DIAGNOSTIC_SECRET_CANARY"
+        cases = (
+            (OSError(24, canary, "/" + canary), "os", "process_fd_limit"),
+            (OSError(30, canary, "/" + canary), "os", "readonly"),
+            (OSError(987654, canary, "/" + canary), "os", "other"),
+            (finalizer.release.ReleaseError(canary), "release", "none"),
+            (ValueError(canary), "value", "none"),
+            (KeyError(canary), "key", "none"),
+            (TypeError(canary), "type", "none"),
+            (subprocess.CalledProcessError(53, [canary], output=canary, stderr=canary), "subprocess", "none"),
+            (subprocess.TimeoutExpired([canary], 1, output=canary, stderr=canary), "subprocess", "none"),
+        )
+        for error, category, code in cases:
+            error.__cause__ = RuntimeError(canary)
+            error.__context__ = RuntimeError(canary)
+            with self.subTest(category=category, code=code), \
+                    mock.patch.dict(finalizer._DIAGNOSTIC, {"phase": canary,
+                                    "source_held_files_at_admit": True, "source_held_fds_at_admit": canary}), \
+                    mock.patch.object(finalizer.resource, "getrlimit", return_value=(2048, finalizer.resource.RLIM_INFINITY)):
+                text = finalizer.failure_diagnostic(error)
+            self.assertNotIn(canary, text)
+            self.assertLess(len(text.encode("ascii")), 1024)
+            self.assertTrue(text.startswith(finalizer.DIAGNOSTIC_PREFIX))
+            value = json.loads(text[len(finalizer.DIAGNOSTIC_PREFIX):])
+            self.assertEqual(value, {"schema": "codewire.cw.runtime-source-refusal/v1", "phase": "unknown",
+                                    "exception": category, "errno": code,
+                                    "nofile": {"soft": 2048, "hard": "unlimited"},
+                                    "source_held_files_at_admit": None, "source_held_fds_at_admit": None})
+        with mock.patch.dict(finalizer._DIAGNOSTIC, {"phase": "readonly", "source_held_files_at_admit": 12,
+                                                    "source_held_fds_at_admit": 84}), \
+                mock.patch.object(finalizer.resource, "getrlimit", side_effect=OSError(24, canary)):
+            value = json.loads(finalizer.failure_diagnostic(ValueError(canary))[len(finalizer.DIAGNOSTIC_PREFIX):])
+        self.assertEqual(value["phase"], "readonly")
+        self.assertEqual((value["source_held_files_at_admit"], value["source_held_fds_at_admit"]), (12, 84))
+        self.assertIsNone(value["nofile"])
+        self.assertNotIn(canary, json.dumps(value))
+
+    def test_capsule_refusal_reports_fixed_phase_before_compiler_or_export(self):
+        error = OSError(24, "DIAGNOSTIC_SECRET_CANARY", "/DIAGNOSTIC_SECRET_CANARY")
+        with mock.patch.object(finalizer.signal, "signal"), \
+                mock.patch.object(finalizer.owner, "arm_custody"), \
+                mock.patch.object(finalizer.source, "admit", side_effect=error), \
+                mock.patch.object(finalizer.owner, "admit_output") as output, \
+                mock.patch.object(finalizer.subprocess, "check_output") as rustc, \
+                mock.patch.object(finalizer.owner, "run_owned") as compile_command, \
+                mock.patch.object(finalizer, "finalize") as export, \
+                contextlib.redirect_stdout(io.StringIO()) as stdout, \
+                self.assertRaises(OSError) as refused:
+            finalizer.main(["--request-sha256", "a" * 64])
+        self.assertIs(refused.exception, error)
+        self.assertEqual(stdout.getvalue(), "")
+        for effect in (output, rustc, compile_command, export):
+            effect.assert_not_called()
+        value = json.loads(finalizer.failure_diagnostic(error)[len(finalizer.DIAGNOSTIC_PREFIX):])
+        self.assertEqual((value["phase"], value["exception"], value["errno"]), ("capsule", "os", "process_fd_limit"))
+        self.assertIsNone(value["source_held_files_at_admit"])
+        self.assertIsNone(value["source_held_fds_at_admit"])
+        self.assertNotIn("DIAGNOSTIC_SECRET_CANARY", json.dumps(value))
+
+
 if __name__ == "__main__":
     if "--legacy-head-witness" in sys.argv:
         LEGACY_HEAD_WITNESS = True

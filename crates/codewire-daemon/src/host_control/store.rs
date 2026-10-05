@@ -947,10 +947,7 @@ impl Store {
         }
         scope.grant_revision = match self.book.grants.get(&scope.grant_id) {
             Some(old) => {
-                if old.revoked
-                    || !old.scope.same_principal(&scope)
-                    || old.scope.grant_revision != value.revision
-                {
+                if !old.scope.same_principal(&scope) || old.scope.grant_revision != value.revision {
                     return Err(Error::Conflict);
                 }
                 old.scope

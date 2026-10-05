@@ -8,11 +8,14 @@ is never executed. Failed compilation/admission cannot emit producer.json.
 """
 
 import argparse
+import errno
 import hashlib
 import importlib.util
+import json
 import math
 import os
 from pathlib import Path
+import resource
 import signal
 import stat
 import subprocess
@@ -47,6 +50,53 @@ FILES = {"cw", "cw.d", "compile.log", "cw.oci.tar", "image.json", "runtime.pack"
 COMPILER_DEADLINE = 7200
 COMPLETION_FIELDS = {"command", "exit", "elapsed_seconds", "log", "log_sha256", "timed_out", "interrupted",
                      "unexpected_family", "cleanup_unknown"}
+
+
+DIAGNOSTIC_PHASES = frozenset({"arguments", "custody", "capsule", "profile", "readonly", "home",
+                              "environment", "rustc", "compile", "export", "result"})
+DIAGNOSTIC_ERRNOS = {errno.EPERM: "permission", errno.EACCES: "permission", errno.EROFS: "readonly",
+                     errno.EMFILE: "process_fd_limit", errno.ENFILE: "system_fd_limit",
+                     errno.ENOENT: "not_found", errno.ENOTDIR: "not_directory", errno.ELOOP: "link",
+                     errno.EINVAL: "invalid", errno.EIO: "io", errno.ENOSPC: "capacity"}
+DIAGNOSTIC_PREFIX = "finalize-cw-runtime-source: producer refused "
+_DIAGNOSTIC = {"phase": "arguments", "source_held_files_at_admit": None, "source_held_fds_at_admit": None}
+
+
+def diagnostic_number(value):
+    return value if type(value) is int and 0 <= value <= (1 << 63) - 1 else None
+
+
+def failure_diagnostic(error):
+    """Fixed labels/numbers only; never render an exception or its source chain.
+
+    Source descriptor counts are a snapshot after complete capsule admission,
+    not a partial/peak count or a measurement after refusal cleanup.
+    """
+    exception = "unknown"
+    for category, label in ((OSError, "os"), (release.ReleaseError, "release"),
+                            (subprocess.SubprocessError, "subprocess"), (ValueError, "value"),
+                            (KeyError, "key"), (TypeError, "type")):
+        if isinstance(error, category):
+            exception = label
+            break
+    code = error.errno if isinstance(error, OSError) else None
+    errno_class = ("none" if code is None else
+                   DIAGNOSTIC_ERRNOS.get(code, "other") if type(code) is int else "other")
+    limits = None
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        limits = {"soft": "unlimited" if type(soft) is int and soft == resource.RLIM_INFINITY
+                  else diagnostic_number(soft),
+                  "hard": "unlimited" if type(hard) is int and hard == resource.RLIM_INFINITY
+                  else diagnostic_number(hard)}
+    except (OSError, ValueError, TypeError):
+        pass
+    value = {"schema": "codewire.cw.runtime-source-refusal/v1",
+             "phase": _DIAGNOSTIC["phase"] if _DIAGNOSTIC["phase"] in DIAGNOSTIC_PHASES else "unknown",
+             "exception": exception, "errno": errno_class, "nofile": limits,
+             "source_held_files_at_admit": diagnostic_number(_DIAGNOSTIC["source_held_files_at_admit"]),
+             "source_held_fds_at_admit": diagnostic_number(_DIAGNOSTIC["source_held_fds_at_admit"])}
+    return DIAGNOSTIC_PREFIX + json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def export_bound(name):
@@ -235,6 +285,7 @@ def verify_export(output, model, request_sha256):
 
 
 def main(argv=None):
+    _DIAGNOSTIC.update(phase="arguments", source_held_files_at_admit=None, source_held_fds_at_admit=None)
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--request-sha256", required=True, action=source.asset.SingleUse)
     args = parser.parse_args(argv)
@@ -243,24 +294,37 @@ def main(argv=None):
         owner.on_signal(sig, frame)
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, cancelled)
+    _DIAGNOSTIC["phase"] = "custody"
     owner.arm_custody()
+    _DIAGNOSTIC["phase"] = "capsule"
     with source.admit(SOURCE_ROOT, GIT_ROOT, REQUEST, args.request_sha256) as admitted:
+        _DIAGNOSTIC.update(source_held_files_at_admit=len(admitted.files),
+                           source_held_fds_at_admit=sum((held.fd is not None) + len(held.parent.fds)
+                                                       for held in admitted.files.values()))
+        _DIAGNOSTIC["phase"] = "profile"
         source.require(os.environ.get("CODEWIRE_RUST_PROFILE") == admitted.model["profile"], "compiler profile projection differs")
+        _DIAGNOSTIC["phase"] = "readonly"
         source.require(all(os.fstatvfs(held.fd).f_flag & os.ST_RDONLY for held in admitted.files.values()),
                        "compiler source/Git/request must be mounted readonly")
+        _DIAGNOSTIC["phase"] = "home"
         home = Path("/tmp/cw-runtime-build-home")
         owner.admit_output(home)
         owner.private_directory(home)
+        _DIAGNOSTIC["phase"] = "environment"
         environment = cargo_environment(admitted.model, home)
+        _DIAGNOSTIC["phase"] = "rustc"
         rustc = subprocess.check_output(["/usr/local/cargo/bin/rustc", "--version"], cwd=SOURCE_ROOT,
                                        env=environment, text=True, timeout=15).strip()
         admitted.selected.toolchain_rustc(SOURCE_ROOT, rustc)
+        _DIAGNOSTIC["phase"] = "compile"
         result = owner.run_owned(command(admitted.model["profile"]), SOURCE_ROOT, environment,
                                  home / "compile.log", time.monotonic() + COMPILER_DEADLINE)
         profile = admitted.model["profile"]
+        _DIAGNOSTIC["phase"] = "export"
         receipt = finalize(admitted, TARGET_ROOT / source.TARGET / profile / "cw",
                            TARGET_ROOT / source.TARGET / profile / "cw.d", rustc, result,
                            WORK / "assets", TARGET_ROOT, CARGO_HOME)
+        _DIAGNOSTIC["phase"] = "result"
         print(release.canonical({"status": "producer-admitted", "payload": receipt["payload"],
                                  "repository_input_count": receipt["repository_input_count"]}).decode(), end="")
     return 0
@@ -269,6 +333,6 @@ def main(argv=None):
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, release.ReleaseError):
-        print("finalize-cw-runtime-source: producer refused", file=sys.stderr)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, release.ReleaseError) as error:
+        print(failure_diagnostic(error), file=sys.stderr)
         sys.exit(1)

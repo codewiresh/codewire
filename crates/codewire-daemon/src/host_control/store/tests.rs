@@ -377,3 +377,197 @@ fn host_control_store_reload_refuses_false_completed_or_acknowledged_shapes() {
         );
     }
 }
+
+#[tokio::test]
+async fn host_control_store_owner_regrant_current_cas_preserves_observe_and_no_reissue() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = managed_admitted(temp.path());
+    let request = managed_launch(3);
+    store.register(&request).unwrap();
+    store.issue(&request).unwrap();
+    let original = store.finish(&request, Err(Error::Unavailable)).unwrap();
+    assert_eq!(original.phase, v1::HostControlRequestPhase::Unknown as i32);
+    let original_bytes = serde_json::to_vec(&original).unwrap();
+    store
+        .revoke_grant(v1::HostControlRevokeGrantRequest {
+            expected_book_revision: 1,
+            grant_id: scope().grant_id,
+            expected_grant_revision: 1,
+        })
+        .unwrap();
+    let mut put = grant(&scope(), 2);
+    let value = put.grant.as_mut().unwrap();
+    value.revision = 2;
+    value.verbs = (1..=11).collect();
+    let result = store.put_grant(put).unwrap();
+    assert_eq!(result.book_revision, 3);
+    assert_eq!(result.grants[0].revision, 3);
+    assert!(!result.grants[0].revoked);
+    let mut current = scope();
+    current.grant_revision = 3;
+    store
+        .authorize(&current, v1::HostControlVerb::ManagedRead)
+        .unwrap();
+    for revision in [1, 2] {
+        let mut stale = scope();
+        stale.grant_revision = revision;
+        assert!(matches!(
+            store.authorize(&stale, v1::HostControlVerb::ManagedRead),
+            Err(Error::Denied)
+        ));
+    }
+    assert_eq!(
+        serde_json::to_vec(&store.find(&request.request_id).unwrap().unwrap()).unwrap(),
+        original_bytes
+    );
+    drop(store);
+    let mut recovered = Store::open(&temp.path().join("state"), &scope().environment_id).unwrap();
+    let grants = recovered.grants().unwrap();
+    assert_eq!(grants.book_revision, 3);
+    assert_eq!(grants.grants[0].revision, 3);
+    assert!(!grants.grants[0].revoked);
+    recovered
+        .authorize(&current, v1::HostControlVerb::ManagedRead)
+        .unwrap();
+    for revision in [1, 2] {
+        let mut stale = scope();
+        stale.grant_revision = revision;
+        assert!(matches!(
+            recovered.authorize(&stale, v1::HostControlVerb::ManagedRead),
+            Err(Error::Denied)
+        ));
+    }
+    assert_eq!(
+        serde_json::to_vec(&recovered.find(&request.request_id).unwrap().unwrap()).unwrap(),
+        original_bytes
+    );
+    let mut rebound = managed_launch(3);
+    rebound.scope = current.clone();
+    assert!(matches!(recovered.register(&rebound), Err(Error::Conflict)));
+    assert!(matches!(recovered.issue(&rebound), Err(Error::Conflict)));
+    drop(recovered);
+
+    // Observe and duplicate admission use the retained owning row. Neither an
+    // old alias nor the newly granted revision can turn Unknown into a spawn.
+    let config = config(temp.path());
+    let engine = crate::durable_session::SessionEngine::new(
+        &config,
+        crate::credential_bridge::CredentialBridge::new(None),
+    );
+    let owner = crate::host_control::Owner::new(
+        &config,
+        crate::host_control::HostControlBinding::new(scope().environment_id)
+            .unwrap()
+            .with_managed_agents(),
+        engine.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::to_vec(
+            &owner
+                .observe(&request.request_id, &request.scope)
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        original_bytes
+    );
+    assert!(matches!(
+        owner.observe(&request.request_id, &current).await,
+        Err(Error::Denied)
+    ));
+    assert_eq!(
+        serde_json::to_vec(&owner.mutate(request).await.unwrap()).unwrap(),
+        original_bytes
+    );
+    assert!(matches!(owner.mutate(rebound).await, Err(Error::Conflict)));
+    assert!(
+        std::fs::read_dir(temp.path().join("state/sessions"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    owner.drain().await.unwrap();
+    engine.shutdown().await.unwrap();
+}
+
+#[test]
+fn host_control_store_regrant_refusals_preserve_exact_book_and_receipt_bytes() {
+    for kind in [
+        "stale-book",
+        "future-book",
+        "stale-grant",
+        "zero-grant",
+        "future-grant",
+        "environment",
+        "org",
+        "network",
+        "caller",
+        "target",
+        "grant-id",
+        "revoked",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = admitted(temp.path());
+        let request = launch(3, &scope(), "must-not-execute");
+        store.register(&request).unwrap();
+        store.issue(&request).unwrap();
+        store.finish(&request, Err(Error::Unavailable)).unwrap();
+        store
+            .revoke_grant(v1::HostControlRevokeGrantRequest {
+                expected_book_revision: 1,
+                grant_id: scope().grant_id,
+                expected_grant_revision: 1,
+            })
+            .unwrap();
+        let before_book = serde_json::to_vec(&store.book).unwrap();
+        let before_receipt =
+            serde_json::to_vec(&store.find(&request.request_id).unwrap().unwrap()).unwrap();
+        let before_name = store.snapshots.last().unwrap().name.clone();
+        let before_path = temp.path().join("state/host-control").join(&before_name);
+        let before_disk = std::fs::read(&before_path).unwrap();
+        assert_eq!(before_disk, before_book);
+        let mut put = grant(&scope(), 2);
+        let value = put.grant.as_mut().unwrap();
+        value.revision = 2;
+        match kind {
+            "stale-book" => put.expected_book_revision = 1,
+            "future-book" => put.expected_book_revision = 3,
+            "stale-grant" => value.revision = 1,
+            "zero-grant" => value.revision = 0,
+            "future-grant" => value.revision = 3,
+            "environment" => value.environment_id = Uuid::from_u128(9).to_string(),
+            "org" => value.org_id = "different-org".into(),
+            "network" => value.network_id = "different-network".into(),
+            "caller" => value.caller_key = vec![3; 32],
+            "target" => value.target_key = vec![4; 32],
+            "grant-id" => value.grant_id = Uuid::from_u128(9).to_string(),
+            "revoked" => value.revoked = true,
+            _ => unreachable!(),
+        }
+        let error = store.put_grant(put).unwrap_err();
+        match kind {
+            "environment" => assert!(matches!(error, Error::Denied)),
+            "revoked" => assert!(matches!(error, Error::Invalid)),
+            _ => assert!(matches!(error, Error::Conflict), "{kind}"),
+        }
+        assert_eq!(
+            serde_json::to_vec(&store.book).unwrap(),
+            before_book,
+            "{kind}"
+        );
+        assert_eq!(
+            serde_json::to_vec(&store.find(&request.request_id).unwrap().unwrap()).unwrap(),
+            before_receipt,
+            "{kind}"
+        );
+        assert_eq!(store.snapshots.last().unwrap().name, before_name, "{kind}");
+        assert_eq!(std::fs::read(&before_path).unwrap(), before_disk, "{kind}");
+        assert!(matches!(
+            store.authorize(&scope(), v1::HostControlVerb::Launch),
+            Err(Error::Denied)
+        ));
+        assert!(!temp.path().join("state/sessions").exists());
+    }
+}
