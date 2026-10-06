@@ -107,8 +107,8 @@ rg -F 'CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL"' "$SMOKE" >/dev/null
 rg -F 'EXPECTED_CODEWIRE_DEV_SERVER_URL="$EXPECTED_CODEWIRE_DEV_SERVER_URL"' "$SMOKE" >/dev/null
 rg -F 'CODEWIRE_SERVER_NAMESPACE="$CODEWIRE_SERVER_NAMESPACE"' "$SMOKE" >/dev/null
 rg -F 'KUBE_CONTEXT="$KUBE_CONTEXT"' "$SMOKE" >/dev/null
-rg -F 'EXPECTED_GATEWAY_STUN_HOST="$COCO_GATEWAY_STUN_HOST"' "$SMOKE" >/dev/null
-rg -F 'EXPECTED_GATEWAY_STUN_PORT="$COCO_GATEWAY_STUN_PORT"' "$SMOKE" >/dev/null
+rg -F 'EXPECTED_STUN_HOST="$COCO_GATEWAY_STUN_HOST"' "$SMOKE" >/dev/null
+rg -F 'EXPECTED_STUN_PORT="$COCO_GATEWAY_STUN_PORT"' "$SMOKE" >/dev/null
 rg -F 'EXPECTED_TAILNET_DIRECT_UDP_LB_IP="$COCO_DIRECT_UDP_LB_IP"' "$SMOKE" >/dev/null
 rg -F 'EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE="$COCO_DIRECT_UDP_TRANSPORT_ZONE"' "$SMOKE" >/dev/null
 rg -F 'SMOKE_IMAGE="${SMOKE_IMAGE:-$COCO_WORKSPACE_IMAGE}"' "$SMOKE" >/dev/null
@@ -135,8 +135,8 @@ set -euo pipefail
 {
   printf 'server_namespace=%s\n' "${CODEWIRE_SERVER_NAMESPACE:-}"
   printf 'kube_context=%s\n' "${KUBE_CONTEXT:-}"
-  printf 'stun_host=%s\n' "${EXPECTED_GATEWAY_STUN_HOST:-}"
-  printf 'stun_port=%s\n' "${EXPECTED_GATEWAY_STUN_PORT:-}"
+  printf 'stun_host=%s\n' "${EXPECTED_STUN_HOST:-}"
+  printf 'stun_port=%s\n' "${EXPECTED_STUN_PORT:-}"
   printf 'direct_udp_ip=%s\n' "${EXPECTED_TAILNET_DIRECT_UDP_LB_IP:-}"
   printf 'transport_zone=%s\n' "${EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE:-}"
   printf 'artifact_dir=%s\n' "$(basename "${SMOKE_ARTIFACT_DIR:-}")"
@@ -180,6 +180,30 @@ args=--admin-oidc --existing-env 11111111-2222-4333-8444-555555555555 --keep
 EOF
 cmp "$forward_dir/expected" "$forward_dir/capture"
 rm -rf "$forward_dir"
+
+# Pending B2c the product phase, which creates a confidential environment the
+# API refuses, is skipped with its reason and the run never reports a pass.
+rg -F 'COCO_PRODUCT_PENDING_B2C=1' "$SMOKE" >/dev/null
+rg -F 'SKIPPED pending B2c' "$SMOKE" >/dev/null
+rg -F 'confidential SNP smoke NOT PASSED' "$SMOKE" >/dev/null
+awk '/^main\(\) \{/,/^}/' "$SMOKE" | rg -F 'exit 77' >/dev/null
+skip_dir="$(mktemp -d "$ROOT/.tmp/confidential-smoke-b2c-skip.XXXXXX")"
+(
+  export EVIDENCE_DIR="$skip_dir"
+  export RUN_COCO_PRODUCT=0
+  # shellcheck disable=SC1090
+  source <(sed '$d' "$SMOKE")
+  RUN_COCO_PRODUCT=1
+  run_product_command() {
+    printf 'pending B2c product phase ran the product smoke\n' >&2
+    exit 1
+  }
+  run_coco_product 2>"$skip_dir/log"
+  [[ "$COCO_PRODUCT_SKIPPED" == 1 ]]
+  rg -F 'SKIPPED pending B2c' "$skip_dir/log" >/dev/null
+  rg -F 'confidential isolation is temporarily unavailable' "$skip_dir/log" >/dev/null
+)
+rm -rf "$skip_dir"
 
 jq -n '{
   metadata: {generation: 7},

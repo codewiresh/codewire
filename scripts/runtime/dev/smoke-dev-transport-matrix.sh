@@ -14,8 +14,8 @@ MATRIX_CORDON_OTHER_RUNTIME_NODES="${MATRIX_CORDON_OTHER_RUNTIME_NODES:-1}"
 EXPECTED_NODE="${EXPECTED_NODE:-}"
 EXPECTED_RUNTIME_NODE_SELECTOR="${EXPECTED_RUNTIME_NODE_SELECTOR:-katacontainers.io/kata-runtime=true}"
 MATRIX_WORKER_LOOPS="${MATRIX_WORKER_LOOPS:-env-reconciler,sandbox-liveness,billing-session}"
-MATRIX_GATEWAY_TAG="${MATRIX_GATEWAY_TAG:-}"
-MATRIX_BUILD_GATEWAY="${MATRIX_BUILD_GATEWAY:-0}"
+MATRIX_DAEMON_TAG="${MATRIX_DAEMON_TAG:-}"
+MATRIX_BUILD_DAEMON="${MATRIX_BUILD_DAEMON:-0}"
 MATRIX_CANDIDATE_IMAGES="${MATRIX_CANDIDATE_IMAGES:-services gateway}"
 SMOKE_TAILNET_DIRECT_WAIT="${SMOKE_TAILNET_DIRECT_WAIT:-5s}"
 SMOKE_TAILNET_PEER_TIMEOUT="${SMOKE_TAILNET_PEER_TIMEOUT:-30s}"
@@ -58,9 +58,10 @@ Environment:
                                     during the run, default 1
   MATRIX_WORKER_LOOPS               WORKER_LOOPS override for the candidate
                                     window
-  MATRIX_GATEWAY_TAG                Gateway image tag to test. Defaults to the
-                                    currently deployed dev tag.
-  MATRIX_BUILD_GATEWAY              Build and push MATRIX_GATEWAY_TAG when 1,
+  MATRIX_DAEMON_TAG                 Workspace daemon image tag to test (the
+                                    "gateway" image, SANDBOX_GATEWAY_IMAGE).
+                                    Defaults to the currently deployed dev tag.
+  MATRIX_BUILD_DAEMON               Build and push MATRIX_DAEMON_TAG when 1,
                                     default 0
   MATRIX_CANDIDATE_IMAGES           Space-separated candidate images to deploy,
                                     default "services gateway"
@@ -161,7 +162,7 @@ if [[ -z "$MATRIX_SANDBOX_NAMESPACE" ]]; then
   MATRIX_SANDBOX_NAMESPACE="$(printf '%s' "$MATRIX_SANDBOX_NAMESPACE" | tr '[:upper:]_' '[:lower:]-' | cut -c1-63 | sed -E 's/-+$//')"
 fi
 
-current_gateway_tag() {
+current_daemon_tag() {
   local configmap image
 
   configmap="$(kubectl_dev -n "$CODEWIRE_SERVER_NAMESPACE" get deployment codewire-orchestration -o json |
@@ -298,19 +299,19 @@ for image in "${candidate_images[@]}"; do
   CANDIDATE_IMAGE_ARGS+=(--image "$image")
 done
 
-if [[ -n "$MATRIX_GATEWAY_TAG" ]]; then
-  GATEWAY_TAG="$MATRIX_GATEWAY_TAG"
-elif [[ "$MATRIX_BUILD_GATEWAY" == "1" ]]; then
-  GATEWAY_TAG="$(generated_candidate_tag)"
+if [[ -n "$MATRIX_DAEMON_TAG" ]]; then
+  DAEMON_TAG="$MATRIX_DAEMON_TAG"
+elif [[ "$MATRIX_BUILD_DAEMON" == "1" ]]; then
+  DAEMON_TAG="$(generated_candidate_tag)"
 else
-  GATEWAY_TAG="$(current_gateway_tag)"
+  DAEMON_TAG="$(current_daemon_tag)"
 fi
-if [[ "$MATRIX_BUILD_GATEWAY" != "1" ]]; then
+if [[ "$MATRIX_BUILD_DAEMON" != "1" ]]; then
   CANDIDATE_IMAGE_ARGS+=(--skip-build)
 fi
 cordon_other_runtime_nodes
 
-log "running fresh-node direct_udp + forced DERP + websocket smoke in $MATRIX_SANDBOX_NAMESPACE with gateway tag $GATEWAY_TAG"
+log "running fresh-node direct_udp + forced DERP + websocket smoke in $MATRIX_SANDBOX_NAMESPACE with daemon image tag $DAEMON_TAG"
 if ! EXPECTED_TAILNET_PATH_TRANSPORT=direct_udp \
     CANDIDATE_WORKER_LOOPS="$MATRIX_WORKER_LOOPS" \
     EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB="$EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB" \
@@ -326,7 +327,7 @@ if ! EXPECTED_TAILNET_PATH_TRANSPORT=direct_udp \
     SMOKE_TIMEOUT_SECONDS="$MATRIX_INITIAL_SMOKE_TIMEOUT_SECONDS" \
     "$ROOT/scripts/runtime/dev/smoke-dev-candidate.sh" \
       "${CANDIDATE_IMAGE_ARGS[@]}" \
-      --tag "$GATEWAY_TAG" \
+      --tag "$DAEMON_TAG" \
       --force-shared-dev \
       --sandbox-namespace "$MATRIX_SANDBOX_NAMESPACE" \
       --keep-namespace \

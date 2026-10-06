@@ -53,14 +53,14 @@ CODEWIRE_SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-}"
 EXPECTED_RUNTIME_CLASS="${EXPECTED_RUNTIME_CLASS:-commodity}"
 EXPECTED_DOCKER_MODE="${EXPECTED_DOCKER_MODE:-guest-dind}"
-EXPECTED_GATEWAY_IMAGE="${EXPECTED_GATEWAY_IMAGE:-}"
+EXPECTED_DAEMON_IMAGE="${EXPECTED_DAEMON_IMAGE:-}"
 EXPECTED_DIND_IMAGE="${EXPECTED_DIND_IMAGE:-}"
 EXPECTED_NODE="${EXPECTED_NODE:-}"
 EXPECTED_NODE_KATA_LABEL="${EXPECTED_NODE_KATA_LABEL:-katacontainers.io/kata-runtime}"
 EXPECTED_NODE_KATA_VALUE="${EXPECTED_NODE_KATA_VALUE:-true}"
 EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB="${EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB:-500}"
-EXPECTED_GATEWAY_STUN_HOST="${EXPECTED_GATEWAY_STUN_HOST:-}"
-EXPECTED_GATEWAY_STUN_PORT="${EXPECTED_GATEWAY_STUN_PORT:-3478}"
+EXPECTED_STUN_HOST="${EXPECTED_STUN_HOST:-}"
+EXPECTED_STUN_PORT="${EXPECTED_STUN_PORT:-3478}"
 EXPECTED_TAILNET_DIRECT_UDP_LB_IP="${EXPECTED_TAILNET_DIRECT_UDP_LB_IP:-}"
 EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE="${EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE:-}"
 EXPECTED_TAILNET_PEER_RELAY_ENDPOINT="${EXPECTED_TAILNET_PEER_RELAY_ENDPOINT:-}"
@@ -265,7 +265,7 @@ Environment:
                            Defaults to 0. Set to 1 only for the admitted
                            host-network diagnostic. Captures route metadata and
                            UDP headers for the configured peer relay without payload.
-  EXPECTED_GATEWAY_IMAGE   Optional exact assertion for the daemon image the
+  EXPECTED_DAEMON_IMAGE    Optional exact assertion for the daemon image the
                            workspace Pod mounts (SANDBOX_GATEWAY_IMAGE)
   EXPECTED_DOCKER_MODE     Expected workspace Docker mode. Defaults to
                            guest-dind, expecting workspace+dind containers.
@@ -277,11 +277,9 @@ Environment:
   EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB
                            Minimum allocatable ephemeral-storage for the
                            scheduled runtime node. Defaults to 500; set 0 to skip.
-  EXPECTED_GATEWAY_STUN_HOST
-                           Expected public STUN host in the tailnet doctor's
+  EXPECTED_STUN_HOST       Expected public STUN host in the tailnet doctor's
                            DERP map
-  EXPECTED_GATEWAY_STUN_PORT
-                           Expected public STUN port in that DERP map
+  EXPECTED_STUN_PORT       Expected public STUN port in that DERP map
   EXPECTED_TAILNET_PATH_TRANSPORT
                            Expected CW_DEBUG_TAILNET path-probe transport.
                            Defaults to empty, accepting any reachable tailnet
@@ -2307,15 +2305,15 @@ assert_pod_shape() {
   assert_docker_socket_contract "$pod_json"
   # The workspace daemon hosts SSH and the tailnet (#2460).
   assert_no_gateway_objects
-  if [[ -n "$EXPECTED_GATEWAY_IMAGE" ]]; then
+  if [[ -n "$EXPECTED_DAEMON_IMAGE" ]]; then
     # The daemon reaches the Pod as a read-only image volume or through its
     # init container; either way it is this release's daemon image.
     daemon_images="$(jq -r '
       [(.spec.initContainers[]? | select(.name == "codewire-daemon-init") | .image),
        (.spec.volumes[]? | .image.reference // empty)] | unique | join(",")
     ' "$pod_json")"
-    [[ "$daemon_images" == "$EXPECTED_GATEWAY_IMAGE" ]] || \
-      die "workspace daemon image=${daemon_images:-<none>}, want $EXPECTED_GATEWAY_IMAGE"
+    [[ "$daemon_images" == "$EXPECTED_DAEMON_IMAGE" ]] || \
+      die "workspace daemon image=${daemon_images:-<none>}, want $EXPECTED_DAEMON_IMAGE"
   fi
   if [[ -n "$EXPECTED_DIND_IMAGE" && "$EXPECTED_DOCKER_MODE" != "none" ]]; then
     [[ "$dind_image" == "$EXPECTED_DIND_IMAGE" ]] || \
@@ -4127,8 +4125,8 @@ assert_tailnet_doctor_direct_udp_evidence() {
 
   jq -e \
     --arg ip "$EXPECTED_TAILNET_DIRECT_UDP_LB_IP" \
-    --arg stun_host "$EXPECTED_GATEWAY_STUN_HOST" \
-    --argjson stun_port "$EXPECTED_GATEWAY_STUN_PORT" \
+    --arg stun_host "$EXPECTED_STUN_HOST" \
+    --argjson stun_port "$EXPECTED_STUN_PORT" \
     '
       (
         (.direct.direct_path.transport == "direct_udp" and .direct.direct_path.ready == true and ((.direct.direct_path.endpoint // "") | contains($ip)))
@@ -4149,11 +4147,11 @@ assert_tailnet_doctor_direct_udp_evidence() {
         end
       )
     ' "$doctor_json" >/dev/null || \
-    die "tailnet doctor did not prove direct_udp via Cilium LoadBalancer IP $EXPECTED_TAILNET_DIRECT_UDP_LB_IP with STUN $EXPECTED_GATEWAY_STUN_HOST:$EXPECTED_GATEWAY_STUN_PORT"
+    die "tailnet doctor did not prove direct_udp via Cilium LoadBalancer IP $EXPECTED_TAILNET_DIRECT_UDP_LB_IP with STUN $EXPECTED_STUN_HOST:$EXPECTED_STUN_PORT"
 
   [[ "$SMOKE_DERP_FALLBACK" != "1" ]] || assert_tailnet_doctor_forced_derp_evidence "$doctor_json"
 
-  log "tailnet doctor proved direct_udp via Cilium LoadBalancer IP $EXPECTED_TAILNET_DIRECT_UDP_LB_IP and STUN map $EXPECTED_GATEWAY_STUN_HOST:$EXPECTED_GATEWAY_STUN_PORT"
+  log "tailnet doctor proved direct_udp via Cilium LoadBalancer IP $EXPECTED_TAILNET_DIRECT_UDP_LB_IP and STUN map $EXPECTED_STUN_HOST:$EXPECTED_STUN_PORT"
 }
 
 assert_tailnet_doctor_forced_derp_evidence() {
@@ -4178,8 +4176,8 @@ assert_tailnet_doctor_peer_relay_evidence() {
 
   jq -e \
     --arg endpoint "$EXPECTED_TAILNET_PEER_RELAY_ENDPOINT" \
-    --arg stun_host "$EXPECTED_GATEWAY_STUN_HOST" \
-    --argjson stun_port "$EXPECTED_GATEWAY_STUN_PORT" \
+    --arg stun_host "$EXPECTED_STUN_HOST" \
+    --argjson stun_port "$EXPECTED_STUN_PORT" \
     '
       (
         ((.direct.direct_path.transport == "udp_relay" or .direct.direct_path.transport == "peer_relay") and ((.direct.direct_path.peer_relay // .direct.direct_path.endpoint // "") | contains($endpoint)))
@@ -4200,11 +4198,11 @@ assert_tailnet_doctor_peer_relay_evidence() {
         end
       )
     ' "$doctor_json" >/dev/null || \
-    die "tailnet doctor did not prove peer_relay via shared endpoint $EXPECTED_TAILNET_PEER_RELAY_ENDPOINT with STUN $EXPECTED_GATEWAY_STUN_HOST:$EXPECTED_GATEWAY_STUN_PORT"
+    die "tailnet doctor did not prove peer_relay via shared endpoint $EXPECTED_TAILNET_PEER_RELAY_ENDPOINT with STUN $EXPECTED_STUN_HOST:$EXPECTED_STUN_PORT"
 
   [[ "$SMOKE_DERP_FALLBACK" != "1" ]] || assert_tailnet_doctor_forced_derp_evidence "$doctor_json"
 
-  log "tailnet doctor proved peer_relay via shared relay endpoint $EXPECTED_TAILNET_PEER_RELAY_ENDPOINT and STUN map $EXPECTED_GATEWAY_STUN_HOST:$EXPECTED_GATEWAY_STUN_PORT"
+  log "tailnet doctor proved peer_relay via shared relay endpoint $EXPECTED_TAILNET_PEER_RELAY_ENDPOINT and STUN map $EXPECTED_STUN_HOST:$EXPECTED_STUN_PORT"
 }
 
 select_kube_context_best_effort() {

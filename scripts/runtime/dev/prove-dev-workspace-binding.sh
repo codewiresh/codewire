@@ -392,16 +392,16 @@ stage_order_ok() {
   local id="$1" logs="$TMPDIR_PROOF/logs-$1.txt"
   # The CLI renders setup progress on stderr.
   cw env logs --follow false "$id" >"$logs" 2>&1 || return 1
-  local bind gateway
+  local bind access
   bind="$(grep -n -i 'Binding workspace\|workspace_bind' "$logs" | head -n1 | cut -d: -f1)"
-  gateway="$(grep -n -i 'SSH access ready\|access_ready' "$logs" | tail -n1 | cut -d: -f1)"
-  [[ -n "$bind" && -n "$gateway" && "$bind" -lt "$gateway" ]]
+  access="$(grep -n -i 'SSH access ready\|access_ready' "$logs" | tail -n1 | cut -d: -f1)"
+  [[ -n "$bind" && -n "$access" && "$bind" -lt "$access" ]]
 }
 
 # --------------------------------------------------------------- journeys
 
 journey_create() {
-  local n id started elapsed times=() binds=() gateways=()
+  local n id started elapsed times=() binds=() accesses=()
   for ((n = 1; n <= PROOF_CREATES; n++)); do
     started="$(now_ms)"
     id="$(create_env)" || { fail "create $n: cw env create"; continue; }
@@ -410,13 +410,13 @@ journey_create() {
     times+=("$elapsed")
     pass "create $n: $id ready in ${elapsed} ms (client side)"
     check "create $n: identity-free workspace Pod" pod_is_identity_free "$id"
-    check "create $n: daemon reachable through the gateway path" daemon_reachable "$id"
+    check "create $n: daemon reachable through the platform API" daemon_reachable "$id"
     check "create $n: workspace_bind before access_ready" stage_order_ok "$id"
     if [[ -n "$SQL_CMD" ]]; then
       check "create $n: one live Pod-scope binding for the current Pod" sql_binding "$id" "$(pod_uid "$id")"
       binds+=("$(sql_stage_ms "$id" workspace_bind)")
-      gateways+=("$(sql_stage_ms "$id" access_ready)")
-      log "create $n: workspace_bind=${binds[-1]:-?} ms access_ready=${gateways[-1]:-?} ms complete=$(sql_stage_ms "$id" complete) ms"
+      accesses+=("$(sql_stage_ms "$id" access_ready)")
+      log "create $n: workspace_bind=${binds[-1]:-?} ms access_ready=${accesses[-1]:-?} ms complete=$(sql_stage_ms "$id" complete) ms"
     fi
     if remove_env "$id"; then
       [[ -z "$SQL_CMD" ]] || check "create $n: no live binding once destroyed" sql_released_after_destroy "$id"

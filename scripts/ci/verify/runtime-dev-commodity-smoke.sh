@@ -90,8 +90,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-stun_host="${EXPECTED_GATEWAY_STUN_HOST:-}"
-stun_port="${EXPECTED_GATEWAY_STUN_PORT:-3478}"
+stun_host="${EXPECTED_STUN_HOST:-}"
+stun_port="${EXPECTED_STUN_PORT:-3478}"
 runtime_configmap="application-only"
 if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then
   runtime_configmap="$(
@@ -155,11 +155,13 @@ if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then
       die "SANDBOX_KATA_AGENT_POLICY_ENABLED=$kata_agent_policy_enabled, want true for commodity policy smoke"
   fi
 
-  if [[ -z "${EXPECTED_GATEWAY_IMAGE:-}" ]]; then
-    EXPECTED_GATEWAY_IMAGE="$(jq -r '.data.SANDBOX_GATEWAY_IMAGE // empty' "$config_json")"
-    export EXPECTED_GATEWAY_IMAGE
+  # The workspace daemon's image keeps its configuration key
+  # (SANDBOX_GATEWAY_IMAGE) from when it also ran the gateway.
+  if [[ -z "${EXPECTED_DAEMON_IMAGE:-}" ]]; then
+    EXPECTED_DAEMON_IMAGE="$(jq -r '.data.SANDBOX_GATEWAY_IMAGE // empty' "$config_json")"
+    export EXPECTED_DAEMON_IMAGE
   fi
-  [[ -n "$EXPECTED_GATEWAY_IMAGE" ]] || die "EXPECTED_GATEWAY_IMAGE is empty and could not be resolved from $runtime_configmap"
+  [[ -n "$EXPECTED_DAEMON_IMAGE" ]] || die "EXPECTED_DAEMON_IMAGE is empty and could not be resolved from $runtime_configmap"
 fi
 
 export CODEWIRE_SERVER_URL
@@ -177,8 +179,8 @@ export EXPECTED_TAILNET_DIRECT_UDP_LB_IP
 export EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE
 export EXPECTED_RUNTIME_TRANSPORT_REGION
 export EXPECTED_KATA_AGENT_POLICY_ANNOTATION
-export EXPECTED_GATEWAY_STUN_HOST="$stun_host"
-export EXPECTED_GATEWAY_STUN_PORT="$stun_port"
+export EXPECTED_STUN_HOST="$stun_host"
+export EXPECTED_STUN_PORT="$stun_port"
 export SMOKE_DERP_FALLBACK
 export SMOKE_SKIP_KUBE
 export EXPECTED_KATA_COCO_INIT_DATA_ANNOTATION
@@ -209,6 +211,6 @@ cmd+=("$@")
 if [[ "$SMOKE_SKIP_KUBE" == "1" ]]; then
   log "running application-only commodity smoke against $CODEWIRE_SERVER_URL"
 else
-  log "running commodity smoke against $CODEWIRE_SERVER_URL using $runtime_configmap and gateway image $EXPECTED_GATEWAY_IMAGE"
+  log "running commodity smoke against $CODEWIRE_SERVER_URL using $runtime_configmap and daemon image $EXPECTED_DAEMON_IMAGE"
 fi
 exec "${cmd[@]}"
