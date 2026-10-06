@@ -351,6 +351,24 @@ fi
 
 bash -n "$SCRIPT" "$COMMON" "$INTEGRATED" "$DASHBOARD_BROWSER" "$FINAL_FENCING" \
   "$ENVIRONMENT_SESSION" "$SANDBOX_SUPPLY_CHAIN" "$RUNTIME_ACCEPTANCE" "$0"
+# The user SSH journey runs real OpenSSH through the block `cw config-ssh`
+# writes, never hand-built trust options, and the CLI and workspace-access
+# crates select its suite.
+user_ssh="$(sed -n '/^workspace_user_ssh_smoke() (/,/^)$/p' "$COMMON")"
+grep -Fq '  workspace_user_ssh_smoke' "$COMMON" || fail 'workspace services do not run the user SSH journey'
+for binding in 'kind_credential_cli config-ssh --ssh-config-file "$config"' \
+    'timeout 60 "$tool" -F "$ssh_config"' "'printf a && printf b | tr b B; echo \" \$((1+2)) \$HOME\"; exit 7'" \
+    'scp -O' 'sftp -b' '[ "$status" -eq 255 ]' 'wait_kind_credential_environment "$environment" destroyed'; do
+  grep -Fq -- "$binding" <<<"$user_ssh" || fail "user SSH journey is missing: $binding"
+done
+if grep -Fq 'KnownHostsCommand=' <<<"$user_ssh"; then
+  fail 'the user SSH journey hand-builds the managed block'
+fi
+for token in rust_pkg_codewire_cli rust_pkg_codewire_workspace_access; do
+  grep -Eq "^ *(.*\| )?${token}(\)| \|).*want .*workspace-services" "$ROOT/scripts/dev/kind/test-selected.sh" ||
+    fail "$token does not select the workspace-services suite"
+done
+
 # The resize workspace is identity-free: it is bound by the resize's own
 # reconcile and never receives an environment capability.
 if grep -Fq 'CRD_SMOKE_DAEMON_AUTH_TOKEN' "$COMMON" \

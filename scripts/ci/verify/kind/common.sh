@@ -3173,7 +3173,131 @@ workspace_service_smokes() {
     "$CARGO_CI_DIR/exec-smoke"
   file_service_smoke
   environment_resize_smoke
+  workspace_user_ssh_smoke
 }
+
+# Bound on a new Sandbox answering its first OpenSSH command, from the create
+# request.
+KIND_USER_SSH_READY_SECONDS=180
+
+# The user's SSH path, exactly as a user gets it: a synthetic personal login,
+# the block `cw config-ssh` writes, and real OpenSSH through it (its
+# ProxyCommand and its only host-key trust, `cw ssh known-hosts`). A new
+# Sandbox must answer its first command within the bound; then a command line
+# the workspace shell parses keeps its exit status, scp round-trips in SFTP
+# and legacy mode, sftp and rsync work, and a key other than the recorded one
+# is refused.
+workspace_user_ssh_smoke() (
+  log "running the user SSH journey through the block cw config-ssh writes"
+  require_tool ssh
+  require_tool scp
+  require_tool sftp
+  umask 077
+  local name="kind-ssh-${RANDOM}${RANDOM}" environment="" image config host started first
+  local output status up
+  KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-ssh.XXXXXX)" || return 1
+  # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
+  cleanup_workspace_user_ssh_smoke() {
+    local status=$?
+    trap - EXIT
+    set +e
+    if [ -n "$environment" ]; then
+      kind_credential_cli env --platform rm "$environment" --yes --output json >/dev/null ||
+        status=1
+      wait_kind_credential_environment "$environment" destroyed || status=1
+    fi
+    rm -rf -- "$KIND_CREDENTIAL_CLI_HOME" || status=1
+    exit "$status"
+  }
+  trap cleanup_workspace_user_ssh_smoke EXIT
+  prepare_kind_credential_cli
+  kind_credential_cli org set org_contract_1 >/dev/null
+  config="$KIND_CREDENTIAL_CLI_HOME/ssh_config"
+  kind_credential_cli config-ssh --ssh-config-file "$config" >/dev/null
+  # OpenSSH's TOOL with the ssh config CONFIG. The block names the cw that
+  # wrote it by absolute path, and its commands find the server and login
+  # as that cw does, from this environment.
+  kind_user_ssh_tool() {
+    local ssh_config="$1" tool="$2"
+    shift 2
+    env -i PATH=/usr/bin:/bin HOME="$KIND_CREDENTIAL_CLI_HOME" \
+      XDG_CONFIG_HOME="$KIND_CREDENTIAL_CLI_HOME/config" \
+      CW_CONFIG_DIR="$KIND_CREDENTIAL_CLI_HOME/cw" \
+      CODEWIRE_SERVER_URL="$KIND_INGRESS_URL" \
+      timeout 60 "$tool" -F "$ssh_config" -o BatchMode=yes -o LogLevel=ERROR "$@" </dev/null
+  }
+  image="$(kind_workspace_runtime_image)"
+  host="cw-$name"
+  started="$SECONDS"
+  environment="$(kind_credential_cli env --platform create --name "$name" --image "$image" \
+    --cpu 500 --memory 1Gi --disk 1Gi --ttl 1h --yes --output json | jq -er '.id')"
+  first=""
+  while [ $((SECONDS - started)) -lt "$KIND_USER_SSH_READY_SECONDS" ]; do
+    if output="$(kind_user_ssh_tool "$config" ssh "$host" 'echo ready' 2>/dev/null)" &&
+      [ "$output" = ready ]; then
+      first=$((SECONDS - started))
+      break
+    fi
+    sleep 1
+  done
+  [ -n "$first" ] || {
+    echo "::error::ssh $host did not answer within ${KIND_USER_SSH_READY_SECONDS}s of the create request"
+    return 1
+  }
+  log "first OpenSSH command answered ${first}s after the create request"
+
+  status=0
+  output="$(kind_user_ssh_tool "$config" ssh "$host" \
+    'printf a && printf b | tr b B; echo " $((1+2)) $HOME"; exit 7')" || status=$?
+  [ "$output" = "aB 3 /home/codewire" ] && [ "$status" -eq 7 ] || {
+    echo "::error::ssh did not run a shell command line: output '$output', exit $status"
+    return 1
+  }
+
+  up="$KIND_CREDENTIAL_CLI_HOME/up.txt"
+  printf 'kind-ssh-%s\n' "$RANDOM" >"$up"
+  kind_user_ssh_tool "$config" scp "$up" "$host:sftp-mode.txt" &&
+    kind_user_ssh_tool "$config" scp "$host:sftp-mode.txt" "$KIND_CREDENTIAL_CLI_HOME/sftp-mode.txt" &&
+    cmp -s "$up" "$KIND_CREDENTIAL_CLI_HOME/sftp-mode.txt" || {
+    echo '::error::scp (SFTP mode) did not round-trip a file through the home directory'
+    return 1
+  }
+  kind_user_ssh_tool "$config" scp -O "$up" "$host:legacy-mode.txt" &&
+    kind_user_ssh_tool "$config" scp -O "$host:legacy-mode.txt" "$KIND_CREDENTIAL_CLI_HOME/legacy-mode.txt" &&
+    cmp -s "$up" "$KIND_CREDENTIAL_CLI_HOME/legacy-mode.txt" || {
+    echo '::error::scp (legacy mode) did not round-trip a file through the home directory'
+    return 1
+  }
+  printf 'pwd\nls sftp-mode.txt\nrm sftp-mode.txt\n' >"$KIND_CREDENTIAL_CLI_HOME/sftp-batch"
+  kind_user_ssh_tool "$config" sftp -b "$KIND_CREDENTIAL_CLI_HOME/sftp-batch" "$host" >/dev/null || {
+    echo '::error::an sftp batch (pwd, ls, rm) failed'
+    return 1
+  }
+  if command -v rsync >/dev/null 2>&1; then
+    env -i PATH=/usr/bin:/bin HOME="$KIND_CREDENTIAL_CLI_HOME" \
+      XDG_CONFIG_HOME="$KIND_CREDENTIAL_CLI_HOME/config" \
+      CW_CONFIG_DIR="$KIND_CREDENTIAL_CLI_HOME/cw" \
+      CODEWIRE_SERVER_URL="$KIND_INGRESS_URL" \
+      timeout 60 rsync -e "ssh -F $config -o BatchMode=yes -o LogLevel=ERROR" \
+      "$up" "$host:rsync.txt" </dev/null || {
+      echo '::error::rsync over the managed block failed'
+      return 1
+    }
+  else
+    log "rsync is not installed on this host; its step did not run"
+  fi
+
+  # A key other than the recorded one, in place of the block's trust source.
+  sed 's|KnownHostsCommand .*|KnownHostsCommand /bin/echo %H ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFak|' \
+    "$config" >"$config.forged"
+  status=0
+  kind_user_ssh_tool "$config.forged" ssh "$host" 'echo trusted' >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 255 ] || {
+    echo "::error::ssh trusted a host key the platform did not record (exit $status)"
+    return 1
+  }
+  log "user SSH journey: shell syntax and exit status, scp in both modes, sftp, a forged key refused"
+)
 
 # The workspace daemon hosts SSH and the tailnet: an environment owns no
 # gateway Deployment, Service, NetworkPolicy, warm-member bridge or host-key
