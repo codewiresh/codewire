@@ -262,9 +262,9 @@ exit {exit_code}
         assert!(ssh.contains("IdentityFile=none\n"));
         assert!(ssh.contains("IdentitiesOnly=no\n"));
         let git = fs::read_to_string(root.path().join("git-argv")).unwrap();
-        assert!(
-            git.ends_with("clone\n--\nssh://git@example.com:2222/org/app.git\n/workspace/app\n")
-        );
+        assert!(git.ends_with(
+            "clone\n--progress\n--\nssh://git@example.com:2222/org/app.git\n/workspace/app\n"
+        ));
         let files = fs::read_dir(&run)
             .unwrap()
             .collect::<Result<Vec<_>, _>>()

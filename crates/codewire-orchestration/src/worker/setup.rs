@@ -26,7 +26,7 @@ use super::setup_lease::{
 use super::{JobPayload, WorkerContext};
 use crate::repository_mount::{canonical_repository_mount, validate_repository_mounts};
 use crate::sandbox::client::{ProbeResult, SandboxClient};
-use crate::sandbox::exec::WorkspaceExecResult;
+use crate::sandbox::exec::{StderrTap, WorkspaceExecResult};
 use crate::sandbox::sidecar::DEFAULT_GATEWAY_SSH_PORT;
 
 const DEFAULT_SIDECAR_READY_TIMEOUT: Duration = Duration::from_secs(180);
@@ -41,7 +41,23 @@ const SETUP_MUTATION_STATES: &[&str] = &["running"];
 // Every chain now launches through the shared projection/provider channel.
 // Leave room beneath its unchanged 16-request bound for provider traffic.
 const SETUP_REPOSITORY_CONCURRENCY: usize = 4;
+/// Stderr chunks buffered between one clone and its progress parser. A full
+/// buffer drops chunks, which only coarsens the reported progress.
+const CLONE_PROGRESS_CHUNKS: usize = 64;
 
+/// A clone without managed credentials. `--progress` makes Git write its
+/// meters to stderr even though the exec has no terminal.
+fn plain_clone_command(url: &str, destination: &str) -> Vec<String> {
+    vec![
+        "git".into(),
+        "clone".into(),
+        "--progress".into(),
+        url.into(),
+        destination.into(),
+    ]
+}
+
+mod clone_progress;
 mod github_checkout;
 mod ssh_checkout;
 
@@ -1027,6 +1043,22 @@ impl WorkerSetupOps<'_> {
         work_dir: &str,
         env: &BTreeMap<String, String>,
     ) -> anyhow::Result<()> {
+        self.workspace_exec_tapped(namespace, env_id, cmd, work_dir, env, None)
+            .await
+    }
+
+    /// [`Self::workspace_exec`], also copying the command's stderr chunks to
+    /// `stderr_tap` while it runs. Fencing, recovery and the result are
+    /// unchanged, and a full tap never delays the command.
+    async fn workspace_exec_tapped(
+        &self,
+        namespace: &str,
+        env_id: &str,
+        cmd: &[String],
+        work_dir: &str,
+        env: &BTreeMap<String, String>,
+        stderr_tap: Option<StderrTap>,
+    ) -> anyhow::Result<()> {
         if self.cancellation_requested() {
             return Err(SetupActivityCancelled.into());
         }
@@ -1186,7 +1218,7 @@ impl WorkerSetupOps<'_> {
 
         let mut authority_tick = tokio::time::interval(Duration::from_millis(500));
         authority_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let wait = handle.wait();
+        let wait = handle.wait_tapping_stderr(stderr_tap);
         tokio::pin!(wait);
         let exec_result = loop {
             tokio::select! {
@@ -1262,6 +1294,67 @@ impl WorkerSetupOps<'_> {
             .into());
         }
         Ok(())
+    }
+
+    /// Runs one repository's clone while turning Git's stderr meters into
+    /// `git_clone` `progress` rows (A5a contract v1). Only stage tokens and
+    /// percentages leave the parser; the stderr copies stay in this process
+    /// and are zeroed when dropped. Progress is telemetry: a dropped chunk or
+    /// an unwritten row never changes the clone's outcome.
+    async fn clone_with_progress(
+        &self,
+        namespace: &str,
+        env_id: &str,
+        clone: &[String],
+        env: &BTreeMap<String, String>,
+        repo_index: usize,
+        repo_count: usize,
+    ) -> anyhow::Result<()> {
+        let (tap, mut chunks) = tokio::sync::mpsc::channel(CLONE_PROGRESS_CHUNKS);
+        let exec = self.workspace_exec_tapped(namespace, env_id, clone, "", env, Some(tap));
+        let report = async {
+            let mut parser = clone_progress::CloneProgressParser::default();
+            let mut throttle =
+                clone_progress::ProgressThrottle::new(clone_progress::PROGRESS_ROW_INTERVAL);
+            // The tap closes when the command's stderr ends.
+            while let Some(chunk) = chunks.recv().await {
+                for progress in parser.feed(&chunk) {
+                    if throttle.admit(progress, std::time::Instant::now()) {
+                        self.emit_clone_row(
+                            "progress",
+                            "",
+                            clone_progress::progress_metadata(repo_index, repo_count, progress),
+                        )
+                        .await;
+                    }
+                }
+            }
+        };
+        let (result, ()) = tokio::join!(exec, report);
+        result
+    }
+
+    /// Writes one A5a `git_clone` row under the active setup phase. These rows
+    /// are best effort: a lost authority is reported by the clone's own fence.
+    async fn emit_clone_row(&self, status: &str, message: &str, metadata: serde_json::Value) {
+        if let Err(error) = self
+            .phase_authority
+            .emit_log(
+                self.active_phase,
+                "git_clone",
+                status,
+                message,
+                Some(metadata),
+            )
+            .await
+        {
+            tracing::debug!(
+                environment_id = %self.env.id,
+                status,
+                error = %error,
+                "setup: clone progress row not written"
+            );
+        }
     }
 
     /// Publish the complete ordinary defaults before clone/install, including an
@@ -1435,19 +1528,30 @@ impl SetupOps for WorkerSetupOps<'_> {
         let this: &WorkerSetupOps<'_> = self;
         // Materialize the unpolled futures before crossing the async-trait
         // boundary; only observe_repository_chains admits them for execution.
+        let repo_count = input.repos.len();
         let clones: Vec<_> = input
             .repos
             .iter()
             .zip(ssh_commands)
             .zip(github_commands)
-            .map(|((repo, ssh_command), github_command)| {
+            .enumerate()
+            .map(|(position, ((repo, ssh_command), github_command))| {
                 let repo = repo.clone();
                 let namespace = input.namespace.clone();
                 let env_id = input.environment_id.clone();
+                let repo_index = position + 1;
                 async move {
                     this.phase_authority
                         .ensure_active(this.active_phase)
                         .await?;
+                    if repo_count > 1 {
+                        this.emit_clone_row(
+                            "started",
+                            &format!("Cloning repository {repo_index} of {repo_count}"),
+                            clone_progress::repository_metadata(repo_index, repo_count),
+                        )
+                        .await;
+                    }
                     let dir = canonical_repository_mount(&repo.url, &repo.mount_path)?;
                     let rm: Vec<String> = vec!["rm".into(), "-rf".into(), dir.clone()];
                     if let Err(error) = this
@@ -1462,12 +1566,9 @@ impl SetupOps for WorkerSetupOps<'_> {
                         .await?;
                     #[cfg(feature = "kind-e2e")]
                     let clone = super::fencing_evidence::clone_fixture_command(&repo.url)
-                        .unwrap_or_else(|| {
-                            vec!["git".into(), "clone".into(), repo.url.clone(), dir.clone()]
-                        });
+                        .unwrap_or_else(|| plain_clone_command(&repo.url, &dir));
                     #[cfg(not(feature = "kind-e2e"))]
-                    let clone: Vec<String> =
-                        vec!["git".into(), "clone".into(), repo.url.clone(), dir.clone()];
+                    let clone = plain_clone_command(&repo.url, &dir);
                     let clone = ssh_command
                         .or_else(|| {
                             github_command
@@ -1475,8 +1576,13 @@ impl SetupOps for WorkerSetupOps<'_> {
                                 .map(|commands| commands.clone.clone())
                         })
                         .unwrap_or(clone);
+                    // Git's meters are English only under the C locale, which
+                    // the managed SSH and GitHub commands already select.
+                    let clone_env = BTreeMap::from([("LC_ALL".to_string(), "C".to_string())]);
                     if let Err(e) = this
-                        .workspace_exec(&namespace, &env_id, &clone, "", &BTreeMap::new())
+                        .clone_with_progress(
+                            &namespace, &env_id, &clone, &clone_env, repo_index, repo_count,
+                        )
                         .await
                     {
                         if is_setup_control_flow(&e) {
@@ -1511,6 +1617,14 @@ impl SetupOps for WorkerSetupOps<'_> {
                                 e.context(format!("git checkout {} for {}", selector, repo.url));
                             return Err(this.fence_failed_launch_group(input, error).await);
                         }
+                    }
+                    if repo_count > 1 {
+                        this.emit_clone_row(
+                            "completed",
+                            &format!("Cloned repository {repo_index} of {repo_count}"),
+                            clone_progress::repository_metadata(repo_index, repo_count),
+                        )
+                        .await;
                     }
                     Ok(())
                 }

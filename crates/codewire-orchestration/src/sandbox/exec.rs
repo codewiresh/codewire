@@ -42,8 +42,22 @@ struct BoundedOutput {
     bytes: Zeroizing<Vec<u8>>,
 }
 
+/// Receives copies of a command's stderr chunks while it runs. Delivery is
+/// best effort: a full receiver drops the chunk rather than slowing the
+/// command, and the copies are zeroed when dropped.
+pub type StderrTap = tokio::sync::mpsc::Sender<Zeroizing<Vec<u8>>>;
+
 impl WorkspaceExecHandle {
-    pub async fn wait(mut self) -> anyhow::Result<WorkspaceExecResult> {
+    pub async fn wait(self) -> anyhow::Result<WorkspaceExecResult> {
+        self.wait_tapping_stderr(None).await
+    }
+
+    /// [`Self::wait`], also handing each stderr chunk to `tap` as it arrives.
+    /// Capture, completion and status classification are unchanged.
+    pub async fn wait_tapping_stderr(
+        mut self,
+        tap: Option<StderrTap>,
+    ) -> anyhow::Result<WorkspaceExecResult> {
         let stdout: anyhow::Result<Vec<u8>>;
         let stderr: anyhow::Result<Vec<u8>>;
         let mut out_reader = self.attached.stdout();
@@ -61,7 +75,7 @@ impl WorkspaceExecHandle {
         };
         let err_task = async {
             if let Some(reader) = err_reader.as_mut() {
-                read_bounded(reader, WORKSPACE_EXEC_CAPTURE_BYTES)
+                read_bounded_tapped(reader, WORKSPACE_EXEC_CAPTURE_BYTES, tap.as_ref())
                     .await
                     .map(|output| output.bytes.to_vec())
                     .map_err(|error| anyhow::anyhow!("workspace exec stderr: {error}"))
@@ -393,12 +407,25 @@ async fn read_bounded<R: AsyncRead + Unpin>(
     reader: &mut R,
     limit: usize,
 ) -> std::io::Result<BoundedOutput> {
+    read_bounded_tapped(reader, limit, None).await
+}
+
+async fn read_bounded_tapped<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    limit: usize,
+    tap: Option<&StderrTap>,
+) -> std::io::Result<BoundedOutput> {
     let mut bytes = Zeroizing::new(Vec::with_capacity(limit.min(8 * 1024)));
     let mut buffer = [0_u8; 8 * 1024];
     loop {
         let count = reader.read(&mut buffer).await?;
         if count == 0 {
             break;
+        }
+        if let Some(tap) = tap {
+            // The whole stream is tapped, including bytes past the capture
+            // limit; a long clone keeps reporting after its first 64 KiB.
+            let _ = tap.try_send(Zeroizing::new(buffer[..count].to_vec()));
         }
         let retain = count.min(limit.saturating_sub(bytes.len()));
         bytes.extend_from_slice(&buffer[..retain]);
