@@ -1,5 +1,7 @@
 # Server identity of orchestration's internal Connect listener (8088): the
-# gateway binding and Mesh authorization calls. The namespace-local Issuer
+# gateway binding and Mesh authorization calls; and of the workspace-binding
+# listener (8087), which workspace daemons verify by its Service name with the
+# same published roots. The namespace-local Issuer
 # and its dedicated CA are provisioned by the infrastructure owner, who also
 # publishes the CA's public certificate as `codewire-orchestration-internal-
 # roots` in the sandbox namespace and here. Never use the credential broker,
@@ -17,6 +19,7 @@ spec:
     group: cert-manager.io
   dnsNames:
     - codewire-orchestration.prod.svc.cluster.local
+    - codewire-orchestration-workspace-binding.prod.svc.cluster.local
   duration: 24h
   renewBefore: 8h
   isCA: false

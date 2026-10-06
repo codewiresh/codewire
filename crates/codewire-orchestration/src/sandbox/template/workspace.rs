@@ -13,8 +13,9 @@ use super::runtime_policy::{
     workspace_storage_class,
 };
 use codewire_gateway_proto::{
-    WORKSPACE_BINDING_TOKEN_AUDIENCE, WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS,
-    WORKSPACE_BINDING_TOKEN_MOUNT_PATH, WORKSPACE_BINDING_URL_ENV, WORKSPACE_POD_UID_ENV,
+    WORKSPACE_BINDING_TLS_ROOTS_MOUNT_PATH, WORKSPACE_BINDING_TOKEN_AUDIENCE,
+    WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS, WORKSPACE_BINDING_TOKEN_MOUNT_PATH,
+    WORKSPACE_BINDING_URL_ENV, WORKSPACE_POD_UID_ENV,
 };
 // The binding recorder recognizes a Pod-scope Pod by this exact volume.
 use crate::worker::workspace_binding::WORKSPACE_BINDING_VOLUME;
@@ -388,6 +389,16 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
                 "mountPath": WORKSPACE_BINDING_TOKEN_MOUNT_PATH,
                 "readOnly": true,
             }));
+        // The public roots that verify the binding listener's TLS identity.
+        volumes.push(workspace_binding_roots_volume());
+        ws["volumeMounts"]
+            .as_array_mut()
+            .expect("workspace mounts")
+            .push(json!({
+                "name": WORKSPACE_BINDING_ROOTS_VOLUME,
+                "mountPath": WORKSPACE_BINDING_TLS_ROOTS_MOUNT_PATH,
+                "readOnly": true,
+            }));
     }
 
     let mut spec = Map::new();
@@ -567,6 +578,22 @@ fn workspace_binding_token_volume() -> Value {
                     "path": "token",
                 },
             }],
+        },
+    })
+}
+
+/// The volume of the binding listener's public roots.
+pub(crate) const WORKSPACE_BINDING_ROOTS_VOLUME: &str = "orchestration-internal-roots";
+
+/// Only the `ca.crt` key of orchestration's published internal roots: public
+/// trust material, never a credential (daemon-hosted access §6).
+fn workspace_binding_roots_volume() -> Value {
+    json!({
+        "name": WORKSPACE_BINDING_ROOTS_VOLUME,
+        "configMap": {
+            "name": super::ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP,
+            "items": [{ "key": "ca.crt", "path": "ca.crt" }],
+            "defaultMode": 0o444,
         },
     })
 }

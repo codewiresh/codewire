@@ -46,6 +46,15 @@ pub const WORKSPACE_BINDING_PORT: u16 = 8087;
 /// workspace-binding listener. A binding-mode Pod carries no environment
 /// identity; it comes only from the bind response.
 pub const WORKSPACE_BINDING_URL_ENV: &str = "CODEWIRE_WORKSPACE_BINDING_URL";
+/// The public roots the workspace daemon verifies the binding listener's TLS
+/// identity with: orchestration's internal CA, the single key `ca.crt` of the
+/// sandbox-namespace ConfigMap `codewire-orchestration-internal-roots`,
+/// mounted read-only into the workspace container of every Pod whose binding
+/// URL is rendered.
+pub const WORKSPACE_BINDING_TLS_ROOTS_MOUNT_PATH: &str =
+    "/run/codewire-orchestration-internal-roots";
+pub const WORKSPACE_BINDING_TLS_ROOTS_FILE: &str =
+    "/run/codewire-orchestration-internal-roots/ca.crt";
 /// The workspace Pod's own UID from the downward API. The daemon compares it
 /// with the reviewed Pod UID in the bind response.
 pub const WORKSPACE_POD_UID_ENV: &str = "CODEWIRE_POD_UID";
@@ -238,6 +247,10 @@ mod tests {
     #[test]
     fn hosted_daemon_binding_state_lives_in_one_owner_directory() {
         assert_eq!(WORKSPACE_BINDING_URL_ENV, "CODEWIRE_WORKSPACE_BINDING_URL");
+        assert_eq!(
+            WORKSPACE_BINDING_TLS_ROOTS_FILE,
+            format!("{WORKSPACE_BINDING_TLS_ROOTS_MOUNT_PATH}/ca.crt")
+        );
         assert_eq!(WORKSPACE_POD_UID_ENV, "CODEWIRE_POD_UID");
         assert_eq!(HOSTED_DAEMON_STATE_DIRECTORY, "/codewire/run/daemon");
         for file in [HOSTED_DAEMON_READY_FILE, HOSTED_DAEMON_CREDENTIAL_FILE] {

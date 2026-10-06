@@ -5,9 +5,12 @@ token, environment ID, operation generation, projection digest, managed-client
 selection or derived client variables; no Codex ConfigMap or init-container
 copy; no environment label on its SandboxTemplate; and no template egress to
 the environment's own gateway. It carries only the Pod-bound
-workspace-binding token (workspace container only), the binding URL and its
-own UID from the downward API, plus exactly one new egress rule to the binding
-listener.
+workspace-binding token (workspace container only), the https binding URL and
+its own UID from the downward API, plus exactly one new egress rule to the
+binding listener. Its one ConfigMap volume is the exact exception of
+daemon-hosted access Q6: the single public key `ca.crt` of
+`codewire-orchestration-internal-roots`, mounted read-only into the workspace
+container only, to verify the binding listener's TLS identity.
 
 Warm pools (Program #2238 C1) share one such template per exact shape. Their
 objects carry no environment, organization, generation, UUID or secret at all,
@@ -66,6 +69,18 @@ FORBIDDEN_TEXT = (
 BINDING_VOLUME = "workspace-binding-identity"
 BINDING_AUDIENCE = "codewire.internal.workspace-binding.v1"
 BINDING_MOUNT = "/var/run/secrets/codewire/workspace-binding"
+ROOTS_VOLUME = "orchestration-internal-roots"
+ROOTS_MOUNT = "/run/codewire-orchestration-internal-roots"
+# The only ConfigMap a workspace may mount: public trust material, one key.
+EXPECTED_ROOTS_VOLUME = {
+    "name": ROOTS_VOLUME,
+    "configMap": {
+        "name": "codewire-orchestration-internal-roots",
+        "items": [{"key": "ca.crt", "path": "ca.crt"}],
+        "defaultMode": 0o444,
+    },
+}
+EXPECTED_ROOTS_MOUNT = {"name": ROOTS_VOLUME, "mountPath": ROOTS_MOUNT, "readOnly": True}
 ENVIRONMENT_LABEL = "codewire.sh/environment-id"
 POOL_NAME = re.compile(r"^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$")
 POOL_REVISION = "codewire.sh/pool-revision"
@@ -111,6 +126,9 @@ def violations(template: dict[str, Any], label: str) -> list[str]:
         mounts_token = any(mount.get("name") == BINDING_VOLUME for mount in container.get("volumeMounts") or [])
         if mounts_token != (container.get("name") == "workspace"):
             output.append(f"{label}: binding token mount is not exactly the workspace container's")
+        roots_mounts = [mount for mount in container.get("volumeMounts") or [] if mount.get("name") == ROOTS_VOLUME]
+        if roots_mounts != ([EXPECTED_ROOTS_MOUNT] if container.get("name") == "workspace" else []):
+            output.append(f"{label}: binding roots are not mounted read-only at {ROOTS_MOUNT} in the workspace container only")
     if spec.get("automountServiceAccountToken") is not False:
         output.append(f"{label}: automounts a Kubernetes API token")
     volumes = [volume for volume in spec.get("volumes") or [] if volume.get("name") == BINDING_VOLUME]
@@ -123,8 +141,11 @@ def violations(template: dict[str, Any], label: str) -> list[str]:
     }
     if volumes != [expected_volume]:
         output.append(f"{label}: binding token volume is not exactly the workspace-binding audience")
+    roots = [volume for volume in spec.get("volumes") or [] if volume.get("name") == ROOTS_VOLUME]
+    if roots != [EXPECTED_ROOTS_VOLUME]:
+        output.append(f"{label}: binding roots volume is not exactly the ca.crt key of the internal roots")
     for volume in spec.get("volumes") or []:
-        if "configMap" in volume:
+        if "configMap" in volume and volume != EXPECTED_ROOTS_VOLUME:
             output.append(f"{label}: mounts ConfigMap volume {volume.get('name')}")
         if "secret" in volume:
             output.append(f"{label}: mounts Secret volume {volume.get('name')}")
@@ -132,8 +153,9 @@ def violations(template: dict[str, Any], label: str) -> list[str]:
     env = {entry.get("name"): entry for entry in workspace.get("env") or []}
     if env.get("CODEWIRE_POD_UID") != {"name": "CODEWIRE_POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}}:
         output.append(f"{label}: workspace UID is not from the downward API")
-    if not str((env.get("CODEWIRE_WORKSPACE_BINDING_URL") or {}).get("value", "")).endswith(":8087"):
-        output.append(f"{label}: workspace has no binding listener URL")
+    binding_url = str((env.get("CODEWIRE_WORKSPACE_BINDING_URL") or {}).get("value", ""))
+    if not (binding_url.startswith("https://") and binding_url.endswith(":8087")):
+        output.append(f"{label}: workspace has no TLS binding listener URL")
     if not any(mount.get("name") == BINDING_VOLUME and mount.get("mountPath") == BINDING_MOUNT and mount.get("readOnly") is True
                for mount in workspace.get("volumeMounts") or []):
         output.append(f"{label}: binding token is not mounted read-only at {BINDING_MOUNT}")
@@ -382,6 +404,36 @@ def self_test(base: dict[str, Any]) -> None:
         {"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}], "ports": [{"protocol": "TCP", "port": 8087}]}))
     rejected("Secret volume", lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append({"name": "env", "secret": {"secretName": "env"}}))
     rejected("environment import", lambda f: workspace(f).__setitem__("envFrom", [{"configMapRef": {"name": "environment"}}]))
+
+    def volume(fixture: dict[str, Any], name: str) -> dict[str, Any]:
+        return next(v for v in fixture["spec"]["podTemplate"]["spec"]["volumes"] if v["name"] == name)
+
+    def roots_mount(fixture: dict[str, Any]) -> dict[str, Any]:
+        return next(m for m in workspace(fixture)["volumeMounts"] if m["name"] == ROOTS_VOLUME)
+
+    def binding_url(fixture: dict[str, Any], value: str) -> None:
+        next(e for e in workspace(fixture)["env"] if e["name"] == "CODEWIRE_WORKSPACE_BINDING_URL")["value"] = value
+
+    rejected("plaintext binding URL", lambda f: binding_url(
+        f, "http://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"))
+    rejected("roots in DinD", lambda f: next(c for c in f["spec"]["podTemplate"]["spec"]["containers"] if c["name"] == "dind")[
+        "volumeMounts"].append(dict(EXPECTED_ROOTS_MOUNT)))
+    rejected("writable roots mount", lambda f: roots_mount(f).__setitem__("readOnly", False))
+    rejected("roots at another path", lambda f: roots_mount(f).__setitem__("mountPath", "/etc/ssl/certs"))
+    rejected("roots by subPath", lambda f: roots_mount(f).__setitem__("subPath", "ca.crt"))
+    rejected("roots without mount", lambda f: workspace(f).__setitem__(
+        "volumeMounts", [m for m in workspace(f)["volumeMounts"] if m["name"] != ROOTS_VOLUME]))
+    rejected("roots volume missing", lambda f: f["spec"]["podTemplate"]["spec"].__setitem__(
+        "volumes", [v for v in f["spec"]["podTemplate"]["spec"]["volumes"] if v["name"] != ROOTS_VOLUME]))
+    rejected("whole roots ConfigMap", lambda f: volume(f, ROOTS_VOLUME)["configMap"].pop("items"))
+    rejected("another roots key", lambda f: volume(f, ROOTS_VOLUME)["configMap"].__setitem__(
+        "items", [{"key": "ca.crt", "path": "ca.crt"}, {"key": "tls.key", "path": "tls.key"}]))
+    rejected("another roots ConfigMap", lambda f: volume(f, ROOTS_VOLUME)["configMap"].__setitem__(
+        "name", "codewire-credential-gateway-roots"))
+    rejected("writable roots mode", lambda f: volume(f, ROOTS_VOLUME)["configMap"].__setitem__("defaultMode", 0o666))
+    rejected("second roots volume", lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append(copy.deepcopy(EXPECTED_ROOTS_VOLUME)))
+    rejected("roots ConfigMap under another name", lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append(
+        {**copy.deepcopy(EXPECTED_ROOTS_VOLUME), "name": "extra-roots"}))
 
 
 def check_identity_free_workspace(args: argparse.Namespace) -> int:

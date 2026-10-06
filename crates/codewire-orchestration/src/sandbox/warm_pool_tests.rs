@@ -10,7 +10,7 @@ const WORKSPACE_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha25
 const SUPPORT_IMAGE: &str = "registry.example.invalid/codewire/gateway@sha256:2222222222222222222222222222222222222222222222222222222222222222";
 const DIND_IMAGE: &str = "docker.io/library/docker:29.7.1-dind@sha256:3333333333333333333333333333333333333333333333333333333333333333";
 const BINDING_URL: &str =
-    "http://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087";
+    "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087";
 
 fn shape(cpu_millicores: i64, memory_mib: i64, disk_gib: i64) -> WorkspaceShape {
     WorkspaceShape {

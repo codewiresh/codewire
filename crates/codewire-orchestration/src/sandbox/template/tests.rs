@@ -3416,7 +3416,7 @@ mod tests {
     // ------------------------------------------- identity-free (B2, §13)
 
     const IDENTITY_FREE_BINDING_URL: &str =
-        "http://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087";
+        "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087";
 
     fn identity_free_opts() -> TemplateOpts {
         TemplateOpts {

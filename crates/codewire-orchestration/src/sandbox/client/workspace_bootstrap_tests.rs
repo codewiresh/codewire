@@ -1461,7 +1461,7 @@ fn binding_opts() -> TemplateOpts {
         server_namespace: "dev".into(),
         workspace_identity: super::super::template::WorkspaceIdentity::Binding {
             binding_url:
-                "http://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087".into(),
+                "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087".into(),
         },
         ..opts()
     }

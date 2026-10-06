@@ -229,10 +229,11 @@ pub fn workspace_binding_tls_host(server_namespace: &str) -> String {
     format!("{WORKSPACE_BINDING_SERVICE_NAME}.{server_namespace}.svc.cluster.local")
 }
 
-/// The in-cluster URL a workspace daemon long-polls for its binding.
+/// The in-cluster URL a workspace daemon long-polls for its binding, over
+/// TLS verified with the mounted internal roots.
 pub fn workspace_binding_url(server_namespace: &str) -> String {
     format!(
-        "http://{}:{}",
+        "https://{}:{}",
         workspace_binding_tls_host(server_namespace),
         codewire_gateway_proto::WORKSPACE_BINDING_PORT
     )
@@ -2730,7 +2731,7 @@ mod tests {
             render(&cfg, &env),
             WorkspaceIdentity::Binding {
                 binding_url:
-                    "http://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
+                    "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
                         .into()
             }
         );
