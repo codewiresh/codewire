@@ -3,13 +3,16 @@
 //! `BindWorkspace` and `RefreshAccess` return a `WorkspaceAccess` for the
 //! binding's environment: a short-lived peer token for the public
 //! coordinator, its expiry and operation generation, the coordinator origin
-//! and the environment's public UDP endpoints. The daemon accepts a grant only
-//! after validating every field, and never logs the peer token.
+//! the environment's public UDP endpoints and its exposed application ports.
+//! The daemon accepts a grant only after validating every field, and never
+//! logs the peer token.
 
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use zeroize::Zeroizing;
+
+use crate::app_ports::{AppPorts, app_ports};
 
 /// Longest peer token the daemon accepts; a compact signed token is far
 /// shorter.
@@ -25,6 +28,7 @@ pub struct AccessFields<'a> {
     pub coordinator_url: &'a str,
     pub direct_udp_endpoints: &'a [String],
     pub peer_relay_endpoints: &'a [String],
+    pub app_ports: &'a [i32],
 }
 
 /// A peer token the daemon holds. Never printed.
@@ -52,6 +56,7 @@ pub struct WorkspaceAccessGrant {
     coordinator_url: String,
     direct_udp_endpoints: Vec<String>,
     peer_relay_endpoints: Vec<String>,
+    app_ports: AppPorts,
 }
 
 /// An access grant the daemon refused. Value-blind.
@@ -100,6 +105,7 @@ impl WorkspaceAccessGrant {
             coordinator_url: fields.coordinator_url.trim_end_matches('/').to_owned(),
             direct_udp_endpoints: endpoints(fields.direct_udp_endpoints)?,
             peer_relay_endpoints: endpoints(fields.peer_relay_endpoints)?,
+            app_ports: app_ports(fields.app_ports).map_err(|_| invalid)?,
         })
     }
 
@@ -125,6 +131,11 @@ impl WorkspaceAccessGrant {
 
     pub fn peer_relay_endpoints(&self) -> &[String] {
         &self.peer_relay_endpoints
+    }
+
+    /// The environment's exposed application ports at the time of the grant.
+    pub fn app_ports(&self) -> &AppPorts {
+        &self.app_ports
     }
 
     /// When to fetch the next grant: half the remaining lifetime from `now`,
@@ -187,6 +198,7 @@ mod tests {
             coordinator_url: coordinator,
             direct_udp_endpoints: direct,
             peer_relay_endpoints: relay,
+            app_ports: &[5173, 3000],
         }
     }
 
@@ -206,6 +218,7 @@ mod tests {
         assert_eq!(grant.peer_token().expose_secret(), TOKEN);
         assert_eq!(grant.coordinator_url(), "https://codewire.sh");
         assert_eq!(grant.operation_generation(), 4);
+        assert_eq!(*grant.app_ports(), AppPorts::from([3000, 5173]));
         assert_eq!(grant.refresh_at(now()), now() + Duration::from_secs(300));
         assert!(!format!("{grant:?}").contains(TOKEN));
     }
@@ -253,5 +266,8 @@ mod tests {
         let mut blank_token = fields("https://codewire.sh", &ok, &ok, 1_000_600);
         blank_token.peer_token = "";
         assert!(WorkspaceAccessGrant::validate(&blank_token, now()).is_err());
+        let mut bad_ports = fields("https://codewire.sh", &ok, &ok, 1_000_600);
+        bad_ports.app_ports = &[0];
+        assert!(WorkspaceAccessGrant::validate(&bad_ports, now()).is_err());
     }
 }

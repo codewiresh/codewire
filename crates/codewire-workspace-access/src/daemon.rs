@@ -1307,6 +1307,13 @@ mod tests {
             Err(Status::unimplemented("fixture unused lifecycle RPC"))
         }
 
+        async fn set_app_ports(
+            &self,
+            _request: Request<v1::SetAppPortsRequest>,
+        ) -> Result<Response<v1::SetAppPortsResponse>, Status> {
+            Err(Status::unimplemented("fixture unused app ports RPC"))
+        }
+
         type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
         type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
         type AttachSessionStream = ReceiverStream<Result<v1::SessionAttachMessage, Status>>;

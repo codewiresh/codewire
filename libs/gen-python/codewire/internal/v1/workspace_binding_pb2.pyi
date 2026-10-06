@@ -31,20 +31,22 @@ class BindWorkspaceResponse(_message.Message):
     def __init__(self, environment_id: _Optional[str] = ..., pod_uid: _Optional[str] = ..., operation_generation: _Optional[int] = ..., daemon_credential: _Optional[str] = ..., projection_selection_sha256: _Optional[str] = ..., managed_credential_clients: _Optional[str] = ..., access: _Optional[_Union[WorkspaceAccess, _Mapping]] = ...) -> None: ...
 
 class WorkspaceAccess(_message.Message):
-    __slots__ = ("peer_token", "peer_token_expires_at", "operation_generation", "coordinator_url", "direct_udp_endpoints", "peer_relay_endpoints")
+    __slots__ = ("peer_token", "peer_token_expires_at", "operation_generation", "coordinator_url", "direct_udp_endpoints", "peer_relay_endpoints", "app_ports")
     PEER_TOKEN_FIELD_NUMBER: _ClassVar[int]
     PEER_TOKEN_EXPIRES_AT_FIELD_NUMBER: _ClassVar[int]
     OPERATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
     COORDINATOR_URL_FIELD_NUMBER: _ClassVar[int]
     DIRECT_UDP_ENDPOINTS_FIELD_NUMBER: _ClassVar[int]
     PEER_RELAY_ENDPOINTS_FIELD_NUMBER: _ClassVar[int]
+    APP_PORTS_FIELD_NUMBER: _ClassVar[int]
     peer_token: str
     peer_token_expires_at: int
     operation_generation: int
     coordinator_url: str
     direct_udp_endpoints: _containers.RepeatedScalarFieldContainer[str]
     peer_relay_endpoints: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, peer_token: _Optional[str] = ..., peer_token_expires_at: _Optional[int] = ..., operation_generation: _Optional[int] = ..., coordinator_url: _Optional[str] = ..., direct_udp_endpoints: _Optional[_Iterable[str]] = ..., peer_relay_endpoints: _Optional[_Iterable[str]] = ...) -> None: ...
+    app_ports: _containers.RepeatedScalarFieldContainer[int]
+    def __init__(self, peer_token: _Optional[str] = ..., peer_token_expires_at: _Optional[int] = ..., operation_generation: _Optional[int] = ..., coordinator_url: _Optional[str] = ..., direct_udp_endpoints: _Optional[_Iterable[str]] = ..., peer_relay_endpoints: _Optional[_Iterable[str]] = ..., app_ports: _Optional[_Iterable[int]] = ...) -> None: ...
 
 class RefreshAccessRequest(_message.Message):
     __slots__ = ()

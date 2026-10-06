@@ -406,6 +406,9 @@ struct FakeStore {
     /// Host keys by (environment, generation), and who recorded them.
     host_keys: Mutex<HashMap<(String, i64), (String, String)>>,
     zones: Mutex<HashMap<String, RuntimeTransportZone>>,
+    /// The environment's exposed application ports; `None` models an
+    /// unavailable lookup.
+    app_ports: Mutex<Option<Vec<i32>>>,
 }
 
 impl FakeStore {
@@ -416,6 +419,7 @@ impl FakeStore {
             queries: AtomicUsize::new(0),
             host_keys: Mutex::new(HashMap::new()),
             zones: Mutex::new(HashMap::from([(ZONE.into(), zone())])),
+            app_ports: Mutex::new(Some(vec![3000, 5173])),
         })
     }
 
@@ -476,6 +480,15 @@ impl BindingStore for FakeStore {
         name: &str,
     ) -> Result<Option<RuntimeTransportZone>, BindingStoreUnavailable> {
         Ok(self.zones.lock().unwrap().get(name).cloned())
+    }
+
+    async fn app_ports(&self, environment_id: &str) -> Result<Vec<i32>, BindingStoreUnavailable> {
+        assert_eq!(environment_id, ENVIRONMENT_ID);
+        self.app_ports
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(BindingStoreUnavailable)
     }
 }
 
@@ -993,6 +1006,7 @@ async fn a_token_that_expires_during_the_wait_gets_no_binding() {
         queries: AtomicUsize::new(0),
         host_keys: Mutex::new(HashMap::new()),
         zones: Mutex::new(HashMap::new()),
+        app_ports: Mutex::new(Some(Vec::new())),
     });
     let fixture = fixture_with(FakeCluster::valid(), store, |state| {
         state.with_timing(Duration::from_secs(5), Duration::from_millis(100))
@@ -1117,6 +1131,8 @@ async fn a_bound_pod_gets_a_generation_bound_peer_token_and_its_public_endpoints
     assert_eq!(access.coordinator_url, COORDINATOR_URL);
     assert_eq!(access.direct_udp_endpoints, vec!["203.0.113.7:41700"]);
     assert_eq!(access.peer_relay_endpoints, vec!["198.51.100.4:41641"]);
+    // The exposed application ports the daemon serves on its tailnet.
+    assert_eq!(access.app_ports, vec![3000, 5173]);
     // Never the allocator or its token, and the token never prints.
     let debug = format!("{response:?}");
     assert!(!debug.contains(&access.peer_token));
@@ -1136,6 +1152,16 @@ async fn missing_endpoints_only_narrow_the_grant() {
     validated_peer_token(access);
     assert!(access.direct_udp_endpoints.is_empty());
     assert!(access.peer_relay_endpoints.is_empty());
+}
+
+#[tokio::test]
+async fn an_unknown_app_port_set_fails_the_grant_instead_of_clearing_it() {
+    // The daemon replaces its served ports with each grant's set, so a
+    // lookup failure must not send an empty one.
+    let store = FakeStore::bound(WorkspaceCredentialScope::Pod);
+    *store.app_ports.lock().unwrap() = None;
+    let fixture = fixture(FakeCluster::placed(), store);
+    assert!(fixture.bind(0).await.is_err());
 }
 
 #[tokio::test]

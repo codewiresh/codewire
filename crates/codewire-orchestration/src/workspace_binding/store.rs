@@ -105,6 +105,11 @@ pub trait BindingStore: Send + Sync {
     {
         Ok(None)
     }
+
+    /// The environment's exposed application ports, for its access grant.
+    async fn app_ports(&self, _environment_id: &str) -> Result<Vec<i32>, BindingStoreUnavailable> {
+        Ok(Vec::new())
+    }
 }
 
 /// PostgreSQL-backed lookup on the listener's own bounded pool.
@@ -266,6 +271,33 @@ impl BindingStore for PgBindingStore {
                 BindingStoreUnavailable
             })
     }
+
+    async fn app_ports(&self, environment_id: &str) -> Result<Vec<i32>, BindingStoreUnavailable> {
+        exposed_app_ports(&self.pool, environment_id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = %error, "workspace binding app port lookup failed");
+                BindingStoreUnavailable
+            })
+    }
+}
+
+/// The environment's exposed application ports, ascending and distinct:
+/// the set its daemon serves on its tailnet address. A port whose removal
+/// was requested is no longer exposed.
+pub async fn exposed_app_ports(
+    pool: &sqlx::PgPool,
+    environment_id: &str,
+) -> Result<Vec<i32>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT port FROM environment_ports \
+         WHERE environment_id = $1 AND deletion_requested_at IS NULL \
+           AND port BETWEEN 1 AND 65535 \
+         ORDER BY port",
+    )
+    .bind(environment_id)
+    .fetch_all(pool)
+    .await
 }
 
 /// The SSH host public key recorded for `environment_id` at its current

@@ -30,6 +30,7 @@ fn grant(token: &str, lifetime_seconds: i64, generation: i64) -> WorkspaceAccess
             coordinator_url: "https://coordinator.codewire.test",
             direct_udp_endpoints: &[],
             peer_relay_endpoints: &[],
+            app_ports: &[],
         },
         now,
     )
@@ -493,6 +494,7 @@ fn grant_for(origin: &str) -> WorkspaceAccessGrant {
             coordinator_url: origin,
             direct_udp_endpoints: &[],
             peer_relay_endpoints: &[],
+            app_ports: &[],
         },
         now,
     )
@@ -532,4 +534,158 @@ async fn the_coordinator_is_trusted_through_mounted_extra_roots_only() {
         Err(CoordinatorError::Trust)
     ));
     assert_eq!(coordinator.seen().len(), 1);
+}
+
+mod app_ports {
+    use std::net::{IpAddr, Ipv6Addr};
+
+    use codewire_tailnet::conn::{Options as ConnOptions, Transport, WgDatagram};
+    use codewire_tailnet::derp::NodePublic as DerpPublic;
+    use codewire_tailnet::node::Prefix;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use super::*;
+
+    const DAEMON_IP: Ipv6Addr = Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0x0d);
+    const CLIENT_IP: Ipv6Addr = Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0x0c);
+
+    /// Two tailnet connections wired to each other in-process, standing in
+    /// for DERP.
+    fn tailnet_pair() -> (Arc<Conn>, Conn) {
+        let daemon_secret = StaticSecret::random_from_rng(OsRng);
+        let client_secret = StaticSecret::random_from_rng(OsRng);
+        let daemon_key = PublicKey::from(&daemon_secret).to_bytes();
+        let client_key = PublicKey::from(&client_secret).to_bytes();
+        let (daemon_out, mut daemon_out_rx) = mpsc::unbounded_channel::<WgDatagram>();
+        let (client_out, mut client_out_rx) = mpsc::unbounded_channel::<WgDatagram>();
+        let (daemon_in, daemon_in_rx) = mpsc::unbounded_channel::<WgDatagram>();
+        let (client_in, client_in_rx) = mpsc::unbounded_channel::<WgDatagram>();
+        tokio::spawn(async move {
+            while let Some(datagram) = daemon_out_rx.recv().await {
+                let _ = client_in.send(WgDatagram {
+                    peer: DerpPublic::from_raw(daemon_key),
+                    data: datagram.data,
+                });
+            }
+        });
+        tokio::spawn(async move {
+            while let Some(datagram) = client_out_rx.recv().await {
+                let _ = daemon_in.send(WgDatagram {
+                    peer: DerpPublic::from_raw(client_key),
+                    data: datagram.data,
+                });
+            }
+        });
+        let transport = |to_transport, from_transport| Transport {
+            to_transport,
+            from_transport,
+            peer_updates: None,
+            path_probe: None,
+            local_endpoint_updates: None,
+        };
+        let options = |secret: &StaticSecret, ip| ConnOptions {
+            id: Uuid::new_v4(),
+            addresses: vec![Prefix::new(IpAddr::V6(ip), 128)],
+            endpoints: Vec::new(),
+            private_key: Some(secret.clone()),
+            disco_private: None,
+        };
+        let daemon = Conn::new(
+            options(&daemon_secret, DAEMON_IP),
+            transport(daemon_out, daemon_in_rx),
+        )
+        .unwrap();
+        let client = Conn::new(
+            options(&client_secret, CLIENT_IP),
+            transport(client_out, client_in_rx),
+        )
+        .unwrap();
+        let node = |key: [u8; 32], ip| Node {
+            id: Uuid::new_v4(),
+            as_of: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            key: NodePublic::from_raw(key),
+            disco_key: DiscoPublic::default(),
+            preferred_derp: 1,
+            derp_latency: None,
+            endpoints: Vec::new(),
+            addresses: vec![Prefix::new(IpAddr::V6(ip), 128)],
+        };
+        daemon.update_peers(&[node(client_key, CLIENT_IP)]).unwrap();
+        client.update_peers(&[node(daemon_key, DAEMON_IP)]).unwrap();
+        (Arc::new(daemon), client)
+    }
+
+    /// An application on the workspace's loopback that answers each line
+    /// with `name`.
+    async fn local_app(name: &'static str) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4];
+                    if stream.read_exact(&mut buffer).await.is_ok() {
+                        let _ = stream.write_all(name.as_bytes()).await;
+                        let _ = stream.flush().await;
+                        let mut rest = [0u8; 1];
+                        let _ = stream.read(&mut rest).await;
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// What `port` on the daemon's tailnet address answers, if anything,
+    /// within a short bound.
+    async fn answer(client: &Conn, port: u16) -> Option<String> {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut stream = client
+                .dial_context_tcp(SocketAddr::new(IpAddr::V6(DAEMON_IP), port))
+                .await
+                .ok()?;
+            stream.write_all(b"ping").await.ok()?;
+            stream.flush().await.ok()?;
+            let mut reply = vec![0u8; 3];
+            stream.read_exact(&mut reply).await.ok()?;
+            String::from_utf8(reply).ok()
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    #[tokio::test]
+    async fn application_ports_follow_the_allowed_set() {
+        let (daemon, client) = tailnet_pair();
+        let web = local_app("web").await;
+        let api = local_app("api").await;
+        let own = local_app("own").await;
+        let (allowed, allowed_rx) = watch::channel(AppPorts::from([web, own]));
+        let (stop, shutdown) = watch::channel(false);
+        tokio::spawn(forward_app_ports(
+            daemon,
+            allowed_rx,
+            BTreeSet::from([own]),
+            shutdown,
+        ));
+
+        // An allowed port reaches the workspace's loopback application.
+        assert_eq!(answer(&client, web).await.as_deref(), Some("web"));
+        // A listening port outside the set, and a reserved one, are not served.
+        assert_eq!(answer(&client, api).await, None);
+        assert_eq!(answer(&client, own).await, None);
+
+        // Exposing adds a listener.
+        allowed.send_replace(AppPorts::from([web, api, own]));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(answer(&client, api).await.as_deref(), Some("api"));
+
+        // Unexposing removes it; the other port stays.
+        allowed.send_replace(AppPorts::from([api]));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(answer(&client, web).await, None);
+        assert_eq!(answer(&client, api).await.as_deref(), Some("api"));
+        let _ = stop.send(true);
+    }
 }

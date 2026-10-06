@@ -452,10 +452,14 @@ impl WorkspaceBindingState {
         .map_err(|_| BindError::Unavailable)?;
         // Endpoints are best effort: a missing Service or zone only narrows
         // the paths the daemon advertises.
-        let (direct_udp_endpoints, zone) = tokio::join!(
+        let (direct_udp_endpoints, zone, app_ports) = tokio::join!(
             access::direct_udp_endpoints(self.kube()?, &binding.namespace, &binding.environment_id),
             self.node_zone(pod),
+            self.store.app_ports(&binding.environment_id),
         );
+        // The daemon replaces its served ports with this set, so an unknown
+        // set fails the grant rather than clearing them.
+        let app_ports = app_ports.map_err(|_| BindError::Unavailable)?;
         let peer_relay_endpoints = zone
             .ok()
             .flatten()
@@ -469,6 +473,7 @@ impl WorkspaceBindingState {
             coordinator_url: self.access.coordinator_url.clone(),
             direct_udp_endpoints,
             peer_relay_endpoints,
+            app_ports,
             ..Default::default()
         })
     }

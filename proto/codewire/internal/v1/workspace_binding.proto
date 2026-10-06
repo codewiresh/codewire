@@ -77,6 +77,11 @@ message WorkspaceAccess {
   // Public host:port endpoints of the UDP peer relay. Empty when the
   // runtime has no peer relay; allocations use AllocatePeerRelay.
   repeated string peer_relay_endpoints = 6;
+  // The environment's exposed application ports (1-65535, ascending,
+  // without duplicates). The daemon serves exactly these on its tailnet
+  // address, forwarded to its own loopback; orchestration also pushes each
+  // change to the daemon, and every grant restates the current set.
+  repeated int32 app_ports = 7;
 }
 
 message RefreshAccessRequest {}

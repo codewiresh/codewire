@@ -420,7 +420,7 @@ async fn run_hosted_daemon() -> anyhow::Result<()> {
         .try_init();
     match codewire_daemon::HostedDaemonMode::from_env()? {
         codewire_daemon::HostedDaemonMode::EnvironmentToken(config) => {
-            serve_hosted_daemon(*config, false, None).await
+            serve_hosted_daemon(*config, false, None, None).await
         }
         codewire_daemon::HostedDaemonMode::Binding(config) => run_bound_hosted_daemon(config).await,
     }
@@ -452,11 +452,24 @@ async fn run_bound_hosted_daemon(
         .install_binding(&bound.binding)
         .context("install hosted daemon binding")?;
     // Workspace access (#2460): the daemon serves SSH itself, reaching its
-    // own gRPC service in-process.
+    // own gRPC service in-process, and the environment's application ports
+    // on its tailnet address.
     let (connector, local) = codewire_daemon::local_transport::local_transport();
+    let (app_ports, _) = tokio::sync::watch::channel(
+        bound
+            .access
+            .as_ref()
+            .map(|grant| grant.app_ports().clone())
+            .unwrap_or_default(),
+    );
     #[cfg(target_os = "linux")]
     {
         let (_access_shutdown, access_shutdown_rx) = tokio::sync::watch::channel(false);
+        let daemon_port = config
+            .listen_addr()
+            .parse::<std::net::SocketAddr>()
+            .map(|address| address.port())
+            .ok();
         let access = hosted_access::serve(
             paths.clone(),
             hosted_access::BoundAccess {
@@ -464,9 +477,11 @@ async fn run_bound_hosted_daemon(
                 generation: bound.binding.operation_generation(),
                 daemon_credential: bound.binding.daemon_credential().clone(),
                 grant: bound.access.clone(),
+                daemon_port,
             },
             connector,
             client.clone(),
+            app_ports.clone(),
             access_shutdown_rx,
         );
         tokio::spawn(async move {
@@ -480,7 +495,13 @@ async fn run_bound_hosted_daemon(
     }
     #[cfg(not(target_os = "linux"))]
     drop(connector);
-    serve_hosted_daemon(config.into_config(&bound.binding), true, Some(local)).await
+    serve_hosted_daemon(
+        config.into_config(&bound.binding),
+        true,
+        Some(local),
+        Some(app_ports),
+    )
+    .await
 }
 
 #[cfg(not(unix))]
@@ -494,6 +515,7 @@ async fn serve_hosted_daemon(
     config: codewire_daemon::Config,
     bound: bool,
     local: Option<codewire_daemon::local_transport::LocalDaemonIncoming>,
+    app_ports: Option<codewire_daemon::app_ports::AppPortsSender>,
 ) -> anyhow::Result<()> {
     use tokio_stream::wrappers::TcpListenerStream;
 
@@ -538,13 +560,30 @@ async fn serve_hosted_daemon(
     // Once listening, the hosted daemon also keeps Codex's own ChatGPT login
     // while the broker delivers one, in the same home.
     #[cfg(target_os = "linux")]
-    return codewire_daemon::serve_hosted_grpc_with_incoming(
-        config,
-        codewire_daemon::codex_home::CodexHome::default(),
-        incoming,
-        hosted_daemon_shutdown_signal(),
-    )
-    .await;
+    return match app_ports {
+        // A bound daemon also accepts orchestration's application-port pushes.
+        Some(app_ports) => {
+            codewire_daemon::serve_bound_hosted_grpc_with_incoming(
+                config,
+                codewire_daemon::codex_home::CodexHome::default(),
+                app_ports,
+                incoming,
+                hosted_daemon_shutdown_signal(),
+            )
+            .await
+        }
+        None => {
+            codewire_daemon::serve_hosted_grpc_with_incoming(
+                config,
+                codewire_daemon::codex_home::CodexHome::default(),
+                incoming,
+                hosted_daemon_shutdown_signal(),
+            )
+            .await
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _ = app_ports;
     #[cfg(not(target_os = "linux"))]
     codewire_daemon::serve_grpc_with_incoming(config, incoming, hosted_daemon_shutdown_signal())
         .await

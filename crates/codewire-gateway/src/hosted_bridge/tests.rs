@@ -73,6 +73,7 @@ macro_rules! daemon_service {
 }
 daemon_service! {
     poweroff_guest(daemon_v1::PoweroffGuestRequest) -> daemon_v1::PoweroffGuestResponse,
+    set_app_ports(daemon_v1::SetAppPortsRequest) -> daemon_v1::SetAppPortsResponse,
     get_capabilities(daemon_v1::GetCapabilitiesRequest) -> daemon_v1::GetCapabilitiesResponse,
     get_health(daemon_v1::GetHealthRequest) -> daemon_v1::GetHealthResponse,
     launch_session(daemon_v1::LaunchSessionRequest) -> daemon_v1::LaunchSessionResponse,

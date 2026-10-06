@@ -37,7 +37,7 @@ pub(crate) use authorize::canonical_uid;
 pub use service::{WorkspaceBindingState, workspace_binding_router};
 pub use store::{
     BindingNotifications, BindingStore, HostKeyRecord, PgBindingStore, WORKSPACE_BINDINGS_CHANNEL,
-    current_host_key, spawn_binding_notification_listener,
+    current_host_key, exposed_app_ports, spawn_binding_notification_listener,
 };
 
 /// Environment variable selecting the listener port; the default is

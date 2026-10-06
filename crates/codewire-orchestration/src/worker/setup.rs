@@ -1748,6 +1748,15 @@ impl SetupOps for WorkerSetupOps<'_> {
                 count = input.app_ports.len(),
                 "post-boot: auto-registered ports"
             );
+            // The bound daemon serves these on its tailnet address (#2460).
+            crate::api::environment_daemon::push_environment_app_ports(
+                &self.ctx.pool,
+                self.ctx.kube.as_ref(),
+                &self.ctx.sandbox_cfg.session_secret,
+                None,
+                &input.environment_id,
+            )
+            .await;
         }
         Ok(())
     }

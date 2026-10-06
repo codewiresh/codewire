@@ -20,6 +20,7 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use codewire_daemon::DaemonAuthToken;
 use codewire_daemon::access::WorkspaceAccessGrant;
+use codewire_daemon::app_ports::AppPortsSender;
 use codewire_daemon::hosted_state::HostedStatePaths;
 use codewire_daemon::local_transport::LocalDaemonConnector;
 use codewire_gateway_proto::{WORKSPACE_SSH_PORT, WORKSPACE_TAILNET_UDP_PORT};
@@ -92,6 +93,8 @@ pub(crate) struct BoundAccess {
     pub daemon_credential: DaemonAuthToken,
     /// The tailnet grant; without one the daemon serves SSH only.
     pub grant: Option<WorkspaceAccessGrant>,
+    /// The daemon's own gRPC port, never served as an application port.
+    pub daemon_port: Option<u16>,
 }
 
 /// Serve workspace access for the accepted binding until `shutdown`.
@@ -100,6 +103,7 @@ pub(crate) async fn serve(
     bound: BoundAccess,
     connector: LocalDaemonConnector,
     plane: Arc<BindingClient>,
+    app_ports: AppPortsSender,
     shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let daemon = DaemonSessionClient::connect_local(
@@ -138,6 +142,17 @@ pub(crate) async fn serve(
     match &grants {
         Some(grants) => {
             tokio::spawn(grants.clone().keep_fresh(shutdown.clone()));
+            // Every grant restates the application ports; pushes replace
+            // them in between.
+            tokio::spawn(restate_app_ports(
+                grants.subscribe(),
+                app_ports.clone(),
+                shutdown.clone(),
+            ));
+            let reserved_ports = [Some(WORKSPACE_SSH_PORT), bound.daemon_port]
+                .into_iter()
+                .flatten()
+                .collect();
             let tailnet = daemon_tailnet::run(
                 DaemonTailnetConfig {
                     environment_id: bound.environment_id,
@@ -145,6 +160,7 @@ pub(crate) async fn serve(
                         Ipv4Addr::UNSPECIFIED,
                         WORKSPACE_TAILNET_UDP_PORT,
                     )),
+                    reserved_ports,
                 },
                 grants.clone(),
                 plane.clone(),
@@ -153,6 +169,7 @@ pub(crate) async fn serve(
                     config: ssh_config,
                     runners,
                 },
+                app_ports.subscribe(),
                 shutdown.clone(),
             );
             tokio::spawn(async move {
@@ -198,6 +215,30 @@ pub(crate) async fn serve(
     ssh.await
         .context("workspace SSH listener task")?
         .context("serve workspace SSH")
+}
+
+/// Replace the application ports with each renewed grant's set.
+async fn restate_app_ports(
+    mut grants: watch::Receiver<WorkspaceAccessGrant>,
+    app_ports: AppPortsSender,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => return,
+            changed = grants.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+        }
+        let ports = grants.borrow_and_update().app_ports().clone();
+        app_ports.send_if_modified(|current| {
+            let changed = *current != ports;
+            *current = ports;
+            changed
+        });
+    }
 }
 
 #[cfg(test)]

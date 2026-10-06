@@ -274,6 +274,7 @@ fn validate_access(access: &WorkspaceAccess) -> Result<WorkspaceAccessGrant, Att
             coordinator_url: &access.coordinator_url,
             direct_udp_endpoints: &access.direct_udp_endpoints,
             peer_relay_endpoints: &access.peer_relay_endpoints,
+            app_ports: &access.app_ports,
         },
         SystemTime::now(),
     )

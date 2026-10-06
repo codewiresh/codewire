@@ -423,7 +423,7 @@ run_database() {
     cargo test --locked -p codewire-orchestration --lib \
       'workspace_binding::store::database_tests::' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "workspace binding access store matrix" "$logfile" 3
+  assert_passed_count "workspace binding access store matrix" "$logfile" 4
 
   logfile="$RUN_DIR/environment-resize-admission.log"
   DATABASE_URL="$DATABASE_URL_RUST" \

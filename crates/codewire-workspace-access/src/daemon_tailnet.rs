@@ -14,7 +14,8 @@
 //! daemon's behalf, so the allocator credential never enters the sandbox.
 //! SSH over the tailnet is served in-process, like the Pod-network listener.
 
-use std::net::SocketAddr;
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -27,17 +28,21 @@ use codewire_client::{
     stun_servers_from_map,
 };
 use codewire_daemon::access::WorkspaceAccessGrant;
+use codewire_daemon::app_ports::AppPorts;
 use codewire_gateway_proto::COORDINATOR_EXTRA_ROOTS_FILE;
 use codewire_tailnet::conn::{Conn, Options};
 use codewire_tailnet::derp_transport::{DerpTarget, DerpTransport, connect_derp_transport};
 use codewire_tailnet::direct_udp;
 use codewire_tailnet::disco::{DiscoPrivate, UDPRelayEndpoint};
+use codewire_tailnet::netstack::{TcpListener as TailnetListener, TcpStream as TailnetStream};
 use codewire_tailnet::node::{DiscoPublic, Node, NodePublic};
 use codewire_tailnet::wg::{PublicKey, StaticSecret};
 use rand::rngs::OsRng;
 use russh::server;
 use tokio::net::lookup_host;
 use tokio::sync::{Mutex, mpsc, watch};
+use tokio::task::JoinSet;
+use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
 
 use crate::daemon_access::{
@@ -516,6 +521,9 @@ pub struct DaemonTailnetConfig {
     pub environment_id: Uuid,
     /// The workspace's tailnet UDP port, on all addresses.
     pub udp_listen_addr: SocketAddr,
+    /// Local ports never served as application ports on the tailnet (the
+    /// daemon's own SSH and gRPC listeners). Port 22 is always SSH.
+    pub reserved_ports: BTreeSet<u16>,
 }
 
 /// Build the tailnet connection from the coordinator's DERP map (falling
@@ -654,6 +662,7 @@ pub async fn run(
     plane: Arc<dyn AccessControlPlane>,
     dialer: Arc<dyn CoordinatorDialer>,
     ssh: TailnetSsh,
+    app_ports: watch::Receiver<AppPorts>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut stop = shutdown.clone();
@@ -694,6 +703,12 @@ pub async fn run(
         .await
         .context("listen on the workspace tailnet :22")?;
     tracing::info!(environment_id = %config.environment_id, "workspace tailnet peer up");
+    let _app_ports = AbortOnDropHandle::new(tokio::spawn(forward_app_ports(
+        tailnet.conn(),
+        app_ports,
+        config.reserved_ports.clone(),
+        shutdown.clone(),
+    )));
     let sessions = tokio::spawn(run_coordinator_sessions(
         Some(first),
         config.environment_id,
@@ -720,6 +735,80 @@ pub async fn run(
     }
     sessions.abort();
     Ok(())
+}
+
+/// Serve the environment's application ports on the tailnet address,
+/// forwarding each connection to the same port on the workspace's own
+/// loopback (IPv4, then IPv6). Listeners follow `allowed`: a port that leaves
+/// the set stops listening and its open connections end. Port 22 (SSH) and
+/// `reserved` ports are never served.
+pub async fn forward_app_ports(
+    conn: Arc<Conn>,
+    mut allowed: watch::Receiver<AppPorts>,
+    reserved: BTreeSet<u16>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut listeners: BTreeMap<u16, AbortOnDropHandle<()>> = BTreeMap::new();
+    loop {
+        let wanted: BTreeSet<u16> = allowed
+            .borrow_and_update()
+            .iter()
+            .copied()
+            .filter(|port| *port != 22 && !reserved.contains(port))
+            .collect();
+        listeners.retain(|port, _| wanted.contains(port));
+        for port in wanted {
+            if listeners.contains_key(&port) {
+                continue;
+            }
+            match conn.listen("tcp", &format!(":{port}")).await {
+                Ok(listener) => {
+                    listeners.insert(
+                        port,
+                        AbortOnDropHandle::new(tokio::spawn(serve_app_port(listener, port))),
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(port, error = %error, "workspace tailnet application port unavailable");
+                }
+            }
+        }
+        tracing::info!(
+            app_port_count = listeners.len(),
+            "workspace tailnet application ports served"
+        );
+        tokio::select! {
+            _ = shutdown.changed() => return,
+            changed = allowed.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Accept on one application port until aborted; aborting ends the
+/// connections it forwards too.
+async fn serve_app_port(mut listener: TailnetListener, port: u16) {
+    let mut connections = JoinSet::new();
+    while let Some(stream) = listener.accept().await {
+        while connections.try_join_next().is_some() {}
+        connections.spawn(forward_to_loopback(stream, port));
+    }
+}
+
+async fn forward_to_loopback(mut stream: TailnetStream, port: u16) {
+    let local = match tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await {
+        Ok(local) => Ok(local),
+        Err(_) => tokio::net::TcpStream::connect((Ipv6Addr::LOCALHOST, port)).await,
+    };
+    let Ok(mut local) = local else {
+        tracing::debug!(port, "workspace application port has no local listener");
+        return;
+    };
+    let _ = local.set_nodelay(true);
+    let _ = tokio::io::copy_bidirectional(&mut stream, &mut local).await;
 }
 
 #[cfg(test)]

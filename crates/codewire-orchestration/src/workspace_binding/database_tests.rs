@@ -182,3 +182,49 @@ async fn db_only_enabled_transport_zones_are_read() -> Result<()> {
     .await;
     db.finish(result).await
 }
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_app_ports_follow_expose_and_unexpose() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, 3).await?;
+        let store = PgBindingStore::from_pool(db.pool.clone());
+        let expose = |port: i32, label: &'static str| {
+            sqlx::query(
+                "INSERT INTO environment_ports (environment_id, port, label, access) \
+                 VALUES ($1, $2, $3, 'creator')",
+            )
+            .bind(ENV)
+            .bind(port)
+            .bind(label)
+            .execute(&db.pool)
+        };
+        ensure!(store.app_ports(ENV).await?.is_empty());
+        // Exposed ports are the grant's and the push's set, ascending.
+        expose(5173, "vite").await?;
+        expose(3000, "web").await?;
+        ensure!(store.app_ports(ENV).await? == vec![3000, 5173]);
+        ensure!(exposed_app_ports(&db.pool, ENV).await? == vec![3000, 5173]);
+        // An unexposed port leaves the set at once, while its DNS cleanup is
+        // still pending.
+        sqlx::query(
+            "UPDATE environment_ports SET deletion_requested_at = NOW() \
+             WHERE environment_id = $1 AND port = 5173",
+        )
+        .bind(ENV)
+        .execute(&db.pool)
+        .await?;
+        ensure!(store.app_ports(ENV).await? == vec![3000]);
+        // Another environment's ports never appear.
+        ensure!(
+            store
+                .app_ports("6f1c1e2a-0000-4000-8000-000000000000")
+                .await?
+                .is_empty()
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

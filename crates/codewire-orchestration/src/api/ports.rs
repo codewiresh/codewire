@@ -155,7 +155,7 @@ pub(crate) async fn create_port_core(
     let owned_access = access.to_owned();
     let owned_state = state.clone();
     let owned_org_id = org_id.to_owned();
-    run_environment_runtime_mutation(pool, org_id, env_id, async move {
+    let created = run_environment_runtime_mutation(pool, org_id, env_id, async move {
         let (state, org_id, access) = (&owned_state, owned_org_id.as_str(), owned_access.as_str());
         let pool = &state.pool;
         let result: AppResult<EnvironmentPort> = async {
@@ -231,7 +231,11 @@ pub(crate) async fn create_port_core(
             Err(error) => Err(error.into()),
         }
     })
-    .await
+    .await;
+    if created.is_ok() {
+        spawn_app_ports_push(state, env_id);
+    }
+    created
 }
 
 pub(crate) async fn list_ports_core(
@@ -315,7 +319,7 @@ pub(crate) async fn delete_port_core(
     let owned_pool = pool.clone();
     let owned_env_id = env_id.to_owned();
     let owned_port_id = port_id.to_owned();
-    run_environment_runtime_mutation(pool, org_id, env_id, async move {
+    let deleted = run_environment_runtime_mutation(pool, org_id, env_id, async move {
         let (pool, env_id, port_id) = (&owned_pool, owned_env_id.as_str(), owned_port_id.as_str());
         let result: AppResult<()> = async {
             let result = sqlx::query(
@@ -382,7 +386,31 @@ pub(crate) async fn delete_port_core(
             Err(error) => Err(error.into()),
         }
     })
-    .await
+    .await;
+    if deleted.is_ok() {
+        spawn_app_ports_push(state, env_id);
+    }
+    deleted
+}
+
+/// After an expose or unexpose commits, tell the environment's daemon its
+/// application ports, without holding the request (#2460).
+fn spawn_app_ports_push(state: &ApiState, env_id: &str) {
+    let pool = state.pool.clone();
+    let kube = state.kube.clone();
+    let session_secret = state.session_secret.clone();
+    let endpoints = state.environment_daemon_endpoints.clone();
+    let env_id = env_id.to_owned();
+    tokio::spawn(async move {
+        super::environment_daemon::push_environment_app_ports(
+            &pool,
+            kube.as_ref(),
+            &session_secret,
+            Some(&endpoints),
+            &env_id,
+        )
+        .await;
+    });
 }
 
 #[cfg(test)]

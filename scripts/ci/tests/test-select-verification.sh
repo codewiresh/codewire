@@ -1469,7 +1469,7 @@ grep -qF 'assert_passed_count "admin startup summary matrix" "$logfile" 2' "$int
 grep -qF -- "'worker::workspace_binding::database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "workspace binding recorder matrix" "$logfile" 21' "$integration_runner"
 grep -qF -- "'workspace_binding::store::database_tests::'" "$integration_runner"
-grep -qF 'assert_passed_count "workspace binding access store matrix" "$logfile" 3' "$integration_runner"
+grep -qF 'assert_passed_count "workspace binding access store matrix" "$logfile" 4' "$integration_runner"
 grep -qF -- "'api::environment_resize::tests::db_'" "$integration_runner"
 grep -qF 'assert_passed_count "environment resize admission matrix" "$logfile" 2' "$integration_runner"
 grep -qF -- "'api::ssh_proxy::database_tests::'" "$integration_runner"
