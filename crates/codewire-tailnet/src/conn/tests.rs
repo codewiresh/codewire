@@ -713,3 +713,56 @@ fn prefix_contains_never_panics_on_oversized_bits() {
     assert!(prefix_contains(&v6, IpAddr::from(A_IP)));
     assert!(!prefix_contains(&v6, IpAddr::from(B_IP)));
 }
+
+#[test]
+fn inbound_packets_must_come_from_the_sending_peers_allowed_ips() {
+    let (ns_in_tx, mut ns_in_rx) = mpsc::channel(4);
+    let allowed = [Prefix::new(IpAddr::V6(B_IP), 128)];
+    super::deliver_inbound(&allowed, IpAddr::V6(B_IP), b"from b", &ns_in_tx);
+    super::deliver_inbound(&allowed, IpAddr::V6(A_IP), b"spoofed a", &ns_in_tx);
+    super::deliver_inbound(
+        &allowed,
+        IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        b"v4",
+        &ns_in_tx,
+    );
+    super::deliver_inbound(&[], IpAddr::V6(B_IP), b"no allowed ips", &ns_in_tx);
+    assert_eq!(ns_in_rx.try_recv().unwrap(), b"from b");
+    assert!(ns_in_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_peer_cannot_send_from_an_address_it_does_not_own() {
+    let a_secret = StaticSecret::random_from_rng(OsRng);
+    let b_secret = StaticSecret::random_from_rng(OsRng);
+    let a_pub = PublicKey::from(&a_secret);
+    let b_pub = PublicKey::from(&b_secret);
+    let (a_transport, b_transport) = shim(
+        DerpPublic::from_raw(a_pub.to_bytes()),
+        DerpPublic::from_raw(b_pub.to_bytes()),
+    );
+    let a = Conn::new(conn_opts(&a_secret, A_IP), a_transport).expect("Conn A");
+    let b = Conn::new(conn_opts(&b_secret, B_IP), b_transport).expect("Conn B");
+    // B allows A only ::c, but A sends from its own address ::a.
+    let c_ip = Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0x000c);
+    a.update_peers(&[peer_node(&b_pub, B_IP)]).expect("A peers");
+    b.update_peers(&[peer_node(&a_pub, c_ip)]).expect("B peers");
+    let mut listener = b.listen("tcp", ":2224").await.expect("B listen");
+    let dial = tokio::spawn(async move {
+        if let Ok(mut stream) = a
+            .dial_context_tcp(SocketAddr::new(IpAddr::V6(B_IP), 2224))
+            .await
+        {
+            let _ = stream.write_all(b"from a").await;
+            let _ = stream.flush().await;
+            std::future::pending::<()>().await;
+        }
+        drop(a);
+    });
+    let accepted = tokio::time::timeout(Duration::from_secs(3), listener.accept()).await;
+    assert!(
+        accepted.is_err(),
+        "B must drop packets from outside A's allowed IPs"
+    );
+    dial.abort();
+}

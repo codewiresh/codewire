@@ -323,6 +323,9 @@ fn tailnet_direct_udp_options(
     )
     .with_stun_servers(stun_servers)
     .with_peer_direct_udp_enabled(!suppress_peer_direct_udp)
+    // The environment peer runs inside the sandbox: never let it steer this
+    // client's UDP at loopback or private networks.
+    .with_public_peer_endpoints_only(true)
 }
 
 fn spawn_coordinator_task(
@@ -1457,6 +1460,7 @@ mod tests {
             false,
         );
         assert!(enabled.peer_direct_udp_enabled);
+        assert!(enabled.public_peer_endpoints_only);
 
         unsafe {
             std::env::set_var("CW_TAILNET_SUPPRESS_PEER_DIRECT_UDP", "1");

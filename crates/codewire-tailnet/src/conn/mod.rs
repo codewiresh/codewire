@@ -816,18 +816,12 @@ fn recv_inbound(
                 });
                 input = &[]; // keep draining
             }
-            TunnResult::WriteToTunnelV4(p, _) | TunnResult::WriteToTunnelV6(p, _) => {
-                // Decrypted IP packet → straight into the netstack inbound.
-                tracing::debug!(
-                    wg_packet_len = dg.data.len(),
-                    ip_packet_len = p.len(),
-                    "rust tailnet decrypted inbound WireGuard packet"
-                );
-                if ns_in_tx.try_send(p.to_vec()).is_err() {
-                    tracing::debug!(
-                        "rust tailnet dropped inbound IP packet at bounded netstack queue"
-                    );
-                }
+            TunnResult::WriteToTunnelV4(p, source) => {
+                deliver_inbound(&peer.addresses, IpAddr::V4(source), p, ns_in_tx);
+                break;
+            }
+            TunnResult::WriteToTunnelV6(p, source) => {
+                deliver_inbound(&peer.addresses, IpAddr::V6(source), p, ns_in_tx);
                 break;
             }
             TunnResult::Done => break,
@@ -840,6 +834,32 @@ fn recv_inbound(
                 break;
             }
         }
+    }
+}
+
+/// Push a decrypted IP packet into the netstack, but only when its source is
+/// one of the sending peer's own addresses (its `AllowedIPs`): a peer cannot
+/// speak for another peer's address or for this node's own.
+fn deliver_inbound(
+    allowed: &[Prefix],
+    source: IpAddr,
+    packet: &[u8],
+    ns_in_tx: &mpsc::Sender<Vec<u8>>,
+) {
+    if !allowed.iter().any(|prefix| prefix_contains(prefix, source)) {
+        tracing::debug!(
+            ip_packet_len = packet.len(),
+            "rust tailnet dropped inbound IP packet from outside the peer's allowed IPs"
+        );
+        return;
+    }
+    // Decrypted IP packet → straight into the netstack inbound.
+    tracing::debug!(
+        ip_packet_len = packet.len(),
+        "rust tailnet decrypted inbound WireGuard packet"
+    );
+    if ns_in_tx.try_send(packet.to_vec()).is_err() {
+        tracing::debug!("rust tailnet dropped inbound IP packet at bounded netstack queue");
     }
 }
 

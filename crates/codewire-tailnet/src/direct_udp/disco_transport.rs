@@ -15,7 +15,7 @@ use crate::udp_relay;
 
 use super::peer_relay::apply_call_me_maybe_via;
 use super::state::{
-    disco_message_kind, is_usable_direct_endpoint, make_ping_action, DiscoAction, DiscoPeerIndex,
+    disco_message_kind, is_acceptable_peer_endpoint, make_ping_action, DiscoAction, DiscoPeerIndex,
     DiscoTarget, Shared, State,
 };
 use super::{derp_magic_addr, PeerRelayAllocationEvent, DEFAULT_DERP_REGION_ID};
@@ -151,9 +151,10 @@ pub(super) async fn handle_disco_packet(
                 let Some(peer) = state.peers_by_node.get(&peer_key).cloned() else {
                     return;
                 };
+                let public_only = state.public_peer_endpoints_only;
                 call.endpoints
                     .into_iter()
-                    .filter(|addr| is_usable_direct_endpoint(*addr))
+                    .filter(|addr| is_acceptable_peer_endpoint(*addr, public_only))
                     .map(|endpoint| {
                         make_ping_action(&mut state, &shared.local_node_key, &peer, endpoint)
                     })
