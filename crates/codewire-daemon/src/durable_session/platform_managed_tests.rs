@@ -63,7 +63,7 @@ impl Fixture {
         let engine = SessionEngine::new(&config, CredentialBridge::new(None));
         let record = engine.launch(v1::LaunchSessionRequest {
             command: vec!["/bin/sh".into(), "-c".into(),
-                "printf '%s' \"$$\" > pid; : > ready; while IFS= read -r line; do [ \"$line\" = exit ] && exit 0; printf '%s\\n' \"$line\" >> received; done".into()],
+                "printf '%s' \"$$\" > pid; : > ready; while IFS= read -r line; do [ \"$line\" = exit ] && exit 0; printf '%s\\n' \"$line\" >> received && : > received-complete; done".into()],
             ..Default::default()
         }).await.unwrap();
         wait_file(&temp.path().join("ready")).await;
@@ -186,7 +186,8 @@ async fn platform_managed_generation_writer_blocks_until_original_pipe_effect_fi
     let effect = owner.await.unwrap();
     advance.await.unwrap();
     writer.await.unwrap();
-    wait_file(&fixture.temp.path().join("received")).await;
+    // Redirection creates `received` before printf finishes writing its bytes.
+    wait_file(&fixture.temp.path().join("received-complete")).await;
     let bytes = std::fs::read(fixture.temp.path().join("received")).unwrap();
     let stale_effect = fixture.temp.path().join("stale-effect");
     let stale = fixture
@@ -346,7 +347,7 @@ async fn platform_managed_caller_drop_keeps_owned_original_pipe_effect_until_set
         .await
         .unwrap()
         .unwrap();
-    wait_file(&fixture.temp.path().join("received")).await;
+    wait_file(&fixture.temp.path().join("received-complete")).await;
     let bytes = std::fs::read(fixture.temp.path().join("received")).unwrap();
     let original = !terminal(&fixture.pidfd) && birth(fixture.pid) == fixture.birth;
     fixture.close().await;
