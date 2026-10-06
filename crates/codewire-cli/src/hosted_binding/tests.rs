@@ -282,8 +282,6 @@ async fn not_found_is_called_again_at_once_until_bound() {
     // A backoff this long makes any wrongful backoff (at least half of it,
     // with jitter) unmistakable, so a loaded machine's slower attempts can
     // never be mistaken for one.
-    // Each attempt opens a new TLS connection, so server-side stamps carry
-    // handshake jitter: pace at 300 ms and allow 100 ms of it.
     let timing = BindTiming {
         initial_backoff: Duration::from_secs(10),
         max_backoff: Duration::from_secs(10),
@@ -309,14 +307,17 @@ async fn not_found_is_called_again_at_once_until_bound() {
     );
     let recorded = fixture.recorded.lock().unwrap();
     assert_eq!(recorded.at.len(), 3);
-    // Paced only to the minimum attempt, never to the error backoff.
+    // Paced only to the minimum attempt, never to the error backoff. Each
+    // server-side stamp trails its attempt's start by a TLS handshake, so
+    // attempt k arrives no earlier than k minimum attempts after the start;
+    // gaps between stamps alone would carry two handshakes' jitter.
+    for (attempt, at) in recorded.at.iter().enumerate() {
+        let since_start = *at - started;
+        let paced = timing.minimum_attempt * u32::try_from(attempt).unwrap();
+        assert!(since_start >= paced, "attempt {attempt} at {since_start:?}");
+    }
     for pair in recorded.at.windows(2) {
         let gap = pair[1] - pair[0];
-        // Server-side stamps trail the client's attempt start by a handshake.
-        assert!(
-            gap + Duration::from_millis(100) >= timing.minimum_attempt,
-            "{gap:?}"
-        );
         assert!(gap < timing.initial_backoff / 2, "{gap:?}");
     }
     assert!(started.elapsed() < timing.initial_backoff / 2);
