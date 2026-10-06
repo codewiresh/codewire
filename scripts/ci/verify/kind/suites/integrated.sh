@@ -50,7 +50,7 @@ run_integrated_kind_suite() {
   create_cluster
   load_images_into_kind
   deploy_overlay
-  host_key_authorization_smoke
+  orchestration_authorization_smoke
   edge_routing_probes
   connect_edge_probes
   coordinator_runtime_smokes

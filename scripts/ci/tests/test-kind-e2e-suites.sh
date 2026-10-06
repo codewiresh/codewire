@@ -939,7 +939,7 @@ create_cluster() { record create-cluster; }
 build_images_and_smokes() { record build; }
 load_images_into_kind() { record load; }
 deploy_overlay() { record deploy; }
-host_key_authorization_smoke() { record host-key-authz; }
+orchestration_authorization_smoke() { record orchestration-authz; }
 edge_routing_probes() { record edge; }
 connect_edge_probes() { record connect-edge; }
 coordinator_runtime_smokes() {
@@ -975,7 +975,7 @@ build
 create-cluster
 load
 deploy
-host-key-authz
+orchestration-authz
 edge
 connect-edge
 internal-connect

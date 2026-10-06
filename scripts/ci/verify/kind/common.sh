@@ -75,7 +75,6 @@ NS=codewire-e2e
 SANDBOX_NS=dev-sandboxes
 # shellcheck source=scripts/ci/verify/kind/credentials.sh
 source "$ROOT/scripts/ci/verify/kind/credentials.sh"
-AUTHZ_TMPDIR=""
 KIND_E2E_COMPATIBILITY_VERSION=1
 KIND_E2E_PREPARED_CONFIGMAP=codewire-kind-e2e-prepared
 RETAINED_KUBECONFIG=""
@@ -346,9 +345,6 @@ cleanup() {
   if [ "$KEEP_KIND_CLUSTER" != "1" ]; then
     kind delete cluster --name "$KIND_CLUSTER_NAME" >/dev/null 2>&1 || true
   fi
-  if [ -n "$AUTHZ_TMPDIR" ]; then
-    rm -rf "$AUTHZ_TMPDIR"
-  fi
   exit "$status"
 }
 
@@ -380,9 +376,6 @@ retained_suite_cleanup() {
   local status=$?
   if [ "$status" -ne 0 ]; then
     dump_cluster_state
-  fi
-  if [ -n "$AUTHZ_TMPDIR" ]; then
-    rm -rf "$AUTHZ_TMPDIR"
   fi
   if [ -n "$RETAINED_KUBECONFIG" ]; then
     rm -f "$RETAINED_KUBECONFIG"
@@ -3789,138 +3782,41 @@ rust_reconciler_ttl_e2e() {
     "$CARGO_CI_DIR/reconciler-ttl-smoke"
 }
 
-host_key_authorization_smoke() {
-  log "proving orchestration host-key RBAC and admission"
+orchestration_authorization_smoke() {
+  log "proving orchestration has no Secret or Deployment authority and reads only its published roots"
   local as_user="system:serviceaccount:${NS}:codewire-orchestration"
-  local env_id="kind-authz-${RANDOM}-${RANDOM}"
-  local secret_name="cw-gateway-host-key-${env_id}"
-  local unrelated_name="kind-unrelated-${RANDOM}-${RANDOM}"
-  local stderr
-  AUTHZ_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/codewire-kind-authz.XXXXXX")"
-  stderr="$AUTHZ_TMPDIR/stderr"
-
-  expect_denied() {
-    local label="$1" message="$2"
-    shift 2
-    if "$@" >"$stderr" 2>&1; then
-      echo "::error::${label} unexpectedly succeeded"
-      return 1
-    fi
-    if ! grep -Fq "$message" "$stderr"; then
-      echo "::error::${label} failed outside the expected boundary"
-      sed -n '1,80p' "$stderr" >&2
-      return 1
-    fi
-  }
-
-  host_key_manifest() {
-    local namespace="$1" name="$2" environment_id="$3" managed_by="${4:-codewire}"
-    cat <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ${name}
-  namespace: ${namespace}
-  labels:
-    app.kubernetes.io/name: codewire-gateway
-    app.kubernetes.io/component: gateway-host-key
-    app.kubernetes.io/managed-by: ${managed_by}
-    codewire.sh/environment-id: ${environment_id}
-    codewire.sh/type: gateway-host-key
-type: Opaque
-stringData:
-  host_ed25519: kind-e2e-synthetic-host-key
-EOF
-  }
-
-  kubectl -n "$SANDBOX_NS" delete secret "$secret_name" "$unrelated_name" \
-    --ignore-not-found >/dev/null
-
-  local verb allowed
-  for verb in get list watch update patch; do
-    allowed="$(kubectl auth can-i "$verb" secrets -n "$SANDBOX_NS" --as "$as_user" || true)"
+  local namespace verb allowed
+  for namespace in "$SANDBOX_NS" "$NS"; do
+    for verb in get list watch create update patch delete; do
+      allowed="$(kubectl auth can-i "$verb" secrets -n "$namespace" --as "$as_user" || true)"
+      if [ "$allowed" != "no" ]; then
+        echo "::error::orchestration can-i ${verb} Secrets in ${namespace} returned ${allowed}, want no"
+        return 1
+      fi
+    done
+    allowed="$(kubectl auth can-i create deployments.apps -n "$namespace" --as "$as_user" || true)"
     if [ "$allowed" != "no" ]; then
-      echo "::error::orchestration can-i ${verb} sandbox Secrets returned ${allowed}, want no"
+      echo "::error::orchestration can-i create Deployments in ${namespace} returned ${allowed}, want no"
       return 1
     fi
   done
-  for verb in create delete; do
-    allowed="$(kubectl auth can-i "$verb" secrets -n "$SANDBOX_NS" --as "$as_user" || true)"
-    if [ "$allowed" != "yes" ]; then
-      echo "::error::orchestration can-i ${verb} sandbox Secrets returned ${allowed}, want yes"
-      return 1
-    fi
-    allowed="$(kubectl auth can-i "$verb" secrets -n "$NS" --as "$as_user" || true)"
+  allowed="$(kubectl auth can-i get configmaps/codewire-orchestration-internal-roots \
+    -n "$SANDBOX_NS" --as "$as_user" || true)"
+  if [ "$allowed" != "yes" ]; then
+    echo "::error::orchestration cannot read its published internal roots: ${allowed}"
+    return 1
+  fi
+  for verb in list update delete; do
+    allowed="$(kubectl auth can-i "$verb" configmaps -n "$SANDBOX_NS" --as "$as_user" || true)"
     if [ "$allowed" != "no" ]; then
-      echo "::error::orchestration can-i ${verb} application Secrets returned ${allowed}, want no"
+      echo "::error::orchestration can-i ${verb} sandbox ConfigMaps returned ${allowed}, want no"
       return 1
     fi
   done
-
-  expect_denied "sandbox Secret read" "forbidden" \
-    kubectl --as "$as_user" -n "$SANDBOX_NS" get secret "$secret_name"
-  expect_denied "application Secret read" "forbidden" \
-    kubectl --as "$as_user" -n "$NS" get secret codewire-secrets
-  expect_denied "sandbox Secret list" "forbidden" \
-    kubectl --as "$as_user" -n "$SANDBOX_NS" get secrets
-  expect_denied "sandbox Secret patch" "forbidden" \
-    kubectl --as "$as_user" -n "$SANDBOX_NS" patch secret "$secret_name" \
-      --type=merge -p '{"metadata":{"labels":{"unexpected":"true"}}}'
-
-  if ! host_key_manifest "$SANDBOX_NS" "$secret_name" "$env_id" |
-      kubectl --as "$as_user" create -f - >/dev/null; then
-    echo "::error::correctly shaped sandbox host-key Secret create was denied"
+  allowed="$(kubectl auth can-i get configmaps/codewire-coordinator-extra-roots \
+    -n "$SANDBOX_NS" --as "$as_user" || true)"
+  if [ "$allowed" != "no" ]; then
+    echo "::error::orchestration can read another sandbox ConfigMap: ${allowed}"
     return 1
   fi
-  kubectl -n "$SANDBOX_NS" get secret "$secret_name" >/dev/null
-  kubectl --as "$as_user" -n "$SANDBOX_NS" delete secret "$secret_name" >/dev/null
-
-  if host_key_manifest "$NS" "$secret_name" "$env_id" |
-      kubectl --as "$as_user" create -f - >"$stderr" 2>&1; then
-    echo "::error::application namespace host-key Secret create unexpectedly succeeded"
-    return 1
-  fi
-  grep -Fq "forbidden" "$stderr" || {
-    echo "::error::application namespace create failed outside RBAC"
-    sed -n '1,80p' "$stderr" >&2
-    return 1
-  }
-
-  if host_key_manifest "$SANDBOX_NS" "$unrelated_name" "$env_id" |
-      kubectl --as "$as_user" create -f - >"$stderr" 2>&1; then
-    echo "::error::unrelated Secret create unexpectedly succeeded"
-    return 1
-  fi
-  grep -Fq "may only create or delete gateway host-key Secrets" "$stderr" || {
-    echo "::error::unrelated Secret create failed outside admission prefix enforcement"
-    sed -n '1,80p' "$stderr" >&2
-    return 1
-  }
-
-  if host_key_manifest "$SANDBOX_NS" "$secret_name" "$env_id" unexpected-manager |
-      kubectl --as "$as_user" create -f - >"$stderr" 2>&1; then
-    echo "::error::incorrectly labeled host-key Secret create unexpectedly succeeded"
-    return 1
-  fi
-  grep -Fq "must retain the renderer's management labels" "$stderr" || {
-    echo "::error::incorrect label fixture failed outside admission label enforcement"
-    sed -n '1,80p' "$stderr" >&2
-    return 1
-  }
-
-  kubectl -n "$SANDBOX_NS" create secret generic "$unrelated_name" \
-    --from-literal=value=kind-e2e >/dev/null
-  if kubectl --as "$as_user" -n "$SANDBOX_NS" delete secret "$unrelated_name" \
-      >"$stderr" 2>&1; then
-    echo "::error::unrelated Secret delete unexpectedly succeeded"
-    return 1
-  fi
-  grep -Fq "may only create or delete gateway host-key Secrets" "$stderr" || {
-    echo "::error::unrelated Secret delete failed outside admission prefix enforcement"
-    sed -n '1,80p' "$stderr" >&2
-    return 1
-  }
-  kubectl -n "$SANDBOX_NS" delete secret "$unrelated_name" >/dev/null
-  rm -rf "$AUTHZ_TMPDIR"
-  AUTHZ_TMPDIR=""
 }
