@@ -47,6 +47,20 @@ const ORCHESTRATION_INTERNAL_TLS_KEY_FILE_ENV: &str = "ORCHESTRATION_INTERNAL_TL
 const ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV: &str =
     codewire_orchestration::workspace_binding::ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV;
 
+/// Public origin of the coordinator a workspace daemon joins its tailnet
+/// through. Defaults to the public API origin, whose ingress routes
+/// `CoordinatorService` to the coordinator.
+const SANDBOX_PUBLIC_COORDINATOR_URL_ENV: &str = "CODEWIRE_SANDBOX_PUBLIC_COORDINATOR_URL";
+
+fn sandbox_public_coordinator_url(configured: Option<&str>, api_base_url: &str) -> String {
+    configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(api_base_url.trim())
+        .trim_end_matches('/')
+        .to_owned()
+}
+
 fn env_list(name: &str) -> Vec<String> {
     env_list_from(std::env::var(name).ok().as_deref())
 }
@@ -180,18 +194,25 @@ async fn verify_internal_tls_roots(
                 "internal TLS roots ConfigMap {sandbox_namespace}/{roots_configmap} has no ca.crt"
             )
         })?;
-    let host = codewire_orchestration::sandbox::template::orchestration_internal_tls_host(
-        server_namespace,
-    );
-    files
-        .verify_against_roots(roots.as_bytes(), &host)
-        .await
-        .with_context(|| {
-            format!(
-                "the internal TLS leaf is not trusted for {host} by ConfigMap \
-                 {sandbox_namespace}/{roots_configmap}"
-            )
-        })
+    // Gateways and Mesh verify the internal API's name; workspace daemons
+    // verify the binding listener's name with the same roots.
+    for host in [
+        codewire_orchestration::sandbox::template::orchestration_internal_tls_host(
+            server_namespace,
+        ),
+        codewire_orchestration::worker::create::workspace_binding_tls_host(server_namespace),
+    ] {
+        files
+            .verify_against_roots(roots.as_bytes(), &host)
+            .await
+            .with_context(|| {
+                format!(
+                    "the internal TLS leaf is not trusted for {host} by ConfigMap \
+                     {sandbox_namespace}/{roots_configmap}"
+                )
+            })?;
+    }
+    Ok(())
 }
 
 fn workspace_binding_bind_addr(
@@ -496,20 +517,46 @@ async fn main() -> anyhow::Result<()> {
         pool.clone(),
         workspace_binding_notifications.clone(),
     );
-    let workspace_binding_app = codewire_orchestration::workspace_binding::app(
-        codewire_orchestration::workspace_binding::workspace_binding_router(Arc::new(
-            codewire_orchestration::workspace_binding::WorkspaceBindingState::new(
-                api_state.kube.clone(),
-                Arc::new(
-                    codewire_orchestration::workspace_binding::PgBindingStore::connect_lazy(
-                        &cfg.database_url,
-                    )?,
-                ),
-                workspace_binding_notifications,
-                &api_state.sandbox_cfg.sandbox_namespace,
-                &cfg.session_secret,
+    // Its daemons get the public coordinator and relay endpoints; the relay
+    // allocator and its token stay here.
+    let workspace_binding_state = Arc::new(
+        codewire_orchestration::workspace_binding::WorkspaceBindingState::new(
+            api_state.kube.clone(),
+            Arc::new(
+                codewire_orchestration::workspace_binding::PgBindingStore::connect_lazy(
+                    &cfg.database_url,
+                )?,
             ),
-        )),
+            workspace_binding_notifications,
+            &api_state.sandbox_cfg.sandbox_namespace,
+            &cfg.session_secret,
+        )
+        .with_access(
+            codewire_orchestration::workspace_binding::AccessSettings {
+                coordinator_url: sandbox_public_coordinator_url(
+                    std::env::var(SANDBOX_PUBLIC_COORDINATOR_URL_ENV)
+                        .ok()
+                        .as_deref(),
+                    &api_state.sandbox_cfg.api_base_url,
+                ),
+            },
+            Arc::new(
+                codewire_orchestration::workspace_binding::HttpRelayAllocator::new(Some(
+                    api_state.sandbox_cfg.udp_relay_allocator_token.clone(),
+                )),
+            ),
+        ),
+    );
+    // There is no plaintext form: inside a cluster it serves TLS with the
+    // internal identity, and outside one no workspace exists to call it, so
+    // it is not served.
+    let workspace_binding_tls = internal_tls
+        .clone()
+        .map(codewire_orchestration::workspace_binding::WorkspaceBindingTls);
+    let workspace_binding_app = codewire_orchestration::workspace_binding::app(
+        codewire_orchestration::workspace_binding::workspace_binding_router(
+            workspace_binding_state,
+        ),
     );
 
     // The internal listener is intentionally a minimal cluster-local surface:
@@ -623,11 +670,20 @@ async fn main() -> anyhow::Result<()> {
                 None => Ok(()),
             }
         },
-        codewire_server_core::bounded_http1::serve_bounded_http1(
-            workspace_binding_app,
-            listeners.workspace_binding,
-            codewire_orchestration::workspace_binding::LISTENER_LIMITS,
-        ),
+        async {
+            match workspace_binding_tls {
+                Some(tls) => {
+                    codewire_server_core::bounded_http1::serve_bounded_http1_upgraded(
+                        workspace_binding_app,
+                        listeners.workspace_binding,
+                        codewire_orchestration::workspace_binding::LISTENER_LIMITS,
+                        tls,
+                    )
+                    .await
+                }
+                None => Ok(()),
+            }
+        },
     )?;
     Ok(())
 }
@@ -700,6 +756,25 @@ mod tests {
         let [public, binding] = free_addrs::<2>().await;
         let listeners = bind_listeners(public, None, binding).await.unwrap();
         assert!(listeners.internal.is_none());
+    }
+
+    #[test]
+    fn workspace_daemons_join_the_public_coordinator() {
+        assert_eq!(
+            sandbox_public_coordinator_url(None, "https://dev.codewire.sh/"),
+            "https://dev.codewire.sh"
+        );
+        assert_eq!(
+            sandbox_public_coordinator_url(Some(" "), "https://dev.codewire.sh"),
+            "https://dev.codewire.sh"
+        );
+        assert_eq!(
+            sandbox_public_coordinator_url(
+                Some("https://coordinator.example/"),
+                "https://dev.codewire.sh"
+            ),
+            "https://coordinator.example"
+        );
     }
 
     #[test]

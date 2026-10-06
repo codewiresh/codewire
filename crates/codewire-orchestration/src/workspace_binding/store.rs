@@ -41,6 +41,9 @@ pub struct LiveBinding {
     pub projection_selection_sha256: Option<String>,
     pub managed_credential_clients: String,
     pub credential_scope: WorkspaceCredentialScope,
+    /// The environment's current operation generation, read in the same
+    /// statement. Peer tokens and host keys are bound to it.
+    pub environment_generation: i64,
 }
 
 impl std::fmt::Debug for LiveBinding {
@@ -59,6 +62,18 @@ impl std::fmt::Debug for LiveBinding {
 #[error("workspace binding store is unavailable")]
 pub struct BindingStoreUnavailable;
 
+/// Outcome of recording an SSH host public key, write-once per environment
+/// and operation generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostKeyRecord {
+    /// The key is now the generation's key.
+    Recorded,
+    /// The same key was already recorded.
+    Unchanged,
+    /// A different key is already recorded for this generation.
+    Conflict,
+}
+
 #[async_trait]
 pub trait BindingStore: Send + Sync {
     /// The live binding of the reviewed Pod, if one is recorded and its
@@ -69,6 +84,27 @@ pub trait BindingStore: Send + Sync {
         namespace: &str,
         pod_name: &str,
     ) -> Result<Option<LiveBinding>, BindingStoreUnavailable>;
+
+    /// Records `public_key` as the SSH host key of `environment_id` at
+    /// `generation`, from the reviewed `pod_uid`. Never overwrites.
+    async fn record_host_key(
+        &self,
+        _environment_id: &str,
+        _generation: i64,
+        _pod_uid: &str,
+        _public_key: &str,
+    ) -> Result<HostKeyRecord, BindingStoreUnavailable> {
+        Err(BindingStoreUnavailable)
+    }
+
+    /// The enabled runtime transport zone `name`, if any.
+    async fn transport_zone(
+        &self,
+        _name: &str,
+    ) -> Result<Option<crate::runtime_transport::RuntimeTransportZone>, BindingStoreUnavailable>
+    {
+        Ok(None)
+    }
 }
 
 /// PostgreSQL-backed lookup on the listener's own bounded pool.
@@ -107,6 +143,7 @@ type LiveBindingRow = (
     Option<String>,
     String,
     String,
+    i64,
 );
 
 #[async_trait]
@@ -127,7 +164,8 @@ impl BindingStore for PgBindingStore {
                       w.operation_generation,
                       w.projection_selection_sha256,
                       w.managed_credential_clients,
-                      w.credential_scope
+                      w.credential_scope,
+                      e.environment_operation_generation
                  FROM sandbox_workspace_bindings w
                  JOIN sandbox_environment_backend b
                    ON b.environment_id = w.environment_id
@@ -156,6 +194,98 @@ impl BindingStore for PgBindingStore {
         })?;
         row.map(live_binding_from_row).transpose()
     }
+
+    async fn record_host_key(
+        &self,
+        environment_id: &str,
+        generation: i64,
+        pod_uid: &str,
+        public_key: &str,
+    ) -> Result<HostKeyRecord, BindingStoreUnavailable> {
+        let unavailable = |error: sqlx::Error| {
+            tracing::warn!(error = %error, "workspace SSH host key record failed");
+            BindingStoreUnavailable
+        };
+        let mut tx = self.pool.begin().await.map_err(unavailable)?;
+        // Only the current generation's key is ever trusted; earlier ones go.
+        sqlx::query(
+            r#"DELETE FROM sandbox_ssh_host_keys
+                WHERE environment_id = $1 AND operation_generation < $2"#,
+        )
+        .bind(environment_id)
+        .bind(generation)
+        .execute(&mut *tx)
+        .await
+        .map_err(unavailable)?;
+        // Write-once: a recorded key is never replaced.
+        let inserted = sqlx::query(
+            r#"INSERT INTO sandbox_ssh_host_keys
+                   (environment_id, operation_generation, pod_uid, public_key)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (environment_id, operation_generation) DO NOTHING"#,
+        )
+        .bind(environment_id)
+        .bind(generation)
+        .bind(pod_uid)
+        .bind(public_key)
+        .execute(&mut *tx)
+        .await
+        .map_err(unavailable)?
+        .rows_affected();
+        let outcome = if inserted == 1 {
+            HostKeyRecord::Recorded
+        } else {
+            let existing: Option<String> = sqlx::query_scalar(
+                r#"SELECT public_key FROM sandbox_ssh_host_keys
+                    WHERE environment_id = $1 AND operation_generation = $2"#,
+            )
+            .bind(environment_id)
+            .bind(generation)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(unavailable)?;
+            match existing {
+                Some(existing) if existing == public_key => HostKeyRecord::Unchanged,
+                Some(_) => HostKeyRecord::Conflict,
+                None => return Err(BindingStoreUnavailable),
+            }
+        };
+        tx.commit().await.map_err(unavailable)?;
+        Ok(outcome)
+    }
+
+    async fn transport_zone(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::runtime_transport::RuntimeTransportZone>, BindingStoreUnavailable>
+    {
+        crate::runtime_transport::load_enabled_zone(&self.pool, name)
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = %error, "workspace binding transport zone lookup failed");
+                BindingStoreUnavailable
+            })
+    }
+}
+
+/// The SSH host public key recorded for `environment_id` at its current
+/// operation generation, for the authenticated known-hosts read. `None`
+/// when the current generation has not recorded one.
+pub async fn current_host_key(
+    pool: &sqlx::PgPool,
+    environment_id: &str,
+) -> Result<Option<(i64, String)>, sqlx::Error> {
+    sqlx::query_as(
+        r#"SELECT k.operation_generation, k.public_key
+             FROM sandbox_ssh_host_keys k
+             JOIN environments e
+               ON e.id = k.environment_id
+              AND e.environment_operation_generation = k.operation_generation
+            WHERE k.environment_id = $1"#,
+    )
+    .bind(environment_id)
+    .fetch_optional(pool)
+    .await
 }
 
 fn live_binding_from_row(
@@ -170,6 +300,7 @@ fn live_binding_from_row(
         projection_selection_sha256,
         managed_credential_clients,
         credential_scope,
+        environment_generation,
     ): LiveBindingRow,
 ) -> Result<LiveBinding, BindingStoreUnavailable> {
     // The schema constrains the scope; anything else is a broken store.
@@ -186,6 +317,7 @@ fn live_binding_from_row(
         projection_selection_sha256,
         managed_credential_clients,
         credential_scope,
+        environment_generation,
     })
 }
 
@@ -290,6 +422,10 @@ async fn listen(pool: &PgPool, notifications: &BindingNotifications) -> anyhow::
 }
 
 #[cfg(test)]
+#[path = "database_tests.rs"]
+mod database_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -324,6 +460,7 @@ mod tests {
                 None,
                 String::new(),
                 scope.into(),
+                7,
             )
         };
         assert_eq!(

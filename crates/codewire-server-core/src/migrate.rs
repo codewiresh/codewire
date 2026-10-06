@@ -52,6 +52,7 @@ mod tests {
     mod runtime_dispatch_scope;
     mod session_mutation;
     mod ssh;
+    mod ssh_host_keys;
     mod two_factor_replacements;
     mod two_factor_setup_skip;
     mod workspace_binding;
@@ -66,10 +67,14 @@ mod tests {
     // environment projection, typed SSH metadata, the GitHub singleton that
     // every personal profile includes, the per-session two-factor setup skip,
     // preview browser authorization, pending authenticator replacement, the
-    // runtime-dispatch lease environment scope and claim-time workspace
-    // binding, through version36. Version 36 removes everything version 35
-    // added, so this is the version-34 value below.
+    // runtime-dispatch lease environment scope, claim-time workspace binding
+    // and daemon SSH host keys, through version37.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
+        "f0e4c2ca1b406aa6ed13e3f773f3d879216d43f4f0b5dd22e9ed62fcf218bb76";
+    // Accepted table schema through version36, before daemon SSH host keys.
+    // Version 36 removes everything version 35 added, so this is also the
+    // version-34 value below.
+    const ACCEPTED_PRE_SSH_HOST_KEY_SCHEMA_FINGERPRINT: &str =
         "218a3ea293e6023d9023b3b133534bfeba823dd68e17818196d609032ccca1b5";
     // Accepted table schema through version35, with the authority stamp that
     // version 36 removes.

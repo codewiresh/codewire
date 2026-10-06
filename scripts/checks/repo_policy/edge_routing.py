@@ -913,7 +913,7 @@ def assert_workspace_binding_listener_boundary(
     if "AppBuilder" in binding_section or "with_" in binding_section:
         fail("the workspace-binding app must mount only its router, with no shared app routes")
     if not re.search(
-        r"serve_bounded_http1\(\s*workspace_binding_app,\s*listeners\.workspace_binding,"
+        r"serve_bounded_http1_upgraded\(\s*workspace_binding_app,\s*listeners\.workspace_binding,"
         r"\s*codewire_orchestration::workspace_binding::LISTENER_LIMITS,",
         main,
     ):
@@ -921,6 +921,17 @@ def assert_workspace_binding_listener_boundary(
             "the workspace-binding app must be served only by the bounded HTTP/1.1 listener "
             "with LISTENER_LIMITS"
         )
+    if not re.search(
+        r"Some\(tls\) => \{\s*codewire_server_core::bounded_http1::serve_bounded_http1_upgraded\("
+        r"\s*workspace_binding_app,\s*listeners\.workspace_binding,"
+        r"\s*codewire_orchestration::workspace_binding::LISTENER_LIMITS,\s*tls,\s*\)",
+        main,
+    ) or not re.search(
+        r"let workspace_binding_tls = internal_tls\s*\.clone\(\)\s*"
+        r"\.map\(codewire_orchestration::workspace_binding::WorkspaceBindingTls\);",
+        main,
+    ):
+        fail("the workspace-binding listener must be served only over the internal TLS identity")
     if main.count("workspace_binding_app") != 2:
         fail("the workspace-binding app must be built once and served once")
 
@@ -1129,8 +1140,17 @@ def internal_connect_listener_self_test() -> None:
         "served only by the bounded HTTP/1.1 listener",
         replacement=(
             "crates/codewire-orchestration/src/main.rs",
-            "codewire_server_core::bounded_http1::serve_bounded_http1(",
+            "codewire_server_core::bounded_http1::serve_bounded_http1_upgraded(",
             "codewire_server_core::serve_with_listener(",
+        ),
+    )
+    expect_rejection(
+        "plaintext workspace-binding serving",
+        "served only over the internal TLS identity",
+        replacement=(
+            "crates/codewire-orchestration/src/main.rs",
+            "LISTENER_LIMITS,\n                        tls,",
+            "LISTENER_LIMITS,\n                        codewire_server_core::bounded_http1::Plaintext,",
         ),
     )
     expect_rejection(

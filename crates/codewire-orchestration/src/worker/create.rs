@@ -223,10 +223,17 @@ impl SandboxWorkerCfg {
 /// `WorkspaceBindingService` (design §3.5).
 pub const WORKSPACE_BINDING_SERVICE_NAME: &str = "codewire-orchestration-workspace-binding";
 
+/// The DNS name of the workspace-binding listener in `server_namespace`: the
+/// name workspace daemons verify and orchestration's internal leaf carries.
+pub fn workspace_binding_tls_host(server_namespace: &str) -> String {
+    format!("{WORKSPACE_BINDING_SERVICE_NAME}.{server_namespace}.svc.cluster.local")
+}
+
 /// The in-cluster URL a workspace daemon long-polls for its binding.
 pub fn workspace_binding_url(server_namespace: &str) -> String {
     format!(
-        "http://{WORKSPACE_BINDING_SERVICE_NAME}.{server_namespace}.svc.cluster.local:{}",
+        "http://{}:{}",
+        workspace_binding_tls_host(server_namespace),
         codewire_gateway_proto::WORKSPACE_BINDING_PORT
     )
 }

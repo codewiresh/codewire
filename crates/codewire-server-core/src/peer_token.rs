@@ -209,10 +209,7 @@ mod tests {
         let (payload, _) = token.split_once('.').unwrap();
         let mut raw = Hmac::<Sha256>::new_from_slice(SECRET.as_bytes()).unwrap();
         raw.update(payload.as_bytes());
-        let raw_signed = format!(
-            "{payload}.{}",
-            engine.encode(raw.finalize().into_bytes())
-        );
+        let raw_signed = format!("{payload}.{}", engine.encode(raw.finalize().into_bytes()));
         assert!(validate(SECRET, &raw_signed, NOW).is_err());
         // A legacy coordinate token (no exp, no generation) is refused.
         let legacy = "eyJlbnZpcm9ubWVudF9pZCI6ImVudi1wYXJpdHktMSIsInNjb3BlIjoiY29vcmRpbmF0ZSJ9.vSHW3CqDqOLFEMxllVJokbJ8xK519tNE8VOddemyXBA";

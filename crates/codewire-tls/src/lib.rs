@@ -20,6 +20,9 @@ pub mod test_support;
 pub use files::ServerTlsFiles;
 pub use incoming::{TlsIncoming, TlsListener};
 
+/// A server connection after [`ServerTlsFiles::accept_http1_only`].
+pub type ServerTlsStream = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
+
 use std::time::Duration;
 
 const TLS_TIMEOUT: Duration = Duration::from_secs(5);
