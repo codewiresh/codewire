@@ -594,6 +594,52 @@ fn only_bounded_canonical_capability_headers_are_copied() {
     assert!(broker_capabilities(&tonic::metadata::MetadataMap::new()).is_empty());
 }
 
+/// Over the generated RPCs: nothing is dialed while the broker cannot admit
+/// the environment, and the first epoch's Open reaches the daemon within a
+/// second of the running signal, on its first attempt.
+#[tokio::test]
+async fn the_first_epoch_is_admitted_within_a_second_of_the_running_signal() {
+    let mut fixture = Fixture::new().await;
+    let (admissible, admission) = watch::channel(false);
+    let shutdown = CancellationToken::new();
+    let config = fixture.config.clone();
+    let stop = shutdown.clone();
+    let relay = tokio::spawn(async move { run(&config, admission, stop.cancelled()).await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), fixture.daemon_calls.recv())
+            .await
+            .is_err()
+    );
+    let signalled = std::time::Instant::now();
+    admissible.send_replace(true);
+    let mut daemon = bounded(fixture.daemon_calls.recv()).await.unwrap();
+    let BrokerCall {
+        input,
+        output,
+        accept,
+        ..
+    } = bounded(fixture.broker_calls.recv()).await.unwrap();
+    accept.send(Ok(())).unwrap();
+    assert!(matches!(
+        bounded(daemon.input.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .payload,
+        Some(v1::credential_bridge_host_message::Payload::Open(_))
+    ));
+    let admitted_after = signalled.elapsed();
+    assert!(
+        admitted_after < Duration::from_secs(1),
+        "admitted {admitted_after:?} after the signal"
+    );
+    assert!(fixture.daemon_calls.try_recv().is_err());
+    shutdown.cancel();
+    bounded(relay).await.unwrap().unwrap();
+    drop((daemon, input, output));
+    fixture.stop().await;
+}
+
 #[tokio::test]
 async fn rejected_and_cancelled_admission_never_send_open_and_reconnect_rereads_tokens() {
     let mut fixture = Fixture::new().await;

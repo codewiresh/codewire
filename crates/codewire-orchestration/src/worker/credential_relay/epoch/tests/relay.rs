@@ -101,23 +101,35 @@ fn synthetic(
 struct Relay {
     origin: Instant,
     starts: mpsc::UnboundedReceiver<Synthetic>,
+    admissible: watch::Sender<bool>,
     stop: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<Result<(), DrainFailure>>,
 }
 
 impl Relay {
+    /// A relay whose environment is running from the start.
     fn start() -> Self {
+        Self::start_admissible(true)
+    }
+
+    fn start_admissible(admissible: bool) -> Self {
         let (starts_tx, starts) = mpsc::unbounded_channel();
         let (stop, stopped) = oneshot::channel::<()>();
-        let task = tokio::spawn(relay(Uuid::nil(), synthetic(starts_tx), async {
+        let (admissible, admission) = watch::channel(admissible);
+        let task = tokio::spawn(relay(Uuid::nil(), admission, synthetic(starts_tx), async {
             let _ = stopped.await;
         }));
         Self {
             origin: Instant::now(),
             starts,
+            admissible,
             stop: Some(stop),
             task,
         }
+    }
+
+    fn set_admissible(&self, admissible: bool) {
+        self.admissible.send_replace(admissible);
     }
 
     async fn next(&mut self) -> Synthetic {
@@ -316,5 +328,43 @@ async fn an_admitted_successor_resets_the_backoff() {
         (retried.started_at, retried.succeeds),
         (relay.at(732), Some(1_900))
     );
+    relay.stop().await.unwrap();
+}
+
+/// The broker refuses every epoch until the environment is running, which
+/// follows the binding by the whole cold start. The relay spends no attempt
+/// before, and starts its first epoch the moment it can be admitted.
+#[tokio::test(start_paused = true)]
+async fn the_first_epoch_starts_the_moment_the_broker_can_admit_it() {
+    let mut relay = Relay::start_admissible(false);
+    relay.none_until(30).await;
+    relay.set_admissible(true);
+    let mut first = relay.next().await;
+    // At that instant, not after a retry delay.
+    assert_eq!((first.started_at, first.succeeds), (relay.at(30), None));
+    first.admit(1_620, Some(600));
+    // Admitted on that first attempt: nothing else starts before its
+    // successor, 90 seconds before it ends at 630 s.
+    relay.none_until(539).await;
+    first.not_cancelled();
+    relay.stop().await.unwrap();
+}
+
+/// A refusal while the environment can be admitted is retried as before; once
+/// it cannot (it is stopping), no fresh epoch is attempted until it can again.
+#[tokio::test(start_paused = true)]
+async fn fresh_epochs_wait_while_the_broker_cannot_admit_them() {
+    let mut relay = Relay::start();
+    let refused = relay.next().await;
+    assert_eq!(refused.started_at, relay.origin);
+    refused.send(Control::Refuse);
+    let retried = relay.next().await;
+    assert_eq!(retried.started_at, relay.at(1));
+    relay.set_admissible(false);
+    retried.send(Control::Refuse);
+    relay.none_until(60).await;
+    relay.set_admissible(true);
+    let resumed = relay.next().await;
+    assert_eq!((resumed.started_at, resumed.succeeds), (relay.at(60), None));
     relay.stop().await.unwrap();
 }

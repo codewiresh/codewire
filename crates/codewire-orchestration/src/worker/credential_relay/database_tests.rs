@@ -129,6 +129,29 @@ fn target(environment: &Environment, pod_uid: &str, generation: u64) -> Target {
     }
 }
 
+/// Every seeded environment is running, so the broker can admit each.
+fn running(environment: &Environment, pod_uid: &str, generation: u64) -> Live {
+    Live {
+        target: target(environment, pod_uid, generation),
+        admissible: true,
+    }
+}
+
+async fn set_state(
+    db: &TestDatabase,
+    environment: &Environment,
+    state: &str,
+    desired: &str,
+) -> Result<()> {
+    sqlx::query("UPDATE environments SET state = $2, desired_state = $3 WHERE id = $1")
+        .bind(environment.id)
+        .bind(state)
+        .bind(desired)
+        .execute(&db.pool)
+        .await?;
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn db_the_relay_serves_exactly_the_live_bindings_of_its_namespace() -> Result<()> {
@@ -155,19 +178,56 @@ async fn db_the_relay_serves_exactly_the_live_bindings_of_its_namespace() -> Res
         let elsewhere = bind(&db, &ELSEWHERE, 3).await?;
         release(&db, &RELEASED).await?;
         let targets = live_targets(&db.pool, NAMESPACE).await?;
-        ensure!(targets == [target(&LIVE, &live, 3)], "{targets:?}");
+        ensure!(targets == [running(&LIVE, &live, 3)], "{targets:?}");
         ensure!(
-            live_targets(&db.pool, OTHER_NAMESPACE).await? == [target(&ELSEWHERE, &elsewhere, 3)]
+            live_targets(&db.pool, OTHER_NAMESPACE).await? == [running(&ELSEWHERE, &elsewhere, 3)]
         );
+        // The pass for one environment reads only its binding, in its
+        // namespace.
+        let live_id = Uuid::parse_str(LIVE.id)?;
+        ensure!(live_target(&db.pool, NAMESPACE, live_id).await? == Some(running(&LIVE, &live, 3)));
+        ensure!(
+            live_target(&db.pool, OTHER_NAMESPACE, live_id)
+                .await?
+                .is_none()
+        );
+        ensure!(
+            live_target(&db.pool, NAMESPACE, Uuid::parse_str(RELEASED.id)?)
+                .await?
+                .is_none()
+        );
+
+        // Bound while it starts: relayed, but the broker cannot admit it
+        // until it runs; nor once it is asked to stop.
+        for (state, desired) in [
+            ("creating", "started"),
+            ("starting", "started"),
+            ("running", "stopped"),
+        ] {
+            set_state(&db, &LIVE, state, desired).await?;
+            let starting = live_target(&db.pool, NAMESPACE, live_id).await?;
+            ensure!(
+                starting
+                    == Some(Live {
+                        target: target(&LIVE, &live, 3),
+                        admissible: false,
+                    }),
+                "{state}/{desired}: {starting:?}"
+            );
+        }
+        set_state(&db, &LIVE, "running", "started").await?;
 
         // A replaced Pod is a different relay target, and the released
         // binding before it is never served again.
         let replacement = bind(&db, &LIVE, 4).await?;
         let targets = live_targets(&db.pool, NAMESPACE).await?;
-        ensure!(targets == [target(&LIVE, &replacement, 4)], "{targets:?}");
-        let plan = plan([target(&LIVE, &live, 3)].iter(), &targets);
-        ensure!(plan.stop == [Uuid::parse_str(LIVE.id)?]);
-        ensure!(plan.start == targets);
+        ensure!(targets == [running(&LIVE, &replacement, 4)], "{targets:?}");
+        let plan = plan(
+            [target(&LIVE, &live, 3)].iter(),
+            &[target(&LIVE, &replacement, 4)],
+        );
+        ensure!(plan.stop == [live_id]);
+        ensure!(plan.start == [target(&LIVE, &replacement, 4)]);
 
         // A stop releases the binding: nothing is relayed for it.
         release(&db, &LIVE).await?;

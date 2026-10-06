@@ -69,19 +69,23 @@ fn only_a_canonical_live_binding_is_a_target() {
             "pod-a".to_owned(),
             generation,
             scope.to_owned(),
+            false,
         )
     };
     assert_eq!(
-        target_from_row(row(environment, 3, "pod")),
-        Some(Target {
-            environment_id: Uuid::parse_str(environment).unwrap(),
-            pod_uid: "pod-a".into(),
-            generation: 3,
-            scope: WorkspaceCredentialScope::Pod,
+        live_from_row(row(environment, 3, "pod")),
+        Some(Live {
+            target: Target {
+                environment_id: Uuid::parse_str(environment).unwrap(),
+                pod_uid: "pod-a".into(),
+                generation: 3,
+                scope: WorkspaceCredentialScope::Pod,
+            },
+            admissible: false,
         })
     );
     assert_eq!(
-        target_from_row(row(environment, 3, "environment")).map(|target| target.scope),
+        live_from_row(row(environment, 3, "environment")).map(|live| live.target.scope),
         Some(WorkspaceCredentialScope::Environment)
     );
     for invalid in [
@@ -90,7 +94,64 @@ fn only_a_canonical_live_binding_is_a_target() {
         row(environment, -1, "pod"),
         row(environment, 3, "node"),
     ] {
-        assert_eq!(target_from_row(invalid), None);
+        assert_eq!(live_from_row(invalid), None);
+    }
+}
+
+/// No relay of this configuration reaches the network: its daemon endpoint
+/// does not parse, so each admitted epoch ends before a connection.
+fn config() -> Arc<RelayConfig> {
+    Arc::new(RelayConfig {
+        namespace: "not a namespace".into(),
+        session_secret: Zeroizing::new("synthetic-relay-session-secret".into()),
+        relay_token: PathBuf::from("/nonexistent/relay-token"),
+        broker: BrokerEndpoint::Preconfigured(
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy(),
+        ),
+        limits: Limits::DEFAULT,
+    })
+}
+
+fn live(environment: u128, admissible: bool) -> Live {
+    Live {
+        target: target(environment, "6f1d1e9a-0b1c-4a52-9a4e-2c1f0000000a", 3),
+        admissible,
+    }
+}
+
+/// A relay starts at its binding but is told when its environment becomes
+/// running; a notification pass over one environment leaves the others alone.
+#[tokio::test]
+async fn a_pass_tells_each_relay_whether_the_broker_can_admit_it() {
+    let config = config();
+    let mut relays = Relays::default();
+    relays.reconcile(&config, &[live(1, false), live(2, false)], None);
+    let admission = relays.running[&Uuid::from_u128(1)].admissible.subscribe();
+    assert!(!*admission.borrow());
+    // Not yet running: its log lines are worth a pass, as are those of an
+    // environment with no relay yet.
+    assert!(relays.awaits(Uuid::from_u128(1)));
+    assert!(relays.awaits(Uuid::from_u128(3)));
+
+    // A pass for environment 1 alone: it is running now, 2 is untouched.
+    relays.reconcile(&config, &[live(1, true)], Some(Uuid::from_u128(1)));
+    assert!(*admission.borrow());
+    assert!(!relays.awaits(Uuid::from_u128(1)));
+    assert!(relays.awaits(Uuid::from_u128(2)));
+    assert_eq!(relays.running.len(), 2);
+
+    // That environment's binding released: only its relay stops.
+    relays.reconcile(&config, &[], Some(Uuid::from_u128(1)));
+    assert_eq!(
+        relays.running.keys().copied().collect::<Vec<_>>(),
+        [Uuid::from_u128(2)]
+    );
+    relays.stop_all();
+    for (_, task) in relays.stopping.drain() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("a stopped relay ends")
+            .unwrap();
     }
 }
 

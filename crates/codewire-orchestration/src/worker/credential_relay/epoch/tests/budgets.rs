@@ -165,7 +165,8 @@ async fn a_bounded_epoch_is_followed_by_a_fresh_one() {
     let relay = {
         let config = fixture.config.clone();
         let shutdown = shutdown.clone();
-        tokio::spawn(async move { run(&config, shutdown.cancelled()).await })
+        let (_, admission) = watch::channel(true);
+        tokio::spawn(async move { run(&config, admission, shutdown.cancelled()).await })
     };
     let (first_daemon, first_broker) = admitted(&mut fixture).await;
     first_daemon

@@ -17,7 +17,7 @@ use codewire_tls::ClientTlsEndpoint;
 use prost::Message as _;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::io::AsyncReadExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tokio_stream::Stream;
 use tokio_util::sync::CancellationToken;
@@ -125,12 +125,19 @@ type EpochFuture<'a> = Pin<Box<dyn Future<Output = Result<(), DrainFailure>> + S
 /// owner was started for, on its own daemon connection. A replaced Pod or
 /// generation is a new binding, and the supervisor replaces this relay rather
 /// than retrying a refused one.
+///
+/// `admissible` is whether the broker can admit this environment yet: it
+/// refuses every epoch until the environment is running. A fresh epoch
+/// starts only while it is true, and at once when it turns true, so no
+/// attempt is spent before and none waits for a retry delay after.
 pub(super) async fn run(
     config: &EpochConfig,
+    admissible: watch::Receiver<bool>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), DrainFailure> {
     relay(
         config.environment_id,
+        admissible,
         move |start| Box::pin(async move { run_epoch(config, start).await }),
         shutdown,
     )
@@ -183,6 +190,7 @@ enum StartingEvent {
 /// cancels and awaits all of them; dropping one would abandon its producers.
 async fn relay<'a, S, D>(
     environment_id: Uuid,
+    mut admissible: watch::Receiver<bool>,
     mut start: S,
     shutdown: D,
 ) -> Result<(), DrainFailure>
@@ -191,6 +199,8 @@ where
     D: Future<Output = ()>,
 {
     let root = CancellationToken::new();
+    let mut can_admit = *admissible.borrow_and_update();
+    let mut first = FirstAdmission::new(can_admit);
     let mut launch = |succeeds: Option<u64>| {
         let (admitted, receiver) = oneshot::channel();
         Starting {
@@ -218,7 +228,7 @@ where
             serving.as_ref(),
             !retiring.is_empty(),
             starting.is_some(),
-            fresh_at,
+            can_admit.then_some(fresh_at),
             successor_retry_at,
         );
         tokio::select! {
@@ -249,6 +259,7 @@ where
                 };
                 successor_retry_at = None;
                 successor_refusals = 0;
+                first.admitted(environment_id);
                 let renewal = Renewal::new(&admitted);
                 if let Some(previous) = serving.take() {
                     // The daemon moved new work to this epoch; the previous
@@ -286,8 +297,21 @@ where
                     break Err(error);
                 }
             }
+            now = admission_changed(&mut admissible) => {
+                if now && !can_admit {
+                    // The broker can admit it from now on: try at once,
+                    // without waiting out a refusal's retry delay.
+                    fresh_at = Instant::now();
+                    first.admissible();
+                }
+                can_admit = now;
+            }
             _ = sleep_until(next.map(|(at, _)| at)), if next.is_some() => {
-                starting = Some(launch(next.and_then(|(_, succeeds)| succeeds)));
+                let succeeds = next.and_then(|(_, succeeds)| succeeds);
+                if succeeds.is_none() {
+                    first.attempt();
+                }
+                starting = Some(launch(succeeds));
             }
         }
     };
@@ -349,19 +373,20 @@ async fn drain_all(mut futures: Vec<EpochFuture<'_>>) -> Result<(), DrainFailure
 
 /// When the next epoch starts and, for a successor, the expiry it must
 /// extend. None while an epoch is starting, while a predecessor still
-/// retires, or when the serving epoch reported no expiry or has ended.
+/// retires, when the serving epoch reported no expiry or has ended, or, for
+/// a fresh epoch, while the broker cannot admit one (`fresh_at` None).
 fn next_start(
     serving: Option<&Serving<'_>>,
     retiring: bool,
     starting: bool,
-    fresh_at: Instant,
+    fresh_at: Option<Instant>,
     successor_retry_at: Option<Instant>,
 ) -> Option<(Instant, Option<u64>)> {
     if starting {
         return None;
     }
     let Some(current) = serving else {
-        return Some((fresh_at, None));
+        return fresh_at.map(|at| (at, None));
     };
     let renewal = current.renewal.filter(|_| !retiring)?;
     let at = successor_retry_at.map_or(renewal.successor_at, |retry| {
@@ -409,6 +434,57 @@ async fn sleep_until(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
+    }
+}
+
+/// The next admissibility value. A relay whose supervisor has gone keeps the
+/// last one; its shutdown follows.
+async fn admission_changed(admissible: &mut watch::Receiver<bool>) -> bool {
+    if admissible.changed().await.is_err() {
+        return std::future::pending().await;
+    }
+    *admissible.borrow_and_update()
+}
+
+/// How the relay's first epoch came to be admitted, logged once: the attempts
+/// it took and how long after the broker could admit it.
+struct FirstAdmission {
+    admissible_at: Option<Instant>,
+    attempts: u32,
+    logged: bool,
+}
+
+impl FirstAdmission {
+    fn new(admissible: bool) -> Self {
+        Self {
+            admissible_at: admissible.then(Instant::now),
+            attempts: 0,
+            logged: false,
+        }
+    }
+
+    fn admissible(&mut self) {
+        self.admissible_at.get_or_insert_with(Instant::now);
+    }
+
+    fn attempt(&mut self) {
+        self.attempts = self.attempts.saturating_add(1);
+    }
+
+    fn admitted(&mut self, environment_id: Uuid) {
+        if std::mem::replace(&mut self.logged, true) {
+            return;
+        }
+        let after_admissible_ms = self.admissible_at.map_or(0, |at| {
+            u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)
+        });
+        tracing::info!(
+            event = "credential_bridge_first_epoch_admitted",
+            %environment_id,
+            attempts = self.attempts,
+            after_admissible_ms,
+            "credential relay admitted its first epoch"
+        );
     }
 }
 
@@ -472,9 +548,72 @@ async fn run_epoch_with_lifetime(
 ) -> Result<(), DrainFailure> {
     let severed = CancellationToken::new();
     let Ok(daemon) = connection::connect(&config.daemon, severed.clone()) else {
+        Unadmitted::DaemonEndpoint.log(config.environment_id, start.succeeds);
         return Ok(());
     };
     run_epoch_on(config, &daemon, &severed, start, lifetime).await
+}
+
+/// Why an epoch ended before its broker admitted it. Closed reasons and gRPC
+/// codes only: never a frame, token or status message. A successor's own
+/// refusal is logged where it is decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unadmitted {
+    DaemonEndpoint,
+    DaemonUnreachable,
+    DaemonRefused(tonic::Code),
+    DaemonReady,
+    RelayToken,
+    BrokerConnect,
+    PrepareTimeout,
+    BrokerTimeout,
+    BrokerRefused(tonic::Code),
+    Activation,
+}
+
+impl Unadmitted {
+    fn from_daemon(error: &SessionClientError) -> Self {
+        match error {
+            SessionClientError::Status(status) => Self::DaemonRefused(status.code()),
+            SessionClientError::InvalidCredential => Self::DaemonReady,
+            _ => Self::DaemonUnreachable,
+        }
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::DaemonEndpoint => "daemon_endpoint",
+            Self::DaemonUnreachable => "daemon_unreachable",
+            Self::DaemonRefused(_) => "daemon_refused",
+            Self::DaemonReady => "daemon_ready_mismatch",
+            Self::RelayToken => "relay_token",
+            Self::BrokerConnect => "broker_connect",
+            Self::PrepareTimeout => "prepare_timeout",
+            Self::BrokerTimeout => "broker_timeout",
+            Self::BrokerRefused(_) => "broker_refused",
+            Self::Activation => "daemon_activation",
+        }
+    }
+
+    /// Logged for a fresh epoch, which the relay retries after a second. It
+    /// starts only once the broker can admit the environment, so each line
+    /// is a real delay before the bridge is up.
+    fn log(self, environment_id: Uuid, succeeds: Option<u64>) {
+        if succeeds.is_some() {
+            return;
+        }
+        let code = match self {
+            Self::DaemonRefused(code) | Self::BrokerRefused(code) => code.description(),
+            _ => "",
+        };
+        tracing::info!(
+            event = "credential_bridge_epoch_unadmitted",
+            %environment_id,
+            reason = self.reason(),
+            code,
+            "credential relay epoch ended before the broker admitted it"
+        );
+    }
 }
 
 /// `severed` closes this epoch's own daemon connection. A drained epoch's
@@ -494,40 +633,44 @@ async fn run_epoch_on(
     let Ok((daemon_drain, preparation)) =
         daemon.prepare_hosted_credential_bridge(config.environment_id, config.generation)
     else {
+        Unadmitted::DaemonEndpoint.log(config.environment_id, succeeds);
         return Ok(());
     };
     let result = async {
         let prepare = async {
-            let (prepared, output) = preparation.await.map_err(|error| {
-                if matches!(&error, SessionClientError::Status(status)
-                    if status.code() == tonic::Code::Unauthenticated)
-                {
-                    // The supervisor replaces this relay when the binding it
-                    // was started for changes; until then, retry quietly.
-                    tracing::debug!(
-                        environment_id = %config.environment_id,
-                        "workspace daemon refused the relay's credential"
-                    );
-                }
-            })?;
+            // A refused credential is retried: the supervisor replaces this
+            // relay when the binding it was started for changes.
+            let (prepared, output) = preparation
+                .await
+                .map_err(|error| Unadmitted::from_daemon(&error))?;
             let relay = read_relay_token(&config.relay_token)
                 .await
-                .map_err(|_| ())?;
-            let metadata =
-                credential_metadata(&relay, prepared.workspace_authorization()).map_err(|_| ())?;
+                .map_err(|_| Unadmitted::RelayToken)?;
+            let metadata = credential_metadata(&relay, prepared.workspace_authorization())
+                .map_err(|_| Unadmitted::RelayToken)?;
             let channel = match &config.broker {
-                BrokerEndpoint::Tls(endpoint) => endpoint.connect().await.map_err(|_| ())?,
+                BrokerEndpoint::Tls(endpoint) => endpoint
+                    .connect()
+                    .await
+                    .map_err(|_| Unadmitted::BrokerConnect)?,
                 #[cfg(test)]
                 BrokerEndpoint::Preconfigured(channel) => channel.clone(),
             };
-            Ok::<_, ()>((prepared, output, metadata, channel))
+            Ok::<_, Unadmitted>((prepared, output, metadata, channel))
         };
         let (prepared, output, metadata, channel) = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Ok(()),
             result = tokio::time::timeout(PREPARE_TIMEOUT, prepare) => match result {
                 Ok(Ok(prepared)) => prepared,
-                _ => return Ok(()),
+                Ok(Err(unadmitted)) => {
+                    unadmitted.log(config.environment_id, succeeds);
+                    return Ok(());
+                }
+                Err(_) => {
+                    Unadmitted::PrepareTimeout.log(config.environment_id, succeeds);
+                    return Ok(());
+                }
             },
         };
         let (sender, receiver) = mpsc::channel(FRAME_BUFFER);
@@ -569,8 +712,8 @@ async fn run_epoch_on(
             let response =
                 tokio::time::timeout(BROKER_ADMISSION_TIMEOUT, broker.credential_bridge(request))
                     .await
-                    .map_err(|_| ())?
-                    .map_err(|_| ())?;
+                    .map_err(|_| Some(Unadmitted::BrokerTimeout))?
+                    .map_err(|status| Some(Unadmitted::BrokerRefused(status.code())))?;
             // Successful TLS/RPC headers certify the broker's dual TokenReview,
             // live Ready Pods, Running DB state, exact generation and real Ready.
             // They also list the optional operations this broker serves. The
@@ -604,9 +747,12 @@ async fn run_epoch_on(
                     },
                     "credential relay successor would not outlive the current epoch"
                 );
-                return Err(());
+                return Err(None);
             }
-            let sender = prepared.activate(&capabilities).await.map_err(|_| ())?;
+            let sender = prepared
+                .activate(&capabilities)
+                .await
+                .map_err(|_| Some(Unadmitted::Activation))?;
             let _ = admitted.send(Admitted {
                 expiry,
                 lifetime_ends,
@@ -628,13 +774,17 @@ async fn run_epoch_on(
                     }
                 }
             }
-            Ok::<(), ()>(())
+            Ok::<(), Option<Unadmitted>>(())
         };
         tokio::select! {
             biased;
             _ = cancellation.cancelled() => {},
             _ = tokio::time::sleep_until(lifetime_ends) => {},
-            _ = exchange => {},
+            outcome = exchange => {
+                if let Err(Some(unadmitted)) = outcome {
+                    unadmitted.log(config.environment_id, succeeds);
+                }
+            },
         }
         cancellation.cancel();
         daemon_drain.cancel();
