@@ -876,9 +876,12 @@ impl WorkerSetupOps<'_> {
                 let kube = self.ctx.kube.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("workspace setup: sandbox backend not configured")
                 })?;
+                // Boxed: the bind and access futures are large, and inline
+                // they would grow every setup activity's future, not only a
+                // recovery's.
                 let attempt = tokio::time::timeout(
                     remaining,
-                    bind_replacement_then_await_access(
+                    Box::pin(bind_replacement_then_await_access(
                         bind_replacement_runtime(
                             kube,
                             self.authority,
@@ -887,7 +890,7 @@ impl WorkerSetupOps<'_> {
                             remaining,
                         ),
                         wait_for_sidecar(self.ctx, &input.namespace, &input.environment_id),
-                    ),
+                    )),
                 );
                 let reached = await_setup_or_cancel(&self.activity_ctx, async {
                     attempt.await.map_err(|_| {
