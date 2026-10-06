@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n%codewire/internal/v1/coordinate.proto\x12\x14\x63odewire.internal.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xfd\x02\n\x0e\x43oordinateNode\x12\x0e\n\x02id\x18\x01 \x01(\tR\x02id\x12/\n\x05\x61s_of\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x04\x61sOf\x12\x10\n\x03key\x18\x03 \x01(\tR\x03key\x12\x1b\n\tdisco_key\x18\x04 \x01(\tR\x08\x64iscoKey\x12%\n\x0epreferred_derp\x18\x05 \x01(\x05R\rpreferredDerp\x12X\n\x0c\x64\x65rp_latency\x18\x06 \x03(\x0b\x32\x35.codewire.internal.v1.CoordinateNode.DerpLatencyEntryR\x0b\x64\x65rpLatency\x12\x1c\n\tendpoints\x18\x07 \x03(\tR\tendpoints\x12\x1c\n\taddresses\x18\x08 \x03(\tR\taddresses\x1a>\n\x10\x44\x65rpLatencyEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\x01R\x05value:\x02\x38\x01\"\xd1\x01\n\x11\x43oordinateRequest\x12:\n\x04node\x18\x01 \x01(\x0b\x32$.codewire.internal.v1.CoordinateNodeH\x00R\x04node\x12=\n\x05hello\x18\x02 \x01(\x0b\x32%.codewire.internal.v1.CoordinateHelloH\x00R\x05hello\x12:\n\x04ping\x18\x03 \x01(\x0b\x32$.codewire.internal.v1.CoordinatePingH\x00R\x04pingB\x05\n\x03msg\"O\n\x0f\x43oordinateHello\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\"\xba\x02\n\'MeshCoordinatorServiceCoordinateRequest\x12:\n\x04node\x18\x01 \x01(\x0b\x32$.codewire.internal.v1.CoordinateNodeH\x00R\x04node\x12\x41\n\x05hello\x18\x02 \x01(\x0b\x32).codewire.internal.v1.MeshCoordinateHelloH\x00R\x05hello\x12:\n\x04ping\x18\x03 \x01(\x0b\x32$.codewire.internal.v1.CoordinatePingH\x00R\x04ping\x12M\n\tsubscribe\x18\x04 \x01(\x0b\x32-.codewire.internal.v1.MeshCoordinateSubscribeH\x00R\tsubscribeB\x05\n\x03msg\"\x89\x01\n\x13MeshCoordinateHello\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1d\n\nnetwork_id\x18\x02 \x01(\tR\tnetworkId\x12<\n\x04role\x18\x03 \x01(\x0e\x32(.codewire.internal.v1.MeshCoordinateRoleR\x04role\":\n\x17MeshCoordinateSubscribe\x12\x1f\n\x0btarget_node\x18\x01 \x01(\tR\ntargetNode\"\xbb\x02\n\x12\x43oordinateResponse\x12M\n\x0bpeer_update\x18\x01 \x01(\x0b\x32*.codewire.internal.v1.CoordinatePeerUpdateH\x00R\npeerUpdate\x12M\n\x0bpeer_remove\x18\x02 \x01(\x0b\x32*.codewire.internal.v1.CoordinatePeerRemoveH\x00R\npeerRemove\x12\x44\n\x08\x64\x65rp_map\x18\x03 \x01(\x0b\x32\'.codewire.internal.v1.CoordinateDerpMapH\x00R\x07\x64\x65rpMap\x12:\n\x04ping\x18\x04 \x01(\x0b\x32$.codewire.internal.v1.CoordinatePingH\x00R\x04pingB\x05\n\x03msg\"\xd1\x02\n(MeshCoordinatorServiceCoordinateResponse\x12M\n\x0bpeer_update\x18\x01 \x01(\x0b\x32*.codewire.internal.v1.CoordinatePeerUpdateH\x00R\npeerUpdate\x12M\n\x0bpeer_remove\x18\x02 \x01(\x0b\x32*.codewire.internal.v1.CoordinatePeerRemoveH\x00R\npeerRemove\x12\x44\n\x08\x64\x65rp_map\x18\x03 \x01(\x0b\x32\'.codewire.internal.v1.CoordinateDerpMapH\x00R\x07\x64\x65rpMap\x12:\n\x04ping\x18\x04 \x01(\x0b\x32$.codewire.internal.v1.CoordinatePingH\x00R\x04pingB\x05\n\x03msg\"\x10\n\x0e\x43oordinatePing\"R\n\x14\x43oordinatePeerUpdate\x12:\n\x05nodes\x18\x01 \x03(\x0b\x32$.codewire.internal.v1.CoordinateNodeR\x05nodes\"/\n\x14\x43oordinatePeerRemove\x12\x17\n\x07peer_id\x18\x01 \x01(\tR\x06peerId\"7\n\x11\x43oordinateDerpMap\x12\"\n\rderp_map_json\x18\x01 \x01(\x0cR\x0b\x64\x65rpMapJson*x\n\x12MeshCoordinateRole\x12$\n MESH_COORDINATE_ROLE_UNSPECIFIED\x10\x00\x12\x1d\n\x19MESH_COORDINATE_ROLE_PEER\x10\x01\x12\x1d\n\x19MESH_COORDINATE_ROLE_DIAL\x10\x02\x32y\n\x12\x43oordinatorService\x12\x63\n\nCoordinate\x12\'.codewire.internal.v1.CoordinateRequest\x1a(.codewire.internal.v1.CoordinateResponse(\x01\x30\x01\x32\xaa\x01\n\x16MeshCoordinatorService\x12\x8f\x01\n\nCoordinate\x12=.codewire.internal.v1.MeshCoordinatorServiceCoordinateRequest\x1a>.codewire.internal.v1.MeshCoordinatorServiceCoordinateResponse(\x01\x30\x01\x42\xe9\x01\n\x18\x63om.codewire.internal.v1B\x0f\x43oordinateProtoP\x01ZJgithub.com/codewiresh/codewire/libs/gen-go/codewire/internal/v1;internalv1\xa2\x02\x03\x43IX\xaa\x02\x14\x43odewire.Internal.V1\xca\x02\x14\x43odewire\\Internal\\V1\xe2\x02 Codewire\\Internal\\V1\\GPBMetadata\xea\x02\x16\x43odewire::Internal::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n%codewire/internal/v1/coordinate.proto\x12\x14\x63odewire.internal.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xfd\x02\n\x0e\x43oordinateNode\x12\x0e\n\x02id\x18\x01 \x01(\tR\x02id\x12/\n\x05\x61s_of\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x04\x61sOf\x12\x10\n\x03key\x18\x03 \x01(\tR\x03key\x12\x1b\n\tdisco_key\x18\x04 \x01(\tR\x08\x64iscoKey\x12%\n\x0epreferred_derp\x18\x05 \x01(\x05R\rpreferredDerp\x12X\n\x0c\x64\x65rp_latency\x18\x06 \x03(\x0b\x32\x35.codewire.internal.v1.CoordinateNode.DerpLatencyEntryR\x0b\x64\x65rpLatency\x12\x1c\n\tendpoints\x18\x07 \x03(\tR\tendpoints\x12\x1c\n\taddresses\x18\x08 \x03(\tR\taddresses\x1a>\n\x10\x44\x65rpLatencyEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\x01R\x05value:\x02\x38\x01\"\x90\x02\n\x11\x43oordinateRequest\x12:\n\x04node\x18\x01 \x01(\x0b\x32$.codewire.internal.v1.CoordinateNodeH\x00R\x04node\x12=\n\x05hello\x18\x02 \x01(\x0b\x32%.codewire.internal.v1.CoordinateHelloH\x00R\x05hello\x12:\n\x04ping\x18\x03 \x01(\x0b\x32$.codewire.internal.v1.CoordinatePingH\x00R\x04ping\x12=\n\x05proof\x18\x04 \x01(\x0b\x32%.codewire.internal.v1.CoordinateProofH\x00R\x05proofB\x05\n\x03msg\"5\n\x0f\x43oordinateProof\x12\"\n\npeer_token\x18\x01 \x01(\tB\x03\x80\x01\x01R\tpeerToken\"O\n\x0f\x43oordinateHello\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12%\n\x0e\x65nvironment_id\x18\x02 \x01(\tR\renvironmentId\"\xba\x02\n\'MeshCoordinatorServiceCoordinateRequest\x12:\n\x04node\x18\x01 \x01(\x0b\x32$.codewire.internal.v1.CoordinateNodeH\x00R\x04node\x12\x41\n\x05hello\x18\x02 \x01(\x0b\x32).codewire.internal.v1.MeshCoordinateHelloH\x00R\x05hello\x12:\n\x04ping\x18\x03 \x01(\x0b\x32$.codewire.internal.v1.CoordinatePingH\x00R\x04ping\x12M\n\tsubscribe\x18\x04 \x01(\x0b\x32-.codewire.internal.v1.MeshCoordinateSubscribeH\x00R\tsubscribeB\x05\n\x03msg\"\x89\x01\n\x13MeshCoordinateHello\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1d\n\nnetwork_id\x18\x02 \x01(\tR\tnetworkId\x12<\n\x04role\x18\x03 \x01(\x0e\x32(.codewire.internal.v1.MeshCoordinateRoleR\x04role\":\n\x17MeshCoordinateSubscribe\x12\x1f\n\x0btarget_node\x18\x01 \x01(\tR\ntargetNode\"\xbb\x02\n\x12\x43oordinateResponse\x12M\n\x0bpeer_update\x18\x01 \x01(\x0b\x32*.codewire.internal.v1.CoordinatePeerUpdateH\x00R\npeerUpdate\x12M\n\x0bpeer_remove\x18\x02 \x01(\x0b\x32*.codewire.internal.v1.CoordinatePeerRemoveH\x00R\npeerRemove\x12\x44\n\x08\x64\x65rp_map\x18\x03 \x01(\x0b\x32\'.codewire.internal.v1.CoordinateDerpMapH\x00R\x07\x64\x65rpMap\x12:\n\x04ping\x18\x04 \x01(\x0b\x32$.codewire.internal.v1.CoordinatePingH\x00R\x04pingB\x05\n\x03msg\"\xd1\x02\n(MeshCoordinatorServiceCoordinateResponse\x12M\n\x0bpeer_update\x18\x01 \x01(\x0b\x32*.codewire.internal.v1.CoordinatePeerUpdateH\x00R\npeerUpdate\x12M\n\x0bpeer_remove\x18\x02 \x01(\x0b\x32*.codewire.internal.v1.CoordinatePeerRemoveH\x00R\npeerRemove\x12\x44\n\x08\x64\x65rp_map\x18\x03 \x01(\x0b\x32\'.codewire.internal.v1.CoordinateDerpMapH\x00R\x07\x64\x65rpMap\x12:\n\x04ping\x18\x04 \x01(\x0b\x32$.codewire.internal.v1.CoordinatePingH\x00R\x04pingB\x05\n\x03msg\"\x10\n\x0e\x43oordinatePing\"R\n\x14\x43oordinatePeerUpdate\x12:\n\x05nodes\x18\x01 \x03(\x0b\x32$.codewire.internal.v1.CoordinateNodeR\x05nodes\"/\n\x14\x43oordinatePeerRemove\x12\x17\n\x07peer_id\x18\x01 \x01(\tR\x06peerId\"7\n\x11\x43oordinateDerpMap\x12\"\n\rderp_map_json\x18\x01 \x01(\x0cR\x0b\x64\x65rpMapJson*x\n\x12MeshCoordinateRole\x12$\n MESH_COORDINATE_ROLE_UNSPECIFIED\x10\x00\x12\x1d\n\x19MESH_COORDINATE_ROLE_PEER\x10\x01\x12\x1d\n\x19MESH_COORDINATE_ROLE_DIAL\x10\x02\x32y\n\x12\x43oordinatorService\x12\x63\n\nCoordinate\x12\'.codewire.internal.v1.CoordinateRequest\x1a(.codewire.internal.v1.CoordinateResponse(\x01\x30\x01\x32\xaa\x01\n\x16MeshCoordinatorService\x12\x8f\x01\n\nCoordinate\x12=.codewire.internal.v1.MeshCoordinatorServiceCoordinateRequest\x1a>.codewire.internal.v1.MeshCoordinatorServiceCoordinateResponse(\x01\x30\x01\x42\xe9\x01\n\x18\x63om.codewire.internal.v1B\x0f\x43oordinateProtoP\x01ZJgithub.com/codewiresh/codewire/libs/gen-go/codewire/internal/v1;internalv1\xa2\x02\x03\x43IX\xaa\x02\x14\x43odewire.Internal.V1\xca\x02\x14\x43odewire\\Internal\\V1\xe2\x02 Codewire\\Internal\\V1\\GPBMetadata\xea\x02\x16\x43odewire::Internal::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -35,36 +35,40 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._serialized_options = b'\n\030com.codewire.internal.v1B\017CoordinateProtoP\001ZJgithub.com/codewiresh/codewire/libs/gen-go/codewire/internal/v1;internalv1\242\002\003CIX\252\002\024Codewire.Internal.V1\312\002\024Codewire\\Internal\\V1\342\002 Codewire\\Internal\\V1\\GPBMetadata\352\002\026Codewire::Internal::V1'
   _globals['_COORDINATENODE_DERPLATENCYENTRY']._loaded_options = None
   _globals['_COORDINATENODE_DERPLATENCYENTRY']._serialized_options = b'8\001'
-  _globals['_MESHCOORDINATEROLE']._serialized_start=2156
-  _globals['_MESHCOORDINATEROLE']._serialized_end=2276
+  _globals['_COORDINATEPROOF'].fields_by_name['peer_token']._loaded_options = None
+  _globals['_COORDINATEPROOF'].fields_by_name['peer_token']._serialized_options = b'\200\001\001'
+  _globals['_MESHCOORDINATEROLE']._serialized_start=2274
+  _globals['_MESHCOORDINATEROLE']._serialized_end=2394
   _globals['_COORDINATENODE']._serialized_start=97
   _globals['_COORDINATENODE']._serialized_end=478
   _globals['_COORDINATENODE_DERPLATENCYENTRY']._serialized_start=416
   _globals['_COORDINATENODE_DERPLATENCYENTRY']._serialized_end=478
   _globals['_COORDINATEREQUEST']._serialized_start=481
-  _globals['_COORDINATEREQUEST']._serialized_end=690
-  _globals['_COORDINATEHELLO']._serialized_start=692
-  _globals['_COORDINATEHELLO']._serialized_end=771
-  _globals['_MESHCOORDINATORSERVICECOORDINATEREQUEST']._serialized_start=774
-  _globals['_MESHCOORDINATORSERVICECOORDINATEREQUEST']._serialized_end=1088
-  _globals['_MESHCOORDINATEHELLO']._serialized_start=1091
-  _globals['_MESHCOORDINATEHELLO']._serialized_end=1228
-  _globals['_MESHCOORDINATESUBSCRIBE']._serialized_start=1230
-  _globals['_MESHCOORDINATESUBSCRIBE']._serialized_end=1288
-  _globals['_COORDINATERESPONSE']._serialized_start=1291
-  _globals['_COORDINATERESPONSE']._serialized_end=1606
-  _globals['_MESHCOORDINATORSERVICECOORDINATERESPONSE']._serialized_start=1609
-  _globals['_MESHCOORDINATORSERVICECOORDINATERESPONSE']._serialized_end=1946
-  _globals['_COORDINATEPING']._serialized_start=1948
-  _globals['_COORDINATEPING']._serialized_end=1964
-  _globals['_COORDINATEPEERUPDATE']._serialized_start=1966
-  _globals['_COORDINATEPEERUPDATE']._serialized_end=2048
-  _globals['_COORDINATEPEERREMOVE']._serialized_start=2050
-  _globals['_COORDINATEPEERREMOVE']._serialized_end=2097
-  _globals['_COORDINATEDERPMAP']._serialized_start=2099
-  _globals['_COORDINATEDERPMAP']._serialized_end=2154
-  _globals['_COORDINATORSERVICE']._serialized_start=2278
-  _globals['_COORDINATORSERVICE']._serialized_end=2399
-  _globals['_MESHCOORDINATORSERVICE']._serialized_start=2402
-  _globals['_MESHCOORDINATORSERVICE']._serialized_end=2572
+  _globals['_COORDINATEREQUEST']._serialized_end=753
+  _globals['_COORDINATEPROOF']._serialized_start=755
+  _globals['_COORDINATEPROOF']._serialized_end=808
+  _globals['_COORDINATEHELLO']._serialized_start=810
+  _globals['_COORDINATEHELLO']._serialized_end=889
+  _globals['_MESHCOORDINATORSERVICECOORDINATEREQUEST']._serialized_start=892
+  _globals['_MESHCOORDINATORSERVICECOORDINATEREQUEST']._serialized_end=1206
+  _globals['_MESHCOORDINATEHELLO']._serialized_start=1209
+  _globals['_MESHCOORDINATEHELLO']._serialized_end=1346
+  _globals['_MESHCOORDINATESUBSCRIBE']._serialized_start=1348
+  _globals['_MESHCOORDINATESUBSCRIBE']._serialized_end=1406
+  _globals['_COORDINATERESPONSE']._serialized_start=1409
+  _globals['_COORDINATERESPONSE']._serialized_end=1724
+  _globals['_MESHCOORDINATORSERVICECOORDINATERESPONSE']._serialized_start=1727
+  _globals['_MESHCOORDINATORSERVICECOORDINATERESPONSE']._serialized_end=2064
+  _globals['_COORDINATEPING']._serialized_start=2066
+  _globals['_COORDINATEPING']._serialized_end=2082
+  _globals['_COORDINATEPEERUPDATE']._serialized_start=2084
+  _globals['_COORDINATEPEERUPDATE']._serialized_end=2166
+  _globals['_COORDINATEPEERREMOVE']._serialized_start=2168
+  _globals['_COORDINATEPEERREMOVE']._serialized_end=2215
+  _globals['_COORDINATEDERPMAP']._serialized_start=2217
+  _globals['_COORDINATEDERPMAP']._serialized_end=2272
+  _globals['_COORDINATORSERVICE']._serialized_start=2396
+  _globals['_COORDINATORSERVICE']._serialized_end=2517
+  _globals['_MESHCOORDINATORSERVICE']._serialized_start=2520
+  _globals['_MESHCOORDINATORSERVICE']._serialized_end=2690
 # @@protoc_insertion_point(module_scope)

@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/internal/v1/workspace_binding.proto.
  */
 export const file_codewire_internal_v1_workspace_binding: GenFile = /*@__PURE__*/
-  fileDesc("Cixjb2Rld2lyZS9pbnRlcm5hbC92MS93b3Jrc3BhY2VfYmluZGluZy5wcm90bxIUY29kZXdpcmUuaW50ZXJuYWwudjEiLAoUQmluZFdvcmtzcGFjZVJlcXVlc3QSFAoMd2FpdF9zZWNvbmRzGAEgASgNIscBChVCaW5kV29ya3NwYWNlUmVzcG9uc2USFgoOZW52aXJvbm1lbnRfaWQYASABKAkSDwoHcG9kX3VpZBgCIAEoCRIcChRvcGVyYXRpb25fZ2VuZXJhdGlvbhgDIAEoAxIeChFkYWVtb25fY3JlZGVudGlhbBgEIAEoCUIDgAEBEiMKG3Byb2plY3Rpb25fc2VsZWN0aW9uX3NoYTI1NhgFIAEoCRIiChptYW5hZ2VkX2NyZWRlbnRpYWxfY2xpZW50cxgGIAEoCTKIAQoXV29ya3NwYWNlQmluZGluZ1NlcnZpY2USbQoNQmluZFdvcmtzcGFjZRIqLmNvZGV3aXJlLmludGVybmFsLnYxLkJpbmRXb3Jrc3BhY2VSZXF1ZXN0GisuY29kZXdpcmUuaW50ZXJuYWwudjEuQmluZFdvcmtzcGFjZVJlc3BvbnNlIgOQAgJC7wEKGGNvbS5jb2Rld2lyZS5pbnRlcm5hbC52MUIVV29ya3NwYWNlQmluZGluZ1Byb3RvUAFaSmdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS9pbnRlcm5hbC92MTtpbnRlcm5hbHYxogIDQ0lYqgIUQ29kZXdpcmUuSW50ZXJuYWwuVjHKAhRDb2Rld2lyZVxJbnRlcm5hbFxWMeICIENvZGV3aXJlXEludGVybmFsXFYxXEdQQk1ldGFkYXRh6gIWQ29kZXdpcmU6OkludGVybmFsOjpWMWIGcHJvdG8z");
+  fileDesc("Cixjb2Rld2lyZS9pbnRlcm5hbC92MS93b3Jrc3BhY2VfYmluZGluZy5wcm90bxIUY29kZXdpcmUuaW50ZXJuYWwudjEiLAoUQmluZFdvcmtzcGFjZVJlcXVlc3QSFAoMd2FpdF9zZWNvbmRzGAEgASgNIv4BChVCaW5kV29ya3NwYWNlUmVzcG9uc2USFgoOZW52aXJvbm1lbnRfaWQYASABKAkSDwoHcG9kX3VpZBgCIAEoCRIcChRvcGVyYXRpb25fZ2VuZXJhdGlvbhgDIAEoAxIeChFkYWVtb25fY3JlZGVudGlhbBgEIAEoCUIDgAEBEiMKG3Byb2plY3Rpb25fc2VsZWN0aW9uX3NoYTI1NhgFIAEoCRIiChptYW5hZ2VkX2NyZWRlbnRpYWxfY2xpZW50cxgGIAEoCRI1CgZhY2Nlc3MYByABKAsyJS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Xb3Jrc3BhY2VBY2Nlc3MivAEKD1dvcmtzcGFjZUFjY2VzcxIXCgpwZWVyX3Rva2VuGAEgASgJQgOAAQESHQoVcGVlcl90b2tlbl9leHBpcmVzX2F0GAIgASgDEhwKFG9wZXJhdGlvbl9nZW5lcmF0aW9uGAMgASgDEhcKD2Nvb3JkaW5hdG9yX3VybBgEIAEoCRIcChRkaXJlY3RfdWRwX2VuZHBvaW50cxgFIAMoCRIcChRwZWVyX3JlbGF5X2VuZHBvaW50cxgGIAMoCSIWChRSZWZyZXNoQWNjZXNzUmVxdWVzdCJOChVSZWZyZXNoQWNjZXNzUmVzcG9uc2USNQoGYWNjZXNzGAEgASgLMiUuY29kZXdpcmUuaW50ZXJuYWwudjEuV29ya3NwYWNlQWNjZXNzIjIKFFJlY29yZEhvc3RLZXlSZXF1ZXN0EhoKEnB1YmxpY19rZXlfb3BlbnNzaBgBIAEoCSIXChVSZWNvcmRIb3N0S2V5UmVzcG9uc2UiSAoYQWxsb2NhdGVQZWVyUmVsYXlSZXF1ZXN0EhIKCmRpc2NvX2tleXMYASADKAkSGAoQcmVsYXlfZ2VuZXJhdGlvbhgCIAEoDSLUAQoZQWxsb2NhdGVQZWVyUmVsYXlSZXNwb25zZRIYChByZWxheV9nZW5lcmF0aW9uGAEgASgNEhgKEHNlcnZlcl9kaXNjb19rZXkYAiABKAkSEgoKZGlzY29fa2V5cxgDIAMoCRISCgpsYW1wb3J0X2lkGAQgASgEEgsKA3ZuaRgFIAEoDRIYChBiaW5kX2xpZmV0aW1lX25zGAYgASgEEiAKGHN0ZWFkeV9zdGF0ZV9saWZldGltZV9ucxgHIAEoBBISCgphZGRyX3BvcnRzGAggAygJMtwDChdXb3Jrc3BhY2VCaW5kaW5nU2VydmljZRJtCg1CaW5kV29ya3NwYWNlEiouY29kZXdpcmUuaW50ZXJuYWwudjEuQmluZFdvcmtzcGFjZVJlcXVlc3QaKy5jb2Rld2lyZS5pbnRlcm5hbC52MS5CaW5kV29ya3NwYWNlUmVzcG9uc2UiA5ACAhJtCg1SZWZyZXNoQWNjZXNzEiouY29kZXdpcmUuaW50ZXJuYWwudjEuUmVmcmVzaEFjY2Vzc1JlcXVlc3QaKy5jb2Rld2lyZS5pbnRlcm5hbC52MS5SZWZyZXNoQWNjZXNzUmVzcG9uc2UiA5ACARJtCg1SZWNvcmRIb3N0S2V5EiouY29kZXdpcmUuaW50ZXJuYWwudjEuUmVjb3JkSG9zdEtleVJlcXVlc3QaKy5jb2Rld2lyZS5pbnRlcm5hbC52MS5SZWNvcmRIb3N0S2V5UmVzcG9uc2UiA5ACAhJ0ChFBbGxvY2F0ZVBlZXJSZWxheRIuLmNvZGV3aXJlLmludGVybmFsLnYxLkFsbG9jYXRlUGVlclJlbGF5UmVxdWVzdBovLmNvZGV3aXJlLmludGVybmFsLnYxLkFsbG9jYXRlUGVlclJlbGF5UmVzcG9uc2VC7wEKGGNvbS5jb2Rld2lyZS5pbnRlcm5hbC52MUIVV29ya3NwYWNlQmluZGluZ1Byb3RvUAFaSmdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS9pbnRlcm5hbC92MTtpbnRlcm5hbHYxogIDQ0lYqgIUQ29kZXdpcmUuSW50ZXJuYWwuVjHKAhRDb2Rld2lyZVxJbnRlcm5hbFxWMeICIENvZGV3aXJlXEludGVybmFsXFYxXEdQQk1ldGFkYXRh6gIWQ29kZXdpcmU6OkludGVybmFsOjpWMWIGcHJvdG8z");
 
 /**
  * @generated from message codewire.internal.v1.BindWorkspaceRequest
@@ -74,6 +74,13 @@ export type BindWorkspaceResponse = Message<"codewire.internal.v1.BindWorkspaceR
    * @generated from field: string managed_credential_clients = 6;
    */
   managedCredentialClients: string;
+
+  /**
+   * The environment's tailnet and SSH access for this Pod.
+   *
+   * @generated from field: codewire.internal.v1.WorkspaceAccess access = 7;
+   */
+  access?: WorkspaceAccess | undefined;
 };
 
 /**
@@ -84,10 +91,218 @@ export const BindWorkspaceResponseSchema: GenMessage<BindWorkspaceResponse> = /*
   messageDesc(file_codewire_internal_v1_workspace_binding, 1);
 
 /**
+ * WorkspaceAccess is everything the bound daemon needs to serve its
+ * environment's tailnet peer. It names only public endpoints: the internal
+ * coordinator, allocator and relay bind addresses never enter the sandbox.
+ *
+ * @generated from message codewire.internal.v1.WorkspaceAccess
+ */
+export type WorkspaceAccess = Message<"codewire.internal.v1.WorkspaceAccess"> & {
+  /**
+   * Peer token for the coordinator: environment, scope "peer", operation
+   * generation and expiry, signed with a key derived for this purpose only.
+   *
+   * @generated from field: string peer_token = 1;
+   */
+  peerToken: string;
+
+  /**
+   * Unix seconds at which peer_token expires. Refresh at half its lifetime.
+   *
+   * @generated from field: int64 peer_token_expires_at = 2;
+   */
+  peerTokenExpiresAt: bigint;
+
+  /**
+   * The operation generation peer_token is bound to.
+   *
+   * @generated from field: int64 operation_generation = 3;
+   */
+  operationGeneration: bigint;
+
+  /**
+   * Public https origin of the coordinator (the CoordinatorService route).
+   *
+   * @generated from field: string coordinator_url = 4;
+   */
+  coordinatorUrl: string;
+
+  /**
+   * host:port endpoints the peer advertises for direct UDP: the
+   * environment's own LoadBalancer. Empty when direct UDP is not configured.
+   *
+   * @generated from field: repeated string direct_udp_endpoints = 5;
+   */
+  directUdpEndpoints: string[];
+
+  /**
+   * Public host:port endpoints of the UDP peer relay. Empty when the
+   * runtime has no peer relay; allocations use AllocatePeerRelay.
+   *
+   * @generated from field: repeated string peer_relay_endpoints = 6;
+   */
+  peerRelayEndpoints: string[];
+};
+
+/**
+ * Describes the message codewire.internal.v1.WorkspaceAccess.
+ * Use `create(WorkspaceAccessSchema)` to create a new message.
+ */
+export const WorkspaceAccessSchema: GenMessage<WorkspaceAccess> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_workspace_binding, 2);
+
+/**
+ * @generated from message codewire.internal.v1.RefreshAccessRequest
+ */
+export type RefreshAccessRequest = Message<"codewire.internal.v1.RefreshAccessRequest"> & {
+};
+
+/**
+ * Describes the message codewire.internal.v1.RefreshAccessRequest.
+ * Use `create(RefreshAccessRequestSchema)` to create a new message.
+ */
+export const RefreshAccessRequestSchema: GenMessage<RefreshAccessRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_workspace_binding, 3);
+
+/**
+ * @generated from message codewire.internal.v1.RefreshAccessResponse
+ */
+export type RefreshAccessResponse = Message<"codewire.internal.v1.RefreshAccessResponse"> & {
+  /**
+   * @generated from field: codewire.internal.v1.WorkspaceAccess access = 1;
+   */
+  access?: WorkspaceAccess | undefined;
+};
+
+/**
+ * Describes the message codewire.internal.v1.RefreshAccessResponse.
+ * Use `create(RefreshAccessResponseSchema)` to create a new message.
+ */
+export const RefreshAccessResponseSchema: GenMessage<RefreshAccessResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_workspace_binding, 4);
+
+/**
+ * @generated from message codewire.internal.v1.RecordHostKeyRequest
+ */
+export type RecordHostKeyRequest = Message<"codewire.internal.v1.RecordHostKeyRequest"> & {
+  /**
+   * One OpenSSH public key line: "ssh-ed25519 <base64>", no comment.
+   *
+   * @generated from field: string public_key_openssh = 1;
+   */
+  publicKeyOpenssh: string;
+};
+
+/**
+ * Describes the message codewire.internal.v1.RecordHostKeyRequest.
+ * Use `create(RecordHostKeyRequestSchema)` to create a new message.
+ */
+export const RecordHostKeyRequestSchema: GenMessage<RecordHostKeyRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_workspace_binding, 5);
+
+/**
+ * @generated from message codewire.internal.v1.RecordHostKeyResponse
+ */
+export type RecordHostKeyResponse = Message<"codewire.internal.v1.RecordHostKeyResponse"> & {
+};
+
+/**
+ * Describes the message codewire.internal.v1.RecordHostKeyResponse.
+ * Use `create(RecordHostKeyResponseSchema)` to create a new message.
+ */
+export const RecordHostKeyResponseSchema: GenMessage<RecordHostKeyResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_workspace_binding, 6);
+
+/**
+ * @generated from message codewire.internal.v1.AllocatePeerRelayRequest
+ */
+export type AllocatePeerRelayRequest = Message<"codewire.internal.v1.AllocatePeerRelayRequest"> & {
+  /**
+   * Exactly two disco public keys ("discokey:<64 hex>"): this environment's
+   * node first, then the peer's. The order is preserved in the response.
+   *
+   * @generated from field: repeated string disco_keys = 1;
+   */
+  discoKeys: string[];
+
+  /**
+   * The caller's relay-allocation generation, echoed back.
+   *
+   * @generated from field: uint32 relay_generation = 2;
+   */
+  relayGeneration: number;
+};
+
+/**
+ * Describes the message codewire.internal.v1.AllocatePeerRelayRequest.
+ * Use `create(AllocatePeerRelayRequestSchema)` to create a new message.
+ */
+export const AllocatePeerRelayRequestSchema: GenMessage<AllocatePeerRelayRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_workspace_binding, 7);
+
+/**
+ * @generated from message codewire.internal.v1.AllocatePeerRelayResponse
+ */
+export type AllocatePeerRelayResponse = Message<"codewire.internal.v1.AllocatePeerRelayResponse"> & {
+  /**
+   * @generated from field: uint32 relay_generation = 1;
+   */
+  relayGeneration: number;
+
+  /**
+   * @generated from field: string server_disco_key = 2;
+   */
+  serverDiscoKey: string;
+
+  /**
+   * @generated from field: repeated string disco_keys = 3;
+   */
+  discoKeys: string[];
+
+  /**
+   * @generated from field: uint64 lamport_id = 4;
+   */
+  lamportId: bigint;
+
+  /**
+   * @generated from field: uint32 vni = 5;
+   */
+  vni: number;
+
+  /**
+   * @generated from field: uint64 bind_lifetime_ns = 6;
+   */
+  bindLifetimeNs: bigint;
+
+  /**
+   * @generated from field: uint64 steady_state_lifetime_ns = 7;
+   */
+  steadyStateLifetimeNs: bigint;
+
+  /**
+   * Public host:port addresses of the relay endpoint.
+   *
+   * @generated from field: repeated string addr_ports = 8;
+   */
+  addrPorts: string[];
+};
+
+/**
+ * Describes the message codewire.internal.v1.AllocatePeerRelayResponse.
+ * Use `create(AllocatePeerRelayResponseSchema)` to create a new message.
+ */
+export const AllocatePeerRelayResponseSchema: GenMessage<AllocatePeerRelayResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_workspace_binding, 8);
+
+/**
  * WorkspaceBindingService binds one identity-free workspace Pod to the
  * environment orchestration recorded for it. The caller is identified only
  * by TokenReview of a Pod-bound projected token with the exact audience
  * codewire.internal.workspace-binding.v1, on the dedicated listener only.
+ *
+ * Every method also requires the TCP peer to be the bound Pod's own IP, read
+ * by the reviewed Pod UID, and the listener serves TLS with the orchestration
+ * internal identity.
  *
  * @generated from service codewire.internal.v1.WorkspaceBindingService
  */
@@ -102,6 +317,42 @@ export const WorkspaceBindingService: GenService<{
     methodKind: "unary";
     input: typeof BindWorkspaceRequestSchema;
     output: typeof BindWorkspaceResponseSchema;
+  },
+  /**
+   * Issues a fresh access grant to the bound Pod: a new peer token for the
+   * binding's environment and operation generation. Daemons call it at half
+   * the current token's lifetime.
+   *
+   * @generated from rpc codewire.internal.v1.WorkspaceBindingService.RefreshAccess
+   */
+  refreshAccess: {
+    methodKind: "unary";
+    input: typeof RefreshAccessRequestSchema;
+    output: typeof RefreshAccessResponseSchema;
+  },
+  /**
+   * Records the bound Pod's SSH host public key for the binding's
+   * environment and operation generation. Write-once: the same key again
+   * succeeds, a different key is failed_precondition.
+   *
+   * @generated from rpc codewire.internal.v1.WorkspaceBindingService.RecordHostKey
+   */
+  recordHostKey: {
+    methodKind: "unary";
+    input: typeof RecordHostKeyRequestSchema;
+    output: typeof RecordHostKeyResponseSchema;
+  },
+  /**
+   * Allocates a UDP peer-relay endpoint between the bound environment's
+   * tailnet node and one peer, with orchestration's own allocator
+   * credential. failed_precondition when the runtime has no peer relay.
+   *
+   * @generated from rpc codewire.internal.v1.WorkspaceBindingService.AllocatePeerRelay
+   */
+  allocatePeerRelay: {
+    methodKind: "unary";
+    input: typeof AllocatePeerRelayRequestSchema;
+    output: typeof AllocatePeerRelayResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_codewire_internal_v1_workspace_binding, 0);

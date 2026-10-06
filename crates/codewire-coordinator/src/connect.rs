@@ -260,6 +260,8 @@ impl SessionSource for ConnectSource {
                     }
                 },
                 Some(coordinate_request::Msg::Ping(_)) => Some(SessionInput::Ping),
+                // Proofs are checked by the peer-token session in a later commit.
+                Some(coordinate_request::Msg::Proof(_)) => Some(SessionInput::Noop),
                 Some(coordinate_request::Msg::Hello(_)) | None => Some(SessionInput::Noop),
             },
             Some(Err(err)) => {

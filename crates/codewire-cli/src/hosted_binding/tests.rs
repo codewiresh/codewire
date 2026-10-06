@@ -78,6 +78,33 @@ impl WorkspaceBindingService for ScriptedService {
             ..Default::default()
         })
     }
+
+    async fn refresh_access(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, codewire_proto::codewire::internal::v1::RefreshAccessRequest>,
+    ) -> ServiceResult<codewire_proto::codewire::internal::v1::RefreshAccessResponse> {
+        Err(ConnectError::unimplemented("not scripted"))
+    }
+
+    async fn record_host_key(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, codewire_proto::codewire::internal::v1::RecordHostKeyRequest>,
+    ) -> ServiceResult<codewire_proto::codewire::internal::v1::RecordHostKeyResponse> {
+        Err(ConnectError::unimplemented("not scripted"))
+    }
+
+    async fn allocate_peer_relay(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<
+            '_,
+            codewire_proto::codewire::internal::v1::AllocatePeerRelayRequest,
+        >,
+    ) -> ServiceResult<codewire_proto::codewire::internal::v1::AllocatePeerRelayResponse> {
+        Err(ConnectError::unimplemented("not scripted"))
+    }
 }
 
 struct Fixture {
