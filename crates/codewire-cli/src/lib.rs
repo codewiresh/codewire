@@ -157,6 +157,11 @@ enum Command {
     Vscode(VscodeArgs),
     #[command(about = "Open a shell session in the selected or named environment")]
     Shell(EnvironmentShellArgs),
+    #[command(name = "ssh", hide = true, about = "OpenSSH integration helpers")]
+    Ssh {
+        #[command(subcommand)]
+        command: SshCommand,
+    },
     #[command(about = "Run a durable session in the selected or named environment")]
     Run(EnvironmentRunArgs),
     #[command(about = "Manage environments")]
@@ -355,6 +360,7 @@ where
         Command::Init(args) => handle_init_command(&globals, args).await,
         Command::Vscode(args) => handle_vscode_command(&globals, args).await,
         Command::Shell(args) => handle_environment_shell_command(&globals, args).await,
+        Command::Ssh { command } => handle_ssh_command(&globals, command).await,
         Command::Run(args) => handle_environment_run_command(&globals, args).await,
         Command::Env(args) => handle_env_command(&globals, args).await,
         Command::Cost(args) => handle_cost_command(&globals, args).await,

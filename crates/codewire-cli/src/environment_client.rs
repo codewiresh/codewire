@@ -358,6 +358,18 @@ impl EnvironmentClient {
             .ok_or_else(|| anyhow::anyhow!("GetEnvironmentTrustReport returned no trust report"))
     }
 
+    /// The SSH host key the platform recorded for the environment's current
+    /// generation, or `None` when none is recorded. Until the platform's
+    /// `GetEnvironmentHostKey` method is wired here, this refuses, so the
+    /// managed OpenSSH block fails closed instead of trusting any key.
+    pub async fn get_environment_host_key(
+        &self,
+        _org_id: &str,
+        _environment_id: &str,
+    ) -> anyhow::Result<Option<crate::commands::RecordedHostKey>> {
+        anyhow::bail!("this Codewire server does not publish environment SSH host keys yet")
+    }
+
     pub async fn get_environment_daemon_status(
         &self,
         org_id: &str,
