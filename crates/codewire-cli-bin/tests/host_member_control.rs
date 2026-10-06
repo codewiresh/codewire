@@ -342,6 +342,112 @@ impl OwnedChild {
         value.validate()?;
         Ok(value)
     }
+    fn capture_launch(pid: u32, image: &Path, deadline: Instant) -> std::io::Result<Self> {
+        let owned = Self::capture(pid, None)?;
+        owned.wait_for_launch_image(pid, image, deadline)?;
+        Ok(owned)
+    }
+    fn wait_for_launch_image(
+        &self,
+        pid: u32,
+        image: &Path,
+        deadline: Instant,
+    ) -> std::io::Result<()> {
+        // vfork completion can precede installation of the new mm/exe.
+        // Keep the original custody and both image files throughout this wait;
+        // only the actual inherited parent image may be pending, never accepted.
+        let parent = std::process::id();
+        let euid = unsafe { libc::geteuid() };
+        let expected_file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(image)?;
+        let inherited_file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC)
+            .open("/proc/self/exe")?;
+        let expected = expected_file.metadata()?;
+        let inherited = inherited_file.metadata()?;
+        if !expected.is_file() || !inherited.is_file() {
+            return Err(std::io::Error::other("owned launch image is not regular"));
+        }
+        let identity = |metadata: &fs::Metadata| (metadata.dev(), metadata.ino(), metadata.len());
+        loop {
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "owned launch image admission exceeded bound",
+                ));
+            }
+            if terminal(&self.fd) {
+                return Err(std::io::Error::other(
+                    "owned launch exited before image admission",
+                ));
+            }
+            self.validate()?;
+            if parent != std::process::id() || euid != unsafe { libc::geteuid() } {
+                return Err(std::io::Error::other("owned launch observer changed"));
+            }
+            let raw = unsafe {
+                libc::openat(
+                    self.proc.as_raw_fd(),
+                    c"exe".as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC,
+                )
+            };
+            if raw < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // Reopen each time: an exe file opened during the inherited phase
+            // remains that old file even after the child completes exec.
+            let actual = unsafe { File::from_raw_fd(raw) }.metadata()?;
+            let named = fs::symlink_metadata(image)?;
+            if !named.is_file()
+                || identity(&named) != identity(&expected)
+                || identity(&expected_file.metadata()?) != identity(&expected)
+                || identity(&inherited_file.metadata()?) != identity(&inherited)
+            {
+                return Err(std::io::Error::other("owned launch image path changed"));
+            }
+            self.validate()?;
+            if parent != std::process::id() || euid != unsafe { libc::geteuid() } {
+                return Err(std::io::Error::other("owned launch observer changed"));
+            }
+            if terminal(&self.fd) {
+                return Err(std::io::Error::other(
+                    "owned launch exited before image admission",
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "owned launch image admission exceeded bound",
+                ));
+            }
+            if identity(&actual) == identity(&expected) {
+                return Ok(());
+            }
+            if identity(&actual) != identity(&inherited) {
+                return Err(std::io::Error::other(format!(
+                    "owned process image changed: pid={pid} birth={} parent={parent} euid={euid} \
+                     expected_dev={} expected_ino={} expected_len={} \
+                     actual_dev={} actual_ino={} actual_len={}",
+                    self.birth,
+                    expected.dev(),
+                    expected.ino(),
+                    expected.len(),
+                    actual.dev(),
+                    actual.ino(),
+                    actual.len(),
+                )));
+            }
+            std::thread::sleep(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(20)),
+            );
+        }
+    }
     fn validate(&self) -> std::io::Result<()> {
         let (birth, parent) = birth_and_parent(&self.proc)?;
         if birth != self.birth

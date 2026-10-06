@@ -101,13 +101,14 @@ fn asset_command(mode: &str, value: &Value) -> Command {
 
 fn asset_run(mut command: Command) -> Value {
     // Before any service/agent: only a bounded fixed Python admission/stager.
+    let deadline = Instant::now() + Duration::from_secs(90);
     let mut child = command.spawn().unwrap();
-    let owned = OwnedChild::capture(
+    let owned = OwnedChild::capture_launch(
         child.id(),
-        Some(&fs::canonicalize("/usr/bin/python3").unwrap()),
+        &fs::canonicalize("/usr/bin/python3").unwrap(),
+        deadline,
     )
     .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(90);
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
             owned.signal(libc::SIGKILL).unwrap();
@@ -930,17 +931,19 @@ async fn actual(root: &Path, artifacts: &Path, direct: bool) -> Value {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let ready_deadline = Instant::now() + Duration::from_secs(15);
     let mut broker = tokio::process::Command::from(command)
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let broker_owned = OwnedChild::capture(
+    let broker_owned = OwnedChild::capture_launch(
         broker.id().unwrap(),
-        Some(Path::new(staged["broker_path"].as_str().unwrap())),
+        Path::new(staged["broker_path"].as_str().unwrap()),
+        ready_deadline,
     )
     .unwrap();
     let mut reader = BufReader::new(broker.stdout.take().unwrap());
-    let ready = tokio::time::timeout(Duration::from_secs(15), async {
+    let ready = tokio::time::timeout_at(tokio::time::Instant::from_std(ready_deadline), async {
         let mut value = Vec::new();
         loop {
             assert!(value.len() < 2048, "bounded private ready frame");
@@ -1570,42 +1573,45 @@ async fn caller_loss(
         &prompt,
     ];
     let command = caller.command(&args);
+    let witness_deadline = Instant::now() + Duration::from_secs(35);
     let mut process = tokio::process::Command::from(command)
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let owned = OwnedChild::capture(process.id().unwrap(), Some(&caller.binary)).unwrap();
+    let owned = OwnedChild::capture_launch(process.id().unwrap(), &caller.binary, witness_deadline)
+        .unwrap();
     let mut stderr = BufReader::new(process.stderr.take().unwrap());
     let stdout = process.stdout.take().unwrap();
     let session = format!("session-{request}");
-    let witness = tokio::time::timeout(Duration::from_secs(35), async {
-        let mut log = Vec::new();
-        loop {
-            let mut bytes = Vec::new();
+    let witness =
+        tokio::time::timeout_at(tokio::time::Instant::from_std(witness_deadline), async {
+            let mut log = Vec::new();
             loop {
-                assert!(
-                    log.len() + bytes.len() < 128 * 1024,
-                    "bounded caller transport frame"
-                );
-                let byte = stderr.read_u8().await.unwrap();
-                bytes.push(byte);
-                if byte == b'\n' {
-                    break;
+                let mut bytes = Vec::new();
+                loop {
+                    assert!(
+                        log.len() + bytes.len() < 128 * 1024,
+                        "bounded caller transport frame"
+                    );
+                    let byte = stderr.read_u8().await.unwrap();
+                    bytes.push(byte);
+                    if byte == b'\n' {
+                        break;
+                    }
+                }
+                let line = std::str::from_utf8(&bytes).unwrap();
+                log.extend_from_slice(&bytes);
+                if let Some(raw) = line.trim_end().strip_prefix("[cw] member transport ") {
+                    let value: Value = serde_json::from_str(raw).unwrap();
+                    if value["action"] == 2 && value["request_id"] == request {
+                        assert_eq!(value["qualified"], true);
+                        return log;
+                    }
                 }
             }
-            let line = std::str::from_utf8(&bytes).unwrap();
-            log.extend_from_slice(&bytes);
-            if let Some(raw) = line.trim_end().strip_prefix("[cw] member transport ") {
-                let value: Value = serde_json::from_str(raw).unwrap();
-                if value["action"] == 2 && value["request_id"] == request {
-                    assert_eq!(value["qualified"], true);
-                    return log;
-                }
-            }
-        }
-    })
-    .await
-    .expect("original managed caller's own Mutate witness");
+        })
+        .await
+        .expect("original managed caller's own Mutate witness");
     let active = until(caller, &session, |v| caller_active(v, &session, &request)).await;
     let original_id = active["driver"]["active_message_id"].clone();
     let original_turn = active["driver"]["current_turn_id"].clone();
@@ -2048,6 +2054,7 @@ fn managed_fixture_actual_actor_birth_path_and_terminal_refusals_do_not_signal()
     let image = root.path().join("owned-sleep");
     fs::copy("/usr/bin/sleep", &image).unwrap();
     fs::set_permissions(&image, fs::Permissions::from_mode(0o500)).unwrap();
+    let launch_deadline = Instant::now() + Duration::from_secs(30);
     let mut child = Command::new(&image)
         .arg("30")
         .env_clear()
@@ -2056,7 +2063,7 @@ fn managed_fixture_actual_actor_birth_path_and_terminal_refusals_do_not_signal()
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let owned = OwnedChild::capture(child.id(), Some(&image)).unwrap();
+    let owned = OwnedChild::capture_launch(child.id(), &image, launch_deadline).unwrap();
     let actor = Actor::capture(child.id(), owned.birth, std::process::id(), &image);
     for (birth, parent) in [
         (owned.birth + 1, std::process::id()),
@@ -2081,6 +2088,17 @@ fn managed_fixture_actual_actor_birth_path_and_terminal_refusals_do_not_signal()
     let expected_image = fs::symlink_metadata(&other).unwrap();
     assert_eq!(fs::read(&image).unwrap(), fs::read(&other).unwrap());
     assert_ne!(actual_image.ino(), expected_image.ino());
+    let launch_mismatch = owned
+        .wait_for_launch_image(child.id(), &other, launch_deadline)
+        .expect_err("launch admission must also refuse the different executable inode");
+    assert_eq!(launch_mismatch.to_string(), mismatch);
+    assert_eq!(
+        owned
+            .wait_for_launch_image(child.id(), &image, Instant::now())
+            .expect_err("an expired launch deadline cannot admit the child")
+            .kind(),
+        std::io::ErrorKind::TimedOut
+    );
     assert!(
         std::panic::catch_unwind(|| Actor::capture(
             child.id(),
@@ -2095,6 +2113,13 @@ fn managed_fixture_actual_actor_birth_path_and_terminal_refusals_do_not_signal()
     owned.signal(libc::SIGTERM).unwrap();
     child.wait().unwrap();
     assert!(terminal(&owned.fd));
+    assert_eq!(
+        owned
+            .wait_for_launch_image(child.id(), &image, launch_deadline)
+            .expect_err("the original terminal pidfd cannot admit a launch")
+            .to_string(),
+        "owned launch exited before image admission"
+    );
     assert!(std::panic::catch_unwind(|| actor.verify()).is_err());
     assert!(fs::symlink_metadata(&other).unwrap().is_file());
     // Check diagnostics only after the original child has been reaped, so a
