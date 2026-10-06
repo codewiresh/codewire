@@ -472,7 +472,7 @@ echo "slow_header_closed_after_ms=\$(( \$(date +%s%3N) - slow_start ))"
 echo "slow_header_read_rc=\$rc"
 exec 5<&- 5>&- 6<&- 6>&-
 # Other orchestration ports stay unreachable from a workspace.
-for other in 8084 8085; do
+for other in 8084 8088; do
   if timeout 4 bash -c "exec 8<>/dev/tcp/codewire-orchestration.${SERVER_NAMESPACE}.svc.cluster.local/\$other" 2>/dev/null; then echo "port_\$other=open"; else echo "port_\$other=blocked"; fi
 done
 echo "token_mode=\$(stat -L -c %a "\$token_file")"
@@ -496,7 +496,7 @@ journey_negatives() {
   check "negatives: slow header closed at the 5 s timeout (4.9-8 s after connect)" \
     within_ms "$(value slow_header_closed_after_ms)" 4900 8000
   check "negatives: 8084 unreachable from a workspace" test "$(value port_8084)" = blocked
-  check "negatives: 8085 unreachable from a workspace" test "$(value port_8085)" = blocked
+  check "negatives: 8088 unreachable from a workspace" test "$(value port_8088)" = blocked
   # The volume asks for 0440, but kubelet writes service account tokens 0600
   # when the Pod sets fsGroup and then adds group read: 0640, group fsGroup,
   # no access for others, on a read-only mount.

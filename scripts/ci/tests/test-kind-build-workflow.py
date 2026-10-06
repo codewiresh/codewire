@@ -501,8 +501,11 @@ kubectl() {
     *' exec cw-binding-gateway-'*)
       printf '%s\n' '{"environmentId":"00000000-0000-4000-8000-000000000501","workspacePodIp":"10.244.0.9","appPorts":[3000],"sidecarToken":"synthetic"}'
       ;;
+    *' get configmap codewire-orchestration-internal-roots '*)
+      printf '%s\n' '-----BEGIN CERTIFICATE-----' 'synthetic' '-----END CERTIFICATE-----'
+      ;;
     *' port-forward '*)
-      printf 'Forwarding from 127.0.0.1:23456 -> 8085\n'
+      printf 'Forwarding from 127.0.0.1:23456 -> 8088\n'
       exec /usr/bin/sleep 60
       ;;
     *' delete sandboxclaim '*|*' delete sandbox '*|*' delete pod '*)
@@ -518,7 +521,7 @@ kubectl() {
 }
 curl_settled() {
   PROBE_BODY='{"code":"unauthenticated"}'
-  if [[ "$*" == *127.0.0.1:23456* ]]; then
+  if [[ "$*" == *:23456:127.0.0.1* && "$*" == *https://codewire-orchestration.*:23456/* ]]; then
     PROBE_CODE=401
     printf 'x-codewire-service: codewire-orchestration-internal\n' >"$PROBE_HEADERS"
   else

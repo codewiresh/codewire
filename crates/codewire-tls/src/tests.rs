@@ -368,6 +368,163 @@ async fn projected_symlink_rotation_a_to_overlap_to_b_applies_to_new_connections
     server.stop().await;
 }
 
+#[test]
+fn connect_origins_are_exact_https_dns_origins_with_absolute_roots() {
+    let roots = Path::new("/synthetic-private/ca.pem");
+    let transport =
+        ConnectOriginTransport::for_origin("https://orchestration.example:8088", roots).unwrap();
+    assert_eq!(
+        format!("{transport:?}"),
+        "ConnectOriginTransport([redacted])"
+    );
+    for origin in [
+        "http://orchestration.example:8085",
+        "https://orchestration.example:8088/path",
+        "https://127.0.0.1:8088",
+        "orchestration.example:8088",
+        "ftp://orchestration.example",
+    ] {
+        assert_eq!(
+            ConnectOriginTransport::for_origin(origin, roots).unwrap_err(),
+            TlsError::Configuration,
+            "{origin}"
+        );
+    }
+    assert_eq!(
+        ConnectOriginTransport::for_origin(
+            "https://orchestration.example:8088",
+            Path::new("ca.pem")
+        )
+        .unwrap_err(),
+        TlsError::Configuration
+    );
+}
+
+async fn connect_get(transport: &ConnectOriginTransport, origin: &str) -> Result<String, String> {
+    use connectrpc::client::ClientTransport as _;
+    use http_body_util::BodyExt as _;
+    let request = http::Request::get(format!("{origin}/"))
+        .body(
+            http_body_util::Empty::<bytes::Bytes>::new()
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .unwrap();
+    let response = tokio::time::timeout(TEST_TIMEOUT, transport.send(request))
+        .await
+        .unwrap()
+        .map_err(|error| error.to_string())?;
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    Ok(String::from_utf8(body.to_vec()).unwrap())
+}
+
+#[tokio::test]
+async fn connect_transport_rereads_roots_per_call_and_verifies_the_origin_name() {
+    let ca = Ca::new();
+    let other = Ca::new();
+    let files = Files::new(&ca, "localhost");
+    let server = Server::start(files.identity.clone()).await;
+    // One transport across every call below: each call applies current roots.
+    let transport = ConnectOriginTransport::for_origin(&server.origin, &files.roots).unwrap();
+    assert_eq!(
+        connect_get(&transport, &server.origin).await.unwrap(),
+        "verified\n"
+    );
+    write(&files.roots, other.pem());
+    assert!(connect_get(&transport, &server.origin).await.is_err());
+    write(&files.roots, "malformed replacement");
+    let error = connect_get(&transport, &server.origin).await.unwrap_err();
+    assert!(error.contains("internal TLS trust unavailable"), "{error}");
+    assert!(
+        !error.contains("synthetic") && !error.contains(".pem"),
+        "{error}"
+    );
+    write(&files.roots, ca.pem());
+    // A leaf from the right CA for another name is refused.
+    files.replace(&ca, "different-service.example");
+    assert!(connect_get(&transport, &server.origin).await.is_err());
+    files.replace(&ca, "localhost");
+    assert_eq!(
+        connect_get(&transport, &server.origin).await.unwrap(),
+        "verified\n"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn connect_transport_refuses_plaintext_servers_and_other_origins() {
+    let ca = Ca::new();
+    let files = Files::new(&ca, "localhost");
+    // An https transport against a plaintext listener never falls back.
+    let plain = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = plain.local_addr().unwrap().port();
+    let plain_task = tokio::spawn(async move {
+        axum::serve(
+            plain,
+            Router::new().route("/", route_get(|| async { "plaintext\n" })),
+        )
+        .await
+    });
+    let origin = format!("https://localhost:{port}");
+    let transport = ConnectOriginTransport::for_origin(&origin, &files.roots).unwrap();
+    let error = connect_get(&transport, &origin).await.unwrap_err();
+    assert!(error.contains("HTTPS request failed"), "{error}");
+    plain_task.abort();
+
+    // A request for another origin is refused before any connection.
+    let server = Server::start(files.identity.clone()).await;
+    let transport = ConnectOriginTransport::for_origin(&server.origin, &files.roots).unwrap();
+    for other in [
+        server.origin.replacen("https://", "http://", 1),
+        format!("https://localhost:{}", server.address.port() + 1),
+        format!("https://127.0.0.1:{}", server.address.port()),
+    ] {
+        let error = connect_get(&transport, &other).await.unwrap_err();
+        assert!(error.contains("configured origin"), "{other}: {error}");
+    }
+    assert_eq!(
+        connect_get(&transport, &server.origin).await.unwrap(),
+        "verified\n"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn mounted_identity_is_verified_offline_against_published_roots() {
+    let ca = Ca::new();
+    let files = Files::new(&ca, "orchestration.example");
+    let roots = ca.pem();
+    files
+        .identity
+        .verify_against_roots(roots.as_bytes(), "orchestration.example")
+        .await
+        .unwrap();
+    assert_eq!(
+        files
+            .identity
+            .verify_against_roots(roots.as_bytes(), "other.example")
+            .await
+            .unwrap_err(),
+        TlsError::Handshake
+    );
+    assert_eq!(
+        files
+            .identity
+            .verify_against_roots(Ca::new().pem().as_bytes(), "orchestration.example")
+            .await
+            .unwrap_err(),
+        TlsError::Handshake
+    );
+    assert_eq!(
+        files
+            .identity
+            .verify_against_roots(b"not a certificate", "orchestration.example")
+            .await
+            .unwrap_err(),
+        TlsError::InvalidPem
+    );
+}
+
 #[tokio::test]
 async fn plaintext_and_failed_handshakes_do_not_terminate_the_listener() {
     let ca = Ca::new();

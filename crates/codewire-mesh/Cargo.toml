@@ -27,6 +27,7 @@ connectrpc = { workspace = true, features = ["client"] }
 codewire-proto = { workspace = true, features = ["client"] }
 codewire-tailnet = { workspace = true }
 codewire-server-core = { workspace = true }
+codewire-tls = { workspace = true }
 futures-util = "0.3"
 rand = { workspace = true }
 serde = { workspace = true }
@@ -42,6 +43,7 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+codewire-tls = { workspace = true, features = ["test-support"] }
 codewire-client = { workspace = true }
 reqwest = { workspace = true }
 tower = { workspace = true }

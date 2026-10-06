@@ -862,7 +862,9 @@ run_deploy() {
   grep -Fq 'name: DATABASE_URL' <<<"$dev_mesh_render"
   grep -Fq 'name: codewire-mesh-db-app' <<<"$dev_mesh_render"
   grep -Fq 'name: CODEWIRE_MESH_AUTHORIZATION_URL' <<<"$dev_mesh_render"
-  grep -Fq 'http://codewire-orchestration.dev.svc.cluster.local:8085' <<<"$dev_mesh_render"
+  grep -Fq 'https://codewire-orchestration.dev.svc.cluster.local:8088' <<<"$dev_mesh_render"
+  grep -Fq 'name: CODEWIRE_MESH_AUTHORIZATION_TLS_ROOTS_FILE' <<<"$dev_mesh_render"
+  grep -Fq 'name: codewire-orchestration-internal-roots' <<<"$dev_mesh_render"
   grep -Fq 'name: CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET' <<<"$dev_mesh_render"
   grep -Fq 'name: codewire-mesh-coordinator' <<<"$dev_mesh_render"
   grep -Fq 'nginx.ingress.kubernetes.io/backend-protocol: "GRPC"' <<<"$dev_mesh_render"
@@ -873,7 +875,8 @@ run_deploy() {
     --set database.enabled=true \
     --set database.secretName=synthetic-database-credential-canary \
     --set database.uriKey=synthetic-database-uri-key-canary \
-    --set meshAuthorization.url=http://authorization.test \
+    --set meshAuthorization.url=https://authorization.test:8088 \
+    --set meshAuthorization.tlsRootsConfigMap=synthetic-internal-roots \
     --set meshAuthorization.hmacSecretRef.name=synthetic-hmac-secret)"
   grep -Fq 'name: synthetic-database-credential-canary' \
     <<<"$database_reference_canary_render"
@@ -885,6 +888,29 @@ run_deploy() {
     echo "::error::synthetic database reference entered the Mesh argv path"
     return 1
   fi
+  if helm template codewire-mesh-tls-canary apps/cli/charts/codewire-mesh \
+      --set mesh.baseURL=https://mesh.test \
+      --set meshAuthorization.url=https://authorization.test:8088 \
+      --set meshAuthorization.hmacSecretRef.name=synthetic-hmac-secret >/dev/null 2>&1; then
+    echo "::error::an https Mesh authorization URL rendered without its public roots"
+    return 1
+  fi
+  if helm template codewire-mesh-plaintext-canary apps/cli/charts/codewire-mesh \
+      --set mesh.baseURL=https://mesh.test \
+      --set meshAuthorization.url=http://authorization.test:8085 \
+      --set meshAuthorization.tlsRootsConfigMap=synthetic-internal-roots \
+      --set meshAuthorization.hmacSecretRef.name=synthetic-hmac-secret >/dev/null 2>&1; then
+    echo "::error::a plaintext Mesh authorization URL rendered"
+    return 1
+  fi
+  local mesh_tls_render
+  mesh_tls_render="$(helm template codewire-mesh-tls apps/cli/charts/codewire-mesh \
+    --set mesh.baseURL=https://mesh.test \
+    --set meshAuthorization.url=https://authorization.test:8088 \
+    --set meshAuthorization.tlsRootsConfigMap=synthetic-internal-roots \
+    --set meshAuthorization.hmacSecretRef.name=synthetic-hmac-secret)"
+  grep -Fq 'name: CODEWIRE_MESH_AUTHORIZATION_TLS_ROOTS_FILE' <<<"$mesh_tls_render"
+  grep -Fq 'name: synthetic-internal-roots' <<<"$mesh_tls_render"
   python3 scripts/checks/repo_checks.py production-source-ownership --self-test
 }
 

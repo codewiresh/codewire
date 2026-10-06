@@ -220,6 +220,8 @@ pub fn render_gateway_network_policy(namespace: &str, opts: &TemplateOpts) -> Va
         }),
     ];
     if !opts.server_namespace.is_empty() {
+        // The API and the TLS-only internal listener the gateway binds to.
+        let internal_port = i64::from(codewire_gateway_proto::ORCHESTRATION_INTERNAL_TLS_PORT);
         egress.push(json!({
             "to": [
                 {
@@ -229,7 +231,7 @@ pub fn render_gateway_network_policy(namespace: &str, opts: &TemplateOpts) -> Va
             ],
             "ports": [
                 { "protocol": "TCP", "port": 8084 },
-                { "protocol": "TCP", "port": 8085 },
+                { "protocol": "TCP", "port": internal_port },
             ],
         }));
         egress.push(json!({

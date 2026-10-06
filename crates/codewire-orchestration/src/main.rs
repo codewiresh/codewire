@@ -24,6 +24,7 @@ use axum::middleware;
 use codewire_orchestration::confidential_storage::{ConfidentialStorageManager, FeatureFlags};
 use codewire_orchestration::worker::{self, cloudflare::CloudflareClient};
 use codewire_server_core::{AppBuilder, ServiceConfig};
+use codewire_tls::{ServerTlsFiles, TlsListener};
 use tokio::net::TcpListener;
 
 const DEFAULT_WORKER_LOOPS: &[&str] = &[
@@ -36,8 +37,13 @@ const DEFAULT_WORKER_LOOPS: &[&str] = &[
 const CONNECT_SYNTHETIC_USER_IDS_ENV: &str = "CONNECT_SYNTHETIC_USER_IDS";
 
 const PUBLIC_CONNECT_METHODS: [&str; 1] = ["/codewire.v1.OrganizationService/GetInvitationByToken"];
-const ORCHESTRATION_INTERNAL_CONNECT_PORT_ENV: &str = "ORCHESTRATION_INTERNAL_CONNECT_PORT";
-const DEFAULT_ORCHESTRATION_INTERNAL_CONNECT_PORT: u16 = 8085;
+// The internal Connect app (gateway binding, Mesh authorization) is served
+// only behind TLS.
+const ORCHESTRATION_INTERNAL_TLS_PORT_ENV: &str = "ORCHESTRATION_INTERNAL_TLS_PORT";
+const DEFAULT_ORCHESTRATION_INTERNAL_TLS_PORT: u16 =
+    codewire_gateway_proto::ORCHESTRATION_INTERNAL_TLS_PORT;
+const ORCHESTRATION_INTERNAL_TLS_CERT_FILE_ENV: &str = "ORCHESTRATION_INTERNAL_TLS_CERT_FILE";
+const ORCHESTRATION_INTERNAL_TLS_KEY_FILE_ENV: &str = "ORCHESTRATION_INTERNAL_TLS_KEY_FILE";
 const ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV: &str =
     codewire_orchestration::workspace_binding::ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV;
 
@@ -86,16 +92,106 @@ fn parse_synthetic_user_ids(value: Option<&str>) -> anyhow::Result<BTreeSet<Stri
     Ok(user_ids)
 }
 
-fn internal_connect_bind_addr(
+fn internal_tls_bind_addr(
     public_bind_addr: SocketAddr,
     configured_port: Option<&str>,
 ) -> anyhow::Result<SocketAddr> {
     listener_bind_addr(
         public_bind_addr,
-        ORCHESTRATION_INTERNAL_CONNECT_PORT_ENV,
+        ORCHESTRATION_INTERNAL_TLS_PORT_ENV,
         configured_port,
-        DEFAULT_ORCHESTRATION_INTERNAL_CONNECT_PORT,
+        DEFAULT_ORCHESTRATION_INTERNAL_TLS_PORT,
     )
+}
+
+/// The mounted identity of the internal TLS listener: both files or neither.
+/// Neither serves no internal API at all.
+fn internal_tls_files(
+    cert_file: Option<&str>,
+    key_file: Option<&str>,
+) -> anyhow::Result<Option<ServerTlsFiles>> {
+    fn present(value: Option<&str>) -> Option<&str> {
+        value.map(str::trim).filter(|value| !value.is_empty())
+    }
+    match (present(cert_file), present(key_file)) {
+        (None, None) => Ok(None),
+        (Some(cert_file), Some(key_file)) => Ok(Some(
+            ServerTlsFiles::new(cert_file.into(), key_file.into()).with_context(|| {
+                format!(
+                    "{ORCHESTRATION_INTERNAL_TLS_CERT_FILE_ENV} and \
+                     {ORCHESTRATION_INTERNAL_TLS_KEY_FILE_ENV} must be distinct absolute files"
+                )
+            })?,
+        )),
+        _ => anyhow::bail!(
+            "{ORCHESTRATION_INTERNAL_TLS_CERT_FILE_ENV} and \
+             {ORCHESTRATION_INTERNAL_TLS_KEY_FILE_ENV} must be set together"
+        ),
+    }
+}
+
+/// Inside a cluster, gateways and Mesh reach the internal API, so it is
+/// served there, and only over TLS. A process outside a cluster (the
+/// checked-in `scripts/dev/dev-stack.sh` and integration verification, which
+/// blanks `KUBERNETES_SERVICE_HOST`) has no gateway or Mesh to serve and runs
+/// without it; there is no plaintext form.
+fn internal_tls_required(in_cluster: bool, tls_configured: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !in_cluster || tls_configured,
+        "inside a cluster the internal API is served only over TLS: set \
+         {ORCHESTRATION_INTERNAL_TLS_CERT_FILE_ENV} and {ORCHESTRATION_INTERNAL_TLS_KEY_FILE_ENV}"
+    );
+    Ok(())
+}
+
+/// Fail closed unless the public roots gateways will mount exist in the
+/// sandbox namespace and verify the mounted leaf for the name gateways use.
+/// A gateway rendered against missing or mismatched roots would otherwise
+/// retry its binding forever.
+async fn verify_internal_tls_roots(
+    kube: Option<&kube::Client>,
+    files: &ServerTlsFiles,
+    sandbox_namespace: &str,
+    roots_configmap: &str,
+    server_namespace: &str,
+) -> anyhow::Result<()> {
+    let kube = kube.context(
+        "the internal TLS listener needs the Kubernetes API to check its published roots",
+    )?;
+    anyhow::ensure!(
+        !server_namespace.trim().is_empty(),
+        "the internal TLS listener needs POD_NAMESPACE for its DNS name"
+    );
+    let configmaps: kube::Api<k8s_openapi::api::core::v1::ConfigMap> =
+        kube::Api::namespaced(kube.clone(), sandbox_namespace);
+    let roots = configmaps
+        .get_opt(roots_configmap)
+        .await
+        .with_context(|| format!("read ConfigMap {sandbox_namespace}/{roots_configmap}"))?
+        .with_context(|| {
+            format!(
+                "internal TLS roots ConfigMap {sandbox_namespace}/{roots_configmap} does not exist"
+            )
+        })?
+        .data
+        .and_then(|mut data| data.remove("ca.crt"))
+        .with_context(|| {
+            format!(
+                "internal TLS roots ConfigMap {sandbox_namespace}/{roots_configmap} has no ca.crt"
+            )
+        })?;
+    let host = codewire_orchestration::sandbox::template::orchestration_internal_tls_host(
+        server_namespace,
+    );
+    files
+        .verify_against_roots(roots.as_bytes(), &host)
+        .await
+        .with_context(|| {
+            format!(
+                "the internal TLS leaf is not trusted for {host} by ConfigMap \
+                 {sandbox_namespace}/{roots_configmap}"
+            )
+        })
 }
 
 fn workspace_binding_bind_addr(
@@ -130,7 +226,8 @@ fn listener_bind_addr(
 
 struct Listeners {
     public: TcpListener,
-    internal: TcpListener,
+    /// The TLS internal listener; `None` when no internal API is served.
+    internal: Option<TcpListener>,
     workspace_binding: TcpListener,
 }
 
@@ -139,15 +236,20 @@ struct Listeners {
 /// startup cannot leave a partial process running.
 async fn bind_listeners(
     public_bind_addr: SocketAddr,
-    internal_bind_addr: SocketAddr,
+    internal_bind_addr: Option<SocketAddr>,
     workspace_binding_bind_addr: SocketAddr,
 ) -> anyhow::Result<Listeners> {
     let public = TcpListener::bind(public_bind_addr)
         .await
         .with_context(|| format!("bind public orchestration listener {public_bind_addr}"))?;
-    let internal = TcpListener::bind(internal_bind_addr)
-        .await
-        .with_context(|| format!("bind internal orchestration listener {internal_bind_addr}"))?;
+    let internal = match internal_bind_addr {
+        Some(addr) => Some(
+            TcpListener::bind(addr)
+                .await
+                .with_context(|| format!("bind internal TLS orchestration listener {addr}"))?,
+        ),
+        None => None,
+    };
     let workspace_binding = TcpListener::bind(workspace_binding_bind_addr)
         .await
         .with_context(|| {
@@ -155,7 +257,7 @@ async fn bind_listeners(
         })?;
     tracing::info!(
         %public_bind_addr,
-        %internal_bind_addr,
+        ?internal_bind_addr,
         %workspace_binding_bind_addr,
         "orchestration listeners bound"
     );
@@ -170,21 +272,47 @@ async fn bind_listeners(
 async fn main() -> anyhow::Result<()> {
     let cfg = ServiceConfig::from_env("orchestration")?;
     codewire_server_core::obs::init(&cfg)?;
-    let internal_connect_bind_addr = internal_connect_bind_addr(
-        cfg.bind_addr,
-        std::env::var(ORCHESTRATION_INTERNAL_CONNECT_PORT_ENV)
-            .ok()
-            .as_deref(),
-    )?;
     let workspace_binding_bind_addr = workspace_binding_bind_addr(
         cfg.bind_addr,
         std::env::var(ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV)
             .ok()
             .as_deref(),
     )?;
+    let internal_tls = internal_tls_files(
+        std::env::var(ORCHESTRATION_INTERNAL_TLS_CERT_FILE_ENV)
+            .ok()
+            .as_deref(),
+        std::env::var(ORCHESTRATION_INTERNAL_TLS_KEY_FILE_ENV)
+            .ok()
+            .as_deref(),
+    )?;
+    internal_tls_required(
+        std::env::var("KUBERNETES_SERVICE_HOST").is_ok_and(|host| !host.trim().is_empty()),
+        internal_tls.is_some(),
+    )?;
+    if let Some(files) = &internal_tls {
+        // Fail closed: a configured identity that cannot serve never starts.
+        // Each handshake then reloads the mounted files, so rotation needs no
+        // restart.
+        files
+            .validate()
+            .await
+            .context("validate the internal TLS listener identity")?;
+    }
+    let internal_bind_addr = internal_tls
+        .as_ref()
+        .map(|_| {
+            internal_tls_bind_addr(
+                cfg.bind_addr,
+                std::env::var(ORCHESTRATION_INTERNAL_TLS_PORT_ENV)
+                    .ok()
+                    .as_deref(),
+            )
+        })
+        .transpose()?;
     let listeners = bind_listeners(
         cfg.bind_addr,
-        internal_connect_bind_addr,
+        internal_bind_addr,
         workspace_binding_bind_addr,
     )
     .await?;
@@ -244,6 +372,16 @@ async fn main() -> anyhow::Result<()> {
         && let Err(error) = sandbox_cfg.require_workspace_binding_config()
     {
         panic!("{error}");
+    }
+    if let Some(files) = &internal_tls {
+        verify_internal_tls_roots(
+            kube.as_ref(),
+            files,
+            &sandbox_cfg.sandbox_namespace,
+            codewire_orchestration::sandbox::template::ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP,
+            &sandbox_cfg.pod_namespace,
+        )
+        .await?;
     }
     let synced_zones = codewire_orchestration::runtime_transport::sync_catalog_json(
         &pool,
@@ -375,7 +513,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // The internal listener is intentionally a minimal cluster-local surface:
-    // no health, REST, public Connect, or edge-routed routes share port 8085.
+    // no health, REST, public Connect, or edge-routed routes share its TLS
+    // port 8088.
     let internal_app = AppBuilder::new("codewire-orchestration-internal")
         .with_connect_routes(
             codewire_orchestration::connect::internal::gateway_binding_router(api_state.clone()),
@@ -467,9 +606,23 @@ async fn main() -> anyhow::Result<()> {
             codewire_orchestration::api::preview::preview_proxy_middleware,
         ));
 
+    let internal_tls = match (listeners.internal, internal_tls) {
+        (Some(listener), Some(files)) => Some((
+            TlsListener::new(listener, files).context("internal TLS listener")?,
+            internal_app,
+        )),
+        _ => None,
+    };
     tokio::try_join!(
         codewire_server_core::serve_with_listener(app, listeners.public),
-        codewire_server_core::serve_with_listener(internal_app, listeners.internal),
+        async {
+            match internal_tls {
+                Some((listener, app)) => {
+                    codewire_server_core::serve_with_axum_listener(app, listener).await
+                }
+                None => Ok(()),
+            }
+        },
         codewire_server_core::bounded_http1::serve_bounded_http1(
             workspace_binding_app,
             listeners.workspace_binding,
@@ -482,15 +635,6 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn internal_connect_listener_defaults_to_8085_on_the_public_bind_ip() {
-        let public = SocketAddr::from(([127, 0, 0, 1], 8084));
-        assert_eq!(
-            internal_connect_bind_addr(public, None).unwrap(),
-            SocketAddr::from(([127, 0, 0, 1], 8085))
-        );
-    }
 
     #[test]
     fn workspace_binding_listener_defaults_to_8087_on_the_public_bind_ip() {
@@ -506,17 +650,26 @@ mod tests {
         assert!(workspace_binding_bind_addr(public, Some("binding")).is_err());
     }
 
-    async fn free_addr() -> SocketAddr {
-        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        probe.local_addr().unwrap()
+    /// Distinct free addresses: every probe is held until all are chosen, so
+    /// the kernel cannot hand one port out twice.
+    async fn free_addrs<const N: usize>() -> [SocketAddr; N] {
+        let mut probes = Vec::with_capacity(N);
+        for _ in 0..N {
+            probes.push(TcpListener::bind("127.0.0.1:0").await.unwrap());
+        }
+        std::array::from_fn(|index| probes[index].local_addr().unwrap())
     }
 
     /// Every listener but `busy` binds; startup must fail and release them.
     async fn assert_listener_setup_fails_closed(busy: usize) {
         let blocker = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut addrs = [free_addr().await, free_addr().await, free_addr().await];
+        let mut addrs = free_addrs::<3>().await;
         addrs[busy] = blocker.local_addr().unwrap();
-        assert!(bind_listeners(addrs[0], addrs[1], addrs[2]).await.is_err());
+        assert!(
+            bind_listeners(addrs[0], Some(addrs[1]), addrs[2])
+                .await
+                .is_err()
+        );
         for (index, addr) in addrs.iter().enumerate() {
             if index != busy {
                 assert!(
@@ -540,6 +693,46 @@ mod tests {
     #[tokio::test]
     async fn listener_setup_fails_closed_when_workspace_binding_port_is_busy() {
         assert_listener_setup_fails_closed(2).await;
+    }
+
+    #[tokio::test]
+    async fn without_an_internal_identity_no_internal_listener_binds() {
+        let [public, binding] = free_addrs::<2>().await;
+        let listeners = bind_listeners(public, None, binding).await.unwrap();
+        assert!(listeners.internal.is_none());
+    }
+
+    #[test]
+    fn inside_a_cluster_the_internal_api_requires_its_tls_identity() {
+        internal_tls_required(true, true).unwrap();
+        internal_tls_required(false, true).unwrap();
+        internal_tls_required(false, false).unwrap();
+        let error = internal_tls_required(true, false).unwrap_err().to_string();
+        assert!(error.contains("only over TLS"), "{error}");
+    }
+
+    #[test]
+    fn internal_tls_listener_defaults_to_8088_and_needs_both_identity_files() {
+        let public = SocketAddr::from(([127, 0, 0, 1], 8084));
+        assert_eq!(
+            internal_tls_bind_addr(public, None).unwrap(),
+            SocketAddr::from(([127, 0, 0, 1], 8088))
+        );
+        assert!(internal_tls_files(None, None).unwrap().is_none());
+        assert!(internal_tls_files(Some(" "), Some("")).unwrap().is_none());
+        assert!(
+            internal_tls_files(Some("/run/tls/tls.crt"), Some("/run/tls/tls.key"))
+                .unwrap()
+                .is_some()
+        );
+        for (cert, key) in [
+            (Some("/run/tls/tls.crt"), None),
+            (None, Some("/run/tls/tls.key")),
+            (Some("tls.crt"), Some("/run/tls/tls.key")),
+            (Some("/run/tls/tls.crt"), Some("/run/tls/tls.crt")),
+        ] {
+            assert!(internal_tls_files(cert, key).is_err(), "{cert:?} {key:?}");
+        }
     }
 
     #[test]

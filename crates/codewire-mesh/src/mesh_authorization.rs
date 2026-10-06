@@ -19,7 +19,8 @@ use codewire_proto::codewire::internal::v1::{
 use codewire_proto::codewire::v1::OrgRole;
 use codewire_server_core::auth::{SESSION_COOKIE_NAME, hash_api_key};
 use codewire_server_core::internal_hmac::issue_internal_hmac_token;
-use connectrpc::client::{CallOptions, ClientConfig, HttpClient};
+use codewire_tls::ConnectOriginTransport;
+use connectrpc::client::{CallOptions, ClientConfig};
 use connectrpc::{ConnectError, ErrorCode};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -36,6 +37,7 @@ pub const FORWARDED_AUTHORIZATION_HEADER: &str = "codewire-forwarded-authorizati
 pub struct MeshAuthorizationClient {
     url: String,
     hmac_secret: String,
+    tls_roots: std::path::PathBuf,
 }
 
 impl fmt::Debug for MeshAuthorizationClient {
@@ -44,6 +46,7 @@ impl fmt::Debug for MeshAuthorizationClient {
             .debug_struct("MeshAuthorizationClient")
             .field("url", &self.url)
             .field("hmac_secret", &"[redacted]")
+            .field("tls_roots", &self.tls_roots)
             .finish()
     }
 }
@@ -216,6 +219,7 @@ impl MeshAuthorizationClient {
         Self {
             url: config.url.clone(),
             hmac_secret: config.hmac_secret().to_owned(),
+            tls_roots: config.tls_roots_file().to_path_buf(),
         }
     }
 
@@ -237,7 +241,12 @@ impl MeshAuthorizationClient {
                 .map_err(|_| MeshAuthorizationClientError::InvalidEndpoint)?,
         )
         .with_default_timeout(Duration::from_secs(5));
-        let client = MeshAuthorizationServiceClient::new(HttpClient::plaintext(), config);
+        // The https endpoint is verified against its mounted roots, reread for
+        // this call, so the forwarded product credential never crosses the
+        // cluster network in plaintext.
+        let transport = ConnectOriginTransport::for_origin(&self.url, &self.tls_roots)
+            .map_err(|_| MeshAuthorizationClientError::InvalidEndpoint)?;
+        let client = MeshAuthorizationServiceClient::new(transport, config);
         let response = client
             .resolve_mesh_authorization_with_options(
                 ResolveMeshAuthorizationRequest {
@@ -467,20 +476,15 @@ mod tests {
                 StatusCode::UNAUTHORIZED
             }
         }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind header capture server");
-        let address = listener.local_addr().expect("header capture address");
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve header capture server");
-        });
+        // Orchestration's internal listener is TLS-only, as in production.
+        let pki = codewire_tls::test_support::SyntheticPki::new("localhost");
+        let address = pki.serve(app).await;
 
         let secret = "mesh-generated-client-header-test";
         let client = MeshAuthorizationClient {
-            url: format!("http://{address}"),
+            url: format!("https://localhost:{}", address.port()),
             hmac_secret: secret.to_owned(),
+            tls_roots: pki.roots.clone(),
         };
         let raw_credential = "Bearer cw_generated_client_test";
         let error = client

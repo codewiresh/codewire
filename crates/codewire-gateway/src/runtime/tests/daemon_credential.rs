@@ -72,25 +72,31 @@ impl GatewayBindingService for ScriptedBinding {
 
 async fn binding(
     answers: Vec<Result<(&'static str, &'static str), ErrorCode>>,
-) -> (BindingPollConfig, Arc<Mutex<u32>>, tempfile::TempDir) {
+) -> (
+    BindingPollConfig,
+    Arc<Mutex<u32>>,
+    (tempfile::TempDir, codewire_tls::test_support::SyntheticPki),
+) {
     let calls = Arc::new(Mutex::new(0));
     let connect = connectrpc::Router::new().add_service(Arc::new(ScriptedBinding {
         answers: Mutex::new(answers),
         calls: calls.clone(),
     }));
     let app = Router::new().fallback_service(connect.into_axum_service());
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+    // Orchestration's internal listener is TLS-only, as in production.
+    let pki = codewire_tls::test_support::SyntheticPki::new("localhost");
+    let address = pki.serve(app).await;
     let directory = tempfile::tempdir().unwrap();
     let token = directory.path().join("token");
     std::fs::write(&token, "synthetic.projected.gateway-binding").unwrap();
     (
-        BindingPollConfig::for_test(format!("http://{address}"), token),
+        BindingPollConfig::for_test(
+            format!("https://localhost:{}", address.port()),
+            token,
+            pki.roots.clone(),
+        ),
         calls,
-        directory,
+        (directory, pki),
     )
 }
 

@@ -30,6 +30,10 @@ spec:
         - name: nexus-registry
         - name: harbor-registry
       serviceAccountName: codewire-orchestration
+      # Group-reads the 0440 internal TLS leaf; the image runs as 65532.
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: orchestration
           # Runs from the shared codewire/services image (one image, many
@@ -40,8 +44,11 @@ spec:
           ports:
             - containerPort: 8084
               name: http
-            - containerPort: 8085
-              name: internal-api
+            # The internal Connect app (gateway binding, Mesh authorization),
+            # TLS-only. Gateways and Mesh verify it with the public roots in
+            # codewire-orchestration-internal-roots.
+            - containerPort: 8088
+              name: internal-tls
             # Serves only WorkspaceBindingService to identity-free workspace
             # Pods, under its own connection and request limits.
             - containerPort: 8087
@@ -64,8 +71,12 @@ spec:
           env:
             - name: ORCHESTRATION_PORT
               value: "8084"
-            - name: ORCHESTRATION_INTERNAL_CONNECT_PORT
-              value: "8085"
+            - name: ORCHESTRATION_INTERNAL_TLS_PORT
+              value: "8088"
+            - name: ORCHESTRATION_INTERNAL_TLS_CERT_FILE
+              value: /run/codewire-orchestration-internal-tls/tls.crt
+            - name: ORCHESTRATION_INTERNAL_TLS_KEY_FILE
+              value: /run/codewire-orchestration-internal-tls/tls.key
             - name: ORCHESTRATION_WORKSPACE_BINDING_PORT
               value: "8087"
             # Public trust only. The separate infrastructure owner provisions
@@ -127,6 +138,9 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 6
           volumeMounts:
+            - name: internal-tls
+              mountPath: /run/codewire-orchestration-internal-tls
+              readOnly: true
             # Platform-only Trustee administration credential. This volume is
             # never projected into tenant Secrets or sandbox Pods.
             - name: confidential-storage-kbs-admin
@@ -136,6 +150,12 @@ spec:
               mountPath: /etc/codewire/confidential-storage-kbs
               readOnly: true
       volumes:
+        # cert-manager-owned leaf for the internal TLS listener. Readable by
+        # the image's 65532 group only, through the pod fsGroup.
+        - name: internal-tls
+          secret:
+            secretName: codewire-orchestration-internal-tls
+            defaultMode: 0440
         - name: confidential-storage-kbs-admin
           secret:
             secretName: codewire-confidential-storage-kbs-admin

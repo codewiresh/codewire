@@ -1,5 +1,6 @@
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use rustls::pki_types::ServerName;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
@@ -80,6 +81,29 @@ impl ClientTlsEndpoint {
         })
         .await
         .map_err(|_| TlsError::Timeout)?
+    }
+
+    /// A Rustls client configuration that trusts exactly the current roots.
+    /// It names its ring provider rather than a process default, so a binary
+    /// that also compiles another provider cannot change or panic its choice.
+    pub(crate) async fn rustls_config(&self) -> Result<rustls::ClientConfig, TlsError> {
+        let bytes = tokio::time::timeout(
+            TLS_TIMEOUT,
+            read_regular(&self.roots, MAX_CERTIFICATE_BYTES),
+        )
+        .await
+        .map_err(|_| TlsError::Timeout)??;
+        let mut roots = rustls::RootCertStore::empty();
+        for certificate in certificates(&bytes)? {
+            roots.add(certificate).map_err(|_| TlsError::InvalidPem)?;
+        }
+        Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|_| TlsError::Configuration)?
+        .with_root_certificates(roots)
+        .with_no_client_auth())
     }
 
     async fn tls_config(&self) -> Result<ClientTlsConfig, TlsError> {

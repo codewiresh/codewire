@@ -29,6 +29,7 @@ use encoding::gzip_base64;
 #[cfg(test)]
 use gateway::{GATEWAY_BINDING_TOKEN_VOLUME, build_sidecar_env};
 pub use gateway::{
+    ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP, orchestration_internal_tls_host,
     render_gateway_deployment, render_gateway_direct_udp_service, render_gateway_host_key_secret,
     render_gateway_service,
 };

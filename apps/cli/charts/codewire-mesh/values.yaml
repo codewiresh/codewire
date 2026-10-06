@@ -13,6 +13,9 @@ database:
 # explicit local identity and does not use these chart values.
 meshAuthorization:
   url: ""
+  # https only (orchestration's internal listener is TLS-only), verified with
+  # the public roots in this ConfigMap (key ca.crt); required with url.
+  tlsRootsConfigMap: ""
   hmacSecretRef:
     name: ""
     key: "SESSION_SECRET"
