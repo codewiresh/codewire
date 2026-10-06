@@ -24,6 +24,7 @@ ENVIRONMENT_SESSION="$ROOT/scripts/ci/verify/kind/suites/environment-session.sh"
 SANDBOX_SUPPLY_CHAIN="$ROOT/scripts/ci/verify/kind/suites/sandbox-supply-chain.sh"
 RUNTIME_ACCEPTANCE="$ROOT/scripts/ci/verify/kind/suites/runtime-acceptance.sh"
 UP="$ROOT/scripts/ci/verify/kind/suites/up.sh"
+WARM_POOLS="$ROOT/scripts/ci/verify/kind/suites/warm-pools.sh"
 mkdir -p "$ROOT/.tmp"
 FIXTURE="$(mktemp -d "$ROOT/.tmp/kind-e2e-suites.XXXXXX")"
 CALLS="$FIXTURE/calls"
@@ -490,6 +491,18 @@ grep -Fq 'coordinate capability crossed into the internal listener' "$COMMON" ||
 if grep -Fq -e 'GatewayBindingService' -e 'codewire.internal.gateway-binding.v1' "$COMMON"; then
   fail 'Kind harness still exercises the deleted gateway binding service'
 fi
+
+# The unclaimed-member probe speaks TLS to the binding listener with the
+# Pod's mounted roots, and finds no bridge, SSH or tailnet listener.
+grep -Fq 'cafile="/run/codewire-orchestration-internal-roots/ca.crt"' "$WARM_POOLS" ||
+  fail 'warm-pool own-bind probe does not verify the binding listener with the mounted roots'
+if grep -Fq 'CODEWIRE_WORKSPACE_BINDING_URL#http://' "$WARM_POOLS"; then
+  fail 'warm-pool own-bind probe still speaks plaintext to the TLS binding listener'
+fi
+for listener in ':1E61$' ':08AE$' ':7918$'; do
+  grep -Fq "$listener" "$WARM_POOLS" ||
+    fail "warm-pool listener probe does not check ${listener}"
+done
 
 # Sourcing the dispatcher defines every suite without executing one.
 # The default fixtures model public, initially uncached dependencies. Hosted
