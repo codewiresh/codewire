@@ -1,6 +1,8 @@
 //! Real admission/controller proof, selected only by the managed Kind harness.
 //! The administrator reads only the synthetic leaves this test just created.
-//! All product bootstrap operations use the deployed orchestration identity.
+//! The legacy bootstrap objects an environment created before the gateway's
+//! HTTPS listener was removed are planted, and every product cleanup runs,
+//! with the deployed orchestration identity.
 
 use super::*;
 use crate::sandbox::template::CredentialRuntimeTemplateConfig;
@@ -65,10 +67,42 @@ async fn credential_bootstrap_kind() -> Result<()> {
     let cleanup = cleanup(&admin, &opts.environment_id).await;
     result?;
     cleanup?;
-    println!(
-        "credential bootstrap Kind: issuance, no-op retry, RBAC, admission and cleanup passed"
-    );
+    println!("credential bootstrap Kind: legacy issuance, RBAC, admission and cleanup passed");
     Ok(())
+}
+
+/// The exact gateway Certificate the previous orchestration requested, which
+/// the kept admission policy still admits for the orchestration identity.
+fn legacy_certificate(opts: &TemplateOpts) -> Value {
+    let name = credential_gateway_certificate_name(&opts.environment_id);
+    let labels = json!({"app.kubernetes.io/name":"codewire", "app.kubernetes.io/managed-by":"codewire",
+        "codewire.sh/environment-id":opts.environment_id, "codewire.sh/org-id":opts.organization_id,
+        "codewire.sh/type":"credential-bootstrap"});
+    json!({"apiVersion":"cert-manager.io/v1", "kind":"Certificate",
+        "metadata":{"name":name,"namespace":NAMESPACE,"labels":labels},
+        "spec":{"secretName":name, "secretTemplate":{"labels":labels},
+            "issuerRef":{"name":"codewire-credential-gateway","kind":"Issuer","group":"cert-manager.io"},
+            "dnsNames":[format!("cw-gateway-svc-{}.{NAMESPACE}.svc.cluster.local", opts.environment_id)],
+            "duration":"24h", "renewBefore":"8h",
+            "privateKey":{"algorithm":"ECDSA","size":256,"encoding":"PKCS8","rotationPolicy":"Always"},
+            "isCA":false,"revisionHistoryLimit":1,
+            "usages":["digital signature","server auth"]}})
+}
+
+async fn plant_legacy_certificate(
+    orchestration: &SandboxClient,
+    opts: &TemplateOpts,
+) -> Result<DynamicObject> {
+    let legacy: DynamicObject = serde_json::from_value(legacy_certificate(opts))?;
+    orchestration
+        .credential_certificates()
+        .create(&PostParams::default(), &legacy)
+        .await?;
+    issued(
+        orchestration,
+        &credential_gateway_certificate_name(&opts.environment_id),
+    )
+    .await
 }
 
 async fn prove_bootstrap(
@@ -78,25 +112,17 @@ async fn prove_bootstrap(
 ) -> Result<()> {
     let name = credential_gateway_certificate_name(&opts.environment_id);
     let config_name = credential_codex_config_name(&opts.environment_id);
-    orchestration.ensure_credential_bootstrap(opts).await?;
-    let certificate = issued(orchestration, &name).await?;
-    let rendered = render_credential_gateway_certificate(NAMESPACE, opts).unwrap();
+    // Nothing creates a gateway Certificate now. An environment created before
+    // the gateway's HTTPS listener was removed still owns one, which the kept
+    // admission policy and final destruction must handle. Plant it the way
+    // the previous orchestration created it.
+    let certificate = plant_legacy_certificate(orchestration, opts).await?;
     ensure!(
-        certificate.data["spec"] == rendered["spec"],
+        certificate.data["spec"] == legacy_certificate(opts)["spec"],
         "API defaulting changed certificate intent"
     );
-    // Selected Codex creates no ConfigMap: the workspace daemon writes
-    // `~/.codex`. An environment created before that still owns one, which
-    // the kept admission policy and final destruction must handle. Plant it
-    // the way the previous orchestration created it.
-    ensure!(
-        orchestration
-            .credential_config_maps()
-            .get_opt(&config_name)
-            .await?
-            .is_none(),
-        "selected Codex created a ConfigMap"
-    );
+    // Selected Codex creates no ConfigMap either: the workspace daemon writes
+    // `~/.codex`. Plant an earlier environment's ConfigMap the same way.
     let legacy: DynamicObject = serde_json::from_value(json!({
         "apiVersion":"v1", "kind":"ConfigMap",
         "metadata":{"name":config_name,"namespace":NAMESPACE,"labels":certificate.metadata.labels},
@@ -106,27 +132,6 @@ async fn prove_bootstrap(
         .credential_config_maps()
         .create(&PostParams::default(), &legacy)
         .await?;
-    orchestration.ensure_credential_bootstrap(opts).await?;
-    let retried = orchestration.credential_certificates().get(&name).await?;
-    // cert-manager may advance status/resourceVersion independently. The
-    // counted unit test proves GET-only retries; live proof checks the exact
-    // persisted intent and identity without mistaking a status write for ours.
-    ensure!(
-        certificate.metadata.uid == retried.metadata.uid
-            && certificate.metadata.generation == retried.metadata.generation
-            && certificate.data["spec"] == retried.data["spec"],
-        "unchanged bootstrap retry changed Certificate identity or intent"
-    );
-    ensure!(
-        config.metadata.resource_version
-            == orchestration
-                .credential_config_maps()
-                .get(&config_name)
-                .await?
-                .metadata
-                .resource_version,
-        "unchanged bootstrap retry wrote ConfigMap"
-    );
 
     let leaf = admin.secrets().get(&name).await?;
     ensure!(
@@ -233,7 +238,7 @@ async fn prove_bootstrap(
             &DeleteParams {
                 propagation_policy: Some(kube::api::PropagationPolicy::Background),
                 preconditions: Some(Preconditions {
-                    uid: certificate.metadata.uid,
+                    uid: certificate.metadata.uid.clone(),
                     resource_version: None,
                 }),
                 ..Default::default()
@@ -312,10 +317,9 @@ async fn prove_bootstrap(
     orchestration
         .delete_credential_bootstrap(&opts.environment_id, Duration::from_secs(30))
         .await?;
-    orchestration.ensure_credential_bootstrap(opts).await?;
-    let reissued = issued(orchestration, &name).await?;
+    let reissued = plant_legacy_certificate(orchestration, opts).await?;
     ensure!(
-        reissued.metadata.uid != retried.metadata.uid,
+        reissued.metadata.uid != certificate.metadata.uid,
         "recreated Certificate reused its old identity"
     );
     let reissued_leaf = admin.secrets().get(&name).await?;
@@ -393,6 +397,27 @@ async fn prove_bootstrap(
     absent(&admin.credential_certificates(), &name).await?;
     absent(&admin.secrets(), &name).await?;
     absent(&admin.credential_config_maps(), &config_name).await
+}
+
+fn certificate_ready(certificate: &DynamicObject) -> bool {
+    let Some(generation) = certificate
+        .metadata
+        .generation
+        .filter(|generation| *generation > 0)
+    else {
+        return false;
+    };
+    certificate
+        .data
+        .pointer("/status/conditions")
+        .and_then(Value::as_array)
+        .is_some_and(|conditions| {
+            conditions.iter().any(|condition| {
+                condition["type"] == "Ready"
+                    && condition["status"] == "True"
+                    && condition["observedGeneration"].as_i64() == Some(generation)
+            })
+        })
 }
 
 async fn issued(client: &SandboxClient, name: &str) -> Result<DynamicObject> {

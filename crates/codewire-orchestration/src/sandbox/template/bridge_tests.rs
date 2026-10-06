@@ -88,20 +88,6 @@ fn warm_member_bridge_names_are_per_environment_and_dns_safe() {
     }
 }
 
-fn rule_with_port(rules: &Value, port: i64) -> Vec<Value> {
-    rules
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|rule| {
-            rule["ports"]
-                .as_array()
-                .is_some_and(|ports| ports.iter().any(|item| item["port"] == port))
-        })
-        .cloned()
-        .collect()
-}
-
 /// Replace the environment's workspace selector by the bridge's member
 /// selector in a rule of the environment policies.
 fn toward_member(rule: &Value, opts: &TemplateOpts) -> Value {
@@ -148,32 +134,20 @@ fn warm_member_bridge_mirrors_the_environment_policies_exactly() {
         let (daemon, gateway) = bridge(&opts);
         let daemon_net = render_workspace_daemon_network_policy(NAMESPACE, &opts);
         let gateway_net = render_gateway_network_policy(NAMESPACE, &opts);
-        let credential = opts.credential_runtime.is_some();
 
-        // Member side: the environment policy's whole ingress, and only its
-        // egress to the environment's own gateway.
+        // Member side: the environment policy's whole ingress. The member
+        // needs no egress beyond the shared template: the workspace never
+        // reaches its gateway.
         assert_eq!(
             daemon["spec"]["podSelector"],
             json!({"matchLabels": {SANDBOX_UID_LABEL: BOUND_SANDBOX, "codewire.sh/type": "workspace"}})
         );
         assert_eq!(daemon["spec"]["ingress"], daemon_net["spec"]["ingress"]);
-        let gateway_egress = rule_with_port(&daemon_net["spec"]["egress"], 8443);
-        assert_eq!(gateway_egress.len(), usize::from(credential));
-        assert_eq!(
-            daemon["spec"].get("egress").cloned().unwrap_or(json!([])),
-            json!(gateway_egress)
-        );
-        assert_eq!(
-            daemon["spec"]["policyTypes"],
-            if credential {
-                json!(["Ingress", "Egress"])
-            } else {
-                json!(["Ingress"])
-            }
-        );
+        assert!(daemon["spec"].get("egress").is_none());
+        assert_eq!(daemon["spec"]["policyTypes"], json!(["Ingress"]));
 
-        // Gateway side: this environment's gateway, with its workspace rules
-        // turned toward the member.
+        // Gateway side: this environment's gateway, with its workspace rule
+        // turned toward the member, and no ingress from the member.
         assert_eq!(
             gateway["spec"]["podSelector"],
             gateway_net["spec"]["podSelector"]
@@ -182,23 +156,8 @@ fn warm_member_bridge_mirrors_the_environment_policies_exactly() {
             gateway["spec"]["egress"],
             json!([toward_member(&gateway_net["spec"]["egress"][0], &opts)])
         );
-        let https_ingress: Vec<Value> = rule_with_port(&gateway_net["spec"]["ingress"], 8443)
-            .iter()
-            .map(|rule| toward_member(rule, &opts))
-            .collect();
-        assert_eq!(https_ingress.len(), usize::from(credential));
-        assert_eq!(
-            gateway["spec"].get("ingress").cloned().unwrap_or(json!([])),
-            json!(https_ingress)
-        );
-        assert_eq!(
-            gateway["spec"]["policyTypes"],
-            if credential {
-                json!(["Ingress", "Egress"])
-            } else {
-                json!(["Egress"])
-            }
-        );
+        assert!(gateway["spec"].get("ingress").is_none());
+        assert_eq!(gateway["spec"]["policyTypes"], json!(["Egress"]));
     }
 }
 
@@ -328,15 +287,8 @@ fn warm_member_bridge_selects_exactly_the_bound_member() {
                 .iter()
                 .flat_map(|rule| pod_peers(rule, "to")),
         )
-        .chain(
-            gateway["spec"]["ingress"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .flat_map(|rule| pod_peers(rule, "from")),
-        )
         .collect();
-    assert_eq!(member_selectors.len(), 3);
+    assert_eq!(member_selectors.len(), 2);
     for selector in &member_selectors {
         // Before and after the claim's relabel.
         let mut before = unbound_member(BOUND_SANDBOX, COLLIDING_NAME_HASH);
@@ -376,12 +328,7 @@ fn warm_member_bridge_admits_only_this_environments_gateway() {
     }
     // The member half's same-namespace peers are this environment's gateway
     // alone; its only other peer is orchestration in the server namespace.
-    let rules = daemon["spec"]["ingress"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .chain(daemon["spec"]["egress"].as_array().unwrap());
-    for rule in rules {
+    for rule in daemon["spec"]["ingress"].as_array().unwrap() {
         let direction = if rule.get("from").is_some() {
             "from"
         } else {

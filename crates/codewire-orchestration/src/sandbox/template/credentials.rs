@@ -4,20 +4,15 @@
 //! into the user's `~/.codex` on the persistent home before it listens, in
 //! both identity modes (`codewire_daemon::codex_home`).
 
-use codewire_access::{
-    CODEX_PLATFORM_ROOTS_FILE, CODEX_PLATFORM_TOKEN_FILE, ManagedCredentialClientPlacement,
-};
+use codewire_access::{CODEX_PLATFORM_TOKEN_FILE, ManagedCredentialClientPlacement};
 use codewire_gateway_proto::{
     CREDENTIAL_GATEWAY_TOKEN_AUDIENCE, CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
 };
 use serde_json::{Value, json};
 
-use super::{TemplateOpts, gateway_service_name};
+use super::TemplateOpts;
 
-pub const CREDENTIAL_GATEWAY_HTTPS_PORT: i64 = 8443;
-pub const CREDENTIAL_GATEWAY_ISSUER_NAME: &str = "codewire-credential-gateway";
 const GATEWAY_TOKEN_DIRECTORY: &str = "/run/codewire-credentials/gateway";
-const GATEWAY_TLS_DIRECTORY: &str = "/run/codewire-credentials/gateway-tls";
 const BROKER_ROOTS_DIRECTORY: &str = "/run/codewire-credentials/broker-roots";
 const PROJECTION_SHA256_ENV: &str = "CODEWIRE_ENVIRONMENT_PROJECTION_SHA256";
 pub use codewire_access::MANAGED_CREDENTIAL_CLIENTS_ENV;
@@ -36,19 +31,17 @@ pub(super) fn projection_environment(opts: &TemplateOpts) -> Option<Value> {
         "value":digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()}))
 }
 
-const INPUTS: [&str; 3] = [
+const INPUTS: [&str; 2] = [
     "SANDBOX_CREDENTIAL_BROKER_NAMESPACE",
-    "SANDBOX_CREDENTIAL_GATEWAY_ROOTS_CONFIGMAP",
     "SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP",
 ];
 
 /// Administrator-selected names of separately provisioned public trust
-/// objects. The issuer is fixed. There is no private key, bearer or provider URL.
+/// objects. There is no private key, bearer or provider URL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CredentialRuntimeTemplateConfig {
     sandbox_namespace: String,
     broker_namespace: String,
-    gateway_roots_configmap: String,
     broker_roots_configmap: String,
 }
 
@@ -83,16 +76,13 @@ impl CredentialRuntimeTemplateConfig {
             "invalid credential sandbox namespace"
         );
         anyhow::ensure!(
-            names[1] != names[2]
-                && !names[1].starts_with("cw-credential-codex-")
-                && !names[2].starts_with("cw-credential-codex-"),
-            "credential gateway and broker roots must be separate"
+            !names[1].starts_with("cw-credential-codex-"),
+            "credential broker roots must be a separate trust object"
         );
         Ok(Some(Self {
             sandbox_namespace: sandbox_namespace.to_owned(),
             broker_namespace: names[0].clone(),
-            gateway_roots_configmap: names[1].clone(),
-            broker_roots_configmap: names[2].clone(),
+            broker_roots_configmap: names[1].clone(),
         }))
     }
 
@@ -112,24 +102,11 @@ impl CredentialRuntimeTemplateConfig {
         .unwrap()
     }
 
-    pub(super) fn assert_namespace(&self, namespace: &str) {
+    pub(crate) fn assert_namespace(&self, namespace: &str) {
         assert_eq!(
             self.sandbox_namespace, namespace,
             "credential runtime namespace must match its owning template"
         );
-    }
-
-    fn gateway_dns(&self, opts: &TemplateOpts) -> String {
-        assert!(
-            uuid::Uuid::parse_str(&opts.environment_id)
-                .is_ok_and(|id| id.to_string() == opts.environment_id),
-            "credential environment ID must be canonical"
-        );
-        format!(
-            "{}.{}.svc.cluster.local",
-            gateway_service_name(&opts.environment_id),
-            self.sandbox_namespace
-        )
     }
 }
 
@@ -149,6 +126,10 @@ fn dns_label(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
+/// The per-environment gateway TLS Certificate, and its leaf Secret, that
+/// environments created before the gateway's workspace-facing HTTPS listener
+/// was removed still own. Nothing creates them now; final destruction removes
+/// remaining ones under the same ownership checks.
 pub fn credential_gateway_certificate_name(environment_id: &str) -> String {
     format!("cw-credential-gateway-{environment_id}")
 }
@@ -158,34 +139,6 @@ pub fn credential_gateway_certificate_name(environment_id: &str) -> String {
 /// destruction removes a remaining one under the same ownership checks.
 pub fn credential_codex_config_name(environment_id: &str) -> String {
     format!("cw-credential-codex-{environment_id}")
-}
-
-fn labels(opts: &TemplateOpts) -> Value {
-    json!({"app.kubernetes.io/name":"codewire", "app.kubernetes.io/managed-by":"codewire",
-        "codewire.sh/environment-id":opts.environment_id, "codewire.sh/org-id":opts.organization_id,
-        "codewire.sh/type":"credential-bootstrap"})
-}
-
-/// Cert-manager owns key generation; orchestration submits only its exact
-/// environment DNS intent. The namespace-local Issuer is provisioned outside
-/// this renderer. The Secret never enters the workspace or API response.
-pub fn render_credential_gateway_certificate(
-    namespace: &str,
-    opts: &TemplateOpts,
-) -> Option<Value> {
-    let cfg = opts.credential_runtime.as_ref()?;
-    cfg.assert_namespace(namespace);
-    let name = credential_gateway_certificate_name(&opts.environment_id);
-    Some(
-        json!({"apiVersion":"cert-manager.io/v1", "kind":"Certificate",
-        "metadata":{"name":name,"namespace":namespace,"labels":labels(opts)},
-        "spec":{"secretName":name, "secretTemplate":{"labels":labels(opts)},
-            "issuerRef":{"name":CREDENTIAL_GATEWAY_ISSUER_NAME,"kind":"Issuer","group":"cert-manager.io"},
-            "dnsNames":[cfg.gateway_dns(opts)], "duration":"24h", "renewBefore":"8h",
-            "privateKey":{"algorithm":"ECDSA","size":256,"encoding":"PKCS8","rotationPolicy":"Always"},
-            "isCA":false,"revisionHistoryLimit":1,
-            "usages":["digital signature","server auth"]}}),
-    )
 }
 
 pub(super) fn gateway_environment(opts: &TemplateOpts) -> Vec<Value> {
@@ -202,22 +155,9 @@ pub(super) fn gateway_environment(opts: &TemplateOpts) -> Vec<Value> {
             "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
             opts.operation_generation.to_string(),
         ),
-        ("CODEWIRE_CREDENTIAL_HTTPS_AUTHORITY", cfg.gateway_dns(opts)),
-        (
-            "CODEWIRE_CREDENTIAL_HTTPS_LISTEN_ADDR",
-            "0.0.0.0:8443".to_owned(),
-        ),
         (
             "CODEWIRE_CREDENTIAL_GATEWAY_TOKEN_FILE",
             format!("{GATEWAY_TOKEN_DIRECTORY}/token"),
-        ),
-        (
-            "CODEWIRE_CREDENTIAL_TLS_CERT_FILE",
-            format!("{GATEWAY_TLS_DIRECTORY}/tls.crt"),
-        ),
-        (
-            "CODEWIRE_CREDENTIAL_TLS_KEY_FILE",
-            format!("{GATEWAY_TLS_DIRECTORY}/tls.key"),
         ),
         (
             "CODEWIRE_CREDENTIAL_BROKER_HTTPS_ORIGIN",
@@ -246,7 +186,6 @@ fn projected_token(name: &str, audience: &str) -> Value {
 pub(super) fn gateway_mounts() -> Vec<Value> {
     [
         ("credential-gateway-identity", GATEWAY_TOKEN_DIRECTORY),
-        ("credential-gateway-tls", GATEWAY_TLS_DIRECTORY),
         ("credential-broker-roots", BROKER_ROOTS_DIRECTORY),
     ]
     .into_iter()
@@ -264,29 +203,24 @@ pub(super) fn gateway_volumes(opts: &TemplateOpts) -> Vec<Value> {
             "credential-gateway-identity",
             CREDENTIAL_GATEWAY_TOKEN_AUDIENCE,
         ),
-        json!({"name":"credential-gateway-tls","secret":{"secretName":credential_gateway_certificate_name(&opts.environment_id),"defaultMode":0o440}}),
         json!({"name":"credential-broker-roots","configMap":{"name":cfg.broker_roots_configmap}}),
     ]
 }
 
 pub(super) fn workspace_volumes(opts: &TemplateOpts) -> Vec<Value> {
-    let cfg = opts
-        .credential_runtime
-        .as_ref()
-        .expect("credential runtime enabled");
-    vec![
-        projected_token(
-            "credential-workspace-identity",
-            CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
-        ),
-        json!({"name":"credential-gateway-roots","configMap":{"name":cfg.gateway_roots_configmap}}),
-    ]
+    assert!(
+        opts.credential_runtime.is_some(),
+        "credential runtime enabled"
+    );
+    vec![projected_token(
+        "credential-workspace-identity",
+        CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
+    )]
 }
 
 pub(super) fn workspace_mounts() -> Vec<Value> {
     vec![
         json!({"name":"credential-workspace-identity","mountPath":CODEX_PLATFORM_TOKEN_FILE.rsplit_once('/').unwrap().0,"readOnly":true}),
-        json!({"name":"credential-gateway-roots","mountPath":CODEX_PLATFORM_ROOTS_FILE.rsplit_once('/').unwrap().0,"readOnly":true}),
     ]
 }
 
@@ -319,12 +253,6 @@ mod tests {
             CredentialRuntimeTemplateConfig::from_lookup("test-sandboxes", configured)
                 .unwrap()
                 .is_some()
-        );
-        assert!(
-            CredentialRuntimeTemplateConfig::from_lookup("test-sandboxes", |_| Some(
-                "same-trust".into()
-            ))
-            .is_err()
         );
         for missing in INPUTS {
             assert!(

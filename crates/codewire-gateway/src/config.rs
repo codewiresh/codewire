@@ -1,6 +1,6 @@
 use crate::docker_proxy::DockerProxySettings;
 use codewire_gateway_proto::DaemonAuthToken;
-use codewire_tls::{ClientTlsEndpoint, ServerTlsFiles};
+use codewire_tls::ClientTlsEndpoint;
 use std::{env, fmt, net::SocketAddr, path::PathBuf};
 use thiserror::Error;
 use uuid::Uuid;
@@ -43,22 +43,16 @@ pub const DOCKER_UPSTREAM_SOCK_ENV: &str = "CODEWIRE_DOCKER_UPSTREAM_SOCK";
 
 pub const ENVIRONMENT_OPERATION_GENERATION_ENV: &str = "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION";
 pub use codewire_daemon::config::HOSTED_PROJECTION_SHA256_ENV;
-pub const CREDENTIAL_HTTPS_AUTHORITY_ENV: &str = "CODEWIRE_CREDENTIAL_HTTPS_AUTHORITY";
-pub const CREDENTIAL_HTTPS_LISTEN_ADDR_ENV: &str = "CODEWIRE_CREDENTIAL_HTTPS_LISTEN_ADDR";
 pub const CREDENTIAL_GATEWAY_TOKEN_FILE_ENV: &str = "CODEWIRE_CREDENTIAL_GATEWAY_TOKEN_FILE";
-pub const CREDENTIAL_TLS_CERT_FILE_ENV: &str = "CODEWIRE_CREDENTIAL_TLS_CERT_FILE";
-pub const CREDENTIAL_TLS_KEY_FILE_ENV: &str = "CODEWIRE_CREDENTIAL_TLS_KEY_FILE";
 pub const CREDENTIAL_BROKER_HTTPS_ORIGIN_ENV: &str = "CODEWIRE_CREDENTIAL_BROKER_HTTPS_ORIGIN";
 pub const CREDENTIAL_BROKER_TLS_ROOTS_FILE_ENV: &str = "CODEWIRE_CREDENTIAL_BROKER_TLS_ROOTS_FILE";
-pub const CREDENTIAL_HTTPS_PORT: u16 = 8443;
 
-const CREDENTIAL_ENV_GROUP: [&str; 8] = [
+/// A gateway Deployment rendered before the workspace-facing credential
+/// HTTPS listener was removed still sets that listener's coordinates until its
+/// next render. They select nothing and are ignored.
+const CREDENTIAL_ENV_GROUP: [&str; 4] = [
     ENVIRONMENT_OPERATION_GENERATION_ENV,
-    CREDENTIAL_HTTPS_AUTHORITY_ENV,
-    CREDENTIAL_HTTPS_LISTEN_ADDR_ENV,
     CREDENTIAL_GATEWAY_TOKEN_FILE_ENV,
-    CREDENTIAL_TLS_CERT_FILE_ENV,
-    CREDENTIAL_TLS_KEY_FILE_ENV,
     CREDENTIAL_BROKER_HTTPS_ORIGIN_ENV,
     CREDENTIAL_BROKER_TLS_ROOTS_FILE_ENV,
 ];
@@ -70,11 +64,7 @@ const CREDENTIAL_ENV_GROUP: [&str; 8] = [
 pub struct CredentialRuntimeConfig {
     environment_id: Uuid,
     operation_generation: u64,
-    https_authority: String,
-    pub(crate) listen_addr: SocketAddr,
     gateway_token_file: PathBuf,
-    tls_cert_file: PathBuf,
-    tls_key_file: PathBuf,
     broker_https_origin: String,
     broker_tls_roots_file: PathBuf,
     hosted_projection_sha256: Option<[u8; 32]>,
@@ -103,28 +93,10 @@ impl CredentialRuntimeConfig {
         )))
     }
 
-    pub(crate) fn server_tls(&self) -> Result<ServerTlsFiles, ConfigError> {
-        ServerTlsFiles::new(self.tls_cert_file.clone(), self.tls_key_file.clone())
-            .map_err(|_| ConfigError::InvalidCredentialRuntime)
-    }
-
     pub(crate) fn broker_endpoint(&self) -> Result<ClientTlsEndpoint, ConfigError> {
         ClientTlsEndpoint::new(
             self.broker_https_origin.clone(),
             self.broker_tls_roots_file.clone(),
-        )
-        .map_err(|_| ConfigError::InvalidCredentialRuntime)
-    }
-
-    pub(crate) fn ingress(
-        &self,
-    ) -> Result<crate::credentials::CredentialIngressConfig, ConfigError> {
-        crate::credentials::CredentialIngressConfig::new(
-            self.environment_id,
-            self.operation_generation,
-            &self.https_authority,
-            self.gateway_token_file.clone(),
-            self.broker_endpoint()?,
         )
         .map_err(|_| ConfigError::InvalidCredentialRuntime)
     }
@@ -185,12 +157,6 @@ impl CredentialRuntimeConfig {
         {
             return Err(ConfigError::InvalidCredentialRuntime);
         }
-        let listen_addr: SocketAddr = required(CREDENTIAL_HTTPS_LISTEN_ADDR_ENV)?
-            .parse()
-            .map_err(|_| ConfigError::InvalidCredentialRuntime)?;
-        if listen_addr.port() != CREDENTIAL_HTTPS_PORT {
-            return Err(ConfigError::InvalidCredentialRuntime);
-        }
         let path = |name| -> Result<PathBuf, ConfigError> {
             let path = PathBuf::from(required(name)?);
             if !path.is_absolute() || path.file_name().is_none() {
@@ -202,16 +168,11 @@ impl CredentialRuntimeConfig {
             hosted_projection_sha256,
             environment_id,
             operation_generation,
-            https_authority: required(CREDENTIAL_HTTPS_AUTHORITY_ENV)?,
-            listen_addr,
             gateway_token_file: path(CREDENTIAL_GATEWAY_TOKEN_FILE_ENV)?,
-            tls_cert_file: path(CREDENTIAL_TLS_CERT_FILE_ENV)?,
-            tls_key_file: path(CREDENTIAL_TLS_KEY_FILE_ENV)?,
             broker_https_origin: required(CREDENTIAL_BROKER_HTTPS_ORIGIN_ENV)?,
             broker_tls_roots_file: path(CREDENTIAL_BROKER_TLS_ROOTS_FILE_ENV)?,
         };
-        config.server_tls()?;
-        config.ingress()?;
+        config.broker_endpoint()?;
         Ok(Some(config))
     }
 }

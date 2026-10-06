@@ -233,7 +233,6 @@ grep -Fq "'\$pod_name', '\$pod_ip', true" <<<"$resize_fixture" ||
 for binding in \
     'CRD_SMOKE_RESIZE_PHASE=render CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id"' \
     'SANDBOX_CREDENTIAL_BROKER_NAMESPACE="$NS"' \
-    'SANDBOX_CREDENTIAL_GATEWAY_ROOTS_CONFIGMAP=codewire-credential-gateway-roots' \
     'SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP=codewire-credential-broker-roots' \
     'CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token"' \
     '"$CARGO_CI_DIR/crd-smoke" >"$resize_manifest"' \

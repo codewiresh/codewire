@@ -69,13 +69,11 @@ spec:
             - name: ORCHESTRATION_WORKSPACE_BINDING_PORT
               value: "8087"
             # Public trust only. The separate infrastructure owner provisions
-            # both bundles and the namespace-local gateway Issuer before rollout.
+            # the broker bundle before rollout.
             - name: SANDBOX_CREDENTIAL_BROKER_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: SANDBOX_CREDENTIAL_GATEWAY_ROOTS_CONFIGMAP
-              value: codewire-credential-gateway-roots
             - name: SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP
               value: codewire-credential-broker-roots
             - name: POD_NAMESPACE

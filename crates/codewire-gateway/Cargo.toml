@@ -54,9 +54,6 @@ codewire-credential-broker = { path = "../codewire-credential-broker", default-f
 rcgen = "0.13"
 boringtun = "0.7"
 chrono = { workspace = true }
-http-body-util = { workspace = true }
-hyper = { workspace = true, features = ["client", "http2"] }
-hyper-util = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true }

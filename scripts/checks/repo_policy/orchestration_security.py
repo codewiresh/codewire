@@ -645,9 +645,10 @@ def warm_bridge_self_test(goldens: dict[str, Any], manifests: list[str]) -> None
     rejected("every namespace", "daemon", lambda f: f["spec"]["ingress"][0]["from"].append({"namespaceSelector": {}}))
     rejected("an address block", "daemon", lambda f: f["spec"]["ingress"][0]["from"].append({"ipBlock": {"cidr": "10.0.0.0/8"}}))
     rejected("every source", "daemon", lambda f: f["spec"]["ingress"][0].pop("from"))
-    rejected("orchestration egress", "daemon", lambda f: f["spec"]["egress"].append(
-        {"to": f["spec"]["ingress"][1]["from"], "ports": [{"port": 8084, "protocol": "TCP"}]}))
-    rejected("isolating an ungranted direction", "daemon", lambda f: f["spec"].pop("egress"))
+    rejected("orchestration egress", "daemon", lambda f: f["spec"].update(
+        egress=[{"to": f["spec"]["ingress"][1]["from"], "ports": [{"port": 8084, "protocol": "TCP"}]}],
+        policyTypes=["Ingress", "Egress"]))
+    rejected("isolating an ungranted direction", "daemon", lambda f: f["spec"]["policyTypes"].append("Egress"))
     rejected("gateway half on every gateway", "gw", lambda f: f["spec"]["podSelector"]["matchLabels"].pop("codewire.sh/environment-id"))
     rejected("gateway half on another environment's gateway", "gw", lambda f: f["spec"]["podSelector"]["matchLabels"].__setitem__(
         "codewire.sh/environment-id", other_environment))
@@ -656,8 +657,10 @@ def warm_bridge_self_test(goldens: dict[str, Any], manifests: list[str]) -> None
         {"to": [{"podSelector": {"matchLabels": {SANDBOX_UID_LABEL: "5e2d8c41-7a3b-4f90-b6e1-2c9d0a8f7b34", "codewire.sh/type": "workspace"}}}]}))
     rejected("gateway half to the environment's workspaces", "gw", lambda f: f["spec"]["egress"][0]["to"].append(
         {"podSelector": {"matchLabels": {"codewire.sh/environment-id": f["metadata"]["labels"]["codewire.sh/environment-id"], "codewire.sh/type": "workspace"}}}))
-    rejected("gateway half from orchestration", "gw", lambda f: f["spec"]["ingress"][0]["from"].append(
-        {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "dev"}}, "podSelector": {"matchLabels": ORCHESTRATION_PEER_POD}}))
+    rejected("gateway half from orchestration", "gw", lambda f: f["spec"].update(
+        ingress=[{"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "dev"}},
+                            "podSelector": {"matchLabels": ORCHESTRATION_PEER_POD}}]}],
+        policyTypes=["Ingress", "Egress"]))
     if not warm_bridge_source_violations('json!({"agents.x-k8s.io/sandbox-name-hash": hash})', 'pub const SANDBOX_UID_LABEL: &str = "agents.x-k8s.io/sandbox-uid";'):
         raise RuntimeError("negative bridge source fixture (renderer names a label key) was accepted")
     if not warm_bridge_source_violations("", 'pub const SANDBOX_UID_LABEL: &str = "agents.x-k8s.io/sandbox-name-hash";'):
