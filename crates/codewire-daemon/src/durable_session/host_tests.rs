@@ -3,6 +3,8 @@ use super::*;
 #[cfg(target_os = "linux")]
 use crate::host_control::tests as control_fixture;
 #[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 #[cfg(target_os = "linux")]
@@ -732,8 +734,232 @@ fn alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
+#[cfg(target_os = "linux")]
+fn assert_no_fixture_children() {
+    let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_ALL,
+            0,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT | libc::__WALL,
+        )
+    };
+    let error = std::io::Error::last_os_error();
+    assert!(
+        result == -1 && error.raw_os_error() == Some(libc::ECHILD),
+        "isolated descendant fixture still owns children: result={result}, error={error}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+async fn isolated_descendant_fixture(case: &str) -> bool {
+    const MARKER: &str = "CW_TEST_HOST_DESCENDANT_OWNER";
+    let test = format!("durable_session::host_tests::{case}");
+    if let Some(marker) = std::env::var_os(MARKER) {
+        assert_eq!(marker, std::ffi::OsStr::new(&test));
+        assert_eq!(
+            std::env::args().skip(1).collect::<Vec<_>>(),
+            ["--exact", &test, "--nocapture", "--test-threads=1"]
+        );
+        assert!(std::env::vars_os().all(|(name, _)| {
+            [MARKER, "HOME", "PATH", "SHELL", "TMPDIR"]
+                .iter()
+                .any(|allowed| name == std::ffi::OsStr::new(allowed))
+        }));
+        // Only this exact, isolated test process adopts its real orphaned
+        // descendants. The parallel test runner never becomes a subreaper.
+        assert_no_fixture_children();
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
+            0
+        );
+        let mut active = 0;
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut active, 0, 0, 0) },
+            0
+        );
+        assert_eq!(active, 1);
+        return false;
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &test, "--nocapture", "--test-threads=1"])
+        .env_clear()
+        .env(MARKER, &test)
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin")
+        .env("SHELL", "/bin/sh")
+        .env("TMPDIR", std::env::temp_dir())
+        .current_dir(home.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let status = match tokio::time::timeout(Duration::from_secs(20), child.wait()).await {
+        Ok(Ok(status)) => status,
+        outcome => {
+            let _ = child.start_kill();
+            tokio::time::timeout(Duration::from_secs(3), child.wait())
+                .await
+                .expect("isolated descendant fixture cleanup remains unknown")
+                .expect("isolated descendant fixture child was not reaped");
+            panic!("isolated descendant fixture failed (case={case}): {outcome:?}");
+        }
+    };
+    assert!(
+        status.success(),
+        "isolated descendant fixture failed: {case}"
+    );
+    true
+}
+
+#[cfg(target_os = "linux")]
+struct FixtureDescendant {
+    pid: u32,
+    birth: u64,
+    pidfd: OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+impl FixtureDescendant {
+    fn children(pid: u32) -> std::collections::BTreeSet<u32> {
+        let mut children = std::collections::BTreeSet::new();
+        for task in std::fs::read_dir(format!("/proc/{pid}/task")).unwrap() {
+            let task = task.unwrap();
+            for child in std::fs::read_to_string(task.path().join("children"))
+                .unwrap()
+                .split_whitespace()
+            {
+                let child = child.parse::<u32>().unwrap();
+                assert_ne!(child, 0);
+                children.insert(child);
+            }
+        }
+        children
+    }
+
+    fn assert_parent(&self, parent: u32, session: u32) {
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", self.pid)).unwrap();
+        let fields = stat
+            .rsplit_once(") ")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        assert_eq!(fields[1].parse::<u32>().unwrap(), parent);
+        assert_eq!(fields[3].parse::<u32>().unwrap(), session);
+        assert_eq!(fields[19].parse::<u64>().unwrap(), self.birth);
+    }
+
+    fn capture_fixture_descendants() -> (Self, Vec<Self>) {
+        // This dedicated test owns exactly one live session at a time. Discover
+        // only its original leader and that leader's children before Stop.
+        let owner = std::process::id();
+        let children = Self::children(owner);
+        assert_eq!(children.len(), 1);
+        let leader = Self::capture(*children.iter().next().unwrap());
+        leader.assert_parent(owner, leader.pid);
+        assert_eq!(
+            unsafe { libc::getpgid(leader.pid.try_into().unwrap()) },
+            libc::pid_t::try_from(leader.pid).unwrap()
+        );
+        assert!(alive(leader.pid));
+        let descendants = Self::children(leader.pid)
+            .into_iter()
+            .map(|pid| {
+                let descendant = Self::capture(pid);
+                descendant.assert_parent(leader.pid, leader.pid);
+                descendant
+            })
+            .collect();
+        leader.assert_parent(owner, leader.pid);
+        assert!(alive(leader.pid));
+        assert_eq!(
+            unsafe { libc::getpgid(leader.pid.try_into().unwrap()) },
+            libc::pid_t::try_from(leader.pid).unwrap()
+        );
+        // Retain the leader's identity, but let production Child.wait reap it.
+        // Any missed/raced descendant still refuses final ECHILD.
+        (leader, descendants)
+    }
+
+    fn birth(pid: u32) -> std::io::Result<u64> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+        stat.rsplit_once(") ")
+            .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+            .and_then(|birth| birth.parse().ok())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid descendant birth")
+            })
+    }
+
+    fn capture(pid: u32) -> Self {
+        // Natural exit can precede capture. A zombie still has an exact
+        // identity; binding does not require authority to signal it.
+        let birth = Self::birth(pid).unwrap();
+        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        assert!(raw >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+        let pidfd = unsafe { OwnedFd::from_raw_fd(raw.try_into().unwrap()) };
+        assert_eq!(Self::birth(pid).unwrap(), birth);
+        Self { pid, birth, pidfd }
+    }
+
+    fn reap(&self) {
+        // The original !alive assertion comes first. This fixture only joins
+        // an ended original process; it never signals or fabricates cleanup.
+        let mut ready = libc::pollfd {
+            fd: self.pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut ready, 1, 0) }, 1);
+        assert_ne!(ready.revents & libc::POLLIN, 0);
+        let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PIDFD,
+                self.pidfd.as_raw_fd().try_into().unwrap(),
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::__WALL,
+            )
+        };
+        let error = std::io::Error::last_os_error();
+        if result == 0 {
+            assert_eq!(
+                unsafe { info.si_pid() },
+                libc::pid_t::try_from(self.pid).unwrap()
+            );
+            assert!(matches!(
+                info.si_code,
+                libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
+            ));
+        } else {
+            assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+            // The original waiting shell may already have reaped its child.
+            // Terminal pidfd plus absence of the original birth proves that
+            // path; ECHILD alone and a remaining same-birth zombie do not.
+            match Self::birth(self.pid) {
+                Ok(birth) => assert_ne!(birth, self.birth, "original descendant was not reaped"),
+                Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn host_stop_owns_shell_descendants_for_pipe_and_pty_preserving_unrelated_child() {
+    #[cfg(target_os = "linux")]
+    if isolated_descendant_fixture(
+        "host_stop_owns_shell_descendants_for_pipe_and_pty_preserving_unrelated_child",
+    )
+    .await
+    {
+        return;
+    }
     for pty in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let engine = host_engine(temp.path());
@@ -752,6 +978,8 @@ async fn host_stop_owns_shell_descendants_for_pipe_and_pty_preserving_unrelated_
         assert_eq!(record.state, v1::SessionLifecycleState::Running as i32);
         assert!(!record.cleanup_unknown);
         let descendant_pid: u32 = wait_file(&descendant).await.trim().parse().unwrap();
+        #[cfg(target_os = "linux")]
+        let descendant = FixtureDescendant::capture(descendant_pid);
         let stopped = tokio::time::timeout(Duration::from_secs(4), engine.stop(&record.session_id))
             .await
             .unwrap()
@@ -762,15 +990,27 @@ async fn host_stop_owns_shell_descendants_for_pipe_and_pty_preserving_unrelated_
             !alive(descendant_pid),
             "ordinary descendant survived host Stop (pty={pty})"
         );
+        #[cfg(target_os = "linux")]
+        descendant.reap();
         assert!(alive(unrelated_pid), "unrelated process was signaled");
         assert!(!temp.path().join("home/.codewire").exists());
         engine.shutdown().await.unwrap();
         unrelated.kill().await.unwrap();
     }
+    #[cfg(target_os = "linux")]
+    assert_no_fixture_children();
 }
 
 #[tokio::test]
 async fn host_exit_cleans_remaining_descendants_before_reaping_group_leader() {
+    #[cfg(target_os = "linux")]
+    if isolated_descendant_fixture(
+        "host_exit_cleans_remaining_descendants_before_reaping_group_leader",
+    )
+    .await
+    {
+        return;
+    }
     for pty in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let engine = host_engine(temp.path());
@@ -781,6 +1021,8 @@ async fn host_exit_cleans_remaining_descendants_before_reaping_group_leader() {
         );
         let record = engine.launch(request(&script, pty)).await.unwrap();
         let pid: u32 = wait_file(&descendant).await.trim().parse().unwrap();
+        #[cfg(target_os = "linux")]
+        let descendant = FixtureDescendant::capture(pid);
         let ended = tokio::time::timeout(Duration::from_secs(4), async {
             loop {
                 let record = engine.get(&record.session_id).await.unwrap();
@@ -796,15 +1038,29 @@ async fn host_exit_cleans_remaining_descendants_before_reaping_group_leader() {
         assert_eq!(ended.exit_code, Some(7));
         assert!(!ended.cleanup_unknown);
         assert!(!alive(pid));
+        #[cfg(target_os = "linux")]
+        descendant.reap();
         engine.shutdown().await.unwrap();
     }
+    #[cfg(target_os = "linux")]
+    assert_no_fixture_children();
 }
 
 #[tokio::test]
 async fn host_shutdown_cleans_owned_groups_and_records_confirmed_completion() {
+    #[cfg(target_os = "linux")]
+    if isolated_descendant_fixture(
+        "host_shutdown_cleans_owned_groups_and_records_confirmed_completion",
+    )
+    .await
+    {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let engine = host_engine(temp.path());
     let mut ids = Vec::new();
+    #[cfg(target_os = "linux")]
+    let mut descendants = std::collections::BTreeMap::new();
     for pty in [false, true] {
         let path = temp.path().join(format!("descendant-{pty}.pid"));
         let script = format!(
@@ -813,6 +1069,8 @@ async fn host_shutdown_cleans_owned_groups_and_records_confirmed_completion() {
         );
         let record = engine.launch(request(&script, pty)).await.unwrap();
         let pid: u32 = wait_file(&path).await.trim().parse().unwrap();
+        #[cfg(target_os = "linux")]
+        descendants.insert(pid, FixtureDescendant::capture(pid));
         ids.push((record.session_id, pid));
     }
     tokio::time::timeout(Duration::from_secs(5), engine.shutdown())
@@ -822,10 +1080,14 @@ async fn host_shutdown_cleans_owned_groups_and_records_confirmed_completion() {
     let recovered = host_engine(temp.path());
     for (id, pid) in ids {
         assert!(!alive(pid));
+        #[cfg(target_os = "linux")]
+        descendants.get(&pid).unwrap().reap();
         let record = recovered.get(&id).await.unwrap();
         assert_eq!(record.state, v1::SessionLifecycleState::Stopped as i32);
         assert!(!record.cleanup_unknown);
     }
+    #[cfg(target_os = "linux")]
+    assert_no_fixture_children();
 }
 
 #[tokio::test]
@@ -1125,6 +1387,11 @@ async fn acknowledged_host_input_reaches_owned_stdin_and_rejects_empty_oversized
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn host_pty_cleanup_includes_ordinary_terminal_job_control_groups() {
+    if isolated_descendant_fixture("host_pty_cleanup_includes_ordinary_terminal_job_control_groups")
+        .await
+    {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let engine = host_engine(temp.path());
     let descendant = temp.path().join("job.pid");
@@ -1142,6 +1409,7 @@ async fn host_pty_cleanup_includes_ordinary_terminal_job_control_groups() {
     ];
     let record = engine.launch(req).await.unwrap();
     let pid: u32 = wait_file(&descendant).await.trim().parse().unwrap();
+    let descendant = FixtureDescendant::capture(pid);
     // Interactive bash puts jobs in a separate group in the same owned session.
     assert_ne!(unsafe { libc::getpgid(pid as i32) }, unsafe {
         libc::getsid(pid as i32)
@@ -1150,11 +1418,21 @@ async fn host_pty_cleanup_includes_ordinary_terminal_job_control_groups() {
     assert_eq!(stopped.state, v1::SessionLifecycleState::Stopped as i32);
     assert!(!stopped.cleanup_unknown);
     assert!(!alive(pid));
+    descendant.reap();
     engine.shutdown().await.unwrap();
+    assert_no_fixture_children();
 }
 
 #[tokio::test]
 async fn host_launch_cancellation_cleans_spawned_descendants_before_failed_acknowledgement() {
+    #[cfg(target_os = "linux")]
+    if isolated_descendant_fixture(
+        "host_launch_cancellation_cleans_spawned_descendants_before_failed_acknowledgement",
+    )
+    .await
+    {
+        return;
+    }
     for pty in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let engine = host_engine(temp.path());
@@ -1189,6 +1467,8 @@ async fn host_launch_cancellation_cleans_spawned_descendants_before_failed_ackno
         });
         // The persisted Running transition is held until after cancellation.
         let pid: u32 = wait_file(&marker).await.trim().parse().unwrap();
+        #[cfg(target_os = "linux")]
+        let descendant = FixtureDescendant::capture(pid);
         cancel.cancel();
         drop(metadata);
         let record = tokio::time::timeout(Duration::from_secs(4), task)
@@ -1199,12 +1479,24 @@ async fn host_launch_cancellation_cleans_spawned_descendants_before_failed_ackno
         assert_eq!(record.state, v1::SessionLifecycleState::Failed as i32);
         assert!(!record.cleanup_unknown);
         assert!(!alive(pid));
+        #[cfg(target_os = "linux")]
+        descendant.reap();
         engine.shutdown().await.unwrap();
     }
+    #[cfg(target_os = "linux")]
+    assert_no_fixture_children();
 }
 
 #[tokio::test]
 async fn acknowledged_host_input_accepts_maximum_and_times_out_without_replay_or_wedged_stop() {
+    #[cfg(target_os = "linux")]
+    if isolated_descendant_fixture(
+        "acknowledged_host_input_accepts_maximum_and_times_out_without_replay_or_wedged_stop",
+    )
+    .await
+    {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let engine = host_engine(temp.path());
     let draining = engine
@@ -1215,7 +1507,14 @@ async fn acknowledged_host_input_accepts_maximum_and_times_out_without_replay_or
         .send_input(&draining.session_id, vec![b'x'; SESSION_INPUT_MAX_BYTES])
         .await
         .unwrap();
+    #[cfg(target_os = "linux")]
+    let (_draining_leader, draining_descendants) = FixtureDescendant::capture_fixture_descendants();
     engine.stop(&draining.session_id).await.unwrap();
+    #[cfg(target_os = "linux")]
+    for descendant in draining_descendants {
+        assert!(!alive(descendant.pid));
+        descendant.reap();
+    }
     let blocked = engine.launch(request("sleep 60", false)).await.unwrap();
     // Pipe capacity varies by host. Each successful acknowledgement is a new
     // write; stop on the FIRST ambiguous result, never replay a timed-out write.
@@ -1236,12 +1535,21 @@ async fn acknowledged_host_input_accepts_maximum_and_times_out_without_replay_or
         matches!(ambiguous, Some(SessionError::DeadlineExceeded(_))),
         "{ambiguous:?}"
     );
+    #[cfg(target_os = "linux")]
+    let (_blocked_leader, blocked_descendants) = FixtureDescendant::capture_fixture_descendants();
     let stopped = tokio::time::timeout(Duration::from_secs(3), engine.stop(&blocked.session_id))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(stopped.state, v1::SessionLifecycleState::Stopped as i32);
+    #[cfg(target_os = "linux")]
+    for descendant in blocked_descendants {
+        assert!(!alive(descendant.pid));
+        descendant.reap();
+    }
     engine.shutdown().await.unwrap();
+    #[cfg(target_os = "linux")]
+    assert_no_fixture_children();
 }
 
 #[tokio::test]
