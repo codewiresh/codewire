@@ -21,9 +21,9 @@ use super::environments::{
 };
 use crate::confidential_storage::require_interactive_access;
 
-/// Ports reserved for the Sandbox runtime: the daemon's SSH (2222) and 2223.
+/// The one port reserved in the workspace Pod: the daemon's SSH server.
 fn is_reserved_port(port: i32) -> bool {
-    port == 2222 || port == 2223
+    port == i32::from(codewire_gateway_proto::WORKSPACE_SSH_PORT)
 }
 
 pub(crate) fn validate_preview_port(port: i32, label: &str, access: &str) -> AppResult<()> {
@@ -430,7 +430,6 @@ mod tests {
             (0, "web", "creator"),
             (65536, "web", "creator"),
             (2222, "web", "creator"),
-            (2223, "web", "creator"),
             (3000, "", "creator"),
             (3000, "x", "creator"),
             (3000, "Web", "creator"),
@@ -442,6 +441,8 @@ mod tests {
             assert!(validate_preview_port(port, label, access).is_err());
         }
         assert!(validate_preview_port(3000, &"a".repeat(23), "creator").is_err());
+        // Only the daemon's SSH port is reserved; its neighbour is ordinary.
+        validate_preview_port(2223, "web", "creator").unwrap();
     }
 
     #[test]
