@@ -3200,20 +3200,21 @@ environment_resize_smoke() (
   local template_name shadow_pool_name
   local claim_name="sandbox-${environment_id}"
   local daemon_service="cw-daemon-${environment_id}"
-  local daemon_token sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid
+  local sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid
   local operation_id operation_state response runtime_state marker image resources
   local resize_manifest="$RUN_DIR/resize-$environment_id.json"
   trap 'rm -f -- "$resize_manifest"' EXIT
-  daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
 
   # Render through the same production code that runtime reconciliation validates.
   # No cluster mutation occurs before these exact object identities are known.
+  # The workspace is identity-free, as every commodity workspace is: Ready on
+  # its daemon's local marker, and bound by the resize's runtime-identity
+  # reconcile, which then waits for its SSH access as a start does.
   CRD_SMOKE_RESIZE_PHASE=render CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id" \
     CRD_SMOKE_NAMESPACE="$SANDBOX_NS" CRD_SMOKE_SERVER_NAMESPACE="$NS" \
     CRD_SMOKE_LOCAL_IMAGES=1 CRD_SMOKE_WORKSPACE_IMAGE=codewire-gateway:e2e \
     SANDBOX_CREDENTIAL_BROKER_NAMESPACE="$NS" \
     SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP=codewire-credential-broker-roots \
-    CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
     "$CARGO_CI_DIR/crd-smoke" >"$resize_manifest"
   template_name="$(jq -er '.items[] | select(.kind == "SandboxTemplate") | .metadata.name' "$resize_manifest")"
   shadow_pool_name="$(jq -er '.items[] | select(.kind == "SandboxWarmPool") | .metadata.name' "$resize_manifest")"

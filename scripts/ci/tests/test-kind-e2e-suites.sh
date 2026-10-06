@@ -243,7 +243,6 @@ for binding in \
     'CRD_SMOKE_RESIZE_PHASE=render CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id"' \
     'SANDBOX_CREDENTIAL_BROKER_NAMESPACE="$NS"' \
     'SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP=codewire-credential-broker-roots' \
-    'CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token"' \
     'assert_no_kind_gateway_objects "$environment_id"' \
     '"$CARGO_CI_DIR/crd-smoke" >"$resize_manifest"' \
     'select(.kind == "SandboxTemplate") | .metadata.name' \
@@ -352,8 +351,15 @@ fi
 
 bash -n "$SCRIPT" "$COMMON" "$INTEGRATED" "$DASHBOARD_BROWSER" "$FINAL_FENCING" \
   "$ENVIRONMENT_SESSION" "$SANDBOX_SUPPLY_CHAIN" "$RUNTIME_ACCEPTANCE" "$0"
-grep -Fq 'CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token"' "$COMMON" ||
-  fail 'the resize workspace daemon does not receive the daemon-scoped capability'
+# The resize workspace is identity-free: it is bound by the resize's own
+# reconcile and never receives an environment capability.
+if grep -Fq 'CRD_SMOKE_DAEMON_AUTH_TOKEN' "$COMMON" \
+  "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs"; then
+  fail 'the resize workspace still receives an environment daemon capability'
+fi
+grep -Fq 'workspace_identity: WorkspaceIdentity::Binding {' \
+  "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
+  fail 'the resize workspace is not rendered identity-free'
 grep -Fq 'CRD_SMOKE_ACCESS_PHASE=cleanup' "$COMMON" ||
   fail 'the FileService fixture does not remove and recheck the access objects'
 grep -Fq 'CRD_SMOKE_ACCESS_PHASE must be full, setup, or cleanup' \

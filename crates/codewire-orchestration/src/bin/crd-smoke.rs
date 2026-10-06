@@ -22,14 +22,15 @@ use codewire_gateway_proto::{WORKSPACE_SSH_PORT, WORKSPACE_TAILNET_UDP_PORT};
 use codewire_orchestration::sandbox::client::SandboxClient;
 use codewire_orchestration::sandbox::template::{
     CredentialRuntimeTemplateConfig, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_RUNC, TemplateOpts,
-    gateway_host_key_secret_name, gateway_network_policy_name, gateway_service_name,
-    gateway_workload_name, render_sandbox_shadow_pool, render_sandbox_template,
-    render_workspace_daemon_service, warm_member_gateway_bridge_name,
+    WorkspaceIdentity, gateway_host_key_secret_name, gateway_network_policy_name,
+    gateway_service_name, gateway_workload_name, render_sandbox_shadow_pool,
+    render_sandbox_template, render_workspace_daemon_service, warm_member_gateway_bridge_name,
     workspace_daemon_network_policy_name, workspace_daemon_service_name,
 };
 use codewire_orchestration::sandbox::{
     ClaimOpts, environment_template_name, render_sandbox_claim, shadow_warm_pool_name,
 };
+use codewire_orchestration::worker::create::workspace_binding_url;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{Secret, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
@@ -53,7 +54,6 @@ async fn main() -> anyhow::Result<()> {
             "render" => {
                 let server_namespace = std::env::var("CRD_SMOKE_SERVER_NAMESPACE")
                     .unwrap_or_else(|_| namespace.clone());
-                let daemon_auth_token = required_resize_capability("CRD_SMOKE_DAEMON_AUTH_TOKEN")?;
                 let credential_runtime = CredentialRuntimeTemplateConfig::from_env(&namespace)?
                     .ok_or_else(|| {
                         anyhow::anyhow!(
@@ -64,7 +64,6 @@ async fn main() -> anyhow::Result<()> {
                     &namespace,
                     &server_namespace,
                     &environment_id,
-                    &daemon_auth_token,
                     Some(credential_runtime),
                 )?;
                 println!("{}", serde_json::to_string(&rendered)?);
@@ -216,20 +215,14 @@ fn validate_resize_environment_id(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn required_resize_capability(name: &str) -> anyhow::Result<String> {
-    let value = std::env::var(name).map_err(|_| anyhow::anyhow!("{name} is required"))?;
-    anyhow::ensure!(
-        !value.trim().is_empty() && value.trim() == value,
-        "{name} must be a non-empty canonical capability"
-    );
-    Ok(value)
-}
-
+/// The resize smoke's environment, rendered identity-free like every
+/// commodity workspace: the Pod carries no capability or environment
+/// identity, writes its readiness marker before it binds, and is bound by the
+/// resize's own runtime-identity reconcile, as a start binds a replacement.
 fn render_resize_fixture(
     namespace: &str,
     server_namespace: &str,
     environment_id: &str,
-    daemon_auth_token: &str,
     credential_runtime: Option<CredentialRuntimeTemplateConfig>,
 ) -> anyhow::Result<Value> {
     validate_resize_environment_id(environment_id)?;
@@ -239,10 +232,6 @@ fn render_resize_fixture(
             && !server_namespace.trim().is_empty()
             && server_namespace.trim() == server_namespace,
         "resize fixture namespaces must be non-empty canonical values"
-    );
-    anyhow::ensure!(
-        !daemon_auth_token.trim().is_empty() && daemon_auth_token.trim() == daemon_auth_token,
-        "resize fixture requires a canonical daemon capability"
     );
 
     let template_name = environment_template_name(RESIZE_TEMPLATE_BASE, environment_id);
@@ -257,7 +246,9 @@ fn render_resize_fixture(
         organization_id: "org_contract_1".into(),
         operation_generation: 1,
         credential_runtime,
-        daemon_auth_token: daemon_auth_token.into(),
+        workspace_identity: WorkspaceIdentity::Binding {
+            binding_url: workspace_binding_url(server_namespace),
+        },
         server_namespace: server_namespace.into(),
         cpu_millicores: 250,
         memory_mib: 256,
@@ -290,11 +281,6 @@ fn render_resize_fixture(
         "rendered resize workspace image changed"
     );
     workspace["imagePullPolicy"] = "Never".into();
-    workspace["readinessProbe"] = json!({
-        "tcpSocket": {"port": 7777},
-        "periodSeconds": 1,
-        "timeoutSeconds": 1,
-    });
     workspace["env"]
         .as_array_mut()
         .ok_or_else(|| anyhow::anyhow!("rendered resize workspace environment is malformed"))?
@@ -661,14 +647,7 @@ mod tests {
     const RESIZE_ENV: &str = "00000000-0000-4000-8000-000000000123";
 
     fn resize_fixture() -> serde_json::Value {
-        render_resize_fixture(
-            "dev-sandboxes",
-            "codewire-e2e",
-            RESIZE_ENV,
-            "synthetic-daemon-capability",
-            None,
-        )
-        .unwrap()
+        render_resize_fixture("dev-sandboxes", "codewire-e2e", RESIZE_ENV, None).unwrap()
     }
 
     fn item<'a>(fixture: &'a serde_json::Value, kind: &str) -> &'a serde_json::Value {
@@ -741,10 +720,9 @@ mod tests {
         let template = item(&fixture, "SandboxTemplate");
         let template_name = format!("{RESIZE_TEMPLATE_BASE}-{RESIZE_ENV}");
         assert_eq!(template["metadata"]["name"], template_name);
-        assert_eq!(
-            template["metadata"]["labels"]["codewire.sh/environment-id"],
-            RESIZE_ENV
-        );
+        // Identity-free: the environment-owned shadow pool names the
+        // template, which carries no environment label.
+        assert_eq!(template["metadata"]["labels"], serde_json::json!({}));
         let pool = item(&fixture, "SandboxWarmPool");
         let pool_name = pool["metadata"]["name"].as_str().unwrap();
         assert_eq!(pool_name.len(), 63);
@@ -790,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_fixture_keeps_daemon_bootstrap_mounts_and_only_synthetic_identity() {
+    fn resize_fixture_keeps_daemon_bootstrap_mounts_and_renders_no_identity() {
         let fixture = resize_fixture();
         let template = item(&fixture, "SandboxTemplate");
         assert_eq!(
@@ -818,14 +796,25 @@ mod tests {
             .unwrap();
         assert_eq!(workspace["image"], "codewire-gateway:e2e");
         assert_eq!(workspace["imagePullPolicy"], "Never");
+        // Ready on the daemon's local marker, written before it binds: the
+        // resize's reconcile binds it, as a start binds a replacement Pod.
         assert_eq!(
-            workspace["readinessProbe"],
-            serde_json::json!({
-                "tcpSocket":{"port":7777},
-                "periodSeconds":1,
-                "timeoutSeconds":1,
-            })
+            workspace["readinessProbe"]["exec"]["command"][2],
+            "test -f /codewire/run/daemon/ready"
         );
+        let env = workspace["env"].as_array().unwrap();
+        let named = |name: &str| env.iter().find(|entry| entry["name"] == name);
+        assert_eq!(
+            named("CODEWIRE_WORKSPACE_BINDING_URL").unwrap()["value"],
+            "https://codewire-orchestration-workspace-binding.codewire-e2e.svc.cluster.local:8087"
+        );
+        for absent in [
+            "CODEWIRE_DAEMON_AUTH_TOKEN",
+            "CODEWIRE_ENVIRONMENT_ID",
+            "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
+        ] {
+            assert!(named(absent).is_none(), "{absent} is rendered");
+        }
         assert!(
             workspace["command"]
                 .as_array()
@@ -877,17 +866,8 @@ mod tests {
         ] {
             assert!(validate_resize_environment_id(invalid).is_err());
         }
-        for capability in ["", " padded-capability "] {
-            assert!(
-                render_resize_fixture(
-                    "dev-sandboxes",
-                    "codewire-e2e",
-                    RESIZE_ENV,
-                    capability,
-                    None,
-                )
-                .is_err()
-            );
+        for (namespace, server_namespace) in [("", "codewire-e2e"), ("dev-sandboxes", " e2e")] {
+            assert!(render_resize_fixture(namespace, server_namespace, RESIZE_ENV, None).is_err());
         }
     }
 }
