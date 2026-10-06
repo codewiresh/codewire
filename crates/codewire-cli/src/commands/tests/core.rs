@@ -12,16 +12,25 @@
         assert!(!stopped.to_ascii_lowercase().contains("deleted"));
     }
 
+    const TEST_CW: &str = "/opt/codewire/bin/cw";
+
+    fn ssh_test_options(ssh_options: &[&str]) -> SshConfigOptions {
+        SshConfigOptions {
+            cw_command: TEST_CW.to_string(),
+            ssh_options: ssh_options.iter().map(|option| option.to_string()).collect(),
+        }
+    }
+
     const CURRENT_MANAGED_SSH_BLOCK: &str = "# ---- START CODEWIRE ----
 # This section is managed by Codewire. Re-run `cw config-ssh` to update it.
 # It stays first in this file: OpenSSH uses the first value it finds for an option.
 Host cw-*
-    ProxyCommand cw shell --stdio %n
+    ProxyCommand /opt/codewire/bin/cw shell --stdio %n
     User codewire
     StrictHostKeyChecking yes
     UserKnownHostsFile /dev/null
     GlobalKnownHostsFile /dev/null
-    KnownHostsCommand cw ssh known-hosts %H
+    KnownHostsCommand /opt/codewire/bin/cw ssh known-hosts %H
     UpdateHostKeys no
     ForwardAgent no
     ForwardX11 no
@@ -36,7 +45,7 @@ Host *
     #[test]
     fn managed_ssh_block_is_fail_closed_and_hardened() {
         assert_eq!(
-            ssh_config_block(&SshConfigOptions::default()).unwrap(),
+            ssh_config_block(&ssh_test_options(&[])).unwrap(),
             CURRENT_MANAGED_SSH_BLOCK
         );
         assert_eq!(
@@ -70,7 +79,7 @@ Host *
 
         let rendered = place_managed_ssh_section(
             &existing,
-            &ssh_config_block(&SshConfigOptions::default()).unwrap(),
+            &ssh_config_block(&ssh_test_options(&[])).unwrap(),
         )
         .unwrap();
 
@@ -90,9 +99,7 @@ Host *
 
     #[test]
     fn managed_ssh_block_placement_is_idempotent() {
-        let options = SshConfigOptions {
-            ssh_options: vec!["ServerAliveInterval 30".to_string()],
-        };
+        let options = ssh_test_options(&["ServerAliveInterval 30"]);
         let block = ssh_config_block(&options).unwrap();
         let once = place_managed_ssh_section("Host other\n    User someone", &block).unwrap();
         let twice = place_managed_ssh_section(&once, &block).unwrap();
@@ -117,19 +124,14 @@ Host *
             "Match all",
             "Include ~/.ssh/other",
         ] {
-            let err = ssh_config_block(&SshConfigOptions {
-                ssh_options: vec![option.to_string()],
-            })
-            .unwrap_err();
+            let err = ssh_config_block(&ssh_test_options(&[option])).unwrap_err();
             assert!(
                 err.to_string().contains("cannot be overridden"),
                 "{option}: {err}"
             );
         }
-        let err = ssh_config_block(&SshConfigOptions {
-            ssh_options: vec!["ServerAliveInterval 30\nForwardAgent yes".to_string()],
-        })
-        .unwrap_err();
+        let err = ssh_config_block(&ssh_test_options(&["ServerAliveInterval 30\nForwardAgent yes"]))
+            .unwrap_err();
         assert!(err.to_string().contains("single line"));
     }
 
@@ -166,7 +168,7 @@ Host *
         )
         .unwrap();
         let (rendered, changed) =
-            render_managed_ssh_config(&config_path, &SshConfigOptions::default()).unwrap();
+            render_managed_ssh_config(&config_path, &ssh_test_options(&[])).unwrap();
         assert!(changed);
         fs::write(&config_path, &rendered).unwrap();
 
@@ -189,12 +191,12 @@ Host *
         let codewire = resolve("cw-demo");
         // OpenSSH versions spell some booleans differently (`no` or `false`).
         for (keyword, accepted) in [
-            ("proxycommand", &["cw shell --stdio %n"][..]),
+            ("proxycommand", &["/opt/codewire/bin/cw shell --stdio %n"][..]),
             ("user", &["codewire"]),
             ("stricthostkeychecking", &["true", "yes"]),
             ("userknownhostsfile", &["/dev/null"]),
             ("globalknownhostsfile", &["/dev/null"]),
-            ("knownhostscommand", &["cw ssh known-hosts %H"]),
+            ("knownhostscommand", &["/opt/codewire/bin/cw ssh known-hosts %H"]),
             ("updatehostkeys", &["false", "no"]),
             ("forwardagent", &["no", "false"]),
             ("forwardx11", &["no", "false"]),
@@ -219,13 +221,67 @@ Host *
         assert!(!other.lines().any(|line| line.starts_with("knownhostscommand")));
     }
 
+    /// OpenSSH runs `KnownHostsCommand` only from an absolute path, and an
+    /// editor's Remote-SSH may start `ssh` without the user's `PATH`, so both
+    /// commands name `cw` absolutely.
+    #[test]
+    fn managed_ssh_block_runs_cw_from_an_absolute_path() {
+        let block = ssh_config_block(&ssh_test_options(&[])).unwrap();
+        for keyword in ["ProxyCommand", "KnownHostsCommand"] {
+            let value = block
+                .lines()
+                .find_map(|line| line.trim_start().strip_prefix(&format!("{keyword} ")))
+                .unwrap_or_else(|| panic!("no {keyword} in\n{block}"));
+            assert!(value.starts_with(&format!("{TEST_CW} ")), "{keyword} {value}");
+        }
+        assert!(current_cw_executable().unwrap().is_absolute());
+        let rendered = ssh_cw_command(&current_cw_executable().unwrap()).unwrap();
+        assert!(rendered.trim_start_matches('"').starts_with('/'));
+    }
+
+    #[test]
+    fn ssh_cw_command_escapes_tokens_and_quotes_whitespace() {
+        assert_eq!(
+            ssh_cw_command(std::path::Path::new("/usr/local/bin/cw")).unwrap(),
+            "/usr/local/bin/cw"
+        );
+        assert_eq!(
+            ssh_cw_command(std::path::Path::new("/Users/a b/bin/cw")).unwrap(),
+            "\"/Users/a b/bin/cw\""
+        );
+        assert_eq!(
+            ssh_cw_command(std::path::Path::new("/opt/100%/cw")).unwrap(),
+            "/opt/100%%/cw"
+        );
+        let err = ssh_cw_command(std::path::Path::new("cw")).unwrap_err();
+        assert!(err.to_string().contains("not absolute"), "{err}");
+        for path in [
+            "/opt/$HOME/cw",
+            "/opt/a\"b/cw",
+            "/opt/a'b/cw",
+            "/opt/a`b`/cw",
+            "/opt/a\\b/cw",
+            "/opt/a\nb/cw",
+        ] {
+            let err = ssh_cw_command(std::path::Path::new(path)).unwrap_err();
+            assert!(err.to_string().contains("cannot be written"), "{path}: {err}");
+        }
+    }
+
+    #[test]
+    fn managed_ssh_section_is_current_only_for_the_same_cw() {
+        let content = format!("{CURRENT_MANAGED_SSH_BLOCK}\n");
+        assert!(managed_ssh_section_is_current(&content, TEST_CW));
+        assert!(!managed_ssh_section_is_current(&content, "/usr/bin/cw"));
+        let bare = CURRENT_MANAGED_SSH_BLOCK.replace(TEST_CW, "cw");
+        assert!(!managed_ssh_section_is_current(&bare, TEST_CW));
+    }
+
     #[test]
     fn render_managed_ssh_config_detects_no_change() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config");
-        let options = SshConfigOptions {
-            ssh_options: vec!["ServerAliveInterval 30".to_string()],
-        };
+        let options = ssh_test_options(&["ServerAliveInterval 30"]);
         let content = ssh_config_block(&options).unwrap() + "\n";
         fs::write(&config_path, &content).unwrap();
 
@@ -357,12 +413,12 @@ Host *
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config");
 
-        let missing = doctor_ssh_config_check_at(&config_path);
+        let missing = doctor_ssh_config_check_at(&config_path, TEST_CW);
         assert_eq!(missing.status, DoctorStatus::Warn);
         assert!(missing.detail.contains("missing"));
 
         fs::write(&config_path, "Host github.com\n  User git\n").unwrap();
-        let unmanaged = doctor_ssh_config_check_at(&config_path);
+        let unmanaged = doctor_ssh_config_check_at(&config_path, TEST_CW);
         assert_eq!(unmanaged.status, DoctorStatus::Warn);
         assert!(unmanaged.detail.contains("Codewire section missing"));
 
@@ -374,7 +430,7 @@ Host *
             ),
         )
         .unwrap();
-        let outdated = doctor_ssh_config_check_at(&config_path);
+        let outdated = doctor_ssh_config_check_at(&config_path, TEST_CW);
         assert_eq!(outdated.status, DoctorStatus::Warn);
         assert!(outdated.detail.contains("outdated or not first"));
 
@@ -383,7 +439,7 @@ Host *
             format!("Host github.com\n  User git\n\n{CURRENT_MANAGED_SSH_BLOCK}\n"),
         )
         .unwrap();
-        let not_first = doctor_ssh_config_check_at(&config_path);
+        let not_first = doctor_ssh_config_check_at(&config_path, TEST_CW);
         assert_eq!(not_first.status, DoctorStatus::Warn);
         assert!(not_first.detail.contains("outdated or not first"));
 
@@ -392,7 +448,7 @@ Host *
             format!("{CURRENT_MANAGED_SSH_BLOCK}\n\nHost github.com\n  User git\n"),
         )
         .unwrap();
-        let managed = doctor_ssh_config_check_at(&config_path);
+        let managed = doctor_ssh_config_check_at(&config_path, TEST_CW);
         assert_eq!(managed.status, DoctorStatus::Ok);
         assert_eq!(managed.detail, config_path.display().to_string());
     }

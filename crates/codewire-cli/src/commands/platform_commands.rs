@@ -1877,10 +1877,14 @@ pub(crate) fn completion_install_paths(shell: CompletionShell) -> Vec<PathBuf> {
 }
 
 pub(crate) fn doctor_ssh_config_check() -> DoctorCheck {
-    doctor_ssh_config_check_at(&default_ssh_config_path())
+    let cw_command = match current_cw_executable().and_then(|path| ssh_cw_command(&path)) {
+        Ok(cw_command) => cw_command,
+        Err(err) => return doctor_check("ssh config", DoctorStatus::Warn, format!("{err:#}")),
+    };
+    doctor_ssh_config_check_at(&default_ssh_config_path(), &cw_command)
 }
 
-pub(crate) fn doctor_ssh_config_check_at(config_path: &Path) -> DoctorCheck {
+pub(crate) fn doctor_ssh_config_check_at(config_path: &Path, cw_command: &str) -> DoctorCheck {
     let content = match fs::read_to_string(config_path) {
         Ok(content) => content,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -1899,7 +1903,7 @@ pub(crate) fn doctor_ssh_config_check_at(config_path: &Path) -> DoctorCheck {
             format!("Codewire section missing in {}", config_path.display()),
         );
     }
-    if !managed_ssh_section_is_current(&content) {
+    if !managed_ssh_section_is_current(&content, cw_command) {
         return doctor_check(
             "ssh config",
             DoctorStatus::Warn,
@@ -1949,23 +1953,24 @@ pub(crate) fn completion_script(shell: CompletionShell) -> Vec<u8> {
 pub(crate) const SSH_CONFIG_MARKER_START: &str = "# ---- START CODEWIRE ----";
 pub(crate) const SSH_CONFIG_MARKER_END: &str = "# ---- END CODEWIRE ----";
 
-/// The managed block's only host-key trust source: the environment's
-/// recorded key, fetched through the authenticated API (`cw ssh known-hosts`).
-pub(crate) const SSH_KNOWN_HOSTS_COMMAND: &str = "cw ssh known-hosts %H";
+/// Stands for the `cw` executable in [`MANAGED_SSH_DIRECTIVES`]; see
+/// [`ssh_cw_command`].
+const SSH_CW_PLACEHOLDER: &str = "{cw}";
 
 /// What every Codewire host gets, in order. The SSH server runs inside the
 /// environment's sandbox, so nothing here may expose the user's agent, X11,
 /// Kerberos credentials or a password prompt to it, and host keys are trusted
-/// only through [`SSH_KNOWN_HOSTS_COMMAND`], failing closed: no first-use
-/// trust and no known_hosts file. OpenSSH keeps the first value it obtains,
-/// so the block is written before the user's own entries.
+/// only through `KnownHostsCommand`: the environment's recorded key, fetched
+/// through the authenticated API (`cw ssh known-hosts`), failing closed with
+/// no first-use trust and no known_hosts file. OpenSSH keeps the first value
+/// it obtains, so the block is written before the user's own entries.
 pub(crate) const MANAGED_SSH_DIRECTIVES: &[(&str, &str)] = &[
-    ("ProxyCommand", "cw shell --stdio %n"),
+    ("ProxyCommand", "{cw} shell --stdio %n"),
     ("User", "codewire"),
     ("StrictHostKeyChecking", "yes"),
     ("UserKnownHostsFile", "/dev/null"),
     ("GlobalKnownHostsFile", "/dev/null"),
-    ("KnownHostsCommand", SSH_KNOWN_HOSTS_COMMAND),
+    ("KnownHostsCommand", "{cw} ssh known-hosts %H"),
     ("UpdateHostKeys", "no"),
     ("ForwardAgent", "no"),
     ("ForwardX11", "no"),
@@ -1989,9 +1994,68 @@ const RESERVED_SSH_OPTION_KEYWORDS: &[&str] = &[
     "HostbasedAuthentication",
 ];
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct SshConfigOptions {
+    /// `cw` as the managed directives run it, from [`ssh_cw_command`].
+    pub(crate) cw_command: String,
     pub(crate) ssh_options: Vec<String>,
+}
+
+/// The managed directives with `cw_command` in place of the executable.
+fn managed_ssh_directives(cw_command: &str) -> impl Iterator<Item = (&'static str, String)> + '_ {
+    MANAGED_SSH_DIRECTIVES
+        .iter()
+        .map(move |(keyword, value)| (*keyword, value.replace(SSH_CW_PLACEHOLDER, cw_command)))
+}
+
+/// The `cw` the managed block runs: the first `cw` on `PATH` when it is this
+/// very executable, so a package manager's stable link survives upgrades, and
+/// otherwise this executable itself.
+pub(crate) fn current_cw_executable() -> anyhow::Result<PathBuf> {
+    let current = env::current_exe().context("locate the running cw executable")?;
+    let resolved_current = fs::canonicalize(&current).unwrap_or_else(|_| current.clone());
+    let name = format!("cw{}", env::consts::EXE_SUFFIX);
+    let on_path = env::var_os("PATH").and_then(|paths| {
+        env::split_paths(&paths)
+            .map(|dir| dir.join(&name))
+            .find(|candidate| candidate.is_absolute() && candidate.is_file())
+    });
+    Ok(match on_path {
+        Some(on_path)
+            if fs::canonicalize(&on_path).is_ok_and(|resolved| resolved == resolved_current) =>
+        {
+            on_path
+        }
+        _ => current,
+    })
+}
+
+/// `path` as OpenSSH runs it from `ProxyCommand` (through the user's shell)
+/// and `KnownHostsCommand` (which OpenSSH runs only from an absolute path).
+/// `%` is doubled because both expand `%` tokens, and a path with whitespace
+/// is double-quoted. A path neither form can carry verbatim is refused.
+pub(crate) fn ssh_cw_command(path: &Path) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        path.is_absolute(),
+        "the cw executable path {} is not absolute",
+        path.display()
+    );
+    let path = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("the cw executable path {} is not UTF-8", path.display()))?;
+    anyhow::ensure!(
+        !path
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '"' | '\'' | '\\' | '$' | '`')),
+        "the cw executable path {path:?} cannot be written into an SSH config; \
+         install cw at a path without quotes, backslashes, `$` or backticks"
+    );
+    let escaped = path.replace('%', "%%");
+    Ok(if escaped.chars().any(char::is_whitespace) {
+        format!("\"{escaped}\"")
+    } else {
+        escaped
+    })
 }
 
 pub(crate) fn handle_config_ssh_command(args: ConfigSshArgs) -> anyhow::Result<()> {
@@ -2000,6 +2064,7 @@ pub(crate) fn handle_config_ssh_command(args: ConfigSshArgs) -> anyhow::Result<(
     let (content, changed) = render_managed_ssh_config(
         &config_path,
         &SshConfigOptions {
+            cw_command: ssh_cw_command(&current_cw_executable()?)?,
             ssh_options: args.ssh_options,
         },
     )?;
@@ -2067,7 +2132,7 @@ pub(crate) fn ssh_config_block(options: &SshConfigOptions) -> anyhow::Result<Str
         "# It stays first in this file: OpenSSH uses the first value it finds for an option.\n",
     );
     output.push_str("Host cw-*\n");
-    for (keyword, value) in MANAGED_SSH_DIRECTIVES {
+    for (keyword, value) in managed_ssh_directives(&options.cw_command) {
         output.push_str(&format!("    {keyword} {value}\n"));
     }
     for option in &options.ssh_options {
@@ -2107,8 +2172,8 @@ fn ssh_option_keyword(option: &str) -> &str {
 }
 
 /// Whether `content` starts with a Codewire section that carries every current
-/// managed directive.
-pub(crate) fn managed_ssh_section_is_current(content: &str) -> bool {
+/// managed directive, running `cw_command`.
+pub(crate) fn managed_ssh_section_is_current(content: &str, cw_command: &str) -> bool {
     let content = content.trim_start_matches(['\n', '\r']);
     let Some(rest) = content.strip_prefix(SSH_CONFIG_MARKER_START) else {
         return false;
@@ -2117,8 +2182,7 @@ pub(crate) fn managed_ssh_section_is_current(content: &str) -> bool {
         return false;
     };
     let section = &rest[..end];
-    MANAGED_SSH_DIRECTIVES
-        .iter()
+    managed_ssh_directives(cw_command)
         .all(|(keyword, value)| section.contains(&format!("\n    {keyword} {value}\n")))
         && section.contains("\nHost cw-*\n")
         && section.ends_with("\nHost *\n")
