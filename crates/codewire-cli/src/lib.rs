@@ -457,6 +457,7 @@ async fn run_bound_hosted_daemon(
     paths
         .install_binding(&bound.binding)
         .context("install hosted daemon binding")?;
+    let daemon_config = config.into_config(&bound.binding);
     // Workspace access (#2460): the daemon serves SSH itself, reaching its
     // own gRPC service in-process, and the environment's application ports
     // on its tailnet address.
@@ -471,8 +472,8 @@ async fn run_bound_hosted_daemon(
     #[cfg(target_os = "linux")]
     {
         let (_access_shutdown, access_shutdown_rx) = tokio::sync::watch::channel(false);
-        let daemon_port = config
-            .listen_addr()
+        let daemon_port = daemon_config
+            .listen_addr
             .parse::<std::net::SocketAddr>()
             .map(|address| address.port())
             .ok();
@@ -484,6 +485,7 @@ async fn run_bound_hosted_daemon(
                 daemon_credential: bound.binding.daemon_credential().clone(),
                 grant: bound.access.clone(),
                 daemon_port,
+                exec_shell: codewire_daemon::env::default_shell_for(&daemon_config),
             },
             connector,
             client.clone(),
@@ -501,13 +503,7 @@ async fn run_bound_hosted_daemon(
     }
     #[cfg(not(target_os = "linux"))]
     drop(connector);
-    serve_hosted_daemon(
-        config.into_config(&bound.binding),
-        true,
-        Some(local),
-        Some(app_ports),
-    )
-    .await
+    serve_hosted_daemon(daemon_config, true, Some(local), Some(app_ports)).await
 }
 
 #[cfg(not(unix))]

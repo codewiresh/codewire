@@ -243,11 +243,19 @@ pub struct DaemonSshRunners {
     pub sessions: Arc<AccessGatedSshRunner<DaemonBackedSshRunner<DaemonSessionClient>>>,
     pub sftp: Arc<DaemonSftpRunner<DaemonSessionClient>>,
     pub scp: Arc<DaemonScpRunner<DaemonSessionClient>>,
+    /// The workspace's default shell, which runs every exec request's
+    /// command line (`<shell> -c <command>`), as sshd does.
+    pub exec_shell: String,
 }
 
 impl DaemonSshRunners {
-    /// Runners whose process sessions wait for `access_ready` to be true.
-    pub fn new(daemon: DaemonSessionClient, access_ready: watch::Receiver<bool>) -> Self {
+    /// Runners whose process sessions wait for `access_ready` to be true and
+    /// run exec command lines through `exec_shell`.
+    pub fn new(
+        daemon: DaemonSessionClient,
+        access_ready: watch::Receiver<bool>,
+        exec_shell: String,
+    ) -> Self {
         Self {
             sessions: Arc::new(AccessGatedSshRunner::new(
                 Arc::new(DaemonBackedSshRunner::new(daemon.clone())),
@@ -255,6 +263,7 @@ impl DaemonSshRunners {
             )),
             sftp: Arc::new(DaemonSftpRunner::new(daemon.clone())),
             scp: Arc::new(DaemonScpRunner::new(daemon)),
+            exec_shell,
         }
     }
 
@@ -267,7 +276,8 @@ impl DaemonSshRunners {
             self.sessions.clone(),
             Some(self.sftp.clone()),
             Some(self.scp.clone()),
-        );
+        )
+        .with_exec_shell(self.exec_shell.clone());
         match server::run_stream(config, stream, handler).await {
             Ok(session) => {
                 let _ = session.await;

@@ -441,6 +441,7 @@ pub struct GatewaySshServer<R> {
     runner: Arc<R>,
     sftp: Option<Arc<dyn SftpSubsystemRunner>>,
     scp: Option<Arc<dyn ScpProtocolRunnerBridge>>,
+    exec_shell: Option<String>,
 }
 
 impl<R> GatewaySshServer<R>
@@ -452,6 +453,7 @@ where
             runner,
             sftp: None,
             scp: None,
+            exec_shell: None,
         }
     }
 
@@ -460,6 +462,7 @@ where
             runner,
             sftp: Some(sftp),
             scp: None,
+            exec_shell: None,
         }
     }
 
@@ -472,7 +475,15 @@ where
             runner,
             sftp: Some(sftp),
             scp: Some(scp),
+            exec_shell: None,
         }
+    }
+
+    /// Run each exec request's command line as `<shell> -c <command>`; see
+    /// [`GatewaySshHandler::with_exec_shell`].
+    pub fn with_exec_shell(mut self, shell: impl Into<String>) -> Self {
+        self.exec_shell = Some(shell.into());
+        self
     }
 }
 
@@ -483,11 +494,15 @@ where
     type Handler = GatewaySshHandler<R>;
 
     fn new_client(&mut self, _peer_addr: Option<SocketAddr>) -> Self::Handler {
-        GatewaySshHandler::with_file_protocols(
+        let handler = GatewaySshHandler::with_file_protocols(
             self.runner.clone(),
             self.sftp.clone(),
             self.scp.clone(),
-        )
+        );
+        match &self.exec_shell {
+            Some(shell) => handler.with_exec_shell(shell.clone()),
+            None => handler,
+        }
     }
 }
 
@@ -495,8 +510,10 @@ pub struct GatewaySshHandler<R> {
     runner: Arc<R>,
     sftp: Option<Arc<dyn SftpSubsystemRunner>>,
     scp: Option<Arc<dyn ScpProtocolRunnerBridge>>,
+    exec_shell: Option<String>,
     channels: HashMap<ChannelId, SshChannelState>,
     file_protocol_channels: HashSet<ChannelId>,
+    sftp_channels: HashSet<ChannelId>,
 }
 
 impl<R> GatewaySshHandler<R>
@@ -520,9 +537,20 @@ where
             runner,
             sftp,
             scp,
+            exec_shell: None,
             channels: HashMap::new(),
             file_protocol_channels: HashSet::new(),
+            sftp_channels: HashSet::new(),
         }
+    }
+
+    /// Run each exec request's command line as `<shell> -c <command>`, as
+    /// sshd runs it through the user's login shell, so pipes, `&&`, globs
+    /// and variables work. Without a shell the line is split into words and
+    /// run directly. SCP requests are recognized before either.
+    pub fn with_exec_shell(mut self, shell: impl Into<String>) -> Self {
+        self.exec_shell = Some(shell.into());
+        self
     }
 
     async fn start_channel_session(
@@ -789,6 +817,15 @@ where
             });
             return Ok(());
         }
+        let command = match &self.exec_shell {
+            // `parse_exec_command` accepted the line as UTF-8.
+            Some(shell) => vec![
+                shell.clone(),
+                "-c".into(),
+                String::from_utf8_lossy(data).into_owned(),
+            ],
+            None => command,
+        };
         self.start_channel_session(channel, command, session).await
     }
 
@@ -815,6 +852,7 @@ where
             return Err(GatewaySshError::UnknownChannel(channel));
         };
         self.file_protocol_channels.insert(channel);
+        self.sftp_channels.insert(channel);
         session.channel_success(channel)?;
         tokio::spawn(async move {
             let _ = sftp.start_sftp(ssh_channel).await;
@@ -838,8 +876,15 @@ where
     async fn channel_eof(
         &mut self,
         channel: ChannelId,
-        _session: &mut server::Session,
+        session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        // An SFTP client sends EOF once it is done, which is when sshd's
+        // sftp-server exits 0. OpenSSH reports a subsystem channel closed
+        // without an exit status as status -1, and scp then fails.
+        if self.sftp_channels.remove(&channel) {
+            session.exit_status_request(channel, 0)?;
+            return Ok(());
+        }
         if self.file_protocol_channels.contains(&channel) {
             return Ok(());
         }
@@ -851,6 +896,7 @@ where
         channel: ChannelId,
         _session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        self.sftp_channels.remove(&channel);
         if self.file_protocol_channels.remove(&channel) {
             return Ok(());
         }

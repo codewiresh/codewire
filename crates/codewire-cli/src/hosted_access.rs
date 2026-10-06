@@ -95,6 +95,8 @@ pub(crate) struct BoundAccess {
     pub grant: Option<WorkspaceAccessGrant>,
     /// The daemon's own gRPC port, never served as an application port.
     pub daemon_port: Option<u16>,
+    /// The workspace's default shell, which runs SSH exec command lines.
+    pub exec_shell: String,
 }
 
 /// Serve workspace access for the accepted binding until `shutdown`.
@@ -121,7 +123,7 @@ pub(crate) async fn serve(
     // before that they are refused at once instead of waiting out a launch
     // the platform cannot admit yet.
     let (access_ready, access_ready_rx) = watch::channel(false);
-    let runners = DaemonSshRunners::new(daemon, access_ready_rx);
+    let runners = DaemonSshRunners::new(daemon, access_ready_rx, bound.exec_shell.clone());
     let listener = tokio::net::TcpListener::bind(SocketAddr::from((
         Ipv4Addr::UNSPECIFIED,
         WORKSPACE_SSH_PORT,

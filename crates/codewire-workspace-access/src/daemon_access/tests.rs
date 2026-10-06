@@ -197,7 +197,7 @@ async fn spawn_daemon_ssh_with_access(ready: bool) -> DaemonSsh {
     tokio::spawn(serve_ssh_listener(
         listener,
         config,
-        DaemonSshRunners::new(daemon, access_ready),
+        DaemonSshRunners::new(daemon, access_ready, "/bin/sh".into()),
         shutdown_rx,
     ));
     DaemonSsh {
@@ -298,6 +298,46 @@ async fn exec_within(
         String::from_utf8_lossy(&stderr).into_owned(),
         exit,
     )
+}
+
+#[tokio::test]
+async fn an_exec_command_line_runs_through_the_workspace_shell() {
+    let daemon = spawn_daemon_ssh().await;
+    let client = connect(daemon.ssh).await;
+    // sshd semantics: the whole line goes to `<shell> -c`, so operators,
+    // pipes, quoting and expansions work as they do over OpenSSH.
+    let (stdout, stderr, exit) = exec_within(
+        &client,
+        r#"printf a && printf b | tr b B; printf ' %s' "$((1 + 2))"; exit 3"#,
+        Duration::from_secs(20),
+    )
+    .await;
+    assert_eq!(stdout, "aB 3", "stderr: {stderr}");
+    assert_eq!(exit, Some(3));
+    let _ = daemon.shutdown.send(true);
+}
+
+#[tokio::test]
+async fn an_sftp_channel_reports_exit_status_zero_when_the_client_is_done() {
+    let daemon = spawn_daemon_ssh().await;
+    let client = connect(daemon.ssh).await;
+    let mut channel = client.channel_open_session().await.unwrap();
+    channel.request_subsystem(true, "sftp").await.unwrap();
+    // OpenSSH's scp and sftp send EOF when finished and report the
+    // subsystem's exit status as their own.
+    channel.eof().await.unwrap();
+    let exit = timeout(Duration::from_secs(10), async {
+        while let Some(message) = channel.wait().await {
+            if let ChannelMsg::ExitStatus { exit_status } = message {
+                return Some(exit_status);
+            }
+        }
+        None
+    })
+    .await
+    .expect("the SFTP channel ended");
+    assert_eq!(exit, Some(0));
+    let _ = daemon.shutdown.send(true);
 }
 
 #[tokio::test]
