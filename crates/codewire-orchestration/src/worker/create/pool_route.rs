@@ -21,7 +21,7 @@ use kube::api::DynamicObject;
 use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
 use serde_json::Value;
 
-use super::{SandboxWorkerCfg, WorkspaceIdentityMode, render_configured_warm_pool};
+use super::{SandboxWorkerCfg, render_configured_warm_pool};
 use crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE;
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::template::{TemplateOpts, render_sandbox_template};
@@ -109,7 +109,7 @@ pub(crate) fn pool_candidate(
     if image_ref.trim() != CANONICAL_WORKSPACE_RUNTIME_IMAGE {
         return Err(ColdReason::Image);
     }
-    if cfg.workspace_identity_mode != WorkspaceIdentityMode::Binding || !opts.identity_free() {
+    if !opts.identity_free() {
         return Err(ColdReason::Identity);
     }
     let shape = WorkspaceShape::of(opts);

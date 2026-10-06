@@ -133,9 +133,8 @@ const APP_PREVIEW_MAX_PORT: i64 = 65535;
 pub enum WorkspaceIdentity {
     /// Today's rendering: the environment-wide daemon token, environment ID,
     /// generation, projection digest and managed clients are rendered into
-    /// the workspace container. Confidential Pods always use it (B2c), and
-    /// `SANDBOX_WORKSPACE_IDENTITY_MODE=environment-token` selects it for
-    /// rollback.
+    /// the workspace container. Only confidential Pods use it, until B2c: such
+    /// a Pod never serves SSH or the tailnet.
     #[default]
     EnvironmentToken,
     /// Identity-free: the Pod carries only a Pod-bound projected token for the

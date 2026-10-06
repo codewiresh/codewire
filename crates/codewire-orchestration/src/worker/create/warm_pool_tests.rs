@@ -28,7 +28,6 @@ fn dev_cfg() -> SandboxWorkerCfg {
         api_base_url: "https://codewire-dev.sh".into(),
         coordinator_url: "http://codewire-coordinator.dev.svc.cluster.local:8090".into(),
         pod_namespace: "dev".into(),
-        workspace_identity_mode: WorkspaceIdentityMode::Binding,
         ..Default::default()
     }
 }
@@ -205,13 +204,8 @@ fn confidential_is_never_pooled() {
 }
 
 #[test]
-fn rollback_and_unmanaged_runtimes_render_no_pool() {
+fn unbindable_and_unmanaged_runtimes_render_no_pool() {
     let shape = shapes()[0];
-    let rollback = SandboxWorkerCfg {
-        workspace_identity_mode: WorkspaceIdentityMode::EnvironmentToken,
-        ..dev_cfg()
-    };
-    assert!(warm_pool_template_opts(&rollback, shape).is_err());
     let no_binding_listener = SandboxWorkerCfg {
         pod_namespace: String::new(),
         ..dev_cfg()

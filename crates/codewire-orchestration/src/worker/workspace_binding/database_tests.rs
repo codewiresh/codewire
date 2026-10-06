@@ -1802,7 +1802,6 @@ fn pool_cfg() -> SandboxWorkerCfg {
         api_base_url: "https://codewire-dev.sh".into(),
         coordinator_url: "http://codewire-coordinator.dev.svc.cluster.local:8090".into(),
         pod_namespace: "dev".into(),
-        workspace_identity_mode: crate::worker::create::WorkspaceIdentityMode::Binding,
         warm_pool_shapes: "1000m/4096Mi/10Gi=2".into(),
         ..Default::default()
     }
