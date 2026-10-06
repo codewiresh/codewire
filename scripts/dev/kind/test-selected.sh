@@ -36,7 +36,7 @@ map_token() {
     rust_pkg_codewire_idp) want dashboard-browser edge-contract ;;
     rust_pkg_codewire_orchestration)
       want workspace-services final-fencing runtime-acceptance credentials ;;
-    rust_pkg_codewire_daemon | rust_pkg_codewire_daemon_bridge | rust_pkg_codewire_gateway)
+    rust_pkg_codewire_daemon | rust_pkg_codewire_daemon_bridge)
       want workspace-services ;;
     rust_pkg_codewire_client) want edge-contract workspace-services ;;
     # Workspace inputs, shared contracts, and crates without a narrower suite

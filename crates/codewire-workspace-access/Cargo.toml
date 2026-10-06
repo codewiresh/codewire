@@ -41,6 +41,8 @@ libc = "0.2"
 
 [dev-dependencies]
 russh-sftp = { workspace = true }
+serde = { workspace = true }
+url = { workspace = true }
 boringtun = "0.7"
 chrono = { workspace = true }
 codewire-proto = { workspace = true }

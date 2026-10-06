@@ -1768,7 +1768,7 @@ assert_kind_credential_bridge_renewal '%s' '%s' '%s'
                 [self.relay_line(-3_000)],
                 [self.relay_line(703_000)],
                 [self.relay_line(300_000, event="credential_bridge_epoch_ended")],
-                [self.relay_line(300_000, target="codewire_gateway::hosted_bridge")],
+                [self.relay_line(300_000, target="codewire_orchestration::worker::credential_relay")],
                 [self.relay_line(300_000, environment="6f1d1e9a-0b1c-4a52-9a4e-2c1f00000009")],
                 [self.relay_line(300_000).replace("Z\"", "+00:00\"")]):
             with self.subTest(logs=logs):

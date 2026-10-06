@@ -78,7 +78,6 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "crates/codewire-desktop/Cargo.toml": "MIT",
         "crates/codewire-email/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-gateway-proto/Cargo.toml": "AGPL-3.0-only",
-        "crates/codewire-gateway/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-idp/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-local-credentials/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-local-vmm/Cargo.toml": "AGPL-3.0-only",
@@ -127,7 +126,6 @@ def check_license_map(_args: argparse.Namespace) -> int:
             check_copy((crate_dir / "LICENSE").as_posix(), effective)
 
     docker_workspace_licenses = {
-        "deployments/docker/gateway.Cargo.toml": "AGPL-3.0-only",
         "deployments/docker/derp.Cargo.toml": "BSD-3-Clause",
     }
     for rel, expected in docker_workspace_licenses.items():

@@ -15,7 +15,6 @@ members = [
     "crates/codewire-egress-broker",
     "crates/codewire-egress-policy",
     "crates/codewire-email",
-    "crates/codewire-gateway",
     "crates/codewire-gateway-proto",
     "crates/codewire-idp",
     "crates/codewire-cli",

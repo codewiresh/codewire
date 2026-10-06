@@ -1809,54 +1809,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codewire-gateway"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum 0.8.9",
- "boringtun",
- "bytes",
- "chrono",
- "codewire-client",
- "codewire-credential-bridge",
- "codewire-credential-broker",
- "codewire-daemon",
- "codewire-gateway-proto",
- "codewire-proto",
- "codewire-tailnet",
- "codewire-tls",
- "codewire-workspace-access",
- "connectrpc",
- "ed25519-dalek 2.2.0",
- "http 1.4.1",
- "libc",
- "prometheus",
- "prost-types",
- "rand 0.8.6",
- "rcgen",
- "reqwest 0.12.28",
- "russh",
- "russh-sftp",
- "serde",
- "serde_json",
- "shell-words",
- "ssh-key",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic 0.14.6",
- "tower 0.5.3",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "codewire-gateway-proto"
 version = "0.1.0"
 dependencies = [
@@ -2404,6 +2356,7 @@ dependencies = [
  "rand 0.8.6",
  "russh",
  "russh-sftp",
+ "serde",
  "serde_json",
  "shell-words",
  "ssh-key",
@@ -2415,6 +2368,7 @@ dependencies = [
  "tonic 0.14.6",
  "tower 0.5.3",
  "tracing",
+ "url",
  "uuid",
  "zeroize",
 ]
