@@ -2,27 +2,27 @@
 //!
 //! The in-pod gateway calls this service to fetch its binding. The gateway
 //! binding is keyed by the Pod identity derived from an exact-audience
-//! Kubernetes TokenReview and issues a coordinate-scoped sidecar token.
+//! Kubernetes TokenReview and issues a coordinate-scoped sidecar token. Both
+//! gateway RPCs authorize the reviewed Pod by the same ownership rule
+//! (`codewire_server_core::gateway_authority`): its live Pod → ReplicaSet →
+//! `cw-gateway-<env>` Deployment chain at the current operation generation.
 //!
 //! Connect-RPC owns the binding wire contract. The shared functions below stay
 //! transport-neutral so that policy and token issuance remain in one service
 //! layer.
 
 use codewire_gateway_proto::GATEWAY_BINDING_SERVICE_ACCOUNT;
+use codewire_server_core::gateway_authority::{self, GatewayChain, GatewayEnvironment};
 use codewire_server_core::{AppError, AppResult};
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::core::v1::{Node, Pod};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Api;
-use uuid::Uuid;
 
 use crate::gateway_binding_identity::GatewayPodIdentity;
 use crate::runtime_transport::{
     RUNTIME_REGION_LABEL, RuntimeTransportBinding, TRANSPORT_ZONE_LABEL, load_enabled_zone,
 };
 use crate::sandbox::client::{ProbeResult, SandboxClient};
-use crate::sandbox::template::gateway_workload_name;
-use crate::sandbox::{LABEL_ENV_ID, LABEL_OPERATION_GENERATION, LABEL_ORG_ID, LABEL_TYPE};
 use crate::worker::gatewayauth::{
     SCOPE_COORDINATE, WorkspaceCredentialScope, daemon_credential_for, issue_token,
 };
@@ -30,7 +30,7 @@ use crate::worker::gatewayauth::{
 use super::ApiState;
 
 #[derive(Debug)]
-struct BindingTarget {
+pub(crate) struct BindingTarget {
     env_id: String,
     node_name: Option<String>,
     workspace_pod_ip: Option<String>,
@@ -42,9 +42,14 @@ struct BindingRuntime {
     namespace: String,
     pod_name: String,
     pod_ip: String,
+    /// The environment facts the gateway's chain is checked against, from the
+    /// same read.
+    gateway: GatewayEnvironment,
 }
 
-type BindingRuntimeRow = (String, String, String, String, String, String);
+/// `(environment, namespace, workspace Pod name, workspace Pod IP, state,
+/// desired state, organization, operation generation)`.
+type BindingRuntimeRow = (String, String, String, String, String, String, String, i64);
 
 /// Shared service-layer result for `GatewayBindingService`.
 #[derive(Clone)]
@@ -167,6 +172,17 @@ pub(crate) struct GatewayDaemonAuthority {
     pub(crate) binding: Option<GatewayDaemonBinding>,
 }
 
+impl GatewayDaemonAuthority {
+    fn gateway_environment(&self) -> GatewayEnvironment {
+        GatewayEnvironment {
+            environment_id: self.environment_id.clone(),
+            organization_id: self.organization_id.clone(),
+            operation_generation: self.operation_generation,
+            namespace: self.namespace.clone(),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct GatewayDaemonBinding {
     pub(crate) pod_uid: String,
@@ -190,8 +206,9 @@ fn gateway_daemon_unavailable() -> AppError {
 /// before `running`, labels and the service account are not enough: the
 /// reviewed gateway Pod must be the live Pod of the environment's own
 /// ReplicaSet → Deployment chain, matched by UID, at the environment's current
-/// operation generation. Deployment availability is intentionally not
-/// required; requiring it would reintroduce the deadlock.
+/// operation generation (`codewire_server_core::gateway_authority`).
+/// Deployment availability is intentionally not required; requiring it would
+/// reintroduce the deadlock.
 pub(crate) async fn issue_gateway_daemon_credential_core(
     state: &ApiState,
     identity: &GatewayPodIdentity,
@@ -200,38 +217,41 @@ pub(crate) async fn issue_gateway_daemon_credential_core(
         return Err(AppError::Forbidden);
     }
     let client = state.kube.as_ref().ok_or_else(gateway_daemon_unavailable)?;
+    issue_gateway_daemon_credential_in(client, &state.pool, &state.session_secret, identity).await
+}
+
+/// [`issue_gateway_daemon_credential_core`] after its namespace and client
+/// checks.
+pub(crate) async fn issue_gateway_daemon_credential_in(
+    client: &kube::Client,
+    pool: &sqlx::PgPool,
+    session_secret: &str,
+    identity: &GatewayPodIdentity,
+) -> AppResult<GatewayDaemonCredential> {
     let namespace = identity.namespace();
-    let pod = Api::<Pod>::namespaced(client.clone(), namespace)
-        .get_opt(identity.pod_name())
+    let (environment_id, objects) = match read_gateway_objects(client, identity)
         .await
         .map_err(|_| gateway_daemon_unavailable())?
-        .ok_or_else(gateway_daemon_not_ready)?;
-    let environment_id =
-        authenticated_gateway_environment(&pod, identity).ok_or(AppError::Forbidden)?;
-    let authority = gateway_daemon_authority(&state.pool, &environment_id)
+    {
+        GatewayRead::Missing => return Err(gateway_daemon_not_ready()),
+        GatewayRead::Refused => return Err(AppError::Forbidden),
+        GatewayRead::Found {
+            environment_id,
+            objects,
+        } => (environment_id, objects),
+    };
+    let authority = gateway_daemon_authority(pool, &environment_id)
         .await?
         .ok_or_else(gateway_daemon_not_ready)?;
     if authority.namespace != namespace {
         return Err(AppError::Forbidden);
     }
-    let (replica_set_name, _) =
-        single_controller(&pod.metadata, "apps/v1", "ReplicaSet").ok_or(AppError::Forbidden)?;
-    let replica_set = Api::<ReplicaSet>::namespaced(client.clone(), namespace)
-        .get_opt(&replica_set_name)
-        .await
-        .map_err(|_| gateway_daemon_unavailable())?
-        .ok_or(AppError::Forbidden)?;
-    let deployment = Api::<Deployment>::namespaced(client.clone(), namespace)
-        .get_opt(&gateway_workload_name(&environment_id))
-        .await
-        .map_err(|_| gateway_daemon_unavailable())?
-        .ok_or(AppError::Forbidden)?;
-    if !gateway_daemon_chain(&authority, &pod, &replica_set, &deployment) {
-        return Err(AppError::Forbidden);
-    }
+    let chain = objects.chain(namespace).ok_or(AppError::Forbidden)?;
+    gateway_authority::authorize(&chain, &authority.gateway_environment())
+        .map_err(|_| AppError::Forbidden)?;
     let binding = authority.binding.ok_or_else(gateway_daemon_not_ready)?;
     let daemon_credential = daemon_credential_for(
-        &state.session_secret,
+        session_secret,
         &environment_id,
         &binding.pod_uid,
         binding.credential_scope,
@@ -302,93 +322,78 @@ fn gateway_daemon_authority_from_row(
     })
 }
 
-/// The gateway Pod, its controlling ReplicaSet and that ReplicaSet's
-/// controlling Deployment `cw-gateway-<env>` are live, chained by UID, and
-/// all four label sets (Pod, ReplicaSet, Deployment, Pod template) carry the
-/// environment, organization, `type=gateway` and the current generation.
-fn gateway_daemon_chain(
-    authority: &GatewayDaemonAuthority,
-    pod: &Pod,
-    replica_set: &ReplicaSet,
-    deployment: &Deployment,
-) -> bool {
-    let Some((replica_set_name, replica_set_uid)) =
-        single_controller(&pod.metadata, "apps/v1", "ReplicaSet")
-    else {
-        return false;
-    };
-    let Some((deployment_name, deployment_uid)) =
-        single_controller(&replica_set.metadata, "apps/v1", "Deployment")
-    else {
-        return false;
-    };
-    let template = deployment
-        .spec
-        .as_ref()
-        .and_then(|spec| spec.template.metadata.as_ref());
-    deployment_name == gateway_workload_name(&authority.environment_id)
-        && live_uid(
-            &replica_set.metadata,
-            &authority.namespace,
-            &replica_set_name,
-        ) == Some(replica_set_uid.as_str())
-        && live_uid(&deployment.metadata, &authority.namespace, &deployment_name)
-            == Some(deployment_uid.as_str())
-        && gateway_association(&pod.metadata, authority)
-        && gateway_association(&replica_set.metadata, authority)
-        && gateway_association(&deployment.metadata, authority)
-        && template.is_some_and(|template| gateway_association(template, authority))
+/// The reviewed gateway Pod and the ReplicaSet and Deployment its controller
+/// references name, read by those names. [`GatewayObjects::chain`] then
+/// matches them by UID.
+struct GatewayObjects {
+    pod: Pod,
+    replica_set: ReplicaSet,
+    deployment: Deployment,
 }
 
-fn live_uid<'a>(metadata: &'a ObjectMeta, namespace: &str, name: &str) -> Option<&'a str> {
-    (metadata.namespace.as_deref() == Some(namespace)
-        && metadata.name.as_deref() == Some(name)
-        && metadata.deletion_timestamp.is_none())
-    .then_some(())
-    .and(metadata.uid.as_deref())
-    .filter(|uid| canonical_uid(uid))
-}
-
-fn gateway_association(metadata: &ObjectMeta, authority: &GatewayDaemonAuthority) -> bool {
-    let generation = authority.operation_generation.to_string();
-    metadata.labels.as_ref().is_some_and(|labels| {
-        [
-            (LABEL_ENV_ID, authority.environment_id.as_str()),
-            (LABEL_ORG_ID, authority.organization_id.as_str()),
-            (LABEL_TYPE, "gateway"),
-            (LABEL_OPERATION_GENERATION, generation.as_str()),
-        ]
-        .into_iter()
-        .all(|(key, value)| labels.get(key).map(String::as_str) == Some(value))
-    })
-}
-
-fn single_controller(
-    metadata: &ObjectMeta,
-    api_version: &str,
-    kind: &str,
-) -> Option<(String, String)> {
-    let mut controllers = metadata
-        .owner_references
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .filter(|owner| owner.controller == Some(true));
-    match (controllers.next(), controllers.next()) {
-        (Some(owner), None)
-            if owner.api_version == api_version
-                && owner.kind == kind
-                && !owner.name.is_empty()
-                && canonical_uid(&owner.uid) =>
-        {
-            Some((owner.name.clone(), owner.uid.clone()))
-        }
-        _ => None,
+impl GatewayObjects {
+    fn chain<'a>(&'a self, namespace: &'a str) -> Option<GatewayChain<'a>> {
+        GatewayChain::verify(namespace, &self.pod, &self.replica_set, &self.deployment)
     }
 }
 
-fn canonical_uid(value: &str) -> bool {
-    Uuid::parse_str(value).is_ok_and(|uid| !uid.is_nil() && uid.to_string() == value)
+enum GatewayRead {
+    /// The reviewed Pod no longer exists.
+    Missing,
+    /// The Pod is not the reviewed live gateway Pod, names no environment, or
+    /// a controller it names is missing.
+    Refused,
+    Found {
+        /// The environment the Pod's labels name, which the shared rule then
+        /// checks against the whole chain.
+        environment_id: String,
+        objects: Box<GatewayObjects>,
+    },
+}
+
+/// Reads the reviewed gateway Pod and, only when it is the reviewed live
+/// gateway Pod naming an environment, the ReplicaSet and Deployment its
+/// controller references name.
+async fn read_gateway_objects(
+    client: &kube::Client,
+    identity: &GatewayPodIdentity,
+) -> anyhow::Result<GatewayRead> {
+    let namespace = identity.namespace();
+    let Some(pod) = Api::<Pod>::namespaced(client.clone(), namespace)
+        .get_opt(identity.pod_name())
+        .await?
+    else {
+        return Ok(GatewayRead::Missing);
+    };
+    let Some(environment_id) = authenticated_gateway_environment(&pod, identity) else {
+        return Ok(GatewayRead::Refused);
+    };
+    let Some(replica_set_name) = GatewayChain::controlling_replica_set(&pod) else {
+        return Ok(GatewayRead::Refused);
+    };
+    let Some(replica_set) = Api::<ReplicaSet>::namespaced(client.clone(), namespace)
+        .get_opt(replica_set_name)
+        .await?
+    else {
+        return Ok(GatewayRead::Refused);
+    };
+    let Some(deployment_name) = GatewayChain::controlling_deployment(&replica_set) else {
+        return Ok(GatewayRead::Refused);
+    };
+    let Some(deployment) = Api::<Deployment>::namespaced(client.clone(), namespace)
+        .get_opt(deployment_name)
+        .await?
+    else {
+        return Ok(GatewayRead::Refused);
+    };
+    Ok(GatewayRead::Found {
+        environment_id,
+        objects: Box::new(GatewayObjects {
+            pod,
+            replica_set,
+            deployment,
+        }),
+    })
 }
 
 async fn resolve_binding_target(
@@ -398,32 +403,56 @@ async fn resolve_binding_target(
     let Some(client) = state.kube.as_ref() else {
         return Ok(None);
     };
-    let pods: Api<Pod> = Api::namespaced(client.clone(), identity.namespace());
-    let pod_obj = match pods.get(identity.pod_name()).await {
-        Ok(pod_obj) => pod_obj,
-        Err(kube::Error::Api(error)) if error.code == 404 => return Ok(None),
-        Err(error) => {
-            return Err(anyhow::anyhow!(
-                "get authenticated gateway Pod {}/{}: {error}",
+    resolve_binding_target_in(client, &state.pool, identity).await
+}
+
+/// [`resolve_binding_target`] with its client. The binding requires the same
+/// ownership chain as the daemon credential; a gateway the shared rule refuses
+/// gets no binding (NotFound, so it keeps polling) and reads nothing of the
+/// workspace.
+pub(crate) async fn resolve_binding_target_in(
+    client: &kube::Client,
+    pool: &sqlx::PgPool,
+    identity: &GatewayPodIdentity,
+) -> anyhow::Result<Option<BindingTarget>> {
+    let (env_id, objects) = match read_gateway_objects(client, identity)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "read authenticated gateway {}/{}: {error}",
                 identity.namespace(),
                 identity.pod_name(),
-            ));
-        }
+            )
+        })? {
+        GatewayRead::Found {
+            environment_id,
+            objects,
+        } => (environment_id, objects),
+        GatewayRead::Missing | GatewayRead::Refused => return Ok(None),
     };
-    let Some(env_id) = authenticated_gateway_environment(&pod_obj, identity) else {
-        return Ok(None);
-    };
-    let pod_node_name = pod_obj
-        .spec
-        .as_ref()
-        .and_then(|spec| spec.node_name.clone());
-    let runtime = binding_runtime_for_environment(state, &env_id).await?;
+    let runtime = binding_runtime_for_environment(pool, &env_id).await?;
     let Some(runtime) = runtime else {
         return Ok(None);
     };
     if runtime.namespace != identity.namespace() {
         return Ok(None);
     }
+    let authorized = objects
+        .chain(identity.namespace())
+        .is_some_and(|chain| gateway_authority::authorize(&chain, &runtime.gateway).is_ok());
+    if !authorized {
+        tracing::info!(
+            env = %env_id,
+            pod = %identity.pod_name(),
+            "gateway binding refused: not the environment's current gateway chain"
+        );
+        return Ok(None);
+    }
+    let pod_node_name = objects
+        .pod
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.node_name.clone());
 
     let probe = SandboxClient::new(client.clone(), &runtime.namespace)
         .probe_environment(&runtime.env_id)
@@ -458,17 +487,11 @@ fn authenticated_gateway_environment(pod: &Pod, identity: &GatewayPodIdentity) -
     {
         return None;
     }
-    let labels = pod.metadata.labels.as_ref()?;
-    if labels.get(LABEL_TYPE).map(String::as_str) != Some("gateway") {
-        return None;
-    }
-    let environment_id = labels.get(LABEL_ENV_ID)?;
-    let parsed = Uuid::parse_str(environment_id).ok()?;
-    (parsed.to_string() == *environment_id).then(|| environment_id.clone())
+    gateway_authority::labelled_environment(pod)
 }
 
 async fn binding_runtime_for_environment(
-    state: &ApiState,
+    pool: &sqlx::PgPool,
     env_id: &str,
 ) -> anyhow::Result<Option<BindingRuntime>> {
     let row: Option<BindingRuntimeRow> = sqlx::query_as(
@@ -477,13 +500,15 @@ async fn binding_runtime_for_environment(
                   COALESCE(b.pod_name, ''),
                   COALESCE(b.pod_ip, ''),
                   e.state,
-                  e.desired_state
+                  e.desired_state,
+                  e.org_id,
+                  e.environment_operation_generation
              FROM sandbox_environment_backend b
              JOIN environments e ON e.id = b.environment_id
             WHERE b.environment_id = $1"#,
     )
     .bind(env_id)
-    .fetch_optional(&state.pool)
+    .fetch_optional(pool)
     .await
     .map_err(|error| anyhow::anyhow!("query environment gateway binding: {error}"))?;
 
@@ -491,16 +516,32 @@ async fn binding_runtime_for_environment(
 }
 
 fn binding_runtime_from_row(
-    (env_id, namespace, pod_name, pod_ip, state, desired_state): BindingRuntimeRow,
+    (
+        env_id,
+        namespace,
+        pod_name,
+        pod_ip,
+        state,
+        desired_state,
+        organization_id,
+        operation_generation,
+    ): BindingRuntimeRow,
 ) -> Option<BindingRuntime> {
     if state != "running" || desired_state != "started" {
         return None;
     }
+    let gateway = GatewayEnvironment {
+        environment_id: env_id.clone(),
+        organization_id,
+        operation_generation,
+        namespace: namespace.clone(),
+    };
     Some(BindingRuntime {
         env_id,
         namespace,
         pod_name,
         pod_ip,
+        gateway,
     })
 }
 
@@ -586,10 +627,15 @@ async fn runtime_transport_for_node(
 }
 
 #[cfg(test)]
+mod database_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::PodSpec;
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{OwnerReference, Time};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, Time};
+
+    use crate::sandbox::{LABEL_ENV_ID, LABEL_TYPE};
 
     const ENVIRONMENT_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
@@ -629,6 +675,12 @@ mod tests {
             namespace: "runtime".into(),
             pod_name: "workspace-current".into(),
             pod_ip: "10.0.0.9".into(),
+            gateway: GatewayEnvironment {
+                environment_id: "env-current".into(),
+                organization_id: ORGANIZATION_ID.into(),
+                operation_generation: 4,
+                namespace: "runtime".into(),
+            },
         }
     }
 
@@ -653,12 +705,17 @@ mod tests {
             "10.0.0.9".into(),
             state.into(),
             desired_state.into(),
+            ORGANIZATION_ID.into(),
+            4,
         )
     }
 
     #[test]
     fn gateway_binding_requires_running_started_environment() {
-        assert!(binding_runtime_from_row(runtime_row("running", "started")).is_some());
+        let runtime = binding_runtime_from_row(runtime_row("running", "started"))
+            .expect("running environment");
+        // The binding checks the gateway chain against the same read.
+        assert_eq!(runtime.gateway, current_runtime().gateway);
         assert!(binding_runtime_from_row(runtime_row("starting", "started")).is_none());
         assert!(binding_runtime_from_row(runtime_row("running", "stopped")).is_none());
     }
@@ -739,236 +796,6 @@ mod tests {
 
     const ORGANIZATION_ID: &str = "org-chain";
     const REPLICA_SET_UID: &str = "3f2b1c0d-1111-4a2b-8c3d-4e5f6a7b8c9d";
-    const DEPLOYMENT_UID: &str = "9d8c7b6a-2222-4f5e-8d4c-3b2a1f0e9d8c";
-    const CURRENT_GENERATION: i64 = 4;
-
-    fn chain_labels(generation: i64) -> std::collections::BTreeMap<String, String> {
-        std::collections::BTreeMap::from([
-            (LABEL_ENV_ID.into(), ENVIRONMENT_ID.into()),
-            (LABEL_ORG_ID.into(), ORGANIZATION_ID.into()),
-            (LABEL_TYPE.into(), "gateway".into()),
-            (LABEL_OPERATION_GENERATION.into(), generation.to_string()),
-        ])
-    }
-
-    fn owner(kind: &str, name: &str, uid: &str) -> OwnerReference {
-        OwnerReference {
-            api_version: "apps/v1".into(),
-            kind: kind.into(),
-            name: name.into(),
-            uid: uid.into(),
-            controller: Some(true),
-            ..Default::default()
-        }
-    }
-
-    fn authority() -> GatewayDaemonAuthority {
-        GatewayDaemonAuthority {
-            environment_id: ENVIRONMENT_ID.into(),
-            organization_id: ORGANIZATION_ID.into(),
-            operation_generation: CURRENT_GENERATION,
-            namespace: "runtime".into(),
-            binding: None,
-        }
-    }
-
-    fn chained_gateway_pod() -> Pod {
-        let mut pod = gateway_pod();
-        pod.metadata.labels = Some(chain_labels(CURRENT_GENERATION));
-        pod.metadata.owner_references =
-            Some(vec![owner("ReplicaSet", "cw-gateway-rs", REPLICA_SET_UID)]);
-        pod
-    }
-
-    fn replica_set() -> ReplicaSet {
-        ReplicaSet {
-            metadata: ObjectMeta {
-                name: Some("cw-gateway-rs".into()),
-                namespace: Some("runtime".into()),
-                uid: Some(REPLICA_SET_UID.into()),
-                labels: Some(chain_labels(CURRENT_GENERATION)),
-                owner_references: Some(vec![owner(
-                    "Deployment",
-                    &gateway_workload_name(ENVIRONMENT_ID),
-                    DEPLOYMENT_UID,
-                )]),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    }
-
-    fn deployment() -> Deployment {
-        Deployment {
-            metadata: ObjectMeta {
-                name: Some(gateway_workload_name(ENVIRONMENT_ID)),
-                namespace: Some("runtime".into()),
-                uid: Some(DEPLOYMENT_UID.into()),
-                labels: Some(chain_labels(CURRENT_GENERATION)),
-                ..Default::default()
-            },
-            spec: Some(k8s_openapi::api::apps::v1::DeploymentSpec {
-                template: k8s_openapi::api::core::v1::PodTemplateSpec {
-                    metadata: Some(ObjectMeta {
-                        labels: Some(chain_labels(CURRENT_GENERATION)),
-                        ..Default::default()
-                    }),
-                    spec: None,
-                },
-                ..Default::default()
-            }),
-            // Not Available: the gateway becomes available only after it
-            // reaches the daemon, so availability must not be required.
-            status: None,
-        }
-    }
-
-    #[test]
-    fn gateway_daemon_credential_requires_the_full_ownership_chain() {
-        let authority = authority();
-        assert!(gateway_daemon_chain(
-            &authority,
-            &chained_gateway_pod(),
-            &replica_set(),
-            &deployment()
-        ));
-
-        // A foreign ReplicaSet: the Pod's controller UID is not the live one.
-        let mut foreign = replica_set();
-        foreign.metadata.uid = Some("0a1b2c3d-3333-4e5f-8a9b-0c1d2e3f4a5b".into());
-        assert!(!gateway_daemon_chain(
-            &authority,
-            &chained_gateway_pod(),
-            &foreign,
-            &deployment()
-        ));
-
-        // A ReplicaSet controlled by another Deployment.
-        let mut wrong_deployment = replica_set();
-        wrong_deployment.metadata.owner_references = Some(vec![owner(
-            "Deployment",
-            "cw-gateway-6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-            DEPLOYMENT_UID,
-        )]);
-        assert!(!gateway_daemon_chain(
-            &authority,
-            &chained_gateway_pod(),
-            &wrong_deployment,
-            &deployment()
-        ));
-
-        // A Deployment replaced under the same name.
-        let mut replaced = deployment();
-        replaced.metadata.uid = Some("0a1b2c3d-4444-4e5f-8a9b-0c1d2e3f4a5b".into());
-        assert!(!gateway_daemon_chain(
-            &authority,
-            &chained_gateway_pod(),
-            &replica_set(),
-            &replaced
-        ));
-
-        // A hand-made Pod with gateway labels but no ReplicaSet controller.
-        let mut hand_made = chained_gateway_pod();
-        hand_made.metadata.owner_references = None;
-        assert!(!gateway_daemon_chain(
-            &authority,
-            &hand_made,
-            &replica_set(),
-            &deployment()
-        ));
-
-        // A ReplicaSet with no controller, or two.
-        let mut orphan = replica_set();
-        orphan.metadata.owner_references = None;
-        assert!(!gateway_daemon_chain(
-            &authority,
-            &chained_gateway_pod(),
-            &orphan,
-            &deployment()
-        ));
-        let mut two = replica_set();
-        two.metadata.owner_references.as_mut().unwrap().push(owner(
-            "Deployment",
-            "other",
-            REPLICA_SET_UID,
-        ));
-        assert!(!gateway_daemon_chain(
-            &authority,
-            &chained_gateway_pod(),
-            &two,
-            &deployment()
-        ));
-
-        // Terminating chain members.
-        let mut terminating = replica_set();
-        terminating.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
-        assert!(!gateway_daemon_chain(
-            &authority,
-            &chained_gateway_pod(),
-            &terminating,
-            &deployment()
-        ));
-        let mut terminating = deployment();
-        terminating.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
-        assert!(!gateway_daemon_chain(
-            &authority,
-            &chained_gateway_pod(),
-            &replica_set(),
-            &terminating
-        ));
-    }
-
-    #[test]
-    fn gateway_daemon_credential_requires_current_generation_and_owner_labels() {
-        let authority = authority();
-        let stale = chain_labels(CURRENT_GENERATION - 1);
-        let mut other_org = chain_labels(CURRENT_GENERATION);
-        other_org.insert(LABEL_ORG_ID.into(), "org-other".into());
-        let mut workspace_role = chain_labels(CURRENT_GENERATION);
-        workspace_role.insert(LABEL_TYPE.into(), "workspace".into());
-        for labels in [stale, other_org, workspace_role] {
-            let mut pod = chained_gateway_pod();
-            pod.metadata.labels = Some(labels.clone());
-            assert!(!gateway_daemon_chain(
-                &authority,
-                &pod,
-                &replica_set(),
-                &deployment()
-            ));
-            let mut rs = replica_set();
-            rs.metadata.labels = Some(labels.clone());
-            assert!(!gateway_daemon_chain(
-                &authority,
-                &chained_gateway_pod(),
-                &rs,
-                &deployment()
-            ));
-            let mut dep = deployment();
-            dep.metadata.labels = Some(labels.clone());
-            assert!(!gateway_daemon_chain(
-                &authority,
-                &chained_gateway_pod(),
-                &replica_set(),
-                &dep
-            ));
-            let mut template = deployment();
-            template
-                .spec
-                .as_mut()
-                .unwrap()
-                .template
-                .metadata
-                .as_mut()
-                .unwrap()
-                .labels = Some(labels);
-            assert!(!gateway_daemon_chain(
-                &authority,
-                &chained_gateway_pod(),
-                &replica_set(),
-                &template
-            ));
-        }
-    }
 
     #[test]
     fn gateway_daemon_authority_rows_are_coherent() {
