@@ -79,7 +79,7 @@ fn parse_open_ssh(bytes: &[u8]) -> Result<PrivateKey, ssh_key::Error> {
     PrivateKey::from_openssh(bytes)
 }
 
-fn generate_ed25519_key() -> PrivateKey {
+pub fn generate_ed25519_key() -> PrivateKey {
     let signing_key = SigningKey::generate(&mut OsRng);
     signing_key_to_ssh_key(signing_key)
 }

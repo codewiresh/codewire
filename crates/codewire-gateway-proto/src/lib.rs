@@ -70,6 +70,10 @@ pub const HOSTED_DAEMON_READY_FILE: &str = "/codewire/run/daemon/ready";
 /// Owner-read-only (0400) copy of a bound daemon's credential, read by the
 /// fixed-purpose hosted exec instead of its inherited environment.
 pub const HOSTED_DAEMON_CREDENTIAL_FILE: &str = "/codewire/run/daemon/credential";
+/// Workspace access is ready: the daemon is bound, its SSH server listens on
+/// [`WORKSPACE_SSH_PORT`] and its host key is recorded. Tailnet comes up
+/// after, asynchronously, and is not part of this marker.
+pub const HOSTED_DAEMON_ACCESS_READY_FILE: &str = "/codewire/run/daemon/access-ready";
 /// Server-side long-poll requested by an unbound daemon; the listener clamps
 /// it to its own maximum.
 pub const WORKSPACE_BINDING_WAIT_SECONDS: u32 = 20;

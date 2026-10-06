@@ -111,6 +111,9 @@ pub(crate) struct BindingClient {
     client: WorkspaceBindingServiceClient<ConnectOriginTransport>,
     token_path: PathBuf,
     timing: BindTiming,
+    /// The listener admits one in-flight request per Pod: every call holds
+    /// this for its whole duration.
+    in_flight: tokio::sync::Mutex<()>,
 }
 
 impl BindingClient {
@@ -131,6 +134,7 @@ impl BindingClient {
             client: WorkspaceBindingServiceClient::new(transport, config),
             token_path: token_path.to_owned(),
             timing,
+            in_flight: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -148,6 +152,7 @@ impl BindingClient {
         &self,
         config: &WorkspaceBindingConfig,
     ) -> Result<BoundWorkspace, AttemptError> {
+        let _in_flight = self.in_flight.lock().await;
         let options = self.authorized().await?;
         let response: BindWorkspaceResponse = match self
             .client
@@ -186,19 +191,17 @@ impl BindingClient {
             drop(Zeroizing::new(std::mem::take(&mut access.peer_token)));
         }
         let binding = accepted.map_err(|_| AttemptError::InvalidResponse)?;
-        let access = access?;
-        // The first grant is for the binding's own operation generation.
-        if access
-            .as_ref()
-            .is_some_and(|access| access.operation_generation() != binding.operation_generation())
-        {
-            return Err(AttemptError::InvalidResponse);
-        }
-        Ok(BoundWorkspace { binding, access })
+        // The grant names the environment's current operation generation,
+        // which may move on after the binding's.
+        Ok(BoundWorkspace {
+            binding,
+            access: access?,
+        })
     }
 
     /// A fresh access grant for the bound Pod.
     pub(crate) async fn refresh_access(&self) -> Result<WorkspaceAccessGrant, AttemptError> {
+        let _in_flight = self.in_flight.lock().await;
         let options = self.authorized().await?;
         let mut response = self
             .client
@@ -245,6 +248,7 @@ impl BindingClient {
         disco_keys: [String; 2],
         relay_generation: u32,
     ) -> Result<AllocatePeerRelayResponse, AttemptError> {
+        let _in_flight = self.in_flight.lock().await;
         let options = self.authorized().await?;
         self.client
             .allocate_peer_relay_with_options(

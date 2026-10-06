@@ -1,6 +1,8 @@
 pub mod config;
 mod console_client;
 mod environment_client;
+#[cfg(target_os = "linux")]
+mod hosted_access;
 #[cfg(unix)]
 mod hosted_binding;
 mod hosted_exec;
@@ -418,7 +420,7 @@ async fn run_hosted_daemon() -> anyhow::Result<()> {
         .try_init();
     match codewire_daemon::HostedDaemonMode::from_env()? {
         codewire_daemon::HostedDaemonMode::EnvironmentToken(config) => {
-            serve_hosted_daemon(*config, false).await
+            serve_hosted_daemon(*config, false, None).await
         }
         codewire_daemon::HostedDaemonMode::Binding(config) => run_bound_hosted_daemon(config).await,
     }
@@ -436,18 +438,45 @@ async fn run_bound_hosted_daemon(
         .mark_ready()
         .context("write hosted daemon readiness marker")?;
     tracing::info!("hosted environment daemon waiting for its workspace binding");
-    let client = hosted_binding::BindingClient::new(
-        config.binding_url(),
-        config.tls_roots_file(),
-        config.token_path(),
-        hosted_binding::BindTiming::default(),
-    )
-    .context("configure workspace binding client")?;
+    let client = std::sync::Arc::new(
+        hosted_binding::BindingClient::new(
+            config.binding_url(),
+            config.tls_roots_file(),
+            config.token_path(),
+            hosted_binding::BindTiming::default(),
+        )
+        .context("configure workspace binding client")?,
+    );
     let bound = hosted_binding::bind_until_accepted(&client, &config).await;
     paths
         .install_binding(&bound.binding)
         .context("install hosted daemon binding")?;
-    serve_hosted_daemon(config.into_config(&bound.binding), true).await
+    // Workspace access (#2460): the daemon serves SSH itself, reaching its
+    // own gRPC service in-process.
+    let (connector, local) = codewire_daemon::local_transport::local_transport();
+    #[cfg(target_os = "linux")]
+    {
+        let (_access_shutdown, access_shutdown_rx) = tokio::sync::watch::channel(false);
+        let access = hosted_access::serve(
+            paths.clone(),
+            bound.binding.operation_generation(),
+            bound.binding.daemon_credential().clone(),
+            connector,
+            client.clone(),
+            access_shutdown_rx,
+        );
+        tokio::spawn(async move {
+            // The sender lives as long as the access task, which ends with
+            // the daemon process.
+            let _keep = _access_shutdown;
+            if let Err(error) = access.await {
+                tracing::error!(error = %format!("{error:#}"), "workspace access stopped");
+            }
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    drop(connector);
+    serve_hosted_daemon(config.into_config(&bound.binding), true, Some(local)).await
 }
 
 #[cfg(not(unix))]
@@ -457,7 +486,11 @@ async fn run_bound_hosted_daemon(
     anyhow::bail!("workspace binding requires a Unix hosted daemon")
 }
 
-async fn serve_hosted_daemon(config: codewire_daemon::Config, bound: bool) -> anyhow::Result<()> {
+async fn serve_hosted_daemon(
+    config: codewire_daemon::Config,
+    bound: bool,
+    local: Option<codewire_daemon::local_transport::LocalDaemonIncoming>,
+) -> anyhow::Result<()> {
     use tokio_stream::wrappers::TcpListenerStream;
 
     config
@@ -491,23 +524,26 @@ async fn serve_hosted_daemon(config: codewire_daemon::Config, bound: bool) -> an
     {
         tracing::warn!(error = %error, "hosted daemon readiness marker unavailable");
     }
+    // One server, one session engine: the network listener and, for a bound
+    // daemon, its own in-process workspace access connections.
+    let local = local.unwrap_or_else(|| codewire_daemon::local_transport::local_transport().1);
+    let incoming = codewire_daemon::local_transport::with_local_connections(
+        TcpListenerStream::new(listener),
+        local,
+    );
     // Once listening, the hosted daemon also keeps Codex's own ChatGPT login
     // while the broker delivers one, in the same home.
     #[cfg(target_os = "linux")]
     return codewire_daemon::serve_hosted_grpc_with_incoming(
         config,
         codewire_daemon::codex_home::CodexHome::default(),
-        TcpListenerStream::new(listener),
+        incoming,
         hosted_daemon_shutdown_signal(),
     )
     .await;
     #[cfg(not(target_os = "linux"))]
-    codewire_daemon::serve_grpc_with_incoming(
-        config,
-        TcpListenerStream::new(listener),
-        hosted_daemon_shutdown_signal(),
-    )
-    .await
+    codewire_daemon::serve_grpc_with_incoming(config, incoming, hosted_daemon_shutdown_signal())
+        .await
 }
 
 async fn hosted_daemon_shutdown_signal() {

@@ -47,6 +47,8 @@ enum Answer {
     BoundFor(&'static str),
     /// Bound, with an access grant for this generation.
     BoundWithAccess(i64),
+    /// Bound, with an already-expired access grant.
+    BoundWithExpiredAccess,
     Error(ErrorCode),
 }
 
@@ -94,6 +96,13 @@ impl WorkspaceBindingService for ScriptedService {
             Answer::Bound => (POD, None),
             Answer::BoundFor(pod) => (pod, None),
             Answer::BoundWithAccess(generation) => (POD, Some(synthetic_access(generation))),
+            Answer::BoundWithExpiredAccess => (
+                POD,
+                Some(WorkspaceAccess {
+                    peer_token_expires_at: 1,
+                    ..synthetic_access(4)
+                }),
+            ),
             Answer::Error(code) => return Err(ConnectError::new(code, "scripted")),
         };
         connectrpc::Response::ok(BindWorkspaceResponse {
@@ -273,9 +282,12 @@ async fn not_found_is_called_again_at_once_until_bound() {
     // A backoff this long makes any wrongful backoff (at least half of it,
     // with jitter) unmistakable, so a loaded machine's slower attempts can
     // never be mistaken for one.
+    // Each attempt opens a new TLS connection, so server-side stamps carry
+    // handshake jitter: pace at 300 ms and allow 100 ms of it.
     let timing = BindTiming {
         initial_backoff: Duration::from_secs(10),
         max_backoff: Duration::from_secs(10),
+        minimum_attempt: Duration::from_millis(300),
         ..timing()
     };
     let fixture = fixture_with(
@@ -300,9 +312,9 @@ async fn not_found_is_called_again_at_once_until_bound() {
     // Paced only to the minimum attempt, never to the error backoff.
     for pair in recorded.at.windows(2) {
         let gap = pair[1] - pair[0];
-        // Server-side stamps trail the client's attempt start slightly.
+        // Server-side stamps trail the client's attempt start by a handshake.
         assert!(
-            gap + Duration::from_millis(10) >= timing.minimum_attempt,
+            gap + Duration::from_millis(100) >= timing.minimum_attempt,
             "{gap:?}"
         );
         assert!(gap < timing.initial_backoff / 2, "{gap:?}");
@@ -433,7 +445,12 @@ fn jitter_stays_within_half_to_full_backoff() {
 
 #[tokio::test]
 async fn an_access_grant_is_validated_with_the_binding() {
-    let fixture = fixture(vec![Answer::BoundWithAccess(4), Answer::BoundWithAccess(3)]).await;
+    let fixture = fixture(vec![
+        Answer::BoundWithAccess(4),
+        Answer::BoundWithAccess(6),
+        Answer::BoundWithExpiredAccess,
+    ])
+    .await;
     let bound = fixture.client.attempt(&fixture.config).await.unwrap();
     let access = bound.access.expect("access grant");
     assert_eq!(access.peer_token().expose_secret(), SYNTHETIC_PEER_TOKEN);
@@ -441,7 +458,12 @@ async fn an_access_grant_is_validated_with_the_binding() {
     assert_eq!(access.coordinator_url(), "https://codewire.test");
     assert_eq!(access.direct_udp_endpoints(), ["203.0.113.7:41641"]);
     assert_eq!(access.peer_relay_endpoints(), ["relay.codewire.test:41641"]);
-    // A first grant for another generation than the binding is refused.
+    // The grant names the environment's current generation, which may have
+    // moved on after the binding's (4).
+    let bound = fixture.client.attempt(&fixture.config).await.unwrap();
+    assert_eq!(bound.binding.operation_generation(), 4);
+    assert_eq!(bound.access.unwrap().operation_generation(), 6);
+    // An invalid grant fails the whole response.
     assert_eq!(
         fixture.client.attempt(&fixture.config).await.unwrap_err(),
         AttemptError::InvalidResponse

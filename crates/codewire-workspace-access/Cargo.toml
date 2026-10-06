@@ -15,6 +15,7 @@ codewire-daemon = { workspace = true }
 codewire-gateway-proto = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["rand_core"] }
 http = { workspace = true }
+hyper-util = { workspace = true }
 prost-types = { workspace = true }
 rand = { workspace = true }
 russh = { workspace = true }
@@ -26,6 +27,7 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tonic = { workspace = true }
+tower = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }
@@ -34,6 +36,7 @@ zeroize = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
+russh-sftp = { workspace = true }
 boringtun = "0.7"
 chrono = { workspace = true }
 codewire-credential-broker = { path = "../codewire-credential-broker", default-features = false, features = ["ssh-agent"] }

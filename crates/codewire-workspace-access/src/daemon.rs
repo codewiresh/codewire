@@ -190,6 +190,33 @@ impl DaemonSessionClient {
         })
     }
 
+    /// A client of this process's own daemon over its in-process transport
+    /// (#2460): workspace access served by the daemon itself. No network
+    /// connection is made; per-RPC authorization still presents
+    /// `credential`.
+    pub async fn connect_local(
+        connector: codewire_daemon::local_transport::LocalDaemonConnector,
+        credential: impl Into<DaemonCredential>,
+    ) -> Result<Self, DaemonClientError> {
+        const LOCAL_ENDPOINT: &str = "http://codewire-daemon.local";
+        let credential = credential.into();
+        let channel = tonic::transport::Endpoint::from_static(LOCAL_ENDPOINT)
+            .connect_with_connector(tower::service_fn(move |_| {
+                let connector = connector.clone();
+                async move { connector.connect().await.map(hyper_util::rt::TokioIo::new) }
+            }))
+            .await
+            .map_err(|source| DaemonClientError::Connect {
+                endpoint: LOCAL_ENDPOINT.to_owned(),
+                source,
+            })?;
+        Ok(Self {
+            inner: v1::daemon_service_client::DaemonServiceClient::new(channel.clone()),
+            channel,
+            credential,
+        })
+    }
+
     /// A credential-bridge client presenting the credential current now. The
     /// hosted relay takes a fresh one for every epoch.
     pub fn credential_client(&self) -> codewire_daemon::client::SessionClient {

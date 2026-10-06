@@ -54,7 +54,9 @@ uuid = { workspace = true }
 zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+async-trait = { workspace = true }
 buffa = { workspace = true }
+codewire-workspace-access = { workspace = true }
 futures = { workspace = true }
 prost = { workspace = true }
 codewire-credential-broker = { workspace = true, features = ["codex-enrollment", "ssh-agent"] }
