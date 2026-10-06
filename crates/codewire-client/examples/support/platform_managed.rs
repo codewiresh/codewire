@@ -44,6 +44,8 @@ pub(super) struct Journey {
     requests: Vec<String>,
     saved: Vec<rpc::EnvironmentAgentOperation>,
     continuity: Option<Continuity>,
+    #[cfg(test)]
+    caller_drop_receipt: Option<tokio::sync::oneshot::Receiver<String>>,
 }
 
 impl Journey {
@@ -94,6 +96,8 @@ impl Journey {
             requests: Vec::new(),
             saved: Vec::new(),
             continuity: None,
+            #[cfg(test)]
+            caller_drop_receipt: None,
         };
         journey.validate_scope(incarnation, image)?;
         for (index, kind) in [
@@ -992,11 +996,56 @@ impl Journey {
         );
         // This drops only the HTTP waiter. It is not a transport interception or
         // a forced lost ACK, and a fast response may win the actual race.
+        #[cfg(not(test))]
         let sent = tokio::time::timeout(
             Duration::from_millis(25),
             client.mutate_environment_agent(request),
         )
         .await;
+        #[cfg(test)]
+        let sent = if let Some(receipt) = self.caller_drop_receipt.take() {
+            // Only this fixture arms cancellation after its real server has
+            // received the original UUID. Drop the same pending HTTP future;
+            // no second mutation is created and no response is manufactured.
+            let mutation = client.mutate_environment_agent(request);
+            tokio::pin!(mutation);
+            let received = tokio::time::timeout(WAIT, async {
+                tokio::select! {
+                    biased;
+                    received = receipt => {
+                        received.context("caller-drop fixture lost its original server receipt")
+                    }
+                    _ = &mut mutation => {
+                        anyhow::bail!("caller-drop fixture mutation settled before cancellation")
+                    }
+                }
+            })
+            .await
+            .context("caller-drop fixture did not receive its original UUID within bound")??;
+            ensure!(
+                received == id,
+                "caller-drop fixture received a different UUID"
+            );
+            let pending = std::future::poll_fn(|context| {
+                std::task::Poll::Ready(matches!(
+                    std::future::Future::poll(mutation.as_mut(), context),
+                    std::task::Poll::Pending
+                ))
+            })
+            .await;
+            ensure!(
+                pending,
+                "caller-drop fixture mutation settled before cancellation"
+            );
+            Err(())
+        } else {
+            tokio::time::timeout(
+                Duration::from_millis(25),
+                client.mutate_environment_agent(request),
+            )
+            .await
+            .map_err(|_| ())
+        };
         let dropped = sent.is_err();
         let response = match sent {
             Ok(Ok(response)) => Some(
@@ -1319,6 +1368,7 @@ mod tests {
             requests: vec![],
             saved: vec![],
             continuity: None,
+            caller_drop_receipt: None,
         }
     }
 
@@ -1548,12 +1598,26 @@ mod tests {
         let session = j.sessions[0].session.clone();
         let scope2 = scope.clone();
         let session2 = session.clone();
+        let (receipt_tx, receipt_rx) = tokio::sync::oneshot::channel();
+        let receipt =
+            std::sync::Arc::new(std::sync::Mutex::new((None::<String>, Some(receipt_tx))));
+        let mutate_receipt = receipt.clone();
+        j.caller_drop_receipt = Some(receipt_rx);
         Mock::given(method("POST"))
             .and(path(MUTATE))
             .respond_with(move |request: &wiremock::Request| {
                 let request =
                     rpc::MutateEnvironmentAgentRequest::decode_from_slice(&request.body).unwrap();
                 assert_eq!(request.expected_scope.as_option(), Some(&scope));
+                let mut receipt = mutate_receipt.lock().unwrap();
+                assert!(receipt.0.is_none(), "one actual original mutation only");
+                receipt.0 = Some(request.request_id.clone());
+                receipt
+                    .1
+                    .take()
+                    .unwrap()
+                    .send(request.request_id.clone())
+                    .unwrap();
                 let op = rpc::EnvironmentAgentOperation {
                     request_id: request.request_id.clone(),
                     scope: Some(scope.clone()).into(),
@@ -1581,6 +1645,11 @@ mod tests {
             .respond_with(move |request: &wiremock::Request| {
                 let request =
                     rpc::ObserveEnvironmentAgentRequest::decode_from_slice(&request.body).unwrap();
+                assert_eq!(
+                    receipt.lock().unwrap().0.as_ref(),
+                    Some(&request.request_id),
+                    "Observe must read the original actually received mutation UUID"
+                );
                 let op = rpc::EnvironmentAgentOperation {
                     request_id: request.request_id.clone(),
                     scope: Some(scope2.clone()).into(),
