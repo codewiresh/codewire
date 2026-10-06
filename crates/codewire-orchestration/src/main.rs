@@ -307,6 +307,15 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .as_deref(),
         )?;
+    // One LISTEN connection serves every StreamLogs follower in this process.
+    let environment_logs =
+        codewire_orchestration::api::log_notifications::EnvironmentLogNotifications::new(
+            codewire_orchestration::api::log_notifications::MAX_LIVE_FOLLOWS_PER_ACCOUNT,
+        );
+    codewire_orchestration::api::log_notifications::spawn_environment_log_listener(
+        pool.clone(),
+        environment_logs.clone(),
+    );
     let api_state = codewire_orchestration::api::ApiState {
         pool: pool.clone(),
         preview_base_domain: std::env::var("PREVIEW_BASE_DOMAIN").unwrap_or_default(),
@@ -325,6 +334,7 @@ async fn main() -> anyhow::Result<()> {
         session_secret: cfg.session_secret.clone(),
         sandbox_cfg: ctx.sandbox_cfg.clone(),
         confidential_storage_flags,
+        environment_logs,
     };
 
     let connect_auth = codewire_server_core::connect::ConnectAuthLayer::authenticated(auth.clone())
