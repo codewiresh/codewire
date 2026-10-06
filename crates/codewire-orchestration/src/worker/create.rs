@@ -286,6 +286,16 @@ pub struct SandboxWorkerCfg {
     /// configures no warm pool; parsed by
     /// [`crate::sandbox::warm_pool::parse_warm_pool_shapes`].
     pub warm_pool_shapes: String,
+    /// `SANDBOX_COORDINATOR_EXTRA_ROOTS=true` mounts the public
+    /// `codewire-coordinator-extra-roots` bundle into identity-free workspaces
+    /// so the daemon can verify a local cluster's coordinator. Dev and
+    /// Production leave it off: their coordinator has a WebPKI certificate.
+    pub coordinator_extra_roots: bool,
+    /// The in-cluster ingress controller workspaces may reach on 80/443
+    /// (`SANDBOX_INGRESS_NAMESPACE`, `SANDBOX_INGRESS_POD_NAME`). Empty keeps
+    /// the RKE2 controller in `kube-system`.
+    pub ingress_namespace: String,
+    pub ingress_pod_name: String,
 }
 
 impl SandboxWorkerCfg {
@@ -383,6 +393,9 @@ impl SandboxWorkerCfg {
             }),
             warm_pool_shapes: std::env::var(crate::sandbox::warm_pool::WARM_POOL_SHAPES_ENV)
                 .unwrap_or_default(),
+            coordinator_extra_roots: getenv("SANDBOX_COORDINATOR_EXTRA_ROOTS", "false") == "true",
+            ingress_namespace: getenv("SANDBOX_INGRESS_NAMESPACE", ""),
+            ingress_pod_name: getenv("SANDBOX_INGRESS_POD_NAME", ""),
         }
     }
 }
@@ -566,6 +579,9 @@ pub fn shape_template_opts(
         api_base_url: cfg.api_base_url.clone(),
         coordinator_url: cfg.coordinator_url.clone(),
         server_namespace: cfg.pod_namespace.clone(),
+        coordinator_extra_roots: cfg.coordinator_extra_roots,
+        ingress_namespace: cfg.ingress_namespace.clone(),
+        ingress_pod_name: cfg.ingress_pod_name.clone(),
         derp_host: cfg.derp_host.clone(),
         derp_port: parse_derp_port(&cfg.derp_port),
         stun_host: cfg.stun_host.clone(),

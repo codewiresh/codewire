@@ -89,7 +89,7 @@ deploy_kind_credential_cert_manager() {
 # Certificates whose cleanup kind_credential_bootstrap_smoke proves; no
 # workspace or gateway mounts gateway trust.
 deploy_kind_credential_issuers() {
-  log "issuing independent synthetic Kind gateway, broker and orchestration roots"
+  log "issuing independent synthetic Kind gateway, broker, orchestration and coordinator roots"
   kubectl_apply -f "$ROOT/tests/e2e/kind/credential-issuers.yaml"
   kubectl -n "$SANDBOX_NS" wait --for=condition=Ready --timeout=120s \
     certificate/codewire-kind-credential-gateway-root issuer/codewire-credential-gateway
@@ -99,8 +99,10 @@ deploy_kind_credential_issuers() {
     certificate/codewire-kind-orchestration-internal-root issuer/codewire-orchestration-internal \
     certificate/codewire-orchestration-internal \
     certificate/codewire-kind-postgres-root issuer/codewire-kind-postgres \
-    certificate/codewire-kind-postgres-tls
-  local gateway_roots broker_roots orchestration_roots
+    certificate/codewire-kind-postgres-tls \
+    certificate/codewire-kind-coordinator-root issuer/codewire-kind-coordinator \
+    certificate/codewire-kind-coordinator-tls
+  local gateway_roots broker_roots orchestration_roots coordinator_roots
   # Only public certificates leave these synthetic controller-owned Secrets.
   # No private key is copied into the host, workspace, ConfigMap or log.
   gateway_roots="$(kubectl -n "$SANDBOX_NS" get secret codewire-kind-credential-gateway-root \
@@ -109,10 +111,16 @@ deploy_kind_credential_issuers() {
     -o 'jsonpath={.data.tls\.crt}' | base64 -d)"
   orchestration_roots="$(kubectl -n "$NS" get secret codewire-kind-orchestration-internal-root \
     -o 'jsonpath={.data.tls\.crt}' | base64 -d)"
+  coordinator_roots="$(kubectl -n "$NS" get secret codewire-kind-coordinator-root \
+    -o 'jsonpath={.data.tls\.crt}' | base64 -d)"
   [ -n "$gateway_roots" ] && [ -n "$broker_roots" ] && [ -n "$orchestration_roots" ] \
+    && [ -n "$coordinator_roots" ] \
     && [ "$gateway_roots" != "$broker_roots" ] \
     && [ "$orchestration_roots" != "$broker_roots" ] \
-    && [ "$orchestration_roots" != "$gateway_roots" ] || {
+    && [ "$orchestration_roots" != "$gateway_roots" ] \
+    && [ "$coordinator_roots" != "$gateway_roots" ] \
+    && [ "$coordinator_roots" != "$broker_roots" ] \
+    && [ "$coordinator_roots" != "$orchestration_roots" ] || {
     echo '::error::Kind credential trust domains are missing or not distinct' >&2
     return 1
   }
@@ -127,6 +135,10 @@ deploy_kind_credential_issuers() {
     kubectl -n "$namespace" create configmap codewire-orchestration-internal-roots \
       --from-literal="ca.crt=$orchestration_roots" --dry-run=client -o yaml | kubectl_apply -f -
   done
+  # Workspace daemons (SANDBOX_COORDINATOR_EXTRA_ROOTS) verify the in-cluster
+  # coordinator edge with this root alone, beside the WebPKI roots.
+  kubectl -n "$SANDBOX_NS" create configmap codewire-coordinator-extra-roots \
+    --from-literal="ca.crt=$coordinator_roots" --dry-run=client -o yaml | kubectl_apply -f -
 }
 
 delete_kind_credential_bootstrap() {

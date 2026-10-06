@@ -10,7 +10,12 @@ its own UID from the downward API, plus exactly one new egress rule to the
 binding listener. Its one ConfigMap volume is the exact exception of
 daemon-hosted access Q6: the single public key `ca.crt` of
 `codewire-orchestration-internal-roots`, mounted read-only into the workspace
-container only, to verify the binding listener's TLS identity.
+container only, to verify the binding listener's TLS identity. A local
+cluster may add one more, and only this one: the single public key `ca.crt`
+of `codewire-coordinator-extra-roots`, mounted read-only at
+`/run/codewire-coordinator-extra-roots` in the workspace container only, which
+the daemon trusts beside the WebPKI roots for a coordinator without a WebPKI
+certificate. Dev and Production never render it.
 
 Warm pools (Program #2238 C1) share one such template per exact shape. Their
 objects carry no environment, organization, generation, UUID or secret at all,
@@ -81,6 +86,19 @@ EXPECTED_ROOTS_VOLUME = {
     },
 }
 EXPECTED_ROOTS_MOUNT = {"name": ROOTS_VOLUME, "mountPath": ROOTS_MOUNT, "readOnly": True}
+EXTRA_ROOTS_VOLUME = "coordinator-extra-roots"
+EXTRA_ROOTS_MOUNT = "/run/codewire-coordinator-extra-roots"
+# The optional second ConfigMap (local clusters only): the coordinator's
+# public extra roots, one key.
+EXPECTED_EXTRA_ROOTS_VOLUME = {
+    "name": EXTRA_ROOTS_VOLUME,
+    "configMap": {
+        "name": "codewire-coordinator-extra-roots",
+        "items": [{"key": "ca.crt", "path": "ca.crt"}],
+        "defaultMode": 0o444,
+    },
+}
+EXPECTED_EXTRA_ROOTS_MOUNT = {"name": EXTRA_ROOTS_VOLUME, "mountPath": EXTRA_ROOTS_MOUNT, "readOnly": True}
 ENVIRONMENT_LABEL = "codewire.sh/environment-id"
 POOL_NAME = re.compile(r"^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$")
 POOL_REVISION = "codewire.sh/pool-revision"
@@ -104,6 +122,31 @@ POOL_FORBIDDEN_INIT_DATA = ("codewire_workspace_storage_key_id", "codewire_confi
 SECRET_KEYS = {"secret", "secretName", "secretKeyRef", "envFrom"}
 
 
+# Only the disposable Kind overlay turns the coordinator extra roots on; a
+# shipped manifest never names the setting.
+EXTRA_ROOTS_SETTING = "SANDBOX_COORDINATOR_EXTRA_ROOTS"
+EXTRA_ROOTS_SETTING_OWNER = "tests/e2e/kind/support.yaml"
+
+
+def extra_roots_setting_violations(manifests: dict[str, str]) -> list[str]:
+    output = [f"{rel}: sets {EXTRA_ROOTS_SETTING}, which only {EXTRA_ROOTS_SETTING_OWNER} may"
+              for rel, text in sorted(manifests.items())
+              if rel != EXTRA_ROOTS_SETTING_OWNER and EXTRA_ROOTS_SETTING in text]
+    if EXTRA_ROOTS_SETTING not in manifests.get(EXTRA_ROOTS_SETTING_OWNER, ""):
+        output.append(f"{EXTRA_ROOTS_SETTING_OWNER}: Kind no longer mounts the coordinator extra roots")
+    return output
+
+
+def deployment_manifests() -> dict[str, str]:
+    manifests = {
+        path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
+        for path in (ROOT / "deployments").rglob("*")
+        if path.is_file() and path.suffix in {".yaml", ".yml", ".json", ".env"}
+    }
+    manifests[EXTRA_ROOTS_SETTING_OWNER] = (ROOT / EXTRA_ROOTS_SETTING_OWNER).read_text(encoding="utf-8")
+    return manifests
+
+
 def containers(spec: dict[str, Any]) -> list[dict[str, Any]]:
     return list(spec.get("containers") or []) + list(spec.get("initContainers") or [])
 
@@ -117,6 +160,10 @@ def violations(template: dict[str, Any], label: str) -> list[str]:
     if ENVIRONMENT_LABEL in text:
         output.append(f"{label}: carries the environment label")
     spec = ((template.get("spec") or {}).get("podTemplate") or {}).get("spec") or {}
+    extra_roots = [volume for volume in spec.get("volumes") or [] if volume.get("name") == EXTRA_ROOTS_VOLUME]
+    if extra_roots not in ([], [EXPECTED_EXTRA_ROOTS_VOLUME]):
+        output.append(f"{label}: coordinator extra roots volume is not exactly the ca.crt key of the extra roots")
+    has_extra_roots = bool(extra_roots)
     for container in containers(spec):
         for entry in container.get("env") or []:
             if entry.get("name") in FORBIDDEN_ENVIRONMENT:
@@ -129,6 +176,11 @@ def violations(template: dict[str, Any], label: str) -> list[str]:
         roots_mounts = [mount for mount in container.get("volumeMounts") or [] if mount.get("name") == ROOTS_VOLUME]
         if roots_mounts != ([EXPECTED_ROOTS_MOUNT] if container.get("name") == "workspace" else []):
             output.append(f"{label}: binding roots are not mounted read-only at {ROOTS_MOUNT} in the workspace container only")
+        extra_mounts = [mount for mount in container.get("volumeMounts") or [] if mount.get("name") == EXTRA_ROOTS_VOLUME]
+        expected_extra = [EXPECTED_EXTRA_ROOTS_MOUNT] if container.get("name") == "workspace" and has_extra_roots else []
+        if extra_mounts != expected_extra:
+            output.append(f"{label}: coordinator extra roots are not mounted read-only at {EXTRA_ROOTS_MOUNT} "
+                          "in the workspace container only, exactly when their volume exists")
     if spec.get("automountServiceAccountToken") is not False:
         output.append(f"{label}: automounts a Kubernetes API token")
     volumes = [volume for volume in spec.get("volumes") or [] if volume.get("name") == BINDING_VOLUME]
@@ -145,7 +197,7 @@ def violations(template: dict[str, Any], label: str) -> list[str]:
     if roots != [EXPECTED_ROOTS_VOLUME]:
         output.append(f"{label}: binding roots volume is not exactly the ca.crt key of the internal roots")
     for volume in spec.get("volumes") or []:
-        if "configMap" in volume and volume != EXPECTED_ROOTS_VOLUME:
+        if "configMap" in volume and volume not in (EXPECTED_ROOTS_VOLUME, EXPECTED_EXTRA_ROOTS_VOLUME):
             output.append(f"{label}: mounts ConfigMap volume {volume.get('name')}")
         if "secret" in volume:
             output.append(f"{label}: mounts Secret volume {volume.get('name')}")
@@ -460,6 +512,40 @@ def self_test(base: dict[str, Any]) -> None:
     rejected("roots ConfigMap under another name", lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append(
         {**copy.deepcopy(EXPECTED_ROOTS_VOLUME), "name": "extra-roots"}))
 
+    # A local cluster's coordinator extra roots: accepted exactly, nothing more.
+    def with_extra_roots(fixture: dict[str, Any]) -> None:
+        fixture["spec"]["podTemplate"]["spec"]["volumes"].append(copy.deepcopy(EXPECTED_EXTRA_ROOTS_VOLUME))
+        workspace(fixture)["volumeMounts"].append(dict(EXPECTED_EXTRA_ROOTS_MOUNT))
+
+    accepted = copy.deepcopy(base)
+    with_extra_roots(accepted)
+    if violations(accepted, "positive fixture coordinator extra roots"):
+        raise RuntimeError("the exact coordinator extra roots were rejected")
+
+    def extra(mutate: Any) -> Any:
+        def apply(fixture: dict[str, Any]) -> None:
+            with_extra_roots(fixture)
+            mutate(fixture)
+        return apply
+
+    def extra_mount(fixture: dict[str, Any]) -> dict[str, Any]:
+        return next(m for m in workspace(fixture)["volumeMounts"] if m["name"] == EXTRA_ROOTS_VOLUME)
+
+    rejected("extra roots without mount", lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append(
+        copy.deepcopy(EXPECTED_EXTRA_ROOTS_VOLUME)))
+    rejected("extra roots mount without volume", lambda f: workspace(f)["volumeMounts"].append(dict(EXPECTED_EXTRA_ROOTS_MOUNT)))
+    rejected("extra roots in DinD", extra(lambda f: next(c for c in f["spec"]["podTemplate"]["spec"]["containers"]
+                                                         if c["name"] == "dind")["volumeMounts"].append(dict(EXPECTED_EXTRA_ROOTS_MOUNT))))
+    rejected("writable extra roots mount", extra(lambda f: extra_mount(f).__setitem__("readOnly", False)))
+    rejected("extra roots at another path", extra(lambda f: extra_mount(f).__setitem__("mountPath", "/etc/ssl/certs")))
+    rejected("another extra roots ConfigMap", extra(lambda f: volume(f, EXTRA_ROOTS_VOLUME)["configMap"].__setitem__(
+        "name", "codewire-credential-broker-roots")))
+    rejected("another extra roots key", extra(lambda f: volume(f, EXTRA_ROOTS_VOLUME)["configMap"].__setitem__(
+        "items", [{"key": "ca.crt", "path": "ca.crt"}, {"key": "tls.key", "path": "tls.key"}])))
+    rejected("writable extra roots mode", extra(lambda f: volume(f, EXTRA_ROOTS_VOLUME)["configMap"].__setitem__("defaultMode", 0o666)))
+    rejected("second extra roots volume", extra(lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append(
+        copy.deepcopy(EXPECTED_EXTRA_ROOTS_VOLUME))))
+
 
 def check_identity_free_workspace(args: argparse.Namespace) -> int:
     failures: list[str] = []
@@ -480,8 +566,22 @@ def check_identity_free_workspace(args: argparse.Namespace) -> int:
             failures.append(f"{rel}: unreadable ({error})")
     if len(pool_objects) == 2:
         failures.extend(pool_violations(pool_objects[0], pool_objects[1], POOL_FIXTURE))
+    try:
+        failures.extend(extra_roots_setting_violations(deployment_manifests()))
+    except OSError as error:
+        failures.append(f"deployment manifests: unreadable ({error})")
     if args.self_test and base is not None:
         try:
+            kind = {EXTRA_ROOTS_SETTING_OWNER: f'  {EXTRA_ROOTS_SETTING}: "true"\n'}
+            if extra_roots_setting_violations(kind):
+                raise RuntimeError("the Kind overlay's coordinator extra roots were rejected")
+            for name, manifests in {
+                "Dev overlay setting": {**kind, "deployments/k8s/overlays/dev/config.yaml": f"{EXTRA_ROOTS_SETTING}: \"true\""},
+                "base setting": {**kind, "deployments/k8s/orchestration/deployment.yaml": f"- name: {EXTRA_ROOTS_SETTING}"},
+                "Kind without the setting": {EXTRA_ROOTS_SETTING_OWNER: ""},
+            }.items():
+                if not extra_roots_setting_violations(manifests):
+                    raise RuntimeError(f"self-test accepted coordinator extra roots: {name}")
             self_test(base)
             if len(pool_objects) == 2:
                 pool_self_test(pool_objects[0], pool_objects[1])

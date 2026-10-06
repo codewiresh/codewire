@@ -100,6 +100,10 @@ pub const WORKSPACE_TAILNET_UDP_PORT: u16 = 31000;
 /// never mount it. A present but malformed bundle fails closed.
 pub const COORDINATOR_EXTRA_ROOTS_MOUNT_PATH: &str = "/run/codewire-coordinator-extra-roots";
 pub const COORDINATOR_EXTRA_ROOTS_FILE: &str = "/run/codewire-coordinator-extra-roots/ca.crt";
+/// The only ConfigMap that may supply those extra roots, and only where
+/// orchestration is configured to mount it (`SANDBOX_COORDINATOR_EXTRA_ROOTS`,
+/// a local cluster). Dev and Production never mount it.
+pub const COORDINATOR_EXTRA_ROOTS_CONFIGMAP: &str = "codewire-coordinator-extra-roots";
 /// Server-side long-poll requested by an unbound daemon; the listener clamps
 /// it to its own maximum.
 pub const WORKSPACE_BINDING_WAIT_SECONDS: u32 = 20;

@@ -179,6 +179,13 @@ pub struct TemplateOpts {
     pub api_base_url: String,
     pub coordinator_url: String,
     pub server_namespace: String,
+    /// Mount `COORDINATOR_EXTRA_ROOTS_CONFIGMAP` for the daemon's coordinator
+    /// trust (local clusters only).
+    pub coordinator_extra_roots: bool,
+    /// The ingress controller workspace egress may reach on 80/443; empty
+    /// fields keep RKE2's `kube-system`/`rke2-ingress-nginx`.
+    pub ingress_namespace: String,
+    pub ingress_pod_name: String,
     pub derp_host: String,
     pub derp_port: i64,
     pub stun_host: String,

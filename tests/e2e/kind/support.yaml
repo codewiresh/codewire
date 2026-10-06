@@ -36,6 +36,16 @@ data:
   # in dev-sandboxes, so both are fully qualified.
   CODEWIRE_API_URL: "http://codewire-orchestration.codewire-e2e.svc.cluster.local:8084"
   CODEWIRE_COORDINATOR_URL: "http://codewire-coordinator.codewire-e2e.svc.cluster.local:8090"
+  # The workspace daemon joins its tailnet through the coordinator's HTTPS
+  # edge. In-cluster that is ingress-nginx under its Service name, serving a
+  # leaf of the synthetic coordinator root (credential-issuers.yaml) whose
+  # public certificate orchestration mounts as the daemon's extra roots.
+  # Workspace egress reaches this controller instead of RKE2's. Dev and
+  # Production set none of these: their coordinator edge has a WebPKI leaf.
+  CODEWIRE_SANDBOX_PUBLIC_COORDINATOR_URL: "https://ingress-nginx-controller.ingress-nginx.svc.cluster.local"
+  SANDBOX_COORDINATOR_EXTRA_ROOTS: "true"
+  SANDBOX_INGRESS_NAMESPACE: ingress-nginx
+  SANDBOX_INGRESS_POD_NAME: ingress-nginx
 ---
 # The non-promotable credential fixture owns this public synthetic App slug.
 # No App client material is present in the browser or in this ConfigMap.

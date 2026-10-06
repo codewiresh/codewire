@@ -3445,6 +3445,100 @@ mod tests {
         }
     }
 
+    fn workspace_volume<'a>(template: &'a Value, name: &str) -> Option<&'a Value> {
+        template["spec"]["podTemplate"]["spec"]["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|volume| volume["name"] == name)
+    }
+
+    fn ingress_egress_target(template: &Value) -> (String, String) {
+        let rule = template["spec"]["networkPolicy"]["egress"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|rule| {
+                rule["ports"].as_array().is_some_and(|ports| {
+                    ports.iter().any(|port| port["port"] == 443 && port["protocol"] == "TCP")
+                }) && rule["to"][0]["podSelector"].is_object()
+            })
+            .expect("ingress controller egress rule");
+        let target = &rule["to"][0];
+        (
+            target["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            target["podSelector"]["matchLabels"]["app.kubernetes.io/name"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        )
+    }
+
+    #[test]
+    fn coordinator_extra_roots_and_ingress_target_default_to_dev_and_production() {
+        let template = render_sandbox_template("dev-sandboxes", &identity_free_opts());
+        assert!(workspace_volume(&template, "coordinator-extra-roots").is_none());
+        assert!(!template.to_string().contains("/run/codewire-coordinator-extra-roots"));
+        assert_eq!(
+            ingress_egress_target(&template),
+            ("kube-system".to_owned(), "rke2-ingress-nginx".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_local_cluster_mounts_only_the_public_coordinator_roots_and_names_its_ingress() {
+        let opts = TemplateOpts {
+            coordinator_extra_roots: true,
+            ingress_namespace: "ingress-nginx".into(),
+            ingress_pod_name: "ingress-nginx".into(),
+            ..identity_free_opts()
+        };
+        let template = render_sandbox_template("dev-sandboxes", &opts);
+        assert_eq!(
+            workspace_volume(&template, "coordinator-extra-roots"),
+            Some(&serde_json::json!({
+                "name": "coordinator-extra-roots",
+                "configMap": {
+                    "name": "codewire-coordinator-extra-roots",
+                    "items": [{ "key": "ca.crt", "path": "ca.crt" }],
+                    "defaultMode": 0o444,
+                },
+            }))
+        );
+        let containers = template["spec"]["podTemplate"]["spec"]["containers"]
+            .as_array()
+            .unwrap();
+        let mounts: Vec<(&str, &Value)> = containers
+            .iter()
+            .flat_map(|container| {
+                container["volumeMounts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|mount| mount["name"] == "coordinator-extra-roots")
+                    .map(move |mount| (container["name"].as_str().unwrap(), mount))
+            })
+            .collect();
+        // The workspace container alone, read-only, at the daemon's path.
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].0, "workspace");
+        assert_eq!(
+            mounts[0].1,
+            &serde_json::json!({
+                "name": "coordinator-extra-roots",
+                "mountPath": "/run/codewire-coordinator-extra-roots",
+                "readOnly": true,
+            })
+        );
+        assert_eq!(
+            ingress_egress_target(&template),
+            ("ingress-nginx".to_owned(), "ingress-nginx".to_owned())
+        );
+    }
+
     /// Invariant 1 / design §13: names that must never appear in an
     /// identity-free workspace template.
     const IDENTITY_FREE_FORBIDDEN_NAMES: [&str; 18] = [

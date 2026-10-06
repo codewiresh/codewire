@@ -79,24 +79,39 @@ pub(super) fn workspace_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
                 { "protocol": "TCP", "port": 53 },
             ],
         }),
-        json!({
-            "to": [
-                {
-                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "kube-system" } },
-                    "podSelector": { "matchLabels": { "app.kubernetes.io/name": "rke2-ingress-nginx" } },
-                },
-            ],
-            "ports": [
-                { "protocol": "TCP", "port": 443 },
-                { "protocol": "TCP", "port": 80 },
-            ],
-        }),
+        ingress_controller_egress_rule(opts),
     ];
     egress.extend(workspace_tailnet_egress_rules(opts));
     if let Some(rule) = kata_coco_kbs_egress_rule(&opts.kata_coco_kbs_url) {
         egress.push(rule);
     }
     egress
+}
+
+/// HTTP and HTTPS to the cluster's ingress controller: RKE2's in
+/// `kube-system` unless orchestration names another (a local cluster's
+/// ingress-nginx, which fronts its coordinator for the daemon).
+fn ingress_controller_egress_rule(opts: &TemplateOpts) -> Value {
+    let namespace = match opts.ingress_namespace.trim() {
+        "" => "kube-system",
+        namespace => namespace,
+    };
+    let pod_name = match opts.ingress_pod_name.trim() {
+        "" => "rke2-ingress-nginx",
+        pod_name => pod_name,
+    };
+    json!({
+        "to": [
+            {
+                "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": namespace } },
+                "podSelector": { "matchLabels": { "app.kubernetes.io/name": pod_name } },
+            },
+        ],
+        "ports": [
+            { "protocol": "TCP", "port": 443 },
+            { "protocol": "TCP", "port": 80 },
+        ],
+    })
 }
 
 /// The shared template egress of an identity-free workspace (design §3.5,
@@ -120,18 +135,7 @@ pub(super) fn identity_free_workspace_egress_rules(opts: &TemplateOpts) -> Vec<V
                 { "protocol": "TCP", "port": 53 },
             ],
         }),
-        json!({
-            "to": [
-                {
-                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "kube-system" } },
-                    "podSelector": { "matchLabels": { "app.kubernetes.io/name": "rke2-ingress-nginx" } },
-                },
-            ],
-            "ports": [
-                { "protocol": "TCP", "port": 443 },
-                { "protocol": "TCP", "port": 80 },
-            ],
-        }),
+        ingress_controller_egress_rule(opts),
         json!({
             "to": [
                 {

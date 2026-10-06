@@ -399,6 +399,20 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
                 "mountPath": WORKSPACE_BINDING_TLS_ROOTS_MOUNT_PATH,
                 "readOnly": true,
             }));
+        // A local cluster's coordinator is not WebPKI-signed: only there does
+        // orchestration mount the public bundle the daemon trusts beside the
+        // WebPKI roots for its coordinator. Dev and Production never do.
+        if opts.coordinator_extra_roots {
+            volumes.push(coordinator_extra_roots_volume());
+            ws["volumeMounts"]
+                .as_array_mut()
+                .expect("workspace mounts")
+                .push(json!({
+                    "name": COORDINATOR_EXTRA_ROOTS_VOLUME,
+                    "mountPath": codewire_gateway_proto::COORDINATOR_EXTRA_ROOTS_MOUNT_PATH,
+                    "readOnly": true,
+                }));
+        }
     }
 
     let mut spec = Map::new();
@@ -592,6 +606,22 @@ fn workspace_binding_roots_volume() -> Value {
         "name": WORKSPACE_BINDING_ROOTS_VOLUME,
         "configMap": {
             "name": super::ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP,
+            "items": [{ "key": "ca.crt", "path": "ca.crt" }],
+            "defaultMode": 0o444,
+        },
+    })
+}
+
+/// The volume of the coordinator's extra public roots (local clusters only).
+pub(crate) const COORDINATOR_EXTRA_ROOTS_VOLUME: &str = "coordinator-extra-roots";
+
+/// Only the `ca.crt` key of the coordinator's extra public roots: public trust
+/// material, never a credential.
+fn coordinator_extra_roots_volume() -> Value {
+    json!({
+        "name": COORDINATOR_EXTRA_ROOTS_VOLUME,
+        "configMap": {
+            "name": codewire_gateway_proto::COORDINATOR_EXTRA_ROOTS_CONFIGMAP,
             "items": [{ "key": "ca.crt", "path": "ca.crt" }],
             "defaultMode": 0o444,
         },
