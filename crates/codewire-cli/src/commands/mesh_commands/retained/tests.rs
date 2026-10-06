@@ -1,10 +1,48 @@
 use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 
+/// Own cleanup from the instant spawn succeeds, including failed admission.
+/// Only this unreaped Child grants authority; persisted PIDs are never used.
+struct KernelChild(std::process::Child);
+
+impl std::ops::Deref for KernelChild {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for KernelChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for KernelChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match self.0.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                _ => break,
+            }
+        }
+        if std::thread::panicking() {
+            eprintln!("owned Mesh kernel fixture child cleanup remains unknown");
+        } else {
+            panic!("owned Mesh kernel fixture child cleanup remains unknown");
+        }
+    }
+}
+
 /// A real ELF child blocked on its owned stdin. This proves kernel custody,
 /// not DERP service behavior; the CLI-bin fixture covers the actual roles.
 struct KernelFixture {
-    child: std::process::Child,
+    child: KernelChild,
     custody: ProcessCustody,
     handle: PinnedProcess,
 }
@@ -24,8 +62,39 @@ impl KernelFixture {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         configure_environment(&mut command, &configuration, &nonce);
-        let child = command.spawn().unwrap();
+        let mut child = KernelChild(command.spawn().unwrap());
+        let original = PinnedProcess::open(child.id()).unwrap();
+        let birth = process_birth(&original.proc_directory).unwrap();
         let arguments = vec![executable.path.display().to_string()];
+        let expected_arguments = format!("{}\0", executable.path.display()).into_bytes();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            assert!(child.try_wait().unwrap().is_none() && !original.exited().unwrap());
+            assert_eq!(process_birth(&original.proc_directory).unwrap(), birth);
+            let image = open_at(
+                &original.proc_directory,
+                "exe",
+                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                0,
+            )
+            .unwrap()
+            .metadata()
+            .unwrap();
+            let ready = image.dev() == executable.dev
+                && image.ino() == executable.ino
+                && image.len() == executable.size
+                && read_proc(&original.proc_directory, "cmdline", MAX_COMMAND).unwrap()
+                    == expected_arguments;
+            assert_eq!(process_birth(&original.proc_directory).unwrap(), birth);
+            if ready {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "owned kernel fixture startup not ready"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let (custody, handle) = ProcessCustody::capture(
             &child,
             executable,
@@ -35,6 +104,8 @@ impl KernelFixture {
             nonce,
         )
         .unwrap();
+        assert_eq!(custody.start_ticks, birth);
+        original.validate(&custody).unwrap();
         Self {
             child,
             custody,
@@ -43,15 +114,6 @@ impl KernelFixture {
     }
     fn alive(&mut self) -> bool {
         self.child.try_wait().unwrap().is_none()
-    }
-}
-
-impl Drop for KernelFixture {
-    fn drop(&mut self) {
-        // The fixture retains its own unreaped Child; this never consumes a
-        // persisted PID or claims cleanup authority over another process.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 

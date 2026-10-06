@@ -37,6 +37,8 @@ pub mod connect_error;
 pub mod connect_testing;
 pub mod db;
 pub mod error;
+#[cfg(feature = "kubernetes-identity")]
+pub mod gateway_authority;
 pub mod health;
 pub mod http;
 pub mod internal_hmac;

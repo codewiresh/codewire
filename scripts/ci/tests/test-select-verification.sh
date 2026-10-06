@@ -1611,6 +1611,8 @@ grep -qF -- "'api::ssh_proxy::database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "SSH proxy runtime lease matrix" "$logfile" 2' "$integration_runner"
 grep -qF -- "'api::environment_daemon::repair_database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "environment daemon repair lease matrix" "$logfile" 2' "$integration_runner"
+grep -qF -- "'api::internal::database_tests::'" "$integration_runner"
+grep -qF 'assert_passed_count "gateway RPC ownership matrix" "$logfile" 2' "$integration_runner"
 grep -qF -- "'worker::billing_sessions::database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "billing session bind matrix" "$logfile" 4' "$integration_runner"
 grep -qF 'selected service_connectcore && run_connect_auth_matrix' \

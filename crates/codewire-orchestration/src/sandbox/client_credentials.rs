@@ -1,10 +1,8 @@
-//! Environment-owned public bootstrap intent. Never reads TLS Secret data.
+//! Leftover per-environment credential bootstrap objects and the credential
+//! gateway readiness wait. Never reads TLS Secret data.
 
 use super::*;
-use crate::sandbox::template::{
-    credential_codex_config_name, credential_gateway_certificate_name,
-    render_credential_gateway_certificate,
-};
+use crate::sandbox::template::{credential_codex_config_name, credential_gateway_certificate_name};
 
 impl SandboxClient {
     pub(super) fn credential_certificates(&self) -> Api<DynamicObject> {
@@ -19,81 +17,18 @@ impl SandboxClient {
         Api::namespaced_with(self.client.clone(), &self.namespace, &resource)
     }
 
-    /// Called before submitting the workspace template, and on gateway restart.
-    /// An unchanged retry only reads public intent. A name collision with an
-    /// object not owned by this exact environment is never silently adopted.
-    pub(super) async fn ensure_credential_bootstrap(
-        &self,
-        opts: &TemplateOpts,
-    ) -> anyhow::Result<()> {
-        // Codex has no bootstrap object: the workspace daemon writes `~/.codex`.
-        if let Some(certificate) = render_credential_gateway_certificate(&self.namespace, opts) {
-            self.ensure_credential_object(self.credential_certificates(), certificate, "spec")
-                .await?;
-        }
-        Ok(())
-    }
-
-    async fn ensure_credential_object(
-        &self,
-        api: Api<DynamicObject>,
-        rendered: Value,
-        field: &str,
-    ) -> anyhow::Result<()> {
-        let mut desired: DynamicObject = serde_json::from_value(rendered)?;
-        let name = desired
-            .metadata
-            .name
-            .clone()
-            .expect("rendered bootstrap name");
-        for _ in 0..3 {
-            let existing = match api.get(&name).await {
-                Ok(existing) => existing,
-                Err(kube::Error::Api(error)) if error.code == 404 => {
-                    match api.create(&PostParams::default(), &desired).await {
-                        Ok(_) => return Ok(()),
-                        Err(kube::Error::Api(error)) if error.code == 409 => continue,
-                        Err(error) => {
-                            return Err(anyhow::anyhow!(
-                                "create credential bootstrap {name}: {error}"
-                            ));
-                        }
-                    }
-                }
-                Err(error) => {
-                    return Err(anyhow::anyhow!("get credential bootstrap {name}: {error}"));
-                }
-            };
-            validate_bootstrap_owner(&existing, &desired)?;
-            // Exact intent prevents accepting extra SANs, usages, or an added
-            // CA capability. Renderer supplies certificate defaults explicitly.
-            if existing.data[field] == desired.data[field] {
-                return Ok(());
-            }
-            desired.metadata.resource_version = existing.metadata.resource_version;
-            desired.metadata.finalizers = existing.metadata.finalizers;
-            desired.metadata.owner_references = existing.metadata.owner_references;
-            match api.replace(&name, &PostParams::default(), &desired).await {
-                Ok(_) => return Ok(()),
-                Err(kube::Error::Api(error)) if error.code == 409 => {}
-                Err(error) => {
-                    return Err(anyhow::anyhow!(
-                        "update credential bootstrap {name}: {error}"
-                    ));
-                }
-            }
-        }
-        anyhow::bail!("credential bootstrap update conflicts exhausted")
-    }
-
+    /// Only environments created before the gateway's workspace-facing HTTPS
+    /// listener was removed still own a gateway Certificate and its leaf; a
+    /// gateway Deployment rendered then mounts that leaf until its next
+    /// render, so ordinary stop keeps them and final environment destruction
+    /// alone owns this cleanup. Absence is the normal case.
+    ///
     /// Removes the issuing Certificate before removing its leaf Secret. Do not
     /// use foreground GC for the Certificate: retaining it while its leaf is
     /// collected lets cert-manager start issuance again during teardown.
     /// The dedicated issuer's
     /// cert-manager installation must enable Certificate owner references so
     /// Kubernetes also collects a late in-flight issuance after deletion.
-    /// Ordinary stop keeps bootstrap objects for the still-existing workspace;
-    /// final environment destruction alone owns this cleanup.
     pub(super) async fn delete_credential_bootstrap(
         &self,
         env_id: &str,
@@ -194,12 +129,12 @@ impl SandboxClient {
     }
 
     /// A read-only convergence wait, always outside the activity's SQL mutation
-    /// fence. Ready means the current Certificate revision and exact generation
-    /// gateway rollout are ready, not that a provider account was contacted.
+    /// fence. Ready means the exact generation gateway rollout is ready, not
+    /// that a provider account was contacted.
     ///
     /// Create and start block on this wait, so it wakes on the gateway
     /// Deployment's next change rather than a fixed poll. Every wake re-reads
-    /// both objects, so a missed or failed watch only falls back to polling.
+    /// the Deployment, so a missed or failed watch only falls back to polling.
     pub async fn wait_for_credential_gateway_ready(
         &self,
         opts: &TemplateOpts,
@@ -219,26 +154,16 @@ impl SandboxClient {
         timeout: Duration,
         fallback_poll: Duration,
     ) -> anyhow::Result<()> {
-        let Some(rendered) = render_credential_gateway_certificate(&self.namespace, opts) else {
+        let Some(config) = &opts.credential_runtime else {
             return Ok(());
         };
-        let desired: DynamicObject = serde_json::from_value(rendered)?;
-        let certificate_name = credential_gateway_certificate_name(&opts.environment_id);
+        config.assert_namespace(&self.namespace);
         let gateway_name = gateway_workload_name(&opts.environment_id);
         let deployments = self.deployments();
         tokio::time::timeout(timeout, async {
             loop {
-                let certificate = self
-                    .credential_certificates()
-                    .get(&certificate_name)
-                    .await?;
-                validate_bootstrap_owner(&certificate, &desired)?;
-                anyhow::ensure!(
-                    certificate.data["spec"] == desired.data["spec"],
-                    "credential Certificate intent changed during readiness"
-                );
                 let gateway = deployments.get(&gateway_name).await?;
-                if certificate_ready(&certificate) && gateway_ready(&gateway, opts) {
+                if gateway_ready(&gateway, opts) {
                     return Ok::<_, anyhow::Error>(());
                 }
                 wait_for_object_change(&deployments, &gateway_name, &gateway, fallback_poll).await;
@@ -249,54 +174,9 @@ impl SandboxClient {
     }
 }
 
-/// The gateway readiness wait re-reads at least this often, covering a
-/// Certificate that turns ready after the Deployment's last change and a
-/// watch that cannot be opened.
+/// The gateway readiness wait re-reads at least this often, covering a watch
+/// that cannot be opened or misses a change.
 const GATEWAY_READY_FALLBACK_POLL: Duration = Duration::from_secs(2);
-
-fn validate_bootstrap_owner(
-    existing: &DynamicObject,
-    desired: &DynamicObject,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        existing.metadata.name == desired.metadata.name
-            && existing.metadata.namespace == desired.metadata.namespace
-            && existing.metadata.deletion_timestamp.is_none()
-            && desired
-                .metadata
-                .labels
-                .as_ref()
-                .is_some_and(|labels| labels.iter().all(|(key, value)| existing
-                    .metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|existing| existing.get(key))
-                    == Some(value))),
-        "credential bootstrap ownership does not match environment"
-    );
-    Ok(())
-}
-
-fn certificate_ready(certificate: &DynamicObject) -> bool {
-    let Some(generation) = certificate
-        .metadata
-        .generation
-        .filter(|generation| *generation > 0)
-    else {
-        return false;
-    };
-    certificate
-        .data
-        .pointer("/status/conditions")
-        .and_then(Value::as_array)
-        .is_some_and(|conditions| {
-            conditions.iter().any(|condition| {
-                condition["type"] == "Ready"
-                    && condition["status"] == "True"
-                    && condition["observedGeneration"].as_i64() == Some(generation)
-            })
-        })
-}
 
 fn gateway_ready(gateway: &DynamicObject, opts: &TemplateOpts) -> bool {
     let Some(generation) = gateway

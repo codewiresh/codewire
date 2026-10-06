@@ -185,7 +185,7 @@ pub(super) fn build_sidecar_env(opts: &TemplateOpts) -> Vec<Value> {
 }
 
 pub fn render_gateway_service(namespace: &str, opts: &TemplateOpts) -> Value {
-    let mut service = json!({
+    json!({
         "apiVersion": "v1",
         "kind": "Service",
         "metadata": {
@@ -202,18 +202,7 @@ pub fn render_gateway_service(namespace: &str, opts: &TemplateOpts) -> Value {
                 { "name": "tailnet-udp", "protocol": "UDP", "port": GATEWAY_TAILNET_UDP_PORT, "targetPort": GATEWAY_TAILNET_UDP_PORT },
             ],
         },
-    });
-    if let Some(config) = &opts.credential_runtime {
-        config.assert_namespace(namespace);
-        service["spec"]["ports"]
-            .as_array_mut()
-            .expect("gateway ports")
-            .push(json!({
-                "name":"credentials", "protocol":"TCP", "port":443,
-                "targetPort":credentials::CREDENTIAL_GATEWAY_HTTPS_PORT,
-            }));
-    }
-    service
+    })
 }
 
 pub fn render_gateway_direct_udp_service(namespace: &str, opts: &TemplateOpts) -> Option<Value> {
@@ -360,9 +349,6 @@ pub fn render_gateway_deployment(namespace: &str, opts: &TemplateOpts) -> Value 
     });
     if let Some(config) = &opts.credential_runtime {
         config.assert_namespace(namespace);
-        gateway_container["ports"].as_array_mut().expect("gateway ports").push(json!({
-            "name":"credentials", "protocol":"TCP", "containerPort":credentials::CREDENTIAL_GATEWAY_HTTPS_PORT,
-        }));
         gateway_container["volumeMounts"]
             .as_array_mut()
             .expect("gateway mounts")

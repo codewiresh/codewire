@@ -3564,7 +3564,6 @@ environment_resize_smoke() (
     CRD_SMOKE_NAMESPACE="$SANDBOX_NS" CRD_SMOKE_SERVER_NAMESPACE="$NS" \
     CRD_SMOKE_LOCAL_GATEWAY=1 CRD_SMOKE_WORKSPACE_IMAGE=codewire-gateway:e2e \
     SANDBOX_CREDENTIAL_BROKER_NAMESPACE="$NS" \
-    SANDBOX_CREDENTIAL_GATEWAY_ROOTS_CONFIGMAP=codewire-credential-gateway-roots \
     SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP=codewire-credential-broker-roots \
     CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
     "$CARGO_CI_DIR/crd-smoke" >"$resize_manifest" || return $?
@@ -3590,8 +3589,8 @@ COMMIT;
 SQL
     [ "$?" -eq 0 ] || status=1
     # Runtime identity reconciliation creates the ordinary gateway stack.
-    # Stop its Deployment and issuing Certificate before deleting either leaf key;
-    # never delete the shared fixture Issuers or public root ConfigMaps.
+    # Stop its Deployment, and any legacy gateway Certificate, before deleting
+    # a key; never delete the shared fixture Issuers or public root ConfigMaps.
     if CRD_SMOKE_RESIZE_PHASE=release CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id" \
       CRD_SMOKE_NAMESPACE="$SANDBOX_NS" "$CARGO_CI_DIR/crd-smoke" &&
       kubectl -n "$SANDBOX_NS" delete \

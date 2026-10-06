@@ -1,10 +1,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use codewire_tailnet::netstack::TcpListener as TailnetTcpListener;
-use codewire_tls::TlsListener;
 use std::net::{IpAddr, SocketAddr};
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream};
@@ -17,7 +15,6 @@ use crate::binding::{
     poll_binding_once, poll_binding_until_ready,
 };
 use crate::config::{CredentialRuntimeConfig, DockerProxyConfig, GatewayConfig};
-use crate::credentials::CredentialIngress;
 use crate::daemon::{DaemonClientError, DaemonSessionClient};
 use crate::daemon_credential::DaemonCredential;
 use crate::docker_proxy::{DockerProxySettings, serve_docker_socket_proxy};
@@ -171,7 +168,6 @@ where
 {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut tasks = JoinSet::new();
-    let mut ingress = None;
     let mut hosted_relay = None;
     tokio::pin!(shutdown);
     let result = {
@@ -181,7 +177,6 @@ where
             readyz_listener,
             shutdown_rx,
             &mut tasks,
-            &mut ingress,
             &mut hosted_relay,
         );
         tokio::pin!(serve);
@@ -193,22 +188,17 @@ where
     };
 
     // Every return, including failed startup/listener/task, follows this owner
-    // path. Cancel credential workers BEFORE waiting for graceful HTTP bodies;
-    // otherwise an active streaming response can deadlock shutdown.
+    // path. Cancel the credential relay BEFORE waiting for listener tasks.
     let _ = shutdown_tx.send(true);
-    let cleanup = drain_gateway_workers(ingress, &mut hosted_relay, &mut tasks).await;
+    let cleanup = drain_gateway_workers(&mut hosted_relay, &mut tasks).await;
     cleanup?;
     result
 }
 
 async fn drain_gateway_workers(
-    ingress: Option<CredentialIngress>,
     hosted_relay: &mut Option<tokio::task::JoinHandle<Result<()>>>,
     tasks: &mut JoinSet<Result<()>>,
 ) -> Result<()> {
-    if let Some(ingress) = ingress {
-        ingress.shutdown().await;
-    }
     // This owner is deliberately outside the abortable listener set. Its
     // completion includes BOTH outgoing tonic producers and its request pump.
     let relay_result = match hosted_relay.take() {
@@ -237,26 +227,11 @@ async fn run_gateway_services(
     readyz_listener: TcpListener,
     shutdown_rx: watch::Receiver<bool>,
     tasks: &mut JoinSet<Result<()>>,
-    ingress_owner: &mut Option<CredentialIngress>,
     hosted_relay: &mut Option<tokio::task::JoinHandle<Result<()>>>,
 ) -> Result<()> {
-    let credential_readiness = if let Some(credentials) = config.credentials.as_ref() {
-        let (ingress, listener) = prepare_credentials(credentials).await?;
-        let live = Arc::new(AtomicBool::new(false));
-        *ingress_owner = Some(ingress.clone());
-        tasks.spawn(serve_credentials_listener(
-            listener,
-            ingress,
-            live.clone(),
-            shutdown_rx.clone(),
-        ));
-        Some(CredentialReadiness::new(
-            live,
-            credentials.server_tls()?,
-            credentials.broker_endpoint()?,
-        ))
-    } else {
-        None
+    let credential_readiness = match config.credentials.as_ref() {
+        Some(credentials) => Some(prepare_credentials(credentials).await?),
+        None => None,
     };
 
     let ssh_addr = ssh_listener
@@ -413,61 +388,13 @@ async fn run_gateway_services(
     }
 }
 
-async fn prepare_credentials(
-    config: &CredentialRuntimeConfig,
-) -> Result<(CredentialIngress, TlsListener)> {
-    let files = config.server_tls()?;
+async fn prepare_credentials(config: &CredentialRuntimeConfig) -> Result<CredentialReadiness> {
     let broker = config.broker_endpoint()?;
-    timeout(Duration::from_secs(5), async {
-        files
-            .validate()
-            .await
-            .map_err(|_| anyhow::anyhow!("credential server TLS unavailable"))?;
-        broker
-            .validate()
-            .await
-            .map_err(|_| anyhow::anyhow!("credential broker trust unavailable"))?;
-        Ok::<_, anyhow::Error>(())
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("credential TLS startup timed out"))??;
-    let listener = TcpListener::bind(config.listen_addr)
+    timeout(Duration::from_secs(5), broker.validate())
         .await
-        .map_err(|_| anyhow::anyhow!("credential HTTPS listener unavailable"))?;
-    let listener = TlsListener::new(listener, files)
-        .map_err(|_| anyhow::anyhow!("credential HTTPS configuration invalid"))?;
-    Ok((CredentialIngress::new(config.ingress()?), listener))
-}
-
-struct CredentialListenerReadiness(Arc<AtomicBool>);
-
-impl Drop for CredentialListenerReadiness {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-}
-
-async fn serve_credentials_listener(
-    listener: TlsListener,
-    ingress: CredentialIngress,
-    live: Arc<AtomicBool>,
-    shutdown_rx: watch::Receiver<bool>,
-) -> Result<()> {
-    let _readiness = CredentialListenerReadiness(live.clone());
-    live.store(true, Ordering::Release);
-    let app =
-        axum::Router::new().fallback(move |request: axum::http::Request<axum::body::Body>| {
-            let ingress = ingress.clone();
-            async move { ingress.respond(request).await }
-        });
-    axum::serve(listener, app)
-        .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
-        .await
-        .map_err(|_| anyhow::anyhow!("credential HTTPS listener failed"))?;
-    if !*shutdown_rx.borrow() {
-        anyhow::bail!("credential HTTPS listener stopped");
-    }
-    Ok(())
+        .map_err(|_| anyhow::anyhow!("credential TLS startup timed out"))?
+        .map_err(|_| anyhow::anyhow!("credential broker trust unavailable"))?;
+    Ok(CredentialReadiness::new(broker))
 }
 
 async fn serve_tailnet_after_binding(
@@ -666,7 +593,7 @@ async fn serve_tailnet_tcp_proxy_listener(
 }
 
 /// Wait for the daemon while still failing on any listener started before it
-/// (credential HTTPS, `/readyz`). The owner cancels this future on shutdown.
+/// (`/readyz`). The owner cancels this future on shutdown.
 ///
 /// A legacy workspace's daemon accepts the rendered environment token. An
 /// identity-free workspace's daemon listens only once bound and accepts only
@@ -1090,7 +1017,7 @@ mod tests {
         let cleanup = tokio::spawn(async move {
             let mut relay = Some(relay);
             let mut listeners = JoinSet::new();
-            let result = drain_gateway_workers(None, &mut relay, &mut listeners).await;
+            let result = drain_gateway_workers(&mut relay, &mut listeners).await;
             assert!(relay.is_none());
             result
         });
@@ -1112,7 +1039,7 @@ mod tests {
             Ok(())
         }));
         assert!(
-            drain_gateway_workers(None, &mut relay, &mut JoinSet::new())
+            drain_gateway_workers(&mut relay, &mut JoinSet::new())
                 .await
                 .is_err()
         );

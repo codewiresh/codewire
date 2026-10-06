@@ -230,11 +230,6 @@
                 "readOnly": true
               },
               {
-                "mountPath": "/run/codewire-credentials/gateway-roots",
-                "name": "credential-gateway-roots",
-                "readOnly": true
-              },
-              {
                 "mountPath": "/var/run/secrets/codewire/workspace-binding",
                 "name": "workspace-binding-identity",
                 "readOnly": true
@@ -306,12 +301,6 @@
                 }
               ]
             }
-          },
-          {
-            "configMap": {
-              "name": "synthetic-trust-1"
-            },
-            "name": "credential-gateway-roots"
           },
           {
             "name": "workspace-binding-identity",

@@ -124,7 +124,7 @@ def violations(template: dict[str, Any], label: str) -> list[str]:
     if volumes != [expected_volume]:
         output.append(f"{label}: binding token volume is not exactly the workspace-binding audience")
     for volume in spec.get("volumes") or []:
-        if "configMap" in volume and volume.get("name") != "credential-gateway-roots":
+        if "configMap" in volume:
             output.append(f"{label}: mounts ConfigMap volume {volume.get('name')}")
         if "secret" in volume:
             output.append(f"{label}: mounts Secret volume {volume.get('name')}")
@@ -364,6 +364,8 @@ def self_test(base: dict[str, Any]) -> None:
     rejected("environment label", lambda f: f["metadata"].__setitem__("labels", {ENVIRONMENT_LABEL: "env"}))
     rejected("codex ConfigMap", lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append(
         {"name": "credential-codex-config", "configMap": {"name": "cw-credential-codex-env"}}))
+    rejected("gateway roots ConfigMap", lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append(
+        {"name": "credential-gateway-roots", "configMap": {"name": "codewire-credential-gateway-roots"}}))
     rejected("client bootstrap init", lambda f: f["spec"]["podTemplate"]["spec"].__setitem__(
         "initContainers", [{"name": "codewire-client-bootstrap", "command": ["sh", "-c", "cp /codewire/codex-bootstrap/config.toml x"]}]))
     rejected("token in DinD", lambda f: next(c for c in f["spec"]["podTemplate"]["spec"]["containers"] if c["name"] == "dind")[

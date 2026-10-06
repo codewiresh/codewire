@@ -2,7 +2,6 @@
 
 use serde_json::{Value, json};
 
-use super::CREDENTIAL_GATEWAY_HTTPS_PORT;
 use super::gateway::tailnet_udp_listener_enabled;
 use super::naming::{
     gateway_labels, gateway_network_policy_name, gateway_selector, warm_member_daemon_bridge_name,
@@ -45,28 +44,15 @@ pub(super) fn workspace_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
             ],
         }),
     ];
-    egress.extend(workspace_gateway_https_egress_rule(opts));
     if let Some(rule) = kata_coco_kbs_egress_rule(&opts.kata_coco_kbs_url) {
         egress.push(rule);
     }
     egress
 }
 
-/// A workspace's egress to its own environment's credential gateway on 8443,
-/// present only with the platform credential runtime.
-fn workspace_gateway_https_egress_rule(opts: &TemplateOpts) -> Option<Value> {
-    opts.credential_runtime.as_ref().map(|_| {
-        json!({
-            "to":[{"podSelector":{"matchLabels":gateway_selector(opts)}}],
-            "ports":[{"protocol":"TCP","port":CREDENTIAL_GATEWAY_HTTPS_PORT}],
-        })
-    })
-}
-
 /// The shared template egress of an identity-free workspace (design §3.5,
-/// §13): today's rules without the environment's own gateway on 8443, which
-/// `cw-daemon-net-<env>` keeps and applies once labels converge, plus exactly
-/// one new rule, TCP 8087 to orchestration Pods in the server namespace.
+/// §13): today's rules plus exactly one new rule, TCP 8087 to orchestration
+/// Pods in the server namespace.
 pub(super) fn identity_free_workspace_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
     let mut egress = vec![
         json!({
@@ -209,15 +195,6 @@ fn gateway_workspace_egress_rule(workspace: Value) -> Value {
     })
 }
 
-/// A gateway's credential HTTPS ingress from the workspace Pods `workspace`
-/// selects.
-fn gateway_https_ingress_rule(workspace: Value) -> Value {
-    json!({
-        "from":[{"podSelector":{"matchLabels":workspace}}],
-        "ports":[{"protocol":"TCP","port":CREDENTIAL_GATEWAY_HTTPS_PORT}],
-    })
-}
-
 pub fn render_gateway_network_policy(namespace: &str, opts: &TemplateOpts) -> Value {
     let mut egress = vec![
         gateway_workspace_egress_rule(workspace_selector(opts)),
@@ -311,7 +288,6 @@ pub fn render_gateway_network_policy(namespace: &str, opts: &TemplateOpts) -> Va
     })];
     if let Some(config) = &opts.credential_runtime {
         config.assert_namespace(namespace);
-        ingress.push(gateway_https_ingress_rule(workspace_selector(opts)));
         egress.push(json!({
             "to":[{
                 "namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":config.broker_namespace()}},
@@ -364,11 +340,10 @@ pub fn render_gateway_network_policy(namespace: &str, opts: &TemplateOpts) -> Va
 ///
 /// - `cw-daemon-warm-<env>` selects the member and grants exactly what
 ///   `cw-daemon-net-<env>` grants beyond the shared template: ingress from
-///   this environment's gateway and from orchestration, and egress to the
-///   gateway's credential port.
+///   this environment's gateway and from orchestration.
 /// - `cw-gw-warm-<env>` selects this environment's gateway and grants
-///   exactly the workspace rules of `cw-gw-net-<env>`, toward the member:
-///   egress to its daemon and preview ports, and credential ingress from it.
+///   exactly the workspace rule of `cw-gw-net-<env>`, toward the member:
+///   egress to its daemon and preview ports.
 ///
 /// The caller applies them only after the warm binding that recorded
 /// `sandbox_uid` committed. A Pod without the label is never selected, so
@@ -400,21 +375,14 @@ pub fn render_warm_member_bridge(
         labels.clone(),
         member.clone(),
         workspace_daemon_ingress_rules(opts),
-        workspace_gateway_https_egress_rule(opts)
-            .into_iter()
-            .collect(),
+        Vec::new(),
     );
-    let mut gateway_ingress = Vec::new();
-    if let Some(config) = &opts.credential_runtime {
-        config.assert_namespace(namespace);
-        gateway_ingress.push(gateway_https_ingress_rule(member.clone()));
-    }
     let gateway = bridge_policy(
         namespace,
         &warm_member_gateway_bridge_name(&opts.environment_id),
         labels,
         gateway_selector(opts),
-        gateway_ingress,
+        Vec::new(),
         vec![gateway_workspace_egress_rule(member)],
     );
     Ok([daemon, gateway])

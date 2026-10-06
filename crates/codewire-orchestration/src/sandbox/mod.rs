@@ -21,10 +21,11 @@ pub const EXTENSIONS_GROUP: &str = "extensions.agents.x-k8s.io";
 pub const CRD_VERSION: &str = "v1beta1";
 pub const EXTENSIONS_API_VERSION: &str = "extensions.agents.x-k8s.io/v1beta1";
 
-/// Labels, mirroring `sandbox.LabelEnvID` / `LabelOrgID` / `LabelType`.
-pub const LABEL_ENV_ID: &str = "codewire.sh/environment-id";
-pub const LABEL_ORG_ID: &str = "codewire.sh/org-id";
-pub const LABEL_TYPE: &str = "codewire.sh/type";
+/// Labels, mirroring `sandbox.LabelEnvID` / `LabelOrgID` / `LabelType`. The
+/// shared gateway ownership rule owns their spelling.
+pub const LABEL_ENV_ID: &str = codewire_server_core::gateway_authority::ENVIRONMENT_LABEL;
+pub const LABEL_ORG_ID: &str = codewire_server_core::gateway_authority::ORGANIZATION_LABEL;
+pub const LABEL_TYPE: &str = codewire_server_core::gateway_authority::TYPE_LABEL;
 
 const DELETION_PROTECTION_FINALIZER: &str = "codewire.sh/deletion-protection";
 
@@ -134,7 +135,8 @@ pub fn environment_pod_selector(env_id: &str) -> BTreeMap<String, String> {
     BTreeMap::from([(LABEL_ENV_ID.to_string(), env_id.to_string())])
 }
 
-pub const LABEL_OPERATION_GENERATION: &str = "codewire.sh/environment-operation-generation";
+pub const LABEL_OPERATION_GENERATION: &str =
+    codewire_server_core::gateway_authority::OPERATION_GENERATION_LABEL;
 
 pub(crate) fn runtime_identity_labels(
     environment_id: &str,

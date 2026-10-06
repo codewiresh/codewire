@@ -268,35 +268,22 @@ mod tests {
     }
 
     #[test]
-    fn credential_bootstrap_has_exact_tls_intent_and_no_codex_object() {
+    fn credential_runtime_renders_no_gateway_tls_identity_or_codex_object() {
         let opts = credential_opts();
-        let certificate = render_credential_gateway_certificate("dev-sandboxes", &opts).unwrap();
-        assert_eq!(
-            certificate["spec"]["secretName"],
-            credential_gateway_certificate_name(&opts.environment_id)
-        );
-        assert_eq!(
-            certificate["spec"]["issuerRef"],
-            json!({"name":CREDENTIAL_GATEWAY_ISSUER_NAME,"kind":"Issuer","group":"cert-manager.io"})
-        );
-        let dns = format!(
-            "{}.dev-sandboxes.svc.cluster.local",
-            gateway_service_name(&opts.environment_id)
-        );
-        assert_eq!(certificate["spec"]["dnsNames"], json!([dns]));
-        assert_eq!(certificate["spec"]["isCA"], false);
-        assert_eq!(
-            certificate["spec"]["usages"],
-            json!(["digital signature", "server auth"])
-        );
-        assert_eq!(
-            certificate["spec"]["privateKey"]["rotationPolicy"],
-            "Always"
-        );
-        assert_eq!(
-            certificate["spec"]["secretTemplate"]["labels"],
-            certificate["metadata"]["labels"]
-        );
+        let gateway = render_gateway_deployment("dev-sandboxes", &opts).to_string();
+        let workspace = render_sandbox_template("dev-sandboxes", &opts).to_string();
+        // The gateway has no workspace-facing listener, so neither Pod
+        // carries a gateway TLS leaf or its public roots.
+        for absent in [
+            "credential-gateway-tls",
+            "cw-credential-gateway-",
+            "credential-gateway-roots",
+            "CODEWIRE_CREDENTIAL_HTTPS_",
+            "CODEWIRE_CREDENTIAL_TLS_",
+        ] {
+            assert!(!gateway.contains(absent), "{absent} in the gateway");
+            assert!(!workspace.contains(absent), "{absent} in the workspace");
+        }
         // Selected Codex renders no ConfigMap, memory home or init copy in any
         // tier or identity mode: the daemon writes `~/.codex` itself.
         for profile in [RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_RUNC] {
@@ -578,14 +565,23 @@ mod tests {
                 "sibling Docker has no credential mounts"
             );
         }
+        // The gateway Service and container expose no credential port.
         let service = render_gateway_service("dev-sandboxes", &opts);
-        assert!(
+        assert_eq!(
             service["spec"]["ports"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|port| port["port"] == 443
-                    && port["targetPort"] == CREDENTIAL_GATEWAY_HTTPS_PORT)
+                .map(|port| port["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["ssh", "readyz", "tailnet-udp"]
+        );
+        assert!(
+            gateway["containers"][0]["ports"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|port| port["name"] != "credentials")
         );
     }
 
@@ -607,17 +603,14 @@ mod tests {
                 .cloned()
                 .collect::<Vec<_>>()
         };
-        assert_eq!(
-            find(&gateway["spec"]["ingress"], 8443),
-            vec![
-                json!({"from":[{"podSelector":{"matchLabels":naming::workspace_selector(&opts)}}],"ports":[{"protocol":"TCP","port":8443}]})
-            ]
-        );
-        assert_eq!(
-            find(&workspace["spec"]["egress"], 8443),
-            vec![
-                json!({"to":[{"podSelector":{"matchLabels":naming::gateway_selector(&opts)}}],"ports":[{"protocol":"TCP","port":8443}]})
-            ]
+        // The workspace never reaches its gateway: the gateway dials the
+        // daemon, and the credential relay runs over that connection.
+        assert!(find(&gateway["spec"]["ingress"], 8443).is_empty());
+        assert!(find(&workspace["spec"]["egress"], 8443).is_empty());
+        assert!(
+            !workspace["spec"]["egress"]
+                .to_string()
+                .contains(&naming::gateway_selector(&opts).to_string())
         );
         assert_eq!(
             find(&gateway["spec"]["egress"], 9443),
@@ -629,20 +622,14 @@ mod tests {
     }
 
     #[test]
-    fn unselected_runtime_generation_rolls_gateway_but_not_public_bootstrap_or_workspace() {
+    fn unselected_runtime_generation_rolls_gateway_but_not_workspace() {
         let mut opts = credential_opts();
         opts.managed_credential_clients = Default::default();
         opts.projection_selection_sha256 = None;
-        let before = (
-            render_sandbox_template("dev-sandboxes", &opts),
-            render_credential_gateway_certificate("dev-sandboxes", &opts),
-        );
+        let before = render_sandbox_template("dev-sandboxes", &opts);
         let first_gateway = render_gateway_deployment("dev-sandboxes", &opts);
         opts.operation_generation += 1;
-        let after = (
-            render_sandbox_template("dev-sandboxes", &opts),
-            render_credential_gateway_certificate("dev-sandboxes", &opts),
-        );
+        let after = render_sandbox_template("dev-sandboxes", &opts);
         assert_eq!(before, after);
         let gateway = render_gateway_deployment("dev-sandboxes", &opts);
         assert_eq!(
@@ -662,7 +649,6 @@ mod tests {
     #[test]
     fn credential_free_templates_do_not_mount_provider_bootstrap_or_activate_listener() {
         let opts = commodity_opts();
-        assert!(render_credential_gateway_certificate("dev-sandboxes", &opts).is_none());
         for value in [
             render_sandbox_template("dev-sandboxes", &opts),
             render_gateway_deployment("dev-sandboxes", &opts),
@@ -672,7 +658,7 @@ mod tests {
                 "credential-workspace-identity",
                 "credential-gateway-identity",
                 "CODEX_HOME",
-                "CODEWIRE_CREDENTIAL_HTTPS_LISTEN_ADDR",
+                "CODEWIRE_CREDENTIAL_GATEWAY_TOKEN_FILE",
             ] {
                 assert!(!encoded.contains(absent));
             }
@@ -770,12 +756,7 @@ mod tests {
         let policy = parsed["data"]["policy.rego"].as_str().unwrap();
         let mut workspace =
             confidential_create_input("workspace", &opts.image, &["/home/codewire", "/workspace"]);
-        for path in [
-            "/run/codewire-credentials/workspace",
-            "/run/codewire-credentials/gateway-roots",
-        ] {
-            workspace["OCI"]["Mounts"].as_array_mut().unwrap().push(json!({"destination":path,"source":"/synthetic/public-bootstrap","type_":"bind","options":["rbind","ro"]}));
-        }
+        workspace["OCI"]["Mounts"].as_array_mut().unwrap().push(json!({"destination":"/run/codewire-credentials/workspace","source":"/synthetic/public-bootstrap","type_":"bind","options":["rbind","ro"]}));
         assert!(kata_policy_allows(policy, &workspace));
         let mut substituted = workspace.clone();
         substituted["storages"][0]["confidential_storage"]["manifest_uri"] = "kbs:///default/codewire-storage-manifests/sha256-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
@@ -3576,10 +3557,10 @@ mod tests {
                 .unwrap()
                 .contains(&json!({"name":"CODEX_HOME","value":codewire_access::CODEX_PLATFORM_HOME}))
         );
-        // The per-environment daemon policy keeps the gateway 8443 egress
-        // that left the shared template.
+        // Neither the shared template nor the per-environment daemon policy
+        // reaches the environment's gateway.
         let policy = render_workspace_daemon_network_policy("dev-sandboxes", &opts);
-        assert!(policy["spec"]["egress"].to_string().contains("\"port\":8443"));
+        assert!(!policy["spec"]["egress"].to_string().contains("\"port\":8443"));
     }
 
 }
