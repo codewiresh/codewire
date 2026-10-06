@@ -1,10 +1,12 @@
 //! Environment-log query and follow support for Connect EnvironmentService.
 //!
-//! The shared source backfills persisted logs, follows PostgreSQL
-//! `LISTEN environment_logs`, emits a heartbeat every 15 seconds, and stops
-//! when the environment reaches a terminal phase. Connect owns the wire
-//! framing and typed heartbeat representation.
+//! The shared source backfills persisted logs, follows the process-wide
+//! `LISTEN environment_logs` fan-out ([`super::log_notifications`]), emits a
+//! heartbeat every 15 seconds, and stops when the environment reaches a
+//! terminal phase. Connect owns the wire framing and typed heartbeat
+//! representation.
 
+use std::future::Future;
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -12,11 +14,12 @@ use chrono::{DateTime, Utc};
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::{AppError, AppResult};
 use serde::Serialize;
-use sqlx::postgres::PgListener;
 use sqlx::{PgPool, Row};
+use tokio::sync::broadcast::error::RecvError;
 
 use super::ApiState;
 use super::environments::{require_environment_access, require_org_member};
+use super::log_notifications::{FollowPermit, LogSignal};
 
 const LOG_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -157,6 +160,17 @@ pub(crate) async fn open_environment_log_stream(
     require_environment_access(&state.pool, user, env_id, org_id, "viewer", "access denied")
         .await?;
 
+    // Bound each account's live follows; a bounded backfill read is free.
+    let follow = if follow {
+        Some(
+            state
+                .environment_logs
+                .acquire_follow(&user.user_id)
+                .ok_or_else(follow_limit_exceeded)?,
+        )
+    } else {
+        None
+    };
     Ok(start_environment_log_stream(
         state.pool.clone(),
         env_id.to_owned(),
@@ -165,35 +179,55 @@ pub(crate) async fn open_environment_log_stream(
     ))
 }
 
-fn start_environment_log_stream(
-    pool: PgPool,
+fn follow_limit_exceeded() -> AppError {
+    AppError::Coded {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        code: "log_stream_limit_exceeded",
+        detail: "too many live log streams are open for this account; close one and try again"
+            .into(),
+    }
+}
+
+/// Where a follower reads rows: strictly after `after_id`, or all of them
+/// when it is empty.
+pub(crate) trait LogRows: Send + Sync + 'static {
+    fn after(
+        &self,
+        env_id: &str,
+        after_id: &str,
+    ) -> impl Future<Output = Result<Vec<EnvironmentLog>, sqlx::Error>> + Send;
+}
+
+impl LogRows for PgPool {
+    fn after(
+        &self,
+        env_id: &str,
+        after_id: &str,
+    ) -> impl Future<Output = Result<Vec<EnvironmentLog>, sqlx::Error>> + Send {
+        query_environment_logs(self, env_id, after_id)
+    }
+}
+
+/// Backfills, then (with a follow permit) follows the shared notifications.
+/// A follower re-reads after the last row it sent when its environment is
+/// signalled, after a listener resync, when it fell behind the shared
+/// channel, and on every heartbeat, so a missed notification delays a row by
+/// at most one heartbeat and never loses it. The permit is released when the
+/// stream ends, including when its reader goes away.
+pub(crate) fn start_environment_log_stream<R: LogRows>(
+    rows: R,
     env_id: String,
     after_log_id: String,
-    follow: bool,
+    follow: Option<FollowPermit>,
 ) -> tokio::sync::mpsc::UnboundedReceiver<AppResult<LogStreamEvent>> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
     tokio::spawn(async move {
         // Subscribe before backfill so a row committed during the initial query
-        // leaves a queued notification and cannot be missed.
-        let mut listener = if follow {
-            let mut listener = match PgListener::connect_with(&pool).await {
-                Ok(listener) => listener,
-                Err(error) => {
-                    let _ = tx.send(Err(error.into()));
-                    return;
-                }
-            };
-            if let Err(error) = listener.listen("environment_logs").await {
-                let _ = tx.send(Err(error.into()));
-                return;
-            }
-            Some(listener)
-        } else {
-            None
-        };
+        // leaves a queued signal and cannot be missed.
+        let mut signals = follow.as_ref().map(FollowPermit::subscribe);
 
-        let logs = match query_environment_logs(&pool, &env_id, &after_log_id).await {
+        let logs = match rows.after(&env_id, &after_log_id).await {
             Ok(logs) => logs,
             Err(error) => {
                 let _ = tx.send(Err(error.into()));
@@ -209,50 +243,53 @@ fn start_environment_log_stream(
                 return;
             }
         }
-        if terminal || !follow {
+        let Some(signals) = signals.as_mut() else {
+            return;
+        };
+        if terminal {
             return;
         }
 
-        let Some(listener) = listener.as_mut() else {
-            return;
-        };
         let mut heartbeat = tokio::time::interval(LOG_HEARTBEAT_INTERVAL);
         heartbeat.tick().await; // first tick is immediate; skip it
         loop {
-            tokio::select! {
+            let reread = tokio::select! {
+                () = tx.closed() => return,
                 _ = heartbeat.tick() => {
                     if tx.send(Ok(LogStreamEvent::Heartbeat(Utc::now()))).is_err() {
                         return;
                     }
+                    true
                 }
-                notification = listener.recv() => {
-                    let notification = match notification {
-                        Ok(notification) => notification,
-                        Err(error) => {
-                            let _ = tx.send(Err(error.into()));
-                            return;
-                        }
-                    };
-                    if notification.payload() != env_id {
-                        continue;
+                signal = signals.recv() => match signal {
+                    Ok(LogSignal::Environment(id)) => *id == *env_id,
+                    Ok(LogSignal::Resync) | Err(RecvError::Lagged(_)) => true,
+                    Err(RecvError::Closed) => {
+                        let _ = tx.send(Err(AppError::ServiceUnavailable(
+                            "environment log notifications stopped".into(),
+                        )));
+                        return;
                     }
-                    let new_logs = match query_environment_logs(&pool, &env_id, &last_id).await {
-                        Ok(logs) => logs,
-                        Err(error) => {
-                            let _ = tx.send(Err(error.into()));
-                            return;
-                        }
-                    };
-                    for log in new_logs {
-                        let terminal = is_terminal_log(&log);
-                        last_id = log.id.clone();
-                        if tx.send(Ok(LogStreamEvent::Log(log))).is_err() {
-                            return;
-                        }
-                        if terminal {
-                            return;
-                        }
-                    }
+                },
+            };
+            if !reread {
+                continue;
+            }
+            let new_logs = match rows.after(&env_id, &last_id).await {
+                Ok(logs) => logs,
+                Err(error) => {
+                    let _ = tx.send(Err(error.into()));
+                    return;
+                }
+            };
+            for log in new_logs {
+                let terminal = is_terminal_log(&log);
+                last_id = log.id.clone();
+                if tx.send(Ok(LogStreamEvent::Log(log))).is_err() {
+                    return;
+                }
+                if terminal {
+                    return;
                 }
             }
         }
@@ -260,6 +297,9 @@ fn start_environment_log_stream(
 
     rx
 }
+
+#[cfg(test)]
+mod follow_tests;
 
 #[cfg(test)]
 mod tests {

@@ -15,6 +15,7 @@ pub mod environment_resize;
 pub mod environment_sources;
 pub mod environments;
 pub mod internal;
+pub mod log_notifications;
 pub mod logs;
 pub mod organizations;
 pub mod ports;
@@ -78,6 +79,9 @@ pub struct ApiState {
     pub sandbox_cfg: SandboxWorkerCfg,
     /// Disabled-by-default confidential storage product gates.
     pub confidential_storage_flags: FeatureFlags,
+    /// The process-wide environment-log listener fan-out and the
+    /// per-account bound on live StreamLogs follows.
+    pub environment_logs: Arc<log_notifications::EnvironmentLogNotifications>,
 }
 
 /// The deliberately permanent browser-facing routes.
