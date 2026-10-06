@@ -15,9 +15,9 @@ spec:
     - port: 8084
       targetPort: 8084
       name: http
-    - port: 8085
-      targetPort: internal-api
-      name: internal-api
+    - port: 8088
+      targetPort: internal-tls
+      name: internal-tls
 ---
 # The native-gRPC Ingress uses service-upstream so this Service's distinct
 # ClusterIP, rather than the shared orchestration pod endpoints, keys its

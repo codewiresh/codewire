@@ -1,8 +1,10 @@
 //! Gateway services, deployment, environment, and host-key rendering.
 
 use codewire_gateway_proto::{
-    GATEWAY_BINDING_TOKEN_AUDIENCE, GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS,
-    GATEWAY_BINDING_TOKEN_MOUNT_PATH,
+    GATEWAY_BINDING_TLS_ROOTS_FILE, GATEWAY_BINDING_TLS_ROOTS_FILE_ENV,
+    GATEWAY_BINDING_TLS_ROOTS_MOUNT_PATH, GATEWAY_BINDING_TOKEN_AUDIENCE,
+    GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS, GATEWAY_BINDING_TOKEN_MOUNT_PATH,
+    ORCHESTRATION_INTERNAL_TLS_PORT,
 };
 use serde_json::{Map, Value, json};
 
@@ -36,6 +38,7 @@ const GATEWAY_STARTUP_PROBE_PERIOD_SECONDS: i64 = 1;
 const GATEWAY_READINESS_PROBE_PERIOD_SECONDS: i64 = 2;
 const GATEWAY_READINESS_FAILURE_THRESHOLD: i64 = 3;
 pub(super) const GATEWAY_BINDING_TOKEN_VOLUME: &str = "gateway-binding-identity";
+const GATEWAY_BINDING_TLS_ROOTS_VOLUME: &str = "orchestration-internal-roots";
 // The gateway waits for its workspace daemon without exiting and reports not
 // ready meanwhile, so a slow start is bounded only by the tier's workspace
 // ready timeout. Each create or start applies the gateway and then begins
@@ -122,6 +125,12 @@ pub(super) fn build_sidecar_env(opts: &TemplateOpts) -> Vec<Value> {
         env.push(json!({
             "name": GATEWAY_BINDING_URL_ENV,
             "value": binding_url,
+        }));
+    }
+    if gateway_binding_tls_roots(opts).is_some() {
+        env.push(json!({
+            "name": GATEWAY_BINDING_TLS_ROOTS_FILE_ENV,
+            "value": GATEWAY_BINDING_TLS_ROOTS_FILE,
         }));
     }
     if let Some(coordinator_url) = gateway_coordinator_url(opts) {
@@ -354,6 +363,16 @@ pub fn render_gateway_deployment(namespace: &str, opts: &TemplateOpts) -> Value 
             .expect("gateway mounts")
             .extend(credentials::gateway_mounts());
     }
+    if gateway_binding_tls_roots(opts).is_some() {
+        gateway_container["volumeMounts"]
+            .as_array_mut()
+            .expect("gateway mounts")
+            .push(json!({
+                "name": GATEWAY_BINDING_TLS_ROOTS_VOLUME,
+                "mountPath": GATEWAY_BINDING_TLS_ROOTS_MOUNT_PATH,
+                "readOnly": true,
+            }));
+    }
     apply_sidecar_probes(
         &mut gateway_container,
         runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL,
@@ -412,6 +431,16 @@ pub fn render_gateway_deployment(namespace: &str, opts: &TemplateOpts) -> Value 
             .and_then(Value::as_array_mut)
             .expect("gateway volumes")
             .extend(credentials::gateway_volumes(opts));
+    }
+    if let Some(configmap) = gateway_binding_tls_roots(opts) {
+        pod_spec
+            .get_mut("volumes")
+            .and_then(Value::as_array_mut)
+            .expect("gateway volumes")
+            .push(json!({
+                "name": GATEWAY_BINDING_TLS_ROOTS_VOLUME,
+                "configMap": { "name": configmap },
+            }));
     }
     if !runtime_spec.runtime_class_name.is_empty() {
         pod_spec.insert(
@@ -476,11 +505,28 @@ fn gateway_coordinator_url(opts: &TemplateOpts) -> Option<String> {
     Some(opts.api_base_url.trim_end_matches('/').to_string())
 }
 
+/// The sandbox-namespace ConfigMap with the public roots of orchestration's
+/// internal TLS listener. The infrastructure owner provisions it; gateways
+/// mount it and orchestration checks its own leaf against it at startup.
+pub const ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP: &str = "codewire-orchestration-internal-roots";
+
+/// The roots ConfigMap a gateway mounts to verify orchestration's internal
+/// TLS listener: whenever it binds, which needs orchestration's namespace.
+pub(super) fn gateway_binding_tls_roots(opts: &TemplateOpts) -> Option<&'static str> {
+    (!opts.server_namespace.is_empty()).then_some(ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP)
+}
+
+/// The DNS name of orchestration's internal TLS listener in `server_namespace`:
+/// the name gateways bind to and its leaf Certificate names.
+pub fn orchestration_internal_tls_host(server_namespace: &str) -> String {
+    format!("codewire-orchestration.{server_namespace}.svc.cluster.local")
+}
+
 fn gateway_binding_url(opts: &TemplateOpts) -> Option<String> {
     (!opts.server_namespace.is_empty()).then(|| {
         format!(
-            "http://codewire-orchestration.{}.svc.cluster.local:8085",
-            opts.server_namespace
+            "https://{}:{ORCHESTRATION_INTERNAL_TLS_PORT}",
+            orchestration_internal_tls_host(&opts.server_namespace)
         )
     })
 }

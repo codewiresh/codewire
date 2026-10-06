@@ -101,6 +101,20 @@ pub async fn serve_with_listener(
     Ok(())
 }
 
+/// [`serve_with_listener`] on any axum listener, such as one that completes a
+/// TLS handshake before HTTP, with the same graceful shutdown.
+pub async fn serve_with_axum_listener<L>(app: Router, listener: L) -> anyhow::Result<()>
+where
+    L: axum::serve::Listener,
+    L::Addr: std::fmt::Debug,
+{
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("axum::serve")?;
+    Ok(())
+}
+
 /// HTTP/2 keepalive settings for the narrowly opt-in auto-protocol server.
 ///
 /// The canonical [`serve`] / [`serve_with_listener`] path intentionally does

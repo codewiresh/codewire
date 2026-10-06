@@ -9,8 +9,9 @@ pub mod store;
 pub use config::{
     Config, ConfigError, DATABASE_URL_ENV, DEFAULT_LISTEN_ADDR, LISTEN_ADDR_ENV,
     LOCAL_API_KEY_HASH_ENV, LOCAL_ORGANIZATION_ID_ENV, LocalMeshAuthorizationConfig,
-    MESH_AUTHORIZATION_HMAC_SECRET_ENV, MESH_AUTHORIZATION_URL_ENV, MESH_URL_ENV,
-    MeshAuthorizationConfig, STUN_SERVERS_ENV, StunServerConfig,
+    MESH_AUTHORIZATION_HMAC_SECRET_ENV, MESH_AUTHORIZATION_TLS_ROOTS_FILE_ENV,
+    MESH_AUTHORIZATION_URL_ENV, MESH_URL_ENV, MeshAuthorizationConfig, STUN_SERVERS_ENV,
+    StunServerConfig,
 };
 pub use server::{router, router_with_store, serve};
 pub use store::{

@@ -59,6 +59,46 @@ impl ServerTlsFiles {
         Ok(())
     }
 
+    /// Verify offline that the current mounted chain is one `roots` trust for
+    /// `dns_name` now: what a client holding only those public roots accepts.
+    pub async fn verify_against_roots(
+        &self,
+        roots_pem: &[u8],
+        dns_name: &str,
+    ) -> Result<(), TlsError> {
+        use rustls::client::danger::ServerCertVerifier as _;
+        let chain = tokio::time::timeout(
+            TLS_TIMEOUT,
+            read_regular(&self.cert_chain, MAX_CERTIFICATE_BYTES),
+        )
+        .await
+        .map_err(|_| TlsError::Timeout)??;
+        let mut chain = certificates(&chain)?;
+        let mut roots = RootCertStore::empty();
+        for root in certificates(roots_pem)? {
+            roots.add(root).map_err(|_| TlsError::InvalidPem)?;
+        }
+        let name = rustls::pki_types::ServerName::try_from(dns_name.to_owned())
+            .map_err(|_| TlsError::Configuration)?;
+        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .map_err(|_| TlsError::Configuration)?;
+        let leaf = chain.remove(0);
+        verifier
+            .verify_server_cert(
+                &leaf,
+                &chain,
+                &name,
+                &[],
+                rustls::pki_types::UnixTime::now(),
+            )
+            .map(|_| ())
+            .map_err(|_| TlsError::Handshake)
+    }
+
     pub(crate) async fn load(&self, http1: bool) -> Result<Arc<ServerConfig>, TlsError> {
         let chain = read_regular(&self.cert_chain, MAX_CERTIFICATE_BYTES).await?;
         let certificates = certificates(&chain)?;

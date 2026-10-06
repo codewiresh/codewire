@@ -365,8 +365,10 @@ assert_mesh_database_input "dev Mesh values" "$mesh_values_database"
 assert_mesh_authorization_input() {
   local label="$1"
   local block="$2"
-  grep -Eq '^[[:space:]]+url: "?http://codewire-orchestration\.dev\.svc\.cluster\.local:8085"?$' <<<"$block" ||
-    fail "$label does not target the internal primary authorization listener"
+  grep -Eq '^[[:space:]]+url: "?https://codewire-orchestration\.dev\.svc\.cluster\.local:8088"?$' <<<"$block" ||
+    fail "$label does not target the internal primary authorization TLS listener"
+  grep -Eq '^[[:space:]]+tlsRootsConfigMap: "?codewire-orchestration-internal-roots"?$' <<<"$block" ||
+    fail "$label does not verify the internal listener with its public roots"
   grep -Eq '^[[:space:]]+name: "?codewire-secrets"?$' <<<"$block" ||
     fail "$label does not use the existing HMAC Secret"
   grep -Eq '^[[:space:]]+key: "?SESSION_SECRET"?$' <<<"$block" ||

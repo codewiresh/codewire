@@ -3235,7 +3235,7 @@ mod tests {
         );
         assert_eq!(
             get("CODEWIRE_BINDING_URL").as_deref(),
-            Some("http://codewire-orchestration.default.svc.cluster.local:8085")
+            Some("https://codewire-orchestration.default.svc.cluster.local:8088")
         );
     }
 
@@ -3254,8 +3254,113 @@ mod tests {
         );
     }
 
+    fn internal_tls_gateway_opts(server_namespace: &str) -> TemplateOpts {
+        TemplateOpts {
+            name: "tmpl-binding-tls".into(),
+            environment_id: "6b4f2d1c-5a3e-4c2b-9f1a-0e7d8c6b5a49".into(),
+            image: "ghcr.io/codewiresh/workspace:golden".into(),
+            support_image: "git.example.invalid/codewire/gateway:test".into(),
+            gateway_token: "test-coordinate-token".into(),
+            daemon_auth_token: "test-daemon-token".into(),
+            server_namespace: server_namespace.into(),
+            ..Default::default()
+        }
+    }
+
+    fn orchestration_egress_ports(policy: &Value) -> Vec<i64> {
+        policy["spec"]["egress"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|rule| {
+                rule["to"].as_array().is_some_and(|targets| {
+                    targets.iter().any(|target| {
+                        target["podSelector"]["matchLabels"]["app.kubernetes.io/component"]
+                            .as_str()
+                            == Some("orchestration")
+                    })
+                })
+            })
+            .expect("orchestration egress rule")["ports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|port| port["port"].as_i64())
+            .collect()
+    }
+
     #[test]
-    fn gateway_policy_keeps_rest_and_connect_orchestration_egress_during_dual_serve() {
+    fn gateway_binds_through_the_internal_tls_listener_with_its_mounted_roots() {
+        let opts = internal_tls_gateway_opts("dev");
+        let env = build_sidecar_env(&opts);
+        let get = |name: &str| {
+            env.iter().find_map(|entry| {
+                (entry["name"].as_str()? == name).then(|| entry["value"].as_str().map(str::to_owned))?
+            })
+        };
+        assert_eq!(
+            get(GATEWAY_BINDING_URL_ENV).as_deref(),
+            Some("https://codewire-orchestration.dev.svc.cluster.local:8088")
+        );
+        assert_eq!(
+            get("CODEWIRE_BINDING_TLS_ROOTS_FILE").as_deref(),
+            Some("/run/codewire-orchestration-internal-roots/ca.crt")
+        );
+
+        let deployment = render_gateway_deployment("dev-sandboxes", &opts);
+        let pod = &deployment["spec"]["template"]["spec"];
+        let volume = pod["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|volume| volume["name"] == "orchestration-internal-roots")
+            .expect("roots volume");
+        assert_eq!(
+            volume,
+            &serde_json::json!({
+                "name": "orchestration-internal-roots",
+                "configMap": { "name": "codewire-orchestration-internal-roots" },
+            })
+        );
+        let mount = pod["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mount| mount["name"] == "orchestration-internal-roots")
+            .expect("roots mount");
+        assert_eq!(
+            mount["mountPath"],
+            "/run/codewire-orchestration-internal-roots"
+        );
+        assert_eq!(mount["readOnly"], true);
+
+        // Its policy opens the API and the TLS internal port, nothing else.
+        let policy = render_gateway_network_policy("dev-sandboxes", &opts);
+        assert_eq!(orchestration_egress_ports(&policy), vec![8084, 8088]);
+    }
+
+    #[test]
+    fn gateway_without_a_server_namespace_renders_no_internal_tls_inputs() {
+        let opts = internal_tls_gateway_opts("");
+        let env = build_sidecar_env(&opts);
+        assert!(!env.iter().any(|entry| {
+            matches!(
+                entry["name"].as_str(),
+                Some(GATEWAY_BINDING_URL_ENV | "CODEWIRE_BINDING_TLS_ROOTS_FILE")
+            )
+        }));
+        let deployment = render_gateway_deployment("dev-sandboxes", &opts);
+        assert!(
+            !deployment["spec"]["template"]["spec"]["volumes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|volume| volume["name"] == "orchestration-internal-roots")
+        );
+    }
+
+    #[test]
+    fn gateway_policy_opens_only_the_api_and_internal_tls_ports_to_orchestration() {
         let rendered = render_gateway_network_policy(
             "codewire-runtime",
             &TemplateOpts {
@@ -3292,7 +3397,7 @@ mod tests {
             .filter_map(|port| port["port"].as_i64())
             .collect();
 
-        assert_eq!(ports, vec![8084, 8085]);
+        assert_eq!(ports, vec![8084, 8088]);
     }
 
     #[test]

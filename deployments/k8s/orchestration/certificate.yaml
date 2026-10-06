@@ -1,0 +1,31 @@
+# Server identity of orchestration's internal Connect listener (8088): the
+# gateway binding and Mesh authorization calls. The namespace-local Issuer
+# and its dedicated CA are provisioned by the infrastructure owner, who also
+# publishes the CA's public certificate as `codewire-orchestration-internal-
+# roots` in the sandbox namespace and here. Never use the credential broker,
+# gateway or Trustee CA for this purpose.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: codewire-orchestration-internal
+  namespace: prod
+spec:
+  secretName: codewire-orchestration-internal-tls
+  issuerRef:
+    name: codewire-orchestration-internal
+    kind: Issuer
+    group: cert-manager.io
+  dnsNames:
+    - codewire-orchestration.prod.svc.cluster.local
+  duration: 24h
+  renewBefore: 8h
+  isCA: false
+  revisionHistoryLimit: 1
+  usages:
+    - digital signature
+    - server auth
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+    rotationPolicy: Always

@@ -396,7 +396,7 @@ def assert_workspace_binding_ingress(resources: list[str], target: dict[str, str
     ingress policy must admit only workspace Pods in the target's sandbox
     namespace on 8087, selected by the immutable kubernetes.io/metadata.name
     rather than a namespace label, while every other port keeps accepting
-    every source, so adding it never changes what 8084, 8085 or any other
+    every source, so adding it never changes what 8084, 8088 or any other
     orchestration port accepts."""
     policy = exactly_one(resources, "NetworkPolicy", WORKSPACE_BINDING_INGRESS, label, output)
     if not policy:

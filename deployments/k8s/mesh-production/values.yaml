@@ -13,7 +13,8 @@ database:
   uriKey: "uri"
 
 meshAuthorization:
-  url: "http://codewire-orchestration.prod.svc.cluster.local:8085"
+  url: "https://codewire-orchestration.prod.svc.cluster.local:8088"
+  tlsRootsConfigMap: "codewire-orchestration-internal-roots"
   hmacSecretRef:
     name: "codewire-secrets"
     key: "SESSION_SECRET"

@@ -1,6 +1,6 @@
 use crate::docker_proxy::DockerProxySettings;
-use codewire_gateway_proto::DaemonAuthToken;
-use codewire_tls::ClientTlsEndpoint;
+use codewire_gateway_proto::{DaemonAuthToken, GATEWAY_BINDING_TLS_ROOTS_FILE_ENV};
+use codewire_tls::{ClientTlsEndpoint, ConnectOriginTransport};
 use std::{env, fmt, net::SocketAddr, path::PathBuf};
 use thiserror::Error;
 use uuid::Uuid;
@@ -190,6 +190,8 @@ pub struct GatewayConfig {
     pub listener_self_check_interval: Option<String>,
     pub api_url: Option<String>,
     pub binding_url: Option<String>,
+    /// Public roots verifying the https binding URL; set exactly with it.
+    pub binding_tls_roots_file: Option<PathBuf>,
     pub coordinator_url: Option<String>,
     pub derp_url: Option<String>,
     pub stun: Option<StunConfig>,
@@ -232,6 +234,10 @@ pub enum ConfigError {
     InvalidDaemonAuthToken,
     #[error("credential runtime configuration is incomplete or invalid")]
     InvalidCredentialRuntime,
+    #[error(
+        "{BINDING_URL_ENV} must be an exact https origin, set together with {GATEWAY_BINDING_TLS_ROOTS_FILE_ENV}"
+    )]
+    InvalidBindingTls,
     #[error("{name} must be a UDP port from 1 to 65535")]
     InvalidPort { name: &'static str },
     #[error("{name} contains invalid STUN server {value:?}; expected host[:port]")]
@@ -288,6 +294,18 @@ impl GatewayConfig {
             trim_env(&getenv, GATEWAY_LISTENER_SELF_CHECK_INTERVAL_ENV);
         let api_url = trim_env(&getenv, API_URL_ENV);
         let binding_url = trim_env(&getenv, BINDING_URL_ENV);
+        let binding_tls_roots_file =
+            trim_env(&getenv, GATEWAY_BINDING_TLS_ROOTS_FILE_ENV).map(PathBuf::from);
+        // Orchestration's internal listener is TLS-only: a binding URL is an
+        // https origin verified with its mounted roots, or there is none.
+        match (&binding_url, &binding_tls_roots_file) {
+            (Some(url), Some(roots)) => {
+                ConnectOriginTransport::for_origin(url, roots)
+                    .map_err(|_| ConfigError::InvalidBindingTls)?;
+            }
+            (None, None) => {}
+            _ => return Err(ConfigError::InvalidBindingTls),
+        }
         let coordinator_url = resolve_coordinator_url(&getenv);
         let derp_url = trim_env(&getenv, DERP_URL_ENV);
         let (stun, stun_servers) = resolve_stun(&getenv)?;
@@ -319,6 +337,7 @@ impl GatewayConfig {
             listener_self_check_interval,
             api_url,
             binding_url,
+            binding_tls_roots_file,
             coordinator_url,
             derp_url,
             stun,
@@ -351,6 +370,7 @@ impl fmt::Debug for GatewayConfig {
             )
             .field("api_url", &self.api_url)
             .field("binding_url", &self.binding_url)
+            .field("binding_tls_roots_file", &self.binding_tls_roots_file)
             .field("coordinator_url", &self.coordinator_url)
             .field("derp_url", &self.derp_url)
             .field("stun", &self.stun)
@@ -668,7 +688,11 @@ mod tests {
         let binding = [
             (
                 BINDING_URL_ENV,
-                "http://codewire-orchestration.dev.svc.cluster.local:8085",
+                "https://codewire-orchestration.dev.svc.cluster.local:8088",
+            ),
+            (
+                GATEWAY_BINDING_TLS_ROOTS_FILE_ENV,
+                "/run/codewire-orchestration-internal-roots/ca.crt",
             ),
             (COORDINATOR_URL_ENV, "http://coordinator:8080"),
         ];
@@ -683,12 +707,16 @@ mod tests {
         assert_eq!(bound.daemon_auth_token, None);
         // The API URL also resolves the coordinator, as for tailnet.
         assert!(
-            without_token(&[binding[0], (API_URL_ENV, "https://codewire.example")])
-                .unwrap()
-                .daemon_auth_token
-                .is_none()
+            without_token(&[
+                binding[0],
+                binding[1],
+                (API_URL_ENV, "https://codewire.example")
+            ])
+            .unwrap()
+            .daemon_auth_token
+            .is_none()
         );
-        for partial in [&binding[..1], &binding[1..], &[]] {
+        for partial in [&binding[..2], &binding[2..], &[]] {
             assert_eq!(
                 without_token(partial),
                 Err(ConfigError::MissingDaemonAuthToken)
@@ -696,7 +724,7 @@ mod tests {
         }
         for blank in ["", "  "] {
             assert_eq!(
-                without_token(&[(BINDING_URL_ENV, blank), binding[1]]),
+                without_token(&[(BINDING_URL_ENV, blank), binding[2]]),
                 Err(ConfigError::MissingDaemonAuthToken)
             );
         }
@@ -788,18 +816,62 @@ mod tests {
             (API_URL_ENV, "https://codewire.example/"),
             (
                 BINDING_URL_ENV,
-                "http://codewire-orchestration.dev.svc.cluster.local:8085",
+                "https://codewire-orchestration.dev.svc.cluster.local:8088",
+            ),
+            (
+                GATEWAY_BINDING_TLS_ROOTS_FILE_ENV,
+                "/run/codewire-orchestration-internal-roots/ca.crt",
             ),
         ])
         .unwrap();
         assert_eq!(
             cfg.binding_url.as_deref(),
-            Some("http://codewire-orchestration.dev.svc.cluster.local:8085")
+            Some("https://codewire-orchestration.dev.svc.cluster.local:8088")
         );
         assert_eq!(
             cfg.coordinator_url.as_deref(),
             Some("https://codewire.example/")
         );
+    }
+
+    #[test]
+    fn binding_url_is_an_https_origin_set_with_its_roots() {
+        let https = "https://codewire-orchestration.dev.svc.cluster.local:8088";
+        let http = "http://codewire-orchestration.dev.svc.cluster.local:8085";
+        let roots = "/run/codewire-orchestration-internal-roots/ca.crt";
+        let cfg = config(&[
+            (BINDING_URL_ENV, https),
+            (GATEWAY_BINDING_TLS_ROOTS_FILE_ENV, roots),
+        ])
+        .unwrap();
+        assert_eq!(cfg.binding_url.as_deref(), Some(https));
+        assert_eq!(cfg.binding_tls_roots_file, Some(PathBuf::from(roots)));
+        for invalid in [
+            &[(BINDING_URL_ENV, https)][..],
+            &[(BINDING_URL_ENV, http)],
+            &[
+                (BINDING_URL_ENV, http),
+                (GATEWAY_BINDING_TLS_ROOTS_FILE_ENV, roots),
+            ],
+            &[(GATEWAY_BINDING_TLS_ROOTS_FILE_ENV, roots)],
+            &[
+                (
+                    BINDING_URL_ENV,
+                    "https://codewire-orchestration.dev.svc.cluster.local:8088/x",
+                ),
+                (GATEWAY_BINDING_TLS_ROOTS_FILE_ENV, roots),
+            ],
+            &[
+                (BINDING_URL_ENV, https),
+                (GATEWAY_BINDING_TLS_ROOTS_FILE_ENV, "ca.crt"),
+            ],
+        ] {
+            assert_eq!(
+                config(invalid),
+                Err(ConfigError::InvalidBindingTls),
+                "{invalid:?}"
+            );
+        }
     }
 
     #[test]

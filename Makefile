@@ -375,6 +375,7 @@ deploy-local: local-runtime build-dashboard-local
 	@$(MAKE) kind-sandbox-namespace
 	kind load docker-image codewire-dashboard:local --name codewire
 	$(KUBECTL) apply -k deployments/k8s/overlays/local-kind/
+	@KUBE_CONTEXT="$(KUBE_CONTEXT)" ./scripts/dev/kind/local-internal-tls.sh
 	@$(MAKE) sync-local-secrets
 	@$(MAKE) prune-local-legacy-runtime
 	@$(KUBECTL) -n default rollout status deployment postgres --timeout=60s
@@ -390,6 +391,7 @@ deploy-local-static: local-runtime build-dashboard-local
 	@$(MAKE) kind-sandbox-namespace
 	kind load docker-image codewire-dashboard:local --name codewire
 	$(KUBECTL) apply -k deployments/k8s/overlays/local-kind-static/
+	@KUBE_CONTEXT="$(KUBE_CONTEXT)" ./scripts/dev/kind/local-internal-tls.sh
 	@$(MAKE) sync-local-secrets
 	@$(MAKE) prune-local-legacy-runtime
 	@$(KUBECTL) -n default rollout status deployment postgres --timeout=60s
@@ -412,6 +414,7 @@ up: build-gateway build-dashboard-local build-sandbox-controller build-derp-loca
 	kind load docker-image codewire-derp:local --name codewire
 	kind load docker-image codewire-services:local --name codewire
 	$(KUBECTL) apply -k deployments/k8s/overlays/local-kind/
+	@KUBE_CONTEXT="$(KUBE_CONTEXT)" ./scripts/dev/kind/local-internal-tls.sh
 	@$(MAKE) sync-local-secrets
 	@$(MAKE) prune-local-legacy-runtime
 	$(KUBECTL) apply -k deployments/k8s/agent-sandbox/overlays/local-kind/

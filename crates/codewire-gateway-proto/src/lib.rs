@@ -23,6 +23,15 @@ pub const GATEWAY_BINDING_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/codewire/ga
 pub const GATEWAY_BINDING_TOKEN_PATH: &str = "/var/run/secrets/codewire/gateway-binding/token";
 pub const GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS: i64 = 600;
 pub const GATEWAY_BINDING_SERVICE_ACCOUNT: &str = "codewire-sandbox";
+/// Orchestration's internal Connect listener behind TLS. The gateway binds
+/// through it and verifies it against the public roots mounted below.
+pub const ORCHESTRATION_INTERNAL_TLS_PORT: u16 = 8088;
+/// The mounted public roots that verify orchestration's internal listener.
+/// Set exactly when the gateway's binding URL is `https`.
+pub const GATEWAY_BINDING_TLS_ROOTS_FILE_ENV: &str = "CODEWIRE_BINDING_TLS_ROOTS_FILE";
+pub const GATEWAY_BINDING_TLS_ROOTS_MOUNT_PATH: &str = "/run/codewire-orchestration-internal-roots";
+pub const GATEWAY_BINDING_TLS_ROOTS_FILE: &str =
+    "/run/codewire-orchestration-internal-roots/ca.crt";
 /// Exact projected-token purpose for an identity-free workspace Pod fetching
 /// its own binding from the dedicated workspace-binding listener. It is
 /// distinct from the gateway-binding and credential audiences, so a token
@@ -219,6 +228,11 @@ mod tests {
             GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS
         );
         assert_eq!(WORKSPACE_BINDING_PORT, 8087);
+        assert_eq!(ORCHESTRATION_INTERNAL_TLS_PORT, 8088);
+        assert_eq!(
+            GATEWAY_BINDING_TLS_ROOTS_FILE,
+            format!("{GATEWAY_BINDING_TLS_ROOTS_MOUNT_PATH}/ca.crt")
+        );
     }
 
     #[test]
