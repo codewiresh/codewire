@@ -21,6 +21,9 @@ pub(crate) struct AppState {
     pub(crate) credential_http: reqwest::Client,
     pub(crate) session_http: reqwest::Client,
     pub(crate) account_http: reqwest::Client,
+    /// Long-lived reads such as the setup-progress relay. No total timeout:
+    /// each use bounds its own lifetime.
+    pub(crate) stream_http: reqwest::Client,
 }
 
 impl AppState {
@@ -57,6 +60,11 @@ impl AppState {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("static dashboard account HTTP client configuration"),
+            stream_http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("static dashboard stream HTTP client configuration"),
         }
     }
 }

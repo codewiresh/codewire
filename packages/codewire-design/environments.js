@@ -91,18 +91,6 @@
       storage.setItem(draftActorKey, actor);
     } catch { /* A storage-denied form remains usable without recovery. */ }
   };
-  const clearAcknowledgedCreate = () => {
-    if (new URLSearchParams(window.location.search).get("message") !== "environment-created") return;
-    try {
-      const storage = window.sessionStorage;
-      const marker = JSON.parse(storage.getItem(pendingCreateKey) || "null");
-      storage.removeItem(pendingCreateKey);
-      if (exactKeys(marker, ["key", "slug", "at"]) && typeof marker.key === "string"
-          && marker.key.startsWith(draftPrefix) && /^[a-z0-9][a-z0-9-]{0,62}$/.test(marker.slug)
-          && Number.isSafeInteger(marker.at) && marker.at <= Date.now() && Date.now() - marker.at < 60 * 60 * 1000
-          && window.location.pathname === `/${marker.slug}/`) storage.removeItem(marker.key);
-    } catch { /* A failed cleanup cannot change the acknowledged Create result. */ }
-  };
   const storedDrafts = (form) => {
     const storage = window.sessionStorage;
     const namespace = `${draftPrefix}${form.dataset.createDraftActor}:${form.dataset.createDraftOrganization}:`;
@@ -874,7 +862,8 @@
     if (!selectedProfile(browser)?.value && repository.dataset.repositoryPrivate === "true") setStatus(browser, "Repository added. Select a credential profile for private checkout.");
     row.querySelector('[name^="repo_branch_"]')?.focus();
   });
-  clearAcknowledgedCreate();
+  // dashboard.js clears the acknowledged Create draft on every page Create
+  // can land on: the Sandboxes list and the new Sandbox's own page.
   wireDraftForms();
   wireCreateOptions();
   wireGithubBrowsers();

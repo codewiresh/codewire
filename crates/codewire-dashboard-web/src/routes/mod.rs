@@ -24,6 +24,7 @@ mod public;
 mod sandbox_resize;
 mod secrets_presets;
 mod settings;
+mod setup_progress;
 mod snapshots;
 mod terminal;
 mod terminal_readiness;
@@ -459,6 +460,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/{slug}/{environment_id}/_fragments/terminal-readiness",
             get(terminal_readiness::get),
+        )
+        .route(
+            "/{slug}/{environment_id}/_events/setup-progress",
+            get(setup_progress::events),
         )
         .route(
             "/{slug}/{environment_id}/_fragments/terminal-sessions",

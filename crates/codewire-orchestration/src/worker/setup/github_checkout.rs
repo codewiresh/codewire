@@ -71,6 +71,7 @@ pub(super) fn commands(
                 "-c".into(),
                 format!("url.{bridge}.insteadOf={}", repo.url),
                 "clone".into(),
+                "--progress".into(),
                 "--template=".into(),
                 "--".into(),
                 repo.url.clone(),

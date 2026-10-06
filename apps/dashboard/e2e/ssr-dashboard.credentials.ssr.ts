@@ -399,7 +399,7 @@ test.describe("managed provider credential browser journey", () => {
       expect(setupDispatches).toEqual([]);
       page.off("request", observeSetup);
       await page.getByRole("button", { name: "Create Sandbox", exact: true }).click();
-      await expect(page).toHaveURL(`${ssrUrl}/${slug}/?message=environment-created`);
+      await expect(page).toHaveURL(new RegExp(`^${ssrUrl}/${slug}/[0-9a-f-]{36}/\\?message=environment-created$`));
       await verifyGithubCheckout(page, orgId, before);
       await destroyGithubCheckout(page, orgId);
 

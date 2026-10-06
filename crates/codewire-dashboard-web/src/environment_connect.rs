@@ -15,7 +15,7 @@ use codewire_proto::codewire::{
         GetEnvironmentTrustReportRequest, ListEnvironmentsRequest, ListPortsRequest,
         PlanEnvironmentResizeRequest, Port, PortAccess, PortServiceClient,
         ResizeEnvironmentRequest, StartEnvironmentRequest, StopEnvironmentRequest,
-        UpdateEnvironmentSourcesRequest,
+        StreamLogsRequest, StreamLogsResponse, UpdateEnvironmentSourcesRequest,
     },
 };
 use connectrpc::{ConnectError, client::ClientConfig};
@@ -61,6 +61,63 @@ fn environment_client(
         transport(state, cookie),
         client_config(state, UNARY_TIMEOUT),
     )
+}
+
+/// Reads one environment's log rows (`StreamLogs`) into a channel, with the
+/// viewer's own session, so orchestration applies its usual environment
+/// access check. The reader owns the stream's lifetime: dropping the receiver
+/// ends the call. A `follow` read keeps going until orchestration ends it.
+pub(crate) fn environment_log_events(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: &str,
+    environment_id: &str,
+    after_log_id: &str,
+    follow: bool,
+) -> tokio::sync::mpsc::Receiver<Result<StreamLogsResponse, ConnectError>> {
+    let (events, receiver) = tokio::sync::mpsc::channel(16);
+    let client = EnvironmentServiceClient::new(
+        BrowserTransport {
+            http: state.stream_http.clone(),
+            cookie: Some(cookie),
+            origin: None,
+        },
+        ClientConfig::new(state.api_origin.clone()),
+    );
+    let request = StreamLogsRequest {
+        org_id: org_id.to_owned(),
+        environment_id: environment_id.to_owned(),
+        follow,
+        after_log_id: after_log_id.to_owned(),
+        ..Default::default()
+    };
+    tokio::spawn(async move {
+        let mut stream = match client.stream_logs(request).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                let _ = events.send(Err(error)).await;
+                return;
+            }
+        };
+        loop {
+            // Stop as soon as the reader goes away, so orchestration releases
+            // this account's live-follow slot without waiting for a heartbeat.
+            let message = tokio::select! {
+                () = events.closed() => return,
+                message = stream.message::<StreamLogsResponse>() => message,
+            };
+            let message = match message {
+                Ok(Some(message)) => Ok(message.to_owned_message()),
+                Ok(None) => return,
+                Err(error) => Err(error),
+            };
+            let failed = message.is_err();
+            if events.send(message).await.is_err() || failed {
+                return;
+            }
+        }
+    });
+    receiver
 }
 
 fn billing_client(state: &AppState, cookie: HeaderValue) -> BillingServiceClient<BrowserTransport> {
@@ -825,6 +882,24 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
     let setup_running = state == "running"
         && !environment.setup_complete
         && environment.setup_error.trim().is_empty();
+    let setup_failure = if state == "running" && !environment.setup_complete {
+        environment
+            .setup_error
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .take(300)
+            .collect::<String>()
+            .trim()
+            .to_owned()
+    } else {
+        String::new()
+    };
     let display_name = if environment.name.trim().is_empty() {
         environment.id.chars().take(8).collect()
     } else {
@@ -875,6 +950,7 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
         can_stop: state == "running",
         can_destroy: !matches!(state, "destroying" | "destroyed"),
         setup_running,
+        setup_failure,
         confidential_actions_allowed: true,
         vscode_url: format!(
             "vscode://vscode-remote/ssh-remote+cw-{}/workspace",

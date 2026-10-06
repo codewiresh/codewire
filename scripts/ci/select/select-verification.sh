@@ -890,6 +890,7 @@ if [ "$event_selected" = false ]; then
       apps/dashboard/e2e/ssr-dashboard.repository-picker.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.resize.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.sandbox-inventory.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.setup-progress.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.source-recovery.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.terminal-renderer.ssr.ts)
         # Design-fixture specs run in the web gate's fixture runner and never

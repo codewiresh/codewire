@@ -1053,9 +1053,10 @@ pub(super) async fn create(
         }
     };
     match create.await {
-        Ok(_) => mutation_redirect(
+        // Land on the new Sandbox, where its setup stages stream live (A5c).
+        Ok(environment_id) => mutation_redirect(
             &state,
-            environments_path(&slug),
+            super::terminal::terminal_path(&slug, &environment_id),
             "environment-created",
             "",
             &headers,
@@ -3238,6 +3239,7 @@ mod tests {
                 can_stop: true,
                 can_destroy: true,
                 setup_running: false,
+                setup_failure: String::new(),
                 confidential_actions_allowed: false,
                 vscode_url: "https://vscode.invalid".into(),
                 ports: Vec::new(),
@@ -3319,6 +3321,7 @@ mod tests {
             can_stop: true,
             can_destroy: true,
             setup_running: false,
+            setup_failure: String::new(),
             confidential_actions_allowed: true,
             vscode_url: "https://vscode.invalid".into(),
             ports: Vec::new(),
@@ -3479,6 +3482,58 @@ mod tests {
         }
     }
 
+    /// A5c: the Sandbox page follows live setup stages only while a start is
+    /// in flight or setup still owns the running Sandbox, with a heading, a
+    /// live status, an alert for failure and an ordered list of stages.
+    #[test]
+    fn sandbox_page_streams_setup_only_while_setup_runs() {
+        const READY: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        const SETUP: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        let organization = test_organization();
+        let section = "<section class=\"cw-setup-progress\" aria-labelledby=\"setup-progress-title\" data-setup-progress";
+        let ready = render_terminal(&organization, resize_test_row(READY, 1_000, 2_048));
+        assert!(!ready.contains(section));
+        assert!(ready.contains(crate::assets::SETUP_PROGRESS_SCRIPT_PATH));
+        for row in [
+            crate::view::EnvironmentRow {
+                setup_running: true,
+                setup_failure: String::new(),
+                ..resize_test_row(SETUP, 1_000, 2_048)
+            },
+            crate::view::EnvironmentRow {
+                state: "creating",
+                ..resize_test_row(SETUP, 1_000, 2_048)
+            },
+        ] {
+            let page = render_terminal(&organization, row);
+            assert!(page.contains(section));
+            assert!(page.contains(&format!(
+                "data-setup-environment-id=\"{SETUP}\" data-setup-org-slug=\"{}\"><h2 id=\"setup-progress-title\">Setup</h2><p class=\"cw-setup-progress-status\" role=\"status\" data-setup-status>",
+                organization.slug
+            )));
+            assert!(page.contains("<p class=\"cw-alert cw-alert--error\" role=\"alert\" data-setup-failure hidden></p><ol class=\"cw-setup-stages\" data-setup-stages></ol>"));
+        }
+    }
+
+    /// A5c: a recorded setup failure keeps the Setup section and its alert
+    /// after a reload, without script, escaped like any other text.
+    #[test]
+    fn a_failed_setup_keeps_its_alert_after_a_reload() {
+        const FAILED: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+        let organization = test_organization();
+        let page = render_terminal(
+            &organization,
+            crate::view::EnvironmentRow {
+                setup_failure: "git clone: exited 128 <b>x</b>".into(),
+                ..resize_test_row(FAILED, 1_000, 2_048)
+            },
+        );
+        assert!(page.contains("data-setup-status>Setup stopped.</p>"));
+        assert!(page.contains(
+            "<p class=\"cw-alert cw-alert--error\" role=\"alert\" data-setup-failure>Setup failed: git clone: exited 128 &#60;b&#62;x&#60;/b&#62;</p>"
+        ));
+    }
+
     /// #2333: orchestration refuses Resize while setup owns a running Sandbox.
     /// Without script, neither the detail page nor the inventory may offer it
     /// then without saying why.
@@ -3491,6 +3546,7 @@ mod tests {
         let ready = resize_test_row(READY, 1_000, 2_048);
         let setup = crate::view::EnvironmentRow {
             setup_running: true,
+            setup_failure: String::new(),
             ..resize_test_row(SETUP, 1_000, 2_048)
         };
         let page = EnvironmentsPageView {
