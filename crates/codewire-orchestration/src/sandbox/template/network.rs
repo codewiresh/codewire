@@ -195,7 +195,7 @@ fn workspace_daemon_ingress_rules(opts: &TemplateOpts) -> Vec<Value> {
             ],
             "ports": [
                 { "protocol": "TCP", "port": WORKSPACE_DAEMON_PORT },
-                { "protocol": "TCP", "port": i64::from(codewire_gateway_proto::WORKSPACE_DAEMON_SSH_PORT) },
+                { "protocol": "TCP", "port": i64::from(codewire_gateway_proto::WORKSPACE_SSH_PORT) },
                 {
                     "protocol": "TCP",
                     "port": APP_PREVIEW_MIN_PORT,

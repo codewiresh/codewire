@@ -3,7 +3,7 @@
   "kind": "SandboxWarmPool",
   "metadata": {
     "annotations": {
-      "codewire.sh/pool-revision": "c73b1dbed6683e80f24eb51c4de8de3a51534ddeb2dca0e4ea987f2e404e7038"
+      "codewire.sh/pool-revision": "69f8de109dd0190a846807804db6cabcf0a320a11d8f98e10a11abbdb5f83947"
     },
     "labels": {
       "app.kubernetes.io/managed-by": "codewire",

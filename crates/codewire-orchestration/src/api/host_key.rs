@@ -172,14 +172,17 @@ mod tests {
             Some((4, key(3)))
         );
         assert!(Fixed(Err(())).current_host_key("env").await.is_err());
-        // Until lane A1's read is wired, nothing is recorded.
-        let pool = sqlx::PgPool::connect_lazy("postgres://synthetic@127.0.0.1:9/none").unwrap();
-        assert_eq!(
+        // The recorded store fails closed: an unreachable database is an
+        // error, never "no key recorded".
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://synthetic@127.0.0.1:9/none")
+            .unwrap();
+        assert!(
             RecordedHostKeys(&pool)
                 .current_host_key("env")
                 .await
-                .unwrap(),
-            None
+                .is_err()
         );
     }
 }

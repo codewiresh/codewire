@@ -24,12 +24,6 @@ impl HostKeyStore for RecordedHostKeys<'_> {
         &self,
         environment_id: &str,
     ) -> Result<Option<(i64, String)>, sqlx::Error> {
-        // Lane A1 (#2460) owns the host-key table and its read. Integration
-        // replaces this body with
-        // `crate::workspace_binding::current_host_key(self.0, environment_id).await`.
-        // Until then no key is recorded: every host-key request is NOT_FOUND
-        // and `access_ready` never completes.
-        let _ = (self.0, environment_id);
-        Ok(None)
+        crate::workspace_binding::current_host_key(self.0, environment_id).await
     }
 }

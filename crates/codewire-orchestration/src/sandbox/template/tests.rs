@@ -3183,7 +3183,7 @@ mod tests {
             ingress[0]["ports"],
             json!([
                 {"protocol": "TCP", "port": WORKSPACE_DAEMON_PORT},
-                {"protocol": "TCP", "port": codewire_gateway_proto::WORKSPACE_DAEMON_SSH_PORT},
+                {"protocol": "TCP", "port": codewire_gateway_proto::WORKSPACE_SSH_PORT},
                 {"protocol": "TCP", "port": APP_PREVIEW_MIN_PORT, "endPort": APP_PREVIEW_MAX_PORT},
             ])
         );

@@ -29,14 +29,6 @@ pub const CREDENTIAL_RELAY_SERVICE_ACCOUNT: &str = "codewire-orchestration";
 pub const CREDENTIAL_RELAY_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/codewire/credential-relay";
 pub const CREDENTIAL_RELAY_TOKEN_PATH: &str = "/var/run/secrets/codewire/credential-relay/token";
 pub const CREDENTIAL_RELAY_TOKEN_EXPIRATION_SECONDS: i64 = 600;
-/// The SSH server the workspace daemon serves inside its Pod. Orchestration's
-/// SSH proxy and setup health check dial it over the Pod network; only
-/// orchestration may reach it.
-pub const WORKSPACE_DAEMON_SSH_PORT: u16 = 2222;
-/// The UDP port the workspace daemon's tailnet peer listens on. The
-/// environment's direct-UDP LoadBalancer targets it, and only the world, never
-/// a cluster or Pod address, may send to it.
-pub const WORKSPACE_TAILNET_UDP_PORT: u16 = 31000;
 /// The public UDP relay's data-plane port, the one relay port a workspace may
 /// reach.
 pub const UDP_RELAY_DATA_PORT: u16 = 41641;
