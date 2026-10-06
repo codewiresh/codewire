@@ -12,9 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codewire_proto::codewire::internal::v1::{
-    CoordinateHello, CoordinatePing, CoordinateRequest, CoordinateResponse, CoordinateResponseView,
-    CoordinatorServiceClient, MeshCoordinateHello, MeshCoordinateRole, MeshCoordinateSubscribe,
-    MeshCoordinatorServiceClient, MeshCoordinatorServiceCoordinateRequest,
+    CoordinateHello, CoordinatePing, CoordinateProof, CoordinateRequest, CoordinateResponse,
+    CoordinateResponseView, CoordinatorServiceClient, MeshCoordinateHello, MeshCoordinateRole,
+    MeshCoordinateSubscribe, MeshCoordinatorServiceClient, MeshCoordinatorServiceCoordinateRequest,
     MeshCoordinatorServiceCoordinateResponse, MeshCoordinatorServiceCoordinateResponseView,
     coordinate_response, mesh_coordinator_service_coordinate_request,
     mesh_coordinator_service_coordinate_response,
@@ -503,7 +503,7 @@ impl CoordinatorPeerSession {
         P: FnMut(&[Node]),
         D: FnMut(&serde_json::Value),
     {
-        self.run_inner(None, &mut handlers, COORDINATOR_HEARTBEAT_INTERVAL)
+        self.run_inner(None, None, &mut handlers, COORDINATOR_HEARTBEAT_INTERVAL)
             .await
     }
 
@@ -519,10 +519,46 @@ impl CoordinatorPeerSession {
     {
         self.run_inner(
             Some(node_updates),
+            None,
             &mut handlers,
             COORDINATOR_HEARTBEAT_INTERVAL,
         )
         .await
+    }
+
+    /// Drive the receive loop while publishing local node updates and
+    /// re-proving an environment peer's session in-band: each token received
+    /// on `proofs` is sent at once as a `CoordinateProof`. The coordinator
+    /// ends a session whose last proven token has lapsed.
+    pub async fn run_with_node_updates_and_proofs<P, D>(
+        &mut self,
+        node_updates: mpsc::UnboundedReceiver<Node>,
+        proofs: mpsc::UnboundedReceiver<crate::BearerToken>,
+        mut handlers: Handlers<P, D>,
+    ) -> Result<(), Error>
+    where
+        P: FnMut(&[Node]),
+        D: FnMut(&serde_json::Value),
+    {
+        self.run_inner(
+            Some(node_updates),
+            Some(proofs),
+            &mut handlers,
+            COORDINATOR_HEARTBEAT_INTERVAL,
+        )
+        .await
+    }
+
+    /// The DERP map the coordinator sent while the session was set up, if
+    /// its first response was one. It stays queued, so the receive loop still
+    /// delivers it to `on_derp_map`.
+    pub fn setup_derp_map(&self) -> Option<serde_json::Value> {
+        match self.pending_responses.front().map(|response| &response.msg) {
+            Some(Some(coordinate_response::Msg::DerpMap(derp))) => {
+                decode_derp_map(&derp.derp_map_json).ok()
+            }
+            _ => None,
+        }
     }
 
     /// Drive the stream for a bounded KIND probe and count typed heartbeats.
@@ -590,6 +626,7 @@ impl CoordinatorPeerSession {
     async fn run_inner<P, D>(
         &mut self,
         node_updates: Option<mpsc::UnboundedReceiver<Node>>,
+        proofs: Option<mpsc::UnboundedReceiver<crate::BearerToken>>,
         handlers: &mut Handlers<P, D>,
         heartbeat_interval: Duration,
     ) -> Result<(), Error>
@@ -598,6 +635,7 @@ impl CoordinatorPeerSession {
         D: FnMut(&serde_json::Value),
     {
         let mut node_updates = node_updates;
+        let mut proofs = proofs;
         let mut heartbeat = tokio::time::interval_at(
             tokio::time::Instant::now() + heartbeat_interval,
             heartbeat_interval,
@@ -623,6 +661,21 @@ impl CoordinatorPeerSession {
                     match maybe {
                         Some(node) => self.update_node(&node).await?,
                         None => node_updates = None,
+                    }
+                }
+                maybe = async {
+                    proofs.as_mut().expect("guarded proof receiver").recv().await
+                }, if proofs.is_some() => {
+                    match maybe {
+                        Some(token) => {
+                            self.stream
+                                .send(primary_request(CoordinateProof {
+                                    peer_token: token.expose_secret().to_owned(),
+                                    ..Default::default()
+                                }))
+                                .await?;
+                        }
+                        None => proofs = None,
                     }
                 }
                 _ = heartbeat.tick() => {

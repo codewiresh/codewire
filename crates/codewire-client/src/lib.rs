@@ -161,9 +161,10 @@ pub use credential_delegation::CredentialDelegationStream;
 pub use error::{ClientError, ErrorInfo, ValidationError};
 pub use tailnet::{
     EnvironmentTailnetDiagnostic, ExpectedTransport, NativeClientFacade, SshTransportMode,
-    TailnetConnection, TailnetDerpMapDiagnostic, TailnetDiagnosticOptions, TailnetDiagnosticStage,
-    TailnetPathDiagnostic, TailnetPeerDiagnostic, diagnose_environment_tailnet, parse_duration,
-    pipe_shell_stdio,
+    StunServer, TailnetConnection, TailnetDerpMapDiagnostic, TailnetDiagnosticOptions,
+    TailnetDiagnosticStage, TailnetPathDiagnostic, TailnetPeerDiagnostic, derp_target_from_map,
+    diagnose_environment_tailnet, parse_duration, pipe_shell_stdio, resolve_stun_servers,
+    stun_servers_from_map,
 };
 /// The one Rust client core consumed by the CLI and future native bindings.
 #[derive(Clone)]
