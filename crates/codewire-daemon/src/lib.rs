@@ -12,6 +12,7 @@ pub mod files;
 #[cfg(unix)]
 pub mod hosted_state;
 mod lifecycle;
+pub mod local_transport;
 #[cfg(unix)]
 mod private_files;
 pub mod server;
