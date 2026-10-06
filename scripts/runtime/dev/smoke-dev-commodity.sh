@@ -4713,6 +4713,42 @@ run_ssh_transport_smoke() {
 # StrictHostKeyChecking yes and no first use. With no pinned file, the only
 # trust source is `cw ssh known-hosts`, the key the environment's bound Pod
 # recorded with the platform.
+# The block `cw config-ssh` writes, exactly as a user gets it. Its commands
+# carry no server: they find it through CODEWIRE_SERVER_URL, which every
+# user-path ssh below exports.
+user_ssh_config() {
+  local config="$TMPDIR_SMOKE/ssh_config"
+  if [[ ! -s "$config" ]]; then
+    "$CW_BIN" --server "$CODEWIRE_SERVER_URL" config-ssh --ssh-config-file "$config" >/dev/null ||
+      die "cw config-ssh could not write the managed SSH block"
+  fi
+  printf '%s\n' "$config"
+}
+
+# OpenSSH as a user runs it, through the managed block: its ProxyCommand and
+# its only host-key trust, `cw ssh known-hosts`.
+user_ssh() {
+  local config
+  config="$(user_ssh_config)" || return
+  env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL" CW_SSH_TRANSPORT=websocket \
+    timeout "$SMOKE_SSH_TIMEOUT" ssh -F "$config" \
+    -o BatchMode=yes \
+    -o "LogLevel=$SMOKE_SSH_LOG_LEVEL" \
+    -o ConnectTimeout="$SMOKE_SSH_CONNECT_TIMEOUT" \
+    "cw-$ENV_ID" "$@"
+}
+
+user_scp() {
+  local config
+  config="$(user_ssh_config)" || return
+  env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL" CW_SSH_TRANSPORT=websocket \
+    timeout "$SMOKE_SSH_TIMEOUT" scp -F "$config" \
+    -o BatchMode=yes \
+    -o "LogLevel=$SMOKE_SSH_LOG_LEVEL" \
+    -o ConnectTimeout="$SMOKE_SSH_CONNECT_TIMEOUT" \
+    "$@"
+}
+
 run_host_key_probe_once() {
   local label="$1"
   local pinned="${2:-}"
@@ -4720,14 +4756,14 @@ run_host_key_probe_once() {
   local stderr="$TMPDIR_SMOKE/ssh-host-key-${label}.err"
   local expected_output="host-key-${label}-ok"
   local cw_command
-  local -a trust
 
-  cw_command="$(printf '%q --server %q' "$CW_BIN" "$CODEWIRE_SERVER_URL")"
-  if [[ -n "$pinned" ]]; then
-    trust=(-o "UserKnownHostsFile=$pinned")
-  else
-    trust=(-o UserKnownHostsFile=/dev/null -o "KnownHostsCommand=$cw_command ssh known-hosts %H")
+  if [[ -z "$pinned" ]]; then
+    user_ssh "printf '${expected_output}\n'" >"$stdout" 2>"$stderr" </dev/null || return 1
+    grep -qx "$expected_output" "$stdout"
+    return
   fi
+  # A pinned known_hosts file in place of the block's KnownHostsCommand.
+  cw_command="$(printf '%q --server %q' "$CW_BIN" "$CODEWIRE_SERVER_URL")"
   if ! env CW_SSH_TRANSPORT=websocket timeout "$SMOKE_SSH_TIMEOUT" ssh -F /dev/null \
       -o BatchMode=yes \
       -o PasswordAuthentication=no \
@@ -4736,16 +4772,38 @@ run_host_key_probe_once() {
       -o StrictHostKeyChecking=yes \
       -o GlobalKnownHostsFile=/dev/null \
       -o UpdateHostKeys=no \
-      "${trust[@]}" \
+      -o "UserKnownHostsFile=$pinned" \
       -o "LogLevel=$SMOKE_SSH_LOG_LEVEL" \
       -o ConnectTimeout="$SMOKE_SSH_CONNECT_TIMEOUT" \
       -o "ProxyCommand=$cw_command shell --stdio %h" \
       "codewire@cw-$ENV_ID" \
-      "printf '${expected_output}\n'" >"$stdout" 2>"$stderr"; then
+      "printf '${expected_output}\n'" >"$stdout" 2>"$stderr" </dev/null; then
     return 1
   fi
 
   grep -qx "$expected_output" "$stdout"
+}
+
+# What a user does over the managed block once it trusts the recorded key: a
+# command line the workspace shell parses, with its exit status, and an
+# SFTP-mode scp round trip in the home directory.
+run_user_ssh_journey() {
+  local output status up down
+  require_cmd scp
+  status=0
+  output="$(user_ssh 'printf a && printf b | tr b B; exit 7' 2>"$TMPDIR_SMOKE/ssh-journey.err" </dev/null)" ||
+    status=$?
+  [[ "$output" == "aB" && "$status" -eq 7 ]] || {
+    sed 's/[[:cntrl:]]//g' "$TMPDIR_SMOKE/ssh-journey.err" >&2 || true
+    die "ssh did not run a shell command line: output '$output', exit $status (want 'aB', 7)"
+  }
+  up="$TMPDIR_SMOKE/scp-up.txt"
+  down="$TMPDIR_SMOKE/scp-down.txt"
+  printf 'smoke-scp-%s\n' "$ENV_ID" >"$up"
+  user_scp "$up" "cw-$ENV_ID:smoke-scp.txt" </dev/null || die "scp (SFTP mode) upload to the home directory failed"
+  user_scp "cw-$ENV_ID:smoke-scp.txt" "$down" </dev/null || die "scp (SFTP mode) download from the home directory failed"
+  cmp -s "$up" "$down" || die "scp (SFTP mode) round trip changed the file"
+  log "user SSH: shell command lines keep their exit status; SFTP-mode scp round-trips"
 }
 
 # The recorded key must be served: retry only until the daemon answers.
@@ -4813,6 +4871,7 @@ run_host_key_smoke() {
 
   log "verifying the daemon presents the host key the platform recorded"
   wait_for_host_key_probe recorded
+  run_user_ssh_journey
   pinned="$TMPDIR_SMOKE/known_hosts.recorded"
   printf '%s\n' "$before" >"$pinned"
   wait_for_host_key_probe pinned "$pinned"

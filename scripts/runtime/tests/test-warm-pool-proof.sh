@@ -70,11 +70,15 @@ grep -qF 'check "hit $n: no gateway objects" no_gateway_objects "$id"' "$PROOF" 
   fail 'hits do not check for gateway objects'
 grep -qF 'check "hit $n: SSH presents the host key the platform recorded" ssh_presents_recorded_key "$id"' "$PROOF" ||
   fail 'hits do not prove SSH against the recorded host key'
-for option in 'StrictHostKeyChecking=yes' 'UserKnownHostsFile=/dev/null' 'GlobalKnownHostsFile=/dev/null' \
-    'KnownHostsCommand=$cw_command ssh known-hosts %H' 'ProxyCommand=$cw_command shell --stdio %n' \
-    'BatchMode=yes' 'ForwardAgent=no'; do
+# The SSH check runs OpenSSH through the block `cw config-ssh` writes, as a
+# user does, never through hand-built trust options.
+for option in 'config-ssh --ssh-config-file "$config"' 'ssh -F "$config"' \
+    'env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL"' 'BatchMode=yes'; do
   grep -qF -- "$option" "$PROOF" || fail "SSH host-key proof is missing $option"
 done
+if grep -qF 'KnownHostsCommand=' "$PROOF"; then
+  fail 'SSH host-key proof hand-builds the managed block'
+fi
 grep -qF 'sql_access_ready "$id" "$uid"' "$PROOF" || fail 'hits do not check access_ready and the recorded host key'
 grep -qF 'AND w.released_at IS NULL JOIN sandbox_ssh_host_keys k ON k.environment_id = b.environment_id AND k.pod_uid = b.pod_uid' "$PROOF" ||
   fail 'the host-key check is not bound to the live bound Pod'

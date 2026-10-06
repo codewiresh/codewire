@@ -315,23 +315,19 @@ in_workspace() {
 
 daemon_reachable() { in_workspace "$1" 'true' >/dev/null 2>&1; }
 
-# OpenSSH through `cw shell --stdio`, with the managed block's settings: the
+# OpenSSH as a user runs it, through the block `cw config-ssh` writes: its
 # only trusted host key is the one `cw ssh known-hosts` reads from the
-# platform for the bound Pod, so success proves the bound daemon's
-# SSH server presents exactly the recorded key.
+# platform for the bound Pod, so success proves the bound daemon's SSH
+# server presents exactly the recorded key. The block's commands carry no
+# server; they find it through CODEWIRE_SERVER_URL.
 ssh_presents_recorded_key() {
-  local id="$1" cw_command
-  cw_command="$(printf '%q --server %q' "$CW_BIN" "$CODEWIRE_SERVER_URL")"
-  timeout 120 ssh -F /dev/null -T \
+  local id="$1" config="$TMPDIR_PROOF/ssh_config"
+  if [[ ! -s "$config" ]]; then
+    "$CW_BIN" --server "$CODEWIRE_SERVER_URL" config-ssh --ssh-config-file "$config" >/dev/null ||
+      { log "cw config-ssh could not write the managed SSH block"; return 1; }
+  fi
+  env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL" timeout 120 ssh -F "$config" -T \
     -o BatchMode=yes -o ConnectTimeout=60 \
-    -o "ProxyCommand=$cw_command shell --stdio %n" \
-    -o User=codewire \
-    -o StrictHostKeyChecking=yes \
-    -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null \
-    -o "KnownHostsCommand=$cw_command ssh known-hosts %H" \
-    -o UpdateHostKeys=no -o ForwardAgent=no -o ForwardX11=no \
-    -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no \
-    -o PubkeyAuthentication=no -o GSSAPIAuthentication=no \
     "cw-$id" true </dev/null >/dev/null 2>"$TMPDIR_PROOF/ssh-$id.err" ||
     { log "ssh: cw-$id: $(sed 's/[[:cntrl:]]//g' "$TMPDIR_PROOF/ssh-$id.err" | tail -n 2 | tr '\n' ' ')"; return 1; }
 }

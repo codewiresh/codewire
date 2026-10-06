@@ -98,11 +98,16 @@ assert_static_contract() {
     rg -F 'codewire.sh/type=gateway' >/dev/null ||
     fail "no-gateway check no longer selects gateway objects by label"
   # The host key is the one the platform recorded for the current
-  # generation: trusted only through `cw ssh known-hosts`, never first use;
-  # a changed key is refused; stop and start rotate it.
-  host_key_smoke="$(awk '/^run_host_key_probe_once\(\)/,/^run_ssh_smoke\(\)/' "$SMOKE")"
-  for binding in 'StrictHostKeyChecking=yes' 'KnownHostsCommand=$cw_command ssh known-hosts %H' \
-      'UserKnownHostsFile=/dev/null' 'GlobalKnownHostsFile=/dev/null' \
+  # generation: trusted only through the block `cw config-ssh` writes, whose
+  # one trust source is `cw ssh known-hosts`, never first use; a changed key
+  # is refused; stop and start rotate it. A user's own command line and an
+  # SFTP-mode scp run over that same block.
+  host_key_smoke="$(awk '/^user_ssh_config\(\)/,/^run_ssh_smoke\(\)/' "$SMOKE")"
+  for binding in 'config-ssh --ssh-config-file "$config"' 'ssh -F "$config"' \
+      'env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL"' 'user_ssh "printf' \
+      'StrictHostKeyChecking=yes' 'GlobalKnownHostsFile=/dev/null' \
+      'UserKnownHostsFile=$pinned' 'run_user_ssh_journey' \
+      "printf a && printf b | tr b B; exit 7" 'cmp -s "$up" "$down"' \
       'expect_host_key_refused forged' 'expect_host_key_refused previous-generation' \
       'the recorded host key did not rotate across stop and start'; do
     rg -F -- "$binding" <<<"$host_key_smoke" >/dev/null ||
@@ -110,6 +115,9 @@ assert_static_contract() {
   done
   if rg -F 'accept-new' <<<"$host_key_smoke" >/dev/null; then
     fail "host-key smoke trusts a key on first use"
+  fi
+  if rg -F 'KnownHostsCommand=' <<<"$host_key_smoke" >/dev/null; then
+    fail "host-key smoke hand-builds the block's KnownHostsCommand"
   fi
   application_secret_smoke="$(awk '/^run_application_secrets_smoke\(\)/,/^}/' "$SMOKE")"
   rg -F 'run_application_secret_exec "$guest_script" "$phase" "$phase_deadline"' <<<"$application_secret_smoke" >/dev/null ||
