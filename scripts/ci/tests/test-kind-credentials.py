@@ -486,16 +486,17 @@ assert_kind_credential_provider_counts %d
                     self.provider_counts(self.provider_events(baseline), baseline).returncode, 0)
 
     @staticmethod
-    def reuse_lines(presented=(2, 2, 2, 0), caches=("miss", "hit", "miss"), admitted_at=None,
+    def reuse_lines(presented=(2, 2, 0), caches=("miss", "hit", "miss"), admitted_at=None,
                     gap=1.5, total_ms=40, authorities=("evaluated", "reused", "evaluated"),
                     record_reads=1):
-        """The gateway request (attempt 3), then the daemon epoch's warm-up at
-        10 s, its reuse `gap` later, and the request after Reconnect at 20 s +
-        `gap`, with an epoch admission at `admitted_at` seconds if given."""
+        """The daemon epoch, admitted at 5 s: its warm-up (attempt 3) at 10 s,
+        its reuse `gap` later, and the request after Reconnect at 20 s +
+        `gap`, with another epoch admission at `admitted_at` seconds if
+        given."""
         fixture = [{"target": "codewire_kind_credential_fixture", "fields": {
             "event": "provider_response", "scenario": "baseline", "attempt": attempt,
             "status": 200, "generation": generation, "response_calls": attempt + 4,
-            "refresh_calls": 2}} for attempt, generation in zip((3, 4, 5, 6), presented)]
+            "refresh_calls": 2}} for attempt, generation in zip((3, 4, 5), presented)]
         def at(seconds):
             whole, fraction = divmod(round(seconds * 1_000_000), 1_000_000)
             return f"2026-10-04T00:{whole // 60:02d}:{whole % 60:02d}.{fraction:06d}Z"
@@ -512,11 +513,10 @@ assert_kind_credential_provider_counts %d
         def admission(seconds):
             return {"timestamp": at(seconds), "target": "codewire_credential_broker::timing",
                     "fields": {"event": "epoch_admission", "outcome": "admitted"}}
-        # The gateway request is its own epoch.
-        timeline = [(5, admission(5)), (5.1, fixture[0]), (5.2, timed("miss", 5.2)),
-                    (10, fixture[1]), (10, timed(caches[0], 10, authorities[0])),
-                    (10 + gap, fixture[2]), (10 + gap, timed(caches[1], 10 + gap, authorities[1])),
-                    (20 + gap, fixture[3]), (20 + gap, timed(caches[2], 20 + gap, authorities[2]))]
+        timeline = [(5, admission(5)),
+                    (10, fixture[0]), (10, timed(caches[0], 10, authorities[0])),
+                    (10 + gap, fixture[1]), (10 + gap, timed(caches[1], 10 + gap, authorities[1])),
+                    (20 + gap, fixture[2]), (20 + gap, timed(caches[2], 20 + gap, authorities[2]))]
         if admitted_at is not None:
             timeline.append((admitted_at, admission(admitted_at)))
         return [line for _, line in sorted(timeline, key=lambda item: item[0])]
@@ -566,9 +566,9 @@ assert_kind_credential_material_reuse
                 self.reuse_lines(caches=("hit", "hit", "miss")),
                 # A reuse after Reconnect, or the old login presented.
                 self.reuse_lines(caches=("miss", "hit", "hit")),
-                self.reuse_lines(presented=(2, 2, 2, 2)),
-                self.reuse_lines(presented=(0, 0, 0, 0)),
-                self.reuse_lines(presented=(2, 2, 1, 0)),
+                self.reuse_lines(presented=(2, 2, 2)),
+                self.reuse_lines(presented=(0, 0, 0)),
+                self.reuse_lines(presented=(2, 1, 0)),
                 # The reuse resolved authority right after an evaluation, or
                 # read more than its record; Reconnect reused the decision.
                 self.reuse_lines(authorities=("evaluated", "evaluated", "evaluated")),
@@ -579,7 +579,9 @@ assert_kind_credential_material_reuse
                 [dict(line, fields=dict(line["fields"], resolves=1))
                  if line.get("fields", {}).get("cache") == "hit" else line
                  for line in self.reuse_lines()],
-                self.reuse_lines()[:-1]):
+                # The provider never saw the login presented after Reconnect.
+                [line for line in self.reuse_lines()
+                 if line.get("fields", {}).get("attempt") != 5]):
             with self.subTest(lines=lines):
                 result = self.material_reuse(lines)
                 self.assertNotEqual(result.returncode, 0)

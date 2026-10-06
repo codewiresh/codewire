@@ -714,12 +714,12 @@ assert_kind_credential_material_reuse() {
         and .fields.event == "proxied_request" and .fields.slot == "codex")
       | .fields + {at: (.timestamp | seconds)}] as $requests |
     ($requests[-3] // {}) as $warm | ($requests[-2] // {}) as $reuse |
-    # The gateway request, the warm-up and the reuse present the refreshed
-    # login; Reconnect published a newly enrolled one, generation 0.
-    ($presented | map(.[0:2])) == [[3, 200], [4, 200], [5, 200], [6, 200]] and
+    # The warm-up and the reuse present the refreshed login; Reconnect
+    # published a newly enrolled one, generation 0.
+    ($presented | map(.[0:2])) == [[3, 200], [4, 200], [5, 200]] and
     ($presented[0][2] | type == "number" and . > 0) and
-    $presented[1][2] == $presented[0][2] and $presented[2][2] == $presented[0][2] and
-    $presented[3][2] == 0 and
+    $presented[1][2] == $presented[0][2] and
+    $presented[2][2] == 0 and
     ($requests | length >= 3) and
     ($requests[-3:] | map([.outcome, .status])) == [["response", 200],
       ["response", 200], ["response", 200]] and
