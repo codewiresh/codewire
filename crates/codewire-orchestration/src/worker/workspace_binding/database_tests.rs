@@ -10,7 +10,6 @@ use sqlx::PgPool;
 use sqlx::postgres::PgListener;
 
 use super::*;
-use crate::api::internal::gateway_daemon_authority;
 use crate::start_metrics::StartPath;
 use crate::test_database_support::TestDatabase;
 use crate::workspace_binding::{BindingStore, PgBindingStore, WORKSPACE_BINDINGS_CHANNEL};
@@ -502,79 +501,6 @@ async fn db_the_bind_lookup_applies_every_bindability_condition() -> Result<()> 
                 .await?
                 .is_some()
         );
-        Ok(())
-    }
-    .await;
-    db.finish(result).await
-}
-
-#[tokio::test]
-#[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn db_the_gateway_credential_authority_reads_the_live_binding() -> Result<()> {
-    let db = TestDatabase::create().await?;
-    let result = async {
-        seed(&db).await?;
-        let before = gateway_daemon_authority(&db.pool, ENV_A)
-            .await
-            .map_err(|error| anyhow::anyhow!("{error}"))?
-            .expect("bindable environment");
-        ensure!(before.binding.is_none() && before.operation_generation == GENERATION);
-        ensure!(before.organization_id == ORGANIZATION && before.namespace == NAMESPACE);
-
-        fenced_write(&db.pool, &record(ENV_A, POD_1)).await?;
-        let after = gateway_daemon_authority(&db.pool, ENV_A)
-            .await
-            .map_err(|error| anyhow::anyhow!("{error}"))?
-            .expect("bindable environment");
-        let binding = after.binding.expect("live binding");
-        ensure!(binding.pod_uid == POD_1);
-        ensure!(binding.credential_scope == WorkspaceCredentialScope::Environment);
-
-        // Retried (pending), creating and starting environments are served
-        // too; others are not.
-        for (state, served) in [
-            ("pending", true),
-            ("creating", true),
-            ("starting", true),
-            ("resizing", true),
-            ("stopping", false),
-            ("stopped", false),
-            ("error", false),
-        ] {
-            sqlx::query("UPDATE environments SET state = $2 WHERE id = $1")
-                .bind(ENV_A)
-                .bind(state)
-                .execute(&db.pool)
-                .await?;
-            let authority = gateway_daemon_authority(&db.pool, ENV_A)
-                .await
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
-            ensure!(authority.is_some() == served, "{state}");
-        }
-        // A resize that replaces the Pod runs under desired `resized`; any
-        // other non-started intent is never served.
-        for (state, desired, served) in [
-            ("resizing", "resized", true),
-            ("running", "resized", false),
-            ("running", "stopped", false),
-            ("creating", "destroyed", false),
-        ] {
-            sqlx::query("UPDATE environments SET state = $2, desired_state = $3 WHERE id = $1")
-                .bind(ENV_A)
-                .bind(state)
-                .bind(desired)
-                .execute(&db.pool)
-                .await?;
-            let authority = gateway_daemon_authority(&db.pool, ENV_A)
-                .await
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
-            ensure!(authority.is_some() == served, "{state}/{desired}");
-            let store = PgBindingStore::from_pool(db.pool.clone());
-            let live = store
-                .live_binding(POD_1, NAMESPACE, &format!("sandbox-{ENV_A}"))
-                .await?;
-            ensure!(live.is_some() == served, "listener {state}/{desired}");
-        }
         Ok(())
     }
     .await;

@@ -16,3 +16,4 @@ replace  654b174d8b535f24a7c7abf9ad5882f5df1227b3dd2f51ac0dcd906eb6df03d5  proto
 replace  aca686b3bb465fe2e6461c5ec5973d86ca89c1cc3b3987b6ded75d40b7f665be  proto/codewire/v1/access_profile.proto
 replace  337a21892c4886d5a88a053d7235e267b39d1ceb22bfff541404b6412a20e689  proto/codewire/v1/credential.proto
 replace  54e7c1934fef59f554387b3aee476fa88741192ffef8466210971e68433cb440  proto/codewire/admin/v1/admin.proto
+delete   a35bfd90570aa951f2d7eb9a623f446f144fad95be468ca549d48984eacf6502  proto/codewire/internal/v1/gateway_binding.proto

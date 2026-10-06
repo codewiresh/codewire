@@ -148,9 +148,6 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
 
 
 INTERNAL_CONNECT_SERVICES = {
-    "codewire.internal.v1.GatewayBindingService": (
-        "codewire_orchestration::connect::internal::gateway_binding_router"
-    ),
     "codewire.internal.v1.MeshAuthorizationService": (
         "codewire_orchestration::connect::mesh_authorization::router"
     ),
@@ -774,8 +771,8 @@ def assert_internal_connect_listener_exemption(
     expected = set().union(*(services for _, services in CLOSED_LISTENERS.values()))
     if set(unrouted) != expected:
         fail(
-            "unrouted listener map must contain exactly GatewayBindingService, "
-            "MeshAuthorizationService and WorkspaceBindingService"
+            "unrouted listener map must contain exactly MeshAuthorizationService "
+            "and WorkspaceBindingService"
         )
     assert_internal_connect_listener_boundary(INTERNAL_CONNECT_SERVICES, fail, reader)
     assert_workspace_binding_listener_boundary(fail, reader)
@@ -1038,7 +1035,7 @@ def internal_connect_listener_self_test() -> None:
             raise RuntimeError(f"{label}: expected rejection {expected!r}, got {failures!r}")
 
     missing = copy.deepcopy(valid_unrouted)
-    missing.pop("codewire.internal.v1.GatewayBindingService")
+    missing.pop("codewire.internal.v1.MeshAuthorizationService")
     expect_rejection("missing exception record", "must contain exactly", unrouted=missing)
 
     missing_binding = copy.deepcopy(valid_unrouted)
@@ -1046,7 +1043,7 @@ def internal_connect_listener_self_test() -> None:
     expect_rejection("missing workspace-binding record", "must contain exactly", unrouted=missing_binding)
 
     wrong_port = copy.deepcopy(valid_unrouted)
-    wrong_port["codewire.internal.v1.GatewayBindingService"]["port"] = 8086
+    wrong_port["codewire.internal.v1.MeshAuthorizationService"]["port"] = 8086
     expect_rejection("wrong exception record", "must use the internal-connect listener", unrouted=wrong_port)
 
     binding_on_8088 = copy.deepcopy(valid_unrouted)
@@ -1061,16 +1058,16 @@ def internal_connect_listener_self_test() -> None:
         unrouted=binding_on_8088,
     )
 
-    gateway_on_8087 = copy.deepcopy(valid_unrouted)
-    gateway_on_8087["codewire.internal.v1.GatewayBindingService"] = {
+    mesh_on_8087 = copy.deepcopy(valid_unrouted)
+    mesh_on_8087["codewire.internal.v1.MeshAuthorizationService"] = {
         "binary": "orchestration",
         "listener": "workspace-binding",
         "port": 8087,
     }
     expect_rejection(
-        "gateway binding recorded on 8087",
+        "mesh authorization recorded on 8087",
         "must use the internal-connect listener on port 8088",
-        unrouted=gateway_on_8087,
+        unrouted=mesh_on_8087,
     )
 
     expect_rejection(
@@ -1079,7 +1076,7 @@ def internal_connect_listener_self_test() -> None:
         per_file={
             "fixture": {
                 "rules": [
-                    {"service": "codewire.internal.v1.GatewayBindingService", "backend": "orchestration"}
+                    {"service": "codewire.internal.v1.MeshAuthorizationService", "backend": "orchestration"}
                 ]
             }
         },
@@ -1102,7 +1099,7 @@ def internal_connect_listener_self_test() -> None:
             "crates/codewire-orchestration/src/main.rs",
             'let app = AppBuilder::new("codewire-orchestration")',
             'let app = AppBuilder::new("codewire-orchestration")\n'
-            '        .with_connect_routes(codewire_orchestration::connect::internal::gateway_binding_router(api_state.clone()))',
+            '        .with_connect_routes(codewire_orchestration::connect::mesh_authorization::router(pool.clone()))',
         ),
     )
     expect_rejection(
@@ -1126,13 +1123,13 @@ def internal_connect_listener_self_test() -> None:
         ),
     )
     expect_rejection(
-        "gateway binding on the workspace-binding app",
+        "mesh authorization on the workspace-binding app",
         "is prohibited from the workspace-binding 8087 app",
         replacement=(
             "crates/codewire-orchestration/src/main.rs",
             "let workspace_binding_app = codewire_orchestration::workspace_binding::app(",
             "let workspace_binding_app = codewire_orchestration::workspace_binding::app(\n"
-            "        codewire_orchestration::connect::internal::gateway_binding_router(api_state.clone()),",
+            "        codewire_orchestration::connect::mesh_authorization::router(pool.clone()),",
         ),
     )
     expect_rejection(

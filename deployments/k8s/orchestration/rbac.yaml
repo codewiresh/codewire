@@ -27,7 +27,7 @@ metadata:
     app.kubernetes.io/name: codewire
     app.kubernetes.io/component: orchestration
 rules:
-  # Exact-audience gateway binding and OpenBao Kubernetes Auth validate their
+  # Exact-audience workspace binding and OpenBao Kubernetes Auth validate their
   # presented workload JWTs through the cluster TokenReview API as this
   # ServiceAccount. They need only TokenReview creation; SubjectAccessReview
   # and broader auth-delegator access are not required.
@@ -70,7 +70,7 @@ rules:
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
     verbs: ["get"]
-  # Gateway binding selects transport-zone capabilities from the scheduled
+  # Workspace binding selects transport-zone capabilities from the scheduled
   # runtime node labels. The warm-pool reconciler (Program #2238 C2) lists
   # runtime nodes for the 25% node cap and to find cordoned ones. Read-only.
   - apiGroups: [""]

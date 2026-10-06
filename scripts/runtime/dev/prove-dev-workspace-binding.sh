@@ -32,7 +32,7 @@ JOURNEYS_GIVEN=0
 BINDING_PORT=8087
 BINDING_HOST="codewire-orchestration-workspace-binding.${SERVER_NAMESPACE}.svc.cluster.local"
 BIND_PATH="/codewire.internal.v1.WorkspaceBindingService/BindWorkspace"
-GATEWAY_PATH="/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
+INTERNAL_PATH="/codewire.internal.v1.MeshAuthorizationService/ResolveMeshAuthorization"
 TOKEN_PATH="/var/run/secrets/codewire/workspace-binding/token"
 CREDENTIAL_PATH="/codewire/run/daemon/credential"
 
@@ -52,7 +52,7 @@ then invariants when --sql-cmd is given):
   create            N timed cold creates; identity-free Pod, daemon reachable,
                     workspace_bind before access_ready, wall and stage times
   negatives         section 14 checks from inside a workspace: own token binds,
-                    garbage bearer, gateway path and HTTP/2 refused, third
+                    garbage bearer, 8088 path and HTTP/2 refused, third
                     concurrent connection refused, slow header closed, other
                     orchestration ports unreachable, file modes, no token env
   stop-start        new Pod UID, same PVC UID, data kept, daemon reachable
@@ -447,7 +447,7 @@ status() { # path bearer -> HTTP status of a Connect unary JSON call
 own=\$(cat "\$token_file")
 echo "own_bind=\$(status '$BIND_PATH' "\$own")"
 echo "garbage_bind=\$(status '$BIND_PATH' 'garbage.not.a-token')"
-echo "gateway_path=\$(status '$GATEWAY_PATH' "\$own")"
+echo "internal_path=\$(status '$INTERNAL_PATH' "\$own")"
 unset own
 # HTTP/2 prior knowledge is not spoken on 8087.
 exec 4<>"/dev/tcp/\$host/\$port"
@@ -490,7 +490,7 @@ journey_negatives() {
   value() { awk -F= -v key="$1" '$1 == key {print $2; exit}' "$out"; }
   check "negatives: own token binds (200)" test "$(value own_bind)" = 200
   check "negatives: garbage bearer is unauthenticated (401)" test "$(value garbage_bind)" = 401
-  check "negatives: gateway binding path is absent on 8087 (404)" test "$(value gateway_path)" = 404
+  check "negatives: 8088 internal path is absent on 8087 (404)" test "$(value internal_path)" = 404
   check "negatives: HTTP/2 prior knowledge refused" one_of "$(value h2_first_line)" closed 'HTTP/1.1*'
   check "negatives: third concurrent connection refused" one_of "$(value third_connection)" closed refused
   check "negatives: slow header closed at the 5 s timeout (4.9-8 s after connect)" \

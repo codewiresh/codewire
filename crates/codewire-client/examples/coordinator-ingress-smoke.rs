@@ -46,39 +46,6 @@ fn sample_node(id: Uuid, marker: u8) -> Node {
     }
 }
 
-async fn direct_binding_probe(
-    direct_url: &str,
-    environment_id: Uuid,
-    sidecar_token: &str,
-) -> Result<(), Box<dyn Error>> {
-    let mut session = CoordinatorPeerSession::connect(
-        direct_url,
-        sidecar_token,
-        PrimaryCoordinateIdentity::sidecar(environment_id),
-    )
-    .await?;
-    let mut received_derp = false;
-    session
-        .run_for_kind_e2e(
-            Duration::from_millis(250),
-            CoordinatorHandlers {
-                on_peers: |_: &[Node]| {},
-                on_derp_map: |_: &serde_json::Value| received_derp = true,
-            },
-        )
-        .await?;
-    if !received_derp {
-        return Err(smoke_error(
-            "direct typed coordinator setup did not receive derp_map",
-        ));
-    }
-    tokio::time::timeout(Duration::from_secs(10), session.finish_for_kind_e2e())
-        .await
-        .map_err(|_| std::io::Error::other("direct probe stream did not close cleanly"))??;
-    println!("coordinator-ingress-smoke: direct binding token accepted: OK");
-    Ok(())
-}
-
 async fn mesh_coordinate_probe(
     base_url: &str,
     certificate_der: Vec<u8>,
@@ -164,10 +131,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         std::env::var("KIND_COORDINATOR_TOKEN").unwrap_or_else(|_| DEFAULT_TOKEN.into());
     let sidecar_token = std::env::var("KIND_COORDINATOR_SIDECAR_TOKEN")
         .unwrap_or_else(|_| DEFAULT_SIDECAR_TOKEN.into());
-
-    if std::env::var("KIND_COORDINATOR_BINDING_PROBE").as_deref() == Ok("1") {
-        return direct_binding_probe(&direct_url, environment_id, &sidecar_token).await;
-    }
 
     let certificate_path = std::env::var("KIND_COORDINATOR_CA_DER")
         .map_err(|_| std::io::Error::other("KIND_COORDINATOR_CA_DER is required"))?;

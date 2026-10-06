@@ -483,18 +483,12 @@ for hardcoded_loopback in '127.0.0.1:7233' '127.0.0.1:8084' '127.0.0.1:18092' '1
     fail "Kind harness still hardcodes client address ${hardcoded_loopback}"
   fi
 done
-grep -Fq 'audience: codewire.internal.gateway-binding.v1' "$COMMON" ||
-  fail 'Kind gateway-binding fixture does not project the exact audience'
-grep -Fq 'mountPath: /var/run/secrets/codewire/gateway-binding' "$COMMON" ||
-  fail 'Kind gateway-binding fixture does not isolate its projected token mount'
-grep -Fq "token=\"\$(cat /var/run/secrets/codewire/gateway-binding/token)\"" "$COMMON" ||
-  fail 'Kind gateway-binding fixture does not reread the projected identity'
-grep -Fq 'anonymous internal binding command was not rejected' "$COMMON" ||
-  fail 'Kind gateway-binding fixture does not assert anonymous rejection'
-grep -Fq 'coordinate capability crossed into gateway binding' "$COMMON" ||
-  fail 'Kind gateway-binding fixture does not assert cross-scope rejection'
-if grep -Fq -- '--post-data="{\"pod\"' "$COMMON"; then
-  fail 'Kind gateway-binding fixture still sends caller-selected Pod coordinates'
+grep -Fq 'anonymous internal command was not rejected' "$COMMON" ||
+  fail 'Kind internal listener probe does not assert anonymous rejection'
+grep -Fq 'coordinate capability crossed into the internal listener' "$COMMON" ||
+  fail 'Kind internal listener probe does not assert cross-scope rejection'
+if grep -Fq -e 'GatewayBindingService' -e 'codewire.internal.gateway-binding.v1' "$COMMON"; then
+  fail 'Kind harness still exercises the deleted gateway binding service'
 fi
 
 # Sourcing the dispatcher defines every suite without executing one.

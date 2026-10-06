@@ -2233,17 +2233,17 @@ connect_edge_probes() {
 # `codewire.internal.v1` is the sole listener-isolation exception to the
 # public `/codewire.` fallback. Prove both sides of that boundary against the
 # rendered Kind Service: public ingress reaches the ordinary public 8084
-# not-found, an authenticated ClusterIP Service-DNS request proves the binding
-# success path, and a direct port-forward proves anonymous and cross-capability
-# requests fail closed on the internal listener.
+# not-found, and a port-forward to the TLS internal listener, verified with
+# the published roots and the Service's DNS name, proves anonymous and
+# cross-capability requests fail closed there.
 coordinator_runtime_smokes() {
-  # The internal binding and public coordinator probes share one environment.
-  # Keep its live runtime until every consumer finishes; otherwise the normal
+  # The internal listener and coordinator probes share one environment. Keep
+  # its live runtime until every consumer finishes; otherwise the normal
   # reconciler correctly invalidates the later public running-state check.
   log "running internal Connect listener isolation probes"
-  local public_base="${KIND_INGRESS_URL}/codewire.internal.v1.GatewayBindingService"
+  local public_base="${KIND_INGRESS_URL}/codewire.internal.v1.MeshAuthorizationService"
   curl_settled -X POST -H 'content-type: application/json' -d '{}' \
-    "${public_base}/IssueGatewayBinding"
+    "${public_base}/ResolveMeshAuthorization"
   if [ "$PROBE_CODE" != "404" ]; then
     echo "::error::public internal Connect path returned ${PROBE_CODE}, want public-listener 404: ${PROBE_BODY}"
     exit 1
@@ -2254,14 +2254,11 @@ coordinator_runtime_smokes() {
     exit 1
   fi
 
-  # The binding service rejects database-only runtime identities: the
-  # referenced SandboxClaim and workspace Pod must both be live and current.
-  # It resolves the Pod only through the runtime chain (Program #2238 B2):
-  # the Claim's status names its bound Sandbox, the Sandbox names its Pod,
-  # and there is no Claim-name fallback. Install the checked-in claim and
-  # Sandbox CRDs before the full controller deployment so this listener probe
-  # can build that exact chain without a controller racing its synthetic
-  # status.
+  # The coordinator probe's environment keeps a live runtime chain (Claim,
+  # Sandbox, Pod) so the reconciler leaves it running for every consumer.
+  # Install the checked-in claim and Sandbox CRDs before the full controller
+  # deployment so this probe can build that exact chain without a controller
+  # racing its synthetic status.
   kubectl_apply --validate=false \
     -f "$ROOT/deployments/k8s/agent-sandbox/base/crds/extensions.agents.x-k8s.io_sandboxclaims.yaml" \
     -f "$ROOT/deployments/k8s/agent-sandbox/base/crds/agents.x-k8s.io_sandboxes.yaml"
@@ -2270,19 +2267,16 @@ coordinator_runtime_smokes() {
     crd/sandboxes.agents.x-k8s.io
 
   (
-    # Admit the stopped UUID-addressed coordinator fixture. The binding
-    # endpoint must mint a token the real coordinator accepts, rather than
-    # merely returning a syntactically plausible token from its own process.
+    # Admit the stopped UUID-addressed coordinator fixture. The real
+    # coordinator must accept its coordinate-scoped token.
     local bound_environment_id=00000000-0000-4000-8000-000000000501
     local bound_claim="sandbox-${bound_environment_id}"
-    # A warm-pool member's name, as adoption leaves it: never the Claim's
-    # name, so the binding succeeds only by following the bound chain.
+    # A warm-pool member's name, as adoption leaves it: never the Claim's name.
     local bound_sandbox="kind-internal-ready-fixture-${bound_environment_id##*-}"
     local bound_pod="$bound_sandbox"
-    local bound_gateway="cw-binding-gateway-${bound_environment_id}"
     local bound_claim_uid bound_sandbox_uid bound_pod_ip bound_claim_status
     local bound_port_id=port_internal_connect_kind
-    local port_forward_log port_forward_pid local_port i sidecar_token in_cluster_probe
+    local port_forward_log port_forward_pid local_port i sidecar_token
     local internal_roots
     port_forward_log="$(mktemp)"
     # Public roots of the TLS internal listener, for host-side probes.
@@ -2320,8 +2314,6 @@ SQL
         --ignore-not-found=true --wait=true >/dev/null 2>&1 || cleanup_status=1
       kubectl -n "$NS" delete pod "$bound_pod" \
         --ignore-not-found=true --wait=true >/dev/null 2>&1 || cleanup_status=1
-      kubectl -n "$NS" delete pod "$bound_gateway" \
-        --ignore-not-found=true --wait=true >/dev/null 2>&1 || cleanup_status=1
       rm -f "$port_forward_log" "$internal_roots"
       [ "$status" -ne 0 ] || status="$cleanup_status"
       exit "$status"
@@ -2334,57 +2326,7 @@ SQL
       --ignore-not-found=true --wait=true >/dev/null
     kubectl -n "$NS" delete pod "$bound_pod" \
       --ignore-not-found=true --wait=true >/dev/null
-    kubectl -n "$NS" delete pod "$bound_gateway" \
-      --ignore-not-found=true --wait=true >/dev/null
     kubectl_apply -f - <<EOF
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: codewire-sandbox
-  namespace: ${NS}
-automountServiceAccountToken: false
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: ${bound_gateway}
-  namespace: ${NS}
-  labels:
-    codewire.sh/environment-id: ${bound_environment_id}
-    codewire.sh/type: gateway
-spec:
-  serviceAccountName: codewire-sandbox
-  automountServiceAccountToken: false
-  restartPolicy: Always
-  securityContext:
-    runAsUser: 1000
-    runAsGroup: 1000
-    fsGroup: 1000
-  containers:
-    - name: gateway-binding-caller
-      image: ${KIND_POSTGRES_LOCAL_IMAGE}
-      imagePullPolicy: Never
-      command: ["sleep", "600"]
-      volumeMounts:
-        - name: gateway-binding-identity
-          mountPath: /var/run/secrets/codewire/gateway-binding
-          readOnly: true
-        - name: orchestration-internal-roots
-          mountPath: /run/codewire-orchestration-internal-roots
-          readOnly: true
-  volumes:
-    - name: orchestration-internal-roots
-      configMap:
-        name: codewire-orchestration-internal-roots
-    - name: gateway-binding-identity
-      projected:
-        defaultMode: 288
-        sources:
-          - serviceAccountToken:
-              audience: codewire.internal.gateway-binding.v1
-              expirationSeconds: 600
-              path: token
----
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
@@ -2456,8 +2398,6 @@ spec:
 EOF
     kubectl -n "$NS" wait "pod/${bound_pod}" \
       --for=condition=Ready --timeout=60s
-    kubectl -n "$NS" wait "pod/${bound_gateway}" \
-      --for=condition=Ready --timeout=60s
     bound_pod_ip="$(
       kubectl -n "$NS" get pod "$bound_pod" -o jsonpath='{.status.podIP}'
     )"
@@ -2470,7 +2410,7 @@ EOF
       jq -cn --arg sandbox "$bound_sandbox" --arg pod_ip "$bound_pod_ip" '{status: {
         sandbox: {name: $sandbox, podIPs: [$pod_ip]},
         conditions: [{lastTransitionTime: "2026-01-01T00:00:00Z",
-          message: "Kind internal binding fixture is ready", reason: "Ready",
+          message: "Kind internal Connect fixture is ready", reason: "Ready",
           status: "True", type: "Ready"}]}}'
     )"
     kubectl -n "$NS" patch sandboxclaim "$bound_claim" \
@@ -2490,31 +2430,9 @@ SET state = 'running', desired_state = 'started', error_reason = NULL
 WHERE id = '$bound_environment_id';
 COMMIT;
 SQL
-    # This originates in a gateway-labeled Pod and addresses the ClusterIP by
-    # Service DNS over the TLS-only internal listener, verified like a gateway
-    # verifies it: with the published roots and the leaf's exact DNS name. The
-    # caller rereads its exact-audience projected token, and sends no Pod
-    # coordinates; orchestration derives name, namespace, and UID exclusively
-    # from TokenReview before resolving the environment label.
+    # The coordinator's own coordinate-scoped capability for this environment.
+    sidecar_token="$(auth_token_for_environment_scope "$bound_environment_id" coordinate)"
     local internal_host="codewire-orchestration.${NS}.svc.cluster.local"
-    # shellcheck disable=SC2016 # The shell inside the fixture Pod expands the token.
-    in_cluster_probe="$(kubectl -n "$NS" exec "$bound_gateway" -- sh -ec '
-      token="$(cat /var/run/secrets/codewire/gateway-binding/token)"
-      SSL_CERT_FILE=/run/codewire-orchestration-internal-roots/ca.crt exec wget -q -O - \
-        --header="content-type: application/json" \
-        --header="authorization: Bearer ${token}" \
-        --post-data="{}" \
-        "https://$1:8088/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
-    ' sh "$internal_host")"
-    if ! jq -e --arg environment_id "$bound_environment_id" --arg pod_ip "$bound_pod_ip" \
-      '(.environmentId // .environment_id) == $environment_id
-       and (.workspacePodIp // .workspace_pod_ip) == $pod_ip
-       and ((.appPorts // .app_ports // []) | index(3000)) != null
-       and ((.sidecarToken // .sidecar_token // "") | length > 0)' \
-      <<<"$in_cluster_probe" >/dev/null; then
-      echo "::error::in-cluster Service-DNS binding request did not reach the internal TLS mount: $in_cluster_probe"
-      exit 1
-    fi
 
     kubectl -n "$NS" get configmap codewire-orchestration-internal-roots \
       -o 'jsonpath={.data.ca\.crt}' >"$internal_roots"
@@ -2543,55 +2461,36 @@ SQL
     curl_settled --cacert "$internal_roots" \
       --resolve "${internal_host}:${local_port}:127.0.0.1" \
       -X POST -H 'content-type: application/json' -d '{}' \
-      "https://${internal_host}:${local_port}/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
+      "https://${internal_host}:${local_port}/codewire.internal.v1.MeshAuthorizationService/ResolveMeshAuthorization"
     if [ "$PROBE_CODE" != "401" ] || ! echo "$PROBE_BODY" | grep -q '"code":"unauthenticated"'; then
-      echo "::error::anonymous internal binding command was not rejected: code=$PROBE_CODE body=$PROBE_BODY"
+      echo "::error::anonymous internal command was not rejected: code=$PROBE_CODE body=$PROBE_BODY"
       exit 1
     fi
     if ! grep -qi '^x-codewire-service: codewire-orchestration-internal' "$PROBE_HEADERS"; then
-      echo "::error::ClusterIP internal binding command did not reach the internal listener"
+      echo "::error::ClusterIP internal command did not reach the internal listener"
       cat "$PROBE_HEADERS"
       exit 1
     fi
 
-    sidecar_token="$(jq -er '.sidecarToken // .sidecar_token // empty' <<<"$in_cluster_probe")"
-
-    # A freshly issued coordinate-scoped Codewire HMAC bearer must not be
-    # accepted as a gateway bootstrap identity. There is no HMAC or anonymous
-    # fallback around the exact-audience Kubernetes TokenReview boundary.
+    # A coordinate-scoped Codewire HMAC bearer is not the Mesh service's
+    # method-scoped HMAC: no other capability crosses into the listener.
     curl_settled --cacert "$internal_roots" \
       --resolve "${internal_host}:${local_port}:127.0.0.1" \
       -X POST -H 'content-type: application/json' \
       -H "authorization: Bearer ${sidecar_token}" -d '{}' \
-      "https://${internal_host}:${local_port}/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
+      "https://${internal_host}:${local_port}/codewire.internal.v1.MeshAuthorizationService/ResolveMeshAuthorization"
     if [ "$PROBE_CODE" != "401" ] || ! echo "$PROBE_BODY" | grep -q '"code":"unauthenticated"'; then
-      echo "::error::coordinate capability crossed into gateway binding: code=$PROBE_CODE body=$PROBE_BODY"
+      echo "::error::coordinate capability crossed into the internal listener: code=$PROBE_CODE body=$PROBE_BODY"
       exit 1
     fi
 
-    # The one Rust client core opens a real generated Coordinate stream. Its
-    # successful setup proves the just-issued HMAC token crossed the service
-    # boundary and was accepted by the coordinator, not only parsed by the
-    # issuer.
-    for i in $(seq 1 20); do
-      if KIND_COORDINATOR_DIRECT_URL="$KIND_COORDINATOR_DIRECT_URL" \
-        KIND_COORDINATOR_ENVIRONMENT="$bound_environment_id" \
-        KIND_COORDINATOR_SIDECAR_TOKEN="$sidecar_token" \
-        KIND_COORDINATOR_BINDING_PROBE=1 \
-        timeout --kill-after=5s 15s "$CARGO_CI_DIR/examples/coordinator-ingress-smoke"; then
-        break
-      fi
-      if [ "$i" = 20 ]; then
-        echo "::error::coordinator did not accept the internal binding token"
-        exit 1
-      fi
-      echo "internal binding coordinator probe not ready (${i}/20)"
-      sleep 2
-    done
-
     log "internal Connect listener isolation probes OK"
     mesh_product_connect_ownership_smoke
-    coordinator_ingress_smoke
+    # The direct Coordinate stream proves the same token is accepted by the
+    # coordinator for this live environment.
+    KIND_COORDINATOR_ENVIRONMENT="$bound_environment_id" \
+      KIND_COORDINATOR_SIDECAR_TOKEN="$sidecar_token" \
+      coordinator_ingress_smoke
   )
 }
 

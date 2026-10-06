@@ -1054,8 +1054,6 @@ async fn the_listener_app_serves_only_bind_workspace() {
     assert_eq!(body["podUid"], POD_UID);
 
     for path in [
-        "/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding",
-        "/codewire.internal.v1.GatewayBindingService/IssueGatewayDaemonCredential",
         "/codewire.internal.v1.MeshAuthorizationService/ResolveMeshAuthorization",
         "/codewire.v1.EnvironmentService/ListEnvironments",
         "/metrics",

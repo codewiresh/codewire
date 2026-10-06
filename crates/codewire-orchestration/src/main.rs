@@ -39,8 +39,7 @@ const DEFAULT_WORKER_LOOPS: &[&str] = &[
 const CONNECT_SYNTHETIC_USER_IDS_ENV: &str = "CONNECT_SYNTHETIC_USER_IDS";
 
 const PUBLIC_CONNECT_METHODS: [&str; 1] = ["/codewire.v1.OrganizationService/GetInvitationByToken"];
-// The internal Connect app (gateway binding, Mesh authorization) is served
-// only behind TLS.
+// The internal Connect app (Mesh authorization) is served only behind TLS.
 const ORCHESTRATION_INTERNAL_TLS_PORT_ENV: &str = "ORCHESTRATION_INTERNAL_TLS_PORT";
 const DEFAULT_ORCHESTRATION_INTERNAL_TLS_PORT: u16 =
     codewire_gateway_proto::ORCHESTRATION_INTERNAL_TLS_PORT;
@@ -146,11 +145,11 @@ fn internal_tls_files(
     }
 }
 
-/// Inside a cluster, gateways and Mesh reach the internal API, so it is
-/// served there, and only over TLS. A process outside a cluster (the
-/// checked-in `scripts/dev/dev-stack.sh` and integration verification, which
-/// blanks `KUBERNETES_SERVICE_HOST`) has no gateway or Mesh to serve and runs
-/// without it; there is no plaintext form.
+/// Inside a cluster, Mesh reaches the internal API, so it is served there,
+/// and only over TLS. A process outside a cluster (the checked-in
+/// `scripts/dev/dev-stack.sh` and integration verification, which blanks
+/// `KUBERNETES_SERVICE_HOST`) has no Mesh to serve and runs without it; there
+/// is no plaintext form.
 fn internal_tls_required(in_cluster: bool, tls_configured: bool) -> anyhow::Result<()> {
     anyhow::ensure!(
         !in_cluster || tls_configured,
@@ -160,10 +159,10 @@ fn internal_tls_required(in_cluster: bool, tls_configured: bool) -> anyhow::Resu
     Ok(())
 }
 
-/// Fail closed unless the public roots gateways will mount exist in the
-/// sandbox namespace and verify the mounted leaf for the name gateways use.
-/// A gateway rendered against missing or mismatched roots would otherwise
-/// retry its binding forever.
+/// Fail closed unless the public roots workspaces mount exist in the sandbox
+/// namespace and verify the mounted leaf for the names their clients use. A
+/// daemon rendered against missing or mismatched roots would otherwise retry
+/// its binding forever.
 async fn verify_internal_tls_roots(
     kube: Option<&kube::Client>,
     files: &ServerTlsFiles,
@@ -196,8 +195,8 @@ async fn verify_internal_tls_roots(
                 "internal TLS roots ConfigMap {sandbox_namespace}/{roots_configmap} has no ca.crt"
             )
         })?;
-    // Gateways and Mesh verify the internal API's name; workspace daemons
-    // verify the binding listener's name with the same roots.
+    // Mesh verifies the internal API's name; workspace daemons verify the
+    // binding listener's name with the same roots.
     for host in [
         codewire_orchestration::sandbox::template::orchestration_internal_tls_host(
             server_namespace,
@@ -490,8 +489,7 @@ async fn main() -> anyhow::Result<()> {
         // Go's nil sandbox client (the route then 503s).
         kube,
         environment_daemon_endpoints,
-        // Shared session secret for the internal gateway-binding token
-        // issuance (Go: cfg.SessionSecret).
+        // Shared session secret for daemon tokens and preview authorization.
         session_secret: cfg.session_secret.clone(),
         sandbox_cfg: ctx.sandbox_cfg.clone(),
         confidential_storage_flags,
@@ -511,7 +509,7 @@ async fn main() -> anyhow::Result<()> {
 
     // The workspace-binding listener is reachable from every tenant workload,
     // so it serves only WorkspaceBindingService under its own connection,
-    // request and database limits. No health, metrics, REST, mesh or gateway
+    // request and database limits. No health, metrics, REST or mesh
     // route shares port 8087, and this service is mounted nowhere else.
     let workspace_binding_notifications =
         Arc::new(codewire_orchestration::workspace_binding::BindingNotifications::default());
@@ -565,9 +563,6 @@ async fn main() -> anyhow::Result<()> {
     // no health, REST, public Connect, or edge-routed routes share its TLS
     // port 8088.
     let internal_app = AppBuilder::new("codewire-orchestration-internal")
-        .with_connect_routes(
-            codewire_orchestration::connect::internal::gateway_binding_router(api_state.clone()),
-        )
         .with_unary_connect_routes_mesh_authorization(
             codewire_orchestration::connect::mesh_authorization::router(pool.clone()),
             mesh_authorization,

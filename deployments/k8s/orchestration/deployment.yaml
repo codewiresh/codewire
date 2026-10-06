@@ -44,8 +44,8 @@ spec:
           ports:
             - containerPort: 8084
               name: http
-            # The internal Connect app (gateway binding, Mesh authorization),
-            # TLS-only. Gateways and Mesh verify it with the public roots in
+            # The internal Connect app (Mesh authorization), TLS-only. Mesh
+            # verifies it with the public roots in
             # codewire-orchestration-internal-roots.
             - containerPort: 8088
               name: internal-tls

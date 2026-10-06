@@ -198,7 +198,7 @@ struct ValidatedRpcProtocol(&'static str);
 ///
 /// This mount carries **no user-auth layer** — D3's third mode (internal /
 /// self-authenticating services, where the handler validates its own
-/// credential, mirroring `api/internal.rs`). User-facing mounts go through
+/// credential). User-facing mounts go through
 /// [`connect_router_with_auth`].
 pub fn connect_router(connect: connectrpc::Router) -> axum::Router {
     build_connect_router(connect, None, None, ProtocolPolicy::ConnectOnly, None, None)
