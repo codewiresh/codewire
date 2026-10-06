@@ -61,6 +61,27 @@ grep -qF 'the warm-member bridge selects exactly the bound Pod' "$PROOF" || fail
 grep -qF 'skip "hit $n: warm-member bridge not checked' "$PROOF" || fail 'no labelled skip without the fork label'
 grep -q 'check "hit \$n: no warm-member bridge once destroyed" bridge_absent' "$PROOF" ||
   fail 'hits do not check the bridge is removed on destroy'
+# #2460: the daemon hosts SSH and the tailnet. Every hit owns no gateway
+# object, its SSH server presents the key the platform recorded (OpenSSH
+# trusts only `cw ssh known-hosts`, never first use), the bridge has no
+# gateway half, and with SQL the current generation's key came from the bound
+# Pod after a completed access_ready.
+grep -qF 'check "hit $n: no gateway objects" no_gateway_objects "$id"' "$PROOF" ||
+  fail 'hits do not check for gateway objects'
+grep -qF 'check "hit $n: SSH presents the host key the platform recorded" ssh_presents_recorded_key "$id"' "$PROOF" ||
+  fail 'hits do not prove SSH against the recorded host key'
+for option in 'StrictHostKeyChecking=yes' 'UserKnownHostsFile=/dev/null' 'GlobalKnownHostsFile=/dev/null' \
+    'KnownHostsCommand=$cw_command ssh known-hosts %H' 'ProxyCommand=$cw_command shell --stdio %n' \
+    'BatchMode=yes' 'ForwardAgent=no'; do
+  grep -qF -- "$option" "$PROOF" || fail "SSH host-key proof is missing $option"
+done
+grep -qF 'sql_access_ready "$id" "$uid"' "$PROOF" || fail 'hits do not check access_ready and the recorded host key'
+grep -qF 'e.environment_operation_generation = k.operation_generation' "$PROOF" ||
+  fail 'the host-key check is not bound to the current generation'
+grep -qF 'exists, but the gateway is gone' "$PROOF" || fail 'the bridge check accepts a gateway half'
+if grep -qF 'reachable through the gateway path' "$PROOF"; then
+  fail 'the proof still describes a gateway path'
+fi
 # The SQL runner only ever receives statements on stdin; no write keyword.
 if grep -nE '\b(INSERT|UPDATE|DELETE|TRUNCATE|ALTER|DROP|GRANT|COPY)\b' "$PROOF" | grep -v '^[0-9]*:#'; then
   fail 'the proof contains a SQL write statement'

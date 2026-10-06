@@ -32,7 +32,7 @@ fail() {
 }
 
 assert_static_contract() {
-  local application_secret_smoke application_secret_exec gateway_host_key_shape normalized_smoke pod_shape
+  local application_secret_smoke application_secret_exec host_key_smoke normalized_smoke pod_shape
 
   bash -n "$SMOKE"
   bash -n "$WRAPPER"
@@ -81,18 +81,35 @@ assert_static_contract() {
   if rg -i 'kubectl_dev[^#]*(secret|gateway_secret)' <<<"$normalized_smoke" >/dev/null; then
     fail "runtime smoke reads Kubernetes Secret resources instead of proving their use through workload behavior"
   fi
+  # #2460: the workspace daemon hosts SSH and the tailnet. The Pod shape
+  # proves an identity-free daemon binding over TLS and that no gateway
+  # object exists; nothing inspects a gateway Pod.
   pod_shape="$(awk '/^assert_pod_shape\(\)/,/^}/' "$SMOKE")"
-  gateway_host_key_shape="$(awk '/# Bind readiness and the exact host-key/,/Ready gateway Pod must project/' <<<"$pod_shape")"
-  rg -F '.metadata.name == $pod' <<<"$gateway_host_key_shape" >/dev/null ||
-    fail "gateway host-key proof is not bound to the observed Pod"
-  rg -F '.type == "Ready" and .status == "True"' <<<"$gateway_host_key_shape" >/dev/null ||
-    fail "gateway host-key proof no longer requires observed Pod readiness"
-  rg -F '.secret.secretName == ("cw-gateway-host-key-" + $id)' <<<"$gateway_host_key_shape" >/dev/null ||
-    fail "gateway host-key proof no longer binds the Pod volume reference"
-  rg -F "' \"\$gateway_pod_json\" >/dev/null" <<<"$gateway_host_key_shape" >/dev/null ||
-    fail "gateway host-key proof is not evaluated against the Ready Pod document"
-  if rg -F 'gateway_deploy_json' <<<"$gateway_host_key_shape" >/dev/null; then
-    fail "gateway host-key proof reverted to an unbound Deployment template"
+  for binding in 'assert_no_gateway_objects' 'CODEWIRE_WORKSPACE_BINDING_URL' \
+      '.name == "orchestration-internal-roots"' '.readOnly == true' \
+      'codewire-orchestration-workspace-binding.${CODEWIRE_SERVER_NAMESPACE}.svc.cluster.local:8087'; do
+    rg -F -- "$binding" <<<"$pod_shape" >/dev/null ||
+      fail "workspace access shape is missing: $binding"
+  done
+  if rg -e 'gateway_pod_json|gateway_deploy_json|GATEWAY_POD_NAME' "$SMOKE" >/dev/null; then
+    fail "runtime smoke still inspects a gateway Pod or Deployment"
+  fi
+  awk '/^assert_no_gateway_objects\(\)/,/^}/' "$SMOKE" |
+    rg -F 'codewire.sh/type=gateway' >/dev/null ||
+    fail "no-gateway check no longer selects gateway objects by label"
+  # The host key is the one the platform recorded for the current
+  # generation: trusted only through `cw ssh known-hosts`, never first use;
+  # a changed key is refused; stop and start rotate it.
+  host_key_smoke="$(awk '/^run_host_key_probe_once\(\)/,/^run_ssh_smoke\(\)/' "$SMOKE")"
+  for binding in 'StrictHostKeyChecking=yes' 'KnownHostsCommand=$cw_command ssh known-hosts %H' \
+      'UserKnownHostsFile=/dev/null' 'GlobalKnownHostsFile=/dev/null' \
+      'expect_host_key_refused forged' 'expect_host_key_refused previous-generation' \
+      'the recorded host key did not rotate across stop and start'; do
+    rg -F -- "$binding" <<<"$host_key_smoke" >/dev/null ||
+      fail "host-key smoke is missing: $binding"
+  done
+  if rg -F 'accept-new' <<<"$host_key_smoke" >/dev/null; then
+    fail "host-key smoke trusts a key on first use"
   fi
   application_secret_smoke="$(awk '/^run_application_secrets_smoke\(\)/,/^}/' "$SMOKE")"
   rg -F 'run_application_secret_exec "$guest_script" "$phase" "$phase_deadline"' <<<"$application_secret_smoke" >/dev/null ||
@@ -135,7 +152,7 @@ assert_static_contract() {
     | rg -F '"$stdout" >&2' >/dev/null; then
     fail "tailnet doctor failure still prints the unfiltered client report"
   fi
-  rg -F 'rust gateway UDP peer relay allocation diagnostic' "$SMOKE" >/dev/null || \
+  rg -F 'workspace daemon UDP peer relay allocation diagnostic' "$SMOKE" >/dev/null || \
     fail "safe allocator diagnostic marker is missing"
   awk '/^start_peer_relay_packet_diagnostics\(\)/,/^}/' "$SMOKE" \
     | rg -F 'tcpdump -i any -Q inout -nn -tttt -l -s 48' >/dev/null || \
@@ -154,8 +171,8 @@ assert_static_contract() {
     fail "tailnet doctor failure diagnostics must not capture full container logs"
   fi
   awk '/^env_is_running\(\)/,/^}/' "$SMOKE" \
-    | rg -F 'fail_if_gateway_crashloop' >/dev/null || \
-    fail "environment wait no longer classifies gateway CrashLoopBackOff"
+    | rg -F 'fail_if_workspace_crashloop' >/dev/null || \
+    fail "environment wait no longer classifies the workspace daemon's CrashLoopBackOff"
   rg -F 'classify_coco_rest_isolation_result' "$SMOKE" >/dev/null || \
     fail "confidential REST-isolation smoke no longer preserves a classified result"
   if rg -F 'coco-rest-disabled-ok' "$SMOKE" >/dev/null; then
@@ -263,8 +280,8 @@ run_coco_rest_isolation_classifier_cases() {
     '' command_failed '' none
 }
 
-run_gateway_crashloop_fail_fast_case() {
-  local case_dir="$TEST_TMP/gateway-crashloop"
+run_workspace_crashloop_fail_fast_case() {
+  local case_dir="$TEST_TMP/workspace-crashloop"
   local error="$case_dir/error"
 
   mkdir -p "$case_dir"
@@ -282,10 +299,10 @@ run_gateway_crashloop_fail_fast_case() {
     kubectl_dev() {
       jq -n --arg sentinel "$SENSITIVE_SENTINEL" '{
         items: [{
-          metadata: {name: "gateway-test", annotations: {unsafe: $sentinel}},
+          metadata: {name: "workspace-test", annotations: {unsafe: $sentinel}},
           status: {
             containerStatuses: [{
-              name: "codewire-gateway",
+              name: "workspace",
               restartCount: 3,
               state: {waiting: {reason: "CrashLoopBackOff", message: $sentinel}}
             }]
@@ -294,18 +311,18 @@ run_gateway_crashloop_fail_fast_case() {
       }'
     }
     collect_failure_diagnostics() {
-      [[ "$1" == "gateway-crashloop" ]]
+      [[ "$1" == "workspace-crashloop" ]]
     }
     env_is_running
   ) >/dev/null 2>"$error"; then
-    fail "environment wait accepted a gateway CrashLoopBackOff"
+    fail "environment wait accepted a workspace daemon CrashLoopBackOff"
   fi
 
   grep -Fq \
-    'gateway entered CrashLoopBackOff while environment state=provisioning (restart_count=3)' \
-    "$error" || fail "gateway CrashLoopBackOff was not classified immediately"
+    'workspace daemon container entered CrashLoopBackOff while environment state=provisioning (restart_count=3)' \
+    "$error" || fail "workspace daemon CrashLoopBackOff was not classified immediately"
   if grep -Fq "$SENSITIVE_SENTINEL" "$error"; then
-    fail "gateway CrashLoopBackOff classifier emitted an unfiltered status message"
+    fail "workspace CrashLoopBackOff classifier emitted an unfiltered status message"
   fi
 }
 
@@ -395,8 +412,9 @@ EOF
     run_tailnet_doctor() { :; }
     require_cmd() { :; }
     run_ssh_transport_smoke() { :; }
-    run_gateway_host_key_restart_smoke() {
-      fail "application-only smoke attempted a Kubernetes rollout"
+    run_host_key_smoke() { :; }
+    kubectl_dev() {
+      fail "application-only smoke used Kubernetes"
     }
     run_ssh_smoke
   )
@@ -649,32 +667,28 @@ run_safe_diagnostic_case() {
   local error="$TEST_TMP/error"
   local case_dir="$TEST_TMP/case"
   local artifact_dir="$TEST_TMP/artifact"
-  local captured="$case_dir/gateway-tailnet-allocator-doctor-failure.log"
-  local captured_json="$case_dir/gateway-tailnet-allocator-doctor-failure.jsonl"
+  local captured="$case_dir/daemon-tailnet-allocator-doctor-failure.log"
+  local captured_json="$case_dir/daemon-tailnet-allocator-doctor-failure.jsonl"
 
   mkdir -p "$case_dir"
   (
     source "$SMOKE"
     TMPDIR_SMOKE="$case_dir"
     ENV_ID="test-environment"
-    GATEWAY_POD_NAME=""
+    # shellcheck disable=SC2034 # Consumed by the sourced diagnostic helper.
+    POD_NAME="workspace-test"
     SANDBOX_NAMESPACE="test-namespace"
     SMOKE_KEEP_ENV=1
     SMOKE_ARTIFACT_DIR="$artifact_dir"
     kubectl_dev() {
-      if [[ "$*" == *" get pod "* ]]; then
-        printf '%s\n' '{"items":[{"metadata":{"name":"gateway-test"}}]}'
-        return 0
-      fi
-      if [[ "$*" == *" logs "* ]]; then
-        printf '%s\n' '{"timestamp":"2026-07-30T12:44:08Z","level":"INFO","fields":{"message":"unrelated gateway log","value":"doctor-failure-sensitive-sentinel"},"target":"codewire_gateway"}'
-        printf '%s\n' '{"timestamp":"2026-07-30T12:44:09Z","level":"INFO","fields":{"message":"rust gateway UDP peer relay allocation diagnostic","outcome":"retry_scheduled","path":"peer_relay","peer_count":1,"queued_count":0,"in_flight_count":0,"attempt_count":2,"failure_count":1},"target":"codewire_gateway::tailnet"}'
+      if [[ "$*" == *" logs workspace-test -c workspace "* ]]; then
+        printf '%s\n' '{"timestamp":"2026-07-30T12:44:08Z","level":"INFO","fields":{"message":"unrelated daemon log","value":"doctor-failure-sensitive-sentinel"},"target":"codewire_workspace_access"}'
+        printf '%s\n' '{"timestamp":"2026-07-30T12:44:09Z","level":"INFO","fields":{"message":"workspace daemon UDP peer relay allocation diagnostic","outcome":"retry_scheduled","path":"peer_relay","peer_count":1,"queued_count":0,"in_flight_count":0,"attempt_count":2,"failure_count":1},"target":"codewire_workspace_access::peer_relay"}'
         return 0
       fi
       return 97
     }
     capture_tailnet_doctor_failure_diagnostics
-    [[ "$GATEWAY_POD_NAME" == "gateway-test" ]]
   ) >"$output" 2>"$error"
 
   [[ -f "$captured" ]] || fail "safe diagnostic output was not captured"
@@ -1078,7 +1092,7 @@ run_packet_diagnostic_phase_order_case() {
   ) >"$output" 2>/dev/null
 
   printf 'kube-ready\ndoctor\n' | cmp - "$output" >/dev/null || \
-    fail "packet diagnostic phases do not execute gateway readiness before the doctor"
+    fail "packet diagnostic phases do not execute workspace readiness before the doctor"
 }
 
 write_admin_oauth_fixture() {
@@ -1179,7 +1193,7 @@ run_admin_oauth_contract_cases() {
 
 assert_static_contract
 run_coco_rest_isolation_classifier_cases
-run_gateway_crashloop_fail_fast_case
+run_workspace_crashloop_fail_fast_case
 run_application_only_boundary_case
 run_missing_server_namespace_case
 run_docker_socket_contract_cases

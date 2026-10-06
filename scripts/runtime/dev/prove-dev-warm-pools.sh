@@ -43,8 +43,9 @@ MEMBER_LABEL="agents.x-k8s.io/warm-pool-sandbox"
 LAUNCH_TYPE_LABEL="agents.x-k8s.io/launch-type"
 REVISION_ANNOTATION="codewire.sh/pool-revision"
 REVISION_ENV="CODEWIRE_WORKSPACE_POOL_REVISION"
-# Program #2238 C6 (#2434): the agent-sandbox fork's birth label, and the two
-# bridge policies orchestration applies after a warm bind.
+# Program #2238 C6 (#2434): the agent-sandbox fork's birth label, and the
+# bridge policy orchestration applies after a warm bind. The gateway half is
+# gone with the gateway (#2460): it must never exist.
 SANDBOX_UID_LABEL="agents.x-k8s.io/sandbox-uid"
 DAEMON_BRIDGE_PREFIX="cw-daemon-warm-"
 GATEWAY_BRIDGE_PREFIX="cw-gw-warm-"
@@ -74,10 +75,14 @@ Journeys (default: preflight hits miss off-shape invariants, then stats when
   hits        N sequential creates of the pool shape, each after the pool
               holds a ready member; each must adopt a warm member
               (warmPoolRef cw-pool-*, launch-type warm), run identity-free,
-              carry the pool revision and reach its daemon, and its
-              warm-member bridge must select exactly the bound Pod (skipped,
-              with a message, while the fork's sandbox-uid label is absent);
-              timed client side
+              carry the pool revision and reach its daemon, own no gateway
+              object, serve SSH presenting the host key the platform
+              recorded (OpenSSH through cw, the managed block's settings),
+              and its warm-member bridge must select exactly the bound Pod
+              (skipped, with a message, while the fork's sandbox-uid label
+              is absent); with --sql-cmd, a completed access_ready stage and
+              a host key recorded for the current generation by the bound
+              Pod; timed client side
   miss        with the pool full, members + 1 creates at once: at least one
               finds the pool empty, gets a fresh Sandbox and still starts
   off-shape   a shape no pool holds goes cold through its own shadow pool
@@ -230,6 +235,9 @@ NEEDS_CW=0
 for journey in "${JOURNEYS[@]}"; do
   case "$journey" in hits|miss|off-shape) NEEDS_CW=1 ;; esac
 done
+for journey in "${JOURNEYS[@]}"; do
+  [[ "$journey" != hits ]] || require_cmd ssh
+done
 if [[ "$NEEDS_CW" == 1 && -z "$CW_BIN" ]]; then
   require_cmd cargo
   log "building cw"
@@ -306,6 +314,27 @@ in_workspace() {
 }
 
 daemon_reachable() { in_workspace "$1" 'true' >/dev/null 2>&1; }
+
+# OpenSSH through `cw shell --stdio`, with the managed block's settings: the
+# only trusted host key is the one `cw ssh known-hosts` reads from the
+# platform for the current generation, so success proves the bound daemon's
+# SSH server presents exactly the recorded key.
+ssh_presents_recorded_key() {
+  local id="$1" cw_command
+  cw_command="$(printf '%q --server %q' "$CW_BIN" "$CODEWIRE_SERVER_URL")"
+  timeout 120 ssh -F /dev/null -T \
+    -o BatchMode=yes -o ConnectTimeout=60 \
+    -o "ProxyCommand=$cw_command shell --stdio %n" \
+    -o User=codewire \
+    -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null \
+    -o "KnownHostsCommand=$cw_command ssh known-hosts %H" \
+    -o UpdateHostKeys=no -o ForwardAgent=no -o ForwardX11=no \
+    -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no \
+    -o PubkeyAuthentication=no -o GSSAPIAuthentication=no \
+    "cw-$id" true </dev/null >/dev/null 2>"$TMPDIR_PROOF/ssh-$id.err" ||
+    { log "ssh: cw-$id: $(sed 's/[[:cntrl:]]//g' "$TMPDIR_PROOF/ssh-$id.err" | tail -n 2 | tr '\n' ' ')"; return 1; }
+}
 
 # ------------------------------------------------------------- Kubernetes
 
@@ -406,9 +435,9 @@ discover_pool() {
   POOL_MEMBERS="$(pool_json | jq -r '.spec.replicas // 0')"
 }
 
-# C6 (#2434): after a warm hit, both bridge halves name exactly the bound
-# Pod's Sandbox UID and this environment's gateway, and the member selector
-# matches exactly one Pod in the namespace: the bound one.
+# C6 (#2434): after a warm hit, the bridge names exactly the bound Pod's
+# Sandbox UID, no gateway half exists, and the member selector matches exactly
+# one Pod in the namespace: the bound one.
 bridge_selects_bound_pod() {
   local id="$1" pod="$2" sandbox sandbox_uid pod_uid selected
   sandbox="$(claim_sandbox "$id")" || return 1
@@ -423,12 +452,9 @@ bridge_selects_bound_pod() {
     jq -e --arg key "$SANDBOX_UID_LABEL" --arg uid "$sandbox_uid" '
       .spec.podSelector == {matchLabels: {($key): $uid, "codewire.sh/type": "workspace"}}' >/dev/null ||
     { log "bridge: ${DAEMON_BRIDGE_PREFIX}${id} is missing or does not select exactly the bound Sandbox"; return 1; }
-  kubectl_ro get networkpolicy -n "$SANDBOX_NAMESPACE" "${GATEWAY_BRIDGE_PREFIX}${id}" -o json |
-    jq -e --arg key "$SANDBOX_UID_LABEL" --arg uid "$sandbox_uid" --arg env "$id" '
-      {podSelector: {matchLabels: {($key): $uid, "codewire.sh/type": "workspace"}}} as $member
-      | .spec.podSelector == {matchLabels: {"codewire.sh/environment-id": $env, "codewire.sh/type": "gateway"}}
-      and ([(.spec.egress // [])[].to[], (.spec.ingress // [])[].from[]] | length > 0 and all(. == $member))' >/dev/null ||
-    { log "bridge: ${GATEWAY_BRIDGE_PREFIX}${id} is missing or peers anything but the bound Sandbox"; return 1; }
+  [[ -z "$(kubectl_ro get networkpolicy -n "$SANDBOX_NAMESPACE" --ignore-not-found -o name \
+    "${GATEWAY_BRIDGE_PREFIX}${id}")" ]] ||
+    { log "bridge: ${GATEWAY_BRIDGE_PREFIX}${id} exists, but the gateway is gone"; return 1; }
   selected="$(kubectl_ro get pod -n "$SANDBOX_NAMESPACE" -l "${SANDBOX_UID_LABEL}=${sandbox_uid},codewire.sh/type=workspace" -o json |
     jq -c '[.items[].metadata.uid]')" || return 1
   [[ "$selected" == "[\"$pod_uid\"]" ]] || { log "bridge: $id member selector matches $selected, not exactly the bound Pod"; return 1; }
@@ -443,6 +469,16 @@ check_bridge() { # N ID
     return
   fi
   check "hit $n: the warm-member bridge selects exactly the bound Pod" bridge_selects_bound_pod "$id" "$pod"
+}
+
+# The daemon hosts SSH and the tailnet: the environment owns no gateway
+# Deployment, Service or NetworkPolicy.
+no_gateway_objects() {
+  local id="$1" found
+  found="$(kubectl_ro get -n "$SANDBOX_NAMESPACE" --ignore-not-found -o name \
+    "deployment/cw-gateway-$id" "service/cw-gateway-svc-$id" \
+    "networkpolicy/cw-gw-net-$id" "networkpolicy/${GATEWAY_BRIDGE_PREFIX}${id}")" || return 1
+  [[ -z "$found" ]] || { log "gateway: $id owns $(tr '\n' ' ' <<<"$found")"; return 1; }
 }
 
 bridge_absent() {
@@ -475,6 +511,17 @@ sql_binding() {
 # at or after a binding of that same Sandbox. Prints "<bad>/<sessions>". The
 # billing loop ticks every 60 s, so an environment measured and removed
 # quickly may have no session yet; zero sessions is reported, not failed.
+# The current incarnation completed access_ready, and the current generation
+# has one host key, recorded by the bound Pod.
+sql_access_ready() {
+  local id="$1" uid="$2" out
+  [[ -n "$SQL_CMD" ]] || return 0
+  out="$(printf "SELECT (SELECT count(*) FROM environment_logs WHERE environment_id = '%s' AND phase = 'access_ready' AND status = 'completed') || '|' || coalesce((SELECT k.pod_uid FROM sandbox_ssh_host_keys k JOIN environments e ON e.id = k.environment_id AND e.environment_operation_generation = k.operation_generation WHERE k.environment_id = '%s'), '');\n" "$id" "$id" |
+    sql_rows | tr -d '[:space:]')" || return 1
+  [[ "${out%%|*}" =~ ^[1-9][0-9]*$ && "${out#*|}" == "$uid" ]] ||
+    { log "access: $id access_ready rows|host-key Pod = $out, want >=1|$uid"; return 1; }
+}
+
 sql_billing_before_bind() {
   local id_list="$1"
   printf "SELECT count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM sandbox_workspace_bindings w WHERE w.environment_id = s.environment_id AND w.sandbox_uid = s.runtime_uid AND w.bound_at <= s.started_at)) || '/' || count(*) FROM sandbox_running_sessions s WHERE s.runtime_type = 'sandbox' AND s.environment_id IN (%s);\n" "$id_list" |
@@ -560,10 +607,13 @@ journey_hits() {
       fail "hit $n: $id was not warm ($path), ready in ${elapsed} ms"
     fi
     check "hit $n: identity-free workspace Pod" pod_is_identity_free "$id"
-    check "hit $n: daemon reachable through the gateway path" daemon_reachable "$id"
+    check "hit $n: daemon reachable through the platform API" daemon_reachable "$id"
+    check "hit $n: no gateway objects" no_gateway_objects "$id"
+    check "hit $n: SSH presents the host key the platform recorded" ssh_presents_recorded_key "$id"
     if [[ -n "$SQL_CMD" ]]; then
       uid="$(pod_uid "$id")"
       check "hit $n: one live Pod-scope binding for the adopted Pod" sql_binding "$id" "$uid"
+      check "hit $n: access_ready completed with a host key recorded by the adopted Pod" sql_access_ready "$id" "$uid"
       check "hit $n: billing starts at or after the bind" sql_billing_at_bind "$id"
     fi
     if remove_env "$id"; then

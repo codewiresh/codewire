@@ -93,8 +93,6 @@ ENV_ID=""
 TMPDIR_SMOKE=""
 CLAIM_NAME=""
 POD_NAME=""
-GATEWAY_POD_NAME=""
-GATEWAY_OLD_POD_NAME=""
 SMOKE_LAST_WAIT_DETAIL=""
 SMOKE_FAILURE_DIAGNOSTICS_CAPTURED=0
 SMOKE_PACKET_CAPTURE_PID=""
@@ -146,6 +144,9 @@ Options:
                            kube, exec, coco, docker, doctor, ssh,
                            tailnet-ssh, derp-ssh, websocket-ssh,
                            host-key, app-preview, resize-guest,
+                           host-key proves the daemon presents the host
+                           key the platform recorded, refuses a changed
+                           key, and rotates it on stop and start.
                            application-secrets,
                            application-secrets-all-scopes, provider-ssh
                            resize-guest requires a fresh disposable env; see
@@ -264,7 +265,8 @@ Environment:
                            Defaults to 0. Set to 1 only for the admitted
                            host-network diagnostic. Captures route metadata and
                            UDP headers for the configured peer relay without payload.
-  EXPECTED_GATEWAY_IMAGE   Optional exact image assertion for codewire-gateway
+  EXPECTED_GATEWAY_IMAGE   Optional exact assertion for the daemon image the
+                           workspace Pod mounts (SANDBOX_GATEWAY_IMAGE)
   EXPECTED_DOCKER_MODE     Expected workspace Docker mode. Defaults to
                            guest-dind, expecting workspace+dind containers.
                            Set none for focused KBS/CoCo proofs that do not
@@ -276,9 +278,10 @@ Environment:
                            Minimum allocatable ephemeral-storage for the
                            scheduled runtime node. Defaults to 500; set 0 to skip.
   EXPECTED_GATEWAY_STUN_HOST
-                           Expected CODEWIRE_STUN_HOST on the gateway
+                           Expected public STUN host in the tailnet doctor's
+                           DERP map
   EXPECTED_GATEWAY_STUN_PORT
-                           Expected CODEWIRE_STUN_PORT on the gateway
+                           Expected public STUN port in that DERP map
   EXPECTED_TAILNET_PATH_TRANSPORT
                            Expected CW_DEBUG_TAILNET path-probe transport.
                            Defaults to empty, accepting any reachable tailnet
@@ -290,8 +293,8 @@ Environment:
                            Required configured endpoint when
                            EXPECTED_TAILNET_PATH_TRANSPORT=peer_relay.
   EXPECTED_UDP_RELAY_BIND_ADDRS
-                           Required configured bind address expected on gateway
-                           pods in peer_relay mode.
+                           Accepted for wrapper compatibility; the daemon
+                           receives relay endpoints from its access grant.
 	  REQUIRE_TAILNET_PATH_PROBE
 	                           Defaults to 0; with SMOKE_TAILNET_DEBUG=1, requires
 	                           cw shell --stdio to emit a path probe line even when
@@ -306,7 +309,7 @@ Environment:
                            Optional; when set, decoded init-data must carry
                            aa.toml/cdh.toml with this KBS URL.
   EXPECTED_KATA_COCO_IMAGE_REGISTRY_AUTH_URI
-                           Optional; when set, workspace and gateway pods plus
+                           Optional; when set, the workspace pod plus
                            the SandboxTemplate must carry CoCo kernel params
                            for guest registry auth via this KBS resource URI.
   EXPECTED_KATA_COCO_TEST_RESOURCE_URI
@@ -2073,23 +2076,25 @@ record_environment_artifact() {
     }' >"$SMOKE_ARTIFACT_DIR/environment.json"
 }
 
-fail_if_gateway_crashloop() {
+fail_if_workspace_crashloop() {
   local environment_state="$1"
-  local pods_json="$TMPDIR_SMOKE/gateway-startup-pods.json"
-  local kubectl_err="$TMPDIR_SMOKE/gateway-startup-pods.err"
+  local pods_json="$TMPDIR_SMOKE/workspace-startup-pods.json"
+  local kubectl_err="$TMPDIR_SMOKE/workspace-startup-pods.err"
   local crashloop
 
   [[ "$SMOKE_SKIP_KUBE" != "1" ]] || return 0
   if ! kubectl_dev -n "$SANDBOX_NAMESPACE" get pod \
-      -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=gateway" \
+      -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=workspace" \
       -o json >"$pods_json" 2>"$kubectl_err"; then
     return 0
   fi
+  # The workspace container runs the daemon, which serves SSH and the
+  # tailnet: its crash loop is the environment's access failing.
   crashloop="$(jq -r '
       [
         .items[]?
         | .status.containerStatuses[]?
-        | select(.name == "codewire-gateway")
+        | select(.name == "workspace")
         | select(.state.waiting.reason == "CrashLoopBackOff")
         | ["CrashLoopBackOff", (.restartCount // 0)]
       ][0] // empty
@@ -2099,8 +2104,8 @@ fail_if_gateway_crashloop() {
 
   local reason restart_count
   IFS=$'\t' read -r reason restart_count <<<"$crashloop"
-  collect_failure_diagnostics "gateway-crashloop" || true
-  die "gateway entered $reason while environment state=$environment_state (restart_count=$restart_count)"
+  collect_failure_diagnostics "workspace-crashloop" || true
+  die "workspace daemon container entered $reason while environment state=$environment_state (restart_count=$restart_count)"
 }
 
 env_is_running() {
@@ -2117,7 +2122,7 @@ env_is_running() {
     die "environment entered error state"
   fi
   if [[ "$state" != "running" ]]; then
-    fail_if_gateway_crashloop "${state:-unknown}"
+    fail_if_workspace_crashloop "${state:-unknown}"
   fi
   [[ "$state" == "running" ]]
 }
@@ -2176,33 +2181,6 @@ pod_exists_for_claim() {
   POD_NAME="$(jq -r '.items[0].metadata.name // empty' "$pods_json")"
   if [[ -z "$POD_NAME" ]]; then
     SMOKE_LAST_WAIT_DETAIL="no workspace pod found for SandboxClaim $CLAIM_NAME yet"
-    return 1
-  fi
-  return 0
-}
-
-gateway_pod_exists() {
-  local pods_json="$TMPDIR_SMOKE/gateway-pods.json"
-  local err="$TMPDIR_SMOKE/gateway-pods.err"
-
-  kubectl_dev -n "$SANDBOX_NAMESPACE" get pod \
-    -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=gateway" \
-    -o json >"$pods_json" 2>"$err" || {
-      SMOKE_LAST_WAIT_DETAIL="$(sed 's/[[:cntrl:]]//g' "$err" | tail -n 1)"
-      return 1
-    }
-  GATEWAY_POD_NAME="$(jq -r '.items[0].metadata.name // empty' "$pods_json")"
-  if [[ -z "$GATEWAY_POD_NAME" ]]; then
-    SMOKE_LAST_WAIT_DETAIL="no gateway pod found with codewire.sh/environment-id=$ENV_ID in namespace $SANDBOX_NAMESPACE"
-    return 1
-  fi
-  return 0
-}
-
-gateway_restarted_pod_exists() {
-  gateway_pod_exists || return 1
-  if [[ -n "$GATEWAY_OLD_POD_NAME" && "$GATEWAY_POD_NAME" == "$GATEWAY_OLD_POD_NAME" ]]; then
-    SMOKE_LAST_WAIT_DETAIL="gateway pod is still $GATEWAY_POD_NAME; waiting for restart"
     return 1
   fi
   return 0
@@ -2300,44 +2278,19 @@ assert_docker_socket_contract() {
 
 assert_pod_shape() {
   local pod_json="$TMPDIR_SMOKE/pod.json"
-  local gateway_pod_json="$TMPDIR_SMOKE/gateway-pod.json"
-  local gateway_deploy_json="$TMPDIR_SMOKE/gateway-deployment.json"
-  local runtime_class gateway_runtime_class node gateway_node node_label gateway_node_label
-  local gateway_image gateway_status_image gateway_image_id containers gateway_containers
-  local gateway_host_key_env gateway_daemon_timeout gateway_startup_failure_threshold
-  local gateway_startup_period gateway_startup_budget gateway_progress_deadline
-  local gateway_restart_count
+  local runtime_class node node_label containers daemon_images
 
   kubectl_dev -n "$SANDBOX_NAMESPACE" get pod "$POD_NAME" -o json >"$pod_json"
-  kubectl_dev -n "$SANDBOX_NAMESPACE" get pod "$GATEWAY_POD_NAME" -o json >"$gateway_pod_json"
-  kubectl_dev -n "$SANDBOX_NAMESPACE" get deploy \
-    -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=gateway" \
-    -o json >"$gateway_deploy_json"
   runtime_class="$(jq -r '.spec.runtimeClassName // ""' "$pod_json")"
-  gateway_runtime_class="$(jq -r '.spec.runtimeClassName // ""' "$gateway_pod_json")"
   node="$(jq -r '.spec.nodeName // ""' "$pod_json")"
-  gateway_node="$(jq -r '.spec.nodeName // ""' "$gateway_pod_json")"
-  gateway_image="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .image' "$gateway_pod_json")"
-  gateway_status_image="$(jq -r '.status.containerStatuses[]? | select(.name=="codewire-gateway") | .image // ""' "$gateway_pod_json")"
-  gateway_image_id="$(jq -r '.status.containerStatuses[]? | select(.name=="codewire-gateway") | .imageID // ""' "$gateway_pod_json")"
   dind_image="$(jq -r '.spec.containers[] | select(.name=="dind") | .image' "$pod_json")"
   dind_status_image="$(jq -r '.status.containerStatuses[]? | select(.name=="dind") | .image // ""' "$pod_json")"
   dind_image_id="$(jq -r '.status.containerStatuses[]? | select(.name=="dind") | .imageID // ""' "$pod_json")"
   containers="$(jq -r '[.spec.containers[].name] | sort | join(",")' "$pod_json")"
-  gateway_containers="$(jq -r '[.spec.containers[].name] | sort | join(",")' "$gateway_pod_json")"
-  gateway_host_key_env="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_SSH_HOST_KEY_PATH") | .value // ""' "$gateway_pod_json")"
-  gateway_daemon_timeout="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_DAEMON_CONNECT_TIMEOUT_SECONDS") | .value // ""' "$gateway_pod_json")"
-  gateway_startup_failure_threshold="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .startupProbe.failureThreshold // 0' "$gateway_pod_json")"
-  gateway_startup_period="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .startupProbe.periodSeconds // 0' "$gateway_pod_json")"
-  gateway_progress_deadline="$(jq -r '.items[0].spec.progressDeadlineSeconds // 0' "$gateway_deploy_json")"
-  gateway_restart_count="$(jq -r '.status.containerStatuses[]? | select(.name=="codewire-gateway") | .restartCount // 0' "$gateway_pod_json")"
   assert_pod_coco_kernel_params "$pod_json" "workspace pod"
-  assert_pod_coco_kernel_params "$gateway_pod_json" "gateway pod"
 
   [[ "$runtime_class" == "$EXPECTED_RUNTIME_CLASS" ]] || \
     die "workspace pod runtimeClassName=$runtime_class, want $EXPECTED_RUNTIME_CLASS"
-  [[ "$gateway_runtime_class" == "$EXPECTED_RUNTIME_CLASS" ]] || \
-    die "gateway pod runtimeClassName=$gateway_runtime_class, want $EXPECTED_RUNTIME_CLASS"
   case "$EXPECTED_DOCKER_MODE" in
     none)
       [[ "$containers" == "workspace" ]] || \
@@ -2352,93 +2305,17 @@ assert_pod_shape() {
       ;;
   esac
   assert_docker_socket_contract "$pod_json"
-  [[ "$gateway_containers" == "codewire-gateway" ]] || \
-    die "gateway pod containers=$gateway_containers, want codewire-gateway"
-  jq -e '.items[]?.spec.template.spec.containers[]? | select(.name=="codewire-gateway")' "$gateway_deploy_json" >/dev/null || \
-    die "gateway Deployment is missing codewire-gateway container"
-  [[ "$gateway_host_key_env" == "/codewire/gateway/ssh/host_ed25519" ]] || \
-    die "gateway CODEWIRE_SSH_HOST_KEY_PATH=$gateway_host_key_env, want /codewire/gateway/ssh/host_ed25519"
-  # The gateway waits for its daemon without a deadline. Its startup probe
-  # budget (failureThreshold x periodSeconds) and rollout deadline match the
-  # tier's workspace ready timeout.
-  local want_ready_timeout=600
-  if [[ "$EXPECTED_RUNTIME_CLASS" == "confidential" ]]; then
-    want_ready_timeout=1800
-  fi
-  [[ -z "$gateway_daemon_timeout" ]] || \
-    die "gateway has a daemon-connect deadline=$gateway_daemon_timeout, want none"
-  gateway_startup_budget=$((gateway_startup_failure_threshold * gateway_startup_period))
-  [[ "$gateway_startup_budget" == "$want_ready_timeout" ]] || \
-    die "gateway startup probe budget=${gateway_startup_budget}s (failureThreshold=$gateway_startup_failure_threshold, periodSeconds=$gateway_startup_period), want ${want_ready_timeout}s"
-  [[ "$gateway_progress_deadline" == "$want_ready_timeout" ]] || \
-    die "gateway progressDeadlineSeconds=$gateway_progress_deadline, want $want_ready_timeout"
-  [[ "$gateway_restart_count" == "0" ]] || \
-    die "gateway restarted $gateway_restart_count time(s) during startup"
-  # Bind readiness and the exact host-key projection/copy shape to this one
-  # observed Pod. General end-to-end modes separately prove the live gateway
-  # path; inspecting Secret objects or their data would add no behavior proof.
-  jq -e --arg id "$ENV_ID" --arg pod "$GATEWAY_POD_NAME" '
-    .metadata.name == $pod
-    and .metadata.labels["codewire.sh/environment-id"] == $id
-    and .metadata.labels["codewire.sh/type"] == "gateway"
-    and ([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length == 1)
-    and (.spec
-    | (
-        [
-          .initContainers[]?
-          | select(
-              .name == "codewire-gateway-host-key-init"
-              and ([.volumeMounts[]? | select(
-                .name == "gateway-host-key"
-                and .mountPath == "/codewire/gateway-host-key"
-                and .readOnly == true
-              )] | length == 1)
-              and ([.volumeMounts[]? | select(
-                .name == "gateway-state"
-                and .mountPath == "/codewire/gateway"
-              )] | length == 1)
-              and ([.volumeMounts[]? | select(.name == "workspace")] | length == 0)
-              and ((.command[2] // "") | contains("/codewire/gateway-host-key/host_ed25519"))
-              and ((.command[2] // "") | contains("/codewire/gateway/ssh/host_ed25519"))
-              and ((.command[2] // "") | contains("chmod 0600"))
-            )
-        ] | length == 1
-      )
-      and (
-        [.volumes[]? | select(.name == "gateway-state" and .emptyDir == {})] | length == 1
-      )
-      and (
-        [
-          .volumes[]?
-          | select(
-              .name == "gateway-host-key"
-              and .secret.secretName == ("cw-gateway-host-key-" + $id)
-              and .secret.items == [{key:"host_ed25519", path:"host_ed25519", mode:292}]
-            )
-        ] | length == 1
-      )
-      and (
-        [
-          .containers[]?
-          | select(
-              .name == "codewire-gateway"
-              and ([.volumeMounts[]? | select(
-                .name == "gateway-state"
-                and .mountPath == "/codewire/gateway"
-              )] | length == 1)
-              and ([.volumeMounts[]? | select(
-                .name == "gateway-host-key" or .name == "workspace"
-              )] | length == 0)
-            )
-        ] | length == 1
-      )
-    )
-  ' "$gateway_pod_json" >/dev/null || \
-    die "Ready gateway Pod must project host_ed25519 through the exact read-only host-key init/volume shape"
+  # The workspace daemon hosts SSH and the tailnet (#2460).
+  assert_no_gateway_objects
   if [[ -n "$EXPECTED_GATEWAY_IMAGE" ]]; then
-    [[ "$gateway_image" == "$EXPECTED_GATEWAY_IMAGE" ]] || \
-      die "gateway image=$gateway_image, want $EXPECTED_GATEWAY_IMAGE"
-    log "gateway status image=${gateway_status_image:-<unset>} imageID=${gateway_image_id:-<unset>}"
+    # The daemon reaches the Pod as a read-only image volume or through its
+    # init container; either way it is this release's daemon image.
+    daemon_images="$(jq -r '
+      [(.spec.initContainers[]? | select(.name == "codewire-daemon-init") | .image),
+       (.spec.volumes[]? | .image.reference // empty)] | unique | join(",")
+    ' "$pod_json")"
+    [[ "$daemon_images" == "$EXPECTED_GATEWAY_IMAGE" ]] || \
+      die "workspace daemon image=${daemon_images:-<none>}, want $EXPECTED_GATEWAY_IMAGE"
   fi
   if [[ -n "$EXPECTED_DIND_IMAGE" && "$EXPECTED_DOCKER_MODE" != "none" ]]; then
     [[ "$dind_image" == "$EXPECTED_DIND_IMAGE" ]] || \
@@ -2447,43 +2324,24 @@ assert_pod_shape() {
   fi
   if [[ -n "$EXPECTED_NODE" ]]; then
     [[ "$node" == "$EXPECTED_NODE" ]] || die "node=$node, want $EXPECTED_NODE"
-    [[ "$gateway_node" == "$EXPECTED_NODE" ]] || die "gateway node=$gateway_node, want $EXPECTED_NODE"
   fi
   node_label="$(kubectl_dev get node "$node" -o "jsonpath={.metadata.labels.${EXPECTED_NODE_KATA_LABEL//./\\.}}" 2>/dev/null || true)"
   [[ "$node_label" == "$EXPECTED_NODE_KATA_VALUE" ]] || \
     die "node $node label $EXPECTED_NODE_KATA_LABEL=$node_label, want $EXPECTED_NODE_KATA_VALUE"
-  gateway_node_label="$(kubectl_dev get node "$gateway_node" -o "jsonpath={.metadata.labels.${EXPECTED_NODE_KATA_LABEL//./\\.}}" 2>/dev/null || true)"
-  [[ "$gateway_node_label" == "$EXPECTED_NODE_KATA_VALUE" ]] || \
-    die "gateway node $gateway_node label $EXPECTED_NODE_KATA_LABEL=$gateway_node_label, want $EXPECTED_NODE_KATA_VALUE"
   assert_runtime_node_storage "$node"
-  if [[ "$gateway_node" != "$node" ]]; then
-    assert_runtime_node_storage "$gateway_node"
-  fi
 
-  local host_socket_count workspace_docker_host gateway_docker_env_count gateway_resources gateway_shim_addr gateway_auth_count
+  local host_socket_count workspace_docker_host expected_binding_url
   local dind_bootstrap dind_data_image dind_data_root dind_data_size dind_mount_mode
-  local gateway_binding_url gateway_binding_roots gateway_derp_url gateway_stun_host gateway_stun_port
-  local expected_binding_url expected_derp_url
-  host_socket_count="$(jq -s '[.[].spec.volumes[]? | select(.hostPath? and ((.hostPath.path == "/var/run/docker.sock") or (.hostPath.path == "/var/run/docker") or (.hostPath.path == "/run/containerd/containerd.sock") or (.hostPath.path == "/run/containerd")))] | length' "$pod_json" "$gateway_pod_json")"
-  [[ "$host_socket_count" == "0" ]] || die "workspace or gateway pod mounts host Docker/containerd socket volume"
+  host_socket_count="$(jq '[.spec.volumes[]? | select(.hostPath? and ((.hostPath.path == "/var/run/docker.sock") or (.hostPath.path == "/var/run/docker") or (.hostPath.path == "/run/containerd/containerd.sock") or (.hostPath.path == "/run/containerd")))] | length' "$pod_json")"
+  [[ "$host_socket_count" == "0" ]] || die "workspace pod mounts host Docker/containerd socket volume"
 
   workspace_docker_host="$(jq -r '.spec.containers[] | select(.name=="workspace") | .env[]? | select(.name=="DOCKER_HOST") | .value // ""' "$pod_json")"
-  gateway_docker_env_count="$(jq '[.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_DOCKER_PROXY_SOCK" or .name=="CODEWIRE_DOCKER_UPSTREAM_SOCK")] | length' "$gateway_pod_json")"
-  gateway_shim_addr="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_WORKSPACE_SHIM_ADDR") | .value // ""' "$gateway_pod_json")"
-  gateway_auth_count="$(jq '[.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_DAEMON_AUTH_TOKEN" and (.value // "" | length > 0))] | length' "$gateway_pod_json")"
-  gateway_binding_url="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_BINDING_URL") | .value // ""' "$gateway_pod_json")"
-  gateway_binding_roots="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_BINDING_TLS_ROOTS_FILE") | .value // ""' "$gateway_pod_json")"
-  gateway_derp_url="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_DERP_URL") | .value // ""' "$gateway_pod_json")"
-  gateway_stun_host="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_STUN_HOST") | .value // ""' "$gateway_pod_json")"
-  gateway_stun_port="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_STUN_PORT") | .value // ""' "$gateway_pod_json")"
-  gateway_resources="$(jq -c '.spec.containers[] | select(.name=="codewire-gateway") | .resources // {}' "$gateway_pod_json")"
   dind_bootstrap="$(jq -r '.spec.containers[] | select(.name=="dind") | .command[2] // ""' "$pod_json")"
   dind_data_image="$(jq -r '.spec.containers[] | select(.name=="dind") | .env[]? | select(.name=="CODEWIRE_DOCKER_DATA_IMAGE") | .value // ""' "$pod_json")"
   dind_data_root="$(jq -r '.spec.containers[] | select(.name=="dind") | .env[]? | select(.name=="CODEWIRE_DOCKER_DATA_ROOT") | .value // ""' "$pod_json")"
   dind_data_size="$(jq -r '.spec.containers[] | select(.name=="dind") | .env[]? | select(.name=="CODEWIRE_DOCKER_DATA_SIZE") | .value // ""' "$pod_json")"
   dind_mount_mode="$(jq -r '.spec.containers[] | select(.name=="dind") | .env[]? | select(.name=="CODEWIRE_DOCKER_MOUNT_MODE") | .value // ""' "$pod_json")"
-  expected_binding_url="https://codewire-orchestration.${CODEWIRE_SERVER_NAMESPACE}.svc.cluster.local:8088"
-  expected_derp_url="https://codewire-derp.${CODEWIRE_SERVER_NAMESPACE}.svc.cluster.local:8443"
+  expected_binding_url="https://codewire-orchestration-workspace-binding.${CODEWIRE_SERVER_NAMESPACE}.svc.cluster.local:8087"
 
   if [[ "$EXPECTED_DOCKER_MODE" == "none" ]]; then
     [[ -z "$workspace_docker_host" ]] || \
@@ -2492,16 +2350,23 @@ assert_pod_shape() {
     [[ "$workspace_docker_host" == "unix:///var/run/docker/docker.sock" ]] || \
       die "workspace DOCKER_HOST=$workspace_docker_host, want unix:///var/run/docker/docker.sock"
   fi
-  [[ "$gateway_docker_env_count" == "0" ]] || \
-    die "gateway must not mount or proxy the workspace Docker socket after the workspace/gateway split"
-  [[ "$gateway_shim_addr" == cw-daemon-*:7777 ]] || \
-    die "gateway CODEWIRE_WORKSPACE_SHIM_ADDR=$gateway_shim_addr, want cw-daemon-<env>:7777"
-  [[ "$gateway_auth_count" == "1" ]] || \
-    die "gateway missing non-empty CODEWIRE_DAEMON_AUTH_TOKEN"
-  [[ "$gateway_binding_url" == "$expected_binding_url" ]] || \
-    die "gateway CODEWIRE_BINDING_URL=$gateway_binding_url, want $expected_binding_url"
-  [[ "$gateway_binding_roots" == "/run/codewire-orchestration-internal-roots/ca.crt" ]] || \
-    die "gateway CODEWIRE_BINDING_TLS_ROOTS_FILE=$gateway_binding_roots, want the internal listener roots"
+  # An identity-free daemon binds to the dedicated listener over TLS with
+  # the published internal roots and learns everything else, including its
+  # tailnet endpoints, from that binding: no daemon token, environment
+  # identity or tailnet configuration is rendered into the Pod.
+  jq -e --arg url "$expected_binding_url" '
+    (.spec.containers[] | select(.name == "workspace")) as $w
+    | ([$w.env[]? | select(.name == "CODEWIRE_WORKSPACE_BINDING_URL") | .value] == [$url])
+    and ([$w.env[]?.name] | (index("CODEWIRE_DAEMON_AUTH_TOKEN") | not) and (index("CODEWIRE_ENVIRONMENT_ID") | not))
+    and ([$w.env[]?.name
+          | select(startswith("CODEWIRE_TAILNET_") or startswith("CODEWIRE_UDP_RELAY_")
+                   or startswith("CODEWIRE_STUN_") or . == "CODEWIRE_DERP_URL")] | length == 0)
+    and ([$w.volumeMounts[]? | select(
+          .name == "orchestration-internal-roots"
+          and .mountPath == "/run/codewire-orchestration-internal-roots"
+          and .readOnly == true)] | length == 1)
+  ' "$pod_json" >/dev/null || \
+    die "workspace Pod is not an identity-free daemon binding to $expected_binding_url with the internal roots"
   if [[ "$EXPECTED_DOCKER_MODE" != "none" ]]; then
     [[ "$dind_bootstrap" == *"--data-root \"\$data_root\""* && "$dind_bootstrap" == *"--storage-driver vfs"* ]] || \
       die "dind bootstrap does not use explicit data root with vfs storage driver"
@@ -2523,24 +2388,8 @@ assert_pod_shape() {
         die "dind CODEWIRE_DOCKER_DATA_ROOT=$dind_data_root, want /var/lib/docker"
     fi
   fi
-  [[ "$gateway_derp_url" == "$expected_derp_url" ]] || \
-    die "gateway CODEWIRE_DERP_URL=$gateway_derp_url, want $expected_derp_url"
-  [[ "$gateway_stun_host" == "$EXPECTED_GATEWAY_STUN_HOST" ]] || \
-    die "gateway CODEWIRE_STUN_HOST=$gateway_stun_host, want $EXPECTED_GATEWAY_STUN_HOST"
-  [[ "$gateway_stun_port" == "$EXPECTED_GATEWAY_STUN_PORT" ]] || \
-    die "gateway CODEWIRE_STUN_PORT=$gateway_stun_port, want $EXPECTED_GATEWAY_STUN_PORT"
-  assert_tailnet_discovery_shape "$pod_json" "$gateway_pod_json"
-  jq -e '
-    .spec.containers[]
-    | select(.name=="codewire-gateway")
-    | .resources.requests.cpu == "100m"
-      and .resources.requests.memory == "128Mi"
-      and .resources.limits.cpu == "500m"
-      and .resources.limits.memory == "256Mi"
-  ' "$gateway_pod_json" >/dev/null || \
-    die "gateway resources=$gateway_resources, want explicit commodity gateway resources"
+  assert_tailnet_discovery_shape "$pod_json"
 
-  kubectl_dev -n "$SANDBOX_NAMESPACE" logs "$GATEWAY_POD_NAME" -c codewire-gateway --tail=20 >/dev/null
   kubectl_dev -n "$SANDBOX_NAMESPACE" exec "$POD_NAME" -c workspace -- id >/dev/null
   if [[ "$EXPECTED_DOCKER_MODE" != "none" ]]; then
     if [[ "$EXPECTED_RUNTIME_CLASS" == "confidential" ]]; then
@@ -2585,16 +2434,29 @@ assert_pod_shape() {
     fi
   fi
 
-  log "workspace pod $POD_NAME runtime=$runtime_class node=$node; gateway pod $GATEWAY_POD_NAME runtime=$gateway_runtime_class node=$gateway_node image=$gateway_image"
+  log "workspace pod $POD_NAME runtime=$runtime_class node=$node hosts SSH and the tailnet; no gateway objects"
+}
+
+# The workspace daemon hosts SSH and the tailnet (#2460): the environment owns
+# no gateway Pod, Deployment, Service or NetworkPolicy, by label or by name.
+assert_no_gateway_objects() {
+  local labelled named
+  labelled="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get pod,deployment,service,networkpolicy \
+    -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=gateway" -o name)"
+  named="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get --ignore-not-found -o name \
+    "deployment/cw-gateway-$ENV_ID" "service/cw-gateway-svc-$ENV_ID" \
+    "networkpolicy/cw-gw-net-$ENV_ID" "networkpolicy/cw-gw-warm-$ENV_ID")"
+  [[ -z "$labelled$named" ]] || \
+    die "environment $ENV_ID owns gateway objects: $(printf '%s %s' "$labelled" "$named" | tr '\n' ' ')"
 }
 
 assert_tailnet_discovery_shape() {
   if expect_tailnet_direct_udp; then
-    assert_tailnet_direct_udp_discovery_shape "$1" "$2"
+    assert_tailnet_direct_udp_discovery_shape "$1"
     return
   fi
   if expect_tailnet_peer_relay; then
-    assert_tailnet_peer_relay_discovery_shape "$1" "$2"
+    assert_tailnet_peer_relay_discovery_shape "$1"
     return
   fi
   [[ -z "${EXPECTED_TAILNET_PATH_TRANSPORT:-}" || "$EXPECTED_TAILNET_PATH_TRANSPORT" == "any" ]] || \
@@ -2602,32 +2464,26 @@ assert_tailnet_discovery_shape() {
   log "tailnet discovery shape check skipped for EXPECTED_TAILNET_PATH_TRANSPORT=${EXPECTED_TAILNET_PATH_TRANSPORT:-any}"
 }
 
+# The workspace daemon is the tailnet peer. It receives its direct-UDP and
+# relay endpoints from its access grant and allocates relay slots through
+# orchestration, so its Pod carries no tailnet configuration, its policy
+# reaches only the relay's public data port (never the allocator) and no
+# direct-UDP Service allocates a NodePort.
 assert_tailnet_peer_relay_discovery_shape() {
   local pod_json="$1"
-  local gateway_pod_json="$2"
-  local direct_udp_label direct_udp_env_count direct_udp_bind_addr relay_allocator_url relay_bind_addrs
-  local direct_udp_service_json direct_udp_services direct_udp_lb_service_json direct_udp_lb_nodeport_count
-  local gateway_policy_json gateway_service_json gateway_nodeport_count
+  local direct_udp_label direct_udp_service_json direct_udp_services
+  local direct_udp_lb_service_json direct_udp_lb_nodeport_count daemon_policy_json
 
-  direct_udp_label="$(jq -rs '[.[].metadata.labels["codewire.sh/direct-udp-service"]? // empty] | map(select(. != "")) | join(",")' "$pod_json" "$gateway_pod_json")"
+  direct_udp_label="$(jq -r '.metadata.labels["codewire.sh/direct-udp-service"]? // ""' "$pod_json")"
   [[ -z "$direct_udp_label" ]] || \
     die "pod still has legacy codewire.sh/direct-udp-service selector label $direct_udp_label"
 
-  direct_udp_env_count="$(jq '[.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_TAILNET_UDP_PORT" or .name=="CODEWIRE_TAILNET_ADVERTISE_ENDPOINTS")] | length' "$gateway_pod_json")"
-  [[ "$direct_udp_env_count" == "0" ]] || \
-    die "gateway has legacy static tailnet UDP env vars; peer relay mode must allocate relay endpoints"
-
-  direct_udp_bind_addr="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_TAILNET_UDP_LISTEN_ADDR") | .value // ""' "$gateway_pod_json")"
-  [[ -z "$direct_udp_bind_addr" || "$direct_udp_bind_addr" == "0.0.0.0:31000" ]] || \
-    die "gateway CODEWIRE_TAILNET_UDP_LISTEN_ADDR=$direct_udp_bind_addr, want unset or 0.0.0.0:31000"
-
-  relay_allocator_url="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_UDP_RELAY_ALLOCATOR_URL") | .value // ""' "$gateway_pod_json")"
-  [[ -z "$relay_allocator_url" ]] || \
-    die "gateway CODEWIRE_UDP_RELAY_ALLOCATOR_URL=$relay_allocator_url, want transport-zone binding instead of flat relay config"
-
-  relay_bind_addrs="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_UDP_RELAY_BIND_ADDRS") | .value // ""' "$gateway_pod_json")"
-  [[ -z "$relay_bind_addrs" ]] || \
-    die "gateway CODEWIRE_UDP_RELAY_BIND_ADDRS=$relay_bind_addrs, want transport-zone binding instead of flat relay config"
+  jq -e '
+    [.spec.containers[] | select(.name == "workspace") | .env[]?.name
+     | select(startswith("CODEWIRE_TAILNET_") or startswith("CODEWIRE_UDP_RELAY_"))]
+    | length == 0
+  ' "$pod_json" >/dev/null || \
+    die "workspace Pod carries static tailnet or relay settings; the daemon must take them from its access grant"
 
   direct_udp_service_json="$TMPDIR_SMOKE/direct-udp-service.json"
   kubectl_dev -n "$SANDBOX_NAMESPACE" get service -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=direct-udp" -o json >"$direct_udp_service_json"
@@ -2641,48 +2497,33 @@ assert_tailnet_peer_relay_discovery_shape() {
   [[ "$direct_udp_lb_nodeport_count" == "0" ]] || \
     die "direct UDP LoadBalancer service must not allocate NodePorts"
 
-  gateway_service_json="$TMPDIR_SMOKE/gateway-service.json"
-  kubectl_dev -n "$SANDBOX_NAMESPACE" get service \
-    -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=gateway" \
-    -o json >"$gateway_service_json"
-  gateway_nodeport_count="$(jq '[.items[]? | select(.spec.type == "NodePort" or ([.spec.ports[]? | select(has("nodePort"))] | length > 0))] | length' "$gateway_service_json")"
-  [[ "$gateway_nodeport_count" == "0" ]] || \
-    die "gateway service must remain ClusterIP without NodePorts"
-
-  gateway_policy_json="$TMPDIR_SMOKE/gateway-peer-relay-networkpolicy.json"
+  daemon_policy_json="$TMPDIR_SMOKE/workspace-peer-relay-networkpolicy.json"
   kubectl_dev -n "$SANDBOX_NAMESPACE" get networkpolicy \
-    -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=gateway" \
-    -o json >"$gateway_policy_json"
+    -l "codewire.sh/environment-id=${ENV_ID},app.kubernetes.io/component=workspace-daemon" \
+    -o json >"$daemon_policy_json"
   jq -e --arg ns "$CODEWIRE_SERVER_NAMESPACE" '
-    [
-      .items[]?.spec.egress[]?
+    [.items[]?.spec.egress[]?
       | select(
-          (
-            .to[]?
-            | .namespaceSelector.matchLabels["kubernetes.io/metadata.name"] == $ns
-              and .podSelector.matchLabels["app.kubernetes.io/component"] == "udp-relay"
-          )
-          and ([.ports[]? | select(.protocol == "TCP" and ((.port | tonumber) == 8095))] | length > 0)
-          and ([.ports[]? | select(.protocol == "UDP" and ((.port | tonumber) == 41641))] | length > 0)
-        )
-    ]
+          (.to[]? | .namespaceSelector.matchLabels["kubernetes.io/metadata.name"] == $ns
+                    and .podSelector.matchLabels["app.kubernetes.io/component"] == "udp-relay")
+          and ([.ports[]? | select(.protocol == "UDP" and ((.port | tonumber) == 41641))] | length > 0))]
     | length > 0
-  ' "$gateway_policy_json" >/dev/null || \
-    die "gateway NetworkPolicy does not allow shared UDP relay allocator egress to namespace $CODEWIRE_SERVER_NAMESPACE on TCP 8095 and UDP 41641"
+  ' "$daemon_policy_json" >/dev/null || \
+    die "workspace NetworkPolicy does not allow the shared UDP relay data port 41641 in namespace $CODEWIRE_SERVER_NAMESPACE"
+  jq -e '
+    [.items[]?.spec.egress[]? | .ports[]? | select(.protocol == "TCP" and ((.port | tonumber) == 8095))]
+    | length == 0
+  ' "$daemon_policy_json" >/dev/null || \
+    die "workspace NetworkPolicy reaches the UDP relay allocator; orchestration allocates relay slots"
 
-  log "tailnet peer relay mode uses shared relay allocator, ClusterIP gateway service, and no NodePort direct UDP services"
+  log "tailnet peer relay mode: the daemon reaches only the relay data port, and no NodePort direct UDP service exists"
 }
 
 assert_tailnet_direct_udp_discovery_shape() {
   local pod_json="$1"
-  local gateway_pod_json="$2"
-  local endpoint_env direct_udp_service_json direct_udp_services
+  local direct_udp_service_json direct_udp_services
 
-  assert_tailnet_peer_relay_discovery_shape "$pod_json" "$gateway_pod_json"
-
-  endpoint_env="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_TAILNET_DIRECT_UDP_ADVERTISE_ENDPOINTS") | .value // ""' "$gateway_pod_json")"
-  [[ "$endpoint_env" == "$EXPECTED_TAILNET_DIRECT_UDP_LB_IP:"* ]] || \
-    die "gateway CODEWIRE_TAILNET_DIRECT_UDP_ADVERTISE_ENDPOINTS=$endpoint_env, want $EXPECTED_TAILNET_DIRECT_UDP_LB_IP:<port>"
+  assert_tailnet_peer_relay_discovery_shape "$pod_json"
 
   direct_udp_service_json="$TMPDIR_SMOKE/direct-udp-lb-service.json"
   kubectl_dev -n "$SANDBOX_NAMESPACE" get service -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=direct-udp-lb" -o json >"$direct_udp_service_json"
@@ -2690,7 +2531,9 @@ assert_tailnet_direct_udp_discovery_shape() {
   [[ "$direct_udp_services" == "1" ]] || \
     die "expected exactly one direct UDP LoadBalancer service for $ENV_ID, found $direct_udp_services"
 
-  direct_udp_env="$endpoint_env" jq -e --arg ip "$EXPECTED_TAILNET_DIRECT_UDP_LB_IP" --arg zone "$EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE" '
+  # The LoadBalancer selects the workspace Pod's tailnet port; the doctor's
+  # evidence proves the daemon advertises exactly this endpoint.
+  jq -e --arg ip "$EXPECTED_TAILNET_DIRECT_UDP_LB_IP" --arg zone "$EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE" --arg id "$ENV_ID" '
     .items[0].spec.type == "LoadBalancer"
     and .items[0].spec.allocateLoadBalancerNodePorts == false
     and .items[0].spec.loadBalancerClass == "io.cilium/l2-announcer"
@@ -2698,22 +2541,19 @@ assert_tailnet_direct_udp_discovery_shape() {
     and .items[0].metadata.labels["codewire.sh/transport-zone"] == $zone
     and .items[0].metadata.annotations["lbipam.cilium.io/sharing-key"] == "codewire-direct-udp"
     and .items[0].metadata.annotations["lbipam.cilium.io/sharing-cross-namespace"] == "*"
+    and .items[0].spec.selector["codewire.sh/type"] == "workspace"
+    and .items[0].spec.selector["codewire.sh/environment-id"] == $id
     and ([.items[0].spec.ports[]? | select(.protocol == "UDP" and ((.targetPort | tonumber) == 31000) and (has("nodePort") | not))] | length == 1)
-    and (
-      (.items[0].metadata.annotations["lbipam.cilium.io/ips"] + ":" + ((.items[0].spec.ports[] | select(.protocol == "UDP") | .port) | tostring))
-      == env.direct_udp_env
-    )
   ' "$direct_udp_service_json" >/dev/null || \
-    die "direct UDP LoadBalancer service does not match advertised Cilium LB-IPAM endpoint $endpoint_env"
+    die "direct UDP LoadBalancer service does not select the workspace tailnet port on Cilium LB-IPAM $EXPECTED_TAILNET_DIRECT_UDP_LB_IP"
 
-  log "tailnet direct UDP mode advertises Cilium LoadBalancer endpoint $endpoint_env without NodePorts"
+  log "tailnet direct UDP mode: Cilium LoadBalancer $EXPECTED_TAILNET_DIRECT_UDP_LB_IP selects the workspace tailnet port without NodePorts"
 }
 
 assert_sandbox_template_derp_egress() {
   local claim_json="$TMPDIR_SMOKE/claim-template.json"
   local claim_shadow_json="$TMPDIR_SMOKE/claim-shadow.json"
   local template_json="$TMPDIR_SMOKE/sandboxtemplate.json"
-  local gateway_policy_json="$TMPDIR_SMOKE/gateway-networkpolicy.json"
   local daemon_policy_json="$TMPDIR_SMOKE/workspace-daemon-networkpolicy.json"
   local daemon_service_json="$TMPDIR_SMOKE/workspace-daemon-service.json"
   local template_name claim_shadow_name
@@ -2731,15 +2571,14 @@ assert_sandbox_template_derp_egress() {
   fi
   kubectl_dev -n "$SANDBOX_NAMESPACE" get sandboxtemplate "$template_name" -o json >"$template_json"
   kubectl_dev -n "$SANDBOX_NAMESPACE" get networkpolicy \
-    -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=gateway" \
-    -o json >"$gateway_policy_json"
-  kubectl_dev -n "$SANDBOX_NAMESPACE" get networkpolicy \
     -l "codewire.sh/environment-id=${ENV_ID},app.kubernetes.io/component=workspace-daemon" \
     -o json >"$daemon_policy_json"
   kubectl_dev -n "$SANDBOX_NAMESPACE" get service \
     -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=workspace-daemon" \
     -o json >"$daemon_service_json"
 
+  # The daemon reaches DERP through its public edge (world TCP 443) and only
+  # STUN on the DERP Pods, never their TLS port.
   jq -e --arg ns "$CODEWIRE_SERVER_NAMESPACE" '
     [
       .items[]?.spec.egress[]?
@@ -2749,34 +2588,38 @@ assert_sandbox_template_derp_egress() {
             | .namespaceSelector.matchLabels["kubernetes.io/metadata.name"] == $ns
               and .podSelector.matchLabels["app.kubernetes.io/component"] == "derp"
           )
-          and ([.ports[]? | select(.protocol == "TCP" and ((.port | tonumber) == 8443))] | length > 0)
           and ([.ports[]? | select(.protocol == "UDP" and ((.port | tonumber) == 3478))] | length > 0)
-        )
-    ]
-    | length > 0
-  ' "$gateway_policy_json" >/dev/null || \
-    die "gateway NetworkPolicy does not allow codewire-derp egress in namespace $CODEWIRE_SERVER_NAMESPACE on TCP 8443 and UDP 3478"
-
-  jq -e '
-    [
-      .items[]?.spec.ingress[]?
-      | select([.ports[]? | select(.protocol == "UDP" and ((.port | tonumber) == 31000))] | length > 0)
-    ]
-    | length > 0
-  ' "$gateway_policy_json" >/dev/null || \
-    die "gateway NetworkPolicy does not allow tailnet UDP ingress on UDP 31000"
-
-  jq -e '
-    [
-      .items[]?.spec.ingress[]?
-      | select(
-          ([.from[]?.podSelector.matchLabels["codewire.sh/type"] | select(. == "gateway")] | length > 0)
-          and ([.ports[]? | select(.protocol == "TCP" and ((.port | tonumber) == 7777))] | length > 0)
+          and ([.ports[]? | select(.protocol == "TCP")] | length == 0)
         )
     ]
     | length > 0
   ' "$daemon_policy_json" >/dev/null || \
-    die "workspace daemon NetworkPolicy must allow gateway-labelled pods to TCP 7777"
+    die "workspace NetworkPolicy does not allow exactly DERP STUN (UDP 3478) to codewire-derp in namespace $CODEWIRE_SERVER_NAMESPACE"
+
+  # Tailnet UDP reaches the daemon from the world only: every peer is an
+  # ipBlock excluding the private, carrier-grade NAT and loopback ranges.
+  jq -e '
+    [
+      .items[]?.spec.ingress[]?
+      | select([.ports[]? | select(.protocol == "UDP" and ((.port | tonumber) == 31000))] | length > 0)
+      | select((.from | length) > 0 and all(.from[];
+          (keys == ["ipBlock"])
+          and (if .ipBlock.cidr == "0.0.0.0/0" then
+                 ((.ipBlock.except // []) as $except
+                  | ["10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+                  | all(. as $range | $except | index($range) != null))
+               else .ipBlock.cidr == "::/0" and ((.ipBlock.except // []) | index("fc00::/7") != null)
+               end)))
+    ]
+    | length > 0
+  ' "$daemon_policy_json" >/dev/null || \
+    die "workspace NetworkPolicy does not admit tailnet UDP 31000 from world addresses only"
+
+  jq -e '
+    [.items[]?.spec.ingress[]? | .from[]?.podSelector.matchLabels["codewire.sh/type"] | select(. == "gateway")]
+    | length == 0
+  ' "$daemon_policy_json" >/dev/null || \
+    die "workspace NetworkPolicy still admits gateway-labelled pods"
 
   jq -e --arg server_namespace "$CODEWIRE_SERVER_NAMESPACE" '
     [
@@ -2790,11 +2633,12 @@ assert_sandbox_template_derp_egress() {
               )
             ] | length > 0)
           and ([.ports[]? | select(.protocol == "TCP" and ((.port | tonumber) == 7777))] | length > 0)
+          and ([.ports[]? | select(.protocol == "TCP" and ((.port | tonumber) == 2222))] | length > 0)
         )
     ]
     | length > 0
   ' "$daemon_policy_json" >/dev/null || \
-    die "workspace daemon NetworkPolicy must allow Codewire orchestration in $CODEWIRE_SERVER_NAMESPACE to TCP 7777"
+    die "workspace daemon NetworkPolicy must allow Codewire orchestration in $CODEWIRE_SERVER_NAMESPACE to TCP 7777 and SSH 2222"
 
   jq -e '
     (.items | length == 1)
@@ -2992,11 +2836,6 @@ run_kube_assertions() {
   log "waiting for pod readiness"
   kubectl_dev -n "$SANDBOX_NAMESPACE" wait "pod/$POD_NAME" \
     --for=condition=Ready --timeout="${SMOKE_TIMEOUT_SECONDS}s"
-  log "waiting for gateway pod"
-  wait_until "gateway pod" "$(( "$(seconds_now)" + SMOKE_TIMEOUT_SECONDS ))" gateway_pod_exists
-  log "waiting for gateway pod readiness"
-  kubectl_dev -n "$SANDBOX_NAMESPACE" wait "pod/$GATEWAY_POD_NAME" \
-    --for=condition=Ready --timeout="${SMOKE_TIMEOUT_SECONDS}s"
   assert_pod_shape
 }
 
@@ -3013,10 +2852,6 @@ discover_runtime_objects() {
   if [[ -z "$POD_NAME" ]]; then
     log "discovering workspace pod adopted by $CLAIM_NAME"
     wait_until "sandbox pod" "$(( "$(seconds_now)" + SMOKE_TIMEOUT_SECONDS ))" pod_exists_for_claim
-  fi
-  if [[ -z "$GATEWAY_POD_NAME" ]]; then
-    log "discovering gateway pod for $ENV_ID"
-    wait_until "gateway pod" "$(( "$(seconds_now)" + SMOKE_TIMEOUT_SECONDS ))" gateway_pod_exists
   fi
 }
 
@@ -4090,7 +3925,7 @@ run_tailnet_doctor() {
   assert_tailnet_doctor_endpoint_evidence "$stdout"
   if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then
     discover_runtime_objects
-    assert_gateway_tailnet_log_evidence
+    assert_daemon_tailnet_log_evidence
   else
     log "application-only smoke accepted client-observed tailnet evidence"
   fi
@@ -4209,10 +4044,10 @@ capture_tailnet_client_failure_diagnostics() {
 }
 
 capture_tailnet_doctor_failure_diagnostics() {
-  local marker="rust gateway UDP peer relay allocation diagnostic"
-  local output="$TMPDIR_SMOKE/gateway-tailnet-allocator-doctor-failure.log"
-  local raw_output="$TMPDIR_SMOKE/gateway-tailnet-allocator-doctor-failure.jsonl"
-  local kubectl_error="$TMPDIR_SMOKE/gateway-tailnet-allocator-doctor-failure.err"
+  local marker="workspace daemon UDP peer relay allocation diagnostic"
+  local output="$TMPDIR_SMOKE/daemon-tailnet-allocator-doctor-failure.log"
+  local raw_output="$TMPDIR_SMOKE/daemon-tailnet-allocator-doctor-failure.jsonl"
+  local kubectl_error="$TMPDIR_SMOKE/daemon-tailnet-allocator-doctor-failure.err"
   local -a pipeline_status
 
   [[ "$SMOKE_SKIP_KUBE" != "1" ]] || {
@@ -4220,13 +4055,16 @@ capture_tailnet_doctor_failure_diagnostics() {
     return 0
   }
 
-  if [[ -z "$GATEWAY_POD_NAME" ]] && ! gateway_pod_exists; then
-    log "tailnet doctor failure allocator diagnostics unavailable: gateway pod not found"
+  if [[ -z "$POD_NAME" ]]; then
+    { [[ -n "$CLAIM_NAME" ]] || claim_exists; } && pod_exists_for_claim || true
+  fi
+  if [[ -z "$POD_NAME" ]]; then
+    log "tailnet doctor failure allocator diagnostics unavailable: workspace pod not found"
     return 0
   fi
 
   set +e
-  kubectl_dev -n "$SANDBOX_NAMESPACE" logs "$GATEWAY_POD_NAME" -c codewire-gateway --tail=400 2>"$kubectl_error" \
+  kubectl_dev -n "$SANDBOX_NAMESPACE" logs "$POD_NAME" -c workspace --tail=400 2>"$kubectl_error" \
     | jq -Rc --arg marker "$marker" '
         fromjson?
         | select(.fields.message == $marker)
@@ -4249,7 +4087,7 @@ capture_tailnet_doctor_failure_diagnostics() {
   set -e
 
   if (( pipeline_status[0] != 0 )); then
-    log "tailnet doctor failure allocator diagnostics unavailable: gateway log read failed"
+    log "tailnet doctor failure allocator diagnostics unavailable: workspace daemon log read failed"
     return 0
   fi
   if (( pipeline_status[1] != 0 )) || [[ ! -s "$raw_output" ]]; then
@@ -4768,13 +4606,6 @@ capture_ssh_failure_evidence() {
     return 0
   }
 
-  logs="$TMPDIR_SMOKE/gateway-tailnet-${label}-after-fail.log"
-  if capture_container_log "$GATEWAY_POD_NAME" codewire-gateway "$logs"; then
-    log "captured gateway SSH-failure logs in $logs"
-  else
-    log "failed to capture gateway SSH-failure logs; stderr in ${logs}.err"
-  fi
-
   logs="$TMPDIR_SMOKE/workspace-${label}-after-fail.log"
   if capture_container_log "$POD_NAME" workspace "$logs"; then
     log "captured workspace SSH-failure logs in $logs"
@@ -4793,21 +4624,21 @@ capture_ssh_failure_evidence() {
     >"$TMPDIR_SMOKE/events-${label}-after-fail.txt" 2>"$TMPDIR_SMOKE/events-${label}-after-fail.err" || true
 }
 
-assert_gateway_tailnet_log_evidence() {
-  local logs="$TMPDIR_SMOKE/gateway-tailnet.log"
+assert_daemon_tailnet_log_evidence() {
+  local logs="$TMPDIR_SMOKE/daemon-tailnet.log"
 
-  capture_container_log "$GATEWAY_POD_NAME" codewire-gateway "$logs"
+  capture_container_log "$POD_NAME" workspace "$logs"
 
-  grep -q 'rust gateway resolved STUN servers for direct UDP' "$logs" || \
-    die "gateway logs do not show Rust STUN server resolution; evidence in $logs"
   grep -q 'rust tailnet direct UDP socket bound' "$logs" || \
-    die "gateway logs do not show direct UDP socket bind; evidence in $logs"
+    die "workspace daemon logs do not show direct UDP socket bind; evidence in $logs"
   grep -q 'rust tailnet startup STUN discovery complete' "$logs" || \
-    die "gateway logs do not show startup STUN discovery; evidence in $logs"
-  grep -q 'rust gateway tailnet direct UDP transport enabled' "$logs" || \
-    die "gateway logs do not show direct UDP transport enabled; evidence in $logs"
+    die "workspace daemon logs do not show startup STUN discovery; evidence in $logs"
+  grep -q 'workspace tailnet direct UDP enabled' "$logs" || \
+    die "workspace daemon logs do not show direct UDP transport enabled; evidence in $logs"
+  grep -q 'workspace tailnet peer up' "$logs" || \
+    die "workspace daemon logs do not show its tailnet peer up; evidence in $logs"
 
-  log "gateway logs prove Rust STUN discovery and direct UDP transport startup; evidence in $logs"
+  log "workspace daemon logs prove STUN discovery, direct UDP and its tailnet peer; evidence in $logs"
 }
 
 run_ssh_transport_smoke() {
@@ -4880,23 +4711,37 @@ run_ssh_transport_smoke() {
   fi
 }
 
-run_gateway_host_key_probe_once() {
-  local strict="$1"
-  local label="$2"
-  local known_hosts="$3"
+# OpenSSH over the WebSocket transport with the managed block's trust:
+# StrictHostKeyChecking yes and no first use. With no pinned file, the only
+# trust source is `cw ssh known-hosts`, the key the platform recorded for the
+# environment's current generation.
+run_host_key_probe_once() {
+  local label="$1"
+  local pinned="${2:-}"
   local stdout="$TMPDIR_SMOKE/ssh-host-key-${label}.out"
   local stderr="$TMPDIR_SMOKE/ssh-host-key-${label}.err"
   local expected_output="host-key-${label}-ok"
+  local cw_command
+  local -a trust
 
+  cw_command="$(printf '%q --server %q' "$CW_BIN" "$CODEWIRE_SERVER_URL")"
+  if [[ -n "$pinned" ]]; then
+    trust=(-o "UserKnownHostsFile=$pinned")
+  else
+    trust=(-o UserKnownHostsFile=/dev/null -o "KnownHostsCommand=$cw_command ssh known-hosts %H")
+  fi
   if ! env CW_SSH_TRANSPORT=websocket timeout "$SMOKE_SSH_TIMEOUT" ssh -F /dev/null \
       -o BatchMode=yes \
       -o PasswordAuthentication=no \
       -o KbdInteractiveAuthentication=no \
-      -o "StrictHostKeyChecking=$strict" \
-      -o UserKnownHostsFile="$known_hosts" \
+      -o PubkeyAuthentication=no \
+      -o StrictHostKeyChecking=yes \
+      -o GlobalKnownHostsFile=/dev/null \
+      -o UpdateHostKeys=no \
+      "${trust[@]}" \
       -o "LogLevel=$SMOKE_SSH_LOG_LEVEL" \
       -o ConnectTimeout="$SMOKE_SSH_CONNECT_TIMEOUT" \
-      -o "ProxyCommand=$CW_BIN --server $CODEWIRE_SERVER_URL shell --stdio %h" \
+      -o "ProxyCommand=$cw_command shell --stdio %h" \
       "codewire@cw-$ENV_ID" \
       "printf '${expected_output}\n'" >"$stdout" 2>"$stderr"; then
     return 1
@@ -4905,29 +4750,16 @@ run_gateway_host_key_probe_once() {
   grep -qx "$expected_output" "$stdout"
 }
 
-run_gateway_host_key_probe() {
-  local strict="$1"
-  local label="$2"
-  local known_hosts="$3"
-  local stderr="$TMPDIR_SMOKE/ssh-host-key-${label}.err"
-
-  if ! run_gateway_host_key_probe_once "$strict" "$label" "$known_hosts"; then
-    sed 's/[[:cntrl:]]//g' "$stderr" >&2 || true
-    capture_ssh_failure_evidence "host-key-${label}"
-    die "gateway host-key $label SSH probe failed"
-  fi
-}
-
-wait_for_gateway_host_key_probe() {
-  local strict="$1"
-  local label="$2"
-  local known_hosts="$3"
+# The recorded key must be served: retry only until the daemon answers.
+wait_for_host_key_probe() {
+  local label="$1"
+  local pinned="${2:-}"
   local deadline stderr
 
   deadline=$(( "$(seconds_now)" + SMOKE_TIMEOUT_SECONDS ))
   stderr="$TMPDIR_SMOKE/ssh-host-key-${label}.err"
   while (( "$(seconds_now)" < deadline )); do
-    if run_gateway_host_key_probe_once "$strict" "$label" "$known_hosts"; then
+    if run_host_key_probe_once "$label" "$pinned"; then
       return
     fi
     if grep -Eq 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed' "$stderr"; then
@@ -4938,40 +4770,81 @@ wait_for_gateway_host_key_probe() {
 
   sed 's/[[:cntrl:]]//g' "$stderr" >&2 || true
   capture_ssh_failure_evidence "host-key-${label}"
-  die "gateway host-key $label SSH probe failed"
+  die "host-key $label SSH probe failed"
 }
 
-run_gateway_host_key_restart_smoke() {
-  local deploy_json="$TMPDIR_SMOKE/gateway-host-key-restart-deploy.json"
-  local deploy_name known_hosts
+# A key other than the recorded one must be refused as a changed host key,
+# never trusted or merely unreachable.
+expect_host_key_refused() {
+  local label="$1"
+  local pinned="$2"
+  local stderr="$TMPDIR_SMOKE/ssh-host-key-${label}.err"
 
-  discover_runtime_objects
-  kubectl_dev -n "$SANDBOX_NAMESPACE" get deploy \
-    -l "codewire.sh/environment-id=${ENV_ID},codewire.sh/type=gateway" \
-    -o json >"$deploy_json"
-  deploy_name="$(jq -r '.items[0].metadata.name // empty' "$deploy_json")"
-  [[ -n "$deploy_name" ]] || die "gateway Deployment not found for host-key restart smoke"
-  kubectl_dev -n "$SANDBOX_NAMESPACE" wait "pod/$GATEWAY_POD_NAME" \
-    --for=condition=Ready --timeout="${SMOKE_TIMEOUT_SECONDS}s"
+  if run_host_key_probe_once "$label" "$pinned"; then
+    die "host-key $label SSH probe trusted a key the platform did not record"
+  fi
+  grep -Eq 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed' "$stderr" || {
+    sed 's/[[:cntrl:]]//g' "$stderr" >&2 || true
+    die "host-key $label SSH probe failed without a host-key refusal"
+  }
+}
 
-  known_hosts="$TMPDIR_SMOKE/known_hosts.host-key-restart"
-  log "recording gateway SSH host key before gateway pod restart"
-  run_gateway_host_key_probe accept-new before "$known_hosts"
+# One known_hosts line: the key the platform recorded for the environment's
+# current generation (a public key; nothing secret).
+recorded_host_key_line() {
+  timeout 60 "$CW_BIN" --server "$CODEWIRE_SERVER_URL" ssh known-hosts "cw-$ENV_ID" 2>/dev/null
+}
 
-  GATEWAY_OLD_POD_NAME="$GATEWAY_POD_NAME"
-  log "restarting gateway Deployment $deploy_name to prove SSH host key stability"
-  kubectl_dev -n "$SANDBOX_NAMESPACE" rollout restart "deployment/$deploy_name" >/dev/null
-  kubectl_dev -n "$SANDBOX_NAMESPACE" rollout status "deployment/$deploy_name" \
-    --timeout="${SMOKE_TIMEOUT_SECONDS}s"
+env_is_stopped() {
+  local info_out="$TMPDIR_SMOKE/env-info-stop.out"
+  cw env info "$ENV_ID" >"$info_out" 2>&1 || return 1
+  [[ "$(awk '$1 == "State:" {print $2; exit}' "$info_out")" == "stopped" ]]
+}
 
-  GATEWAY_POD_NAME=""
-  wait_until "restarted gateway pod" "$(( "$(seconds_now)" + SMOKE_TIMEOUT_SECONDS ))" gateway_restarted_pod_exists
-  kubectl_dev -n "$SANDBOX_NAMESPACE" wait "pod/$GATEWAY_POD_NAME" \
-    --for=condition=Ready --timeout="${SMOKE_TIMEOUT_SECONDS}s"
+# The daemon serves SSH with a host key it generated for this generation;
+# only its public key is recorded with the platform (#2460). Prove the served
+# key is the recorded one, a changed key is refused, and a stop and start
+# rotates the key with the generation.
+run_host_key_smoke() {
+  local before after pinned previous_pin forged
 
-  log "verifying gateway SSH host key is stable after pod restart"
-  wait_for_gateway_host_key_probe yes after "$known_hosts"
-  log "gateway SSH host key remained stable across pod restart"
+  require_cmd ssh-keygen
+  before="$(recorded_host_key_line)" || die "cw ssh known-hosts returned no recorded host key for cw-$ENV_ID"
+  [[ "$before" =~ ^cw-$ENV_ID\ ssh-ed25519\ [A-Za-z0-9+/]+=*$ ]] || \
+    die "recorded host key for cw-$ENV_ID is not one OpenSSH Ed25519 known_hosts line"
+
+  log "verifying the daemon presents the host key the platform recorded"
+  wait_for_host_key_probe recorded
+  pinned="$TMPDIR_SMOKE/known_hosts.recorded"
+  printf '%s\n' "$before" >"$pinned"
+  wait_for_host_key_probe pinned "$pinned"
+
+  forged="$TMPDIR_SMOKE/forged-host-key"
+  ssh-keygen -q -t ed25519 -N '' -C '' -f "$forged" >/dev/null
+  printf 'cw-%s %s\n' "$ENV_ID" "$(awk '{print $1, $2}' "$forged.pub")" >"$TMPDIR_SMOKE/known_hosts.forged"
+  expect_host_key_refused forged "$TMPDIR_SMOKE/known_hosts.forged"
+  log "a host key other than the recorded one is refused"
+
+  if [[ -n "$SMOKE_EXISTING_ENV_ID" ]]; then
+    log "host-key rotation needs a stop and start; skipped for the reused environment $ENV_ID"
+    return
+  fi
+  log "stopping and starting $ENV_ID to prove the host key rotates with the generation"
+  cw env stop "$ENV_ID" >/dev/null
+  wait_until "environment stopped" "$(( "$(seconds_now)" + SMOKE_TIMEOUT_SECONDS ))" env_is_stopped
+  cw env start "$ENV_ID" >/dev/null
+  wait_environment
+  POD_NAME=""
+  if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then
+    discover_runtime_objects
+  fi
+  after="$(recorded_host_key_line)" || die "cw ssh known-hosts returned no host key after the restart"
+  [[ "$after" != "$before" ]] || die "the recorded host key did not rotate across stop and start"
+  wait_for_host_key_probe rotated
+  previous_pin="$TMPDIR_SMOKE/known_hosts.previous-generation"
+  cp "$pinned" "$previous_pin"
+  expect_host_key_refused previous-generation "$previous_pin"
+  log "the host key rotated with the generation; the previous generation's key is refused"
 }
 
 run_ssh_smoke() {
@@ -4999,11 +4872,7 @@ run_ssh_smoke() {
     run_ssh_transport_smoke tailnet tailnet-peer-relay peer_relay
     EXPECTED_TAILNET_PATH_TRANSPORT="$initial_expected_transport"
   fi
-  if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then
-    run_gateway_host_key_restart_smoke
-  else
-    log "skipping Kubernetes-owned gateway restart assertion"
-  fi
+  run_host_key_smoke
 }
 
 run_selected_phase() {
@@ -5059,7 +4928,7 @@ run_selected_phase() {
       discover_runtime_objects
       assert_pod_shape
       require_cmd ssh
-      run_gateway_host_key_restart_smoke
+      run_host_key_smoke
       ;;
     app-preview)
       wait_for_cw_run
