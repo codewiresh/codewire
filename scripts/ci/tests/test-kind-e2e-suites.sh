@@ -103,7 +103,7 @@ expect_live_failure() {
 }
 
 # Workspace exec uses the production private adapter and authenticated daemon,
-# not a bare container shell. Reuse the gateway fixture without giving the host
+# not a bare container shell. Reuse the daemon fixture without giving the host
 # exec binary ownership of its Pod lifecycle.
 exec_source="$ROOT/crates/codewire-orchestration/src/bin/exec-smoke.rs"
 grep -Fq 'std::env::var("SMOKE_POD_NAME")?' "$exec_source" ||
@@ -111,7 +111,7 @@ grep -Fq 'std::env::var("SMOKE_POD_NAME")?' "$exec_source" ||
 if grep -Eq 'pods\.(create|delete)\(|busybox:|SMOKE_KEEP_POD' "$exec_source"; then
   fail 'workspace exec still creates an unauthenticated Pod or owns its lifecycle'
 fi
-gateway_fixture="$(sed -n '/^gateway_host_key_restart_smoke() {/,/^billing_contract_through_ingress() {/p' "$COMMON")"
+daemon_fixture="$(sed -n '/^workspace_access_stack_smoke() {/,/^billing_contract_through_ingress() {/p' "$COMMON")"
 for binding in \
     'name: workspace' \
     'name: codewire-daemon-init' \
@@ -125,11 +125,20 @@ for binding in \
     'mountPath: /codewire/run' \
     'mountPath: /home/codewire' \
     'mountPath: /workspace'; do
-  grep -Fq "$binding" <<<"$gateway_fixture" ||
+  grep -Fq "$binding" <<<"$daemon_fixture" ||
     fail "authenticated workspace exec fixture missing: $binding"
 done
+# The daemon hosts SSH and the tailnet: the fixture proves the access objects
+# and that no gateway object exists, and never waits on or restarts a gateway.
+for binding in 'CRD_SMOKE_ACCESS_PHASE=setup' 'CRD_SMOKE_LOCAL_IMAGES=1'; do
+  grep -Fq "$binding" <<<"$daemon_fixture" ||
+    fail "access-object fixture missing: $binding"
+done
+if grep -Eq 'cw-gateway|rollout (status|restart)|port-forward|ssh-keyscan' <<<"$daemon_fixture"; then
+  fail 'access-object fixture still depends on a gateway'
+fi
 grep -Fq 'SMOKE_POD_NAME=crd-smoke-workspace-daemon' "$COMMON" ||
-  fail 'workspace exec does not target the authenticated gateway fixture'
+  fail 'workspace exec does not target the authenticated daemon fixture'
 
 # Terminal tickets connect through that same authenticated daemon. The public
 # helper must run inside the ready claim/database binding, before its cleanup.
@@ -189,7 +198,7 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 seed = root / "tests/fixtures/orchestration/seed.sql"
-assert hashlib.sha256(seed.read_bytes()).hexdigest() == "6d45bddfa5ad285ea68acd9bd90c7f608bd558bd03b057cc11e3b326025dad64"
+assert hashlib.sha256(seed.read_bytes()).hexdigest() == "2e0c9c1fe32c34f455ce343d8e4500e304213ec14c039784fbad609272beed88"
 adapter = root / "tests/fixtures/orchestration/runtime-ready.sql"
 sql = adapter.read_text()
 for field in ["generation", "activity_id", "attempt", "phase", "status", "pod_uid"]:
@@ -234,7 +243,8 @@ for binding in \
     'CRD_SMOKE_RESIZE_PHASE=render CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id"' \
     'SANDBOX_CREDENTIAL_BROKER_NAMESPACE="$NS"' \
     'SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP=codewire-credential-broker-roots' \
-    'CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token"' \
+    'CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token"' \
+    'assert_no_kind_gateway_objects "$environment_id"' \
     '"$CARGO_CI_DIR/crd-smoke" >"$resize_manifest"' \
     'select(.kind == "SandboxTemplate") | .metadata.name' \
     'select(.kind == "SandboxWarmPool") | .metadata.name' \
@@ -286,6 +296,8 @@ SH
     elif [[ " $* " == *' --cascade=foreground '* ]]; then
       [[ " $* " != *' certificate/'* && " $* " != *' secret/'* ]] ||
         fail 'foreground workload drain includes a credential issuer or key'
+      [[ " $* " != *' deployment/'* && " $* " != *' networkpolicy/cw-gw-'* ]] ||
+        fail 'resize cleanup still drains gateway objects that nothing creates'
       [[ "$failure" != foreground ]]
     elif [[ " $* " == *" certificate/cw-credential-gateway-$environment_id "* ]]; then
       [[ " $* " == *' --cascade=background --wait=true --timeout=120s '* ]] ||
@@ -295,8 +307,6 @@ SH
       [[ " $* " != *' configmap/'* ]] ||
         fail 'credential cleanup names a Codex ConfigMap that nothing creates'
       [[ "$failure" != leaf ]]
-    elif [[ " $* " == *" secret/cw-gateway-host-key-$environment_id "* ]]; then
-      [[ "$failure" != hostkey ]]
     else
       fail "unexpected resize cleanup command: $*"
     fi
@@ -309,24 +319,23 @@ SH
 )
 : >"$CALLS"
 run_resize_cleanup_fixture none 0
-[[ "$(wc -l <"$CALLS")" -eq 6 ]] || fail 'resize cleanup lost a required phase'
+[[ "$(wc -l <"$CALLS")" -eq 5 ]] || fail 'resize cleanup lost a required phase'
 mapfile -t resize_cleanup_calls <"$CALLS"
 [[ "${resize_cleanup_calls[0]}" == *' exec '* &&
    "${resize_cleanup_calls[1]}" == 'release '* &&
    "${resize_cleanup_calls[2]}" == *' --cascade=foreground '* &&
    "${resize_cleanup_calls[3]}" == *' delete certificate/'* &&
-   "${resize_cleanup_calls[4]}" == *' delete secret/cw-credential-gateway-'* &&
-   "${resize_cleanup_calls[5]}" == *' delete secret/cw-gateway-host-key-'* ]] ||
-  fail 'resize cleanup does not preserve database, claim release, workload, issuer, leaf and host-key order'
+   "${resize_cleanup_calls[4]}" == *' delete secret/cw-credential-gateway-'* ]] ||
+  fail 'resize cleanup does not preserve database, claim release, workload, issuer and leaf order'
 grep -Fq -- '--cascade=foreground --wait=true --timeout=120s' "$CALLS" ||
   fail 'resize cleanup does not wait for exact dependants to stop'
 grep -Fq "DELETE FROM environment_presets WHERE id = 'preset-env-resize-fixture' AND org_id = 'org_contract_1';" \
   "$FIXTURE/resize-cleanup.sql" || fail 'resize cleanup omitted its exact preset'
-for failure in database release foreground certificate leaf hostkey; do
+for failure in database release foreground certificate leaf; do
   : >"$CALLS"
   expect_failure "resize-cleanup-$failure" run_resize_cleanup_fixture "$failure" 0
   case "$failure" in
-    database|hostkey) expected_calls=6 ;;
+    database) expected_calls=5 ;;
     release) expected_calls=2 ;;
     foreground) expected_calls=3 ;;
     certificate) expected_calls=4 ;;
@@ -343,16 +352,19 @@ fi
 
 bash -n "$SCRIPT" "$COMMON" "$INTEGRATED" "$DASHBOARD_BROWSER" "$FINAL_FENCING" \
   "$ENVIRONMENT_SESSION" "$SANDBOX_SUPPLY_CHAIN" "$RUNTIME_ACCEPTANCE" "$0"
-grep -Fq 'CRD_SMOKE_GATEWAY_TOKEN="$gateway_token"' "$COMMON" ||
-  fail 'local gateway does not receive its coordinate-scoped capability'
 grep -Fq 'CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token"' "$COMMON" ||
-  fail 'local gateway and workspace daemon do not receive the daemon-scoped capability'
-grep -Fq 'CRD_SMOKE_GATEWAY_TOKEN is required with CRD_SMOKE_LOCAL_GATEWAY=1' \
+  fail 'the resize workspace daemon does not receive the daemon-scoped capability'
+grep -Fq 'CRD_SMOKE_ACCESS_PHASE=cleanup' "$COMMON" ||
+  fail 'the FileService fixture does not remove and recheck the access objects'
+grep -Fq 'CRD_SMOKE_ACCESS_PHASE must be full, setup, or cleanup' \
   "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
-  fail 'local CRD smoke permits an unrelated literal gateway credential'
-grep -Fq 'CRD_SMOKE_DAEMON_AUTH_TOKEN is required with CRD_SMOKE_LOCAL_GATEWAY=1' \
+  fail 'CRD smoke no longer bounds its access phases'
+grep -Fq 'async fn ensure_no_gateway_objects(' \
   "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
-  fail 'local CRD smoke permits an unrelated literal daemon credential'
+  fail 'CRD smoke no longer proves the absence of gateway objects'
+if grep -Fq 'CRD_SMOKE_GATEWAY' "$COMMON" "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs"; then
+  fail 'Kind still passes a gateway capability or phase to the CRD smoke'
+fi
 grep -Fq 'std::env::var("CRD_SMOKE_WORKSPACE_IMAGE")' \
   "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
   fail 'CRD smoke cannot consume the sealed workspace alias'
@@ -786,7 +798,6 @@ kind_credential_native_smoke() (
   false
   record native-continued-after-failure
 )
-stop_gateway_port_forward() { :; }
 dump_cluster_state() { record dump; }
 if [ "${ERREXIT_MECHANISM:-current}" = current ]; then
   run_kind_up() { require_kind_errexit; record up; }
@@ -947,8 +958,6 @@ require:kubectl
 require:openssl
 require:psql
 require:python3
-require:ssh-keygen
-require:ssh-keyscan
 browser-prerequisites
 acquire-lock
 reclaim
@@ -1059,8 +1068,7 @@ for failed_step in validate smokes coordinator billing; do
     }
     require_tool() { :; }
     kubectl() { integrated_fixture_kubectl "$@"; }
-    stop_gateway_port_forward() { :; }
-    dump_cluster_state() { record dump; }
+        dump_cluster_state() { record dump; }
     kind() { record "kind:$*"; }
     docker() { record "docker:$*"; }
     log() { record "log:$*"; }
@@ -2588,8 +2596,7 @@ for retained_function in run_retained_sandbox_supply_chain_suite \
         record acquire-lock
         [ "$failed_step" != lock ] || return 40
       }
-      stop_gateway_port_forward() { :; }
-      dump_cluster_state() { record dump; }
+            dump_cluster_state() { record dump; }
       kind() { record "kind:$*"; }
       docker() { record "docker:$*"; }
       log() { record "log:$*"; }
@@ -2659,7 +2666,6 @@ BASH
 : >"$CALLS"
 validate_retained_cluster() { :; }
 temporal_fencing_smoke() { return 42; }
-stop_gateway_port_forward() { :; }
 dump_cluster_state() { record dump; }
 log() { record "log:$*"; }
 kind() { record "kind:$*"; }

@@ -7,20 +7,25 @@
 //! Exit code is the verdict; CI runs this with the kind kubeconfig
 //! after applying deployments/k8s/agent-sandbox/base/crds.
 //!
-//! `CRD_SMOKE_GATEWAY_PHASE=setup|cleanup` lets the Kind harness restart the
-//! real gateway between the existing stack-creation and lifecycle-cleanup
-//! assertions. `CRD_SMOKE_LOCAL_GATEWAY=1` selects the side-loaded gateway
-//! image and the diagnostic runc RuntimeClass for that disposable cluster.
+//! It then proves the environment's access objects: the daemon Service and
+//! the workspace NetworkPolicy (orchestration to the daemon, SSH and preview
+//! ports; world-only tailnet UDP), and no gateway object at all, since the
+//! workspace daemon hosts SSH and the tailnet. `CRD_SMOKE_ACCESS_PHASE=
+//! setup|cleanup` lets the Kind harness keep those objects for its daemon
+//! fixture between the two assertions. `CRD_SMOKE_LOCAL_IMAGES=1` selects the
+//! side-loaded daemon image and the diagnostic runc RuntimeClass for that
+//! disposable cluster.
 
 use std::{collections::BTreeMap, time::Duration};
 
+use codewire_gateway_proto::{WORKSPACE_SSH_PORT, WORKSPACE_TAILNET_UDP_PORT};
 use codewire_orchestration::sandbox::client::SandboxClient;
 use codewire_orchestration::sandbox::template::{
-    CredentialRuntimeTemplateConfig, GATEWAY_HOST_KEY_SECRET_KEY, RUNTIME_PROFILE_COMMODITY,
-    RUNTIME_PROFILE_RUNC, TemplateOpts, gateway_host_key_secret_name, gateway_network_policy_name,
-    gateway_service_name, gateway_workload_name, render_sandbox_shadow_pool,
-    render_sandbox_template, render_workspace_daemon_service, workspace_daemon_network_policy_name,
-    workspace_daemon_service_name,
+    CredentialRuntimeTemplateConfig, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_RUNC, TemplateOpts,
+    gateway_host_key_secret_name, gateway_network_policy_name, gateway_service_name,
+    gateway_workload_name, render_sandbox_shadow_pool, render_sandbox_template,
+    render_workspace_daemon_service, warm_member_gateway_bridge_name,
+    workspace_daemon_network_policy_name, workspace_daemon_service_name,
 };
 use codewire_orchestration::sandbox::{
     ClaimOpts, environment_template_name, render_sandbox_claim, shadow_warm_pool_name,
@@ -48,7 +53,6 @@ async fn main() -> anyhow::Result<()> {
             "render" => {
                 let server_namespace = std::env::var("CRD_SMOKE_SERVER_NAMESPACE")
                     .unwrap_or_else(|_| namespace.clone());
-                let gateway_token = required_resize_capability("CRD_SMOKE_GATEWAY_TOKEN")?;
                 let daemon_auth_token = required_resize_capability("CRD_SMOKE_DAEMON_AUTH_TOKEN")?;
                 let credential_runtime = CredentialRuntimeTemplateConfig::from_env(&namespace)?
                     .ok_or_else(|| {
@@ -60,7 +64,6 @@ async fn main() -> anyhow::Result<()> {
                     &namespace,
                     &server_namespace,
                     &environment_id,
-                    &gateway_token,
                     &daemon_auth_token,
                     Some(credential_runtime),
                 )?;
@@ -78,16 +81,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     let client = SandboxClient::from_env(&namespace).await?;
-    let gateway_phase = std::env::var("CRD_SMOKE_GATEWAY_PHASE").unwrap_or_else(|_| "full".into());
+    let access_phase = std::env::var("CRD_SMOKE_ACCESS_PHASE").unwrap_or_else(|_| "full".into());
     anyhow::ensure!(
-        matches!(gateway_phase.as_str(), "full" | "setup" | "cleanup"),
-        "CRD_SMOKE_GATEWAY_PHASE must be full, setup, or cleanup"
+        matches!(access_phase.as_str(), "full" | "setup" | "cleanup"),
+        "CRD_SMOKE_ACCESS_PHASE must be full, setup, or cleanup"
     );
-    let template_opts = gateway_template_opts(&namespace)?;
+    let template_opts = access_template_opts(&namespace);
 
-    if gateway_phase == "cleanup" {
-        cleanup_gateway_stack(&client, &namespace, &template_opts).await?;
-        println!("gateway companion object lifecycle cleanup verified — CRD smoke passed");
+    if access_phase == "cleanup" {
+        cleanup_access_stack(&client, &namespace, &template_opts).await?;
+        println!("access object cleanup verified — CRD smoke passed");
         return Ok(());
     }
 
@@ -183,28 +186,16 @@ async fn main() -> anyhow::Result<()> {
     client
         .delete_access_stack(&template_opts.environment_id)
         .await?;
-    client
-        .delete_gateway_host_key_secret(&template_opts.environment_id)
-        .await?;
-    let gateway_result = verify_gateway_stack(&client, &namespace, &template_opts).await;
-    if gateway_phase == "setup" {
-        gateway_result?;
-        println!("gateway companion object setup verified — awaiting restart smoke");
+    let access_result = verify_access_stack(&client, &namespace, &template_opts).await;
+    if access_phase == "setup" {
+        access_result?;
+        println!("access object setup verified — retaining them for the daemon fixture");
         return Ok(());
     }
-    let cleanup_result = client
-        .delete_access_stack(&template_opts.environment_id)
-        .await;
-    let secret_preserved_result =
-        verify_gateway_host_key_secret(&namespace, &template_opts, "post-stack-delete").await;
-    let secret_cleanup_result = client
-        .delete_gateway_host_key_secret(&template_opts.environment_id)
-        .await;
-    gateway_result?;
+    let cleanup_result = cleanup_access_stack(&client, &namespace, &template_opts).await;
+    access_result?;
     cleanup_result?;
-    secret_preserved_result?;
-    secret_cleanup_result?;
-    println!("gateway companion object round-trip verified — CRD smoke passed");
+    println!("access object round-trip verified — CRD smoke passed");
     Ok(())
 }
 
@@ -238,7 +229,6 @@ fn render_resize_fixture(
     namespace: &str,
     server_namespace: &str,
     environment_id: &str,
-    gateway_token: &str,
     daemon_auth_token: &str,
     credential_runtime: Option<CredentialRuntimeTemplateConfig>,
 ) -> anyhow::Result<Value> {
@@ -251,12 +241,8 @@ fn render_resize_fixture(
         "resize fixture namespaces must be non-empty canonical values"
     );
     anyhow::ensure!(
-        !gateway_token.trim().is_empty()
-            && gateway_token.trim() == gateway_token
-            && !daemon_auth_token.trim().is_empty()
-            && daemon_auth_token.trim() == daemon_auth_token
-            && gateway_token != daemon_auth_token,
-        "resize fixture requires distinct canonical coordinate and daemon capabilities"
+        !daemon_auth_token.trim().is_empty() && daemon_auth_token.trim() == daemon_auth_token,
+        "resize fixture requires a canonical daemon capability"
     );
 
     let template_name = environment_template_name(RESIZE_TEMPLATE_BASE, environment_id);
@@ -271,7 +257,6 @@ fn render_resize_fixture(
         organization_id: "org_contract_1".into(),
         operation_generation: 1,
         credential_runtime,
-        gateway_token: gateway_token.into(),
         daemon_auth_token: daemon_auth_token.into(),
         server_namespace: server_namespace.into(),
         cpu_millicores: 250,
@@ -398,42 +383,33 @@ fn is_transient_apiserver_shutdown(message: &str) -> bool {
         && (message.contains("ServiceUnavailable") || message.contains("503"))
 }
 
-fn gateway_template_opts(namespace: &str) -> anyhow::Result<TemplateOpts> {
-    let local_gateway = std::env::var("CRD_SMOKE_LOCAL_GATEWAY").as_deref() == Ok("1");
+/// The access objects the smoke renders for `env-crd-smoke`. Nothing here is
+/// a capability: the daemon Service, its policy and the direct-UDP Service
+/// carry none, and the daemon fixture receives its own.
+fn access_template_opts(namespace: &str) -> TemplateOpts {
+    let local_images = std::env::var("CRD_SMOKE_LOCAL_IMAGES").as_deref() == Ok("1");
     let server_namespace =
         std::env::var("CRD_SMOKE_SERVER_NAMESPACE").unwrap_or_else(|_| namespace.into());
     let workspace_image = std::env::var("CRD_SMOKE_WORKSPACE_IMAGE").unwrap_or_else(|_| {
         "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff".into()
     });
-    let gateway_token =
-        resolve_gateway_token(local_gateway, std::env::var("CRD_SMOKE_GATEWAY_TOKEN").ok())?;
-    let daemon_auth_token = resolve_daemon_auth_token(
-        local_gateway,
-        std::env::var("CRD_SMOKE_DAEMON_AUTH_TOKEN").ok(),
-    )?;
-    anyhow::ensure!(
-        gateway_token != daemon_auth_token,
-        "CRD smoke coordinate and daemon capabilities must be distinct"
-    );
-    Ok(TemplateOpts {
+    TemplateOpts {
         name: "tmpl-crd-smoke".into(),
         image: workspace_image,
-        support_image: if local_gateway {
+        support_image: if local_images {
             "codewire-gateway:e2e".into()
         } else {
             "ghcr.io/codewiresh/gateway:crd-smoke".into()
         },
-        runtime_profile: if local_gateway {
+        runtime_profile: if local_images {
             "runc".into()
         } else {
             RUNTIME_PROFILE_COMMODITY.into()
         },
         environment_id: "env-crd-smoke".into(),
-        gateway_token,
         organization_id: "org-crd-smoke".into(),
         operation_generation: 1,
-        daemon_auth_token,
-        api_base_url: if local_gateway {
+        api_base_url: if local_images {
             String::new()
         } else {
             "https://codewire-dev.sh".into()
@@ -454,42 +430,38 @@ fn gateway_template_opts(namespace: &str) -> anyhow::Result<TemplateOpts> {
         disk_gib: 5,
         workspace_storage_class: "standard".into(),
         ..Default::default()
-    })
-}
-
-fn resolve_gateway_token(local_gateway: bool, token: Option<String>) -> anyhow::Result<String> {
-    match token {
-        Some(token) if !token.trim().is_empty() => Ok(token),
-        _ if local_gateway => {
-            anyhow::bail!("CRD_SMOKE_GATEWAY_TOKEN is required with CRD_SMOKE_LOCAL_GATEWAY=1")
-        }
-        _ => Ok("gateway-crd-smoke-token".into()),
     }
 }
 
-fn resolve_daemon_auth_token(local_gateway: bool, token: Option<String>) -> anyhow::Result<String> {
-    match token {
-        Some(token) if !token.trim().is_empty() => Ok(token),
-        _ if local_gateway => {
-            anyhow::bail!("CRD_SMOKE_DAEMON_AUTH_TOKEN is required with CRD_SMOKE_LOCAL_GATEWAY=1")
-        }
-        _ => Ok("daemon-crd-smoke-token".into()),
-    }
-}
-
-async fn cleanup_gateway_stack(
+/// Remove the access objects and prove they, and every gateway object, are
+/// gone.
+async fn cleanup_access_stack(
     client: &SandboxClient,
     namespace: &str,
     opts: &TemplateOpts,
 ) -> anyhow::Result<()> {
     client.delete_access_stack(&opts.environment_id).await?;
-    verify_gateway_host_key_secret(namespace, opts, "post-stack-delete").await?;
-    client
-        .delete_gateway_host_key_secret(&opts.environment_id)
-        .await
+    let kube = kube::Client::try_default().await?;
+    let services: Api<Service> = Api::namespaced(kube.clone(), namespace);
+    let network_policies: Api<NetworkPolicy> = Api::namespaced(kube, namespace);
+    let daemon_service = workspace_daemon_service_name(&opts.environment_id);
+    anyhow::ensure!(
+        services.get_opt(&daemon_service).await?.is_none(),
+        "workspace daemon Service {daemon_service} survived the access stack delete"
+    );
+    let daemon_policy = workspace_daemon_network_policy_name(&opts.environment_id);
+    anyhow::ensure!(
+        network_policies.get_opt(&daemon_policy).await?.is_none(),
+        "workspace NetworkPolicy {daemon_policy} survived the access stack delete"
+    );
+    ensure_no_gateway_objects(namespace, &opts.environment_id).await
 }
 
-async fn verify_gateway_stack(
+/// Apply the access objects and prove their shape: the daemon Service, the
+/// workspace NetworkPolicy admitting orchestration to the daemon, SSH and
+/// preview ports and the world (never the cluster) to the tailnet UDP port,
+/// and no gateway object.
+async fn verify_access_stack(
     client: &SandboxClient,
     namespace: &str,
     opts: &TemplateOpts,
@@ -498,27 +470,7 @@ async fn verify_gateway_stack(
 
     let kube = kube::Client::try_default().await?;
     let services: Api<Service> = Api::namespaced(kube.clone(), namespace);
-    let deployments: Api<Deployment> = Api::namespaced(kube.clone(), namespace);
-    let secrets: Api<Secret> = Api::namespaced(kube.clone(), namespace);
     let network_policies: Api<NetworkPolicy> = Api::namespaced(kube, namespace);
-
-    let gateway_host_key_secret = secrets
-        .get(&gateway_host_key_secret_name(&opts.environment_id))
-        .await?;
-    let gateway_host_key_secret_value = serde_json::to_value(&gateway_host_key_secret)?;
-    ensure_gateway_host_key_secret_shape(&gateway_host_key_secret_value, opts, "initial")?;
-
-    let gateway_service = services
-        .get(&gateway_service_name(&opts.environment_id))
-        .await?;
-    let gateway_service_value = serde_json::to_value(&gateway_service)?;
-    ensure_service_is_cluster_ip_without_nodeports(&gateway_service_value, "gateway service")?;
-    anyhow::ensure!(
-        has_service_port(&gateway_service_value, "ssh", 2222, "TCP")
-            && has_service_port(&gateway_service_value, "readyz", 2223, "TCP")
-            && has_service_port(&gateway_service_value, "tailnet-udp", 31000, "UDP"),
-        "gateway service missing expected ports: {gateway_service_value}"
-    );
 
     let daemon_service = services
         .get(&workspace_daemon_service_name(&opts.environment_id))
@@ -529,72 +481,11 @@ async fn verify_gateway_stack(
         "workspace daemon service",
     )?;
     anyhow::ensure!(
-        has_service_port(&daemon_service_value, "daemon", 7777, "TCP"),
-        "workspace daemon service missing daemon port: {daemon_service_value}"
-    );
-
-    let gateway_deployment = deployments
-        .get(&gateway_workload_name(&opts.environment_id))
-        .await?;
-    let gateway_deployment_value = serde_json::to_value(&gateway_deployment)?;
-    anyhow::ensure!(
-        gateway_deployment_value["spec"]["template"]["spec"]["containers"]
-            .as_array()
-            .map(|containers| {
-                containers.len() == 1
-                    && containers[0]["name"] == "codewire-gateway"
-                    && containers[0]["env"].as_array().is_some_and(|env| {
-                        env.iter().any(|entry| {
-                            entry["name"] == "CODEWIRE_WORKSPACE_SHIM_ADDR"
-                                && entry["value"]
-                                    .as_str()
-                                    .is_some_and(|value| value.contains(":7777"))
-                        }) && env.iter().any(|entry| {
-                            entry["name"] == "CODEWIRE_DAEMON_AUTH_TOKEN"
-                                && entry["value"]
-                                    .as_str()
-                                    .is_some_and(|value| value == opts.daemon_auth_token)
-                        }) && env.iter().any(|entry| {
-                            entry["name"] == "CODEWIRE_GATEWAY_TOKEN"
-                                && entry["value"]
-                                    .as_str()
-                                    .is_some_and(|value| value == opts.gateway_token)
-                        })
-                    })
-            })
-            .unwrap_or(false),
-        "gateway deployment did not keep coordinate and daemon capabilities separated"
-    );
-    let expected_runtime_class = opts.runtime_profile_spec().runtime_class_name;
-    anyhow::ensure!(
-        gateway_deployment_value["spec"]["template"]["spec"]["runtimeClassName"]
-            == expected_runtime_class,
-        "gateway deployment runtime class did not match {:?}",
-        expected_runtime_class
-    );
-    anyhow::ensure!(
-        value_contains(&gateway_deployment_value, "gateway-host-key")
-            && value_contains(&gateway_deployment_value, "codewire-gateway-host-key-init")
-            && value_contains(
-                &gateway_deployment_value,
-                "/codewire/gateway/ssh/host_ed25519"
-            ),
-        "gateway deployment missing host-key Secret mount/init shape"
-    );
-
-    let gateway_policy = network_policies
-        .get(&gateway_network_policy_name(&opts.environment_id))
-        .await?;
-    let gateway_policy_value = serde_json::to_value(&gateway_policy)?;
-    anyhow::ensure!(
-        gateway_policy_value["spec"]["podSelector"]["matchLabels"]["codewire.sh/type"] == "gateway",
-        "gateway NetworkPolicy selector is wrong: {gateway_policy_value}"
-    );
-    anyhow::ensure!(
-        value_contains(&gateway_policy_value, "7777")
-            && value_contains(&gateway_policy_value, "31000")
-            && value_contains(&gateway_policy_value, "3478"),
-        "gateway NetworkPolicy missing daemon/UDP/STUN shape: {gateway_policy_value}"
+        has_service_port(&daemon_service_value, "daemon", 7777, "TCP")
+            && daemon_service_value["spec"]["ports"]
+                .as_array()
+                .is_some_and(|ports| ports.len() == 1),
+        "workspace daemon service must expose exactly the daemon port: {daemon_service_value}"
     );
 
     let daemon_policy = network_policies
@@ -607,51 +498,51 @@ async fn verify_gateway_stack(
         "workspace daemon NetworkPolicy selector is wrong: {daemon_policy_value}"
     );
     anyhow::ensure!(
-        value_contains(&daemon_policy_value, "gateway")
-            && value_contains(&daemon_policy_value, "7777"),
-        "workspace daemon NetworkPolicy missing gateway-to-daemon ingress: {daemon_policy_value}"
+        has_orchestration_access_ingress(&daemon_policy_value, &opts.server_namespace),
+        "workspace daemon NetworkPolicy missing orchestration-to-daemon/SSH/app-preview ingress: {daemon_policy_value}"
     );
     anyhow::ensure!(
-        has_orchestration_daemon_and_preview_ingress(&daemon_policy_value, &opts.server_namespace),
-        "workspace daemon NetworkPolicy missing orchestration-to-daemon/app-preview ingress: {daemon_policy_value}"
+        has_world_only_tailnet_ingress(&daemon_policy_value),
+        "workspace daemon NetworkPolicy missing world-only tailnet UDP ingress: {daemon_policy_value}"
+    );
+    anyhow::ensure!(
+        !value_contains(&daemon_policy_value, "\"gateway\""),
+        "workspace daemon NetworkPolicy still admits a gateway: {daemon_policy_value}"
     );
 
-    Ok(())
+    ensure_no_gateway_objects(namespace, &opts.environment_id).await
 }
 
-async fn verify_gateway_host_key_secret(
-    namespace: &str,
-    opts: &TemplateOpts,
-    phase: &str,
-) -> anyhow::Result<()> {
+/// The workspace daemon hosts SSH and the tailnet, so no gateway Deployment,
+/// Service, NetworkPolicy, warm-member bridge or host-key Secret exists.
+async fn ensure_no_gateway_objects(namespace: &str, env_id: &str) -> anyhow::Result<()> {
     let kube = kube::Client::try_default().await?;
-    let secrets: Api<Secret> = Api::namespaced(kube, namespace);
-    let secret = secrets
-        .get(&gateway_host_key_secret_name(&opts.environment_id))
-        .await?;
-    let secret_value = serde_json::to_value(&secret)?;
-    ensure_gateway_host_key_secret_shape(&secret_value, opts, phase)
-}
-
-fn ensure_gateway_host_key_secret_shape(
-    value: &Value,
-    opts: &TemplateOpts,
-    phase: &str,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        value["metadata"]["labels"]["codewire.sh/environment-id"] == opts.environment_id,
-        "gateway host key Secret missing environment label during {phase}"
-    );
-    anyhow::ensure!(
-        value["metadata"]["labels"]["codewire.sh/type"] == "gateway-host-key",
-        "gateway host key Secret missing type label during {phase}"
-    );
-    anyhow::ensure!(
-        value["data"][GATEWAY_HOST_KEY_SECRET_KEY]
-            .as_str()
-            .is_some_and(|encoded| !encoded.trim().is_empty()),
-        "gateway host key Secret missing data key during {phase}"
-    );
+    let deployments: Api<Deployment> = Api::namespaced(kube.clone(), namespace);
+    let services: Api<Service> = Api::namespaced(kube.clone(), namespace);
+    let secrets: Api<Secret> = Api::namespaced(kube.clone(), namespace);
+    let network_policies: Api<NetworkPolicy> = Api::namespaced(kube, namespace);
+    let mut found = Vec::new();
+    let workload = gateway_workload_name(env_id);
+    if deployments.get_opt(&workload).await?.is_some() {
+        found.push(format!("Deployment/{workload}"));
+    }
+    let service = gateway_service_name(env_id);
+    if services.get_opt(&service).await?.is_some() {
+        found.push(format!("Service/{service}"));
+    }
+    for policy in [
+        gateway_network_policy_name(env_id),
+        warm_member_gateway_bridge_name(env_id),
+    ] {
+        if network_policies.get_opt(&policy).await?.is_some() {
+            found.push(format!("NetworkPolicy/{policy}"));
+        }
+    }
+    let host_key = gateway_host_key_secret_name(env_id);
+    if secrets.get_opt(&host_key).await?.is_some() {
+        found.push(format!("Secret/{host_key}"));
+    }
+    anyhow::ensure!(found.is_empty(), "gateway objects exist: {found:?}");
     Ok(())
 }
 
@@ -682,7 +573,7 @@ fn has_service_port(value: &Value, name: &str, port: i64, protocol: &str) -> boo
         })
 }
 
-fn has_orchestration_daemon_and_preview_ingress(value: &Value, server_namespace: &str) -> bool {
+fn has_orchestration_access_ingress(value: &Value, server_namespace: &str) -> bool {
     value["spec"]["ingress"]
         .as_array()
         .into_iter()
@@ -700,20 +591,55 @@ fn has_orchestration_daemon_and_preview_ingress(value: &Value, server_namespace:
                         && from["podSelector"]["matchLabels"]["app.kubernetes.io/component"]
                             == "orchestration"
                 });
-            let daemon_port_matches = ingress["ports"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|port| port["protocol"] == "TCP" && port["port"] == 7777);
-            let preview_port_matches =
-                ingress["ports"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|port| {
-                        port["protocol"] == "TCP" && port["port"] == 1 && port["endPort"] == 65535
-                    });
-            from_matches && daemon_port_matches && preview_port_matches
+            let ports = || ingress["ports"].as_array().into_iter().flatten();
+            let tcp_port =
+                |want: i64| ports().any(|port| port["protocol"] == "TCP" && port["port"] == want);
+            let preview_port_matches = ports().any(|port| {
+                port["protocol"] == "TCP" && port["port"] == 1 && port["endPort"] == 65535
+            });
+            from_matches
+                && tcp_port(7777)
+                && tcp_port(i64::from(WORKSPACE_SSH_PORT))
+                && preview_port_matches
+        })
+}
+
+/// The tailnet UDP port admits only world addresses: every peer is an
+/// `ipBlock` whose exceptions cover the private, carrier-grade NAT and
+/// loopback ranges, so no cluster or Pod address can reach it.
+fn has_world_only_tailnet_ingress(value: &Value) -> bool {
+    value["spec"]["ingress"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|ingress| {
+            let udp_tailnet = ingress["ports"].as_array().is_some_and(|ports| {
+                ports.len() == 1
+                    && ports[0]["protocol"] == "UDP"
+                    && ports[0]["port"] == i64::from(WORKSPACE_TAILNET_UDP_PORT)
+            });
+            let world_only = ingress["from"].as_array().is_some_and(|from| {
+                !from.is_empty()
+                    && from.iter().all(|peer| {
+                        peer.as_object().is_some_and(|peer| peer.len() == 1)
+                            && match peer["ipBlock"]["cidr"].as_str() {
+                                Some("0.0.0.0/0") => [
+                                    "10.0.0.0/8",
+                                    "100.64.0.0/10",
+                                    "127.0.0.0/8",
+                                    "172.16.0.0/12",
+                                    "192.168.0.0/16",
+                                ]
+                                .iter()
+                                .all(|range| value_contains(&peer["ipBlock"]["except"], range)),
+                                Some("::/0") => {
+                                    value_contains(&peer["ipBlock"]["except"], "fc00::/7")
+                                }
+                                _ => false,
+                            }
+                    })
+            });
+            udp_tailnet && world_only
         })
 }
 
@@ -727,9 +653,10 @@ fn value_contains(value: &Value, needle: &str) -> bool {
 mod tests {
     use super::{
         RESIZE_MARKER_ENV, RESIZE_MARKER_KEY, RESIZE_MARKER_VALUE, RESIZE_TEMPLATE_BASE,
-        is_transient_apiserver_shutdown, render_resize_fixture, resolve_daemon_auth_token,
-        resolve_gateway_token, validate_resize_environment_id,
+        access_template_opts, has_orchestration_access_ingress, has_world_only_tailnet_ingress,
+        is_transient_apiserver_shutdown, render_resize_fixture, validate_resize_environment_id,
     };
+    use codewire_orchestration::sandbox::template::render_workspace_daemon_network_policy;
 
     const RESIZE_ENV: &str = "00000000-0000-4000-8000-000000000123";
 
@@ -738,7 +665,6 @@ mod tests {
             "dev-sandboxes",
             "codewire-e2e",
             RESIZE_ENV,
-            "synthetic-coordinate-capability",
             "synthetic-daemon-capability",
             None,
         )
@@ -768,27 +694,41 @@ mod tests {
     }
 
     #[test]
-    fn local_gateway_requires_distinct_coordinate_and_daemon_credentials() {
-        assert!(resolve_gateway_token(true, None).is_err());
-        assert!(resolve_gateway_token(true, Some("  ".into())).is_err());
-        assert_eq!(
-            resolve_gateway_token(true, Some("derived-environment-token".into())).unwrap(),
-            "derived-environment-token"
+    fn access_policy_admits_orchestration_and_world_only_tailnet() {
+        let opts = access_template_opts("dev-sandboxes");
+        let policy = render_workspace_daemon_network_policy("dev-sandboxes", &opts);
+        assert!(has_orchestration_access_ingress(
+            &policy,
+            &opts.server_namespace
+        ));
+        assert!(has_world_only_tailnet_ingress(&policy));
+        assert!(
+            !serde_json::to_string(&policy)
+                .unwrap()
+                .contains("\"gateway\"")
         );
-        assert_eq!(
-            resolve_gateway_token(false, None).unwrap(),
-            "gateway-crd-smoke-token"
-        );
-        assert!(resolve_daemon_auth_token(true, None).is_err());
-        assert!(resolve_daemon_auth_token(true, Some("  ".into())).is_err());
-        assert_eq!(
-            resolve_daemon_auth_token(true, Some("derived-daemon-token".into())).unwrap(),
-            "derived-daemon-token"
-        );
-        assert_eq!(
-            resolve_daemon_auth_token(false, None).unwrap(),
-            "daemon-crd-smoke-token"
-        );
+
+        let mut no_ssh = policy.clone();
+        for ingress in no_ssh["spec"]["ingress"].as_array_mut().unwrap() {
+            if let Some(ports) = ingress["ports"].as_array_mut() {
+                ports.retain(|port| port["port"] != 2222);
+            }
+        }
+        assert!(!has_orchestration_access_ingress(
+            &no_ssh,
+            &opts.server_namespace
+        ));
+
+        let mut cluster_peer = policy.clone();
+        for ingress in cluster_peer["spec"]["ingress"].as_array_mut().unwrap() {
+            if ingress["ports"][0]["protocol"] == "UDP" {
+                ingress["from"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({"podSelector": {}}));
+            }
+        }
+        assert!(!has_world_only_tailnet_ingress(&cluster_peer));
     }
 
     #[test]
@@ -937,16 +877,17 @@ mod tests {
         ] {
             assert!(validate_resize_environment_id(invalid).is_err());
         }
-        assert!(
-            render_resize_fixture(
-                "dev-sandboxes",
-                "codewire-e2e",
-                RESIZE_ENV,
-                "same-capability",
-                "same-capability",
-                None,
-            )
-            .is_err()
-        );
+        for capability in ["", " padded-capability "] {
+            assert!(
+                render_resize_fixture(
+                    "dev-sandboxes",
+                    "codewire-e2e",
+                    RESIZE_ENV,
+                    capability,
+                    None,
+                )
+                .is_err()
+            );
+        }
     }
 }

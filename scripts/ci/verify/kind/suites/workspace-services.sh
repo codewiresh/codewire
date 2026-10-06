@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Retained workspace services: gateway host-key restart, exec, file service,
-# environment setup/session/run, resize, and the Temporal workflow smoke.
+# Retained workspace services: the access objects (no gateway objects), exec,
+# file service, environment setup/session/run, resize, and the Temporal
+# workflow smoke.
 # Designed to repeat; each run leaves one errored env-temporal-kind-* row.
 set -euo pipefail
 
@@ -14,8 +15,6 @@ run_retained_workspace_services_suite() {
   require_tool jq
   require_tool kind
   require_tool kubectl
-  require_tool ssh-keygen
-  require_tool ssh-keyscan
 
   trap retained_suite_cleanup EXIT
   validate_retained_cluster

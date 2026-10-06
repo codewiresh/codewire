@@ -19,8 +19,6 @@ run_integrated_kind_suite() {
   require_tool openssl
   require_tool psql
   require_tool python3
-  require_tool ssh-keygen
-  require_tool ssh-keyscan
 
   # Browser dependencies are host inputs, not cluster state. Reject a missing
   # frozen install or browser before the expensive image, smoke-binary and

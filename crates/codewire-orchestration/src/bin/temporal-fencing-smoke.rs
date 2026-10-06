@@ -22,7 +22,7 @@ mod enabled {
     use anyhow::Context as _;
     use codewire_orchestration::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE;
     use codewire_orchestration::sandbox::client::SandboxClient;
-    use codewire_orchestration::sandbox::template::gateway_host_key_secret_name;
+    use codewire_orchestration::sandbox::host_keys::RecordedHostKeys;
     use codewire_orchestration::temporal::{
         EnvironmentCommand, EnvironmentWorkflow, EnvironmentWorkflowRun,
         OrganizationDeletionWorkflow, TemporalTrigger, environment_workflow_id,
@@ -47,8 +47,6 @@ mod enabled {
     };
     use connectrpc::ErrorCode;
     use connectrpc::client::{ClientConfig, HttpClient};
-    use k8s_openapi::api::core::v1::Secret;
-    use kube::Api;
     use reqwest::header::COOKIE;
     use serde_json::{Value, json};
     use sqlx::PgPool;
@@ -62,6 +60,10 @@ mod enabled {
 
     const TEMPORAL_NAMESPACE: &str = "default";
     const SANDBOX_NAMESPACE: &str = "dev-sandboxes";
+    /// The Kind overlay's namespace: its orchestration serves the workspace
+    /// binding listener every workspace daemon binds through, and its
+    /// coordinator. The worker renders exactly what that orchestration would.
+    const SERVER_NAMESPACE: &str = "codewire-e2e";
     const SETUP_WAIT_QUIET_LIMIT: Duration = Duration::from_secs(240);
     const SETUP_WAIT_ABSOLUTE_LIMIT: Duration = Duration::from_secs(600);
     const ATTEMPT_HISTORY_WAIT: Duration = Duration::from_secs(10);
@@ -350,6 +352,25 @@ mod enabled {
                 .env("SANDBOX_NETWORK_POLICY_MANAGEMENT", "Managed")
                 .env("SANDBOX_DIND_ENABLED", "false")
                 .env("SIDECAR_READY_TIMEOUT_SECS", "120")
+                // Only a bound daemon serves SSH and records its host key, so
+                // the worker binds workspaces through the in-cluster listener,
+                // with the overlay's settings (tests/e2e/kind/support.yaml).
+                .env("POD_NAMESPACE", SERVER_NAMESPACE)
+                .env(
+                    "CODEWIRE_API_URL",
+                    format!(
+                        "http://codewire-orchestration.{SERVER_NAMESPACE}.svc.cluster.local:8084"
+                    ),
+                )
+                .env(
+                    "CODEWIRE_COORDINATOR_URL",
+                    format!(
+                        "http://codewire-coordinator.{SERVER_NAMESPACE}.svc.cluster.local:8090"
+                    ),
+                )
+                .env("SANDBOX_COORDINATOR_EXTRA_ROOTS", "true")
+                .env("SANDBOX_INGRESS_NAMESPACE", "ingress-nginx")
+                .env("SANDBOX_INGRESS_POD_NAME", "ingress-nginx")
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .kill_on_drop(true);
@@ -653,6 +674,51 @@ mod enabled {
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
+        }
+
+        /// A ready environment's access invariants: its current
+        /// incarnation completed `access_ready`, one host key is recorded
+        /// for its current generation by its current Pod, and that Pod's SSH
+        /// port presents exactly that key.
+        async fn assert_access_ready(&self, env_id: &str, pod_uid: &str) -> anyhow::Result<()> {
+            let completed: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM environment_logs
+                  WHERE environment_id = $1 AND phase = 'access_ready' AND status = 'completed'",
+            )
+            .bind(env_id)
+            .fetch_one(&self.pool)
+            .await?;
+            anyhow::ensure!(
+                completed >= 1,
+                "{env_id} reached setup without a completed access_ready stage"
+            );
+            let recorded: Option<String> = sqlx::query_scalar(
+                "SELECT k.pod_uid FROM sandbox_ssh_host_keys k
+                   JOIN environments e
+                     ON e.id = k.environment_id
+                    AND e.environment_operation_generation = k.operation_generation
+                  WHERE k.environment_id = $1",
+            )
+            .bind(env_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            let recorded = recorded.ok_or_else(|| {
+                anyhow::anyhow!("{env_id} has no host key recorded for its current generation")
+            })?;
+            anyhow::ensure!(
+                recorded == pod_uid,
+                "{env_id}'s current host key was recorded by Pod {recorded}, not its current Pod {pod_uid}"
+            );
+            self.sandbox
+                .wait_for_workspace_access_ready(
+                    env_id,
+                    Duration::from_secs(30),
+                    &RecordedHostKeys(&self.pool),
+                )
+                .await
+                .with_context(|| {
+                    format!("{env_id}'s Pod SSH port does not present its recorded key")
+                })
         }
 
         async fn wait_setup_error<W>(
@@ -1086,7 +1152,6 @@ mod enabled {
                 "Sandbox/",
                 "Pod/",
                 "PersistentVolumeClaim/",
-                "Deployment/",
                 "Service/",
                 "NetworkPolicy/",
                 "SandboxTemplate/",
@@ -1101,13 +1166,16 @@ mod enabled {
                     residue.resources
                 );
             }
-            let secrets: Api<Secret> =
-                Api::namespaced(kube::Client::try_default().await?, SANDBOX_NAMESPACE);
-            let host_key_name = gateway_host_key_secret_name(&env_id);
+            // The daemon hosts SSH and the tailnet: no gateway workload.
             anyhow::ensure!(
-                secrets.get_opt(&host_key_name).await?.is_some(),
-                "WI-2 fixture did not create gateway host-key Secret"
+                !residue
+                    .resources
+                    .iter()
+                    .any(|resource| resource.starts_with("Deployment/")),
+                "WI-2 fixture created a gateway Deployment: {:?}",
+                residue.resources
             );
+            self.assert_access_ready(&env_id, &workspace.uid).await?;
 
             let session_id = format!("session-{env_id}");
             sqlx::query(
@@ -1174,10 +1242,6 @@ mod enabled {
                 }
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
-            anyhow::ensure!(
-                secrets.get_opt(&host_key_name).await?.is_none(),
-                "gateway host-key Secret survived external cleanup"
-            );
             let backend_retained: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM sandbox_environment_backend WHERE environment_id = $1)",
             )

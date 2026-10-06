@@ -76,10 +76,6 @@ SANDBOX_NS=dev-sandboxes
 # shellcheck source=scripts/ci/verify/kind/credentials.sh
 source "$ROOT/scripts/ci/verify/kind/credentials.sh"
 AUTHZ_TMPDIR=""
-GATEWAY_SMOKE_TMPDIR=""
-GATEWAY_PORT_FORWARD_PID=""
-GATEWAY_PORT_FORWARD_PORT=""
-GATEWAY_PUBLIC_FINGERPRINT=""
 KIND_E2E_COMPATIBILITY_VERSION=1
 KIND_E2E_PREPARED_CONFIGMAP=codewire-kind-e2e-prepared
 RETAINED_KUBECONFIG=""
@@ -343,7 +339,6 @@ dump_cluster_state() {
 
 cleanup() {
   local status=$?
-  stop_gateway_port_forward
   if [ "$status" -ne 0 ]; then
     dump_cluster_state
   fi
@@ -353,9 +348,6 @@ cleanup() {
   fi
   if [ -n "$AUTHZ_TMPDIR" ]; then
     rm -rf "$AUTHZ_TMPDIR"
-  fi
-  if [ -n "$GATEWAY_SMOKE_TMPDIR" ]; then
-    rm -rf "$GATEWAY_SMOKE_TMPDIR"
   fi
   exit "$status"
 }
@@ -386,30 +378,17 @@ assert_kind_idp_topology() {
 
 retained_suite_cleanup() {
   local status=$?
-  stop_gateway_port_forward
   if [ "$status" -ne 0 ]; then
     dump_cluster_state
   fi
   if [ -n "$AUTHZ_TMPDIR" ]; then
     rm -rf "$AUTHZ_TMPDIR"
   fi
-  if [ -n "$GATEWAY_SMOKE_TMPDIR" ]; then
-    rm -rf "$GATEWAY_SMOKE_TMPDIR"
-  fi
   if [ -n "$RETAINED_KUBECONFIG" ]; then
     rm -f "$RETAINED_KUBECONFIG"
   fi
   log "retained suite left Kind cluster ${KIND_CLUSTER_NAME} intact"
   exit "$status"
-}
-
-stop_gateway_port_forward() {
-  if [ -n "$GATEWAY_PORT_FORWARD_PID" ]; then
-    kill "$GATEWAY_PORT_FORWARD_PID" >/dev/null 2>&1 || true
-    wait "$GATEWAY_PORT_FORWARD_PID" >/dev/null 2>&1 || true
-    GATEWAY_PORT_FORWARD_PID=""
-    GATEWAY_PORT_FORWARD_PORT=""
-  fi
 }
 
 require_tool() {
@@ -757,10 +736,6 @@ auth_token_for_environment_scope() {
       | openssl base64 -A | tr '+/' '-_' | tr -d '='
   )"
   printf '%s.%s' "$encoded_payload" "$signature"
-}
-
-gateway_auth_token_for_environment() {
-  auth_token_for_environment_scope "$1" coordinate
 }
 
 daemon_auth_token_for_environment() {
@@ -2773,10 +2748,8 @@ file_service_smoke() (
   # The Sandbox that controls the daemon Pod, named like it, as the
   # controller names a Sandbox's own Pod.
   local sandbox_name="$daemon_pod"
-  local gateway_token daemon_token original_replicas pod_ip pod_uid ready
+  local original_replicas pod_ip pod_uid ready
   local claim_uid sandbox_uid pod_owner
-  gateway_token="$(gateway_auth_token_for_environment "$environment_id")"
-  daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
 
   original_replicas="$(
     kubectl -n agent-sandbox-system get deploy/agent-sandbox-controller \
@@ -2983,13 +2956,10 @@ SQL
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
     CRD_SMOKE_SERVER_NAMESPACE="$NS" \
     CRD_SMOKE_WORKSPACE_IMAGE="$workspace_image" \
-    CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" \
-    CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
-    CRD_SMOKE_GATEWAY_PHASE=cleanup \
-    CRD_SMOKE_LOCAL_GATEWAY=1 \
+    CRD_SMOKE_ACCESS_PHASE=cleanup \
+    CRD_SMOKE_LOCAL_IMAGES=1 \
     "$CARGO_CI_DIR/crd-smoke"
   kubectl -n "$SANDBOX_NS" delete pod "$daemon_pod" --wait=true >/dev/null
-  rm -rf "$GATEWAY_SMOKE_TMPDIR"
   log "daemon-native FileService streaming and black-box Connect contract green"
 )
 
@@ -3196,13 +3166,28 @@ deploy_agent_sandbox() {
 }
 
 workspace_service_smokes() {
-  gateway_host_key_restart_smoke
+  workspace_access_stack_smoke
 
   log "running workspace exec smoke"
   SMOKE_NAMESPACE="$SANDBOX_NS" SMOKE_POD_NAME=crd-smoke-workspace-daemon \
     "$CARGO_CI_DIR/exec-smoke"
   file_service_smoke
   environment_resize_smoke
+}
+
+# The workspace daemon hosts SSH and the tailnet: an environment owns no
+# gateway Deployment, Service, NetworkPolicy, warm-member bridge or host-key
+# Secret.
+assert_no_kind_gateway_objects() {
+  local environment_id="$1" found
+  found="$(kubectl -n "$SANDBOX_NS" get \
+    "deployment/cw-gateway-$environment_id" "service/cw-gateway-svc-$environment_id" \
+    "networkpolicy/cw-gw-net-$environment_id" "networkpolicy/cw-gw-warm-$environment_id" \
+    "secret/cw-gateway-host-key-$environment_id" --ignore-not-found=true -o name)" || return $?
+  if [ -n "$found" ]; then
+    echo "::error::environment ${environment_id} owns gateway objects: $(tr '\n' ' ' <<<"$found")"
+    return 1
+  fi
 }
 
 environment_resize_smoke() (
@@ -3215,21 +3200,20 @@ environment_resize_smoke() (
   local template_name shadow_pool_name
   local claim_name="sandbox-${environment_id}"
   local daemon_service="cw-daemon-${environment_id}"
-  local gateway_token daemon_token sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid
+  local daemon_token sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid
   local operation_id operation_state response runtime_state marker image resources
   local resize_manifest="$RUN_DIR/resize-$environment_id.json"
   trap 'rm -f -- "$resize_manifest"' EXIT
-  gateway_token="$(gateway_auth_token_for_environment "$environment_id")"
   daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
 
   # Render through the same production code that runtime reconciliation validates.
   # No cluster mutation occurs before these exact object identities are known.
   CRD_SMOKE_RESIZE_PHASE=render CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id" \
     CRD_SMOKE_NAMESPACE="$SANDBOX_NS" CRD_SMOKE_SERVER_NAMESPACE="$NS" \
-    CRD_SMOKE_LOCAL_GATEWAY=1 CRD_SMOKE_WORKSPACE_IMAGE=codewire-gateway:e2e \
+    CRD_SMOKE_LOCAL_IMAGES=1 CRD_SMOKE_WORKSPACE_IMAGE=codewire-gateway:e2e \
     SANDBOX_CREDENTIAL_BROKER_NAMESPACE="$NS" \
     SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP=codewire-credential-broker-roots \
-    CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
+    CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
     "$CARGO_CI_DIR/crd-smoke" >"$resize_manifest"
   template_name="$(jq -er '.items[] | select(.kind == "SandboxTemplate") | .metadata.name' "$resize_manifest")"
   shadow_pool_name="$(jq -er '.items[] | select(.kind == "SandboxWarmPool") | .metadata.name' "$resize_manifest")"
@@ -3252,25 +3236,17 @@ DELETE FROM environment_presets WHERE id = '$preset_id' AND org_id = 'org_contra
 COMMIT;
 SQL
     [ "$?" -eq 0 ] || status=1
-    # Runtime identity reconciliation creates the ordinary gateway stack.
-    # Stop its Deployment, and any legacy gateway Certificate, before deleting
-    # a key; never delete the shared fixture Issuers or public root ConfigMaps.
+    # Runtime identity reconciliation creates the environment's access
+    # objects. Stop its workload before any legacy gateway Certificate, and
+    # never delete the shared fixture Issuers or public root ConfigMaps.
     if CRD_SMOKE_RESIZE_PHASE=release CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id" \
       CRD_SMOKE_NAMESPACE="$SANDBOX_NS" "$CARGO_CI_DIR/crd-smoke" &&
       kubectl -n "$SANDBOX_NS" delete \
       "sandboxclaim/$claim_name" "sandboxwarmpool/$shadow_pool_name" \
       "sandboxtemplate/$template_name" "service/$daemon_service" \
-      "deployment/cw-gateway-$environment_id" \
-      "service/cw-gateway-svc-$environment_id" "service/cw-gateway-udp-$environment_id" \
-      "networkpolicy/cw-gw-net-$environment_id" "networkpolicy/cw-daemon-net-$environment_id" \
+      "service/cw-gateway-udp-$environment_id" "networkpolicy/cw-daemon-net-$environment_id" \
       --ignore-not-found=true --cascade=foreground --wait=true --timeout=120s >/dev/null; then
-      if delete_kind_credential_bootstrap "$environment_id"; then
-        kubectl -n "$SANDBOX_NS" delete \
-          "secret/cw-gateway-host-key-$environment_id" \
-          --ignore-not-found=true --wait=true --timeout=120s >/dev/null || status=1
-      else
-        status=1
-      fi
+      delete_kind_credential_bootstrap "$environment_id" || status=1
     else
       status=1
     fi
@@ -3504,6 +3480,8 @@ SQL
     return 1
   fi
 
+  assert_no_kind_gateway_objects "$environment_id"
+
   local as_user="system:serviceaccount:${NS}:codewire-orchestration"
   if [ "$(kubectl auth can-i get storageclasses.storage.k8s.io --as "$as_user")" != "yes" ] \
       || [ "$(kubectl auth can-i patch persistentvolumeclaims --namespace "$SANDBOX_NS" --as "$as_user")" != "yes" ]; then
@@ -3682,89 +3660,23 @@ assert_sandbox_supply_chain() {
   log "sandbox token automount disabled and observed workspace/DinD references are immutable"
 }
 
-start_gateway_port_forward() {
-  local label="$1"
-  local log_file="$GATEWAY_SMOKE_TMPDIR/port-forward-${label}.log"
-  local i
-
-  stop_gateway_port_forward
-  kubectl -n "$SANDBOX_NS" port-forward --address=127.0.0.1 \
-    service/cw-gateway-svc-env-crd-smoke :2222 >"$log_file" 2>&1 &
-  GATEWAY_PORT_FORWARD_PID=$!
-  for i in $(seq 1 30); do
-    GATEWAY_PORT_FORWARD_PORT="$(
-      sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) -> 2222$/\1/p' \
-        "$log_file" | sed -n '1p'
-    )"
-    if [ -n "$GATEWAY_PORT_FORWARD_PORT" ]; then
-      return 0
-    fi
-    if ! kill -0 "$GATEWAY_PORT_FORWARD_PID" >/dev/null 2>&1; then
-      echo "::error::gateway port-forward exited before becoming ready"
-      sed -n '1,80p' "$log_file" >&2
-      return 1
-    fi
-    sleep 1
-  done
-  echo "::error::gateway port-forward did not publish a local port"
-  sed -n '1,80p' "$log_file" >&2
-  return 1
-}
-
-capture_gateway_public_fingerprint() {
-  local label="$1"
-  local public_key=""
-  local i
-
-  start_gateway_port_forward "$label"
-  for i in $(seq 1 30); do
-    public_key="$(
-      { ssh-keyscan -T 2 -t ed25519 -p "$GATEWAY_PORT_FORWARD_PORT" 127.0.0.1 \
-          2>/dev/null || true; } | awk '$2 == "ssh-ed25519" { print; exit }'
-    )"
-    if [ -n "$public_key" ]; then
-      break
-    fi
-    sleep 1
-  done
-  stop_gateway_port_forward
-  if [ -z "$public_key" ]; then
-    echo "::error::gateway did not present an Ed25519 SSH host key during ${label} probe"
-    return 1
-  fi
-  GATEWAY_PUBLIC_FINGERPRINT="$(
-    printf '%s\n' "$public_key" | ssh-keygen -lf - -E sha256 | awk '{ print $2 }'
-  )"
-  if [[ "$GATEWAY_PUBLIC_FINGERPRINT" != SHA256:* ]]; then
-    echo "::error::gateway ${label} SSH fingerprint was malformed"
-    return 1
-  fi
-}
-
-gateway_host_key_restart_smoke() {
+workspace_access_stack_smoke() {
   local workspace_image
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   local daemon_pod=crd-smoke-workspace-daemon
-  local gateway_deploy=cw-gateway-env-crd-smoke
-  local host_key_secret=cw-gateway-host-key-env-crd-smoke
-  local gateway_token daemon_token
-  local before_fingerprint after_fingerprint before_uid after_uid
+  local daemon_token
 
-  log "running CRD round-trip and gateway host-key restart smoke"
-  gateway_token="$(gateway_auth_token_for_environment env-crd-smoke)"
+  log "running CRD round-trip and access-object smoke (no gateway objects)"
   daemon_token="$(daemon_auth_token_for_environment env-crd-smoke)"
-  GATEWAY_SMOKE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/codewire-kind-gateway.XXXXXX")"
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
     CRD_SMOKE_SERVER_NAMESPACE="$NS" \
     CRD_SMOKE_WORKSPACE_IMAGE="$workspace_image" \
-    CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" \
-    CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
-    CRD_SMOKE_GATEWAY_PHASE=setup \
-    CRD_SMOKE_LOCAL_GATEWAY=1 \
+    CRD_SMOKE_ACCESS_PHASE=setup \
+    CRD_SMOKE_LOCAL_IMAGES=1 \
     "$CARGO_CI_DIR/crd-smoke"
 
   # Pod specs are immutable. Recreate only this owned daemon fixture when a
-  # retained service smoke is repeated; preserve the gateway and host-key Secret.
+  # retained service smoke is repeated; the access objects stay in place.
   kubectl -n "$SANDBOX_NS" delete "pod/${daemon_pod}" \
     --ignore-not-found=true --wait=true --timeout=120s
   kubectl_apply -f - <<EOF
@@ -3827,32 +3739,8 @@ spec:
 EOF
   kubectl -n "$SANDBOX_NS" wait "pod/${daemon_pod}" \
     --for=condition=Ready --timeout=120s
-  kubectl -n "$SANDBOX_NS" rollout status "deployment/${gateway_deploy}" --timeout=180s
 
-  before_uid="$(
-    kubectl -n "$SANDBOX_NS" get secret "$host_key_secret" -o jsonpath='{.metadata.uid}'
-  )"
-  capture_gateway_public_fingerprint before-restart
-  before_fingerprint="$GATEWAY_PUBLIC_FINGERPRINT"
-
-  kubectl -n "$SANDBOX_NS" rollout restart "deployment/${gateway_deploy}" >/dev/null
-  kubectl -n "$SANDBOX_NS" rollout status "deployment/${gateway_deploy}" --timeout=180s
-  after_uid="$(
-    kubectl -n "$SANDBOX_NS" get secret "$host_key_secret" -o jsonpath='{.metadata.uid}'
-  )"
-  capture_gateway_public_fingerprint after-restart
-  after_fingerprint="$GATEWAY_PUBLIC_FINGERPRINT"
-
-  if [ "$after_uid" != "$before_uid" ]; then
-    echo "::error::gateway host-key Secret identity changed across gateway restart"
-    return 1
-  fi
-  if [ "$after_fingerprint" != "$before_fingerprint" ]; then
-    echo "::error::gateway SSH host-key fingerprint changed across gateway restart"
-    return 1
-  fi
-
-  log "gateway host-key Secret identity and SSH fingerprint survived restart; retaining the stack for FileService"
+  log "access objects verified with no gateway objects; retaining the daemon fixture for FileService"
 }
 
 billing_contract_through_ingress() {

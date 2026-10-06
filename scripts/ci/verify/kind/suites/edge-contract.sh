@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Retained edge contract: gateway host-key authorization, ingress routing and
-# Connect edge probes. Read-only or self-cleaning; safe to repeat.
+# Retained edge contract: orchestration's narrow sandbox Secret authorization
+# (which still bounds the one-time removal of legacy gateway host-key
+# Secrets), ingress routing and Connect edge probes. Read-only or
+# self-cleaning; safe to repeat.
 set -euo pipefail
 
 if [ "${KIND_E2E_COMMON_LOADED:-0}" != "1" ]; then
