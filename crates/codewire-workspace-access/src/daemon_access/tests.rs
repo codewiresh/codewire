@@ -148,9 +148,14 @@ struct DaemonSsh {
     workspace_root: PathBuf,
     ssh: SocketAddr,
     shutdown: watch::Sender<bool>,
+    access_ready: watch::Sender<bool>,
 }
 
 async fn spawn_daemon_ssh() -> DaemonSsh {
+    spawn_daemon_ssh_with_access(true).await
+}
+
+async fn spawn_daemon_ssh_with_access(ready: bool) -> DaemonSsh {
     let temp = tempfile::tempdir().unwrap();
     let workspace_root = temp.path().join("workspace");
     let home_root = temp.path().join("home");
@@ -188,10 +193,11 @@ async fn spawn_daemon_ssh() -> DaemonSsh {
     let config = Arc::new(daemon_ssh_server_config(store.for_generation(1).unwrap()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ssh = listener.local_addr().unwrap();
+    let (access_ready_tx, access_ready) = watch::channel(ready);
     tokio::spawn(serve_ssh_listener(
         listener,
         config,
-        DaemonSshRunners::new(daemon),
+        DaemonSshRunners::new(daemon, access_ready),
         shutdown_rx,
     ));
     DaemonSsh {
@@ -199,6 +205,7 @@ async fn spawn_daemon_ssh() -> DaemonSsh {
         workspace_root,
         ssh,
         shutdown,
+        access_ready: access_ready_tx,
     }
 }
 
@@ -256,6 +263,58 @@ async fn an_exec_session_runs_through_the_in_process_daemon() {
     .await
     .expect("exec session finished");
     assert_eq!(String::from_utf8_lossy(&stdout), "hello from the daemon");
+    assert_eq!(exit, Some(0));
+    let _ = daemon.shutdown.send(true);
+}
+
+/// Run `command` on a new session channel: its stdout, stderr and exit
+/// status, within `limit`.
+async fn exec_within(
+    client: &client::Handle<AcceptAllKeys>,
+    command: &str,
+    limit: Duration,
+) -> (String, String, Option<u32>) {
+    let mut channel = client.channel_open_session().await.unwrap();
+    channel
+        .exec(true, command.as_bytes().to_vec())
+        .await
+        .unwrap();
+    let (mut stdout, mut stderr, mut exit) = (Vec::new(), Vec::new(), None);
+    timeout(limit, async {
+        while let Some(message) = channel.wait().await {
+            match message {
+                ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
+                ChannelMsg::ExtendedData { data, ext: 1 } => stderr.extend_from_slice(&data),
+                ChannelMsg::ExitStatus { exit_status } => exit = Some(exit_status),
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the session ended within its limit");
+    (
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+        exit,
+    )
+}
+
+#[tokio::test]
+async fn a_session_before_access_is_ready_is_refused_at_once() {
+    let daemon = spawn_daemon_ssh_with_access(false).await;
+    let client = connect(daemon.ssh).await;
+    // Refused promptly with the reason and a failing exit status, never left
+    // waiting on a launch the platform cannot admit yet.
+    let (stdout, stderr, exit) =
+        exec_within(&client, "printf never-run", Duration::from_secs(5)).await;
+    assert_eq!(stdout, "");
+    assert_eq!(stderr.trim_end(), ACCESS_NOT_READY);
+    assert_eq!(exit, Some(1));
+    // Once access is ready the same connection runs sessions.
+    daemon.access_ready.send_replace(true);
+    let (stdout, _, exit) = exec_within(&client, "printf SSH-OK", Duration::from_secs(20)).await;
+    assert_eq!(stdout, "SSH-OK");
     assert_eq!(exit, Some(0));
     let _ = daemon.shutdown.send(true);
 }

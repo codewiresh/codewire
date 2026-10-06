@@ -117,7 +117,11 @@ pub(crate) async fn serve(
         .context("prepare the workspace SSH host key")?;
     let public_key = public_key_line(&host_key);
     let ssh_config = Arc::new(daemon_ssh_server_config(host_key));
-    let runners = DaemonSshRunners::new(daemon);
+    // Process sessions start only once this Pod's host key is recorded;
+    // before that they are refused at once instead of waiting out a launch
+    // the platform cannot admit yet.
+    let (access_ready, access_ready_rx) = watch::channel(false);
+    let runners = DaemonSshRunners::new(daemon, access_ready_rx);
     let listener = tokio::net::TcpListener::bind(SocketAddr::from((
         Ipv4Addr::UNSPECIFIED,
         WORKSPACE_SSH_PORT,
@@ -193,14 +197,14 @@ pub(crate) async fn serve(
             paths
                 .mark_access_ready()
                 .context("mark workspace access ready")?;
+            access_ready.send_replace(true);
             tracing::info!("workspace SSH host key recorded; access ready");
         }
         Err(_) => {
-            // Another key is recorded for this generation: clients would
-            // refuse this one, so access is never reported ready.
-            tracing::error!(
-                "workspace SSH host key refused for this generation; access is not ready"
-            );
+            // Another key is recorded for this Pod: clients would refuse
+            // this one, so access is never reported ready and SSH sessions
+            // stay refused.
+            tracing::error!("workspace SSH host key refused for this Pod; access is not ready");
         }
     }
     if let (Some(grants), Some(recorded)) = (grants, recorded_generation) {

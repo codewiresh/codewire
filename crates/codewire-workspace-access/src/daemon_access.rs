@@ -24,7 +24,12 @@ use crate::daemon::DaemonSessionClient;
 use crate::host_key::generate_ed25519_key;
 use crate::scp::DaemonScpRunner;
 use crate::sftp::DaemonSftpRunner;
-use crate::ssh::{DaemonBackedSshRunner, GatewaySshHandler, gateway_server_config};
+use crate::ssh::{
+    DaemonBackedSshRunner, DaemonSessionStart, GatewaySshHandler, SshChannelOutput,
+    SshSessionInput, SshSessionOutput, SshSessionRunner, SshSessionRunnerError,
+    gateway_server_config,
+};
+use russh::ChannelId;
 
 const HOST_KEY_PREFIX: &str = "ssh_host_ed25519_g";
 const HOST_KEY_MODE: u32 = 0o400;
@@ -122,7 +127,7 @@ pub struct PeerRelayAllocation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ControlPlaneError {
     /// Permanently refused (`failed_precondition`): for example, another
-    /// host key is already recorded for this generation.
+    /// host key is already recorded for this Pod.
     #[error("refused by the control plane")]
     Refused,
     /// Unavailable or rejected for now; try again later.
@@ -144,8 +149,8 @@ pub trait AccessControlPlane: Send + Sync + 'static {
 }
 
 /// Record the host key, retrying while the control plane is unavailable.
-/// A refusal is permanent: another key is recorded for this generation, so
-/// SSH must not be reported ready.
+/// A refusal is permanent: another key is recorded for this Pod, so SSH must
+/// not be reported ready.
 pub async fn record_host_key_until_accepted(
     plane: &dyn AccessControlPlane,
     public_key_openssh: &str,
@@ -178,18 +183,76 @@ pub fn daemon_ssh_server_config(host_key: PrivateKey) -> server::Config {
     config
 }
 
+/// What an SSH session started before access is ready reports, on stderr,
+/// with exit status 1.
+pub const ACCESS_NOT_READY: &str = "workspace access is not ready: the environment is still \
+starting or this Pod's SSH host key was not recorded; try again shortly";
+
+/// Process sessions (exec, shell, PTY) start only once workspace access is
+/// ready: this Pod's host key is recorded, so the environment can come up
+/// and the platform connects the credential bridge every launch waits for.
+/// Before that a session is refused at once with [`ACCESS_NOT_READY`]
+/// instead of waiting out a launch that cannot be admitted. SFTP and SCP,
+/// which launch no process, are not gated: orchestration's health check
+/// uses SFTP.
+pub struct AccessGatedSshRunner<R> {
+    inner: Arc<R>,
+    ready: watch::Receiver<bool>,
+}
+
+impl<R> AccessGatedSshRunner<R> {
+    pub fn new(inner: Arc<R>, ready: watch::Receiver<bool>) -> Self {
+        Self { inner, ready }
+    }
+}
+
+#[async_trait]
+impl<R: SshSessionRunner> SshSessionRunner for AccessGatedSshRunner<R> {
+    async fn start_session(
+        &self,
+        channel: ChannelId,
+        start: DaemonSessionStart,
+        output: SshChannelOutput,
+    ) -> Result<(), SshSessionRunnerError> {
+        if !*self.ready.borrow() {
+            tracing::warn!("refused an SSH session: workspace access is not ready");
+            output
+                .send(SshSessionOutput::Error(ACCESS_NOT_READY.into()))
+                .await?;
+            return output.send(SshSessionOutput::Exit(1)).await;
+        }
+        self.inner.start_session(channel, start, output).await
+    }
+
+    async fn session_input(
+        &self,
+        channel: ChannelId,
+        input: SshSessionInput,
+    ) -> Result<(), SshSessionRunnerError> {
+        self.inner.session_input(channel, input).await
+    }
+
+    async fn close_session(&self, channel: ChannelId) -> Result<(), SshSessionRunnerError> {
+        self.inner.close_session(channel).await
+    }
+}
+
 /// The SSH protocol runners backed by one daemon client.
 #[derive(Clone)]
 pub struct DaemonSshRunners {
-    pub sessions: Arc<DaemonBackedSshRunner<DaemonSessionClient>>,
+    pub sessions: Arc<AccessGatedSshRunner<DaemonBackedSshRunner<DaemonSessionClient>>>,
     pub sftp: Arc<DaemonSftpRunner<DaemonSessionClient>>,
     pub scp: Arc<DaemonScpRunner<DaemonSessionClient>>,
 }
 
 impl DaemonSshRunners {
-    pub fn new(daemon: DaemonSessionClient) -> Self {
+    /// Runners whose process sessions wait for `access_ready` to be true.
+    pub fn new(daemon: DaemonSessionClient, access_ready: watch::Receiver<bool>) -> Self {
         Self {
-            sessions: Arc::new(DaemonBackedSshRunner::new(daemon.clone())),
+            sessions: Arc::new(AccessGatedSshRunner::new(
+                Arc::new(DaemonBackedSshRunner::new(daemon.clone())),
+                access_ready,
+            )),
             sftp: Arc::new(DaemonSftpRunner::new(daemon.clone())),
             scp: Arc::new(DaemonScpRunner::new(daemon)),
         }
