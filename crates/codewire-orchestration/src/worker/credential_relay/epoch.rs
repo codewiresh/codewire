@@ -554,42 +554,78 @@ async fn run_epoch_with_lifetime(
     run_epoch_on(config, &daemon, &severed, start, lifetime).await
 }
 
-/// Why an epoch ended before its broker admitted it. Closed reasons and gRPC
-/// codes only: never a frame, token or status message. A successor's own
-/// refusal is logged where it is decided.
+/// Why an epoch ended before its broker admitted it, and at which hop: the
+/// relay itself, the daemon or the broker. Closed reasons and gRPC codes
+/// only: never a frame, token or status message. A status that tonic made
+/// from a transport failure carries its error as a source, and is
+/// "unreachable"; one the peer answered has none, and is "refused". A
+/// successor's own refusal is logged where it is decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Unadmitted {
     DaemonEndpoint,
-    DaemonUnreachable,
+    DaemonUnreachable(Option<tonic::Code>),
     DaemonRefused(tonic::Code),
     DaemonReady,
     RelayToken,
     BrokerConnect,
     PrepareTimeout,
     BrokerTimeout,
+    BrokerUnreachable(tonic::Code),
     BrokerRefused(tonic::Code),
     Activation,
+}
+
+/// Whether tonic made `status` from a local transport failure rather than
+/// receiving it from the peer.
+fn transport_failure(status: &Status) -> bool {
+    std::error::Error::source(status).is_some()
 }
 
 impl Unadmitted {
     fn from_daemon(error: &SessionClientError) -> Self {
         match error {
+            SessionClientError::Status(status) if transport_failure(status) => {
+                Self::DaemonUnreachable(Some(status.code()))
+            }
             SessionClientError::Status(status) => Self::DaemonRefused(status.code()),
             SessionClientError::InvalidCredential => Self::DaemonReady,
-            _ => Self::DaemonUnreachable,
+            _ => Self::DaemonUnreachable(None),
+        }
+    }
+
+    fn from_broker(status: &Status) -> Self {
+        if transport_failure(status) {
+            Self::BrokerUnreachable(status.code())
+        } else {
+            Self::BrokerRefused(status.code())
+        }
+    }
+
+    fn hop(self) -> &'static str {
+        match self {
+            Self::DaemonEndpoint | Self::RelayToken | Self::PrepareTimeout => "relay",
+            Self::DaemonUnreachable(_)
+            | Self::DaemonRefused(_)
+            | Self::DaemonReady
+            | Self::Activation => "daemon",
+            Self::BrokerConnect
+            | Self::BrokerTimeout
+            | Self::BrokerUnreachable(_)
+            | Self::BrokerRefused(_) => "broker",
         }
     }
 
     fn reason(self) -> &'static str {
         match self {
             Self::DaemonEndpoint => "daemon_endpoint",
-            Self::DaemonUnreachable => "daemon_unreachable",
+            Self::DaemonUnreachable(_) => "daemon_unreachable",
             Self::DaemonRefused(_) => "daemon_refused",
             Self::DaemonReady => "daemon_ready_mismatch",
             Self::RelayToken => "relay_token",
             Self::BrokerConnect => "broker_connect",
             Self::PrepareTimeout => "prepare_timeout",
             Self::BrokerTimeout => "broker_timeout",
+            Self::BrokerUnreachable(_) => "broker_unreachable",
             Self::BrokerRefused(_) => "broker_refused",
             Self::Activation => "daemon_activation",
         }
@@ -603,12 +639,16 @@ impl Unadmitted {
             return;
         }
         let code = match self {
-            Self::DaemonRefused(code) | Self::BrokerRefused(code) => code.description(),
+            Self::DaemonUnreachable(Some(code))
+            | Self::DaemonRefused(code)
+            | Self::BrokerUnreachable(code)
+            | Self::BrokerRefused(code) => code.description(),
             _ => "",
         };
         tracing::info!(
             event = "credential_bridge_epoch_unadmitted",
             %environment_id,
+            hop = self.hop(),
             reason = self.reason(),
             code,
             "credential relay epoch ended before the broker admitted it"
@@ -713,7 +753,7 @@ async fn run_epoch_on(
                 tokio::time::timeout(BROKER_ADMISSION_TIMEOUT, broker.credential_bridge(request))
                     .await
                     .map_err(|_| Some(Unadmitted::BrokerTimeout))?
-                    .map_err(|status| Some(Unadmitted::BrokerRefused(status.code())))?;
+                    .map_err(|status| Some(Unadmitted::from_broker(&status)))?;
             // Successful TLS/RPC headers certify the broker's dual TokenReview,
             // live Ready Pods, Running DB state, exact generation and real Ready.
             // They also list the optional operations this broker serves. The

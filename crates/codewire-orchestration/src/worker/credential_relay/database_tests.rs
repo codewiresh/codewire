@@ -61,9 +61,22 @@ async fn seed(db: &TestDatabase, environment: &Environment) -> Result<()> {
     Ok(())
 }
 
-/// Binds a fresh Pod of `environment` at `generation`, releasing any earlier
-/// binding, as the recorder does. Returns the new Pod's UID.
+/// A synthetic projection selection digest.
+const SELECTION: &str = "5e1ec7ed5e1ec7ed5e1ec7ed5e1ec7ed5e1ec7ed5e1ec7ed5e1ec7ed5e1ec7ed";
+
+/// Binds a fresh Pod of `environment` at `generation` with a credential
+/// selection, releasing any earlier binding, as the recorder does. Returns
+/// the new Pod's UID.
 async fn bind(db: &TestDatabase, environment: &Environment, generation: i64) -> Result<String> {
+    bind_with(db, environment, generation, Some(SELECTION)).await
+}
+
+async fn bind_with(
+    db: &TestDatabase,
+    environment: &Environment,
+    generation: i64,
+    selection: Option<&str>,
+) -> Result<String> {
     let pod_uid = Uuid::new_v4().to_string();
     let mut tx = db.pool.begin().await?;
     sqlx::query(
@@ -75,8 +88,9 @@ async fn bind(db: &TestDatabase, environment: &Environment, generation: i64) -> 
     .await?;
     sqlx::query(
         "INSERT INTO sandbox_workspace_bindings(pod_uid,environment_id,namespace,pod_name, \
-           claim_uid,sandbox_uid,operation_generation,managed_credential_clients,credential_scope) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pod')",
+           claim_uid,sandbox_uid,operation_generation,managed_credential_clients,credential_scope, \
+           projection_selection_sha256) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pod',$9)",
     )
     .bind(&pod_uid)
     .bind(environment.id)
@@ -86,6 +100,7 @@ async fn bind(db: &TestDatabase, environment: &Environment, generation: i64) -> 
     .bind(Uuid::new_v4().to_string())
     .bind(generation)
     .bind(codewire_access::ManagedCredentialClients::default().encode())
+    .bind(selection)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -232,6 +247,11 @@ async fn db_the_relay_serves_exactly_the_live_bindings_of_its_namespace() -> Res
         // A stop releases the binding: nothing is relayed for it.
         release(&db, &LIVE).await?;
         ensure!(live_targets(&db.pool, NAMESPACE).await?.is_empty());
+
+        // A Pod bound without a credential selection has no bridge to relay.
+        bind_with(&db, &LIVE, 5, None).await?;
+        ensure!(live_targets(&db.pool, NAMESPACE).await?.is_empty());
+        ensure!(live_target(&db.pool, NAMESPACE, live_id).await?.is_none());
         Ok(())
     }
     .await;

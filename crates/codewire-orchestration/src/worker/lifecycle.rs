@@ -808,6 +808,34 @@ pub async fn handle_environment_start(
         return Err(error);
     }
 
+    // The access objects come first, as create makes them with its Claim.
+    // Stop removed them; made again only at the access wait, the daemon
+    // Service would not yet route when the environment turns running, and
+    // the credential relay's first epoch would not reach the daemon.
+    if let Err(error) = await_reconcile_or_cancel(
+        &activity_ctx,
+        super::create::run_template_mutation(
+            authority,
+            &runtime_opts,
+            START_MUTATION_STATES,
+            client.ensure_access_stack(&runtime_opts),
+        ),
+    )
+    .await
+    {
+        if is_lifecycle_control_loss(&error) {
+            return Err(error);
+        }
+        record_environment_error(
+            &svc,
+            authority,
+            env_id,
+            &format!("access objects: {error:#}"),
+        )
+        .await?;
+        return Err(error);
+    }
+
     // Wait for the sandbox to become ready again, binding an identity-free
     // Pod as soon as it is bind-ready (design §10, amended).
     if let Err(e) = await_reconcile_or_cancel(

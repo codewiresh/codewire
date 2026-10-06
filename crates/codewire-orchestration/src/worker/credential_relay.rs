@@ -9,9 +9,11 @@
 //! daemon's workspace token, and takes the environment from the workspace
 //! Pod's live binding. Every authority decision stays in the broker.
 //!
-//! A leader-gated loop relays exactly the live bindings: one relay per bound
-//! environment, started when its binding appears and replaced when the
-//! binding names another Pod or generation. A released binding stops its
+//! A leader-gated loop relays exactly the live bindings with a credential
+//! selection: one relay per bound environment, started when its binding
+//! appears and replaced when the binding names another Pod or generation. A
+//! daemon bound without a selection has no bridge and refuses every epoch,
+//! so its environment gets no relay. A released binding stops its
 //! relay at the next pass; the broker refuses it already.
 //!
 //! The broker admits an epoch only once the environment is running, which
@@ -94,8 +96,10 @@ struct Live {
 type TargetRow = (String, String, i64, String, bool);
 
 /// The live bindings of this sandbox namespace: the backend pointer names the
-/// binding and it is not released. `admissible` is the environment half of
-/// the broker's admission scope, which refuses every other state.
+/// binding, it is not released, and it carries the projection selection
+/// without which the bound daemon serves no bridge. `admissible` is the
+/// environment half of the broker's admission scope, which refuses every
+/// other state.
 macro_rules! live_targets {
     ($filter:literal) => {
         concat!(
@@ -105,7 +109,8 @@ macro_rules! live_targets {
                JOIN sandbox_workspace_bindings w \
                  ON w.environment_id = b.environment_id AND w.pod_uid = b.pod_uid \
                JOIN environments e ON e.id = b.environment_id \
-              WHERE b.bound_at IS NOT NULL AND w.released_at IS NULL AND w.namespace = $1",
+              WHERE b.bound_at IS NOT NULL AND w.released_at IS NULL AND w.namespace = $1 \
+                AND w.projection_selection_sha256 IS NOT NULL",
             $filter,
             " ORDER BY b.environment_id LIMIT $2"
         )

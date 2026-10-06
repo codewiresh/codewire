@@ -1027,3 +1027,35 @@ async fn a_missing_or_malformed_expiry_admits_a_fresh_epoch_without_one() {
     }
     fixture.stop().await;
 }
+
+/// The log names the hop that refused an epoch, and tells a transport failure
+/// tonic made locally from a status the peer answered.
+#[test]
+fn an_unadmitted_epoch_names_its_hop() {
+    let connect = Status::from_error(Box::new(tonic::ConnectError(Box::new(
+        std::io::Error::other("connection refused"),
+    ))));
+    assert_eq!(connect.code(), tonic::Code::Unavailable);
+    let unreachable = Unadmitted::from_daemon(&SessionClientError::Status(connect));
+    assert_eq!(
+        (unreachable.hop(), unreachable.reason()),
+        ("daemon", "daemon_unreachable")
+    );
+    let refused = Unadmitted::from_daemon(&SessionClientError::Status(
+        Status::failed_precondition("credential bridge is unavailable"),
+    ));
+    assert_eq!(
+        (refused, refused.hop(), refused.reason()),
+        (
+            Unadmitted::DaemonRefused(tonic::Code::FailedPrecondition),
+            "daemon",
+            "daemon_refused"
+        )
+    );
+    let broker = Unadmitted::from_broker(&Status::permission_denied("denied"));
+    assert_eq!(
+        (broker.hop(), broker.reason()),
+        ("broker", "broker_refused")
+    );
+    assert_eq!(Unadmitted::RelayToken.hop(), "relay");
+}
