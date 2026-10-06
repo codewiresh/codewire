@@ -459,8 +459,12 @@ async fn run_bound_hosted_daemon(
         let (_access_shutdown, access_shutdown_rx) = tokio::sync::watch::channel(false);
         let access = hosted_access::serve(
             paths.clone(),
-            bound.binding.operation_generation(),
-            bound.binding.daemon_credential().clone(),
+            hosted_access::BoundAccess {
+                environment_id: bound.binding.environment_id(),
+                generation: bound.binding.operation_generation(),
+                daemon_credential: bound.binding.daemon_credential().clone(),
+                grant: bound.access.clone(),
+            },
             connector,
             client.clone(),
             access_shutdown_rx,

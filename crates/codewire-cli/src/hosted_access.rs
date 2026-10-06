@@ -7,6 +7,10 @@
 //! listens and the key is recorded. Only orchestration can reach the SSH
 //! port (its NetworkPolicy); local processes reaching it gain nothing they do
 //! not already have, because sessions run as the workspace user.
+//!
+//! The daemon is also the environment's tailnet peer, started in parallel
+//! from the binding's access grant and not part of readiness; it serves the
+//! same SSH server over the tailnet.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -18,15 +22,20 @@ use codewire_daemon::DaemonAuthToken;
 use codewire_daemon::access::WorkspaceAccessGrant;
 use codewire_daemon::hosted_state::HostedStatePaths;
 use codewire_daemon::local_transport::LocalDaemonConnector;
-use codewire_gateway_proto::WORKSPACE_SSH_PORT;
+use codewire_gateway_proto::{WORKSPACE_SSH_PORT, WORKSPACE_TAILNET_UDP_PORT};
 use codewire_workspace_access::daemon::DaemonSessionClient;
 use codewire_workspace_access::daemon_access::{
     AccessControlPlane, ControlPlaneError, DaemonSshRunners, HostKeyStore, PeerRelayAllocation,
     daemon_ssh_server_config, public_key_line, record_host_key_until_accepted, serve_ssh_listener,
 };
 use codewire_workspace_access::daemon_credential::DaemonCredential;
+use codewire_workspace_access::daemon_tailnet::{
+    self, AccessGrants, DaemonTailnetConfig, PublicCoordinator, TailnetSsh,
+    record_host_key_per_generation,
+};
 use connectrpc::ErrorCode;
 use tokio::sync::watch;
+use uuid::Uuid;
 
 use crate::hosted_binding::{AttemptError, BindingClient};
 
@@ -76,25 +85,35 @@ fn control_plane_error(error: AttemptError) -> ControlPlaneError {
     }
 }
 
+/// The accepted binding's identity, as workspace access needs it.
+pub(crate) struct BoundAccess {
+    pub environment_id: Uuid,
+    pub generation: u64,
+    pub daemon_credential: DaemonAuthToken,
+    /// The tailnet grant; without one the daemon serves SSH only.
+    pub grant: Option<WorkspaceAccessGrant>,
+}
+
 /// Serve workspace access for the accepted binding until `shutdown`.
 pub(crate) async fn serve(
     paths: HostedStatePaths,
-    generation: u64,
-    daemon_credential: DaemonAuthToken,
+    bound: BoundAccess,
     connector: LocalDaemonConnector,
     plane: Arc<BindingClient>,
     shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let daemon = DaemonSessionClient::connect_local(
         connector,
-        DaemonCredential::rendered(daemon_credential),
+        DaemonCredential::rendered(bound.daemon_credential),
     )
     .await
     .context("connect workspace access to the local daemon")?;
     let host_key = HostKeyStore::new(&paths.state_directory)
-        .for_generation(generation)
+        .for_generation(bound.generation)
         .context("prepare the workspace SSH host key")?;
     let public_key = public_key_line(&host_key);
+    let ssh_config = Arc::new(daemon_ssh_server_config(host_key));
+    let runners = DaemonSshRunners::new(daemon);
     let listener = tokio::net::TcpListener::bind(SocketAddr::from((
         Ipv4Addr::UNSPECIFIED,
         WORKSPACE_SSH_PORT,
@@ -103,11 +122,48 @@ pub(crate) async fn serve(
     .with_context(|| format!("listen workspace SSH on {WORKSPACE_SSH_PORT}"))?;
     let ssh = tokio::spawn(serve_ssh_listener(
         listener,
-        Arc::new(daemon_ssh_server_config(host_key)),
-        DaemonSshRunners::new(daemon),
+        ssh_config.clone(),
+        runners.clone(),
         shutdown.clone(),
     ));
     tracing::info!(ssh_port = WORKSPACE_SSH_PORT, "workspace SSH listening");
+
+    let plane: Arc<dyn AccessControlPlane> = plane;
+    let grants = bound
+        .grant
+        .map(|grant| AccessGrants::new(plane.clone(), grant));
+    let recorded_generation = grants
+        .as_ref()
+        .map(|grants| grants.current().operation_generation());
+    match &grants {
+        Some(grants) => {
+            tokio::spawn(grants.clone().keep_fresh(shutdown.clone()));
+            let tailnet = daemon_tailnet::run(
+                DaemonTailnetConfig {
+                    environment_id: bound.environment_id,
+                    udp_listen_addr: SocketAddr::from((
+                        Ipv4Addr::UNSPECIFIED,
+                        WORKSPACE_TAILNET_UDP_PORT,
+                    )),
+                },
+                grants.clone(),
+                plane.clone(),
+                Arc::new(PublicCoordinator),
+                TailnetSsh {
+                    config: ssh_config,
+                    runners,
+                },
+                shutdown.clone(),
+            );
+            tokio::spawn(async move {
+                if let Err(error) = tailnet.await {
+                    tracing::error!(error = %format!("{error:#}"), "workspace tailnet stopped");
+                }
+            });
+        }
+        None => tracing::info!("binding carries no tailnet access; serving SSH only"),
+    }
+
     match record_host_key_until_accepted(
         plane.as_ref(),
         &public_key,
@@ -129,6 +185,15 @@ pub(crate) async fn serve(
                 "workspace SSH host key refused for this generation; access is not ready"
             );
         }
+    }
+    if let (Some(grants), Some(recorded)) = (grants, recorded_generation) {
+        tokio::spawn(record_host_key_per_generation(
+            plane,
+            grants.subscribe(),
+            public_key,
+            recorded,
+            shutdown,
+        ));
     }
     ssh.await
         .context("workspace SSH listener task")?
