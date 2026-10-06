@@ -12,26 +12,6 @@
     "namespace": "dev-sandboxes"
   },
   "spec": {
-    "egress": [
-      {
-        "ports": [
-          {
-            "port": 8443,
-            "protocol": "TCP"
-          }
-        ],
-        "to": [
-          {
-            "podSelector": {
-              "matchLabels": {
-                "codewire.sh/environment-id": "be31063a-8ec8-46d5-aa17-75cda1729370",
-                "codewire.sh/type": "gateway"
-              }
-            }
-          }
-        ]
-      }
-    ],
     "ingress": [
       {
         "from": [
@@ -92,8 +72,7 @@
       }
     },
     "policyTypes": [
-      "Ingress",
-      "Egress"
+      "Ingress"
     ]
   }
 }

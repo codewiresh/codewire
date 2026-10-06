@@ -85,6 +85,9 @@ deploy_kind_credential_cert_manager() {
   done
 }
 
+# The gateway root and Issuer only issue the legacy per-environment gateway
+# Certificates whose cleanup kind_credential_bootstrap_smoke proves; no
+# workspace or gateway mounts gateway trust.
 deploy_kind_credential_issuers() {
   log "issuing independent synthetic Kind gateway and broker roots"
   kubectl_apply -f "$ROOT/tests/e2e/kind/credential-issuers.yaml"
@@ -106,8 +109,6 @@ deploy_kind_credential_issuers() {
     echo '::error::Kind credential trust domains are missing or not distinct' >&2
     return 1
   }
-  kubectl -n "$SANDBOX_NS" create configmap codewire-credential-gateway-roots \
-    --from-literal="ca.crt=$gateway_roots" --dry-run=client -o yaml | kubectl_apply -f -
   kubectl -n "$SANDBOX_NS" create configmap codewire-credential-broker-roots \
     --from-literal="ca.crt=$broker_roots" --dry-run=client -o yaml | kubectl_apply -f -
 }
@@ -123,6 +124,19 @@ delete_kind_credential_bootstrap() {
     --ignore-not-found=true --cascade=background --wait=true --timeout=120s >/dev/null || return $?
   kubectl -n "$SANDBOX_NS" delete "secret/cw-credential-gateway-$environment" \
     --ignore-not-found=true --wait=true --timeout=120s >/dev/null
+}
+
+# Nothing creates a per-environment gateway Certificate or its leaf: the
+# gateway has no workspace-facing TLS listener.
+assert_no_kind_gateway_certificate() {
+  local environment="$1" found
+  [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
+  found="$(kubectl -n "$SANDBOX_NS" get "certificate/cw-credential-gateway-$environment" \
+    "secret/cw-credential-gateway-$environment" --ignore-not-found=true -o name)" || return $?
+  [ -z "$found" ] || {
+    echo '::error::an environment created a gateway Certificate' >&2
+    return 1
+  }
 }
 
 # Codex has no bootstrap object: the workspace daemon writes Codewire's
@@ -327,15 +341,16 @@ kind_credential_workspace() {
         then .[0].metadata.name else error("expected one exact managed workspace") end'
 }
 
-# One request on the gateway capability path. The gateway admits a new bridge
-# epoch for every such request, so this proves transport, the Pod capability,
-# the gateway roots and a denial, never a reuse within an epoch or an
-# authority change reaching a connected epoch.
+# The workspace's credential projection, without a request: MODE `unselected`
+# before any profile is selected, `selected` once Codex is. Either way no
+# provider value is in the child environment and Codex's files are the
+# daemon's own.
 kind_credential_probe() {
   local environment="$1" mode="$2" pod
-  pod="$(kind_credential_workspace "$environment")"
+  [[ "$mode" =~ ^(selected|unselected)$ ]] || return 1
+  pod="$(kind_credential_workspace "$environment")" || return $?
   kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- \
-    python3 -B -u - "$environment" "$mode" < "$ROOT/scripts/ci/verify/kind/credential_probe.py"
+    python3 -B -u - "$mode" < "$ROOT/scripts/ci/verify/kind/credential_probe.py"
 }
 
 # The broker reuses a hosted epoch's authority decision for at most 60
@@ -883,7 +898,7 @@ kind_credential_native_smoke() (
   fi
   log "running public platform enrollment/profile/native Codex acceptance with synthetic credentials"
   local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation gateway gateway_uid
-  local certificate certificate_uid after_certificate_uid workspace_image marker
+  local workspace_image marker
   local login_events login_generation update restart_generation pair renewal_stop renewal_pid=""
   local member_role_changed="" bound_revision journey_from served
   # The acceptance must never die with a bare exit status again (runs 10381,
@@ -924,9 +939,7 @@ kind_credential_native_smoke() (
     --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
   wait_kind_credential_environment "$environment" running
-  kind_credential_probe "$environment" wrong-root
-  kind_credential_probe "$environment" missing
-  kind_credential_probe "$environment" unbound
+  kind_credential_probe "$environment" unselected
   update="$(kind_credential_cli env --platform update "$environment" \
     --profile "platform:$profile_name" --yes --output json)"
   printf '%s\n' "$update"
@@ -986,8 +999,7 @@ kind_credential_native_smoke() (
   kind_credential_codex_login "$environment" own-login || return $?
   kind_credential_codex_login "$environment" logout || return $?
 
-  certificate="cw-credential-gateway-$environment"
-  certificate_uid="$(kubectl -n "$SANDBOX_NS" get certificate "$certificate" -o 'jsonpath={.metadata.uid}')"
+  assert_no_kind_gateway_certificate "$environment" || return $?
   assert_no_kind_codex_config_map "$environment" || return $?
   # Codex's home is ~/.codex on the persistent home: state written there
   # survives Stop/Start, as on a laptop.
@@ -997,14 +1009,10 @@ kind_credential_native_smoke() (
     return $?
   kind_credential_cli env --platform stop "$environment" --output json
   wait_kind_credential_environment "$environment" stopped
-  after_certificate_uid="$(kubectl -n "$SANDBOX_NS" get certificate "$certificate" -o 'jsonpath={.metadata.uid}')"
-  [ "$certificate_uid" = "$after_certificate_uid" ] || {
-    echo '::error::ordinary stop did not retain its environment bootstrap' >&2
-    return 1
-  }
   assert_no_kind_codex_config_map "$environment" || return $?
   kind_credential_cli env --platform start "$environment" --output json
   wait_kind_credential_environment "$environment" running
+  assert_no_kind_gateway_certificate "$environment" || return $?
   assert_no_kind_codex_config_map "$environment" || return $?
   pod="$(kind_credential_workspace "$environment")" || return $?
   [ "$(kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- \
@@ -1016,10 +1024,10 @@ kind_credential_native_smoke() (
     return $?
   # A new container forgets the logout and receives the login again.
   kind_credential_codex_login "$environment" redelivered || return $?
-  # The gateway capability path: transport, the Pod capability and the roots.
-  # Every such request is its own bridge epoch.
-  kind_credential_probe "$environment" success
-  assert_kind_credential_provider_counts 3
+  # The selected projection after Stop/Start, with no provider request since
+  # the session.
+  kind_credential_probe "$environment" selected
+  assert_kind_credential_provider_counts 2
   # The daemon's long-lived bridge epoch: its first proxied request reads the
   # login and fills the epoch's material cache; the next one, inside two
   # minutes, reuses it. Reconnect then replaces the login: the next request
@@ -1028,7 +1036,7 @@ kind_credential_native_smoke() (
   kind_credential_daemon_probe "$environment" success
   kind_credential_cli credentials --platform connect codex --name "$credential_name" --yes
   kind_credential_daemon_probe "$environment" success
-  assert_kind_credential_provider_counts 6
+  assert_kind_credential_provider_counts 5
   assert_kind_credential_material_reuse
   # Authority changes on that same, still-connected epoch, while it is minutes
   # from a natural renewal: repeated requests reuse its authority decision;
@@ -1062,21 +1070,20 @@ kind_credential_native_smoke() (
   kind_credential_cli credentials --platform revoke "$credential_name" --output json
   kind_credential_daemon_probe "$environment" revoked
   assert_kind_credential_authority_changes "$journey_from" "$KIND_DAEMON_PROBE_LOG"
-  # The gateway capability path denies the revoked credential too.
-  kind_credential_probe "$environment" revoked
+  # Revocation exposes nothing to the workspace either.
+  kind_credential_probe "$environment" selected
   # Revocation is an explicit denial: the daemon removes Codewire's login and
   # restores its proxy config.toml at the next check.
   kind_credential_codex_login "$environment" revoked || return $?
   # Every daemon request the provider served is one more baseline response.
   served="$(jq -s 'map(.served // 0) | add' "$KIND_DAEMON_PROBE_LOG")" || return $?
-  assert_kind_credential_provider_counts "$((6 + served))"
+  assert_kind_credential_provider_counts "$((5 + served))"
 
   # Do not unbind before destroy: terminal cleanup itself must remove the
   # binding, so a tombstone cannot permanently pin the profile and credential.
   kind_credential_cli env --platform rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
-  kubectl -n "$SANDBOX_NS" wait --for=delete --timeout=120s \
-    "certificate/$certificate" "secret/$certificate"
+  assert_no_kind_gateway_certificate "$environment" || return $?
   assert_no_kind_codex_config_map "$environment" || return $?
   kind_credential_cli credentials --platform --profile "$profile_name" delete --yes
   kind_credential_cli credentials --platform delete "$credential_name" --yes

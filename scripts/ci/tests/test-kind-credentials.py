@@ -10,7 +10,6 @@ import io
 import json
 import os
 from pathlib import Path
-import ssl
 import shlex
 import subprocess
 import sys
@@ -54,21 +53,12 @@ class WorkspaceProbe(unittest.TestCase):
         self.scratch = tempfile.TemporaryDirectory(prefix="kind-credential-probe-")
         self.addCleanup(self.scratch.cleanup)
         self.home = Path(self.scratch.name)
-        self.token = self.home / "capability"
-        self.token.write_text("synthetic-pod-capability", encoding="ascii")
-        self.context = Mock()
-        self.connection = Mock()
-        self.connection.getresponse.return_value.status = 200
-        self.connection.getresponse.return_value.read.return_value = b"CWCODEX149 kind"
         self.output = io.StringIO()
         self.managed()
         for fixture in (
             patch.object(PROBE, "CODEX_HOME", self.home),
-            patch.object(PROBE, "TOKEN", self.token),
             patch.dict(os.environ, {"CODEX_HOME": str(self.home),
                                    "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"}, clear=True),
-            patch.object(PROBE.ssl, "SSLContext", return_value=self.context),
-            patch.object(PROBE.http.client, "HTTPSConnection", return_value=self.connection),
             contextlib.redirect_stdout(self.output),
         ):
             fixture.__enter__()
@@ -83,89 +73,23 @@ class WorkspaceProbe(unittest.TestCase):
         os.environ.pop("CODEWIRE_MANAGED_CREDENTIAL_CLIENTS", None)
         (self.home / "config.toml").unlink(missing_ok=True)
 
+    def events(self):
+        return [json.loads(line) for line in self.output.getvalue().splitlines()]
+
+    def test_probe_makes_no_request_and_reads_no_capability(self):
+        source = (ROOT / "scripts/ci/verify/kind/credential_probe.py").read_text()
+        for absent in ("http.client", "ssl", "socket", "/run/codewire-credentials", "Authorization"):
+            self.assertNotIn(absent, source)
+
     def test_current_selected_loopback_configuration_needs_no_ca_override(self):
-        PROBE.probe(ENVIRONMENT, "success")
-        self.context.load_verify_locations.assert_called_once_with(cafile=PROBE.ROOTS)
+        PROBE.probe("selected")
         self.assertNotIn("CODEX_CA_CERTIFICATE", os.environ)
+        self.assertEqual(self.events(), [{"event": "credential_projection", "mode": "selected"}])
 
     def test_initial_unselected_configuration_needs_no_codex_settings(self):
         self.unselected()
-        self.connection.getresponse.return_value.status = 403
-        PROBE.probe(ENVIRONMENT, "unbound")
-        self.context.load_verify_locations.assert_called_once_with(cafile=PROBE.ROOTS)
-        self.assertEqual(self.connection.request.call_args.kwargs["headers"]["Authorization"],
-                         "Bearer synthetic-pod-capability")
-
-    def test_success_uses_only_exact_gateway_roots_and_pod_capability(self):
-        PROBE.probe(ENVIRONMENT, "success")
-        self.context.load_verify_locations.assert_called_once_with(cafile=PROBE.ROOTS)
-        PROBE.http.client.HTTPSConnection.assert_called_once_with(
-            f"cw-gateway-svc-{ENVIRONMENT}.dev-sandboxes.svc.cluster.local",
-            context=self.context, timeout=20)
-        request = self.connection.request.call_args
-        self.assertEqual(request.args, ("POST", "/v1/responses"))
-        self.assertEqual(request.kwargs["headers"]["Authorization"], "Bearer synthetic-pod-capability")
-        self.assertNotIn("synthetic-pod-capability", self.output.getvalue())
-        self.connection.close.assert_called_once()
-
-    def test_all_denials_require_their_exact_status(self):
-        for mode, status in (("unbound", 403), ("revoked", 403), ("missing", 401)):
-            with self.subTest(mode=mode):
-                if mode == "revoked":
-                    os.environ["CODEX_HOME"] = str(self.home)
-                    os.environ["CODEWIRE_MANAGED_CREDENTIAL_CLIENTS"] = "v1:codex"
-                    self.managed()
-                else:
-                    self.unselected()
-                self.connection.getresponse.return_value.status = status
-                PROBE.probe(ENVIRONMENT, mode)
-                self.connection.getresponse.return_value.status = 200
-                with self.assertRaises(ValueError):
-                    PROBE.probe(ENVIRONMENT, mode)
-
-    def test_missing_identity_does_not_read_capability(self):
-        self.unselected()
-        self.token.unlink()
-        self.connection.getresponse.return_value.status = 401
-        PROBE.probe(ENVIRONMENT, "missing")
-        self.assertNotIn("Authorization", self.connection.request.call_args.kwargs["headers"])
-
-    def test_wrong_root_requires_certificate_rejection_not_network_error(self):
-        self.unselected()
-        self.token.unlink()
-        self.connection.request.side_effect = ssl.SSLCertVerificationError("synthetic")
-        PROBE.probe(ENVIRONMENT, "wrong-root")
-        self.context.load_verify_locations.assert_not_called()
-        self.assertEqual(json.loads(self.output.getvalue()), {"event": "wrong_root_denied"})
-        self.connection.request.side_effect = TimeoutError("synthetic")
-        with self.assertRaises(TimeoutError):
-            PROBE.probe(ENVIRONMENT, "wrong-root")
-
-    def test_untrusted_root_success_cannot_pass(self):
-        self.unselected()
-        with self.assertRaises(ValueError):
-            PROBE.probe(ENVIRONMENT, "wrong-root")
-
-    def test_trusted_mode_certificate_failure_cannot_pass(self):
-        self.connection.request.side_effect = ssl.SSLCertVerificationError("synthetic")
-        with self.assertRaises(ssl.SSLCertVerificationError):
-            PROBE.probe(ENVIRONMENT, "success")
-
-    def test_provider_material_and_oversize_response_are_rejected(self):
-        for payload in (b"CW_KIND_SYNTHETIC_REFRESH_private", b"synthetic-kind-signature",
-                        b"x" * (64 * 1024 + 1), b"missing-marker"):
-            with self.subTest(size=len(payload)):
-                self.connection.getresponse.return_value.read.return_value = payload
-                with self.assertRaises(ValueError):
-                    PROBE.probe(ENVIRONMENT, "success")
-        self.assertEqual(self.output.getvalue(), "")
-
-    def test_invalid_capability_never_reaches_network(self):
-        for value in ("", "a b", "a\nb", "x" * (16 * 1024 + 1)):
-            self.token.write_text(value, encoding="ascii")
-            with self.assertRaises(ValueError):
-                PROBE.probe(ENVIRONMENT, "success")
-        self.connection.request.assert_not_called()
+        PROBE.probe("unselected")
+        self.assertEqual(self.events(), [{"event": "credential_projection", "mode": "unselected"}])
 
     def codewire_login(self, refresh_token=None):
         return json.dumps({
@@ -182,11 +106,9 @@ class WorkspaceProbe(unittest.TestCase):
             with self.subTest(config=config):
                 if not config:
                     (self.home / "config.toml").unlink()
-                for mode in ("success", "revoked"):
-                    self.connection.getresponse.return_value.status = PROBE.MODES[mode]
-                    PROBE.probe(ENVIRONMENT, mode)
+                PROBE.probe("selected")
 
-    def test_a_login_that_is_not_codewires_fails_before_network(self):
+    def test_a_login_that_is_not_codewires_fails(self):
         outside = self.home / "outside.json"
         outside.write_text(self.codewire_login(), encoding="ascii")
         for contents in ("synthetic",
@@ -202,28 +124,27 @@ class WorkspaceProbe(unittest.TestCase):
                 else:
                     auth.write_text(contents, encoding="ascii")
                 with self.assertRaisesRegex(ValueError, "^unexpected-provider-auth-file$"):
-                    PROBE.probe(ENVIRONMENT, "success")
-        self.connection.request.assert_not_called()
+                    PROBE.probe("selected")
+        self.assertEqual(self.output.getvalue(), "")
 
-    def test_provider_auth_file_or_environment_fail_before_network(self):
+    def test_provider_auth_file_or_environment_fail(self):
         (self.home / "auth.json").write_text("synthetic", encoding="ascii")
         with self.assertRaises(ValueError):
-            PROBE.probe(ENVIRONMENT, "success")
+            PROBE.probe("selected")
         (self.home / "auth.json").unlink()
         os.environ["SYNTHETIC_FIXTURE"] = "CW_KIND_SYNTHETIC_REFRESH_private"
         with self.assertRaises(ValueError):
-            PROBE.probe(ENVIRONMENT, "success")
-        self.connection.request.assert_not_called()
+            PROBE.probe("selected")
+        self.assertEqual(self.output.getvalue(), "")
 
-    def test_projection_and_target_are_not_caller_overridable(self):
-        for environment, mode in (("not-a-uuid", "success"), (ENVIRONMENT.upper(), "success"),
-                                  (ENVIRONMENT, "unknown")):
-            with self.assertRaises(ValueError):
-                PROBE.probe(environment, mode)
+    def test_projection_is_not_caller_overridable(self):
+        for mode in ("unknown", "success", "revoked", "unbound", "missing", "wrong-root"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "^selection$"):
+                PROBE.probe(mode)
         os.environ["CODEX_CA_CERTIFICATE"] = "/synthetic/other-roots"
         with self.assertRaises(ValueError):
-            PROBE.probe(ENVIRONMENT, "success")
-        self.connection.request.assert_not_called()
+            PROBE.probe("selected")
+        self.assertEqual(self.output.getvalue(), "")
 
     def test_selected_probe_requires_exact_current_selection(self):
         for selection in (None, "", "v1:none", "v1:openai", "codex", "v1:codex,openai"):
@@ -232,32 +153,28 @@ class WorkspaceProbe(unittest.TestCase):
                 if selection is not None:
                     os.environ["CODEWIRE_MANAGED_CREDENTIAL_CLIENTS"] = selection
                 with self.assertRaisesRegex(ValueError, "^projection$"):
-                    PROBE.probe(ENVIRONMENT, "success")
+                    PROBE.probe("selected")
         with patch.dict(os.environ, {"CODEX_HOME": "/synthetic/other-home"}):
             with self.assertRaisesRegex(ValueError, "^projection$"):
-                PROBE.probe(ENVIRONMENT, "success")
-        self.connection.request.assert_not_called()
+                PROBE.probe("selected")
 
     def test_identity_free_selection_is_the_daemon_written_config_alone(self):
         os.environ.pop("CODEX_HOME")
         os.environ.pop("CODEWIRE_MANAGED_CREDENTIAL_CLIENTS")
-        PROBE.probe(ENVIRONMENT, "success")
-        self.connection.request.reset_mock()
+        PROBE.probe("selected")
         for first_line in ("", "model = \"gpt-5\"", " " + PROBE.MANAGED_HEADER.decode()):
             with self.subTest(first_line=first_line):
                 self.managed(first_line)
                 with self.assertRaisesRegex(ValueError, "^projection$"):
-                    PROBE.probe(ENVIRONMENT, "success")
+                    PROBE.probe("selected")
         # A delivered login removes Codewire's config.toml; absence is fine.
         (self.home / "config.toml").unlink()
-        PROBE.probe(ENVIRONMENT, "success")
-        self.connection.request.reset_mock()
+        PROBE.probe("selected")
         outside = self.home / "outside.toml"
         outside.write_text(PROBE.MANAGED_HEADER.decode() + "\n")
         (self.home / "config.toml").symlink_to(outside)
         with self.assertRaisesRegex(ValueError, "^projection$"):
-            PROBE.probe(ENVIRONMENT, "success")
-        self.connection.request.assert_not_called()
+            PROBE.probe("selected")
 
     def test_unselected_probe_rejects_stale_client_configuration(self):
         self.unselected()
@@ -266,34 +183,34 @@ class WorkspaceProbe(unittest.TestCase):
                        {"CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:none"}):
             with self.subTest(values=values), patch.dict(os.environ, values, clear=True):
                 with self.assertRaisesRegex(ValueError, "^unexpected-unselected-client$"):
-                    PROBE.probe(ENVIRONMENT, "unbound")
+                    PROBE.probe("unselected")
         (self.home / "config.toml").write_text("synthetic-stale-client", encoding="ascii")
         with self.assertRaisesRegex(ValueError, "^unexpected-unselected-client$"):
-            PROBE.probe(ENVIRONMENT, "unbound")
-        self.connection.request.assert_not_called()
+            PROBE.probe("unselected")
+        self.assertEqual(self.output.getvalue(), "")
 
     def test_legacy_ca_override_is_rejected_in_selected_and_unselected_modes(self):
-        for mode in ("success", "unbound"):
-            if mode == "unbound":
+        for mode in ("selected", "unselected"):
+            if mode == "unselected":
                 self.unselected()
-            for value in ("", PROBE.ROOTS, "/synthetic/other-roots"):
+            for value in ("", "/run/codewire-credentials/gateway-roots/ca.crt",
+                          "/synthetic/other-roots"):
                 with self.subTest(mode=mode, value=value), patch.dict(
                         os.environ, {"CODEX_CA_CERTIFICATE": value}):
                     with self.assertRaisesRegex(ValueError, "^projection$"):
-                        PROBE.probe(ENVIRONMENT, mode)
-        self.connection.request.assert_not_called()
+                        PROBE.probe(mode)
+        self.assertEqual(self.output.getvalue(), "")
 
     def test_unselected_probe_retains_provider_leak_rejections(self):
         self.unselected()
         for value in ("CW_KIND_SYNTHETIC_REFRESH_private", "synthetic-kind-signature"):
             with patch.dict(os.environ, {"SYNTHETIC_FIXTURE": value}):
                 with self.assertRaisesRegex(ValueError, "^provider-environment-exposure$"):
-                    PROBE.probe(ENVIRONMENT, "unbound")
+                    PROBE.probe("unselected")
         (self.home / "auth.json").write_text("synthetic", encoding="ascii")
         with self.assertRaisesRegex(ValueError, "^unexpected-provider-auth-file$"):
-            PROBE.probe(ENVIRONMENT, "unbound")
+            PROBE.probe("unselected")
         self.assertEqual(self.output.getvalue(), "")
-        self.connection.request.assert_not_called()
 
 
 class HarnessGuards(unittest.TestCase):
@@ -1126,13 +1043,16 @@ kind_credential_codex_login '%s' %s %s
         redelivered = index('kind_credential_codex_login "$environment" redelivered || return $?')
         daemon = 'kind_credential_daemon_probe "$environment" '
         bounded = ' "$KIND_AUTHORITY_CHANGE_WITHIN_MS"'
-        gateway = index('kind_credential_probe "$environment" success')
-        counted = index("assert_kind_credential_provider_counts 3")
+        initial = index('kind_credential_probe "$environment" unselected')
+        no_certificate = index('assert_no_kind_gateway_certificate "$environment"')
+        restarted_without_certificate = index('assert_no_kind_gateway_certificate "$environment"', start)
+        gateway = index('kind_credential_probe "$environment" selected')
+        counted = index("assert_kind_credential_provider_counts 2", gateway)
         warm = index(daemon + "success\n", counted)
         reuse = index(daemon + "success\n", warm + 1)
         reconnect = index('credentials --platform connect codex --name "$credential_name" --yes')
         reconnected = index(daemon + "success\n", reconnect)
-        six = index("assert_kind_credential_provider_counts 6")
+        six = index("assert_kind_credential_provider_counts 5")
         reused = index("assert_kind_credential_material_reuse")
         anchor = index('journey_from="$(kind_credential_codex_request_count)" || return $?')
         logged = index('KIND_DAEMON_PROBE_LOG="$(mktemp "$RUN_DIR/credential-daemon-authority.XXXXXX")"')
@@ -1153,27 +1073,35 @@ kind_credential_codex_login '%s' %s %s
         revoke = index('credentials --platform revoke "$credential_name"')
         revoked_daemon = index(daemon + "revoked\n", revoke)
         changes = index('assert_kind_credential_authority_changes "$journey_from" "$KIND_DAEMON_PROBE_LOG"')
-        revoked_gateway = index('kind_credential_probe "$environment" revoked')
+        revoked_gateway = index('kind_credential_probe "$environment" selected', revoke)
         revoked = index('kind_credential_codex_login "$environment" revoked || return $?')
         served = index('served="$(jq -s \'map(.served // 0) | add\' "$KIND_DAEMON_PROBE_LOG")" || return $?')
-        final = index('assert_kind_credential_provider_counts "$((6 + served))"')
+        final = index('assert_kind_credential_provider_counts "$((5 + served))"')
         destroy = index('env --platform rm "$environment"')
-        # Delivery before the proxy session whose refreshes rotate it; the
-        # user's own login and logout after rotation; a new container forgets
-        # the logout; one gateway request; on the daemon's epoch a warm-up, a
-        # reuse and Reconnect; then each authority change on that connected
-        # epoch; a replaced Pod's new epoch; revocation last, on that epoch,
-        # which removes the login before destroy.
-        order = [deliver, session, counts, rotation, own, logout, stop, start, redelivered,
+        destroyed_without_certificate = index('assert_no_kind_gateway_certificate "$environment"', destroy)
+        # An unselected projection first; delivery before the proxy session
+        # whose refreshes rotate it; the user's own login and logout after
+        # rotation; no gateway Certificate across Stop/Start; a new container
+        # forgets the logout; the selected projection with no request since
+        # the session; on the daemon's epoch a warm-up, a reuse and Reconnect;
+        # then each authority change on that connected epoch; a replaced
+        # Pod's new epoch; revocation last, on that epoch, which removes the
+        # login before destroy, which leaves no gateway Certificate either.
+        order = [initial, deliver, session, counts, rotation, own, logout, no_certificate, stop,
+                 start, restarted_without_certificate, redelivered,
                  gateway, counted, warm, reuse, reconnect, reconnected, six, reused, anchor,
                  logged, repeated, member, denied, restored, readmitted, bound, unset, rebind,
                  unbound, rebound, recovered, replaced, marker, fresh, revoke, revoked_daemon,
-                 changes, revoked_gateway, revoked, served, final, destroy]
+                 changes, revoked_gateway, revoked, served, final, destroy,
+                 destroyed_without_certificate]
         self.assertEqual(sorted(order), order)
-        # Reuse and a connected epoch's authority changes are proven only on
-        # the daemon path; the gateway path admits an epoch per request.
+        # Every provider request crosses the daemon: the projection probe
+        # makes none.
         self.assertNotIn("kind_credential_probe ", flow[counted:revoked_gateway])
-        self.assertEqual(flow.count('kind_credential_probe "$environment" success'), 1)
+        self.assertEqual(flow.count('kind_credential_probe "$environment" unselected'), 1)
+        self.assertEqual(flow.count('kind_credential_probe "$environment" selected'), 2)
+        self.assertEqual(flow.count("kind_credential_probe "), 3)
+        self.assertEqual(flow.count('assert_no_kind_gateway_certificate "$environment"'), 3)
         self.assertEqual(flow.count(daemon + "denied" + bounded), 2)
         self.assertEqual(flow.count(daemon + "success" + bounded), 2)
         # A credential change applies to the very next request: no bound.

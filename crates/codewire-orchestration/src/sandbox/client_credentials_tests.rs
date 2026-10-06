@@ -75,14 +75,20 @@ fn missing() -> (StatusCode, Value) {
     )
 }
 
-fn certificate(opts: &TemplateOpts) -> Value {
-    let mut value = render_credential_gateway_certificate(NS, opts).unwrap();
-    value["metadata"]["uid"] = "synthetic-certificate-uid".into();
-    value["metadata"]["resourceVersion"] = "10".into();
-    value["metadata"]["generation"] = 2.into();
-    value["status"] =
-        json!({"conditions":[{"type":"Ready","status":"True","observedGeneration":2}]});
-    value
+/// A gateway Certificate as the previous orchestration created it; an
+/// environment created before the gateway's HTTPS listener was removed
+/// still owns one.
+fn legacy_certificate(opts: &TemplateOpts) -> Value {
+    json!({"apiVersion":"cert-manager.io/v1", "kind":"Certificate",
+        "metadata":{"name":credential_gateway_certificate_name(&opts.environment_id),
+            "namespace":NS, "uid":"synthetic-certificate-uid", "resourceVersion":"10",
+            "generation":2,
+            "labels":{"app.kubernetes.io/name":"codewire", "app.kubernetes.io/managed-by":"codewire",
+                "codewire.sh/environment-id":opts.environment_id,
+                "codewire.sh/org-id":opts.organization_id,
+                "codewire.sh/type":"credential-bootstrap"}},
+        "spec":{"secretName":credential_gateway_certificate_name(&opts.environment_id)},
+        "status":{"conditions":[{"type":"Ready","status":"True","observedGeneration":2}]}})
 }
 
 fn gateway(opts: &TemplateOpts) -> Value {
@@ -96,7 +102,6 @@ fn gateway(opts: &TemplateOpts) -> Value {
 async fn disabled_credential_bootstrap_does_not_call_kubernetes() {
     let (client, requests) = client(vec![]);
     let opts = TemplateOpts::default();
-    client.ensure_credential_bootstrap(&opts).await.unwrap();
     client
         .wait_for_credential_gateway_ready(&opts, Duration::ZERO)
         .await
@@ -105,18 +110,13 @@ async fn disabled_credential_bootstrap_does_not_call_kubernetes() {
 }
 
 #[tokio::test]
-async fn public_bootstrap_is_created_before_workspace_template_without_secret_access() {
-    // Codex is selected, yet the only bootstrap object is the Certificate:
-    // the workspace daemon writes Codex's `~/.codex`, so no ConfigMap exists.
+async fn workspace_template_creates_no_credential_bootstrap_object() {
+    // Codex is selected, yet nothing but the template is written: the
+    // workspace daemon writes Codex's `~/.codex`, and the gateway has no
+    // workspace-facing TLS identity.
     let opts = opts();
-    let certificate = certificate(&opts);
     let template = render_sandbox_template(NS, &opts);
-    let (client, requests) = client(vec![
-        missing(),
-        (StatusCode::CREATED, certificate),
-        missing(),
-        (StatusCode::CREATED, template),
-    ]);
+    let (client, requests) = client(vec![missing(), (StatusCode::CREATED, template)]);
     client.ensure_sandbox_template(&opts).await.unwrap();
     let requests = requests.lock().unwrap();
     assert_eq!(
@@ -124,80 +124,19 @@ async fn public_bootstrap_is_created_before_workspace_template_without_secret_ac
             .iter()
             .map(|request| request.0.clone())
             .collect::<Vec<_>>(),
-        [Method::GET, Method::POST, Method::GET, Method::POST]
+        [Method::GET, Method::POST]
     );
-    assert!(requests[1].1.ends_with("/certificates"));
-    assert!(requests[3].1.ends_with("/sandboxtemplates"));
-    assert!(
-        requests.iter().all(|request| {
-            !request.1.contains("/secrets") && !request.1.contains("/configmaps")
-        })
-    );
-}
-
-#[tokio::test]
-async fn unchanged_bootstrap_is_read_only_and_foreign_collision_is_not_adopted() {
-    let opts = opts();
-    let certificate = certificate(&opts);
-    let (client, requests) = client(vec![(StatusCode::OK, certificate.clone())]);
-    client.ensure_credential_bootstrap(&opts).await.unwrap();
-    assert_eq!(requests.lock().unwrap().len(), 1);
     assert!(
         requests
-            .lock()
-            .unwrap()
             .iter()
-            .all(|request| request.0 == Method::GET)
+            .all(|request| request.1.ends_with("/sandboxtemplates")
+                || request.1.ends_with("/sandboxtemplates/synthetic-template"))
     );
-    let mut foreign = certificate;
-    foreign["metadata"]["labels"][LABEL_ENV_ID] = "foreign-environment".into();
-    let (client, requests) = self::client(vec![(StatusCode::OK, foreign)]);
-    assert!(
-        client
-            .ensure_credential_bootstrap(&opts)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("ownership")
-    );
-    assert_eq!(requests.lock().unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn extra_certificate_authority_is_removed_and_never_accepted_as_ready() {
-    let opts = opts();
-    let mut changed = certificate(&opts);
-    changed["spec"]["uris"] = json!(["spiffe://foreign.example.invalid/"]);
-    let (client, requests) = client(vec![
-        (StatusCode::OK, changed.clone()),
-        (StatusCode::OK, certificate(&opts)),
-    ]);
-    client.ensure_credential_bootstrap(&opts).await.unwrap();
-    {
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests[1].0, Method::PUT);
-        assert!(requests[1].2["spec"].get("uris").is_none());
-        assert_eq!(requests[1].2["metadata"]["resourceVersion"], "10");
-    }
-    let (client, requests) = self::client(vec![(StatusCode::OK, changed)]);
-    assert!(
-        client
-            .wait_for_credential_gateway_ready(&opts, Duration::from_secs(1))
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("intent changed")
-    );
-    assert_eq!(requests.lock().unwrap().len(), 1);
 }
 
 #[test]
-fn readiness_rejects_stale_certificate_generation_and_old_gateway_rollout() {
+fn readiness_rejects_old_gateway_rollout() {
     let opts = opts();
-    let mut cert: DynamicObject = serde_json::from_value(certificate(&opts)).unwrap();
-    assert!(certificate_ready(&cert));
-    cert.data["status"]["conditions"][0]["observedGeneration"] = 1.into();
-    assert!(!certificate_ready(&cert));
     let gateway: DynamicObject = serde_json::from_value(gateway(&opts)).unwrap();
     assert!(gateway_ready(&gateway, &opts));
     for field in [
@@ -217,23 +156,20 @@ fn readiness_rejects_stale_certificate_generation_and_old_gateway_rollout() {
 }
 
 #[tokio::test]
-async fn credential_readiness_observes_current_public_objects_only() {
+async fn credential_readiness_observes_only_the_gateway_rollout() {
     let opts = opts();
-    let (client, requests) = client(vec![
-        (StatusCode::OK, certificate(&opts)),
-        (StatusCode::OK, gateway(&opts)),
-    ]);
+    let (client, requests) = client(vec![(StatusCode::OK, gateway(&opts))]);
     client
         .wait_for_credential_gateway_ready(&opts, Duration::from_secs(1))
         .await
         .unwrap();
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert!(
-        requests
-            .iter()
-            .all(|request| request.0 == Method::GET && !request.1.contains("/secrets"))
-    );
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, Method::GET);
+    assert!(requests[0].1.ends_with(&format!(
+        "/deployments/{}",
+        gateway_workload_name(&opts.environment_id)
+    )));
 }
 
 #[tokio::test]
@@ -243,10 +179,10 @@ async fn bootstrap_cleanup_uses_uid_fence_and_never_reads_secret_material() {
         StatusCode::OK,
         json!({"apiVersion":"v1","kind":"Status","status":"Success","code":200}),
     );
-    let mut terminating = certificate(&opts);
+    let mut terminating = legacy_certificate(&opts);
     terminating["metadata"]["deletionTimestamp"] = "2026-09-06T00:00:00Z".into();
     let (client, requests) = client(vec![
-        (StatusCode::OK, certificate(&opts)),
+        (StatusCode::OK, legacy_certificate(&opts)),
         success.clone(),
         (StatusCode::OK, terminating),
         success,
@@ -289,7 +225,7 @@ async fn bootstrap_cleanup_uses_uid_fence_and_never_reads_secret_material() {
 #[tokio::test]
 async fn foreign_bootstrap_collision_is_not_deleted_during_compensation() {
     let opts = opts();
-    let mut foreign = certificate(&opts);
+    let mut foreign = legacy_certificate(&opts);
     foreign["metadata"]["labels"][LABEL_ENV_ID] = "foreign-environment".into();
     let (client, requests) = client(vec![(StatusCode::OK, foreign)]);
     assert!(
@@ -350,10 +286,8 @@ async fn gateway_readiness_wakes_on_the_deployment_watch() {
     let ready = gateway(&opts);
     let event = json!({"type": "MODIFIED", "object": ready}).to_string() + "\n";
     let (client, requests) = raw_client(vec![
-        (StatusCode::OK, certificate(&opts).to_string()),
         (StatusCode::OK, rolling_gateway(&opts).to_string()),
         (StatusCode::OK, event),
-        (StatusCode::OK, certificate(&opts).to_string()),
         (StatusCode::OK, ready.to_string()),
     ]);
     // The fallback poll outlasts the wait, so only the watch event can end it.
@@ -366,8 +300,8 @@ async fn gateway_readiness_wakes_on_the_deployment_watch() {
         .await
         .unwrap();
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 5, "{requests:#?}");
-    let watch = &requests[2];
+    assert_eq!(requests.len(), 3, "{requests:#?}");
+    let watch = &requests[1];
     let gateway_name = gateway_workload_name(&opts.environment_id);
     assert!(
         watch.starts_with(&format!("GET /apis/apps/v1/namespaces/{NS}/deployments?")),
@@ -391,10 +325,8 @@ async fn gateway_readiness_polls_when_the_watch_is_refused() {
         "reason": "Forbidden", "code": 403,
     });
     let (client, requests) = raw_client(vec![
-        (StatusCode::OK, certificate(&opts).to_string()),
         (StatusCode::OK, rolling_gateway(&opts).to_string()),
         (StatusCode::FORBIDDEN, forbidden.to_string()),
-        (StatusCode::OK, certificate(&opts).to_string()),
         (StatusCode::OK, gateway(&opts).to_string()),
     ]);
     let fallback = Duration::from_millis(200);
@@ -407,5 +339,5 @@ async fn gateway_readiness_polls_when_the_watch_is_refused() {
         started.elapsed() >= fallback,
         "a refused watch must wait out the fallback instead of re-reading at once"
     );
-    assert_eq!(requests.lock().unwrap().len(), 5);
+    assert_eq!(requests.lock().unwrap().len(), 3);
 }

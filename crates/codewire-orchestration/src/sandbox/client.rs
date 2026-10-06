@@ -3668,7 +3668,6 @@ impl SandboxClient {
             anyhow::bail!("ensure gateway stack: environment_id is required");
         }
         let opts = self.resolve_gateway_direct_udp_service_opts(opts).await?;
-        self.ensure_credential_bootstrap(&opts).await?;
         self.ensure_gateway_host_key_secret(&opts).await?;
         self.ensure_dynamic(
             self.services(),
@@ -4672,7 +4671,6 @@ impl SandboxClient {
     /// otherwise update (3 retries on resource-version conflicts).
     pub async fn ensure_sandbox_template(&self, opts: &TemplateOpts) -> anyhow::Result<()> {
         opts.validate_confidential_storage_manifest()?;
-        self.ensure_credential_bootstrap(opts).await?;
         let name = &opts.name;
         let templates = self.templates();
         let rendered = render_sandbox_template(&self.namespace, opts);
