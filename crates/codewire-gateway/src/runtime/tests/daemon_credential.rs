@@ -325,7 +325,14 @@ async fn a_refusal_loop_is_throttled_and_every_outcome_is_observed() {
             .iter()
             .all(|outcome| *outcome == RefreshOutcome::Unchanged)
     );
-    assert_eq!(*calls.lock().unwrap() as usize, outcomes.len());
+    // Shutdown may cancel one call the binding already counted; every
+    // completed call's outcome is observed.
+    let calls = *calls.lock().unwrap() as usize;
+    assert!(
+        calls == outcomes.len() || calls == outcomes.len() + 1,
+        "{calls} calls for {} observed outcomes",
+        outcomes.len()
+    );
     // Each pause is at least what the schedule asked for: 40, 80, then 20
     // after the change, then 40, 80, 160, 160 ms.
     let mut schedule = RefreshSchedule::default();
