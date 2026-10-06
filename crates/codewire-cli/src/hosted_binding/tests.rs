@@ -2,26 +2,51 @@ use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 
+use super::*;
 use axum::Router;
 use codewire_daemon::HostedDaemonMode;
 use codewire_daemon::config::{WORKSPACE_BINDING_URL_ENV, WORKSPACE_POD_UID_ENV};
-use codewire_proto::codewire::internal::v1::WorkspaceBindingService;
+use codewire_proto::codewire::internal::v1::{
+    RecordHostKeyResponse, RefreshAccessResponse, WorkspaceBindingService,
+};
+use codewire_tls::test_support::SyntheticPki;
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 use tempfile::TempDir;
-use tokio::net::TcpListener;
-
-use super::*;
 
 const POD: &str = "7e7b20f6-0bd2-4f11-8b16-9c239851eb52";
 const OTHER_POD: &str = "a1560db3-8899-40c9-b521-500f223b04fb";
 const ENVIRONMENT: &str = "550e8400-e29b-41d4-a716-446655440000";
 const SYNTHETIC_CREDENTIAL: &str = "synthetic-workspace-daemon-credential";
 const SYNTHETIC_PROJECTED_TOKEN: &str = "synthetic.projected.workspace-binding";
+const SYNTHETIC_PEER_TOKEN: &str = "synthetic.peer.token";
+const HOST_KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+const OTHER_HOST_KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB7FpOVbm/6E3nHvH0r0IGM2xQtW2X5nOkjLwFvbTgbM";
+
+fn synthetic_access(generation: i64) -> WorkspaceAccess {
+    let expires = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 600;
+    WorkspaceAccess {
+        peer_token: SYNTHETIC_PEER_TOKEN.into(),
+        peer_token_expires_at: i64::try_from(expires).unwrap(),
+        operation_generation: generation,
+        coordinator_url: "https://codewire.test".into(),
+        direct_udp_endpoints: vec!["203.0.113.7:41641".into()],
+        peer_relay_endpoints: vec!["relay.codewire.test:41641".into()],
+        ..Default::default()
+    }
+}
 
 /// One scripted answer of the fake listener.
 enum Answer {
     Bound,
     BoundFor(&'static str),
+    /// Bound, with an access grant for this generation.
+    BoundWithAccess(i64),
     Error(ErrorCode),
 }
 
@@ -31,6 +56,8 @@ struct Recorded {
     waits: Vec<u32>,
     versions: Vec<http::Version>,
     at: Vec<tokio::time::Instant>,
+    host_key: Option<String>,
+    relay_requests: Vec<(Vec<String>, u32)>,
 }
 
 struct ScriptedService {
@@ -63,9 +90,10 @@ impl WorkspaceBindingService for ScriptedService {
             .unwrap()
             .pop_front()
             .unwrap_or(Answer::Bound);
-        let pod_uid = match answer {
-            Answer::Bound => POD,
-            Answer::BoundFor(pod) => pod,
+        let (pod_uid, access) = match answer {
+            Answer::Bound => (POD, None),
+            Answer::BoundFor(pod) => (pod, None),
+            Answer::BoundWithAccess(generation) => (POD, Some(synthetic_access(generation))),
             Answer::Error(code) => return Err(ConnectError::new(code, "scripted")),
         };
         connectrpc::Response::ok(BindWorkspaceResponse {
@@ -75,6 +103,7 @@ impl WorkspaceBindingService for ScriptedService {
             daemon_credential: SYNTHETIC_CREDENTIAL.into(),
             projection_selection_sha256: String::new(),
             managed_credential_clients: "v1:none".into(),
+            access: access.map(::buffa::MessageField::some).unwrap_or_default(),
             ..Default::default()
         })
     }
@@ -82,28 +111,59 @@ impl WorkspaceBindingService for ScriptedService {
     async fn refresh_access(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, codewire_proto::codewire::internal::v1::RefreshAccessRequest>,
-    ) -> ServiceResult<codewire_proto::codewire::internal::v1::RefreshAccessResponse> {
-        Err(ConnectError::unimplemented("not scripted"))
+        _request: ServiceRequest<'_, RefreshAccessRequest>,
+    ) -> ServiceResult<RefreshAccessResponse> {
+        connectrpc::Response::ok(RefreshAccessResponse {
+            access: ::buffa::MessageField::some(synthetic_access(5)),
+            ..Default::default()
+        })
     }
 
     async fn record_host_key(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, codewire_proto::codewire::internal::v1::RecordHostKeyRequest>,
-    ) -> ServiceResult<codewire_proto::codewire::internal::v1::RecordHostKeyResponse> {
-        Err(ConnectError::unimplemented("not scripted"))
+        request: ServiceRequest<'_, RecordHostKeyRequest>,
+    ) -> ServiceResult<RecordHostKeyResponse> {
+        let mut recorded = self.recorded.lock().unwrap();
+        let key = request.public_key_openssh.to_string();
+        match recorded.host_key.as_deref() {
+            Some(existing) if existing != key => Err(ConnectError::new(
+                ErrorCode::FailedPrecondition,
+                "a different key is recorded",
+            )),
+            _ => {
+                recorded.host_key = Some(key);
+                connectrpc::Response::ok(RecordHostKeyResponse::default())
+            }
+        }
     }
 
     async fn allocate_peer_relay(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<
-            '_,
-            codewire_proto::codewire::internal::v1::AllocatePeerRelayRequest,
-        >,
-    ) -> ServiceResult<codewire_proto::codewire::internal::v1::AllocatePeerRelayResponse> {
-        Err(ConnectError::unimplemented("not scripted"))
+        request: ServiceRequest<'_, AllocatePeerRelayRequest>,
+    ) -> ServiceResult<AllocatePeerRelayResponse> {
+        let disco_keys: Vec<String> = request
+            .disco_keys
+            .iter()
+            .map(|key| key.to_string())
+            .collect();
+        self.recorded
+            .lock()
+            .unwrap()
+            .relay_requests
+            .push((disco_keys.clone(), request.relay_generation));
+        connectrpc::Response::ok(AllocatePeerRelayResponse {
+            relay_generation: request.relay_generation,
+            server_disco_key: "discokey:00".into(),
+            disco_keys,
+            lamport_id: 1,
+            vni: 7,
+            bind_lifetime_ns: 1,
+            steady_state_lifetime_ns: 2,
+            addr_ports: vec!["203.0.113.9:41641".into()],
+            ..Default::default()
+        })
     }
 }
 
@@ -112,6 +172,8 @@ struct Fixture {
     config: WorkspaceBindingConfig,
     recorded: Arc<Mutex<Recorded>>,
     token: PathBuf,
+    url: String,
+    _pki: SyntheticPki,
     _directory: TempDir,
 }
 
@@ -145,19 +207,17 @@ async fn fixture_with(answers: Vec<Answer>, timing: BindTiming) -> Fixture {
                 next.run(request)
             },
         ));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+    // The listener serves TLS only, as in production.
+    let pki = SyntheticPki::new("localhost");
+    let address = pki.serve(app).await;
     let directory = tempfile::tempdir().unwrap();
     let token = directory.path().join("token");
     std::fs::write(&token, SYNTHETIC_PROJECTED_TOKEN).unwrap();
-    let url = format!("http://{address}");
+    let url = format!("https://localhost:{}", address.port());
     let values = [
         (
             WORKSPACE_BINDING_URL_ENV,
-            "http://binding.test:8087".to_owned(),
+            "https://binding.test:8087".to_owned(),
         ),
         (WORKSPACE_POD_UID_ENV, POD.to_owned()),
     ];
@@ -170,12 +230,18 @@ async fn fixture_with(answers: Vec<Answer>, timing: BindTiming) -> Fixture {
     .unwrap() else {
         panic!("binding mode expected");
     };
-    let config = config.with_token_path(&token);
+    // The synthetic listener's roots stand in for the mounted internal CA.
+    let config = config
+        .with_token_path(&token)
+        .with_tls_roots_file(&pki.roots);
     Fixture {
-        client: BindingClient::new(&url, config.token_path(), timing).unwrap(),
+        client: BindingClient::new(&url, config.tls_roots_file(), config.token_path(), timing)
+            .unwrap(),
         config,
         recorded,
         token,
+        url,
+        _pki: pki,
         _directory: directory,
     }
 }
@@ -183,7 +249,9 @@ async fn fixture_with(answers: Vec<Answer>, timing: BindTiming) -> Fixture {
 #[tokio::test]
 async fn an_accepted_binding_carries_the_credential_and_requested_wait() {
     let fixture = fixture(vec![Answer::Bound]).await;
-    let binding = fixture.client.attempt(&fixture.config).await.unwrap();
+    let bound = fixture.client.attempt(&fixture.config).await.unwrap();
+    assert!(bound.access.is_none());
+    let binding = bound.binding;
     assert_eq!(binding.environment_id().to_string(), ENVIRONMENT);
     assert_eq!(binding.operation_generation(), 4);
     assert_eq!(
@@ -220,7 +288,9 @@ async fn not_found_is_called_again_at_once_until_bound() {
     )
     .await;
     let started = tokio::time::Instant::now();
-    let binding = bind_until_accepted(&fixture.client, &fixture.config).await;
+    let binding = bind_until_accepted(&fixture.client, &fixture.config)
+        .await
+        .binding;
     assert_eq!(
         binding.daemon_credential().expose_secret(),
         SYNTHETIC_CREDENTIAL
@@ -275,8 +345,8 @@ async fn another_pods_binding_is_never_accepted() {
         AttemptError::InvalidResponse
     );
     // The loop treats it as a failure and backs off, then accepts its own.
-    let binding = bind_until_accepted(&fixture.client, &fixture.config).await;
-    assert_eq!(binding.environment_id().to_string(), ENVIRONMENT);
+    let bound = bind_until_accepted(&fixture.client, &fixture.config).await;
+    assert_eq!(bound.binding.environment_id().to_string(), ENVIRONMENT);
 }
 
 #[tokio::test]
@@ -359,6 +429,113 @@ fn jitter_stays_within_half_to_full_backoff() {
         let pause = jittered(Duration::from_millis(500));
         assert!(pause >= Duration::from_millis(250) && pause <= Duration::from_millis(500));
     }
+}
+
+#[tokio::test]
+async fn an_access_grant_is_validated_with_the_binding() {
+    let fixture = fixture(vec![Answer::BoundWithAccess(4), Answer::BoundWithAccess(3)]).await;
+    let bound = fixture.client.attempt(&fixture.config).await.unwrap();
+    let access = bound.access.expect("access grant");
+    assert_eq!(access.peer_token().expose_secret(), SYNTHETIC_PEER_TOKEN);
+    assert_eq!(access.operation_generation(), 4);
+    assert_eq!(access.coordinator_url(), "https://codewire.test");
+    assert_eq!(access.direct_udp_endpoints(), ["203.0.113.7:41641"]);
+    assert_eq!(access.peer_relay_endpoints(), ["relay.codewire.test:41641"]);
+    // A first grant for another generation than the binding is refused.
+    assert_eq!(
+        fixture.client.attempt(&fixture.config).await.unwrap_err(),
+        AttemptError::InvalidResponse
+    );
+}
+
+#[tokio::test]
+async fn refresh_record_and_allocate_use_the_bound_exchange() {
+    let fixture = fixture(vec![]).await;
+    let access = fixture.client.refresh_access().await.unwrap();
+    assert_eq!(access.operation_generation(), 5);
+    // The same key is recorded again idempotently; another is refused.
+    fixture.client.record_host_key(HOST_KEY).await.unwrap();
+    fixture.client.record_host_key(HOST_KEY).await.unwrap();
+    assert_eq!(
+        fixture
+            .client
+            .record_host_key(OTHER_HOST_KEY)
+            .await
+            .unwrap_err(),
+        AttemptError::Rejected(ErrorCode::FailedPrecondition)
+    );
+    let keys = ["discokey:aa".to_owned(), "discokey:bb".to_owned()];
+    let allocation = fixture
+        .client
+        .allocate_peer_relay(keys.clone(), 9)
+        .await
+        .unwrap();
+    assert_eq!(allocation.relay_generation, 9);
+    assert_eq!(allocation.addr_ports, ["203.0.113.9:41641"]);
+    let recorded = fixture.recorded.lock().unwrap();
+    assert_eq!(recorded.relay_requests, [(keys.to_vec(), 9)]);
+    // Every call carried the projected token, over HTTP/1.1.
+    assert!(
+        recorded
+            .authorizations
+            .iter()
+            .all(|value| value == &format!("Bearer {SYNTHETIC_PROJECTED_TOKEN}"))
+    );
+    assert!(
+        recorded
+            .versions
+            .iter()
+            .all(|version| *version == http::Version::HTTP_11)
+    );
+}
+
+#[tokio::test]
+async fn the_listener_must_present_a_certificate_from_the_mounted_roots() {
+    let fixture = fixture(vec![]).await;
+    // Roots from another authority: no call ever succeeds.
+    let other = SyntheticPki::new("localhost");
+    let client = BindingClient::new(
+        &fixture.url,
+        &other.roots,
+        fixture.config.token_path(),
+        timing(),
+    )
+    .unwrap();
+    assert_eq!(
+        client.attempt(&fixture.config).await.unwrap_err(),
+        AttemptError::Rejected(ErrorCode::Unavailable)
+    );
+    assert!(fixture.recorded.lock().unwrap().at.is_empty());
+    // An absent roots mount never falls back to other trust.
+    let unmounted = tempfile::tempdir().unwrap();
+    let client = BindingClient::new(
+        &fixture.url,
+        &unmounted.path().join("ca.crt"),
+        fixture.config.token_path(),
+        timing(),
+    )
+    .unwrap();
+    assert!(client.attempt(&fixture.config).await.is_err());
+    assert!(fixture.recorded.lock().unwrap().at.is_empty());
+    // Plaintext origins and relative roots are refused outright.
+    assert!(
+        BindingClient::new(
+            "http://localhost:8087",
+            &other.roots,
+            fixture.config.token_path(),
+            timing()
+        )
+        .is_err()
+    );
+    assert!(
+        BindingClient::new(
+            &fixture.url,
+            Path::new("ca.crt"),
+            fixture.config.token_path(),
+            timing()
+        )
+        .is_err()
+    );
 }
 
 #[test]

@@ -438,15 +438,16 @@ async fn run_bound_hosted_daemon(
     tracing::info!("hosted environment daemon waiting for its workspace binding");
     let client = hosted_binding::BindingClient::new(
         config.binding_url(),
+        config.tls_roots_file(),
         config.token_path(),
         hosted_binding::BindTiming::default(),
     )
     .context("configure workspace binding client")?;
-    let binding = hosted_binding::bind_until_accepted(&client, &config).await;
+    let bound = hosted_binding::bind_until_accepted(&client, &config).await;
     paths
-        .install_binding(&binding)
+        .install_binding(&bound.binding)
         .context("install hosted daemon binding")?;
-    serve_hosted_daemon(config.into_config(&binding), true).await
+    serve_hosted_daemon(config.into_config(&bound.binding), true).await
 }
 
 #[cfg(not(unix))]

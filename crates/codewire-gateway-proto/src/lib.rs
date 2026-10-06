@@ -55,6 +55,9 @@ pub const WORKSPACE_BINDING_TLS_ROOTS_MOUNT_PATH: &str =
     "/run/codewire-orchestration-internal-roots";
 pub const WORKSPACE_BINDING_TLS_ROOTS_FILE: &str =
     "/run/codewire-orchestration-internal-roots/ca.crt";
+/// The bound daemon's SSH listener in the workspace Pod. Only orchestration
+/// (its SSH proxy and setup health check) may reach it.
+pub const WORKSPACE_SSH_PORT: u16 = 2222;
 /// The workspace Pod's own UID from the downward API. The daemon compares it
 /// with the reviewed Pod UID in the bind response.
 pub const WORKSPACE_POD_UID_ENV: &str = "CODEWIRE_POD_UID";

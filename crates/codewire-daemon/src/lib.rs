@@ -1,3 +1,4 @@
+pub mod access;
 #[cfg(target_os = "linux")]
 pub mod claude_home;
 pub mod client;

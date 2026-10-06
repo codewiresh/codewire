@@ -86,7 +86,7 @@ mod tests {
 
     fn binding_config() -> WorkspaceBindingConfig {
         let values = [
-            (WORKSPACE_BINDING_URL_ENV, "http://binding.test:8087"),
+            (WORKSPACE_BINDING_URL_ENV, "https://binding.test:8087"),
             (WORKSPACE_POD_UID_ENV, POD),
         ];
         match HostedDaemonMode::from_lookup(|name| {
