@@ -55,9 +55,6 @@ pub const WORKSPACE_BINDING_TLS_ROOTS_MOUNT_PATH: &str =
     "/run/codewire-orchestration-internal-roots";
 pub const WORKSPACE_BINDING_TLS_ROOTS_FILE: &str =
     "/run/codewire-orchestration-internal-roots/ca.crt";
-/// The bound daemon's SSH listener in the workspace Pod. Only orchestration
-/// (its SSH proxy and setup health check) may reach it.
-pub const WORKSPACE_SSH_PORT: u16 = 2222;
 /// The workspace Pod's own UID from the downward API. The daemon compares it
 /// with the reviewed Pod UID in the bind response.
 pub const WORKSPACE_POD_UID_ENV: &str = "CODEWIRE_POD_UID";
@@ -74,6 +71,13 @@ pub const HOSTED_DAEMON_CREDENTIAL_FILE: &str = "/codewire/run/daemon/credential
 /// [`WORKSPACE_SSH_PORT`] and its host key is recorded. Tailnet comes up
 /// after, asynchronously, and is not part of this marker.
 pub const HOSTED_DAEMON_ACCESS_READY_FILE: &str = "/codewire/run/daemon/access-ready";
+/// The bound daemon's SSH listener in the workspace Pod. Only orchestration
+/// (its SSH proxy and setup health check) may reach it.
+pub const WORKSPACE_SSH_PORT: u16 = 2222;
+/// The bound daemon's tailnet direct-UDP port in the workspace Pod: the
+/// target of the environment's direct-UDP LoadBalancer, reachable from the
+/// world only. The gateway used the same port.
+pub const WORKSPACE_TAILNET_UDP_PORT: u16 = 31000;
 /// Server-side long-poll requested by an unbound daemon; the listener clamps
 /// it to its own maximum.
 pub const WORKSPACE_BINDING_WAIT_SECONDS: u32 = 20;
