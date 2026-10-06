@@ -14,10 +14,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, header::AUTHORIZATION};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use codewire_gateway_proto::{
-    GATEWAY_BINDING_SERVICE_ACCOUNT, GATEWAY_BINDING_TOKEN_AUDIENCE,
-    WORKSPACE_BINDING_TOKEN_AUDIENCE,
-};
+use codewire_gateway_proto::{SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
 use codewire_server_core::bounded_http1::PeerAddr;
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewStatus, UserInfo};
 use k8s_openapi::api::core::v1::{Pod, PodSpec, PodStatus};
@@ -37,7 +34,7 @@ use super::store::{
 use super::{app, workspace_binding_router};
 use crate::runtime_transport::{PeerRelayTransport, RuntimeTransportZone, TRANSPORT_ZONE_LABEL};
 use crate::sandbox::{LABEL_ENV_ID, LABEL_TYPE};
-use crate::worker::gatewayauth::{
+use crate::worker::environment_auth::{
     SCOPE_DAEMON, WorkspaceCredentialScope, issue_token, issue_workspace_daemon_credential,
 };
 
@@ -122,7 +119,7 @@ fn review(namespace: &str, service_account: &str, audience: &str) -> TokenReview
 fn valid_review() -> TokenReviewStatus {
     review(
         NAMESPACE,
-        GATEWAY_BINDING_SERVICE_ACCOUNT,
+        SANDBOX_SERVICE_ACCOUNT,
         WORKSPACE_BINDING_TOKEN_AUDIENCE,
     )
 }
@@ -157,7 +154,7 @@ fn workspace_pod() -> Pod {
             ..Default::default()
         },
         spec: Some(PodSpec {
-            service_account_name: Some(GATEWAY_BINDING_SERVICE_ACCOUNT.into()),
+            service_account_name: Some(SANDBOX_SERVICE_ACCOUNT.into()),
             containers: Vec::new(),
             ..Default::default()
         }),
@@ -180,7 +177,7 @@ fn direct_udp_service() -> Value {
         "apiVersion": "v1",
         "kind": "Service",
         "metadata": {
-            "name": crate::sandbox::template::gateway_direct_udp_service_name(ENVIRONMENT_ID),
+            "name": crate::sandbox::template::direct_udp_service_name(ENVIRONMENT_ID),
             "namespace": NAMESPACE,
         },
         "spec": {"type": "LoadBalancer", "ports": [{"port": 41700, "protocol": "UDP"}]},
@@ -358,9 +355,7 @@ impl FakeCluster {
                     && path
                         == format!(
                             "/api/v1/namespaces/{NAMESPACE}/services/{}",
-                            crate::sandbox::template::gateway_direct_udp_service_name(
-                                ENVIRONMENT_ID
-                            )
+                            crate::sandbox::template::direct_udp_service_name(ENVIRONMENT_ID)
                         )
                 {
                     match cluster.service.lock().unwrap().clone() {
@@ -686,14 +681,13 @@ async fn a_peer_flood_is_refused_before_any_review() {
 #[tokio::test]
 async fn only_the_exact_workspace_binding_audience_authenticates() {
     for audience in [
-        GATEWAY_BINDING_TOKEN_AUDIENCE,
+        codewire_gateway_proto::CREDENTIAL_RELAY_TOKEN_AUDIENCE,
         codewire_gateway_proto::CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
-        codewire_gateway_proto::CREDENTIAL_GATEWAY_TOKEN_AUDIENCE,
         "https://kubernetes.default.svc",
     ] {
         let fixture = fixture(
             FakeCluster::new(
-                review(NAMESPACE, GATEWAY_BINDING_SERVICE_ACCOUNT, audience),
+                review(NAMESPACE, SANDBOX_SERVICE_ACCOUNT, audience),
                 vec![Some(workspace_pod())],
                 vec![Some(sandbox())],
             ),
@@ -708,7 +702,7 @@ async fn only_the_exact_workspace_binding_audience_authenticates() {
 #[tokio::test]
 async fn reviewed_namespace_and_service_account_are_enforced() {
     for (namespace, service_account) in [
-        ("other-sandboxes", GATEWAY_BINDING_SERVICE_ACCOUNT),
+        ("other-sandboxes", SANDBOX_SERVICE_ACCOUNT),
         (NAMESPACE, "default"),
     ] {
         let fixture = fixture(

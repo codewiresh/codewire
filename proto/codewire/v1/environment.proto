@@ -506,10 +506,10 @@ message TrustReportPlacement {
 }
 
 message TrustReportImages {
+  reserved 3, 4;
+  reserved "gateway_image", "gateway_image_id";
   string workspace_image = 1;
   string workspace_image_id = 2;
-  string gateway_image = 3;
-  string gateway_image_id = 4;
   string dind_image = 5;
   string dind_image_id = 6;
   string daemon_init_image = 7;

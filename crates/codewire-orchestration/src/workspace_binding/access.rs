@@ -152,7 +152,7 @@ pub async fn direct_udp_endpoints(
     environment_id: &str,
 ) -> Vec<String> {
     let services: Api<Service> = Api::namespaced(kube.clone(), namespace);
-    let name = crate::sandbox::template::gateway_direct_udp_service_name(environment_id);
+    let name = crate::sandbox::template::direct_udp_service_name(environment_id);
     let Ok(Some(service)) = services.get_opt(&name).await else {
         return Vec::new();
     };

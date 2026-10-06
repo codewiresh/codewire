@@ -3268,7 +3268,7 @@ SQL
       kubectl -n "$SANDBOX_NS" delete \
       "sandboxclaim/$claim_name" "sandboxwarmpool/$shadow_pool_name" \
       "sandboxtemplate/$template_name" "service/$daemon_service" \
-      "service/cw-gateway-udp-$environment_id" "networkpolicy/cw-daemon-net-$environment_id" \
+      "service/cw-tailnet-udp-$environment_id" "networkpolicy/cw-daemon-net-$environment_id" \
       --ignore-not-found=true --cascade=foreground --wait=true --timeout=120s >/dev/null; then
       delete_kind_credential_bootstrap "$environment_id" || status=1
     else

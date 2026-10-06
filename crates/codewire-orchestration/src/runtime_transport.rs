@@ -1,7 +1,7 @@
 //! Runtime transport-zone registry (#339).
 //!
 //! Infra declares zone capabilities; Codewire stores the validated catalog and
-//! selects a zone after Kubernetes places the gateway pod.
+//! selects a zone after Kubernetes places the workspace Pod.
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;

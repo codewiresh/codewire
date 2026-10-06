@@ -752,24 +752,20 @@ class TrustReportPlacement(_message.Message):
     def __init__(self, namespace: _Optional[str] = ..., workspace_pod: _Optional[str] = ..., pod_ip: _Optional[str] = ..., node: _Optional[str] = ..., zone: _Optional[str] = ..., region: _Optional[str] = ...) -> None: ...
 
 class TrustReportImages(_message.Message):
-    __slots__ = ("workspace_image", "workspace_image_id", "gateway_image", "gateway_image_id", "dind_image", "dind_image_id", "daemon_init_image", "daemon_init_image_id")
+    __slots__ = ("workspace_image", "workspace_image_id", "dind_image", "dind_image_id", "daemon_init_image", "daemon_init_image_id")
     WORKSPACE_IMAGE_FIELD_NUMBER: _ClassVar[int]
     WORKSPACE_IMAGE_ID_FIELD_NUMBER: _ClassVar[int]
-    GATEWAY_IMAGE_FIELD_NUMBER: _ClassVar[int]
-    GATEWAY_IMAGE_ID_FIELD_NUMBER: _ClassVar[int]
     DIND_IMAGE_FIELD_NUMBER: _ClassVar[int]
     DIND_IMAGE_ID_FIELD_NUMBER: _ClassVar[int]
     DAEMON_INIT_IMAGE_FIELD_NUMBER: _ClassVar[int]
     DAEMON_INIT_IMAGE_ID_FIELD_NUMBER: _ClassVar[int]
     workspace_image: str
     workspace_image_id: str
-    gateway_image: str
-    gateway_image_id: str
     dind_image: str
     dind_image_id: str
     daemon_init_image: str
     daemon_init_image_id: str
-    def __init__(self, workspace_image: _Optional[str] = ..., workspace_image_id: _Optional[str] = ..., gateway_image: _Optional[str] = ..., gateway_image_id: _Optional[str] = ..., dind_image: _Optional[str] = ..., dind_image_id: _Optional[str] = ..., daemon_init_image: _Optional[str] = ..., daemon_init_image_id: _Optional[str] = ...) -> None: ...
+    def __init__(self, workspace_image: _Optional[str] = ..., workspace_image_id: _Optional[str] = ..., dind_image: _Optional[str] = ..., dind_image_id: _Optional[str] = ..., daemon_init_image: _Optional[str] = ..., daemon_init_image_id: _Optional[str] = ...) -> None: ...
 
 class TrustReportProvenance(_message.Message):
     __slots__ = ("status", "guest_kernel", "guest_initrd", "guest_image", "firmware", "source", "notes")

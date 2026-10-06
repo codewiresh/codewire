@@ -21,7 +21,7 @@ use super::environments::{
 };
 use crate::confidential_storage::require_interactive_access;
 
-/// Mirrors `reservedPorts` (gateway SSH + readyz).
+/// Ports reserved for the Sandbox runtime: the daemon's SSH (2222) and 2223.
 fn is_reserved_port(port: i32) -> bool {
     port == 2222 || port == 2223
 }

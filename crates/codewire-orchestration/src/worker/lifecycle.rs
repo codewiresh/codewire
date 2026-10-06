@@ -21,7 +21,7 @@ use super::create::{
 };
 use super::env_data::{load_backend_row, load_environment};
 use super::env_log::emit_authoritative_environment_log_for_states;
-use super::gatewayauth::issue_environment_tokens;
+use super::environment_auth::issue_environment_daemon_token;
 use super::port_dns;
 use super::setup::{
     handle_post_start_configuration, is_setup_activity_cancelled, is_setup_recovery_failed,
@@ -199,15 +199,14 @@ async fn ensure_access_stack_for_env(
     let env = load_environment(&ctx.pool, env_id).await?;
     let preset_id = env.preset_id.clone().unwrap_or_default();
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, &preset_id).await?;
-    let auth_tokens = issue_environment_tokens(&cfg.session_secret, env_id)?;
+    let daemon_auth_token = issue_environment_daemon_token(&cfg.session_secret, env_id)?;
     let opts = environment_template_opts(
         cfg,
         &image_ref,
         &template_base,
         &env,
         authority.operation_generation(),
-        &auth_tokens.coordinate,
-        &auth_tokens.daemon,
+        &daemon_auth_token,
     )?;
     let client = sandbox_client(ctx, namespace)?;
     run_template_mutation(

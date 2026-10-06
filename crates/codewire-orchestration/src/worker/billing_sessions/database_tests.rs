@@ -9,7 +9,7 @@ use sqlx::PgPool;
 use super::*;
 use crate::test_database_support::TestDatabase;
 use crate::worker::activity_authority::ActivityAuthority;
-use crate::worker::gatewayauth::WorkspaceCredentialScope;
+use crate::worker::environment_auth::WorkspaceCredentialScope;
 use crate::worker::workspace_binding::{BindingRecord, write_binding};
 
 const CREATOR: &str = "billing-bind-creator";

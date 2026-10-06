@@ -2,9 +2,9 @@
 //!
 //! Mirror of the dynamic-client paths in `internal/sandbox/client.go`:
 //! SandboxClaim create (AlreadyExists → reuse), get, finalizer removal,
-//! delete. Rust now owns the live gateway/workspace split, so this client
-//! also manages the gateway Deployment, gateway Service, workspace-daemon
-//! Service, and their NetworkPolicies.
+//! delete. It also manages the environment's access objects: the
+//! workspace-daemon Service, the direct-UDP LoadBalancer and the workspace
+//! NetworkPolicies.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -25,19 +25,15 @@ use kube::api::{
 };
 use kube::core::GroupVersionKind;
 use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
-use russh::keys::ssh_key::private::Ed25519Keypair;
-use russh::keys::ssh_key::{LineEnding, PrivateKey};
 use serde_json::Value;
 
 use super::template::{
     CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
-    RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts, gateway_direct_udp_service_name,
-    gateway_host_key_secret_name, gateway_network_policy_name, gateway_workload_name,
-    render_gateway_direct_udp_service, render_gateway_host_key_secret, render_sandbox_shadow_pool,
-    render_sandbox_template, render_warm_member_bridge, render_workspace_daemon_network_policy,
+    RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts, direct_udp_service_name,
+    render_direct_udp_service, render_sandbox_shadow_pool, render_sandbox_template,
+    render_warm_member_bridge, render_workspace_daemon_network_policy,
     render_workspace_daemon_service, warm_member_daemon_bridge_name,
-    warm_member_gateway_bridge_name, workspace_daemon_network_policy_name,
-    workspace_daemon_service_name,
+    workspace_daemon_network_policy_name, workspace_daemon_service_name,
 };
 use super::{
     CRD_VERSION, ClaimOpts, EXTENSIONS_GROUP, LABEL_ENV_ID, LABEL_ORG_ID, LABEL_TYPE,
@@ -262,9 +258,6 @@ fn legacy_shared_warm_pool_name_matches(name: &str, template_name: &str) -> bool
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
 }
-
-#[path = "client_credentials.rs"]
-mod credentials;
 
 #[path = "client/workspace_binding.rs"]
 mod workspace_binding;
@@ -3360,21 +3353,9 @@ impl SandboxClient {
         }
     }
 
-    fn deployments(&self) -> Api<DynamicObject> {
-        let gvk = GroupVersionKind::gvk("apps", "v1", "Deployment");
-        let resource = ApiResource::from_gvk_with_plural(&gvk, "deployments");
-        Api::namespaced_with(self.client.clone(), &self.namespace, &resource)
-    }
-
     fn services(&self) -> Api<DynamicObject> {
         let gvk = GroupVersionKind::gvk("", "v1", "Service");
         let resource = ApiResource::from_gvk_with_plural(&gvk, "services");
-        Api::namespaced_with(self.client.clone(), &self.namespace, &resource)
-    }
-
-    fn secrets(&self) -> Api<DynamicObject> {
-        let gvk = GroupVersionKind::gvk("", "v1", "Secret");
-        let resource = ApiResource::from_gvk_with_plural(&gvk, "secrets");
         Api::namespaced_with(self.client.clone(), &self.namespace, &resource)
     }
 
@@ -3664,30 +3645,30 @@ impl SandboxClient {
 
     /// The environment's access objects (design §5): the daemon Service the
     /// API and the credential relay dial, the direct-UDP LoadBalancer to the
-    /// workspace's tailnet peer, and the workspace's NetworkPolicy. No
-    /// gateway object is rendered: the daemon hosts SSH and the tailnet.
+    /// workspace's tailnet peer, and the workspace's NetworkPolicy. The
+    /// daemon hosts SSH and the tailnet.
     pub async fn ensure_access_stack(&self, opts: &TemplateOpts) -> anyhow::Result<()> {
         if opts.environment_id.trim().is_empty() {
             anyhow::bail!("ensure access stack: environment_id is required");
         }
-        let opts = self.resolve_gateway_direct_udp_service_opts(opts).await?;
+        let opts = self.resolve_direct_udp_service_opts(opts).await?;
         self.ensure_dynamic(
             self.services(),
             &workspace_daemon_service_name(&opts.environment_id),
             render_workspace_daemon_service(&self.namespace, &opts),
         )
         .await?;
-        if let Some(service) = render_gateway_direct_udp_service(&self.namespace, &opts) {
+        if let Some(service) = render_direct_udp_service(&self.namespace, &opts) {
             self.ensure_dynamic(
                 self.services(),
-                &gateway_direct_udp_service_name(&opts.environment_id),
+                &direct_udp_service_name(&opts.environment_id),
                 service,
             )
             .await?;
         } else {
             delete_dynamic(
                 &self.services(),
-                &gateway_direct_udp_service_name(&opts.environment_id),
+                &direct_udp_service_name(&opts.environment_id),
             )
             .await?;
         }
@@ -3726,60 +3707,26 @@ impl SandboxClient {
         .await
     }
 
-    /// Remove an environment's warm-member bridge, and the gateway half an
-    /// environment bound before the gateway's removal may still own.
-    /// NotFound is success.
+    /// Remove an environment's warm-member bridge. NotFound is success.
     pub async fn delete_warm_member_bridge(&self, env_id: &str) -> anyhow::Result<()> {
-        let policies = self.network_policies();
-        delete_dynamic(&policies, &warm_member_daemon_bridge_name(env_id)).await?;
-        delete_dynamic(&policies, &warm_member_gateway_bridge_name(env_id)).await
+        delete_dynamic(
+            &self.network_policies(),
+            &warm_member_daemon_bridge_name(env_id),
+        )
+        .await
     }
 
-    pub async fn ensure_gateway_host_key_secret(&self, opts: &TemplateOpts) -> anyhow::Result<()> {
-        if opts.environment_id.trim().is_empty() {
-            anyhow::bail!("ensure gateway host key secret: environment_id is required");
-        }
-        let name = gateway_host_key_secret_name(&opts.environment_id);
-        let secrets = self.secrets();
-        let host_key = generate_gateway_host_key_openssh()?;
-        let obj: DynamicObject = serde_json::from_value(render_gateway_host_key_secret(
-            &self.namespace,
-            opts,
-            &host_key,
-        ))?;
-        match secrets.create(&PostParams::default(), &obj).await {
-            Ok(_) => Ok(()),
-            Err(kube::Error::Api(e)) if e.code == 409 => Ok(()),
-            Err(e) => Err(anyhow::anyhow!(
-                "create gateway host key Secret {name}: {e}"
-            )),
-        }
-    }
-
-    /// Remove the environment's access objects, and every gateway object an
-    /// environment created before the gateway's removal may still own.
+    /// Remove the environment's access objects.
     pub async fn delete_access_stack(&self, env_id: &str) -> anyhow::Result<()> {
         let services = self.services();
         delete_dynamic(&services, &workspace_daemon_service_name(env_id)).await?;
-        delete_dynamic(&services, &super::template::gateway_service_name(env_id)).await?;
-        delete_dynamic(&services, &gateway_direct_udp_service_name(env_id)).await?;
-        delete_dynamic(&self.deployments(), &gateway_workload_name(env_id)).await?;
+        delete_dynamic(&services, &direct_udp_service_name(env_id)).await?;
         self.delete_warm_member_bridge(env_id).await?;
         delete_dynamic(
             &self.network_policies(),
             &workspace_daemon_network_policy_name(env_id),
         )
-        .await?;
-        delete_dynamic(
-            &self.network_policies(),
-            &gateway_network_policy_name(env_id),
-        )
-        .await?;
-        Ok(())
-    }
-
-    pub async fn delete_gateway_host_key_secret(&self, env_id: &str) -> anyhow::Result<()> {
-        delete_dynamic(&self.secrets(), &gateway_host_key_secret_name(env_id)).await
+        .await
     }
 
     /// Remove every environment-owned runtime object and prove absence before
@@ -3832,13 +3779,6 @@ impl SandboxClient {
             known_sandbox_name
         };
         self.delete_access_stack(env_id).await?;
-        self.delete_credential_bootstrap(env_id, timeout).await?;
-        delete_dynamic_until_absent(
-            &self.secrets(),
-            &gateway_host_key_secret_name(env_id),
-            timeout,
-        )
-        .await?;
         self.remove_deletion_protection_finalizer(env_id).await?;
         self.delete_sandbox_claim(env_id).await?;
 
@@ -4062,35 +4002,11 @@ impl SandboxClient {
 
         for (kind, api, name) in [
             (
-                "Certificate",
-                self.credential_certificates(),
-                super::template::credential_gateway_certificate_name(env_id),
-            ),
-            (
-                "ConfigMap",
-                self.credential_config_maps(),
-                super::template::credential_codex_config_name(env_id),
-            ),
-            (
-                "Deployment",
-                self.deployments(),
-                gateway_workload_name(env_id),
-            ),
-            (
                 "Service",
                 self.services(),
                 workspace_daemon_service_name(env_id),
             ),
-            (
-                "Service",
-                self.services(),
-                super::template::gateway_service_name(env_id),
-            ),
-            (
-                "Service",
-                self.services(),
-                gateway_direct_udp_service_name(env_id),
-            ),
+            ("Service", self.services(), direct_udp_service_name(env_id)),
             (
                 "NetworkPolicy",
                 self.network_policies(),
@@ -4099,17 +4015,7 @@ impl SandboxClient {
             (
                 "NetworkPolicy",
                 self.network_policies(),
-                gateway_network_policy_name(env_id),
-            ),
-            (
-                "NetworkPolicy",
-                self.network_policies(),
                 warm_member_daemon_bridge_name(env_id),
-            ),
-            (
-                "NetworkPolicy",
-                self.network_policies(),
-                warm_member_gateway_bridge_name(env_id),
             ),
         ] {
             if dynamic_exists(&api, &name).await? {
@@ -4284,7 +4190,7 @@ impl SandboxClient {
         anyhow::bail!("update {name}: too many conflicts")
     }
 
-    async fn resolve_gateway_direct_udp_service_opts(
+    async fn resolve_direct_udp_service_opts(
         &self,
         opts: &TemplateOpts,
     ) -> anyhow::Result<TemplateOpts> {
@@ -4296,21 +4202,20 @@ impl SandboxClient {
             anyhow::bail!("direct UDP LoadBalancer is enabled but no IP is configured");
         }
         if opts.direct_udp_lb_port == 0 {
-            opts.direct_udp_lb_port =
-                i64::from(self.allocate_gateway_direct_udp_port(&opts).await?);
+            opts.direct_udp_lb_port = i64::from(self.allocate_direct_udp_port(&opts).await?);
         } else {
-            validate_gateway_direct_udp_port(opts.direct_udp_lb_port)
+            validate_direct_udp_port(opts.direct_udp_lb_port)
                 .map_err(|e| anyhow::anyhow!("direct UDP LoadBalancer port: {e}"))?;
         }
         Ok(opts)
     }
 
-    async fn allocate_gateway_direct_udp_port(&self, opts: &TemplateOpts) -> anyhow::Result<u16> {
+    async fn allocate_direct_udp_port(&self, opts: &TemplateOpts) -> anyhow::Result<u16> {
         let services = self.services();
-        let name = gateway_direct_udp_service_name(&opts.environment_id);
+        let name = direct_udp_service_name(&opts.environment_id);
         match services.get(&name).await {
             Ok(existing) => {
-                if let Some(port) = gateway_direct_udp_service_port(&existing) {
+                if let Some(port) = direct_udp_service_port(&existing) {
                     return Ok(port);
                 }
             }
@@ -4318,8 +4223,8 @@ impl SandboxClient {
             Err(e) => return Err(anyhow::anyhow!("get direct UDP Service {name}: {e}")),
         }
 
-        let (start, end) = gateway_direct_udp_port_range(opts)?;
-        let used = self.used_gateway_direct_udp_ports(opts).await?;
+        let (start, end) = direct_udp_port_range(opts)?;
+        let used = self.used_direct_udp_ports(opts).await?;
         let width = u32::from(end) - u32::from(start) + 1;
         let mut hasher = Crc32Hasher::new();
         hasher.update(opts.environment_id.as_bytes());
@@ -4334,10 +4239,7 @@ impl SandboxClient {
         anyhow::bail!("no free direct UDP LoadBalancer ports in configured range {start}-{end}")
     }
 
-    async fn used_gateway_direct_udp_ports(
-        &self,
-        opts: &TemplateOpts,
-    ) -> anyhow::Result<BTreeSet<u16>> {
+    async fn used_direct_udp_ports(&self, opts: &TemplateOpts) -> anyhow::Result<BTreeSet<u16>> {
         let ip = opts.direct_udp_lb_ip.trim();
         let list = self
             .services()
@@ -4347,8 +4249,8 @@ impl SandboxClient {
         Ok(list
             .items
             .iter()
-            .filter(|service| gateway_direct_udp_service_ip_matches(service, ip))
-            .filter_map(gateway_direct_udp_service_port)
+            .filter(|service| direct_udp_service_ip_matches(service, ip))
+            .filter_map(direct_udp_service_port)
             .collect())
     }
 
@@ -4451,26 +4353,17 @@ fn delete_params_for_observed_uid(uid: &str) -> DeleteParams {
     }
 }
 
-fn generate_gateway_host_key_openssh() -> anyhow::Result<String> {
-    let mut seed = [0u8; 32];
-    getrandom::fill(&mut seed).map_err(|e| anyhow::anyhow!("generate gateway host key: {e}"))?;
-    PrivateKey::from(Ed25519Keypair::from_seed(&seed))
-        .to_openssh(LineEnding::LF)
-        .map(|key| key.to_string())
-        .map_err(|e| anyhow::anyhow!("encode gateway host key: {e}"))
-}
-
-fn gateway_direct_udp_port_range(opts: &TemplateOpts) -> anyhow::Result<(u16, u16)> {
+fn direct_udp_port_range(opts: &TemplateOpts) -> anyhow::Result<(u16, u16)> {
     let start = if opts.direct_udp_lb_port_start == 0 {
         DEFAULT_DIRECT_UDP_LB_PORT_START
     } else {
-        validate_gateway_direct_udp_port(opts.direct_udp_lb_port_start)
+        validate_direct_udp_port(opts.direct_udp_lb_port_start)
             .map_err(|e| anyhow::anyhow!("direct UDP LoadBalancer port start: {e}"))?
     };
     let end = if opts.direct_udp_lb_port_end == 0 {
         DEFAULT_DIRECT_UDP_LB_PORT_END
     } else {
-        validate_gateway_direct_udp_port(opts.direct_udp_lb_port_end)
+        validate_direct_udp_port(opts.direct_udp_lb_port_end)
             .map_err(|e| anyhow::anyhow!("direct UDP LoadBalancer port end: {e}"))?
     };
     if start > end {
@@ -4483,14 +4376,14 @@ fn workspace_pod_selector(env_id: &str) -> String {
     format!("{LABEL_ENV_ID}={env_id},{LABEL_TYPE}=workspace")
 }
 
-fn validate_gateway_direct_udp_port(port: i64) -> Result<u16, &'static str> {
+fn validate_direct_udp_port(port: i64) -> Result<u16, &'static str> {
     match u16::try_from(port) {
         Ok(port) if port > 0 => Ok(port),
         _ => Err("must be a UDP port from 1 to 65535"),
     }
 }
 
-fn gateway_direct_udp_service_port(service: &DynamicObject) -> Option<u16> {
+fn direct_udp_service_port(service: &DynamicObject) -> Option<u16> {
     service
         .data
         .pointer("/spec/ports")
@@ -4498,13 +4391,16 @@ fn gateway_direct_udp_service_port(service: &DynamicObject) -> Option<u16> {
         .iter()
         .find(|port| {
             port["protocol"].as_str() == Some("UDP")
-                && port["targetPort"].as_i64() == Some(super::template::GATEWAY_TAILNET_UDP_PORT)
+                && port["targetPort"].as_i64()
+                    == Some(i64::from(
+                        codewire_gateway_proto::WORKSPACE_TAILNET_UDP_PORT,
+                    ))
         })
         .and_then(|port| port["port"].as_i64())
         .and_then(|port| u16::try_from(port).ok())
 }
 
-fn gateway_direct_udp_service_ip_matches(service: &DynamicObject, ip: &str) -> bool {
+fn direct_udp_service_ip_matches(service: &DynamicObject, ip: &str) -> bool {
     service
         .metadata
         .annotations
@@ -4538,25 +4434,6 @@ async fn delete_dynamic(api: &Api<DynamicObject>, name: &str) -> anyhow::Result<
         Ok(_) => Ok(()),
         Err(kube::Error::Api(e)) if e.code == 404 => Ok(()),
         Err(e) => Err(anyhow::anyhow!("delete {name}: {e}")),
-    }
-}
-
-async fn delete_dynamic_until_absent(
-    api: &Api<DynamicObject>,
-    name: &str,
-    timeout: Duration,
-) -> anyhow::Result<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        match api.delete(name, &DeleteParams::default()).await {
-            Err(kube::Error::Api(error)) if error.code == 404 => return Ok(()),
-            Ok(_) => {}
-            Err(error) => return Err(anyhow::anyhow!("delete {name}: {error}")),
-        }
-        if tokio::time::Instant::now() + Duration::from_millis(250) >= deadline {
-            anyhow::bail!("timeout waiting for {name} to be deleted");
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -5373,7 +5250,6 @@ mod tests {
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Method, Request, Response, StatusCode, header};
-    use russh::keys::ssh_key::Algorithm;
     use serde_json::json;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -6225,152 +6101,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn generated_gateway_host_key_is_openssh_ed25519() {
-        let key = generate_gateway_host_key_openssh().unwrap();
-        assert!(key.contains("BEGIN OPENSSH PRIVATE KEY"));
-        let parsed = PrivateKey::from_openssh(&key).unwrap();
-        assert_eq!(parsed.algorithm(), Algorithm::Ed25519);
-    }
-
-    #[tokio::test]
-    async fn gateway_host_key_secret_fresh_create_is_one_post() {
-        let (client, requests) = sandbox_client_with_secret_responses(vec![(
-            StatusCode::CREATED,
-            json!({
-                "apiVersion": "v1",
-                "kind": "Secret",
-                "metadata": {
-                    "name": "cw-gateway-host-key-env-test",
-                    "namespace": "dev-sandboxes",
-                },
-            }),
-        )]);
-
-        client
-            .ensure_gateway_host_key_secret(&gateway_host_key_opts())
-            .await
-            .unwrap();
-
-        assert_eq!(
-            requests.lock().unwrap().as_slice(),
-            &[(
-                Method::POST,
-                "/api/v1/namespaces/dev-sandboxes/secrets".to_string(),
-            )]
-        );
-    }
-
-    #[tokio::test]
-    async fn gateway_host_key_secret_conflict_is_success_without_read() {
-        let (client, requests) = sandbox_client_with_secret_responses(vec![(
-            StatusCode::CONFLICT,
-            kubernetes_status("AlreadyExists", 409),
-        )]);
-
-        client
-            .ensure_gateway_host_key_secret(&gateway_host_key_opts())
-            .await
-            .unwrap();
-
-        assert_eq!(
-            requests.lock().unwrap().as_slice(),
-            &[(
-                Method::POST,
-                "/api/v1/namespaces/dev-sandboxes/secrets".to_string(),
-            )]
-        );
-    }
-
-    #[tokio::test]
-    async fn gateway_host_key_secret_non_conflict_failure_is_error_without_read() {
-        let (client, requests) = sandbox_client_with_secret_responses(vec![(
-            StatusCode::FORBIDDEN,
-            kubernetes_status("Forbidden", 403),
-        )]);
-
-        let error = client
-            .ensure_gateway_host_key_secret(&gateway_host_key_opts())
-            .await
-            .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("create gateway host key Secret cw-gateway-host-key-env-test")
-        );
-        assert_eq!(
-            requests.lock().unwrap().as_slice(),
-            &[(
-                Method::POST,
-                "/api/v1/namespaces/dev-sandboxes/secrets".to_string(),
-            )]
-        );
-    }
-
-    #[tokio::test]
-    async fn gateway_host_key_delete_retries_until_not_found_without_read() {
-        let (client, requests) = sandbox_client_with_secret_responses(vec![
-            (
-                StatusCode::OK,
-                json!({
-                    "apiVersion": "v1",
-                    "kind": "Status",
-                    "status": "Success",
-                    "code": 200,
-                }),
-            ),
-            (StatusCode::NOT_FOUND, kubernetes_status("NotFound", 404)),
-        ]);
-
-        delete_dynamic_until_absent(
-            &client.secrets(),
-            "cw-gateway-host-key-env-test",
-            Duration::from_secs(1),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            requests.lock().unwrap().as_slice(),
-            &[
-                (
-                    Method::DELETE,
-                    "/api/v1/namespaces/dev-sandboxes/secrets/cw-gateway-host-key-env-test"
-                        .to_string(),
-                ),
-                (
-                    Method::DELETE,
-                    "/api/v1/namespaces/dev-sandboxes/secrets/cw-gateway-host-key-env-test"
-                        .to_string(),
-                ),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn gateway_host_key_delete_failure_is_retryable_without_false_absence() {
-        let (client, requests) = sandbox_client_with_secret_responses(vec![(
-            StatusCode::FORBIDDEN,
-            kubernetes_status("Forbidden", 403),
-        )]);
-
-        let error = delete_dynamic_until_absent(
-            &client.secrets(),
-            "cw-gateway-host-key-env-test",
-            Duration::from_secs(1),
-        )
-        .await
-        .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("delete cw-gateway-host-key-env-test")
-        );
-        assert_eq!(requests.lock().unwrap().len(), 1);
-    }
-
     #[tokio::test]
     async fn workspace_daemon_repair_replaces_only_the_workspace_pod() {
         let (client, requests) = sandbox_client_with_secret_responses(vec![
@@ -6518,7 +6248,6 @@ mod tests {
         TemplateOpts {
             name: "workspace-env-test".into(),
             environment_id: "env-test".into(),
-            gateway_token: "confidential-recovery-coordinate-token".into(),
             daemon_auth_token: "confidential-recovery-daemon-token".into(),
             runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_CONFIDENTIAL.into(),
             kata_coco_init_data_enabled: true,
@@ -6799,13 +6528,6 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("workspace Pod changed"));
         assert_eq!(requests.lock().unwrap().len(), 1);
-    }
-
-    fn gateway_host_key_opts() -> TemplateOpts {
-        TemplateOpts {
-            environment_id: "env-test".into(),
-            ..Default::default()
-        }
     }
 
     fn kubernetes_status(reason: &str, code: u16) -> Value {
@@ -7373,7 +7095,6 @@ mod tests {
             name: template_name.into(),
             image: "workspace:test".into(),
             environment_id: "env-test".into(),
-            gateway_token: "synthetic-coordinate-token".into(),
             daemon_auth_token: "synthetic-daemon-token".into(),
             cpu_millicores: 1_000,
             memory_mib: 1_024,
@@ -7411,7 +7132,7 @@ mod tests {
             "apiVersion": "v1",
             "kind": "Service",
             "metadata": {
-                "name": "cw-gateway-udp-env-test",
+                "name": "cw-tailnet-udp-env-test",
                 "annotations": {
                     "lbipam.cilium.io/ips": "192.0.2.36",
                 },
@@ -7424,18 +7145,15 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(gateway_direct_udp_service_ip_matches(
-            &service,
-            "192.0.2.36"
-        ));
-        assert_eq!(gateway_direct_udp_service_port(&service), Some(33123));
+        assert!(direct_udp_service_ip_matches(&service, "192.0.2.36"));
+        assert_eq!(direct_udp_service_port(&service), Some(33123));
     }
 
     #[test]
     fn direct_udp_port_range_defaults_and_validates() {
         let opts = TemplateOpts::default();
         assert_eq!(
-            gateway_direct_udp_port_range(&opts).unwrap(),
+            direct_udp_port_range(&opts).unwrap(),
             (
                 DEFAULT_DIRECT_UDP_LB_PORT_START,
                 DEFAULT_DIRECT_UDP_LB_PORT_END
@@ -7447,17 +7165,14 @@ mod tests {
             direct_udp_lb_port_end: 33010,
             ..Default::default()
         };
-        assert_eq!(
-            gateway_direct_udp_port_range(&opts).unwrap(),
-            (33000, 33010)
-        );
+        assert_eq!(direct_udp_port_range(&opts).unwrap(), (33000, 33010));
 
         let opts = TemplateOpts {
             direct_udp_lb_port_start: 40000,
             direct_udp_lb_port_end: 33000,
             ..Default::default()
         };
-        assert!(gateway_direct_udp_port_range(&opts).is_err());
+        assert!(direct_udp_port_range(&opts).is_err());
     }
 
     #[test]
@@ -7465,7 +7180,7 @@ mod tests {
         let mut rendered: DynamicObject = serde_json::from_value(json!({
             "apiVersion": "v1",
             "kind": "Service",
-            "metadata": { "name": "cw-gateway-svc-env-test" },
+            "metadata": { "name": "cw-daemon-env-test" },
             "spec": {
                 "type": "ClusterIP",
                 "ports": [
@@ -7477,7 +7192,7 @@ mod tests {
         let existing: DynamicObject = serde_json::from_value(json!({
             "apiVersion": "v1",
             "kind": "Service",
-            "metadata": { "name": "cw-gateway-svc-env-test" },
+            "metadata": { "name": "cw-daemon-env-test" },
             "spec": {
                 "type": "ClusterIP",
                 "clusterIP": "10.43.12.34",

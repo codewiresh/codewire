@@ -1349,8 +1349,6 @@ fn proto_trust_report(report: EnvironmentTrustReport) -> proto::EnvironmentTrust
         images: Some(proto::TrustReportImages {
             workspace_image: report.images.workspace_image.unwrap_or_default(),
             workspace_image_id: report.images.workspace_image_id.unwrap_or_default(),
-            gateway_image: report.images.gateway_image.unwrap_or_default(),
-            gateway_image_id: report.images.gateway_image_id.unwrap_or_default(),
             dind_image: report.images.dind_image.unwrap_or_default(),
             dind_image_id: report.images.dind_image_id.unwrap_or_default(),
             daemon_init_image: report.images.daemon_init_image.unwrap_or_default(),

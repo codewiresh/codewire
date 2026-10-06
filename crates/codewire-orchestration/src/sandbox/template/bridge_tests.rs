@@ -26,14 +26,12 @@ fn bridge_opts() -> TemplateOpts {
         environment_id: ENV.into(),
         organization_id: "org-golden-bridge".into(),
         operation_generation: 7,
-        gateway_token: "gw-token-golden-bridge".into(),
         daemon_auth_token: "daemon-token-golden-bridge".into(),
         server_namespace: "dev".into(),
         stun_host: "stun.codewire-dev.sh".into(),
         workspace_identity: WorkspaceIdentity::Binding {
             binding_url: "https://codewire-orchestration.dev.svc.cluster.local:8087".into(),
         },
-        gateway_daemon_credential_from_binding: true,
         credential_runtime: Some(CredentialRuntimeTemplateConfig::synthetic(NAMESPACE)),
         ..Default::default()
     }
@@ -67,12 +65,6 @@ fn warm_member_bridge_names_are_per_environment_and_dns_safe() {
     assert_eq!(
         warm_member_daemon_bridge_name(ENV),
         format!("cw-daemon-warm-{ENV}")
-    );
-    // Only cleanup still names the gateway half an environment bound before
-    // the gateway's removal may own.
-    assert_eq!(
-        warm_member_gateway_bridge_name(ENV),
-        format!("cw-gw-warm-{ENV}")
     );
     assert!(daemon["metadata"]["name"].as_str().unwrap().len() <= 63);
     assert_eq!(daemon["metadata"]["namespace"], NAMESPACE);

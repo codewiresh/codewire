@@ -173,36 +173,10 @@ mod tests {
     }
 
     #[test]
-    fn gateway_generation_rolls_only_its_template_and_never_changes_selectors_or_workspace_template()
-     {
+    fn operation_generation_never_changes_the_workspace_template() {
         let mut opts = commodity_opts();
-        let first_gateway = render_gateway_deployment("dev-sandboxes", &opts);
         let first_workspace = render_sandbox_template("dev-sandboxes", &opts);
-        for labels in [
-            &first_gateway["metadata"]["labels"],
-            &first_gateway["spec"]["template"]["metadata"]["labels"],
-        ] {
-            assert_eq!(labels["codewire.sh/environment-id"], opts.environment_id);
-            assert_eq!(labels["codewire.sh/org-id"], opts.organization_id);
-            assert_eq!(labels["codewire.sh/type"], "gateway");
-            assert_eq!(labels[super::super::LABEL_OPERATION_GENERATION], "7");
-        }
         opts.operation_generation = 8;
-        let next_gateway = render_gateway_deployment("dev-sandboxes", &opts);
-        assert_eq!(
-            first_gateway["spec"]["selector"],
-            next_gateway["spec"]["selector"]
-        );
-        assert!(
-            next_gateway["spec"]["selector"]["matchLabels"]
-                .get(super::super::LABEL_OPERATION_GENERATION)
-                .is_none()
-        );
-        assert_eq!(
-            next_gateway["spec"]["template"]["metadata"]["labels"]
-                [super::super::LABEL_OPERATION_GENERATION],
-            "8"
-        );
         assert_eq!(
             first_workspace,
             render_sandbox_template("dev-sandboxes", &opts)
@@ -223,7 +197,6 @@ mod tests {
             environment_id: "env-golden-commodity".into(),
             organization_id: "org-golden-commodity".into(),
             operation_generation: 7,
-            gateway_token: "gw-token-golden-commodity".into(),
             daemon_auth_token: "daemon-token-golden-commodity".into(),
             api_base_url: "https://codewire-dev.sh".into(),
             server_namespace: "dev".into(),
@@ -268,21 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn credential_runtime_renders_no_gateway_tls_identity_or_codex_object() {
-        let opts = credential_opts();
-        let gateway = render_gateway_deployment("dev-sandboxes", &opts).to_string();
-        let workspace = render_sandbox_template("dev-sandboxes", &opts).to_string();
-        // The gateway has no workspace-facing listener, so neither Pod
-        // carries a gateway TLS leaf or its public roots.
-        for absent in [
-            "credential-gateway-tls",
-            "cw-credential-gateway-",
-            "CODEWIRE_CREDENTIAL_HTTPS_",
-            "CODEWIRE_CREDENTIAL_TLS_",
-        ] {
-            assert!(!gateway.contains(absent), "{absent} in the gateway");
-            assert!(!workspace.contains(absent), "{absent} in the workspace");
-        }
+    fn credential_runtime_renders_no_codex_object() {
         // Selected Codex renders no ConfigMap, memory home or init copy in any
         // tier or identity mode: the daemon writes `~/.codex` itself.
         for profile in [RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_RUNC] {
@@ -295,7 +254,6 @@ mod tests {
                     };
                 }
                 assert_no_legacy_codex(&render_sandbox_template("dev-sandboxes", &variant));
-                assert_no_legacy_codex(&render_gateway_deployment("dev-sandboxes", &variant));
             }
         }
     }
@@ -316,32 +274,25 @@ mod tests {
                     }
                 }
             }
-            for service in [
-                render_workspace_daemon_service("dev-sandboxes", &opts),
-                render_gateway_service("dev-sandboxes", &opts),
-            ] {
-                for port in service["spec"]["ports"].as_array().unwrap() {
-                    for key in ["port", "targetPort", "nodePort"] {
-                        assert_ne!(port[key], 38081);
-                    }
+            let service = render_workspace_daemon_service("dev-sandboxes", &opts);
+            for port in service["spec"]["ports"].as_array().unwrap() {
+                for key in ["port", "targetPort", "nodePort"] {
+                    assert_ne!(port[key], 38081);
                 }
             }
         }
     }
 
     #[test]
-    fn hosted_projection_bootstrap_binds_both_peers_and_private_process_directory() {
+    fn hosted_projection_bootstrap_binds_the_workspace_and_private_process_directory() {
         for profile in [RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL] {
             let mut opts = credential_opts();
             opts.runtime_profile = profile.into();
             opts.projection_selection_sha256 = Some([0xab; 32]);
             let template = render_sandbox_template("dev-sandboxes", &opts);
             let workspace = &template["spec"]["podTemplate"]["spec"];
-            let gateway = render_gateway_deployment("dev-sandboxes", &opts);
-            for env in [
-                &workspace["containers"][0]["env"],
-                &gateway["spec"]["template"]["spec"]["containers"][0]["env"],
-            ] {
+            {
+                let env = &workspace["containers"][0]["env"];
                 for (name, value) in [
                     (
                         codewire_daemon::config::HOSTED_PROJECTION_SHA256_ENV,
@@ -397,34 +348,25 @@ mod tests {
     }
 
     #[test]
-    fn hosted_projection_generation_and_selection_change_both_bootstraps() {
+    fn hosted_projection_generation_and_selection_change_the_bootstrap() {
         let mut opts = credential_opts();
         opts.projection_selection_sha256 = Some([0xab; 32]);
-        let rendered = |opts: &TemplateOpts| {
-            (
-                render_sandbox_template("dev-sandboxes", opts),
-                render_gateway_deployment("dev-sandboxes", opts),
-            )
-        };
+        let rendered = |opts: &TemplateOpts| render_sandbox_template("dev-sandboxes", opts);
         let original = rendered(&opts);
         opts.operation_generation += 1;
         let generation = rendered(&opts);
-        assert_ne!(original.0, generation.0);
-        assert_ne!(original.1, generation.1);
+        assert_ne!(original, generation);
         opts.projection_selection_sha256 = Some([0xcd; 32]);
         let selection = rendered(&opts);
-        assert_ne!(generation.0, selection.0);
-        assert_ne!(generation.1, selection.1);
+        assert_ne!(generation, selection);
         opts.projection_selection_sha256 = None;
         opts.managed_credential_clients = Default::default();
         let cleared = rendered(&opts);
-        for value in [cleared.0, cleared.1] {
-            assert!(
-                !value
-                    .to_string()
-                    .contains(codewire_daemon::config::HOSTED_PROJECTION_SHA256_ENV)
-            );
-        }
+        assert!(
+            !cleared
+                .to_string()
+                .contains(codewire_daemon::config::HOSTED_PROJECTION_SHA256_ENV)
+        );
     }
 
     #[test]
@@ -436,34 +378,21 @@ mod tests {
         assert!(
             std::panic::catch_unwind(|| render_sandbox_template("dev-sandboxes", &opts)).is_err()
         );
-        assert!(
-            std::panic::catch_unwind(|| render_gateway_deployment("dev-sandboxes", &opts)).is_err()
-        );
     }
 
     #[test]
-    fn credential_mounts_and_identities_are_separate_for_workspace_gateway_and_init() {
+    fn credential_mounts_and_identities_are_separate_for_workspace_and_init() {
         use codewire_access::{CODEX_PLATFORM_HOME, CODEX_PLATFORM_TOKEN_FILE};
-        use codewire_gateway_proto::{
-            CREDENTIAL_GATEWAY_TOKEN_AUDIENCE, CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
-        };
+        use codewire_gateway_proto::CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE;
         let opts = credential_opts();
         let template = render_sandbox_template("dev-sandboxes", &opts);
         let workspace = &template["spec"]["podTemplate"]["spec"];
-        let deployment = render_gateway_deployment("dev-sandboxes", &opts);
-        let gateway = &deployment["spec"]["template"]["spec"];
-        for (spec, volume_name, audience) in [
-            (
+        {
+            let (spec, volume_name, audience) = (
                 workspace,
                 "credential-workspace-identity",
                 CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
-            ),
-            (
-                gateway,
-                "credential-gateway-identity",
-                CREDENTIAL_GATEWAY_TOKEN_AUDIENCE,
-            ),
-        ] {
+            );
             assert_eq!(spec["automountServiceAccountToken"], false);
             let volume = spec["volumes"]
                 .as_array()
@@ -546,121 +475,47 @@ mod tests {
                     == CODEX_PLATFORM_TOKEN_FILE.rsplit_once('/').unwrap().0
                     && mount["readOnly"] == true)
         );
-        assert!(!workspace.to_string().contains("credential-gateway-tls"));
-        assert!(
-            !workspace
-                .to_string()
-                .contains(CREDENTIAL_GATEWAY_TOKEN_AUDIENCE)
-        );
-        assert!(
-            !gateway
-                .to_string()
-                .contains(CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE)
-        );
-        assert_no_legacy_codex(gateway);
         for container in workspace["containers"].as_array().unwrap().iter().skip(1) {
             assert!(
                 !container.to_string().contains("credential-"),
                 "sibling Docker has no credential mounts"
             );
         }
-        // The gateway Service and container expose no credential port.
-        let service = render_gateway_service("dev-sandboxes", &opts);
-        assert_eq!(
-            service["spec"]["ports"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|port| port["name"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            ["ssh", "readyz", "tailnet-udp"]
-        );
-        assert!(
-            gateway["containers"][0]["ports"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|port| port["name"] != "credentials")
-        );
     }
 
     #[test]
-    fn credential_network_allows_only_same_environment_gateway_and_exact_broker_peer() {
+    fn credential_network_gives_the_workspace_no_broker_peer() {
         let opts = credential_opts();
-        let gateway = render_gateway_network_policy("dev-sandboxes", &opts);
         let workspace = render_workspace_daemon_network_policy("dev-sandboxes", &opts);
-        let find = |rules: &Value, port: i64| {
-            rules
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|rule| {
-                    rule["ports"]
-                        .as_array()
-                        .is_some_and(|ports| ports.iter().any(|item| item["port"] == port))
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        // The workspace never reaches its gateway: the gateway dials the
-        // daemon, and the credential relay runs over that connection.
-        assert!(find(&gateway["spec"]["ingress"], 8443).is_empty());
-        assert!(find(&workspace["spec"]["egress"], 8443).is_empty());
-        assert!(
-            !workspace["spec"]["egress"]
-                .to_string()
-                .contains(&naming::gateway_selector(&opts).to_string())
-        );
-        assert_eq!(
-            find(&gateway["spec"]["egress"], 9443),
-            vec![
-                json!({"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"synthetic-trust-0"}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":"codewire","app.kubernetes.io/component":"credential-service"}}}],"ports":[{"protocol":"TCP","port":9443}]})
-            ]
-        );
-        assert!(find(&workspace["spec"]["egress"], 9443).is_empty());
+        let egress = workspace["spec"]["egress"].as_array().unwrap();
+        // The credential relay in orchestration dials the daemon's bridge and
+        // the broker; the workspace reaches neither port itself.
+        for port in [8443, 9443] {
+            assert!(
+                egress.iter().all(|rule| rule["ports"]
+                    .as_array()
+                    .is_none_or(|ports| ports.iter().all(|item| item["port"] != port))),
+                "workspace egress opens {port}"
+            );
+        }
     }
 
     #[test]
-    fn unselected_runtime_generation_rolls_gateway_but_not_workspace() {
+    fn unselected_runtime_generation_does_not_roll_the_workspace() {
         let mut opts = credential_opts();
         opts.managed_credential_clients = Default::default();
         opts.projection_selection_sha256 = None;
         let before = render_sandbox_template("dev-sandboxes", &opts);
-        let first_gateway = render_gateway_deployment("dev-sandboxes", &opts);
         opts.operation_generation += 1;
-        let after = render_sandbox_template("dev-sandboxes", &opts);
-        assert_eq!(before, after);
-        let gateway = render_gateway_deployment("dev-sandboxes", &opts);
-        assert_eq!(
-            first_gateway["spec"]["selector"],
-            gateway["spec"]["selector"]
-        );
-        assert!(
-            gateway["spec"]["template"]["spec"]["containers"][0]["env"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry
-                    == &json!({"name":"CODEWIRE_ENVIRONMENT_OPERATION_GENERATION","value":"8"}))
-        );
+        assert_eq!(before, render_sandbox_template("dev-sandboxes", &opts));
     }
 
     #[test]
     fn credential_free_templates_do_not_mount_provider_bootstrap_or_activate_listener() {
         let opts = commodity_opts();
-        for value in [
-            render_sandbox_template("dev-sandboxes", &opts),
-            render_gateway_deployment("dev-sandboxes", &opts),
-        ] {
-            let encoded = value.to_string();
-            for absent in [
-                "credential-workspace-identity",
-                "credential-gateway-identity",
-                "CODEX_HOME",
-                "CODEWIRE_CREDENTIAL_GATEWAY_TOKEN_FILE",
-            ] {
-                assert!(!encoded.contains(absent));
-            }
+        let encoded = render_sandbox_template("dev-sandboxes", &opts).to_string();
+        for absent in ["credential-workspace-identity", "CODEX_HOME"] {
+            assert!(!encoded.contains(absent));
         }
     }
 
@@ -807,7 +662,6 @@ mod tests {
         let rendered = format!(
             "{:?}",
             TemplateOpts {
-                gateway_token: "gateway-secret-value".into(),
                 daemon_auth_token: "daemon-secret-value".into(),
                 udp_relay_allocator_token: "relay-secret-value".into(),
                 kata_coco_kbs_ca_pem: "embedded-public-ca".into(),
@@ -815,153 +669,32 @@ mod tests {
             }
         );
 
-        assert!(rendered.contains("gateway_token: \"<redacted>\""));
         assert!(rendered.contains("daemon_auth_token: \"<redacted>\""));
         assert!(rendered.contains("udp_relay_allocator_token: \"<redacted>\""));
         assert!(rendered.contains("kata_coco_kbs_ca_pem: \"<configured>\""));
-        assert!(!rendered.contains("gateway-secret-value"));
         assert!(!rendered.contains("daemon-secret-value"));
         assert!(!rendered.contains("relay-secret-value"));
         assert!(!rendered.contains("embedded-public-ca"));
     }
 
     #[test]
-    fn template_keeps_coordinate_and_daemon_capabilities_in_separate_env_vars() {
+    fn environment_token_workspace_renders_only_the_daemon_capability() {
         let opts = commodity_opts();
-        let gateway = render_gateway_deployment("codewire-runtime", &opts);
-        let gateway_env = gateway["spec"]["template"]["spec"]["containers"][0]["env"]
-            .as_array()
-            .unwrap();
         let workspace = render_sandbox_template("codewire-runtime", &opts);
         let workspace_env = workspace["spec"]["podTemplate"]["spec"]["containers"][0]["env"]
             .as_array()
             .unwrap();
-        let value = |env: &[Value], name: &str| {
-            env.iter().find_map(|entry| {
+        let value = |name: &str| {
+            workspace_env.iter().find_map(|entry| {
                 (entry["name"].as_str() == Some(name))
                     .then(|| entry["value"].as_str().unwrap().to_owned())
             })
         };
-
         assert_eq!(
-            value(gateway_env, "CODEWIRE_GATEWAY_TOKEN"),
-            Some("gw-token-golden-commodity".into())
-        );
-        assert_eq!(
-            value(gateway_env, DAEMON_AUTH_TOKEN_ENV),
+            value(DAEMON_AUTH_TOKEN_ENV),
             Some("daemon-token-golden-commodity".into())
         );
-        assert_eq!(
-            value(workspace_env, DAEMON_AUTH_TOKEN_ENV),
-            Some("daemon-token-golden-commodity".into())
-        );
-        assert_eq!(value(workspace_env, "CODEWIRE_GATEWAY_TOKEN"), None);
-    }
-
-    #[test]
-    fn projected_binding_identity_is_bounded_and_mounted_only_in_the_gateway() {
-        use codewire_gateway_proto::{
-            GATEWAY_BINDING_TOKEN_AUDIENCE, GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS,
-            GATEWAY_BINDING_TOKEN_MOUNT_PATH, GATEWAY_BINDING_TOKEN_PATH,
-        };
-
-        for runtime_profile in [RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL] {
-            let mut opts = commodity_opts();
-            opts.environment_id = "550e8400-e29b-41d4-a716-446655440000".into();
-            opts.runtime_profile = runtime_profile.into();
-            let deployment = render_gateway_deployment("codewire-runtime", &opts);
-            let spec = &deployment["spec"]["template"]["spec"];
-
-            assert_eq!(spec["automountServiceAccountToken"].as_bool(), Some(false));
-            assert_eq!(
-                spec["serviceAccountName"].as_str(),
-                Some(SANDBOX_SERVICE_ACCOUNT)
-            );
-            let volumes = spec["volumes"].as_array().unwrap();
-            let identity_volume = volumes
-                .iter()
-                .find(|volume| volume["name"].as_str() == Some(GATEWAY_BINDING_TOKEN_VOLUME))
-                .expect("gateway binding identity volume");
-            assert_eq!(
-                identity_volume["projected"]["defaultMode"].as_i64(),
-                Some(0o440)
-            );
-            let sources = identity_volume["projected"]["sources"].as_array().unwrap();
-            assert_eq!(sources.len(), 1);
-            let projected = &sources[0]["serviceAccountToken"];
-            assert_eq!(
-                projected["audience"].as_str(),
-                Some(GATEWAY_BINDING_TOKEN_AUDIENCE)
-            );
-            assert_eq!(
-                projected["expirationSeconds"].as_i64(),
-                Some(GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS)
-            );
-            assert_eq!(projected["path"].as_str(), Some("token"));
-
-            let gateway = &spec["containers"][0];
-            assert!(gateway["env"].as_array().unwrap().iter().all(|entry| {
-                !matches!(
-                    entry["name"].as_str(),
-                    Some("POD_NAMESPACE") | Some("POD_NAME")
-                )
-            }));
-            assert!(
-                gateway["volumeMounts"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|mount| {
-                        mount["name"].as_str() == Some(GATEWAY_BINDING_TOKEN_VOLUME)
-                            && mount["mountPath"].as_str() == Some(GATEWAY_BINDING_TOKEN_MOUNT_PATH)
-                            && mount["readOnly"].as_bool() == Some(true)
-                    })
-            );
-            assert!(
-                spec["initContainers"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .all(|container| {
-                        container["volumeMounts"].as_array().is_none_or(|mounts| {
-                            mounts.iter().all(|mount| {
-                                mount["name"].as_str() != Some(GATEWAY_BINDING_TOKEN_VOLUME)
-                            })
-                        })
-                    })
-            );
-            assert_eq!(
-                GATEWAY_BINDING_TOKEN_PATH,
-                format!("{GATEWAY_BINDING_TOKEN_MOUNT_PATH}/token")
-            );
-        }
-
-        let workspace = render_sandbox_template("codewire-runtime", &commodity_opts());
-        let workspace_spec = &workspace["spec"]["podTemplate"]["spec"];
-        assert!(
-            workspace_spec["volumes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|volume| volume["name"].as_str() != Some(GATEWAY_BINDING_TOKEN_VOLUME))
-        );
-        for collection in ["containers", "initContainers"] {
-            assert!(
-                workspace_spec[collection]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .all(|container| {
-                        container["volumeMounts"].as_array().is_none_or(|mounts| {
-                            mounts.iter().all(|mount| {
-                                mount["name"].as_str() != Some(GATEWAY_BINDING_TOKEN_VOLUME)
-                                    && mount["mountPath"].as_str()
-                                        != Some(GATEWAY_BINDING_TOKEN_MOUNT_PATH)
-                            })
-                        })
-                    })
-            );
-        }
+        assert_eq!(value("CODEWIRE_GATEWAY_TOKEN"), None);
     }
 
     #[test]
@@ -972,17 +705,13 @@ mod tests {
             ("runtime_policy", include_str!("runtime_policy.rs")),
         ];
         for (name, source) in leaves {
-            for forbidden in ["super::gateway", "super::network", "super::workspace"] {
+            for forbidden in ["super::network", "super::workspace"] {
                 assert!(
                     !source.contains(forbidden),
                     "{name} leaf imports forbidden renderer {forbidden}"
                 );
             }
         }
-
-        let gateway = include_str!("gateway.rs");
-        assert!(!gateway.contains("super::network"));
-        assert!(!gateway.contains("super::workspace"));
 
         let network = include_str!("network.rs");
         assert!(!network.contains("super::workspace"));
@@ -1147,7 +876,6 @@ mod tests {
                 name: "tmpl-commodity".into(),
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
-                gateway_token: "commodity-template-token".into(),
                 daemon_auth_token: "commodity-template-daemon-token".into(),
                 disk_gib: 40,
                 ..Default::default()
@@ -1325,122 +1053,6 @@ mod tests {
                 .all(|volume| volume.get("hostPath").is_none()),
             "commodity workspace pod must not mount host Docker or containerd sockets"
         );
-
-        let gateway = render_gateway_deployment(
-            "codewire-runtime",
-            &TemplateOpts {
-                name: "tmpl-commodity".into(),
-                image: "ghcr.io/codewiresh/workspace:golden".into(),
-                support_image: "git.example.invalid/codewire/gateway:test".into(),
-                runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
-                environment_id: "env-commodity".into(),
-                gateway_token: "gw-token".into(),
-                daemon_auth_token: "commodity-daemon-token".into(),
-                server_namespace: "dev".into(),
-                ..Default::default()
-            },
-        );
-        let spec = &gateway["spec"]["template"]["spec"];
-        assert_eq!(
-            gateway["spec"]["progressDeadlineSeconds"],
-            json!(WORKSPACE_READY_TIMEOUT.as_secs()),
-            "the commodity gateway rollout deadline matches the tier ready timeout"
-        );
-        assert!(
-            gateway["spec"]["template"]["metadata"]["labels"]["codewire.sh/isolation-tier"]
-                .is_null(),
-            "commodity gateways must not gain the confidential Trustee ingress label"
-        );
-        assert_eq!(
-            spec["runtimeClassName"].as_str(),
-            Some(RUNTIME_CLASS_COMMODITY)
-        );
-        let gateway_container = &spec["containers"][0];
-        assert_eq!(gateway_container["name"].as_str(), Some("codewire-gateway"));
-        assert!(gateway_container.get("resources").is_some());
-        assert_eq!(
-            startup_probe_budget_seconds(gateway_container),
-            WORKSPACE_READY_TIMEOUT.as_secs(),
-            "the kubelet must not restart a commodity gateway during a slow start"
-        );
-        assert_eq!(
-            gateway_container["startupProbe"]["periodSeconds"],
-            json!(1),
-            "create notices the gateway reaching its daemon within one second"
-        );
-        assert_eq!(
-            gateway_container["readinessProbe"],
-            json!({
-                "httpGet": { "path": "/readyz", "port": DEFAULT_GATEWAY_READYZ_PORT },
-                "periodSeconds": 2,
-                "timeoutSeconds": 2,
-                "failureThreshold": 3,
-            }),
-            "steady-state gateway readiness keeps its period and failure budget"
-        );
-        assert!(
-            spec["volumes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|volume| volume.get("hostPath").is_none()),
-            "split gateway pod must not mount host Docker or containerd sockets"
-        );
-        assert!(
-            gateway_container["volumeMounts"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|mount| {
-                    mount["name"].as_str() == Some("gateway-state")
-                        && mount["mountPath"].as_str() == Some("/codewire/gateway")
-                })
-        );
-        assert!(
-            gateway_container["volumeMounts"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|mount| mount["name"].as_str() != Some("docker-sock")
-                    && mount["mountPath"].as_str() != Some("/var/run/docker")),
-            "split gateway must not mount the workspace pod-local Docker socket"
-        );
-        assert!(
-            gateway_container["env"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|env| env["name"].as_str() == Some(DAEMON_AUTH_TOKEN_ENV)
-                    && env["value"].as_str() == Some("commodity-daemon-token"))
-        );
-        assert!(
-            gateway_container["env"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|env| env["name"].as_str() == Some("CODEWIRE_GATEWAY_TOKEN")
-                    && env["value"].as_str() == Some("gw-token"))
-        );
-        assert_no_gateway_daemon_deadline(gateway_container);
-    }
-
-    /// The kubelet restarts a container whose startup probe fails this long.
-    fn startup_probe_budget_seconds(container: &Value) -> u64 {
-        let probe = &container["startupProbe"];
-        probe["failureThreshold"].as_u64().unwrap() * probe["periodSeconds"].as_u64().unwrap()
-    }
-
-    /// The gateway waits for its daemon without exiting; no rendered setting
-    /// may reintroduce the retired connect deadline.
-    fn assert_no_gateway_daemon_deadline(container: &Value) {
-        assert!(
-            container["env"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|env| env["name"].as_str() != Some("CODEWIRE_DAEMON_CONNECT_TIMEOUT_SECONDS")),
-            "the gateway must not be given a daemon-connect deadline"
-        );
     }
 
     #[test]
@@ -1452,7 +1064,6 @@ mod tests {
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
                 environment_id: "8ce0bf4b-bdeb-4fde-95cf-97e27b44c90d".into(),
-                gateway_token: "confidential-template-token".into(),
                 daemon_auth_token: "confidential-daemon-token".into(),
                 disk_gib: 40,
                 ..Default::default()
@@ -1506,7 +1117,6 @@ mod tests {
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 support_image: "git.example.invalid/codewire/gateway:test".into(),
                 environment_id: "env-managed-daemon".into(),
-                gateway_token: "managed-coordinate-token".into(),
                 daemon_auth_token: "managed-daemon-token".into(),
                 ..Default::default()
             },
@@ -1541,7 +1151,6 @@ mod tests {
                 image_command: vec!["/bin/custom-entrypoint".into(), "--serve".into()],
                 support_image: "git.example.invalid/codewire/gateway:test".into(),
                 environment_id: "env-custom-daemon".into(),
-                gateway_token: "custom-coordinate-token".into(),
                 daemon_auth_token: "custom-daemon-token".into(),
                 ..Default::default()
             },
@@ -1589,7 +1198,6 @@ mod tests {
                     "literal $(touch /tmp/not-run) 'quote'".into(),
                 ],
                 environment_id: "env-custom-quoted".into(),
-                gateway_token: "custom-quoted-coordinate-token".into(),
                 daemon_auth_token: "custom-quoted-daemon-token".into(),
                 ..Default::default()
             },
@@ -1840,7 +1448,6 @@ mod tests {
                     name: format!("tmpl-dind-memory-{name}"),
                     image: "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff".into(),
                     runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
-            gateway_token: "test-coordinate-token".into(),
             daemon_auth_token: "test-daemon-token".into(),
                     memory_mib,
                     disk_gib: 50,
@@ -1871,7 +1478,6 @@ mod tests {
                 image: "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff".into(),
                 dind_image: image.into(),
                 runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
-                gateway_token: "test-coordinate-token".into(),
                 daemon_auth_token: "test-daemon-token".into(),
                 disk_gib: 50,
                 ..Default::default()
@@ -1893,106 +1499,6 @@ mod tests {
     }
 
     #[test]
-    fn gateway_host_key_secret_and_mount_are_environment_scoped() {
-        let opts = TemplateOpts {
-            name: "tmpl-gateway-host-key".into(),
-            image: "ghcr.io/codewiresh/workspace:golden".into(),
-            support_image: "git.example.invalid/codewire/gateway:test".into(),
-            runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
-            environment_id: "env-gateway-host-key".into(),
-            gateway_token: "gw-token".into(),
-            daemon_auth_token: "gateway-host-key-daemon-token".into(),
-            server_namespace: "dev".into(),
-            ..Default::default()
-        };
-        let secret = render_gateway_host_key_secret(
-            "codewire-runtime",
-            &opts,
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n",
-        );
-        assert_eq!(
-            secret["metadata"]["name"].as_str(),
-            Some("cw-gateway-host-key-env-gateway-host-key")
-        );
-        assert_eq!(
-            secret["metadata"]["labels"]["codewire.sh/type"].as_str(),
-            Some("gateway-host-key")
-        );
-        assert_eq!(
-            secret["metadata"]["labels"]["codewire.sh/environment-id"].as_str(),
-            Some("env-gateway-host-key")
-        );
-        assert_eq!(
-            secret["stringData"][GATEWAY_HOST_KEY_SECRET_KEY].as_str(),
-            Some(
-                "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n"
-            )
-        );
-
-        let deployment = render_gateway_deployment("codewire-runtime", &opts);
-        let pod_spec = &deployment["spec"]["template"]["spec"];
-        let volumes = pod_spec["volumes"].as_array().unwrap();
-        assert!(volumes.iter().any(|volume| {
-            volume["name"].as_str() == Some("gateway-state") && volume.get("emptyDir").is_some()
-        }));
-        let host_key_volume = volumes
-            .iter()
-            .find(|volume| volume["name"].as_str() == Some("gateway-host-key"))
-            .expect("gateway-host-key volume");
-        assert_eq!(
-            host_key_volume["secret"]["secretName"].as_str(),
-            Some("cw-gateway-host-key-env-gateway-host-key")
-        );
-        assert_eq!(
-            host_key_volume["secret"]["items"][0]["key"].as_str(),
-            Some(GATEWAY_HOST_KEY_SECRET_KEY)
-        );
-        assert_eq!(
-            host_key_volume["secret"]["items"][0]["mode"].as_i64(),
-            Some(0o444)
-        );
-
-        let init = &pod_spec["initContainers"][0];
-        assert_eq!(
-            init["name"].as_str(),
-            Some("codewire-gateway-host-key-init")
-        );
-        assert_eq!(
-            init["image"].as_str(),
-            Some("git.example.invalid/codewire/gateway:test")
-        );
-        let init_command = init["command"][2].as_str().unwrap();
-        assert!(init_command.contains(GATEWAY_HOST_KEY_SECRET_MOUNT_PATH));
-        assert!(init_command.contains(GATEWAY_HOST_KEY_PATH));
-        assert!(init_command.contains("chmod 0600"));
-        assert!(
-            init["volumeMounts"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|mount| {
-                    mount["name"].as_str() == Some("gateway-host-key")
-                        && mount["mountPath"].as_str() == Some(GATEWAY_HOST_KEY_SECRET_MOUNT_PATH)
-                        && mount["readOnly"].as_bool() == Some(true)
-                })
-        );
-
-        let gateway_container = &pod_spec["containers"][0];
-        assert!(gateway_container["env"].as_array().unwrap().iter().any(
-            |env| env["name"].as_str() == Some("CODEWIRE_SSH_HOST_KEY_PATH")
-                && env["value"].as_str() == Some(GATEWAY_HOST_KEY_PATH)
-        ));
-        assert!(
-            gateway_container["volumeMounts"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|mount| mount["name"].as_str() != Some("workspace")),
-            "gateway must not mount workspace state for host-key persistence"
-        );
-    }
-
-    #[test]
     fn commodity_template_agent_policy_init_data_when_enabled() {
         let rendered = render_sandbox_template(
             "codewire-runtime",
@@ -2000,7 +1506,6 @@ mod tests {
                 name: "tmpl-commodity".into(),
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
-                gateway_token: "test-coordinate-token".into(),
                 daemon_auth_token: "test-daemon-token".into(),
                 kata_agent_policy_enabled: true,
                 ..Default::default()
@@ -2038,7 +1543,6 @@ mod tests {
                 name: "tmpl-commodity".into(),
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
-                gateway_token: "test-coordinate-token".into(),
                 daemon_auth_token: "test-daemon-token".into(),
                 kata_coco_init_data_enabled: true,
                 ..Default::default()
@@ -2062,7 +1566,6 @@ mod tests {
                 name: "tmpl-confidential".into(),
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-                gateway_token: "test-coordinate-token".into(),
                 daemon_auth_token: "test-daemon-token".into(),
                 environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
                 confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
@@ -2339,7 +1842,6 @@ mod tests {
                 name: "tmpl-confidential-policy-conformance".into(),
                 image: image.into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-                gateway_token: "test-coordinate-token".into(),
                 daemon_auth_token: "test-daemon-token".into(),
                 docker_mode: DOCKER_MODE_NONE.into(),
                 environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
@@ -2391,7 +1893,6 @@ mod tests {
     fn confidential_template_requires_content_addressed_manifest_before_mutation() {
         let mut opts = TemplateOpts {
             runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-            gateway_token: "test-coordinate-token".into(),
             daemon_auth_token: "test-daemon-token".into(),
             disk_gib: 20,
             ..Default::default()
@@ -2410,7 +1911,6 @@ mod tests {
             name: "tmpl-confidential-owner-authorization".into(),
             image: "ghcr.io/codewiresh/workspace-base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-            gateway_token: "test-coordinate-token".into(),
             daemon_auth_token: "test-daemon-token".into(),
             environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
             confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
@@ -2439,7 +1939,6 @@ mod tests {
     fn measured_key_release_claim_requires_the_exact_protected_contract() {
         let mut opts = TemplateOpts {
             runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-            gateway_token: "test-coordinate-token".into(),
             daemon_auth_token: "test-daemon-token".into(),
             environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
             confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
@@ -2475,13 +1974,12 @@ mod tests {
     }
 
     #[test]
-    fn confidential_template_and_gateway_carry_coco_resource_kernel_params() {
+    fn confidential_template_carries_coco_resource_kernel_params() {
         let opts = TemplateOpts {
             name: "tmpl-confidential-auth".into(),
             image: "ghcr.io/codewiresh/workspace:golden".into(),
             support_image: "git.example.invalid/codewire/gateway:test".into(),
             runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-            gateway_token: "test-coordinate-token".into(),
             daemon_auth_token: "test-daemon-token".into(),
             kata_coco_init_data_enabled: true,
             kata_coco_kbs_url:
@@ -2505,108 +2003,6 @@ mod tests {
                 .and_then(Value::as_str),
             Some(want_kernel_params)
         );
-
-        let gateway = render_gateway_deployment("codewire-runtime", &opts);
-        assert_eq!(
-            gateway["spec"]["progressDeadlineSeconds"],
-            json!(CONFIDENTIAL_WORKSPACE_READY_TIMEOUT.as_secs()),
-            "confidential guest initialization keeps the tier's cold-start budget"
-        );
-        let gateway_container = &gateway["spec"]["template"]["spec"]["containers"][0];
-        assert_eq!(
-            startup_probe_budget_seconds(gateway_container),
-            CONFIDENTIAL_WORKSPACE_READY_TIMEOUT.as_secs(),
-            "the startup probe must last as long as the confidential ready wait"
-        );
-        assert_no_gateway_daemon_deadline(gateway_container);
-        assert_eq!(
-            gateway["spec"]["template"]["metadata"]["labels"]["codewire.sh/isolation-tier"]
-                .as_str(),
-            Some("confidential")
-        );
-        let gateway_annotations = gateway["spec"]["template"]["metadata"]["annotations"]
-            .as_object()
-            .unwrap();
-        assert_ne!(
-            gateway_annotations
-                .get(KATA_COCO_INIT_DATA_ANNOTATION_KEY)
-                .and_then(Value::as_str),
-            annotations
-                .get(KATA_COCO_INIT_DATA_ANNOTATION_KEY)
-                .and_then(Value::as_str),
-            "only the workspace policy authorizes the persistent volume"
-        );
-        let gateway_init_data = decode_gzip_base64(
-            gateway_annotations
-                .get(KATA_COCO_INIT_DATA_ANNOTATION_KEY)
-                .and_then(Value::as_str)
-                .unwrap(),
-        );
-        let gateway_init_data: toml::Value = toml::from_str(&gateway_init_data).unwrap();
-        assert!(
-            !gateway_init_data["data"]
-                .as_table()
-                .unwrap()
-                .contains_key("codewire_workspace_storage_key_id"),
-            "the gateway must not receive workspace key-release authority"
-        );
-        assert!(
-            !gateway_init_data["data"]
-                .as_table()
-                .unwrap()
-                .contains_key("codewire_workspace_storage_manifest_tag"),
-            "the gateway must not receive workspace manifest-release authority"
-        );
-        let gateway_init_data = decode_gzip_base64(
-            gateway_annotations[KATA_COCO_INIT_DATA_ANNOTATION_KEY]
-                .as_str()
-                .unwrap(),
-        );
-        assert!(gateway_init_data.contains("default CreateContainerRequest := true"));
-        assert!(!gateway_init_data.contains("codewire_confidential_storage :="));
-        assert_eq!(
-            gateway_annotations[KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY].as_str(),
-            Some(want_kernel_params)
-        );
-
-        let policy = render_gateway_network_policy("codewire-runtime", &opts);
-        let egress = policy["spec"]["egress"].as_array().unwrap();
-        let kbs_rule = egress.iter().find(|rule| {
-            rule["to"].as_array().is_some_and(|targets| {
-                targets.iter().any(|target| {
-                    target["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
-                        .as_str()
-                        == Some("codewire-trustee")
-                        && target["podSelector"].is_null()
-                })
-            })
-        });
-        assert!(kbs_rule.is_some(), "gateway KBS egress rule missing");
-    }
-
-    #[test]
-    fn confidential_gateway_omits_coco_annotations_when_init_data_is_disabled() {
-        let gateway = render_gateway_deployment(
-            "codewire-runtime",
-            &TemplateOpts {
-                name: "tmpl-confidential-no-coco".into(),
-                support_image: "nexus.example.invalid/gateway@sha256:golden".into(),
-                runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-                gateway_token: "test-coordinate-token".into(),
-                daemon_auth_token: "test-daemon-token".into(),
-                environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
-                kata_coco_kbs_url:
-                    "https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080".into(),
-                kata_coco_image_registry_auth_uri: "kbs:///default/containers/auth".into(),
-                ..Default::default()
-            },
-        );
-
-        assert!(
-            gateway["spec"]["template"]["metadata"]
-                .get("annotations")
-                .is_none()
-        );
     }
 
     #[test]
@@ -2615,7 +2011,6 @@ mod tests {
             name: "tmpl-confidential-resource".into(),
             image: "ghcr.io/codewiresh/workspace:golden".into(),
             runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-            gateway_token: "test-coordinate-token".into(),
             daemon_auth_token: "test-daemon-token".into(),
             kata_coco_init_data_enabled: true,
             kata_coco_kbs_url:
@@ -2642,7 +2037,6 @@ mod tests {
             name: "tmpl-commodity-auth".into(),
             image: "ghcr.io/codewiresh/workspace:golden".into(),
             runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
-            gateway_token: "test-coordinate-token".into(),
             daemon_auth_token: "test-daemon-token".into(),
             kata_coco_init_data_enabled: true,
             kata_coco_kbs_url: "https://kbs.codewire-dev.sh".into(),
@@ -2655,13 +2049,6 @@ mod tests {
             .as_object()
             .unwrap();
         assert!(!annotations.contains_key(KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY));
-
-        let gateway = render_gateway_deployment("codewire-runtime", &opts);
-        assert!(
-            gateway["spec"]["template"]["metadata"]
-                .get("annotations")
-                .is_none()
-        );
     }
 
     #[test]
@@ -2669,241 +2056,6 @@ mod tests {
         let want = "H4sIAAAAAAAA/wEFAPr/aGVsbG+GphA2BQAAAA==";
         assert_eq!(gzip_base64("hello"), want);
         assert_eq!(decode_gzip_base64(want), "hello");
-    }
-
-    #[test]
-    fn template_allows_derp_egress() {
-        let rendered = render_gateway_network_policy(
-            "codewire-runtime",
-            &TemplateOpts {
-                name: "tmpl-derp-egress".into(),
-                image: "ghcr.io/codewiresh/workspace:golden".into(),
-                support_image: "git.example.invalid/codewire/gateway:test".into(),
-                api_base_url: "https://codewire-dev.sh".into(),
-                gateway_token: "test-coordinate-token".into(),
-                daemon_auth_token: "test-daemon-token".into(),
-                server_namespace: "dev".into(),
-                derp_host: "derp.codewire-dev.sh".into(),
-                derp_port: 443,
-                stun_host: "stun.codewire.sh".into(),
-                stun_port: 3478,
-                cpu_millicores: 1000,
-                memory_mib: 2048,
-                ..Default::default()
-            },
-        );
-
-        let egress = rendered["spec"]["egress"].as_array().unwrap();
-        let derp_rule = egress.iter().find(|rule| {
-            rule["to"].as_array().is_some_and(|targets| {
-                targets.iter().any(|target| {
-                    target["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
-                        .as_str()
-                        == Some("dev")
-                        && target["podSelector"]["matchLabels"]["app.kubernetes.io/component"]
-                            .as_str()
-                            == Some("derp")
-                })
-            })
-        });
-        let derp_rule = derp_rule.expect("DERP egress rule missing");
-        let ports = derp_rule["ports"].as_array().unwrap();
-        assert!(ports.iter().any(|port| {
-            port["protocol"].as_str() == Some("TCP")
-                && port["port"].as_i64() == Some(INTERNAL_DERP_TLS_PORT)
-        }));
-        assert!(ports.iter().any(|port| {
-            port["protocol"].as_str() == Some("UDP")
-                && port["port"].as_i64() == Some(INTERNAL_DERP_STUN_PORT)
-        }));
-    }
-
-    #[test]
-    fn template_omits_legacy_server_egress() {
-        let rendered = render_gateway_network_policy(
-            "codewire-runtime",
-            &TemplateOpts {
-                name: "tmpl-no-legacy-server-egress".into(),
-                image: "ghcr.io/codewiresh/workspace:golden".into(),
-                support_image: "git.example.invalid/codewire/gateway:test".into(),
-                api_base_url: "https://codewire-dev.sh".into(),
-                gateway_token: "test-coordinate-token".into(),
-                daemon_auth_token: "test-daemon-token".into(),
-                server_namespace: "dev".into(),
-                cpu_millicores: 1000,
-                memory_mib: 2048,
-                ..Default::default()
-            },
-        );
-
-        let egress = rendered["spec"]["egress"].as_array().unwrap();
-        let legacy_server_rule = egress.iter().find(|rule| {
-            rule["to"].as_array().is_some_and(|targets| {
-                targets.iter().any(|target| {
-                    target["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
-                        .as_str()
-                        == Some("dev")
-                        && target["podSelector"]["matchLabels"]["app.kubernetes.io/component"]
-                            .as_str()
-                            == Some("server")
-                })
-            })
-        });
-        assert!(
-            legacy_server_rule.is_none(),
-            "legacy monolith egress rule should be absent"
-        );
-    }
-
-    #[test]
-    fn template_allows_direct_udp_ingress_when_stun_is_configured() {
-        let opts = TemplateOpts {
-            name: "tmpl-direct-udp-ingress".into(),
-            image: "ghcr.io/codewiresh/workspace:golden".into(),
-            support_image: "git.example.invalid/codewire/gateway:test".into(),
-            api_base_url: "https://codewire-dev.sh".into(),
-            gateway_token: "test-coordinate-token".into(),
-            daemon_auth_token: "test-daemon-token".into(),
-            stun_host: "stun.codewire-dev.sh".into(),
-            stun_port: 3478,
-            cpu_millicores: 1000,
-            memory_mib: 2048,
-            ..Default::default()
-        };
-        let rendered = render_gateway_network_policy("codewire-runtime", &opts);
-
-        let ingress = rendered["spec"]["ingress"].as_array().unwrap();
-        assert!(ingress.iter().any(|rule| {
-            rule["ports"].as_array().is_some_and(|ports| {
-                ports.iter().any(|port| {
-                    port["protocol"].as_str() == Some("UDP")
-                        && port["port"].as_i64() == Some(GATEWAY_TAILNET_UDP_PORT)
-                })
-            })
-        }));
-
-        let deployment = render_gateway_deployment("codewire-runtime", &opts);
-        let env = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
-            .as_array()
-            .unwrap();
-        assert!(env.iter().any(|entry| {
-            entry["name"].as_str() == Some(GATEWAY_TAILNET_UDP_LISTEN_ADDR_ENV)
-                && entry["value"].as_str() == Some(GATEWAY_TAILNET_UDP_LISTEN_ADDR)
-        }));
-    }
-
-    #[test]
-    fn template_wires_udp_relay_allocator_env_and_egress() {
-        let opts = TemplateOpts {
-            name: "tmpl-udp-relay".into(),
-            image: "ghcr.io/codewiresh/workspace:golden".into(),
-            support_image: "git.example.invalid/codewire/gateway:test".into(),
-            api_base_url: "https://codewire-dev.sh".into(),
-            gateway_token: "test-coordinate-token".into(),
-            daemon_auth_token: "test-daemon-token".into(),
-            server_namespace: "dev".into(),
-            udp_relay_allocator_url:
-                "http://codewire-udp-relay.dev.svc.cluster.local:8095/internal/udp-relay/allocations"
-                    .into(),
-            udp_relay_allocator_token: "relay-token".into(),
-            udp_relay_bind_addrs: "codewire-udp-relay.dev.svc.cluster.local:41641".into(),
-            cpu_millicores: 1000,
-            memory_mib: 2048,
-            ..Default::default()
-        };
-        let deployment = render_gateway_deployment("codewire-runtime", &opts);
-        let env = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
-            .as_array()
-            .unwrap();
-        assert!(env.iter().any(|entry| {
-            entry["name"].as_str() == Some(GATEWAY_UDP_RELAY_ALLOCATOR_URL_ENV)
-                && entry["value"].as_str()
-                    == Some(
-                        "http://codewire-udp-relay.dev.svc.cluster.local:8095/internal/udp-relay/allocations",
-                    )
-        }));
-        assert!(env.iter().any(|entry| {
-            entry["name"].as_str() == Some(GATEWAY_UDP_RELAY_ALLOCATOR_TOKEN_ENV)
-                && entry["value"].as_str() == Some("relay-token")
-        }));
-        assert!(env.iter().any(|entry| {
-            entry["name"].as_str() == Some(GATEWAY_UDP_RELAY_BIND_ADDRS_ENV)
-                && entry["value"].as_str() == Some("codewire-udp-relay.dev.svc.cluster.local:41641")
-        }));
-
-        let policy = render_gateway_network_policy("codewire-runtime", &opts);
-        let egress = policy["spec"]["egress"].as_array().unwrap();
-        let relay_rule = egress.iter().find(|rule| {
-            rule["to"].as_array().is_some_and(|targets| {
-                targets.iter().any(|target| {
-                    target["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
-                        .as_str()
-                        == Some("dev")
-                        && target["podSelector"]["matchLabels"]["app.kubernetes.io/component"]
-                            .as_str()
-                            == Some("udp-relay")
-                })
-            })
-        });
-        let relay_rule = relay_rule.expect("UDP relay allocator egress rule missing");
-        assert!(relay_rule["ports"].as_array().unwrap().iter().any(|port| {
-            port["protocol"].as_str() == Some("TCP") && port["port"].as_i64() == Some(8095)
-        }));
-        assert!(relay_rule["ports"].as_array().unwrap().iter().any(|port| {
-            port["protocol"].as_str() == Some("UDP") && port["port"].as_i64() == Some(41641)
-        }));
-    }
-
-    #[test]
-    fn template_allows_udp_relay_egress_without_flat_env_in_registry_mode() {
-        let opts = TemplateOpts {
-            name: "tmpl-udp-relay-registry".into(),
-            image: "ghcr.io/codewiresh/workspace:golden".into(),
-            support_image: "git.example.invalid/codewire/gateway:test".into(),
-            api_base_url: "https://codewire-dev.sh".into(),
-            gateway_token: "test-coordinate-token".into(),
-            daemon_auth_token: "test-daemon-token".into(),
-            server_namespace: "dev".into(),
-            udp_relay_allocator_egress_enabled: true,
-            cpu_millicores: 1000,
-            memory_mib: 2048,
-            ..Default::default()
-        };
-
-        let deployment = render_gateway_deployment("codewire-runtime", &opts);
-        let env = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
-            .as_array()
-            .unwrap();
-        assert!(!env.iter().any(|entry| {
-            matches!(
-                entry["name"].as_str(),
-                Some(GATEWAY_UDP_RELAY_ALLOCATOR_URL_ENV)
-                    | Some(GATEWAY_UDP_RELAY_ALLOCATOR_TOKEN_ENV)
-                    | Some(GATEWAY_UDP_RELAY_BIND_ADDRS_ENV)
-            )
-        }));
-
-        let policy = render_gateway_network_policy("codewire-runtime", &opts);
-        let egress = policy["spec"]["egress"].as_array().unwrap();
-        let relay_rule = egress.iter().find(|rule| {
-            rule["to"].as_array().is_some_and(|targets| {
-                targets.iter().any(|target| {
-                    target["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
-                        .as_str()
-                        == Some("dev")
-                        && target["podSelector"]["matchLabels"]["app.kubernetes.io/component"]
-                            .as_str()
-                            == Some("udp-relay")
-                })
-            })
-        });
-        let relay_rule = relay_rule.expect("UDP relay allocator egress rule missing");
-        assert!(relay_rule["ports"].as_array().unwrap().iter().any(|port| {
-            port["protocol"].as_str() == Some("TCP") && port["port"].as_i64() == Some(8095)
-        }));
-        assert!(relay_rule["ports"].as_array().unwrap().iter().any(|port| {
-            port["protocol"].as_str() == Some("UDP") && port["port"].as_i64() == Some(41641)
-        }));
     }
 
     #[test]
@@ -2915,7 +2067,6 @@ mod tests {
                 image: "ghcr.io/codewiresh/workspace:golden".into(),
                 support_image: "git.example.invalid/codewire/gateway:test".into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
-                gateway_token: "test-coordinate-token".into(),
                 daemon_auth_token: "test-daemon-token".into(),
                 kata_coco_init_data_enabled: true,
                 kata_coco_kbs_url:
@@ -2960,7 +2111,6 @@ mod tests {
             "codewire-runtime",
             &TemplateOpts {
                 name: "tmpl-storage-default".into(),
-                gateway_token: "test-coordinate-token".into(),
                 daemon_auth_token: "test-daemon-token".into(),
                 disk_gib: 20,
                 ..Default::default()
@@ -2988,7 +2138,6 @@ mod tests {
             "codewire-runtime",
             &TemplateOpts {
                 name: "tmpl-storage-local".into(),
-                gateway_token: "test-coordinate-token".into(),
                 daemon_auth_token: "test-daemon-token".into(),
                 disk_gib: 20,
                 workspace_storage_class: "local-path".into(),
@@ -3005,7 +2154,6 @@ mod tests {
             &TemplateOpts {
                 name: "tmpl-storage-confidential".into(),
                 environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
-                gateway_token: "test-coordinate-token".into(),
                 daemon_auth_token: "test-daemon-token".into(),
                 confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
                 runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
@@ -3028,25 +2176,9 @@ mod tests {
     }
 
     #[test]
-    fn gateway_service_is_cluster_ip_without_node_ports() {
-        let rendered = render_gateway_service("codewire-runtime", &commodity_opts());
-        assert_eq!(
-            rendered["spec"]["type"].as_str(),
-            Some("ClusterIP"),
-            "gateway service must not reintroduce per-sandbox NodePorts"
-        );
-        let ports = rendered["spec"]["ports"].as_array().unwrap();
-        assert!(
-            ports.iter().all(|port| port.get("nodePort").is_none()),
-            "gateway service ports must not carry static nodePort fields: {ports:?}"
-        );
-    }
-
-    #[test]
     fn direct_udp_load_balancer_service_uses_cilium_lb_ipam_without_nodeports() {
         let opts = TemplateOpts {
             direct_udp_lb_enabled: true,
-            gateway_token: "test-coordinate-token".into(),
             daemon_auth_token: "test-daemon-token".into(),
             direct_udp_lb_ip: "192.0.2.36".into(),
             direct_udp_lb_port: 33123,
@@ -3056,11 +2188,11 @@ mod tests {
             ..commodity_opts()
         };
 
-        let service = render_gateway_direct_udp_service("codewire-runtime", &opts)
+        let service = render_direct_udp_service("codewire-runtime", &opts)
             .expect("direct UDP LoadBalancer service");
         assert_eq!(
             service["metadata"]["name"].as_str(),
-            Some("cw-gateway-udp-env-golden-commodity")
+            Some("cw-tailnet-udp-env-golden-commodity")
         );
         assert_eq!(
             service["metadata"]["annotations"]["lbipam.cilium.io/ips"].as_str(),
@@ -3110,21 +2242,12 @@ mod tests {
         assert_eq!(service["spec"]["ports"][0]["port"].as_i64(), Some(33123));
         assert_eq!(
             service["spec"]["ports"][0]["targetPort"].as_i64(),
-            Some(GATEWAY_TAILNET_UDP_PORT)
+            Some(i64::from(codewire_gateway_proto::WORKSPACE_TAILNET_UDP_PORT))
         );
-
-        let deployment = render_gateway_deployment("codewire-runtime", &opts);
-        let env = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
-            .as_array()
-            .unwrap();
-        assert!(env.iter().any(|entry| {
-            entry["name"].as_str() == Some(GATEWAY_TAILNET_UDP_LISTEN_ADDR_ENV)
-                && entry["value"].as_str() == Some(GATEWAY_TAILNET_UDP_LISTEN_ADDR)
-        }));
-        assert!(env.iter().any(|entry| {
-            entry["name"].as_str() == Some(GATEWAY_TAILNET_DIRECT_UDP_ADVERTISE_ENDPOINTS_ENV)
-                && entry["value"].as_str() == Some("192.0.2.36:33123")
-        }));
+        assert_eq!(
+            service["spec"]["selector"]["codewire.sh/type"].as_str(),
+            Some("workspace")
+        );
     }
 
     #[test]
@@ -3224,199 +2347,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_coordinator_url_and_internal_binding_url_are_independent_of_public_api_url() {
-        let env = build_sidecar_env(&TemplateOpts {
-            gateway_token: "coordinator-url-token".into(),
-            daemon_auth_token: "coordinator-url-daemon-token".into(),
-            api_base_url: "https://codewire.example".into(),
-            coordinator_url: "http://codewire-coordinator.default.svc.cluster.local:8090".into(),
-            server_namespace: "default".into(),
-            ..Default::default()
-        });
-        let get = |name: &str| {
-            env.iter().find_map(|entry| {
-                (entry.get("name")?.as_str()? == name)
-                    .then(|| entry.get("value")?.as_str().map(str::to_string))
-                    .flatten()
-            })
-        };
-
-        assert_eq!(
-            get("CODEWIRE_API_URL").as_deref(),
-            Some("https://codewire.example")
-        );
-        assert_eq!(
-            get("CODEWIRE_COORDINATOR_URL").as_deref(),
-            Some("http://codewire-coordinator.default.svc.cluster.local:8090")
-        );
-        assert_eq!(
-            get("CODEWIRE_BINDING_URL").as_deref(),
-            Some("https://codewire-orchestration.default.svc.cluster.local:8088")
-        );
-    }
-
-    #[test]
-    fn binding_url_is_omitted_without_a_server_namespace() {
-        let env = build_sidecar_env(&TemplateOpts {
-            gateway_token: "binding-url-token".into(),
-            daemon_auth_token: "binding-url-daemon-token".into(),
-            api_base_url: "https://codewire.example".into(),
-            ..Default::default()
-        });
-
-        assert!(
-            !env.iter()
-                .any(|entry| entry["name"].as_str() == Some(GATEWAY_BINDING_URL_ENV))
-        );
-    }
-
-    fn internal_tls_gateway_opts(server_namespace: &str) -> TemplateOpts {
-        TemplateOpts {
-            name: "tmpl-binding-tls".into(),
-            environment_id: "6b4f2d1c-5a3e-4c2b-9f1a-0e7d8c6b5a49".into(),
-            image: "ghcr.io/codewiresh/workspace:golden".into(),
-            support_image: "git.example.invalid/codewire/gateway:test".into(),
-            gateway_token: "test-coordinate-token".into(),
-            daemon_auth_token: "test-daemon-token".into(),
-            server_namespace: server_namespace.into(),
-            ..Default::default()
-        }
-    }
-
-    fn orchestration_egress_ports(policy: &Value) -> Vec<i64> {
-        policy["spec"]["egress"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|rule| {
-                rule["to"].as_array().is_some_and(|targets| {
-                    targets.iter().any(|target| {
-                        target["podSelector"]["matchLabels"]["app.kubernetes.io/component"]
-                            .as_str()
-                            == Some("orchestration")
-                    })
-                })
-            })
-            .expect("orchestration egress rule")["ports"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|port| port["port"].as_i64())
-            .collect()
-    }
-
-    #[test]
-    fn gateway_binds_through_the_internal_tls_listener_with_its_mounted_roots() {
-        let opts = internal_tls_gateway_opts("dev");
-        let env = build_sidecar_env(&opts);
-        let get = |name: &str| {
-            env.iter().find_map(|entry| {
-                (entry["name"].as_str()? == name).then(|| entry["value"].as_str().map(str::to_owned))?
-            })
-        };
-        assert_eq!(
-            get(GATEWAY_BINDING_URL_ENV).as_deref(),
-            Some("https://codewire-orchestration.dev.svc.cluster.local:8088")
-        );
-        assert_eq!(
-            get("CODEWIRE_BINDING_TLS_ROOTS_FILE").as_deref(),
-            Some("/run/codewire-orchestration-internal-roots/ca.crt")
-        );
-
-        let deployment = render_gateway_deployment("dev-sandboxes", &opts);
-        let pod = &deployment["spec"]["template"]["spec"];
-        let volume = pod["volumes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|volume| volume["name"] == "orchestration-internal-roots")
-            .expect("roots volume");
-        assert_eq!(
-            volume,
-            &serde_json::json!({
-                "name": "orchestration-internal-roots",
-                "configMap": { "name": "codewire-orchestration-internal-roots" },
-            })
-        );
-        let mount = pod["containers"][0]["volumeMounts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|mount| mount["name"] == "orchestration-internal-roots")
-            .expect("roots mount");
-        assert_eq!(
-            mount["mountPath"],
-            "/run/codewire-orchestration-internal-roots"
-        );
-        assert_eq!(mount["readOnly"], true);
-
-        // Its policy opens the API and the TLS internal port, nothing else.
-        let policy = render_gateway_network_policy("dev-sandboxes", &opts);
-        assert_eq!(orchestration_egress_ports(&policy), vec![8084, 8088]);
-    }
-
-    #[test]
-    fn gateway_without_a_server_namespace_renders_no_internal_tls_inputs() {
-        let opts = internal_tls_gateway_opts("");
-        let env = build_sidecar_env(&opts);
-        assert!(!env.iter().any(|entry| {
-            matches!(
-                entry["name"].as_str(),
-                Some(GATEWAY_BINDING_URL_ENV | "CODEWIRE_BINDING_TLS_ROOTS_FILE")
-            )
-        }));
-        let deployment = render_gateway_deployment("dev-sandboxes", &opts);
-        assert!(
-            !deployment["spec"]["template"]["spec"]["volumes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|volume| volume["name"] == "orchestration-internal-roots")
-        );
-    }
-
-    #[test]
-    fn gateway_policy_opens_only_the_api_and_internal_tls_ports_to_orchestration() {
-        let rendered = render_gateway_network_policy(
-            "codewire-runtime",
-            &TemplateOpts {
-                name: "tmpl-binding-egress".into(),
-                image: "ghcr.io/codewiresh/workspace:golden".into(),
-                support_image: "git.example.invalid/codewire/gateway:test".into(),
-                gateway_token: "test-coordinate-token".into(),
-                daemon_auth_token: "test-daemon-token".into(),
-                server_namespace: "dev".into(),
-                ..Default::default()
-            },
-        );
-        let rule = rendered["spec"]["egress"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|rule| {
-                rule["to"].as_array().is_some_and(|targets| {
-                    targets.iter().any(|target| {
-                        target["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
-                            .as_str()
-                            == Some("dev")
-                            && target["podSelector"]["matchLabels"]["app.kubernetes.io/component"]
-                                .as_str()
-                                == Some("orchestration")
-                    })
-                })
-            })
-            .expect("orchestration egress rule");
-        let ports: Vec<i64> = rule["ports"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|port| port["port"].as_i64())
-            .collect();
-
-        assert_eq!(ports, vec![8084, 8088]);
-    }
-
-    #[test]
     fn zero_replica_shadow_pool_matches_golden_file() {
         assert_eq!(
             render_sandbox_shadow_pool(
@@ -3439,7 +2369,6 @@ mod tests {
             workspace_identity: WorkspaceIdentity::Binding {
                 binding_url: IDENTITY_FREE_BINDING_URL.into(),
             },
-            gateway_daemon_credential_from_binding: true,
             ..credential_opts()
         }
     }
@@ -3569,7 +2498,6 @@ mod tests {
         for value in [
             opts.environment_id.as_str(),
             opts.organization_id.as_str(),
-            opts.gateway_token.as_str(),
             opts.daemon_auth_token.as_str(),
         ] {
             assert!(!text.contains(value), "environment value in an identity-free template");
@@ -3711,7 +2639,6 @@ mod tests {
             environment_id: "1d2e3f4a-5b6c-4d7e-8f90-a1b2c3d4e5f6".into(),
             organization_id: "org-other".into(),
             operation_generation: 12,
-            gateway_token: "gw-token-other".into(),
             daemon_auth_token: "daemon-token-other".into(),
             managed_credential_clients:
                 codewire_access::ManagedCredentialClients::from_profile_slots(["github"]).unwrap(),
@@ -3737,45 +2664,6 @@ mod tests {
             render_sandbox_template("dev-sandboxes", &runc),
             load_golden("identity-free-sandboxtemplate-runc.golden.json"),
         );
-    }
-
-    /// The identity-free gateway fetches its daemon credential over its own
-    /// binding; the legacy rendering is unchanged for rollback and
-    /// confidential.
-    #[test]
-    fn identity_free_gateway_gets_no_daemon_token_and_no_codex_config_map() {
-        let opts = identity_free_opts();
-        let env = build_sidecar_env(&opts);
-        assert!(!env.iter().any(|entry| entry["name"] == DAEMON_AUTH_TOKEN_ENV));
-        assert!(!serde_json::to_string(&env).unwrap().contains(&opts.daemon_auth_token));
-        assert!(env.iter().any(|entry| entry["name"] == GATEWAY_BINDING_URL_ENV));
-        assert_no_legacy_codex(&render_sandbox_template("dev-sandboxes", &opts));
-        let legacy = credential_opts();
-        assert!(build_sidecar_env(&legacy)
-            .iter()
-            .any(|entry| entry["name"] == DAEMON_AUTH_TOKEN_ENV));
-        // Rollback: a legacy workspace whose gateway reads the binding.
-        let rollback = TemplateOpts {
-            gateway_daemon_credential_from_binding: true,
-            ..credential_opts()
-        };
-        assert!(!build_sidecar_env(&rollback)
-            .iter()
-            .any(|entry| entry["name"] == DAEMON_AUTH_TOKEN_ENV));
-        // The rollback rendering carries Codex's selection in its environment
-        // only; its daemon writes `~/.codex` exactly as a bound one does.
-        let rollback_template = render_sandbox_template("dev-sandboxes", &rollback);
-        assert_no_legacy_codex(&rollback_template);
-        assert!(
-            rollback_template["spec"]["podTemplate"]["spec"]["containers"][0]["env"]
-                .as_array()
-                .unwrap()
-                .contains(&json!({"name":"CODEX_HOME","value":codewire_access::CODEX_PLATFORM_HOME}))
-        );
-        // Neither the shared template nor the per-environment daemon policy
-        // reaches the environment's gateway.
-        let policy = render_workspace_daemon_network_policy("dev-sandboxes", &opts);
-        assert!(!policy["spec"]["egress"].to_string().contains("\"port\":8443"));
     }
 
 }

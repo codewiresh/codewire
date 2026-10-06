@@ -41,7 +41,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::WorkerContext;
-use super::gatewayauth::{WorkspaceCredentialScope, daemon_credential_for};
+use super::environment_auth::{WorkspaceCredentialScope, daemon_credential_for};
 use crate::api::log_notifications::ENVIRONMENT_LOGS_CHANNEL;
 
 mod budget;

@@ -605,7 +605,7 @@ fn workspace_binding_roots_volume() -> Value {
     json!({
         "name": WORKSPACE_BINDING_ROOTS_VOLUME,
         "configMap": {
-            "name": super::ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP,
+            "name": ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP,
             "items": [{ "key": "ca.crt", "path": "ca.crt" }],
             "defaultMode": 0o444,
         },
@@ -838,4 +838,15 @@ pub fn render_workspace_daemon_service(namespace: &str, opts: &TemplateOpts) -> 
             ],
         },
     })
+}
+
+/// The sandbox-namespace ConfigMap with the public roots of orchestration's
+/// internal TLS listeners. The infrastructure owner provisions it; workspaces
+/// mount it and orchestration checks its own leaf against it at startup.
+pub const ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP: &str = "codewire-orchestration-internal-roots";
+
+/// The DNS name of orchestration's internal TLS listener in `server_namespace`:
+/// the name Mesh calls and its leaf Certificate names.
+pub fn orchestration_internal_tls_host(server_namespace: &str) -> String {
+    format!("codewire-orchestration.{server_namespace}.svc.cluster.local")
 }

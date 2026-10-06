@@ -9,8 +9,7 @@ use tokio::sync::Notify;
 
 use super::*;
 
-const PURPOSES: [PodIdentityPurpose; 4] = [
-    PodIdentityPurpose::GatewayBinding,
+const PURPOSES: [PodIdentityPurpose; 3] = [
     PodIdentityPurpose::CredentialRelay,
     PodIdentityPurpose::CredentialWorkspace,
     PodIdentityPurpose::WorkspaceBinding,
@@ -221,7 +220,7 @@ async fn the_credential_relay_is_only_orchestrations_service_account() {
     let mut sandbox = status(relay);
     sandbox.user.as_mut().unwrap().username = Some(format!(
         "system:serviceaccount:runtime:{}",
-        GATEWAY_BINDING_SERVICE_ACCOUNT
+        SANDBOX_SERVICE_ACCOUNT
     ));
     assert_eq!(
         KubernetesPodIdentityVerifier::for_test(FakeReviewer::status(sandbox), relay)
@@ -232,7 +231,6 @@ async fn the_credential_relay_is_only_orchestrations_service_account() {
     for purpose in [
         PodIdentityPurpose::CredentialWorkspace,
         PodIdentityPurpose::WorkspaceBinding,
-        PodIdentityPurpose::GatewayBinding,
     ] {
         let mut orchestration = status(purpose);
         orchestration.user.as_mut().unwrap().username = Some(format!(
@@ -250,7 +248,7 @@ async fn the_credential_relay_is_only_orchestrations_service_account() {
 
 #[tokio::test]
 async fn service_account_and_pod_coordinates_cannot_be_selected_by_the_caller() {
-    let purpose = PodIdentityPurpose::GatewayBinding;
+    let purpose = PodIdentityPurpose::WorkspaceBinding;
     for username in [
         "system:serviceaccount:runtime:other",
         "system:serviceaccount::codewire-sandbox",
@@ -388,7 +386,7 @@ async fn unauthenticated_payload_never_supplies_identity_or_expiry() {
 
 #[tokio::test]
 async fn missing_client_status_and_review_failures_are_closed() {
-    let purpose = PodIdentityPurpose::GatewayBinding;
+    let purpose = PodIdentityPurpose::WorkspaceBinding;
     let token = future_token();
     assert_eq!(
         KubernetesPodIdentityVerifier::new(None, purpose)
@@ -442,7 +440,7 @@ async fn review_timeout_and_request_cancellation_leave_no_detached_review() {
     let reviewer = Arc::new(PendingReviewer::default());
     let mut verifier = KubernetesPodIdentityVerifier::for_test(
         reviewer.clone(),
-        PodIdentityPurpose::GatewayBinding,
+        PodIdentityPurpose::WorkspaceBinding,
     );
     verifier.timeout = Duration::from_millis(1);
     assert_eq!(

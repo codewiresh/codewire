@@ -1508,8 +1508,6 @@ fn legacy_environment_trust_report(value: rpc::EnvironmentTrustReport) -> Enviro
         images: TrustReportImages {
             workspace_image: empty_to_none(images.workspace_image),
             workspace_image_id: empty_to_none(images.workspace_image_id),
-            gateway_image: empty_to_none(images.gateway_image),
-            gateway_image_id: empty_to_none(images.gateway_image_id),
             dind_image: empty_to_none(images.dind_image),
             dind_image_id: empty_to_none(images.dind_image_id),
             daemon_init_image: empty_to_none(images.daemon_init_image),

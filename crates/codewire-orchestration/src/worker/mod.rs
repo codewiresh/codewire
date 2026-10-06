@@ -20,9 +20,9 @@ pub mod create;
 pub mod credential_relay;
 pub mod env_data;
 pub mod env_log;
+pub mod environment_auth;
 #[cfg(feature = "kind-e2e")]
 pub mod fencing_evidence;
-pub mod gatewayauth;
 pub mod image_cache;
 pub mod lifecycle;
 pub mod loops;

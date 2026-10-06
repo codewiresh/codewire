@@ -17,7 +17,7 @@ use sqlx::PgPool;
 use sqlx::postgres::{PgListener, PgPoolOptions};
 use tokio::sync::Notify;
 
-use crate::worker::gatewayauth::WorkspaceCredentialScope;
+use crate::worker::environment_auth::WorkspaceCredentialScope;
 
 /// Notification channel the binding recorder publishes Pod UIDs on.
 pub const WORKSPACE_BINDINGS_CHANNEL: &str = "workspace_bindings";

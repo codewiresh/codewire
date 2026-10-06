@@ -1024,7 +1024,7 @@ async fn db_release_clears_the_pointer_and_every_live_lookup() -> Result<()> {
         let secret = "synthetic-session-secret";
         ensure!(
             environment_daemon_credential(&db.pool, None, secret, ENV_A).await?
-                == crate::worker::gatewayauth::issue_workspace_daemon_credential(
+                == crate::worker::environment_auth::issue_workspace_daemon_credential(
                     secret, ENV_A, POD_1
                 )?
         );
@@ -1060,10 +1060,10 @@ async fn db_release_clears_the_pointer_and_every_live_lookup() -> Result<()> {
         let legacy = FakeKube::runtime(ENV_A, POD_2, WorkspaceCredentialScope::Environment);
         ensure!(
             environment_daemon_credential(&db.pool, Some(&legacy.client()), secret, ENV_A).await?
-                == crate::worker::gatewayauth::issue_token(
+                == crate::worker::environment_auth::issue_token(
                     secret,
                     ENV_A,
-                    crate::worker::gatewayauth::SCOPE_DAEMON
+                    crate::worker::environment_auth::SCOPE_DAEMON
                 )?
         );
         let unbound = FakeKube::runtime(ENV_A, POD_2, WorkspaceCredentialScope::Pod);

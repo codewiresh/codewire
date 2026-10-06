@@ -16,14 +16,14 @@ use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, header::AUTHORIZATION};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use codewire_gateway_proto::{GATEWAY_BINDING_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
+use codewire_gateway_proto::{SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewStatus, UserInfo};
 use serde_json::{Value, json};
 use tower::service_fn;
 
 use super::service::{BindError, WorkspaceBindingState};
 use super::store::{BindingNotifications, BindingStore, BindingStoreUnavailable, LiveBinding};
-use crate::worker::gatewayauth::WorkspaceCredentialScope;
+use crate::worker::environment_auth::WorkspaceCredentialScope;
 
 const NAMESPACE: &str = "sandboxes";
 const SECRET: &str = "synthetic-session-secret";
@@ -124,7 +124,7 @@ fn cluster(reviews: Arc<AtomicUsize>) -> kube::Client {
                             audiences: Some(vec![WORKSPACE_BINDING_TOKEN_AUDIENCE.into()]),
                             user: Some(UserInfo {
                                 username: Some(format!(
-                                    "system:serviceaccount:{NAMESPACE}:{GATEWAY_BINDING_SERVICE_ACCOUNT}"
+                                    "system:serviceaccount:{NAMESPACE}:{SANDBOX_SERVICE_ACCOUNT}"
                                 )),
                                 extra: Some(std::collections::BTreeMap::from([
                                     (
@@ -158,7 +158,7 @@ fn cluster(reviews: Arc<AtomicUsize>) -> kube::Client {
                             "ownerReferences": [{"apiVersion": "agents.x-k8s.io/v1beta1",
                                 "kind": "Sandbox", "name": pod.sandbox, "uid": pod.sandbox_uid,
                                 "controller": true}]},
-                        "spec": {"serviceAccountName": GATEWAY_BINDING_SERVICE_ACCOUNT, "containers": []},
+                        "spec": {"serviceAccountName": SANDBOX_SERVICE_ACCOUNT, "containers": []},
                         "status": {"phase": "Running", "podIP": pod.ip.to_string()},
                     }),
                 )

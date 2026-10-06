@@ -9,8 +9,8 @@
 //!
 //! It then proves the environment's access objects: the daemon Service and
 //! the workspace NetworkPolicy (orchestration to the daemon, SSH and preview
-//! ports; world-only tailnet UDP), and no gateway object at all, since the
-//! workspace daemon hosts SSH and the tailnet. `CRD_SMOKE_ACCESS_PHASE=
+//! ports; world-only tailnet UDP), since the workspace daemon hosts SSH and
+//! the tailnet. `CRD_SMOKE_ACCESS_PHASE=
 //! setup|cleanup` lets the Kind harness keep those objects for its daemon
 //! fixture between the two assertions. `CRD_SMOKE_LOCAL_IMAGES=1` selects the
 //! side-loaded daemon image and the diagnostic runc RuntimeClass for that
@@ -22,17 +22,15 @@ use codewire_gateway_proto::{WORKSPACE_SSH_PORT, WORKSPACE_TAILNET_UDP_PORT};
 use codewire_orchestration::sandbox::client::SandboxClient;
 use codewire_orchestration::sandbox::template::{
     CredentialRuntimeTemplateConfig, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_RUNC, TemplateOpts,
-    WorkspaceIdentity, gateway_host_key_secret_name, gateway_network_policy_name,
-    gateway_service_name, gateway_workload_name, render_sandbox_shadow_pool,
-    render_sandbox_template, render_workspace_daemon_service, warm_member_gateway_bridge_name,
-    workspace_daemon_network_policy_name, workspace_daemon_service_name,
+    WorkspaceIdentity, render_sandbox_shadow_pool, render_sandbox_template,
+    render_workspace_daemon_service, workspace_daemon_network_policy_name,
+    workspace_daemon_service_name,
 };
 use codewire_orchestration::sandbox::{
     ClaimOpts, environment_template_name, render_sandbox_claim, shadow_warm_pool_name,
 };
 use codewire_orchestration::worker::create::workspace_binding_url;
-use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::{Secret, Service};
+use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use kube::Api;
 use serde_json::{Value, json};
@@ -419,8 +417,7 @@ fn access_template_opts(namespace: &str) -> TemplateOpts {
     }
 }
 
-/// Remove the access objects and prove they, and every gateway object, are
-/// gone.
+/// Remove the access objects and prove they are gone.
 async fn cleanup_access_stack(
     client: &SandboxClient,
     namespace: &str,
@@ -440,13 +437,12 @@ async fn cleanup_access_stack(
         network_policies.get_opt(&daemon_policy).await?.is_none(),
         "workspace NetworkPolicy {daemon_policy} survived the access stack delete"
     );
-    ensure_no_gateway_objects(namespace, &opts.environment_id).await
+    Ok(())
 }
 
 /// Apply the access objects and prove their shape: the daemon Service, the
 /// workspace NetworkPolicy admitting orchestration to the daemon, SSH and
-/// preview ports and the world (never the cluster) to the tailnet UDP port,
-/// and no gateway object.
+/// preview ports and the world (never the cluster) to the tailnet UDP port.
 async fn verify_access_stack(
     client: &SandboxClient,
     namespace: &str,
@@ -491,44 +487,6 @@ async fn verify_access_stack(
         has_world_only_tailnet_ingress(&daemon_policy_value),
         "workspace daemon NetworkPolicy missing world-only tailnet UDP ingress: {daemon_policy_value}"
     );
-    anyhow::ensure!(
-        !value_contains(&daemon_policy_value, "\"gateway\""),
-        "workspace daemon NetworkPolicy still admits a gateway: {daemon_policy_value}"
-    );
-
-    ensure_no_gateway_objects(namespace, &opts.environment_id).await
-}
-
-/// The workspace daemon hosts SSH and the tailnet, so no gateway Deployment,
-/// Service, NetworkPolicy, warm-member bridge or host-key Secret exists.
-async fn ensure_no_gateway_objects(namespace: &str, env_id: &str) -> anyhow::Result<()> {
-    let kube = kube::Client::try_default().await?;
-    let deployments: Api<Deployment> = Api::namespaced(kube.clone(), namespace);
-    let services: Api<Service> = Api::namespaced(kube.clone(), namespace);
-    let secrets: Api<Secret> = Api::namespaced(kube.clone(), namespace);
-    let network_policies: Api<NetworkPolicy> = Api::namespaced(kube, namespace);
-    let mut found = Vec::new();
-    let workload = gateway_workload_name(env_id);
-    if deployments.get_opt(&workload).await?.is_some() {
-        found.push(format!("Deployment/{workload}"));
-    }
-    let service = gateway_service_name(env_id);
-    if services.get_opt(&service).await?.is_some() {
-        found.push(format!("Service/{service}"));
-    }
-    for policy in [
-        gateway_network_policy_name(env_id),
-        warm_member_gateway_bridge_name(env_id),
-    ] {
-        if network_policies.get_opt(&policy).await?.is_some() {
-            found.push(format!("NetworkPolicy/{policy}"));
-        }
-    }
-    let host_key = gateway_host_key_secret_name(env_id);
-    if secrets.get_opt(&host_key).await?.is_some() {
-        found.push(format!("Secret/{host_key}"));
-    }
-    anyhow::ensure!(found.is_empty(), "gateway objects exist: {found:?}");
     Ok(())
 }
 
@@ -681,11 +639,6 @@ mod tests {
             &opts.server_namespace
         ));
         assert!(has_world_only_tailnet_ingress(&policy));
-        assert!(
-            !serde_json::to_string(&policy)
-                .unwrap()
-                .contains("\"gateway\"")
-        );
 
         let mut no_ssh = policy.clone();
         for ingress in no_ssh["spec"]["ingress"].as_array_mut().unwrap() {

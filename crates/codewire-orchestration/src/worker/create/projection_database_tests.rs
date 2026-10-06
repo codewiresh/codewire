@@ -95,7 +95,6 @@ fn template_opts(env: &EnvironmentRow) -> Result<TemplateOpts> {
         "workspace",
         env,
         GENERATION,
-        "synthetic-coordinate-capability",
         "synthetic-daemon-capability",
     )
 }

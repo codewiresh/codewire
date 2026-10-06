@@ -1159,15 +1159,6 @@ mod enabled {
                     residue.resources
                 );
             }
-            // The daemon hosts SSH and the tailnet: no gateway workload.
-            anyhow::ensure!(
-                !residue
-                    .resources
-                    .iter()
-                    .any(|resource| resource.starts_with("Deployment/")),
-                "WI-2 fixture created a gateway Deployment: {:?}",
-                residue.resources
-            );
             self.assert_access_ready(&env_id, &workspace.uid).await?;
 
             let session_id = format!("session-{env_id}");

@@ -39,7 +39,9 @@ use super::store::{BindingNotifications, BindingStore, HostKeyRecord, LiveBindin
 use super::{BINDING_REQUERY_INTERVAL, MAX_BIND_WAIT};
 use crate::runtime_transport::{RuntimeTransportZone, TRANSPORT_ZONE_LABEL};
 use crate::sandbox::{CRD_VERSION, SANDBOX_GROUP};
-use crate::worker::gatewayauth::{WorkspaceCredentialScope, issue_workspace_daemon_credential};
+use crate::worker::environment_auth::{
+    WorkspaceCredentialScope, issue_workspace_daemon_credential,
+};
 
 /// Value-blind failures (design §3.7). The daemon calls `BindWorkspace` again
 /// at once on `NotFound` and backs off on everything else.

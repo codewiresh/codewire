@@ -23,7 +23,6 @@ fn opts() -> TemplateOpts {
             super::super::template::CredentialRuntimeTemplateConfig::synthetic(NS),
         ),
         daemon_auth_token: "synthetic-daemon-capability".into(),
-        gateway_token: "synthetic-coordinate-capability".into(),
         ..Default::default()
     }
 }

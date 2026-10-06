@@ -11,7 +11,7 @@ use super::env_data::{
     BackendRow, EnvironmentRow, load_backend_row, load_environment, load_environment_in,
 };
 use super::env_log::emit_authoritative_environment_log_for_states;
-use super::gatewayauth::{WorkspaceCredentialScope, issue_environment_tokens};
+use super::environment_auth::{WorkspaceCredentialScope, issue_environment_daemon_token};
 use super::start_timing::{POD_STAGE_PHASES, duration_ms, pod_stage_timings, start_profile};
 use super::workspace_binding::{
     EnvironmentBinding, bind_before_ready, bind_workspace_runtime, binding_bootstrap_current,
@@ -426,7 +426,6 @@ pub fn environment_template_opts(
     template_base: &str,
     env: &EnvironmentRow,
     operation_generation: i64,
-    gateway_token: &str,
     daemon_auth_token: &str,
 ) -> anyhow::Result<TemplateOpts> {
     let env_id = env.id.as_str();
@@ -462,11 +461,6 @@ pub fn environment_template_opts(
         projection_selection_sha256.is_none() || cfg.credential_runtime.is_some(),
         "selected environment sources require credential runtime trust"
     );
-    assert!(
-        gateway_token != daemon_auth_token,
-        "hosted coordinate and daemon capabilities must be distinct"
-    );
-
     let runtime_spec = match runtime_profile_for_isolation_tier(&env.isolation_tier)
         .expect("environment isolation tier is validated at creation")
     {
@@ -491,7 +485,6 @@ pub fn environment_template_opts(
         operation_generation,
         projection_selection_sha256,
         managed_credential_clients,
-        gateway_token: gateway_token.to_string(),
         daemon_auth_token: daemon_auth_token.to_string(),
         ..shape_template_opts(cfg, image_ref, &runtime_spec, shape)
     })
@@ -522,11 +515,10 @@ pub fn shape_template_opts(
     // binding listener only with the orchestration namespace and a
     // coordinator known, which a worker with a sandbox backend requires at
     // startup (`require_workspace_binding_config`).
-    let gateway_daemon_credential_from_binding = runtime_spec.profile
-        != RUNTIME_PROFILE_CONFIDENTIAL
+    let binds = runtime_spec.profile != RUNTIME_PROFILE_CONFIDENTIAL
         && !cfg.pod_namespace.trim().is_empty()
         && !(cfg.coordinator_url.trim().is_empty() && cfg.api_base_url.trim().is_empty());
-    let workspace_identity = if gateway_daemon_credential_from_binding {
+    let workspace_identity = if binds {
         WorkspaceIdentity::Binding {
             binding_url: workspace_binding_url(cfg.pod_namespace.trim()),
         }
@@ -543,7 +535,6 @@ pub fn shape_template_opts(
         projection_selection_sha256: None,
         managed_credential_clients: Default::default(),
         confidential_storage_manifest_uri: String::new(),
-        gateway_token: String::new(),
         daemon_auth_token: String::new(),
         // Cluster and shape.
         image: image_ref.to_string(),
@@ -554,7 +545,6 @@ pub fn shape_template_opts(
         docker_mode: runtime_spec.docker_mode.clone(),
         credential_runtime: cfg.credential_runtime.clone(),
         workspace_identity,
-        gateway_daemon_credential_from_binding,
         api_base_url: cfg.api_base_url.clone(),
         coordinator_url: cfg.coordinator_url.clone(),
         server_namespace: cfg.pod_namespace.clone(),
@@ -873,15 +863,15 @@ pub(super) async fn load_environment_template_opts(
     let (image, base) =
         load_sandbox_template_config(&ctx.pool, env.preset_id.as_deref().unwrap_or_default())
             .await?;
-    let tokens = issue_environment_tokens(&ctx.sandbox_cfg.session_secret, &env.id)?;
+    let daemon_auth_token =
+        issue_environment_daemon_token(&ctx.sandbox_cfg.session_secret, &env.id)?;
     environment_template_opts(
         &ctx.sandbox_cfg,
         &image,
         &base,
         env,
         operation_generation,
-        &tokens.coordinate,
-        &tokens.daemon,
+        &daemon_auth_token,
     )
 }
 
@@ -945,15 +935,14 @@ pub(super) async fn confidential_runtime_template_opts(
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, preset_id).await?;
     let cfg = &ctx.sandbox_cfg;
     let expected_template = environment_per_env_template_name(&image_ref, &template_base, env_id);
-    let auth_tokens = issue_environment_tokens(&cfg.session_secret, env_id)?;
+    let daemon_auth_token = issue_environment_daemon_token(&cfg.session_secret, env_id)?;
     let mut template_opts = environment_template_opts(
         cfg,
         &image_ref,
         &template_base,
         env,
         operation_generation,
-        &auth_tokens.coordinate,
-        &auth_tokens.daemon,
+        &daemon_auth_token,
     )?;
     template_opts.confidential_storage_manifest_uri = confidential_storage_manifest_uri.to_owned();
     if template_opts.name != expected_template {
@@ -1386,35 +1375,35 @@ async fn run_environment_create(
                             return Err(e);
                         }
                     };
-                let auth_tokens = match issue_environment_tokens(&cfg.session_secret, env_id) {
-                    Ok(tokens) => tokens,
-                    Err(e) => {
-                        emit_create_log(
-                            authority,
-                            "create_claim",
-                            "failed",
-                            &format!("{e:#}"),
-                            None,
-                        )
-                        .await?;
-                        record_error(
-                            &svc,
-                            authority,
-                            env_id,
-                            &format!("environment capabilities: {e:#}"),
-                        )
-                        .await?;
-                        return Err(e);
-                    }
-                };
+                let daemon_auth_token =
+                    match issue_environment_daemon_token(&cfg.session_secret, env_id) {
+                        Ok(token) => token,
+                        Err(e) => {
+                            emit_create_log(
+                                authority,
+                                "create_claim",
+                                "failed",
+                                &format!("{e:#}"),
+                                None,
+                            )
+                            .await?;
+                            record_error(
+                                &svc,
+                                authority,
+                                env_id,
+                                &format!("environment capabilities: {e:#}"),
+                            )
+                            .await?;
+                            return Err(e);
+                        }
+                    };
                 let mut template_opts = environment_template_opts(
                     cfg,
                     &image_ref,
                     &template_base,
                     &env,
                     authority.operation_generation(),
-                    &auth_tokens.coordinate,
-                    &auth_tokens.daemon,
+                    &daemon_auth_token,
                 )?;
                 template_opts.confidential_storage_manifest_uri =
                     confidential_storage_manifest_uri.unwrap_or_default();
@@ -2121,15 +2110,14 @@ async fn ensure_access_stack_for_environment(
 ) -> anyhow::Result<()> {
     let preset_id = env.preset_id.clone().unwrap_or_default();
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, &preset_id).await?;
-    let auth_tokens = issue_environment_tokens(&cfg.session_secret, env_id)?;
+    let daemon_auth_token = issue_environment_daemon_token(&cfg.session_secret, env_id)?;
     let template_opts = environment_template_opts(
         cfg,
         &image_ref,
         &template_base,
         env,
         authority.operation_generation(),
-        &auth_tokens.coordinate,
-        &auth_tokens.daemon,
+        &daemon_auth_token,
     )?;
     let runtime_spec = template_opts.runtime_profile_spec();
     validate_managed_runtime_profile(&runtime_spec, cfg.allow_diagnostic_runtime)
@@ -2711,7 +2699,6 @@ mod tests {
                 "base",
                 env,
                 7,
-                "tok",
                 "daemon-tok",
             )
             .unwrap()
@@ -2727,20 +2714,6 @@ mod tests {
             }
         );
         // Confidential keeps its rendered token.
-        let gateway = |cfg: &SandboxWorkerCfg, env: &EnvironmentRow| {
-            environment_template_opts(
-                cfg,
-                "ghcr.io/codewiresh/workspace:1",
-                "base",
-                env,
-                7,
-                "tok",
-                "daemon-tok",
-            )
-            .unwrap()
-            .gateway_daemon_credential_from_binding
-        };
-        assert!(gateway(&cfg, &env));
         let no_namespace = SandboxWorkerCfg {
             pod_namespace: String::new(),
             ..cfg.clone()
@@ -2766,8 +2739,6 @@ mod tests {
             render(&cfg, &confidential),
             WorkspaceIdentity::EnvironmentToken
         );
-        assert!(!gateway(&cfg, &confidential));
-        assert!(!gateway(&no_namespace, &env));
     }
 
     #[test]
@@ -3364,7 +3335,6 @@ mod tests {
             "preset-base",
             &env,
             7,
-            "tok",
             "daemon-tok",
         )
         .unwrap();
@@ -3395,7 +3365,6 @@ mod tests {
             "preset-base",
             &env,
             7,
-            "tok",
             "daemon-tok",
         )
         .unwrap();
@@ -3443,7 +3412,6 @@ mod tests {
             "workspace",
             &standard,
             7,
-            "tok",
             "daemon-tok",
         )
         .unwrap();
@@ -3481,7 +3449,6 @@ mod tests {
             "workspace",
             &confidential,
             7,
-            "tok",
             "daemon-tok",
         )
         .unwrap();
@@ -3552,7 +3519,6 @@ mod tests {
             "workspace",
             &env,
             7,
-            "tok",
             "daemon-tok",
         )
         .unwrap();
@@ -3578,7 +3544,6 @@ mod tests {
             "workspace",
             &env,
             7,
-            "tok",
             "daemon-tok",
         )
         .unwrap();
@@ -3623,7 +3588,6 @@ mod tests {
             "workspace",
             &env,
             7,
-            "tok",
             "daemon-tok",
         )
         .unwrap();

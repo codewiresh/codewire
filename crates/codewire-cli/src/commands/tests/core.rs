@@ -1000,8 +1000,6 @@ exec /bin/sleep 30
             "images": {
                 "workspace_image": "ghcr.io/codewiresh/workspace@sha256:abc",
                 "workspace_image_id": "docker-pullable://ghcr.io/codewiresh/workspace@sha256:abc",
-                "gateway_image": "ghcr.io/codewiresh/codewire-gateway@sha256:def",
-                "gateway_image_id": "docker-pullable://ghcr.io/codewiresh/codewire-gateway@sha256:def",
                 "dind_image": "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
                 "dind_image_id": "docker-pullable://docker.io/library/docker@sha256:123",
                 "daemon_init_image": "ghcr.io/codewiresh/codewire-daemon@sha256:456",
@@ -1051,8 +1049,9 @@ exec /bin/sleep 30
         ));
         assert!(text.contains("Node: node1-codewire-dev\n"));
         assert!(text.contains(
-            "Gateway image ID: docker-pullable://ghcr.io/codewiresh/codewire-gateway@sha256:def\n"
+            "Daemon init image ID: docker-pullable://ghcr.io/codewiresh/codewire-daemon@sha256:456\n"
         ));
+        assert!(!text.contains("Gateway"));
         assert!(text.contains("Provenance: not_available\n"));
         assert!(text.contains("Attestation: dev_evidence_available (sev-snp)\n"));
         assert!(text.contains("Resource: kbs:///default/codewire/runtime-test-resource\n"));

@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use codewire_gateway_proto::{GATEWAY_BINDING_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
+use codewire_gateway_proto::{SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
 use k8s_openapi::api::core::v1::{Container, ContainerStatus, Pod};
 use kube::api::DynamicObject;
 use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
@@ -37,7 +37,7 @@ use super::activity_authority::{ActivityAuthority, await_external_mutation, is_a
 use super::create::SandboxWorkerCfg;
 use super::env_data::{BackendRow, EnvironmentRow, load_environment, load_environment_in};
 use super::env_log::emit_authoritative_environment_log_for_states;
-use super::gatewayauth::{WorkspaceCredentialScope, daemon_credential_for};
+use super::environment_auth::{WorkspaceCredentialScope, daemon_credential_for};
 use crate::sandbox::client::{
     RuntimeIdentityObservation, SandboxClient, WorkspacePodIdentity, WorkspacePvc,
 };
@@ -541,7 +541,7 @@ fn pod_still_observed(pod: &Pod, pod_uid: &str, sandbox_uid: &str) -> bool {
             .spec
             .as_ref()
             .and_then(|spec| spec.service_account_name.as_deref())
-            == Some(GATEWAY_BINDING_SERVICE_ACCOUNT)
+            == Some(SANDBOX_SERVICE_ACCOUNT)
         && pod
             .metadata
             .owner_references
@@ -1804,10 +1804,10 @@ pub(crate) async fn environment_daemon_credential(
     if credential_scope(&pod) != Some(WorkspaceCredentialScope::Environment) {
         return Err(DaemonNotBound.into());
     }
-    super::gatewayauth::issue_token(
+    super::environment_auth::issue_token(
         session_secret,
         environment_id,
-        super::gatewayauth::SCOPE_DAEMON,
+        super::environment_auth::SCOPE_DAEMON,
     )
 }
 

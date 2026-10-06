@@ -409,7 +409,7 @@ const STARTING_BACKLOG_STATES: [&str; 6] = [
 ];
 
 /// Transitions that begin a new runtime incarnation. A running environment's
-/// gateway readiness counts only when recorded at or after the latest one.
+/// access readiness counts only when recorded at or after the latest one.
 const INCARNATION_START_STATES: [&str; 2] = ["creating", "starting"];
 
 fn round_f64_to_i64(v: f64) -> i64 {
@@ -435,7 +435,7 @@ pub(crate) async fn get_admin_environment_startup_summary_core(
 /// `running_without_access_ready_count` counts running environments whose
 /// current incarnation has no completed `access_ready`. Create and restart
 /// both record it, so a completed row from an earlier incarnation no longer
-/// hides a start whose gateway never became ready. An environment with no
+/// hides a start whose access never became ready. An environment with no
 /// recorded incarnation transition falls back to any completed row.
 async fn startup_summary(
     pool: &sqlx::PgPool,

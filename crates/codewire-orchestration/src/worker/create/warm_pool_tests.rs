@@ -96,7 +96,6 @@ fn environment_opts(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> TemplateOpt
         "workspace",
         env,
         7,
-        "synthetic-coordinate",
         "synthetic-daemon",
     )
     .unwrap()
@@ -157,7 +156,6 @@ fn environment_opts_are_the_shape_opts_plus_identity() {
             operation_generation: 0,
             projection_selection_sha256: None,
             managed_credential_clients: Default::default(),
-            gateway_token: String::new(),
             daemon_auth_token: String::new(),
             ..opts
         };
@@ -183,7 +181,7 @@ fn pool_opts_use_the_canonical_image_and_carry_no_identity() {
     assert!(opts.identity_free());
     assert!(opts.name.is_empty() && opts.environment_id.is_empty());
     assert!(opts.organization_id.is_empty() && opts.operation_generation == 0);
-    assert!(opts.gateway_token.is_empty() && opts.daemon_auth_token.is_empty());
+    assert!(opts.daemon_auth_token.is_empty());
     assert!(opts.projection_selection_sha256.is_none());
     let objects = render_configured_warm_pool(&cfg, shapes()[0], 2).unwrap();
     assert!(objects.name.starts_with("cw-pool-1000m-4096mi-10gi-"));

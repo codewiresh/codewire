@@ -7,15 +7,6 @@ pub const DAEMON_AUTH_TOKEN_HEADER: &str = "x-codewire-daemon-token";
 /// Lifecycle callers must recover the exact Pod on this status, conservatively
 /// including a real child that exits with the same code.
 pub const HOSTED_EXEC_AMBIGUOUS_EXIT_CODE: i32 = 125;
-/// Exact Kubernetes projected-token audience for the gateway-binding RPC.
-///
-/// The audience is deliberately distinct from both Kubernetes' API audience
-/// and every Codewire HMAC capability scope. A token projected for this
-/// audience can authenticate only the single cluster-local binding exchange.
-pub const GATEWAY_BINDING_TOKEN_AUDIENCE: &str = "codewire.internal.gateway-binding.v1";
-/// Exact projected-token purpose for a gateway authenticating to the isolated
-/// credential broker. This does not authorize workload or binding-bootstrap use.
-pub const CREDENTIAL_GATEWAY_TOKEN_AUDIENCE: &str = "codewire.internal.credential-gateway.v1";
 /// Exact projected-token purpose for a workspace authenticating credential
 /// access through the credential relay, not the Kubernetes API.
 pub const CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE: &str = "codewire.internal.credential-workspace.v1";
@@ -35,22 +26,14 @@ pub const UDP_RELAY_DATA_PORT: u16 = 41641;
 /// The DERP servers' STUN port, the one DERP port a workspace may reach
 /// directly; DERP itself is reached through the public edge.
 pub const DERP_STUN_PORT: u16 = 3478;
-pub const GATEWAY_BINDING_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/codewire/gateway-binding";
-pub const GATEWAY_BINDING_TOKEN_PATH: &str = "/var/run/secrets/codewire/gateway-binding/token";
-pub const GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS: i64 = 600;
-pub const GATEWAY_BINDING_SERVICE_ACCOUNT: &str = "codewire-sandbox";
-/// Orchestration's internal Connect listener behind TLS. The gateway binds
-/// through it and verifies it against the public roots mounted below.
+/// The service account every workspace Pod runs as. A workspace-binding token
+/// is accepted only for it.
+pub const SANDBOX_SERVICE_ACCOUNT: &str = "codewire-sandbox";
+/// Orchestration's internal Connect listener behind TLS, which Mesh calls.
 pub const ORCHESTRATION_INTERNAL_TLS_PORT: u16 = 8088;
-/// The mounted public roots that verify orchestration's internal listener.
-/// Set exactly when the gateway's binding URL is `https`.
-pub const GATEWAY_BINDING_TLS_ROOTS_FILE_ENV: &str = "CODEWIRE_BINDING_TLS_ROOTS_FILE";
-pub const GATEWAY_BINDING_TLS_ROOTS_MOUNT_PATH: &str = "/run/codewire-orchestration-internal-roots";
-pub const GATEWAY_BINDING_TLS_ROOTS_FILE: &str =
-    "/run/codewire-orchestration-internal-roots/ca.crt";
 /// Exact projected-token purpose for an identity-free workspace Pod fetching
 /// its own binding from the dedicated workspace-binding listener. It is
-/// distinct from the gateway-binding and credential audiences, so a token
+/// distinct from the credential audiences, so a token
 /// projected for this purpose cannot be replayed against any other exchange.
 pub const WORKSPACE_BINDING_TOKEN_AUDIENCE: &str = "codewire.internal.workspace-binding.v1";
 pub const WORKSPACE_BINDING_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/codewire/workspace-binding";
@@ -92,7 +75,7 @@ pub const HOSTED_DAEMON_ACCESS_READY_FILE: &str = "/codewire/run/daemon/access-r
 pub const WORKSPACE_SSH_PORT: u16 = 2222;
 /// The bound daemon's tailnet direct-UDP port in the workspace Pod: the
 /// target of the environment's direct-UDP LoadBalancer, reachable from the
-/// world only. The gateway used the same port.
+/// world only.
 pub const WORKSPACE_TAILNET_UDP_PORT: u16 = 31000;
 /// Extra roots the bound daemon trusts for the public coordinator, beside
 /// the WebPKI roots: a PEM bundle mounted read-only only by a local cluster
@@ -129,20 +112,20 @@ pub const CREDENTIAL_BRIDGE_MAX_HEADER_VALUE_BYTES: usize = 8 * 1024;
 pub const CREDENTIAL_BRIDGE_MAX_HEADER_BYTES: usize = 64 * 1024;
 pub const CREDENTIAL_BRIDGE_MAX_IN_FLIGHT: usize = 16;
 /// Response header on the broker's admitted `CredentialBridge` stream: one
-/// value per optional operation this broker serves. The gateway copies the
+/// value per optional operation this broker serves. The relay copies the
 /// known values into the daemon's `CredentialBridgeOpen.capabilities`.
 pub const CREDENTIAL_BRIDGE_CAPABILITIES_HEADER: &str = "x-codewire-credential-bridge-capabilities";
 /// Response header on the broker's admitted `CredentialBridge` stream: the
 /// epoch's verified identity expiry, in decimal Unix seconds. The broker ends
-/// the epoch then. The gateway uses it only to schedule and check the next
-/// epoch's admission before this one ends; an older broker omits it.
+/// the epoch then. The relay uses it only to schedule and check the next
+/// epoch's admission before this one ends.
 pub const CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER: &str = "x-codewire-credential-bridge-expires-at";
 /// The broker serves `CodexLoginRequest` on this epoch. A daemon sends that
 /// frame only when its epoch's Open lists this value: an older broker or
-/// gateway ends the epoch on an unknown frame.
+/// relay ends the epoch on an unknown frame.
 pub const CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN: &str = "codex-login";
 /// Every optional operation a current host may list. Unknown values are
-/// ignored by the gateway; an Open is bounded to this many entries.
+/// ignored by the relay; an Open is bounded to this many entries.
 pub const CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES: &[&str] =
     &[CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN];
 pub const CREDENTIAL_BRIDGE_MAX_CAPABILITIES: usize = 8;
@@ -236,7 +219,7 @@ pub mod daemon {
     }
 }
 
-/// Private gateway-initiated credential-broker transport. This service imports
+/// Private relay-initiated credential-broker transport. This service imports
 /// the neutral material-free bridge frames but no daemon service authority.
 pub mod broker {
     pub mod v1 {
@@ -252,8 +235,6 @@ mod tests {
     #[test]
     fn projected_token_audiences_are_pairwise_distinct_and_mounts_do_not_overlap() {
         let audiences = [
-            GATEWAY_BINDING_TOKEN_AUDIENCE,
-            CREDENTIAL_GATEWAY_TOKEN_AUDIENCE,
             CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
             CREDENTIAL_RELAY_TOKEN_AUDIENCE,
             WORKSPACE_BINDING_TOKEN_AUDIENCE,
@@ -268,30 +249,17 @@ mod tests {
             WORKSPACE_BINDING_TOKEN_PATH,
             format!("{WORKSPACE_BINDING_TOKEN_MOUNT_PATH}/token")
         );
-        assert!(!WORKSPACE_BINDING_TOKEN_MOUNT_PATH.starts_with(GATEWAY_BINDING_TOKEN_MOUNT_PATH));
-        assert!(!GATEWAY_BINDING_TOKEN_MOUNT_PATH.starts_with(WORKSPACE_BINDING_TOKEN_MOUNT_PATH));
-        assert_eq!(
-            WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS,
-            GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS
-        );
         assert_eq!(
             CREDENTIAL_RELAY_TOKEN_PATH,
             format!("{CREDENTIAL_RELAY_TOKEN_MOUNT_PATH}/token")
         );
-        assert_ne!(
-            CREDENTIAL_RELAY_SERVICE_ACCOUNT,
-            GATEWAY_BINDING_SERVICE_ACCOUNT
-        );
+        assert_ne!(CREDENTIAL_RELAY_SERVICE_ACCOUNT, SANDBOX_SERVICE_ACCOUNT);
         assert_eq!(
             CREDENTIAL_RELAY_TOKEN_EXPIRATION_SECONDS,
             WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS
         );
         assert_eq!(WORKSPACE_BINDING_PORT, 8087);
         assert_eq!(ORCHESTRATION_INTERNAL_TLS_PORT, 8088);
-        assert_eq!(
-            GATEWAY_BINDING_TLS_ROOTS_FILE,
-            format!("{GATEWAY_BINDING_TLS_ROOTS_MOUNT_PATH}/ca.crt")
-        );
     }
 
     #[test]

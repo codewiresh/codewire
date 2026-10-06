@@ -1,20 +1,16 @@
 //! Workspace network-policy rendering. The environment's SSH server and
 //! tailnet peer live in its workspace daemon (design §5): only orchestration
 //! reaches the daemon, previews and SSH, and only the world sends to the
-//! tailnet UDP port. The gateway renderer remains only until its removal.
+//! tailnet UDP port, through the environment's direct-UDP LoadBalancer.
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
-use super::gateway::tailnet_udp_listener_enabled;
 use super::naming::{
-    gateway_labels, gateway_network_policy_name, gateway_selector, warm_member_daemon_bridge_name,
-    warm_member_selector, workspace_daemon_network_policy_name, workspace_selector,
+    direct_udp_service_name, warm_member_daemon_bridge_name, warm_member_selector,
+    workspace_daemon_network_policy_name, workspace_selector,
 };
-use super::{
-    APP_PREVIEW_MAX_PORT, APP_PREVIEW_MIN_PORT, DEFAULT_GATEWAY_READYZ_PORT,
-    DEFAULT_GATEWAY_SSH_PORT, GATEWAY_TAILNET_UDP_PORT, INTERNAL_DERP_STUN_PORT,
-    INTERNAL_DERP_TLS_PORT, TemplateOpts, WORKSPACE_DAEMON_PORT,
-};
+use super::runtime_policy::RUNTIME_PROFILE_CONFIDENTIAL;
+use super::{APP_PREVIEW_MAX_PORT, APP_PREVIEW_MIN_PORT, TemplateOpts, WORKSPACE_DAEMON_PORT};
 
 /// Private, loopback, link-local and carrier-grade NAT ranges: every cluster
 /// and Pod network a Codewire cluster uses. The world is everything else.
@@ -240,153 +236,100 @@ pub fn render_workspace_daemon_network_policy(namespace: &str, opts: &TemplateOp
     })
 }
 
-/// A gateway's egress to the daemon and preview ports of the workspace Pods
-/// `workspace` selects.
-fn gateway_workspace_egress_rule(workspace: Value) -> Value {
-    json!({
-        "to": [ { "podSelector": { "matchLabels": workspace } } ],
-        "ports": [
-            { "protocol": "TCP", "port": WORKSPACE_DAEMON_PORT },
-            { "protocol": "TCP", "port": APP_PREVIEW_MIN_PORT, "endPort": APP_PREVIEW_MAX_PORT },
-        ],
-    })
+pub(super) fn tailnet_udp_listener_enabled(opts: &TemplateOpts) -> bool {
+    direct_udp_ingress_enabled(opts)
+        || direct_udp_endpoint(opts).is_some()
+        || !opts.udp_relay_allocator_url.trim().is_empty()
+        || !opts.udp_relay_bind_addrs.trim().is_empty()
 }
 
-pub fn render_gateway_network_policy(namespace: &str, opts: &TemplateOpts) -> Value {
-    let mut egress = vec![
-        gateway_workspace_egress_rule(workspace_selector(opts)),
-        json!({
-            "to": [
-                { "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "kube-system" } } },
-            ],
-            "ports": [
-                { "protocol": "UDP", "port": 53 },
-                { "protocol": "TCP", "port": 53 },
-            ],
-        }),
-        json!({
-            "to": [
-                { "ipBlock": { "cidr": "0.0.0.0/0", "except": ["10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"] } },
-                { "ipBlock": { "cidr": "::/0", "except": ["fc00::/7"] } },
-            ],
-            "ports": [
-                { "protocol": "TCP", "port": 443 },
-                { "protocol": "UDP", "port": INTERNAL_DERP_STUN_PORT },
-                { "protocol": "UDP", "port": GATEWAY_TAILNET_UDP_PORT },
-            ],
-        }),
-    ];
-    if !opts.server_namespace.is_empty() {
-        // The API and the TLS-only internal listener the gateway binds to.
-        let internal_port = i64::from(codewire_gateway_proto::ORCHESTRATION_INTERNAL_TLS_PORT);
-        egress.push(json!({
-            "to": [
-                {
-                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": opts.server_namespace } },
-                    "podSelector": { "matchLabels": { "app.kubernetes.io/component": "orchestration" } },
-                },
-            ],
-            "ports": [
-                { "protocol": "TCP", "port": 8084 },
-                { "protocol": "TCP", "port": internal_port },
-            ],
-        }));
-        egress.push(json!({
-            "to": [
-                {
-                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": opts.server_namespace } },
-                    "podSelector": { "matchLabels": { "app.kubernetes.io/component": "coordinator" } },
-                },
-            ],
-            "ports": [ { "protocol": "TCP", "port": 8090 } ],
-        }));
-        egress.push(json!({
-            "to": [
-                {
-                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": opts.server_namespace } },
-                    "podSelector": { "matchLabels": { "app.kubernetes.io/component": "derp" } },
-                },
-            ],
-            "ports": [
-                { "protocol": "TCP", "port": INTERNAL_DERP_TLS_PORT },
-                { "protocol": "UDP", "port": INTERNAL_DERP_STUN_PORT },
-            ],
-        }));
-        if opts.udp_relay_allocator_egress_enabled
-            || !opts.udp_relay_allocator_url.trim().is_empty()
-        {
-            egress.push(json!({
-                "to": [
-                    {
-                        "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": opts.server_namespace } },
-                        "podSelector": { "matchLabels": { "app.kubernetes.io/component": "udp-relay" } },
-                    },
-                ],
-                "ports": [
-                    { "protocol": "TCP", "port": 8095 },
-                    { "protocol": "UDP", "port": 41641 },
-                ],
-            }));
-        }
-        egress.push(json!({
-            "to": [
-                {
-                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": opts.server_namespace } },
-                    "podSelector": { "matchLabels": { "app.kubernetes.io/name": "codewire-mesh" } },
-                },
-            ],
-            "ports": [ { "protocol": "TCP", "port": 8080 } ],
-        }));
+fn direct_udp_ingress_enabled(opts: &TemplateOpts) -> bool {
+    !opts.stun_host.trim().is_empty() || !opts.stun_servers.trim().is_empty()
+}
+
+fn direct_udp_endpoint(opts: &TemplateOpts) -> Option<String> {
+    if !opts.direct_udp_lb_enabled {
+        return None;
     }
-    if let Some(rule) = kata_coco_kbs_egress_rule(&opts.kata_coco_kbs_url) {
-        egress.push(rule);
+    let ip = opts.direct_udp_lb_ip.trim();
+    if ip.is_empty() || opts.direct_udp_lb_port <= 0 || opts.direct_udp_lb_port > 65535 {
+        return None;
+    }
+    Some(format!("{ip}:{}", opts.direct_udp_lb_port))
+}
+
+/// The environment's direct-UDP LoadBalancer (design §5): its shared IP and
+/// allocated port, selecting the workspace Pod's tailnet peer.
+pub fn render_direct_udp_service(namespace: &str, opts: &TemplateOpts) -> Option<Value> {
+    let _endpoint = direct_udp_endpoint(opts)?;
+    let lb_class = opts.direct_udp_lb_class.trim();
+    let sharing_key = opts.direct_udp_lb_sharing_key.trim();
+    let mut annotations = Map::new();
+    annotations.insert(
+        "lbipam.cilium.io/ips".into(),
+        opts.direct_udp_lb_ip.trim().into(),
+    );
+    if !sharing_key.is_empty() {
+        annotations.insert("lbipam.cilium.io/sharing-key".into(), sharing_key.into());
+        annotations.insert(
+            "lbipam.cilium.io/sharing-cross-namespace".into(),
+            "*".into(),
+        );
     }
 
-    let mut ingress = vec![json!({
-        "ports": [ { "protocol": "TCP", "port": DEFAULT_GATEWAY_READYZ_PORT } ],
-    })];
-    if let Some(config) = &opts.credential_runtime {
-        config.assert_namespace(namespace);
-        egress.push(json!({
-            "to":[{
-                "namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":config.broker_namespace()}},
-                "podSelector":{"matchLabels":{"app.kubernetes.io/name":"codewire","app.kubernetes.io/component":"credential-service"}},
-            }],
-            "ports":[{"protocol":"TCP","port":9443}],
-        }));
+    let mut labels = json!({
+        "codewire.sh/environment-id": opts.environment_id,
+        "codewire.sh/org-id": opts.organization_id,
+        (super::super::LABEL_OPERATION_GENERATION): opts.operation_generation.to_string(),
+        "app.kubernetes.io/name": "codewire-workspace",
+        "app.kubernetes.io/component": "direct-udp",
+        "app.kubernetes.io/managed-by": "codewire",
+    });
+    let labels_obj = labels.as_object_mut().expect("labels object");
+    if opts.runtime_profile_spec().profile == RUNTIME_PROFILE_CONFIDENTIAL {
+        labels_obj.insert("codewire.sh/isolation-tier".into(), "confidential".into());
     }
-    if !opts.server_namespace.is_empty() {
-        ingress.push(json!({
-            "from": [
-                {
-                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": opts.server_namespace } },
-                    "podSelector": { "matchLabels": { "app.kubernetes.io/component": "orchestration" } },
-                },
-            ],
-            "ports": [ { "protocol": "TCP", "port": DEFAULT_GATEWAY_SSH_PORT } ],
-        }));
-    }
-    if tailnet_udp_listener_enabled(opts) {
-        ingress.push(json!({
-            "ports": [ { "protocol": "UDP", "port": GATEWAY_TAILNET_UDP_PORT } ],
-        }));
+    labels_obj.insert("codewire.sh/type".into(), "direct-udp-lb".into());
+    labels_obj.insert("codewire.sh/runtime-network".into(), "direct-udp".into());
+    labels_obj.insert("codewire.sh/transport".into(), "direct-udp".into());
+    if !opts.direct_udp_transport_zone.trim().is_empty() {
+        labels_obj.insert(
+            "codewire.sh/transport-zone".into(),
+            opts.direct_udp_transport_zone.trim().into(),
+        );
     }
 
-    json!({
-        "apiVersion": "networking.k8s.io/v1",
-        "kind": "NetworkPolicy",
+    let mut spec = json!({
+        "type": "LoadBalancer",
+        "allocateLoadBalancerNodePorts": false,
+        "ipFamilyPolicy": "SingleStack",
+        "ipFamilies": ["IPv4"],
+        "externalTrafficPolicy": "Cluster",
+        "selector": workspace_selector(opts),
+        "ports": [
+            {
+                "name": "tailnet-udp",
+                "protocol": "UDP",
+                "port": opts.direct_udp_lb_port,
+                "targetPort": i64::from(codewire_gateway_proto::WORKSPACE_TAILNET_UDP_PORT),
+            },
+        ],
+    });
+    if !lb_class.is_empty() {
+        spec["loadBalancerClass"] = lb_class.into();
+    }
+
+    Some(json!({
+        "apiVersion": "v1",
+        "kind": "Service",
         "metadata": {
-            "name": gateway_network_policy_name(&opts.environment_id),
+            "name": direct_udp_service_name(&opts.environment_id),
             "namespace": namespace,
-            "labels": gateway_labels(opts),
+            "labels": labels,
+            "annotations": annotations,
         },
-        "spec": {
-            "podSelector": { "matchLabels": gateway_selector(opts) },
-            "policyTypes": ["Ingress", "Egress"],
-            "ingress": ingress,
-            "egress": egress,
-        },
-    })
+        "spec": spec,
+    }))
 }
 
 /// Program #2238 C6 (#2434): the bridge for one adopted warm-pool member.

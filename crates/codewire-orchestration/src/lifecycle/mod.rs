@@ -1383,7 +1383,7 @@ mod tests {
     async fn complete_start_drives_starting_to_running() {
         // The start activity reaches `running` via this CAS once the
         // claim is Ready and the pod IP is recorded (mirroring the create
-        // path's MarkRunning), independent of the post-running gateway/SSH
+        // path's MarkRunning), independent of the post-running SSH access
         // steps. A winning CAS (starting -> running) succeeds.
         let store = MockStore::new(true);
         let svc = Service::new(store.clone());

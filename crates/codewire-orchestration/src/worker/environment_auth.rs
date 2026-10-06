@@ -17,13 +17,6 @@ pub const SCOPE_WORKSPACE_DAEMON: &str = "workspace-daemon";
 /// signs these credentials directly.
 const WORKSPACE_DAEMON_CREDENTIAL_KEY_LABEL: &[u8] = b"codewire/workspace-daemon-credential/v1";
 
-/// Distinct capabilities rendered into one hosted environment. These fields
-/// intentionally do not implement `Debug`: both values are bearer material.
-pub struct EnvironmentAuthTokens {
-    pub coordinate: String,
-    pub daemon: String,
-}
-
 /// Issues the canonical token with stable claim-field order. The unit test
 /// pins an independently accepted wire vector.
 pub fn issue_token(secret: &str, environment_id: &str, scope: &str) -> anyhow::Result<String> {
@@ -134,18 +127,13 @@ pub fn daemon_credential_for(
     }
 }
 
-/// Issues the two domain-separated capabilities needed by a hosted runtime.
-pub fn issue_environment_tokens(
+/// The environment-wide daemon capability a rendering carries. Only a
+/// workspace that binds no Pod (confidential, until B2c) renders it.
+pub fn issue_environment_daemon_token(
     secret: &str,
     environment_id: &str,
-) -> anyhow::Result<EnvironmentAuthTokens> {
-    let coordinate = issue_token(secret, environment_id, SCOPE_COORDINATE)?;
-    let daemon = issue_token(secret, environment_id, SCOPE_DAEMON)?;
-    anyhow::ensure!(
-        coordinate != daemon,
-        "coordinate and daemon capabilities must be distinct"
-    );
-    Ok(EnvironmentAuthTokens { coordinate, daemon })
+) -> anyhow::Result<String> {
+    issue_token(secret, environment_id, SCOPE_DAEMON)
 }
 
 #[cfg(test)]
@@ -274,17 +262,16 @@ mod tests {
     }
 
     #[test]
-    fn hosted_environment_tokens_are_domain_separated() {
-        let tokens = issue_environment_tokens("synthetic-secret", "env-synthetic").unwrap();
+    fn environment_daemon_token_is_domain_separated() {
+        let daemon = issue_environment_daemon_token("synthetic-secret", "env-synthetic").unwrap();
 
-        assert_ne!(tokens.coordinate, tokens.daemon);
         assert_eq!(
-            tokens.coordinate,
-            issue_token("synthetic-secret", "env-synthetic", SCOPE_COORDINATE).unwrap()
-        );
-        assert_eq!(
-            tokens.daemon,
+            daemon,
             issue_token("synthetic-secret", "env-synthetic", SCOPE_DAEMON).unwrap()
+        );
+        assert_ne!(
+            daemon,
+            issue_token("synthetic-secret", "env-synthetic", SCOPE_COORDINATE).unwrap()
         );
     }
 }
