@@ -1343,6 +1343,16 @@ async fn journey(
     target
         .json(&["env", "stop", env, "--local", "--output", "json"], None)
         .await;
+    // The daemon releases its ownership lock before its Tokio runtime and
+    // process finish exiting. Observe the original pidfd within the existing
+    // journey deadline; lock availability alone is not kernel exit proof.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !terminal(&daemon.fd) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("stopped host daemon did not exit through its original pidfd");
     assert!(terminal(&daemon.fd));
     let witnesses = caller.path_witnesses.lock().unwrap().clone();
     assert!(witnesses.iter().all(|value| value["environment_id"] == env
