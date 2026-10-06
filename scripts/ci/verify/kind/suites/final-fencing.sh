@@ -15,10 +15,8 @@ run_retained_final_fencing_suite() {
 
   trap retained_suite_cleanup EXIT
   validate_retained_cluster
-  if [ ! -x "$CARGO_CI_DIR/temporal-fencing-smoke" ]; then
-    echo "::error::retained final-fencing suite requires executable ${CARGO_CI_DIR}/temporal-fencing-smoke"
-    return 1
-  fi
+  # Rebuild the smoke from this tree; a stale binary proves an older one.
+  build_retained_kind_smokes
   temporal_fencing_smoke
   log "retained final-fencing suite green"
 }

@@ -484,6 +484,19 @@ for listener in ':1E61$' ':08AE$' ':7918$'; do
     fail "warm-pool listener probe does not check ${listener}"
 done
 
+# A retained suite that runs a Rust smoke rebuilds the smokes from this tree
+# first: cargo keeps it incremental, and the prebuilt-ci mode verifies the
+# consumed set instead. A stale binary otherwise proves an older tree.
+for suite_smoke in \
+    "$FINAL_FENCING:temporal_fencing_smoke" \
+    "$RUNTIME_ACCEPTANCE:rust_reconciler_ttl_e2e"; do
+  suite_file="${suite_smoke%%:*}"
+  smoke="${suite_smoke##*:}"
+  suite_body="$(cat "$suite_file")"
+  [[ "$suite_body" == *"build_retained_kind_smokes"*"$smoke"* ]] ||
+    fail "$(basename "$suite_file") runs ${smoke} without build_retained_kind_smokes first"
+done
+
 # Sourcing the dispatcher defines every suite without executing one.
 # The default fixtures model public, initially uncached dependencies. Hosted
 # Edge/Kind exports a sealed tuple for its later real runtime; inheriting that
@@ -2562,6 +2575,7 @@ grep -Fxq 'ttl-cluster:retained-fixture' "$FIXTURE/ttl-wrapper.out" ||
 (
   validate_retained_cluster() { record validate; }
   assert_sandbox_supply_chain() { record provenance; }
+  build_retained_kind_smokes() { record smokes; }
   rust_reconciler_ttl_e2e() { record ttl; }
   require_tool() { :; }
   acquire_kind_host_lock() { record acquire-lock; }
@@ -2576,7 +2590,7 @@ grep -Fxq 'ttl-cluster:retained-fixture' "$FIXTURE/ttl-wrapper.out" ||
   (run_retained_sandbox_supply_chain_suite)
   (run_retained_runtime_acceptance_suite)
 )
-printf '%s\n' validate provenance acquire-lock validate ttl | cmp -s - "$CALLS" ||
+printf '%s\n' validate provenance acquire-lock validate smokes ttl | cmp -s - "$CALLS" ||
   fail 'retained runtime/provenance suites did not preserve validation-before-proof order'
 
 # A failed prerequisite or proof must remain a failure, without falling through
@@ -2597,6 +2611,7 @@ for retained_function in run_retained_sandbox_supply_chain_suite \
         [ "$failed_step" != validate ] || return 41
       }
       assert_sandbox_supply_chain() { record proof; return 42; }
+      build_retained_kind_smokes() { record smokes; }
       rust_reconciler_ttl_e2e() { record proof; return 42; }
       require_tool() { :; }
       acquire_kind_host_lock() {
@@ -2672,7 +2687,8 @@ BASH
 # KEEP_KIND_CLUSTER is unset or zero.
 : >"$CALLS"
 validate_retained_cluster() { :; }
-temporal_fencing_smoke() { return 42; }
+build_retained_kind_smokes() { record smokes; }
+temporal_fencing_smoke() { record fencing; return 42; }
 dump_cluster_state() { record dump; }
 log() { record "log:$*"; }
 kind() { record "kind:$*"; }
@@ -2680,6 +2696,8 @@ KEEP_KIND_CLUSTER=0
 RETAINED_KUBECONFIG=""
 expect_live_failure final-fencing-failure run_retained_final_fencing_suite
 [ "$live_status" -eq 42 ] || fail 'retained final-fencing suite lost its failure status'
+[ "$(grep -Fx -e smokes -e fencing "$CALLS" | tr '\n' ' ')" = 'smokes fencing ' ] ||
+  fail 'retained final-fencing suite runs its smoke without rebuilding it from this tree'
 grep -Fxq dump "$CALLS" || fail 'retained failure did not dump cluster state'
 if grep -Fq 'delete cluster' "$CALLS"; then
   fail 'retained suite tried to delete its cluster'
