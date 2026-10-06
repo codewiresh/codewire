@@ -21,8 +21,8 @@
 //! via `SecretKey::generate` and never need to clamp by hand.
 
 use crypto_box::{
-    PublicKey, SalsaBox, SecretKey,
     aead::{Aead, AeadCore},
+    PublicKey, SalsaBox, SecretKey,
 };
 use rand_core::{CryptoRng, RngCore};
 
@@ -161,11 +161,9 @@ mod member_control_tests {
         for first in [0, 1] {
             let mut bytes = [0; KEY_LEN];
             bytes[0] = first;
-            assert!(
-                secret
-                    .require_contributory(&NodePublic::from_raw(bytes))
-                    .is_err()
-            );
+            assert!(secret
+                .require_contributory(&NodePublic::from_raw(bytes))
+                .is_err());
         }
         let other = NodePrivate::from_raw([0x73; KEY_LEN]);
         secret.require_contributory(&other.public()).unwrap();

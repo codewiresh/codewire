@@ -82,6 +82,8 @@ pub struct TerminalView {
     /// Cached grid dimensions from the last successful render
     cached_cols: usize,
     cached_screen_rows: usize,
+    #[cfg(test)]
+    pty_fixtures: crate::tests::PtyFixtures,
 }
 
 impl TerminalView {
@@ -108,6 +110,8 @@ impl TerminalView {
             cached_rows: Vec::new(),
             cached_cols: DEFAULT_COLS,
             cached_screen_rows: DEFAULT_ROWS,
+            #[cfg(test)]
+            pty_fixtures: crate::tests::PtyFixtures::default(),
         }
     }
 
@@ -178,6 +182,10 @@ impl TerminalView {
 
         // Create the input channel (std mpsc)
         let (tx, rx) = mpsc::channel();
+        #[cfg(test)]
+        let fixture_tx = tx.clone();
+        #[cfg(test)]
+        let (fixture_child_tx, fixture_child_rx) = mpsc::channel();
         self.pty_tx = Some(TerminalInputSender::Pty(tx));
 
         // Event channel: background threads -> GPUI foreground
@@ -191,7 +199,7 @@ impl TerminalView {
             .collect();
 
         // Spawn on a background thread (blocking I/O)
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             let env_refs: Vec<(&str, &str)> =
                 env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -203,6 +211,10 @@ impl TerminalView {
                         return;
                     }
                 };
+            #[cfg(test)]
+            let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+            #[cfg(test)]
+            let _ = fixture_child_tx.send(child.clone());
 
             // Read loop on this thread — send Connected on first output
             let first_output = std::sync::atomic::AtomicBool::new(true);
@@ -223,10 +235,17 @@ impl TerminalView {
             backend::read_loop(term, reader, repaint);
 
             // Process exited
+            #[cfg(not(test))]
             let _ = child.wait();
+            #[cfg(test)]
+            let _ = child.lock().expect("PTY fixture child owner").wait();
             let _ = event_tx.unbounded_send(TermEvent::Disconnected);
             let _ = write_handle.join();
         });
+        #[cfg(test)]
+        self.pty_fixtures.push(fixture_tx, fixture_child_rx, worker);
+        #[cfg(not(test))]
+        drop(worker);
 
         self.watch_terminal_events(label.to_string(), event_rx, cx);
     }
