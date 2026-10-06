@@ -148,7 +148,7 @@ pub(crate) async fn serve(
                 },
                 grants.clone(),
                 plane.clone(),
-                Arc::new(PublicCoordinator),
+                Arc::new(PublicCoordinator::new()),
                 TailnetSsh {
                     config: ssh_config,
                     runners,

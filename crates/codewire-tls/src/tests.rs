@@ -713,3 +713,38 @@ async fn http1_only_handshakes_negotiate_http1_and_refuse_h2_only_clients() {
     assert_eq!(outcomes[0], Ok(Some(b"http/1.1".to_vec())));
     assert_eq!(outcomes[1], Err(TlsError::Handshake));
 }
+
+#[tokio::test]
+async fn an_optional_trust_bundle_is_absent_valid_or_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("ca.crt");
+    // Not mounted: no extra trust, and no error.
+    assert_eq!(crate::read_optional_roots(&path).await, Ok(None));
+    // A valid bundle is returned whole.
+    let bundle = format!("{}{}", Ca::new().pem(), Ca::new().pem());
+    write(&path, &bundle);
+    let roots = crate::read_optional_roots(&path).await.unwrap().unwrap();
+    assert_eq!(roots.len(), 2);
+    // A present but empty or malformed bundle fails closed.
+    write(&path, b"");
+    assert_eq!(
+        crate::read_optional_roots(&path).await,
+        Err(TlsError::Files)
+    );
+    write(
+        &path,
+        b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+    );
+    assert_eq!(
+        crate::read_optional_roots(&path).await,
+        Err(TlsError::InvalidPem)
+    );
+    let truncated = format!("{bundle}-----BEGIN CERTIFICATE-----\n");
+    write(&path, truncated);
+    assert!(crate::read_optional_roots(&path).await.is_err());
+    // Only absolute paths name a mount.
+    assert_eq!(
+        crate::read_optional_roots(Path::new("ca.crt")).await,
+        Err(TlsError::Configuration)
+    );
+}

@@ -15,6 +15,7 @@
 //! SSH over the tailnet is served in-process, like the Pod-network listener.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -26,6 +27,7 @@ use codewire_client::{
     stun_servers_from_map,
 };
 use codewire_daemon::access::WorkspaceAccessGrant;
+use codewire_gateway_proto::COORDINATOR_EXTRA_ROOTS_FILE;
 use codewire_tailnet::conn::{Conn, Options};
 use codewire_tailnet::derp_transport::{DerpTarget, DerpTransport, connect_derp_transport};
 use codewire_tailnet::direct_udp;
@@ -143,9 +145,32 @@ pub trait CoordinatorDialer: Send + Sync + 'static {
     ) -> Result<CoordinatorPeerSession, CoordinatorError>;
 }
 
-/// The public coordinator named by the grant, through the public gRPC edge
-/// with WebPKI roots.
-pub struct PublicCoordinator;
+/// The public coordinator named by the grant, through the public gRPC edge.
+/// It trusts the WebPKI roots plus, only when a bundle is mounted at its
+/// extra-roots path, that bundle; a present but unusable bundle refuses
+/// every dial rather than falling back.
+pub struct PublicCoordinator {
+    extra_roots_file: PathBuf,
+}
+
+impl PublicCoordinator {
+    /// Extra roots from [`COORDINATOR_EXTRA_ROOTS_FILE`] when mounted.
+    pub fn new() -> Self {
+        Self::with_extra_roots_file(COORDINATOR_EXTRA_ROOTS_FILE)
+    }
+
+    pub fn with_extra_roots_file(extra_roots_file: impl Into<PathBuf>) -> Self {
+        Self {
+            extra_roots_file: extra_roots_file.into(),
+        }
+    }
+}
+
+impl Default for PublicCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl CoordinatorDialer for PublicCoordinator {
@@ -154,13 +179,32 @@ impl CoordinatorDialer for PublicCoordinator {
         grant: &WorkspaceAccessGrant,
         environment_id: Uuid,
     ) -> Result<CoordinatorPeerSession, CoordinatorError> {
-        CoordinatorPeerSession::connect_public_edge_grpc_with_setup_timeout(
-            grant.coordinator_url(),
-            grant.peer_token().expose_secret(),
-            PrimaryCoordinateIdentity::sidecar(environment_id),
-            COORDINATOR_SETUP_TIMEOUT,
-        )
-        .await
+        let identity = PrimaryCoordinateIdentity::sidecar(environment_id);
+        let token = grant.peer_token().expose_secret();
+        match codewire_tls::read_optional_roots(&self.extra_roots_file)
+            .await
+            .map_err(|_| CoordinatorError::Trust)?
+        {
+            None => {
+                CoordinatorPeerSession::connect_public_edge_grpc_with_setup_timeout(
+                    grant.coordinator_url(),
+                    token,
+                    identity,
+                    COORDINATOR_SETUP_TIMEOUT,
+                )
+                .await
+            }
+            Some(extra_roots) => {
+                CoordinatorPeerSession::connect_public_edge_grpc_with_extra_roots(
+                    grant.coordinator_url(),
+                    token,
+                    identity,
+                    extra_roots,
+                    COORDINATOR_SETUP_TIMEOUT,
+                )
+                .await
+            }
+        }
     }
 }
 

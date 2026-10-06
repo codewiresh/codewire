@@ -241,6 +241,29 @@ fn read_regular_blocking(path: &Path, limit: usize, canceled: impl Fn() -> bool)
     Ok(bytes)
 }
 
+/// An optional mounted trust bundle: `None` when nothing exists at `path`,
+/// its certificates when it holds a valid PEM bundle, and an error when it is
+/// present but unreadable, empty or malformed, so a broken mount never
+/// silently changes trust.
+pub async fn read_optional_roots(
+    path: &Path,
+) -> Result<Option<Vec<CertificateDer<'static>>>, TlsError> {
+    validate_path(path)?;
+    if !tokio::fs::try_exists(path)
+        .await
+        .map_err(|_| TlsError::Files)?
+    {
+        return Ok(None);
+    }
+    let bytes = tokio::time::timeout(
+        crate::TLS_TIMEOUT,
+        read_regular(path, MAX_CERTIFICATE_BYTES),
+    )
+    .await
+    .map_err(|_| TlsError::Timeout)??;
+    certificates(&bytes).map(Some)
+}
+
 pub(crate) fn certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, TlsError> {
     let mut remaining = pem;
     let mut certificates = Vec::new();

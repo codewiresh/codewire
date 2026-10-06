@@ -207,12 +207,16 @@ impl FakeCoordinator {
     }
 }
 
-async fn serve_coordinator(end_sessions: usize) -> (FakeCoordinator, SocketAddr) {
-    let coordinator = FakeCoordinator {
+fn fake_coordinator(end_sessions: usize) -> FakeCoordinator {
+    FakeCoordinator {
         seen: Arc::default(),
         changed: Arc::default(),
         end_sessions: Arc::new(AtomicUsize::new(end_sessions)),
-    };
+    }
+}
+
+async fn serve_coordinator(end_sessions: usize) -> (FakeCoordinator, SocketAddr) {
+    let coordinator = fake_coordinator(end_sessions);
     let router = connectrpc::Router::new().add_service(Arc::new(coordinator.clone()));
     let server = connectrpc::Server::bind("127.0.0.1:0").await.unwrap();
     let address = server.local_addr().unwrap();
@@ -475,4 +479,57 @@ fn derp_falls_back_to_the_coordinator_origin_with_verified_tls() {
         8443
     );
     assert!(derp_target_from_origin("http://codewire.sh").is_err());
+}
+
+/// A grant naming `origin` as the coordinator.
+fn grant_for(origin: &str) -> WorkspaceAccessGrant {
+    let now = SystemTime::now();
+    let now_seconds = i64::try_from(now.duration_since(UNIX_EPOCH).unwrap().as_secs()).unwrap();
+    WorkspaceAccessGrant::validate(
+        &AccessFields {
+            peer_token: "peer-token-0",
+            peer_token_expires_at: now_seconds + 600,
+            operation_generation: 4,
+            coordinator_url: origin,
+            direct_udp_endpoints: &[],
+            peer_relay_endpoints: &[],
+        },
+        now,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn the_coordinator_is_trusted_through_mounted_extra_roots_only() {
+    // A coordinator edge with a cluster-owned authority, as on a local
+    // cluster.
+    let coordinator = fake_coordinator(0);
+    let pki = codewire_tls::test_support::SyntheticPki::new("localhost");
+    let app = connectrpc::Router::new()
+        .add_service(Arc::new(coordinator.clone()))
+        .into_axum_router();
+    let address = pki.serve(app).await;
+    let grant = grant_for(&format!("https://localhost:{}", address.port()));
+    let mounts = tempfile::tempdir().unwrap();
+
+    // Not mounted: the public roots alone refuse the cluster authority.
+    let unmounted = PublicCoordinator::with_extra_roots_file(mounts.path().join("ca.crt"));
+    assert!(unmounted.dial(&grant, ENVIRONMENT).await.is_err());
+    assert!(coordinator.seen().is_empty());
+
+    // Mounted: the extra bundle is trusted beside the public roots.
+    let mounted = PublicCoordinator::with_extra_roots_file(&pki.roots);
+    let session = mounted.dial(&grant, ENVIRONMENT).await.unwrap();
+    assert!(session.setup_derp_map().is_some());
+    assert_eq!(coordinator.seen(), [connected("peer-token-0")]);
+
+    // Present but malformed: refused before any connection.
+    let malformed = mounts.path().join("malformed.crt");
+    std::fs::write(&malformed, b"-----BEGIN CERTIFICATE-----\nAAAA\n").unwrap();
+    let broken = PublicCoordinator::with_extra_roots_file(&malformed);
+    assert!(matches!(
+        broken.dial(&grant, ENVIRONMENT).await,
+        Err(CoordinatorError::Trust)
+    ));
+    assert_eq!(coordinator.seen().len(), 1);
 }

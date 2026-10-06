@@ -108,6 +108,9 @@ pub enum Error {
     /// A coordinator DERP map exceeded the bounded client contract.
     #[error("coordinator DERP map exceeds its size limit")]
     DerpMapTooLarge,
+    /// Configured extra trust roots for the coordinator are unusable.
+    #[error("coordinator trust roots are unusable")]
+    Trust,
 }
 
 impl crate::CodewireClient {
@@ -354,6 +357,33 @@ impl CoordinatorPeerSession {
             identity,
             CoordinatorWireProtocol::PublicEdgeGrpc,
             None,
+            setup_timeout,
+        )
+        .await
+    }
+
+    /// Dial the public coordinator edge trusting the WebPKI roots plus
+    /// `extra_roots`, for an edge served by a deployment-owned authority
+    /// (a local cluster). No extra root changes nothing.
+    pub async fn connect_public_edge_grpc_with_extra_roots(
+        url: &str,
+        bearer_token: &str,
+        identity: PrimaryCoordinateIdentity,
+        extra_roots: Vec<rustls_pki_types::CertificateDer<'static>>,
+        setup_timeout: Duration,
+    ) -> Result<Self, Error> {
+        let mut roots = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        for root in extra_roots {
+            roots.add(root).map_err(|_| Error::Trust)?;
+        }
+        Self::connect_bounded(
+            url,
+            bearer_token,
+            identity,
+            CoordinatorWireProtocol::PublicEdgeGrpc,
+            Some(coordinator_tls_config_with_roots(roots)?),
             setup_timeout,
         )
         .await

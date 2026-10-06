@@ -2381,6 +2381,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum 0.8.9",
  "boringtun",
  "chrono",
  "codewire-client",
@@ -2390,6 +2391,7 @@ dependencies = [
  "codewire-gateway-proto",
  "codewire-proto",
  "codewire-tailnet",
+ "codewire-tls",
  "connectrpc",
  "ed25519-dalek 2.2.0",
  "futures",

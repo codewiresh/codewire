@@ -78,6 +78,12 @@ pub const WORKSPACE_SSH_PORT: u16 = 2222;
 /// target of the environment's direct-UDP LoadBalancer, reachable from the
 /// world only. The gateway used the same port.
 pub const WORKSPACE_TAILNET_UDP_PORT: u16 = 31000;
+/// Extra roots the bound daemon trusts for the public coordinator, beside
+/// the WebPKI roots: a PEM bundle mounted read-only only by a local cluster
+/// whose coordinator edge has a cluster-owned authority. Dev and Production
+/// never mount it. A present but malformed bundle fails closed.
+pub const COORDINATOR_EXTRA_ROOTS_MOUNT_PATH: &str = "/run/codewire-coordinator-extra-roots";
+pub const COORDINATOR_EXTRA_ROOTS_FILE: &str = "/run/codewire-coordinator-extra-roots/ca.crt";
 /// Server-side long-poll requested by an unbound daemon; the listener clamps
 /// it to its own maximum.
 pub const WORKSPACE_BINDING_WAIT_SECONDS: u32 = 20;
@@ -261,6 +267,10 @@ mod tests {
         assert_eq!(
             WORKSPACE_BINDING_TLS_ROOTS_FILE,
             format!("{WORKSPACE_BINDING_TLS_ROOTS_MOUNT_PATH}/ca.crt")
+        );
+        assert_eq!(
+            COORDINATOR_EXTRA_ROOTS_FILE,
+            format!("{COORDINATOR_EXTRA_ROOTS_MOUNT_PATH}/ca.crt")
         );
         assert_eq!(WORKSPACE_POD_UID_ENV, "CODEWIRE_POD_UID");
         assert_eq!(HOSTED_DAEMON_STATE_DIRECTORY, "/codewire/run/daemon");
