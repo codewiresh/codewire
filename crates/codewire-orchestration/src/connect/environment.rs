@@ -45,6 +45,7 @@ use crate::api::environments::{
     get_environment_core, list_environments_core, protect_environment_core, require_org_member,
     start_environment_core, stop_environment_core, unprotect_environment_core,
 };
+use crate::api::host_key::{RecordedHostKeys, get_environment_host_key_core};
 use crate::api::logs::{
     EnvironmentLog as ApiEnvironmentLog, LogStreamEvent, open_environment_log_stream,
 };
@@ -148,6 +149,29 @@ impl proto::EnvironmentService for EnvironmentConnectService {
             )
             .into(),
             poll_interval: poll_interval.into(),
+            ..Default::default()
+        })
+    }
+
+    async fn get_environment_host_key(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::GetEnvironmentHostKeyRequest>,
+    ) -> ServiceResult<proto::GetEnvironmentHostKeyResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let key = get_environment_host_key_core(
+            &self.state,
+            &user,
+            request.org_id,
+            request.environment_id,
+            &RecordedHostKeys(&self.state.pool),
+        )
+        .await
+        .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto::GetEnvironmentHostKeyResponse {
+            generation: key.generation,
+            public_key_openssh: key.public_key_openssh,
             ..Default::default()
         })
     }

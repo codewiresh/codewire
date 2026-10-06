@@ -2489,6 +2489,16 @@ impl proto::EnvironmentService for SupervisorRpc {
         unsupported()
     }
 
+    async fn get_environment_host_key(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::GetEnvironmentHostKeyRequest>,
+    ) -> ServiceResult<proto::GetEnvironmentHostKeyResponse> {
+        // A local environment's SSH trust is the local runtime's, not a
+        // platform-recorded host key.
+        unsupported()
+    }
+
     async fn get_environment_daemon_status(
         &self,
         _ctx: RequestContext,

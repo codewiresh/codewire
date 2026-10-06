@@ -14,6 +14,7 @@ pub mod environment_daemon;
 pub mod environment_resize;
 pub mod environment_sources;
 pub mod environments;
+pub mod host_key;
 pub mod internal;
 pub mod log_notifications;
 pub mod logs;

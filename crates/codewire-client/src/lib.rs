@@ -70,7 +70,8 @@ pub use codewire_proto::codewire::v1::{
     EnvironmentState, EnvironmentTrustReport, ExecRequest, ExecResponse,
     ExecServiceClient as GeneratedExecServiceClient, ExtendEnvironmentTtlRequest,
     ExtendEnvironmentTtlResponse, FileEntry, FileServiceClient as GeneratedFileServiceClient,
-    GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentRequest,
+    GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse,
+    GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse, GetEnvironmentRequest,
     GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse,
     GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse,
     GetOrganizationRequest, GetOrganizationResponse, GetSessionRequest, GetSessionResponse,
@@ -969,6 +970,18 @@ impl CodewireClient {
     ) -> Result<GetEnvironmentTrustReportResponse, ClientError> {
         self.environments
             .get_environment_trust_report_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    /// The SSH host key recorded for the environment's current generation.
+    pub async fn get_environment_host_key(
+        &self,
+        request: GetEnvironmentHostKeyRequest,
+    ) -> Result<GetEnvironmentHostKeyResponse, ClientError> {
+        self.environments
+            .get_environment_host_key_with_options(request, self.auth_options().await?)
             .await
             .map(|response| response.into_owned())
             .map_err(ClientError::from)

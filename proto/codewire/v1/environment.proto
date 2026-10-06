@@ -40,6 +40,12 @@ service EnvironmentService {
   rpc GetEnvironmentTrustReport(GetEnvironmentTrustReportRequest) returns (GetEnvironmentTrustReportResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // The SSH host public key the environment's daemon recorded for its current
+  // operation generation, for the client's known_hosts. A key recorded for an
+  // earlier generation is never returned; none recorded is NOT_FOUND.
+  rpc GetEnvironmentHostKey(GetEnvironmentHostKeyRequest) returns (GetEnvironmentHostKeyResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
   rpc GetEnvironmentDaemonStatus(GetEnvironmentDaemonStatusRequest) returns (GetEnvironmentDaemonStatusResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
@@ -221,6 +227,18 @@ message GetEnvironmentRequest {
 message GetEnvironmentResponse {
   Environment environment = 1;
   google.protobuf.Duration poll_interval = 2;
+}
+
+message GetEnvironmentHostKeyRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message GetEnvironmentHostKeyResponse {
+  // The environment operation generation the key was recorded for.
+  int64 generation = 1;
+  // One OpenSSH public key line, `ssh-ed25519 <base64>`, without a comment.
+  string public_key_openssh = 2;
 }
 
 message EnvironmentResources {

@@ -78,6 +78,9 @@ const (
 	// EnvironmentServiceGetEnvironmentTrustReportProcedure is the fully-qualified name of the
 	// EnvironmentService's GetEnvironmentTrustReport RPC.
 	EnvironmentServiceGetEnvironmentTrustReportProcedure = "/codewire.v1.EnvironmentService/GetEnvironmentTrustReport"
+	// EnvironmentServiceGetEnvironmentHostKeyProcedure is the fully-qualified name of the
+	// EnvironmentService's GetEnvironmentHostKey RPC.
+	EnvironmentServiceGetEnvironmentHostKeyProcedure = "/codewire.v1.EnvironmentService/GetEnvironmentHostKey"
 	// EnvironmentServiceGetEnvironmentDaemonStatusProcedure is the fully-qualified name of the
 	// EnvironmentService's GetEnvironmentDaemonStatus RPC.
 	EnvironmentServiceGetEnvironmentDaemonStatusProcedure = "/codewire.v1.EnvironmentService/GetEnvironmentDaemonStatus"
@@ -124,6 +127,10 @@ type EnvironmentServiceClient interface {
 	CancelEnvironmentDeletion(context.Context, *connect.Request[v1.CancelEnvironmentDeletionRequest]) (*connect.Response[v1.CancelEnvironmentDeletionResponse], error)
 	ExtendEnvironmentTtl(context.Context, *connect.Request[v1.ExtendEnvironmentTtlRequest]) (*connect.Response[v1.ExtendEnvironmentTtlResponse], error)
 	GetEnvironmentTrustReport(context.Context, *connect.Request[v1.GetEnvironmentTrustReportRequest]) (*connect.Response[v1.GetEnvironmentTrustReportResponse], error)
+	// The SSH host public key the environment's daemon recorded for its current
+	// operation generation, for the client's known_hosts. A key recorded for an
+	// earlier generation is never returned; none recorded is NOT_FOUND.
+	GetEnvironmentHostKey(context.Context, *connect.Request[v1.GetEnvironmentHostKeyRequest]) (*connect.Response[v1.GetEnvironmentHostKeyResponse], error)
 	GetEnvironmentDaemonStatus(context.Context, *connect.Request[v1.GetEnvironmentDaemonStatusRequest]) (*connect.Response[v1.GetEnvironmentDaemonStatusResponse], error)
 	StreamEnvironmentDaemonLogs(context.Context, *connect.Request[v1.StreamEnvironmentDaemonLogsRequest]) (*connect.ServerStreamForClient[v1.StreamEnvironmentDaemonLogsResponse], error)
 	RepairEnvironmentDaemon(context.Context, *connect.Request[v1.RepairEnvironmentDaemonRequest]) (*connect.Response[v1.RepairEnvironmentDaemonResponse], error)
@@ -240,6 +247,13 @@ func NewEnvironmentServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
+		getEnvironmentHostKey: connect.NewClient[v1.GetEnvironmentHostKeyRequest, v1.GetEnvironmentHostKeyResponse](
+			httpClient,
+			baseURL+EnvironmentServiceGetEnvironmentHostKeyProcedure,
+			connect.WithSchema(environmentServiceMethods.ByName("GetEnvironmentHostKey")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
 		getEnvironmentDaemonStatus: connect.NewClient[v1.GetEnvironmentDaemonStatusRequest, v1.GetEnvironmentDaemonStatusResponse](
 			httpClient,
 			baseURL+EnvironmentServiceGetEnvironmentDaemonStatusProcedure,
@@ -312,6 +326,7 @@ type environmentServiceClient struct {
 	cancelEnvironmentDeletion     *connect.Client[v1.CancelEnvironmentDeletionRequest, v1.CancelEnvironmentDeletionResponse]
 	extendEnvironmentTtl          *connect.Client[v1.ExtendEnvironmentTtlRequest, v1.ExtendEnvironmentTtlResponse]
 	getEnvironmentTrustReport     *connect.Client[v1.GetEnvironmentTrustReportRequest, v1.GetEnvironmentTrustReportResponse]
+	getEnvironmentHostKey         *connect.Client[v1.GetEnvironmentHostKeyRequest, v1.GetEnvironmentHostKeyResponse]
 	getEnvironmentDaemonStatus    *connect.Client[v1.GetEnvironmentDaemonStatusRequest, v1.GetEnvironmentDaemonStatusResponse]
 	streamEnvironmentDaemonLogs   *connect.Client[v1.StreamEnvironmentDaemonLogsRequest, v1.StreamEnvironmentDaemonLogsResponse]
 	repairEnvironmentDaemon       *connect.Client[v1.RepairEnvironmentDaemonRequest, v1.RepairEnvironmentDaemonResponse]
@@ -397,6 +412,11 @@ func (c *environmentServiceClient) GetEnvironmentTrustReport(ctx context.Context
 	return c.getEnvironmentTrustReport.CallUnary(ctx, req)
 }
 
+// GetEnvironmentHostKey calls codewire.v1.EnvironmentService.GetEnvironmentHostKey.
+func (c *environmentServiceClient) GetEnvironmentHostKey(ctx context.Context, req *connect.Request[v1.GetEnvironmentHostKeyRequest]) (*connect.Response[v1.GetEnvironmentHostKeyResponse], error) {
+	return c.getEnvironmentHostKey.CallUnary(ctx, req)
+}
+
 // GetEnvironmentDaemonStatus calls codewire.v1.EnvironmentService.GetEnvironmentDaemonStatus.
 func (c *environmentServiceClient) GetEnvironmentDaemonStatus(ctx context.Context, req *connect.Request[v1.GetEnvironmentDaemonStatusRequest]) (*connect.Response[v1.GetEnvironmentDaemonStatusResponse], error) {
 	return c.getEnvironmentDaemonStatus.CallUnary(ctx, req)
@@ -457,6 +477,10 @@ type EnvironmentServiceHandler interface {
 	CancelEnvironmentDeletion(context.Context, *connect.Request[v1.CancelEnvironmentDeletionRequest]) (*connect.Response[v1.CancelEnvironmentDeletionResponse], error)
 	ExtendEnvironmentTtl(context.Context, *connect.Request[v1.ExtendEnvironmentTtlRequest]) (*connect.Response[v1.ExtendEnvironmentTtlResponse], error)
 	GetEnvironmentTrustReport(context.Context, *connect.Request[v1.GetEnvironmentTrustReportRequest]) (*connect.Response[v1.GetEnvironmentTrustReportResponse], error)
+	// The SSH host public key the environment's daemon recorded for its current
+	// operation generation, for the client's known_hosts. A key recorded for an
+	// earlier generation is never returned; none recorded is NOT_FOUND.
+	GetEnvironmentHostKey(context.Context, *connect.Request[v1.GetEnvironmentHostKeyRequest]) (*connect.Response[v1.GetEnvironmentHostKeyResponse], error)
 	GetEnvironmentDaemonStatus(context.Context, *connect.Request[v1.GetEnvironmentDaemonStatusRequest]) (*connect.Response[v1.GetEnvironmentDaemonStatusResponse], error)
 	StreamEnvironmentDaemonLogs(context.Context, *connect.Request[v1.StreamEnvironmentDaemonLogsRequest], *connect.ServerStream[v1.StreamEnvironmentDaemonLogsResponse]) error
 	RepairEnvironmentDaemon(context.Context, *connect.Request[v1.RepairEnvironmentDaemonRequest]) (*connect.Response[v1.RepairEnvironmentDaemonResponse], error)
@@ -569,6 +593,13 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
+	environmentServiceGetEnvironmentHostKeyHandler := connect.NewUnaryHandler(
+		EnvironmentServiceGetEnvironmentHostKeyProcedure,
+		svc.GetEnvironmentHostKey,
+		connect.WithSchema(environmentServiceMethods.ByName("GetEnvironmentHostKey")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
 	environmentServiceGetEnvironmentDaemonStatusHandler := connect.NewUnaryHandler(
 		EnvironmentServiceGetEnvironmentDaemonStatusProcedure,
 		svc.GetEnvironmentDaemonStatus,
@@ -653,6 +684,8 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 			environmentServiceExtendEnvironmentTtlHandler.ServeHTTP(w, r)
 		case EnvironmentServiceGetEnvironmentTrustReportProcedure:
 			environmentServiceGetEnvironmentTrustReportHandler.ServeHTTP(w, r)
+		case EnvironmentServiceGetEnvironmentHostKeyProcedure:
+			environmentServiceGetEnvironmentHostKeyHandler.ServeHTTP(w, r)
 		case EnvironmentServiceGetEnvironmentDaemonStatusProcedure:
 			environmentServiceGetEnvironmentDaemonStatusHandler.ServeHTTP(w, r)
 		case EnvironmentServiceStreamEnvironmentDaemonLogsProcedure:
@@ -736,6 +769,10 @@ func (UnimplementedEnvironmentServiceHandler) ExtendEnvironmentTtl(context.Conte
 
 func (UnimplementedEnvironmentServiceHandler) GetEnvironmentTrustReport(context.Context, *connect.Request[v1.GetEnvironmentTrustReportRequest]) (*connect.Response[v1.GetEnvironmentTrustReportResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.GetEnvironmentTrustReport is not implemented"))
+}
+
+func (UnimplementedEnvironmentServiceHandler) GetEnvironmentHostKey(context.Context, *connect.Request[v1.GetEnvironmentHostKeyRequest]) (*connect.Response[v1.GetEnvironmentHostKeyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.GetEnvironmentHostKey is not implemented"))
 }
 
 func (UnimplementedEnvironmentServiceHandler) GetEnvironmentDaemonStatus(context.Context, *connect.Request[v1.GetEnvironmentDaemonStatusRequest]) (*connect.Response[v1.GetEnvironmentDaemonStatusResponse], error) {

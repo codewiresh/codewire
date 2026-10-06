@@ -349,6 +349,22 @@ class GetEnvironmentResponse(_message.Message):
     poll_interval: _duration_pb2.Duration
     def __init__(self, environment: _Optional[_Union[Environment, _Mapping]] = ..., poll_interval: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ...) -> None: ...
 
+class GetEnvironmentHostKeyRequest(_message.Message):
+    __slots__ = ("org_id", "environment_id")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    environment_id: str
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ...) -> None: ...
+
+class GetEnvironmentHostKeyResponse(_message.Message):
+    __slots__ = ("generation", "public_key_openssh")
+    GENERATION_FIELD_NUMBER: _ClassVar[int]
+    PUBLIC_KEY_OPENSSH_FIELD_NUMBER: _ClassVar[int]
+    generation: int
+    public_key_openssh: str
+    def __init__(self, generation: _Optional[int] = ..., public_key_openssh: _Optional[str] = ...) -> None: ...
+
 class EnvironmentResources(_message.Message):
     __slots__ = ("cpu_millicores", "memory_mb", "disk_gb")
     CPU_MILLICORES_FIELD_NUMBER: _ClassVar[int]
