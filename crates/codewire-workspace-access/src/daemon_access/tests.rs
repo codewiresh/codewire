@@ -10,7 +10,6 @@ use russh::{ChannelMsg, client, kex};
 use tokio::time::timeout;
 
 use super::*;
-use crate::daemon_credential::DaemonCredential;
 
 const TEST_DAEMON_TOKEN: &str = "synthetic-local-daemon-token";
 
@@ -185,7 +184,7 @@ async fn spawn_daemon_ssh_with_access(ready: bool) -> DaemonSsh {
     });
     let daemon = DaemonSessionClient::connect_local(
         connector,
-        DaemonCredential::rendered(DaemonAuthToken::new(TEST_DAEMON_TOKEN).unwrap()),
+        DaemonAuthToken::new(TEST_DAEMON_TOKEN).unwrap(),
     )
     .await
     .unwrap();

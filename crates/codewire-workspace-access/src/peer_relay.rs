@@ -3,8 +3,7 @@
 //! When a client peer appears, the environment peer proactively asks for a
 //! relay slot for the pair, and it answers a client's own allocation request
 //! (a disco `AllocateUDPRelayEndpointRequest`) the same way. The allocation
-//! itself is made by a [`PeerRelayBackend`]: the gateway calls the internal
-//! allocator with its static token, while a bound workspace daemon asks
+//! itself is made by a [`PeerRelayBackend`]: a bound workspace daemon asks
 //! orchestration, so the allocator credential never enters the sandbox.
 
 use std::collections::{HashMap, HashSet};
@@ -171,8 +170,8 @@ impl PeerRelayAllocationTracker {
 #[derive(Clone)]
 pub struct PeerRelayAllocator {
     backend: Arc<dyn PeerRelayBackend>,
-    /// Who logs: `rust gateway` or `workspace daemon`. Diagnostics match on
-    /// the gateway's message text.
+    /// Who logs, such as `workspace daemon`. Diagnostics match on the
+    /// message text.
     component: &'static str,
     attempt_timeout: Duration,
     bind_addr_ports: Arc<[String]>,

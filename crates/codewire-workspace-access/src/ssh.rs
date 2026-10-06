@@ -19,7 +19,7 @@ use crate::sftp::DaemonSftpRunner;
 #[path = "ssh/stock_credentials.rs"]
 mod stock_credentials;
 
-const GATEWAY_KEX_ORDER: &[kex::Name] = &[
+const WORKSPACE_SSH_KEX_ORDER: &[kex::Name] = &[
     kex::CURVE25519,
     kex::ECDH_SHA2_NISTP256,
     kex::ECDH_SHA2_NISTP384,
@@ -421,7 +421,7 @@ fn exit_code_to_u32(code: i32) -> u32 {
 }
 
 #[derive(Debug, Error)]
-pub enum GatewaySshError {
+pub enum WorkspaceSshError {
     #[error(transparent)]
     Russh(#[from] russh::Error),
     #[error("unknown SSH channel {0}")]
@@ -437,14 +437,14 @@ pub enum GatewaySshError {
 }
 
 #[derive(Clone)]
-pub struct GatewaySshServer<R> {
+pub struct WorkspaceSshServer<R> {
     runner: Arc<R>,
     sftp: Option<Arc<dyn SftpSubsystemRunner>>,
     scp: Option<Arc<dyn ScpProtocolRunnerBridge>>,
     exec_shell: Option<String>,
 }
 
-impl<R> GatewaySshServer<R>
+impl<R> WorkspaceSshServer<R>
 where
     R: SshSessionRunner,
 {
@@ -480,21 +480,21 @@ where
     }
 
     /// Run each exec request's command line as `<shell> -c <command>`; see
-    /// [`GatewaySshHandler::with_exec_shell`].
+    /// [`WorkspaceSshHandler::with_exec_shell`].
     pub fn with_exec_shell(mut self, shell: impl Into<String>) -> Self {
         self.exec_shell = Some(shell.into());
         self
     }
 }
 
-impl<R> server::Server for GatewaySshServer<R>
+impl<R> server::Server for WorkspaceSshServer<R>
 where
     R: SshSessionRunner,
 {
-    type Handler = GatewaySshHandler<R>;
+    type Handler = WorkspaceSshHandler<R>;
 
     fn new_client(&mut self, _peer_addr: Option<SocketAddr>) -> Self::Handler {
-        let handler = GatewaySshHandler::with_file_protocols(
+        let handler = WorkspaceSshHandler::with_file_protocols(
             self.runner.clone(),
             self.sftp.clone(),
             self.scp.clone(),
@@ -506,7 +506,7 @@ where
     }
 }
 
-pub struct GatewaySshHandler<R> {
+pub struct WorkspaceSshHandler<R> {
     runner: Arc<R>,
     sftp: Option<Arc<dyn SftpSubsystemRunner>>,
     scp: Option<Arc<dyn ScpProtocolRunnerBridge>>,
@@ -516,7 +516,7 @@ pub struct GatewaySshHandler<R> {
     sftp_channels: HashSet<ChannelId>,
 }
 
-impl<R> GatewaySshHandler<R>
+impl<R> WorkspaceSshHandler<R>
 where
     R: SshSessionRunner,
 {
@@ -558,10 +558,10 @@ where
         channel: ChannelId,
         command: Vec<String>,
         session: &mut server::Session,
-    ) -> Result<(), GatewaySshError> {
+    ) -> Result<(), WorkspaceSshError> {
         let Some(state) = self.channels.get(&channel) else {
             session.channel_failure(channel)?;
-            return Err(GatewaySshError::UnknownChannel(channel));
+            return Err(WorkspaceSshError::UnknownChannel(channel));
         };
 
         let start = build_daemon_session_start(SshSessionRequest {
@@ -573,7 +573,7 @@ where
         let output = SshChannelOutput::new(channel, session.handle());
         if let Err(err) = self.runner.start_session(channel, start, output).await {
             session.channel_failure(channel)?;
-            return Err(GatewaySshError::Runner(err));
+            return Err(WorkspaceSshError::Runner(err));
         }
         if let Some(state) = self.channels.get_mut(&channel) {
             state.started = true;
@@ -586,7 +586,7 @@ where
         &self,
         channel: ChannelId,
         input: SshSessionInput,
-    ) -> Result<(), GatewaySshError> {
+    ) -> Result<(), WorkspaceSshError> {
         self.runner.session_input(channel, input).await?;
         Ok(())
     }
@@ -610,30 +610,30 @@ impl SshChannelState {
     }
 }
 
-pub fn gateway_server_config() -> server::Config {
+pub fn workspace_ssh_server_config() -> server::Config {
     let mut config = server::Config::default();
-    apply_gateway_server_policy(&mut config);
+    apply_workspace_ssh_policy(&mut config);
     config
 }
 
-pub fn apply_gateway_server_policy(config: &mut server::Config) {
-    config.methods = gateway_auth_methods();
-    config.preferred = gateway_preferred_algorithms();
+pub fn apply_workspace_ssh_policy(config: &mut server::Config) {
+    config.methods = workspace_ssh_auth_methods();
+    config.preferred = workspace_ssh_preferred_algorithms();
 }
 
-pub fn gateway_auth_methods() -> MethodSet {
+pub fn workspace_ssh_auth_methods() -> MethodSet {
     MethodSet::from(&[MethodKind::None][..])
 }
 
-pub fn gateway_preferred_algorithms() -> Preferred {
+pub fn workspace_ssh_preferred_algorithms() -> Preferred {
     Preferred {
-        kex: Cow::Borrowed(GATEWAY_KEX_ORDER),
+        kex: Cow::Borrowed(WORKSPACE_SSH_KEX_ORDER),
         ..Preferred::DEFAULT
     }
 }
 
-pub fn gateway_kex_names() -> Vec<String> {
-    GATEWAY_KEX_ORDER
+pub fn workspace_ssh_kex_names() -> Vec<String> {
+    WORKSPACE_SSH_KEX_ORDER
         .iter()
         .map(|name| name.as_ref().to_string())
         .collect()
@@ -657,10 +657,11 @@ pub fn build_daemon_session_start(request: SshSessionRequest) -> DaemonSessionSt
     }
 }
 
-pub fn parse_exec_command(command: &[u8]) -> Result<Vec<String>, GatewaySshError> {
+pub fn parse_exec_command(command: &[u8]) -> Result<Vec<String>, WorkspaceSshError> {
     let command = std::str::from_utf8(command)
-        .map_err(|err| GatewaySshError::InvalidExecCommand(err.to_string()))?;
-    shell_words::split(command).map_err(|err| GatewaySshError::InvalidExecCommand(err.to_string()))
+        .map_err(|err| WorkspaceSshError::InvalidExecCommand(err.to_string()))?;
+    shell_words::split(command)
+        .map_err(|err| WorkspaceSshError::InvalidExecCommand(err.to_string()))
 }
 
 pub fn allow_local_port_forward(host: &str, port: u32) -> bool {
@@ -693,11 +694,11 @@ fn pty_dimension_to_i32(value: u32) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
 
-impl<R> server::Handler for GatewaySshHandler<R>
+impl<R> server::Handler for WorkspaceSshHandler<R>
 where
     R: SshSessionRunner,
 {
-    type Error = GatewaySshError;
+    type Error = WorkspaceSshError;
 
     async fn auth_none(&mut self, _user: &str) -> Result<server::Auth, Self::Error> {
         Ok(server::Auth::Accept)
@@ -748,7 +749,7 @@ where
     ) -> Result<(), Self::Error> {
         let Some(state) = self.channels.get_mut(&channel) else {
             session.channel_failure(channel)?;
-            return Err(GatewaySshError::UnknownChannel(channel));
+            return Err(WorkspaceSshError::UnknownChannel(channel));
         };
         state.pty = Some(SshPtyRequest {
             term: term.into(),
@@ -768,7 +769,7 @@ where
     ) -> Result<(), Self::Error> {
         let Some(state) = self.channels.get_mut(&channel) else {
             session.channel_failure(channel)?;
-            return Err(GatewaySshError::UnknownChannel(channel));
+            return Err(WorkspaceSshError::UnknownChannel(channel));
         };
         state.env.push(format!("{variable_name}={variable_value}"));
         session.channel_success(channel)?;
@@ -804,11 +805,11 @@ where
             };
             let Some(mut state) = self.channels.remove(&channel) else {
                 session.channel_failure(channel)?;
-                return Err(GatewaySshError::UnknownChannel(channel));
+                return Err(WorkspaceSshError::UnknownChannel(channel));
             };
             let Some(ssh_channel) = state.channel.take() else {
                 session.channel_failure(channel)?;
-                return Err(GatewaySshError::UnknownChannel(channel));
+                return Err(WorkspaceSshError::UnknownChannel(channel));
             };
             self.file_protocol_channels.insert(channel);
             session.channel_success(channel)?;
@@ -845,11 +846,11 @@ where
         };
         let Some(mut state) = self.channels.remove(&channel) else {
             session.channel_failure(channel)?;
-            return Err(GatewaySshError::UnknownChannel(channel));
+            return Err(WorkspaceSshError::UnknownChannel(channel));
         };
         let Some(ssh_channel) = state.channel.take() else {
             session.channel_failure(channel)?;
-            return Err(GatewaySshError::UnknownChannel(channel));
+            return Err(WorkspaceSshError::UnknownChannel(channel));
         };
         self.file_protocol_channels.insert(channel);
         self.sftp_channels.insert(channel);
@@ -922,7 +923,7 @@ where
         };
         let Some(state) = self.channels.get_mut(&channel) else {
             session.channel_failure(channel)?;
-            return Err(GatewaySshError::UnknownChannel(channel));
+            return Err(WorkspaceSshError::UnknownChannel(channel));
         };
         if let Some(pty) = state.pty.as_mut() {
             pty.width = col_width;
@@ -1180,12 +1181,12 @@ mod tests {
     {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let mut config = gateway_server_config();
+        let mut config = workspace_ssh_server_config();
         config.keys.push(test_host_key());
         let config = Arc::new(config);
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let session = server::run_stream(config, stream, GatewaySshHandler::new(runner))
+            let session = server::run_stream(config, stream, WorkspaceSshHandler::new(runner))
                 .await
                 .unwrap();
             let _ = session.await;
@@ -1202,7 +1203,7 @@ mod tests {
     {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let mut config = gateway_server_config();
+        let mut config = workspace_ssh_server_config();
         config.keys.push(test_host_key());
         let config = Arc::new(config);
         let task = tokio::spawn(async move {
@@ -1210,7 +1211,7 @@ mod tests {
             let session = server::run_stream(
                 config,
                 stream,
-                GatewaySshHandler::with_sftp(runner, Some(sftp)),
+                WorkspaceSshHandler::with_sftp(runner, Some(sftp)),
             )
             .await
             .unwrap();
@@ -1229,7 +1230,7 @@ mod tests {
     {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let mut config = gateway_server_config();
+        let mut config = workspace_ssh_server_config();
         config.keys.push(test_host_key());
         let config = Arc::new(config);
         let task = tokio::spawn(async move {
@@ -1237,7 +1238,7 @@ mod tests {
             let session = server::run_stream(
                 config,
                 stream,
-                GatewaySshHandler::with_file_protocols(runner, Some(sftp), Some(scp)),
+                WorkspaceSshHandler::with_file_protocols(runner, Some(sftp), Some(scp)),
             )
             .await
             .unwrap();
@@ -1247,15 +1248,7 @@ mod tests {
     }
 
     fn test_host_key() -> russh::keys::PrivateKey {
-        let dir = std::env::temp_dir().join(format!(
-            "codewire-gateway-russh-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("host_ed25519");
-        let key = host_key::load_or_create(&path).unwrap().key;
-        let _ = std::fs::remove_dir_all(dir);
-        key
+        host_key::generate_ed25519_key()
     }
 
     fn test_client_config() -> Arc<client::Config> {
@@ -1525,18 +1518,18 @@ mod tests {
     }
 
     #[test]
-    fn gateway_server_config_keeps_no_client_auth_admission() {
-        let config = gateway_server_config();
+    fn workspace_ssh_server_config_keeps_no_client_auth_admission() {
+        let config = workspace_ssh_server_config();
         assert_eq!(&*config.methods, &[MethodKind::None]);
     }
 
     #[test]
-    fn gateway_server_config_excludes_mlkem_until_tailnet_supports_it() {
-        let config = gateway_server_config();
+    fn workspace_ssh_server_config_excludes_mlkem_until_tailnet_supports_it() {
+        let config = workspace_ssh_server_config();
         assert!(config.preferred.kex.contains(&kex::CURVE25519));
         assert!(!config.preferred.kex.contains(&kex::MLKEM768X25519_SHA256));
         assert_eq!(
-            gateway_kex_names(),
+            workspace_ssh_kex_names(),
             [
                 "curve25519-sha256",
                 "ecdh-sha2-nistp256",
@@ -1664,7 +1657,7 @@ mod tests {
         let (gateway, tailnet_client, relay_shutdown, relay_task) = peer_relay_tailnet_pair().await;
         let runner = Arc::new(RecordingRunner::default());
         let mut listener = gateway.listen("tcp", ":22").await.unwrap();
-        let mut config = gateway_server_config();
+        let mut config = workspace_ssh_server_config();
         config.keys.push(test_host_key());
         let config = Arc::new(config);
         let server_runner = runner.clone();
@@ -1673,9 +1666,10 @@ mod tests {
                 .await
                 .expect("tailnet SSH accept did not hang")
                 .expect("tailnet SSH listener accepts a stream");
-            let session = server::run_stream(config, stream, GatewaySshHandler::new(server_runner))
-                .await
-                .expect("SSH server accepts tailnet stream");
+            let session =
+                server::run_stream(config, stream, WorkspaceSshHandler::new(server_runner))
+                    .await
+                    .expect("SSH server accepts tailnet stream");
             let _ = session.await;
         });
 
@@ -1803,7 +1797,7 @@ mod tests {
         let (gateway, tailnet_client, relay_shutdown, relay_task) = peer_relay_tailnet_pair().await;
         let runner = Arc::new(CompletingRunner);
         let mut listener = gateway.listen("tcp", ":22").await.unwrap();
-        let mut config = gateway_server_config();
+        let mut config = workspace_ssh_server_config();
         config.keys.push(test_host_key());
         let config = Arc::new(config);
         let server_task = tokio::spawn(async move {
@@ -1811,7 +1805,7 @@ mod tests {
                 .await
                 .expect("tailnet SSH accept did not hang")
                 .expect("tailnet SSH listener accepts a stream");
-            let session = server::run_stream(config, stream, GatewaySshHandler::new(runner))
+            let session = server::run_stream(config, stream, WorkspaceSshHandler::new(runner))
                 .await
                 .expect("SSH server accepts tailnet stream");
             let _ = session.await;

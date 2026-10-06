@@ -1,8 +1,7 @@
 //! Workspace access served by the bound workspace daemon itself (#2460).
 //!
 //! The daemon runs the SSH server (with SFTP and SCP) in its own process and
-//! reaches its sessions over the in-process transport, so no per-environment
-//! gateway is needed. Its SSH host key is generated per binding generation,
+//! reaches its sessions over the in-process transport. Its SSH host key is generated per binding generation,
 //! never leaves the VM, and only its public line is recorded with
 //! orchestration, write-once, through the Pod-bound binding exchange.
 
@@ -25,9 +24,8 @@ use crate::host_key::generate_ed25519_key;
 use crate::scp::DaemonScpRunner;
 use crate::sftp::DaemonSftpRunner;
 use crate::ssh::{
-    DaemonBackedSshRunner, DaemonSessionStart, GatewaySshHandler, SshChannelOutput,
-    SshSessionInput, SshSessionOutput, SshSessionRunner, SshSessionRunnerError,
-    gateway_server_config,
+    DaemonBackedSshRunner, DaemonSessionStart, SshChannelOutput, SshSessionInput, SshSessionOutput,
+    SshSessionRunner, SshSessionRunnerError, WorkspaceSshHandler, workspace_ssh_server_config,
 };
 use russh::ChannelId;
 
@@ -178,7 +176,7 @@ pub async fn record_host_key_until_accepted(
 /// authenticated `none` auth; agent, X11 and reverse forwarding refused) with
 /// this generation's host key.
 pub fn daemon_ssh_server_config(host_key: PrivateKey) -> server::Config {
-    let mut config = gateway_server_config();
+    let mut config = workspace_ssh_server_config();
     config.keys.push(host_key);
     config
 }
@@ -272,7 +270,7 @@ impl DaemonSshRunners {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let handler = GatewaySshHandler::with_file_protocols(
+        let handler = WorkspaceSshHandler::with_file_protocols(
             self.sessions.clone(),
             Some(self.sftp.clone()),
             Some(self.scp.clone()),

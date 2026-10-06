@@ -1,13 +1,11 @@
 use async_trait::async_trait;
-use codewire_gateway_proto::DAEMON_AUTH_TOKEN_HEADER;
 use codewire_gateway_proto::daemon::v1;
+use codewire_gateway_proto::{DAEMON_AUTH_TOKEN_HEADER, DaemonAuthToken};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::Channel;
-
-use crate::daemon_credential::DaemonCredential;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionStart {
@@ -128,15 +126,13 @@ pub trait DaemonClient: Send + Sync {
     async fn readlink(&self, path: &str) -> Result<String, DaemonClientError>;
 }
 
-/// The gateway's client for its workspace daemon. Each call presents the
-/// current [`DaemonCredential`]; a call the daemon refuses as unauthenticated
-/// asks an issued credential to refresh, so a replaced workspace Pod behind
-/// the same daemon Service is followed without reconnecting by hand.
+/// Workspace access's client for its daemon. Each call presents the bound
+/// Pod's daemon credential.
 #[derive(Clone)]
 pub struct DaemonSessionClient {
     inner: v1::daemon_service_client::DaemonServiceClient<Channel>,
     channel: Channel,
-    credential: DaemonCredential,
+    credential: DaemonAuthToken,
 }
 
 pub struct ExecDaemonSession {
@@ -160,18 +156,10 @@ pub struct PtyDaemonSessionInput {
 }
 
 impl DaemonSessionClient {
-    pub async fn connect_shim(
-        shim_addr: impl AsRef<str>,
-        credential: impl Into<DaemonCredential>,
-    ) -> Result<Self, DaemonClientError> {
-        Self::connect_endpoint(daemon_endpoint_for_shim(shim_addr.as_ref()), credential).await
-    }
-
     pub async fn connect_endpoint(
         endpoint: String,
-        credential: impl Into<DaemonCredential>,
+        credential: DaemonAuthToken,
     ) -> Result<Self, DaemonClientError> {
-        let credential = credential.into();
         let channel = Channel::from_shared(endpoint.clone())
             .map_err(|source| DaemonClientError::InvalidEndpoint {
                 endpoint: endpoint.clone(),
@@ -196,10 +184,9 @@ impl DaemonSessionClient {
     /// `credential`.
     pub async fn connect_local(
         connector: codewire_daemon::local_transport::LocalDaemonConnector,
-        credential: impl Into<DaemonCredential>,
+        credential: DaemonAuthToken,
     ) -> Result<Self, DaemonClientError> {
         const LOCAL_ENDPOINT: &str = "http://codewire-daemon.local";
-        let credential = credential.into();
         let channel = tonic::transport::Endpoint::from_static(LOCAL_ENDPOINT)
             .connect_with_connector(tower::service_fn(move |_| {
                 let connector = connector.clone();
@@ -217,23 +204,17 @@ impl DaemonSessionClient {
         })
     }
 
-    /// A credential-bridge client presenting the credential current now. The
-    /// hosted relay takes a fresh one for every epoch.
+    /// A credential-bridge client presenting this client's credential.
     pub fn credential_client(&self) -> codewire_daemon::client::SessionClient {
         codewire_daemon::client::SessionClient::from_channel(
             self.channel.clone(),
-            self.credential.token().expose_secret(),
+            self.credential.expose_secret(),
         )
         .expect("DaemonAuthToken guarantees valid ASCII metadata")
     }
 
-    pub fn credential(&self) -> &DaemonCredential {
-        &self.credential
-    }
-
     fn authorize<T>(&self, request: &mut Request<T>) {
-        let token = self.credential.token();
-        let mut value = MetadataValue::<Ascii>::try_from(token.expose_secret())
+        let mut value = MetadataValue::<Ascii>::try_from(self.credential.expose_secret())
             .expect("DaemonAuthToken guarantees valid ASCII metadata");
         value.set_sensitive(true);
         request
@@ -241,12 +222,7 @@ impl DaemonSessionClient {
             .insert(DAEMON_AUTH_TOKEN_HEADER, value);
     }
 
-    /// Map a refused call, reporting an unauthenticated refusal so an issued
-    /// credential is fetched again for the next call.
     fn refused(&self, status: tonic::Status) -> DaemonClientError {
-        if status.code() == tonic::Code::Unauthenticated {
-            self.credential.report_unauthenticated();
-        }
         DaemonClientError::Status(status)
     }
 }
@@ -269,8 +245,7 @@ impl DaemonClient for DaemonSessionClient {
         let output = client
             .exec_session(request)
             .await
-            .map_err(|status| self.refused(status))
-            .inspect(|_| self.credential.report_authenticated())?
+            .map_err(|status| self.refused(status))?
             .into_inner();
         Ok(ExecDaemonSession { input, output })
     }
@@ -288,8 +263,7 @@ impl DaemonClient for DaemonSessionClient {
         let output = client
             .pty_session(request)
             .await
-            .map_err(|status| self.refused(status))
-            .inspect(|_| self.credential.report_authenticated())?
+            .map_err(|status| self.refused(status))?
             .into_inner();
         Ok(PtyDaemonSession { input, output })
     }
@@ -301,8 +275,7 @@ impl DaemonClient for DaemonSessionClient {
         let response = client
             .list(request)
             .await
-            .map_err(|status| self.refused(status))
-            .inspect(|_| self.credential.report_authenticated())?;
+            .map_err(|status| self.refused(status))?;
         Ok(response.into_inner().entries)
     }
 
@@ -320,12 +293,10 @@ impl DaemonClient for DaemonSessionClient {
         let response = match client.stat(request).await {
             Ok(response) => response,
             Err(status) if status.code() == tonic::Code::NotFound => {
-                self.credential.report_authenticated();
                 return Ok(None);
             }
             Err(status) => return Err(self.refused(status)),
         };
-        self.credential.report_authenticated();
         Ok(response.into_inner().entry)
     }
 
@@ -345,8 +316,7 @@ impl DaemonClient for DaemonSessionClient {
         client
             .open_file(request)
             .await
-            .map_err(|status| self.refused(status))
-            .inspect(|_| self.credential.report_authenticated())?;
+            .map_err(|status| self.refused(status))?;
         Ok(())
     }
 
@@ -366,8 +336,7 @@ impl DaemonClient for DaemonSessionClient {
         let response = client
             .read(request)
             .await
-            .map_err(|status| self.refused(status))
-            .inspect(|_| self.credential.report_authenticated())?;
+            .map_err(|status| self.refused(status))?;
         Ok(response.into_inner().data)
     }
 
@@ -387,8 +356,7 @@ impl DaemonClient for DaemonSessionClient {
         let response = client
             .write(request)
             .await
-            .map_err(|status| self.refused(status))
-            .inspect(|_| self.credential.report_authenticated())?;
+            .map_err(|status| self.refused(status))?;
         Ok(response.into_inner().bytes_written)
     }
 
@@ -402,8 +370,7 @@ impl DaemonClient for DaemonSessionClient {
         client
             .mkdir(request)
             .await
-            .map_err(|status| self.refused(status))
-            .inspect(|_| self.credential.report_authenticated())?;
+            .map_err(|status| self.refused(status))?;
         Ok(())
     }
 
@@ -417,8 +384,7 @@ impl DaemonClient for DaemonSessionClient {
         client
             .remove(request)
             .await
-            .map_err(|status| self.refused(status))
-            .inspect(|_| self.credential.report_authenticated())?;
+            .map_err(|status| self.refused(status))?;
         Ok(())
     }
 
@@ -432,8 +398,7 @@ impl DaemonClient for DaemonSessionClient {
         client
             .rename(request)
             .await
-            .map_err(|status| self.refused(status))
-            .inspect(|_| self.credential.report_authenticated())?;
+            .map_err(|status| self.refused(status))?;
         Ok(())
     }
 
@@ -444,8 +409,7 @@ impl DaemonClient for DaemonSessionClient {
         client
             .set_stat(request)
             .await
-            .map_err(|status| self.refused(status))
-            .inspect(|_| self.credential.report_authenticated())?;
+            .map_err(|status| self.refused(status))?;
         Ok(())
     }
 
@@ -456,8 +420,7 @@ impl DaemonClient for DaemonSessionClient {
         let response = client
             .readlink(request)
             .await
-            .map_err(|status| self.refused(status))
-            .inspect(|_| self.credential.report_authenticated())?;
+            .map_err(|status| self.refused(status))?;
         Ok(response.into_inner().target)
     }
 }
@@ -519,15 +482,6 @@ impl PtyDaemonSessionInput {
             .send(pty_input_message(input))
             .await
             .map_err(|_| DaemonClientError::RequestClosed)
-    }
-}
-
-pub fn daemon_endpoint_for_shim(shim_addr: &str) -> String {
-    let shim_addr = shim_addr.trim().trim_end_matches('/');
-    if shim_addr.starts_with("http://") || shim_addr.starts_with("https://") {
-        shim_addr.to_string()
-    } else {
-        format!("http://{shim_addr}")
     }
 }
 
@@ -858,18 +812,6 @@ mod tests {
                 seconds: 30,
                 nanos: 40,
             })
-        );
-    }
-
-    #[test]
-    fn daemon_endpoint_adds_http_scheme_for_shim_address() {
-        assert_eq!(
-            daemon_endpoint_for_shim("127.0.0.1:7777"),
-            "http://127.0.0.1:7777"
-        );
-        assert_eq!(
-            daemon_endpoint_for_shim("http://127.0.0.1:7777/"),
-            "http://127.0.0.1:7777"
         );
     }
 

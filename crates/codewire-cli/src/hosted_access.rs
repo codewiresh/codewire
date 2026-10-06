@@ -29,7 +29,6 @@ use codewire_workspace_access::daemon_access::{
     AccessControlPlane, ControlPlaneError, DaemonSshRunners, HostKeyStore, PeerRelayAllocation,
     daemon_ssh_server_config, public_key_line, record_host_key_until_accepted, serve_ssh_listener,
 };
-use codewire_workspace_access::daemon_credential::DaemonCredential;
 use codewire_workspace_access::daemon_tailnet::{
     self, AccessGrants, DaemonTailnetConfig, PublicCoordinator, TailnetSsh,
     record_host_key_per_generation,
@@ -108,12 +107,9 @@ pub(crate) async fn serve(
     app_ports: AppPortsSender,
     shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let daemon = DaemonSessionClient::connect_local(
-        connector,
-        DaemonCredential::rendered(bound.daemon_credential),
-    )
-    .await
-    .context("connect workspace access to the local daemon")?;
+    let daemon = DaemonSessionClient::connect_local(connector, bound.daemon_credential)
+        .await
+        .context("connect workspace access to the local daemon")?;
     let host_key = HostKeyStore::new(&paths.state_directory)
         .for_generation(bound.generation)
         .context("prepare the workspace SSH host key")?;
