@@ -272,6 +272,8 @@ create_env() { # CPU -> environment id
   # The per-user create limit (10 per 60 s) resets only after 60 s without a
   # create; twenty hits exhaust it, so later journeys wait out the window.
   for attempt in 1 2 3; do
+    # Timings start at the accepted request, not before a rate-limit wait.
+    now_ms >"$TMPDIR_PROOF/create-started"
     if cw env create --image "$PROOF_IMAGE" --name "$name" --cpu "$cpu" \
       --memory "$PROOF_MEMORY" --disk "$PROOF_DISK" --isolation standard --ttl "$PROOF_TTL" \
       --no-network --no-wait --yes >"$out" 2>&1; then
@@ -541,8 +543,8 @@ journey_hits() {
   ensure_pool
   for ((n = 1; n <= PROOF_HITS; n++)); do
     if ! wait_pool_members 1; then fail "hit $n: pool $POOL_NAME has no ready member after ${POOL_WAIT_SECONDS}s"; continue; fi
-    started="$(now_ms)"
     id="$(create_env "$PROOF_CPU")" || { fail "hit $n: cw env create"; continue; }
+    started="$(<"$TMPDIR_PROOF/create-started")"
     if ! wait_ready "$id"; then fail "hit $n: $id did not become ready"; remove_env "$id" || true; continue; fi
     elapsed=$(( $(now_ms) - started ))
     path="$(classify "$id")"
@@ -590,8 +592,8 @@ journey_miss() {
     return
   fi
   for ((n = 1; n <= burst; n++)); do
-    started="$(now_ms)"
     id="$(create_env "$PROOF_CPU")" || { fail "miss: create $n"; continue; }
+    started="$(<"$TMPDIR_PROOF/create-started")"
     ids+=("$id")
     starts+=("$started")
   done
@@ -621,8 +623,8 @@ journey_miss() {
 
 journey_off_shape() {
   local id started elapsed ref launch
-  started="$(now_ms)"
   id="$(create_env "$OFF_SHAPE_CPU")" || { fail "off-shape: create"; return; }
+  started="$(<"$TMPDIR_PROOF/create-started")"
   if ! wait_ready "$id"; then fail "off-shape: $id did not become ready"; remove_env "$id" || true; return; fi
   elapsed=$(( $(now_ms) - started ))
   COLD_IDS+=("$id")
