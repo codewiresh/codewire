@@ -380,7 +380,7 @@ async fn signing_rechecks_revocation_environment_and_authenticated_pod_after_unw
         "revoke",
         "stop",
         "generation",
-        "gateway",
+        "relay",
         "workspace",
         "identity-expiry",
         "credential-expiry",
@@ -402,7 +402,7 @@ async fn signing_rechecks_revocation_environment_and_authenticated_pod_after_unw
                     sqlx::query("UPDATE environments SET environment_operation_generation=8 WHERE id=$1")
                         .bind(f.f.context.environment_id.as_str()).execute(&f.f.db.pool).await?;
                 }
-                "gateway" => f.f.authority.change(|session| session.gateway_mut().uid = Uuid::new_v4()),
+                "relay" => f.f.authority.change(|session| session.relay_mut().uid = Uuid::new_v4()),
                 "workspace" => f.f.authority.change(|session| session.workspace_mut().uid = Uuid::new_v4()),
                 "identity-expiry" => f.f.authority.change(|session| session.identity_expires_at_unix = 1),
                 "credential-expiry" => {

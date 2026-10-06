@@ -11,7 +11,7 @@ use super::*;
 
 const PURPOSES: [PodIdentityPurpose; 4] = [
     PodIdentityPurpose::GatewayBinding,
-    PodIdentityPurpose::CredentialGateway,
+    PodIdentityPurpose::CredentialRelay,
     PodIdentityPurpose::CredentialWorkspace,
     PodIdentityPurpose::WorkspaceBinding,
 ];
@@ -184,7 +184,7 @@ fn pre_review_filter_discards_garbage_without_authenticating() {
 
 #[tokio::test]
 async fn review_authentication_and_single_exact_audience_are_mandatory() {
-    let purpose = PodIdentityPurpose::CredentialGateway;
+    let purpose = PodIdentityPurpose::CredentialRelay;
     for mutate in [
         |s: &mut TokenReviewStatus| s.authenticated = None,
         |s: &mut TokenReviewStatus| s.authenticated = Some(false),
@@ -192,8 +192,8 @@ async fn review_authentication_and_single_exact_audience_are_mandatory() {
         |s: &mut TokenReviewStatus| s.audiences = Some(Vec::new()),
         |s: &mut TokenReviewStatus| {
             s.audiences = Some(vec![
-                CREDENTIAL_GATEWAY_TOKEN_AUDIENCE.into(),
-                CREDENTIAL_GATEWAY_TOKEN_AUDIENCE.into(),
+                CREDENTIAL_RELAY_TOKEN_AUDIENCE.into(),
+                CREDENTIAL_RELAY_TOKEN_AUDIENCE.into(),
             ])
         },
         |s: &mut TokenReviewStatus| s.error = Some(CANARY.into()),
@@ -207,6 +207,43 @@ async fn review_authentication_and_single_exact_audience_are_mandatory() {
         assert_eq!(
             verifier.authenticate(&headers(&future_token())).await,
             Err(PodIdentityError::Unauthenticated)
+        );
+    }
+}
+
+/// The relay purpose belongs to orchestration's account alone: a workspace or
+/// gateway Pod (the sandbox account) presenting the relay audience is refused,
+/// and orchestration cannot present a workspace purpose.
+#[tokio::test]
+async fn the_credential_relay_is_only_orchestrations_service_account() {
+    let relay = PodIdentityPurpose::CredentialRelay;
+    assert_eq!(relay.service_account(), "codewire-orchestration");
+    let mut sandbox = status(relay);
+    sandbox.user.as_mut().unwrap().username = Some(format!(
+        "system:serviceaccount:runtime:{}",
+        GATEWAY_BINDING_SERVICE_ACCOUNT
+    ));
+    assert_eq!(
+        KubernetesPodIdentityVerifier::for_test(FakeReviewer::status(sandbox), relay)
+            .authenticate(&headers(&future_token()))
+            .await,
+        Err(PodIdentityError::PermissionDenied)
+    );
+    for purpose in [
+        PodIdentityPurpose::CredentialWorkspace,
+        PodIdentityPurpose::WorkspaceBinding,
+        PodIdentityPurpose::GatewayBinding,
+    ] {
+        let mut orchestration = status(purpose);
+        orchestration.user.as_mut().unwrap().username = Some(format!(
+            "system:serviceaccount:runtime:{}",
+            relay.service_account()
+        ));
+        assert_eq!(
+            KubernetesPodIdentityVerifier::for_test(FakeReviewer::status(orchestration), purpose)
+                .authenticate(&headers(&future_token()))
+                .await,
+            Err(PodIdentityError::PermissionDenied)
         );
     }
 }
@@ -308,7 +345,7 @@ async fn authenticated_review_still_requires_strict_future_original_expiry() {
 
 #[tokio::test]
 async fn padded_noncanonical_and_malformed_jwt_payloads_are_rejected() {
-    let purpose = PodIdentityPurpose::CredentialGateway;
+    let purpose = PodIdentityPurpose::CredentialRelay;
     let encoded = URL_SAFE_NO_PAD.encode(br#"{"exp":9999999999}"#);
     // Alter only unused final bits of an otherwise valid JSON payload. A lax
     // base64 decoder would yield the same bytes; the canonical decoder rejects it.
@@ -416,7 +453,7 @@ async fn review_timeout_and_request_cancellation_leave_no_detached_review() {
     let reviewer = Arc::new(PendingReviewer::default());
     let verifier = KubernetesPodIdentityVerifier::for_test(
         reviewer.clone(),
-        PodIdentityPurpose::CredentialGateway,
+        PodIdentityPurpose::CredentialRelay,
     );
     let request =
         tokio::spawn(async move { verifier.authenticate(&headers(&future_token())).await });

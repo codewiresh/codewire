@@ -90,6 +90,14 @@ impl CredentialRuntimeTemplateConfig {
         &self.broker_namespace
     }
 
+    /// The broker's private TLS origin, which the credential relay dials.
+    pub fn broker_https_origin(&self) -> String {
+        format!(
+            "https://codewire-credential-service.{}.svc.cluster.local:9443",
+            self.broker_namespace
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn synthetic(namespace: &str) -> Self {
         Self::from_lookup(namespace, |name| {
@@ -161,10 +169,7 @@ pub(super) fn gateway_environment(opts: &TemplateOpts) -> Vec<Value> {
         ),
         (
             "CODEWIRE_CREDENTIAL_BROKER_HTTPS_ORIGIN",
-            format!(
-                "https://codewire-credential-service.{}.svc.cluster.local:9443",
-                cfg.broker_namespace
-            ),
+            cfg.broker_https_origin(),
         ),
         (
             "CODEWIRE_CREDENTIAL_BROKER_TLS_ROOTS_FILE",

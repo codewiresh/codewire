@@ -17,8 +17,32 @@ pub const GATEWAY_BINDING_TOKEN_AUDIENCE: &str = "codewire.internal.gateway-bind
 /// credential broker. This does not authorize workload or binding-bootstrap use.
 pub const CREDENTIAL_GATEWAY_TOKEN_AUDIENCE: &str = "codewire.internal.credential-gateway.v1";
 /// Exact projected-token purpose for a workspace authenticating credential
-/// access through its per-environment gateway, not the Kubernetes API.
+/// access through the credential relay, not the Kubernetes API.
 pub const CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE: &str = "codewire.internal.credential-workspace.v1";
+/// Exact projected-token purpose for orchestration relaying a bound
+/// workspace daemon's credential bridge to the isolated credential broker.
+/// The broker pins it to [`CREDENTIAL_RELAY_SERVICE_ACCOUNT`] in its own
+/// (server) namespace; it authorizes no other exchange.
+pub const CREDENTIAL_RELAY_TOKEN_AUDIENCE: &str = "codewire.internal.credential-relay.v1";
+/// The only service account that may present a credential-relay token.
+pub const CREDENTIAL_RELAY_SERVICE_ACCOUNT: &str = "codewire-orchestration";
+pub const CREDENTIAL_RELAY_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/codewire/credential-relay";
+pub const CREDENTIAL_RELAY_TOKEN_PATH: &str = "/var/run/secrets/codewire/credential-relay/token";
+pub const CREDENTIAL_RELAY_TOKEN_EXPIRATION_SECONDS: i64 = 600;
+/// The SSH server the workspace daemon serves inside its Pod. Orchestration's
+/// SSH proxy and setup health check dial it over the Pod network; only
+/// orchestration may reach it.
+pub const WORKSPACE_DAEMON_SSH_PORT: u16 = 2222;
+/// The UDP port the workspace daemon's tailnet peer listens on. The
+/// environment's direct-UDP LoadBalancer targets it, and only the world, never
+/// a cluster or Pod address, may send to it.
+pub const WORKSPACE_TAILNET_UDP_PORT: u16 = 31000;
+/// The public UDP relay's data-plane port, the one relay port a workspace may
+/// reach.
+pub const UDP_RELAY_DATA_PORT: u16 = 41641;
+/// The DERP servers' STUN port, the one DERP port a workspace may reach
+/// directly; DERP itself is reached through the public edge.
+pub const DERP_STUN_PORT: u16 = 3478;
 pub const GATEWAY_BINDING_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/codewire/gateway-binding";
 pub const GATEWAY_BINDING_TOKEN_PATH: &str = "/var/run/secrets/codewire/gateway-binding/token";
 pub const GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS: i64 = 600;
@@ -235,6 +259,7 @@ mod tests {
             GATEWAY_BINDING_TOKEN_AUDIENCE,
             CREDENTIAL_GATEWAY_TOKEN_AUDIENCE,
             CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
+            CREDENTIAL_RELAY_TOKEN_AUDIENCE,
             WORKSPACE_BINDING_TOKEN_AUDIENCE,
         ];
         for (index, audience) in audiences.iter().enumerate() {
@@ -252,6 +277,18 @@ mod tests {
         assert_eq!(
             WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS,
             GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS
+        );
+        assert_eq!(
+            CREDENTIAL_RELAY_TOKEN_PATH,
+            format!("{CREDENTIAL_RELAY_TOKEN_MOUNT_PATH}/token")
+        );
+        assert_ne!(
+            CREDENTIAL_RELAY_SERVICE_ACCOUNT,
+            GATEWAY_BINDING_SERVICE_ACCOUNT
+        );
+        assert_eq!(
+            CREDENTIAL_RELAY_TOKEN_EXPIRATION_SECONDS,
+            WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS
         );
         assert_eq!(WORKSPACE_BINDING_PORT, 8087);
         assert_eq!(ORCHESTRATION_INTERNAL_TLS_PORT, 8088);

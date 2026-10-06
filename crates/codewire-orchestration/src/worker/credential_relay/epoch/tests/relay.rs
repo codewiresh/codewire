@@ -1,0 +1,320 @@
+//! Paused-time proof of the relay's epoch schedule with synthetic epochs; the
+//! parent module proves the real epoch's admission against generated RPCs.
+use super::*;
+
+/// What the test tells one synthetic epoch to do.
+enum Control {
+    /// Report the daemon's Open, with the broker's expiry `ahead` (if any).
+    Admit { unix: u64, ahead: Option<Duration> },
+    /// Report the daemon's Open and end in the same poll.
+    AdmitThenEnd,
+    /// End before an Open, as a refused successor does.
+    Refuse,
+    /// End by itself, as when its broker ends it.
+    End(Result<(), DrainFailure>),
+}
+
+struct Synthetic {
+    started_at: Instant,
+    succeeds: Option<u64>,
+    control: mpsc::UnboundedSender<Control>,
+    /// When it observed cancellation and finished draining.
+    drained: oneshot::Receiver<Instant>,
+}
+
+impl Synthetic {
+    fn send(&self, control: Control) {
+        self.control.send(control).unwrap();
+    }
+
+    fn admit(&self, unix: u64, ahead: Option<u64>) {
+        self.send(Control::Admit {
+            unix,
+            ahead: ahead.map(Duration::from_secs),
+        });
+    }
+
+    fn not_cancelled(&mut self) {
+        assert!(matches!(
+            self.drained.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+    }
+}
+
+const DRAIN: Duration = Duration::from_secs(1);
+
+/// Each start reports itself on `starts`; a cancelled epoch takes [`DRAIN`].
+fn synthetic(
+    starts: mpsc::UnboundedSender<Synthetic>,
+) -> impl FnMut(EpochStart) -> EpochFuture<'static> {
+    move |start: EpochStart| {
+        let (control, mut commands) = mpsc::unbounded_channel();
+        let (drained_tx, drained) = oneshot::channel();
+        starts
+            .send(Synthetic {
+                started_at: Instant::now(),
+                succeeds: start.succeeds,
+                control,
+                drained,
+            })
+            .unwrap();
+        let EpochStart {
+            cancellation,
+            admitted,
+            ..
+        } = start;
+        Box::pin(async move {
+            let mut admitted = Some(admitted);
+            let mut admit = |expiry| {
+                let _ = admitted.take().expect("admitted once").send(Admitted {
+                    expiry,
+                    lifetime_ends: Instant::now() + EPOCH_MAX_LIFETIME,
+                });
+            };
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => {
+                        tokio::time::sleep(DRAIN).await;
+                        let _ = drained_tx.send(Instant::now());
+                        return Ok(());
+                    }
+                    command = commands.recv() => match command {
+                        Some(Control::Admit { unix, ahead }) => admit(ahead.map(|ahead| BrokerExpiry {
+                            unix,
+                            at: Instant::now() + ahead,
+                        })),
+                        Some(Control::AdmitThenEnd) => {
+                            admit(None);
+                            return Ok(());
+                        }
+                        Some(Control::Refuse) | None => return Ok(()),
+                        Some(Control::End(result)) => return result,
+                    }
+                }
+            }
+        })
+    }
+}
+
+struct Relay {
+    origin: Instant,
+    starts: mpsc::UnboundedReceiver<Synthetic>,
+    stop: Option<oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<Result<(), DrainFailure>>,
+}
+
+impl Relay {
+    fn start() -> Self {
+        let (starts_tx, starts) = mpsc::unbounded_channel();
+        let (stop, stopped) = oneshot::channel::<()>();
+        let task = tokio::spawn(relay(Uuid::nil(), synthetic(starts_tx), async {
+            let _ = stopped.await;
+        }));
+        Self {
+            origin: Instant::now(),
+            starts,
+            stop: Some(stop),
+            task,
+        }
+    }
+
+    async fn next(&mut self) -> Synthetic {
+        self.starts.recv().await.expect("relay is running")
+    }
+
+    fn at(&self, seconds: u64) -> Instant {
+        self.origin + Duration::from_secs(seconds)
+    }
+
+    /// No epoch starts until `seconds`.
+    async fn none_until(&mut self, seconds: u64) {
+        assert!(
+            tokio::time::timeout_at(self.at(seconds), self.starts.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    async fn stop(mut self) -> Result<(), DrainFailure> {
+        let _ = self.stop.take().unwrap().send(());
+        self.task.await.unwrap()
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_successor_starts_ninety_seconds_before_the_current_epoch_ends() {
+    let mut relay = Relay::start();
+    let mut first = relay.next().await;
+    assert_eq!((first.started_at, first.succeeds), (relay.origin, None));
+    first.admit(1_200, Some(200));
+    let mut second = relay.next().await;
+    assert_eq!(
+        (second.started_at, second.succeeds),
+        (relay.at(110), Some(1_200))
+    );
+    // Admitting the successor leaves the previous epoch to its broker.
+    second.admit(1_850, Some(650));
+    tokio::time::sleep_until(relay.at(200)).await;
+    first.not_cancelled();
+    first.send(Control::End(Ok(())));
+    // Here the relay's own 600 s lifetime ends first: 110 + 600 - 90.
+    let third = relay.next().await;
+    assert_eq!(
+        (third.started_at, third.succeeds),
+        (relay.at(620), Some(1_850))
+    );
+    second.not_cancelled();
+    let stopped = Instant::now();
+    relay.stop().await.unwrap();
+    // Both live epochs were cancelled and drained together.
+    assert_eq!(Instant::now(), stopped + DRAIN);
+    assert_eq!(second.drained.await.unwrap(), stopped + DRAIN);
+    assert_eq!(third.drained.await.unwrap(), stopped + DRAIN);
+    assert!(first.drained.await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_successor_backs_off_from_three_to_fifteen_seconds_until_the_epoch_ends() {
+    let mut relay = Relay::start();
+    let mut first = relay.next().await;
+    first.admit(1_120, Some(120));
+    // 3, 6 and 12 seconds apart, then at most 15.
+    for at in [30, 33, 39, 51, 66, 81, 96, 111] {
+        let candidate = relay.next().await;
+        assert_eq!(
+            (candidate.started_at, candidate.succeeds),
+            (relay.at(at), Some(1_120))
+        );
+        candidate.send(Control::Refuse);
+    }
+    // The attempt at 111 s was the last: the current epoch ends at 120 s.
+    relay.none_until(120).await;
+    first.not_cancelled();
+    first.send(Control::End(Ok(())));
+    // Then a fresh epoch starts as before, after the usual delay.
+    let fresh = relay.next().await;
+    assert_eq!((fresh.started_at, fresh.succeeds), (relay.at(121), None));
+    relay.stop().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_missing_expiry_falls_back_to_renewing_after_the_epoch_ends() {
+    let mut relay = Relay::start();
+    let first = relay.next().await;
+    first.send(Control::Admit {
+        unix: 0,
+        ahead: None,
+    });
+    relay.none_until(700).await;
+    first.send(Control::End(Ok(())));
+    let second = relay.next().await;
+    assert_eq!((second.started_at, second.succeeds), (relay.at(701), None));
+    // A fresh epoch that fails before admission is retried the same way.
+    second.send(Control::Refuse);
+    let third = relay.next().await;
+    assert_eq!((third.started_at, third.succeeds), (relay.at(702), None));
+    relay.stop().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_cancels_and_drains_both_epochs() {
+    for admit_successor in [false, true] {
+        let mut relay = Relay::start();
+        let first = relay.next().await;
+        first.admit(1_120, Some(120));
+        let mut second = relay.next().await;
+        if admit_successor {
+            second.admit(1_700, Some(600));
+            tokio::task::yield_now().await;
+            second.not_cancelled();
+        }
+        let stopped = Instant::now();
+        relay.stop().await.unwrap();
+        assert_eq!(Instant::now(), stopped + DRAIN);
+        assert_eq!(first.drained.await.unwrap(), stopped + DRAIN);
+        assert_eq!(second.drained.await.unwrap(), stopped + DRAIN);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_drain_failure_on_any_epoch_is_fatal() {
+    for retiring_fails in [true, false] {
+        let mut relay = Relay::start();
+        let first = relay.next().await;
+        first.admit(1_120, Some(120));
+        let second = relay.next().await;
+        let (failing, survivor) = if retiring_fails {
+            // The draining predecessor fails while its successor serves.
+            second.admit(1_700, Some(600));
+            (first, second)
+        } else {
+            // The starting successor fails while its predecessor serves.
+            (second, first)
+        };
+        failing.send(Control::End(Err(DrainFailure)));
+        assert!(relay.task.await.unwrap().is_err());
+        // The other epoch was cancelled and awaited before the relay failed.
+        assert!(survivor.drained.await.is_ok());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_successor_admitted_and_ended_at_once_still_retires_its_predecessor() {
+    let mut relay = Relay::start();
+    let mut first = relay.next().await;
+    first.admit(1_120, Some(120));
+    let second = relay.next().await;
+    second.send(Control::AdmitThenEnd);
+    // The daemon drained the predecessor for it, so the relay keeps it
+    // relaying and starts a fresh epoch alongside, not a third one.
+    let mut fresh = relay.next().await;
+    assert_eq!((fresh.started_at, fresh.succeeds), (relay.at(31), None));
+    first.not_cancelled();
+    fresh.admit(1_800, Some(600));
+    first.send(Control::End(Ok(())));
+    // The fresh epoch then renews normally.
+    let next = relay.next().await;
+    assert_eq!(
+        (next.started_at, next.succeeds),
+        (relay.at(31 + 510), Some(1_800))
+    );
+    fresh.not_cancelled();
+    relay.stop().await.unwrap();
+}
+
+#[test]
+fn successor_backoff_doubles_from_three_to_at_most_fifteen_seconds() {
+    let delays: Vec<_> = (0..6)
+        .map(|refusals| successor_backoff(refusals).as_secs())
+        .collect();
+    assert_eq!(delays, [3, 6, 12, 15, 15, 15]);
+    assert_eq!(successor_backoff(u32::MAX), SUCCESSOR_RETRY_MAX);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_admitted_successor_resets_the_backoff() {
+    let mut relay = Relay::start();
+    let first = relay.next().await;
+    first.admit(1_300, Some(300));
+    for at in [210, 213] {
+        let refused = relay.next().await;
+        assert_eq!(refused.started_at, relay.at(at));
+        refused.send(Control::Refuse);
+    }
+    let successor = relay.next().await;
+    assert_eq!(successor.started_at, relay.at(219));
+    successor.admit(1_900, Some(600));
+    first.send(Control::End(Ok(())));
+    // Its own successor, at 219 + 600 - 90, is retried after 3 s again.
+    let refused = relay.next().await;
+    assert_eq!(refused.started_at, relay.at(729));
+    refused.send(Control::Refuse);
+    let retried = relay.next().await;
+    assert_eq!(
+        (retried.started_at, retried.succeeds),
+        (relay.at(732), Some(1_900))
+    );
+    relay.stop().await.unwrap();
+}

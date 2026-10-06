@@ -1424,6 +1424,7 @@ grep -qF -- "--skip 'worker::lifecycle::tests::destroy_template_hint_allows_miss
 grep -qF -- "--skip 'worker::create::projection_database_tests::'" <<<"$activity_fencing_block"
 grep -qF -- "--skip 'worker::workspace_binding::database_tests::'" <<<"$activity_fencing_block"
 grep -qF -- "--skip 'worker::billing_sessions::database_tests::'" <<<"$activity_fencing_block"
+grep -qF -- "--skip 'worker::credential_relay::database_tests::'" <<<"$activity_fencing_block"
 grep -qF 'assert_passed_count "orchestration activity fencing matrix" "$logfile" 2' <<<"$activity_fencing_block"
 destroy_hint_block="$(sed -n '/logfile="$RUN_DIR\/environment-destroy-template-hint.log"/,/assert_passed_count "environment destroy template hint matrix"/p' "$integration_runner")"
 grep -qF 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure' <<<"$destroy_hint_block"
@@ -1480,6 +1481,8 @@ grep -qF -- "'api::internal::database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "gateway RPC ownership matrix" "$logfile" 2' "$integration_runner"
 grep -qF -- "'worker::billing_sessions::database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "billing session bind matrix" "$logfile" 4' "$integration_runner"
+grep -qF -- "'worker::credential_relay::database_tests::'" "$integration_runner"
+grep -qF 'assert_passed_count "credential relay target matrix" "$logfile" 1' "$integration_runner"
 grep -qF 'selected service_connectcore && run_connect_auth_matrix' \
   "$integration_runner"
 if rg -n 'run_connectcore|CONNECTCORE_BASE_URLS|go test.*connectcore' \

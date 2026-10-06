@@ -5,7 +5,7 @@
 //! dropping those dependencies. Dropping a server or runtime is not a promise
 //! that provider-side rotation or protected-store publication was drained.
 //!
-//! The gateway must own both halves of each private call and end its outgoing
+//! The relay must own both halves of each private call and end its outgoing
 //! request stream when its response owner is dropped. Dropping only a remote
 //! tonic response half need not send HTTP/2 cancellation while outgoing DATA
 //! remains possible. The server observes input EOF/error or its own response
@@ -46,7 +46,7 @@ use crate::{
 
 /// Admission and active/draining epochs share one process-wide service budget.
 /// Each hosted Sandbox with credentials holds one long-lived epoch, and two for
-/// up to 90 seconds at each renewal, while its gateway admits the next epoch
+/// up to 90 seconds at each renewal, while its relay admits the next epoch
 /// before the current identity expires. Kubelet rotates each Pod's 600-second
 /// token every 480 seconds, so a Sandbox renews at most twice per 480 seconds
 /// and holds at most 1.375 streams on average: 1024 streams serve about 740
@@ -65,9 +65,9 @@ pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS: usize = 1024;
 /// concurrency.
 pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES: usize = 64;
 /// Optional operations this broker serves, listed in the admitted stream's
-/// response headers. The gateway copies them into the daemon's Open, and the
+/// response headers. The relay copies them into the daemon's Open, and the
 /// daemon sends an optional operation only when listed, so an older broker or
-/// gateway is never sent a frame that would end its epoch.
+/// relay is never sent a frame that would end its epoch.
 pub const PLATFORM_CREDENTIAL_BRIDGE_CAPABILITIES: &[&str] =
     &[codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN];
 const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -96,7 +96,7 @@ impl PlatformBridgeAuthenticationError {
 
 /// Trusted process-local authentication, never a deserializer of guest scope.
 ///
-/// Authenticate the exact gateway and forwarded workspace identities under the
+/// Authenticate the exact relay and forwarded workspace identities under the
 /// accepted TLS/audience policy. The returned authority must retain those exact
 /// presented identities and original verified expiries, and revalidate current
 /// Pod/environment/owner/policy state on every session call. Token rotation must
@@ -501,7 +501,7 @@ where
                     tonic::metadata::MetadataValue::from_static(capability),
                 );
             }
-            // The verified expiry at which this epoch ends, so the gateway can
+            // The verified expiry at which this epoch ends, so the relay can
             // admit the next one first. Not a credential; digits only.
             response.metadata_mut().insert(
                 codewire_gateway_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,

@@ -17,6 +17,7 @@ pub mod agents;
 pub mod billing_sessions;
 pub mod cloudflare;
 pub mod create;
+pub mod credential_relay;
 pub mod env_data;
 pub mod env_log;
 #[cfg(feature = "kind-e2e")]

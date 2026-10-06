@@ -8,7 +8,8 @@
 //! - leader-gated background loops (`WORKER_LOOPS`): the env reconciler,
 //!   sandbox-liveness, and billing-session controller, whose enqueues
 //!   SignalWithStart workflows; the warm-pool reconciler, inert until
-//!   `SANDBOX_WARM_POOL_SHAPES` names a shape; plus the per-replica
+//!   `SANDBOX_WARM_POOL_SHAPES` names a shape; the credential relay, inert
+//!   without the platform credential runtime; plus the per-replica
 //!   `image-cache` reconciler for the runtime-node image cache DaemonSet
 //!
 //! NATS is gone: there is no consumer plane and no `TENANT_LOCKS`
@@ -33,6 +34,7 @@ const DEFAULT_WORKER_LOOPS: &[&str] = &[
     "billing-session",
     "image-cache",
     "warm-pool",
+    "credential-relay",
 ];
 const CONNECT_SYNTHETIC_USER_IDS_ENV: &str = "CONNECT_SYNTHETIC_USER_IDS";
 
@@ -820,6 +822,7 @@ mod tests {
                 "billing-session",
                 "image-cache",
                 "warm-pool",
+                "credential-relay",
             ]
         );
     }

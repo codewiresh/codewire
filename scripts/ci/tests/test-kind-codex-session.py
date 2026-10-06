@@ -627,10 +627,10 @@ class AcceptanceTests(unittest.TestCase):
         self.assertGreater(clock[0], 600)
         self.assertLess(clock[0], 601)
 
-    def test_epoch_bound_matches_production_gateway(self):
-        gateway = SOURCE.parents[4] / "crates/codewire-gateway/src/hosted_bridge.rs"
+    def test_epoch_bound_matches_production_relay(self):
+        relay = SOURCE.parents[4] / "crates/codewire-orchestration/src/worker/credential_relay/epoch.rs"
         self.assertIn("const EPOCH_MAX_LIFETIME: Duration = Duration::from_secs(600);",
-                      gateway.read_text())
+                      relay.read_text())
         self.assertEqual(driver.HOSTED_EPOCH_MAX_LIFETIME, 600.0)
 
     def test_unchanged_projection_times_out(self):

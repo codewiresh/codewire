@@ -174,14 +174,21 @@ is not admission. Subsequent admission replies are protocol errors.
 
 ### Kubernetes Pod identity
 
-The optional `codewire-server-core/kubernetes-identity` verifier has three
-fixed purposes: gateway binding, credential gateway, and credential workspace.
-Their audiences are distinct. A caller cannot choose an arbitrary audience or
-substitute a token issued for another purpose. Existing gateway binding retains
-`codewire.internal.gateway-binding.v1`; credential purposes use
-`codewire.internal.credential-gateway.v1` and
+The optional `codewire-server-core/kubernetes-identity` verifier has fixed
+purposes: gateway binding, credential relay, credential workspace and workspace
+binding. Their audiences are distinct. A caller cannot choose an arbitrary
+audience or substitute a token issued for another purpose. Gateway binding
+retains `codewire.internal.gateway-binding.v1`; credential purposes use
+`codewire.internal.credential-relay.v1` and
 `codewire.internal.credential-workspace.v1`. These are Kubernetes projected Pod
 tokens, not another Codewire user bearer flavor.
+
+The credential relay is orchestration (design §4 of
+`docs/plans/2026-10-06-daemon-hosted-access.md`): only the
+`codewire-orchestration` ServiceAccount may present the relay audience, and the
+broker additionally requires the relay Pod to be in its own namespace. The
+broker takes the environment from the workspace Pod's live binding, never from
+a label, and reviews the workspace Pod's token as before.
 
 The shared verifier requires one bounded canonical bearer, a successful
 exact-audience TokenReview, the expected ServiceAccount and singular reviewed

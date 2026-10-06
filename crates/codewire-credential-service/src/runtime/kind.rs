@@ -81,10 +81,12 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
             crate::authority::TimedKekProvider::wrap(Arc::new(TestKekProvider)),
             builtin_provider_catalog(),
         ));
+        // Kind runs orchestration, the credential relay, beside this service.
         let authenticator = KubernetesPlatformBridgeAuthenticator::new(
             client,
             pool.clone(),
             Arc::new(TestKekProvider),
+            config::NAMESPACE.to_owned(),
         );
         let github_app_authorization = Arc::new(
             codewire_credential_broker::GitHubAppAuthorizationOwner::new(

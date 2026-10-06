@@ -97,7 +97,7 @@ async fn unwrap_rechecks_replacement_revocation_rebinding_stop_generation_and_ha
 async fn unwrap_rechecks_authenticated_gateway_workspace_policy_and_identity_expiry() -> Result<()>
 {
     for mutation in [
-        "gateway",
+        "relay",
         "workspace",
         "policy",
         "authorized set replaced",
@@ -133,7 +133,7 @@ async fn unwrap_rechecks_authenticated_gateway_workspace_policy_and_identity_exp
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn lease_denies_authority_changed_before_its_first_grant_evaluation() -> Result<()> {
     for mutation in [
-        "gateway",
+        "relay",
         "workspace",
         "policy",
         "authorized set replaced",
@@ -185,7 +185,7 @@ async fn lease_denies_authority_changed_before_its_first_grant_evaluation() -> R
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn final_lease_authority_denies_any_change_and_only_narrows_expiry() -> Result<()> {
     for mutation in [
-        "gateway",
+        "relay",
         "workspace",
         "policy",
         "authorized set replaced",
@@ -362,7 +362,7 @@ async fn cache_hit_rechecks_replacement_revocation_rebinding_stop_generation_exp
 async fn cache_hit_rechecks_authenticated_gateway_workspace_policy_and_identity_expiry()
 -> Result<()> {
     for mutation in [
-        "gateway",
+        "relay",
         "workspace",
         "policy",
         "authorized set replaced",
@@ -428,7 +428,7 @@ async fn final_lease_rechecks_pod_identity_after_sql_lock_waits() -> Result<()> 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn a_codex_login_on_a_hosted_epoch_rechecks_authority_after_its_unwrap() -> Result<()> {
-    for mutation in ["gateway", "workspace", "personal-policy"] {
+    for mutation in ["relay", "workspace", "personal-policy"] {
         let f = Fixture::create_for_bridge().await?;
         let result = async {
             let adapter = f.epoch().await?;

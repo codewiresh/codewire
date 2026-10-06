@@ -1130,7 +1130,7 @@ async fn send_app_ports(channel: Channel, token: &str, ports: Vec<i32>) -> AppRe
     Ok(())
 }
 
-fn cluster_daemon_endpoint(namespace: &str, environment_id: &str) -> String {
+pub(crate) fn cluster_daemon_endpoint(namespace: &str, environment_id: &str) -> String {
     format!(
         "http://{}.{}.svc.cluster.local:{}",
         workspace_daemon_service_name(environment_id),

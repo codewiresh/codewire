@@ -460,6 +460,13 @@ run_database() {
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "billing session bind matrix" "$logfile" 4
 
+  logfile="$RUN_DIR/credential-relay-targets.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::credential_relay::database_tests::' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "credential relay target matrix" "$logfile" 1
+
 }
 
 prepare_idp_keyring() {
@@ -1090,6 +1097,7 @@ run_orchestration() {
       --skip 'worker::create::projection_database_tests::' \
       --skip 'worker::workspace_binding::database_tests::' \
       --skip 'worker::billing_sessions::database_tests::' \
+      --skip 'worker::credential_relay::database_tests::' \
       --nocapture | tee "$logfile"
   assert_passed_count "orchestration activity fencing matrix" "$logfile" 2
 

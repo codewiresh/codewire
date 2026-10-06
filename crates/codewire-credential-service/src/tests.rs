@@ -24,7 +24,6 @@ use codewire_server_core::pod_identity::{
     KubernetesPodIdentityVerifier, PodIdentityPurpose, VerifiedPodIdentity,
 };
 use http::{Request, Response, StatusCode};
-use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::core::v1::Pod;
 use kube::Client;
 use kube::api::DynamicObject;
@@ -37,20 +36,20 @@ use uuid::Uuid;
 use crate::KubernetesPlatformBridgeAuthenticator;
 use crate::authority::{Scope, WORKSPACE_AUTHORIZATION, kubernetes_read, unix_now};
 use crate::objects::{
-    Lineage, LineageNames, LineageReads, binding_managed_clients, gateway_chain,
-    gateway_environment, validate_lineage, workspace_chain,
+    Lineage, LineageNames, binding_managed_clients, validate_lineage, workspace_chain,
 };
 
 mod database;
 
 const NAMESPACE: &str = "synthetic-workspaces";
+/// The server namespace orchestration, the credential relay, shares with this
+/// service.
+const RELAY_NAMESPACE: &str = "synthetic-server";
 const ENVIRONMENT: &str = "a94ef1b4-bbbc-45dd-aa7f-143b8d1f8417";
-const GATEWAY: &str = "synthetic-gateway";
+const RELAY: &str = "synthetic-orchestration";
 const WORKSPACE: &str = "synthetic-workspace";
-const GATEWAY_UID: &str = "4646bcca-54bb-4881-9109-2f9c43da021a";
+const RELAY_UID: &str = "4646bcca-54bb-4881-9109-2f9c43da021a";
 const WORKSPACE_UID: &str = "5334599b-3b66-4363-92b3-bd1cb230d95e";
-const RS_UID: &str = "d6df50a9-9c1a-4efb-b071-de2336475347";
-const DEPLOYMENT_UID: &str = "ef35a526-2125-418c-995a-e07504e8e135";
 const CLAIM_UID: &str = "e78d4729-6710-4ad9-8b05-ecad87013e33";
 const SANDBOX_UID: &str = "9a784b09-4c0b-4af7-bc88-275d8f78d5f0";
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -97,29 +96,6 @@ fn metadata(name: &str, uid: &str, role: &str) -> Value {
 }
 
 fn objects() -> BTreeMap<String, Value> {
-    let mut gateway = json!({
-        "apiVersion":"v1","kind":"Pod","metadata":metadata(GATEWAY,GATEWAY_UID,"gateway"),
-        "spec":{"serviceAccountName":PodIdentityPurpose::CredentialGateway.service_account()},
-        "status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}
-    });
-    gateway["metadata"]["ownerReferences"] =
-        json!([owner("apps/v1", "ReplicaSet", "synthetic-rs", RS_UID)]);
-    let deployment_name = format!("cw-gateway-{ENVIRONMENT}");
-    let mut replica_set = json!({
-        "apiVersion":"apps/v1","kind":"ReplicaSet","metadata":metadata("synthetic-rs",RS_UID,"gateway")
-    });
-    replica_set["metadata"]["ownerReferences"] = json!([owner(
-        "apps/v1",
-        "Deployment",
-        &deployment_name,
-        DEPLOYMENT_UID
-    )]);
-    let deployment = json!({
-        "apiVersion":"apps/v1","kind":"Deployment",
-        "metadata":metadata(&deployment_name,DEPLOYMENT_UID,"gateway"),
-        "spec":{"selector":{"matchLabels":labels("gateway")},"template":{"metadata":{"labels":labels("gateway")}}},
-        "status":{"observedGeneration":3,"availableReplicas":1,"conditions":[{"type":"Available","status":"True"}]}
-    });
     let mut claim = json!({
         "apiVersion":"extensions.agents.x-k8s.io/v1beta1","kind":"SandboxClaim",
         "metadata":metadata("synthetic-claim",CLAIM_UID,"sandbox"),
@@ -153,16 +129,7 @@ fn objects() -> BTreeMap<String, Value> {
         SANDBOX_UID,
     )]);
     BTreeMap::from([
-        (pod_path(GATEWAY), gateway),
         (pod_path(WORKSPACE), workspace),
-        (
-            format!("/apis/apps/v1/namespaces/{NAMESPACE}/replicasets/synthetic-rs"),
-            replica_set,
-        ),
-        (
-            format!("/apis/apps/v1/namespaces/{NAMESPACE}/deployments/{deployment_name}"),
-            deployment,
-        ),
         (
             format!(
                 "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/{NAMESPACE}/sandboxclaims/synthetic-claim"
@@ -331,18 +298,35 @@ fn reviewed(review: &Value) -> Value {
         .unwrap();
     let payload: Value = serde_json::from_slice(&payload).unwrap();
     let role = payload["synthetic_role"].as_str().unwrap();
-    let purpose = if role == "gateway" {
-        PodIdentityPurpose::CredentialGateway
-    } else {
-        PodIdentityPurpose::CredentialWorkspace
+    // A relay token is orchestration's, in the server namespace; a
+    // "foreign-relay" is the same account in another namespace.
+    let (purpose, namespace, pod, uid) = match role {
+        "relay" => (
+            PodIdentityPurpose::CredentialRelay,
+            RELAY_NAMESPACE,
+            RELAY,
+            RELAY_UID,
+        ),
+        "foreign-relay" => (
+            PodIdentityPurpose::CredentialRelay,
+            "synthetic-other",
+            RELAY,
+            RELAY_UID,
+        ),
+        _ => (
+            PodIdentityPurpose::CredentialWorkspace,
+            NAMESPACE,
+            WORKSPACE,
+            WORKSPACE_UID,
+        ),
     };
     let authenticated = review["spec"]["audiences"] == json!([purpose.audience()]);
     json!({
         "apiVersion":"authentication.k8s.io/v1","kind":"TokenReview",
         "status":{"authenticated":authenticated,"audiences":[purpose.audience()],
-            "user":{"username":format!("system:serviceaccount:{NAMESPACE}:{}",purpose.service_account()),
-                "extra":{"authentication.kubernetes.io/pod-name":[if role=="gateway" {GATEWAY} else {WORKSPACE}],
-                    "authentication.kubernetes.io/pod-uid":[if role=="gateway" {GATEWAY_UID} else {WORKSPACE_UID}]}
+            "user":{"username":format!("system:serviceaccount:{namespace}:{}",purpose.service_account()),
+                "extra":{"authentication.kubernetes.io/pod-name":[pod],
+                    "authentication.kubernetes.io/pod-uid":[uid]}
             }}
     })
 }
@@ -351,7 +335,7 @@ fn headers(expires: u64) -> MetadataMap {
     let mut metadata = MetadataMap::new();
     metadata.insert(
         "authorization",
-        format!("Bearer {}", token("gateway", expires + 60))
+        format!("Bearer {}", token("relay", expires + 60))
             .parse()
             .unwrap(),
     );
@@ -377,6 +361,7 @@ async fn malformed_private_metadata_never_reaches_kubernetes_or_database() {
         fixture.client(),
         closed_pool().await,
         Arc::new(TestKekProvider),
+        RELAY_NAMESPACE.to_owned(),
     );
     for fault in 0..9 {
         let mut metadata = headers(unix_now().unwrap() + 600);
@@ -440,6 +425,7 @@ async fn real_kube_client_reviews_both_fixed_purposes_before_any_domain_lookup()
         fixture.client(),
         closed_pool().await,
         Arc::new(TestKekProvider),
+        RELAY_NAMESPACE.to_owned(),
     );
     let (result, timings) =
         timing::measure(authenticator.authenticate(&headers(unix_now().unwrap() + 600))).await;
@@ -448,34 +434,58 @@ async fn real_kube_client_reviews_both_fixed_purposes_before_any_domain_lookup()
         Err(PlatformBridgeAuthenticationError::Unavailable)
     ));
     let paths = fixture.paths.lock().unwrap().clone();
-    assert_eq!(&paths[..2], &[TOKEN_REVIEW_PATH, TOKEN_REVIEW_PATH]);
-    assert_eq!(&paths[2..], &[pod_path(GATEWAY)]);
-    // Both concurrent TokenReviews, then one resolve whose only Kubernetes
-    // read (the gateway Pod) preceded its first, failing, SQL statement.
+    // Both concurrent TokenReviews, then one resolve whose first statement,
+    // the workspace Pod's binding lookup, failed before any Kubernetes read:
+    // no label or Pod read names the environment.
+    assert_eq!(paths, [TOKEN_REVIEW_PATH, TOKEN_REVIEW_PATH]);
     assert_eq!(timings.token_review.count, 2);
     assert_eq!(timings.resolve.count, 1);
-    assert!(timings.resolve_kubernetes > std::time::Duration::ZERO);
-    assert!(timings.resolve_kubernetes <= timings.resolve.elapsed);
-    fixture.paths.lock().unwrap().clear();
-    let mut swapped = headers(unix_now().unwrap() + 600);
-    swapped.insert_bin(
-        WORKSPACE_AUTHORIZATION,
-        MetadataValue::from_bytes(
-            format!("Bearer {}", token("gateway", unix_now().unwrap() + 600)).as_bytes(),
+    assert_eq!(timings.resolve_kubernetes, std::time::Duration::ZERO);
+    // A relay token presented as the workspace's, a workspace token presented
+    // as the relay's, and orchestration's account in another namespace are
+    // refused before any domain lookup.
+    for (relay, workspace, expected) in [
+        (
+            "relay",
+            "relay",
+            PlatformBridgeAuthenticationError::Unauthenticated,
         ),
-    );
-    assert!(matches!(
-        authenticator.authenticate(&swapped).await,
-        Err(PlatformBridgeAuthenticationError::Unauthenticated)
-    ));
-    assert!(
-        fixture
-            .paths
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|path| path == TOKEN_REVIEW_PATH)
-    );
+        (
+            "workspace",
+            "workspace",
+            PlatformBridgeAuthenticationError::Unauthenticated,
+        ),
+        (
+            "foreign-relay",
+            "workspace",
+            PlatformBridgeAuthenticationError::Denied,
+        ),
+    ] {
+        fixture.paths.lock().unwrap().clear();
+        let expires = unix_now().unwrap() + 600;
+        let mut metadata = MetadataMap::new();
+        metadata.insert(
+            "authorization",
+            format!("Bearer {}", token(relay, expires)).parse().unwrap(),
+        );
+        let mut forwarded =
+            MetadataValue::from_bytes(format!("Bearer {}", token(workspace, expires)).as_bytes());
+        forwarded.set_sensitive(true);
+        metadata.insert_bin(WORKSPACE_AUTHORIZATION, forwarded);
+        let result = authenticator.authenticate(&metadata).await;
+        assert!(
+            matches!(&result, Err(error) if *error == expected),
+            "{relay}/{workspace} was not {expected:?}"
+        );
+        assert!(
+            fixture
+                .paths
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|path| path == TOKEN_REVIEW_PATH)
+        );
+    }
 }
 
 #[tokio::test]
@@ -566,6 +576,7 @@ async fn whole_authentication_deadline_bounds_pending_token_review() -> Result<(
         fixture.client(),
         closed_pool().await,
         Arc::new(TestKekProvider),
+        RELAY_NAMESPACE.to_owned(),
     );
     let metadata = headers(unix_now()? + 600);
     let task = tokio::spawn(async move { authenticator.authenticate(&metadata).await });
@@ -588,47 +599,6 @@ async fn whole_authentication_deadline_bounds_pending_token_review() -> Result<(
             .all(|path| path == TOKEN_REVIEW_PATH)
     );
     Ok(())
-}
-
-#[test]
-fn gateway_chain_rejects_controller_uid_role_scope_generation_and_readiness_changes() {
-    let values = objects();
-    for fault in 0..12 {
-        let mut pod = values[&pod_path(GATEWAY)].clone();
-        let mut rs = object(&values, "ReplicaSet");
-        let mut deployment = object(&values, "Deployment");
-        match fault {
-            0 => {}
-            1 => rs["metadata"]["uid"] = json!(Uuid::new_v4().to_string()),
-            2 => pod["metadata"]["ownerReferences"][0]["apiVersion"] = json!("other/v1"),
-            3 => rs["metadata"]["ownerReferences"][0]["name"] = json!("other"),
-            4 => deployment["metadata"]["deletionTimestamp"] = json!("2026-01-01T00:00:00Z"),
-            5 => pod["metadata"]["labels"]["codewire.sh/org-id"] = json!("other"),
-            6 => {
-                pod["metadata"]["labels"]["codewire.sh/environment-operation-generation"] =
-                    json!("6")
-            }
-            7 => rs["metadata"]["labels"]["codewire.sh/type"] = json!("workspace"),
-            8 => {
-                deployment["spec"]["template"]["metadata"]["labels"]["codewire.sh/environment-operation-generation"] =
-                    json!("8")
-            }
-            9 => deployment["status"]["observedGeneration"] = json!(2),
-            10 => deployment["status"]["availableReplicas"] = json!(0),
-            _ => pod["metadata"]["ownerReferences"]
-                .as_array_mut()
-                .unwrap()
-                .push(owner("apps/v1", "ReplicaSet", "another", RS_UID)),
-        }
-        let pod: Pod = serde_json::from_value(pod).unwrap();
-        let rs: ReplicaSet = serde_json::from_value(rs).unwrap();
-        let deployment: Deployment = serde_json::from_value(deployment).unwrap();
-        assert_eq!(
-            gateway_chain(&scope(), &pod, &rs, &deployment).is_ok(),
-            fault == 0
-        );
-        assert_eq!(gateway_environment(&pod).unwrap(), ENVIRONMENT);
-    }
 }
 
 #[test]
@@ -730,20 +700,18 @@ async fn verified_identity(
     )
 }
 
-/// Which resolve of an epoch validates a lineage: the admission, from the
-/// gateway Pod it read before its scope query, or a later one, from the
-/// admission's names.
+/// Which resolve of an epoch validates a lineage: the admission, with no
+/// read hint, or a later one, from the admission's Sandbox name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Admission,
     Epoch,
 }
 
-/// The verified identities of one epoch and the names its admission read its
-/// ReplicaSet and Sandbox under.
+/// The verified workspace identity of one epoch and the name its admission
+/// read its Sandbox under.
 struct Readers {
     client: Client,
-    gateway: VerifiedPodIdentity,
     workspace: VerifiedPodIdentity,
     names: LineageNames,
 }
@@ -752,8 +720,6 @@ impl Readers {
     async fn new(fixture: &KubeFixture) -> Result<Self> {
         let mut readers = Self {
             client: fixture.client(),
-            gateway: verified_identity(fixture, PodIdentityPurpose::CredentialGateway, "gateway")
-                .await?,
             workspace: verified_identity(
                 fixture,
                 PodIdentityPurpose::CredentialWorkspace,
@@ -761,7 +727,6 @@ impl Readers {
             )
             .await?,
             names: LineageNames {
-                replica_set: String::new(),
                 sandbox: String::new(),
             },
         };
@@ -769,46 +734,23 @@ impl Readers {
             .lineage(fixture, &scope(), Mode::Admission)
             .await
             .map_err(|error| anyhow::anyhow!("admission lineage was denied: {error}"))?;
-        ensure!(names.replica_set == "synthetic-rs" && names.sandbox == "synthetic-sandbox");
+        ensure!(names.sandbox == "synthetic-sandbox");
         readers.names = names;
         Ok(readers)
     }
 
-    /// One resolve's lineage. At admission the gateway Pod is the fixture's
-    /// current one, as the resolve read it just before.
+    /// One resolve's lineage.
     async fn lineage(
         &self,
-        fixture: &KubeFixture,
+        _fixture: &KubeFixture,
         scope: &Scope,
         mode: Mode,
     ) -> Result<(Lineage, LineageNames), PlatformRuntimeError> {
-        match mode {
-            Mode::Admission => {
-                let gateway: Pod = serde_json::from_value(
-                    fixture.objects.lock().unwrap()[&pod_path(GATEWAY)].clone(),
-                )
-                .unwrap();
-                validate_lineage(
-                    &self.client,
-                    scope,
-                    LineageReads::Admission(&gateway),
-                    &self.workspace,
-                )
-                .await
-            }
-            Mode::Epoch => {
-                validate_lineage(
-                    &self.client,
-                    scope,
-                    LineageReads::Epoch {
-                        gateway: &self.gateway,
-                        names: &self.names,
-                    },
-                    &self.workspace,
-                )
-                .await
-            }
-        }
+        let names = match mode {
+            Mode::Admission => None,
+            Mode::Epoch => Some(&self.names),
+        };
+        validate_lineage(&self.client, scope, names, &self.workspace).await
     }
 }
 
@@ -884,28 +826,21 @@ async fn lineage_requires_the_bound_pod_uid_and_the_recorded_claim_and_sandbox()
     Ok(())
 }
 
-/// The lineage reads of one resolve, by the object each fetches. Later in an
-/// epoch they include the gateway Pod, which admission read before.
-fn lineage_paths(mode: Mode) -> BTreeMap<&'static str, String> {
+/// The lineage reads of one resolve, by the object each fetches.
+fn lineage_paths() -> BTreeMap<&'static str, String> {
     let objects = objects();
     let path = |kind: &str| {
         objects
             .iter()
-            .find(|(path, value)| value["kind"] == kind && **path != pod_path(GATEWAY))
+            .find(|(_, value)| value["kind"] == kind)
             .map(|(path, _)| path.clone())
             .unwrap()
     };
-    let mut paths = BTreeMap::from([
-        ("ReplicaSet", path("ReplicaSet")),
-        ("Deployment", path("Deployment")),
+    BTreeMap::from([
         ("SandboxClaim", path("SandboxClaim")),
         ("Sandbox", path("Sandbox")),
         ("workspace Pod", pod_path(WORKSPACE)),
-    ]);
-    if mode == Mode::Epoch {
-        paths.insert("gateway Pod", pod_path(GATEWAY));
-    }
-    paths
+    ])
 }
 
 #[tokio::test]
@@ -919,7 +854,7 @@ async fn lineage_reads_overlap_and_later_in_the_epoch_none_waits_for_another() -
         .map_err(|error| anyhow::anyhow!("undelayed lineage was denied: {error}"))?;
 
     for mode in [Mode::Admission, Mode::Epoch] {
-        let paths = lineage_paths(mode);
+        let paths = lineage_paths();
         *fixture.delays.lock().unwrap() =
             paths.values().map(|path| (path.clone(), DELAY)).collect();
         fixture.spans.lock().unwrap().clear();
@@ -945,8 +880,8 @@ async fn lineage_reads_overlap_and_later_in_the_epoch_none_waits_for_another() -
         let first_answer = spans.iter().map(|span| span.answered).min().unwrap();
         // At admission the Sandbox's name comes only from its Claim's status,
         // so that read alone follows another. Later in the epoch it starts
-        // under the admission's name, as the ReplicaSet's does, so every read,
-        // the gateway Pod's included, starts before any is answered.
+        // under the admission's name, so every read starts before any is
+        // answered.
         let (waits, rounds) = match mode {
             Mode::Admission => (Some("Sandbox"), 2),
             Mode::Epoch => (None, 1),
@@ -966,8 +901,8 @@ async fn lineage_reads_overlap_and_later_in_the_epoch_none_waits_for_another() -
             ensure!(span(kind).started >= span("SandboxClaim").answered);
         }
 
-        // Admission's five reads of DELAY take two DELAYs, the Claim then its
-        // Sandbox; a later resolve's six take one. The Kubernetes time
+        // Admission's three reads of DELAY take two DELAYs, the Claim then its
+        // Sandbox; a later resolve's three take one. The Kubernetes time
         // recorded is that wall time, not the sum.
         let sum = DELAY * paths.len() as u32;
         eprintln!(
@@ -992,7 +927,7 @@ async fn any_failed_lineage_read_fails_closed_without_waiting_for_the_others() -
     let readers = Readers::new(&fixture).await?;
     let original = fixture.objects.lock().unwrap().clone();
     for mode in [Mode::Admission, Mode::Epoch] {
-        let paths = lineage_paths(mode);
+        let paths = lineage_paths();
         for (kind, failing) in &paths {
             for (code, expected) in [
                 (404, PlatformRuntimeError::Denied),
@@ -1007,12 +942,10 @@ async fn any_failed_lineage_read_fails_closed_without_waiting_for_the_others() -
                     );
                 }
                 // Every other read hangs, except the one naming the failing
-                // object: the Claim its Sandbox, and later in the epoch the
-                // gateway Pod its ReplicaSet. Their failure counts only once
+                // object: the Claim its Sandbox. Its failure counts only once
                 // that fresh read confirms the name.
-                let parent = match (mode, *kind) {
-                    (_, "Sandbox") => Some("SandboxClaim"),
-                    (Mode::Epoch, "ReplicaSet") => Some("gateway Pod"),
+                let parent = match *kind {
+                    "Sandbox" => Some("SandboxClaim"),
                     _ => None,
                 };
                 *fixture.delays.lock().unwrap() = paths
@@ -1042,12 +975,12 @@ async fn any_failed_lineage_read_fails_closed_without_waiting_for_the_others() -
     Ok(())
 }
 
-/// Later in an epoch the admission's names only start two reads early. When
-/// the fresh gateway Pod or Claim names another object, that object is read
-/// under its fresh name and decides exactly as at admission: neither the
-/// object under the admission's name nor its absence decides anything.
+/// Later in an epoch the admission's Sandbox name only starts that read early.
+/// When the fresh Claim names another Sandbox, that Sandbox is read under its
+/// fresh name and decides exactly as at admission: neither the object under
+/// the admission's name nor its absence decides anything.
 #[tokio::test]
-async fn a_renamed_replica_set_or_sandbox_is_read_again_under_its_fresh_name() -> Result<()> {
+async fn a_renamed_sandbox_is_read_again_under_its_fresh_name() -> Result<()> {
     let fixture = KubeFixture::new();
     let readers = Readers::new(&fixture).await?;
     let (admitted, _) = readers
@@ -1058,17 +991,14 @@ async fn a_renamed_replica_set_or_sandbox_is_read_again_under_its_fresh_name() -
     let sandbox_path = |name: &str| {
         format!("/apis/agents.x-k8s.io/v1beta1/namespaces/{NAMESPACE}/sandboxes/{name}")
     };
-    let replica_set_path =
-        |name: &str| format!("/apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{name}");
     let claim_path = format!(
         "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/{NAMESPACE}/sandboxclaims/synthetic-claim"
     );
     let next_sandbox = Uuid::new_v4().to_string();
-    let next_replica_set = Uuid::new_v4().to_string();
 
     #[derive(Clone, Copy)]
     enum Next {
-        /// Exists and owns the workspace (or gateway) Pod.
+        /// Exists and owns the workspace Pod.
         Live,
         /// Exists but is not Ready.
         Unready,
@@ -1085,90 +1015,50 @@ async fn a_renamed_replica_set_or_sandbox_is_read_again_under_its_fresh_name() -
         /// A server error.
         Failing,
     }
-    // (renamed object, its successor, the read under the admission's name,
-    // the binding records the successor Sandbox, admitted)
+    // (successor, the read under the admission's name, the binding records
+    // the successor Sandbox, admitted)
     let cases = [
-        ("Sandbox", Next::Live, Earlier::Absent, true, true),
-        ("Sandbox", Next::Live, Earlier::Kept, true, true),
-        ("Sandbox", Next::Live, Earlier::Failing, true, true),
-        ("Sandbox", Next::Live, Earlier::Kept, false, false),
-        ("Sandbox", Next::Unready, Earlier::Kept, true, false),
-        ("Sandbox", Next::Absent, Earlier::Kept, false, false),
-        ("ReplicaSet", Next::Live, Earlier::Absent, false, true),
-        ("ReplicaSet", Next::Live, Earlier::Kept, false, true),
-        ("ReplicaSet", Next::Live, Earlier::Failing, false, true),
-        ("ReplicaSet", Next::Unready, Earlier::Kept, false, false),
-        ("ReplicaSet", Next::Absent, Earlier::Kept, false, false),
+        (Next::Live, Earlier::Absent, true, true),
+        (Next::Live, Earlier::Kept, true, true),
+        (Next::Live, Earlier::Failing, true, true),
+        (Next::Live, Earlier::Kept, false, false),
+        (Next::Unready, Earlier::Kept, true, false),
+        (Next::Absent, Earlier::Kept, false, false),
     ];
-    for (index, (renamed, next, earlier_read, bind_next, admitted_next)) in
-        cases.into_iter().enumerate()
-    {
+    for (index, (next, earlier_read, bind_next, admitted_next)) in cases.into_iter().enumerate() {
         let (earlier_path, next_path) = {
             let mut objects = fixture.objects.lock().unwrap();
             *objects = original.clone();
-            if renamed == "Sandbox" {
-                let earlier = sandbox_path("synthetic-sandbox");
-                let next_path = sandbox_path("synthetic-sandbox-2");
-                let mut sandbox = objects[&earlier].clone();
-                sandbox["metadata"]["name"] = json!("synthetic-sandbox-2");
-                sandbox["metadata"]["uid"] = json!(next_sandbox);
-                if matches!(next, Next::Unready) {
-                    sandbox["status"]["conditions"][0]["status"] = json!("False");
-                }
-                if !matches!(next, Next::Absent) {
-                    objects.insert(next_path.clone(), sandbox);
-                    let owner = &mut objects.get_mut(&pod_path(WORKSPACE)).unwrap()["metadata"]["ownerReferences"]
-                        [0];
-                    owner["name"] = json!("synthetic-sandbox-2");
-                    owner["uid"] = json!(next_sandbox);
-                }
-                objects.get_mut(&claim_path).unwrap()["status"]["sandbox"]["name"] =
-                    json!("synthetic-sandbox-2");
-                match earlier_read {
-                    Earlier::Kept => {}
-                    Earlier::Absent => {
-                        objects.remove(&earlier);
-                    }
-                    Earlier::Failing => {
-                        objects.insert(
-                            earlier.clone(),
-                            json!({"apiVersion":"v1","kind":"Status","status":"Failure","code":500}),
-                        );
-                    }
-                }
-                (earlier, next_path)
-            } else {
-                let earlier = replica_set_path("synthetic-rs");
-                let next_path = replica_set_path("synthetic-rs-2");
-                let mut replica_set = objects[&earlier].clone();
-                replica_set["metadata"]["name"] = json!("synthetic-rs-2");
-                replica_set["metadata"]["uid"] = json!(next_replica_set);
-                if matches!(next, Next::Unready) {
-                    // A ReplicaSet the gateway's Deployment does not control.
-                    replica_set["metadata"]["ownerReferences"][0]["uid"] =
-                        json!(Uuid::new_v4().to_string());
-                }
-                if !matches!(next, Next::Absent) {
-                    objects.insert(next_path.clone(), replica_set);
-                }
-                let owner = &mut objects.get_mut(&pod_path(GATEWAY)).unwrap()["metadata"]["ownerReferences"]
-                    [0];
-                owner["name"] = json!("synthetic-rs-2");
-                owner["uid"] = json!(next_replica_set);
-                match earlier_read {
-                    Earlier::Kept => {}
-                    Earlier::Absent => {
-                        objects.remove(&earlier);
-                    }
-                    Earlier::Failing => {
-                        objects.insert(
-                            earlier.clone(),
-                            json!({"apiVersion":"v1","kind":"Status","status":"Failure","code":500}),
-                        );
-                    }
-                }
-                (earlier, next_path)
+            let earlier = sandbox_path("synthetic-sandbox");
+            let next_path = sandbox_path("synthetic-sandbox-2");
+            let mut sandbox = objects[&earlier].clone();
+            sandbox["metadata"]["name"] = json!("synthetic-sandbox-2");
+            sandbox["metadata"]["uid"] = json!(next_sandbox);
+            if matches!(next, Next::Unready) {
+                sandbox["status"]["conditions"][0]["status"] = json!("False");
             }
+            if !matches!(next, Next::Absent) {
+                objects.insert(next_path.clone(), sandbox);
+                let owner = &mut objects.get_mut(&pod_path(WORKSPACE)).unwrap()["metadata"]["ownerReferences"]
+                    [0];
+                owner["name"] = json!("synthetic-sandbox-2");
+                owner["uid"] = json!(next_sandbox);
+            }
+            objects.get_mut(&claim_path).unwrap()["status"]["sandbox"]["name"] =
+                json!("synthetic-sandbox-2");
+            match earlier_read {
+                Earlier::Kept => {}
+                Earlier::Absent => {
+                    objects.remove(&earlier);
+                }
+                Earlier::Failing => {
+                    objects.insert(
+                        earlier.clone(),
+                        json!({"apiVersion":"v1","kind":"Status","status":"Failure","code":500}),
+                    );
+                }
+            }
+            (earlier, next_path)
         };
         let mut selected = scope();
         if bind_next {
@@ -1180,37 +1070,26 @@ async fn a_renamed_replica_set_or_sandbox_is_read_again_under_its_fresh_name() -
         let read = fixture.paths.lock().unwrap().clone();
         ensure!(
             later == sequential,
-            "case {index}: a renamed {renamed} decided otherwise than its sequential read"
+            "case {index}: a renamed Sandbox decided otherwise than its sequential read"
         );
         match later {
             Ok((lineage, names)) => {
                 ensure!(
                     admitted_next,
-                    "case {index}: a renamed {renamed} was admitted"
+                    "case {index}: a renamed Sandbox was admitted"
                 );
                 ensure!(
                     lineage != admitted,
-                    "case {index}: the earlier {renamed} decided"
+                    "case {index}: the earlier Sandbox decided"
                 );
                 ensure!(
-                    names.replica_set
-                        == if renamed == "ReplicaSet" {
-                            "synthetic-rs-2"
-                        } else {
-                            "synthetic-rs"
-                        }
-                        && names.sandbox
-                            == if renamed == "Sandbox" {
-                                "synthetic-sandbox-2"
-                            } else {
-                                "synthetic-sandbox"
-                            },
-                    "case {index}: the next resolve's names are not the fresh ones"
+                    names.sandbox == "synthetic-sandbox-2",
+                    "case {index}: the next resolve's name is not the fresh one"
                 );
             }
             Err(error) => ensure!(
                 !admitted_next && error == PlatformRuntimeError::Denied,
-                "case {index}: a renamed {renamed} was {error}"
+                "case {index}: a renamed Sandbox was {error}"
             ),
         }
         // The read under the admission's name ran, and was then read again

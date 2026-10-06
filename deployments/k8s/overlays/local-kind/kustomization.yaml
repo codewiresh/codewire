@@ -187,9 +187,6 @@ transformers:
       name: codewire-credential-service-peers
     patch: |-
       - op: replace
-        path: /spec/ingress/1/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
-        value: dev-sandboxes
-      - op: replace
         path: /spec/ingress/0/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
         value: ingress-nginx
       - op: replace

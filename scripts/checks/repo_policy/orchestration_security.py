@@ -391,6 +391,21 @@ def assert_gateway_replicaset(resources: list[str], target: dict[str, str], labe
 WORKSPACE_BINDING_INGRESS = "codewire-orchestration-workspace-binding"
 
 
+def own_pod_selector(policy: str) -> str:
+    """A NetworkPolicy's own spec.podSelector, not the selectors of its peers:
+    the credential service admits orchestration as a peer without selecting
+    orchestration's Pods."""
+    lines = top_level_block(policy, "spec").split("\n")
+    start = next((index for index, line in enumerate(lines) if line == "  podSelector:"), -1)
+    if start < 0:
+        return ""
+    end = next(
+        (index for index in range(start + 1, len(lines)) if not lines[index].startswith("    ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
 def assert_workspace_binding_ingress(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
     """TCP 8087 serves only WorkspaceBindingService, for workspace Pods. Its
     ingress policy must admit only workspace Pods in the target's sandbox
@@ -446,7 +461,7 @@ def assert_workspace_binding_ingress(resources: list[str], target: dict[str, str
         if top_level_field(resource, "kind") == "NetworkPolicy"
         and metadata_field(resource, "namespace") == target["subject_namespace"]
         and metadata_field(resource, "name") != WORKSPACE_BINDING_INGRESS
-        and "component: orchestration" in top_level_block(resource, "spec")
+        and "component: orchestration" in own_pod_selector(resource)
     ]
     if others:
         output.append(f"{label}: another NetworkPolicy also selects orchestration Pods")
