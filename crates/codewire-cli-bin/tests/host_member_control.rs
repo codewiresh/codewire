@@ -22,6 +22,9 @@ use uuid::Uuid;
 #[path = "host_member_control/managed.rs"]
 mod managed;
 
+#[path = "support/cw_fixture.rs"]
+mod cw_fixture;
+
 const ORG: &str = "org-host-member-proof";
 const NETWORK: &str = "network-host-member-proof";
 const NODE: &str = "target-host-member-proof";
@@ -1428,13 +1431,13 @@ fn host_members_two_real_endpoints_direct_and_tls_derp() {
         assert_eq!(metadata.mode() & 0o022, 0);
         let artifacts = tempfile::Builder::new()
             .prefix("host-member-binaries-")
+            .permissions(fs::Permissions::from_mode(0o700))
             .tempdir_in(&artifact_parent)
             .unwrap()
             .keep();
         for label in ["target", "caller"] {
             let path = artifacts.join(format!("{label}-cw"));
-            fs::copy(env!("CARGO_BIN_EXE_cw"), &path).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o500)).unwrap();
+            cw_fixture::prepare(&path);
             assert_eq!(fs::symlink_metadata(&path).unwrap().nlink(), 1);
         }
         let stdout = OpenOptions::new()

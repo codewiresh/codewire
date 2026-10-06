@@ -4,13 +4,141 @@
 //! admission and the real update journey remain separate acceptance.
 use std::fs;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::process::Command;
+
+#[path = "support/cw_fixture.rs"]
+mod cw_fixture;
+
+const ISOLATED_CASE: &str = "CW_RETAINED_MESH_ISOLATED_CASE";
+
+fn reap_until(deadline: Instant) -> bool {
+    loop {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        let pid = unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG | libc::__WALL) };
+        if pid < 0 {
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::ECHILD) => return true,
+                Some(libc::EINTR) => continue,
+                _ => return false,
+            }
+        }
+        if pid == 0 {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+struct CaseChild(std::process::Child);
+
+impl Drop for CaseChild {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        let _ = self.0.kill();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.0.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                _ => {
+                    eprintln!("isolated Mesh test child closure unknown; retain its artifacts");
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn isolated_case(name: &str) -> bool {
+    if let Some(case) = std::env::var_os(ISOLATED_CASE) {
+        assert_eq!(case, name);
+        // Only this exact one-test process adopts the retained helpers. Never
+        // change the parallel Cargo test parent's process-wide child custody.
+        assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
+        let mut observed = 0;
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut observed) },
+            0
+        );
+        assert_eq!(observed, 1);
+        assert_eq!(
+            unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG | libc::__WALL) },
+            -1,
+            "no children before the isolated case launches"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        return true;
+    }
+    let root = tempfile::Builder::new()
+        .prefix("retained-mesh-test-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap()
+        .keep();
+    let output = |name: &str| {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join(name))
+            .unwrap()
+    };
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", name, "--test-threads=1", "--nocapture"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env(ISOLATED_CASE, name)
+        .envs(
+            ["HOME", "TMPDIR", "CARGO_TARGET_TMPDIR"]
+                .into_iter()
+                .filter_map(|key| std::env::var_os(key).map(|value| (key, value))),
+        )
+        .stdin(Stdio::null())
+        .stdout(output("stdout"))
+        .stderr(output("stderr"));
+    let mut child = CaseChild(command.spawn().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(540);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "isolated Mesh case exceeded its bound; retain {}",
+            root.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let read = |name: &str| {
+        let path = root.join(name);
+        assert!(fs::metadata(&path).unwrap().len() <= 64 * 1024);
+        fs::read_to_string(path).unwrap()
+    };
+    let stdout = read("stdout");
+    let stderr = read("stderr");
+    assert!(
+        status.success() && stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+        "{stdout}\n{stderr}\nretained isolated Mesh logs {}",
+        root.display()
+    );
+    fs::remove_dir_all(root).unwrap();
+    false
+}
 
 struct Fixture {
     root: PathBuf,
@@ -22,12 +150,16 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = tempfile::tempdir().unwrap().keep();
+        let root = tempfile::Builder::new()
+            .prefix("retained-mesh-")
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap()
+            .keep();
         let a = root.join("a-cw");
         let b = root.join("b-cw");
         for path in [&a, &b] {
-            fs::copy(env!("CARGO_BIN_EXE_cw"), path).unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o500)).unwrap();
+            cw_fixture::prepare(path);
         }
         fs::create_dir(root.join("empty-path")).unwrap();
         fs::write(root.join("unrelated-sentinel"), b"preserve").unwrap();
@@ -146,10 +278,22 @@ impl Drop for Fixture {
             && !self.root.join("mesh/mesh_runtime.json").exists()
             && !self.root.join("mesh/mesh-starting.json").exists()
         {
+            if std::env::var_os(ISOLATED_CASE).is_some() {
+                assert!(
+                    reap_until(Instant::now() + Duration::from_secs(5)),
+                    "normal isolated Mesh custody did not prove ECHILD; retain {}",
+                    self.root.display()
+                );
+            }
             fs::remove_dir_all(&self.root).unwrap();
         } else {
             eprintln!(
                 "retained failed or unknown synthetic helper root: {}",
+                self.root.display()
+            );
+            assert!(
+                std::thread::panicking() || std::env::var_os(ISOLATED_CASE).is_none(),
+                "normal isolated product cleanup was not confirmed; retain {}",
                 self.root.display()
             );
         }
@@ -196,6 +340,11 @@ fn assert_no_new_privileges(custody: &Value, handle: &OwnedFd) {
 
 #[tokio::test]
 async fn embedded_roles_without_helper_path_reuse_live_a_from_b_then_launch_selected_b() {
+    if !isolated_case(
+        "embedded_roles_without_helper_path_reuse_live_a_from_b_then_launch_selected_b",
+    ) {
+        return;
+    }
     let fixture = Fixture::new();
     let first = fixture.up(&fixture.a, &[]).await;
     assert_eq!(first["started"], true);
@@ -288,6 +437,11 @@ async fn embedded_roles_without_helper_path_reuse_live_a_from_b_then_launch_sele
 
 #[tokio::test]
 async fn concurrent_start_and_down_serialize_and_invalid_present_override_has_no_effects() {
+    if !isolated_case(
+        "concurrent_start_and_down_serialize_and_invalid_present_override_has_no_effects",
+    ) {
+        return;
+    }
     let fixture = Fixture::new();
     let (a, b) = tokio::join!(fixture.up(&fixture.a, &[]), fixture.up(&fixture.b, &[]));
     assert_ne!(a["started"], b["started"]);
