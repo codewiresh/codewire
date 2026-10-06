@@ -118,18 +118,18 @@ impl DaemonCredential {
     }
 
     /// Whether a daemon call was accepted since the last look, clearing it.
-    pub(crate) fn take_authenticated(&self) -> bool {
+    pub fn take_authenticated(&self) -> bool {
         self.inner.authenticated.swap(false, Ordering::AcqRel)
     }
 
     /// Wait for the next refusal report.
-    pub(crate) async fn refresh_requested(&self) {
+    pub async fn refresh_requested(&self) {
         self.inner.refresh.notified().await;
     }
 
     /// Install a freshly issued credential. Returns whether it changed: a new
     /// workspace Pod, or a rotated derivation for the same Pod.
-    pub(crate) fn replace(&self, token: DaemonAuthToken, workspace_pod_uid: String) -> bool {
+    pub fn replace(&self, token: DaemonAuthToken, workspace_pod_uid: String) -> bool {
         if !self.inner.refreshable {
             return false;
         }

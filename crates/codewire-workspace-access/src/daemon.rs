@@ -192,7 +192,7 @@ impl DaemonSessionClient {
 
     /// A credential-bridge client presenting the credential current now. The
     /// hosted relay takes a fresh one for every epoch.
-    pub(crate) fn credential_client(&self) -> codewire_daemon::client::SessionClient {
+    pub fn credential_client(&self) -> codewire_daemon::client::SessionClient {
         codewire_daemon::client::SessionClient::from_channel(
             self.channel.clone(),
             self.credential.token().expose_secret(),
@@ -200,7 +200,7 @@ impl DaemonSessionClient {
         .expect("DaemonAuthToken guarantees valid ASCII metadata")
     }
 
-    pub(crate) fn credential(&self) -> &DaemonCredential {
+    pub fn credential(&self) -> &DaemonCredential {
         &self.credential
     }
 

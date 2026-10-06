@@ -1823,6 +1823,7 @@ dependencies = [
  "codewire-proto",
  "codewire-tailnet",
  "codewire-tls",
+ "codewire-workspace-access",
  "connectrpc",
  "ed25519-dalek 2.2.0",
  "http 1.4.1",
@@ -2367,6 +2368,39 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
+ "zeroize",
+]
+
+[[package]]
+name = "codewire-workspace-access"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "boringtun",
+ "chrono",
+ "codewire-credential-bridge",
+ "codewire-credential-broker",
+ "codewire-daemon",
+ "codewire-gateway-proto",
+ "codewire-tailnet",
+ "ed25519-dalek 2.2.0",
+ "http 1.4.1",
+ "libc",
+ "prost-types",
+ "rand 0.8.6",
+ "russh",
+ "russh-sftp",
+ "shell-words",
+ "ssh-key",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.14.6",
+ "tracing",
+ "uuid",
  "zeroize",
 ]
 

@@ -27,6 +27,7 @@ COPY crates/codewire-proto ./crates/codewire-proto
 COPY crates/codewire-server-core ./crates/codewire-server-core
 COPY crates/codewire-tailnet ./crates/codewire-tailnet
 COPY crates/codewire-workload-secrets ./crates/codewire-workload-secrets
+COPY crates/codewire-workspace-access ./crates/codewire-workspace-access
 COPY proto ./proto
 COPY libs/gateway-proto ./libs/gateway-proto
 ARG CODEWIRE_SCCACHE_MODE=disabled

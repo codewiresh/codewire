@@ -41,6 +41,7 @@ members = [
     "crates/codewire-udp-relay",
     "crates/codewire-vmm-guest-probe",
     "crates/codewire-workload-secrets",
+    "crates/codewire-workspace-access",
 ]
 exclude = [
     "crates/codewire-desktop",
@@ -78,6 +79,7 @@ codewire-egress-policy = { path = "crates/codewire-egress-policy" }
 codewire-email = { path = "crates/codewire-email" }
 codewire-netstack = { path = "crates/codewire-netstack" }
 codewire-tailnet = { path = "crates/codewire-tailnet" }
+codewire-workspace-access = { path = "crates/codewire-workspace-access" }
 codewire-tls = { path = "crates/codewire-tls" }
 codewire-udp-relay = { path = "crates/codewire-udp-relay" }
 codewire-vmm-guest-probe = { path = "crates/codewire-vmm-guest-probe" }

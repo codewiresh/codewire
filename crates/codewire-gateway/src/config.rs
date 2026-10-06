@@ -11,7 +11,7 @@ pub const DEFAULT_SHIM_ADDR: &str = "127.0.0.1:7777";
 pub const DEFAULT_SSH_LISTEN_ADDR: &str = "0.0.0.0:2222";
 pub const DEFAULT_READYZ_LISTEN_ADDR: &str = "0.0.0.0:2223";
 pub const DEFAULT_DOCKER_UPSTREAM_SOCK: &str = "/var/run/docker/docker.sock";
-pub const DEFAULT_HOST_KEY_PATH: &str = "/codewire/gateway/ssh/host_ed25519";
+pub use codewire_workspace_access::host_key::DEFAULT_HOST_KEY_PATH;
 pub const DEFAULT_TAILNET_UDP_LISTEN_ADDR: &str = "0.0.0.0:31000";
 
 pub const SSH_LISTEN_ADDR_ENV: &str = "CODEWIRE_SSH_LISTEN_ADDR";

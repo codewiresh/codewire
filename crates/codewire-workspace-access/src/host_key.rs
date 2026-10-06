@@ -10,7 +10,8 @@ use ssh_key::private::Ed25519Keypair;
 use ssh_key::{Algorithm, LineEnding, PrivateKey};
 use thiserror::Error;
 
-use crate::config::DEFAULT_HOST_KEY_PATH;
+/// The gateway's host-key path. Deleted with the gateway.
+pub const DEFAULT_HOST_KEY_PATH: &str = "/codewire/gateway/ssh/host_ed25519";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostKeySource {

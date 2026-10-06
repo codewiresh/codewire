@@ -18,6 +18,7 @@ members = [
     "crates/codewire-tailnet",
     "crates/codewire-tls",
     "crates/codewire-workload-secrets",
+    "crates/codewire-workspace-access",
 ]
 
 [workspace.package]
@@ -43,6 +44,7 @@ codewire-server-core = { path = "crates/codewire-server-core" }
 codewire-tailnet = { path = "crates/codewire-tailnet" }
 codewire-tls = { path = "crates/codewire-tls" }
 codewire-workload-secrets = { path = "crates/codewire-workload-secrets" }
+codewire-workspace-access = { path = "crates/codewire-workspace-access" }
 
 aes-gcm = "=0.10.3"
 anyhow = "1"
