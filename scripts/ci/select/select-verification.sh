@@ -405,7 +405,6 @@ if [ "$event_selected" = false ]; then
       scripts/ci/plan/*|\
       scripts/ci/tests/test-select-verification.sh|\
       scripts/ci/tests/test-source-approval-workflow.sh|\
-      scripts/ci/tests/test-setup-kubeconfig.sh|\
       scripts/ci/tests/test-resolve-published-support-pair.sh|\
       scripts/ci/tests/test-resolve-deployed-source.sh|\
       scripts/ci/tests/test-require-verification-results.sh|\

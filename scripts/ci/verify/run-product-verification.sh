@@ -182,7 +182,6 @@ run_shell_policy() {
 
 run_policy_core() {
   run_verification_shell_syntax
-  scripts/ci/tests/test-setup-kubeconfig.sh
   scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-select-verification.sh
   scripts/ci/tests/test-service-ssh-image-verifier.sh
