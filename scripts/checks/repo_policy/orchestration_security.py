@@ -249,6 +249,11 @@ WARM_POOL_KIND_TARGETS = ("deployments/k8s/overlays/local-kind", "deployments/k8
 # Kind e2e overlay's side-loaded gateway image (C4). Every other target admits
 # digest-pinned images alone.
 WARM_POOL_LOCAL_IMAGES = {"tests/e2e/kind": ["codewire-gateway:e2e"]}
+# The public roots ConfigMaps a pool template mounts, each only as its ca.crt:
+# orchestration's internal roots everywhere, and the Kind e2e coordinator's
+# extra roots there alone (SANDBOX_COORDINATOR_EXTRA_ROOTS).
+WARM_POOL_ROOTS_CONFIGMAPS = ["codewire-orchestration-internal-roots"]
+WARM_POOL_EXTRA_ROOTS_CONFIGMAPS = {"tests/e2e/kind": ["codewire-coordinator-extra-roots"]}
 
 
 def cel_list(values: tuple[str, ...] | list[str]) -> str:
@@ -311,7 +316,11 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             "c.env.exists_one(e, e.name == 'CODEWIRE_WORKSPACE_POOL_REVISION')",
             "e.value == object.metadata.annotations['codewire.sh/pool-revision']",
             "variables.volumes.all(v, dyn(v).all(k, k in ['name', 'image', 'emptyDir', 'configMap', 'projected'])",
-            "v.configMap.name == 'codewire-credential-gateway-roots'",
+            "v.configMap.name in variables.rootsConfigMaps",
+            "dyn(v.configMap).all(k, k in ['name', 'items', 'defaultMode'])",
+            "has(v.configMap.items) && size(v.configMap.items) == 1",
+            "dyn(v.configMap.items[0]).all(k, k in ['key', 'path'])",
+            "v.configMap.items[0].key == 'ca.crt' && v.configMap.items[0].path == 'ca.crt'",
             "v.projected.sources.all(s, dyn(s).all(k, k == 'serviceAccountToken')",
             "has(s.serviceAccountToken.audience) && s.serviceAccountToken.audience in variables.audiences",
             "variables.pod.serviceAccountName == 'codewire-sandbox'",
@@ -359,6 +368,12 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
                 found = re.search(r"name: runtimeClasses - expression: '?(\[[^\]]*\])'? name: localImages ", normalized)
                 if not found or found.group(1) != cel_list(local):
                     output.append(f"{label}: {policy_name} local images must be exactly {cel_list(local)}, second: "
+                                  f"{found.group(1) if found else None}")
+                # Only the Kind e2e overlay adds its coordinator's roots, third.
+                roots = WARM_POOL_ROOTS_CONFIGMAPS + WARM_POOL_EXTRA_ROOTS_CONFIGMAPS.get(target["path"], [])
+                found = re.search(r"name: localImages - expression: '?(\[[^\]]*\])'? name: rootsConfigMaps ", normalized)
+                if not found or found.group(1) != cel_list(roots):
+                    output.append(f"{label}: {policy_name} roots ConfigMaps must be exactly {cel_list(roots)}, third: "
                                   f"{found.group(1) if found else None}")
         if binding:
             expected = compact(f"spec: policyName: {policy_name} validationActions: - Deny")
@@ -1113,7 +1128,15 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
             (WARM_POOL_TEMPLATE_POLICY, "dyn(e.valueFrom).all(k, k == 'fieldRef')", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "e.valueFrom.fieldRef.fieldPath == 'metadata.uid'", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "'configMap', 'projected'])", "'configMap', 'projected', 'hostPath'])"),
-            (WARM_POOL_TEMPLATE_POLICY, "v.configMap.name == 'codewire-credential-gateway-roots'", "true"),
+            # Only the public roots ConfigMaps, each only as its ca.crt.
+            (WARM_POOL_TEMPLATE_POLICY, "v.configMap.name in variables.rootsConfigMaps", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "dyn(v.configMap).all(k, k in ['name', 'items', 'defaultMode'])", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "size(v.configMap.items) == 1", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "dyn(v.configMap.items[0]).all(k, k in ['key', 'path'])", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "v.configMap.items[0].key == 'ca.crt'", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "v.configMap.items[0].path == 'ca.crt'", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "['codewire-orchestration-internal-roots']",
+             "['codewire-orchestration-internal-roots', 'codewire-credential-broker-roots']"),
             (WARM_POOL_TEMPLATE_POLICY, "dyn(s).all(k, k == 'serviceAccountToken')", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "s.serviceAccountToken.audience in variables.audiences", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "'codewire.internal.credential-workspace.v1']", "'codewire.internal.credential-workspace.v1', 'https://kubernetes.default.svc']"),

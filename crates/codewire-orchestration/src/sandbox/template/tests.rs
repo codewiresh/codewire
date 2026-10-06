@@ -277,7 +277,6 @@ mod tests {
         for absent in [
             "credential-gateway-tls",
             "cw-credential-gateway-",
-            "credential-gateway-roots",
             "CODEWIRE_CREDENTIAL_HTTPS_",
             "CODEWIRE_CREDENTIAL_TLS_",
         ] {

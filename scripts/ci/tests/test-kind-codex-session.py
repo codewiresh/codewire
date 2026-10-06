@@ -121,7 +121,7 @@ class ProjectionTests(unittest.TestCase):
 
     def test_no_legacy_ca_override_fallback(self):
         with codex_home() as home:
-            for value in ("", "/run/codewire-credentials/gateway-roots/ca.crt", "/synthetic/roots"):
+            for value in ("", "/run/codewire-credentials/other-roots/ca.crt", "/synthetic/roots"):
                 with self.subTest(value=value), patch.dict(os.environ, {
                         "CODEX_HOME": str(home),
                         "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex",

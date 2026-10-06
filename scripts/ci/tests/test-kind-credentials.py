@@ -193,7 +193,7 @@ class WorkspaceProbe(unittest.TestCase):
         for mode in ("selected", "unselected"):
             if mode == "unselected":
                 self.unselected()
-            for value in ("", "/run/codewire-credentials/gateway-roots/ca.crt",
+            for value in ("", "/run/codewire-credentials/other-roots/ca.crt",
                           "/synthetic/other-roots"):
                 with self.subTest(mode=mode, value=value), patch.dict(
                         os.environ, {"CODEX_CA_CERTIFICATE": value}):

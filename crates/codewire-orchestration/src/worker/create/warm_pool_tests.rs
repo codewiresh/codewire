@@ -254,3 +254,95 @@ fn warm_pool_matches_golden_files() {
         load_golden("warm-pool-sandboxwarmpool.golden.json")
     );
 }
+
+/// The CEL list literal a policy variable or overlay value carries.
+fn cel_names(literal: &str) -> Vec<String> {
+    literal
+        .trim()
+        .trim_matches('"')
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .map(|name| name.trim().trim_matches('\'').to_owned())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// The template admission policy's volume rule, here for ConfigMaps: a
+/// rendered pool template mounts only the policy's public roots ConfigMaps,
+/// each only as its `ca.crt` (Kind e2e also admits its coordinator's extra
+/// roots). A renderer that mounts another ConfigMap, or more of one, fails
+/// here before a cluster denies every pool.
+#[test]
+fn rendered_pool_templates_pass_the_admission_volume_rule() {
+    let manifests = concat!(env!("CARGO_MANIFEST_DIR"), "/../../");
+    let policy = std::fs::read_to_string(format!(
+        "{manifests}deployments/k8s/orchestration/warm-pool-authz.yaml"
+    ))
+    .unwrap();
+    let base = policy
+        .split_once("- name: rootsConfigMaps\n")
+        .and_then(|(_, rest)| rest.lines().next())
+        .and_then(|line| line.trim().strip_prefix("expression: "))
+        .map(cel_names)
+        .expect("the template policy names its roots ConfigMaps");
+    let kind =
+        std::fs::read_to_string(format!("{manifests}tests/e2e/kind/kustomization.yaml")).unwrap();
+    let kind = kind
+        .split_once("path: /spec/variables/2/expression\n")
+        .and_then(|(_, rest)| rest.lines().next())
+        .and_then(|line| line.trim().strip_prefix("value: "))
+        .map(cel_names)
+        .expect("the Kind e2e overlay names its roots ConfigMaps");
+    assert_eq!(base, ["codewire-orchestration-internal-roots"]);
+    assert_eq!(
+        kind,
+        [
+            "codewire-orchestration-internal-roots",
+            codewire_gateway_proto::COORDINATOR_EXTRA_ROOTS_CONFIGMAP
+        ]
+    );
+    for (cfg, allowed, mounted) in [
+        (dev_cfg(), &base, 1),
+        (
+            SandboxWorkerCfg {
+                coordinator_extra_roots: true,
+                ..dev_cfg()
+            },
+            &kind,
+            2,
+        ),
+    ] {
+        for shape in shapes() {
+            let rendered = render_configured_warm_pool(&cfg, shape, 1).unwrap();
+            let volumes = rendered.template["spec"]["podTemplate"]["spec"]["volumes"]
+                .as_array()
+                .unwrap();
+            let config_maps: Vec<&Value> = volumes
+                .iter()
+                .filter_map(|volume| volume.get("configMap"))
+                .collect();
+            assert_eq!(config_maps.len(), mounted);
+            for config_map in config_maps {
+                let fields = config_map.as_object().unwrap();
+                assert!(
+                    fields
+                        .keys()
+                        .all(|key| ["name", "items", "defaultMode"].contains(&key.as_str())),
+                    "{config_map}"
+                );
+                assert!(
+                    allowed
+                        .iter()
+                        .any(|name| config_map["name"] == name.as_str()),
+                    "the policy refuses ConfigMap {}",
+                    config_map["name"]
+                );
+                assert_eq!(
+                    config_map["items"],
+                    serde_json::json!([{ "key": "ca.crt", "path": "ca.crt" }])
+                );
+            }
+        }
+    }
+}

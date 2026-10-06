@@ -455,8 +455,8 @@ def self_test(base: dict[str, Any]) -> None:
     rejected("environment label", lambda f: f["metadata"].__setitem__("labels", {ENVIRONMENT_LABEL: "env"}))
     rejected("codex ConfigMap", lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append(
         {"name": "credential-codex-config", "configMap": {"name": "cw-credential-codex-env"}}))
-    rejected("gateway roots ConfigMap", lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append(
-        {"name": "credential-gateway-roots", "configMap": {"name": "codewire-credential-gateway-roots"}}))
+    rejected("broker roots ConfigMap", lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append(
+        {"name": "credential-broker-roots", "configMap": {"name": "codewire-credential-broker-roots"}}))
     rejected("client bootstrap init", lambda f: f["spec"]["podTemplate"]["spec"].__setitem__(
         "initContainers", [{"name": "codewire-client-bootstrap", "command": ["sh", "-c", "cp /codewire/codex-bootstrap/config.toml x"]}]))
     rejected("token in DinD", lambda f: next(c for c in f["spec"]["podTemplate"]["spec"]["containers"] if c["name"] == "dind")[
@@ -506,7 +506,7 @@ def self_test(base: dict[str, Any]) -> None:
     rejected("another roots key", lambda f: volume(f, ROOTS_VOLUME)["configMap"].__setitem__(
         "items", [{"key": "ca.crt", "path": "ca.crt"}, {"key": "tls.key", "path": "tls.key"}]))
     rejected("another roots ConfigMap", lambda f: volume(f, ROOTS_VOLUME)["configMap"].__setitem__(
-        "name", "codewire-credential-gateway-roots"))
+        "name", "codewire-credential-broker-roots"))
     rejected("writable roots mode", lambda f: volume(f, ROOTS_VOLUME)["configMap"].__setitem__("defaultMode", 0o666))
     rejected("second roots volume", lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append(copy.deepcopy(EXPECTED_ROOTS_VOLUME)))
     rejected("roots ConfigMap under another name", lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append(

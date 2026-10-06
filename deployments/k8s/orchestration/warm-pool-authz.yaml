@@ -12,8 +12,10 @@
 #   template, holds at most 16 members and replaces stale members (Recreate);
 # - a cw-pool- template is an allowlist: digest-pinned images; the
 #   identity-free workspace and DinD variables only, the Pod UID the only
-#   reference; image, emptyDir, the gateway roots ConfigMap and the two
-#   workspace-audience projected tokens the only volumes; the commodity
+#   reference; image, emptyDir, the public roots ConfigMaps (orchestration's
+#   internal roots; Kind adds its coordinator's extra roots), each mounted
+#   only as its ca.crt, and the two workspace-audience projected tokens the
+#   only volumes; the commodity
 #   runtime (Kind overlays add their diagnostic runtimes); no host namespace,
 #   host alias or node pin; its revision in the workspace container's
 #   immutable environment; no environment identity label; and no ingress
@@ -120,6 +122,11 @@ spec:
     # deployed cluster admits only digest-pinned images.
     - name: localImages
       expression: "[]"
+    # The public roots ConfigMaps a workspace mounts, each only as its ca.crt.
+    # The Kind e2e overlay replaces this third variable to add its
+    # coordinator's extra roots; keep it third.
+    - name: rootsConfigMaps
+      expression: "['codewire-orchestration-internal-roots']"
     - name: pod
       expression: object.spec.podTemplate.spec
     - name: containers
@@ -184,11 +191,15 @@ spec:
       message: a warm-pool workspace binds through the workspace binding listener and carries its pool revision in its immutable Pod spec
     - expression: >-
         variables.volumes.all(v, dyn(v).all(k, k in ['name', 'image', 'emptyDir', 'configMap', 'projected']) &&
-        (!has(v.configMap) || (has(v.configMap.name) && v.configMap.name == 'codewire-credential-gateway-roots')) &&
+        (!has(v.configMap) || (has(v.configMap.name) && v.configMap.name in variables.rootsConfigMaps &&
+        dyn(v.configMap).all(k, k in ['name', 'items', 'defaultMode']) &&
+        has(v.configMap.items) && size(v.configMap.items) == 1 &&
+        dyn(v.configMap.items[0]).all(k, k in ['key', 'path']) &&
+        v.configMap.items[0].key == 'ca.crt' && v.configMap.items[0].path == 'ca.crt')) &&
         (!has(v.projected) || (has(v.projected.sources) && v.projected.sources.all(s,
         dyn(s).all(k, k == 'serviceAccountToken') &&
         has(s.serviceAccountToken.audience) && s.serviceAccountToken.audience in variables.audiences))))
-      message: a warm-pool template mounts only images, emptyDirs, the gateway roots ConfigMap and workspace-audience projected tokens
+      message: a warm-pool template mounts only images, emptyDirs, the public roots ConfigMaps (only their ca.crt) and workspace-audience projected tokens
     - expression: >-
         has(variables.pod.serviceAccountName) &&
         variables.pod.serviceAccountName == 'codewire-sandbox' &&
