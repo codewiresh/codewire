@@ -1285,8 +1285,141 @@ esac
         std::process::exit(match role.as_str() {
             "driver" => driver_role(serde_json::from_str(&spec).unwrap()),
             "guardian" => guardian_role(serde_json::from_str(&spec).unwrap()),
+            "fixture" => orphan_fixture_role(serde_json::from_str(&spec).unwrap()),
             _ => 2,
         });
+    }
+
+    fn join_fixture_children(deadline: Instant) -> bool {
+        loop {
+            let mut status = 0;
+            // SAFETY: only the isolated single-case fixture is a subreaper.
+            // This joins its children without signaling or stealing another
+            // parallel test's child status.
+            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG | libc::__WALL) };
+            if pid > 0 {
+                continue;
+            }
+            if pid < 0 {
+                match io::Error::last_os_error().raw_os_error() {
+                    Some(libc::ECHILD) => return true,
+                    Some(libc::EINTR) => continue,
+                    error => panic!("fixture child join failed: {error:?}"),
+                }
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn orphan_fixture_role(case: String) -> i32 {
+        prctl_set(libc::PR_SET_CHILD_SUBREAPER, 1).unwrap();
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG | libc::__WALL) },
+            -1,
+            "fixture must start without children"
+        );
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        let result = std::panic::catch_unwind(|| match case.as_str() {
+            "driver_sigkill_leaves_the_guardian_to_reap_a_detached_term_resistant_family" => {
+                driver_sigkill_leaves_the_guardian_to_reap_a_detached_term_resistant_family();
+            }
+            "member_host_driver_group_sigkill_preserves_guardian_until_exact_family_echild" => {
+                member_host_driver_group_sigkill_preserves_guardian_until_exact_family_echild();
+            }
+            "guardian_sigkill_kills_the_provider_by_parent_death_and_leaves_custody_unknown" => {
+                guardian_sigkill_kills_the_provider_by_parent_death_and_leaves_custody_unknown();
+            }
+            _ => panic!("unknown orphan fixture case"),
+        });
+        // The original RAII guards have dropped, including on panic. Require
+        // actual ECHILD without a cleanup signal or a successful salvage path.
+        let joined = join_fixture_children(Instant::now() + WAIT);
+        if result.is_ok() && joined { 0 } else { 1 }
+    }
+
+    fn in_orphan_fixture(case: &str) -> bool {
+        if std::env::var(ROLE_ENV).as_deref() == Ok("fixture") {
+            assert_eq!(
+                serde_json::from_str::<String>(&std::env::var(SPEC_ENV).unwrap()).unwrap(),
+                case
+            );
+            return true;
+        }
+        let mut command = role("fixture", &case);
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        let mut process = DriverProcess(command.spawn().unwrap());
+        let deadline = Instant::now() + WAIT * 3;
+        let status = loop {
+            if let Some(status) = process.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "isolated fixture exceeded its bound"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            status.success(),
+            "isolated fixture failed: {case}: {status}"
+        );
+        false
+    }
+
+    struct AdoptedProcess {
+        pid: u32,
+        ticks: u64,
+        pidfd: OwnedFd,
+    }
+
+    impl AdoptedProcess {
+        fn capture(pid: u32, ticks: u64) -> Self {
+            let pidfd = pidfd_open(pid).unwrap();
+            assert!(alive(pid, ticks), "fixture birth changed before capture");
+            Self { pid, ticks, pidfd }
+        }
+
+        fn reap(&self) -> Option<i32> {
+            let birth =
+                process_stat(self.pid).expect("held fixture process disappeared before reap");
+            assert_eq!(
+                birth.start_ticks, self.ticks,
+                "fixture process birth changed"
+            );
+            if birth.ppid != std::process::id() {
+                return None;
+            }
+            let mut terminal = libc::pollfd {
+                fd: self.pidfd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: this is a held pidfd for the captured exact birth.
+            let ready = unsafe { libc::poll(&mut terminal, 1, 0) };
+            assert!(ready >= 0);
+            if ready == 0 {
+                return None;
+            }
+            assert_ne!(terminal.revents & libc::POLLIN, 0);
+            let mut status = 0;
+            // The captured birth is now this isolated fixture's unreaped
+            // child. No other thread reaps it or launches a replacement.
+            let reaped = unsafe {
+                libc::waitpid(self.pid as i32, &mut status, libc::WNOHANG | libc::__WALL)
+            };
+            assert_eq!(
+                reaped, self.pid as i32,
+                "exact adopted child was not reaped"
+            );
+            Some(status)
+        }
     }
 
     fn role(role: &str, spec: &impl serde::Serialize) -> Command {
@@ -1754,6 +1887,11 @@ esac
 
     #[test]
     fn driver_sigkill_leaves_the_guardian_to_reap_a_detached_term_resistant_family() {
+        if !in_orphan_fixture(
+            "driver_sigkill_leaves_the_guardian_to_reap_a_detached_term_resistant_family",
+        ) {
+            return;
+        }
         let fixture = fixture();
         let mut sentinel = Sentinel::spawn();
         let spec = fixture.spec(&["provider", "hold"]);
@@ -1764,6 +1902,7 @@ esac
             receipt.guardian_pid.unwrap(),
             receipt.guardian_start_ticks.unwrap(),
         );
+        let guardian_process = AdoptedProcess::capture(guardian.0, guardian.1);
         leftovers.0.push(guardian);
         assert_eq!(receipt.provider_pid, Some(family[0].1));
         assert!(receipt.cleanup_unknown && receipt.finished_at.is_none());
@@ -1781,6 +1920,11 @@ esac
         assert_eq!(receipt.exit_code, Some(128 + libc::SIGTERM));
         assert_eq!(receipt.error, None);
         assert_family_gone(&fixture, &family);
+        let status = fixture.wait_for("adopted guardian reap", || guardian_process.reap());
+        assert_eq!(
+            std::process::ExitStatus::from_raw(status).code(),
+            Some(128 + libc::SIGTERM)
+        );
         fixture.wait_for("guardian exit", || {
             (!alive(guardian.0, guardian.1)).then_some(())
         });
@@ -1798,6 +1942,11 @@ esac
 
     #[test]
     fn member_host_driver_group_sigkill_preserves_guardian_until_exact_family_echild() {
+        if !in_orphan_fixture(
+            "member_host_driver_group_sigkill_preserves_guardian_until_exact_family_echild",
+        ) {
+            return;
+        }
         let mut fixture = fixture();
         fixture.session_id = format!("session-{}", fixture.driver_id);
         // Synthetic target-owned origin, not a claim of authenticated network
@@ -1818,6 +1967,7 @@ esac
             receipt.guardian_pid.unwrap(),
             receipt.guardian_start_ticks.unwrap(),
         );
+        let guardian_process = AdoptedProcess::capture(guardian.0, guardian.1);
         leftovers.0.push(guardian);
         assert_eq!(
             unsafe { libc::getpgid(driver.0.id() as i32) },
@@ -1843,6 +1993,11 @@ esac
         assert_eq!(receipt.error, None);
         assert_eq!(receipt.exit_code, Some(128 + libc::SIGTERM));
         assert_family_gone(&fixture, &family);
+        let status = fixture.wait_for("adopted member guardian reap", || guardian_process.reap());
+        assert_eq!(
+            std::process::ExitStatus::from_raw(status).code(),
+            Some(128 + libc::SIGTERM)
+        );
         fixture.wait_for("member guardian exit", || {
             (!alive(guardian.0, guardian.1)).then_some(())
         });
@@ -1945,6 +2100,11 @@ esac
 
     #[test]
     fn guardian_sigkill_kills_the_provider_by_parent_death_and_leaves_custody_unknown() {
+        if !in_orphan_fixture(
+            "guardian_sigkill_kills_the_provider_by_parent_death_and_leaves_custody_unknown",
+        ) {
+            return;
+        }
         let fixture = fixture();
         let spec = fixture.spec(&["provider", "hold"]);
         let (_driver, identity, family, mut leftovers) = launched(&fixture, &spec);
@@ -1955,13 +2115,19 @@ esac
             receipt.guardian_start_ticks.unwrap(),
         );
         leftovers.0.push(guardian);
+        let (_, provider, ticks) = family[0];
+        let provider_process = AdoptedProcess::capture(provider, ticks);
         // Only this test kills a guardian. Adopted tools then escape custody
         // (the leftovers guard removes them); the receipt must say unknown.
         let process = pidfd_open(guardian.0).unwrap();
         assert!(alive(guardian.0, guardian.1));
         pidfd_signal(&process, libc::SIGKILL).unwrap();
         assert_eq!(fixture.guardian_status(), "signal 9");
-        let (_, provider, ticks) = family[0];
+        let status = fixture.wait_for("adopted provider reap", || provider_process.reap());
+        assert_eq!(
+            std::process::ExitStatus::from_raw(status).signal(),
+            Some(libc::SIGKILL)
+        );
         fixture.wait_for("provider parent-death signal", || {
             (!alive(provider, ticks)).then_some(())
         });

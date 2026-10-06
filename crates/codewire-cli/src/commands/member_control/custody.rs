@@ -269,15 +269,58 @@ mod kernel_tests {
     use std::os::unix::fs::PermissionsExt;
     #[tokio::test]
     async fn member_socket_pidfd_is_cloexec_same_birth_and_replaced_socket_refuses() {
+        struct SocketOwner(std::process::Child);
+        impl Drop for SocketOwner {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                self.0.wait().expect("reap the exact socket-owner child");
+            }
+        }
         let temp = tempfile::tempdir().unwrap();
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let socket = temp.path().join("owner.sock");
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
-        let (_accepted, _) = listener.accept().await.unwrap();
+        // Use a bounded native ELF for this kernel-only witness. A debug
+        // libtest image can exceed the unchanged production executable cap.
+        let mut owner = SocketOwner(
+            std::process::Command::new("/usr/bin/python3")
+                .args([
+                    "-I",
+                    "-B",
+                    "-c",
+                    "import os, socket, sys; os.umask(0o077); s = socket.socket(socket.AF_UNIX); \
+                     s.bind(sys.argv[1]); s.listen(1); os.chmod(sys.argv[1], 0o600); \
+                     c, _ = s.accept(); c.recv(1)",
+                ])
+                .arg(&socket)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            assert!(owner.0.try_wait().unwrap().is_none(), "socket owner exited");
+            if std::fs::symlink_metadata(&socket)
+                .is_ok_and(|meta| meta.file_type().is_socket() && meta.mode() & 0o7777 == 0o600)
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "socket owner not ready"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let stream = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::net::UnixStream::connect(&socket),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let (pidfd, pid) = socket_pidfd(&stream).unwrap();
-        assert_eq!(pid, std::process::id());
+        assert_eq!(pid, owner.0.id());
         assert_ne!(
             unsafe { libc::fcntl(pidfd.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
             0
@@ -287,11 +330,12 @@ mod kernel_tests {
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(format!("/proc/{pid}"))
             .unwrap();
-        let executable = ExecutableIdentity::admit(&std::env::current_exe().unwrap()).unwrap();
+        let image = std::fs::read_link(format!("/proc/{pid}/exe")).unwrap();
+        let executable = ExecutableIdentity::admit(&image).unwrap();
         let argv = proc_read(&proc, "cmdline", 16 * 1024).unwrap();
         let meta = std::fs::symlink_metadata(&socket).unwrap();
-        // This is a real kernel pin/image witness using this test ELF, not
-        // genuine cw role/provenance or host product acceptance.
+        // This is a real kernel pin/image witness, not genuine cw
+        // role/provenance or host product acceptance.
         let pin = OwnerPin {
             birth: birth(&proc).unwrap(),
             boot: boot().unwrap(),
@@ -309,7 +353,6 @@ mod kernel_tests {
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(pin.validate().is_err());
         drop(replacement);
-        drop(listener);
     }
     #[tokio::test]
     async fn member_private_connector_refuses_a_wrong_role_without_owner_effects() {

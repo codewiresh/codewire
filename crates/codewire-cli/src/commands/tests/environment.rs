@@ -6,7 +6,7 @@ fn short_env_id_does_not_panic_on_non_ascii_refs() {
 #[cfg(target_os = "linux")]
 #[test]
 fn native_delete_replacement_persists_an_existing_or_unselected_target_without_stale_identity() {
-    let data = tempfile::tempdir().unwrap();
+    let data = private_mesh_data_fixture();
     config::save_current_target(
         data.path(),
         &config::CurrentTargetConfig {

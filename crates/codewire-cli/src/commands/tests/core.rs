@@ -1,3 +1,16 @@
+fn private_mesh_data_fixture() -> tempfile::TempDir {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap()
+    }
+    #[cfg(not(unix))]
+    tempfile::tempdir().unwrap()
+}
+
 #[test]
 fn member_mutation_flags_require_member_on_shared_session_commands() {
     for command in ["stop", "restart", "interrupt", "inbox"] {
