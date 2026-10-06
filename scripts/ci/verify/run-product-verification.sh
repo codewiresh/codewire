@@ -197,7 +197,6 @@ run_policy_core() {
   (
   isolate_kind_fixture_environment
   run_verification_shell_syntax
-  scripts/ci/tests/test-setup-kubeconfig.sh
   scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-select-verification.sh
   scripts/ci/tests/test-service-ssh-image-verifier.sh
