@@ -240,6 +240,23 @@ replacements:
         options:
           delimiter: "."
           index: 1
+  - source:
+      group: cert-manager.io
+      version: v1
+      kind: Certificate
+      name: codewire-orchestration-internal
+      fieldPath: metadata.namespace
+    targets:
+      - select:
+          group: cert-manager.io
+          version: v1
+          kind: Certificate
+          name: codewire-orchestration-internal
+        fieldPaths:
+          - spec.dnsNames.0
+        options:
+          delimiter: "."
+          index: 1
 
 transformers:
   - |-

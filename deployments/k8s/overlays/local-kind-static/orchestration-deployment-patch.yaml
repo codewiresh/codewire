@@ -16,8 +16,14 @@
   value:
     - name: ORCHESTRATION_PORT
       value: "8084"
-    - name: ORCHESTRATION_INTERNAL_CONNECT_PORT
-      value: "8085"
+    # TLS-only internal listener; scripts/dev/kind/local-internal-tls.sh
+    # provisions the mounted leaf and its roots on this cluster.
+    - name: ORCHESTRATION_INTERNAL_TLS_PORT
+      value: "8088"
+    - name: ORCHESTRATION_INTERNAL_TLS_CERT_FILE
+      value: /run/codewire-orchestration-internal-tls/tls.crt
+    - name: ORCHESTRATION_INTERNAL_TLS_KEY_FILE
+      value: /run/codewire-orchestration-internal-tls/tls.key
     - name: ORCHESTRATION_WORKSPACE_BINDING_PORT
       value: "8087"
     - name: POD_NAMESPACE

@@ -1,5 +1,5 @@
 {
-  "$comment": "Connect service -> binary ownership map (docs/plans/connect-rpc/03, D5). The single checked-in source both the edge rules and scripts/checks/repo_checks.py connect-edge-routing read. Every Connect service declared under proto/codewire/** must appear in exactly one of 'owners', 'pending', or 'unrouted'. Owner values: 'credential-service' (explicit public OAuth mutation and owner-delegation APIs -> isolated :8086 authority in all six edge files; private TLS broker remains unrouted), 'orchestration' (reached through the /codewire. fallback unless named in 'explicit'; must never appear in another binary's rule), 'billing' (needs an explicit billing-targeted rule in all six edge files), 'mesh' (needs an explicit :18090 Mesh rule in both Caddy files and the topology-specific Kubernetes Service named by 'mesh_kubernetes_backends'), 'coordinator' (needs an explicit :8090/codewire-coordinator rule plus h2c/GRPC/3600 shape in all six files), 'testing' (the D8 probe: never routed in Caddyfiles/base, explicit proof rules in the kind/local manifests only). 'explicit' records services whose per-Service matcher is required. 'pending' lists services whose proto has merged but whose serving/edge wiring has not. 'unrouted' is the closed cluster-local listener exception: its record fixes binary, listener, and Service port and is rejected if it gains a public edge matcher or public-listener mount. Two listener classes exist: internal-connect (8085, gateway binding and Mesh authorization) and workspace-binding (8087, reachable from tenant workloads, carrying only WorkspaceBindingService).",
+  "$comment": "Connect service -> binary ownership map (docs/plans/connect-rpc/03, D5). The single checked-in source both the edge rules and scripts/checks/repo_checks.py connect-edge-routing read. Every Connect service declared under proto/codewire/** must appear in exactly one of 'owners', 'pending', or 'unrouted'. Owner values: 'credential-service' (explicit public OAuth mutation and owner-delegation APIs -> isolated :8086 authority in all six edge files; private TLS broker remains unrouted), 'orchestration' (reached through the /codewire. fallback unless named in 'explicit'; must never appear in another binary's rule), 'billing' (needs an explicit billing-targeted rule in all six edge files), 'mesh' (needs an explicit :18090 Mesh rule in both Caddy files and the topology-specific Kubernetes Service named by 'mesh_kubernetes_backends'), 'coordinator' (needs an explicit :8090/codewire-coordinator rule plus h2c/GRPC/3600 shape in all six files), 'testing' (the D8 probe: never routed in Caddyfiles/base, explicit proof rules in the kind/local manifests only). 'explicit' records services whose per-Service matcher is required. 'pending' lists services whose proto has merged but whose serving/edge wiring has not. 'unrouted' is the closed cluster-local listener exception: its record fixes binary, listener, and Service port and is rejected if it gains a public edge matcher or public-listener mount. Two listener classes exist: internal-connect (8088, TLS-only, gateway binding and Mesh authorization) and workspace-binding (8087, reachable from tenant workloads, carrying only WorkspaceBindingService).",
   "owners": {
     "codewire.admin.v1.AdminService": "orchestration",
     "codewire.admin.v1.BillingCatalogService": "billing",
@@ -56,12 +56,12 @@
     "codewire.internal.v1.GatewayBindingService": {
       "binary": "orchestration",
       "listener": "internal-connect",
-      "port": 8085
+      "port": 8088
     },
     "codewire.internal.v1.MeshAuthorizationService": {
       "binary": "orchestration",
       "listener": "internal-connect",
-      "port": 8085
+      "port": 8088
     },
     "codewire.internal.v1.WorkspaceBindingService": {
       "binary": "orchestration",

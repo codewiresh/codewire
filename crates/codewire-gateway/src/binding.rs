@@ -8,7 +8,8 @@ use codewire_proto::codewire::internal::v1::{
     GatewayBindingServiceClient, IssueGatewayBindingRequest, IssueGatewayDaemonCredentialRequest,
     PeerRelayTransport as ProtoPeerRelayTransport, RuntimeTransport as ProtoRuntimeTransport,
 };
-use connectrpc::client::{CallOptions, ClientConfig, HttpClient};
+use codewire_tls::ConnectOriginTransport;
+use connectrpc::client::{CallOptions, ClientConfig};
 use connectrpc::{ConnectError, ErrorCode};
 use http::HeaderValue;
 use http::header::AUTHORIZATION;
@@ -29,6 +30,8 @@ pub struct BindingPollConfig {
     pub binding_url: String,
     pub coordinator_url: String,
     binding_token_path: PathBuf,
+    /// Public roots verifying the https binding URL, reread for every call.
+    binding_tls_roots: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +76,8 @@ pub struct EndpointList {
 pub enum BindingError {
     #[error("parse gateway binding Connect base URL: {0}")]
     BaseUrl(#[from] http::uri::InvalidUri),
+    #[error("gateway binding transport: {0}")]
+    Transport(#[from] codewire_tls::TlsError),
     #[error("poll gateway binding: {0}")]
     Connect(#[from] ConnectError),
     #[error("parse binding environment_id: {0}")]
@@ -124,24 +129,28 @@ impl BindingPollConfig {
             binding_url,
             coordinator_url: coordinator_url.into(),
             binding_token_path: PathBuf::from(GATEWAY_BINDING_TOKEN_PATH),
+            binding_tls_roots: config.binding_tls_roots_file.clone()?,
         })
     }
 
     /// A binding configuration whose projected token lives at `token_path`.
     #[cfg(test)]
-    pub(crate) fn for_test(binding_url: String, token_path: PathBuf) -> Self {
+    pub(crate) fn for_test(binding_url: String, token_path: PathBuf, roots: PathBuf) -> Self {
         Self {
             binding_url,
             coordinator_url: "http://coordinator:8080".into(),
             binding_token_path: token_path,
+            binding_tls_roots: roots,
         }
     }
 
-    pub(crate) fn client(&self) -> Result<GatewayBindingServiceClient<HttpClient>, BindingError> {
+    pub(crate) fn client(
+        &self,
+    ) -> Result<GatewayBindingServiceClient<ConnectOriginTransport>, BindingError> {
         let config = ClientConfig::new(self.binding_url.parse()?)
             .with_default_timeout(Duration::from_secs(5));
         Ok(GatewayBindingServiceClient::new(
-            HttpClient::plaintext(),
+            ConnectOriginTransport::for_origin(&self.binding_url, &self.binding_tls_roots)?,
             config,
         ))
     }
@@ -176,7 +185,7 @@ pub async fn poll_binding_until_ready(
 }
 
 pub async fn poll_binding_once(
-    client: &GatewayBindingServiceClient<HttpClient>,
+    client: &GatewayBindingServiceClient<ConnectOriginTransport>,
     config: &BindingPollConfig,
 ) -> Result<Option<BindingPollResult>, BindingError> {
     let token = read_binding_token(&config.binding_token_path).await?;
@@ -186,7 +195,10 @@ pub async fn poll_binding_once(
         .await
     {
         Ok(binding) => binding.into_owned(),
-        Err(error) if binding_not_ready(&error) => return Ok(None),
+        Err(error) if binding_not_ready(&error) => {
+            warn_unavailable(&error);
+            return Ok(None);
+        }
         Err(error) => return Err(BindingError::Connect(error)),
     };
     let environment_id = Uuid::parse_str(&binding.environment_id)
@@ -215,7 +227,7 @@ pub async fn poll_binding_once(
 /// no workspace binding is recorded (`not_found`) or the listener is
 /// unavailable. The projected token is reread on every call.
 pub async fn fetch_daemon_credential_once(
-    client: &GatewayBindingServiceClient<HttpClient>,
+    client: &GatewayBindingServiceClient<ConnectOriginTransport>,
     config: &BindingPollConfig,
 ) -> Result<Option<IssuedDaemonCredential>, BindingError> {
     let token = read_binding_token(&config.binding_token_path).await?;
@@ -229,7 +241,10 @@ pub async fn fetch_daemon_credential_once(
         .await
     {
         Ok(response) => response.into_owned(),
-        Err(error) if binding_not_ready(&error) => return Ok(None),
+        Err(error) if binding_not_ready(&error) => {
+            warn_unavailable(&error);
+            return Ok(None);
+        }
         Err(error) => return Err(BindingError::Connect(error)),
     };
     let credential = Zeroizing::new(std::mem::take(&mut response.daemon_credential));
@@ -283,6 +298,39 @@ fn binding_call_options(token: &str) -> Result<CallOptions, BindingError> {
 
 fn binding_not_ready(error: &ConnectError) -> bool {
     matches!(error.code, ErrorCode::NotFound | ErrorCode::Unavailable)
+}
+
+const UNAVAILABLE_WARN_INTERVAL: Duration = Duration::from_secs(30);
+static LAST_UNAVAILABLE_WARNING: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+/// `unavailable` is retried like `not_found`, but it is also how an
+/// unreachable orchestration, a refused TLS handshake and unusable mounted
+/// roots surface, so it is reported at most once per interval instead of being
+/// retried silently. The error carries a class, never a credential or path.
+fn warn_unavailable(error: &ConnectError) {
+    if error.code != ErrorCode::Unavailable {
+        return;
+    }
+    let mut last = LAST_UNAVAILABLE_WARNING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !warn_due(&mut last, std::time::Instant::now()) {
+        return;
+    }
+    drop(last);
+    tracing::warn!(
+        error = %error,
+        "gateway binding call unavailable; retrying (orchestration unreachable, or its internal TLS listener or trust refused)"
+    );
+}
+
+fn warn_due(last: &mut Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    if last.is_some_and(|warned| now.duration_since(warned) < UNAVAILABLE_WARN_INTERVAL) {
+        return false;
+    }
+    *last = Some(now);
+    true
 }
 
 impl From<ProtoRuntimeTransport> for RuntimeTransportBinding {
@@ -364,6 +412,7 @@ mod tests {
         IssueGatewayDaemonCredentialResponse, PeerRelayTransport as ProtoPeerRelayTransport,
         RuntimeTransport as ProtoRuntimeTransport,
     };
+    use codewire_tls::test_support::SyntheticPki;
     use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
@@ -380,6 +429,8 @@ mod tests {
             listener_self_check_interval: None,
             api_url: api_url.map(str::to_string),
             binding_url: binding_url.map(str::to_string),
+            binding_tls_roots_file: binding_url
+                .map(|_| PathBuf::from("/run/codewire-orchestration-internal-roots/ca.crt")),
             coordinator_url: Some("http://coordinator:8080".into()),
             daemon_auth_token: Some(DaemonAuthToken::new("gateway-binding-test-token").unwrap()),
             derp_url: None,
@@ -397,7 +448,12 @@ mod tests {
         }
     }
 
-    fn binding_config(binding_url: String) -> (BindingPollConfig, TempDir) {
+    /// A served binding: its https URL and the synthetic PKI that verifies it.
+    type ServedBinding = (String, SyntheticPki);
+
+    fn binding_config(
+        (binding_url, pki): ServedBinding,
+    ) -> (BindingPollConfig, (TempDir, SyntheticPki)) {
         let directory = tempfile::tempdir().unwrap();
         let binding_token_path = directory.path().join("token");
         std::fs::write(&binding_token_path, SYNTHETIC_BINDING_TOKEN).unwrap();
@@ -406,8 +462,9 @@ mod tests {
                 binding_url,
                 coordinator_url: "http://coordinator:8080".into(),
                 binding_token_path,
+                binding_tls_roots: pki.roots.clone(),
             },
-            directory,
+            (directory, pki),
         )
     }
 
@@ -496,15 +553,58 @@ mod tests {
         }
     }
 
-    async fn start_binding_service(service: Arc<impl GatewayBindingService>) -> String {
+    /// The binding service behind a synthetic TLS listener for `localhost`.
+    async fn start_binding_service(service: Arc<impl GatewayBindingService>) -> ServedBinding {
+        let pki = SyntheticPki::new("localhost");
         let connect = connectrpc::Router::new().add_service(service);
         let app = Router::new().fallback_service(connect.into_axum_service());
+        let address = pki.serve(app).await;
+        (format!("https://localhost:{}", address.port()), pki)
+    }
+
+    #[tokio::test]
+    async fn binding_verifies_orchestration_with_the_mounted_roots_on_every_call() {
+        let (config, _fixture) =
+            binding_config(start_binding_service(Arc::new(ReadyBindingService)).await);
+        let client = config.client().unwrap();
+        let binding = poll_binding_once(&client, &config).await.unwrap().unwrap();
+        assert_eq!(binding.tailnet.gateway_token, "test-token");
+
+        // Roots of another authority refuse the same listener on the next
+        // call. Like an unreachable orchestration, that is not a binding, and
+        // polling continues with a rate-limited warning.
+        let other = SyntheticPki::new("localhost");
+        std::fs::copy(&other.roots, &config.binding_tls_roots).unwrap();
+        assert!(matches!(
+            poll_binding_once(&client, &config).await,
+            Ok(None)
+        ));
+    }
+
+    #[tokio::test]
+    async fn binding_never_speaks_plaintext() {
+        let pki = SyntheticPki::new("localhost");
+        let connect = connectrpc::Router::new().add_service(Arc::new(ReadyBindingService));
+        let app = Router::new().fallback_service(connect.into_axum_service());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        format!("http://{addr}")
+        // An https client against a plaintext listener gets no binding.
+        let (config, _fixture) = binding_config((format!("https://localhost:{port}"), pki));
+        let client = config.client().unwrap();
+        assert!(matches!(
+            poll_binding_once(&client, &config).await,
+            Ok(None)
+        ));
+        // And an http binding URL is not a usable client at all.
+        let mut plaintext = config.clone();
+        plaintext.binding_url = format!("http://localhost:{port}");
+        assert!(matches!(
+            plaintext.client(),
+            Err(BindingError::Transport(_))
+        ));
     }
 
     #[test]
@@ -518,7 +618,7 @@ mod tests {
     fn from_gateway_config_uses_explicit_binding_url() {
         let config = gateway_config(
             Some("https://codewire.example"),
-            Some("http://codewire-orchestration.dev.svc.cluster.local:8085"),
+            Some("https://codewire-orchestration.dev.svc.cluster.local:8088"),
         );
 
         let poll =
@@ -526,7 +626,11 @@ mod tests {
 
         assert_eq!(
             poll.binding_url,
-            "http://codewire-orchestration.dev.svc.cluster.local:8085"
+            "https://codewire-orchestration.dev.svc.cluster.local:8088"
+        );
+        assert_eq!(
+            poll.binding_tls_roots,
+            PathBuf::from("/run/codewire-orchestration-internal-roots/ca.crt")
         );
         assert_eq!(
             poll.binding_token_path,
@@ -587,7 +691,7 @@ mod tests {
     fn runtime_transport_binding_overlays_peer_relay_gateway_config() {
         let mut config = gateway_config(
             None,
-            Some("http://codewire-orchestration.dev.svc.cluster.local:8085"),
+            Some("https://codewire-orchestration.dev.svc.cluster.local:8088"),
         );
         let runtime_transport = RuntimeTransportBinding {
             runtime_region: "dev-eu".into(),
@@ -629,6 +733,19 @@ mod tests {
             binding_config(start_binding_service(Arc::new(NotReadyBindingService)).await);
         let client = config.client().unwrap();
         assert!(poll_binding_once(&client, &config).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn unavailable_warnings_are_rate_limited() {
+        let start = std::time::Instant::now();
+        let mut last = None;
+        assert!(warn_due(&mut last, start));
+        assert!(!warn_due(&mut last, start + Duration::from_secs(29)));
+        assert!(warn_due(&mut last, start + UNAVAILABLE_WARN_INTERVAL));
+        assert!(!warn_due(
+            &mut last,
+            start + UNAVAILABLE_WARN_INTERVAL + Duration::from_secs(1)
+        ));
     }
 
     #[test]
@@ -757,7 +874,11 @@ mod tests {
 
     async fn daemon_credential_fixture(
         answers: Vec<Result<(String, String), ErrorCode>>,
-    ) -> (BindingPollConfig, Arc<Mutex<Vec<String>>>, TempDir) {
+    ) -> (
+        BindingPollConfig,
+        Arc<Mutex<Vec<String>>>,
+        (TempDir, SyntheticPki),
+    ) {
         let authorizations = Arc::new(Mutex::new(Vec::new()));
         let url = start_binding_service(Arc::new(DaemonCredentialService {
             answers: Mutex::new(answers),

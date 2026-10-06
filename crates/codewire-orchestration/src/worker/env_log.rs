@@ -37,7 +37,9 @@ pub fn env_phase_label(phase: &str) -> &str {
 /// timing rows (the `pod_*` start marks) are deliberately not checkpoints:
 /// they describe how long a start took, not a lifecycle transition.
 pub fn should_record_worker_checkpoint(phase: &str, status: &str) -> bool {
-    if status == "warning" {
+    // `progress` rows are transient telemetry inside a running stage
+    // (A5a contract v1), never a lifecycle transition.
+    if status == "warning" || status == "progress" {
         return false;
     }
     matches!(
@@ -60,6 +62,17 @@ pub fn should_record_worker_checkpoint(phase: &str, status: &str) -> bool {
             | "register_ports"
             | "complete"
     )
+}
+
+/// A row scoped to one repository (`repo_index`) nests under its phase-level
+/// row and is not a checkpoint of its own: the phase-level row is.
+fn records_worker_checkpoint(
+    phase: &str,
+    status: &str,
+    metadata: Option<&serde_json::Value>,
+) -> bool {
+    should_record_worker_checkpoint(phase, status)
+        && metadata.is_none_or(|metadata| metadata.get("repo_index").is_none())
 }
 
 /// Mirrors `environmentlifecycle.JournalEntry`.
@@ -142,7 +155,7 @@ pub async fn emit_environment_log(
         return;
     }
 
-    if should_record_worker_checkpoint(phase, status) {
+    if records_worker_checkpoint(phase, status, metadata.as_ref()) {
         let mut entry = JournalEntry {
             kind: "checkpoint".into(),
             actor: "worker".into(),
@@ -256,7 +269,7 @@ pub(crate) async fn emit_environment_log_in_transaction(
     .execute(&mut **tx)
     .await?;
 
-    if should_record_worker_checkpoint(phase, status) {
+    if records_worker_checkpoint(phase, status, metadata.as_ref()) {
         let mut kind = "checkpoint";
         let mut actor = "worker";
         if phase == "reconcile_enqueue" {
@@ -301,6 +314,18 @@ mod tests {
             "started"
         ));
         assert!(!should_record_worker_checkpoint("health_check", "warning"));
+        assert!(!should_record_worker_checkpoint("git_clone", "progress"));
+        assert!(records_worker_checkpoint("git_clone", "started", None));
+        assert!(records_worker_checkpoint(
+            "git_clone",
+            "completed",
+            Some(&serde_json::json!({"duration_ms": 5}))
+        ));
+        assert!(!records_worker_checkpoint(
+            "git_clone",
+            "completed",
+            Some(&serde_json::json!({"repo_index": 1, "repo_count": 2}))
+        ));
         assert!(!should_record_worker_checkpoint("ssh_public_key", "info"));
         assert!(!should_record_worker_checkpoint(
             "unknown_phase",

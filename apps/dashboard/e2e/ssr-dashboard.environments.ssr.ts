@@ -759,7 +759,8 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator("[data-app-port-row]")).toHaveCount(0);
     await expect(page.locator('[name="application_previews_explicit"]')).toHaveValue("true");
     await page.getByRole("button", { name: "Create Sandbox" }).click();
-    await expect(page).toHaveURL(`${ssrUrl}/${slug}/?message=environment-created`);
+    // Create lands on the new Sandbox's page, where its setup stages stream.
+    await expect(page).toHaveURL(new RegExp(`^${ssrUrl}/${slug}/[0-9a-f-]{36}/\\?message=environment-created$`));
     const [created] = await sql`
       SELECT id, preset_id, project_spec FROM environments
       WHERE org_id = ${orgId} AND name = ${name}
@@ -784,7 +785,7 @@ test.describe.serial("server-rendered environments", () => {
     expect(routes.count).toBe(0);
     // Restore the live rail and release resources before the following
     // lifecycle/visual fixture; afterAll remains the failure-path cleanup.
-    await page.reload();
+    await page.goto(`${ssrUrl}/${slug}/`);
     const row = page.locator("tr", { hasText: name }).first();
     await openRowActions(row);
     await row.getByText("Delete", { exact: true }).click();
@@ -827,9 +828,12 @@ test.describe.serial("server-rendered environments", () => {
     await page.getByLabel("Secret project", { exact: true }).selectOption(secretProjectId);
     await page.getByRole("button", { name: "Create Sandbox" }).click();
     await expect(page).toHaveURL(
-      `${ssrUrl}/${slug}/?message=environment-created`,
+      new RegExp(`^${ssrUrl}/${slug}/[0-9a-f-]{36}/\\?message=environment-created$`),
     );
-    await expect(page.getByRole("status")).toContainText("Sandbox creation started");
+    await expect(page.getByRole("status").filter({ hasText: "Sandbox creation started" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Setup", exact: true })).toBeVisible();
+    // The rest of this journey starts from the Sandboxes list.
+    await page.goto(`${ssrUrl}/${slug}/`);
     const sidebarAlignment = await page.evaluate(() => {
       const bounds = (selector: string) => {
         const rect = document.querySelector(selector)?.getBoundingClientRect();

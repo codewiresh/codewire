@@ -15,6 +15,27 @@ const app = document.querySelector("[data-dashboard-app]");
       storage.removeItem("codewire.create-draft-actor.v1");
     } catch { /* Signing out must remain possible when storage is denied. */ }
   }, true);
+  // An acknowledged Create lands on the Sandboxes list or on the new
+  // Sandbox's page with ?message=environment-created. Remove exactly the
+  // draft whose submission environments.js marked, and nothing else.
+  (() => {
+    if (new URLSearchParams(window.location.search).get("message") !== "environment-created") return;
+    const prefix = "codewire.create-selections.v1:";
+    const pendingKey = `${prefix}pending-create`;
+    try {
+      const storage = window.sessionStorage;
+      const marker = JSON.parse(storage.getItem(pendingKey) || "null");
+      storage.removeItem(pendingKey);
+      const exact = marker && typeof marker === "object" && !Array.isArray(marker) && Object.keys(marker).length === 3
+        && ["key", "slug", "at"].every((key) => Object.hasOwn(marker, key));
+      if (exact && typeof marker.key === "string" && marker.key.startsWith(prefix) && marker.key !== pendingKey
+          && /^[a-z0-9][a-z0-9-]{0,62}$/.test(marker.slug)
+          && Number.isSafeInteger(marker.at) && marker.at <= Date.now() && Date.now() - marker.at < 60 * 60 * 1000
+          && new RegExp(`^/${marker.slug}/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)?$`).test(window.location.pathname)) {
+        storage.removeItem(marker.key);
+      }
+    } catch { /* A failed cleanup cannot change the acknowledged Create result. */ }
+  })();
   const fieldHelp = (trigger) => {
     if (!(trigger instanceof HTMLButtonElement)) return null;
     const target = document.getElementById(trigger.getAttribute("popovertarget") || "");

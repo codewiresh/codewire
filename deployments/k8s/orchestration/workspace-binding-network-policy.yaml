@@ -6,9 +6,9 @@
 #
 # NetworkPolicies add together and isolate a selected Pod for every port, so
 # the first rule keeps every other port open to every source, exactly as with
-# no policy: the API (8084), the internal gateway-binding and mesh listener
-# (8085) and anything else orchestration serves accept what they accepted
-# before. Only 8087 narrows. A bound workspace's token is still required on
+# no policy: the API (8084), the TLS internal gateway-binding and mesh
+# listener (8088) and anything else orchestration serves accept what they
+# accepted before. Only 8087 narrows. A bound workspace's token is still required on
 # 8087; this is defence in depth, not its authentication.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

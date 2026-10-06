@@ -2462,7 +2462,7 @@ assert_pod_shape() {
 
   local host_socket_count workspace_docker_host gateway_docker_env_count gateway_resources gateway_shim_addr gateway_auth_count
   local dind_bootstrap dind_data_image dind_data_root dind_data_size dind_mount_mode
-  local gateway_binding_url gateway_derp_url gateway_stun_host gateway_stun_port
+  local gateway_binding_url gateway_binding_roots gateway_derp_url gateway_stun_host gateway_stun_port
   local expected_binding_url expected_derp_url
   host_socket_count="$(jq -s '[.[].spec.volumes[]? | select(.hostPath? and ((.hostPath.path == "/var/run/docker.sock") or (.hostPath.path == "/var/run/docker") or (.hostPath.path == "/run/containerd/containerd.sock") or (.hostPath.path == "/run/containerd")))] | length' "$pod_json" "$gateway_pod_json")"
   [[ "$host_socket_count" == "0" ]] || die "workspace or gateway pod mounts host Docker/containerd socket volume"
@@ -2472,6 +2472,7 @@ assert_pod_shape() {
   gateway_shim_addr="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_WORKSPACE_SHIM_ADDR") | .value // ""' "$gateway_pod_json")"
   gateway_auth_count="$(jq '[.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_DAEMON_AUTH_TOKEN" and (.value // "" | length > 0))] | length' "$gateway_pod_json")"
   gateway_binding_url="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_BINDING_URL") | .value // ""' "$gateway_pod_json")"
+  gateway_binding_roots="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_BINDING_TLS_ROOTS_FILE") | .value // ""' "$gateway_pod_json")"
   gateway_derp_url="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_DERP_URL") | .value // ""' "$gateway_pod_json")"
   gateway_stun_host="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_STUN_HOST") | .value // ""' "$gateway_pod_json")"
   gateway_stun_port="$(jq -r '.spec.containers[] | select(.name=="codewire-gateway") | .env[]? | select(.name=="CODEWIRE_STUN_PORT") | .value // ""' "$gateway_pod_json")"
@@ -2481,7 +2482,7 @@ assert_pod_shape() {
   dind_data_root="$(jq -r '.spec.containers[] | select(.name=="dind") | .env[]? | select(.name=="CODEWIRE_DOCKER_DATA_ROOT") | .value // ""' "$pod_json")"
   dind_data_size="$(jq -r '.spec.containers[] | select(.name=="dind") | .env[]? | select(.name=="CODEWIRE_DOCKER_DATA_SIZE") | .value // ""' "$pod_json")"
   dind_mount_mode="$(jq -r '.spec.containers[] | select(.name=="dind") | .env[]? | select(.name=="CODEWIRE_DOCKER_MOUNT_MODE") | .value // ""' "$pod_json")"
-  expected_binding_url="http://codewire-orchestration.${CODEWIRE_SERVER_NAMESPACE}.svc.cluster.local:8085"
+  expected_binding_url="https://codewire-orchestration.${CODEWIRE_SERVER_NAMESPACE}.svc.cluster.local:8088"
   expected_derp_url="https://codewire-derp.${CODEWIRE_SERVER_NAMESPACE}.svc.cluster.local:8443"
 
   if [[ "$EXPECTED_DOCKER_MODE" == "none" ]]; then
@@ -2499,6 +2500,8 @@ assert_pod_shape() {
     die "gateway missing non-empty CODEWIRE_DAEMON_AUTH_TOKEN"
   [[ "$gateway_binding_url" == "$expected_binding_url" ]] || \
     die "gateway CODEWIRE_BINDING_URL=$gateway_binding_url, want $expected_binding_url"
+  [[ "$gateway_binding_roots" == "/run/codewire-orchestration-internal-roots/ca.crt" ]] || \
+    die "gateway CODEWIRE_BINDING_TLS_ROOTS_FILE=$gateway_binding_roots, want the internal listener roots"
   if [[ "$EXPECTED_DOCKER_MODE" != "none" ]]; then
     [[ "$dind_bootstrap" == *"--data-root \"\$data_root\""* && "$dind_bootstrap" == *"--storage-driver vfs"* ]] || \
       die "dind bootstrap does not use explicit data root with vfs storage driver"

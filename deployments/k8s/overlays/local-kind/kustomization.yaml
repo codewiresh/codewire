@@ -70,6 +70,18 @@ patches:
     target:
       kind: Deployment
       name: codewire-orchestration
+  # No cert-manager here: scripts/dev/kind/local-internal-tls.sh creates the
+  # orchestration internal leaf Secret and roots instead of this Certificate.
+  - patch: |-
+      $patch: delete
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: unused
+    target:
+      group: cert-manager.io
+      kind: Certificate
+      name: codewire-orchestration-internal
   # Remove base ingress resources; local kind uses a hostless ingress shape
   # that matches current 127.0.0.1:8080 / 127.0.0.1:8443 workflows.
   - patch: |-

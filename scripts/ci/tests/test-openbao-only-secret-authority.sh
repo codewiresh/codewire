@@ -319,7 +319,8 @@ for topology in local-kind local-kind-static; do
   jq -e '
     def named($items; $name): [$items[] | select(.name == $name)];
     .spec.template.spec.containers[0].env as $env |
-    named($env; "ORCHESTRATION_INTERNAL_CONNECT_PORT")[0].value == "8085" and
+    named($env; "ORCHESTRATION_INTERNAL_CONNECT_PORT") == [] and
+    named($env; "ORCHESTRATION_INTERNAL_TLS_PORT")[0].value == "8088" and
     named($env; "POD_NAMESPACE")[0].valueFrom.fieldRef.fieldPath == "metadata.namespace" and
     named($env; "POD_NAME")[0].valueFrom.fieldRef.fieldPath == "metadata.name" and
     named($env; "POD_UID")[0].valueFrom.fieldRef.fieldPath == "metadata.uid" and

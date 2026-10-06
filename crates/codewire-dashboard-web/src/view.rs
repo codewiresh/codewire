@@ -866,6 +866,10 @@ pub(crate) struct EnvironmentRow {
     /// recorded a failure. Orchestration refuses Resize in this window, so
     /// Resize waits and says why. Presentation only, never authorization.
     pub(crate) setup_running: bool,
+    /// The recorded setup failure of a running Sandbox whose setup has not
+    /// completed, bounded for display; empty otherwise. The viewer already
+    /// receives it from GetEnvironment.
+    pub(crate) setup_failure: String,
     pub(crate) confidential_actions_allowed: bool,
     pub(crate) vscode_url: String,
     pub(crate) ports: Vec<EnvironmentPortRow>,
@@ -877,6 +881,15 @@ pub(crate) struct EnvironmentRow {
 }
 
 impl EnvironmentRow {
+    /// A start is in flight or setup still owns this running Sandbox, so the
+    /// page follows its live setup stages. Presentation only.
+    pub(crate) fn setup_progress_visible(&self) -> bool {
+        !self.deletion_started()
+            && (self.setup_running
+                || !self.setup_failure.is_empty()
+                || matches!(self.state, "pending" | "creating" | "starting"))
+    }
+
     /// The exact credential profile revision this Sandbox is bound to.
     pub(crate) fn bound_profile(&self) -> Option<(&str, u64)> {
         let sources = self.sources.as_ref()?;

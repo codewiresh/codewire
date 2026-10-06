@@ -20,6 +20,7 @@
     <script src="/assets/codewire/terminal-protocol-v1.js" defer></script>
     <script src="/assets/codewire/durable-terminal-v1.js" nonce="{{ style_nonce }}" defer></script>
     <script src="/assets/codewire/terminal-readiness-v2.js" defer></script>
+    <script src="/assets/codewire/setup-progress-v1.js" defer></script>
     <script src="/assets/codewire/sandbox-resize-v3.js" defer></script>
     <script src="/assets/codewire/terminal-v1.js" nonce="{{ style_nonce }}" defer></script>
   </head>
@@ -47,6 +48,7 @@
             <p class="cw-field-help" id="sandbox-resize-setup-note" data-resize-setup-note{% if !page.environment.setup_running || !page.environment.confidential_actions_allowed %} hidden{% endif %}>Resize is available when setup finishes.</p>
           </div>
         </section>
+        {% if page.environment.setup_progress_visible() %}<section class="cw-setup-progress" aria-labelledby="setup-progress-title" data-setup-progress data-setup-environment-id="{{ page.environment.id }}" data-setup-org-slug="{{ organization.slug }}"><h2 id="setup-progress-title">Setup</h2><p class="cw-setup-progress-status" role="status" data-setup-status>{% if page.environment.setup_failure.is_empty() %}Waiting for setup progress…{% else %}Setup stopped.{% endif %}</p><p class="cw-alert cw-alert--error" role="alert" data-setup-failure{% if page.environment.setup_failure.is_empty() %} hidden>{% else %}>Setup failed: {{ page.environment.setup_failure }}{% endif %}</p><ol class="cw-setup-stages" data-setup-stages></ol><noscript><p class="cw-setup-progress-status">Live setup progress needs JavaScript. Reload this page to check setup.</p></noscript></section>{% endif %}
         {% include "terminal_resize.html" %}
         <dialog class="cw-dialog" data-dialog id="sandbox-stop" aria-labelledby="sandbox-stop-title" aria-describedby="sandbox-stop-description">
           <header class="cw-dialog-header"><h2 id="sandbox-stop-title">Stop {{ page.environment.name }}?</h2></header>

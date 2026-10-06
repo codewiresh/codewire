@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'none'">
+  <title>Sandbox setup progress fixture</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/environments.css"><link rel="stylesheet" href="../../routes/terminal.css">
+  <script src="../../dashboard.js" defer></script>
+  <script src="../../setup-progress.js" defer></script>
+</head>
+<body class="cw-body" data-dashboard-app>
+  <main class="cw-sandbox-detail-main">
+    <header class="cw-console-header"><nav class="cw-console-breadcrumb" aria-label="Breadcrumb"><a href="sandboxes.html">Sandboxes</a><span aria-hidden="true">/</span><strong aria-current="page">Setup progress</strong></nav></header>
+    <p class="cw-alert" role="status">Sandbox creation started.</p>
+    <section class="cw-sandbox-heading" aria-label="Sandbox status and actions">
+      <div><header class="cw-terminal-heading"><a class="cw-terminal-back" href="sandboxes.html" aria-label="Back to Sandboxes">←</a><h1>Fixture Sandbox</h1></header><p class="cw-field-help">Setup progress fixture. Events are synthetic; the browser spec answers this page's event stream.</p><dl><div><dt>State</dt><dd><span class="cw-status" data-tone="warning">starting</span></dd></div><div><dt>Resources</dt><dd>2 vCPU · 8 GiB · 10 GiB</dd></div></dl></div>
+    </section>
+    <section class="cw-setup-progress" aria-labelledby="setup-progress-title" data-setup-progress data-setup-environment-id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" data-setup-org-slug="fixture-org"><h2 id="setup-progress-title">Setup</h2><p class="cw-setup-progress-status" role="status" data-setup-status>Waiting for setup progress…</p><p class="cw-alert cw-alert--error" role="alert" data-setup-failure hidden></p><ol class="cw-setup-stages" data-setup-stages></ol><noscript><p class="cw-setup-progress-status">Live setup progress needs JavaScript. Reload this page to check setup.</p></noscript></section>
+  </main>
+</body>
+</html>

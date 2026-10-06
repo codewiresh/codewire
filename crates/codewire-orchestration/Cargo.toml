@@ -63,6 +63,7 @@ codewire-project-proto = { workspace = true }
 codewire-protected-store = { workspace = true, features = ["platform"] }
 codewire-proto = { workspace = true }
 codewire-server-core = { workspace = true, features = ["kubernetes-identity"] }
+codewire-tls = { workspace = true }
 codewire-workload-secrets = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

@@ -2632,7 +2632,10 @@ coordinator_runtime_smokes() {
     local bound_claim_uid bound_sandbox_uid bound_pod_ip bound_claim_status
     local bound_port_id=port_internal_connect_kind
     local port_forward_log port_forward_pid local_port i sidecar_token in_cluster_probe
+    local internal_roots
     port_forward_log="$(mktemp)"
+    # Public roots of the TLS internal listener, for host-side probes.
+    internal_roots="$(mktemp)"
     port_forward_pid=""
 
     # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
@@ -2656,7 +2659,7 @@ SQL
         # Preserve the runtime if its retirement transaction failed. Do not
         # manufacture another running row with no backend during cleanup.
         echo '::error::failed to retire the coordinator runtime fixture' >&2
-        rm -f "$port_forward_log"
+        rm -f "$port_forward_log" "$internal_roots"
         [ "$status" -ne 0 ] || status=1
         exit "$status"
       fi
@@ -2668,7 +2671,7 @@ SQL
         --ignore-not-found=true --wait=true >/dev/null 2>&1 || cleanup_status=1
       kubectl -n "$NS" delete pod "$bound_gateway" \
         --ignore-not-found=true --wait=true >/dev/null 2>&1 || cleanup_status=1
-      rm -f "$port_forward_log"
+      rm -f "$port_forward_log" "$internal_roots"
       [ "$status" -ne 0 ] || status="$cleanup_status"
       exit "$status"
     }
@@ -2715,7 +2718,13 @@ spec:
         - name: gateway-binding-identity
           mountPath: /var/run/secrets/codewire/gateway-binding
           readOnly: true
+        - name: orchestration-internal-roots
+          mountPath: /run/codewire-orchestration-internal-roots
+          readOnly: true
   volumes:
+    - name: orchestration-internal-roots
+      configMap:
+        name: codewire-orchestration-internal-roots
     - name: gateway-binding-identity
       projected:
         defaultMode: 288
@@ -2831,34 +2840,39 @@ WHERE id = '$bound_environment_id';
 COMMIT;
 SQL
     # This originates in a gateway-labeled Pod and addresses the ClusterIP by
-    # Service DNS. The caller rereads its exact-audience projected token, and
-    # sends no Pod coordinates; orchestration derives name, namespace, and UID
-    # exclusively from TokenReview before resolving the environment label.
+    # Service DNS over the TLS-only internal listener, verified like a gateway
+    # verifies it: with the published roots and the leaf's exact DNS name. The
+    # caller rereads its exact-audience projected token, and sends no Pod
+    # coordinates; orchestration derives name, namespace, and UID exclusively
+    # from TokenReview before resolving the environment label.
+    local internal_host="codewire-orchestration.${NS}.svc.cluster.local"
     # shellcheck disable=SC2016 # The shell inside the fixture Pod expands the token.
     in_cluster_probe="$(kubectl -n "$NS" exec "$bound_gateway" -- sh -ec '
       token="$(cat /var/run/secrets/codewire/gateway-binding/token)"
-      exec wget -q -O - \
+      SSL_CERT_FILE=/run/codewire-orchestration-internal-roots/ca.crt exec wget -q -O - \
         --header="content-type: application/json" \
         --header="authorization: Bearer ${token}" \
         --post-data="{}" \
-        http://codewire-orchestration:8085/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding
-    ')"
+        "https://$1:8088/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
+    ' sh "$internal_host")"
     if ! jq -e --arg environment_id "$bound_environment_id" --arg pod_ip "$bound_pod_ip" \
       '(.environmentId // .environment_id) == $environment_id
        and (.workspacePodIp // .workspace_pod_ip) == $pod_ip
        and ((.appPorts // .app_ports // []) | index(3000)) != null
        and ((.sidecarToken // .sidecar_token // "") | length > 0)' \
       <<<"$in_cluster_probe" >/dev/null; then
-      echo "::error::in-cluster Service-DNS binding request did not reach the internal 8085 mount: $in_cluster_probe"
+      echo "::error::in-cluster Service-DNS binding request did not reach the internal TLS mount: $in_cluster_probe"
       exit 1
     fi
 
+    kubectl -n "$NS" get configmap codewire-orchestration-internal-roots \
+      -o 'jsonpath={.data.ca\.crt}' >"$internal_roots"
     kubectl -n "$NS" port-forward --address=127.0.0.1 \
-      service/codewire-orchestration :8085 >"$port_forward_log" 2>&1 &
+      service/codewire-orchestration :8088 >"$port_forward_log" 2>&1 &
     port_forward_pid=$!
 
     for i in $(seq 1 30); do
-      local_port="$(sed -nE 's/.*127\.0\.0\.1:([0-9]+) -> 8085.*/\1/p' "$port_forward_log" | head -n 1)"
+      local_port="$(sed -nE 's/.*127\.0\.0\.1:([0-9]+) -> 8088.*/\1/p' "$port_forward_log" | head -n 1)"
       if [ -n "$local_port" ]; then
         break
       fi
@@ -2875,8 +2889,10 @@ SQL
       exit 1
     fi
 
-    curl_settled -X POST -H 'content-type: application/json' -d '{}' \
-      "http://127.0.0.1:${local_port}/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
+    curl_settled --cacert "$internal_roots" \
+      --resolve "${internal_host}:${local_port}:127.0.0.1" \
+      -X POST -H 'content-type: application/json' -d '{}' \
+      "https://${internal_host}:${local_port}/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
     if [ "$PROBE_CODE" != "401" ] || ! echo "$PROBE_BODY" | grep -q '"code":"unauthenticated"'; then
       echo "::error::anonymous internal binding command was not rejected: code=$PROBE_CODE body=$PROBE_BODY"
       exit 1
@@ -2892,9 +2908,11 @@ SQL
     # A freshly issued coordinate-scoped Codewire HMAC bearer must not be
     # accepted as a gateway bootstrap identity. There is no HMAC or anonymous
     # fallback around the exact-audience Kubernetes TokenReview boundary.
-    curl_settled -X POST -H 'content-type: application/json' \
+    curl_settled --cacert "$internal_roots" \
+      --resolve "${internal_host}:${local_port}:127.0.0.1" \
+      -X POST -H 'content-type: application/json' \
       -H "authorization: Bearer ${sidecar_token}" -d '{}' \
-      "http://127.0.0.1:${local_port}/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
+      "https://${internal_host}:${local_port}/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
     if [ "$PROBE_CODE" != "401" ] || ! echo "$PROBE_BODY" | grep -q '"code":"unauthenticated"'; then
       echo "::error::coordinate capability crossed into gateway binding: code=$PROBE_CODE body=$PROBE_BODY"
       exit 1

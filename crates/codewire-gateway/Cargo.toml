@@ -50,6 +50,7 @@ zeroize = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
+codewire-tls = { workspace = true, features = ["test-support"] }
 codewire-credential-broker = { path = "../codewire-credential-broker", default-features = false, features = ["ssh-agent"] }
 rcgen = "0.13"
 boringtun = "0.7"

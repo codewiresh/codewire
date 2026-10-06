@@ -1,5 +1,8 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
+
+use codewire_tls::ConnectOriginTransport;
 
 use url::Host;
 
@@ -11,6 +14,9 @@ pub const STUN_SERVERS_ENV: &str = "CODEWIRE_MESH_STUN_SERVERS";
 pub const DATABASE_URL_ENV: &str = "DATABASE_URL";
 pub const MESH_AUTHORIZATION_URL_ENV: &str = "CODEWIRE_MESH_AUTHORIZATION_URL";
 pub const MESH_AUTHORIZATION_HMAC_SECRET_ENV: &str = "CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET";
+/// Public roots verifying the https authorization URL; required with it.
+pub const MESH_AUTHORIZATION_TLS_ROOTS_FILE_ENV: &str =
+    "CODEWIRE_MESH_AUTHORIZATION_TLS_ROOTS_FILE";
 pub const LOCAL_ORGANIZATION_ID_ENV: &str = "CODEWIRE_MESH_LOCAL_ORGANIZATION_ID";
 pub const LOCAL_API_KEY_HASH_ENV: &str = "CODEWIRE_MESH_LOCAL_API_KEY_HASH";
 
@@ -26,11 +32,16 @@ const MAX_STUN_HOST_BYTES: usize = 253;
 pub struct MeshAuthorizationConfig {
     pub url: String,
     hmac_secret: String,
+    tls_roots_file: PathBuf,
 }
 
 impl MeshAuthorizationConfig {
     pub(crate) fn hmac_secret(&self) -> &str {
         &self.hmac_secret
+    }
+
+    pub(crate) fn tls_roots_file(&self) -> &std::path::Path {
+        &self.tls_roots_file
     }
 }
 
@@ -40,6 +51,7 @@ impl fmt::Debug for MeshAuthorizationConfig {
             .debug_struct("MeshAuthorizationConfig")
             .field("url", &self.url)
             .field("hmac_secret", &"[redacted]")
+            .field("tls_roots_file", &self.tls_roots_file)
             .finish()
     }
 }
@@ -137,6 +149,7 @@ impl Config {
         let mesh_authorization = mesh_authorization_config(
             getenv(MESH_AUTHORIZATION_URL_ENV),
             getenv(MESH_AUTHORIZATION_HMAC_SECRET_ENV),
+            getenv(MESH_AUTHORIZATION_TLS_ROOTS_FILE_ENV),
         )?;
         let local_authorization = local_authorization_config(
             getenv(LOCAL_ORGANIZATION_ID_ENV),
@@ -183,6 +196,10 @@ pub enum ConfigError {
         "{MESH_AUTHORIZATION_URL_ENV} and {MESH_AUTHORIZATION_HMAC_SECRET_ENV} must be set together"
     )]
     IncompleteMeshAuthorization,
+    #[error(
+        "{MESH_AUTHORIZATION_URL_ENV} must be an exact https origin, set together with {MESH_AUTHORIZATION_TLS_ROOTS_FILE_ENV}"
+    )]
+    InvalidMeshAuthorizationTls,
     #[error("{LOCAL_ORGANIZATION_ID_ENV} and {LOCAL_API_KEY_HASH_ENV} must be set together")]
     IncompleteLocalMeshAuthorization,
     #[error(
@@ -279,12 +296,23 @@ fn trim(value: Option<String>) -> Option<String> {
 fn mesh_authorization_config(
     url: Option<String>,
     hmac_secret: Option<String>,
+    tls_roots_file: Option<String>,
 ) -> Result<Option<MeshAuthorizationConfig>, ConfigError> {
+    let tls_roots_file = trim(tls_roots_file).map(PathBuf::from);
     match (trim(url), trim(hmac_secret)) {
+        (None, None) if tls_roots_file.is_some() => Err(ConfigError::InvalidMeshAuthorizationTls),
         (None, None) => Ok(None),
         (Some(url), Some(hmac_secret)) => {
             validate_base_url(&url)?;
-            Ok(Some(MeshAuthorizationConfig { url, hmac_secret }))
+            // Orchestration's internal listener is TLS-only.
+            let tls_roots_file = tls_roots_file.ok_or(ConfigError::InvalidMeshAuthorizationTls)?;
+            ConnectOriginTransport::for_origin(&url, &tls_roots_file)
+                .map_err(|_| ConfigError::InvalidMeshAuthorizationTls)?;
+            Ok(Some(MeshAuthorizationConfig {
+                url,
+                hmac_secret,
+                tls_roots_file,
+            }))
         }
         _ => Err(ConfigError::IncompleteMeshAuthorization),
     }
@@ -512,7 +540,11 @@ mod tests {
                 (DATABASE_URL_ENV, "postgres://env/db"),
                 (
                     MESH_AUTHORIZATION_URL_ENV,
-                    "http://orchestration.internal:8085",
+                    "https://orchestration.internal:8088",
+                ),
+                (
+                    MESH_AUTHORIZATION_TLS_ROOTS_FILE_ENV,
+                    "/run/codewire-mesh-authorization-roots/ca.crt",
                 ),
                 (MESH_AUTHORIZATION_HMAC_SECRET_ENV, "test-hmac"),
             ]),
@@ -534,7 +566,64 @@ mod tests {
             cfg.mesh_authorization
                 .as_ref()
                 .map(|config| config.url.as_str()),
-            Some("http://orchestration.internal:8085")
+            Some("https://orchestration.internal:8088")
+        );
+    }
+
+    #[test]
+    fn authorization_url_is_an_https_origin_set_with_its_roots() {
+        let https = "https://codewire-orchestration.dev.svc.cluster.local:8088";
+        let roots = "/run/codewire-mesh-authorization-roots/ca.crt";
+        let hosted = |vars: &[(&str, &str)]| {
+            let mut all = vec![
+                (MESH_URL_ENV, "https://mesh.codewire.sh"),
+                (MESH_AUTHORIZATION_HMAC_SECRET_ENV, "test-hmac"),
+            ];
+            all.extend_from_slice(vars);
+            Config::from_sources(Vec::<String>::new(), env(&all))
+        };
+        let cfg = hosted(&[
+            (MESH_AUTHORIZATION_URL_ENV, https),
+            (MESH_AUTHORIZATION_TLS_ROOTS_FILE_ENV, roots),
+        ])
+        .unwrap();
+        let authorization = cfg.mesh_authorization.unwrap();
+        assert_eq!(authorization.url, https);
+        assert_eq!(authorization.tls_roots_file(), std::path::Path::new(roots));
+        for invalid in [
+            &[(MESH_AUTHORIZATION_URL_ENV, https)][..],
+            &[(
+                MESH_AUTHORIZATION_URL_ENV,
+                "http://orchestration.internal:8085",
+            )],
+            &[
+                (
+                    MESH_AUTHORIZATION_URL_ENV,
+                    "http://orchestration.internal:8085",
+                ),
+                (MESH_AUTHORIZATION_TLS_ROOTS_FILE_ENV, roots),
+            ],
+            &[
+                (MESH_AUTHORIZATION_URL_ENV, https),
+                (MESH_AUTHORIZATION_TLS_ROOTS_FILE_ENV, "ca.crt"),
+            ],
+        ] {
+            assert_eq!(
+                hosted(invalid).unwrap_err(),
+                ConfigError::InvalidMeshAuthorizationTls,
+                "{invalid:?}"
+            );
+        }
+        assert_eq!(
+            Config::from_sources(
+                Vec::<String>::new(),
+                env(&[
+                    (MESH_URL_ENV, "https://mesh.codewire.sh"),
+                    (MESH_AUTHORIZATION_TLS_ROOTS_FILE_ENV, roots),
+                ]),
+            )
+            .unwrap_err(),
+            ConfigError::InvalidMeshAuthorizationTls
         );
     }
 
@@ -564,7 +653,11 @@ mod tests {
                 (DATABASE_URL_ENV, MARKER),
                 (
                     MESH_AUTHORIZATION_URL_ENV,
-                    "http://orchestration.internal:8085",
+                    "https://orchestration.internal:8088",
+                ),
+                (
+                    MESH_AUTHORIZATION_TLS_ROOTS_FILE_ENV,
+                    "/run/codewire-mesh-authorization-roots/ca.crt",
                 ),
                 (MESH_AUTHORIZATION_HMAC_SECRET_ENV, "synthetic-hmac"),
             ]),

@@ -43,4 +43,4 @@ cw_ssh="/usr/bin/ssh -F /dev/null -o 'HostName=$cw_host' -p '$cw_port' -o 'HostK
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null \
     GIT_TERMINAL_PROMPT=0 GIT_SSH_VARIANT=ssh GIT_SSH_COMMAND="$cw_ssh" \
     /usr/bin/git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
-    clone -- "$cw_source" "$cw_destination"
+    clone --progress -- "$cw_source" "$cw_destination"

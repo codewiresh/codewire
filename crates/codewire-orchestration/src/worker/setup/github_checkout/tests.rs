@@ -25,8 +25,15 @@ fn clean_source_and_exact_loopback_rewrite_are_separate_arguments() {
             .unwrap();
         assert_eq!(plan.clone.last().unwrap(), &repo.mount_path);
         assert_eq!(
-            &plan.clone[plan.clone.len() - 4..],
-            &["--template=", "--", source, "/workspace/app"]
+            &plan.clone[plan.clone.len() - 6..],
+            &[
+                "clone",
+                "--progress",
+                "--template=",
+                "--",
+                source,
+                "/workspace/app"
+            ]
         );
         assert!(plan.clone.contains(&format!(
             "url.http://127.0.0.1:38081/_codewire/github/{}.insteadOf={source}",

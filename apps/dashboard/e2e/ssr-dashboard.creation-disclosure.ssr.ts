@@ -728,23 +728,28 @@ test("Create drafts are removed after account change and sign-out", async ({ pag
   expect(await page.evaluate((draftKey) => sessionStorage.getItem(draftKey), actorKey)).toBeNull();
 });
 
-test("acknowledged Sandbox creation removes only the submitted draft", async ({ page }) => {
-  await page.goto(fixtureUrl());
-  await page.getByLabel("Name", { exact: true }).fill("created-canary");
-  const key = keyForDraft(selectionsDraft());
-  const unrelated = { ...selectionsDraft(), draft: "00000000-0000-4000-8000-000000000004" };
-  await page.evaluate(({ otherKey, bytes }) => sessionStorage.setItem(otherKey, bytes), { otherKey: keyForDraft(unrelated), bytes: JSON.stringify(unrelated) });
-  await page.locator("[data-environment-form]").evaluate((form: HTMLFormElement) => {
-    form.action = `${location.origin}/fixture-org/_actions/sandboxes/create`;
-    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+// Create lands on the new Sandbox's page; the Sandboxes list stays a valid
+// landing. Both load dashboard.js, which owns the acknowledgment cleanup.
+for (const landing of ["/fixture-org/", "/fixture-org/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/"]) {
+  test(`acknowledged Sandbox creation removes only the submitted draft on ${landing}`, async ({ page }) => {
+    await page.goto(fixtureUrl());
+    await page.getByLabel("Name", { exact: true }).fill("created-canary");
+    const key = keyForDraft(selectionsDraft());
+    const unrelated = { ...selectionsDraft(), draft: "00000000-0000-4000-8000-000000000004" };
+    await page.evaluate(({ otherKey, bytes }) => sessionStorage.setItem(otherKey, bytes), { otherKey: keyForDraft(unrelated), bytes: JSON.stringify(unrelated) });
+    await page.locator("[data-environment-form]").evaluate((form: HTMLFormElement) => {
+      form.action = `${location.origin}/fixture-org/_actions/sandboxes/create`;
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    const acknowledged = `${landing}?message=environment-created`;
+    await page.route(`**${acknowledged}`, (route) => route.fulfill({
+      status: 200, contentType: "text/html", body: '<!doctype html><html><head><script defer src="/dashboard.js"></script></head><body><main>Sandbox creation started.</main></body></html>',
+    }));
+    await page.goto(new URL(acknowledged, fixtureUrl()).href);
+    await expect.poll(() => page.evaluate((draftKey) => sessionStorage.getItem(draftKey), key)).toBeNull();
+    expect(await page.evaluate((draftKey) => sessionStorage.getItem(draftKey), keyForDraft(unrelated))).not.toBeNull();
   });
-  await page.route("**/fixture-org/?message=environment-created", (route) => route.fulfill({
-    status: 200, contentType: "text/html", body: '<!doctype html><html><head><script defer src="/environments.js"></script></head><body><main>Sandbox creation started.</main></body></html>',
-  }));
-  await page.goto(new URL("/fixture-org/?message=environment-created", fixtureUrl()).href);
-  expect(await page.evaluate((draftKey) => sessionStorage.getItem(draftKey), key)).toBeNull();
-  expect(await page.evaluate((draftKey) => sessionStorage.getItem(draftKey), keyForDraft(unrelated))).not.toBeNull();
-});
+}
 
 test("Create recovery restores authored values only after current selections are checked", async ({ page }) => {
   const draft = {

@@ -783,6 +783,7 @@ mod tests {
             listener_self_check_interval: None,
             api_url: api_url.map(str::to_string),
             binding_url: None,
+            binding_tls_roots_file: None,
             coordinator_url: Some(coordinator_url.into()),
             daemon_auth_token: Some(DaemonAuthToken::new("gateway-tailnet-test-token").unwrap()),
             derp_url: derp_url.map(str::to_string),

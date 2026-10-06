@@ -10,6 +10,12 @@ metadata:
 {{- if and .Values.meshAuthorization.url (not .Values.meshAuthorization.hmacSecretRef.name) }}
 {{- fail "meshAuthorization.url requires meshAuthorization.hmacSecretRef.name" }}
 {{- end }}
+{{- if and .Values.meshAuthorization.url (not (hasPrefix "https://" .Values.meshAuthorization.url)) }}
+{{- fail "meshAuthorization.url must be https: orchestration's internal listener is TLS-only" }}
+{{- end }}
+{{- if ne (not (empty .Values.meshAuthorization.url)) (not (empty .Values.meshAuthorization.tlsRootsConfigMap)) }}
+{{- fail "meshAuthorization.url and meshAuthorization.tlsRootsConfigMap must be set together" }}
+{{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy:
@@ -65,6 +71,10 @@ spec:
                   name: {{ .Values.meshAuthorization.hmacSecretRef.name }}
                   key: {{ .Values.meshAuthorization.hmacSecretRef.key }}
                   optional: {{ .Values.meshAuthorization.hmacSecretRef.optional | default false }}
+            {{- if .Values.meshAuthorization.tlsRootsConfigMap }}
+            - name: CODEWIRE_MESH_AUTHORIZATION_TLS_ROOTS_FILE
+              value: /run/codewire-mesh-authorization-roots/ca.crt
+            {{- end }}
             {{- end }}
           ports:
             - name: http
@@ -89,7 +99,17 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            {{- if .Values.meshAuthorization.tlsRootsConfigMap }}
+            - name: mesh-authorization-roots
+              mountPath: /run/codewire-mesh-authorization-roots
+              readOnly: true
+            {{- end }}
       volumes:
+        {{- if .Values.meshAuthorization.tlsRootsConfigMap }}
+        - name: mesh-authorization-roots
+          configMap:
+            name: {{ .Values.meshAuthorization.tlsRootsConfigMap }}
+        {{- end }}
         - name: data
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:

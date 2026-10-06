@@ -108,6 +108,7 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
     if getattr(_args, "self_test", False):
         try:
             internal_connect_listener_self_test()
+            isolated_grpc_service_self_test()
             mesh_connect_backend_topology_self_test(ownership, owners, per_file)
             mesh_coordinator_transport_self_test()
             mesh_primary_origin_rest_edge_self_test()
@@ -164,7 +165,7 @@ WORKSPACE_BINDING_SERVICES = {
 }
 
 CLOSED_LISTENERS = {
-    "internal-connect": (8085, INTERNAL_CONNECT_SERVICES),
+    "internal-connect": (8088, INTERNAL_CONNECT_SERVICES),
     "workspace-binding": (8087, WORKSPACE_BINDING_SERVICES),
 }
 
@@ -745,7 +746,7 @@ def assert_internal_connect_listener_exemption(
 ) -> None:
     """Validate the closed cluster-local listener exceptions.
 
-    Two listener classes exist: internal-connect (8085) for the gateway and
+    Two listener classes exist: internal-connect (8088, TLS-only) for the gateway and
     Mesh, and workspace-binding (8087), which tenant workloads can reach and
     which therefore carries only WorkspaceBindingService.
     """
@@ -837,26 +838,37 @@ def assert_internal_connect_listener_boundary(
         r"name:\s*ORCHESTRATION_PORT\s*\n\s*value:\s*['\"]8084['\"]", deployment
     ):
         fail("orchestration Deployment must set ORCHESTRATION_PORT=8084 for the public listener")
+    # The internal app is served only behind TLS on 8088, and nothing else is.
     if not re.search(
-        r"containerPort:\s*8085\s*\n\s*name:\s*internal-api", deployment
+        r"TlsListener::new\(listener, files\)[^;]*?\binternal_app\b",
+        main,
+        re.DOTALL,
     ):
-        fail("orchestration Deployment must declare named internal-api container port 8085")
+        fail("the internal TLS listener must serve only the internal Connect app")
+    if re.search(r"serve_with_listener\(\s*internal_app\b", main):
+        fail("the internal Connect app must never be served without TLS")
+    if re.search(r"internal-api\b|ORCHESTRATION_INTERNAL_CONNECT_PORT", deployment):
+        fail("orchestration Deployment must not restore the plaintext internal listener")
+    if not re.search(r"containerPort:\s*8088\s*\n\s*name:\s*internal-tls", deployment):
+        fail("orchestration Deployment must declare named internal-tls container port 8088")
     if not re.search(
-        r"name:\s*ORCHESTRATION_INTERNAL_CONNECT_PORT\s*\n\s*value:\s*['\"]8085['\"]",
+        r"name:\s*ORCHESTRATION_INTERNAL_TLS_PORT\s*\n\s*value:\s*['\"]8088['\"]",
         deployment,
     ):
-        fail("orchestration Deployment must set ORCHESTRATION_INTERNAL_CONNECT_PORT=8085")
+        fail("orchestration Deployment must set ORCHESTRATION_INTERNAL_TLS_PORT=8088")
 
     service = reader("deployments/k8s/orchestration/service.yaml")
     if not re.search(
         r"port:\s*8084\s*\n\s*targetPort:\s*8084\s*\n\s*name:\s*http", service
     ):
         fail("orchestration ClusterIP Service must preserve named public http port 8084 -> 8084")
+    if re.search(r"internal-api\b|port:\s*8085\b", service):
+        fail("orchestration ClusterIP Service must not restore the plaintext internal listener")
     if not re.search(
-        r"port:\s*8085\s*\n\s*targetPort:\s*internal-api\s*\n\s*name:\s*internal-api",
+        r"port:\s*8088\s*\n\s*targetPort:\s*internal-tls\s*\n\s*name:\s*internal-tls",
         service,
     ):
-        fail("orchestration ClusterIP Service must expose named internal-api port 8085")
+        fail("orchestration ClusterIP Service must expose named internal-tls port 8088")
 
 
 def yaml_documents(source: str) -> list[str]:
@@ -892,7 +904,7 @@ def assert_workspace_binding_listener_boundary(
         if router not in binding_section:
             fail(f"{service} is not mounted on the workspace-binding app")
         if router in sections["internal-connect"]:
-            fail(f"{service} is prohibited from the internal-connect 8085 app")
+            fail(f"{service} is prohibited from the internal-connect 8088 app")
         if router in sections["public"]:
             fail(f"{service} is prohibited from the public 8084 app")
     for router in INTERNAL_CONNECT_SERVICES.values():
@@ -1026,16 +1038,16 @@ def internal_connect_listener_self_test() -> None:
     wrong_port["codewire.internal.v1.GatewayBindingService"]["port"] = 8086
     expect_rejection("wrong exception record", "must use the internal-connect listener", unrouted=wrong_port)
 
-    binding_on_8085 = copy.deepcopy(valid_unrouted)
-    binding_on_8085["codewire.internal.v1.WorkspaceBindingService"] = {
+    binding_on_8088 = copy.deepcopy(valid_unrouted)
+    binding_on_8088["codewire.internal.v1.WorkspaceBindingService"] = {
         "binary": "orchestration",
         "listener": "internal-connect",
-        "port": 8085,
+        "port": 8088,
     }
     expect_rejection(
-        "workspace binding recorded on 8085",
+        "workspace binding recorded on 8088",
         "must use the workspace-binding listener on port 8087",
-        unrouted=binding_on_8085,
+        unrouted=binding_on_8088,
     )
 
     gateway_on_8087 = copy.deepcopy(valid_unrouted)
@@ -1046,7 +1058,7 @@ def internal_connect_listener_self_test() -> None:
     }
     expect_rejection(
         "gateway binding recorded on 8087",
-        "must use the internal-connect listener on port 8085",
+        "must use the internal-connect listener on port 8088",
         unrouted=gateway_on_8087,
     )
 
@@ -1084,7 +1096,7 @@ def internal_connect_listener_self_test() -> None:
     )
     expect_rejection(
         "workspace binding on the internal app",
-        "WorkspaceBindingService is prohibited from the internal-connect 8085 app",
+        "WorkspaceBindingService is prohibited from the internal-connect 8088 app",
         replacement=(
             "crates/codewire-orchestration/src/main.rs",
             'let internal_app = AppBuilder::new("codewire-orchestration-internal")',
@@ -1122,12 +1134,51 @@ def internal_connect_listener_self_test() -> None:
         ),
     )
     expect_rejection(
-        "internal Service retarget",
-        "must expose named internal-api port 8085",
+        "public app on the internal TLS listener",
+        "the internal TLS listener must serve only the internal Connect app",
+        replacement=(
+            "crates/codewire-orchestration/src/main.rs",
+            "            internal_app,\n        )),",
+            "            app.clone(),\n        )),",
+        ),
+    )
+    expect_rejection(
+        "plaintext internal serving",
+        "the internal Connect app must never be served without TLS",
+        replacement=(
+            "crates/codewire-orchestration/src/main.rs",
+            "codewire_server_core::serve_with_listener(app, listeners.public),",
+            "codewire_server_core::serve_with_listener(app, listeners.public),\n"
+            "        codewire_server_core::serve_with_listener(internal_app, plain),",
+        ),
+    )
+    expect_rejection(
+        "plaintext internal Deployment port restored",
+        "orchestration Deployment must not restore the plaintext internal listener",
+        replacement=(
+            "deployments/k8s/orchestration/deployment.yaml",
+            "            - containerPort: 8088\n",
+            "            - containerPort: 8085\n              name: internal-api\n"
+            "            - containerPort: 8088\n",
+        ),
+    )
+    expect_rejection(
+        "internal TLS Service retarget",
+        "must expose named internal-tls port 8088",
         replacement=(
             "deployments/k8s/orchestration/service.yaml",
-            "targetPort: internal-api",
+            "targetPort: internal-tls",
             "targetPort: 8084",
+        ),
+    )
+    expect_rejection(
+        "plaintext internal Service port restored",
+        "must not restore the plaintext internal listener",
+        replacement=(
+            "deployments/k8s/orchestration/service.yaml",
+            "    - port: 8088\n      targetPort: internal-tls\n      name: internal-tls",
+            "    - port: 8085\n      targetPort: internal-api\n      name: internal-api\n"
+            "    - port: 8088\n      targetPort: internal-tls\n      name: internal-tls",
         ),
     )
     expect_rejection(
@@ -1136,17 +1187,17 @@ def internal_connect_listener_self_test() -> None:
         replacement=(
             "deployments/k8s/orchestration/service.yaml",
             "port: 8084\n      targetPort: 8084\n      name: http",
-            "port: 8084\n      targetPort: internal-api\n      name: http",
+            "port: 8084\n      targetPort: internal-tls\n      name: http",
         ),
     )
     expect_rejection(
-        "workspace-binding Service carrying 8085",
+        "workspace-binding Service carrying 8088",
         "must be one ClusterIP Service exposing only 8087",
         replacement=(
             "deployments/k8s/orchestration/service.yaml",
             "    - port: 8087\n      targetPort: workspace-bind\n      name: workspace-bind",
             "    - port: 8087\n      targetPort: workspace-bind\n      name: workspace-bind\n"
-            "    - port: 8085\n      targetPort: internal-api\n      name: internal-api",
+            "    - port: 8088\n      targetPort: internal-tls\n      name: internal-tls",
         ),
     )
     expect_rejection(
@@ -1154,8 +1205,8 @@ def internal_connect_listener_self_test() -> None:
         "only the workspace-binding Service may expose port 8087",
         replacement=(
             "deployments/k8s/orchestration/service.yaml",
-            "    - port: 8085\n      targetPort: internal-api\n      name: internal-api",
-            "    - port: 8085\n      targetPort: internal-api\n      name: internal-api\n"
+            "    - port: 8088\n      targetPort: internal-tls\n      name: internal-tls",
+            "    - port: 8088\n      targetPort: internal-tls\n      name: internal-tls\n"
             "    - port: 8087\n      targetPort: workspace-bind\n      name: workspace-bind",
         ),
     )
@@ -1165,7 +1216,7 @@ def internal_connect_listener_self_test() -> None:
         replacement=(
             "deployments/k8s/orchestration/deployment.yaml",
             "containerPort: 8087",
-            "containerPort: 8088",
+            "containerPort: 8089",
         ),
     )
     expect_rejection(
@@ -1746,8 +1797,31 @@ def assert_environment_session_grpc_service_shape(
         document,
     ):
         fail(f"{label}: isolated gRPC Service must expose 8084 -> named target http")
-    if re.search(r"name:\s+internal-api\b", document):
+    if re.search(r"(name|targetPort):\s+internal-(api|tls)\b", document):
         fail(f"{label}: isolated gRPC Service must not expose the internal API")
+
+
+def isolated_grpc_service_self_test() -> None:
+    """Both internal listeners stay off the native-gRPC Service."""
+    base = (
+        "kind: Service\nmetadata:\n  name: codewire-orchestration-grpc\nspec:\n"
+        "  selector:\n    app.kubernetes.io/name: codewire\n"
+        "    app.kubernetes.io/component: orchestration\n"
+        "  ports:\n    - name: grpc\n      port: 8084\n      targetPort: http\n"
+    )
+    failures: list[str] = []
+    assert_environment_session_grpc_service_shape(base, "self-test", failures.append)
+    if failures:
+        raise RuntimeError(f"isolated gRPC Service fixture rejected: {failures!r}")
+    for listener, port in [("internal-api", 8085), ("internal-tls", 8088)]:
+        failures = []
+        assert_environment_session_grpc_service_shape(
+            base + f"    - name: {listener}\n      port: {port}\n      targetPort: {listener}\n",
+            "self-test",
+            failures.append,
+        )
+        if not any("must not expose the internal API" in failure for failure in failures):
+            raise RuntimeError(f"isolated gRPC Service accepted {listener}: {failures!r}")
 
 
 def ingress_identity(document: str | None, label: str, fail: Callable[[str], None]) -> dict[str, str] | None:

@@ -58,6 +58,23 @@ dialog[data-sandbox-resize] > .cw-dialog-body > p:first-child { margin-top: 0; }
 .cw-sandbox-detail-main .cw-durable-terminal { grid-template-rows: auto auto auto auto auto minmax(min-content, 1fr); }
 .cw-sandbox-detail-main .cw-terminal-tab-panel { grid-template-rows: auto auto minmax(11.25rem, 1fr); }
 .cw-sandbox-detail-main .cw-sandbox-terminal:not(.cw-durable-terminal) { grid-template-rows: auto minmax(11.25rem, 1fr); }
+/* Setup progress (A5c): the section owns the page gutter; each stage and
+   repository row shares one inset through the row rule below. */
+.cw-setup-progress { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-5); border-bottom: var(--border-width) solid var(--border-subtle); }
+.cw-setup-progress[hidden], .cw-setup-progress [hidden] { display: none; }
+.cw-setup-progress h2 { margin: 0; font-size: var(--text-secondary); font-weight: var(--weight-semibold); }
+.cw-setup-progress-status { margin: 0; color: var(--fg-secondary); font-size: var(--text-small); }
+.cw-setup-progress .cw-alert { margin: 0; }
+.cw-setup-stages, .cw-setup-repositories { display: grid; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
+.cw-setup-repositories { padding-inline-start: var(--space-4); }
+.cw-setup-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); padding-block: var(--space-0-5); }
+.cw-setup-stage-label { color: var(--fg-primary); font-size: var(--text-small); }
+.cw-setup-stage-detail { color: var(--fg-tertiary); font-family: var(--font-mono); font-size: var(--text-micro); }
+.cw-setup-stage[data-state="running"] > .cw-setup-row .cw-setup-stage-label { color: var(--accent-text); }
+.cw-setup-stage[data-state="warning"] > .cw-setup-row .cw-setup-stage-detail { color: var(--warning); }
+.cw-setup-stage[data-state="failed"] > .cw-setup-row .cw-setup-stage-label,
+.cw-setup-stage[data-state="failed"] > .cw-setup-row .cw-setup-stage-detail { color: var(--destructive); }
+.cw-setup-row progress { inline-size: var(--control-width-sm); accent-color: var(--accent); }
 .cw-terminal-tab-panel[hidden], .cw-terminal-panels[hidden], .cw-terminal-empty[hidden], .cw-terminal-reload[hidden] { display: none; }
 .cw-terminal-tab-panel .cw-terminal-toolbar { flex-wrap: wrap; }
 .cw-terminal-toolbar button[hidden] { display: none; }

@@ -447,7 +447,8 @@ export async function runDevUxWalkthrough(page: Page, options: {
     owned.beforeCreate();
     submitted = Date.now();
     await button(page, "Create Sandbox").click();
-    await expect(page.getByRole("status")).toContainText("Sandbox creation started");
+    // Create lands on the new Sandbox's page, which has several live statuses.
+    await expect(page.getByRole("status").filter({ hasText: "Sandbox creation started" })).toBeVisible();
     accepted = Date.now();
   });
   const id = await owned.createdId(deadline);
