@@ -1899,6 +1899,16 @@ pub(crate) fn doctor_ssh_config_check_at(config_path: &Path) -> DoctorCheck {
             format!("Codewire section missing in {}", config_path.display()),
         );
     }
+    if !managed_ssh_section_is_current(&content) {
+        return doctor_check(
+            "ssh config",
+            DoctorStatus::Warn,
+            format!(
+                "Codewire section in {} is outdated or not first; run `cw config-ssh`",
+                config_path.display()
+            ),
+        );
+    }
     doctor_check(
         "ssh config",
         DoctorStatus::Ok,
@@ -1939,6 +1949,46 @@ pub(crate) fn completion_script(shell: CompletionShell) -> Vec<u8> {
 pub(crate) const SSH_CONFIG_MARKER_START: &str = "# ---- START CODEWIRE ----";
 pub(crate) const SSH_CONFIG_MARKER_END: &str = "# ---- END CODEWIRE ----";
 
+/// The managed block's only host-key trust source: the environment's
+/// recorded key, fetched through the authenticated API (`cw ssh known-hosts`).
+pub(crate) const SSH_KNOWN_HOSTS_COMMAND: &str = "cw ssh known-hosts %H";
+
+/// What every Codewire host gets, in order. The SSH server runs inside the
+/// environment's sandbox, so nothing here may expose the user's agent, X11,
+/// Kerberos credentials or a password prompt to it, and host keys are trusted
+/// only through [`SSH_KNOWN_HOSTS_COMMAND`], failing closed: no first-use
+/// trust and no known_hosts file. OpenSSH keeps the first value it obtains,
+/// so the block is written before the user's own entries.
+pub(crate) const MANAGED_SSH_DIRECTIVES: &[(&str, &str)] = &[
+    ("ProxyCommand", "cw shell --stdio %n"),
+    ("User", "codewire"),
+    ("StrictHostKeyChecking", "yes"),
+    ("UserKnownHostsFile", "/dev/null"),
+    ("GlobalKnownHostsFile", "/dev/null"),
+    ("KnownHostsCommand", SSH_KNOWN_HOSTS_COMMAND),
+    ("UpdateHostKeys", "no"),
+    ("ForwardAgent", "no"),
+    ("ForwardX11", "no"),
+    ("PasswordAuthentication", "no"),
+    ("KbdInteractiveAuthentication", "no"),
+    ("PubkeyAuthentication", "no"),
+    ("GSSAPIAuthentication", "no"),
+    ("GSSAPIDelegateCredentials", "no"),
+];
+
+/// Keywords `--ssh-option` may not set: the managed directives (which would be
+/// silently ignored after them), and those that would change the block's
+/// scope, which host key is checked, or which hop is trusted.
+const RESERVED_SSH_OPTION_KEYWORDS: &[&str] = &[
+    "Host",
+    "Match",
+    "Include",
+    "HostKeyAlias",
+    "ProxyJump",
+    "ForwardX11Trusted",
+    "HostbasedAuthentication",
+];
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SshConfigOptions {
     pub(crate) ssh_options: Vec<String>,
@@ -1976,10 +2026,6 @@ pub(crate) fn default_ssh_config_path() -> PathBuf {
     home_path_or_tilde(".ssh/config")
 }
 
-pub(crate) fn default_known_hosts_path() -> PathBuf {
-    home_path_or_tilde(".ssh/codewire_known_hosts")
-}
-
 pub(crate) fn home_path_or_tilde(relative: &str) -> PathBuf {
     env::var_os("HOME")
         .map(PathBuf::from)
@@ -2006,66 +2052,108 @@ pub(crate) fn render_managed_ssh_config(
         Err(err) => return Err(err).with_context(|| format!("read ssh config {config_path:?}")),
     };
     let existing_text = String::from_utf8_lossy(&existing);
-    let rendered = replace_managed_ssh_section(&existing_text, &ssh_config_block(options))?;
+    let rendered = place_managed_ssh_section(&existing_text, &ssh_config_block(options)?)?;
     let changed = existing != rendered.as_bytes();
     Ok((rendered, changed))
 }
 
-pub(crate) fn ssh_config_block(options: &SshConfigOptions) -> String {
+pub(crate) fn ssh_config_block(options: &SshConfigOptions) -> anyhow::Result<String> {
     let mut output = String::new();
     output.push_str(SSH_CONFIG_MARKER_START);
     output.push('\n');
     output
         .push_str("# This section is managed by Codewire. Re-run `cw config-ssh` to update it.\n");
+    output.push_str(
+        "# It stays first in this file: OpenSSH uses the first value it finds for an option.\n",
+    );
     output.push_str("Host cw-*\n");
-    output.push_str("    ProxyCommand cw shell --stdio %n\n");
-    output.push_str("    StrictHostKeyChecking accept-new\n");
-    output.push_str(&format!(
-        "    UserKnownHostsFile {}\n",
-        default_known_hosts_path().display()
-    ));
-    output.push_str("    User codewire\n");
+    for (keyword, value) in MANAGED_SSH_DIRECTIVES {
+        output.push_str(&format!("    {keyword} {value}\n"));
+    }
     for option in &options.ssh_options {
         let option = option.trim();
         if option.is_empty() {
             continue;
         }
+        anyhow::ensure!(
+            !option.contains(['\n', '\r']),
+            "SSH option must be a single line: {option:?}"
+        );
+        let keyword = ssh_option_keyword(option);
+        anyhow::ensure!(
+            !MANAGED_SSH_DIRECTIVES
+                .iter()
+                .map(|(managed, _)| *managed)
+                .chain(RESERVED_SSH_OPTION_KEYWORDS.iter().copied())
+                .any(|reserved| reserved.eq_ignore_ascii_case(keyword)),
+            "SSH option {keyword} is fixed by the managed Codewire block and cannot be overridden"
+        );
         output.push_str("    ");
         output.push_str(option);
         output.push('\n');
     }
+    // Restore the global scope so the user's entries after this block keep
+    // their meaning for every host.
+    output.push_str("Host *\n");
     output.push_str(SSH_CONFIG_MARKER_END);
-    output
+    Ok(output)
 }
 
-pub(crate) fn replace_managed_ssh_section(existing: &str, managed: &str) -> anyhow::Result<String> {
+fn ssh_option_keyword(option: &str) -> &str {
+    option
+        .split(|c: char| c.is_whitespace() || c == '=')
+        .next()
+        .unwrap_or_default()
+}
+
+/// Whether `content` starts with a Codewire section that carries every current
+/// managed directive.
+pub(crate) fn managed_ssh_section_is_current(content: &str) -> bool {
+    let content = content.trim_start_matches(['\n', '\r']);
+    let Some(rest) = content.strip_prefix(SSH_CONFIG_MARKER_START) else {
+        return false;
+    };
+    let Some(end) = rest.find(SSH_CONFIG_MARKER_END) else {
+        return false;
+    };
+    let section = &rest[..end];
+    MANAGED_SSH_DIRECTIVES
+        .iter()
+        .all(|(keyword, value)| section.contains(&format!("\n    {keyword} {value}\n")))
+        && section.contains("\nHost cw-*\n")
+        && section.ends_with("\nHost *\n")
+}
+
+/// Puts `managed` first in the file, replacing any earlier Codewire section
+/// wherever it was. Everything else is kept as it was.
+pub(crate) fn place_managed_ssh_section(existing: &str, managed: &str) -> anyhow::Result<String> {
+    let rest = remove_managed_ssh_section(existing)?;
+    let rest = rest.trim_start_matches(['\n', '\r']);
+    let mut output = String::with_capacity(managed.len() + rest.len() + 3);
+    output.push_str(managed);
+    output.push('\n');
+    if !rest.is_empty() {
+        output.push('\n');
+        output.push_str(rest);
+        if !rest.ends_with('\n') {
+            output.push('\n');
+        }
+    }
+    Ok(output)
+}
+
+pub(crate) fn remove_managed_ssh_section(existing: &str) -> anyhow::Result<String> {
     let start = existing.find(SSH_CONFIG_MARKER_START);
     let end = existing.find(SSH_CONFIG_MARKER_END);
 
     match (start, end) {
-        (None, None) => {
-            let mut output = existing.to_string();
-            if !output.is_empty() && !output.ends_with('\n') {
-                output.push('\n');
-            }
-            if !output.is_empty() {
-                output.push('\n');
-            }
-            output.push_str(managed);
-            output.push('\n');
-            Ok(output)
-        }
+        (None, None) => Ok(existing.to_string()),
         (Some(start), Some(end)) if end >= start => {
             let mut end = end + SSH_CONFIG_MARKER_END.len();
             if existing.as_bytes().get(end) == Some(&b'\n') {
                 end += 1;
             }
-            Ok(format!(
-                "{}{}\n{}",
-                &existing[..start],
-                managed,
-                &existing[end..]
-            ))
+            Ok(format!("{}{}", &existing[..start], &existing[end..]))
         }
         _ => anyhow::bail!("malformed ssh config: Codewire markers are incomplete"),
     }
