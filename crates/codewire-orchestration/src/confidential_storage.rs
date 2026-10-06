@@ -62,6 +62,27 @@ impl FeatureFlags {
     }
 }
 
+/// The stable refusal while a confidential workspace cannot bind. Daemon-
+/// hosted access (#2460) serves SSH and the tailnet only from a bound daemon,
+/// and a confidential workspace keeps its measured, environment-bound identity
+/// until B2c moves it onto the workspace binding; until then no confidential
+/// environment is created or started.
+pub const CONFIDENTIAL_ISOLATION_UNAVAILABLE: &str =
+    "confidential isolation is temporarily unavailable";
+pub const CONFIDENTIAL_ISOLATION_UNAVAILABLE_CODE: &str = "CONFIDENTIAL_ISOLATION_UNAVAILABLE";
+
+/// Refuse to create or start a confidential environment until B2c.
+pub fn refuse_confidential_isolation(isolation_tier: &str) -> AppResult<()> {
+    if isolation_tier != "confidential" {
+        return Ok(());
+    }
+    Err(AppError::Coded {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: CONFIDENTIAL_ISOLATION_UNAVAILABLE_CODE,
+        detail: CONFIDENTIAL_ISOLATION_UNAVAILABLE.into(),
+    })
+}
+
 /// Authoritative product gate for confidential create and interactive
 /// operations. Stop, destroy, and system reconciliation deliberately do not
 /// call this helper, so disabling the feature cannot orphan resources.
@@ -2196,6 +2217,23 @@ mod tests {
         assert!(manifest_uri("not-a-digest").is_err());
         assert_eq!(device_size_bytes(20).unwrap(), 20 * 1024 * 1024 * 1024);
         assert!(device_size_bytes(0).is_err());
+    }
+
+    #[test]
+    fn confidential_isolation_is_refused_with_a_stable_unavailable_error() {
+        assert!(refuse_confidential_isolation("standard").is_ok());
+        match refuse_confidential_isolation("confidential") {
+            Err(AppError::Coded {
+                status,
+                code,
+                detail,
+            }) => {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(code, "CONFIDENTIAL_ISOLATION_UNAVAILABLE");
+                assert_eq!(detail, "confidential isolation is temporarily unavailable");
+            }
+            other => panic!("confidential isolation was not refused: {other:?}"),
+        }
     }
 
     #[test]
