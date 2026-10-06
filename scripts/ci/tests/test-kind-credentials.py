@@ -811,6 +811,50 @@ kind_credential_daemon_probe '%s' success
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn("the daemon-path success request failed", result.stderr)
 
+    def test_a_launch_is_retried_only_while_setup_is_not_ready(self):
+        directory = tempfile.TemporaryDirectory(prefix="kind-launch-")
+        self.addCleanup(directory.cleanup)
+        launch = '''
+RUN_DIR='%s'
+calls="$RUN_DIR/calls"
+: > "$calls"
+sleep() { :; }
+kind_credential_cli() {
+  [ "$1 $2 $3" = "run %s --detach" ] || return 97
+  echo call >> "$calls"
+  local count
+  count="$(wc -l < "$calls")"
+  if [ "$count" -le %d ]; then
+    echo "Error: %s" >&2
+    return 1
+  fi
+  printf '{"session_id":"session-1"}\\n'
+}
+KIND_LAUNCH_SETUP_SECONDS=%d
+status=0
+launched="$(kind_credential_launch %s --detach)" || status=$?
+printf '%%s %%s %%s\\n' "$status" "$(wc -l < "$calls")" "$launched"
+'''
+        cases = (
+            # Refused twice for setup, then launched.
+            (2, "environment setup is not ready; wait for setup to finish", 60,
+             "0 3 {\"session_id\":\"session-1\"}"),
+            # Any other refusal returns at once.
+            (5, "environment is not running", 60, "1 1"),
+            # Setup that stays not ready fails once the bound passes.
+            (5, "environment setup is not ready; wait for setup to finish", 0, "1 1"),
+        )
+        for refusals, message, seconds, expected in cases:
+            with self.subTest(message=message, seconds=seconds):
+                result = self.shell(launch % (directory.name, ENVIRONMENT, refusals, message,
+                                              seconds, ENVIRONMENT))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
+                if expected.startswith("1"):
+                    self.assertIn(message, result.stderr)
+        source = (ROOT / "scripts/ci/verify/kind/credentials.sh").read_text()
+        self.assertIn('launched="$(kind_credential_launch "$environment" --no-tty --detach', source)
+
     def test_membership_role_change_is_exact_and_fails_closed(self):
         for changed, expected in (("synthetic-membership\n", 0), ("", 1),
                                   ("one\ntwo\n", 1)):

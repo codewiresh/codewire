@@ -1128,6 +1128,11 @@ KIND_CLAUDE_SUBSCRIPTION_TOKEN='sk-ant-oat01-CW_KIND_SYNTHETIC_CLAUDE_TOKEN-0123
 KIND_CLAUDE_REFUSED_TOKEN='sk-ant-oat01-CW_KIND_SYNTHETIC_REFUSED_TOKEN-0123456789abcdef'
 # Bound on one daemon-launched Claude Code session reaching a terminal state.
 KIND_CLAUDE_SESSION_ATTEMPTS=90
+# A managed restart turns the environment running a moment before its start
+# releases the setup owner, and a launch in between is refused with exactly
+# this message. Only that refusal is retried, once a second, for this long.
+KIND_SETUP_NOT_READY='environment setup is not ready; wait for setup to finish'
+KIND_LAUNCH_SETUP_SECONDS=60
 
 # The managed client selection recorded for the live binding of one exact
 # workspace Pod: the record launch authority reads. Waits briefly for the
@@ -1185,13 +1190,34 @@ kind_credential_claude_stage() {
 # daemon projects. Launch, terminal state and saved output are all unary
 # calls. Its output is closed events only; the run passes only when its
 # session exited 0 and its last event is its own completion.
+# `cw run` in ENVIRONMENT with the remaining arguments, retried only while it
+# is refused because setup is not ready yet; every other failure returns at
+# once with the launch's own status and output.
+kind_credential_launch() {
+  local environment="$1" deadline=$((SECONDS + KIND_LAUNCH_SETUP_SECONDS)) stderr output status
+  shift
+  stderr="$(mktemp "$RUN_DIR/credential-launch.XXXXXX")" || return $?
+  while :; do
+    status=0
+    output="$(kind_credential_cli run "$environment" "$@" 2>"$stderr")" || status=$?
+    if [ "$status" -eq 0 ] || ! grep -Fq -- "$KIND_SETUP_NOT_READY" "$stderr" ||
+      [ "$SECONDS" -ge "$deadline" ]; then
+      cat -- "$stderr" >&2
+      rm -f -- "$stderr"
+      [ "$status" -ne 0 ] || printf '%s\n' "$output"
+      return "$status"
+    fi
+    sleep 1
+  done
+}
+
 kind_credential_claude_run() {
   local environment="$1" driver="$2" form="$3" outcome="$4"
   local launched session attempt state output
   [[ "$driver" =~ ^/tmp/codewire-kind-claude-session-[0-9]{1,12}\.py$ ]] || return 1
   case "$form" in api_key | subscription_token) ;; *) return 1 ;; esac
   case "$outcome" in success | refused) ;; *) return 1 ;; esac
-  launched="$(kind_credential_cli run "$environment" --no-tty --detach --output json -- \
+  launched="$(kind_credential_launch "$environment" --no-tty --detach --output json -- \
     python3 -B -u "$driver" "$form" "$outcome")" || return $?
   session="$(jq -er '.session_id | select(type == "string" and test("^[A-Za-z0-9_-]{1,128}$"))' \
     <<<"$launched")" || {
