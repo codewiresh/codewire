@@ -27,7 +27,8 @@ const RUNNING_ENV_ID: &str = "00000000-0000-4000-8000-000000000901";
 const STOPPED_ENV_ID: &str = "00000000-0000-4000-8000-000000000902";
 const UNKNOWN_ENV_ID: &str = "00000000-0000-4000-8000-000000000999";
 const SESSION_COOKIE: &str = "codewire.session_token";
-const COORDINATE_SCOPE: &str = "coordinate";
+/// The seeded running environment's operation generation.
+const RUNNING_GENERATION: i64 = 1;
 
 struct Harness {
     base_url: String,
@@ -104,8 +105,9 @@ impl Harness {
     }
 
     async fn assert_rejection_codes(&self) {
-        let sidecar = sidecar_token(&self.session_secret, RUNNING_ENV_ID, COORDINATE_SCOPE);
-        let wrong_scope = sidecar_token(&self.session_secret, RUNNING_ENV_ID, "other");
+        let sidecar = peer_token(&self.session_secret, RUNNING_ENV_ID, RUNNING_GENERATION);
+        let stale = peer_token(&self.session_secret, RUNNING_ENV_ID, RUNNING_GENERATION + 1);
+        let legacy = legacy_token(&self.session_secret, RUNNING_ENV_ID, "coordinate");
         let cases = [
             (
                 None,
@@ -134,12 +136,21 @@ impl Harness {
             ),
             (
                 None,
-                Some(wrong_scope.as_str()),
+                Some(legacy.as_str()),
                 request(Hello {
                     environment_id: RUNNING_ENV_ID.into(),
                     ..Default::default()
                 }),
-                ErrorCode::PermissionDenied,
+                ErrorCode::Unauthenticated,
+            ),
+            (
+                None,
+                Some(stale.as_str()),
+                request(Hello {
+                    environment_id: RUNNING_ENV_ID.into(),
+                    ..Default::default()
+                }),
+                ErrorCode::Unauthenticated,
             ),
             (
                 None,
@@ -148,7 +159,7 @@ impl Harness {
                     environment_id: UNKNOWN_ENV_ID.into(),
                     ..Default::default()
                 }),
-                ErrorCode::PermissionDenied,
+                ErrorCode::Unauthenticated,
             ),
             (
                 None,
@@ -212,7 +223,7 @@ impl Harness {
     }
 
     async fn assert_peer_round_trip(&self) {
-        let sidecar_token = sidecar_token(&self.session_secret, RUNNING_ENV_ID, COORDINATE_SCOPE);
+        let sidecar_token = peer_token(&self.session_secret, RUNNING_ENV_ID, RUNNING_GENERATION);
         let mut sidecar = self
             .client(None, Some(&sidecar_token))
             .coordinate()
@@ -300,15 +311,25 @@ fn sample_node(key_byte: u8, disco_byte: u8) -> Node {
     node
 }
 
-fn sidecar_token(secret: &str, environment_id: &str, scope: &str) -> String {
+fn peer_token(secret: &str, environment_id: &str, generation: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64;
+    codewire_server_core::peer_token::issue(secret, environment_id, generation, now + 600)
+        .expect("issue peer token")
+}
+
+/// The retired coordinate-scope format, which the coordinator now refuses.
+fn legacy_token(secret: &str, environment_id: &str, scope: &str) -> String {
     let payload = serde_json::to_vec(&serde_json::json!({
         "environment_id": environment_id,
         "scope": scope,
     }))
-    .expect("serialize sidecar token payload");
+    .expect("serialize legacy token payload");
     let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let payload = engine.encode(payload);
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("sidecar token key");
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("legacy token key");
     mac.update(payload.as_bytes());
     format!("{payload}.{}", engine.encode(mac.finalize().into_bytes()))
 }

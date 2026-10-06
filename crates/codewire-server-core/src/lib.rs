@@ -50,6 +50,7 @@ pub mod obs;
 pub mod org;
 pub mod org_deletion;
 pub mod organization_slug;
+pub mod peer_token;
 #[cfg(feature = "kubernetes-identity")]
 pub mod pod_identity;
 pub mod rest_sunset;
