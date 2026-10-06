@@ -1230,6 +1230,8 @@ impl CwRuntimeError {
 mod tests {
     use super::*;
     use codewire_vmm_guest_probe::cw_runtime::{CwImageDescriptor, CwImagePayload};
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
 
     fn fixture_asset(root: &Path, marker: u8) -> (PathBuf, Vec<u8>) {
         fs::create_dir(root).unwrap();
@@ -1655,14 +1657,168 @@ mod tests {
         );
     }
 
+    const ISOLATED_PRODUCER_CASE: &str = "CODEWIRE_RUNTIME_TEST_ISOLATED_CASE";
+
+    struct IsolatedProducerChild(std::process::Child);
+
+    impl Drop for IsolatedProducerChild {
+        fn drop(&mut self) {
+            match self.0.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => {}
+                Err(_) => {
+                    eprintln!("isolated producer case child custody unknown; retain its root");
+                    return;
+                }
+            }
+            let _ = self.0.kill();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match self.0.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    _ => {
+                        eprintln!("isolated producer case child closure unknown; retain its root");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    fn assert_no_producer_case_children() {
+        // WNOWAIT preserves any unexpected child's evidence. Only ECHILD is
+        // accepted; a terminal but unreaped leaf is not completed custody.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe {
+                libc::waitid(
+                    libc::P_ALL,
+                    0,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT | libc::__WALL,
+                )
+            },
+            -1,
+            "isolated producer case still owns a child"
+        );
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    fn isolated_producer_case(name: &str) -> bool {
+        if let Some(case) = std::env::var_os(ISOLATED_PRODUCER_CASE) {
+            assert_eq!(case, name);
+            // This exact one-test process owns the orphan leaf. Never arm a
+            // process-wide subreaper in the parallel Cargo test parent.
+            assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
+            let mut observed = 0;
+            assert_eq!(
+                unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut observed) },
+                0
+            );
+            assert_eq!(observed, 1);
+            assert_no_producer_case_children();
+            return true;
+        }
+        let root = tempfile::Builder::new()
+            .prefix("cw-runtime-custody-")
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap()
+            .keep();
+        let output = |name: &str| {
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(root.join(name))
+                .unwrap()
+        };
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", name, "--test-threads=1", "--nocapture"])
+            .env_clear()
+            .env(ISOLATED_PRODUCER_CASE, name)
+            .envs(
+                ["TMPDIR", "CARGO_TARGET_TMPDIR"]
+                    .into_iter()
+                    .filter_map(|key| std::env::var_os(key).map(|value| (key, value))),
+            )
+            .stdin(Stdio::null())
+            .stdout(output("stdout"))
+            .stderr(output("stderr"));
+        let mut child = IsolatedProducerChild(command.spawn().unwrap());
+        // The original startup/recovery phases remain five seconds each.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let status = loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "isolated producer case exceeded its bound; retain {}",
+                root.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let read = |name: &str| {
+            let mut value = String::new();
+            File::open(root.join(name))
+                .unwrap()
+                .take(64 * 1024 + 1)
+                .read_to_string(&mut value)
+                .unwrap();
+            assert!(value.len() <= 64 * 1024, "isolated producer log bound");
+            value
+        };
+        let stdout = read("stdout");
+        let stderr = read("stderr");
+        assert!(
+            status.success() && stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+            "{stdout}\n{stderr}\nretained isolated producer logs {}",
+            root.display()
+        );
+        fs::remove_dir_all(root).unwrap();
+        false
+    }
+
+    fn producer_leaf_stat(pid: u32) -> (String, u32, u64) {
+        let mut bytes = Vec::new();
+        File::open(format!("/proc/{pid}/stat"))
+            .unwrap()
+            .take(4097)
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert!(bytes.len() <= 4096, "leaf stat bound");
+        let text = std::str::from_utf8(&bytes).unwrap();
+        let (_, fields) = text.rsplit_once(") ").unwrap();
+        let fields: Vec<_> = fields.split_ascii_whitespace().collect();
+        (
+            fields[0].to_owned(),
+            fields[1].parse().unwrap(),
+            fields[19].parse().unwrap(),
+        )
+    }
+
     #[test]
     fn killed_producer_stops_leaf_before_recovery() {
-        assert_killed_producer_cleanup(false);
+        if isolated_producer_case("cw_runtime::tests::killed_producer_stops_leaf_before_recovery") {
+            assert_killed_producer_cleanup(false);
+        }
     }
 
     #[test]
     fn killed_producer_with_closed_stdio_stops_leaf_before_recovery() {
-        assert_killed_producer_cleanup(true);
+        if isolated_producer_case(
+            "cw_runtime::tests::killed_producer_with_closed_stdio_stops_leaf_before_recovery",
+        ) {
+            assert_killed_producer_cleanup(true);
+        }
     }
 
     fn assert_killed_producer_cleanup(closed_stdio: bool) {
@@ -1695,6 +1851,23 @@ mod tests {
             assert!(producer.0.try_wait().unwrap().is_none());
             std::thread::sleep(Duration::from_millis(10));
         };
+        // The producer still owns its unreaped leaf while its birth is pinned.
+        assert!(producer.0.try_wait().unwrap().is_none());
+        let before = producer_leaf_stat(leaf);
+        assert_eq!(before.1, producer.0.id());
+        let identity = crate::linux::ProcessIdentity::capture(leaf).unwrap();
+        let leaf_process = crate::linux::LiveProcess::recover(&identity).unwrap();
+        let leaf_wait = leaf_process.duplicate_wait_descriptor().unwrap();
+        let after = producer_leaf_stat(leaf);
+        assert_eq!(after.1, producer.0.id());
+        assert_eq!(before.2, identity.start_time_ticks);
+        assert_eq!(after.2, identity.start_time_ticks);
+        assert!(!leaf_process.is_exited().unwrap());
+        assert!(producer.0.try_wait().unwrap().is_none());
+        assert!(
+            Instant::now() < deadline,
+            "leaf birth capture exceeded fixture bound"
+        );
         let engine = PrivateRoot::open(&task.path().join("engine")).unwrap();
         let store = CwRuntimeStore::create(&engine).unwrap();
         assert!(matches!(
@@ -1714,14 +1887,51 @@ mod tests {
                 Err(error) => panic!("unexpected publication failure: {error}"),
             }
         };
-        // A zombie has exited and cannot write. No process signal is needed:
-        // producer-death custody must already have stopped the exact leaf.
-        if let Ok(stat) = fs::read_to_string(format!("/proc/{leaf}/stat")) {
-            let (_, fields) = stat.rsplit_once(") ").unwrap();
-            assert_eq!(fields.split_whitespace().next(), Some("Z"));
+        // Lock release precedes the kernel's terminal notification. Observe
+        // the original pinned leaf without signals, within the same five-second
+        // recovery bound, then join that exact adopted birth before ECHILD.
+        while !leaf_process.is_exited().unwrap() {
+            assert!(
+                Instant::now() < deadline,
+                "producer-death leaf still running"
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
+        let terminal = producer_leaf_stat(leaf);
+        assert_eq!(terminal.0, "Z");
+        assert_eq!(terminal.1, std::process::id());
+        assert_eq!(terminal.2, identity.start_time_ticks);
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe {
+                libc::waitid(
+                    libc::P_PIDFD,
+                    leaf_wait.as_raw_fd() as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT | libc::__WALL,
+                )
+            },
+            0
+        );
+        assert_eq!(unsafe { info.si_pid() }, leaf as libc::pid_t);
+        assert_eq!(info.si_code, libc::CLD_KILLED);
+        assert_eq!(unsafe { info.si_status() }, libc::SIGKILL);
+        let mut status = 0;
+        assert_eq!(
+            unsafe {
+                libc::waitpid(
+                    leaf as libc::pid_t,
+                    &mut status,
+                    libc::WNOHANG | libc::__WALL,
+                )
+            },
+            leaf as libc::pid_t
+        );
+        assert!(libc::WIFSIGNALED(status));
+        assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
         store.recover_abandoned(deadline).unwrap();
         assert_eq!(fs::read_dir(store.staging.path()).unwrap().count(), 0);
         drop(publication);
+        assert_no_producer_case_children();
     }
 }

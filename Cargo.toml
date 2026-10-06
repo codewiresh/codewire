@@ -273,6 +273,11 @@ strip = true
 [profile.test.package."sha2@0.10.9"]
 opt-level = 3
 
+# In-process VMM RPC fixtures admit their own test executable. Omit linked
+# debug information so it fits the unchanged 256MiB executable bound.
+[profile.test.package.codewire-local-vmm]
+strip = "debuginfo"
+
 # CI/dev-drill profile: release semantics without LTO or single-unit
 # codegen — host-built test binaries in CI use this (shipped images
 # still build the real release profile via the Dockerfiles).

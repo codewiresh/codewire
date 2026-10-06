@@ -7934,6 +7934,70 @@ mod tests {
         attach_named_test_runner_process(core, "dev", socket_identity)
     }
 
+    // These two shutdown fixtures retain the unreaped Child before any readiness
+    // assertion, including the single strict LiveProcess capture.
+    struct ShutdownTestChild(Child);
+
+    impl ShutdownTestChild {
+        fn capture(&mut self, executable: &Path) -> LiveProcess {
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            loop {
+                assert!(
+                    self.0.try_wait().unwrap().is_none(),
+                    "shutdown test child exited before its expected executable"
+                );
+                if fs::read_link(format!("/proc/{}/exe", self.0.id()))
+                    .ok()
+                    .as_deref()
+                    == Some(executable)
+                {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "shutdown test child did not reach its expected executable"
+                );
+                std::thread::yield_now();
+            }
+            LiveProcess::capture_child(self.0.id(), executable).unwrap()
+        }
+    }
+
+    impl Drop for ShutdownTestChild {
+        fn drop(&mut self) {
+            match self.0.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("shutdown test child cleanup status unknown: {error}");
+                    return;
+                }
+            }
+            // Only failure cleanup can reach this point: both positive fixture
+            // paths already require their original Child to have been reaped.
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            if let Err(error) = self.0.kill() {
+                eprintln!("shutdown test child cleanup kill failed: {error}");
+            }
+            loop {
+                match self.0.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Ok(None) => {
+                        eprintln!("shutdown test child cleanup did not finish within one second");
+                        return;
+                    }
+                    Err(error) => {
+                        eprintln!("shutdown test child cleanup status unknown: {error}");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn unacknowledged_runner_shutdown_still_observes_natural_exit() {
         use crate::control::v1::environment_runner_service_server::EnvironmentRunnerServiceServer;
@@ -7941,19 +8005,21 @@ mod tests {
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let socket = parent.path().join("shutdown.sock");
         let executable = fs::canonicalize("/bin/sh").unwrap();
-        let mut child = Command::new(&executable)
-            .args([
-                "-c",
-                "read -r retirement_command; test \"$retirement_command\" = retire",
-            ])
-            .stdin(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let live = LiveProcess::capture_child(child.id(), &executable).unwrap();
+        let mut child = ShutdownTestChild(
+            Command::new(&executable)
+                .args([
+                    "-c",
+                    "read -r retirement_command; test \"$retirement_command\" = retire",
+                ])
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let live = child.capture(&executable);
         let service = TestRunnerProtocolService {
             reply: TestRunnerProtocolReply::Version(4),
             useful_calls: Arc::new(AtomicUsize::new(0)),
-            shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.stdin.take()))),
+            shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.0.stdin.take()))),
         };
         let (incoming, identity) = bind_owner_only(&socket).unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -7975,7 +8041,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert!(child.try_wait().unwrap().unwrap().success());
+        assert!(child.0.try_wait().unwrap().unwrap().success());
         assert!(live.is_exited().unwrap());
         drop(client);
         stop.send(()).unwrap();
@@ -7991,8 +8057,8 @@ mod tests {
         let (identity, calls, stop, server) =
             spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(4));
         let executable = fs::canonicalize("/bin/sleep").unwrap();
-        let mut child = Command::new(&executable).arg("60").spawn().unwrap();
-        let live = LiveProcess::capture_child(child.id(), &executable).unwrap();
+        let mut child = ShutdownTestChild(Command::new(&executable).arg("60").spawn().unwrap());
+        let live = child.capture(&executable);
         let mut client = RunnerClient::connect(&socket).await.unwrap();
         assert!(
             !request_runner_shutdown_and_observe(&mut client, Uuid::new_v4(), 1, &live)
@@ -8000,9 +8066,9 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert!(child.try_wait().unwrap().is_none());
+        assert!(child.0.try_wait().unwrap().is_none());
         live.signal(Signal::KILL).unwrap();
-        assert!(!child.wait().unwrap().success());
+        assert!(!child.0.wait().unwrap().success());
         assert!(live.is_exited().unwrap());
         drop(client);
         stop.send(()).unwrap();
