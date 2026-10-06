@@ -760,10 +760,8 @@ mod enabled {
 
         async fn cross_run_serialization(&self) -> anyhow::Result<()> {
             let scenario = "cross-run";
-            let env_id = format!(
-                "env-wif-cross-{}",
-                &uuid::Uuid::new_v4().simple().to_string()[..8]
-            );
+            // The daemon binds only canonical environment UUIDs.
+            let env_id = uuid::Uuid::new_v4().to_string();
             let queue = format!(
                 "wif-cross-{}",
                 &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -872,10 +870,8 @@ mod enabled {
 
         async fn worker_death_recovery(&self) -> anyhow::Result<()> {
             let scenario = "worker-death";
-            let env_id = format!(
-                "env-wif-death-{}",
-                &uuid::Uuid::new_v4().simple().to_string()[..8]
-            );
+            // The daemon binds only canonical environment UUIDs.
+            let env_id = uuid::Uuid::new_v4().to_string();
             let queue = format!(
                 "wif-death-{}",
                 &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -1013,10 +1009,8 @@ mod enabled {
 
         async fn same_generation_retry(&self) -> anyhow::Result<()> {
             let scenario = "fail-once";
-            let env_id = format!(
-                "env-wif-retry-{}",
-                &uuid::Uuid::new_v4().simple().to_string()[..8]
-            );
+            // The daemon binds only canonical environment UUIDs.
+            let env_id = uuid::Uuid::new_v4().to_string();
             let queue = format!(
                 "wif-retry-{}",
                 &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -1066,10 +1060,8 @@ mod enabled {
                 (CLONE_SIBLING_FIXTURE_URL, ""),
             ])
             .context("parallel-clone fixture sources must pass production validation")?;
-            let env_id = format!(
-                "env-wif-clone-{}",
-                &uuid::Uuid::new_v4().simple().to_string()[..8]
-            );
+            // The daemon binds only canonical environment UUIDs.
+            let env_id = uuid::Uuid::new_v4().to_string();
             let queue = format!(
                 "wif-clone-{}",
                 &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -1115,10 +1107,8 @@ mod enabled {
 
         async fn external_cleanup_retry(&self) -> anyhow::Result<()> {
             let scenario = "external-cleanup";
-            let env_id = format!(
-                "env-wi2-cleanup-{}",
-                &uuid::Uuid::new_v4().simple().to_string()[..8]
-            );
+            // The daemon binds only canonical environment UUIDs.
+            let env_id = uuid::Uuid::new_v4().to_string();
             let queue = format!(
                 "wi2-cleanup-{}",
                 &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -1363,7 +1353,7 @@ mod enabled {
             let suffix = &uuid::Uuid::new_v4().simple().to_string()[..8];
             let user_id = format!("usr-org-delete-{suffix}");
             let org_id = format!("org-delete-{suffix}");
-            let env_id = format!("env-org-delete-{suffix}");
+            let env_id = uuid::Uuid::new_v4().to_string();
             let queue = format!("org-delete-{suffix}");
             let session_token = format!("org-delete-session-{suffix}");
             let evidence = self.scenario_path(scenario, "evidence.jsonl");

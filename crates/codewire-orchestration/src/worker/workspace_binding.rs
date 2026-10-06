@@ -899,6 +899,7 @@ const DENIED_IMAGES: &str = "images";
 const DENIED_VOLUME: &str = "workspace volume";
 const DENIED_SCOPE: &str = "credential scope";
 const DENIED_CAPTURE: &str = "bootstrap capture";
+const DENIED_ENVIRONMENT_ID: &str = "environment id is not a canonical UUID";
 /// Program #2238 C3: a pool-born Sandbox's first bind found a spec other than
 /// this environment's expected rendering.
 const DENIED_POOL_RENDERING: &str = "pool rendering";
@@ -1173,6 +1174,11 @@ pub(crate) async fn record_workspace_binding(
             && states.iter().all(|state| BINDABLE_STATES.contains(state)),
         "workspace binding authority does not match the environment"
     );
+    // The daemon accepts only a canonical environment UUID from its bind
+    // response; any other binding would be answered forever and never used.
+    if !crate::workspace_binding::canonical_uid(&env.id) {
+        return Err(BindRefused::Denied(DENIED_ENVIRONMENT_ID).into());
+    }
     let pool = authority.pool();
     let facts = load_backend_facts(pool, &env.id)
         .await?

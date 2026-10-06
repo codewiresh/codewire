@@ -420,9 +420,13 @@ where
 async fn run_hosted_daemon() -> anyhow::Result<()> {
     use tracing_subscriber::EnvFilter;
 
+    // Info by default: binding, host-key and access failures must be visible
+    // without RUST_LOG. Every daemon log line is value-blind.
     let _ = tracing_subscriber::fmt()
         .json()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .try_init();
     match codewire_daemon::HostedDaemonMode::from_env()? {
         codewire_daemon::HostedDaemonMode::EnvironmentToken(config) => {
