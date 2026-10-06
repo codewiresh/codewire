@@ -13,7 +13,7 @@ pub fn env_phase_label(phase: &str) -> &str {
         "resume_workspace" => "Resuming suspended sandbox",
         "store_backend" => "Storing backend info",
         "workspace_bind" => "Binding workspace",
-        "gateway_ready" => "Gateway ready",
+        "access_ready" => "SSH access ready",
         "pod_scheduled" => "Workspace pod scheduled",
         "pod_initialized" => "Workspace pod initialized",
         "pod_running" => "Workspace containers started",
@@ -50,7 +50,7 @@ pub fn should_record_worker_checkpoint(phase: &str, status: &str) -> bool {
             | "wait_for_ready"
             | "store_backend"
             | "workspace_bind"
-            | "gateway_ready"
+            | "access_ready"
             | "mark_running"
             | "publish_setup"
             | "health_check"
@@ -347,11 +347,8 @@ mod tests {
         ] {
             assert!(!should_record_worker_checkpoint(phase, "completed"));
         }
-        assert!(should_record_worker_checkpoint("gateway_ready", "started"));
-        assert!(should_record_worker_checkpoint(
-            "gateway_ready",
-            "completed"
-        ));
+        assert!(should_record_worker_checkpoint("access_ready", "started"));
+        assert!(should_record_worker_checkpoint("access_ready", "completed"));
     }
 
     #[test]

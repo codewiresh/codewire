@@ -33,8 +33,7 @@ use super::template::{
     CONFIDENTIAL_WORKSPACE_STORAGE_CLASS, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
     RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_RUNC, TemplateOpts, gateway_direct_udp_service_name,
     gateway_host_key_secret_name, gateway_network_policy_name, gateway_workload_name,
-    render_gateway_deployment, render_gateway_direct_udp_service, render_gateway_host_key_secret,
-    render_gateway_network_policy, render_gateway_service, render_sandbox_shadow_pool,
+    render_gateway_direct_udp_service, render_gateway_host_key_secret, render_sandbox_shadow_pool,
     render_sandbox_template, render_warm_member_bridge, render_workspace_daemon_network_policy,
     render_workspace_daemon_service, warm_member_daemon_bridge_name,
     warm_member_gateway_bridge_name, workspace_daemon_network_policy_name,
@@ -3663,22 +3662,19 @@ impl SandboxClient {
         }
     }
 
-    pub async fn ensure_gateway_stack(&self, opts: &TemplateOpts) -> anyhow::Result<()> {
+    /// The environment's access objects (design §5): the daemon Service the
+    /// API and the credential relay dial, the direct-UDP LoadBalancer to the
+    /// workspace's tailnet peer, and the workspace's NetworkPolicy. No
+    /// gateway object is rendered: the daemon hosts SSH and the tailnet.
+    pub async fn ensure_access_stack(&self, opts: &TemplateOpts) -> anyhow::Result<()> {
         if opts.environment_id.trim().is_empty() {
-            anyhow::bail!("ensure gateway stack: environment_id is required");
+            anyhow::bail!("ensure access stack: environment_id is required");
         }
         let opts = self.resolve_gateway_direct_udp_service_opts(opts).await?;
-        self.ensure_gateway_host_key_secret(&opts).await?;
         self.ensure_dynamic(
             self.services(),
             &workspace_daemon_service_name(&opts.environment_id),
             render_workspace_daemon_service(&self.namespace, &opts),
-        )
-        .await?;
-        self.ensure_dynamic(
-            self.services(),
-            &super::template::gateway_service_name(&opts.environment_id),
-            render_gateway_service(&self.namespace, &opts),
         )
         .await?;
         if let Some(service) = render_gateway_direct_udp_service(&self.namespace, &opts) {
@@ -3695,12 +3691,6 @@ impl SandboxClient {
             )
             .await?;
         }
-        self.ensure_dynamic(
-            self.deployments(),
-            &gateway_workload_name(&opts.environment_id),
-            render_gateway_deployment(&self.namespace, &opts),
-        )
-        .await?;
         if opts.network_policy_management.is_empty() || opts.network_policy_management == "Managed"
         {
             self.ensure_dynamic(
@@ -3709,21 +3699,15 @@ impl SandboxClient {
                 render_workspace_daemon_network_policy(&self.namespace, &opts),
             )
             .await?;
-            self.ensure_dynamic(
-                self.network_policies(),
-                &gateway_network_policy_name(&opts.environment_id),
-                render_gateway_network_policy(&self.namespace, &opts),
-            )
-            .await?;
         }
         Ok(())
     }
 
-    /// Program #2238 C6 (#2434): apply `cw-daemon-warm-<env>` and
-    /// `cw-gw-warm-<env>` for the adopted warm member whose Sandbox UID a
-    /// committed warm binding recorded. The caller proves that binding inside
-    /// its fence; nothing else may call this. Managed like the environment's
-    /// own policies, and removed with them by [`Self::delete_gateway_stack`].
+    /// Program #2238 C6 (#2434): apply `cw-daemon-warm-<env>` for the adopted
+    /// warm member whose Sandbox UID a committed warm binding recorded. The
+    /// caller proves that binding inside its fence; nothing else may call
+    /// this. Managed like the environment's own policies, and removed with
+    /// them by [`Self::delete_access_stack`].
     pub async fn ensure_warm_member_bridge(
         &self,
         opts: &TemplateOpts,
@@ -3734,23 +3718,17 @@ impl SandboxClient {
         {
             return Ok(());
         }
-        let [daemon, gateway] = render_warm_member_bridge(&self.namespace, opts, sandbox_uid)?;
         self.ensure_dynamic(
             self.network_policies(),
             &warm_member_daemon_bridge_name(&opts.environment_id),
-            daemon,
-        )
-        .await?;
-        self.ensure_dynamic(
-            self.network_policies(),
-            &warm_member_gateway_bridge_name(&opts.environment_id),
-            gateway,
+            render_warm_member_bridge(&self.namespace, opts, sandbox_uid)?,
         )
         .await
     }
 
-    /// Remove both halves of an environment's warm-member bridge. NotFound
-    /// is success.
+    /// Remove an environment's warm-member bridge, and the gateway half an
+    /// environment bound before the gateway's removal may still own.
+    /// NotFound is success.
     pub async fn delete_warm_member_bridge(&self, env_id: &str) -> anyhow::Result<()> {
         let policies = self.network_policies();
         delete_dynamic(&policies, &warm_member_daemon_bridge_name(env_id)).await?;
@@ -3778,7 +3756,9 @@ impl SandboxClient {
         }
     }
 
-    pub async fn delete_gateway_stack(&self, env_id: &str) -> anyhow::Result<()> {
+    /// Remove the environment's access objects, and every gateway object an
+    /// environment created before the gateway's removal may still own.
+    pub async fn delete_access_stack(&self, env_id: &str) -> anyhow::Result<()> {
         let services = self.services();
         delete_dynamic(&services, &workspace_daemon_service_name(env_id)).await?;
         delete_dynamic(&services, &super::template::gateway_service_name(env_id)).await?;
@@ -3851,7 +3831,7 @@ impl SandboxClient {
         } else {
             known_sandbox_name
         };
-        self.delete_gateway_stack(env_id).await?;
+        self.delete_access_stack(env_id).await?;
         self.delete_credential_bootstrap(env_id, timeout).await?;
         delete_dynamic_until_absent(
             &self.secrets(),

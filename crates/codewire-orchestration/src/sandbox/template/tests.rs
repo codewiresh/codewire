@@ -3164,40 +3164,57 @@ mod tests {
             policy["spec"]["podSelector"]["matchLabels"]["codewire.sh/type"].as_str(),
             Some("workspace")
         );
+        // Only orchestration reaches the daemon, SSH and preview ports; no
+        // gateway or other same-namespace Pod is a peer.
         let ingress = policy["spec"]["ingress"].as_array().unwrap();
+        assert_eq!(ingress.len(), 2, "{ingress:?}");
         assert_eq!(
-            ingress[0]["from"][0]["podSelector"]["matchLabels"]["codewire.sh/type"].as_str(),
-            Some("gateway")
-        );
-        assert_eq!(
-            ingress[0]["ports"][0]["port"].as_i64(),
-            Some(WORKSPACE_DAEMON_PORT)
-        );
-        assert_eq!(
-            ingress[1]["from"][0]["namespaceSelector"]["matchLabels"]
+            ingress[0]["from"][0]["namespaceSelector"]["matchLabels"]
                 ["kubernetes.io/metadata.name"]
                 .as_str(),
             Some("dev")
         );
         assert_eq!(
-            ingress[1]["from"][0]["podSelector"]["matchLabels"]["app.kubernetes.io/component"]
+            ingress[0]["from"][0]["podSelector"]["matchLabels"]["app.kubernetes.io/component"]
                 .as_str(),
             Some("orchestration")
         );
-        assert_eq!(ingress[1]["ports"][0]["protocol"].as_str(), Some("TCP"));
         assert_eq!(
-            ingress[1]["ports"][0]["port"].as_i64(),
-            Some(WORKSPACE_DAEMON_PORT)
+            ingress[0]["ports"],
+            json!([
+                {"protocol": "TCP", "port": WORKSPACE_DAEMON_PORT},
+                {"protocol": "TCP", "port": codewire_gateway_proto::WORKSPACE_DAEMON_SSH_PORT},
+                {"protocol": "TCP", "port": APP_PREVIEW_MIN_PORT, "endPort": APP_PREVIEW_MAX_PORT},
+            ])
         );
-        assert_eq!(ingress[1]["ports"][1]["protocol"].as_str(), Some("TCP"));
+        // The tailnet UDP listener's port admits the world alone (N1): no
+        // cluster or Pod address.
+        let world = &ingress[1];
         assert_eq!(
-            ingress[1]["ports"][1]["port"].as_i64(),
-            Some(APP_PREVIEW_MIN_PORT)
+            world["ports"],
+            json!([{"protocol": "UDP", "port": codewire_gateway_proto::WORKSPACE_TAILNET_UDP_PORT}])
         );
-        assert_eq!(
-            ingress[1]["ports"][1]["endPort"].as_i64(),
-            Some(APP_PREVIEW_MAX_PORT)
-        );
+        let peers = world["from"].as_array().unwrap();
+        assert_eq!(peers.len(), 2);
+        for peer in peers {
+            assert_eq!(peer.as_object().unwrap().len(), 1, "{peer}");
+            let block = &peer["ipBlock"];
+            let except: Vec<&str> = block["except"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|cidr| cidr.as_str().unwrap())
+                .collect();
+            match block["cidr"].as_str() {
+                Some("0.0.0.0/0") => {
+                    for cluster in ["10.0.0.0/8", "100.64.0.0/10", "172.16.0.0/12", "192.168.0.0/16"] {
+                        assert!(except.contains(&cluster), "{cluster} may send to the tailnet port");
+                    }
+                }
+                Some("::/0") => assert_eq!(except, ["fc00::/7"]),
+                other => panic!("unexpected tailnet peer {other:?}"),
+            }
+        }
         let egress = policy["spec"]["egress"].as_array().unwrap();
         assert!(egress.iter().any(|rule| {
             rule["to"]

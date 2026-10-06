@@ -22,6 +22,7 @@ use crate::lifecycle::{PgLifecycleStore, Service};
 use crate::sandbox::client::{
     ProbeResult, SandboxClient, WorkspacePodIdentity, WorkspaceSandboxIdentity,
 };
+use crate::sandbox::host_keys::RecordedHostKeys;
 use crate::sandbox::template::{
     CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DOCKER_MODE_LOCAL_DIND_DIRECT,
     KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, RUNTIME_PROFILE_CONFIDENTIAL, RuntimeProfileSpec,
@@ -1297,7 +1298,7 @@ async fn run_environment_create(
 
             // `create_claim` measures creating the environment-scoped
             // template, shadow pool, claim and gateway objects. The readiness
-            // wait that follows is its own `gateway_ready` stage; earlier
+            // wait that follows is its own `access_ready` stage; earlier
             // `create_claim` samples included that wait.
             CreateAction::CreateClaim => {
                 let started = std::time::Instant::now();
@@ -1636,7 +1637,7 @@ async fn run_environment_create(
                     authority,
                     &template_opts,
                     CREATE_MUTATION_STATES,
-                    client.ensure_gateway_stack(&template_opts),
+                    client.ensure_access_stack(&template_opts),
                 )
                 .await
                 {
@@ -1675,9 +1676,9 @@ async fn run_environment_create(
                 let gateway_started = std::time::Instant::now();
                 emit_create_log(
                     authority,
-                    "gateway_ready",
+                    "access_ready",
                     "started",
-                    GATEWAY_READY_STARTED_MESSAGE,
+                    ACCESS_READY_STARTED_MESSAGE,
                     None,
                 )
                 .await?;
@@ -1688,9 +1689,10 @@ async fn run_environment_create(
                     CREATE_MUTATION_STATES,
                     authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
-                        readiness_wait(client.wait_for_credential_gateway_ready(
-                            &template_opts,
+                        readiness_wait(client.wait_for_workspace_access_ready(
+                            env_id,
                             ready_timeout_for_isolation(&env.isolation_tier),
+                            &RecordedHostKeys(&ctx.pool),
                         )),
                     ),
                 )
@@ -1703,7 +1705,7 @@ async fn run_environment_create(
                 if let Err(e) = gateway_result {
                     emit_create_log(
                         authority,
-                        "gateway_ready",
+                        "access_ready",
                         "failed",
                         &format!("{e:#}"),
                         gateway_meta,
@@ -1716,7 +1718,7 @@ async fn run_environment_create(
                     record_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
                     return Err(e);
                 }
-                emit_create_log(authority, "gateway_ready", "completed", "", gateway_meta).await?;
+                emit_create_log(authority, "access_ready", "completed", "", gateway_meta).await?;
                 // A pool Claim's Sandbox is warm only when the controller
                 // adopted a member; with none ready it was created cold.
                 let gateway_path = match claim_path {
@@ -1728,7 +1730,7 @@ async fn run_environment_create(
                     StartPath::Cold => StartPath::Cold,
                 };
                 observe_create_stage(
-                    StartStage::GatewayReady,
+                    StartStage::AccessReady,
                     gateway_path,
                     profile,
                     gateway_elapsed,
@@ -1820,7 +1822,7 @@ fn elapsed_meta(elapsed: Duration) -> Option<serde_json::Value> {
     Some(serde_json::json!({ "duration_ms": duration_ms(elapsed) }))
 }
 
-const GATEWAY_READY_STARTED_MESSAGE: &str = "Waiting for gateway";
+const ACCESS_READY_STARTED_MESSAGE: &str = "Waiting for SSH access";
 
 /// What one runtime identity reconciliation in this create attempt checked:
 /// the environment row it rendered from, the recorded Claim association, and
@@ -2104,7 +2106,7 @@ async fn resume_suspended_workspace(
     }
 }
 
-async fn ensure_gateway_stack_for_environment(
+async fn ensure_access_stack_for_environment(
     ctx: &WorkerContext,
     cfg: &SandboxWorkerCfg,
     env: &EnvironmentRow,
@@ -2133,15 +2135,16 @@ async fn ensure_gateway_stack_for_environment(
         authority,
         &template_opts,
         states,
-        client.ensure_gateway_stack(&template_opts),
+        client.ensure_access_stack(&template_opts),
     )
     .await?;
     authority
         .run_while_authoritative_for_states(
             states,
-            client.wait_for_credential_gateway_ready(
-                &template_opts,
+            client.wait_for_workspace_access_ready(
+                env_id,
                 ready_timeout_for_isolation(&env.isolation_tier),
+                &RecordedHostKeys(&ctx.pool),
             ),
         )
         .await
@@ -2410,14 +2413,14 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
             );
         }
         // The early bind lost the race to the Claim Ready wait: bridge now,
-        // still before the gateway wait below.
+        // still before the access wait below.
         warm_bridge::bridge_warm_member(ctx, env, authority, states, &recorded).await?;
     }
 
-    // Create's `gateway_ready` stage (A0a) is the CreateClaim wait, which the
-    // early bind lets finish while Docker starts; here the gateway is
+    // Create's `access_ready` stage (A0a) is the CreateClaim wait, which the
+    // early bind lets finish while Docker starts; here SSH access is
     // normally ready already.
-    ensure_gateway_stack_for_environment(
+    ensure_access_stack_for_environment(
         ctx,
         &ctx.sandbox_cfg,
         env,

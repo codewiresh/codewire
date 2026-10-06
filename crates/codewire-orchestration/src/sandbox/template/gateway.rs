@@ -13,6 +13,7 @@ use super::encoding::kata_policy_init_data_annotation;
 use super::naming::{
     gateway_direct_udp_service_name, gateway_host_key_secret_name, gateway_labels,
     gateway_selector, gateway_service_name, gateway_workload_name, workspace_daemon_service_addr,
+    workspace_selector,
 };
 use super::runtime_policy::{
     RUNTIME_PROFILE_CONFIDENTIAL, kata_coco_kernel_params_annotation, uses_kata_policy_init_data,
@@ -214,6 +215,8 @@ pub fn render_gateway_service(namespace: &str, opts: &TemplateOpts) -> Value {
     })
 }
 
+/// The environment's direct-UDP LoadBalancer (design §5): its shared IP and
+/// allocated port, selecting the workspace Pod's tailnet peer.
 pub fn render_gateway_direct_udp_service(namespace: &str, opts: &TemplateOpts) -> Option<Value> {
     let _endpoint = gateway_direct_udp_endpoint(opts)?;
     let lb_class = opts.direct_udp_lb_class.trim();
@@ -231,8 +234,18 @@ pub fn render_gateway_direct_udp_service(namespace: &str, opts: &TemplateOpts) -
         );
     }
 
-    let mut labels = gateway_labels(opts);
+    let mut labels = json!({
+        "codewire.sh/environment-id": opts.environment_id,
+        "codewire.sh/org-id": opts.organization_id,
+        (super::super::LABEL_OPERATION_GENERATION): opts.operation_generation.to_string(),
+        "app.kubernetes.io/name": "codewire-workspace",
+        "app.kubernetes.io/component": "direct-udp",
+        "app.kubernetes.io/managed-by": "codewire",
+    });
     let labels_obj = labels.as_object_mut().expect("labels object");
+    if opts.runtime_profile_spec().profile == RUNTIME_PROFILE_CONFIDENTIAL {
+        labels_obj.insert("codewire.sh/isolation-tier".into(), "confidential".into());
+    }
     labels_obj.insert("codewire.sh/type".into(), "direct-udp-lb".into());
     labels_obj.insert("codewire.sh/runtime-network".into(), "direct-udp".into());
     labels_obj.insert("codewire.sh/transport".into(), "direct-udp".into());
@@ -249,13 +262,13 @@ pub fn render_gateway_direct_udp_service(namespace: &str, opts: &TemplateOpts) -
         "ipFamilyPolicy": "SingleStack",
         "ipFamilies": ["IPv4"],
         "externalTrafficPolicy": "Cluster",
-        "selector": gateway_selector(opts),
+        "selector": workspace_selector(opts),
         "ports": [
             {
                 "name": "tailnet-udp",
                 "protocol": "UDP",
                 "port": opts.direct_udp_lb_port,
-                "targetPort": GATEWAY_TAILNET_UDP_PORT,
+                "targetPort": i64::from(codewire_gateway_proto::WORKSPACE_TAILNET_UDP_PORT),
             },
         ],
     });

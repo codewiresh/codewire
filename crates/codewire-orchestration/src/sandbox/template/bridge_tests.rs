@@ -29,6 +29,7 @@ fn bridge_opts() -> TemplateOpts {
         gateway_token: "gw-token-golden-bridge".into(),
         daemon_auth_token: "daemon-token-golden-bridge".into(),
         server_namespace: "dev".into(),
+        stun_host: "stun.codewire-dev.sh".into(),
         workspace_identity: WorkspaceIdentity::Binding {
             binding_url: "https://codewire-orchestration.dev.svc.cluster.local:8087".into(),
         },
@@ -38,9 +39,8 @@ fn bridge_opts() -> TemplateOpts {
     }
 }
 
-fn bridge(opts: &TemplateOpts) -> (Value, Value) {
-    let [daemon, gateway] = render_warm_member_bridge(NAMESPACE, opts, BOUND_SANDBOX).unwrap();
-    (daemon, gateway)
+fn bridge(opts: &TemplateOpts) -> Value {
+    render_warm_member_bridge(NAMESPACE, opts, BOUND_SANDBOX).unwrap()
 }
 
 fn load_golden(name: &str) -> Value {
@@ -54,72 +54,38 @@ fn load_golden(name: &str) -> Value {
 
 #[test]
 fn warm_member_bridge_matches_golden_files() {
-    let (daemon, gateway) = bridge(&bridge_opts());
     assert_eq!(
-        daemon,
+        bridge(&bridge_opts()),
         load_golden("warm-member-bridge-daemon-networkpolicy.golden.json")
-    );
-    assert_eq!(
-        gateway,
-        load_golden("warm-member-bridge-gateway-networkpolicy.golden.json")
     );
 }
 
 #[test]
 fn warm_member_bridge_names_are_per_environment_and_dns_safe() {
-    let (daemon, gateway) = bridge(&bridge_opts());
+    let daemon = bridge(&bridge_opts());
     assert_eq!(daemon["metadata"]["name"], format!("cw-daemon-warm-{ENV}"));
-    assert_eq!(gateway["metadata"]["name"], format!("cw-gw-warm-{ENV}"));
     assert_eq!(
         warm_member_daemon_bridge_name(ENV),
         format!("cw-daemon-warm-{ENV}")
     );
+    // Only cleanup still names the gateway half an environment bound before
+    // the gateway's removal may own.
     assert_eq!(
         warm_member_gateway_bridge_name(ENV),
         format!("cw-gw-warm-{ENV}")
     );
-    for policy in [&daemon, &gateway] {
-        assert!(policy["metadata"]["name"].as_str().unwrap().len() <= 63);
-        assert_eq!(policy["metadata"]["namespace"], NAMESPACE);
-        assert_eq!(
-            policy["metadata"]["labels"]["codewire.sh/environment-id"],
-            ENV
-        );
-    }
-}
-
-/// Replace the environment's workspace selector by the bridge's member
-/// selector in a rule of the environment policies.
-fn toward_member(rule: &Value, opts: &TemplateOpts) -> Value {
-    fn replace(value: &mut Value, from: &Value, to: &Value) -> usize {
-        if value == from {
-            *value = to.clone();
-            return 1;
-        }
-        match value {
-            Value::Array(items) => items.iter_mut().map(|item| replace(item, from, to)).sum(),
-            Value::Object(fields) => fields
-                .values_mut()
-                .map(|item| replace(item, from, to))
-                .sum(),
-            _ => 0,
-        }
-    }
-    let mut rule = rule.clone();
-    let replaced = replace(
-        &mut rule,
-        &naming::workspace_selector(opts),
-        &json!({SANDBOX_UID_LABEL: BOUND_SANDBOX, "codewire.sh/type": "workspace"}),
+    assert!(daemon["metadata"]["name"].as_str().unwrap().len() <= 63);
+    assert_eq!(daemon["metadata"]["namespace"], NAMESPACE);
+    assert_eq!(
+        daemon["metadata"]["labels"]["codewire.sh/environment-id"],
+        ENV
     );
-    assert_eq!(replaced, 1, "{rule}");
-    rule
 }
 
-/// The bridge grants exactly the workspace rules of `cw-daemon-net-<env>`
-/// and `cw-gw-net-<env>`, nothing more: the same sources, ports and gateway
-/// peer, with only the member selector changed.
+/// The bridge grants exactly the ingress of `cw-daemon-net-<env>`, nothing
+/// more: the same sources and ports, with only the member selector changed.
 #[test]
-fn warm_member_bridge_mirrors_the_environment_policies_exactly() {
+fn warm_member_bridge_mirrors_the_environment_policy_exactly() {
     for opts in [
         bridge_opts(),
         TemplateOpts {
@@ -128,16 +94,13 @@ fn warm_member_bridge_mirrors_the_environment_policies_exactly() {
         },
         TemplateOpts {
             server_namespace: String::new(),
+            stun_host: "stun.example.test".into(),
             ..bridge_opts()
         },
     ] {
-        let (daemon, gateway) = bridge(&opts);
+        let daemon = bridge(&opts);
         let daemon_net = render_workspace_daemon_network_policy(NAMESPACE, &opts);
-        let gateway_net = render_gateway_network_policy(NAMESPACE, &opts);
-
-        // Member side: the environment policy's whole ingress. The member
-        // needs no egress beyond the shared template: the workspace never
-        // reaches its gateway.
+        // The member needs no egress beyond the shared template.
         assert_eq!(
             daemon["spec"]["podSelector"],
             json!({"matchLabels": {SANDBOX_UID_LABEL: BOUND_SANDBOX, "codewire.sh/type": "workspace"}})
@@ -145,19 +108,6 @@ fn warm_member_bridge_mirrors_the_environment_policies_exactly() {
         assert_eq!(daemon["spec"]["ingress"], daemon_net["spec"]["ingress"]);
         assert!(daemon["spec"].get("egress").is_none());
         assert_eq!(daemon["spec"]["policyTypes"], json!(["Ingress"]));
-
-        // Gateway side: this environment's gateway, with its workspace rule
-        // turned toward the member, and no ingress from the member.
-        assert_eq!(
-            gateway["spec"]["podSelector"],
-            gateway_net["spec"]["podSelector"]
-        );
-        assert_eq!(
-            gateway["spec"]["egress"],
-            json!([toward_member(&gateway_net["spec"]["egress"][0], &opts)])
-        );
-        assert!(gateway["spec"].get("ingress").is_none());
-        assert_eq!(gateway["spec"]["policyTypes"], json!(["Egress"]));
     }
 }
 
@@ -195,18 +145,6 @@ fn selects(selector: &Value, labels: &Value) -> bool {
         .all(|(key, value)| labels.get(key) == Some(value))
 }
 
-/// The selectors in a rule's `from` or `to` peers, all same-namespace Pod
-/// selectors in a bridge.
-fn pod_peers(rule: &Value, direction: &str) -> Vec<Value> {
-    rule[direction]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|peer| peer.get("namespaceSelector").is_none())
-        .map(|peer| peer["podSelector"].clone())
-        .collect()
-}
-
 /// A pool member before adoption, with the fork's birth labels.
 fn unbound_member(sandbox_uid: &str, name_hash: &str) -> Value {
     json!({
@@ -232,16 +170,18 @@ fn relabelled_member(environment: &str, sandbox_uid: &str) -> Value {
     })
 }
 
+/// A Pod an environment's gateway Deployment ran before the gateway's
+/// removal; a lingering one must never be selected or admitted.
 fn gateway_pod(environment: &str) -> Value {
-    let opts = TemplateOpts {
-        environment_id: environment.into(),
-        ..bridge_opts()
-    };
-    let mut labels =
-        render_gateway_deployment(NAMESPACE, &opts)["spec"]["template"]["metadata"]["labels"]
-            .clone();
-    labels["pod-template-hash"] = json!("7d9c8b6f5");
-    labels
+    json!({
+        "app.kubernetes.io/component": "gateway",
+        "app.kubernetes.io/managed-by": "codewire",
+        "app.kubernetes.io/name": "codewire-gateway",
+        "codewire.sh/environment-id": environment,
+        "codewire.sh/org-id": "org-golden-bridge",
+        "codewire.sh/type": "gateway",
+        "pod-template-hash": "7d9c8b6f5",
+    })
 }
 
 fn image_cache_pod() -> Value {
@@ -278,84 +218,63 @@ fn foreign_pods() -> Vec<(&'static str, Value)> {
 
 #[test]
 fn warm_member_bridge_selects_exactly_the_bound_member() {
-    let (daemon, gateway) = bridge(&bridge_opts());
-    let member_selectors: Vec<Value> = std::iter::once(daemon["spec"]["podSelector"].clone())
-        .chain(
-            gateway["spec"]["egress"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .flat_map(|rule| pod_peers(rule, "to")),
-        )
-        .collect();
-    assert_eq!(member_selectors.len(), 2);
-    for selector in &member_selectors {
-        // Before and after the claim's relabel.
-        let mut before = unbound_member(BOUND_SANDBOX, COLLIDING_NAME_HASH);
-        before
-            .as_object_mut()
-            .unwrap()
-            .remove("agents.x-k8s.io/warm-pool-sandbox");
-        assert!(selects(selector, &before));
-        assert!(selects(selector, &relabelled_member(ENV, BOUND_SANDBOX)));
-        for (label, pod) in foreign_pods() {
-            assert!(!selects(selector, &pod), "member selector chose {label}");
-        }
-        // Before the fork stamps the label, the bridge selects nothing and
-        // the environment policies keep working as they do today.
-        let mut unstamped = relabelled_member(ENV, BOUND_SANDBOX);
-        unstamped.as_object_mut().unwrap().remove(SANDBOX_UID_LABEL);
-        assert!(!selects(selector, &unstamped));
-        assert!(selects(
-            &render_workspace_daemon_network_policy(NAMESPACE, &bridge_opts())["spec"]["podSelector"],
-            &unstamped
-        ));
+    let selector = bridge(&bridge_opts())["spec"]["podSelector"].clone();
+    // Before and after the claim's relabel.
+    let mut before = unbound_member(BOUND_SANDBOX, COLLIDING_NAME_HASH);
+    before
+        .as_object_mut()
+        .unwrap()
+        .remove("agents.x-k8s.io/warm-pool-sandbox");
+    assert!(selects(&selector, &before));
+    assert!(selects(&selector, &relabelled_member(ENV, BOUND_SANDBOX)));
+    for (label, pod) in foreign_pods() {
+        assert!(!selects(&selector, &pod), "member selector chose {label}");
     }
+    // Before the fork stamps the label, the bridge selects nothing and the
+    // environment policy keeps working as it does today.
+    let mut unstamped = relabelled_member(ENV, BOUND_SANDBOX);
+    unstamped.as_object_mut().unwrap().remove(SANDBOX_UID_LABEL);
+    assert!(!selects(&selector, &unstamped));
+    assert!(selects(
+        &render_workspace_daemon_network_policy(NAMESPACE, &bridge_opts())["spec"]["podSelector"],
+        &unstamped
+    ));
 }
 
 #[test]
-fn warm_member_bridge_admits_only_this_environments_gateway() {
-    let (daemon, gateway) = bridge(&bridge_opts());
-    // The gateway half applies to this environment's gateway alone.
-    let selected = &gateway["spec"]["podSelector"];
-    assert!(selects(selected, &gateway_pod(ENV)));
-    for (label, pod) in [
-        ("another environment's gateway Pod", gateway_pod(OTHER_ENV)),
-        ("the bound member", relabelled_member(ENV, BOUND_SANDBOX)),
-        ("an image-cache Pod", image_cache_pod()),
-    ] {
-        assert!(!selects(selected, &pod), "gateway half applies to {label}");
-    }
-    // The member half's same-namespace peers are this environment's gateway
-    // alone; its only other peer is orchestration in the server namespace.
-    for rule in daemon["spec"]["ingress"].as_array().unwrap() {
-        let direction = if rule.get("from").is_some() {
-            "from"
-        } else {
-            "to"
-        };
-        for peer in rule[direction].as_array().unwrap() {
-            assert!(peer.get("ipBlock").is_none(), "{peer}");
-            if let Some(namespace) = peer.get("namespaceSelector") {
+fn warm_member_bridge_admits_orchestration_and_the_world_only() {
+    let opts = TemplateOpts {
+        stun_host: "stun.example.test".into(),
+        ..bridge_opts()
+    };
+    let daemon = bridge(&opts);
+    let ingress = daemon["spec"]["ingress"].as_array().unwrap();
+    assert_eq!(ingress.len(), 2, "{ingress:?}");
+    for rule in ingress {
+        for peer in rule["from"].as_array().unwrap() {
+            if let Some(block) = peer.get("ipBlock") {
+                // The tailnet UDP port, from the world only (N1).
                 assert_eq!(
-                    *namespace,
-                    json!({"matchLabels": {"kubernetes.io/metadata.name": "dev"}})
+                    rule["ports"],
+                    json!([{"protocol": "UDP", "port": codewire_gateway_proto::WORKSPACE_TAILNET_UDP_PORT}])
                 );
-                assert_eq!(
-                    peer["podSelector"],
-                    json!({"matchLabels": {"app.kubernetes.io/name": "codewire", "app.kubernetes.io/component": "orchestration"}})
+                assert!(
+                    block["except"]
+                        .as_array()
+                        .is_some_and(|except| !except.is_empty()),
+                    "{block}"
                 );
                 continue;
             }
-            let peer = &peer["podSelector"];
-            assert!(selects(peer, &gateway_pod(ENV)));
-            assert!(!selects(peer, &gateway_pod(OTHER_ENV)));
-            for (label, pod) in foreign_pods()
-                .into_iter()
-                .filter(|(label, _)| *label != "this environment's gateway Pod")
-            {
-                assert!(!selects(peer, &pod), "member half admits {label}");
-            }
+            // No same-namespace peer: no gateway, no other workspace.
+            assert_eq!(
+                peer["namespaceSelector"],
+                json!({"matchLabels": {"kubernetes.io/metadata.name": "dev"}})
+            );
+            assert_eq!(
+                peer["podSelector"],
+                json!({"matchLabels": {"app.kubernetes.io/name": "codewire", "app.kubernetes.io/component": "orchestration"}})
+            );
         }
     }
 }

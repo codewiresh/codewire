@@ -765,7 +765,7 @@ SELECT '${path}', l.phase, count(*),
        round(percentile_cont(0.95) WITHIN GROUP (ORDER BY (l.metadata->>'duration_ms')::double precision))::bigint
   FROM ids
   JOIN environment_logs l ON l.environment_id = ids.id
- WHERE l.phase IN ('create_claim', 'wait_for_ready', 'workspace_bind', 'gateway_ready')
+ WHERE l.phase IN ('create_claim', 'wait_for_ready', 'workspace_bind', 'access_ready')
    AND l.status = 'completed' AND l.metadata ? 'duration_ms'
  GROUP BY l.phase;
 SQL

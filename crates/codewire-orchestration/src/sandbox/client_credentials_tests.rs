@@ -91,24 +91,6 @@ fn legacy_certificate(opts: &TemplateOpts) -> Value {
         "status":{"conditions":[{"type":"Ready","status":"True","observedGeneration":2}]}})
 }
 
-fn gateway(opts: &TemplateOpts) -> Value {
-    let mut value = render_gateway_deployment(NS, opts);
-    value["metadata"]["generation"] = 3.into();
-    value["status"] = json!({"observedGeneration":3,"replicas":1,"updatedReplicas":1,"availableReplicas":1,"readyReplicas":1});
-    value
-}
-
-#[tokio::test]
-async fn disabled_credential_bootstrap_does_not_call_kubernetes() {
-    let (client, requests) = client(vec![]);
-    let opts = TemplateOpts::default();
-    client
-        .wait_for_credential_gateway_ready(&opts, Duration::ZERO)
-        .await
-        .unwrap();
-    assert!(requests.lock().unwrap().is_empty());
-}
-
 #[tokio::test]
 async fn workspace_template_creates_no_credential_bootstrap_object() {
     // Codex is selected, yet nothing but the template is written: the
@@ -132,44 +114,6 @@ async fn workspace_template_creates_no_credential_bootstrap_object() {
             .all(|request| request.1.ends_with("/sandboxtemplates")
                 || request.1.ends_with("/sandboxtemplates/synthetic-template"))
     );
-}
-
-#[test]
-fn readiness_rejects_old_gateway_rollout() {
-    let opts = opts();
-    let gateway: DynamicObject = serde_json::from_value(gateway(&opts)).unwrap();
-    assert!(gateway_ready(&gateway, &opts));
-    for field in [
-        "observedGeneration",
-        "replicas",
-        "updatedReplicas",
-        "availableReplicas",
-        "readyReplicas",
-    ] {
-        let mut changed = gateway.clone();
-        changed.data["status"][field] = 0.into();
-        assert!(!gateway_ready(&changed, &opts), "stale {field}");
-    }
-    let mut next = opts.clone();
-    next.operation_generation += 1;
-    assert!(!gateway_ready(&gateway, &next));
-}
-
-#[tokio::test]
-async fn credential_readiness_observes_only_the_gateway_rollout() {
-    let opts = opts();
-    let (client, requests) = client(vec![(StatusCode::OK, gateway(&opts))]);
-    client
-        .wait_for_credential_gateway_ready(&opts, Duration::from_secs(1))
-        .await
-        .unwrap();
-    let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].0, Method::GET);
-    assert!(requests[0].1.ends_with(&format!(
-        "/deployments/{}",
-        gateway_workload_name(&opts.environment_id)
-    )));
 }
 
 #[tokio::test]
@@ -238,106 +182,4 @@ async fn foreign_bootstrap_collision_is_not_deleted_during_compensation() {
     );
     assert_eq!(requests.lock().unwrap().len(), 1);
     assert_eq!(requests.lock().unwrap()[0].0, Method::GET);
-}
-
-/// Serves raw bodies in order and records `METHOD path?query` for each call.
-fn raw_client(responses: Vec<(StatusCode, String)>) -> (SandboxClient, Arc<Mutex<Vec<String>>>) {
-    let recorded = Arc::new(Mutex::new(Vec::new()));
-    let requests = recorded.clone();
-    let queued = Arc::new(Mutex::new(VecDeque::from(responses)));
-    let service = Router::new().fallback(move |request: Request<Body>| {
-        let requests = requests.clone();
-        let queued = queued.clone();
-        async move {
-            requests.lock().unwrap().push(format!(
-                "{} {}",
-                request.method(),
-                request.uri().path_and_query().unwrap()
-            ));
-            let (status, body) = queued
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("unexpected Kubernetes request");
-            Response::builder()
-                .status(status)
-                .header("content-type", "application/json")
-                .body(Body::from(body))
-                .unwrap()
-        }
-    });
-    (
-        SandboxClient::new(Client::new(service, "default"), NS),
-        recorded,
-    )
-}
-
-fn rolling_gateway(opts: &TemplateOpts) -> Value {
-    let mut value = gateway(opts);
-    value["metadata"]["resourceVersion"] = "20".into();
-    value["status"]["availableReplicas"] = 0.into();
-    value["status"]["readyReplicas"] = 0.into();
-    value
-}
-
-#[tokio::test]
-async fn gateway_readiness_wakes_on_the_deployment_watch() {
-    let opts = opts();
-    let ready = gateway(&opts);
-    let event = json!({"type": "MODIFIED", "object": ready}).to_string() + "\n";
-    let (client, requests) = raw_client(vec![
-        (StatusCode::OK, rolling_gateway(&opts).to_string()),
-        (StatusCode::OK, event),
-        (StatusCode::OK, ready.to_string()),
-    ]);
-    // The fallback poll outlasts the wait, so only the watch event can end it.
-    client
-        .wait_for_credential_gateway_ready_with_fallback(
-            &opts,
-            Duration::from_secs(5),
-            Duration::from_secs(60),
-        )
-        .await
-        .unwrap();
-    let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 3, "{requests:#?}");
-    let watch = &requests[1];
-    let gateway_name = gateway_workload_name(&opts.environment_id);
-    assert!(
-        watch.starts_with(&format!("GET /apis/apps/v1/namespaces/{NS}/deployments?")),
-        "{watch}"
-    );
-    for part in [
-        "watch=true",
-        &format!("fieldSelector=metadata.name%3D{gateway_name}"),
-        "resourceVersion=20",
-    ] {
-        assert!(watch.contains(part), "{watch} lacks {part}");
-    }
-    assert!(requests.iter().all(|request| !request.contains("/secrets")));
-}
-
-#[tokio::test]
-async fn gateway_readiness_polls_when_the_watch_is_refused() {
-    let opts = opts();
-    let forbidden = json!({
-        "apiVersion": "v1", "kind": "Status", "status": "Failure",
-        "reason": "Forbidden", "code": 403,
-    });
-    let (client, requests) = raw_client(vec![
-        (StatusCode::OK, rolling_gateway(&opts).to_string()),
-        (StatusCode::FORBIDDEN, forbidden.to_string()),
-        (StatusCode::OK, gateway(&opts).to_string()),
-    ]);
-    let fallback = Duration::from_millis(200);
-    let started = std::time::Instant::now();
-    client
-        .wait_for_credential_gateway_ready_with_fallback(&opts, Duration::from_secs(5), fallback)
-        .await
-        .unwrap();
-    assert!(
-        started.elapsed() >= fallback,
-        "a refused watch must wait out the fallback instead of re-reading at once"
-    );
-    assert_eq!(requests.lock().unwrap().len(), 3);
 }

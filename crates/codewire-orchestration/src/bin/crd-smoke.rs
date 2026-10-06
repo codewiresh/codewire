@@ -181,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
     println!("delete verified");
 
     client
-        .delete_gateway_stack(&template_opts.environment_id)
+        .delete_access_stack(&template_opts.environment_id)
         .await?;
     client
         .delete_gateway_host_key_secret(&template_opts.environment_id)
@@ -193,7 +193,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let cleanup_result = client
-        .delete_gateway_stack(&template_opts.environment_id)
+        .delete_access_stack(&template_opts.environment_id)
         .await;
     let secret_preserved_result =
         verify_gateway_host_key_secret(&namespace, &template_opts, "post-stack-delete").await;
@@ -482,7 +482,7 @@ async fn cleanup_gateway_stack(
     namespace: &str,
     opts: &TemplateOpts,
 ) -> anyhow::Result<()> {
-    client.delete_gateway_stack(&opts.environment_id).await?;
+    client.delete_access_stack(&opts.environment_id).await?;
     verify_gateway_host_key_secret(namespace, opts, "post-stack-delete").await?;
     client
         .delete_gateway_host_key_secret(&opts.environment_id)
@@ -494,7 +494,7 @@ async fn verify_gateway_stack(
     namespace: &str,
     opts: &TemplateOpts,
 ) -> anyhow::Result<()> {
-    client.ensure_gateway_stack(opts).await?;
+    client.ensure_access_stack(opts).await?;
 
     let kube = kube::Client::try_default().await?;
     let services: Api<Service> = Api::namespaced(kube.clone(), namespace);

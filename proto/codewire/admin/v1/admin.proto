@@ -144,7 +144,7 @@ message GetEnvironmentStartupSummaryResponse {
   int32 starting_backlog_count = 3;
   int32 starting_backlog_over_5m_count = 4;
   int32 starting_backlog_over_10m_count = 5;
-  int32 running_without_gateway_ready_count = 6;
+  int32 running_without_access_ready_count = 6;
   repeated StartupPhaseSummary phase_durations = 7;
 }
 

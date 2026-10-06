@@ -50,7 +50,7 @@ Usage:
 Journeys (default: create negatives stop-start repair resize destroy-stopped,
 then invariants when --sql-cmd is given):
   create            N timed cold creates; identity-free Pod, daemon reachable,
-                    workspace_bind before gateway_ready, wall and stage times
+                    workspace_bind before access_ready, wall and stage times
   negatives         section 14 checks from inside a workspace: own token binds,
                     garbage bearer, gateway path and HTTP/2 refused, third
                     concurrent connection refused, slow header closed, other
@@ -388,13 +388,13 @@ sql_stage_ms() {
 }
 
 stage_order_ok() {
-  # workspace_bind completes before gateway_ready completes (design §10).
+  # workspace_bind completes before access_ready completes (design §10).
   local id="$1" logs="$TMPDIR_PROOF/logs-$1.txt"
   # The CLI renders setup progress on stderr.
   cw env logs --follow false "$id" >"$logs" 2>&1 || return 1
   local bind gateway
   bind="$(grep -n -i 'Binding workspace\|workspace_bind' "$logs" | head -n1 | cut -d: -f1)"
-  gateway="$(grep -n -i 'Gateway ready\|gateway_ready' "$logs" | tail -n1 | cut -d: -f1)"
+  gateway="$(grep -n -i 'SSH access ready\|access_ready' "$logs" | tail -n1 | cut -d: -f1)"
   [[ -n "$bind" && -n "$gateway" && "$bind" -lt "$gateway" ]]
 }
 
@@ -411,12 +411,12 @@ journey_create() {
     pass "create $n: $id ready in ${elapsed} ms (client side)"
     check "create $n: identity-free workspace Pod" pod_is_identity_free "$id"
     check "create $n: daemon reachable through the gateway path" daemon_reachable "$id"
-    check "create $n: workspace_bind before gateway_ready" stage_order_ok "$id"
+    check "create $n: workspace_bind before access_ready" stage_order_ok "$id"
     if [[ -n "$SQL_CMD" ]]; then
       check "create $n: one live Pod-scope binding for the current Pod" sql_binding "$id" "$(pod_uid "$id")"
       binds+=("$(sql_stage_ms "$id" workspace_bind)")
-      gateways+=("$(sql_stage_ms "$id" gateway_ready)")
-      log "create $n: workspace_bind=${binds[-1]:-?} ms gateway_ready=${gateways[-1]:-?} ms complete=$(sql_stage_ms "$id" complete) ms"
+      gateways+=("$(sql_stage_ms "$id" access_ready)")
+      log "create $n: workspace_bind=${binds[-1]:-?} ms access_ready=${gateways[-1]:-?} ms complete=$(sql_stage_ms "$id" complete) ms"
     fi
     if remove_env "$id"; then
       [[ -z "$SQL_CMD" ]] || check "create $n: no live binding once destroyed" sql_released_after_destroy "$id"

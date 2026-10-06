@@ -27,7 +27,8 @@ use super::{JobPayload, WorkerContext};
 use crate::repository_mount::{canonical_repository_mount, validate_repository_mounts};
 use crate::sandbox::client::{ProbeResult, SandboxClient};
 use crate::sandbox::exec::{StderrTap, WorkspaceExecResult};
-use crate::sandbox::sidecar::DEFAULT_GATEWAY_SSH_PORT;
+use crate::sandbox::host_keys::RecordedHostKeys;
+use crate::sandbox::sidecar::WORKSPACE_SSH_PORT;
 
 const DEFAULT_SIDECAR_READY_TIMEOUT: Duration = Duration::from_secs(180);
 const SIDECAR_READY_TIMEOUT_ENV: &str = "SIDECAR_READY_TIMEOUT_SECS";
@@ -1806,7 +1807,7 @@ pub(crate) async fn wait_for_sidecar(
         let attempt_timeout = remaining.min(SIDECAR_READY_ATTEMPT_TIMEOUT);
         match tokio::time::timeout(
             attempt_timeout,
-            client.check_sidecar_ready(env_id, DEFAULT_GATEWAY_SSH_PORT),
+            client.check_sidecar_ready(env_id, WORKSPACE_SSH_PORT, &RecordedHostKeys(&ctx.pool)),
         )
         .await
         {

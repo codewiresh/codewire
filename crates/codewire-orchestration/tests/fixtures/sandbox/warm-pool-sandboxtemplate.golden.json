@@ -108,6 +108,28 @@
               }
             }
           ]
+        },
+        {
+          "ports": [
+            {
+              "port": 3478,
+              "protocol": "UDP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "derp"
+                }
+              }
+            }
+          ]
         }
       ]
     },

@@ -294,7 +294,7 @@ async fn warm_member_bridge_is_residue_and_leaves_with_the_gateway_stack() {
             residue.resources
         );
     }
-    client.delete_gateway_stack("env-test").await.unwrap();
+    client.delete_access_stack("env-test").await.unwrap();
     assert_eq!(has_bridge(&objects, "env-test"), [false, false]);
     assert_eq!(has_bridge(&objects, "env-foreign"), [true, true]);
 
@@ -317,7 +317,7 @@ async fn warm_member_bridge_is_residue_and_leaves_with_the_gateway_stack() {
 /// that is not a canonical UUID writes nothing, and unmanaged network
 /// policies are left alone.
 #[tokio::test]
-async fn warm_member_bridge_applies_both_halves_for_a_canonical_uid_only() {
+async fn warm_member_bridge_applies_the_daemon_half_for_a_canonical_uid_only() {
     const ENVIRONMENT: &str = "be31063a-8ec8-46d5-aa17-75cda1729370";
     const SANDBOX: &str = "0b6f4a52-5d1e-4c2a-9a4e-3f1d2c7b8e90";
     let (client, objects) = fixture(false, false, false);
@@ -347,7 +347,8 @@ async fn warm_member_bridge_applies_both_halves_for_a_canonical_uid_only() {
         .ensure_warm_member_bridge(&opts, SANDBOX)
         .await
         .unwrap();
-    assert_eq!(has_bridge(&objects, ENVIRONMENT), [true, true]);
+    // No gateway half: there is no gateway to admit.
+    assert_eq!(has_bridge(&objects, ENVIRONMENT), [true, false]);
     let daemon = objects.lock().unwrap()[&(
         "networkpolicies".into(),
         warm_member_daemon_bridge_name(ENVIRONMENT),

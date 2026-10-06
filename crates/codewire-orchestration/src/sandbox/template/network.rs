@@ -1,18 +1,66 @@
-//! Workspace and gateway network-policy rendering.
+//! Workspace network-policy rendering. The environment's SSH server and
+//! tailnet peer live in its workspace daemon (design §5): only orchestration
+//! reaches the daemon, previews and SSH, and only the world sends to the
+//! tailnet UDP port. The gateway renderer remains only until its removal.
 
 use serde_json::{Value, json};
 
 use super::gateway::tailnet_udp_listener_enabled;
 use super::naming::{
     gateway_labels, gateway_network_policy_name, gateway_selector, warm_member_daemon_bridge_name,
-    warm_member_gateway_bridge_name, warm_member_selector, workspace_daemon_network_policy_name,
-    workspace_selector,
+    warm_member_selector, workspace_daemon_network_policy_name, workspace_selector,
 };
 use super::{
     APP_PREVIEW_MAX_PORT, APP_PREVIEW_MIN_PORT, DEFAULT_GATEWAY_READYZ_PORT,
     DEFAULT_GATEWAY_SSH_PORT, GATEWAY_TAILNET_UDP_PORT, INTERNAL_DERP_STUN_PORT,
     INTERNAL_DERP_TLS_PORT, TemplateOpts, WORKSPACE_DAEMON_PORT,
 };
+
+/// Private, loopback, link-local and carrier-grade NAT ranges: every cluster
+/// and Pod network a Codewire cluster uses. The world is everything else.
+const NON_WORLD_IPV4: [&str; 6] = [
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "169.254.0.0/16",
+];
+
+fn world_peers() -> Value {
+    json!([
+        { "ipBlock": { "cidr": "0.0.0.0/0", "except": NON_WORLD_IPV4 } },
+        { "ipBlock": { "cidr": "::/0", "except": ["fc00::/7"] } },
+    ])
+}
+
+/// The daemon's tailnet reach beyond the public internet rule (design §5):
+/// STUN on the DERP servers and the public UDP relay's data plane. Traffic to
+/// their public LoadBalancers is delivered to these Pods, so the rules name
+/// them, on those public ports only: never DERP's TLS port, the relay's
+/// allocator or any other server-namespace Pod.
+fn workspace_tailnet_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
+    if opts.server_namespace.is_empty() {
+        return Vec::new();
+    }
+    let server_pods = |component: &str| {
+        json!([{
+            "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": opts.server_namespace } },
+            "podSelector": { "matchLabels": { "app.kubernetes.io/component": component } },
+        }])
+    };
+    let mut egress = vec![json!({
+        "to": server_pods("derp"),
+        "ports": [ { "protocol": "UDP", "port": i64::from(codewire_gateway_proto::DERP_STUN_PORT) } ],
+    })];
+    if opts.udp_relay_allocator_egress_enabled || !opts.udp_relay_allocator_url.trim().is_empty() {
+        egress.push(json!({
+            "to": server_pods("udp-relay"),
+            "ports": [ { "protocol": "UDP", "port": i64::from(codewire_gateway_proto::UDP_RELAY_DATA_PORT) } ],
+        }));
+    }
+    egress
+}
 
 pub(super) fn workspace_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
     let mut egress = vec![
@@ -44,6 +92,7 @@ pub(super) fn workspace_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
             ],
         }),
     ];
+    egress.extend(workspace_tailnet_egress_rules(opts));
     if let Some(rule) = kata_coco_kbs_egress_rule(&opts.kata_coco_kbs_url) {
         egress.push(rule);
     }
@@ -51,8 +100,9 @@ pub(super) fn workspace_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
 }
 
 /// The shared template egress of an identity-free workspace (design §3.5,
-/// §13): today's rules plus exactly one new rule, TCP 8087 to orchestration
-/// Pods in the server namespace.
+/// §13): today's rules, TCP 8087 to orchestration Pods in the server
+/// namespace, and the daemon's tailnet reach, so a warm member's tailnet peer
+/// starts at bind without waiting for its environment's own policy.
 pub(super) fn identity_free_workspace_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
     let mut egress = vec![
         json!({
@@ -94,6 +144,7 @@ pub(super) fn identity_free_workspace_egress_rules(opts: &TemplateOpts) -> Vec<V
             ],
         }),
     ];
+    egress.extend(workspace_tailnet_egress_rules(opts));
     if let Some(rule) = kata_coco_kbs_egress_rule(&opts.kata_coco_kbs_url) {
         egress.push(rule);
     }
@@ -124,16 +175,11 @@ fn kata_coco_kbs_egress_rule(kbs_url: &str) -> Option<Value> {
     }))
 }
 
-/// Who may reach a workspace's daemon and preview ports: its own
-/// environment's gateway, and orchestration in the server namespace.
+/// Who may reach a workspace (design §5): orchestration in the server
+/// namespace on the daemon, preview and SSH ports, and the world, never a
+/// cluster or Pod address (N1), on the tailnet UDP port.
 fn workspace_daemon_ingress_rules(opts: &TemplateOpts) -> Vec<Value> {
-    let mut ingress = vec![json!({
-        "from": [ { "podSelector": { "matchLabels": gateway_selector(opts) } } ],
-        "ports": [
-            { "protocol": "TCP", "port": WORKSPACE_DAEMON_PORT },
-            { "protocol": "TCP", "port": APP_PREVIEW_MIN_PORT, "endPort": APP_PREVIEW_MAX_PORT },
-        ],
-    })];
+    let mut ingress = Vec::new();
     if !opts.server_namespace.is_empty() {
         ingress.push(json!({
             "from": [
@@ -149,12 +195,19 @@ fn workspace_daemon_ingress_rules(opts: &TemplateOpts) -> Vec<Value> {
             ],
             "ports": [
                 { "protocol": "TCP", "port": WORKSPACE_DAEMON_PORT },
+                { "protocol": "TCP", "port": i64::from(codewire_gateway_proto::WORKSPACE_DAEMON_SSH_PORT) },
                 {
                     "protocol": "TCP",
                     "port": APP_PREVIEW_MIN_PORT,
                     "endPort": APP_PREVIEW_MAX_PORT,
                 },
             ],
+        }));
+    }
+    if tailnet_udp_listener_enabled(opts) {
+        ingress.push(json!({
+            "from": world_peers(),
+            "ports": [ { "protocol": "UDP", "port": i64::from(codewire_gateway_proto::WORKSPACE_TAILNET_UDP_PORT) } ],
         }));
     }
     ingress
@@ -335,27 +388,22 @@ pub fn render_gateway_network_policy(namespace: &str, opts: &TemplateOpts) -> Va
 /// Program #2238 C6 (#2434): the bridge for one adopted warm-pool member.
 ///
 /// A member gains `codewire.sh/environment-id` only when its claim relabels
-/// it, and Cilium drops the gateway's traffic until the relabelled Pod has a
-/// new security identity. These two policies select the member by the label
+/// it, and Cilium drops traffic to it until the relabelled Pod has a new
+/// security identity. `cw-daemon-warm-<env>` selects the member by the label
 /// the fork stamped at its birth, `agents.x-k8s.io/sandbox-uid`, together
-/// with the workspace type, so the existing identity is admitted at once:
+/// with the workspace type, so the existing identity is admitted at once. It
+/// grants exactly what `cw-daemon-net-<env>` grants beyond the shared
+/// template: ingress from orchestration and, for the tailnet, from the world.
 ///
-/// - `cw-daemon-warm-<env>` selects the member and grants exactly what
-///   `cw-daemon-net-<env>` grants beyond the shared template: ingress from
-///   this environment's gateway and from orchestration.
-/// - `cw-gw-warm-<env>` selects this environment's gateway and grants
-///   exactly the workspace rule of `cw-gw-net-<env>`, toward the member:
-///   egress to its daemon and preview ports.
-///
-/// The caller applies them only after the warm binding that recorded
+/// The caller applies it only after the warm binding that recorded
 /// `sandbox_uid` committed. A Pod without the label is never selected, so
 /// until the fork stamps it the bridge is inert and the environment policies
-/// behave exactly as before.
+/// behave exactly as before. There is no gateway half: the gateway is gone.
 pub fn render_warm_member_bridge(
     namespace: &str,
     opts: &TemplateOpts,
     sandbox_uid: &str,
-) -> anyhow::Result<[Value; 2]> {
+) -> anyhow::Result<Value> {
     anyhow::ensure!(
         canonical_uuid(&opts.environment_id),
         "warm member bridge: the environment ID is not a canonical UUID"
@@ -371,23 +419,14 @@ pub fn render_warm_member_bridge(
         "app.kubernetes.io/managed-by": "codewire",
         "codewire.sh/environment-id": opts.environment_id,
     });
-    let daemon = bridge_policy(
+    Ok(bridge_policy(
         namespace,
         &warm_member_daemon_bridge_name(&opts.environment_id),
-        labels.clone(),
-        member.clone(),
+        labels,
+        member,
         workspace_daemon_ingress_rules(opts),
         Vec::new(),
-    );
-    let gateway = bridge_policy(
-        namespace,
-        &warm_member_gateway_bridge_name(&opts.environment_id),
-        labels,
-        gateway_selector(opts),
-        Vec::new(),
-        vec![gateway_workspace_egress_rule(member)],
-    );
-    Ok([daemon, gateway])
+    ))
 }
 
 /// A bridge declares only the directions it grants, so it never isolates a

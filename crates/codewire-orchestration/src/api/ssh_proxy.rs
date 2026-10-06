@@ -29,7 +29,7 @@ use super::prepare::{json_response, plain_error};
 use super::proxy::{resolve_running_sandbox_target, resolve_running_sandbox_target_for_role};
 use super::terminal::{authenticate_socket_request, require_sandbox_claim_ready};
 use crate::sandbox::client::SandboxClient;
-use crate::sandbox::sidecar::{DEFAULT_GATEWAY_SSH_PORT, PortForwardedStream};
+use crate::sandbox::sidecar::{PortForwardedStream, WORKSPACE_SSH_PORT};
 use crate::worker::workspace_binding::environment_daemon_credential;
 
 const DEFAULT_SHIM_PORT: u16 = 7777;
@@ -87,7 +87,7 @@ pub async fn ssh_proxy_websocket(
     let connect = {
         let environment_id = target.environment_id.clone();
         async move {
-            sb.gateway_port_forward_stream(&environment_id, DEFAULT_GATEWAY_SSH_PORT)
+            sb.workspace_ssh_stream(&environment_id, WORKSPACE_SSH_PORT)
                 .await
         }
     };
@@ -96,7 +96,7 @@ pub async fn ssh_proxy_websocket(
     {
         Ok(Ok(stream)) => stream,
         Ok(Err(err)) => {
-            tracing::info!(error = %err, env = %target.environment_id, namespace = %target.namespace, "ssh-proxy: sidecar port-forward failed");
+            tracing::info!(error = %err, env = %target.environment_id, namespace = %target.namespace, "ssh-proxy: workspace SSH connect failed");
             return ssh_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 r#"{"error":"sshd not available","tier":"fallback"}"#,
@@ -119,7 +119,7 @@ pub async fn ssh_proxy_websocket(
     })
 }
 
-/// Open the gateway SSH stream behind the environment runtime fence.
+/// Open the workspace daemon's SSH stream behind the environment runtime fence.
 ///
 /// The port-forward runs in the shared runtime-mutation owner task, so a
 /// client that leaves mid-connect cannot strand the lease. An opened stream
@@ -187,7 +187,7 @@ pub async fn ssh_proxy_check(
     }
 
     if sb
-        .gateway_port_forward_stream(&target.environment_id, DEFAULT_GATEWAY_SSH_PORT)
+        .workspace_ssh_stream(&target.environment_id, WORKSPACE_SSH_PORT)
         .await
         .is_err()
     {

@@ -1,5 +1,5 @@
-//! Leftover per-environment credential bootstrap objects and the credential
-//! gateway readiness wait. Never reads TLS Secret data.
+//! Leftover per-environment credential bootstrap objects. Never reads TLS
+//! Secret data.
 
 use super::*;
 use crate::sandbox::template::{credential_codex_config_name, credential_gateway_certificate_name};
@@ -127,84 +127,6 @@ impl SandboxClient {
         .await
         .map_err(|_| anyhow::anyhow!("credential bootstrap deletion timed out"))?
     }
-
-    /// A read-only convergence wait, always outside the activity's SQL mutation
-    /// fence. Ready means the exact generation gateway rollout is ready, not
-    /// that a provider account was contacted.
-    ///
-    /// Create and start block on this wait, so it wakes on the gateway
-    /// Deployment's next change rather than a fixed poll. Every wake re-reads
-    /// the Deployment, so a missed or failed watch only falls back to polling.
-    pub async fn wait_for_credential_gateway_ready(
-        &self,
-        opts: &TemplateOpts,
-        timeout: Duration,
-    ) -> anyhow::Result<()> {
-        self.wait_for_credential_gateway_ready_with_fallback(
-            opts,
-            timeout,
-            GATEWAY_READY_FALLBACK_POLL,
-        )
-        .await
-    }
-
-    async fn wait_for_credential_gateway_ready_with_fallback(
-        &self,
-        opts: &TemplateOpts,
-        timeout: Duration,
-        fallback_poll: Duration,
-    ) -> anyhow::Result<()> {
-        let Some(config) = &opts.credential_runtime else {
-            return Ok(());
-        };
-        config.assert_namespace(&self.namespace);
-        let gateway_name = gateway_workload_name(&opts.environment_id);
-        let deployments = self.deployments();
-        tokio::time::timeout(timeout, async {
-            loop {
-                let gateway = deployments.get(&gateway_name).await?;
-                if gateway_ready(&gateway, opts) {
-                    return Ok::<_, anyhow::Error>(());
-                }
-                wait_for_object_change(&deployments, &gateway_name, &gateway, fallback_poll).await;
-            }
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("credential gateway readiness timed out"))?
-    }
-}
-
-/// The gateway readiness wait re-reads at least this often, covering a watch
-/// that cannot be opened or misses a change.
-const GATEWAY_READY_FALLBACK_POLL: Duration = Duration::from_secs(2);
-
-fn gateway_ready(gateway: &DynamicObject, opts: &TemplateOpts) -> bool {
-    let Some(generation) = gateway
-        .metadata
-        .generation
-        .filter(|generation| *generation > 0)
-    else {
-        return false;
-    };
-    let labels = &gateway.data["spec"]["template"]["metadata"]["labels"];
-    let status = &gateway.data["status"];
-    let operation_generation = opts.operation_generation.to_string();
-    gateway.metadata.deletion_timestamp.is_none()
-        && labels[LABEL_ENV_ID] == opts.environment_id
-        && labels[LABEL_ORG_ID] == opts.organization_id
-        && labels[crate::sandbox::LABEL_OPERATION_GENERATION].as_str()
-            == Some(operation_generation.as_str())
-        && status["observedGeneration"]
-            .as_i64()
-            .is_some_and(|observed| observed >= generation)
-        && [
-            "replicas",
-            "updatedReplicas",
-            "availableReplicas",
-            "readyReplicas",
-        ]
-        .iter()
-        .all(|field| status[field].as_i64() == Some(1))
 }
 
 #[cfg(test)]

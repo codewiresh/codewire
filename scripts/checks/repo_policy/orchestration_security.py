@@ -475,15 +475,30 @@ def assert_workspace_binding_ingress(resources: list[str], target: dict[str, str
 WARM_BRIDGE_FIXTURE_DIR = "crates/codewire-orchestration/tests/fixtures/sandbox"
 WARM_BRIDGE_FIXTURES = {
     "daemon": f"{WARM_BRIDGE_FIXTURE_DIR}/warm-member-bridge-daemon-networkpolicy.golden.json",
-    "gw": f"{WARM_BRIDGE_FIXTURE_DIR}/warm-member-bridge-gateway-networkpolicy.golden.json",
 }
 WARM_BRIDGE_RENDERER = "crates/codewire-orchestration/src/sandbox/template/network.rs"
 WARM_BRIDGE_NAMING = "crates/codewire-orchestration/src/sandbox/template/naming.rs"
 AGENTS_LABEL_PREFIX = "agents.x-k8s.io/"
 SANDBOX_UID_LABEL = "agents.x-k8s.io/sandbox-uid"
 CANONICAL_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-WARM_BRIDGE_NAME = re.compile(rf"cw-(daemon|gw)-warm-({CANONICAL_UUID})")
+WARM_BRIDGE_NAME = re.compile(rf"cw-(daemon)-warm-({CANONICAL_UUID})")
 ORCHESTRATION_PEER_POD = {"app.kubernetes.io/name": "codewire", "app.kubernetes.io/component": "orchestration"}
+# The daemon's tailnet UDP port admits the world only (design §5, N1): every
+# cluster and Pod range is excepted.
+WORKSPACE_TAILNET_UDP_PORTS = [{"port": 31000, "protocol": "UDP"}]
+WORLD_EXCEPTIONS = {
+    "0.0.0.0/0": {"10.0.0.0/8", "100.64.0.0/10", "172.16.0.0/12", "192.168.0.0/16"},
+    "::/0": {"fc00::/7"},
+}
+
+
+def world_peer(peer: Any) -> bool:
+    """An ipBlock peer for the whole world less every cluster and Pod range."""
+    if not isinstance(peer, dict) or set(peer) != {"ipBlock"} or not isinstance(peer["ipBlock"], dict):
+        return False
+    block = peer["ipBlock"]
+    required = WORLD_EXCEPTIONS.get(block.get("cidr"))
+    return required is not None and set(block) == {"cidr", "except"} and required <= set(block.get("except") or [])
 
 
 def label_selectors(policy: dict[str, Any]) -> list[Any]:
@@ -513,19 +528,18 @@ def uses_agents_selector(policy: dict[str, Any]) -> bool:
 
 def warm_bridge_violations(policy: dict[str, Any], label: str) -> list[str]:
     """A NetworkPolicy selecting through any agents.x-k8s.io label must be one
-    half of one environment's warm-member bridge: named cw-daemon-warm-<env>
-    or cw-gw-warm-<env>, selecting the member by exactly its Sandbox UID and
-    the workspace type, and peering only that environment's gateway (plus,
-    on the member half, the orchestration source cw-daemon-net-<env> admits)."""
+    environment's warm-member bridge: named cw-daemon-warm-<env>, selecting
+    the member by exactly its Sandbox UID and the workspace type, and
+    admitting only what cw-daemon-net-<env> admits: orchestration, and the
+    world on the tailnet UDP port. There is no gateway to peer."""
     if not uses_agents_selector(policy):
         return []
     output: list[str] = []
     name = str((policy.get("metadata") or {}).get("name", ""))
     matched = WARM_BRIDGE_NAME.fullmatch(name)
     if policy.get("kind") != "NetworkPolicy" or not matched:
-        return [f"{label}: {name!r} selects through an agents.x-k8s.io label but is not cw-daemon-warm-<env> or cw-gw-warm-<env>"]
-    half, environment = matched.groups()
-    gateway = {"matchLabels": {"codewire.sh/environment-id": environment, "codewire.sh/type": "gateway"}}
+        return [f"{label}: {name!r} selects through an agents.x-k8s.io label but is not cw-daemon-warm-<env>"]
+    _, environment = matched.groups()
     members = [selector for selector in label_selectors(policy) if any(key.startswith(AGENTS_LABEL_PREFIX) for key in selector_keys(selector))]
     uids = set()
     for selector in members:
@@ -539,9 +553,8 @@ def warm_bridge_violations(policy: dict[str, Any], label: str) -> list[str]:
         output.append(f"{label}: the bridge names more than one Sandbox UID: {sorted(uids)}")
     member = members[0] if len(members) > 0 else None
     spec = policy.get("spec") if isinstance(policy.get("spec"), dict) else {}
-    expected_selected = member if half == "daemon" else gateway
-    if spec.get("podSelector") != expected_selected:
-        output.append(f"{label}: the {half} half must apply to {'the member' if half == 'daemon' else 'its own gateway'} alone: {spec.get('podSelector')}")
+    if spec.get("podSelector") != member:
+        output.append(f"{label}: the bridge must apply to the member alone: {spec.get('podSelector')}")
     expected_types = [direction.capitalize() for direction in ("ingress", "egress") if spec.get(direction)]
     if spec.get("policyTypes") != expected_types:
         output.append(f"{label}: policyTypes must be exactly the granted directions {expected_types}: {spec.get('policyTypes')}")
@@ -552,18 +565,18 @@ def warm_bridge_violations(policy: dict[str, Any], label: str) -> list[str]:
                 output.append(f"{label}: a {direction} rule without {peers_key!r} peers admits every source or destination")
                 continue
             for peer in peers:
-                if half == "gw":
-                    allowed = peer == {"podSelector": member}
-                else:
-                    allowed = peer == {"podSelector": gateway} or (
-                        direction == "ingress"
+                allowed = direction == "ingress" and (
+                    (
+                        isinstance(peer, dict)
                         and set(peer) == {"namespaceSelector", "podSelector"}
                         and set((peer["namespaceSelector"] or {}).get("matchLabels") or {}) == {"kubernetes.io/metadata.name"}
                         and set(peer["namespaceSelector"]) == {"matchLabels"}
                         and peer["podSelector"] == {"matchLabels": ORCHESTRATION_PEER_POD}
                     )
+                    or (world_peer(peer) and (rule or {}).get("ports") == WORKSPACE_TAILNET_UDP_PORTS)
+                )
                 if not allowed:
-                    output.append(f"{label}: the {half} half peers something other than environment {environment}'s gateway: {peer}")
+                    output.append(f"{label}: environment {environment}'s bridge admits something other than orchestration or the world's tailnet traffic: {peer}")
     return output
 
 
@@ -634,12 +647,15 @@ def warm_bridge_self_test(goldens: dict[str, Any], manifests: list[str]) -> None
     if warm_bridge_violations(legacy, "unchanged cw-daemon-net"):
         raise RuntimeError("an environment policy without agents.x-k8s.io selectors was rejected")
     rejected("name-hash bridge (old design)", "daemon", lambda f: name_hash(member_labels(f)))
-    rejected("name-hash gateway peer (old design)", "gw", lambda f: name_hash(f["spec"]["egress"][0]["to"][0]["podSelector"]["matchLabels"]))
 
     def name_hash_term(f: dict[str, Any]) -> None:
         f["metadata"]["name"] = f["metadata"]["name"].replace("cw-daemon-warm-", "cw-daemon-net-")
         name_hash(member_labels(f))
 
+    def world_rule(f: dict[str, Any]) -> dict[str, Any]:
+        return next(rule for rule in f["spec"]["ingress"] if any("ipBlock" in peer for peer in rule["from"]))
+
+    environment = goldens["daemon"]["metadata"]["labels"]["codewire.sh/environment-id"]
     rejected("name-hash term on cw-daemon-net (old design)", "daemon", name_hash_term)
     rejected("name hash beside the UID", "daemon", lambda f: member_labels(f).__setitem__("agents.x-k8s.io/sandbox-name-hash", "d0258436"))
     rejected("claim UID instead of the Sandbox UID", "daemon", lambda f: member_labels(f).__setitem__(
@@ -651,31 +667,21 @@ def warm_bridge_self_test(goldens: dict[str, Any], manifests: list[str]) -> None
         "matchExpressions": [{"key": SANDBOX_UID_LABEL, "operator": "Exists"}], "matchLabels": {"codewire.sh/type": "workspace"}}))
     rejected("another name", "daemon", lambda f: f["metadata"].__setitem__("name", "cw-pool-member-bridge"))
     rejected("unsuffixed name", "daemon", lambda f: f["metadata"].__setitem__("name", "cw-daemon-warm"))
-    rejected("another environment's gateway", "daemon", lambda f: f["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"].__setitem__(
-        "codewire.sh/environment-id", other_environment))
-    rejected("name for another environment", "daemon", lambda f: f["metadata"].__setitem__(
-        "name", f"cw-daemon-warm-{other_environment}"))
-    rejected("any gateway", "daemon", lambda f: f["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"].pop("codewire.sh/environment-id"))
+    rejected("gateway half name", "daemon", lambda f: f["metadata"].__setitem__("name", f"cw-gw-warm-{environment}"))
+    rejected("this environment's gateway (old design)", "daemon", lambda f: f["spec"]["ingress"][0]["from"].append(
+        {"podSelector": {"matchLabels": {"codewire.sh/environment-id": environment, "codewire.sh/type": "gateway"}}}))
+    rejected("a server Pod other than orchestration", "daemon", lambda f: f["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"].__setitem__(
+        "app.kubernetes.io/component", "gateway"))
     rejected("every Pod in the namespace", "daemon", lambda f: f["spec"]["ingress"][0]["from"].append({"podSelector": {}}))
     rejected("every namespace", "daemon", lambda f: f["spec"]["ingress"][0]["from"].append({"namespaceSelector": {}}))
-    rejected("an address block", "daemon", lambda f: f["spec"]["ingress"][0]["from"].append({"ipBlock": {"cidr": "10.0.0.0/8"}}))
+    rejected("an address block on the daemon ports", "daemon", lambda f: f["spec"]["ingress"][0]["from"].append({"ipBlock": {"cidr": "10.0.0.0/8"}}))
+    rejected("cluster addresses on the tailnet port", "daemon", lambda f: world_rule(f)["from"][0]["ipBlock"].__setitem__("except", ["127.0.0.0/8"]))
+    rejected("the world on a TCP port", "daemon", lambda f: world_rule(f).__setitem__("ports", [{"port": 31000, "protocol": "TCP"}]))
     rejected("every source", "daemon", lambda f: f["spec"]["ingress"][0].pop("from"))
     rejected("orchestration egress", "daemon", lambda f: f["spec"].update(
-        egress=[{"to": f["spec"]["ingress"][1]["from"], "ports": [{"port": 8084, "protocol": "TCP"}]}],
+        egress=[{"to": f["spec"]["ingress"][0]["from"], "ports": [{"port": 8084, "protocol": "TCP"}]}],
         policyTypes=["Ingress", "Egress"]))
     rejected("isolating an ungranted direction", "daemon", lambda f: f["spec"]["policyTypes"].append("Egress"))
-    rejected("gateway half on every gateway", "gw", lambda f: f["spec"]["podSelector"]["matchLabels"].pop("codewire.sh/environment-id"))
-    rejected("gateway half on another environment's gateway", "gw", lambda f: f["spec"]["podSelector"]["matchLabels"].__setitem__(
-        "codewire.sh/environment-id", other_environment))
-    rejected("gateway half on the member", "gw", lambda f: f["spec"].__setitem__("podSelector", f["spec"]["egress"][0]["to"][0]["podSelector"]))
-    rejected("gateway half to another member", "gw", lambda f: f["spec"]["egress"].append(
-        {"to": [{"podSelector": {"matchLabels": {SANDBOX_UID_LABEL: "5e2d8c41-7a3b-4f90-b6e1-2c9d0a8f7b34", "codewire.sh/type": "workspace"}}}]}))
-    rejected("gateway half to the environment's workspaces", "gw", lambda f: f["spec"]["egress"][0]["to"].append(
-        {"podSelector": {"matchLabels": {"codewire.sh/environment-id": f["metadata"]["labels"]["codewire.sh/environment-id"], "codewire.sh/type": "workspace"}}}))
-    rejected("gateway half from orchestration", "gw", lambda f: f["spec"].update(
-        ingress=[{"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "dev"}},
-                            "podSelector": {"matchLabels": ORCHESTRATION_PEER_POD}}]}],
-        policyTypes=["Ingress", "Egress"]))
     if not warm_bridge_source_violations('json!({"agents.x-k8s.io/sandbox-name-hash": hash})', 'pub const SANDBOX_UID_LABEL: &str = "agents.x-k8s.io/sandbox-uid";'):
         raise RuntimeError("negative bridge source fixture (renderer names a label key) was accepted")
     if not warm_bridge_source_violations("", 'pub const SANDBOX_UID_LABEL: &str = "agents.x-k8s.io/sandbox-name-hash";'):

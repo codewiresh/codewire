@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod exec;
+pub mod host_keys;
 pub mod image_cache;
 pub mod sidecar;
 pub mod template;

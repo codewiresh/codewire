@@ -171,7 +171,24 @@ def violations(template: dict[str, Any], label: str) -> list[str]:
         for peer in binding_rules[0].get("to") or [{}]
     ):
         output.append(f"{label}: template egress is not exactly one TCP 8087 rule to orchestration")
+    # The daemon's tailnet reaches DERP's STUN port and the public relay's
+    # data plane, whose public LoadBalancers land on these Pods: those UDP
+    # ports only, never DERP TLS or the relay allocator (design §5).
+    for rule in egress:
+        components = {
+            ((peer.get("podSelector") or {}).get("matchLabels") or {}).get("app.kubernetes.io/component")
+            for peer in rule.get("to") or []
+        }
+        for component in sorted(components & TAILNET_EGRESS.keys()):
+            if rule.get("ports") != TAILNET_EGRESS[component] or len(components) != 1:
+                output.append(f"{label}: template egress reaches {component} beyond its public UDP port")
     return output
+
+
+TAILNET_EGRESS = {
+    "derp": [{"port": 3478, "protocol": "UDP"}],
+    "udp-relay": [{"port": 41641, "protocol": "UDP"}],
+}
 
 
 POOL_REVISION_ENV = "CODEWIRE_WORKSPACE_POOL_REVISION"
@@ -400,6 +417,14 @@ def self_test(base: dict[str, Any]) -> None:
     rejected("readiness on binding", lambda f: workspace(f).__setitem__("readinessProbe", {"exec": {"command": ["true"]}}))
     rejected("gateway egress", lambda f: f["spec"]["networkPolicy"]["egress"].append(
         {"to": [{"podSelector": {"matchLabels": {"codewire.sh/type": "gateway"}}}], "ports": [{"protocol": "TCP", "port": 8443}]}))
+    rejected("relay allocator egress", lambda f: f["spec"]["networkPolicy"]["egress"].append(
+        {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "dev"}},
+                 "podSelector": {"matchLabels": {"app.kubernetes.io/component": "udp-relay"}}}],
+         "ports": [{"protocol": "TCP", "port": 8095}]}))
+    rejected("DERP TLS egress", lambda f: f["spec"]["networkPolicy"]["egress"].append(
+        {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "dev"}},
+                 "podSelector": {"matchLabels": {"app.kubernetes.io/component": "derp"}}}],
+         "ports": [{"protocol": "UDP", "port": 3478}, {"protocol": "TCP", "port": 8443}]}))
     rejected("second binding egress", lambda f: f["spec"]["networkPolicy"]["egress"].append(
         {"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}], "ports": [{"protocol": "TCP", "port": 8087}]}))
     rejected("Secret volume", lambda f: f["spec"]["podTemplate"]["spec"]["volumes"].append({"name": "env", "secret": {"secretName": "env"}}))

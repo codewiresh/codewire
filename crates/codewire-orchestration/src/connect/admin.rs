@@ -238,7 +238,7 @@ fn proto_startup_summary(
         starting_backlog_count: value.starting_backlog_count,
         starting_backlog_over_5m_count: value.starting_backlog_over_5m_count,
         starting_backlog_over_10m_count: value.starting_backlog_over_10m_count,
-        running_without_gateway_ready_count: value.running_without_gateway_ready_count,
+        running_without_access_ready_count: value.running_without_access_ready_count,
         phase_durations,
         ..Default::default()
     })

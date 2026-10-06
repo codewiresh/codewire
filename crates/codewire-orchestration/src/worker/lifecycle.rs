@@ -33,6 +33,7 @@ use crate::lifecycle::{Action, PgLifecycleStore, RuntimeAbsenceProof, Service, S
 use crate::sandbox::client::{
     ProbeResult, SandboxClient, WorkspacePodIdentity, WorkspaceSandboxIdentity,
 };
+use crate::sandbox::host_keys::RecordedHostKeys;
 
 const DELETED_TIMEOUT: Duration = Duration::from_secs(120);
 const POD_IP_POLL_TIMEOUT: Duration = Duration::from_secs(300); // start: 5-minute pod IP poll
@@ -188,7 +189,7 @@ fn sandbox_client(ctx: &WorkerContext, namespace: &str) -> anyhow::Result<Sandbo
     Ok(SandboxClient::new(kube.clone(), namespace))
 }
 
-async fn ensure_gateway_stack_for_env(
+async fn ensure_access_stack_for_env(
     ctx: &WorkerContext,
     cfg: &SandboxWorkerCfg,
     env_id: &str,
@@ -213,15 +214,16 @@ async fn ensure_gateway_stack_for_env(
         authority,
         &opts,
         START_MUTATION_STATES,
-        client.ensure_gateway_stack(&opts),
+        client.ensure_access_stack(&opts),
     )
     .await?;
     authority
         .run_while_authoritative_for_states(
             START_MUTATION_STATES,
-            client.wait_for_credential_gateway_ready(
-                &opts,
+            client.wait_for_workspace_access_ready(
+                env_id,
                 super::create::ready_timeout_for_isolation(&env.isolation_tier),
+                &RecordedHostKeys(&ctx.pool),
             ),
         )
         .await
@@ -343,13 +345,13 @@ pub async fn handle_environment_stop(
     // later start binds the new Pod UID.
     release_workspace_binding(&client.client, authority, STOP_MUTATION_STATES).await?;
     if let Err(e) = authority
-        .run_external_mutation(STOP_MUTATION_STATES, client.delete_gateway_stack(env_id))
+        .run_external_mutation(STOP_MUTATION_STATES, client.delete_access_stack(env_id))
         .await
     {
         tracing::warn!(
             environment_id = env_id,
             error = %e,
-            "environment.stop: failed to delete gateway stack, continuing"
+            "environment.stop: failed to delete access stack, continuing"
         );
     }
 
@@ -443,7 +445,7 @@ pub async fn handle_environment_restart_sources(
     .await?;
     await_reconcile_or_cancel(
         &activity_ctx,
-        authority.run_external_mutation(STOP_MUTATION_STATES, client.delete_gateway_stack(&env.id)),
+        authority.run_external_mutation(STOP_MUTATION_STATES, client.delete_access_stack(&env.id)),
     )
     .await?;
     let svc = Service::for_activity(ctx.pool.clone(), authority.clone());
@@ -896,8 +898,7 @@ pub async fn handle_environment_start(
         return Err(anyhow::anyhow!("update pod_ip/pod_name: {e:#}"));
     }
 
-    if let Err(e) =
-        ensure_gateway_stack_for_env(ctx, &ctx.sandbox_cfg, env_id, &ns, authority).await
+    if let Err(e) = ensure_access_stack_for_env(ctx, &ctx.sandbox_cfg, env_id, &ns, authority).await
     {
         record_environment_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
         return Err(e);
@@ -940,7 +941,7 @@ pub async fn handle_environment_start(
             emit_authoritative_environment_log_for_states(
                 authority,
                 &["running"],
-                "gateway_ready",
+                "access_ready",
                 "completed",
                 "",
                 Some(serde_json::json!({
@@ -973,7 +974,7 @@ pub async fn handle_environment_start(
             emit_authoritative_environment_log_for_states(
                 authority,
                 &["running"],
-                "gateway_ready",
+                "access_ready",
                 "failed",
                 &format!("{e:#}"),
                 Some(serde_json::json!({
