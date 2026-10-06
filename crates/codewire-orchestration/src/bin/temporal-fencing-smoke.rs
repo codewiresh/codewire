@@ -677,9 +677,9 @@ mod enabled {
         }
 
         /// A ready environment's access invariants: its current
-        /// incarnation completed `access_ready`, one host key is recorded
-        /// for its current generation by its current Pod, and that Pod's SSH
-        /// port presents exactly that key.
+        /// incarnation completed `access_ready`, its current bound Pod
+        /// recorded a host key, and that Pod's SSH port presents exactly
+        /// that key.
         async fn assert_access_ready(&self, env_id: &str, pod_uid: &str) -> anyhow::Result<()> {
             let completed: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM environment_logs
@@ -693,21 +693,24 @@ mod enabled {
                 "{env_id} reached setup without a completed access_ready stage"
             );
             let recorded: Option<String> = sqlx::query_scalar(
-                "SELECT k.pod_uid FROM sandbox_ssh_host_keys k
-                   JOIN environments e
-                     ON e.id = k.environment_id
-                    AND e.environment_operation_generation = k.operation_generation
-                  WHERE k.environment_id = $1",
+                "SELECT k.pod_uid FROM sandbox_environment_backend b
+                   JOIN sandbox_workspace_bindings w
+                     ON w.environment_id = b.environment_id
+                    AND w.pod_uid = b.pod_uid
+                    AND w.released_at IS NULL
+                   JOIN sandbox_ssh_host_keys k
+                     ON k.environment_id = b.environment_id
+                    AND k.pod_uid = b.pod_uid
+                  WHERE b.environment_id = $1",
             )
             .bind(env_id)
             .fetch_optional(&self.pool)
             .await?;
-            let recorded = recorded.ok_or_else(|| {
-                anyhow::anyhow!("{env_id} has no host key recorded for its current generation")
-            })?;
+            let recorded = recorded
+                .ok_or_else(|| anyhow::anyhow!("{env_id}'s bound Pod has recorded no host key"))?;
             anyhow::ensure!(
                 recorded == pod_uid,
-                "{env_id}'s current host key was recorded by Pod {recorded}, not its current Pod {pod_uid}"
+                "{env_id} is bound to Pod {recorded}, not its current workspace Pod {pod_uid}"
             );
             self.sandbox
                 .wait_for_workspace_access_ready(

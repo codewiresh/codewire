@@ -346,9 +346,9 @@ impl WorkspaceBindingState {
         })
     }
 
-    /// Records the daemon's SSH host public key for the environment's
-    /// current generation, write-once (S3). The environment, generation and
-    /// Pod come only from the reviewed identity and its binding.
+    /// Records the daemon's SSH host public key for its bound Pod, write-once
+    /// per Pod (S3). The environment, generation and Pod come only from the
+    /// reviewed identity and its binding.
     pub(crate) async fn record_host_key(
         &self,
         headers: &HeaderMap,

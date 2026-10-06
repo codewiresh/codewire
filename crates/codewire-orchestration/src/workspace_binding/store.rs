@@ -62,15 +62,15 @@ impl std::fmt::Debug for LiveBinding {
 #[error("workspace binding store is unavailable")]
 pub struct BindingStoreUnavailable;
 
-/// Outcome of recording an SSH host public key, write-once per environment
-/// and operation generation.
+/// Outcome of recording an SSH host public key, write-once per bound Pod.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostKeyRecord {
-    /// The key is now the generation's key.
+    /// The key is now the Pod's key.
     Recorded,
-    /// The same key was already recorded.
+    /// The same key was already recorded for this Pod.
     Unchanged,
-    /// A different key is already recorded for this generation.
+    /// A different key (or another environment) is already recorded for
+    /// this Pod.
     Conflict,
 }
 
@@ -85,8 +85,8 @@ pub trait BindingStore: Send + Sync {
         pod_name: &str,
     ) -> Result<Option<LiveBinding>, BindingStoreUnavailable>;
 
-    /// Records `public_key` as the SSH host key of `environment_id` at
-    /// `generation`, from the reviewed `pod_uid`. Never overwrites.
+    /// Records `public_key` as the SSH host key of the reviewed, bound
+    /// `pod_uid` of `environment_id`, noting `generation`. Never overwrites.
     async fn record_host_key(
         &self,
         _environment_id: &str,
@@ -212,22 +212,29 @@ impl BindingStore for PgBindingStore {
             BindingStoreUnavailable
         };
         let mut tx = self.pool.begin().await.map_err(unavailable)?;
-        // Only the current generation's key is ever trusted; earlier ones go.
+        // Only the bound Pod's key is ever trusted: keys of the environment's
+        // released bindings go, so the table stays bounded.
         sqlx::query(
-            r#"DELETE FROM sandbox_ssh_host_keys
-                WHERE environment_id = $1 AND operation_generation < $2"#,
+            r#"DELETE FROM sandbox_ssh_host_keys k
+                WHERE k.environment_id = $1
+                  AND k.pod_uid <> $2
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sandbox_workspace_bindings w
+                       WHERE w.environment_id = k.environment_id
+                         AND w.pod_uid = k.pod_uid
+                         AND w.released_at IS NULL)"#,
         )
         .bind(environment_id)
-        .bind(generation)
+        .bind(pod_uid)
         .execute(&mut *tx)
         .await
         .map_err(unavailable)?;
-        // Write-once: a recorded key is never replaced.
+        // Write-once per Pod: a recorded key is never replaced.
         let inserted = sqlx::query(
             r#"INSERT INTO sandbox_ssh_host_keys
                    (environment_id, operation_generation, pod_uid, public_key)
                VALUES ($1, $2, $3, $4)
-               ON CONFLICT (environment_id, operation_generation) DO NOTHING"#,
+               ON CONFLICT (pod_uid) DO NOTHING"#,
         )
         .bind(environment_id)
         .bind(generation)
@@ -240,17 +247,18 @@ impl BindingStore for PgBindingStore {
         let outcome = if inserted == 1 {
             HostKeyRecord::Recorded
         } else {
-            let existing: Option<String> = sqlx::query_scalar(
-                r#"SELECT public_key FROM sandbox_ssh_host_keys
-                    WHERE environment_id = $1 AND operation_generation = $2"#,
+            let existing: Option<(String, String)> = sqlx::query_as(
+                r#"SELECT environment_id, public_key FROM sandbox_ssh_host_keys
+                    WHERE pod_uid = $1"#,
             )
-            .bind(environment_id)
-            .bind(generation)
+            .bind(pod_uid)
             .fetch_optional(&mut *tx)
             .await
             .map_err(unavailable)?;
             match existing {
-                Some(existing) if existing == public_key => HostKeyRecord::Unchanged,
+                Some((environment, key)) if environment == environment_id && key == public_key => {
+                    HostKeyRecord::Unchanged
+                }
                 Some(_) => HostKeyRecord::Conflict,
                 None => return Err(BindingStoreUnavailable),
             }
@@ -300,20 +308,26 @@ pub async fn exposed_app_ports(
     .await
 }
 
-/// The SSH host public key recorded for `environment_id` at its current
-/// operation generation, for the authenticated known-hosts read. `None`
-/// when the current generation has not recorded one.
+/// The SSH host public key recorded by the Pod `environment_id` is currently
+/// bound to, with the generation it was recorded at, for the authenticated
+/// known-hosts read. `None` when the environment has no live binding or its
+/// bound Pod has not recorded a key: a released or replaced Pod's key is
+/// never returned.
 pub async fn current_host_key(
     pool: &sqlx::PgPool,
     environment_id: &str,
 ) -> Result<Option<(i64, String)>, sqlx::Error> {
     sqlx::query_as(
         r#"SELECT k.operation_generation, k.public_key
-             FROM sandbox_ssh_host_keys k
-             JOIN environments e
-               ON e.id = k.environment_id
-              AND e.environment_operation_generation = k.operation_generation
-            WHERE k.environment_id = $1"#,
+             FROM sandbox_environment_backend b
+             JOIN sandbox_workspace_bindings w
+               ON w.environment_id = b.environment_id
+              AND w.pod_uid = b.pod_uid
+              AND w.released_at IS NULL
+             JOIN sandbox_ssh_host_keys k
+               ON k.environment_id = b.environment_id
+              AND k.pod_uid = b.pod_uid
+            WHERE b.environment_id = $1"#,
     )
     .bind(environment_id)
     .fetch_optional(pool)

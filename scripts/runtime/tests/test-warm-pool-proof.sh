@@ -64,8 +64,8 @@ grep -q 'check "hit \$n: no warm-member bridge once destroyed" bridge_absent' "$
 # #2460: the daemon hosts SSH and the tailnet. Every hit owns no gateway
 # object, its SSH server presents the key the platform recorded (OpenSSH
 # trusts only `cw ssh known-hosts`, never first use), the bridge has no
-# gateway half, and with SQL the current generation's key came from the bound
-# Pod after a completed access_ready.
+# gateway half, and with SQL the served key is the live bound Pod's, after a
+# completed access_ready.
 grep -qF 'check "hit $n: no gateway objects" no_gateway_objects "$id"' "$PROOF" ||
   fail 'hits do not check for gateway objects'
 grep -qF 'check "hit $n: SSH presents the host key the platform recorded" ssh_presents_recorded_key "$id"' "$PROOF" ||
@@ -76,8 +76,8 @@ for option in 'StrictHostKeyChecking=yes' 'UserKnownHostsFile=/dev/null' 'Global
   grep -qF -- "$option" "$PROOF" || fail "SSH host-key proof is missing $option"
 done
 grep -qF 'sql_access_ready "$id" "$uid"' "$PROOF" || fail 'hits do not check access_ready and the recorded host key'
-grep -qF 'e.environment_operation_generation = k.operation_generation' "$PROOF" ||
-  fail 'the host-key check is not bound to the current generation'
+grep -qF 'AND w.released_at IS NULL JOIN sandbox_ssh_host_keys k ON k.environment_id = b.environment_id AND k.pod_uid = b.pod_uid' "$PROOF" ||
+  fail 'the host-key check is not bound to the live bound Pod'
 grep -qF 'exists, but the gateway is gone' "$PROOF" || fail 'the bridge check accepts a gateway half'
 if grep -qF 'reachable through the gateway path' "$PROOF"; then
   fail 'the proof still describes a gateway path'

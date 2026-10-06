@@ -127,9 +127,9 @@ type EnvironmentServiceClient interface {
 	CancelEnvironmentDeletion(context.Context, *connect.Request[v1.CancelEnvironmentDeletionRequest]) (*connect.Response[v1.CancelEnvironmentDeletionResponse], error)
 	ExtendEnvironmentTtl(context.Context, *connect.Request[v1.ExtendEnvironmentTtlRequest]) (*connect.Response[v1.ExtendEnvironmentTtlResponse], error)
 	GetEnvironmentTrustReport(context.Context, *connect.Request[v1.GetEnvironmentTrustReportRequest]) (*connect.Response[v1.GetEnvironmentTrustReportResponse], error)
-	// The SSH host public key the environment's daemon recorded for its current
-	// operation generation, for the client's known_hosts. A key recorded for an
-	// earlier generation is never returned; none recorded is NOT_FOUND.
+	// The SSH host public key the daemon of the environment's currently bound
+	// Pod recorded, for the client's known_hosts. A released or replaced Pod's
+	// key is never returned; none recorded is NOT_FOUND.
 	GetEnvironmentHostKey(context.Context, *connect.Request[v1.GetEnvironmentHostKeyRequest]) (*connect.Response[v1.GetEnvironmentHostKeyResponse], error)
 	GetEnvironmentDaemonStatus(context.Context, *connect.Request[v1.GetEnvironmentDaemonStatusRequest]) (*connect.Response[v1.GetEnvironmentDaemonStatusResponse], error)
 	StreamEnvironmentDaemonLogs(context.Context, *connect.Request[v1.StreamEnvironmentDaemonLogsRequest]) (*connect.ServerStreamForClient[v1.StreamEnvironmentDaemonLogsResponse], error)
@@ -477,9 +477,9 @@ type EnvironmentServiceHandler interface {
 	CancelEnvironmentDeletion(context.Context, *connect.Request[v1.CancelEnvironmentDeletionRequest]) (*connect.Response[v1.CancelEnvironmentDeletionResponse], error)
 	ExtendEnvironmentTtl(context.Context, *connect.Request[v1.ExtendEnvironmentTtlRequest]) (*connect.Response[v1.ExtendEnvironmentTtlResponse], error)
 	GetEnvironmentTrustReport(context.Context, *connect.Request[v1.GetEnvironmentTrustReportRequest]) (*connect.Response[v1.GetEnvironmentTrustReportResponse], error)
-	// The SSH host public key the environment's daemon recorded for its current
-	// operation generation, for the client's known_hosts. A key recorded for an
-	// earlier generation is never returned; none recorded is NOT_FOUND.
+	// The SSH host public key the daemon of the environment's currently bound
+	// Pod recorded, for the client's known_hosts. A released or replaced Pod's
+	// key is never returned; none recorded is NOT_FOUND.
 	GetEnvironmentHostKey(context.Context, *connect.Request[v1.GetEnvironmentHostKeyRequest]) (*connect.Response[v1.GetEnvironmentHostKeyResponse], error)
 	GetEnvironmentDaemonStatus(context.Context, *connect.Request[v1.GetEnvironmentDaemonStatusRequest]) (*connect.Response[v1.GetEnvironmentDaemonStatusResponse], error)
 	StreamEnvironmentDaemonLogs(context.Context, *connect.Request[v1.StreamEnvironmentDaemonLogsRequest], *connect.ServerStream[v1.StreamEnvironmentDaemonLogsResponse]) error

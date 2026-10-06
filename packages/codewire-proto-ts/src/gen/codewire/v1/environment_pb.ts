@@ -547,7 +547,7 @@ export const GetEnvironmentHostKeyRequestSchema: GenMessage<GetEnvironmentHostKe
  */
 export type GetEnvironmentHostKeyResponse = Message<"codewire.v1.GetEnvironmentHostKeyResponse"> & {
   /**
-   * The environment operation generation the key was recorded for.
+   * The environment operation generation the key was recorded at.
    *
    * @generated from field: int64 generation = 1;
    */
@@ -2839,9 +2839,9 @@ export const EnvironmentService: GenService<{
     output: typeof GetEnvironmentTrustReportResponseSchema;
   },
   /**
-   * The SSH host public key the environment's daemon recorded for its current
-   * operation generation, for the client's known_hosts. A key recorded for an
-   * earlier generation is never returned; none recorded is NOT_FOUND.
+   * The SSH host public key the daemon of the environment's currently bound
+   * Pod recorded, for the client's known_hosts. A released or replaced Pod's
+   * key is never returned; none recorded is NOT_FOUND.
    *
    * @generated from rpc codewire.v1.EnvironmentService.GetEnvironmentHostKey
    */

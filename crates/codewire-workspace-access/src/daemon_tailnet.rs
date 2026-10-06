@@ -334,8 +334,9 @@ pub async fn run_coordinator_sessions(
 }
 
 /// Record the host key again whenever the grant's operation generation
-/// differs from `recorded`, the generation it was last recorded for:
-/// orchestration keeps one key per environment and generation.
+/// differs from `recorded`, the generation it was last recorded for.
+/// Orchestration keeps one key per bound Pod, so the same Pod's same key is
+/// accepted again unchanged; the call only confirms it.
 pub async fn record_host_key_per_generation(
     plane: Arc<dyn AccessControlPlane>,
     mut grants: watch::Receiver<WorkspaceAccessGrant>,

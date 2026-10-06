@@ -341,9 +341,10 @@ export const WorkspaceBindingService: GenService<{
     output: typeof RefreshAccessResponseSchema;
   },
   /**
-   * Records the bound Pod's SSH host public key for the binding's
-   * environment and operation generation. Write-once: the same key again
-   * succeeds, a different key is failed_precondition.
+   * Records the bound Pod's SSH host public key for that Pod, noting the
+   * binding's environment and operation generation. Write-once per Pod: the
+   * same key again succeeds, a different key is failed_precondition. A Pod
+   * that replaces another records its own key.
    *
    * @generated from rpc codewire.internal.v1.WorkspaceBindingService.RecordHostKey
    */

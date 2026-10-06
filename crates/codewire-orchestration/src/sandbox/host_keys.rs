@@ -1,12 +1,12 @@
-//! The SSH host keys workspace daemons record at bind (design L4), read for
-//! the environment's current operation generation only. Clients trust exactly
+//! The SSH host keys workspace daemons record at bind (design L4), read only
+//! for the Pod the environment is currently bound to. Clients trust exactly
 //! that key, and orchestration's own SSH checks pin to it.
 
 use async_trait::async_trait;
 use sqlx::PgPool;
 
-/// The recorded host keys: the key of an environment's current operation
-/// generation, with that generation, or none.
+/// The recorded host keys: the key the environment's currently bound Pod
+/// recorded, with the generation it was recorded at, or none.
 #[async_trait]
 pub trait HostKeyStore: Send + Sync {
     async fn current_host_key(

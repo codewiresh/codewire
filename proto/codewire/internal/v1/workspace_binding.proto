@@ -24,9 +24,10 @@ service WorkspaceBindingService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
-  // Records the bound Pod's SSH host public key for the binding's
-  // environment and operation generation. Write-once: the same key again
-  // succeeds, a different key is failed_precondition.
+  // Records the bound Pod's SSH host public key for that Pod, noting the
+  // binding's environment and operation generation. Write-once per Pod: the
+  // same key again succeeds, a different key is failed_precondition. A Pod
+  // that replaces another records its own key.
   rpc RecordHostKey(RecordHostKeyRequest) returns (RecordHostKeyResponse) {
     option idempotency_level = IDEMPOTENT;
   }

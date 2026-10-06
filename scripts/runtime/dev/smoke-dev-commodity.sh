@@ -4711,8 +4711,8 @@ run_ssh_transport_smoke() {
 
 # OpenSSH over the WebSocket transport with the managed block's trust:
 # StrictHostKeyChecking yes and no first use. With no pinned file, the only
-# trust source is `cw ssh known-hosts`, the key the platform recorded for the
-# environment's current generation.
+# trust source is `cw ssh known-hosts`, the key the environment's bound Pod
+# recorded with the platform.
 run_host_key_probe_once() {
   local label="$1"
   local pinned="${2:-}"
@@ -4787,8 +4787,8 @@ expect_host_key_refused() {
   }
 }
 
-# One known_hosts line: the key the platform recorded for the environment's
-# current generation (a public key; nothing secret).
+# One known_hosts line: the key the environment's bound Pod recorded with the
+# platform (a public key; nothing secret).
 recorded_host_key_line() {
   timeout 60 "$CW_BIN" --server "$CODEWIRE_SERVER_URL" ssh known-hosts "cw-$ENV_ID" 2>/dev/null
 }
@@ -4799,10 +4799,10 @@ env_is_stopped() {
   [[ "$(awk '$1 == "State:" {print $2; exit}' "$info_out")" == "stopped" ]]
 }
 
-# The daemon serves SSH with a host key it generated for this generation;
-# only its public key is recorded with the platform (#2460). Prove the served
-# key is the recorded one, a changed key is refused, and a stop and start
-# rotates the key with the generation.
+# The daemon serves SSH with a host key it generated for its Pod; only its
+# public key is recorded with the platform (#2460), and only the bound Pod's
+# key is served. Prove the served key is the recorded one, a changed key is
+# refused, and a stop and start, which replaces the Pod, rotates the key.
 run_host_key_smoke() {
   local before after pinned previous_pin forged
 
@@ -4827,7 +4827,7 @@ run_host_key_smoke() {
     log "host-key rotation needs a stop and start; skipped for the reused environment $ENV_ID"
     return
   fi
-  log "stopping and starting $ENV_ID to prove the host key rotates with the generation"
+  log "stopping and starting $ENV_ID to prove the host key rotates with the Pod"
   cw env stop "$ENV_ID" >/dev/null
   wait_until "environment stopped" "$(( "$(seconds_now)" + SMOKE_TIMEOUT_SECONDS ))" env_is_stopped
   cw env start "$ENV_ID" >/dev/null
@@ -4842,7 +4842,7 @@ run_host_key_smoke() {
   previous_pin="$TMPDIR_SMOKE/known_hosts.previous-generation"
   cp "$pinned" "$previous_pin"
   expect_host_key_refused previous-generation "$previous_pin"
-  log "the host key rotated with the generation; the previous generation's key is refused"
+  log "the host key rotated with the Pod; the previous Pod's key is refused"
 }
 
 run_ssh_smoke() {

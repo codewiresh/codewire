@@ -2,15 +2,15 @@
 //! source (`KnownHostsCommand`).
 //!
 //! An environment's SSH server runs inside its sandbox and holds a host key
-//! the environment's daemon generated for the current generation; only the
-//! public key is recorded with the platform. OpenSSH asks this command for the
+//! the daemon of its currently bound Pod generated; only the public key is
+//! recorded with the platform. OpenSSH asks this command for the
 //! key of the host it is about to trust, and this command answers with exactly
 //! one known_hosts line built from the recorded key fetched through the
 //! authenticated API. Every failure (an unknown host form, an unresolved
 //! environment, no recorded key, an API error, a malformed key) prints nothing
 //! and fails, so with `StrictHostKeyChecking yes` and no known_hosts files the
 //! connection is refused rather than trusted on first use. Nothing is cached:
-//! each connection reads the current generation's key.
+//! each connection reads the bound Pod's key.
 
 use super::*;
 use base64::Engine as _;
@@ -61,7 +61,8 @@ async fn handle_ssh_known_hosts(globals: &Globals, host: &str) -> anyhow::Result
     Ok(())
 }
 
-/// A host key the platform recorded for an environment's current generation.
+/// A host key the platform recorded for an environment's bound Pod, with the
+/// generation it was recorded at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RecordedHostKey {
     pub(crate) generation: u64,
@@ -77,8 +78,8 @@ pub(crate) trait EnvironmentHostKeys {
         environment_ref: &str,
     ) -> anyhow::Result<String>;
 
-    /// The recorded host key of the environment's current generation, or
-    /// `None` when none is recorded.
+    /// The recorded host key of the environment's bound Pod, or `None` when
+    /// none is recorded.
     async fn recorded_host_key(
         &self,
         org_id: &str,

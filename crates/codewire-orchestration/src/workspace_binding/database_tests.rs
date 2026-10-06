@@ -1,5 +1,5 @@
-//! Disposable-PostgreSQL proof for the daemon access store: write-once SSH
-//! host keys trusted only at the environment's current generation, the
+//! Disposable-PostgreSQL proof for the daemon access store: SSH host keys
+//! write-once per Pod and trusted only for the environment's bound Pod, the
 //! generation the live binding carries, and enabled transport zones. Only
 //! synthetic rows in an isolated test database are used.
 
@@ -68,13 +68,56 @@ async fn stored(db: &TestDatabase) -> Result<Vec<(i64, String, String)>> {
     .await?)
 }
 
+/// Bind `pod` at `generation` and point the environment's backend at it, as
+/// a claim-time bind does.
+async fn bind(db: &TestDatabase, pod: &str, generation: i64) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO sandbox_workspace_bindings \
+         (pod_uid,environment_id,namespace,pod_name,claim_uid,sandbox_uid, \
+          operation_generation,managed_credential_clients,credential_scope) \
+         VALUES ($1,$2,$3,$4,'c0ffee00-e29b-41d4-a716-446655440000', \
+         '5a4db0c5-e29b-41d4-a716-446655440000',$5,'','pod')",
+    )
+    .bind(pod)
+    .bind(ENV)
+    .bind(NAMESPACE)
+    .bind(format!("sandbox-{pod}"))
+    .bind(generation)
+    .execute(&db.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO sandbox_environment_backend \
+         (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_uid,bound_at) \
+         VALUES ($1,$2,$3,'c0ffee00-e29b-41d4-a716-446655440000',$4,now()) \
+         ON CONFLICT (environment_id) DO UPDATE \
+         SET pod_uid = EXCLUDED.pod_uid, bound_at = EXCLUDED.bound_at",
+    )
+    .bind(ENV)
+    .bind(NAMESPACE)
+    .bind(format!("sandbox-{ENV}"))
+    .bind(pod)
+    .execute(&db.pool)
+    .await?;
+    Ok(())
+}
+
+async fn release(db: &TestDatabase, pod: &str) -> Result<()> {
+    sqlx::query("UPDATE sandbox_workspace_bindings SET released_at = now() WHERE pod_uid = $1")
+        .bind(pod)
+        .execute(&db.pool)
+        .await?;
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn db_host_keys_are_write_once_and_trusted_only_at_the_current_generation() -> Result<()> {
+async fn db_host_keys_are_write_once_per_pod_and_trusted_only_for_the_bound_pod() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
         seed(&db, 3).await?;
         let store = PgBindingStore::from_pool(db.pool.clone());
+        ensure!(current_host_key(&db.pool, ENV).await?.is_none());
+        bind(&db, POD, 3).await?;
         ensure!(current_host_key(&db.pool, ENV).await?.is_none());
 
         let record = |generation, pod, key| store.record_host_key(ENV, generation, pod, key);
@@ -84,19 +127,29 @@ async fn db_host_keys_are_write_once_and_trusted_only_at_the_current_generation(
         ensure!(stored(&db).await? == vec![(3, POD.to_owned(), KEY.to_owned())]);
         ensure!(current_host_key(&db.pool, ENV).await? == Some((3, KEY.to_owned())));
 
-        // A start, stop or resize moves the generation: the old key is no
-        // longer trusted, before and after the next one is recorded.
-        set_generation(&db, 4).await?;
+        // A Pod replaced within the same generation records its own key, and
+        // the released Pod's key is never served again.
+        release(&db, POD).await?;
+        bind(&db, NEXT_POD, 3).await?;
         ensure!(current_host_key(&db.pool, ENV).await?.is_none());
-        ensure!(record(4, NEXT_POD, OTHER_KEY).await? == HostKeyRecord::Recorded);
-        ensure!(stored(&db).await? == vec![(4, NEXT_POD.to_owned(), OTHER_KEY.to_owned())]);
-        ensure!(current_host_key(&db.pool, ENV).await? == Some((4, OTHER_KEY.to_owned())));
+        ensure!(record(3, NEXT_POD, OTHER_KEY).await? == HostKeyRecord::Recorded);
+        ensure!(current_host_key(&db.pool, ENV).await? == Some((3, OTHER_KEY.to_owned())));
+        // Recording pruned the released binding's key.
+        ensure!(stored(&db).await? == vec![(3, NEXT_POD.to_owned(), OTHER_KEY.to_owned())]);
 
-        // A late call for a superseded generation never displaces the
-        // current key and is never trusted.
-        ensure!(record(3, POD, KEY).await? == HostKeyRecord::Recorded);
-        ensure!(current_host_key(&db.pool, ENV).await? == Some((4, OTHER_KEY.to_owned())));
+        // The same Pod keeps its key across a generation it lives through
+        // (a live resize), and stays trusted.
+        set_generation(&db, 4).await?;
+        ensure!(record(4, NEXT_POD, OTHER_KEY).await? == HostKeyRecord::Unchanged);
         ensure!(record(4, NEXT_POD, KEY).await? == HostKeyRecord::Conflict);
+        ensure!(current_host_key(&db.pool, ENV).await? == Some((3, OTHER_KEY.to_owned())));
+
+        // A late record from the released Pod never displaces the bound Pod's
+        // key, and a released binding with no successor serves nothing.
+        ensure!(record(3, POD, KEY).await? == HostKeyRecord::Recorded);
+        ensure!(current_host_key(&db.pool, ENV).await? == Some((3, OTHER_KEY.to_owned())));
+        release(&db, NEXT_POD).await?;
+        ensure!(current_host_key(&db.pool, ENV).await?.is_none());
         Ok(())
     }
     .await;

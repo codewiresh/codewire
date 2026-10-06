@@ -81,8 +81,8 @@ Journeys (default: preflight hits miss off-shape invariants, then stats when
               and its warm-member bridge must select exactly the bound Pod
               (skipped, with a message, while the fork's sandbox-uid label
               is absent); with --sql-cmd, a completed access_ready stage and
-              a host key recorded for the current generation by the bound
-              Pod; timed client side
+              a host key recorded by the live bound Pod; timed client
+              side
   miss        with the pool full, members + 1 creates at once: at least one
               finds the pool empty, gets a fresh Sandbox and still starts
   off-shape   a shape no pool holds goes cold through its own shadow pool
@@ -317,7 +317,7 @@ daemon_reachable() { in_workspace "$1" 'true' >/dev/null 2>&1; }
 
 # OpenSSH through `cw shell --stdio`, with the managed block's settings: the
 # only trusted host key is the one `cw ssh known-hosts` reads from the
-# platform for the current generation, so success proves the bound daemon's
+# platform for the bound Pod, so success proves the bound daemon's
 # SSH server presents exactly the recorded key.
 ssh_presents_recorded_key() {
   local id="$1" cw_command
@@ -511,12 +511,12 @@ sql_binding() {
 # at or after a binding of that same Sandbox. Prints "<bad>/<sessions>". The
 # billing loop ticks every 60 s, so an environment measured and removed
 # quickly may have no session yet; zero sessions is reported, not failed.
-# The current incarnation completed access_ready, and the current generation
-# has one host key, recorded by the bound Pod.
+# The current incarnation completed access_ready, and the environment's live
+# bound Pod has recorded a host key: the key clients are served.
 sql_access_ready() {
   local id="$1" uid="$2" out
   [[ -n "$SQL_CMD" ]] || return 0
-  out="$(printf "SELECT (SELECT count(*) FROM environment_logs WHERE environment_id = '%s' AND phase = 'access_ready' AND status = 'completed') || '|' || coalesce((SELECT k.pod_uid FROM sandbox_ssh_host_keys k JOIN environments e ON e.id = k.environment_id AND e.environment_operation_generation = k.operation_generation WHERE k.environment_id = '%s'), '');\n" "$id" "$id" |
+  out="$(printf "SELECT (SELECT count(*) FROM environment_logs WHERE environment_id = '%s' AND phase = 'access_ready' AND status = 'completed') || '|' || coalesce((SELECT k.pod_uid FROM sandbox_environment_backend b JOIN sandbox_workspace_bindings w ON w.environment_id = b.environment_id AND w.pod_uid = b.pod_uid AND w.released_at IS NULL JOIN sandbox_ssh_host_keys k ON k.environment_id = b.environment_id AND k.pod_uid = b.pod_uid WHERE b.environment_id = '%s'), '');\n" "$id" "$id" |
     sql_rows | tr -d '[:space:]')" || return 1
   [[ "${out%%|*}" =~ ^[1-9][0-9]*$ && "${out#*|}" == "$uid" ]] ||
     { log "access: $id access_ready rows|host-key Pod = $out, want >=1|$uid"; return 1; }

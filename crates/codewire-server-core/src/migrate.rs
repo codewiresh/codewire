@@ -70,7 +70,7 @@ mod tests {
     // runtime-dispatch lease environment scope, claim-time workspace binding
     // and daemon SSH host keys, through version37.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "f0e4c2ca1b406aa6ed13e3f773f3d879216d43f4f0b5dd22e9ed62fcf218bb76";
+        "88dff060b2dbf35cf0b6464bce13c682c6e13b48ba6d3f80970fb2dfe997c7eb";
     // Accepted table schema through version36, before daemon SSH host keys.
     // Version 36 removes everything version 35 added, so this is also the
     // version-34 value below.

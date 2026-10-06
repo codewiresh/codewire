@@ -1,7 +1,7 @@
 //! The environment's SSH host key for clients (design L4): the public key the
-//! workspace daemon recorded with `RecordHostKey` for the environment's
-//! current operation generation. `cw ssh known-hosts` trusts exactly this
-//! key, so a key from any other generation is never returned and no key is
+//! workspace daemon of the environment's currently bound Pod recorded with
+//! `RecordHostKey`. `cw ssh known-hosts` trusts exactly this key, so a
+//! released or replaced Pod's key is never returned and no key is
 //! `NOT_FOUND`, which the client treats as a refusal.
 
 pub use crate::sandbox::host_keys::{HostKeyStore, RecordedHostKeys};
@@ -19,8 +19,8 @@ pub struct EnvironmentHostKey {
     pub public_key_openssh: String,
 }
 
-/// Authorize exactly as GetEnvironment does, then return the key recorded for
-/// the environment's current generation.
+/// Authorize exactly as GetEnvironment does, then return the key recorded by
+/// the environment's currently bound Pod.
 pub async fn get_environment_host_key_core(
     state: &ApiState,
     user: &AuthUser,
@@ -36,22 +36,18 @@ pub async fn get_environment_host_key_core(
             tracing::warn!(environment_id = %environment.id, %error, "read environment host key failed");
             AppError::ServiceUnavailable("environment host key is unavailable".into())
         })?;
-    current_key(environment.operation_generation, recorded)
+    current_key(recorded)
 }
 
 fn not_recorded() -> AppError {
-    AppError::NotFound("no host key is recorded for the environment's current generation".into())
+    AppError::NotFound("no host key is recorded for the environment's bound Pod".into())
 }
 
-/// The recorded key, only for `current_generation` and only as one canonical
-/// `ssh-ed25519 <base64>` line. A start between the two reads makes the
-/// generations differ, which fails closed until the next request.
-fn current_key(
-    current_generation: u64,
-    recorded: Option<(i64, String)>,
-) -> AppResult<EnvironmentHostKey> {
+/// The bound Pod's recorded key, with the generation it was recorded at, only
+/// as one canonical `ssh-ed25519 <base64>` line.
+fn current_key(recorded: Option<(i64, String)>) -> AppResult<EnvironmentHostKey> {
     let (generation, key) = recorded.ok_or_else(not_recorded)?;
-    if u64::try_from(generation).ok() != Some(current_generation) || current_generation == 0 {
+    if generation <= 0 {
         return Err(not_recorded());
     }
     let public_key_openssh = canonical_ed25519(&key).ok_or_else(|| {
@@ -95,35 +91,25 @@ mod tests {
     }
 
     #[test]
-    fn only_the_current_generations_key_is_returned() {
+    fn only_the_bound_pods_recorded_key_is_returned() {
         assert_eq!(
-            current_key(7, Some((7, key(1)))).unwrap(),
+            current_key(Some((7, key(1)))).unwrap(),
             EnvironmentHostKey {
                 generation: 7,
                 public_key_openssh: key(1),
             }
         );
-        // An earlier or later generation's key, or none, is not found.
-        for recorded in [Some((6, key(1))), Some((8, key(1))), None] {
-            assert!(matches!(
-                current_key(7, recorded),
-                Err(AppError::NotFound(_))
-            ));
+        // No key from the bound Pod, or an impossible generation, is not
+        // found.
+        for recorded in [None, Some((0, key(1))), Some((-7, key(1)))] {
+            assert!(matches!(current_key(recorded), Err(AppError::NotFound(_))));
         }
-        assert!(matches!(
-            current_key(0, Some((0, key(1)))),
-            Err(AppError::NotFound(_))
-        ));
-        assert!(matches!(
-            current_key(7, Some((-7, key(1)))),
-            Err(AppError::NotFound(_))
-        ));
     }
 
     #[test]
     fn only_a_canonical_ed25519_key_is_returned_without_its_comment() {
         assert_eq!(
-            current_key(3, Some((3, format!("{}  daemon@env\n", key(2)))))
+            current_key(Some((3, format!("{}  daemon@env\n", key(2)))))
                 .unwrap()
                 .public_key_openssh,
             key(2)
@@ -142,7 +128,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    current_key(3, Some((3, invalid.clone()))),
+                    current_key(Some((3, invalid.clone()))),
                     Err(AppError::NotFound(_))
                 ),
                 "{invalid:?}"

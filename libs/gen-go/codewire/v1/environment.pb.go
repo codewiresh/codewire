@@ -1614,7 +1614,7 @@ func (x *GetEnvironmentHostKeyRequest) GetEnvironmentId() string {
 
 type GetEnvironmentHostKeyResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The environment operation generation the key was recorded for.
+	// The environment operation generation the key was recorded at.
 	Generation int64 `protobuf:"varint,1,opt,name=generation,proto3" json:"generation,omitempty"`
 	// One OpenSSH public key line, `ssh-ed25519 <base64>`, without a comment.
 	PublicKeyOpenssh string `protobuf:"bytes,2,opt,name=public_key_openssh,json=publicKeyOpenssh,proto3" json:"public_key_openssh,omitempty"`

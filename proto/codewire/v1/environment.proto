@@ -40,9 +40,9 @@ service EnvironmentService {
   rpc GetEnvironmentTrustReport(GetEnvironmentTrustReportRequest) returns (GetEnvironmentTrustReportResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
-  // The SSH host public key the environment's daemon recorded for its current
-  // operation generation, for the client's known_hosts. A key recorded for an
-  // earlier generation is never returned; none recorded is NOT_FOUND.
+  // The SSH host public key the daemon of the environment's currently bound
+  // Pod recorded, for the client's known_hosts. A released or replaced Pod's
+  // key is never returned; none recorded is NOT_FOUND.
   rpc GetEnvironmentHostKey(GetEnvironmentHostKeyRequest) returns (GetEnvironmentHostKeyResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
@@ -235,7 +235,7 @@ message GetEnvironmentHostKeyRequest {
 }
 
 message GetEnvironmentHostKeyResponse {
-  // The environment operation generation the key was recorded for.
+  // The environment operation generation the key was recorded at.
   int64 generation = 1;
   // One OpenSSH public key line, `ssh-ed25519 <base64>`, without a comment.
   string public_key_openssh = 2;

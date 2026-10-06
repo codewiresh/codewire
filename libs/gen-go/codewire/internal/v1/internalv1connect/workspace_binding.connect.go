@@ -57,9 +57,10 @@ type WorkspaceBindingServiceClient interface {
 	// binding's environment and operation generation. Daemons call it at half
 	// the current token's lifetime.
 	RefreshAccess(context.Context, *connect.Request[v1.RefreshAccessRequest]) (*connect.Response[v1.RefreshAccessResponse], error)
-	// Records the bound Pod's SSH host public key for the binding's
-	// environment and operation generation. Write-once: the same key again
-	// succeeds, a different key is failed_precondition.
+	// Records the bound Pod's SSH host public key for that Pod, noting the
+	// binding's environment and operation generation. Write-once per Pod: the
+	// same key again succeeds, a different key is failed_precondition. A Pod
+	// that replaces another records its own key.
 	RecordHostKey(context.Context, *connect.Request[v1.RecordHostKeyRequest]) (*connect.Response[v1.RecordHostKeyResponse], error)
 	// Allocates a UDP peer-relay endpoint between the bound environment's
 	// tailnet node and one peer, with orchestration's own allocator
@@ -147,9 +148,10 @@ type WorkspaceBindingServiceHandler interface {
 	// binding's environment and operation generation. Daemons call it at half
 	// the current token's lifetime.
 	RefreshAccess(context.Context, *connect.Request[v1.RefreshAccessRequest]) (*connect.Response[v1.RefreshAccessResponse], error)
-	// Records the bound Pod's SSH host public key for the binding's
-	// environment and operation generation. Write-once: the same key again
-	// succeeds, a different key is failed_precondition.
+	// Records the bound Pod's SSH host public key for that Pod, noting the
+	// binding's environment and operation generation. Write-once per Pod: the
+	// same key again succeeds, a different key is failed_precondition. A Pod
+	// that replaces another records its own key.
 	RecordHostKey(context.Context, *connect.Request[v1.RecordHostKeyRequest]) (*connect.Response[v1.RecordHostKeyResponse], error)
 	// Allocates a UDP peer-relay endpoint between the bound environment's
 	// tailnet node and one peer, with orchestration's own allocator

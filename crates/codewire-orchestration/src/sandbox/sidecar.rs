@@ -96,8 +96,8 @@ async fn direct_stream(pod: &Pod, pod_name: &str, port: u16) -> anyhow::Result<T
         .map_err(|e| anyhow::anyhow!("connect {addr}: {e}"))
 }
 
-/// Accepts exactly the host key recorded for the environment's current
-/// generation.
+/// Accepts exactly the host key the environment's currently bound Pod
+/// recorded.
 struct PinnedHostKey(russh::keys::PublicKey);
 
 impl PinnedHostKey {
@@ -106,7 +106,7 @@ impl PinnedHostKey {
             .current_host_key(env_id)
             .await
             .map_err(|e| anyhow::anyhow!("read the recorded host key: {e}"))?
-            .ok_or_else(|| anyhow::anyhow!("no host key is recorded for the current generation"))?;
+            .ok_or_else(|| anyhow::anyhow!("no host key is recorded for the bound Pod"))?;
         Ok(Self(russh::keys::PublicKey::from_openssh(&key).map_err(
             |_| anyhow::anyhow!("the recorded host key is not an OpenSSH key"),
         )?))
@@ -250,11 +250,10 @@ impl SandboxClient {
         direct_stream(&pod, pod_name, port).await
     }
 
-    /// The `access_ready` stage (design L4): the environment's current
-    /// generation has a recorded host key, and the current workspace Pod's
-    /// SSH port completes a key exchange presenting exactly that key. The
-    /// daemon records its key only once bound, so this proves the bound
-    /// daemon serves SSH.
+    /// The `access_ready` stage (design L4): the environment's currently
+    /// bound Pod has recorded a host key, and that Pod's SSH port completes a
+    /// key exchange presenting exactly that key. The daemon records its key
+    /// only once bound, so this proves the bound daemon serves SSH.
     pub async fn wait_for_workspace_access_ready(
         &self,
         env_id: &str,
