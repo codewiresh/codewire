@@ -315,7 +315,7 @@ transformers:
     apiVersion: builtin
     kind: PatchTransformer
     metadata:
-      name: codewire-orchestration-gateway-host-key-dev-sandboxes
+      name: codewire-orchestration-sandbox-roles-dev-sandboxes
     patch: |-
       - op: replace
         path: /metadata/namespace
@@ -324,12 +324,12 @@ transformers:
       group: rbac.authorization.k8s.io
       version: v1
       kind: Role|RoleBinding
-      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap|image-cache)|credential-service-runtime)
+      name: codewire-(orchestration-(internal-roots|image-cache)|credential-service-runtime)
   - |-
     apiVersion: builtin
     kind: PatchTransformer
     metadata:
-      name: codewire-orchestration-gateway-host-key-codewire-e2e-subject
+      name: codewire-orchestration-sandbox-roles-codewire-e2e-subject
     patch: |-
       - op: replace
         path: /subjects/0/namespace
@@ -338,12 +338,12 @@ transformers:
       group: rbac.authorization.k8s.io
       version: v1
       kind: RoleBinding
-      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap|image-cache)|credential-service-runtime)
+      name: codewire-(orchestration-(internal-roots|image-cache)|credential-service-runtime)
   - |-
     apiVersion: builtin
     kind: PatchTransformer
     metadata:
-      name: codewire-orchestration-gateway-host-key-admission-cluster-scope
+      name: codewire-orchestration-sandbox-roles-admission-cluster-scope
     patch: |-
       - op: remove
         path: /metadata/namespace
@@ -351,7 +351,7 @@ transformers:
       group: admissionregistration.k8s.io
       version: v1
       kind: ValidatingAdmissionPolicy|ValidatingAdmissionPolicyBinding
-      name: codewire-orchestration-(gateway-host-key|credential-bootstrap|credential-leaf-cleanup|image-cache|warm-pool|warm-pool-template|warm-pool-member)
+      name: codewire-orchestration-(image-cache|warm-pool|warm-pool-template|warm-pool-member)
   - |-
     apiVersion: builtin
     kind: PatchTransformer

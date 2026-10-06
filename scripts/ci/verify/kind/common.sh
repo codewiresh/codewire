@@ -3198,21 +3198,6 @@ workspace_user_ssh_smoke() (
   log "user SSH journey: shell syntax and exit status, scp in both modes, sftp, a forged key refused"
 )
 
-# The workspace daemon hosts SSH and the tailnet: an environment owns no
-# gateway Deployment, Service, NetworkPolicy, warm-member bridge or host-key
-# Secret.
-assert_no_kind_gateway_objects() {
-  local environment_id="$1" found
-  found="$(kubectl -n "$SANDBOX_NS" get \
-    "deployment/cw-gateway-$environment_id" "service/cw-gateway-svc-$environment_id" \
-    "networkpolicy/cw-gw-net-$environment_id" "networkpolicy/cw-gw-warm-$environment_id" \
-    "secret/cw-gateway-host-key-$environment_id" --ignore-not-found=true -o name)" || return $?
-  if [ -n "$found" ]; then
-    echo "::error::environment ${environment_id} owns gateway objects: $(tr '\n' ' ' <<<"$found")"
-    return 1
-  fi
-}
-
 environment_resize_smoke() (
   log "running public environment resize against the agent-sandbox controller"
   umask 077
@@ -3237,7 +3222,6 @@ environment_resize_smoke() (
     CRD_SMOKE_NAMESPACE="$SANDBOX_NS" CRD_SMOKE_SERVER_NAMESPACE="$NS" \
     CRD_SMOKE_LOCAL_IMAGES=1 CRD_SMOKE_WORKSPACE_IMAGE=codewire-gateway:e2e \
     SANDBOX_CREDENTIAL_BROKER_NAMESPACE="$NS" \
-    SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP=codewire-credential-broker-roots \
     "$CARGO_CI_DIR/crd-smoke" >"$resize_manifest"
   template_name="$(jq -er '.items[] | select(.kind == "SandboxTemplate") | .metadata.name' "$resize_manifest")"
   shadow_pool_name="$(jq -er '.items[] | select(.kind == "SandboxWarmPool") | .metadata.name' "$resize_manifest")"
@@ -3261,19 +3245,16 @@ COMMIT;
 SQL
     [ "$?" -eq 0 ] || status=1
     # Runtime identity reconciliation creates the environment's access
-    # objects. Stop its workload before any legacy gateway Certificate, and
-    # never delete the shared fixture Issuers or public root ConfigMaps.
-    if CRD_SMOKE_RESIZE_PHASE=release CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id" \
+    # objects. Never delete the shared fixture Issuers or public root
+    # ConfigMaps.
+    CRD_SMOKE_RESIZE_PHASE=release CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id" \
       CRD_SMOKE_NAMESPACE="$SANDBOX_NS" "$CARGO_CI_DIR/crd-smoke" &&
       kubectl -n "$SANDBOX_NS" delete \
       "sandboxclaim/$claim_name" "sandboxwarmpool/$shadow_pool_name" \
       "sandboxtemplate/$template_name" "service/$daemon_service" \
       "service/cw-tailnet-udp-$environment_id" "networkpolicy/cw-daemon-net-$environment_id" \
-      --ignore-not-found=true --cascade=foreground --wait=true --timeout=120s >/dev/null; then
-      delete_kind_credential_bootstrap "$environment_id" || status=1
-    else
+      --ignore-not-found=true --cascade=foreground --wait=true --timeout=120s >/dev/null ||
       status=1
-    fi
     rm -f -- "$resize_manifest" || status=1
     exit "$status"
   }
@@ -3504,7 +3485,6 @@ SQL
     return 1
   fi
 
-  assert_no_kind_gateway_objects "$environment_id"
 
   local as_user="system:serviceaccount:${NS}:codewire-orchestration"
   if [ "$(kubectl auth can-i get storageclasses.storage.k8s.io --as "$as_user")" != "yes" ] \
@@ -3561,7 +3541,6 @@ temporal_fencing_smoke() {
 
 deploy_agent_sandbox_and_smoke() {
   deploy_agent_sandbox
-  kind_credential_bootstrap_smoke
   kind_credential_native_smoke
   kind_credential_claude_session
   workspace_service_smokes

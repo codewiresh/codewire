@@ -85,8 +85,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP
-              value: codewire-credential-broker-roots
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

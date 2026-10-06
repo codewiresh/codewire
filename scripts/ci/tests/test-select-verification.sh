@@ -401,7 +401,7 @@ run_paths_case idp_kek_boundary pull_request refs/pull/32/head false \
   'deploy policy security security_idp_kek' \
   deployments/k8s/idp/deployment.yaml
 run_paths_case orchestration_host_key_authz pull_request refs/pull/910/head false \
-  'deploy policy security security_idp_kek' deployments/k8s/orchestration/gateway-host-key-authz.yaml
+  'deploy policy security security_idp_kek' deployments/k8s/orchestration/internal-roots-authz.yaml
 run_paths_case leaf_rust pull_request refs/pull/4/head false \
   'policy rust rust_pkg_codewire_cli' \
   crates/codewire-cli/src/commands/info.rs

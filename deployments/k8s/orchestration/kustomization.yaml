@@ -8,8 +8,7 @@ resources:
   - service.yaml
   - rbac.yaml
   - certificate.yaml
-  - gateway-host-key-authz.yaml
-  - credential-bootstrap-authz.yaml
+  - internal-roots-authz.yaml
   - image-cache-authz.yaml
   - warm-pool-authz.yaml
   - workspace-binding-network-policy.yaml
@@ -17,8 +16,8 @@ resources:
 transformers:
   # These run after the package namespace transformer. Parent overlays repeat
   # the small environment-specific transform after their own namespace pass.
-  - gateway-host-key-prod-sandboxes.transformer.yaml
-  - gateway-host-key-admission-cluster-scope.transformer.yaml
+  - sandbox-roles-prod-sandboxes.transformer.yaml
+  - admission-cluster-scope.transformer.yaml
   - image-cache-prod-sandboxes.transformer.yaml
 
 labels:

@@ -243,8 +243,6 @@ grep -Fq "'\$pod_name', '\$pod_ip', true" <<<"$resize_fixture" ||
 for binding in \
     'CRD_SMOKE_RESIZE_PHASE=render CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id"' \
     'SANDBOX_CREDENTIAL_BROKER_NAMESPACE="$NS"' \
-    'SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP=codewire-credential-broker-roots' \
-    'assert_no_kind_gateway_objects "$environment_id"' \
     '"$CARGO_CI_DIR/crd-smoke" >"$resize_manifest"' \
     'select(.kind == "SandboxTemplate") | .metadata.name' \
     'select(.kind == "SandboxWarmPool") | .metadata.name' \
@@ -269,8 +267,6 @@ done
 # Exercise the actual cleanup definition with no Kubernetes or database.
 # A failed foreground drain must never race a still-live issuer/key writer.
 resize_cleanup_definition="$(sed -n '/^  cleanup_environment_resize_smoke() {/,/^  }/p' "$COMMON")"
-credential_cleanup_definition="$(sed -n '/^delete_kind_credential_bootstrap() {/,/^}/p' "$CREDENTIALS")"
-[[ -n "$credential_cleanup_definition" ]] || fail 'credential cleanup helper is missing'
 run_resize_cleanup_fixture() (
   local failure="$1" initial_status="$2"
   local environment_id=00000000-0000-4000-8000-000000000123 preset_id=preset-env-resize-fixture
@@ -299,19 +295,10 @@ SH
       [[ " $* " != *' deployment/'* && " $* " != *' networkpolicy/cw-gw-'* ]] ||
         fail 'resize cleanup still drains gateway objects that nothing creates'
       [[ "$failure" != foreground ]]
-    elif [[ " $* " == *" certificate/cw-credential-gateway-$environment_id "* ]]; then
-      [[ " $* " == *' --cascade=background --wait=true --timeout=120s '* ]] ||
-        fail 'issuing Certificate must disappear before its outputs'
-      [[ "$failure" != certificate ]]
-    elif [[ " $* " == *" secret/cw-credential-gateway-$environment_id "* ]]; then
-      [[ " $* " != *' configmap/'* ]] ||
-        fail 'credential cleanup names a Codex ConfigMap that nothing creates'
-      [[ "$failure" != leaf ]]
     else
       fail "unexpected resize cleanup command: $*"
     fi
   }
-  eval "$credential_cleanup_definition"
   eval "$resize_cleanup_definition"
   set +e
   (exit "$initial_status")
@@ -319,27 +306,23 @@ SH
 )
 : >"$CALLS"
 run_resize_cleanup_fixture none 0
-[[ "$(wc -l <"$CALLS")" -eq 5 ]] || fail 'resize cleanup lost a required phase'
+[[ "$(wc -l <"$CALLS")" -eq 3 ]] || fail 'resize cleanup lost a required phase'
 mapfile -t resize_cleanup_calls <"$CALLS"
 [[ "${resize_cleanup_calls[0]}" == *' exec '* &&
    "${resize_cleanup_calls[1]}" == 'release '* &&
-   "${resize_cleanup_calls[2]}" == *' --cascade=foreground '* &&
-   "${resize_cleanup_calls[3]}" == *' delete certificate/'* &&
-   "${resize_cleanup_calls[4]}" == *' delete secret/cw-credential-gateway-'* ]] ||
-  fail 'resize cleanup does not preserve database, claim release, workload, issuer and leaf order'
+   "${resize_cleanup_calls[2]}" == *' --cascade=foreground '* ]] ||
+  fail 'resize cleanup does not preserve database, claim release and workload order'
 grep -Fq -- '--cascade=foreground --wait=true --timeout=120s' "$CALLS" ||
   fail 'resize cleanup does not wait for exact dependants to stop'
 grep -Fq "DELETE FROM environment_presets WHERE id = 'preset-env-resize-fixture' AND org_id = 'org_contract_1';" \
   "$FIXTURE/resize-cleanup.sql" || fail 'resize cleanup omitted its exact preset'
-for failure in database release foreground certificate leaf; do
+for failure in database release foreground; do
   : >"$CALLS"
   expect_failure "resize-cleanup-$failure" run_resize_cleanup_fixture "$failure" 0
   case "$failure" in
-    database) expected_calls=5 ;;
+    database) expected_calls=3 ;;
     release) expected_calls=2 ;;
     foreground) expected_calls=3 ;;
-    certificate) expected_calls=4 ;;
-    leaf) expected_calls=5 ;;
   esac
   [[ "$(wc -l <"$CALLS")" -eq "$expected_calls" ]] ||
     fail "resize cleanup continued past failed $failure phase or omitted bounded cleanup"
@@ -384,9 +367,6 @@ grep -Fq 'CRD_SMOKE_ACCESS_PHASE=cleanup' "$COMMON" ||
 grep -Fq 'CRD_SMOKE_ACCESS_PHASE must be full, setup, or cleanup' \
   "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
   fail 'CRD smoke no longer bounds its access phases'
-grep -Fq 'async fn ensure_no_gateway_objects(' \
-  "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
-  fail 'CRD smoke no longer proves the absence of gateway objects'
 if grep -Fq 'CRD_SMOKE_GATEWAY' "$COMMON" "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs"; then
   fail 'Kind still passes a gateway capability or phase to the CRD smoke'
 fi
@@ -823,7 +803,6 @@ kubectl() {
 }
 validate_retained_cluster() { record validate; }
 build_retained_kind_smokes() { record smokes; }
-kind_credential_bootstrap_smoke() { record bootstrap; }
 kind_credential_native_smoke() (
   record native-start
   false
@@ -838,7 +817,6 @@ else
     trap retained_suite_cleanup EXIT
     validate_retained_cluster || return $?
     build_retained_kind_smokes || return $?
-    kind_credential_bootstrap_smoke || return $?
     kind_credential_native_smoke || return $?
     log "retained credentials suite green"
   }
@@ -2206,7 +2184,6 @@ grep -Fq 'did not become ready within 60 seconds after image import' \
 # file, and ordinary Temporal prerequisites pass, before final fencing.
 : >"$CALLS"
 deploy_agent_sandbox() { record deploy-agent; }
-kind_credential_bootstrap_smoke() { record credential-bootstrap; }
 kind_credential_native_smoke() { record credential-native; }
 kind_credential_claude_session() { record credential-claude; }
 workspace_service_smokes() { record workspace-services; }
@@ -2216,7 +2193,6 @@ temporal_fencing_smoke() { record temporal-fencing; }
 deploy_agent_sandbox_and_smoke
 cat >"$FIXTURE/want-prepared-order" <<'EOF'
 deploy-agent
-credential-bootstrap
 credential-native
 credential-claude
 workspace-services

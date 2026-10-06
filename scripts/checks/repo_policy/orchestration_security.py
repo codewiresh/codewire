@@ -11,98 +11,35 @@ from .kubernetes import (
 )
 
 
-def assert_credential_bootstrap(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
-    """Static permission/intent checks; actual CEL denial is a Kind assertion."""
-    name = "codewire-orchestration-credential-bootstrap"
-    role = exactly_one(resources, "Role", name, label, output)
-    binding = exactly_one(resources, "RoleBinding", name, label, output)
+INTERNAL_ROOTS_ROLE = "codewire-orchestration-internal-roots"
+
+
+def assert_internal_roots(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
+    """Orchestration reads exactly the published roots of its internal TLS
+    listeners in the sandbox namespace, and writes nothing there."""
+    role = exactly_one(resources, "Role", INTERNAL_ROOTS_ROLE, label, output)
+    binding = exactly_one(resources, "RoleBinding", INTERNAL_ROOTS_ROLE, label, output)
     expected_rules = compact('''
         rules:
         - apiGroups:
-          - cert-manager.io
-          resources:
-          - certificates
-          verbs:
-          - get
-          - create
-          - update
-          - delete
-        - apiGroups:
           - ""
+          resourceNames:
+          - codewire-orchestration-internal-roots
           resources:
           - configmaps
           verbs:
           - get
-          - create
-          - update
-          - delete
     ''')
-    if role and (metadata_field(role, "namespace") != target["role_namespace"] or compact(top_level_block(role, "rules")) != expected_rules):
-        output.append(f"{label}: credential bootstrap Role must grant only exact namespaced public-object CRUD")
+    if role and (metadata_field(role, "namespace") != target["role_namespace"]
+            or compact(top_level_block(role, "rules")) != expected_rules):
+        output.append(f"{label}: internal roots Role must grant only get of the published roots ConfigMap")
     if binding:
-        expected_ref = compact(f"roleRef: apiGroup: rbac.authorization.k8s.io kind: Role name: {name}")
+        expected_ref = compact(f"roleRef: apiGroup: rbac.authorization.k8s.io kind: Role name: {INTERNAL_ROOTS_ROLE}")
         expected_subject = compact(f"subjects: - kind: ServiceAccount name: codewire-orchestration namespace: {target['subject_namespace']}")
         if (metadata_field(binding, "namespace") != target["role_namespace"]
                 or compact(top_level_block(binding, "roleRef")) != expected_ref
                 or compact(top_level_block(binding, "subjects")) != expected_subject):
-            output.append(f"{label}: credential bootstrap binding escaped its namespace or identity")
-    required_by_policy = {
-        name: [
-            "operations: - CREATE - UPDATE - DELETE",
-            "resources: - certificates", "resources: - configmaps",
-            "request.operation == 'DELETE' ? oldObject : object",
-            "request.resource.resource == 'certificates' ? 'cw-credential-gateway-' : 'cw-credential-codex-'",
-            "variables.environment.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')",
-            "request.name == variables.prefix + variables.environment",
-            "variables.target.metadata.namespace == request.namespace",
-            "oldObject.metadata.labels['codewire.sh/environment-id'] == variables.environment",
-            "oldObject.metadata.labels['codewire.sh/org-id'] == variables.labels['codewire.sh/org-id']",
-            "oldObject.metadata.labels['app.kubernetes.io/managed-by'] == 'codewire'",
-            "oldObject.metadata.labels['codewire.sh/type'] == 'credential-bootstrap'",
-            "size(object.data) == 1 && 'config.toml' in object.data && !has(object.binaryData)",
-            "object.spec.secretName == request.name",
-            "object.spec.issuerRef == {'name':'codewire-credential-gateway','kind':'Issuer','group':'cert-manager.io'}",
-            "object.spec.dnsNames == ['cw-gateway-svc-' + variables.environment + '.' + request.namespace + '.svc.cluster.local']",
-            "object.spec.isCA == false",
-            "object.spec.usages == ['digital signature', 'server auth']",
-            "object.spec.duration == '24h' && object.spec.renewBefore == '8h'",
-            "object.spec.privateKey == {'algorithm':dyn('ECDSA'),'size':dyn(256),'encoding':dyn('PKCS8'),'rotationPolicy':dyn('Always')}",
-            "object.spec.revisionHistoryLimit == 1",
-            "object.spec.secretTemplate.labels == variables.labels",
-        ] + [f"!has(object.spec.{field})" for field in [
-            "subject", "literalSubject", "commonName", "ipAddresses", "uris", "emailAddresses", "otherNames",
-            "nameConstraints", "keystores", "additionalOutputFormats", "renewBeforePercentage", "secretTemplate.annotations",
-        ]],
-        "codewire-orchestration-credential-leaf-cleanup": [
-            "operations: - CREATE - UPDATE - DELETE", "resources: - secrets",
-            "request.name.startsWith('cw-credential-gateway-')",
-            "expression: request.operation == 'DELETE'",
-            "oldObject.type == 'kubernetes.io/tls'",
-            "oldObject.metadata.namespace == request.namespace",
-            "request.name == 'cw-credential-gateway-' + oldObject.metadata.labels['codewire.sh/environment-id']",
-            "oldObject.metadata.labels['app.kubernetes.io/managed-by'] == 'codewire'",
-            "oldObject.metadata.labels['codewire.sh/type'] == 'credential-bootstrap'",
-            "owner.apiVersion == 'cert-manager.io/v1' && owner.kind == 'Certificate'",
-            "owner.name == request.name && size(owner.uid) > 0 && has(owner.controller) && owner.controller",
-        ],
-    }
-    for policy_name, required in required_by_policy.items():
-        policy = exactly_one(resources, "ValidatingAdmissionPolicy", policy_name, label, output)
-        binding = exactly_one(resources, "ValidatingAdmissionPolicyBinding", policy_name, label, output)
-        if policy:
-            # Kustomize single-quotes scalar CEL ternaries and YAML doubles
-            # their embedded apostrophes. Compare the decoded spelling.
-            normalized = compact(top_level_block(policy, "spec")).replace("''", "'")
-            for fragment in ["failurePolicy: Fail", "matchPolicy: Equivalent",
-                    "request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')", *required]:
-                if fragment not in normalized:
-                    output.append(f"{label}: {policy_name} missing {fragment}")
-            if metadata_field(policy, "namespace") is not None:
-                output.append(f"{label}: {policy_name} must remain cluster-scoped")
-        if binding:
-            expected = compact(f"spec: policyName: {policy_name} validationActions: - Deny")
-            if metadata_field(binding, "namespace") is not None or compact(top_level_block(binding, "spec")) != expected:
-                output.append(f"{label}: {policy_name} must deny by identity without mutable namespace selectors")
+            output.append(f"{label}: internal roots binding escaped its namespace or identity")
 
 
 IMAGE_CACHE_ROLE = "codewire-orchestration-image-cache"
@@ -711,11 +648,9 @@ def check_warm_member_bridge(self_test: bool, manifests: list[str]) -> list[str]
     return failures
 
 
-def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
-    name = "codewire-orchestration-gateway-host-key"
+def check_orchestration_authz(args: argparse.Namespace) -> int:
     orchestration = "codewire-orchestration"
     token_request_name = "codewire-orchestration-tokenrequest"
-    forbidden_secret_verbs = ["get", "list", "watch", "update", "patch"]
     targets = [
         {"path": "deployments/k8s/orchestration", "role_namespace": "prod-sandboxes", "subject_namespace": "prod"},
         {"path": "deployments/k8s/overlays/dev", "role_namespace": "dev-sandboxes", "subject_namespace": "dev"},
@@ -730,61 +665,8 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         role = exactly_one(resources, "ClusterRole", orchestration, label, output)
         if role and re.search(r"^\s*- secrets\s*$", role, re.MULTILINE):
             output.append(f"{label}: cluster-wide orchestration role still grants Secret access")
-
-    def assert_role(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
-        role = exactly_one(resources, "Role", name, label, output)
-        if not role:
-            return
-        if metadata_field(role, "namespace") != target["role_namespace"]:
-            output.append(f"{label}: host-key Role must live in {target['role_namespace']}")
-        expected_rules = compact(
-            """
-            rules:
-            - apiGroups:
-              - ""
-              resources:
-              - secrets
-              verbs:
-              - create
-              - delete
-            """
-        )
-        actual_rules = compact(top_level_block(role, "rules"))
-        if actual_rules != expected_rules:
-            output.append(f"{label}: host-key Role must grant only Secret create/delete")
-        for verb in forbidden_secret_verbs:
-            if re.search(rf"^\s*- {verb}\s*$", role, re.MULTILINE):
-                output.append(f"{label}: host-key Role grants forbidden Secret verb {verb}")
-
-    def assert_role_binding(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
-        binding = exactly_one(resources, "RoleBinding", name, label, output)
-        if not binding:
-            return
-        if metadata_field(binding, "namespace") != target["role_namespace"]:
-            output.append(f"{label}: host-key RoleBinding must live in {target['role_namespace']}")
-        expected_role_ref = compact(
-            f"""
-            roleRef:
-              apiGroup: rbac.authorization.k8s.io
-              kind: Role
-              name: {name}
-            """
-        )
-        if compact(top_level_block(binding, "roleRef")) != expected_role_ref:
-            output.append(f"{label}: host-key RoleBinding must reference Role/{name}")
-        expected_subjects = compact(
-            f"""
-            subjects:
-            - kind: ServiceAccount
-              name: {orchestration}
-              namespace: {target['subject_namespace']}
-            """
-        )
-        if compact(top_level_block(binding, "subjects")) != expected_subjects:
-            output.append(
-                f"{label}: host-key RoleBinding must select "
-                f"{target['subject_namespace']}/{orchestration}"
-            )
+        if role and re.search(r"^\s*- deployments\s*$", role, re.MULTILINE):
+            output.append(f"{label}: cluster-wide orchestration role still grants Deployment access")
 
     def assert_token_request_authz(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
         role = exactly_one(resources, "Role", token_request_name, label, output)
@@ -853,8 +735,7 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         expected = sorted(
             [
                 f"ClusterRoleBinding/<cluster>/{orchestration}",
-                f"RoleBinding/{target['role_namespace']}/{name}",
-                f"RoleBinding/{target['role_namespace']}/codewire-orchestration-credential-bootstrap",
+                f"RoleBinding/{target['role_namespace']}/{INTERNAL_ROOTS_ROLE}",
                 f"RoleBinding/{target['role_namespace']}/{IMAGE_CACHE_ROLE}",
                 f"RoleBinding/{target['subject_namespace']}/{RELEASE_REVISION_ROLE}",
                 f"RoleBinding/{target['subject_namespace']}/{token_request_name}",
@@ -866,58 +747,12 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
                 f"{', '.join(actual) if actual else 'empty'}"
             )
 
-    def assert_admission(resources: list[str], label: str, output: list[str]) -> None:
-        policy = exactly_one(resources, "ValidatingAdmissionPolicy", name, label, output)
-        binding = exactly_one(resources, "ValidatingAdmissionPolicyBinding", name, label, output)
-        if policy:
-            if metadata_field(policy, "namespace") is not None:
-                output.append(f"{label}: ValidatingAdmissionPolicy must remain cluster-scoped")
-            normalized = compact(top_level_block(policy, "spec"))
-            required = [
-                "failurePolicy: Fail",
-                "matchPolicy: Equivalent",
-                "operations: - CREATE - DELETE",
-                "resources: - secrets",
-                "request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')",
-                "request.name.startsWith('cw-gateway-host-key-')",
-                "(request.operation == 'DELETE' && request.name.startsWith('cw-credential-gateway-'))",
-                "request.operation != 'CREATE' || object.type == 'Opaque'",
-                "object.metadata.labels['app.kubernetes.io/name'] == 'codewire-gateway'",
-                "object.metadata.labels['app.kubernetes.io/component'] == 'gateway-host-key'",
-                "object.metadata.labels['app.kubernetes.io/managed-by'] == 'codewire'",
-                "object.metadata.labels['codewire.sh/type'] == 'gateway-host-key'",
-                "request.name == 'cw-gateway-host-key-' + object.metadata.labels['codewire.sh/environment-id']",
-            ]
-            for fragment in required:
-                if fragment not in normalized:
-                    output.append(f"{label}: admission policy is missing {fragment}")
-        if binding:
-            if metadata_field(binding, "namespace") is not None:
-                output.append(f"{label}: ValidatingAdmissionPolicyBinding must remain cluster-scoped")
-            expected = compact(
-                f"""
-                spec:
-                  matchResources:
-                    namespaceSelector:
-                      matchLabels:
-                        codewire.sh/resource-type: sandbox
-                  policyName: {name}
-                  validationActions:
-                  - Deny
-                """
-            )
-            if compact(top_level_block(binding, "spec")) != expected:
-                output.append(f"{label}: admission binding must fail closed in sandbox-labeled namespaces")
-
     def verify_resources(resources: list[str], target: dict[str, str], label: str) -> list[str]:
         output: list[str] = []
         assert_cluster_role(resources, label, output)
-        assert_role(resources, target, label, output)
-        assert_role_binding(resources, target, label, output)
         assert_token_request_authz(resources, target, label, output)
         assert_bound_surface(resources, target, label, output)
-        assert_admission(resources, label, output)
-        assert_credential_bootstrap(resources, target, label, output)
+        assert_internal_roots(resources, target, label, output)
         assert_image_cache(resources, target, label, output)
         assert_warm_pool(resources, target, label, output)
         assert_workspace_binding_ingress(resources, target, label, output)
@@ -925,23 +760,6 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         if target["path"] != "deployments/k8s/orchestration":
             assert_credential_service(resources, target, label, output)
         return output
-
-    def expected_admission_allows(operation: str, secret_name: str, obj: dict[str, Any] | None = None) -> bool:
-        obj = obj or {}
-        if not secret_name.startswith("cw-gateway-host-key-"):
-            return False
-        if operation == "DELETE":
-            return True
-        if operation != "CREATE" or obj.get("type") != "Opaque":
-            return False
-        labels = ((obj.get("metadata") or {}).get("labels") or {})
-        return (
-            labels.get("app.kubernetes.io/name") == "codewire-gateway"
-            and labels.get("app.kubernetes.io/component") == "gateway-host-key"
-            and labels.get("app.kubernetes.io/managed-by") == "codewire"
-            and labels.get("codewire.sh/type") == "gateway-host-key"
-            and secret_name == f"cw-gateway-host-key-{labels.get('codewire.sh/environment-id')}"
-        )
 
     def self_test() -> None:
         target = targets[0]
@@ -955,22 +773,29 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         expect_rejected(
             "application namespace binding",
             lambda resources: resources
-            + [resources_by_kind_and_name(resources, "RoleBinding", name)[0].replace("namespace: prod-sandboxes", "namespace: prod")],
+            + [resources_by_kind_and_name(resources, "RoleBinding", INTERNAL_ROOTS_ROLE)[0].replace("namespace: prod-sandboxes", "namespace: prod")],
         )
+        for internal_roots_label, before, after in [
+            ("any ConfigMap", "  resourceNames:\n  - codewire-orchestration-internal-roots\n", ""),
+            ("another ConfigMap", "  - codewire-orchestration-internal-roots", "  - codewire-credential-broker-roots"),
+            ("ConfigMap list", "  - get", "  - get\n  - list"),
+            ("ConfigMap write", "  - get", "  - get\n  - update"),
+            ("Secrets", "  - configmaps", "  - secrets"),
+        ]:
+            expect_rejected(
+                f"internal roots {internal_roots_label}",
+                lambda resources, before=before, after=after: [
+                    resource.replace(before, after)
+                    if top_level_field(resource, "kind") == "Role" and metadata_field(resource, "name") == INTERNAL_ROOTS_ROLE
+                    else resource
+                    for resource in resources
+                ],
+            )
         expect_rejected(
-            "wildcard Secret grant",
+            "cluster-wide Deployment grant",
             lambda resources: [
-                resource.replace("  - secrets", '  - "*"')
-                if top_level_field(resource, "kind") == "Role" and metadata_field(resource, "name") == name
-                else resource
-                for resource in resources
-            ],
-        )
-        expect_rejected(
-            "Secret get verb",
-            lambda resources: [
-                resource.replace("  - delete", "  - delete\n  - get")
-                if top_level_field(resource, "kind") == "Role" and metadata_field(resource, "name") == name
+                resource.replace('  - services\n', '  - services\n- apiGroups:\n  - apps\n  resources:\n  - deployments\n  verbs:\n  - get\n', 1)
+                if top_level_field(resource, "kind") == "ClusterRole" and metadata_field(resource, "name") == orchestration
                 else resource
                 for resource in resources
             ],
@@ -1003,38 +828,6 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
                 if not (top_level_field(resource, "kind") or "").startswith("ValidatingAdmissionPolicy")
             ],
         )
-        expect_rejected(
-            "unrelated Secret guard",
-            lambda resources: [
-                resource.replace("cw-gateway-host-key-", "cw-any-secret-")
-                if top_level_field(resource, "kind") == "ValidatingAdmissionPolicy"
-                else resource
-                for resource in resources
-            ],
-        )
-        for before, after in [
-            ("  - certificates", "  - issuers"),
-            ("  - configmaps", "  - secrets"),
-            ("kind: Role\n  name: codewire-orchestration-credential-bootstrap", "kind: ClusterRole\n  name: codewire-orchestration-credential-bootstrap"),
-            ("'name':'codewire-credential-gateway'", "'name':'unrelated-issuer'"),
-            ("'kind':'Issuer'", "'kind':'ClusterIssuer'"),
-            ("object.spec.isCA == false", "object.spec.isCA == true"),
-            ("'size':dyn(256)", "'size':dyn(384)"),
-            ("'rotationPolicy':dyn('Always')", "'rotationPolicy':dyn('Never')"),
-            ("'size':dyn(256)", "'size':256"),
-            ("!has(object.spec.uris)", "true"),
-            ("!has(object.spec.keystores)", "true"),
-            ("!has(object.binaryData)", "true"),
-            ("oldObject.metadata.labels['codewire.sh/environment-id'] == variables.environment", "true"),
-            ("size(owner.uid) > 0", "true"),
-            ("has(owner.controller) && owner.controller", "true"),
-        ]:
-            expect_rejected(f"credential guard {before}", lambda resources, before=before, after=after: [resource.replace(before, after) for resource in resources])
-        expect_rejected("credential namespace-label bypass", lambda resources: [
-            resource.replace("spec:\n", "spec:\n  matchResources:\n    namespaceSelector:\n      matchLabels:\n        codewire.sh/resource-type: sandbox\n", 1)
-            if top_level_field(resource, "kind") == "ValidatingAdmissionPolicyBinding" and metadata_field(resource, "name") == "codewire-orchestration-credential-bootstrap"
-            else resource for resource in resources
-        ])
         def image_cache_rejected(label: str, kind: str, before: str, after: str, name: str = IMAGE_CACHE_ROLE) -> None:
             # Rendered CEL folds across lines at spaces, and single-quoted
             # YAML scalars double embedded apostrophes; match either spelling.
@@ -1183,12 +976,10 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
             .replace(f"name: {WORKSPACE_BINDING_INGRESS}", "name: codewire-orchestration-extra")
         ])
         expect_rejected("image cache cluster-wide DaemonSets", lambda resources: [
-            resource.replace("  - deployments\n", "  - deployments\n  - daemonsets\n", 1)
+            resource.replace("  - services\n", "  - services\n  - daemonsets\n", 1)
             if top_level_field(resource, "kind") == "ClusterRole" and metadata_field(resource, "name") == orchestration
             else resource for resource in resources
         ])
-        if expected_admission_allows("CREATE", "unrelated-secret", {"type": "Opaque", "metadata": {"labels": {}}}) or expected_admission_allows("DELETE", "unrelated-secret"):
-            raise RuntimeError("unrelated Secret create/delete fixture was accepted")
 
     try:
         credential_target = {"subject_namespace": "prod", "role_namespace": "prod-sandboxes"}
@@ -1211,7 +1002,7 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
 
     if failures:
         for failure in failures:
-            print(f"::error::orchestration host-key authorization: {failure}", file=sys.stderr)
+            print(f"::error::orchestration authorization: {failure}", file=sys.stderr)
         return 1
-    print(f"orchestration host-key authorization: OK ({len(targets)} rendered target(s))")
+    print(f"orchestration authorization: OK ({len(targets)} rendered target(s))")
     return 0

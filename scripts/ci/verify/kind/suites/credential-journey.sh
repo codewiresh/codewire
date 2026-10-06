@@ -32,7 +32,6 @@ run_retained_credentials_suite() {
   log "restarting the synthetic credential-service for a fresh provider event log"
   kubectl -n "$NS" rollout restart deployment/codewire-credential-service
   kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s
-  kind_credential_bootstrap_smoke
   kind_credential_native_smoke
   kind_credential_claude_session
   log "retained credentials suite green"

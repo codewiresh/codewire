@@ -10,11 +10,8 @@
 # this SA, so it needs its own grant.
 #
 # Least-privilege: only the resources orchestration's create/exec/probe
-# paths touch. It owns Sandbox CRDs plus the per-environment gateway companion
-# Deployment, ClusterIP Services, and NetworkPolicies. Gateway host-key Secret
-# creation/deletion is granted separately in the shared sandbox namespace and
-# constrained by admission. It still does NOT get the full codewire-server
-# surface such as ingresses, secret reads/writes, or RBAC authoring.
+# paths touch. It owns Sandbox CRDs plus the per-environment Services and
+# NetworkPolicies. It gets no Deployment, ingress, Secret or RBAC authority.
 #
 # The ClusterRoleBinding's subject namespace is rewritten per overlay by
 # kustomize's namespace transformer (prod here, codewire-e2e in the kind
@@ -91,13 +88,11 @@ rules:
   - apiGroups: ["extensions.agents.x-k8s.io"]
     resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Split gateway/workspace runtime companions. Orchestration creates these
-  # alongside the SandboxClaim and removes them on stop/destroy.
+  # The environment's access objects: the workspace daemon Service, the
+  # direct-UDP LoadBalancer and the workspace NetworkPolicies. Orchestration
+  # creates them alongside the SandboxClaim and removes them on stop/destroy.
   - apiGroups: [""]
     resources: ["services"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]

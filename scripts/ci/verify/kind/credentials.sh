@@ -85,14 +85,9 @@ deploy_kind_credential_cert_manager() {
   done
 }
 
-# The gateway root and Issuer only issue the legacy per-environment gateway
-# Certificates whose cleanup kind_credential_bootstrap_smoke proves; no
-# workspace or gateway mounts gateway trust.
 deploy_kind_credential_issuers() {
-  log "issuing independent synthetic Kind gateway, broker, orchestration and coordinator roots"
+  log "issuing independent synthetic Kind broker, orchestration and coordinator roots"
   kubectl_apply -f "$ROOT/tests/e2e/kind/credential-issuers.yaml"
-  kubectl -n "$SANDBOX_NS" wait --for=condition=Ready --timeout=120s \
-    certificate/codewire-kind-credential-gateway-root issuer/codewire-credential-gateway
   kubectl -n "$NS" wait --for=condition=Ready --timeout=120s \
     certificate/codewire-kind-credential-broker-root issuer/codewire-credential-broker \
     certificate/codewire-credential-broker \
@@ -102,23 +97,17 @@ deploy_kind_credential_issuers() {
     certificate/codewire-kind-postgres-tls \
     certificate/codewire-kind-coordinator-root issuer/codewire-kind-coordinator \
     certificate/codewire-kind-coordinator-tls
-  local gateway_roots broker_roots orchestration_roots coordinator_roots
+  local broker_roots orchestration_roots coordinator_roots
   # Only public certificates leave these synthetic controller-owned Secrets.
   # No private key is copied into the host, workspace, ConfigMap or log.
-  gateway_roots="$(kubectl -n "$SANDBOX_NS" get secret codewire-kind-credential-gateway-root \
-    -o 'jsonpath={.data.tls\.crt}' | base64 -d)"
   broker_roots="$(kubectl -n "$NS" get secret codewire-kind-credential-broker-root \
     -o 'jsonpath={.data.tls\.crt}' | base64 -d)"
   orchestration_roots="$(kubectl -n "$NS" get secret codewire-kind-orchestration-internal-root \
     -o 'jsonpath={.data.tls\.crt}' | base64 -d)"
   coordinator_roots="$(kubectl -n "$NS" get secret codewire-kind-coordinator-root \
     -o 'jsonpath={.data.tls\.crt}' | base64 -d)"
-  [ -n "$gateway_roots" ] && [ -n "$broker_roots" ] && [ -n "$orchestration_roots" ] \
-    && [ -n "$coordinator_roots" ] \
-    && [ "$gateway_roots" != "$broker_roots" ] \
+  [ -n "$broker_roots" ] && [ -n "$orchestration_roots" ] && [ -n "$coordinator_roots" ] \
     && [ "$orchestration_roots" != "$broker_roots" ] \
-    && [ "$orchestration_roots" != "$gateway_roots" ] \
-    && [ "$coordinator_roots" != "$gateway_roots" ] \
     && [ "$coordinator_roots" != "$broker_roots" ] \
     && [ "$coordinator_roots" != "$orchestration_roots" ] || {
     echo '::error::Kind credential trust domains are missing or not distinct' >&2
@@ -128,8 +117,8 @@ deploy_kind_credential_issuers() {
   # in its own namespace.
   kubectl -n "$NS" create configmap codewire-credential-broker-roots \
     --from-literal="ca.crt=$broker_roots" --dry-run=client -o yaml | kubectl_apply -f -
-  # Gateways (sandbox namespace) verify orchestration's internal TLS listener
-  # with these roots; the copy in this namespace is for Mesh once it switches.
+  # Workspace daemons (sandbox namespace) verify orchestration's binding
+  # listener with these roots, and Mesh (this namespace) its internal one.
   local namespace
   for namespace in "$SANDBOX_NS" "$NS"; do
     kubectl -n "$namespace" create configmap codewire-orchestration-internal-roots \
@@ -140,72 +129,6 @@ deploy_kind_credential_issuers() {
   kubectl -n "$SANDBOX_NS" create configmap codewire-coordinator-extra-roots \
     --from-literal="ca.crt=$coordinator_roots" --dry-run=client -o yaml | kubectl_apply -f -
 }
-
-delete_kind_credential_bootstrap() {
-  local environment="$1"
-  [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
-  # Remove the issuing object first. Foreground GC retains it while deleting
-  # its leaf, which can start cert-manager issuance again. Background removes
-  # that intent while its owner references still collect late controller work.
-  # Both phases must complete; this is not best-effort teardown.
-  kubectl -n "$SANDBOX_NS" delete "certificate/cw-credential-gateway-$environment" \
-    --ignore-not-found=true --cascade=background --wait=true --timeout=120s >/dev/null || return $?
-  kubectl -n "$SANDBOX_NS" delete "secret/cw-credential-gateway-$environment" \
-    --ignore-not-found=true --wait=true --timeout=120s >/dev/null
-}
-
-# Nothing creates a per-environment gateway Certificate or its leaf: the
-# gateway has no workspace-facing TLS listener.
-assert_no_kind_gateway_certificate() {
-  local environment="$1" found
-  [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
-  found="$(kubectl -n "$SANDBOX_NS" get "certificate/cw-credential-gateway-$environment" \
-    "secret/cw-credential-gateway-$environment" --ignore-not-found=true -o name)" || return $?
-  [ -z "$found" ] || {
-    echo '::error::an environment created a gateway Certificate' >&2
-    return 1
-  }
-}
-
-# Codex has no bootstrap object: the workspace daemon writes Codewire's
-# config.toml into the user's ~/.codex on the persistent home.
-assert_no_kind_codex_config_map() {
-  local environment="$1" found
-  found="$(kubectl -n "$SANDBOX_NS" get configmap "cw-credential-codex-$environment" \
-    --ignore-not-found=true -o name)" || return $?
-  [ -z "$found" ] || {
-    echo '::error::selected Codex created a per-environment ConfigMap' >&2
-    return 1
-  }
-}
-
-kind_credential_bootstrap_smoke() (
-  log "checking credential bootstrap with real Kind admission and certificate issuance"
-  local binary kubeconfig
-  local kubeconfig_args=()
-  binary="$(jq -ser '
-    [.[] | select(.reason == "compiler-artifact" and .profile.test == true
-      and .target.name == "codewire_orchestration" and .executable != null) | .executable]
-    | if length == 1 then .[0] else error("expected one orchestration libtest") end
-  ' "$RUN_DIR/credential-bootstrap-build.jsonl")"
-  [ -x "$binary" ] || { echo '::error::credential bootstrap executable is missing' >&2; return 1; }
-  # Export only this disposable cluster's identity. Do not let the Rust client
-  # fall back to any ambient kubeconfig or external cluster credentials.
-  kubeconfig="$(mktemp "$RUN_DIR/credential-bootstrap-kubeconfig.XXXXXX")"
-  trap 'rm -f -- "$kubeconfig"' EXIT
-  if is_remote_dind_kind_job; then
-    kubeconfig_args+=(--internal)
-  fi
-  kind get kubeconfig "${kubeconfig_args[@]}" --name "$KIND_CLUSTER_NAME" >"$kubeconfig"
-  KUBECONFIG="$kubeconfig" CODEWIRE_KIND_CONTEXT="kind-$KIND_CLUSTER_NAME" \
-    CODEWIRE_KIND_CREDENTIAL_BOOTSTRAP=1 \
-    "$binary" --exact sandbox::client::credentials::kind::credential_bootstrap_kind \
-      --ignored --nocapture --test-threads=1 | tee "$RUN_DIR/credential-bootstrap-kind.log"
-  grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$RUN_DIR/credential-bootstrap-kind.log" || {
-    echo '::error::credential bootstrap gate did not execute exactly one passing test' >&2
-    return 1
-  }
-)
 
 start_kind_credential_fixture() {
   local fixture_patch
@@ -1026,8 +949,6 @@ kind_credential_native_smoke() (
   kind_credential_codex_login "$environment" own-login || return $?
   kind_credential_codex_login "$environment" logout || return $?
 
-  assert_no_kind_gateway_certificate "$environment" || return $?
-  assert_no_kind_codex_config_map "$environment" || return $?
   # Codex's home is ~/.codex on the persistent home: state written there
   # survives Stop/Start, as on a laptop.
   marker="kind-persistence-${RANDOM}${RANDOM}"
@@ -1036,11 +957,8 @@ kind_credential_native_smoke() (
     return $?
   kind_credential_cli env --platform stop "$environment" --output json
   wait_kind_credential_environment "$environment" stopped
-  assert_no_kind_codex_config_map "$environment" || return $?
   kind_credential_cli env --platform start "$environment" --output json
   wait_kind_credential_environment "$environment" running
-  assert_no_kind_gateway_certificate "$environment" || return $?
-  assert_no_kind_codex_config_map "$environment" || return $?
   pod="$(kind_credential_workspace "$environment")" || return $?
   [ "$(kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- \
     cat /home/codewire/.codex/kind-persistence)" = "$marker" ] || {
@@ -1110,8 +1028,6 @@ kind_credential_native_smoke() (
   # binding, so a tombstone cannot permanently pin the profile and credential.
   kind_credential_cli env --platform rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
-  assert_no_kind_gateway_certificate "$environment" || return $?
-  assert_no_kind_codex_config_map "$environment" || return $?
   kind_credential_cli credentials --platform --profile "$profile_name" delete --yes
   kind_credential_cli credentials --platform delete "$credential_name" --yes
   log "public synthetic Codex flow, ChatGPT login delivery, native rotation/retry, revocation and terminal cleanup passed"

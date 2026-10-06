@@ -1,7 +1,7 @@
 apiVersion: builtin
 kind: PatchTransformer
 metadata:
-  name: codewire-orchestration-gateway-host-key-prod-sandboxes
+  name: codewire-orchestration-sandbox-roles-prod-sandboxes
 patch: |-
   - op: replace
     path: /metadata/namespace
@@ -10,4 +10,4 @@ target:
   group: rbac.authorization.k8s.io
   version: v1
   kind: Role|RoleBinding
-  name: codewire-orchestration-(gateway-host-key|credential-bootstrap|image-cache)
+  name: codewire-orchestration-(internal-roots|image-cache)

@@ -979,58 +979,10 @@ kind_credential_bound_revision '%s'
     def test_provider_audit_still_rejects_a_restarted_fixture(self):
         self.assertNotEqual(self.provider_counts(self.provider_events(), restarts=1).returncode, 0)
 
-    def test_bootstrap_cleanup_removes_issuer_before_outputs_and_propagates_failures(self):
-        for certificate_status, leaf_status in ((0, 0), (42, 0), (0, 43)):
-            result = self.shell('''
-SANDBOX_NS=dev-sandboxes
-kubectl() {
-  printf '%%s\\n' "$*" >&2
-  case "$*" in
-    '-n dev-sandboxes delete certificate/cw-credential-gateway-%s --ignore-not-found=true --cascade=background --wait=true --timeout=120s') return %s ;;
-    '-n dev-sandboxes delete secret/cw-credential-gateway-%s --ignore-not-found=true --wait=true --timeout=120s') return %s ;;
-    *) return 99 ;;
-  esac
-}
-delete_kind_credential_bootstrap '%s'
-''' % (ENVIRONMENT, certificate_status, ENVIRONMENT, leaf_status, ENVIRONMENT))
-            self.assertEqual(result.returncode, certificate_status or leaf_status, result.stderr)
-            calls = result.stderr.splitlines()
-            self.assertEqual(len(calls), 1 if certificate_status else 2, result.stderr)
-            self.assertIn("delete certificate/", calls[0])
-            if not certificate_status:
-                self.assertIn("delete secret/", calls[1])
-        common = (ROOT / "scripts/ci/verify/kind/common.sh").read_text()
-        cleanup = common.split("cleanup_environment_resize_smoke() {", 1)[1].split(
-            "trap cleanup_environment_resize_smoke EXIT", 1)[0]
-        self.assertNotIn('"certificate/cw-credential-gateway-$environment_id"', cleanup)
-        self.assertLess(cleanup.index("--cascade=foreground --wait=true"),
-                        cleanup.index('delete_kind_credential_bootstrap "$environment_id"'))
-        self.assertIn('exit "$status"', cleanup)
-
-    def test_codex_config_map_absence_is_exact_and_fails_closed(self):
-        for found, expected in (("", 0), ("configmap/cw-credential-codex-%s" % ENVIRONMENT, 1)):
-            result = self.shell('''
-SANDBOX_NS=dev-sandboxes
-kubectl() {
-  printf '%%s\\n' "$*" >&2
-  [ "$*" = '-n dev-sandboxes get configmap cw-credential-codex-%s --ignore-not-found=true -o name' ] || return 99
-  printf '%%s' '%s'
-}
-assert_no_kind_codex_config_map '%s'
-''' % (ENVIRONMENT, found, ENVIRONMENT))
-            self.assertEqual(result.returncode, expected, result.stderr)
-        result = self.shell('''
-SANDBOX_NS=dev-sandboxes
-kubectl() { return 42; }
-assert_no_kind_codex_config_map '%s'
-''' % ENVIRONMENT)
-        self.assertEqual(result.returncode, 42, result.stderr)
-
     def test_native_flow_proves_codex_home_persistence_without_a_config_map(self):
         source = HELPERS.read_text()
         flow = source.split("kind_credential_native_smoke() (", 1)[1]
-        self.assertNotIn("configmap", flow.lower().replace("assert_no_kind_codex_config_map", ""))
-        self.assertEqual(flow.count('assert_no_kind_codex_config_map "$environment" || return $?'), 4)
+        self.assertNotIn("configmap", flow.lower())
         stop = flow.index('env --platform stop "$environment"')
         start = flow.index('env --platform start "$environment"')
         self.assertLess(flow.index("/home/codewire/.codex/kind-persistence"), stop)
@@ -1090,8 +1042,6 @@ kind_credential_codex_login '%s' %s %s
         daemon = 'kind_credential_daemon_probe "$environment" '
         bounded = ' "$KIND_AUTHORITY_CHANGE_WITHIN_MS"'
         initial = index('kind_credential_probe "$environment" unselected')
-        no_certificate = index('assert_no_kind_gateway_certificate "$environment"')
-        restarted_without_certificate = index('assert_no_kind_gateway_certificate "$environment"', start)
         gateway = index('kind_credential_probe "$environment" selected')
         counted = index("assert_kind_credential_provider_counts 2", gateway)
         warm = index(daemon + "success\n", counted)
@@ -1124,22 +1074,20 @@ kind_credential_codex_login '%s' %s %s
         served = index('served="$(jq -s \'map(.served // 0) | add\' "$KIND_DAEMON_PROBE_LOG")" || return $?')
         final = index('assert_kind_credential_provider_counts "$((5 + served))"')
         destroy = index('env --platform rm "$environment"')
-        destroyed_without_certificate = index('assert_no_kind_gateway_certificate "$environment"', destroy)
         # An unselected projection first; delivery before the proxy session
         # whose refreshes rotate it; the user's own login and logout after
-        # rotation; no gateway Certificate across Stop/Start; a new container
-        # forgets the logout; the selected projection with no request since
+        # rotation; Stop/Start, where a new container forgets the logout; the
+        # selected projection with no request since
         # the session; on the daemon's epoch a warm-up, a reuse and Reconnect;
         # then each authority change on that connected epoch; a replaced
         # Pod's new epoch; revocation last, on that epoch, which removes the
-        # login before destroy, which leaves no gateway Certificate either.
-        order = [initial, deliver, session, counts, rotation, own, logout, no_certificate, stop,
-                 start, restarted_without_certificate, redelivered,
+        # login before destroy.
+        order = [initial, deliver, session, counts, rotation, own, logout, stop,
+                 start, redelivered,
                  gateway, counted, warm, reuse, reconnect, reconnected, six, reused, anchor,
                  logged, repeated, member, denied, restored, readmitted, bound, unset, rebind,
                  unbound, rebound, recovered, replaced, marker, fresh, revoke, revoked_daemon,
-                 changes, revoked_gateway, revoked, served, final, destroy,
-                 destroyed_without_certificate]
+                 changes, revoked_gateway, revoked, served, final, destroy]
         self.assertEqual(sorted(order), order)
         # Every provider request crosses the daemon: the projection probe
         # makes none.
@@ -1147,7 +1095,6 @@ kind_credential_codex_login '%s' %s %s
         self.assertEqual(flow.count('kind_credential_probe "$environment" unselected'), 1)
         self.assertEqual(flow.count('kind_credential_probe "$environment" selected'), 2)
         self.assertEqual(flow.count("kind_credential_probe "), 3)
-        self.assertEqual(flow.count('assert_no_kind_gateway_certificate "$environment"'), 3)
         self.assertEqual(flow.count(daemon + "denied" + bounded), 2)
         self.assertEqual(flow.count(daemon + "success" + bounded), 2)
         # A credential change applies to the very next request: no bound.
@@ -1158,16 +1105,6 @@ kind_credential_codex_login '%s' %s %s
         self.assertEqual(flow[counted:anchor].count(daemon + "success\n"), 3)
         self.assertIn('login_events="$(kind_credential_codex_login "$environment" deliver)" || return $?',
                       flow)
-
-    def test_bootstrap_cleanup_rejects_noncanonical_environment_without_io(self):
-        for environment in ("", "foreign", ENVIRONMENT.upper()):
-            result = self.shell('''
-SANDBOX_NS=dev-sandboxes
-kubectl() { echo unexpected-kubectl >&2; return 99; }
-delete_kind_credential_bootstrap '%s'
-''' % environment)
-            self.assertEqual(result.returncode, 1, result.stderr)
-            self.assertEqual(result.stderr, "")
 
     def test_native_flow_resolves_the_selected_runtime_image_not_a_contract_only_preset(self):
         source = HELPERS.read_text()
