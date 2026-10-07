@@ -5,18 +5,16 @@
 //! host-only runner boundary.  The persisted identity binds the directory,
 //! filesystem, and mount instance; every launch reopens the path without
 //! following symlinks and refuses replacement or mount-topology changes.
-//! Admission is Linux-only for now: Darwin refuses every direct share.
+//! Linux serves the admitted descriptor through virtiofsd. Darwin admits only
+//! APFS directories and hands the exact admitted path and identity to the
+//! Virtualization.framework helper, which checks them again around VM start.
 
-#[cfg(target_os = "linux")]
 use std::ffi::OsString;
 use std::fmt;
-#[cfg(target_os = "linux")]
 use std::fs;
-#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd as _;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt as _;
-#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Component, Path, PathBuf};
 
@@ -24,9 +22,7 @@ use codewire_vmm_guest_probe::DirectShareMount;
 #[cfg(target_os = "linux")]
 use rustix::fs::{AtFlags, Mode, OFlags, ResolveFlags, StatxFlags, openat2, statx};
 
-#[cfg(target_os = "linux")]
-use crate::linux::path::current_uid;
-#[cfg(target_os = "linux")]
+use crate::host::path::current_uid;
 use crate::supervisor_metadata::direct_share::allowed_filesystem;
 pub(crate) use crate::supervisor_metadata::direct_share::{DirectShareError, DirectShareIdentity};
 
@@ -86,7 +82,6 @@ impl DirectShareRequest {
         })
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn reopen(
         &self,
         forbidden_roots: &[PathBuf],
@@ -97,7 +92,6 @@ impl DirectShareRequest {
 
 /// Admit a canonical user-owned directory that is disjoint from all private
 /// Codewire state supplied by the caller and from common credential stores.
-#[cfg(target_os = "linux")]
 pub(crate) fn admit_direct_share(
     requested: &Path,
     forbidden_roots: &[PathBuf],
@@ -130,17 +124,6 @@ pub(crate) fn admit_direct_share(
         identity,
         descriptor,
     })
-}
-
-/// Direct shares are not yet supported on Darwin; refuse before any effect.
-#[cfg(target_os = "macos")]
-pub(crate) fn admit_direct_share(
-    requested: &Path,
-    _forbidden_roots: &[PathBuf],
-) -> Result<AdmittedDirectShare, DirectShareError> {
-    Err(DirectShareError::UnsupportedFilesystem(
-        requested.to_owned(),
-    ))
 }
 
 /// Reopen a durable direct-share path and require its exact admitted identity.
@@ -215,6 +198,109 @@ fn capture_identity(descriptor: &OwnedFd) -> Result<DirectShareIdentity, DirectS
     ))
 }
 
+/// Open the directory itself. `O_NOFOLLOW_ANY` refuses a symlink in any
+/// component, not only the last, so a replaced parent cannot redirect it.
+#[cfg(target_os = "macos")]
+fn open_exact_directory(path: &Path) -> Result<OwnedFd, DirectShareError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW_ANY | libc::O_CLOEXEC)
+        .open(path)
+        .map(OwnedFd::from)
+        .map_err(|error| DirectShareError::Open {
+            path: path.to_owned(),
+            source: darwin_errno(&error),
+        })
+}
+
+/// The kernel's current path for the opened directory (`F_GETPATH`).
+#[cfg(target_os = "macos")]
+fn descriptor_path(descriptor: &OwnedFd) -> Result<PathBuf, DirectShareError> {
+    let mut buffer = [0_u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes a NUL-terminated path of at most MAXPATHLEN
+    // (PATH_MAX) bytes into the supplied buffer of exactly that size.
+    if unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) } == -1 {
+        return Err(DirectShareError::Inspect(darwin_errno(
+            &std::io::Error::last_os_error(),
+        )));
+    }
+    let end = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or(DirectShareError::InvalidDirectory)?;
+    Ok(PathBuf::from(OsString::from_vec(buffer[..end].to_vec())))
+}
+
+#[cfg(target_os = "macos")]
+fn capture_identity(descriptor: &OwnedFd) -> Result<DirectShareIdentity, DirectShareError> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the descriptor is live and the buffer has libc's stat layout.
+    if unsafe { libc::fstat(descriptor.as_raw_fd(), metadata.as_mut_ptr()) } != 0 {
+        return Err(DirectShareError::Inspect(darwin_errno(
+            &std::io::Error::last_os_error(),
+        )));
+    }
+    // SAFETY: a successful fstat initialized the complete structure.
+    let metadata = unsafe { metadata.assume_init() };
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR || metadata.st_ino == 0 {
+        return Err(DirectShareError::InvalidDirectory);
+    }
+    let filesystem = darwin_statfs(descriptor)?;
+    let device = metadata.st_dev as u32;
+    Ok(DirectShareIdentity::from_captured_parts(
+        device >> 24,
+        device & 0x00ff_ffff,
+        metadata.st_ino,
+        darwin_mount_id(&filesystem),
+        metadata.st_uid,
+        darwin_filesystem_magic(&filesystem),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_statfs(descriptor: &OwnedFd) -> Result<libc::statfs, DirectShareError> {
+    let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: the descriptor is live and the buffer has libc's statfs layout.
+    if unsafe { libc::fstatfs(descriptor.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
+        return Err(DirectShareError::Inspect(darwin_errno(
+            &std::io::Error::last_os_error(),
+        )));
+    }
+    // SAFETY: a successful fstatfs initialized the complete structure.
+    Ok(unsafe { filesystem.assume_init() })
+}
+
+/// Darwin has no mount ID; the mounted filesystem's `f_fsid` stands in for it.
+#[cfg(target_os = "macos")]
+fn darwin_mount_id(filesystem: &libc::statfs) -> u64 {
+    // SAFETY: fsid_t is repr(C), exactly two int32 values without padding.
+    let [high, low] = unsafe { std::mem::transmute::<libc::fsid_t, [i32; 2]>(filesystem.f_fsid) };
+    (u64::from(high as u32) << 32) | u64::from(low as u32)
+}
+
+/// Only APFS is admitted; every other filesystem reports no magic.
+#[cfg(target_os = "macos")]
+fn darwin_filesystem_magic(filesystem: &libc::statfs) -> i64 {
+    if c_chars_to_bytes(&filesystem.f_fstypename) == Some(b"apfs".as_slice()) {
+        crate::supervisor_metadata::direct_share::APFS_VOLUME_MAGIC
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn c_chars_to_bytes(value: &[libc::c_char]) -> Option<&[u8]> {
+    let end = value.iter().position(|byte| *byte == 0)?;
+    // SAFETY: c_char and u8 have the same size and alignment.
+    Some(unsafe { std::slice::from_raw_parts(value.as_ptr().cast::<u8>(), end) })
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_errno(error: &std::io::Error) -> rustix::io::Errno {
+    rustix::io::Errno::from_io_error(error).unwrap_or(rustix::io::Errno::IO)
+}
+
 fn validate_normal_absolute_path(path: &Path) -> Result<(), DirectShareError> {
     let bytes = path.as_os_str().as_bytes();
     if !path.is_absolute()
@@ -233,21 +319,65 @@ fn validate_normal_absolute_path(path: &Path) -> Result<(), DirectShareError> {
     Ok(())
 }
 
+/// Roots that are never shared themselves; directories beneath them may be.
 #[cfg(target_os = "linux")]
+const BROAD_ROOTS: &[&str] = &[
+    "/boot", "/dev", "/etc", "/home", "/proc", "/root", "/run", "/sys", "/tmp", "/usr", "/var",
+];
+/// Trees that are never shared at any depth.
+#[cfg(target_os = "linux")]
+const FORBIDDEN_TREES: &[&str] = &["/dev", "/proc", "/run", "/sys"];
+#[cfg(target_os = "macos")]
+const BROAD_ROOTS: &[&str] = &[
+    "/Applications",
+    "/Library",
+    "/System",
+    "/Users",
+    "/Volumes",
+    "/bin",
+    "/cores",
+    "/dev",
+    "/etc",
+    "/opt",
+    "/private",
+    "/private/etc",
+    "/private/tmp",
+    "/private/var",
+    "/sbin",
+    "/tmp",
+    "/usr",
+    "/var",
+];
+/// `/System` also holds the firmlinked alias of every user directory.
+#[cfg(target_os = "macos")]
+const FORBIDDEN_TREES: &[&str] = &["/System", "/dev", "/private/etc", "/private/var/db"];
+/// Credential stores beneath the user's home directory.
+const HOME_CREDENTIAL_STORES: &[&str] = &[
+    ".aws",
+    ".claude",
+    ".codex",
+    ".config/gh",
+    ".config/gcloud",
+    ".docker",
+    ".gnupg",
+    ".kube",
+    ".local/share/keyrings",
+    ".ssh",
+    ".switch",
+];
+#[cfg(target_os = "linux")]
+const PLATFORM_HOME_CREDENTIAL_STORES: &[&str] = &[];
+#[cfg(target_os = "macos")]
+const PLATFORM_HOME_CREDENTIAL_STORES: &[&str] = &["Library/Keychains"];
+
 fn validate_source_policy(
     path: &Path,
     forbidden_roots: &[PathBuf],
 ) -> Result<(), DirectShareError> {
-    const BROAD_ROOTS: &[&str] = &[
-        "/boot", "/dev", "/etc", "/home", "/proc", "/root", "/run", "/sys", "/tmp", "/usr", "/var",
-    ];
     if BROAD_ROOTS.iter().any(|root| path == Path::new(root)) {
         return Err(DirectShareError::ForbiddenSource(path.to_owned()));
     }
-    if ["/dev", "/proc", "/run", "/sys"]
-        .iter()
-        .any(|root| path.starts_with(root))
-    {
+    if FORBIDDEN_TREES.iter().any(|root| path.starts_with(root)) {
         return Err(DirectShareError::ForbiddenSource(path.to_owned()));
     }
     for root in forbidden_roots {
@@ -259,19 +389,10 @@ fn validate_source_policy(
     if path == home {
         return Err(DirectShareError::ForbiddenSource(path.to_owned()));
     }
-    for relative in [
-        ".aws",
-        ".claude",
-        ".codex",
-        ".config/gh",
-        ".config/gcloud",
-        ".docker",
-        ".gnupg",
-        ".kube",
-        ".local/share/keyrings",
-        ".ssh",
-        ".switch",
-    ] {
+    for relative in HOME_CREDENTIAL_STORES
+        .iter()
+        .chain(PLATFORM_HOME_CREDENTIAL_STORES)
+    {
         if paths_overlap(path, &home.join(relative)) {
             return Err(DirectShareError::ForbiddenSource(path.to_owned()));
         }
@@ -297,7 +418,35 @@ fn current_home_directory() -> Result<PathBuf, DirectShareError> {
     Err(DirectShareError::MissingHomeDirectory)
 }
 
-#[cfg(target_os = "linux")]
+/// The account's home directory from Directory Services, never `$HOME`.
+/// It is canonicalized because a home beneath `/var` lives in `/private/var`.
+#[cfg(target_os = "macos")]
+fn current_home_directory() -> Result<PathBuf, DirectShareError> {
+    let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut buffer = vec![0 as libc::c_char; 16 * 1024];
+    let mut result = std::ptr::null_mut();
+    // SAFETY: every pointer refers to a live buffer of the stated size; the
+    // returned strings point into `buffer`, which outlives their use below.
+    let status = unsafe {
+        libc::getpwuid_r(
+            current_uid(),
+            entry.as_mut_ptr(),
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if status != 0 || result.is_null() {
+        return Err(DirectShareError::MissingHomeDirectory);
+    }
+    // SAFETY: a successful lookup set `result` to `entry` with a NUL-terminated
+    // pw_dir inside `buffer`.
+    let directory = unsafe { std::ffi::CStr::from_ptr((*result).pw_dir) };
+    let home = PathBuf::from(std::ffi::OsStr::from_bytes(directory.to_bytes()));
+    validate_normal_absolute_path(&home)?;
+    Ok(fs::canonicalize(&home).unwrap_or(home))
+}
+
 fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
@@ -372,7 +521,71 @@ fn unescape_mount_field(field: &[u8]) -> Result<Vec<u8>, DirectShareError> {
     Ok(output)
 }
 
-#[cfg(all(test, target_os = "linux"))]
+/// Refuse a share that is itself a mount root, or that has a filesystem
+/// mounted beneath it, as Linux does from its mount table.
+#[cfg(target_os = "macos")]
+fn reject_mount_alias_or_submounts(
+    path: &Path,
+    source_mount_id: u64,
+) -> Result<(), DirectShareError> {
+    reject_mount_alias_or_submounts_in(path, source_mount_id, &darwin_mounts()?)
+}
+
+#[cfg(target_os = "macos")]
+fn reject_mount_alias_or_submounts_in(
+    path: &Path,
+    source_mount_id: u64,
+    mounts: &[(PathBuf, u64)],
+) -> Result<(), DirectShareError> {
+    for (mountpoint, mount_id) in mounts {
+        if mountpoint == path && *mount_id == source_mount_id {
+            return Err(DirectShareError::MountAlias(path.to_owned()));
+        }
+        if mountpoint != path && mountpoint.starts_with(path) {
+            return Err(DirectShareError::NestedMount(mountpoint.clone()));
+        }
+    }
+    Ok(())
+}
+
+/// Every mounted filesystem's mount point and `f_fsid`.
+#[cfg(target_os = "macos")]
+fn darwin_mounts() -> Result<Vec<(PathBuf, u64)>, DirectShareError> {
+    // The table can grow between the count and the copy; retry a bounded
+    // number of times rather than trusting a possibly truncated copy.
+    for _ in 0..4 {
+        // SAFETY: a null buffer asks only for the current count.
+        let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+        let count = usize::try_from(count).map_err(|_| DirectShareError::InvalidMountTable)?;
+        let capacity = count + 8;
+        let bytes = libc::c_int::try_from(capacity * std::mem::size_of::<libc::statfs>())
+            .map_err(|_| DirectShareError::InvalidMountTable)?;
+        let mut table = Vec::<libc::statfs>::with_capacity(capacity);
+        // SAFETY: the buffer holds `capacity` statfs entries, which is `bytes`.
+        let filled = unsafe { libc::getfsstat(table.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
+        let filled = usize::try_from(filled).map_err(|_| DirectShareError::InvalidMountTable)?;
+        if filled >= capacity {
+            continue;
+        }
+        // SAFETY: getfsstat initialized exactly `filled` leading entries.
+        unsafe { table.set_len(filled) };
+        return table
+            .iter()
+            .map(|filesystem| {
+                let mountpoint = c_chars_to_bytes(&filesystem.f_mntonname)
+                    .filter(|bytes| bytes.first() == Some(&b'/'))
+                    .ok_or(DirectShareError::InvalidMountTable)?;
+                Ok((
+                    PathBuf::from(OsString::from_vec(mountpoint.to_vec())),
+                    darwin_mount_id(filesystem),
+                ))
+            })
+            .collect();
+    }
+    Err(DirectShareError::InvalidMountTable)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
@@ -426,6 +639,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn kernel_and_runtime_pseudo_filesystem_trees_are_always_forbidden() {
         for path in ["/dev/shm", "/proc/self", "/run/user", "/sys/kernel"] {
@@ -436,6 +650,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn mount_table_parser_rejects_aliases_nested_mounts_and_bad_escapes() {
         let path = Path::new("/home/user/project");
@@ -465,5 +680,135 @@ mod tests {
             unescape_mount_field(b"/bad\\09x"),
             Err(DirectShareError::InvalidMountTable)
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_system_trees_broad_roots_and_credential_stores_are_forbidden() {
+        for path in [
+            "/System/Volumes/Data/Users",
+            "/dev/fd",
+            "/private/etc/ssh",
+            "/private/var/db/dslocal",
+            "/Users",
+            "/Volumes",
+            "/private/tmp",
+            "/private/var",
+        ] {
+            assert!(
+                matches!(
+                    validate_source_policy(Path::new(path), &[]),
+                    Err(DirectShareError::ForbiddenSource(rejected)) if rejected == Path::new(path)
+                ),
+                "{path} must be forbidden"
+            );
+        }
+        let home = current_home_directory().unwrap();
+        for relative in ["", ".ssh/keys", "Library/Keychains", "Library"] {
+            let path = if relative.is_empty() {
+                home.clone()
+            } else {
+                home.join(relative)
+            };
+            assert!(
+                matches!(
+                    validate_source_policy(&path, &[]),
+                    Err(DirectShareError::ForbiddenSource(_))
+                ),
+                "{} must be forbidden",
+                path.display()
+            );
+        }
+        validate_source_policy(Path::new("/private/tmp/project"), &[]).unwrap();
+        validate_source_policy(&home.join("src/project"), &[]).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_open_refuses_a_symlink_in_any_component() {
+        let parent = tempfile::tempdir().unwrap();
+        let parent = fs::canonicalize(parent.path()).unwrap();
+        fs::create_dir_all(parent.join("real/child")).unwrap();
+        symlink(parent.join("real"), parent.join("link")).unwrap();
+        assert!(open_exact_directory(&parent.join("real/child")).is_ok());
+        for path in [parent.join("link"), parent.join("link/child")] {
+            assert!(matches!(
+                open_exact_directory(&path),
+                Err(DirectShareError::Open { .. })
+            ));
+        }
+        assert!(matches!(
+            admit_direct_share(&parent.join("link/child"), &[]),
+            Err(DirectShareError::NonCanonical(_))
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_identity_binds_apfs_and_refuses_other_filesystems() {
+        let source = tempfile::tempdir().unwrap();
+        let canonical = fs::canonicalize(source.path()).unwrap();
+        let admitted = admit_direct_share(&canonical, &[]).unwrap();
+        let identity = admitted.identity();
+        assert_eq!(
+            identity.filesystem_magic(),
+            crate::supervisor_metadata::direct_share::APFS_VOLUME_MAGIC
+        );
+        assert_ne!(identity.mount_id(), 0);
+        assert_eq!(identity.owner_uid(), current_uid());
+        assert_eq!(descriptor_path(admitted.descriptor()).unwrap(), canonical);
+
+        // devfs is not APFS, so its identity can never be admitted.
+        let devfs = open_exact_directory(Path::new("/dev")).unwrap();
+        let identity = capture_identity(&devfs).unwrap();
+        assert!(!allowed_filesystem(identity.filesystem_magic()));
+        assert!(identity.validate().is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_mount_check_refuses_mount_roots_and_nested_mounts() {
+        let path = Path::new("/Users/someone/project");
+        let mounts = |entries: &[(&str, u64)]| {
+            entries
+                .iter()
+                .map(|(path, id)| (PathBuf::from(path), *id))
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            reject_mount_alias_or_submounts_in(
+                path,
+                7,
+                &mounts(&[("/", 1), ("/System/Volumes/Data", 7)])
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            reject_mount_alias_or_submounts_in(path, 9, &mounts(&[("/Users/someone/project", 9)])),
+            Err(DirectShareError::MountAlias(_))
+        ));
+        assert!(matches!(
+            reject_mount_alias_or_submounts_in(
+                path,
+                7,
+                &mounts(&[("/Users/someone/project/disk", 11)])
+            ),
+            Err(DirectShareError::NestedMount(mounted)) if mounted == Path::new("/Users/someone/project/disk")
+        ));
+        assert!(
+            reject_mount_alias_or_submounts_in(
+                path,
+                7,
+                &mounts(&[("/Users/someone/project-other", 11)])
+            )
+            .is_ok()
+        );
+        // The live table always has a root filesystem.
+        assert!(
+            darwin_mounts()
+                .unwrap()
+                .iter()
+                .any(|(mountpoint, _)| mountpoint == Path::new("/"))
+        );
     }
 }
