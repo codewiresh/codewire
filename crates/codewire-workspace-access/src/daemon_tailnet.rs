@@ -551,12 +551,20 @@ pub async fn connect_daemon_tailnet(
     let local_node_key = NodePublic::from_raw(PublicKey::from(&secret).to_bytes());
     let disco_private = DiscoPrivate::generate(&mut OsRng);
     let local_disco = disco_private.public();
-    let stun = resolve_stun_servers(stun_servers_from_map(derp_map))
-        .await
-        .context("resolve DERP map STUN servers")?;
     let advertised = resolve_endpoints(grant.direct_udp_endpoints())
         .await
         .context("resolve the environment's direct UDP endpoints")?;
+    // Peers reach a daemon directly at the endpoint the platform publishes
+    // for it. Behind that endpoint a STUN answer could name only the node's
+    // outbound NAT mapping, which admits replies from that STUN server and
+    // nothing else, so STUN runs only for a daemon with no published endpoint.
+    let stun = if advertised.is_empty() {
+        resolve_stun_servers(stun_servers_from_map(derp_map))
+            .await
+            .context("resolve DERP map STUN servers")?
+    } else {
+        Vec::new()
+    };
     let relay_enabled = !grant.peer_relay_endpoints().is_empty();
     let (transport, endpoints, handle) =
         if stun.is_empty() && advertised.is_empty() && !relay_enabled {
