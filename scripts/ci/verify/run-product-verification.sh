@@ -794,7 +794,7 @@ run_deploy() {
   scripts/ci/tests/test-deploy-dev.sh
   scripts/ci/tests/test-build-push-runtime-images.sh
   install_kustomize
-  python3 scripts/checks/repo_checks.py orchestration-host-key-authz --self-test
+  python3 scripts/checks/repo_checks.py orchestration-authz --self-test
 
   local overlay
   for overlay in \

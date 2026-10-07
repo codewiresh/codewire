@@ -40,7 +40,7 @@ CLAUDE_SPEC.loader.exec_module(CLAUDE)
 PROVIDER = ROOT / "crates/codewire-credential-service/src/runtime/kind/provider.rs"
 ENVIRONMENT = "86fb3daa-dde0-4fb4-bf83-6e2399d78a5f"
 WORKSPACE_UID = "57f35d02-39f9-40ed-b9e1-bc4a64ad3b0e"
-GATEWAY_UID = "65d41c9c-510b-4c8a-961d-338a879c1fa4"
+RELAY_UID = "65d41c9c-510b-4c8a-961d-338a879c1fa4"
 CREDENTIAL_IMAGES = (
     ("controller", "8615625f29f821542fca5351e3791a21121bf869aa63c72607e0a51e4c233a4a"),
     ("webhook", "f7ad7d3c6dbe73ead365c2324dbe6575b4fc618ed06f0863f250c5eafb35a246"),
@@ -193,7 +193,7 @@ class WorkspaceProbe(unittest.TestCase):
         for mode in ("selected", "unselected"):
             if mode == "unselected":
                 self.unselected()
-            for value in ("", "/run/codewire-credentials/gateway-roots/ca.crt",
+            for value in ("", "/run/codewire-credentials/other-roots/ca.crt",
                           "/synthetic/other-roots"):
                 with self.subTest(mode=mode, value=value), patch.dict(
                         os.environ, {"CODEX_CA_CERTIFICATE": value}):
@@ -230,7 +230,7 @@ class HarnessGuards(unittest.TestCase):
     def rotation_events(cls):
         first = {"event": "bridge_authenticated", "environment_id": ENVIRONMENT,
                  "generation": 2, "workspace_pod_uid": WORKSPACE_UID,
-                 "gateway_pod_uid": GATEWAY_UID, "auth_sequence": 1,
+                 "relay_pod_uid": RELAY_UID, "auth_sequence": 1,
                  "workspace_token_changed": False}
         provider = cls.provider_events()
         return [first, provider[0], dict(first, auth_sequence=2, workspace_token_changed=True),
@@ -247,7 +247,7 @@ class HarnessGuards(unittest.TestCase):
 RUN_DIR='%s'
 kind_credential_fixture_events() { printf '%%s\\n' '%s'; }
 assert_kind_credential_rotation '%s' 2 '%s' '%s' '%s'
-''' % (self.rotation_directory, json.dumps(events), ENVIRONMENT, WORKSPACE_UID, GATEWAY_UID, path))
+''' % (self.rotation_directory, json.dumps(events), ENVIRONMENT, WORKSPACE_UID, RELAY_UID, path))
 
     def rotation_evidence(self):
         paths = list(self.rotation_directory.glob("credential-rotation.*/evidence.json"))
@@ -270,7 +270,7 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' '%s'
                 self.assertIn("fixture record:", result.stderr)
                 self.assertEqual(self.rotation_evidence(), {
                     "expected": {"environment_id": ENVIRONMENT, "generation": 2,
-                                 "workspace_pod_uid": WORKSPACE_UID, "gateway_pod_uid": GATEWAY_UID},
+                                 "workspace_pod_uid": WORKSPACE_UID, "relay_pod_uid": RELAY_UID},
                     "events": events,
                 })
 
@@ -280,7 +280,7 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' '%s'
             event["message"] = "synthetic-do-not-save"
             event["unknown_material"] = {"nested": "synthetic-do-not-save"}
         events[0].update(environment_id="synthetic-do-not-save", generation="synthetic-do-not-save",
-                         workspace_pod_uid=["synthetic-do-not-save"], gateway_pod_uid=None,
+                         workspace_pod_uid=["synthetic-do-not-save"], relay_pod_uid=None,
                          auth_sequence=-1, workspace_token_changed="synthetic-do-not-save")
         events[1].update(scenario="synthetic-do-not-save", attempt=1.5,
                          status="synthetic-do-not-save", response_calls=2**53,
@@ -312,13 +312,13 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' '%s'
 RUN_DIR='%s'
 save_kind_credential_rotation_evidence sensitive sensitive sensitive sensitive <<<'[]'
 save_kind_credential_rotation_evidence '%s' 2 '%s' '%s' <<<'[]'
-''' % (directory, ENVIRONMENT, WORKSPACE_UID, GATEWAY_UID))
+''' % (directory, ENVIRONMENT, WORKSPACE_UID, RELAY_UID))
             self.assertEqual(result.returncode, 0, result.stderr)
             paths = [Path(path) for path in result.stdout.splitlines()]
             self.assertEqual(len(set(paths)), 2)
             self.assertEqual(json.loads(paths[0].read_text())["expected"], {
                 "environment_id": None, "generation": None,
-                "workspace_pod_uid": None, "gateway_pod_uid": None,
+                "workspace_pod_uid": None, "relay_pod_uid": None,
             })
             self.assertEqual(json.loads(paths[1].read_text())["expected"]["environment_id"], ENVIRONMENT)
 
@@ -329,7 +329,7 @@ RUN_DIR='%s'
 kind_credential_fixture_events() { printf '[]'; }
 mktemp() { return 38; }
 assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
-''' % (directory, ENVIRONMENT, WORKSPACE_UID, GATEWAY_UID))
+''' % (directory, ENVIRONMENT, WORKSPACE_UID, RELAY_UID))
             self.assertEqual(result.returncode, 38, result.stderr)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
@@ -339,7 +339,7 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
 RUN_DIR='%s'
 kind_credential_fixture_events() { printf '[]'; return 37; }
 assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
-''' % (directory, ENVIRONMENT, WORKSPACE_UID, GATEWAY_UID))
+''' % (directory, ENVIRONMENT, WORKSPACE_UID, RELAY_UID))
             self.assertEqual(result.returncode, 37, result.stderr)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
@@ -354,7 +354,7 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
         for generation in (1, 2):
             events = self.rotation_events()
             first = dict(events[0], generation=generation, workspace_pod_uid=ENVIRONMENT,
-                         gateway_pod_uid=ENVIRONMENT)
+                         relay_pod_uid=ENVIRONMENT)
             for event in events:
                 if event["event"] == "bridge_authenticated":
                     event["auth_sequence"] += 1
@@ -365,7 +365,7 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
                 self.assertNotEqual(self.rotation_proof([first, *events]).returncode, 0)
 
     def test_identity_or_generation_change_after_selection_cannot_be_filtered_out(self):
-        for changes in ({"workspace_pod_uid": ENVIRONMENT}, {"gateway_pod_uid": ENVIRONMENT},
+        for changes in ({"workspace_pod_uid": ENVIRONMENT}, {"relay_pod_uid": ENVIRONMENT},
                         {"generation": 3}):
             for position in (1, 2, 4):
                 events = self.rotation_events()
@@ -396,7 +396,7 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
 
     def test_wrong_identity_old_token_missing_or_misordered_auth_cannot_prove_rotation(self):
         for changes in ({"workspace_token_changed": False}, {"workspace_token_changed": "true"},
-                        {"workspace_pod_uid": ENVIRONMENT}, {"gateway_pod_uid": ENVIRONMENT},
+                        {"workspace_pod_uid": ENVIRONMENT}, {"relay_pod_uid": ENVIRONMENT},
                         {"environment_id": WORKSPACE_UID}, {"generation": 3},
                         {"auth_sequence": 1}, {"auth_sequence": 3}):
             events = self.rotation_events()
@@ -486,16 +486,17 @@ assert_kind_credential_provider_counts %d
                     self.provider_counts(self.provider_events(baseline), baseline).returncode, 0)
 
     @staticmethod
-    def reuse_lines(presented=(2, 2, 2, 0), caches=("miss", "hit", "miss"), admitted_at=None,
+    def reuse_lines(presented=(2, 2, 0), caches=("miss", "hit", "miss"), admitted_at=None,
                     gap=1.5, total_ms=40, authorities=("evaluated", "reused", "evaluated"),
                     record_reads=1):
-        """The gateway request (attempt 3), then the daemon epoch's warm-up at
-        10 s, its reuse `gap` later, and the request after Reconnect at 20 s +
-        `gap`, with an epoch admission at `admitted_at` seconds if given."""
+        """The daemon epoch, admitted at 5 s: its warm-up (attempt 3) at 10 s,
+        its reuse `gap` later, and the request after Reconnect at 20 s +
+        `gap`, with another epoch admission at `admitted_at` seconds if
+        given."""
         fixture = [{"target": "codewire_kind_credential_fixture", "fields": {
             "event": "provider_response", "scenario": "baseline", "attempt": attempt,
             "status": 200, "generation": generation, "response_calls": attempt + 4,
-            "refresh_calls": 2}} for attempt, generation in zip((3, 4, 5, 6), presented)]
+            "refresh_calls": 2}} for attempt, generation in zip((3, 4, 5), presented)]
         def at(seconds):
             whole, fraction = divmod(round(seconds * 1_000_000), 1_000_000)
             return f"2026-10-04T00:{whole // 60:02d}:{whole % 60:02d}.{fraction:06d}Z"
@@ -512,11 +513,10 @@ assert_kind_credential_provider_counts %d
         def admission(seconds):
             return {"timestamp": at(seconds), "target": "codewire_credential_broker::timing",
                     "fields": {"event": "epoch_admission", "outcome": "admitted"}}
-        # The gateway request is its own epoch.
-        timeline = [(5, admission(5)), (5.1, fixture[0]), (5.2, timed("miss", 5.2)),
-                    (10, fixture[1]), (10, timed(caches[0], 10, authorities[0])),
-                    (10 + gap, fixture[2]), (10 + gap, timed(caches[1], 10 + gap, authorities[1])),
-                    (20 + gap, fixture[3]), (20 + gap, timed(caches[2], 20 + gap, authorities[2]))]
+        timeline = [(5, admission(5)),
+                    (10, fixture[0]), (10, timed(caches[0], 10, authorities[0])),
+                    (10 + gap, fixture[1]), (10 + gap, timed(caches[1], 10 + gap, authorities[1])),
+                    (20 + gap, fixture[2]), (20 + gap, timed(caches[2], 20 + gap, authorities[2]))]
         if admitted_at is not None:
             timeline.append((admitted_at, admission(admitted_at)))
         return [line for _, line in sorted(timeline, key=lambda item: item[0])]
@@ -566,9 +566,9 @@ assert_kind_credential_material_reuse
                 self.reuse_lines(caches=("hit", "hit", "miss")),
                 # A reuse after Reconnect, or the old login presented.
                 self.reuse_lines(caches=("miss", "hit", "hit")),
-                self.reuse_lines(presented=(2, 2, 2, 2)),
-                self.reuse_lines(presented=(0, 0, 0, 0)),
-                self.reuse_lines(presented=(2, 2, 1, 0)),
+                self.reuse_lines(presented=(2, 2, 2)),
+                self.reuse_lines(presented=(0, 0, 0)),
+                self.reuse_lines(presented=(2, 1, 0)),
                 # The reuse resolved authority right after an evaluation, or
                 # read more than its record; Reconnect reused the decision.
                 self.reuse_lines(authorities=("evaluated", "evaluated", "evaluated")),
@@ -579,7 +579,9 @@ assert_kind_credential_material_reuse
                 [dict(line, fields=dict(line["fields"], resolves=1))
                  if line.get("fields", {}).get("cache") == "hit" else line
                  for line in self.reuse_lines()],
-                self.reuse_lines()[:-1]):
+                # The provider never saw the login presented after Reconnect.
+                [line for line in self.reuse_lines()
+                 if line.get("fields", {}).get("attempt") != 5]):
             with self.subTest(lines=lines):
                 result = self.material_reuse(lines)
                 self.assertNotEqual(result.returncode, 0)
@@ -809,6 +811,50 @@ kind_credential_daemon_probe '%s' success
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn("the daemon-path success request failed", result.stderr)
 
+    def test_a_launch_is_retried_only_while_setup_is_not_ready(self):
+        directory = tempfile.TemporaryDirectory(prefix="kind-launch-")
+        self.addCleanup(directory.cleanup)
+        launch = '''
+RUN_DIR='%s'
+calls="$RUN_DIR/calls"
+: > "$calls"
+sleep() { :; }
+kind_credential_cli() {
+  [ "$1 $2 $3" = "run %s --detach" ] || return 97
+  echo call >> "$calls"
+  local count
+  count="$(wc -l < "$calls")"
+  if [ "$count" -le %d ]; then
+    echo "Error: %s" >&2
+    return 1
+  fi
+  printf '{"session_id":"session-1"}\\n'
+}
+KIND_LAUNCH_SETUP_SECONDS=%d
+status=0
+launched="$(kind_credential_launch %s --detach)" || status=$?
+printf '%%s %%s %%s\\n' "$status" "$(wc -l < "$calls")" "$launched"
+'''
+        cases = (
+            # Refused twice for setup, then launched.
+            (2, "environment setup is not ready; wait for setup to finish", 60,
+             "0 3 {\"session_id\":\"session-1\"}"),
+            # Any other refusal returns at once.
+            (5, "environment is not running", 60, "1 1"),
+            # Setup that stays not ready fails once the bound passes.
+            (5, "environment setup is not ready; wait for setup to finish", 0, "1 1"),
+        )
+        for refusals, message, seconds, expected in cases:
+            with self.subTest(message=message, seconds=seconds):
+                result = self.shell(launch % (directory.name, ENVIRONMENT, refusals, message,
+                                              seconds, ENVIRONMENT))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
+                if expected.startswith("1"):
+                    self.assertIn(message, result.stderr)
+        source = (ROOT / "scripts/ci/verify/kind/credentials.sh").read_text()
+        self.assertIn('launched="$(kind_credential_launch "$environment" --no-tty --detach', source)
+
     def test_membership_role_change_is_exact_and_fails_closed(self):
         for changed, expected in (("synthetic-membership\n", 0), ("", 1),
                                   ("one\ntwo\n", 1)):
@@ -933,58 +979,10 @@ kind_credential_bound_revision '%s'
     def test_provider_audit_still_rejects_a_restarted_fixture(self):
         self.assertNotEqual(self.provider_counts(self.provider_events(), restarts=1).returncode, 0)
 
-    def test_bootstrap_cleanup_removes_issuer_before_outputs_and_propagates_failures(self):
-        for certificate_status, leaf_status in ((0, 0), (42, 0), (0, 43)):
-            result = self.shell('''
-SANDBOX_NS=dev-sandboxes
-kubectl() {
-  printf '%%s\\n' "$*" >&2
-  case "$*" in
-    '-n dev-sandboxes delete certificate/cw-credential-gateway-%s --ignore-not-found=true --cascade=background --wait=true --timeout=120s') return %s ;;
-    '-n dev-sandboxes delete secret/cw-credential-gateway-%s --ignore-not-found=true --wait=true --timeout=120s') return %s ;;
-    *) return 99 ;;
-  esac
-}
-delete_kind_credential_bootstrap '%s'
-''' % (ENVIRONMENT, certificate_status, ENVIRONMENT, leaf_status, ENVIRONMENT))
-            self.assertEqual(result.returncode, certificate_status or leaf_status, result.stderr)
-            calls = result.stderr.splitlines()
-            self.assertEqual(len(calls), 1 if certificate_status else 2, result.stderr)
-            self.assertIn("delete certificate/", calls[0])
-            if not certificate_status:
-                self.assertIn("delete secret/", calls[1])
-        common = (ROOT / "scripts/ci/verify/kind/common.sh").read_text()
-        cleanup = common.split("cleanup_environment_resize_smoke() {", 1)[1].split(
-            "trap cleanup_environment_resize_smoke EXIT", 1)[0]
-        self.assertNotIn('"certificate/cw-credential-gateway-$environment_id"', cleanup)
-        self.assertLess(cleanup.index("--cascade=foreground --wait=true"),
-                        cleanup.index('delete_kind_credential_bootstrap "$environment_id"'))
-        self.assertIn('exit "$status"', cleanup)
-
-    def test_codex_config_map_absence_is_exact_and_fails_closed(self):
-        for found, expected in (("", 0), ("configmap/cw-credential-codex-%s" % ENVIRONMENT, 1)):
-            result = self.shell('''
-SANDBOX_NS=dev-sandboxes
-kubectl() {
-  printf '%%s\\n' "$*" >&2
-  [ "$*" = '-n dev-sandboxes get configmap cw-credential-codex-%s --ignore-not-found=true -o name' ] || return 99
-  printf '%%s' '%s'
-}
-assert_no_kind_codex_config_map '%s'
-''' % (ENVIRONMENT, found, ENVIRONMENT))
-            self.assertEqual(result.returncode, expected, result.stderr)
-        result = self.shell('''
-SANDBOX_NS=dev-sandboxes
-kubectl() { return 42; }
-assert_no_kind_codex_config_map '%s'
-''' % ENVIRONMENT)
-        self.assertEqual(result.returncode, 42, result.stderr)
-
     def test_native_flow_proves_codex_home_persistence_without_a_config_map(self):
         source = HELPERS.read_text()
         flow = source.split("kind_credential_native_smoke() (", 1)[1]
-        self.assertNotIn("configmap", flow.lower().replace("assert_no_kind_codex_config_map", ""))
-        self.assertEqual(flow.count('assert_no_kind_codex_config_map "$environment" || return $?'), 4)
+        self.assertNotIn("configmap", flow.lower())
         stop = flow.index('env --platform stop "$environment"')
         start = flow.index('env --platform start "$environment"')
         self.assertLess(flow.index("/home/codewire/.codex/kind-persistence"), stop)
@@ -1044,8 +1042,6 @@ kind_credential_codex_login '%s' %s %s
         daemon = 'kind_credential_daemon_probe "$environment" '
         bounded = ' "$KIND_AUTHORITY_CHANGE_WITHIN_MS"'
         initial = index('kind_credential_probe "$environment" unselected')
-        no_certificate = index('assert_no_kind_gateway_certificate "$environment"')
-        restarted_without_certificate = index('assert_no_kind_gateway_certificate "$environment"', start)
         gateway = index('kind_credential_probe "$environment" selected')
         counted = index("assert_kind_credential_provider_counts 2", gateway)
         warm = index(daemon + "success\n", counted)
@@ -1078,22 +1074,20 @@ kind_credential_codex_login '%s' %s %s
         served = index('served="$(jq -s \'map(.served // 0) | add\' "$KIND_DAEMON_PROBE_LOG")" || return $?')
         final = index('assert_kind_credential_provider_counts "$((5 + served))"')
         destroy = index('env --platform rm "$environment"')
-        destroyed_without_certificate = index('assert_no_kind_gateway_certificate "$environment"', destroy)
         # An unselected projection first; delivery before the proxy session
         # whose refreshes rotate it; the user's own login and logout after
-        # rotation; no gateway Certificate across Stop/Start; a new container
-        # forgets the logout; the selected projection with no request since
+        # rotation; Stop/Start, where a new container forgets the logout; the
+        # selected projection with no request since
         # the session; on the daemon's epoch a warm-up, a reuse and Reconnect;
         # then each authority change on that connected epoch; a replaced
         # Pod's new epoch; revocation last, on that epoch, which removes the
-        # login before destroy, which leaves no gateway Certificate either.
-        order = [initial, deliver, session, counts, rotation, own, logout, no_certificate, stop,
-                 start, restarted_without_certificate, redelivered,
+        # login before destroy.
+        order = [initial, deliver, session, counts, rotation, own, logout, stop,
+                 start, redelivered,
                  gateway, counted, warm, reuse, reconnect, reconnected, six, reused, anchor,
                  logged, repeated, member, denied, restored, readmitted, bound, unset, rebind,
                  unbound, rebound, recovered, replaced, marker, fresh, revoke, revoked_daemon,
-                 changes, revoked_gateway, revoked, served, final, destroy,
-                 destroyed_without_certificate]
+                 changes, revoked_gateway, revoked, served, final, destroy]
         self.assertEqual(sorted(order), order)
         # Every provider request crosses the daemon: the projection probe
         # makes none.
@@ -1101,7 +1095,6 @@ kind_credential_codex_login '%s' %s %s
         self.assertEqual(flow.count('kind_credential_probe "$environment" unselected'), 1)
         self.assertEqual(flow.count('kind_credential_probe "$environment" selected'), 2)
         self.assertEqual(flow.count("kind_credential_probe "), 3)
-        self.assertEqual(flow.count('assert_no_kind_gateway_certificate "$environment"'), 3)
         self.assertEqual(flow.count(daemon + "denied" + bounded), 2)
         self.assertEqual(flow.count(daemon + "success" + bounded), 2)
         # A credential change applies to the very next request: no bound.
@@ -1112,16 +1105,6 @@ kind_credential_codex_login '%s' %s %s
         self.assertEqual(flow[counted:anchor].count(daemon + "success\n"), 3)
         self.assertIn('login_events="$(kind_credential_codex_login "$environment" deliver)" || return $?',
                       flow)
-
-    def test_bootstrap_cleanup_rejects_noncanonical_environment_without_io(self):
-        for environment in ("", "foreign", ENVIRONMENT.upper()):
-            result = self.shell('''
-SANDBOX_NS=dev-sandboxes
-kubectl() { echo unexpected-kubectl >&2; return 99; }
-delete_kind_credential_bootstrap '%s'
-''' % environment)
-            self.assertEqual(result.returncode, 1, result.stderr)
-            self.assertEqual(result.stderr, "")
 
     def test_native_flow_resolves_the_selected_runtime_image_not_a_contract_only_preset(self):
         source = HELPERS.read_text()
@@ -1195,29 +1178,31 @@ wait_kind_credential_environment '%s' running
         self.assertNotIn('did not reach running', result.stderr)
 
     @staticmethod
-    def _sandbox_pair_pods(workspace_phase, gateway_generation, gateway_uid=GATEWAY_UID):
+    def _restart_pods(workspace_phase, workspace_generation):
         return json.dumps({"items": [
             {"metadata": {"name": "sandbox-workspace",
-                          "labels": {"codewire.sh/type": "workspace"}},
+                          "labels": {"codewire.sh/type": "workspace",
+                                     "codewire.sh/environment-operation-generation":
+                                         str(workspace_generation)}},
              "spec": {"serviceAccountName": "codewire-sandbox",
                       "automountServiceAccountToken": False,
                       "containers": [{"name": "workspace"}]},
              "status": {"phase": workspace_phase}},
+            # A lingering pre-removal gateway Pod is never the answer.
             {"metadata": {"name": "cw-gateway-restart",
-                          "labels": {"codewire.sh/type": "gateway"},
-                          "uid": gateway_uid},
-             "spec": {"containers": [{"name": "gateway", "env": [
-                 {"name": "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
-                  "value": str(gateway_generation)}]}]},
+                          "labels": {"codewire.sh/type": "gateway",
+                                     "codewire.sh/environment-operation-generation":
+                                         str(workspace_generation)}},
+             "spec": {"containers": [{"name": "gateway"}]},
              "status": {"phase": "Running"}}]})
 
-    def test_sandbox_pair_wait_retries_until_the_restart_pair_is_running(self):
-        directory = tempfile.TemporaryDirectory(prefix="kind-sandbox-pair-")
+    def test_restart_wait_retries_until_the_restarted_workspace_is_running(self):
+        directory = tempfile.TemporaryDirectory(prefix="kind-restart-wait-")
         self.addCleanup(directory.cleanup)
-        # The first observation has the workspace still Pending and only the
-        # pre-restart (generation 1) gateway Running; neither may satisfy it.
-        pending = self._sandbox_pair_pods("Pending", 1)
-        ready = self._sandbox_pair_pods("Running", 2)
+        # The first observation has only the pre-restart (generation 1)
+        # workspace Pending; it may not satisfy the wait.
+        pending = self._restart_pods("Pending", 1)
+        ready = self._restart_pods("Running", 2)
         result = self.shell('''
 SANDBOX_NS=dev-sandboxes
 sleep() { :; }
@@ -1227,24 +1212,20 @@ kubectl() {
   printf '%%s\\n' "$count" > '%(dir)s/count'
   if [ "$count" -lt 2 ]; then printf '%%s' '%(pending)s'; else printf '%%s' '%(ready)s'; fi
 }
-wait_kind_credential_sandbox_pair '%(env)s' 2
+wait_kind_credential_restarted_workspace '%(env)s' 2
 ''' % {"dir": directory.name, "pending": pending, "ready": ready, "env": ENVIRONMENT})
         self.assertEqual(result.returncode, 0, result.stderr)
-        lines = result.stdout.splitlines()
-        self.assertEqual(len(lines), 2, result.stdout)
-        self.assertEqual(lines[0], "sandbox-workspace")
-        self.assertEqual(json.loads(lines[1])["metadata"]["uid"], GATEWAY_UID)
+        self.assertEqual(result.stdout.splitlines(), ["sandbox-workspace"])
         with open(os.path.join(directory.name, "count"), encoding="utf-8") as handle:
             self.assertEqual(int(handle.read()), 2)
 
-    def test_sandbox_pair_wait_holds_through_the_suspended_recreate_transition(self):
-        directory = tempfile.TemporaryDirectory(prefix="kind-sandbox-pair-exec-")
+    def test_restart_wait_holds_through_the_suspended_recreate_transition(self):
+        directory = tempfile.TemporaryDirectory(prefix="kind-restart-wait-exec-")
         self.addCleanup(directory.cleanup)
-        # The recreated pair is Running immediately, but the Suspended/recreate
-        # transition has not finished inside the workspace container: execs
-        # fail twice before the container accepts them. The wait must hold
-        # instead of handing the suite a pod it cannot use yet.
-        ready = self._sandbox_pair_pods("Running", 2)
+        # The recreated workspace is Running immediately, but the recreate has
+        # not finished inside the workspace container: execs fail twice before
+        # the container accepts them. The wait must hold.
+        ready = self._restart_pods("Running", 2)
         result = self.shell('''
 SANDBOX_NS=dev-sandboxes
 sleep() { :; }
@@ -1257,31 +1238,29 @@ kubectl() {
   fi
   printf '%%s' '%(ready)s'
 }
-wait_kind_credential_sandbox_pair '%(env)s' 2
+wait_kind_credential_restarted_workspace '%(env)s' 2
 ''' % {"dir": directory.name, "ready": ready, "env": ENVIRONMENT})
         self.assertEqual(result.returncode, 0, result.stderr)
-        lines = result.stdout.splitlines()
-        self.assertEqual(len(lines), 2, result.stdout)
-        self.assertEqual(lines[0], "sandbox-workspace")
+        self.assertEqual(result.stdout.splitlines(), ["sandbox-workspace"])
         with open(os.path.join(directory.name, "attempts"), encoding="utf-8") as handle:
             self.assertEqual(int(handle.read()), 3)
 
-    def test_sandbox_pair_wait_exhaustion_names_environment_and_generation(self):
-        pending = self._sandbox_pair_pods("Pending", 1)
+    def test_restart_wait_exhaustion_names_environment_and_generation(self):
+        pending = self._restart_pods("Pending", 1)
         result = self.shell('''
 SANDBOX_NS=dev-sandboxes
 sleep() { :; }
 kubectl() { printf '%%s' '%s'; }
-wait_kind_credential_sandbox_pair '%s' 2
+wait_kind_credential_restarted_workspace '%s' 2
 ''' % (pending, ENVIRONMENT))
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn(
             '::error::credential fixture environment %s did not materialize its '
-            'generation-2 workspace and gateway Pods exec-ready after the managed restart' % ENVIRONMENT,
+            'generation-2 workspace Pod exec-ready after the managed restart' % ENVIRONMENT,
             result.stderr)
 
-    def test_sandbox_pair_wait_exhaustion_when_exec_never_opens(self):
-        ready = self._sandbox_pair_pods("Running", 2)
+    def test_restart_wait_exhaustion_when_exec_never_opens(self):
+        ready = self._restart_pods("Running", 2)
         result = self.shell('''
 SANDBOX_NS=dev-sandboxes
 sleep() { :; }
@@ -1289,10 +1268,33 @@ kubectl() {
   if [ "$*" = "-n dev-sandboxes exec sandbox-workspace -c workspace -- true" ]; then return 1; fi
   printf '%%s' '%s'
 }
-wait_kind_credential_sandbox_pair '%s' 2
+wait_kind_credential_restarted_workspace '%s' 2
 ''' % (ready, ENVIRONMENT))
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn('exec-ready', result.stderr)
+
+    def test_the_relay_is_the_one_running_orchestration_pod(self):
+        pods = lambda *items: json.dumps({"items": list(items)}).replace("'", "'\\''")
+        running = {"metadata": {"name": "codewire-orchestration-a", "uid": RELAY_UID},
+                   "status": {"phase": "Running"}}
+        terminating = {"metadata": {"name": "codewire-orchestration-b", "uid": WORKSPACE_UID,
+                                    "deletionTimestamp": "2026-10-06T00:00:00Z"},
+                       "status": {"phase": "Running"}}
+        for listing, expected in ((pods(running, terminating), 0), (pods(), 5),
+                                  (pods(running, dict(running, metadata={"name": "c", "uid": "u"})), 5)):
+            with self.subTest(listing=listing):
+                result = self.shell('''
+NS=dev
+kubectl() {
+  [ "$*" = '-n dev get pods -l app.kubernetes.io/name=codewire,app.kubernetes.io/component=orchestration -o json' ] || return 99
+  printf '%%s' '%s'
+}
+kind_credential_relay_pod
+''' % listing)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if expected == 0:
+                    self.assertEqual(result.stdout.splitlines(),
+                                     ["codewire-orchestration-a", RELAY_UID])
 
     def test_native_acceptance_reports_the_failing_command_instead_of_a_bare_exit(self):
         # prepare_kind_credential_cli is the first fallible plain command after
@@ -1313,12 +1315,7 @@ kind_credential_native_smoke
         # deliver completion whose event stream lacks the delivered event.
         # jq's select-miss exit code differs between jq 1.8 and the job image,
         # so the missing generation must be a named error on content.
-        gateway = json.dumps({"metadata": {"uid": GATEWAY_UID},
-                              "spec": {"containers": [{"name": "gateway", "env": [
-                                  {"name": "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
-                                   "value": "1"}]}]}}) .replace("'", "'\\''")
-        workspace = json.dumps({"metadata": {"uid": WORKSPACE_UID},
-                                "spec": {"containers": [{"name": "workspace"}]}}).replace("'", "'\\''")
+
         result = self.shell('''
 log() { :; }
 SANDBOX_NS=dev-sandboxes
@@ -1338,17 +1335,17 @@ kind_credential_cli() {
 }
 wait_kind_credential_environment() { return 0; }
 kind_credential_probe() { :; }
-wait_kind_credential_sandbox_pair() { printf 'sandbox-x\\n%%s\\n' '%(gateway)s'; }
+wait_kind_credential_restarted_workspace() { printf 'sandbox-x\\n'; }
+kind_credential_relay_pod() { printf 'codewire-orchestration-a\\n%%s\\n' '%(relay)s'; }
 kubectl() {
   case "$*" in
     "-n dev-sandboxes get pod sandbox-x -o jsonpath={.metadata.uid}") printf '%%s\\n' '%(uid)s' ;;
-    "-n dev-sandboxes get pod sandbox-x -o json") printf '%%s\\n' '%(workspace)s' ;;
     *) return 99 ;;
   esac
 }
 kind_credential_codex_login() { printf '{"event":"complete","mode":"deliver"}\\n'; }
 kind_credential_native_smoke
-''' % {"env": ENVIRONMENT, "gateway": gateway, "workspace": workspace, "uid": WORKSPACE_UID})
+''' % {"env": ENVIRONMENT, "relay": RELAY_UID, "uid": WORKSPACE_UID})
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn('::error::the delivered Codex login event is missing its generation',
                       result.stderr)
@@ -1369,16 +1366,17 @@ kind_credential_native_smoke
     def test_native_restart_wait_binds_the_update_generation_before_pod_assertions(self):
         source = HELPERS.read_text()
         flow = source.split("kind_credential_native_smoke() (", 1)[1]
-        self.assertNotIn("expected one exact managed gateway", flow)
+        for retired in ("wait_kind_credential_sandbox_pair", "gateway_uid", "codewire-gateway"):
+            self.assertNotIn(retired, flow)
         update = flow.index('update="$(kind_credential_cli env --platform update "$environment"')
         generation = flow.index('restart_generation="$(jq -er')
-        pair = flow.index('pair="$(wait_kind_credential_sandbox_pair '
-                          '"$environment" "$restart_generation")"')
-        gateway_uid = flow.index('gateway_uid="$(jq -er')
+        pod = flow.index('pod="$(wait_kind_credential_restarted_workspace '
+                         '"$environment" "$restart_generation")"')
+        relay = flow.index('relay="$(kind_credential_relay_pod)"')
         self.assertLess(update, generation)
-        self.assertLess(generation, pair)
-        self.assertLess(pair, gateway_uid)
-        self.assertIn('wait_kind_credential_environment "$environment" running\n  pair=', flow)
+        self.assertLess(generation, pod)
+        self.assertLess(pod, relay)
+        self.assertIn('wait_kind_credential_environment "$environment" running\n  pod=', flow)
 
     def test_host_cli_build_selects_its_actual_binary_package(self):
         manifest = tomllib.loads((ROOT / "crates/codewire-cli-bin/Cargo.toml").read_text())
@@ -1634,44 +1632,47 @@ prepare_kind_credential_support_images
         return json.dumps(event)
 
     @classmethod
-    def gateway_line(cls, offset_ms, event="credential_bridge_epoch_overlap",
-                     target="codewire_gateway::hosted_bridge"):
+    def relay_line(cls, offset_ms, event="credential_bridge_epoch_overlap",
+                   target="codewire_orchestration::worker::credential_relay::epoch",
+                   environment=ENVIRONMENT):
         stamp = datetime.fromtimestamp((cls.RENEWAL_STARTED_MS + offset_ms) / 1000, timezone.utc)
         return json.dumps({
             "timestamp": stamp.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), "level": "INFO",
-            "fields": {"event": event, "previous_ends_in_ms": 29000, "next_ends_in_ms": 509000,
-                       "message": "hosted credential bridge admitted the next epoch"},
+            "fields": {"event": event, "environment_id": environment,
+                       "previous_ends_in_ms": 29000, "next_ends_in_ms": 509000,
+                       "message": "credential relay admitted the next epoch"},
             "target": target,
         })
 
-    def renewal_assertion(self, probe, logs, log_status=0, pod="cw-gateway-renewal"):
+    def renewal_assertion(self, probe, logs, log_status=0, pod="codewire-orchestration-7d9c8-x2k4p",
+                          environment=ENVIRONMENT):
         directory = tempfile.TemporaryDirectory(prefix="kind-bridge-renewal-")
         self.addCleanup(directory.cleanup)
         probe_path = Path(directory.name) / "probe.jsonl"
         probe_path.write_text("".join(f"{line}\n" for line in probe))
-        logs_path = Path(directory.name) / "gateway.log"
+        logs_path = Path(directory.name) / "relay.log"
         logs_path.write_text("".join(f"{line}\n" for line in logs))
         return self.shell('''
-SANDBOX_NS=dev-sandboxes
+NS=dev
 kubectl() {
-  [ "$*" = '-n dev-sandboxes logs pod/cw-gateway-renewal -c codewire-gateway' ] || { echo unexpected-kubectl >&2; return 99; }
+  [ "$*" = '-n dev logs pod/codewire-orchestration-7d9c8-x2k4p -c orchestration' ] || { echo unexpected-kubectl >&2; return 99; }
   cat '%s'
   return %d
 }
-assert_kind_credential_bridge_renewal '%s' '%s'
-''' % (logs_path, log_status, probe_path, pod))
+assert_kind_credential_bridge_renewal '%s' '%s' '%s'
+''' % (logs_path, log_status, probe_path, environment, pod))
 
     def test_bridge_renewal_requires_only_broker_answers_and_an_overlap_in_the_window(self):
         noise = ["not-json", json.dumps({"timestamp": "x", "fields": "x"}),
-                 self.gateway_line(100_000, event="credential_bridge_epoch_ended")]
+                 self.relay_line(100_000, event="credential_bridge_epoch_ended")]
         for offset in (300_000, -2_000, 702_000):
             with self.subTest(offset=offset):
                 result = self.renewal_assertion(
-                    [self.renewal_probe()], [*noise, self.gateway_line(offset)])
+                    [self.renewal_probe()], [*noise, self.relay_line(offset)])
                 self.assertEqual(result.returncode, 0, result.stderr)
         # About one request a second: the minimum is a short renewal window.
         result = self.renewal_assertion([self.renewal_probe(requests=60)],
-                                        [self.gateway_line(300_000)])
+                                        [self.relay_line(300_000)])
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_bridge_renewal_rejects_any_503_other_status_or_thin_probe(self):
@@ -1689,37 +1690,38 @@ assert_kind_credential_bridge_renewal '%s' '%s'
                 json.dumps({"event": "bridge_renewal_probe_failed"}),
                 "not-json"):
             with self.subTest(probe=probe):
-                result = self.renewal_assertion([probe], [self.gateway_line(300_000)])
+                result = self.renewal_assertion([probe], [self.relay_line(300_000)])
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn("a proxied request failed or the probe was incomplete", result.stderr)
                 self.assertNotIn("unexpected-kubectl", result.stderr)
         for probes in ([], [self.renewal_probe(), self.renewal_probe()]):
             with self.subTest(probes=probes):
-                result = self.renewal_assertion(probes, [self.gateway_line(300_000)])
+                result = self.renewal_assertion(probes, [self.relay_line(300_000)])
                 self.assertEqual(result.returncode, 1, result.stderr)
 
-    def test_bridge_renewal_requires_the_gateway_overlap_inside_the_window(self):
+    def test_bridge_renewal_requires_the_relay_overlap_inside_the_window(self):
         for logs in (
                 [],
-                [self.gateway_line(-3_000)],
-                [self.gateway_line(703_000)],
-                [self.gateway_line(300_000, event="credential_bridge_epoch_ended")],
-                [self.gateway_line(300_000, target="codewire_gateway::runtime")],
-                [self.gateway_line(300_000).replace("Z\"", "+00:00\"")]):
+                [self.relay_line(-3_000)],
+                [self.relay_line(703_000)],
+                [self.relay_line(300_000, event="credential_bridge_epoch_ended")],
+                [self.relay_line(300_000, target="codewire_orchestration::worker::credential_relay")],
+                [self.relay_line(300_000, environment="6f1d1e9a-0b1c-4a52-9a4e-2c1f00000009")],
+                [self.relay_line(300_000).replace("Z\"", "+00:00\"")]):
             with self.subTest(logs=logs):
                 result = self.renewal_assertion([self.renewal_probe()], logs)
                 self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn("gateway logged no epoch overlap", result.stderr)
+                self.assertIn("credential relay logged no epoch overlap", result.stderr)
 
     def test_bridge_renewal_fails_closed_on_log_or_pod_name_failure(self):
-        result = self.renewal_assertion([self.renewal_probe()], [self.gateway_line(300_000)],
+        result = self.renewal_assertion([self.renewal_probe()], [self.relay_line(300_000)],
                                         log_status=7)
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("could not read the gateway log", result.stderr)
+        self.assertIn("could not read the credential relay log", result.stderr)
         for pod in ("", "Gateway", "pod/cw-gateway-renewal", "cw gateway"):
             with self.subTest(pod=pod):
                 result = self.renewal_assertion([self.renewal_probe()],
-                                                [self.gateway_line(300_000)], pod=pod)
+                                                [self.relay_line(300_000)], pod=pod)
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertNotIn("unexpected-kubectl", result.stderr)
 
@@ -2676,7 +2678,7 @@ kind_credential_codex_request_count
         self.assertNotIn("python3 -B -u -", flow)
         ordered = [
             'update="$(kind_credential_cli env --platform update "$environment"',
-            'pair="$(wait_kind_credential_sandbox_pair "$environment" "$generation")"',
+            'pod="$(wait_kind_credential_restarted_workspace "$environment" "$generation")"',
             'clients="$(kind_credential_managed_clients "$environment" "$pod_uid")"',
             'assert_kind_credential_claude_selection "$form" "$clients"',
             'driver="$(kind_credential_claude_stage "$pod")"',

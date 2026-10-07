@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/internal/v1/coordinate.proto.
  */
 export const file_codewire_internal_v1_coordinate: GenFile = /*@__PURE__*/
-  fileDesc("CiVjb2Rld2lyZS9pbnRlcm5hbC92MS9jb29yZGluYXRlLnByb3RvEhRjb2Rld2lyZS5pbnRlcm5hbC52MSKmAgoOQ29vcmRpbmF0ZU5vZGUSCgoCaWQYASABKAkSKQoFYXNfb2YYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEgsKA2tleRgDIAEoCRIRCglkaXNjb19rZXkYBCABKAkSFgoOcHJlZmVycmVkX2RlcnAYBSABKAUSSwoMZGVycF9sYXRlbmN5GAYgAygLMjUuY29kZXdpcmUuaW50ZXJuYWwudjEuQ29vcmRpbmF0ZU5vZGUuRGVycExhdGVuY3lFbnRyeRIRCgllbmRwb2ludHMYByADKAkSEQoJYWRkcmVzc2VzGAggAygJGjIKEERlcnBMYXRlbmN5RW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgBOgI4ASK+AQoRQ29vcmRpbmF0ZVJlcXVlc3QSNAoEbm9kZRgBIAEoCzIkLmNvZGV3aXJlLmludGVybmFsLnYxLkNvb3JkaW5hdGVOb2RlSAASNgoFaGVsbG8YAiABKAsyJS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Db29yZGluYXRlSGVsbG9IABI0CgRwaW5nGAMgASgLMiQuY29kZXdpcmUuaW50ZXJuYWwudjEuQ29vcmRpbmF0ZVBpbmdIAEIFCgNtc2ciOQoPQ29vcmRpbmF0ZUhlbGxvEg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCSKcAgonTWVzaENvb3JkaW5hdG9yU2VydmljZUNvb3JkaW5hdGVSZXF1ZXN0EjQKBG5vZGUYASABKAsyJC5jb2Rld2lyZS5pbnRlcm5hbC52MS5Db29yZGluYXRlTm9kZUgAEjoKBWhlbGxvGAIgASgLMikuY29kZXdpcmUuaW50ZXJuYWwudjEuTWVzaENvb3JkaW5hdGVIZWxsb0gAEjQKBHBpbmcYAyABKAsyJC5jb2Rld2lyZS5pbnRlcm5hbC52MS5Db29yZGluYXRlUGluZ0gAEkIKCXN1YnNjcmliZRgEIAEoCzItLmNvZGV3aXJlLmludGVybmFsLnYxLk1lc2hDb29yZGluYXRlU3Vic2NyaWJlSABCBQoDbXNnInEKE01lc2hDb29yZGluYXRlSGVsbG8SDgoGb3JnX2lkGAEgASgJEhIKCm5ldHdvcmtfaWQYAiABKAkSNgoEcm9sZRgDIAEoDjIoLmNvZGV3aXJlLmludGVybmFsLnYxLk1lc2hDb29yZGluYXRlUm9sZSIuChdNZXNoQ29vcmRpbmF0ZVN1YnNjcmliZRITCgt0YXJnZXRfbm9kZRgBIAEoCSKUAgoSQ29vcmRpbmF0ZVJlc3BvbnNlEkEKC3BlZXJfdXBkYXRlGAEgASgLMiouY29kZXdpcmUuaW50ZXJuYWwudjEuQ29vcmRpbmF0ZVBlZXJVcGRhdGVIABJBCgtwZWVyX3JlbW92ZRgCIAEoCzIqLmNvZGV3aXJlLmludGVybmFsLnYxLkNvb3JkaW5hdGVQZWVyUmVtb3ZlSAASOwoIZGVycF9tYXAYAyABKAsyJy5jb2Rld2lyZS5pbnRlcm5hbC52MS5Db29yZGluYXRlRGVycE1hcEgAEjQKBHBpbmcYBCABKAsyJC5jb2Rld2lyZS5pbnRlcm5hbC52MS5Db29yZGluYXRlUGluZ0gAQgUKA21zZyKqAgooTWVzaENvb3JkaW5hdG9yU2VydmljZUNvb3JkaW5hdGVSZXNwb25zZRJBCgtwZWVyX3VwZGF0ZRgBIAEoCzIqLmNvZGV3aXJlLmludGVybmFsLnYxLkNvb3JkaW5hdGVQZWVyVXBkYXRlSAASQQoLcGVlcl9yZW1vdmUYAiABKAsyKi5jb2Rld2lyZS5pbnRlcm5hbC52MS5Db29yZGluYXRlUGVlclJlbW92ZUgAEjsKCGRlcnBfbWFwGAMgASgLMicuY29kZXdpcmUuaW50ZXJuYWwudjEuQ29vcmRpbmF0ZURlcnBNYXBIABI0CgRwaW5nGAQgASgLMiQuY29kZXdpcmUuaW50ZXJuYWwudjEuQ29vcmRpbmF0ZVBpbmdIAEIFCgNtc2ciEAoOQ29vcmRpbmF0ZVBpbmciSwoUQ29vcmRpbmF0ZVBlZXJVcGRhdGUSMwoFbm9kZXMYASADKAsyJC5jb2Rld2lyZS5pbnRlcm5hbC52MS5Db29yZGluYXRlTm9kZSInChRDb29yZGluYXRlUGVlclJlbW92ZRIPCgdwZWVyX2lkGAEgASgJIioKEUNvb3JkaW5hdGVEZXJwTWFwEhUKDWRlcnBfbWFwX2pzb24YASABKAwqeAoSTWVzaENvb3JkaW5hdGVSb2xlEiQKIE1FU0hfQ09PUkRJTkFURV9ST0xFX1VOU1BFQ0lGSUVEEAASHQoZTUVTSF9DT09SRElOQVRFX1JPTEVfUEVFUhABEh0KGU1FU0hfQ09PUkRJTkFURV9ST0xFX0RJQUwQAjJ5ChJDb29yZGluYXRvclNlcnZpY2USYwoKQ29vcmRpbmF0ZRInLmNvZGV3aXJlLmludGVybmFsLnYxLkNvb3JkaW5hdGVSZXF1ZXN0GiguY29kZXdpcmUuaW50ZXJuYWwudjEuQ29vcmRpbmF0ZVJlc3BvbnNlKAEwATKqAQoWTWVzaENvb3JkaW5hdG9yU2VydmljZRKPAQoKQ29vcmRpbmF0ZRI9LmNvZGV3aXJlLmludGVybmFsLnYxLk1lc2hDb29yZGluYXRvclNlcnZpY2VDb29yZGluYXRlUmVxdWVzdBo+LmNvZGV3aXJlLmludGVybmFsLnYxLk1lc2hDb29yZGluYXRvclNlcnZpY2VDb29yZGluYXRlUmVzcG9uc2UoATABQukBChhjb20uY29kZXdpcmUuaW50ZXJuYWwudjFCD0Nvb3JkaW5hdGVQcm90b1ABWkpnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvaW50ZXJuYWwvdjE7aW50ZXJuYWx2MaICA0NJWKoCFENvZGV3aXJlLkludGVybmFsLlYxygIUQ29kZXdpcmVcSW50ZXJuYWxcVjHiAiBDb2Rld2lyZVxJbnRlcm5hbFxWMVxHUEJNZXRhZGF0YeoCFkNvZGV3aXJlOjpJbnRlcm5hbDo6VjFiBnByb3RvMw", [file_google_protobuf_timestamp]);
+  fileDesc("CiVjb2Rld2lyZS9pbnRlcm5hbC92MS9jb29yZGluYXRlLnByb3RvEhRjb2Rld2lyZS5pbnRlcm5hbC52MSKmAgoOQ29vcmRpbmF0ZU5vZGUSCgoCaWQYASABKAkSKQoFYXNfb2YYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEgsKA2tleRgDIAEoCRIRCglkaXNjb19rZXkYBCABKAkSFgoOcHJlZmVycmVkX2RlcnAYBSABKAUSSwoMZGVycF9sYXRlbmN5GAYgAygLMjUuY29kZXdpcmUuaW50ZXJuYWwudjEuQ29vcmRpbmF0ZU5vZGUuRGVycExhdGVuY3lFbnRyeRIRCgllbmRwb2ludHMYByADKAkSEQoJYWRkcmVzc2VzGAggAygJGjIKEERlcnBMYXRlbmN5RW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgBOgI4ASL2AQoRQ29vcmRpbmF0ZVJlcXVlc3QSNAoEbm9kZRgBIAEoCzIkLmNvZGV3aXJlLmludGVybmFsLnYxLkNvb3JkaW5hdGVOb2RlSAASNgoFaGVsbG8YAiABKAsyJS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Db29yZGluYXRlSGVsbG9IABI0CgRwaW5nGAMgASgLMiQuY29kZXdpcmUuaW50ZXJuYWwudjEuQ29vcmRpbmF0ZVBpbmdIABI2CgVwcm9vZhgEIAEoCzIlLmNvZGV3aXJlLmludGVybmFsLnYxLkNvb3JkaW5hdGVQcm9vZkgAQgUKA21zZyIqCg9Db29yZGluYXRlUHJvb2YSFwoKcGVlcl90b2tlbhgBIAEoCUIDgAEBIjkKD0Nvb3JkaW5hdGVIZWxsbxIOCgZvcmdfaWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkinAIKJ01lc2hDb29yZGluYXRvclNlcnZpY2VDb29yZGluYXRlUmVxdWVzdBI0CgRub2RlGAEgASgLMiQuY29kZXdpcmUuaW50ZXJuYWwudjEuQ29vcmRpbmF0ZU5vZGVIABI6CgVoZWxsbxgCIAEoCzIpLmNvZGV3aXJlLmludGVybmFsLnYxLk1lc2hDb29yZGluYXRlSGVsbG9IABI0CgRwaW5nGAMgASgLMiQuY29kZXdpcmUuaW50ZXJuYWwudjEuQ29vcmRpbmF0ZVBpbmdIABJCCglzdWJzY3JpYmUYBCABKAsyLS5jb2Rld2lyZS5pbnRlcm5hbC52MS5NZXNoQ29vcmRpbmF0ZVN1YnNjcmliZUgAQgUKA21zZyJxChNNZXNoQ29vcmRpbmF0ZUhlbGxvEg4KBm9yZ19pZBgBIAEoCRISCgpuZXR3b3JrX2lkGAIgASgJEjYKBHJvbGUYAyABKA4yKC5jb2Rld2lyZS5pbnRlcm5hbC52MS5NZXNoQ29vcmRpbmF0ZVJvbGUiLgoXTWVzaENvb3JkaW5hdGVTdWJzY3JpYmUSEwoLdGFyZ2V0X25vZGUYASABKAkilAIKEkNvb3JkaW5hdGVSZXNwb25zZRJBCgtwZWVyX3VwZGF0ZRgBIAEoCzIqLmNvZGV3aXJlLmludGVybmFsLnYxLkNvb3JkaW5hdGVQZWVyVXBkYXRlSAASQQoLcGVlcl9yZW1vdmUYAiABKAsyKi5jb2Rld2lyZS5pbnRlcm5hbC52MS5Db29yZGluYXRlUGVlclJlbW92ZUgAEjsKCGRlcnBfbWFwGAMgASgLMicuY29kZXdpcmUuaW50ZXJuYWwudjEuQ29vcmRpbmF0ZURlcnBNYXBIABI0CgRwaW5nGAQgASgLMiQuY29kZXdpcmUuaW50ZXJuYWwudjEuQ29vcmRpbmF0ZVBpbmdIAEIFCgNtc2ciqgIKKE1lc2hDb29yZGluYXRvclNlcnZpY2VDb29yZGluYXRlUmVzcG9uc2USQQoLcGVlcl91cGRhdGUYASABKAsyKi5jb2Rld2lyZS5pbnRlcm5hbC52MS5Db29yZGluYXRlUGVlclVwZGF0ZUgAEkEKC3BlZXJfcmVtb3ZlGAIgASgLMiouY29kZXdpcmUuaW50ZXJuYWwudjEuQ29vcmRpbmF0ZVBlZXJSZW1vdmVIABI7CghkZXJwX21hcBgDIAEoCzInLmNvZGV3aXJlLmludGVybmFsLnYxLkNvb3JkaW5hdGVEZXJwTWFwSAASNAoEcGluZxgEIAEoCzIkLmNvZGV3aXJlLmludGVybmFsLnYxLkNvb3JkaW5hdGVQaW5nSABCBQoDbXNnIhAKDkNvb3JkaW5hdGVQaW5nIksKFENvb3JkaW5hdGVQZWVyVXBkYXRlEjMKBW5vZGVzGAEgAygLMiQuY29kZXdpcmUuaW50ZXJuYWwudjEuQ29vcmRpbmF0ZU5vZGUiJwoUQ29vcmRpbmF0ZVBlZXJSZW1vdmUSDwoHcGVlcl9pZBgBIAEoCSIqChFDb29yZGluYXRlRGVycE1hcBIVCg1kZXJwX21hcF9qc29uGAEgASgMKngKEk1lc2hDb29yZGluYXRlUm9sZRIkCiBNRVNIX0NPT1JESU5BVEVfUk9MRV9VTlNQRUNJRklFRBAAEh0KGU1FU0hfQ09PUkRJTkFURV9ST0xFX1BFRVIQARIdChlNRVNIX0NPT1JESU5BVEVfUk9MRV9ESUFMEAIyeQoSQ29vcmRpbmF0b3JTZXJ2aWNlEmMKCkNvb3JkaW5hdGUSJy5jb2Rld2lyZS5pbnRlcm5hbC52MS5Db29yZGluYXRlUmVxdWVzdBooLmNvZGV3aXJlLmludGVybmFsLnYxLkNvb3JkaW5hdGVSZXNwb25zZSgBMAEyqgEKFk1lc2hDb29yZGluYXRvclNlcnZpY2USjwEKCkNvb3JkaW5hdGUSPS5jb2Rld2lyZS5pbnRlcm5hbC52MS5NZXNoQ29vcmRpbmF0b3JTZXJ2aWNlQ29vcmRpbmF0ZVJlcXVlc3QaPi5jb2Rld2lyZS5pbnRlcm5hbC52MS5NZXNoQ29vcmRpbmF0b3JTZXJ2aWNlQ29vcmRpbmF0ZVJlc3BvbnNlKAEwAULpAQoYY29tLmNvZGV3aXJlLmludGVybmFsLnYxQg9Db29yZGluYXRlUHJvdG9QAVpKZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL2ludGVybmFsL3YxO2ludGVybmFsdjGiAgNDSViqAhRDb2Rld2lyZS5JbnRlcm5hbC5WMcoCFENvZGV3aXJlXEludGVybmFsXFYx4gIgQ29kZXdpcmVcSW50ZXJuYWxcVjFcR1BCTWV0YWRhdGHqAhZDb2Rld2lyZTo6SW50ZXJuYWw6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp]);
 
 /**
  * CoordinateNode carries WireGuard connectivity for one peer.
@@ -95,6 +95,16 @@ export type CoordinateRequest = Message<"codewire.internal.v1.CoordinateRequest"
      */
     value: CoordinatePing;
     case: "ping";
+  } | {
+    /**
+     * An environment peer re-proves its session with a fresh peer token at
+     * least once per token lifetime; the coordinator ends a session whose
+     * last valid proof has expired. Clients never send it.
+     *
+     * @generated from field: codewire.internal.v1.CoordinateProof proof = 4;
+     */
+    value: CoordinateProof;
+    case: "proof";
   } | { case: undefined; value?: undefined };
 };
 
@@ -104,6 +114,26 @@ export type CoordinateRequest = Message<"codewire.internal.v1.CoordinateRequest"
  */
 export const CoordinateRequestSchema: GenMessage<CoordinateRequest> = /*@__PURE__*/
   messageDesc(file_codewire_internal_v1_coordinate, 1);
+
+/**
+ * CoordinateProof carries a fresh peer token for the session's own
+ * environment and current operation generation.
+ *
+ * @generated from message codewire.internal.v1.CoordinateProof
+ */
+export type CoordinateProof = Message<"codewire.internal.v1.CoordinateProof"> & {
+  /**
+   * @generated from field: string peer_token = 1;
+   */
+  peerToken: string;
+};
+
+/**
+ * Describes the message codewire.internal.v1.CoordinateProof.
+ * Use `create(CoordinateProofSchema)` to create a new message.
+ */
+export const CoordinateProofSchema: GenMessage<CoordinateProof> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_coordinate, 2);
 
 /**
  * @generated from message codewire.internal.v1.CoordinateHello
@@ -125,7 +155,7 @@ export type CoordinateHello = Message<"codewire.internal.v1.CoordinateHello"> & 
  * Use `create(CoordinateHelloSchema)` to create a new message.
  */
 export const CoordinateHelloSchema: GenMessage<CoordinateHello> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_coordinate, 2);
+  messageDesc(file_codewire_internal_v1_coordinate, 3);
 
 /**
  * MeshCoordinatorServiceCoordinateRequest is a message from a Mesh
@@ -169,7 +199,7 @@ export type MeshCoordinatorServiceCoordinateRequest = Message<"codewire.internal
  * Use `create(MeshCoordinatorServiceCoordinateRequestSchema)` to create a new message.
  */
 export const MeshCoordinatorServiceCoordinateRequestSchema: GenMessage<MeshCoordinatorServiceCoordinateRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_coordinate, 3);
+  messageDesc(file_codewire_internal_v1_coordinate, 4);
 
 /**
  * @generated from message codewire.internal.v1.MeshCoordinateHello
@@ -196,7 +226,7 @@ export type MeshCoordinateHello = Message<"codewire.internal.v1.MeshCoordinateHe
  * Use `create(MeshCoordinateHelloSchema)` to create a new message.
  */
 export const MeshCoordinateHelloSchema: GenMessage<MeshCoordinateHello> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_coordinate, 4);
+  messageDesc(file_codewire_internal_v1_coordinate, 5);
 
 /**
  * @generated from message codewire.internal.v1.MeshCoordinateSubscribe
@@ -213,7 +243,7 @@ export type MeshCoordinateSubscribe = Message<"codewire.internal.v1.MeshCoordina
  * Use `create(MeshCoordinateSubscribeSchema)` to create a new message.
  */
 export const MeshCoordinateSubscribeSchema: GenMessage<MeshCoordinateSubscribe> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_coordinate, 5);
+  messageDesc(file_codewire_internal_v1_coordinate, 6);
 
 /**
  * CoordinateResponse is the primary service's response envelope.
@@ -256,7 +286,7 @@ export type CoordinateResponse = Message<"codewire.internal.v1.CoordinateRespons
  * Use `create(CoordinateResponseSchema)` to create a new message.
  */
 export const CoordinateResponseSchema: GenMessage<CoordinateResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_coordinate, 6);
+  messageDesc(file_codewire_internal_v1_coordinate, 7);
 
 /**
  * MeshCoordinatorServiceCoordinateResponse uses the shared coordinate response
@@ -300,7 +330,7 @@ export type MeshCoordinatorServiceCoordinateResponse = Message<"codewire.interna
  * Use `create(MeshCoordinatorServiceCoordinateResponseSchema)` to create a new message.
  */
 export const MeshCoordinatorServiceCoordinateResponseSchema: GenMessage<MeshCoordinatorServiceCoordinateResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_coordinate, 7);
+  messageDesc(file_codewire_internal_v1_coordinate, 8);
 
 /**
  * @generated from message codewire.internal.v1.CoordinatePing
@@ -313,7 +343,7 @@ export type CoordinatePing = Message<"codewire.internal.v1.CoordinatePing"> & {
  * Use `create(CoordinatePingSchema)` to create a new message.
  */
 export const CoordinatePingSchema: GenMessage<CoordinatePing> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_coordinate, 8);
+  messageDesc(file_codewire_internal_v1_coordinate, 9);
 
 /**
  * @generated from message codewire.internal.v1.CoordinatePeerUpdate
@@ -330,7 +360,7 @@ export type CoordinatePeerUpdate = Message<"codewire.internal.v1.CoordinatePeerU
  * Use `create(CoordinatePeerUpdateSchema)` to create a new message.
  */
 export const CoordinatePeerUpdateSchema: GenMessage<CoordinatePeerUpdate> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_coordinate, 9);
+  messageDesc(file_codewire_internal_v1_coordinate, 10);
 
 /**
  * @generated from message codewire.internal.v1.CoordinatePeerRemove
@@ -347,7 +377,7 @@ export type CoordinatePeerRemove = Message<"codewire.internal.v1.CoordinatePeerR
  * Use `create(CoordinatePeerRemoveSchema)` to create a new message.
  */
 export const CoordinatePeerRemoveSchema: GenMessage<CoordinatePeerRemove> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_coordinate, 10);
+  messageDesc(file_codewire_internal_v1_coordinate, 11);
 
 /**
  * CoordinateDerpMap wraps the tailscale tailcfg.DERPMap JSON document.
@@ -366,7 +396,7 @@ export type CoordinateDerpMap = Message<"codewire.internal.v1.CoordinateDerpMap"
  * Use `create(CoordinateDerpMapSchema)` to create a new message.
  */
 export const CoordinateDerpMapSchema: GenMessage<CoordinateDerpMap> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_coordinate, 11);
+  messageDesc(file_codewire_internal_v1_coordinate, 12);
 
 /**
  * @generated from enum codewire.internal.v1.MeshCoordinateRole

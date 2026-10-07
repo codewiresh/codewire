@@ -11,7 +11,7 @@ use super::env_data::{
     BackendRow, EnvironmentRow, load_backend_row, load_environment, load_environment_in,
 };
 use super::env_log::emit_authoritative_environment_log_for_states;
-use super::gatewayauth::{WorkspaceCredentialScope, issue_environment_tokens};
+use super::environment_auth::{WorkspaceCredentialScope, issue_environment_daemon_token};
 use super::start_timing::{POD_STAGE_PHASES, duration_ms, pod_stage_timings, start_profile};
 use super::workspace_binding::{
     EnvironmentBinding, bind_before_ready, bind_workspace_runtime, binding_bootstrap_current,
@@ -22,6 +22,7 @@ use crate::lifecycle::{PgLifecycleStore, Service};
 use crate::sandbox::client::{
     ProbeResult, SandboxClient, WorkspacePodIdentity, WorkspaceSandboxIdentity,
 };
+use crate::sandbox::host_keys::RecordedHostKeys;
 use crate::sandbox::template::{
     CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DOCKER_MODE_LOCAL_DIND_DIRECT,
     KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, RUNTIME_PROFILE_CONFIDENTIAL, RuntimeProfileSpec,
@@ -162,27 +163,15 @@ pub(super) fn requires_running_runtime_identity(state: &str, desired_state: &str
 
 // ── Worker sandbox config (the cfg slice the create path reads) ────────
 
-/// `SANDBOX_WORKSPACE_IDENTITY_MODE` (Program #2238 B2): how new hosted
-/// commodity workspace Pods are rendered. `binding` is the default;
-/// `environment-token` is the rollback, which renders legacy Pods while every
-/// reader stays scope-aware, so Pod-scope Pods keep working.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum WorkspaceIdentityMode {
-    #[default]
-    Binding,
-    EnvironmentToken,
-}
+/// `SANDBOX_WORKSPACE_IDENTITY_MODE` may only say `binding`, which is also
+/// its default. Every commodity workspace is identity-free: an
+/// environment-token workspace never serves SSH or the tailnet, so it could
+/// never become access-ready (#2460), and a worker configured for one
+/// refuses to start.
+pub const WORKSPACE_IDENTITY_MODE_ENV: &str = "SANDBOX_WORKSPACE_IDENTITY_MODE";
 
-impl WorkspaceIdentityMode {
-    pub const ENV: &'static str = "SANDBOX_WORKSPACE_IDENTITY_MODE";
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "" | "binding" => Some(Self::Binding),
-            "environment-token" => Some(Self::EnvironmentToken),
-            _ => None,
-        }
-    }
+pub fn workspace_identity_mode_supported(value: &str) -> bool {
+    matches!(value.trim(), "" | "binding")
 }
 
 impl SandboxWorkerCfg {
@@ -193,13 +182,12 @@ impl SandboxWorkerCfg {
     }
 
     /// Review L2: a commodity workspace binds through the binding Service in
-    /// the orchestration namespace (`POD_NAMESPACE`), and its gateway fetches
-    /// the daemon credential from the coordinator or API URL. Without them
-    /// `environment_template_opts` would silently render legacy
-    /// environment-token Pods, so a worker with a sandbox backend refuses to
-    /// start instead, like an invalid `SANDBOX_WORKSPACE_IDENTITY_MODE`. Both
-    /// modes need them: under rollback the gateway still reads the binding
-    /// for existing identity-free environments.
+    /// the orchestration namespace (`POD_NAMESPACE`), and its access grant
+    /// names the coordinator or API URL. Without them
+    /// `environment_template_opts` would render environment-token Pods, which
+    /// never serve SSH or the tailnet, so a worker with a sandbox backend
+    /// refuses to start instead, like an unsupported
+    /// `SANDBOX_WORKSPACE_IDENTITY_MODE`.
     pub fn require_workspace_binding_config(&self) -> Result<(), String> {
         let mut missing = Vec::new();
         if self.pod_namespace.trim().is_empty() {
@@ -223,10 +211,18 @@ impl SandboxWorkerCfg {
 /// `WorkspaceBindingService` (design §3.5).
 pub const WORKSPACE_BINDING_SERVICE_NAME: &str = "codewire-orchestration-workspace-binding";
 
-/// The in-cluster URL a workspace daemon long-polls for its binding.
+/// The DNS name of the workspace-binding listener in `server_namespace`: the
+/// name workspace daemons verify and orchestration's internal leaf carries.
+pub fn workspace_binding_tls_host(server_namespace: &str) -> String {
+    format!("{WORKSPACE_BINDING_SERVICE_NAME}.{server_namespace}.svc.cluster.local")
+}
+
+/// The in-cluster URL a workspace daemon long-polls for its binding, over
+/// TLS verified with the mounted internal roots.
 pub fn workspace_binding_url(server_namespace: &str) -> String {
     format!(
-        "http://{WORKSPACE_BINDING_SERVICE_NAME}.{server_namespace}.svc.cluster.local:{}",
+        "https://{}:{}",
+        workspace_binding_tls_host(server_namespace),
         codewire_gateway_proto::WORKSPACE_BINDING_PORT
     )
 }
@@ -272,15 +268,29 @@ pub struct SandboxWorkerCfg {
     pub runtime_transport_zones_json: String,
     pub pod_namespace: String,
     pub debug_tailnet: bool,
-    pub workspace_identity_mode: WorkspaceIdentityMode,
     /// `SANDBOX_WARM_POOL_SHAPES` as configured (Program #2238 C2). Empty
     /// configures no warm pool; parsed by
     /// [`crate::sandbox::warm_pool::parse_warm_pool_shapes`].
     pub warm_pool_shapes: String,
+    /// `SANDBOX_COORDINATOR_EXTRA_ROOTS=true` mounts the public
+    /// `codewire-coordinator-extra-roots` bundle into identity-free workspaces
+    /// so the daemon can verify a local cluster's coordinator. Dev and
+    /// Production leave it off: their coordinator has a WebPKI certificate.
+    pub coordinator_extra_roots: bool,
+    /// The in-cluster ingress controller workspaces may reach on 80/443
+    /// (`SANDBOX_INGRESS_NAMESPACE`, `SANDBOX_INGRESS_POD_NAME`). Empty keeps
+    /// the RKE2 controller in `kube-system`.
+    pub ingress_namespace: String,
+    pub ingress_pod_name: String,
 }
 
 impl SandboxWorkerCfg {
     pub fn from_env() -> Self {
+        let identity_mode = std::env::var(WORKSPACE_IDENTITY_MODE_ENV).unwrap_or_default();
+        assert!(
+            workspace_identity_mode_supported(&identity_mode),
+            "{WORKSPACE_IDENTITY_MODE_ENV} must be binding: an environment-token workspace never serves SSH or the tailnet"
+        );
         let env = std::env::var("ENVIRONMENT").unwrap_or_else(|_| "dev".to_string());
         let env_prefix = match env.as_str() {
             "local" | "development" => "dev",
@@ -363,17 +373,11 @@ impl SandboxWorkerCfg {
             debug_tailnet: !std::env::var("CODEWIRE_DEBUG_TAILNET")
                 .unwrap_or_default()
                 .is_empty(),
-            workspace_identity_mode: WorkspaceIdentityMode::parse(
-                &std::env::var(WorkspaceIdentityMode::ENV).unwrap_or_default(),
-            )
-            .unwrap_or_else(|| {
-                panic!(
-                    "{} must be binding or environment-token",
-                    WorkspaceIdentityMode::ENV
-                )
-            }),
             warm_pool_shapes: std::env::var(crate::sandbox::warm_pool::WARM_POOL_SHAPES_ENV)
                 .unwrap_or_default(),
+            coordinator_extra_roots: getenv("SANDBOX_COORDINATOR_EXTRA_ROOTS", "false") == "true",
+            ingress_namespace: getenv("SANDBOX_INGRESS_NAMESPACE", ""),
+            ingress_pod_name: getenv("SANDBOX_INGRESS_POD_NAME", ""),
         }
     }
 }
@@ -422,7 +426,6 @@ pub fn environment_template_opts(
     template_base: &str,
     env: &EnvironmentRow,
     operation_generation: i64,
-    gateway_token: &str,
     daemon_auth_token: &str,
 ) -> anyhow::Result<TemplateOpts> {
     let env_id = env.id.as_str();
@@ -458,11 +461,6 @@ pub fn environment_template_opts(
         projection_selection_sha256.is_none() || cfg.credential_runtime.is_some(),
         "selected environment sources require credential runtime trust"
     );
-    assert!(
-        gateway_token != daemon_auth_token,
-        "hosted coordinate and daemon capabilities must be distinct"
-    );
-
     let runtime_spec = match runtime_profile_for_isolation_tier(&env.isolation_tier)
         .expect("environment isolation tier is validated at creation")
     {
@@ -487,7 +485,6 @@ pub fn environment_template_opts(
         operation_generation,
         projection_selection_sha256,
         managed_credential_clients,
-        gateway_token: gateway_token.to_string(),
         daemon_auth_token: daemon_auth_token.to_string(),
         ..shape_template_opts(cfg, image_ref, &runtime_spec, shape)
     })
@@ -515,17 +512,13 @@ pub fn shape_template_opts(
     let uses_runtime_transport_registry = !cfg.runtime_transport_zones_json.trim().is_empty();
     // Commodity workspaces are identity-free (design §13); confidential keeps
     // its measured environment-bound init-data until B2c. A Pod reaches the
-    // binding listener, and its gateway the binding RPC, only with the
-    // orchestration namespace and a coordinator known. The gateway uses the
-    // binding RPC in both modes, so a rollback never strands an existing
-    // identity-free environment behind a rendered environment token.
-    let gateway_daemon_credential_from_binding = runtime_spec.profile
-        != RUNTIME_PROFILE_CONFIDENTIAL
+    // binding listener only with the orchestration namespace and a
+    // coordinator known, which a worker with a sandbox backend requires at
+    // startup (`require_workspace_binding_config`).
+    let binds = runtime_spec.profile != RUNTIME_PROFILE_CONFIDENTIAL
         && !cfg.pod_namespace.trim().is_empty()
         && !(cfg.coordinator_url.trim().is_empty() && cfg.api_base_url.trim().is_empty());
-    let workspace_identity = if cfg.workspace_identity_mode == WorkspaceIdentityMode::Binding
-        && gateway_daemon_credential_from_binding
-    {
+    let workspace_identity = if binds {
         WorkspaceIdentity::Binding {
             binding_url: workspace_binding_url(cfg.pod_namespace.trim()),
         }
@@ -542,7 +535,6 @@ pub fn shape_template_opts(
         projection_selection_sha256: None,
         managed_credential_clients: Default::default(),
         confidential_storage_manifest_uri: String::new(),
-        gateway_token: String::new(),
         daemon_auth_token: String::new(),
         // Cluster and shape.
         image: image_ref.to_string(),
@@ -553,10 +545,12 @@ pub fn shape_template_opts(
         docker_mode: runtime_spec.docker_mode.clone(),
         credential_runtime: cfg.credential_runtime.clone(),
         workspace_identity,
-        gateway_daemon_credential_from_binding,
         api_base_url: cfg.api_base_url.clone(),
         coordinator_url: cfg.coordinator_url.clone(),
         server_namespace: cfg.pod_namespace.clone(),
+        coordinator_extra_roots: cfg.coordinator_extra_roots,
+        ingress_namespace: cfg.ingress_namespace.clone(),
+        ingress_pod_name: cfg.ingress_pod_name.clone(),
         derp_host: cfg.derp_host.clone(),
         derp_port: parse_derp_port(&cfg.derp_port),
         stun_host: cfg.stun_host.clone(),
@@ -618,7 +612,8 @@ fn standard_runtime_profile_spec(cfg: &SandboxWorkerCfg) -> RuntimeProfileSpec {
 /// canonical workspace image on the standard tier, from the shape and this
 /// process's configuration alone, never from an environment row. A
 /// confidential runtime, a diagnostic runtime outside diagnostic clusters and
-/// the environment-token rollback mode render no pool.
+/// a configuration that cannot render identity-free workspaces render no
+/// pool.
 pub fn warm_pool_template_opts(
     cfg: &SandboxWorkerCfg,
     shape: WorkspaceShape,
@@ -633,7 +628,7 @@ pub fn warm_pool_template_opts(
     let opts = shape_template_opts(cfg, CANONICAL_WORKSPACE_RUNTIME_IMAGE, &runtime_spec, shape);
     anyhow::ensure!(
         opts.identity_free(),
-        "warm pools require identity-free workspaces (SANDBOX_WORKSPACE_IDENTITY_MODE=binding)"
+        "warm pools require identity-free workspaces (POD_NAMESPACE and a coordinator)"
     );
     Ok(opts)
 }
@@ -868,15 +863,15 @@ pub(super) async fn load_environment_template_opts(
     let (image, base) =
         load_sandbox_template_config(&ctx.pool, env.preset_id.as_deref().unwrap_or_default())
             .await?;
-    let tokens = issue_environment_tokens(&ctx.sandbox_cfg.session_secret, &env.id)?;
+    let daemon_auth_token =
+        issue_environment_daemon_token(&ctx.sandbox_cfg.session_secret, &env.id)?;
     environment_template_opts(
         &ctx.sandbox_cfg,
         &image,
         &base,
         env,
         operation_generation,
-        &tokens.coordinate,
-        &tokens.daemon,
+        &daemon_auth_token,
     )
 }
 
@@ -940,15 +935,14 @@ pub(super) async fn confidential_runtime_template_opts(
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, preset_id).await?;
     let cfg = &ctx.sandbox_cfg;
     let expected_template = environment_per_env_template_name(&image_ref, &template_base, env_id);
-    let auth_tokens = issue_environment_tokens(&cfg.session_secret, env_id)?;
+    let daemon_auth_token = issue_environment_daemon_token(&cfg.session_secret, env_id)?;
     let mut template_opts = environment_template_opts(
         cfg,
         &image_ref,
         &template_base,
         env,
         operation_generation,
-        &auth_tokens.coordinate,
-        &auth_tokens.daemon,
+        &daemon_auth_token,
     )?;
     template_opts.confidential_storage_manifest_uri = confidential_storage_manifest_uri.to_owned();
     if template_opts.name != expected_template {
@@ -1063,6 +1057,14 @@ async fn run_environment_create(
                 "create cancelled: desired state changed"
             );
             return Ok(());
+        }
+        // A confidential workspace cannot bind until B2c, and only a bound
+        // daemon serves SSH and the tailnet (#2460): the API refuses these,
+        // and a create that still arrives fails with the same reason.
+        if env.isolation_tier == "confidential" {
+            let reason = crate::confidential_storage::CONFIDENTIAL_ISOLATION_UNAVAILABLE;
+            record_error(&svc, authority, env_id, reason).await?;
+            anyhow::bail!(reason);
         }
 
         let profile = start_profile(cfg, &env.isolation_tier);
@@ -1289,7 +1291,7 @@ async fn run_environment_create(
 
             // `create_claim` measures creating the environment-scoped
             // template, shadow pool, claim and gateway objects. The readiness
-            // wait that follows is its own `gateway_ready` stage; earlier
+            // wait that follows is its own `access_ready` stage; earlier
             // `create_claim` samples included that wait.
             CreateAction::CreateClaim => {
                 let started = std::time::Instant::now();
@@ -1373,35 +1375,35 @@ async fn run_environment_create(
                             return Err(e);
                         }
                     };
-                let auth_tokens = match issue_environment_tokens(&cfg.session_secret, env_id) {
-                    Ok(tokens) => tokens,
-                    Err(e) => {
-                        emit_create_log(
-                            authority,
-                            "create_claim",
-                            "failed",
-                            &format!("{e:#}"),
-                            None,
-                        )
-                        .await?;
-                        record_error(
-                            &svc,
-                            authority,
-                            env_id,
-                            &format!("environment capabilities: {e:#}"),
-                        )
-                        .await?;
-                        return Err(e);
-                    }
-                };
+                let daemon_auth_token =
+                    match issue_environment_daemon_token(&cfg.session_secret, env_id) {
+                        Ok(token) => token,
+                        Err(e) => {
+                            emit_create_log(
+                                authority,
+                                "create_claim",
+                                "failed",
+                                &format!("{e:#}"),
+                                None,
+                            )
+                            .await?;
+                            record_error(
+                                &svc,
+                                authority,
+                                env_id,
+                                &format!("environment capabilities: {e:#}"),
+                            )
+                            .await?;
+                            return Err(e);
+                        }
+                    };
                 let mut template_opts = environment_template_opts(
                     cfg,
                     &image_ref,
                     &template_base,
                     &env,
                     authority.operation_generation(),
-                    &auth_tokens.coordinate,
-                    &auth_tokens.daemon,
+                    &daemon_auth_token,
                 )?;
                 template_opts.confidential_storage_manifest_uri =
                     confidential_storage_manifest_uri.unwrap_or_default();
@@ -1628,7 +1630,7 @@ async fn run_environment_create(
                     authority,
                     &template_opts,
                     CREATE_MUTATION_STATES,
-                    client.ensure_gateway_stack(&template_opts),
+                    client.ensure_access_stack(&template_opts),
                 )
                 .await
                 {
@@ -1667,9 +1669,9 @@ async fn run_environment_create(
                 let gateway_started = std::time::Instant::now();
                 emit_create_log(
                     authority,
-                    "gateway_ready",
+                    "access_ready",
                     "started",
-                    GATEWAY_READY_STARTED_MESSAGE,
+                    ACCESS_READY_STARTED_MESSAGE,
                     None,
                 )
                 .await?;
@@ -1680,9 +1682,10 @@ async fn run_environment_create(
                     CREATE_MUTATION_STATES,
                     authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
-                        readiness_wait(client.wait_for_credential_gateway_ready(
-                            &template_opts,
+                        readiness_wait(client.wait_for_workspace_access_ready(
+                            env_id,
                             ready_timeout_for_isolation(&env.isolation_tier),
+                            &RecordedHostKeys(&ctx.pool),
                         )),
                     ),
                 )
@@ -1695,7 +1698,7 @@ async fn run_environment_create(
                 if let Err(e) = gateway_result {
                     emit_create_log(
                         authority,
-                        "gateway_ready",
+                        "access_ready",
                         "failed",
                         &format!("{e:#}"),
                         gateway_meta,
@@ -1708,7 +1711,7 @@ async fn run_environment_create(
                     record_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
                     return Err(e);
                 }
-                emit_create_log(authority, "gateway_ready", "completed", "", gateway_meta).await?;
+                emit_create_log(authority, "access_ready", "completed", "", gateway_meta).await?;
                 // A pool Claim's Sandbox is warm only when the controller
                 // adopted a member; with none ready it was created cold.
                 let gateway_path = match claim_path {
@@ -1720,7 +1723,7 @@ async fn run_environment_create(
                     StartPath::Cold => StartPath::Cold,
                 };
                 observe_create_stage(
-                    StartStage::GatewayReady,
+                    StartStage::AccessReady,
                     gateway_path,
                     profile,
                     gateway_elapsed,
@@ -1812,7 +1815,7 @@ fn elapsed_meta(elapsed: Duration) -> Option<serde_json::Value> {
     Some(serde_json::json!({ "duration_ms": duration_ms(elapsed) }))
 }
 
-const GATEWAY_READY_STARTED_MESSAGE: &str = "Waiting for gateway";
+const ACCESS_READY_STARTED_MESSAGE: &str = "Waiting for SSH access";
 
 /// What one runtime identity reconciliation in this create attempt checked:
 /// the environment row it rendered from, the recorded Claim association, and
@@ -2096,7 +2099,7 @@ async fn resume_suspended_workspace(
     }
 }
 
-async fn ensure_gateway_stack_for_environment(
+async fn ensure_access_stack_for_environment(
     ctx: &WorkerContext,
     cfg: &SandboxWorkerCfg,
     env: &EnvironmentRow,
@@ -2107,15 +2110,14 @@ async fn ensure_gateway_stack_for_environment(
 ) -> anyhow::Result<()> {
     let preset_id = env.preset_id.clone().unwrap_or_default();
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, &preset_id).await?;
-    let auth_tokens = issue_environment_tokens(&cfg.session_secret, env_id)?;
+    let daemon_auth_token = issue_environment_daemon_token(&cfg.session_secret, env_id)?;
     let template_opts = environment_template_opts(
         cfg,
         &image_ref,
         &template_base,
         env,
         authority.operation_generation(),
-        &auth_tokens.coordinate,
-        &auth_tokens.daemon,
+        &daemon_auth_token,
     )?;
     let runtime_spec = template_opts.runtime_profile_spec();
     validate_managed_runtime_profile(&runtime_spec, cfg.allow_diagnostic_runtime)
@@ -2125,15 +2127,16 @@ async fn ensure_gateway_stack_for_environment(
         authority,
         &template_opts,
         states,
-        client.ensure_gateway_stack(&template_opts),
+        client.ensure_access_stack(&template_opts),
     )
     .await?;
     authority
         .run_while_authoritative_for_states(
             states,
-            client.wait_for_credential_gateway_ready(
-                &template_opts,
+            client.wait_for_workspace_access_ready(
+                env_id,
                 ready_timeout_for_isolation(&env.isolation_tier),
+                &RecordedHostKeys(&ctx.pool),
             ),
         )
         .await
@@ -2402,14 +2405,14 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
             );
         }
         // The early bind lost the race to the Claim Ready wait: bridge now,
-        // still before the gateway wait below.
+        // still before the access wait below.
         warm_bridge::bridge_warm_member(ctx, env, authority, states, &recorded).await?;
     }
 
-    // Create's `gateway_ready` stage (A0a) is the CreateClaim wait, which the
-    // early bind lets finish while Docker starts; here the gateway is
+    // Create's `access_ready` stage (A0a) is the CreateClaim wait, which the
+    // early bind lets finish while Docker starts; here SSH access is
     // normally ready already.
-    ensure_gateway_stack_for_environment(
+    ensure_access_stack_for_environment(
         ctx,
         &ctx.sandbox_cfg,
         env,
@@ -2660,45 +2663,29 @@ mod tests {
                 },
                 "CODEWIRE_COORDINATOR_URL or CODEWIRE_API_URL",
             ),
-            (
-                SandboxWorkerCfg {
-                    workspace_identity_mode: WorkspaceIdentityMode::EnvironmentToken,
-                    pod_namespace: String::new(),
-                    ..complete.clone()
-                },
-                "POD_NAMESPACE",
-            ),
         ] {
             let error = cfg.require_workspace_binding_config().unwrap_err();
             assert!(error.contains(missing), "{error}");
         }
     }
 
-    /// `SANDBOX_WORKSPACE_IDENTITY_MODE`: `binding` (the default) renders
-    /// identity-free commodity Pods; confidential, the rollback mode and a
-    /// configuration without the orchestration namespace or a coordinator
-    /// render legacy Pods.
+    /// Commodity Pods always render identity-free, and only `binding` (or
+    /// nothing) is a supported `SANDBOX_WORKSPACE_IDENTITY_MODE`: an
+    /// environment-token commodity workspace could never become
+    /// access-ready. Confidential keeps its rendered token until B2c; a
+    /// configuration without the orchestration namespace or a coordinator,
+    /// which a sandbox worker refuses at startup, renders one too.
     #[test]
-    fn the_identity_mode_selects_identity_free_commodity_rendering() {
-        assert_eq!(
-            WorkspaceIdentityMode::parse(""),
-            Some(WorkspaceIdentityMode::Binding)
-        );
-        assert_eq!(
-            WorkspaceIdentityMode::parse("binding"),
-            Some(WorkspaceIdentityMode::Binding)
-        );
-        assert_eq!(
-            WorkspaceIdentityMode::parse("environment-token"),
-            Some(WorkspaceIdentityMode::EnvironmentToken)
-        );
-        for invalid in ["Binding", "token", "legacy", "pod"] {
-            assert_eq!(WorkspaceIdentityMode::parse(invalid), None);
+    fn commodity_workspaces_always_render_identity_free() {
+        for supported in ["", "binding", " binding "] {
+            assert!(
+                workspace_identity_mode_supported(supported),
+                "{supported:?}"
+            );
         }
-        assert_eq!(
-            WorkspaceIdentityMode::default(),
-            WorkspaceIdentityMode::Binding
-        );
+        for refused in ["environment-token", "Binding", "token", "legacy", "pod"] {
+            assert!(!workspace_identity_mode_supported(refused), "{refused}");
+        }
         let cfg = SandboxWorkerCfg {
             runtime_profile: "commodity".into(),
             pod_namespace: "dev".into(),
@@ -2712,7 +2699,6 @@ mod tests {
                 "base",
                 env,
                 7,
-                "tok",
                 "daemon-tok",
             )
             .unwrap()
@@ -2723,33 +2709,11 @@ mod tests {
             render(&cfg, &env),
             WorkspaceIdentity::Binding {
                 binding_url:
-                    "http://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
+                    "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
                         .into()
             }
         );
-        let rollback = SandboxWorkerCfg {
-            workspace_identity_mode: WorkspaceIdentityMode::EnvironmentToken,
-            ..cfg.clone()
-        };
-        assert_eq!(render(&rollback, &env), WorkspaceIdentity::EnvironmentToken);
-        // Under rollback the gateway still uses the binding RPC, so an
-        // existing identity-free environment keeps working; confidential
-        // keeps its rendered token.
-        let gateway = |cfg: &SandboxWorkerCfg, env: &EnvironmentRow| {
-            environment_template_opts(
-                cfg,
-                "ghcr.io/codewiresh/workspace:1",
-                "base",
-                env,
-                7,
-                "tok",
-                "daemon-tok",
-            )
-            .unwrap()
-            .gateway_daemon_credential_from_binding
-        };
-        assert!(gateway(&cfg, &env));
-        assert!(gateway(&rollback, &env));
+        // Confidential keeps its rendered token.
         let no_namespace = SandboxWorkerCfg {
             pod_namespace: String::new(),
             ..cfg.clone()
@@ -2775,8 +2739,6 @@ mod tests {
             render(&cfg, &confidential),
             WorkspaceIdentity::EnvironmentToken
         );
-        assert!(!gateway(&cfg, &confidential));
-        assert!(!gateway(&no_namespace, &env));
     }
 
     #[test]
@@ -3373,7 +3335,6 @@ mod tests {
             "preset-base",
             &env,
             7,
-            "tok",
             "daemon-tok",
         )
         .unwrap();
@@ -3404,7 +3365,6 @@ mod tests {
             "preset-base",
             &env,
             7,
-            "tok",
             "daemon-tok",
         )
         .unwrap();
@@ -3452,7 +3412,6 @@ mod tests {
             "workspace",
             &standard,
             7,
-            "tok",
             "daemon-tok",
         )
         .unwrap();
@@ -3490,7 +3449,6 @@ mod tests {
             "workspace",
             &confidential,
             7,
-            "tok",
             "daemon-tok",
         )
         .unwrap();
@@ -3561,7 +3519,6 @@ mod tests {
             "workspace",
             &env,
             7,
-            "tok",
             "daemon-tok",
         )
         .unwrap();
@@ -3587,7 +3544,6 @@ mod tests {
             "workspace",
             &env,
             7,
-            "tok",
             "daemon-tok",
         )
         .unwrap();
@@ -3632,7 +3588,6 @@ mod tests {
             "workspace",
             &env,
             7,
-            "tok",
             "daemon-tok",
         )
         .unwrap();

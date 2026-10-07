@@ -85,113 +85,50 @@ deploy_kind_credential_cert_manager() {
   done
 }
 
-# The gateway root and Issuer only issue the legacy per-environment gateway
-# Certificates whose cleanup kind_credential_bootstrap_smoke proves; no
-# workspace or gateway mounts gateway trust.
 deploy_kind_credential_issuers() {
-  log "issuing independent synthetic Kind gateway, broker and orchestration roots"
+  log "issuing independent synthetic Kind broker, orchestration and coordinator roots"
   kubectl_apply -f "$ROOT/tests/e2e/kind/credential-issuers.yaml"
-  kubectl -n "$SANDBOX_NS" wait --for=condition=Ready --timeout=120s \
-    certificate/codewire-kind-credential-gateway-root issuer/codewire-credential-gateway
   kubectl -n "$NS" wait --for=condition=Ready --timeout=120s \
     certificate/codewire-kind-credential-broker-root issuer/codewire-credential-broker \
     certificate/codewire-credential-broker \
     certificate/codewire-kind-orchestration-internal-root issuer/codewire-orchestration-internal \
     certificate/codewire-orchestration-internal \
     certificate/codewire-kind-postgres-root issuer/codewire-kind-postgres \
-    certificate/codewire-kind-postgres-tls
-  local gateway_roots broker_roots orchestration_roots
+    certificate/codewire-kind-postgres-tls \
+    certificate/codewire-kind-coordinator-root issuer/codewire-kind-coordinator \
+    certificate/codewire-kind-coordinator-tls
+  local broker_roots orchestration_roots coordinator_roots
   # Only public certificates leave these synthetic controller-owned Secrets.
   # No private key is copied into the host, workspace, ConfigMap or log.
-  gateway_roots="$(kubectl -n "$SANDBOX_NS" get secret codewire-kind-credential-gateway-root \
-    -o 'jsonpath={.data.tls\.crt}' | base64 -d)"
   broker_roots="$(kubectl -n "$NS" get secret codewire-kind-credential-broker-root \
     -o 'jsonpath={.data.tls\.crt}' | base64 -d)"
   orchestration_roots="$(kubectl -n "$NS" get secret codewire-kind-orchestration-internal-root \
     -o 'jsonpath={.data.tls\.crt}' | base64 -d)"
-  [ -n "$gateway_roots" ] && [ -n "$broker_roots" ] && [ -n "$orchestration_roots" ] \
-    && [ "$gateway_roots" != "$broker_roots" ] \
+  coordinator_roots="$(kubectl -n "$NS" get secret codewire-kind-coordinator-root \
+    -o 'jsonpath={.data.tls\.crt}' | base64 -d)"
+  [ -n "$broker_roots" ] && [ -n "$orchestration_roots" ] && [ -n "$coordinator_roots" ] \
     && [ "$orchestration_roots" != "$broker_roots" ] \
-    && [ "$orchestration_roots" != "$gateway_roots" ] || {
+    && [ "$coordinator_roots" != "$broker_roots" ] \
+    && [ "$coordinator_roots" != "$orchestration_roots" ] || {
     echo '::error::Kind credential trust domains are missing or not distinct' >&2
     return 1
   }
-  kubectl -n "$SANDBOX_NS" create configmap codewire-credential-broker-roots \
+  # Orchestration, the credential relay, verifies the broker with these roots
+  # in its own namespace.
+  kubectl -n "$NS" create configmap codewire-credential-broker-roots \
     --from-literal="ca.crt=$broker_roots" --dry-run=client -o yaml | kubectl_apply -f -
-  # Gateways (sandbox namespace) verify orchestration's internal TLS listener
-  # with these roots; the copy in this namespace is for Mesh once it switches.
+  # Workspace daemons (sandbox namespace) verify orchestration's binding
+  # listener with these roots, and Mesh (this namespace) its internal one.
   local namespace
   for namespace in "$SANDBOX_NS" "$NS"; do
     kubectl -n "$namespace" create configmap codewire-orchestration-internal-roots \
       --from-literal="ca.crt=$orchestration_roots" --dry-run=client -o yaml | kubectl_apply -f -
   done
+  # Workspace daemons (SANDBOX_COORDINATOR_EXTRA_ROOTS) verify the in-cluster
+  # coordinator edge with this root alone, beside the WebPKI roots.
+  kubectl -n "$SANDBOX_NS" create configmap codewire-coordinator-extra-roots \
+    --from-literal="ca.crt=$coordinator_roots" --dry-run=client -o yaml | kubectl_apply -f -
 }
-
-delete_kind_credential_bootstrap() {
-  local environment="$1"
-  [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
-  # Remove the issuing object first. Foreground GC retains it while deleting
-  # its leaf, which can start cert-manager issuance again. Background removes
-  # that intent while its owner references still collect late controller work.
-  # Both phases must complete; this is not best-effort teardown.
-  kubectl -n "$SANDBOX_NS" delete "certificate/cw-credential-gateway-$environment" \
-    --ignore-not-found=true --cascade=background --wait=true --timeout=120s >/dev/null || return $?
-  kubectl -n "$SANDBOX_NS" delete "secret/cw-credential-gateway-$environment" \
-    --ignore-not-found=true --wait=true --timeout=120s >/dev/null
-}
-
-# Nothing creates a per-environment gateway Certificate or its leaf: the
-# gateway has no workspace-facing TLS listener.
-assert_no_kind_gateway_certificate() {
-  local environment="$1" found
-  [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
-  found="$(kubectl -n "$SANDBOX_NS" get "certificate/cw-credential-gateway-$environment" \
-    "secret/cw-credential-gateway-$environment" --ignore-not-found=true -o name)" || return $?
-  [ -z "$found" ] || {
-    echo '::error::an environment created a gateway Certificate' >&2
-    return 1
-  }
-}
-
-# Codex has no bootstrap object: the workspace daemon writes Codewire's
-# config.toml into the user's ~/.codex on the persistent home.
-assert_no_kind_codex_config_map() {
-  local environment="$1" found
-  found="$(kubectl -n "$SANDBOX_NS" get configmap "cw-credential-codex-$environment" \
-    --ignore-not-found=true -o name)" || return $?
-  [ -z "$found" ] || {
-    echo '::error::selected Codex created a per-environment ConfigMap' >&2
-    return 1
-  }
-}
-
-kind_credential_bootstrap_smoke() (
-  log "checking credential bootstrap with real Kind admission and certificate issuance"
-  local binary kubeconfig
-  local kubeconfig_args=()
-  binary="$(jq -ser '
-    [.[] | select(.reason == "compiler-artifact" and .profile.test == true
-      and .target.name == "codewire_orchestration" and .executable != null) | .executable]
-    | if length == 1 then .[0] else error("expected one orchestration libtest") end
-  ' "$RUN_DIR/credential-bootstrap-build.jsonl")"
-  [ -x "$binary" ] || { echo '::error::credential bootstrap executable is missing' >&2; return 1; }
-  # Export only this disposable cluster's identity. Do not let the Rust client
-  # fall back to any ambient kubeconfig or external cluster credentials.
-  kubeconfig="$(mktemp "$RUN_DIR/credential-bootstrap-kubeconfig.XXXXXX")"
-  trap 'rm -f -- "$kubeconfig"' EXIT
-  if is_remote_dind_kind_job; then
-    kubeconfig_args+=(--internal)
-  fi
-  kind get kubeconfig "${kubeconfig_args[@]}" --name "$KIND_CLUSTER_NAME" >"$kubeconfig"
-  KUBECONFIG="$kubeconfig" CODEWIRE_KIND_CONTEXT="kind-$KIND_CLUSTER_NAME" \
-    CODEWIRE_KIND_CREDENTIAL_BOOTSTRAP=1 \
-    "$binary" --exact sandbox::client::credentials::kind::credential_bootstrap_kind \
-      --ignored --nocapture --test-threads=1 | tee "$RUN_DIR/credential-bootstrap-kind.log"
-  grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$RUN_DIR/credential-bootstrap-kind.log" || {
-    echo '::error::credential bootstrap gate did not execute exactly one passing test' >&2
-    return 1
-  }
-)
 
 start_kind_credential_fixture() {
   local fixture_patch
@@ -303,47 +240,49 @@ wait_kind_credential_setup_complete() {
   return 1
 }
 
-# A managed restart replaces both sandbox Pods after the update is accepted.
-# The environment state can read running again while the new Pods are still
-# Pending, and one-shot selectors then miss them: a jq empty result exits 4
+# A managed restart replaces the workspace Pod after the update is accepted.
+# The environment state can read running again while the new Pod is still
+# Pending, and one-shot selectors then miss it: a jq empty result exits 4
 # without printing anything, which is how the failure reaches the log as a
 # bare exit code. A recreated Pod is also Running before its workspace
 # container accepts execs, so phase alone cannot gate the suite's next
 # commands — every one of them selects or execs into exactly that container.
-# Wait for exactly one exact workspace and one exact gateway rendering the
-# restart's operation generation, with the workspace answering an exec,
-# then print the workspace name and the gateway document on two lines.
-# Binding the gateway to the update's generation keeps the pre-restart Pods
-# from satisfying the wait.
-wait_kind_credential_sandbox_pair() {
-  local environment="$1" generation="$2" attempt pair candidate
+# Wait for exactly one exact workspace labelled with the restart's operation
+# generation, answering an exec, and print its name; the generation keeps the
+# pre-restart Pod from satisfying the wait. Orchestration is the credential
+# relay: there is no gateway Pod.
+wait_kind_credential_restarted_workspace() {
+  local environment="$1" generation="$2" attempt pod
   [[ "$generation" =~ ^[1-9][0-9]*$ ]] || return 1
   for ((attempt = 0; attempt < 90; attempt++)); do
-    if pair="$(kubectl -n "$SANDBOX_NS" get pods \
+    if pod="$(kubectl -n "$SANDBOX_NS" get pods \
         -l "codewire.sh/environment-id=$environment" -o json | jq -er \
         --arg generation "$generation" '
       [.items[] | select(.metadata.deletionTimestamp == null
-          and .status.phase == "Running")] as $live |
-      def rendered: [.spec.containers[]? | .env[]? |
-        select(.name == "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION") | .value];
-      ([$live[] | select(.metadata.labels["codewire.sh/type"] == "workspace"
+          and .status.phase == "Running"
+          and .metadata.labels["codewire.sh/type"] == "workspace"
+          and .metadata.labels["codewire.sh/environment-operation-generation"] == $generation
           and .spec.serviceAccountName == "codewire-sandbox"
-          and .spec.automountServiceAccountToken == false)]) as $workspace |
-      ([$live[] | select(.metadata.labels["codewire.sh/type"] == "gateway"
-          and (rendered == [$generation]))]) as $gateway |
-      if ($workspace | length) == 1 and ($gateway | length) == 1 then
-        $workspace[0].metadata.name + "\n" + ($gateway[0] | tojson)
-      else empty end')" && [ -n "$pair" ]; then
-      candidate="$(sed -n '1p' <<<"$pair")"
-      if kubectl -n "$SANDBOX_NS" exec "$candidate" -c workspace -- true 2>/dev/null; then
-        printf '%s\n' "$pair"
+          and .spec.automountServiceAccountToken == false)] |
+      if length == 1 then .[0].metadata.name else empty end')" && [ -n "$pod" ]; then
+      if kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- true 2>/dev/null; then
+        printf '%s\n' "$pod"
         return 0
       fi
     fi
     sleep 2
   done
-  echo "::error::credential fixture environment ${environment} did not materialize its generation-${generation} workspace and gateway Pods exec-ready after the managed restart" >&2
+  echo "::error::credential fixture environment ${environment} did not materialize its generation-${generation} workspace Pod exec-ready after the managed restart" >&2
   return 1
+}
+
+# The credential relay: the one running orchestration Pod, as its name and UID.
+kind_credential_relay_pod() {
+  kubectl -n "$NS" get pods \
+    -l "app.kubernetes.io/name=codewire,app.kubernetes.io/component=orchestration" -o json | jq -er '
+      [.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")]
+      | if length == 1 then .[0].metadata.name + "\n" + .[0].metadata.uid
+        else error("expected one running orchestration Pod, the credential relay") end'
 }
 
 kind_credential_workspace() {
@@ -579,12 +518,14 @@ stop_kind_credential_bridge_renewal() {
 
 # Every proxied request through the renewal window was answered by the broker
 # (the unselected slot's 403): none failed with 503 for want of an epoch. The
-# gateway also logged admitting a successor while its predecessor drained,
-# inside that same window. Log timestamps have one-second resolution after
-# their fraction is dropped; allow two seconds of slack at each end.
+# relay also logged admitting this environment's successor while its
+# predecessor drained, inside that same window. Log timestamps have one-second
+# resolution after their fraction is dropped; allow two seconds of slack at
+# each end.
 assert_kind_credential_bridge_renewal() {
-  local probe="$1" gateway_pod="$2" window logs
-  [[ "$gateway_pod" =~ ^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$ ]] || return 1
+  local probe="$1" environment="$2" relay_pod="$3" window logs
+  [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
+  [[ "$relay_pod" =~ ^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$ ]] || return 1
   window="$(jq -sce --argjson minimum "$KIND_BRIDGE_RENEWAL_MIN_REQUESTS" '
     def count: type == "number" and . >= 0 and . <= 9007199254740991 and floor == .;
     if length == 1 and (.[0] | type == "object")
@@ -600,20 +541,21 @@ assert_kind_credential_bridge_renewal() {
     echo "::error::a proxied request failed or the probe was incomplete across the bridge renewal; probe record: $probe" >&2
     return 1
   }
-  logs="$(kubectl -n "$SANDBOX_NS" logs "pod/$gateway_pod" -c codewire-gateway)" || {
-    echo '::error::could not read the gateway log for bridge renewal evidence' >&2
+  logs="$(kubectl -n "$NS" logs "pod/$relay_pod" -c orchestration)" || {
+    echo '::error::could not read the credential relay log for bridge renewal evidence' >&2
     return 1
   }
-  jq -Rne --argjson window "$window" '
+  jq -Rne --argjson window "$window" --arg environment "$environment" '
     [inputs | fromjson? | select(type == "object"
-        and .target == "codewire_gateway::hosted_bridge"
+        and .target == "codewire_orchestration::worker::credential_relay::epoch"
         and (.fields | type == "object")
-        and .fields.event == "credential_bridge_epoch_overlap")
+        and .fields.event == "credential_bridge_epoch_overlap"
+        and .fields.environment_id == $environment)
       | .timestamp | strings | sub("\\.[0-9]+Z$"; "Z") | (fromdateiso8601? // empty)
       | . * 1000]
     | any(.[]; . >= $window.started - 2000 and . <= $window.ended + 2000)
   ' <<<"$logs" >/dev/null || {
-    echo '::error::the gateway logged no epoch overlap while proxied requests were running' >&2
+    echo '::error::the credential relay logged no epoch overlap while proxied requests were running' >&2
     return 1
   }
 }
@@ -695,12 +637,12 @@ assert_kind_credential_material_reuse() {
         and .fields.event == "proxied_request" and .fields.slot == "codex")
       | .fields + {at: (.timestamp | seconds)}] as $requests |
     ($requests[-3] // {}) as $warm | ($requests[-2] // {}) as $reuse |
-    # The gateway request, the warm-up and the reuse present the refreshed
-    # login; Reconnect published a newly enrolled one, generation 0.
-    ($presented | map(.[0:2])) == [[3, 200], [4, 200], [5, 200], [6, 200]] and
+    # The warm-up and the reuse present the refreshed login; Reconnect
+    # published a newly enrolled one, generation 0.
+    ($presented | map(.[0:2])) == [[3, 200], [4, 200], [5, 200]] and
     ($presented[0][2] | type == "number" and . > 0) and
-    $presented[1][2] == $presented[0][2] and $presented[2][2] == $presented[0][2] and
-    $presented[3][2] == 0 and
+    $presented[1][2] == $presented[0][2] and
+    $presented[2][2] == 0 and
     ($requests | length >= 3) and
     ($requests[-3:] | map([.outcome, .status])) == [["response", 200],
       ["response", 200], ["response", 200]] and
@@ -808,7 +750,7 @@ save_kind_credential_rotation_evidence() (
   umask 077
   local directory
   directory="$(mktemp -d "$RUN_DIR/credential-rotation.XXXXXX")" || return $?
-  jq -ce --arg environment "$1" --arg generation "$2" --arg workspace "$3" --arg gateway "$4" '
+  jq -ce --arg environment "$1" --arg generation "$2" --arg workspace "$3" --arg relay "$4" '
     def uuid: if type == "string" and
       test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
       then . else null end;
@@ -819,7 +761,7 @@ save_kind_credential_rotation_evidence() (
       if type != "object" then {event:null}
       elif .event == "bridge_authenticated" then {
         event, environment_id:(.environment_id | uuid), generation:(.generation | count),
-        workspace_pod_uid:(.workspace_pod_uid | uuid), gateway_pod_uid:(.gateway_pod_uid | uuid),
+        workspace_pod_uid:(.workspace_pod_uid | uuid), relay_pod_uid:(.relay_pod_uid | uuid),
         auth_sequence:(.auth_sequence | count), workspace_token_changed:(.workspace_token_changed | boolean)
       }
       elif .event == "provider_response" then {
@@ -835,7 +777,7 @@ save_kind_credential_rotation_evidence() (
     if type == "array" and length <= 4096 then {
       expected:{environment_id:($environment | uuid),
         generation:($generation | try tonumber catch null | count),
-        workspace_pod_uid:($workspace | uuid), gateway_pod_uid:($gateway | uuid)},
+        workspace_pod_uid:($workspace | uuid), relay_pod_uid:($relay | uuid)},
       events:map(event)
     } else error("invalid bounded fixture transcript") end
   ' > "$directory/evidence.pending" 2>/dev/null || {
@@ -850,10 +792,10 @@ save_kind_credential_rotation_evidence() (
 )
 
 assert_kind_credential_rotation() {
-  local environment="$1" generation="$2" workspace_uid="$3" gateway_uid="$4" session="$5" events evidence
+  local environment="$1" generation="$2" workspace_uid="$3" relay_uid="$4" session="$5" events evidence
   events="$(kind_credential_fixture_events)" || return $?
   evidence="$(save_kind_credential_rotation_evidence "$environment" "$generation" \
-    "$workspace_uid" "$gateway_uid" <<<"$events")" || return $?
+    "$workspace_uid" "$relay_uid" <<<"$events")" || return $?
   # Authentication is not Ready/admission by itself. Compose the exact live
   # authenticator transcript with the >600s epoch bound and a successful stock
   # turn after actual projected-token replacement; never print token digests.
@@ -870,7 +812,7 @@ assert_kind_credential_rotation() {
     return 1
   }
   jq -e --arg environment "$environment" --argjson generation "$generation" \
-    --arg workspace "$workspace_uid" --arg gateway "$gateway_uid" '
+    --arg workspace "$workspace_uid" --arg relay "$relay_uid" '
     def uuid: type == "string" and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
     to_entries as $events |
     [$events[] | select(.value.event == "provider_response" and .value.scenario == "baseline"
@@ -878,22 +820,23 @@ assert_kind_credential_rotation() {
     [$events[] | select(.value.event == "provider_response" and .value.scenario == "baseline"
       and .value.attempt == 2 and .value.status == 200)] as $rotation |
     [$events[] | select(.value.event == "bridge_authenticated")] as $all_auth |
-    # A source restart retains its workflow generation but replaces both Pods.
-    # Start at the exact selected identity; earlier unbound probes cannot prove
-    # this journey. Do not filter away any later identity/generation change.
+    # A source restart retains its workflow generation but replaces the
+    # workspace Pod. Start at the exact selected identity; earlier unbound
+    # probes cannot prove this journey. Do not filter away any later
+    # identity/generation change.
     [$all_auth[] | select(.value.environment_id == $environment and .value.generation == $generation and
-      .value.workspace_pod_uid == $workspace and .value.gateway_pod_uid == $gateway)] as $selected |
+      .value.workspace_pod_uid == $workspace and .value.relay_pod_uid == $relay)] as $selected |
     [$all_auth[] | select(.value.environment_id == $environment and .key >= $selected[0].key)] as $auth |
-    ($environment | uuid) and ($workspace | uuid) and ($gateway | uuid) and $generation > 0 and
+    ($environment | uuid) and ($workspace | uuid) and ($relay | uuid) and $generation > 0 and
     ($baseline | length == 1) and ($rotation | length == 1) and
     $baseline[0].key < $rotation[0].key and ($selected | length >= 2) and
     $selected[0].key < $baseline[0].key and $selected[0].value.workspace_token_changed == false and
     ([$all_auth[].value.auth_sequence] == [range(1; ($all_auth | length) + 1)]) and
     all($all_auth[].value; (.environment_id | uuid) and (.workspace_pod_uid | uuid) and
-      (.gateway_pod_uid | uuid) and (.generation | type == "number") and .generation > 0 and
+      (.relay_pod_uid | uuid) and (.generation | type == "number") and .generation > 0 and
       (.workspace_token_changed | type == "boolean")) and
     all($auth[].value; .environment_id == $environment and .generation == $generation and
-      .workspace_pod_uid == $workspace and .gateway_pod_uid == $gateway and
+      .workspace_pod_uid == $workspace and .relay_pod_uid == $relay and
       (.workspace_token_changed | type == "boolean")) and
     $all_auth[0].value.workspace_token_changed == false and
     any($auth[]; .key < $baseline[0].key) and
@@ -911,9 +854,9 @@ kind_credential_native_smoke() (
     return 0
   fi
   log "running public platform enrollment/profile/native Codex acceptance with synthetic credentials"
-  local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation gateway gateway_uid
+  local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation relay relay_pod relay_uid
   local workspace_image marker
-  local login_events login_generation update restart_generation pair renewal_stop renewal_pid=""
+  local login_events login_generation update restart_generation renewal_stop renewal_pid=""
   local member_role_changed="" bound_revision journey_from served
   # The acceptance must never die with a bare exit status again (runs 10381,
   # 10459, 10465 all lost the failing command to a silent jq exit 4). Report
@@ -961,21 +904,14 @@ kind_credential_native_smoke() (
     if type == "number" and . > 0 and . == floor then .
     else error("expected a positive operation generation") end' <<<"$update")"
   wait_kind_credential_environment "$environment" running
-  pair="$(wait_kind_credential_sandbox_pair "$environment" "$restart_generation")"
-  pod="$(sed -n '1p' <<<"$pair")"
-  gateway="$(sed -n '2p' <<<"$pair")"
+  pod="$(wait_kind_credential_restarted_workspace "$environment" "$restart_generation")"
   pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')"
-  gateway_uid="$(jq -er '.metadata.uid' <<<"$gateway")"
-  # An environment-token workspace renders its operation generation; an
-  # identity-free one takes it from its binding. The gateway renders it in
-  # both identity modes, and a rendered workspace value must agree.
-  generation="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o json | jq -er --argjson gateway "$gateway" '
-    def generation: [.spec.containers[] | .env[]? |
-      select(.name == "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION") | .value];
-    ($gateway | generation) as $expected | generation as $rendered |
-    if ($expected | length) == 1 and ($expected[0] | test("^[1-9][0-9]*$"))
-      and ($rendered == [] or $rendered == $expected)
-    then $expected[0] else error("expected exact immutable workspace generation") end')"
+  # The workspace Pod carries the update's generation; the broker reviews it
+  # against the binding orchestration recorded for that Pod.
+  generation="$restart_generation"
+  relay="$(kind_credential_relay_pod)"
+  relay_pod="$(sed -n '1p' <<<"$relay")"
+  relay_uid="$(sed -n '2p' <<<"$relay")"
   # The creator's own login reaches Codex's auth.json; stock Codex reads it as
   # ChatGPT, reads usage and completes a turn against a synthetic backend.
   login_events="$(kind_credential_codex_login "$environment" deliver)" || return $?
@@ -998,10 +934,10 @@ kind_credential_native_smoke() (
     < "$ROOT/scripts/ci/verify/kind/codex_session.py" | tee "$RUN_DIR/credential-native-session.jsonl"
   stop_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid" || return $?
   renewal_pid=""
-  assert_kind_credential_rotation "$environment" "$generation" "$pod_uid" "$gateway_uid" \
+  assert_kind_credential_rotation "$environment" "$generation" "$pod_uid" "$relay_uid" \
     "$RUN_DIR/credential-native-session.jsonl"
   assert_kind_credential_bridge_renewal "$RUN_DIR/credential-bridge-renewal.jsonl" \
-    "$(jq -er '.metadata.name' <<<"$gateway")" || return $?
+    "$environment" "$relay_pod" || return $?
   [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')" = "$pod_uid" ] || {
     echo '::error::native Codex rotation proof changed workspace Pod identity' >&2
     return 1
@@ -1013,8 +949,6 @@ kind_credential_native_smoke() (
   kind_credential_codex_login "$environment" own-login || return $?
   kind_credential_codex_login "$environment" logout || return $?
 
-  assert_no_kind_gateway_certificate "$environment" || return $?
-  assert_no_kind_codex_config_map "$environment" || return $?
   # Codex's home is ~/.codex on the persistent home: state written there
   # survives Stop/Start, as on a laptop.
   marker="kind-persistence-${RANDOM}${RANDOM}"
@@ -1023,11 +957,8 @@ kind_credential_native_smoke() (
     return $?
   kind_credential_cli env --platform stop "$environment" --output json
   wait_kind_credential_environment "$environment" stopped
-  assert_no_kind_codex_config_map "$environment" || return $?
   kind_credential_cli env --platform start "$environment" --output json
   wait_kind_credential_environment "$environment" running
-  assert_no_kind_gateway_certificate "$environment" || return $?
-  assert_no_kind_codex_config_map "$environment" || return $?
   pod="$(kind_credential_workspace "$environment")" || return $?
   [ "$(kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- \
     cat /home/codewire/.codex/kind-persistence)" = "$marker" ] || {
@@ -1097,8 +1028,6 @@ kind_credential_native_smoke() (
   # binding, so a tombstone cannot permanently pin the profile and credential.
   kind_credential_cli env --platform rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
-  assert_no_kind_gateway_certificate "$environment" || return $?
-  assert_no_kind_codex_config_map "$environment" || return $?
   kind_credential_cli credentials --platform --profile "$profile_name" delete --yes
   kind_credential_cli credentials --platform delete "$credential_name" --yes
   log "public synthetic Codex flow, ChatGPT login delivery, native rotation/retry, revocation and terminal cleanup passed"
@@ -1115,6 +1044,11 @@ KIND_CLAUDE_SUBSCRIPTION_TOKEN='sk-ant-oat01-CW_KIND_SYNTHETIC_CLAUDE_TOKEN-0123
 KIND_CLAUDE_REFUSED_TOKEN='sk-ant-oat01-CW_KIND_SYNTHETIC_REFUSED_TOKEN-0123456789abcdef'
 # Bound on one daemon-launched Claude Code session reaching a terminal state.
 KIND_CLAUDE_SESSION_ATTEMPTS=90
+# A managed restart turns the environment running a moment before its start
+# releases the setup owner, and a launch in between is refused with exactly
+# this message. Only that refusal is retried, once a second, for this long.
+KIND_SETUP_NOT_READY='environment setup is not ready; wait for setup to finish'
+KIND_LAUNCH_SETUP_SECONDS=60
 
 # The managed client selection recorded for the live binding of one exact
 # workspace Pod: the record launch authority reads. Waits briefly for the
@@ -1172,13 +1106,34 @@ kind_credential_claude_stage() {
 # daemon projects. Launch, terminal state and saved output are all unary
 # calls. Its output is closed events only; the run passes only when its
 # session exited 0 and its last event is its own completion.
+# `cw run` in ENVIRONMENT with the remaining arguments, retried only while it
+# is refused because setup is not ready yet; every other failure returns at
+# once with the launch's own status and output.
+kind_credential_launch() {
+  local environment="$1" deadline=$((SECONDS + KIND_LAUNCH_SETUP_SECONDS)) stderr output status
+  shift
+  stderr="$(mktemp "$RUN_DIR/credential-launch.XXXXXX")" || return $?
+  while :; do
+    status=0
+    output="$(kind_credential_cli run "$environment" "$@" 2>"$stderr")" || status=$?
+    if [ "$status" -eq 0 ] || ! grep -Fq -- "$KIND_SETUP_NOT_READY" "$stderr" ||
+      [ "$SECONDS" -ge "$deadline" ]; then
+      cat -- "$stderr" >&2
+      rm -f -- "$stderr"
+      [ "$status" -ne 0 ] || printf '%s\n' "$output"
+      return "$status"
+    fi
+    sleep 1
+  done
+}
+
 kind_credential_claude_run() {
   local environment="$1" driver="$2" form="$3" outcome="$4"
   local launched session attempt state output
   [[ "$driver" =~ ^/tmp/codewire-kind-claude-session-[0-9]{1,12}\.py$ ]] || return 1
   case "$form" in api_key | subscription_token) ;; *) return 1 ;; esac
   case "$outcome" in success | refused) ;; *) return 1 ;; esac
-  launched="$(kind_credential_cli run "$environment" --no-tty --detach --output json -- \
+  launched="$(kind_credential_launch "$environment" --no-tty --detach --output json -- \
     python3 -B -u "$driver" "$form" "$outcome")" || return $?
   session="$(jq -er '.session_id | select(type == "string" and test("^[A-Za-z0-9_-]{1,128}$"))' \
     <<<"$launched")" || {
@@ -1270,7 +1225,7 @@ kind_credential_claude_session() (
   fi
   log "running public Anthropic API key and Claude subscription token acceptance with stock Claude Code"
   local KIND_CREDENTIAL_CLI_HOME suffix key_name token_name key_profile token_profile environment
-  local workspace_image form profile credential update generation pair pod pod_uid clients baseline
+  local workspace_image form profile credential update generation pod pod_uid clients baseline
   local driver
   set -E
   trap 'echo "::error::Claude Code credential acceptance failed: command=${BASH_COMMAND} status=$?" >&2' ERR
@@ -1320,8 +1275,7 @@ kind_credential_claude_session() (
       if type == "number" and . > 0 and . == floor then .
       else error("expected a positive operation generation") end' <<<"$update")"
     wait_kind_credential_environment "$environment" running
-    pair="$(wait_kind_credential_sandbox_pair "$environment" "$generation")"
-    pod="$(sed -n '1p' <<<"$pair")"
+    pod="$(wait_kind_credential_restarted_workspace "$environment" "$generation")"
     pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')"
     clients="$(kind_credential_managed_clients "$environment" "$pod_uid")"
     assert_kind_credential_claude_selection "$form" "$clients"

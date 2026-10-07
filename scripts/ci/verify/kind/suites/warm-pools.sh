@@ -446,7 +446,7 @@ warm_pool_forced_miss() {
 # An unclaimed member, while another environment is bound: its daemon has no
 # listener, its own binding token binds nothing, and it holds no credential.
 warm_pool_unbound_negatives() {
-  local member pod probe uid
+  local member pod probe probe_script uid
   member="$(kubectl -n "$SANDBOX_NS" get sandboxes -l "$WARM_POOL_MEMBER_LABEL" -o json |
     jq -r --arg pool "$WP_POOL" '[.items[]
       | select(any(.metadata.ownerReferences[]?; .kind == "SandboxWarmPool" and .name == $pool))
@@ -475,27 +475,57 @@ warm_pool_unbound_negatives() {
     jq '{labels: .metadata.labels, env: [.spec.containers[] | {name, env: [.env[]?.name]}], volumes: [.spec.volumes[]?.name]}' <<<"$pod" >&2
     return 1
   fi
-  probe="$(kubectl -n "$SANDBOX_NS" exec "$(jq -r '.metadata.name' <<<"$pod")" -c workspace -- bash -c '
-    set -u
-    listen=absent
-    for table in /proc/net/tcp /proc/net/tcp6; do
-      [ -r "$table" ] || continue
-      if awk "NR > 1 && \$4 == \"0A\" && \$2 ~ /:1E61\$/ {found = 1} END {exit !found}" "$table"; then
-        listen=present
-      fi
-    done
-    echo "daemon_listener=${listen}"
-    url="${CODEWIRE_WORKSPACE_BINDING_URL#http://}"
-    host="${url%%/*}"; port="${host##*:}"; host="${host%:*}"
-    token="$(cat /var/run/secrets/codewire/workspace-binding/token)"
-    exec 3<>"/dev/tcp/${host}/${port}"
-    printf "POST /codewire.internal.v1.WorkspaceBindingService/BindWorkspace HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nAuthorization: Bearer %s\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{\"waitSeconds\":0}" "$host" "$token" >&3
-    unset token
-    IFS= read -r -t 10 line <&3 || line=""
-    exec 3<&- 3>&-
-    echo "own_bind=$(printf "%s" "$line" | awk "{print \$2}")"
-    if [ -e /codewire/run/daemon/credential ]; then echo credential=present; else echo credential=absent; fi
-  ')"
+  # Nothing may listen before binding: not the credential bridge (TCP 7777,
+  # 0x1E61), SSH (TCP 2222, 0x08AE) or the tailnet (UDP 31000, 0x7918). The
+  # own-bind call speaks TLS to the binding listener, verified with the Pod's
+  # mounted internal roots; only its status is printed, never the token.
+  probe_script="$(cat <<'PROBE'
+set -u
+listen=absent
+for table in /proc/net/tcp /proc/net/tcp6; do
+  [ -r "$table" ] || continue
+  if awk 'NR > 1 && $4 == "0A" && ($2 ~ /:1E61$/ || $2 ~ /:08AE$/) {found = 1} END {exit !found}' "$table"; then
+    listen=present
+  fi
+done
+for table in /proc/net/udp /proc/net/udp6; do
+  [ -r "$table" ] || continue
+  if awk 'NR > 1 && $2 ~ /:7918$/ {found = 1} END {exit !found}' "$table"; then
+    listen=present
+  fi
+done
+echo "daemon_listener=${listen}"
+own_bind="$(python3 - <<'PY'
+import http.client
+import os
+import ssl
+import urllib.parse
+
+url = urllib.parse.urlsplit(os.environ["CODEWIRE_WORKSPACE_BINDING_URL"])
+context = ssl.create_default_context(cafile="/run/codewire-orchestration-internal-roots/ca.crt")
+with open("/var/run/secrets/codewire/workspace-binding/token", encoding="ascii") as handle:
+    token = handle.read().strip()
+connection = http.client.HTTPSConnection(url.hostname, url.port or 443, context=context, timeout=10)
+try:
+    connection.request(
+        "POST",
+        "/codewire.internal.v1.WorkspaceBindingService/BindWorkspace",
+        body=b'{"waitSeconds":0}',
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + token},
+    )
+    print(connection.getresponse().status)
+except (OSError, http.client.HTTPException) as error:
+    print("error-" + type(error).__name__)
+finally:
+    connection.close()
+PY
+)"
+echo "own_bind=${own_bind}"
+if [ -e /codewire/run/daemon/credential ]; then echo credential=present; else echo credential=absent; fi
+PROBE
+)"
+  probe="$(kubectl -n "$SANDBOX_NS" exec "$(jq -r '.metadata.name' <<<"$pod")" -c workspace -- \
+    bash -c "$probe_script")"
   log "unclaimed member ${member}: $(tr '\n' ' ' <<<"$probe")"
   # 404: no binding is recorded for this Pod. 429: the member's own daemon
   # already holds this Pod's long-poll slot. Either way nothing binds.

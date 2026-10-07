@@ -8,7 +8,8 @@
 //! - leader-gated background loops (`WORKER_LOOPS`): the env reconciler,
 //!   sandbox-liveness, and billing-session controller, whose enqueues
 //!   SignalWithStart workflows; the warm-pool reconciler, inert until
-//!   `SANDBOX_WARM_POOL_SHAPES` names a shape; plus the per-replica
+//!   `SANDBOX_WARM_POOL_SHAPES` names a shape; the credential relay, inert
+//!   without the platform credential runtime; plus the per-replica
 //!   `image-cache` reconciler for the runtime-node image cache DaemonSet
 //!
 //! NATS is gone: there is no consumer plane and no `TENANT_LOCKS`
@@ -33,12 +34,12 @@ const DEFAULT_WORKER_LOOPS: &[&str] = &[
     "billing-session",
     "image-cache",
     "warm-pool",
+    "credential-relay",
 ];
 const CONNECT_SYNTHETIC_USER_IDS_ENV: &str = "CONNECT_SYNTHETIC_USER_IDS";
 
 const PUBLIC_CONNECT_METHODS: [&str; 1] = ["/codewire.v1.OrganizationService/GetInvitationByToken"];
-// The internal Connect app (gateway binding, Mesh authorization) is served
-// only behind TLS.
+// The internal Connect app (Mesh authorization) is served only behind TLS.
 const ORCHESTRATION_INTERNAL_TLS_PORT_ENV: &str = "ORCHESTRATION_INTERNAL_TLS_PORT";
 const DEFAULT_ORCHESTRATION_INTERNAL_TLS_PORT: u16 =
     codewire_gateway_proto::ORCHESTRATION_INTERNAL_TLS_PORT;
@@ -46,6 +47,20 @@ const ORCHESTRATION_INTERNAL_TLS_CERT_FILE_ENV: &str = "ORCHESTRATION_INTERNAL_T
 const ORCHESTRATION_INTERNAL_TLS_KEY_FILE_ENV: &str = "ORCHESTRATION_INTERNAL_TLS_KEY_FILE";
 const ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV: &str =
     codewire_orchestration::workspace_binding::ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV;
+
+/// Public origin of the coordinator a workspace daemon joins its tailnet
+/// through. Defaults to the public API origin, whose ingress routes
+/// `CoordinatorService` to the coordinator.
+const SANDBOX_PUBLIC_COORDINATOR_URL_ENV: &str = "CODEWIRE_SANDBOX_PUBLIC_COORDINATOR_URL";
+
+fn sandbox_public_coordinator_url(configured: Option<&str>, api_base_url: &str) -> String {
+    configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(api_base_url.trim())
+        .trim_end_matches('/')
+        .to_owned()
+}
 
 fn env_list(name: &str) -> Vec<String> {
     env_list_from(std::env::var(name).ok().as_deref())
@@ -130,11 +145,11 @@ fn internal_tls_files(
     }
 }
 
-/// Inside a cluster, gateways and Mesh reach the internal API, so it is
-/// served there, and only over TLS. A process outside a cluster (the
-/// checked-in `scripts/dev/dev-stack.sh` and integration verification, which
-/// blanks `KUBERNETES_SERVICE_HOST`) has no gateway or Mesh to serve and runs
-/// without it; there is no plaintext form.
+/// Inside a cluster, Mesh reaches the internal API, so it is served there,
+/// and only over TLS. A process outside a cluster (the checked-in
+/// `scripts/dev/dev-stack.sh` and integration verification, which blanks
+/// `KUBERNETES_SERVICE_HOST`) has no Mesh to serve and runs without it; there
+/// is no plaintext form.
 fn internal_tls_required(in_cluster: bool, tls_configured: bool) -> anyhow::Result<()> {
     anyhow::ensure!(
         !in_cluster || tls_configured,
@@ -144,10 +159,10 @@ fn internal_tls_required(in_cluster: bool, tls_configured: bool) -> anyhow::Resu
     Ok(())
 }
 
-/// Fail closed unless the public roots gateways will mount exist in the
-/// sandbox namespace and verify the mounted leaf for the name gateways use.
-/// A gateway rendered against missing or mismatched roots would otherwise
-/// retry its binding forever.
+/// Fail closed unless the public roots workspaces mount exist in the sandbox
+/// namespace and verify the mounted leaf for the names their clients use. A
+/// daemon rendered against missing or mismatched roots would otherwise retry
+/// its binding forever.
 async fn verify_internal_tls_roots(
     kube: Option<&kube::Client>,
     files: &ServerTlsFiles,
@@ -180,18 +195,25 @@ async fn verify_internal_tls_roots(
                 "internal TLS roots ConfigMap {sandbox_namespace}/{roots_configmap} has no ca.crt"
             )
         })?;
-    let host = codewire_orchestration::sandbox::template::orchestration_internal_tls_host(
-        server_namespace,
-    );
-    files
-        .verify_against_roots(roots.as_bytes(), &host)
-        .await
-        .with_context(|| {
-            format!(
-                "the internal TLS leaf is not trusted for {host} by ConfigMap \
-                 {sandbox_namespace}/{roots_configmap}"
-            )
-        })
+    // Mesh verifies the internal API's name; workspace daemons verify the
+    // binding listener's name with the same roots.
+    for host in [
+        codewire_orchestration::sandbox::template::orchestration_internal_tls_host(
+            server_namespace,
+        ),
+        codewire_orchestration::worker::create::workspace_binding_tls_host(server_namespace),
+    ] {
+        files
+            .verify_against_roots(roots.as_bytes(), &host)
+            .await
+            .with_context(|| {
+                format!(
+                    "the internal TLS leaf is not trusted for {host} by ConfigMap \
+                     {sandbox_namespace}/{roots_configmap}"
+                )
+            })?;
+    }
+    Ok(())
 }
 
 fn workspace_binding_bind_addr(
@@ -467,8 +489,7 @@ async fn main() -> anyhow::Result<()> {
         // Go's nil sandbox client (the route then 503s).
         kube,
         environment_daemon_endpoints,
-        // Shared session secret for the internal gateway-binding token
-        // issuance (Go: cfg.SessionSecret).
+        // Shared session secret for daemon tokens and preview authorization.
         session_secret: cfg.session_secret.clone(),
         sandbox_cfg: ctx.sandbox_cfg.clone(),
         confidential_storage_flags,
@@ -488,7 +509,7 @@ async fn main() -> anyhow::Result<()> {
 
     // The workspace-binding listener is reachable from every tenant workload,
     // so it serves only WorkspaceBindingService under its own connection,
-    // request and database limits. No health, metrics, REST, mesh or gateway
+    // request and database limits. No health, metrics, REST or mesh
     // route shares port 8087, and this service is mounted nowhere else.
     let workspace_binding_notifications =
         Arc::new(codewire_orchestration::workspace_binding::BindingNotifications::default());
@@ -496,29 +517,52 @@ async fn main() -> anyhow::Result<()> {
         pool.clone(),
         workspace_binding_notifications.clone(),
     );
-    let workspace_binding_app = codewire_orchestration::workspace_binding::app(
-        codewire_orchestration::workspace_binding::workspace_binding_router(Arc::new(
-            codewire_orchestration::workspace_binding::WorkspaceBindingState::new(
-                api_state.kube.clone(),
-                Arc::new(
-                    codewire_orchestration::workspace_binding::PgBindingStore::connect_lazy(
-                        &cfg.database_url,
-                    )?,
-                ),
-                workspace_binding_notifications,
-                &api_state.sandbox_cfg.sandbox_namespace,
-                &cfg.session_secret,
+    // Its daemons get the public coordinator and relay endpoints; the relay
+    // allocator and its token stay here.
+    let workspace_binding_state = Arc::new(
+        codewire_orchestration::workspace_binding::WorkspaceBindingState::new(
+            api_state.kube.clone(),
+            Arc::new(
+                codewire_orchestration::workspace_binding::PgBindingStore::connect_lazy(
+                    &cfg.database_url,
+                )?,
             ),
-        )),
+            workspace_binding_notifications,
+            &api_state.sandbox_cfg.sandbox_namespace,
+            &cfg.session_secret,
+        )
+        .with_access(
+            codewire_orchestration::workspace_binding::AccessSettings {
+                coordinator_url: sandbox_public_coordinator_url(
+                    std::env::var(SANDBOX_PUBLIC_COORDINATOR_URL_ENV)
+                        .ok()
+                        .as_deref(),
+                    &api_state.sandbox_cfg.api_base_url,
+                ),
+            },
+            Arc::new(
+                codewire_orchestration::workspace_binding::HttpRelayAllocator::new(Some(
+                    api_state.sandbox_cfg.udp_relay_allocator_token.clone(),
+                )),
+            ),
+        ),
+    );
+    // There is no plaintext form: inside a cluster it serves TLS with the
+    // internal identity, and outside one no workspace exists to call it, so
+    // it is not served.
+    let workspace_binding_tls = internal_tls
+        .clone()
+        .map(codewire_orchestration::workspace_binding::WorkspaceBindingTls);
+    let workspace_binding_app = codewire_orchestration::workspace_binding::app(
+        codewire_orchestration::workspace_binding::workspace_binding_router(
+            workspace_binding_state,
+        ),
     );
 
     // The internal listener is intentionally a minimal cluster-local surface:
     // no health, REST, public Connect, or edge-routed routes share its TLS
     // port 8088.
     let internal_app = AppBuilder::new("codewire-orchestration-internal")
-        .with_connect_routes(
-            codewire_orchestration::connect::internal::gateway_binding_router(api_state.clone()),
-        )
         .with_unary_connect_routes_mesh_authorization(
             codewire_orchestration::connect::mesh_authorization::router(pool.clone()),
             mesh_authorization,
@@ -623,11 +667,20 @@ async fn main() -> anyhow::Result<()> {
                 None => Ok(()),
             }
         },
-        codewire_server_core::bounded_http1::serve_bounded_http1(
-            workspace_binding_app,
-            listeners.workspace_binding,
-            codewire_orchestration::workspace_binding::LISTENER_LIMITS,
-        ),
+        async {
+            match workspace_binding_tls {
+                Some(tls) => {
+                    codewire_server_core::bounded_http1::serve_bounded_http1_upgraded(
+                        workspace_binding_app,
+                        listeners.workspace_binding,
+                        codewire_orchestration::workspace_binding::LISTENER_LIMITS,
+                        tls,
+                    )
+                    .await
+                }
+                None => Ok(()),
+            }
+        },
     )?;
     Ok(())
 }
@@ -703,6 +756,25 @@ mod tests {
     }
 
     #[test]
+    fn workspace_daemons_join_the_public_coordinator() {
+        assert_eq!(
+            sandbox_public_coordinator_url(None, "https://dev.codewire.sh/"),
+            "https://dev.codewire.sh"
+        );
+        assert_eq!(
+            sandbox_public_coordinator_url(Some(" "), "https://dev.codewire.sh"),
+            "https://dev.codewire.sh"
+        );
+        assert_eq!(
+            sandbox_public_coordinator_url(
+                Some("https://coordinator.example/"),
+                "https://dev.codewire.sh"
+            ),
+            "https://coordinator.example"
+        );
+    }
+
+    #[test]
     fn inside_a_cluster_the_internal_api_requires_its_tls_identity() {
         internal_tls_required(true, true).unwrap();
         internal_tls_required(false, true).unwrap();
@@ -745,6 +817,7 @@ mod tests {
                 "billing-session",
                 "image-cache",
                 "warm-pool",
+                "credential-relay",
             ]
         );
     }

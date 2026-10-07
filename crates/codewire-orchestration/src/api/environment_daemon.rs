@@ -1054,7 +1054,83 @@ async fn daemon_channel_for_runtime(
     .await
 }
 
-fn cluster_daemon_endpoint(namespace: &str, environment_id: &str) -> String {
+/// Push the environment's exposed application ports to its bound daemon,
+/// which serves exactly these on its tailnet address (#2460). Called after a
+/// change commits; best effort: a failed push is logged, and the daemon's
+/// next access renewal restates the set.
+pub(crate) async fn push_environment_app_ports(
+    pool: &PgPool,
+    kube: Option<&kube::Client>,
+    session_secret: &str,
+    endpoints: Option<&EnvironmentDaemonEndpointOverrides>,
+    environment_id: &str,
+) {
+    let result: AppResult<Option<usize>> = async {
+        let namespace: Option<String> = sqlx::query_scalar(
+            "SELECT namespace FROM sandbox_environment_backend WHERE environment_id = $1",
+        )
+        .bind(environment_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| AppError::InternalMsg("load environment backend".into()))?;
+        let Some(namespace) = namespace.filter(|namespace| !namespace.is_empty()) else {
+            return Ok(None);
+        };
+        let ports = crate::workspace_binding::exposed_app_ports(pool, environment_id)
+            .await
+            .map_err(|_| AppError::InternalMsg("load environment app ports".into()))?;
+        let endpoint = match endpoints {
+            Some(endpoints) => endpoints.endpoint(&namespace, environment_id),
+            None => cluster_daemon_endpoint(&namespace, environment_id),
+        };
+        let (channel, token) = daemon_channel_for_endpoint(
+            pool,
+            kube,
+            session_secret,
+            environment_id,
+            endpoint,
+            DaemonRequestBudget::Control,
+        )
+        .await?;
+        let count = ports.len();
+        send_app_ports(channel, &token, ports).await?;
+        Ok(Some(count))
+    }
+    .await;
+    match result {
+        Ok(Some(app_port_count)) => {
+            tracing::info!(
+                environment_id,
+                app_port_count,
+                "application ports pushed to the environment daemon"
+            );
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!(
+            environment_id,
+            error = %error,
+            "push application ports to the environment daemon failed; its next access renewal restates them"
+        ),
+    }
+}
+
+async fn send_app_ports(channel: Channel, token: &str, ports: Vec<i32>) -> AppResult<()> {
+    v1::daemon_service_client::DaemonServiceClient::new(channel)
+        .set_app_ports(authorize(v1::SetAppPortsRequest { ports }, token)?)
+        .await
+        .map_err(|status| {
+            AppError::Upstream(
+                format!(
+                    "environment daemon refused application ports: {:?}",
+                    status.code()
+                )
+                .into(),
+            )
+        })?;
+    Ok(())
+}
+
+pub(crate) fn cluster_daemon_endpoint(namespace: &str, environment_id: &str) -> String {
     format!(
         "http://{}.{}.svc.cluster.local:{}",
         workspace_daemon_service_name(environment_id),
@@ -1426,6 +1502,78 @@ mod tests {
             }
             self.task.await.expect("join daemon proxy harness");
         }
+    }
+
+    /// A daemon serving `SetAppPorts` into `app_ports` when given one.
+    async fn app_ports_daemon(
+        app_ports: Option<codewire_daemon::app_ports::AppPortsSender>,
+    ) -> (Channel, TempDir) {
+        let temp = tempfile::tempdir().expect("app ports daemon tempdir");
+        let config = Config {
+            listen_addr: "unused:0".into(),
+            workspace_root: temp.path().to_path_buf(),
+            home_root: temp.path().to_path_buf(),
+            auth_token: DaemonAuthToken::new(TEST_DAEMON_TOKEN).unwrap(),
+            process_execution: codewire_daemon::execution::ProcessExecution::Native,
+            credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            launch_projection: None,
+        };
+        let mut daemon = codewire_daemon::service::DaemonServiceImpl::new(config);
+        if let Some(app_ports) = app_ports {
+            daemon = daemon.with_app_ports(app_ports);
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(v1::daemon_service_server::DaemonServiceServer::new(daemon))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let channel = Endpoint::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        (channel, temp)
+    }
+
+    #[tokio::test]
+    async fn pushed_app_ports_replace_the_bound_daemons_set() {
+        let (app_ports, served) =
+            tokio::sync::watch::channel(codewire_daemon::app_ports::AppPorts::from([8080]));
+        let (channel, _temp) = app_ports_daemon(Some(app_ports)).await;
+        // After an expose: the full set, including the new port.
+        send_app_ports(channel.clone(), TEST_DAEMON_TOKEN, vec![3000, 8080])
+            .await
+            .unwrap();
+        assert_eq!(
+            *served.borrow(),
+            codewire_daemon::app_ports::AppPorts::from([3000, 8080])
+        );
+        // After an unexpose: the set without it.
+        send_app_ports(channel.clone(), TEST_DAEMON_TOKEN, vec![8080])
+            .await
+            .unwrap();
+        assert_eq!(
+            *served.borrow(),
+            codewire_daemon::app_ports::AppPorts::from([8080])
+        );
+        // Only with the daemon credential.
+        assert!(
+            send_app_ports(channel, "wrong-daemon-token", vec![])
+                .await
+                .is_err()
+        );
+        assert_eq!(served.borrow().len(), 1);
+
+        // A daemon that serves no tailnet refuses, and the caller only logs.
+        let (legacy, _legacy_temp) = app_ports_daemon(None).await;
+        assert!(
+            send_app_ports(legacy, TEST_DAEMON_TOKEN, vec![3000])
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

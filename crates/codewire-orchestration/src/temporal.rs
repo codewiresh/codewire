@@ -142,7 +142,7 @@ where
     heartbeat_ctx.record_heartbeat(Vec::new());
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    tokio::pin!(future);
+    let mut future = Box::pin(future);
 
     loop {
         tokio::select! {
@@ -166,7 +166,7 @@ where
     ctx.record_heartbeat(Vec::new());
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    tokio::pin!(future);
+    let mut future = Box::pin(future);
 
     loop {
         tokio::select! {
@@ -192,7 +192,9 @@ where
     ctx.record_heartbeat(Vec::new());
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    tokio::pin!(future);
+    // On the heap: an activity's state machine is large, and this one is
+    // otherwise held inside the activity future that the SDK moves.
+    let mut future = Box::pin(future);
 
     loop {
         tokio::select! {

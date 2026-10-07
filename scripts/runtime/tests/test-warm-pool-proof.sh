@@ -61,6 +61,31 @@ grep -qF 'the warm-member bridge selects exactly the bound Pod' "$PROOF" || fail
 grep -qF 'skip "hit $n: warm-member bridge not checked' "$PROOF" || fail 'no labelled skip without the fork label'
 grep -q 'check "hit \$n: no warm-member bridge once destroyed" bridge_absent' "$PROOF" ||
   fail 'hits do not check the bridge is removed on destroy'
+# #2460: the daemon hosts SSH and the tailnet. Every hit owns no gateway
+# object, its SSH server presents the key the platform recorded (OpenSSH
+# trusts only `cw ssh known-hosts`, never first use), the bridge has no
+# gateway half, and with SQL the served key is the live bound Pod's, after a
+# completed access_ready.
+grep -qF 'check "hit $n: no gateway objects" no_gateway_objects "$id"' "$PROOF" ||
+  fail 'hits do not check for gateway objects'
+grep -qF 'check "hit $n: SSH presents the host key the platform recorded" ssh_presents_recorded_key "$id"' "$PROOF" ||
+  fail 'hits do not prove SSH against the recorded host key'
+# The SSH check runs OpenSSH through the block `cw config-ssh` writes, as a
+# user does, never through hand-built trust options.
+for option in 'config-ssh --ssh-config-file "$config"' 'ssh -F "$config"' \
+    'env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL"' 'BatchMode=yes'; do
+  grep -qF -- "$option" "$PROOF" || fail "SSH host-key proof is missing $option"
+done
+if grep -qF 'KnownHostsCommand=' "$PROOF"; then
+  fail 'SSH host-key proof hand-builds the managed block'
+fi
+grep -qF 'sql_access_ready "$id" "$uid"' "$PROOF" || fail 'hits do not check access_ready and the recorded host key'
+grep -qF 'AND w.released_at IS NULL JOIN sandbox_ssh_host_keys k ON k.environment_id = b.environment_id AND k.pod_uid = b.pod_uid' "$PROOF" ||
+  fail 'the host-key check is not bound to the live bound Pod'
+grep -qF 'exists, but the gateway is gone' "$PROOF" || fail 'the bridge check accepts a gateway half'
+if grep -qF 'reachable through the gateway path' "$PROOF"; then
+  fail 'the proof still describes a gateway path'
+fi
 # The SQL runner only ever receives statements on stdin; no write keyword.
 if grep -nE '\b(INSERT|UPDATE|DELETE|TRUNCATE|ALTER|DROP|GRANT|COPY)\b' "$PROOF" | grep -v '^[0-9]*:#'; then
   fail 'the proof contains a SQL write statement'

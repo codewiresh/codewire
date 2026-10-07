@@ -1,10 +1,9 @@
 //! Fairness of the 8087 request limits for two workspace Pods on one node
-//! (B1 review L6). Each Pod normally has its own Pod IP, so one Pod's flood
-//! or long-poll never spends the other's peer bucket, per-Pod slot or wait.
-//! When a CNI masquerades both Pods behind one node IP the peer bucket, which
-//! is checked before any TokenReview and so before the Pod is known, is
-//! shared; the per-Pod slots and waits stay independent. Both behaviours are
-//! pinned here.
+//! (B1 review L6). Each Pod has its own Pod IP, so one Pod's flood or
+//! long-poll never spends the other's peer bucket, per-Pod slot or wait. A
+//! CNI that masquerades Pods behind the node IP is unsupported: every method
+//! requires the TCP peer to be the bound Pod's own address (daemon-hosted
+//! access S1), so such calls fail closed. Both behaviours are pinned here.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -17,14 +16,14 @@ use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, header::AUTHORIZATION};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use codewire_gateway_proto::{GATEWAY_BINDING_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
+use codewire_gateway_proto::{SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewStatus, UserInfo};
 use serde_json::{Value, json};
 use tower::service_fn;
 
 use super::service::{BindError, WorkspaceBindingState};
 use super::store::{BindingNotifications, BindingStore, BindingStoreUnavailable, LiveBinding};
-use crate::worker::gatewayauth::WorkspaceCredentialScope;
+use crate::worker::environment_auth::WorkspaceCredentialScope;
 
 const NAMESPACE: &str = "sandboxes";
 const SECRET: &str = "synthetic-session-secret";
@@ -36,6 +35,7 @@ const NODE_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 50, 3));
 
 struct WorkspacePod {
     name: &'static str,
+    ip: IpAddr,
     uid: &'static str,
     sandbox: &'static str,
     sandbox_uid: &'static str,
@@ -45,6 +45,7 @@ struct WorkspacePod {
 
 const POD_A: WorkspacePod = WorkspacePod {
     name: "sandbox-a",
+    ip: POD_IP_A,
     uid: "7e7b20f6-0bd2-4f11-8b16-9c239851eb52",
     sandbox: "sandbox-a",
     sandbox_uid: "5a4db0c5-6d1e-4b0f-9b3c-2f0e7c1d9a11",
@@ -54,6 +55,7 @@ const POD_A: WorkspacePod = WorkspacePod {
 
 const POD_B: WorkspacePod = WorkspacePod {
     name: "sandbox-b",
+    ip: POD_IP_B,
     uid: "a1560db3-8899-40c9-b521-500f223b04fb",
     sandbox: "sandbox-b",
     sandbox_uid: "3f2b1c0d-1111-4a2b-8c3d-4e5f6a7b8c9d",
@@ -122,7 +124,7 @@ fn cluster(reviews: Arc<AtomicUsize>) -> kube::Client {
                             audiences: Some(vec![WORKSPACE_BINDING_TOKEN_AUDIENCE.into()]),
                             user: Some(UserInfo {
                                 username: Some(format!(
-                                    "system:serviceaccount:{NAMESPACE}:{GATEWAY_BINDING_SERVICE_ACCOUNT}"
+                                    "system:serviceaccount:{NAMESPACE}:{SANDBOX_SERVICE_ACCOUNT}"
                                 )),
                                 extra: Some(std::collections::BTreeMap::from([
                                     (
@@ -156,8 +158,8 @@ fn cluster(reviews: Arc<AtomicUsize>) -> kube::Client {
                             "ownerReferences": [{"apiVersion": "agents.x-k8s.io/v1beta1",
                                 "kind": "Sandbox", "name": pod.sandbox, "uid": pod.sandbox_uid,
                                 "controller": true}]},
-                        "spec": {"serviceAccountName": GATEWAY_BINDING_SERVICE_ACCOUNT, "containers": []},
-                        "status": {"phase": "Running"},
+                        "spec": {"serviceAccountName": SANDBOX_SERVICE_ACCOUNT, "containers": []},
+                        "status": {"phase": "Running", "podIP": pod.ip.to_string()},
                     }),
                 )
             } else if let Some(pod) = pods.iter().find(|pod| {
@@ -176,6 +178,13 @@ fn cluster(reviews: Arc<AtomicUsize>) -> kube::Client {
                                 "kind": "SandboxClaim", "name": "claim", "uid": pod.claim_uid,
                                 "controller": true}]},
                     }),
+                )
+            } else if path.starts_with(&format!("/api/v1/namespaces/{NAMESPACE}/services/")) {
+                // No direct-UDP LoadBalancer is provisioned.
+                json_response(
+                    StatusCode::NOT_FOUND,
+                    json!({"apiVersion": "v1", "kind": "Status", "status": "Failure",
+                        "reason": "NotFound", "code": 404}),
                 )
             } else {
                 panic!("unexpected Kubernetes request {method} {path}");
@@ -217,6 +226,7 @@ impl TwoPodStore {
                 projection_selection_sha256: None,
                 managed_credential_clients: String::new(),
                 credential_scope: WorkspaceCredentialScope::Pod,
+                environment_generation: 3,
             },
         );
     }
@@ -306,36 +316,33 @@ async fn two_pods_on_one_node_do_not_starve_each_other() {
     );
 }
 
-/// Behind one masquerading node IP both Pods share the pre-review peer
-/// bucket (the Pod is unknown before TokenReview), but their per-Pod slots
-/// and waits stay independent: A's long-poll never blocks B's bind. The
-/// daemon's one call per wait keeps two Pods far below the shared 1/s.
+/// Behind a masquerading node IP neither Pod is served: the peer is not
+/// the reviewed Pod's address (S1). The refusal comes before any binding
+/// lookup or wait, so it holds no Pod's slot.
 #[tokio::test]
-async fn behind_one_node_ip_the_bucket_is_shared_but_slots_and_waits_are_not() {
+async fn behind_a_masquerading_node_ip_no_pod_is_served() {
     let store = Arc::new(TwoPodStore::default());
+    store.bind(&POD_A);
     store.bind(&POD_B);
     let reviews = Arc::new(AtomicUsize::new(0));
-    let state = state(store.clone(), reviews);
-
-    let waiting = {
-        let state = state.clone();
-        tokio::spawn(async move { state.bind(&bearer(&POD_A), Some(NODE_IP), 20).await })
-    };
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let response = state
-        .bind(&bearer(&POD_B), Some(NODE_IP), 20)
-        .await
-        .unwrap();
-    assert_eq!(response.pod_uid, POD_B.uid);
-    assert_eq!(waiting.await.unwrap(), Err(BindError::NotFound));
-
-    // The shared bucket (burst 5) has three tokens left; a flood from either
-    // Pod drains it for both: the known residual of a masquerading CNI.
-    for _ in 0..3 {
-        let _ = state.bind(&bearer(&POD_A), Some(NODE_IP), 0).await;
+    let state = state(store.clone(), reviews.clone());
+    for pod in [&POD_A, &POD_B] {
+        assert_eq!(
+            state.bind(&bearer(pod), Some(NODE_IP), 20).await,
+            Err(BindError::PermissionDenied)
+        );
     }
-    assert_eq!(
-        state.bind(&bearer(&POD_B), Some(NODE_IP), 0).await,
-        Err(BindError::ResourceExhausted)
-    );
+    assert_eq!(reviews.load(Ordering::SeqCst), 2);
+    assert_eq!(store.queries.load(Ordering::SeqCst), 0);
+    // Each Pod still binds from its own address.
+    for pod in [&POD_A, &POD_B] {
+        assert_eq!(
+            state
+                .bind(&bearer(pod), Some(pod.ip), 0)
+                .await
+                .unwrap()
+                .pod_uid,
+            pod.uid
+        );
+    }
 }

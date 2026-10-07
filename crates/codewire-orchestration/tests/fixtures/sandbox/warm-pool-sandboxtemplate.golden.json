@@ -3,7 +3,7 @@
   "kind": "SandboxTemplate",
   "metadata": {
     "annotations": {
-      "codewire.sh/pool-revision": "3af4b975a46d4d330368488f986eeca1f2c75a2fa058324475dfe6041181411e"
+      "codewire.sh/pool-revision": "69f8de109dd0190a846807804db6cabcf0a320a11d8f98e10a11abbdb5f83947"
     },
     "labels": {
       "app.kubernetes.io/managed-by": "codewire",
@@ -108,6 +108,28 @@
               }
             }
           ]
+        },
+        {
+          "ports": [
+            {
+              "port": 3478,
+              "protocol": "UDP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "derp"
+                }
+              }
+            }
+          ]
         }
       ]
     },
@@ -146,7 +168,7 @@
               },
               {
                 "name": "CODEWIRE_WORKSPACE_BINDING_URL",
-                "value": "http://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
+                "value": "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
               },
               {
                 "name": "CODEWIRE_POD_UID",
@@ -162,7 +184,7 @@
               },
               {
                 "name": "CODEWIRE_WORKSPACE_POOL_REVISION",
-                "value": "3af4b975a46d4d330368488f986eeca1f2c75a2fa058324475dfe6041181411e"
+                "value": "69f8de109dd0190a846807804db6cabcf0a320a11d8f98e10a11abbdb5f83947"
               }
             ],
             "image": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -249,6 +271,11 @@
               {
                 "mountPath": "/var/run/secrets/codewire/workspace-binding",
                 "name": "workspace-binding-identity",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/run/codewire-orchestration-internal-roots",
+                "name": "orchestration-internal-roots",
                 "readOnly": true
               },
               {
@@ -365,6 +392,19 @@
                 }
               ]
             }
+          },
+          {
+            "configMap": {
+              "defaultMode": 292,
+              "items": [
+                {
+                  "key": "ca.crt",
+                  "path": "ca.crt"
+                }
+              ],
+              "name": "codewire-orchestration-internal-roots"
+            },
+            "name": "orchestration-internal-roots"
           },
           {
             "emptyDir": {

@@ -275,7 +275,7 @@ async fn a_credential_change_applies_to_the_very_next_lease() -> Result<()> {
 async fn an_authority_change_is_served_until_sixty_seconds_then_denied() -> Result<()> {
     for change in [
         "membership or role",
-        "gateway",
+        "relay",
         "workspace",
         "policy",
         "personal-policy",

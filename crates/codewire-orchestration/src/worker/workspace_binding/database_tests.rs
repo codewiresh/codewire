@@ -10,7 +10,6 @@ use sqlx::PgPool;
 use sqlx::postgres::PgListener;
 
 use super::*;
-use crate::api::internal::gateway_daemon_authority;
 use crate::start_metrics::StartPath;
 use crate::test_database_support::TestDatabase;
 use crate::workspace_binding::{BindingStore, PgBindingStore, WORKSPACE_BINDINGS_CHANNEL};
@@ -502,79 +501,6 @@ async fn db_the_bind_lookup_applies_every_bindability_condition() -> Result<()> 
                 .await?
                 .is_some()
         );
-        Ok(())
-    }
-    .await;
-    db.finish(result).await
-}
-
-#[tokio::test]
-#[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn db_the_gateway_credential_authority_reads_the_live_binding() -> Result<()> {
-    let db = TestDatabase::create().await?;
-    let result = async {
-        seed(&db).await?;
-        let before = gateway_daemon_authority(&db.pool, ENV_A)
-            .await
-            .map_err(|error| anyhow::anyhow!("{error}"))?
-            .expect("bindable environment");
-        ensure!(before.binding.is_none() && before.operation_generation == GENERATION);
-        ensure!(before.organization_id == ORGANIZATION && before.namespace == NAMESPACE);
-
-        fenced_write(&db.pool, &record(ENV_A, POD_1)).await?;
-        let after = gateway_daemon_authority(&db.pool, ENV_A)
-            .await
-            .map_err(|error| anyhow::anyhow!("{error}"))?
-            .expect("bindable environment");
-        let binding = after.binding.expect("live binding");
-        ensure!(binding.pod_uid == POD_1);
-        ensure!(binding.credential_scope == WorkspaceCredentialScope::Environment);
-
-        // Retried (pending), creating and starting environments are served
-        // too; others are not.
-        for (state, served) in [
-            ("pending", true),
-            ("creating", true),
-            ("starting", true),
-            ("resizing", true),
-            ("stopping", false),
-            ("stopped", false),
-            ("error", false),
-        ] {
-            sqlx::query("UPDATE environments SET state = $2 WHERE id = $1")
-                .bind(ENV_A)
-                .bind(state)
-                .execute(&db.pool)
-                .await?;
-            let authority = gateway_daemon_authority(&db.pool, ENV_A)
-                .await
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
-            ensure!(authority.is_some() == served, "{state}");
-        }
-        // A resize that replaces the Pod runs under desired `resized`; any
-        // other non-started intent is never served.
-        for (state, desired, served) in [
-            ("resizing", "resized", true),
-            ("running", "resized", false),
-            ("running", "stopped", false),
-            ("creating", "destroyed", false),
-        ] {
-            sqlx::query("UPDATE environments SET state = $2, desired_state = $3 WHERE id = $1")
-                .bind(ENV_A)
-                .bind(state)
-                .bind(desired)
-                .execute(&db.pool)
-                .await?;
-            let authority = gateway_daemon_authority(&db.pool, ENV_A)
-                .await
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
-            ensure!(authority.is_some() == served, "{state}/{desired}");
-            let store = PgBindingStore::from_pool(db.pool.clone());
-            let live = store
-                .live_binding(POD_1, NAMESPACE, &format!("sandbox-{ENV_A}"))
-                .await?;
-            ensure!(live.is_some() == served, "listener {state}/{desired}");
-        }
         Ok(())
     }
     .await;
@@ -1098,7 +1024,7 @@ async fn db_release_clears_the_pointer_and_every_live_lookup() -> Result<()> {
         let secret = "synthetic-session-secret";
         ensure!(
             environment_daemon_credential(&db.pool, None, secret, ENV_A).await?
-                == crate::worker::gatewayauth::issue_workspace_daemon_credential(
+                == crate::worker::environment_auth::issue_workspace_daemon_credential(
                     secret, ENV_A, POD_1
                 )?
         );
@@ -1134,10 +1060,10 @@ async fn db_release_clears_the_pointer_and_every_live_lookup() -> Result<()> {
         let legacy = FakeKube::runtime(ENV_A, POD_2, WorkspaceCredentialScope::Environment);
         ensure!(
             environment_daemon_credential(&db.pool, Some(&legacy.client()), secret, ENV_A).await?
-                == crate::worker::gatewayauth::issue_token(
+                == crate::worker::environment_auth::issue_token(
                     secret,
                     ENV_A,
-                    crate::worker::gatewayauth::SCOPE_DAEMON
+                    crate::worker::environment_auth::SCOPE_DAEMON
                 )?
         );
         let unbound = FakeKube::runtime(ENV_A, POD_2, WorkspaceCredentialScope::Pod);
@@ -1802,7 +1728,6 @@ fn pool_cfg() -> SandboxWorkerCfg {
         api_base_url: "https://codewire-dev.sh".into(),
         coordinator_url: "http://codewire-coordinator.dev.svc.cluster.local:8090".into(),
         pod_namespace: "dev".into(),
-        workspace_identity_mode: crate::worker::create::WorkspaceIdentityMode::Binding,
         warm_pool_shapes: "1000m/4096Mi/10Gi=2".into(),
         ..Default::default()
     }

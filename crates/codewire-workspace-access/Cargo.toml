@@ -1,0 +1,55 @@
+[package]
+name = "codewire-workspace-access"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-only"
+description = "Workspace access for Codewire environments: the SSH, SFTP and SCP server and its daemon client."
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+codewire-client = { workspace = true }
+codewire-credential-bridge = { workspace = true }
+codewire-daemon = { workspace = true }
+codewire-gateway-proto = { workspace = true }
+codewire-tailnet = { workspace = true }
+codewire-tls = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+http = { workspace = true }
+hyper-util = { workspace = true }
+prost-types = { workspace = true }
+rand = { workspace = true }
+russh = { workspace = true }
+russh-sftp = { workspace = true }
+serde_json = { workspace = true }
+shell-words = { workspace = true }
+ssh-key = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tonic = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+zeroize = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+russh-sftp = { workspace = true }
+serde = { workspace = true }
+url = { workspace = true }
+boringtun = "0.7"
+chrono = { workspace = true }
+codewire-proto = { workspace = true }
+axum = { workspace = true }
+codewire-tls = { workspace = true, features = ["test-support"] }
+connectrpc = { workspace = true, features = ["server", "axum"] }
+futures = { workspace = true }
+codewire-credential-broker = { path = "../codewire-credential-broker", default-features = false, features = ["ssh-agent"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

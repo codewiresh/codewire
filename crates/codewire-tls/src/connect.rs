@@ -22,6 +22,7 @@ use crate::{ClientTlsEndpoint, TLS_TIMEOUT, TlsError};
 pub struct ConnectOriginTransport {
     authority: http::uri::Authority,
     endpoint: ClientTlsEndpoint,
+    http1_only: bool,
 }
 
 impl std::fmt::Debug for ConnectOriginTransport {
@@ -44,7 +45,16 @@ impl ConnectOriginTransport {
         Ok(Self {
             authority,
             endpoint,
+            http1_only: false,
         })
+    }
+
+    /// Offer only HTTP/1.1 (ALPN `http/1.1`), for a bounded listener that
+    /// refuses HTTP/2, such as the tenant-reachable workspace-binding
+    /// listener.
+    pub fn http1_only(mut self) -> Self {
+        self.http1_only = true;
+        self
     }
 }
 
@@ -68,6 +78,7 @@ impl ClientTransport for ConnectOriginTransport {
             });
         }
         let endpoint = self.endpoint.clone();
+        let http1_only = self.http1_only;
         Box::pin(async move {
             // The error class carries no path, PEM or peer detail.
             let config = endpoint.rustls_config().await.map_err(|error| {
@@ -79,9 +90,12 @@ impl ClientTransport for ConnectOriginTransport {
             http.set_connect_timeout(Some(TLS_TIMEOUT));
             let https = HttpsConnectorBuilder::new()
                 .with_tls_config(config)
-                .https_only()
-                .enable_all_versions()
-                .wrap_connector(http);
+                .https_only();
+            let https = if http1_only {
+                https.enable_http1().wrap_connector(http)
+            } else {
+                https.enable_all_versions().wrap_connector(http)
+            };
             Client::builder(TokioExecutor::new())
                 .build(https)
                 .request(request)

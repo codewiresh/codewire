@@ -358,6 +358,40 @@ impl EnvironmentClient {
             .ok_or_else(|| anyhow::anyhow!("GetEnvironmentTrustReport returned no trust report"))
     }
 
+    /// The SSH host key the platform recorded for the environment's current
+    /// generation, or `None` when none is recorded (NOT_FOUND). Every other
+    /// failure is an error, so the managed OpenSSH block fails closed instead
+    /// of trusting any key.
+    pub async fn get_environment_host_key(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+    ) -> anyhow::Result<Option<crate::commands::RecordedHostKey>> {
+        let response = match self
+            .inner
+            .get_environment_host_key(rpc::GetEnvironmentHostKeyRequest {
+                org_id: org_id.to_string(),
+                environment_id: environment_id.to_string(),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
+            Err(error) => return Err(display_client_error(error)),
+        };
+        let generation = u64::try_from(response.generation)
+            .ok()
+            .filter(|generation| *generation > 0)
+            .ok_or_else(|| {
+                anyhow::anyhow!("GetEnvironmentHostKey returned an invalid generation")
+            })?;
+        Ok(Some(crate::commands::RecordedHostKey {
+            generation,
+            public_key_openssh: response.public_key_openssh,
+        }))
+    }
+
     pub async fn get_environment_daemon_status(
         &self,
         org_id: &str,
@@ -1474,8 +1508,6 @@ fn legacy_environment_trust_report(value: rpc::EnvironmentTrustReport) -> Enviro
         images: TrustReportImages {
             workspace_image: empty_to_none(images.workspace_image),
             workspace_image_id: empty_to_none(images.workspace_image_id),
-            gateway_image: empty_to_none(images.gateway_image),
-            gateway_image_id: empty_to_none(images.gateway_image_id),
             dind_image: empty_to_none(images.dind_image),
             dind_image_id: empty_to_none(images.dind_image_id),
             daemon_init_image: empty_to_none(images.daemon_init_image),

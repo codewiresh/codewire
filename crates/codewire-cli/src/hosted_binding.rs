@@ -8,15 +8,24 @@
 //! Codex configuration, and only then listens. It never listens on an
 //! unvalidated response and never exits while unbound. Neither the projected
 //! token nor the daemon credential is ever logged.
+//!
+//! The listener serves TLS with the orchestration internal identity, checked
+//! against the mounted public roots on every call (#2460). Besides the
+//! binding, the same Pod-bound exchange refreshes the daemon's access grant,
+//! records its SSH host public key and allocates UDP peer-relay endpoints.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
+use codewire_daemon::access::{AccessFields, WorkspaceAccessGrant};
 use codewire_daemon::{BindResponseFields, WorkspaceBinding, WorkspaceBindingConfig};
 use codewire_proto::codewire::internal::v1::{
-    BindWorkspaceRequest, BindWorkspaceResponse, WorkspaceBindingServiceClient,
+    AllocatePeerRelayRequest, AllocatePeerRelayResponse, BindWorkspaceRequest,
+    BindWorkspaceResponse, RecordHostKeyRequest, RefreshAccessRequest, WorkspaceAccess,
+    WorkspaceBindingServiceClient,
 };
-use connectrpc::client::{CallOptions, ClientConfig, HttpClient};
+use codewire_tls::ConnectOriginTransport;
+use connectrpc::client::{CallOptions, ClientConfig};
 use connectrpc::{ConnectError, ErrorCode};
 use http::HeaderValue;
 use http::header::AUTHORIZATION;
@@ -89,40 +98,62 @@ impl AttemptError {
     }
 }
 
+/// A binding the daemon accepted, with its access grant when the listener
+/// issued one.
+#[derive(Debug)]
+pub(crate) struct BoundWorkspace {
+    pub binding: WorkspaceBinding,
+    pub access: Option<WorkspaceAccessGrant>,
+}
+
 /// The Connect client for one daemon's binding exchange.
 pub(crate) struct BindingClient {
-    client: WorkspaceBindingServiceClient<HttpClient>,
+    client: WorkspaceBindingServiceClient<ConnectOriginTransport>,
     token_path: PathBuf,
     timing: BindTiming,
+    /// The listener admits one in-flight request per Pod: every call holds
+    /// this for its whole duration.
+    in_flight: tokio::sync::Mutex<()>,
 }
 
 impl BindingClient {
-    /// HTTP/1.1 only: the tenant-reachable listener refuses HTTP/2.
+    /// HTTPS only, verified against `tls_roots`, and HTTP/1.1 only: the
+    /// tenant-reachable listener refuses HTTP/2. Fails without usable roots.
     pub(crate) fn new(
         binding_url: &str,
+        tls_roots: &Path,
         token_path: &Path,
         timing: BindTiming,
     ) -> anyhow::Result<Self> {
-        let config =
-            ClientConfig::new(binding_url.parse()?).with_default_timeout(timing.deadline());
+        let origin = binding_url.trim_end_matches('/');
+        let transport = ConnectOriginTransport::for_origin(origin, tls_roots)
+            .map_err(|_| anyhow::anyhow!("workspace binding requires an https origin and roots"))?
+            .http1_only();
+        let config = ClientConfig::new(origin.parse()?).with_default_timeout(timing.deadline());
         Ok(Self {
-            client: WorkspaceBindingServiceClient::new(HttpClient::plaintext(), config),
+            client: WorkspaceBindingServiceClient::new(transport, config),
             token_path: token_path.to_owned(),
             timing,
+            in_flight: tokio::sync::Mutex::new(()),
         })
     }
 
-    /// One `BindWorkspace` call. The projected token is reread every time,
-    /// because the kubelet rotates it.
-    pub(crate) async fn attempt(
-        &self,
-        config: &WorkspaceBindingConfig,
-    ) -> Result<WorkspaceBinding, AttemptError> {
+    /// Call options carrying the current projected token. It is reread every
+    /// time, because the kubelet rotates it.
+    async fn authorized(&self) -> Result<CallOptions, AttemptError> {
         let token = read_binding_token(&self.token_path)
             .await
             .ok_or(AttemptError::IdentityUnavailable)?;
-        let options = call_options(&token).ok_or(AttemptError::IdentityUnavailable)?;
-        drop(token);
+        call_options(&token).ok_or(AttemptError::IdentityUnavailable)
+    }
+
+    /// One `BindWorkspace` call.
+    pub(crate) async fn attempt(
+        &self,
+        config: &WorkspaceBindingConfig,
+    ) -> Result<BoundWorkspace, AttemptError> {
+        let _in_flight = self.in_flight.lock().await;
+        let options = self.authorized().await?;
         let response: BindWorkspaceResponse = match self
             .client
             .bind_workspace_with_options(
@@ -146,13 +177,108 @@ impl BindingClient {
             managed_credential_clients: &response.managed_credential_clients,
         };
         let accepted = config.validate(&fields);
-        // The response owns a copy of the credential; wipe it either way.
+        // The response owns copies of the credential and peer token; wipe
+        // them either way.
         let mut response = response;
         drop(Zeroizing::new(std::mem::take(
             &mut response.daemon_credential,
         )));
-        accepted.map_err(|_| AttemptError::InvalidResponse)
+        let access = match response.access.as_option() {
+            None => Ok(None),
+            Some(access) => validate_access(access).map(Some),
+        };
+        if let Some(access) = response.access.as_option_mut() {
+            drop(Zeroizing::new(std::mem::take(&mut access.peer_token)));
+        }
+        let binding = accepted.map_err(|_| AttemptError::InvalidResponse)?;
+        // The grant names the environment's current operation generation,
+        // which may move on after the binding's.
+        Ok(BoundWorkspace {
+            binding,
+            access: access?,
+        })
     }
+
+    /// A fresh access grant for the bound Pod.
+    pub(crate) async fn refresh_access(&self) -> Result<WorkspaceAccessGrant, AttemptError> {
+        let _in_flight = self.in_flight.lock().await;
+        let options = self.authorized().await?;
+        let mut response = self
+            .client
+            .refresh_access_with_options(RefreshAccessRequest::default(), options)
+            .await
+            .map_err(|error| classify(&error))?
+            .into_owned();
+        let access = response
+            .access
+            .as_option()
+            .ok_or(AttemptError::InvalidResponse)
+            .and_then(validate_access);
+        if let Some(access) = response.access.as_option_mut() {
+            drop(Zeroizing::new(std::mem::take(&mut access.peer_token)));
+        }
+        access
+    }
+
+    /// Record this Pod's SSH host public key (`ssh-ed25519 <base64>`).
+    /// Recording the same key again succeeds; a different key for the same
+    /// environment and generation is `failed_precondition`.
+    pub(crate) async fn record_host_key(
+        &self,
+        public_key_openssh: &str,
+    ) -> Result<(), AttemptError> {
+        let options = self.authorized().await?;
+        self.client
+            .record_host_key_with_options(
+                RecordHostKeyRequest {
+                    public_key_openssh: public_key_openssh.to_owned(),
+                    ..Default::default()
+                },
+                options,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| classify(&error))
+    }
+
+    /// Allocate a UDP peer-relay endpoint between this environment's node
+    /// (`disco_keys[0]`) and one peer (`disco_keys[1]`).
+    pub(crate) async fn allocate_peer_relay(
+        &self,
+        disco_keys: [String; 2],
+        relay_generation: u32,
+    ) -> Result<AllocatePeerRelayResponse, AttemptError> {
+        let _in_flight = self.in_flight.lock().await;
+        let options = self.authorized().await?;
+        self.client
+            .allocate_peer_relay_with_options(
+                AllocatePeerRelayRequest {
+                    disco_keys: disco_keys.to_vec(),
+                    relay_generation,
+                    ..Default::default()
+                },
+                options,
+            )
+            .await
+            .map(|response| response.into_owned())
+            .map_err(|error| classify(&error))
+    }
+}
+
+fn validate_access(access: &WorkspaceAccess) -> Result<WorkspaceAccessGrant, AttemptError> {
+    WorkspaceAccessGrant::validate(
+        &AccessFields {
+            peer_token: &access.peer_token,
+            peer_token_expires_at: access.peer_token_expires_at,
+            operation_generation: access.operation_generation,
+            coordinator_url: &access.coordinator_url,
+            direct_udp_endpoints: &access.direct_udp_endpoints,
+            peer_relay_endpoints: &access.peer_relay_endpoints,
+            app_ports: &access.app_ports,
+        },
+        SystemTime::now(),
+    )
+    .map_err(|_| AttemptError::InvalidResponse)
 }
 
 fn classify(error: &ConnectError) -> AttemptError {
@@ -168,7 +294,7 @@ fn classify(error: &ConnectError) -> AttemptError {
 pub(crate) async fn bind_until_accepted(
     client: &BindingClient,
     config: &WorkspaceBindingConfig,
-) -> WorkspaceBinding {
+) -> BoundWorkspace {
     let timing = client.timing;
     let mut backoff = timing.initial_backoff;
     let mut attempts = 0_u64;
@@ -176,9 +302,13 @@ pub(crate) async fn bind_until_accepted(
         attempts = attempts.saturating_add(1);
         let started = tokio::time::Instant::now();
         let error = match client.attempt(config).await {
-            Ok(binding) => {
-                tracing::info!(attempts, "workspace binding accepted");
-                return binding;
+            Ok(bound) => {
+                tracing::info!(
+                    attempts,
+                    access = bound.access.is_some(),
+                    "workspace binding accepted"
+                );
+                return bound;
             }
             Err(error) => error,
         };

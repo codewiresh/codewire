@@ -40,6 +40,12 @@ service EnvironmentService {
   rpc GetEnvironmentTrustReport(GetEnvironmentTrustReportRequest) returns (GetEnvironmentTrustReportResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
+  // The SSH host public key the daemon of the environment's currently bound
+  // Pod recorded, for the client's known_hosts. A released or replaced Pod's
+  // key is never returned; none recorded is NOT_FOUND.
+  rpc GetEnvironmentHostKey(GetEnvironmentHostKeyRequest) returns (GetEnvironmentHostKeyResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
   rpc GetEnvironmentDaemonStatus(GetEnvironmentDaemonStatusRequest) returns (GetEnvironmentDaemonStatusResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
@@ -221,6 +227,18 @@ message GetEnvironmentRequest {
 message GetEnvironmentResponse {
   Environment environment = 1;
   google.protobuf.Duration poll_interval = 2;
+}
+
+message GetEnvironmentHostKeyRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message GetEnvironmentHostKeyResponse {
+  // The environment operation generation the key was recorded at.
+  int64 generation = 1;
+  // One OpenSSH public key line, `ssh-ed25519 <base64>`, without a comment.
+  string public_key_openssh = 2;
 }
 
 message EnvironmentResources {
@@ -488,10 +506,10 @@ message TrustReportPlacement {
 }
 
 message TrustReportImages {
+  reserved 3, 4;
+  reserved "gateway_image", "gateway_image_id";
   string workspace_image = 1;
   string workspace_image_id = 2;
-  string gateway_image = 3;
-  string gateway_image_id = 4;
   string dind_image = 5;
   string dind_image_id = 6;
   string daemon_init_image = 7;

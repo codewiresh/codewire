@@ -21,7 +21,7 @@ use super::create::{
 };
 use super::env_data::{load_backend_row, load_environment};
 use super::env_log::emit_authoritative_environment_log_for_states;
-use super::gatewayauth::issue_environment_tokens;
+use super::environment_auth::issue_environment_daemon_token;
 use super::port_dns;
 use super::setup::{
     handle_post_start_configuration, is_setup_activity_cancelled, is_setup_recovery_failed,
@@ -33,6 +33,7 @@ use crate::lifecycle::{Action, PgLifecycleStore, RuntimeAbsenceProof, Service, S
 use crate::sandbox::client::{
     ProbeResult, SandboxClient, WorkspacePodIdentity, WorkspaceSandboxIdentity,
 };
+use crate::sandbox::host_keys::RecordedHostKeys;
 
 const DELETED_TIMEOUT: Duration = Duration::from_secs(120);
 const POD_IP_POLL_TIMEOUT: Duration = Duration::from_secs(300); // start: 5-minute pod IP poll
@@ -188,7 +189,7 @@ fn sandbox_client(ctx: &WorkerContext, namespace: &str) -> anyhow::Result<Sandbo
     Ok(SandboxClient::new(kube.clone(), namespace))
 }
 
-async fn ensure_gateway_stack_for_env(
+async fn ensure_access_stack_for_env(
     ctx: &WorkerContext,
     cfg: &SandboxWorkerCfg,
     env_id: &str,
@@ -198,30 +199,30 @@ async fn ensure_gateway_stack_for_env(
     let env = load_environment(&ctx.pool, env_id).await?;
     let preset_id = env.preset_id.clone().unwrap_or_default();
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, &preset_id).await?;
-    let auth_tokens = issue_environment_tokens(&cfg.session_secret, env_id)?;
+    let daemon_auth_token = issue_environment_daemon_token(&cfg.session_secret, env_id)?;
     let opts = environment_template_opts(
         cfg,
         &image_ref,
         &template_base,
         &env,
         authority.operation_generation(),
-        &auth_tokens.coordinate,
-        &auth_tokens.daemon,
+        &daemon_auth_token,
     )?;
     let client = sandbox_client(ctx, namespace)?;
     run_template_mutation(
         authority,
         &opts,
         START_MUTATION_STATES,
-        client.ensure_gateway_stack(&opts),
+        client.ensure_access_stack(&opts),
     )
     .await?;
     authority
         .run_while_authoritative_for_states(
             START_MUTATION_STATES,
-            client.wait_for_credential_gateway_ready(
-                &opts,
+            client.wait_for_workspace_access_ready(
+                env_id,
                 super::create::ready_timeout_for_isolation(&env.isolation_tier),
+                &RecordedHostKeys(&ctx.pool),
             ),
         )
         .await
@@ -343,13 +344,13 @@ pub async fn handle_environment_stop(
     // later start binds the new Pod UID.
     release_workspace_binding(&client.client, authority, STOP_MUTATION_STATES).await?;
     if let Err(e) = authority
-        .run_external_mutation(STOP_MUTATION_STATES, client.delete_gateway_stack(env_id))
+        .run_external_mutation(STOP_MUTATION_STATES, client.delete_access_stack(env_id))
         .await
     {
         tracing::warn!(
             environment_id = env_id,
             error = %e,
-            "environment.stop: failed to delete gateway stack, continuing"
+            "environment.stop: failed to delete access stack, continuing"
         );
     }
 
@@ -443,7 +444,7 @@ pub async fn handle_environment_restart_sources(
     .await?;
     await_reconcile_or_cancel(
         &activity_ctx,
-        authority.run_external_mutation(STOP_MUTATION_STATES, client.delete_gateway_stack(&env.id)),
+        authority.run_external_mutation(STOP_MUTATION_STATES, client.delete_access_stack(&env.id)),
     )
     .await?;
     let svc = Service::for_activity(ctx.pool.clone(), authority.clone());
@@ -806,6 +807,34 @@ pub async fn handle_environment_start(
         return Err(error);
     }
 
+    // The access objects come first, as create makes them with its Claim.
+    // Stop removed them; made again only at the access wait, the daemon
+    // Service would not yet route when the environment turns running, and
+    // the credential relay's first epoch would not reach the daemon.
+    if let Err(error) = await_reconcile_or_cancel(
+        &activity_ctx,
+        super::create::run_template_mutation(
+            authority,
+            &runtime_opts,
+            START_MUTATION_STATES,
+            client.ensure_access_stack(&runtime_opts),
+        ),
+    )
+    .await
+    {
+        if is_lifecycle_control_loss(&error) {
+            return Err(error);
+        }
+        record_environment_error(
+            &svc,
+            authority,
+            env_id,
+            &format!("access objects: {error:#}"),
+        )
+        .await?;
+        return Err(error);
+    }
+
     // Wait for the sandbox to become ready again, binding an identity-free
     // Pod as soon as it is bind-ready (design §10, amended).
     if let Err(e) = await_reconcile_or_cancel(
@@ -896,8 +925,7 @@ pub async fn handle_environment_start(
         return Err(anyhow::anyhow!("update pod_ip/pod_name: {e:#}"));
     }
 
-    if let Err(e) =
-        ensure_gateway_stack_for_env(ctx, &ctx.sandbox_cfg, env_id, &ns, authority).await
+    if let Err(e) = ensure_access_stack_for_env(ctx, &ctx.sandbox_cfg, env_id, &ns, authority).await
     {
         record_environment_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
         return Err(e);
@@ -940,7 +968,7 @@ pub async fn handle_environment_start(
             emit_authoritative_environment_log_for_states(
                 authority,
                 &["running"],
-                "gateway_ready",
+                "access_ready",
                 "completed",
                 "",
                 Some(serde_json::json!({
@@ -973,7 +1001,7 @@ pub async fn handle_environment_start(
             emit_authoritative_environment_log_for_states(
                 authority,
                 &["running"],
-                "gateway_ready",
+                "access_ready",
                 "failed",
                 &format!("{e:#}"),
                 Some(serde_json::json!({

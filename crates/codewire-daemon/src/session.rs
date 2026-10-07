@@ -110,6 +110,7 @@ async fn run_exec_session(
         _ = tx.closed() => Err(std::io::Error::other("environment launch cancelled")),
     };
     if projection.is_err() {
+        log_unadmitted_launch(&config);
         let _ = child.kill().await;
         finish_cancelled_exec_launch(child.wait().await, &tx).await;
         return;
@@ -190,6 +191,22 @@ fn exec_wait_result(
             "environment process cleanup was not confirmed",
         )),
     }
+}
+
+/// A launch whose environment projection was not delivered: cancelled by
+/// its caller, refused, or not admitted before its deadline. A hosted
+/// daemon's launch waits for the platform's credential bridge, so name that
+/// dependency; nothing about the request or its values is logged.
+fn log_unadmitted_launch(config: &Config) {
+    let hosted = config
+        .credential_bridge
+        .as_ref()
+        .is_some_and(|identity| identity.transport == crate::CredentialBridgeTransport::Hosted);
+    tracing::warn!(
+        hosted_credential_bridge = hosted,
+        "environment launch was cancelled or not admitted before its deadline; \
+         a hosted launch waits for the platform credential bridge to connect"
+    );
 }
 
 async fn finish_cancelled_exec_launch(
@@ -285,6 +302,7 @@ async fn run_pty_session<S>(
     {
         Ok(input) => input,
         Err(_) => {
+            log_unadmitted_launch(&config);
             // Dropping the projection future closes the exact rendezvous and
             // cancels its bridge operation. Do not acknowledge cancellation
             // until this launcher has actually been reaped.

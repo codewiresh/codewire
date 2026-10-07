@@ -32,7 +32,7 @@ JOURNEYS_GIVEN=0
 BINDING_PORT=8087
 BINDING_HOST="codewire-orchestration-workspace-binding.${SERVER_NAMESPACE}.svc.cluster.local"
 BIND_PATH="/codewire.internal.v1.WorkspaceBindingService/BindWorkspace"
-GATEWAY_PATH="/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
+INTERNAL_PATH="/codewire.internal.v1.MeshAuthorizationService/ResolveMeshAuthorization"
 TOKEN_PATH="/var/run/secrets/codewire/workspace-binding/token"
 CREDENTIAL_PATH="/codewire/run/daemon/credential"
 
@@ -50,10 +50,10 @@ Usage:
 Journeys (default: create negatives stop-start repair resize destroy-stopped,
 then invariants when --sql-cmd is given):
   create            N timed cold creates; identity-free Pod, daemon reachable,
-                    workspace_bind before gateway_ready, wall and stage times
+                    workspace_bind before access_ready, wall and stage times
   negatives         section 14 checks from inside a workspace: own token binds,
-                    garbage bearer, gateway path and HTTP/2 refused, third
-                    concurrent connection refused, slow header closed, other
+                    garbage bearer, 8088 path and HTTP/2 refused over TLS, third
+                    concurrent connection refused, silent connection closed, other
                     orchestration ports unreachable, file modes, no token env
   stop-start        new Pod UID, same PVC UID, data kept, daemon reachable
   repair            daemon repair binds the replacement Pod
@@ -388,20 +388,20 @@ sql_stage_ms() {
 }
 
 stage_order_ok() {
-  # workspace_bind completes before gateway_ready completes (design §10).
+  # workspace_bind completes before access_ready completes (design §10).
   local id="$1" logs="$TMPDIR_PROOF/logs-$1.txt"
   # The CLI renders setup progress on stderr.
   cw env logs --follow false "$id" >"$logs" 2>&1 || return 1
-  local bind gateway
+  local bind access
   bind="$(grep -n -i 'Binding workspace\|workspace_bind' "$logs" | head -n1 | cut -d: -f1)"
-  gateway="$(grep -n -i 'Gateway ready\|gateway_ready' "$logs" | tail -n1 | cut -d: -f1)"
-  [[ -n "$bind" && -n "$gateway" && "$bind" -lt "$gateway" ]]
+  access="$(grep -n -i 'SSH access ready\|access_ready' "$logs" | tail -n1 | cut -d: -f1)"
+  [[ -n "$bind" && -n "$access" && "$bind" -lt "$access" ]]
 }
 
 # --------------------------------------------------------------- journeys
 
 journey_create() {
-  local n id started elapsed times=() binds=() gateways=()
+  local n id started elapsed times=() binds=() accesses=()
   for ((n = 1; n <= PROOF_CREATES; n++)); do
     started="$(now_ms)"
     id="$(create_env)" || { fail "create $n: cw env create"; continue; }
@@ -410,13 +410,13 @@ journey_create() {
     times+=("$elapsed")
     pass "create $n: $id ready in ${elapsed} ms (client side)"
     check "create $n: identity-free workspace Pod" pod_is_identity_free "$id"
-    check "create $n: daemon reachable through the gateway path" daemon_reachable "$id"
-    check "create $n: workspace_bind before gateway_ready" stage_order_ok "$id"
+    check "create $n: daemon reachable through the platform API" daemon_reachable "$id"
+    check "create $n: workspace_bind before access_ready" stage_order_ok "$id"
     if [[ -n "$SQL_CMD" ]]; then
       check "create $n: one live Pod-scope binding for the current Pod" sql_binding "$id" "$(pod_uid "$id")"
       binds+=("$(sql_stage_ms "$id" workspace_bind)")
-      gateways+=("$(sql_stage_ms "$id" gateway_ready)")
-      log "create $n: workspace_bind=${binds[-1]:-?} ms gateway_ready=${gateways[-1]:-?} ms complete=$(sql_stage_ms "$id" complete) ms"
+      accesses+=("$(sql_stage_ms "$id" access_ready)")
+      log "create $n: workspace_bind=${binds[-1]:-?} ms access_ready=${accesses[-1]:-?} ms complete=$(sql_stage_ms "$id" complete) ms"
     fi
     if remove_env "$id"; then
       [[ -z "$SQL_CMD" ]] || check "create $n: no live binding once destroyed" sql_released_after_destroy "$id"
@@ -430,54 +430,87 @@ journey_create() {
   fi
 }
 
-# Raw HTTP/1.1 over bash /dev/tcp inside the workspace: no curl dependency,
-# and only status lines are ever printed, never a response body.
+# Runs inside the workspace. The binding listener is TLS-only: every request
+# is made over TLS by python3, verified with the Pod's mounted internal roots
+# and the listener's Service name. Only status codes and outcomes are
+# printed: the token is read from its file and never leaves the process.
 negatives_script() {
-  cat <<SCRIPT
-set -u
-host='$BINDING_HOST'; port=$BINDING_PORT
-token_file='$TOKEN_PATH'
-status() { # path bearer -> HTTP status of a Connect unary JSON call
-  exec 3<>"/dev/tcp/\$host/\$port" || { echo 000; return; }
-  printf 'POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nAuthorization: Bearer %s\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{"waitSeconds":0}' "\$1" "\$host" "\$2" >&3
-  IFS= read -r -t 10 line <&3 || line=''
-  exec 3<&- 3>&-
-  printf '%s\n' "\$line" | awk '{print \$2}'
+  printf "set -u\nhost='%s'; port=%s\ntoken_file='%s'\nbind_path='%s'\ninternal_path='%s'\ncredential_path='%s'\nserver_namespace='%s'\n" \
+    "$BINDING_HOST" "$BINDING_PORT" "$TOKEN_PATH" "$BIND_PATH" "$INTERNAL_PATH" \
+    "$CREDENTIAL_PATH" "$SERVER_NAMESPACE"
+  cat <<'SCRIPT'
+export NEG_HOST="$host" NEG_PORT="$port" NEG_TOKEN_FILE="$token_file"
+tls() { # status PATH own|garbage, or alpn
+  python3 - "$@" <<'PY'
+import http.client
+import os
+import socket
+import ssl
+import sys
+
+host, port = os.environ["NEG_HOST"], int(os.environ["NEG_PORT"])
+context = ssl.create_default_context(cafile="/run/codewire-orchestration-internal-roots/ca.crt")
+if sys.argv[1] == "alpn":
+    # HTTP/2 is not spoken on the binding listener: offering only h2 must
+    # not select it.
+    context.set_alpn_protocols(["h2"])
+    try:
+        with socket.create_connection((host, port), timeout=10) as raw:
+            with context.wrap_socket(raw, server_hostname=host) as tls:
+                print(tls.selected_alpn_protocol() or "none")
+    except (OSError, ssl.SSLError):
+        print("refused")
+    sys.exit(0)
+path, bearer = sys.argv[2], sys.argv[3]
+if bearer == "own":
+    with open(os.environ["NEG_TOKEN_FILE"], encoding="ascii") as handle:
+        bearer = handle.read().strip()
+else:
+    bearer = "garbage.not.a-token"
+connection = http.client.HTTPSConnection(host, port, context=context, timeout=10)
+try:
+    connection.request(
+        "POST",
+        path,
+        body=b'{"waitSeconds":0}',
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + bearer},
+    )
+    print(connection.getresponse().status)
+except (OSError, http.client.HTTPException):
+    print("000")
+finally:
+    connection.close()
+PY
 }
-own=\$(cat "\$token_file")
-echo "own_bind=\$(status '$BIND_PATH' "\$own")"
-echo "garbage_bind=\$(status '$BIND_PATH' 'garbage.not.a-token')"
-echo "gateway_path=\$(status '$GATEWAY_PATH' "\$own")"
-unset own
-# HTTP/2 prior knowledge is not spoken on 8087.
-exec 4<>"/dev/tcp/\$host/\$port"
-printf 'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n' >&4
-if IFS= read -r -t 5 line <&4; then echo "h2_first_line=\$(printf '%s' "\$line" | tr -cd 'A-Za-z0-9/. ')"; else echo "h2_first_line=closed"; fi
-exec 4<&- 4>&-
-# Two connections per peer: the third is refused at accept.
-exec 5<>"/dev/tcp/\$host/\$port"; printf 'POST / HTTP/1.1\r\n' >&5
-# The header timeout runs from this connection, not from the read below.
-slow_start=\$(date +%s%3N)
-exec 6<>"/dev/tcp/\$host/\$port"; printf 'POST / HTTP/1.1\r\n' >&6
+echo "own_bind=$(tls status "$bind_path" own)"
+echo "garbage_bind=$(tls status "$bind_path" garbage)"
+echo "internal_path=$(tls status "$internal_path" own)"
+echo "h2_alpn=$(tls alpn)"
+# Two connections per peer: the third is refused at accept. The first two
+# stay silent, so their TLS handshakes never start.
+slow_start=$(date +%s%3N)
+exec 5<>"/dev/tcp/$host/$port"
+exec 6<>"/dev/tcp/$host/$port"
 sleep 0.5
-if exec 7<>"/dev/tcp/\$host/\$port" 2>/dev/null; then
-  if IFS= read -r -t 2 line <&7; then echo "third_connection=answered"; else rc=\$?; [ "\$rc" -gt 128 ] && echo "third_connection=open" || echo "third_connection=closed"; fi
+if exec 7<>"/dev/tcp/$host/$port" 2>/dev/null; then
+  if IFS= read -r -t 2 line <&7; then echo "third_connection=answered"; else rc=$?; [ "$rc" -gt 128 ] && echo "third_connection=open" || echo "third_connection=closed"; fi
   exec 7<&- 7>&-
 else
   echo "third_connection=refused"
 fi
-# A slow header is closed at the 5 s header timeout.
-IFS= read -r -t 9 line <&5; rc=\$?
-echo "slow_header_closed_after_ms=\$(( \$(date +%s%3N) - slow_start ))"
-echo "slow_header_read_rc=\$rc"
+# A silent connection is closed when the handshake and request deadline,
+# 5 s after accept, passes.
+IFS= read -r -t 9 line <&5; rc=$?
+echo "slow_handshake_closed_after_ms=$(( $(date +%s%3N) - slow_start ))"
+echo "slow_handshake_read_rc=$rc"
 exec 5<&- 5>&- 6<&- 6>&-
 # Other orchestration ports stay unreachable from a workspace.
 for other in 8084 8088; do
-  if timeout 4 bash -c "exec 8<>/dev/tcp/codewire-orchestration.${SERVER_NAMESPACE}.svc.cluster.local/\$other" 2>/dev/null; then echo "port_\$other=open"; else echo "port_\$other=blocked"; fi
+  if timeout 4 bash -c "exec 8<>/dev/tcp/codewire-orchestration.${server_namespace}.svc.cluster.local/$other" 2>/dev/null; then echo "port_$other=open"; else echo "port_$other=blocked"; fi
 done
-echo "token_mode=\$(stat -L -c %a "\$token_file")"
-echo "token_group=\$(stat -L -c %g "\$token_file")"
-echo "credential_mode=\$(stat -c %a '$CREDENTIAL_PATH' 2>/dev/null || echo missing)"
+echo "token_mode=$(stat -L -c %a "$token_file")"
+echo "token_group=$(stat -L -c %g "$token_file")"
+echo "credential_mode=$(stat -c %a "$credential_path" 2>/dev/null || echo missing)"
 if env | grep -q '^CODEWIRE_DAEMON_AUTH_TOKEN='; then echo env_token=present; else echo env_token=absent; fi
 SCRIPT
 }
@@ -490,11 +523,11 @@ journey_negatives() {
   value() { awk -F= -v key="$1" '$1 == key {print $2; exit}' "$out"; }
   check "negatives: own token binds (200)" test "$(value own_bind)" = 200
   check "negatives: garbage bearer is unauthenticated (401)" test "$(value garbage_bind)" = 401
-  check "negatives: gateway binding path is absent on 8087 (404)" test "$(value gateway_path)" = 404
-  check "negatives: HTTP/2 prior knowledge refused" one_of "$(value h2_first_line)" closed 'HTTP/1.1*'
+  check "negatives: 8088 internal path is absent on 8087 (404)" test "$(value internal_path)" = 404
+  check "negatives: HTTP/2 is not negotiated" one_of "$(value h2_alpn)" refused none http/1.1
   check "negatives: third concurrent connection refused" one_of "$(value third_connection)" closed refused
-  check "negatives: slow header closed at the 5 s timeout (4.9-8 s after connect)" \
-    within_ms "$(value slow_header_closed_after_ms)" 4900 8000
+  check "negatives: a silent connection is closed at the 5 s deadline (4.9-8 s after connect)" \
+    within_ms "$(value slow_handshake_closed_after_ms)" 4900 8000
   check "negatives: 8084 unreachable from a workspace" test "$(value port_8084)" = blocked
   check "negatives: 8088 unreachable from a workspace" test "$(value port_8088)" = blocked
   # The volume asks for 0440, but kubelet writes service account tokens 0600

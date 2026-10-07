@@ -54,6 +54,7 @@ required-features = ["kind-e2e"]
 [dependencies]
 codewire-access = { workspace = true }
 codewire-admin-proto = { workspace = true }
+codewire-daemon = { workspace = true }
 codewire-daemon-bridge = { workspace = true }
 codewire-gateway-proto = { workspace = true }
 codewire-platform-credentials = { workspace = true }
@@ -79,7 +80,11 @@ k8s-openapi = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+# The credential relay's epoch cancellation (worker::credential_relay).
+tokio-util = { workspace = true }
 tonic = { workspace = true }
+# Encoded frame sizes for the credential relay's byte budgets.
+prost = { workspace = true }
 tower = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -117,7 +122,7 @@ zeroize = { workspace = true }
 tokio-tungstenite = { version = "=0.28.0", default-features = false, features = ["connect", "handshake"], optional = true }
 
 [dev-dependencies]
-codewire-daemon = { workspace = true }
+codewire-tls = { workspace = true, features = ["test-support"] }
 codewire-protected-store = { workspace = true, features = ["platform-test-support"] }
 codewire-proto = { workspace = true, features = ["client"] }
 connectrpc = { workspace = true, features = ["client"] }

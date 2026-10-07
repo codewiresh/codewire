@@ -119,7 +119,10 @@ impl Shared {
             } else {
                 Vec::new()
             }),
-            state: Mutex::new(State::default()),
+            state: Mutex::new(State {
+                public_peer_endpoints_only: options.public_peer_endpoints_only,
+                ..State::default()
+            }),
             stats: StatsAtoms::default(),
         }
     }
@@ -150,6 +153,8 @@ pub(super) struct State {
     pub(super) peers_by_relay: HashMap<RelayKey, [u8; 32]>,
     pub(super) pending_peer_relays: HashMap<[u8; 32], PendingPeerRelayRequest>,
     pub(super) pending_tx: HashMap<[u8; 12], [u8; 32]>,
+    /// See [`super::Options::public_peer_endpoints_only`].
+    pub(super) public_peer_endpoints_only: bool,
 }
 
 impl State {
@@ -435,6 +440,42 @@ pub(super) fn is_usable_direct_endpoint(endpoint: SocketAddr) -> bool {
     }
 }
 
+/// A peer-supplied address this side may send to: usable, and globally
+/// routable when `public_only` is set.
+pub(super) fn is_acceptable_peer_endpoint(endpoint: SocketAddr, public_only: bool) -> bool {
+    is_usable_direct_endpoint(endpoint) && (!public_only || is_globally_routable(endpoint.ip()))
+}
+
+/// Not loopback, private, shared (CGNAT), link-local, unique-local,
+/// multicast, broadcast or unspecified, including IPv4 inside IPv6.
+pub(super) fn is_globally_routable(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [first, second, ..] = ip.octets();
+            !(ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_multicast()
+                || first == 0
+                || (first == 100 && (second & 0xc0) == 64))
+        }
+        IpAddr::V6(ip) => {
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_globally_routable(IpAddr::V4(v4));
+            }
+            let first = ip.segments()[0];
+            !(ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_multicast()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || (first & 0xffc0) == 0xfec0)
+        }
+    }
+}
+
 pub(super) fn derp_public_from_node(node: NodePublic) -> DerpPublic {
     DerpPublic::from_raw(*node.as_bytes())
 }
@@ -468,7 +509,7 @@ pub(super) fn verified_peer_for_endpoint(
 
 impl State {
     pub(super) fn verify_endpoint(&mut self, peer_key: [u8; 32], endpoint: SocketAddr) {
-        if !is_usable_direct_endpoint(endpoint) {
+        if !is_acceptable_peer_endpoint(endpoint, self.public_peer_endpoints_only) {
             return;
         }
         let mut retired_transactions = Vec::new();
@@ -492,7 +533,8 @@ impl State {
             }
             self.peers_by_endpoint.insert(endpoint, peer_key);
             if !already_verified {
-                tracing::info!(
+                // A peer's endpoint is a person's address: debug only.
+                tracing::debug!(
                     endpoint = %endpoint,
                     "rust tailnet direct UDP endpoint verified"
                 );

@@ -289,7 +289,7 @@ impl CredentialBridge {
     }
 
     /// Queue Ready without admitting requests or replacing an active peer.
-    /// A gateway sends this stream to the private RPC before awaiting headers;
+    /// A relay sends this stream to the private RPC before awaiting headers;
     /// a daemon prepares it after validating its authenticated Open frame.
     pub fn prepare_connection(
         &self,

@@ -14,7 +14,7 @@ use crate::sandbox::image_cache::{CacheState, DesiredSet, RenderConfig, merge, r
 use crate::sandbox::template::{
     CredentialRuntimeTemplateConfig, DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_PROFILE_COMMODITY,
 };
-use crate::worker::create::{SandboxWorkerCfg, WorkspaceIdentityMode};
+use crate::worker::create::SandboxWorkerCfg;
 use crate::worker::warm_pool::WarmPoolConfig;
 
 const NAMESPACE: &str = "dev-sandboxes";
@@ -35,7 +35,6 @@ fn dev_cfg(shapes: &str) -> SandboxWorkerCfg {
         api_base_url: "https://codewire-dev.sh".into(),
         coordinator_url: "http://codewire-coordinator.dev.svc.cluster.local:8090".into(),
         pod_namespace: "dev".into(),
-        workspace_identity_mode: WorkspaceIdentityMode::Binding,
         warm_pool_shapes: shapes.into(),
         ..Default::default()
     }

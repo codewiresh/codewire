@@ -192,7 +192,7 @@ impl Fixture {
             uid: Uuid::new_v4(),
         };
         let session = PlatformRuntimeSession::new(
-            pod("gateway"),
+            pod("relay"),
             pod("workspace"),
             context,
             Owner::User(owner),

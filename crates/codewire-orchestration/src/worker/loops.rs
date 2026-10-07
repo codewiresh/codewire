@@ -105,6 +105,16 @@ pub fn start_loops(ctx: Arc<WorkerContext>, database_url: String, loops: &[Strin
                     super::warm_pool::warm_pool_loop(ctx, is_leader).await;
                 });
             }
+            // Design §4: the credential relay pulls every bound daemon's
+            // bridge to the broker. Leader-gated, so one relay serves each
+            // environment; inert without the platform credential runtime.
+            "credential-relay" => {
+                let ctx = ctx.clone();
+                let is_leader = is_leader.clone();
+                tokio::spawn(async move {
+                    super::credential_relay::credential_relay_loop(ctx, is_leader).await;
+                });
+            }
             // Not leader-gated: every orchestration Pod adds the image set it
             // renders, so a rolling deploy's new Pods warm their release
             // before the old leader steps down.

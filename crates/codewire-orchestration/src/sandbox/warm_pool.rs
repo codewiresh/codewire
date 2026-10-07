@@ -561,7 +561,6 @@ pub fn validate_pool_template_opts(opts: &TemplateOpts) -> anyhow::Result<()> {
         ("environment ID", !opts.environment_id.is_empty()),
         ("organization ID", !opts.organization_id.is_empty()),
         ("operation generation", opts.operation_generation != 0),
-        ("gateway token", !opts.gateway_token.is_empty()),
         ("daemon token", !opts.daemon_auth_token.is_empty()),
         (
             "projection digest",

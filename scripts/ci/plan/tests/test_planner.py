@@ -285,8 +285,6 @@ class FixtureRepository:
                         "Cargo.toml",
                         "Cargo.lock",
                         "crates/**",
-                        "deployments/docker/gateway.Cargo.lock",
-                        "deployments/docker/gateway.Cargo.toml",
                         "deployments/docker/gateway.Dockerfile",
                         "deployments/docker/gateway.Dockerfile.dockerignore",
                         "libs/gateway-proto/**",

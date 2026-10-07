@@ -5,7 +5,7 @@
 //! workspace, and after the wait the Pod → Sandbox → SandboxClaim chain must
 //! match the recorded binding by UID.
 
-use codewire_gateway_proto::GATEWAY_BINDING_SERVICE_ACCOUNT;
+use codewire_gateway_proto::SANDBOX_SERVICE_ACCOUNT;
 use codewire_server_core::pod_identity::VerifiedPodIdentity;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -41,7 +41,7 @@ pub(super) fn bindable_pod(pod: &Pod, identity: &VerifiedPodIdentity) -> Option<
             .spec
             .as_ref()
             .and_then(|spec| spec.service_account_name.as_deref())
-            != Some(GATEWAY_BINDING_SERVICE_ACCOUNT)
+            != Some(SANDBOX_SERVICE_ACCOUNT)
         || label(metadata, LABEL_TYPE) != Some("workspace")
         || pod
             .status

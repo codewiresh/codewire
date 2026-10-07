@@ -266,7 +266,7 @@ impl CredentialBridge {
             if !*accepting || owner.shutdown.is_cancelled() {
                 return;
             }
-            // The gateway admits the next epoch before the current identity
+            // The relay admits the next epoch before the current identity
             // expires and ends the replaced one itself: that epoch finishes
             // only the requests already sent on it, for at most 90 seconds,
             // and new ones go here.

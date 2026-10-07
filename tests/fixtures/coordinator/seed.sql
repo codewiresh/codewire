@@ -72,9 +72,11 @@ VALUES (
     '{"schema_version":1,"working_directory":"/workspace"}'::jsonb
 );
 
+-- The running environment's peer is proven at operation generation 1.
 INSERT INTO environments (
     id, org_id, created_by, type, state, name, preset_id,
-    cpu_millicores, memory_mb, total_running_seconds, project_spec
+    cpu_millicores, memory_mb, total_running_seconds, project_spec,
+    environment_operation_generation
 )
 VALUES
     (
@@ -88,7 +90,8 @@ VALUES
         500,
         1024,
         0,
-        '{"schema_version":1,"working_directory":"/workspace"}'::jsonb
+        '{"schema_version":1,"working_directory":"/workspace"}'::jsonb,
+        1
     ),
     (
         '00000000-0000-4000-8000-000000000902',
@@ -101,5 +104,6 @@ VALUES
         500,
         1024,
         0,
-        '{"schema_version":1,"working_directory":"/workspace"}'::jsonb
+        '{"schema_version":1,"working_directory":"/workspace"}'::jsonb,
+        1
     );

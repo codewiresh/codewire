@@ -252,26 +252,20 @@ async fn destroy_proves_the_recorded_workspace_pvc_gone_even_before_adoption() {
 }
 
 fn insert_bridge(objects: &Arc<Mutex<Objects>>, environment: &str) {
-    for name in [
-        warm_member_daemon_bridge_name(environment),
-        warm_member_gateway_bridge_name(environment),
-    ] {
-        objects.lock().unwrap().insert(
-            ("networkpolicies".into(), name.clone()),
-            json!({"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
-                "metadata":{"name":name,"namespace":"dev-sandboxes","uid":format!("uid-{name}"),
-                    "labels":{LABEL_ENV_ID:environment}}}),
-        );
-    }
+    let name = warm_member_daemon_bridge_name(environment);
+    objects.lock().unwrap().insert(
+        ("networkpolicies".into(), name.clone()),
+        json!({"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+            "metadata":{"name":name,"namespace":"dev-sandboxes","uid":format!("uid-{name}"),
+                "labels":{LABEL_ENV_ID:environment}}}),
+    );
 }
 
-fn has_bridge(objects: &Arc<Mutex<Objects>>, environment: &str) -> [bool; 2] {
-    let objects = objects.lock().unwrap();
-    [
+fn has_bridge(objects: &Arc<Mutex<Objects>>, environment: &str) -> bool {
+    objects.lock().unwrap().contains_key(&(
+        "networkpolicies".into(),
         warm_member_daemon_bridge_name(environment),
-        warm_member_gateway_bridge_name(environment),
-    ]
-    .map(|name| objects.contains_key(&("networkpolicies".into(), name)))
+    ))
 }
 
 /// Program #2238 C6 (#2434): both bridge halves are environment residue and
@@ -279,7 +273,7 @@ fn has_bridge(objects: &Arc<Mutex<Objects>>, environment: &str) -> [bool; 2] {
 /// delete; a cold re-claim deletes them by name. Another environment's
 /// bridge is never touched.
 #[tokio::test]
-async fn warm_member_bridge_is_residue_and_leaves_with_the_gateway_stack() {
+async fn warm_member_bridge_is_residue_and_leaves_with_the_access_stack() {
     let (client, objects) = fixture(false, false, false);
     insert_bridge(&objects, "env-test");
     insert_bridge(&objects, "env-foreign");
@@ -287,20 +281,20 @@ async fn warm_member_bridge_is_residue_and_leaves_with_the_gateway_stack() {
         .environment_residue("env-test", "", None, false)
         .await
         .unwrap();
-    for name in ["cw-daemon-warm-env-test", "cw-gw-warm-env-test"] {
-        assert!(
-            residue.resources.contains(&format!("NetworkPolicy/{name}")),
-            "{name} is not residue: {:?}",
-            residue.resources
-        );
-    }
-    client.delete_gateway_stack("env-test").await.unwrap();
-    assert_eq!(has_bridge(&objects, "env-test"), [false, false]);
-    assert_eq!(has_bridge(&objects, "env-foreign"), [true, true]);
+    assert!(
+        residue
+            .resources
+            .contains(&"NetworkPolicy/cw-daemon-warm-env-test".to_owned()),
+        "the bridge is not residue: {:?}",
+        residue.resources
+    );
+    client.delete_access_stack("env-test").await.unwrap();
+    assert!(!has_bridge(&objects, "env-test"));
+    assert!(has_bridge(&objects, "env-foreign"));
 
     insert_bridge(&objects, "env-test");
     client.delete_warm_member_bridge("env-test").await.unwrap();
-    assert_eq!(has_bridge(&objects, "env-test"), [false, false]);
+    assert!(!has_bridge(&objects, "env-test"));
     // NotFound is success.
     client.delete_warm_member_bridge("env-test").await.unwrap();
 
@@ -309,15 +303,15 @@ async fn warm_member_bridge_is_residue_and_leaves_with_the_gateway_stack() {
         .delete_environment_resources("env-test", "", None, false, Duration::from_secs(1))
         .await
         .unwrap();
-    assert_eq!(has_bridge(&objects, "env-test"), [false, false]);
-    assert_eq!(has_bridge(&objects, "env-foreign"), [true, true]);
+    assert!(!has_bridge(&objects, "env-test"));
+    assert!(has_bridge(&objects, "env-foreign"));
 }
 
 /// The bridge is created only through the renderer: a recorded Sandbox UID
 /// that is not a canonical UUID writes nothing, and unmanaged network
 /// policies are left alone.
 #[tokio::test]
-async fn warm_member_bridge_applies_both_halves_for_a_canonical_uid_only() {
+async fn warm_member_bridge_applies_the_daemon_half_for_a_canonical_uid_only() {
     const ENVIRONMENT: &str = "be31063a-8ec8-46d5-aa17-75cda1729370";
     const SANDBOX: &str = "0b6f4a52-5d1e-4c2a-9a4e-3f1d2c7b8e90";
     let (client, objects) = fixture(false, false, false);
@@ -342,12 +336,12 @@ async fn warm_member_bridge_applies_both_halves_for_a_canonical_uid_only() {
         .ensure_warm_member_bridge(&unmanaged, SANDBOX)
         .await
         .unwrap();
-    assert_eq!(has_bridge(&objects, ENVIRONMENT), [false, false]);
+    assert!(!has_bridge(&objects, ENVIRONMENT));
     client
         .ensure_warm_member_bridge(&opts, SANDBOX)
         .await
         .unwrap();
-    assert_eq!(has_bridge(&objects, ENVIRONMENT), [true, true]);
+    assert!(has_bridge(&objects, ENVIRONMENT));
     let daemon = objects.lock().unwrap()[&(
         "networkpolicies".into(),
         warm_member_daemon_bridge_name(ENVIRONMENT),

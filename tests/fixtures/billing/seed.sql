@@ -290,5 +290,5 @@ INSERT INTO environment_logs (id, environment_id, phase, status, message, metada
 VALUES
     ('log_startup_1', 'env_contract_journal', 'create_claim', 'completed', 'claim created', '{"duration_ms": 100}', NOW() - INTERVAL '4 minutes'),
     ('log_startup_2', 'env_contract_journal', 'wait_for_ready', 'completed', 'sandbox ready', '{"duration_ms": 250.9}', NOW() - INTERVAL '3 minutes'),
-    ('log_startup_3', 'env_contract_journal', 'gateway_ready', 'completed', NULL, '{"duration_ms": 75}', NOW() - INTERVAL '2 minutes'),
+    ('log_startup_3', 'env_contract_journal', 'access_ready', 'completed', NULL, '{"duration_ms": 75}', NOW() - INTERVAL '2 minutes'),
     ('log_startup_4', 'env_contract_journal', 'file_ready', 'completed', NULL, NULL, NOW() - INTERVAL '1 minute');

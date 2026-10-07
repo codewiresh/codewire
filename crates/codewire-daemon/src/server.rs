@@ -178,7 +178,7 @@ where
     IE: Into<Box<dyn Error + Send + Sync>>,
     F: Future<Output = ()> + Send + 'static,
 {
-    serve(config, runtime_state, None, incoming, shutdown).await
+    serve(config, runtime_state, None, None, incoming, shutdown).await
 }
 
 /// The hosted workspace daemon: [`serve_grpc_with_incoming`] plus, on a hosted
@@ -202,6 +202,35 @@ where
         config,
         DaemonRuntimeState::ready(),
         Some(codex_home),
+        None,
+        incoming,
+        shutdown,
+    )
+    .await
+}
+
+/// [`serve_hosted_grpc_with_incoming`] for a bound daemon that serves the
+/// environment's application ports: `SetAppPorts` replaces the set in
+/// `app_ports`.
+#[cfg(target_os = "linux")]
+pub async fn serve_bound_hosted_grpc_with_incoming<I, IO, IE, F>(
+    config: Config,
+    codex_home: crate::codex_home::CodexHome,
+    app_ports: crate::app_ports::AppPortsSender,
+    incoming: I,
+    shutdown: F,
+) -> Result<()>
+where
+    I: Stream<Item = std::result::Result<IO, IE>> + Send + 'static,
+    IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
+    IE: Into<Box<dyn Error + Send + Sync>>,
+    F: Future<Output = ()> + Send + 'static,
+{
+    serve(
+        config,
+        DaemonRuntimeState::ready(),
+        Some(codex_home),
+        Some(app_ports),
         incoming,
         shutdown,
     )
@@ -217,6 +246,7 @@ async fn serve<I, IO, IE, F>(
     config: Config,
     runtime_state: DaemonRuntimeState,
     codex_home: Option<CodexLoginHome>,
+    app_ports: Option<crate::app_ports::AppPortsSender>,
     incoming: I,
     shutdown: F,
 ) -> Result<()>
@@ -239,7 +269,10 @@ where
     }
     #[cfg(target_os = "linux")]
     let startup_config = config.clone();
-    let implementation = DaemonServiceImpl::with_runtime_state(config, runtime_state);
+    let mut implementation = DaemonServiceImpl::with_runtime_state(config, runtime_state);
+    if let Some(app_ports) = app_ports {
+        implementation = implementation.with_app_ports(app_ports);
+    }
     let session_owner = implementation.session_engine();
     let _session_cancellation = session_owner.cancel_on_drop();
     let bridge_owner = implementation.credential_bridge();

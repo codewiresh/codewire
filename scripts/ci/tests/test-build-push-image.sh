@@ -299,7 +299,7 @@ verify_kind_build_cache_contract() {
     fail 'Kind images are not marked non-promotable'
   # shellcheck disable=SC2016
   count="$(grep -cF 'cargo build --locked --profile "$CODEWIRE_RUST_PROFILE"' "$GATEWAY_DOCKERFILE")"
-  [[ "$count" -eq 2 ]] || fail 'gateway must preserve its two distinct profile-selected builds'
+  [[ "$count" -eq 1 ]] || fail 'the support image must build only cw, profile-selected'
   grep -qF -- '-p codewire-cli-bin --bin cw' "$GATEWAY_DOCKERFILE" ||
     fail 'gateway support image does not build the self-contained cw binary'
   if grep -Eq -- '--bin codewire-daemon|/usr/local/bin/(daemon|codewire-daemon)' \

@@ -18,29 +18,45 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::peer::{DbPeerVerifier, PEER_RECHECK_INTERVAL, PeerProof, PeerVerifier, ProofError};
 use crate::session::{
-    SessionInput, SessionOutput, SessionPeer, SessionSink, SessionSource, run_peer_session,
+    PeerChecks, SessionInput, SessionOutput, SessionPeer, SessionSink, SessionSource,
+    run_peer_session,
 };
 use crate::{
-    CoordinationPlane, CoordinatorState, PeerEvent, PeerKind, PeerRegistry, SCOPE_COORDINATE,
-    Transport, authorize_client, authorize_sidecar, bearer_token, sidecar_token,
+    CoordinationPlane, CoordinatorState, PeerEvent, PeerKind, PeerRegistry, Transport,
+    authorize_client, bearer_token,
 };
 
 pub(crate) fn router(state: CoordinatorState, auth: AuthState) -> axum::Router {
+    let verifier: Arc<dyn PeerVerifier> = Arc::new(DbPeerVerifier::new(
+        state.pool.clone(),
+        state.session_secret.clone(),
+    ));
     router_with_authorizer(
         state.clone(),
-        Arc::new(ProductionAuthorizer { state, auth }),
+        Arc::new(ProductionAuthorizer {
+            state,
+            auth,
+            verifier: verifier.clone(),
+        }),
+        PeerChecks {
+            verifier,
+            recheck: PEER_RECHECK_INTERVAL,
+        },
     )
 }
 
 fn router_with_authorizer(
     state: CoordinatorState,
     authorizer: Arc<dyn CoordinateAuthorizer>,
+    checks: PeerChecks,
 ) -> axum::Router {
     let connect = connectrpc::Router::new().add_service(Arc::new(CoordinateService {
         peers: state.peers,
         coordination: state.coordination,
         authorizer,
+        checks,
     }));
     codewire_server_core::connect::connect_router_with_protocol_policy(
         connect,
@@ -53,6 +69,8 @@ struct AuthorizedPeer {
     peer_id: Uuid,
     sidecar_id: Option<Uuid>,
     kind: PeerKind,
+    /// An environment peer's connect-time proof.
+    proof: Option<PeerProof>,
 }
 
 type AuthorizationFuture<'a> =
@@ -65,6 +83,7 @@ trait CoordinateAuthorizer: Send + Sync {
 struct ProductionAuthorizer {
     state: CoordinatorState,
     auth: AuthState,
+    verifier: Arc<dyn PeerVerifier>,
 }
 
 impl CoordinateAuthorizer for ProductionAuthorizer {
@@ -92,37 +111,40 @@ impl ProductionAuthorizer {
             ));
         }
 
-        let bearer = bearer_token(headers);
-        if let Some((token, claims)) = bearer.and_then(|token| {
-            sidecar_token::validate(&self.state.session_secret, token)
-                .ok()
-                .map(|claims| (token, claims))
-        }) {
-            if !hello.org_id.trim().is_empty() {
-                return Err(ConnectError::invalid_argument(
-                    "sidecar hello must not include org_id",
-                ));
-            }
-            if claims.scope != SCOPE_COORDINATE {
-                return Err(ConnectError::permission_denied(
-                    "invalid sidecar token scope",
-                ));
-            }
-            if claims.environment_id != hello.environment_id {
-                return Err(ConnectError::permission_denied(
-                    "hello environment does not match sidecar token",
-                ));
-            }
-            let environment_id = Uuid::parse_str(&hello.environment_id)
+        // A hello without an organization is an environment's own peer: it
+        // authenticates only with a peer token for that environment at its
+        // current operation generation. Legacy coordinate tokens are refused.
+        if hello.org_id.trim().is_empty() {
+            let environment_id = Uuid::parse_str(hello.environment_id.trim())
                 .map_err(|_| ConnectError::invalid_argument("invalid environment id"))?;
-            if let Err(response) = authorize_sidecar(&self.state, environment_id, token).await {
-                return Err(response_to_connect_error(response).await);
-            }
+            let token = bearer_token(headers)
+                .ok_or_else(|| ConnectError::unauthenticated("peer token required"))?;
+            let proof = match self.verifier.verify(environment_id, token).await {
+                Ok(proof) => proof,
+                Err(ProofError::Refused) => {
+                    return Err(ConnectError::unauthenticated(
+                        "invalid, expired or superseded peer token",
+                    ));
+                }
+                Err(ProofError::Unavailable) => {
+                    return Err(ConnectError::unavailable("peer token check unavailable"));
+                }
+            };
             return Ok(AuthorizedPeer {
                 peer_id: environment_id,
                 sidecar_id: None,
                 kind: PeerKind::Sidecar,
+                proof: Some(proof),
             });
+        }
+        // A peer token never authenticates a client session.
+        if let Some(token) = bearer_token(headers)
+            && let Ok(environment_id) = Uuid::parse_str(hello.environment_id.trim())
+            && self.verifier.verify(environment_id, token).await.is_ok()
+        {
+            return Err(ConnectError::invalid_argument(
+                "peer hello must not include org_id",
+            ));
         }
 
         if hello.org_id.trim().is_empty() {
@@ -148,6 +170,7 @@ impl ProductionAuthorizer {
             peer_id: Uuid::new_v4(),
             sidecar_id: Some(environment_id),
             kind: PeerKind::Client,
+            proof: None,
         })
     }
 }
@@ -191,6 +214,7 @@ struct CoordinateService {
     peers: Arc<PeerRegistry>,
     coordination: Option<Arc<CoordinationPlane>>,
     authorizer: Arc<dyn CoordinateAuthorizer>,
+    checks: PeerChecks,
 }
 
 #[allow(refining_impl_trait)]
@@ -232,7 +256,9 @@ impl CoordinatorService for CoordinateService {
                 sidecar_id: peer.sidecar_id,
                 kind: peer.kind,
                 transport: Transport::Connect,
+                proof: peer.proof,
             },
+            Some(self.checks.clone()),
         );
         tokio::spawn(session);
 
@@ -260,6 +286,9 @@ impl SessionSource for ConnectSource {
                     }
                 },
                 Some(coordinate_request::Msg::Ping(_)) => Some(SessionInput::Ping),
+                Some(coordinate_request::Msg::Proof(proof)) => {
+                    Some(SessionInput::Proof(proof.peer_token.clone()))
+                }
                 Some(coordinate_request::Msg::Hello(_)) | None => Some(SessionInput::Noop),
             },
             Some(Err(err)) => {
@@ -373,6 +402,59 @@ mod tests {
 
     struct HermeticAuthorizer;
 
+    /// Checks peer tokens like production against a fixed current
+    /// generation, without a database.
+    pub(crate) struct FixedGenerationVerifier {
+        pub(crate) secret: &'static str,
+        pub(crate) generation: Option<i64>,
+    }
+
+    impl PeerVerifier for FixedGenerationVerifier {
+        fn verify<'a>(
+            &'a self,
+            env_id: Uuid,
+            token: &'a str,
+        ) -> crate::peer::BoxFuture<'a, Result<PeerProof, ProofError>> {
+            Box::pin(async move {
+                let claims = codewire_server_core::peer_token::validate(
+                    self.secret,
+                    token,
+                    crate::peer::unix_now(),
+                )
+                .map_err(|_| ProofError::Refused)?;
+                crate::peer::check_claims(&claims, env_id, self.generation)
+            })
+        }
+
+        fn is_current<'a>(
+            &'a self,
+            _env_id: Uuid,
+            generation: i64,
+        ) -> crate::peer::BoxFuture<'a, Result<bool, ProofError>> {
+            Box::pin(async move { Ok(self.generation == Some(generation)) })
+        }
+    }
+
+    fn hermetic_checks() -> PeerChecks {
+        PeerChecks {
+            verifier: Arc::new(FixedGenerationVerifier {
+                secret: "secret",
+                generation: Some(1),
+            }),
+            recheck: PEER_RECHECK_INTERVAL,
+        }
+    }
+
+    fn peer_token(environment_id: &str, generation: i64) -> String {
+        codewire_server_core::peer_token::issue(
+            "secret",
+            environment_id,
+            generation,
+            crate::peer::unix_now() + codewire_server_core::peer_token::PEER_TOKEN_LIFETIME_SECS,
+        )
+        .unwrap()
+    }
+
     impl CoordinateAuthorizer for HermeticAuthorizer {
         fn authorize<'a>(
             &'a self,
@@ -387,12 +469,17 @@ mod tests {
                         peer_id: environment_id,
                         sidecar_id: None,
                         kind: PeerKind::Sidecar,
+                        proof: Some(PeerProof {
+                            generation: 1,
+                            expires_at: crate::peer::unix_now() + 600,
+                        }),
                     })
                 } else {
                     Ok(AuthorizedPeer {
                         peer_id: Uuid::new_v4(),
                         sidecar_id: Some(environment_id),
                         kind: PeerKind::Client,
+                        proof: None,
                     })
                 }
             })
@@ -417,7 +504,7 @@ mod tests {
     async fn start_hermetic_app_with_state(
         state: CoordinatorState,
     ) -> (std::net::SocketAddr, JoinHandle<()>) {
-        let routes = router_with_authorizer(state, Arc::new(HermeticAuthorizer));
+        let routes = router_with_authorizer(state, Arc::new(HermeticAuthorizer), hermetic_checks());
         let app = codewire_server_core::AppBuilder::new("coordinator-connect-test")
             .with_routes(routes)
             .into_router();
@@ -725,7 +812,7 @@ mod tests {
         message.to_owned_message()
     }
 
-    fn sign_sidecar_token(secret: &str, environment_id: &str, scope: &str) -> String {
+    fn sign_legacy_token(secret: &str, environment_id: &str, scope: &str) -> String {
         let payload = serde_json::to_vec(&serde_json::json!({
             "environment_id": environment_id,
             "scope": scope,
@@ -736,6 +823,18 @@ mod tests {
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(payload.as_bytes());
         format!("{payload}.{}", engine.encode(mac.finalize().into_bytes()))
+    }
+
+    fn fixed_authorizer(generation: Option<i64>) -> ProductionAuthorizer {
+        let (state, auth) = lazy_state();
+        ProductionAuthorizer {
+            state,
+            auth,
+            verifier: Arc::new(FixedGenerationVerifier {
+                secret: "secret",
+                generation,
+            }),
+        }
     }
 
     #[tokio::test]
@@ -779,37 +878,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coordinator_rejects_a_daemon_scoped_capability() {
-        let (state, auth) = lazy_state();
-        let authorizer = ProductionAuthorizer { state, auth };
+    async fn environment_peers_need_a_current_peer_token() {
+        let authorizer = fixed_authorizer(Some(4));
         let environment_id = Uuid::new_v4().to_string();
-        let daemon_scope = sign_sidecar_token("secret", &environment_id, "daemon");
+        let other_environment = Uuid::new_v4().to_string();
+        let peer_hello = |environment_id: &str| Hello {
+            environment_id: environment_id.into(),
+            ..Default::default()
+        };
 
-        let error = match authorizer
+        let current = peer_token(&environment_id, 4);
+        let peer = match authorizer
             .authorize(
-                &headers_with_bearer(&daemon_scope),
+                &headers_with_bearer(&current),
                 None,
-                Hello {
-                    environment_id,
-                    ..Default::default()
-                },
+                peer_hello(&environment_id),
             )
             .await
         {
-            Err(error) => error,
-            Ok(_) => panic!("daemon capability unexpectedly authorized coordinator access"),
+            Ok(peer) => peer,
+            Err(error) => panic!("a current peer token was refused: {error:?}"),
         };
-        assert_eq!(error.code, connectrpc::ErrorCode::PermissionDenied);
+        assert!(matches!(peer.kind, PeerKind::Sidecar));
+        assert_eq!(peer.proof.map(|proof| proof.generation), Some(4));
+
+        let expired = codewire_server_core::peer_token::issue(
+            "secret",
+            &environment_id,
+            4,
+            crate::peer::unix_now() - 120,
+        )
+        .unwrap();
+        let cases = [
+            ("no bearer", HeaderMap::new(), peer_hello(&environment_id)),
+            (
+                "legacy coordinate token",
+                headers_with_bearer(&sign_legacy_token("secret", &environment_id, "coordinate")),
+                peer_hello(&environment_id),
+            ),
+            (
+                "daemon-scoped token",
+                headers_with_bearer(&sign_legacy_token("secret", &environment_id, "daemon")),
+                peer_hello(&environment_id),
+            ),
+            (
+                "stale generation",
+                headers_with_bearer(&peer_token(&environment_id, 3)),
+                peer_hello(&environment_id),
+            ),
+            (
+                "expired token",
+                headers_with_bearer(&expired),
+                peer_hello(&environment_id),
+            ),
+            (
+                "another environment's token",
+                headers_with_bearer(&current),
+                peer_hello(&other_environment),
+            ),
+        ];
+        for (label, headers, hello) in cases {
+            match authorizer.authorize(&headers, None, hello).await {
+                Err(error) => assert_eq!(
+                    error.code,
+                    connectrpc::ErrorCode::Unauthenticated,
+                    "{label}"
+                ),
+                Ok(_) => panic!("{label} unexpectedly authorized an environment peer"),
+            }
+        }
+
+        // A destroyed environment (no current generation) refuses its peer.
+        let gone = fixed_authorizer(None);
+        assert!(
+            gone.authorize(
+                &headers_with_bearer(&current),
+                None,
+                peer_hello(&environment_id)
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[tokio::test]
     async fn production_credential_dispatch_rejects_with_d3_codes_without_db() {
-        let (state, auth) = lazy_state();
-        let authorizer = ProductionAuthorizer { state, auth };
+        let authorizer = fixed_authorizer(Some(1));
         let environment_id = Uuid::new_v4().to_string();
-        let sidecar = sign_sidecar_token("secret", &environment_id, SCOPE_COORDINATE);
-        let daemon_scope = sign_sidecar_token("secret", &environment_id, "daemon");
-        let other_environment = Uuid::new_v4().to_string();
+        let peer = peer_token(&environment_id, 1);
 
         let cases = [
             (
@@ -822,23 +978,7 @@ mod tests {
                 connectrpc::ErrorCode::Unauthenticated,
             ),
             (
-                headers_with_bearer(&daemon_scope),
-                Hello {
-                    environment_id: environment_id.clone(),
-                    ..Default::default()
-                },
-                connectrpc::ErrorCode::PermissionDenied,
-            ),
-            (
-                headers_with_bearer(&sidecar),
-                Hello {
-                    environment_id: other_environment,
-                    ..Default::default()
-                },
-                connectrpc::ErrorCode::PermissionDenied,
-            ),
-            (
-                headers_with_bearer(&sidecar),
+                headers_with_bearer(&peer),
                 Hello {
                     org_id: "org-1".into(),
                     environment_id: environment_id.clone(),
@@ -1285,8 +1425,9 @@ mod tests {
             .await
             .unwrap()
             .expect("sidecar node must be persisted in coordinator KV");
-        assert_eq!(persisted.id, environment_id);
-        assert_eq!(persisted.preferred_derp, 11);
+        assert_eq!(persisted.0, 1, "the KV node is stamped with its generation");
+        assert_eq!(persisted.1.id, environment_id);
+        assert_eq!(persisted.1.preferred_derp, 11);
 
         let proposed_client_id = Uuid::new_v4();
         let client_node = codewire_tailnet::node::Node {
@@ -1332,7 +1473,7 @@ mod tests {
     #[tokio::test]
     async fn coordinator_policy_rejects_grpc_web_and_unrelated_content_types() {
         let (state, _) = lazy_state();
-        let router = router_with_authorizer(state, Arc::new(HermeticAuthorizer));
+        let router = router_with_authorizer(state, Arc::new(HermeticAuthorizer), hermetic_checks());
         for content_type in [
             "application/grpc-web",
             "application/grpc-web+proto",

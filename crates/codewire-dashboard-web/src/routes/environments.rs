@@ -431,8 +431,7 @@ impl EnvironmentSubmission {
             "" | "standard" => IsolationTier::Standard,
             "confidential" if form.confidential_available => IsolationTier::Confidential,
             "confidential" => {
-                form.form_error =
-                    "Confidential Sandboxes are not available for this organization.".to_owned();
+                form.form_error = "Confidential isolation is temporarily unavailable.".to_owned();
                 IsolationTier::Unspecified
             }
             _ => {
@@ -452,9 +451,8 @@ impl EnvironmentSubmission {
             let port_number = port.trim().parse::<u16>().ok().filter(|port| *port != 0);
             match port_number {
                 None => row.port_error = "Enter an internal port from 1 to 65535.".into(),
-                Some(2222 | 2223) => {
-                    row.port_error =
-                        "Ports 2222 and 2223 are reserved for the Sandbox runtime.".into()
+                Some(2222) => {
+                    row.port_error = "Port 2222 is reserved for the Sandbox runtime.".into()
                 }
                 Some(port) if !seen_ports.insert(port) => {
                     row.port_error = "This internal port is already used in another row.".into()
@@ -1447,7 +1445,7 @@ pub(super) async fn create_port(
         .filter(|port| (1..=65_535).contains(port));
     let result = match port {
         None => "invalid-port",
-        Some(2222 | 2223) => "reserved-port",
+        Some(2222) => "reserved-port",
         Some(_) if !valid_port_label(&submission.label) => "invalid-port-label",
         Some(_)
             if !matches!(
@@ -2518,7 +2516,7 @@ fn port_error(value: &str) -> &'static str {
     match value {
         "not-authorized" => "You do not have permission to change this preview.",
         "invalid-port" => "Enter an internal port from 1 to 65535.",
-        "reserved-port" => "Ports 2222 and 2223 are reserved for the Sandbox runtime.",
+        "reserved-port" => "Port 2222 is reserved for the Sandbox runtime.",
         "invalid-port-label" => {
             "Use a 2–22 character lowercase preview label, starting and ending with a letter or digit."
         }
@@ -2761,6 +2759,22 @@ mod tests {
         for organization in ["", "organization%3Adelimiter", &"a".repeat(129)] {
             assert!(CreateOptionsRequest::parse(body(organization).as_bytes()).is_err());
         }
+    }
+
+    #[test]
+    fn only_the_daemon_ssh_port_is_reserved_for_previews() {
+        let submission = EnvironmentSubmission::parse(b"image=example.test/workspace&app_port_0=2222&app_label_0=ssh&app_access_0=creator&app_port_1=2223&app_label_1=web&app_access_1=creator").unwrap();
+        let mut form = submission.form_view("synthetic-csrf".into());
+        let _ = submission.validate_and_draft("org-test", &mut form);
+        assert_eq!(
+            form.app_ports[0].port_error,
+            "Port 2222 is reserved for the Sandbox runtime."
+        );
+        assert!(form.app_ports[1].port_error.is_empty());
+        assert_eq!(
+            port_error("reserved-port"),
+            "Port 2222 is reserved for the Sandbox runtime."
+        );
     }
 
     #[test]
@@ -3171,6 +3185,25 @@ mod tests {
         .render()
         .unwrap();
         assert!(visible.contains("environment-isolation-tier"));
+    }
+
+    #[test]
+    fn confidential_choice_is_disabled_until_it_can_bind() {
+        let organization = test_organization();
+        let mut form = default_create_form("csrf".into(), true);
+        form.show_confidential_controls = true;
+        form.confidential_available = false;
+        form.confidential_price = "$0.1000 / CPU-hour + $0.0500 / GiB-hour".to_owned();
+        let html = EnvironmentCreateFormTemplate {
+            organization: &organization,
+            form: &form,
+        }
+        .render()
+        .unwrap();
+        assert!(html.contains(
+            r#"<option value="confidential" disabled>Confidential isolation is temporarily unavailable</option>"#
+        ));
+        assert!(!html.contains("CPU-hour"));
     }
 
     #[test]

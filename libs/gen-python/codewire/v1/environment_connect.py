@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, ResizeEnvironmentRequest, ResizeEnvironmentResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
+from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, ResizeEnvironmentRequest, ResizeEnvironmentResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -78,6 +78,9 @@ class EnvironmentService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def get_environment_trust_report(self, request: GetEnvironmentTrustReportRequest, ctx: RequestContext[GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse]) -> GetEnvironmentTrustReportResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def get_environment_host_key(self, request: GetEnvironmentHostKeyRequest, ctx: RequestContext[GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse]) -> GetEnvironmentHostKeyResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def get_environment_daemon_status(self, request: GetEnvironmentDaemonStatusRequest, ctx: RequestContext[GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse]) -> GetEnvironmentDaemonStatusResponse:
@@ -267,6 +270,16 @@ class EnvironmentServiceASGIApplication(ConnectASGIApplication[EnvironmentServic
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.get_environment_trust_report,
+                ),
+                "/codewire.v1.EnvironmentService/GetEnvironmentHostKey": Endpoint.unary(
+                    method=MethodInfo(
+                        name="GetEnvironmentHostKey",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=GetEnvironmentHostKeyRequest,
+                        output=GetEnvironmentHostKeyResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.get_environment_host_key,
                 ),
                 "/codewire.v1.EnvironmentService/GetEnvironmentDaemonStatus": Endpoint.unary(
                     method=MethodInfo(
@@ -696,6 +709,28 @@ class EnvironmentServiceClient(ConnectClient):
             use_get=use_get,
         )
 
+    async def get_environment_host_key(
+        self,
+        request: GetEnvironmentHostKeyRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetEnvironmentHostKeyResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetEnvironmentHostKey",
+                service_name="codewire.v1.EnvironmentService",
+                input=GetEnvironmentHostKeyRequest,
+                output=GetEnvironmentHostKeyResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
     async def get_environment_daemon_status(
         self,
         request: GetEnvironmentDaemonStatusRequest,
@@ -906,6 +941,9 @@ class EnvironmentServiceSync(Protocol):
     def get_environment_trust_report(self, request: GetEnvironmentTrustReportRequest, ctx: RequestContext[GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse]) -> GetEnvironmentTrustReportResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def get_environment_host_key(self, request: GetEnvironmentHostKeyRequest, ctx: RequestContext[GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse]) -> GetEnvironmentHostKeyResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def get_environment_daemon_status(self, request: GetEnvironmentDaemonStatusRequest, ctx: RequestContext[GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse]) -> GetEnvironmentDaemonStatusResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -1091,6 +1129,16 @@ class EnvironmentServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.get_environment_trust_report,
+                ),
+                "/codewire.v1.EnvironmentService/GetEnvironmentHostKey": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="GetEnvironmentHostKey",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=GetEnvironmentHostKeyRequest,
+                        output=GetEnvironmentHostKeyResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.get_environment_host_key,
                 ),
                 "/codewire.v1.EnvironmentService/GetEnvironmentDaemonStatus": EndpointSync.unary(
                     method=MethodInfo(
@@ -1499,6 +1547,27 @@ class EnvironmentServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.EnvironmentService",
                 input=GetEnvironmentTrustReportRequest,
                 output=GetEnvironmentTrustReportResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def get_environment_host_key(
+        self,
+        request: GetEnvironmentHostKeyRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetEnvironmentHostKeyResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetEnvironmentHostKey",
+                service_name="codewire.v1.EnvironmentService",
+                input=GetEnvironmentHostKeyRequest,
+                output=GetEnvironmentHostKeyResponse,
                 idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,

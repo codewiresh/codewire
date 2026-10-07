@@ -44,7 +44,7 @@ pub enum Phase {
     Provider,
     /// One OAuth refresh, including its own admission and durable publication.
     Refresh,
-    /// TokenReviews of the gateway and workspace identities at admission.
+    /// TokenReviews of the relay and workspace identities at admission.
     TokenReview,
     /// An epoch's wait for the guest's Ready frame.
     Ready,

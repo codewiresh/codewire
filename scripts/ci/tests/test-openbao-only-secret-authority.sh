@@ -374,11 +374,9 @@ jq -e '
     },
     {
       "from": [{
-        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "dev-sandboxes"}},
         "podSelector": {"matchLabels": {
-          "app.kubernetes.io/managed-by": "codewire",
-          "app.kubernetes.io/name": "codewire-gateway",
-          "codewire.sh/type": "gateway"
+          "app.kubernetes.io/component": "orchestration",
+          "app.kubernetes.io/name": "codewire"
         }}
       }],
       "ports": [{"port": 9443, "protocol": "TCP"}]

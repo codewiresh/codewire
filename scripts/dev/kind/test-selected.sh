@@ -27,14 +27,16 @@ map_token() {
   case "$1" in
     rust_pkg_codewire_credential_service | rust_pkg_codewire_credential_broker | \
       rust_pkg_codewire_credential_bridge | rust_pkg_codewire_platform_credentials | \
-      rust_pkg_codewire_access | rust_pkg_codewire_local_credentials | \
-      rust_pkg_codewire_cli | rust_pkg_codewire_cli_bin)
+      rust_pkg_codewire_access | rust_pkg_codewire_local_credentials)
       want credentials ;;
+    # The CLI also writes the managed SSH block the user SSH journey runs.
+    rust_pkg_codewire_cli | rust_pkg_codewire_cli_bin) want credentials workspace-services ;;
+    rust_pkg_codewire_workspace_access) want workspace-services ;;
     rust_pkg_codewire_dashboard_web | web) want dashboard-browser ;;
     rust_pkg_codewire_idp) want dashboard-browser edge-contract ;;
     rust_pkg_codewire_orchestration)
       want workspace-services final-fencing runtime-acceptance credentials ;;
-    rust_pkg_codewire_daemon | rust_pkg_codewire_daemon_bridge | rust_pkg_codewire_gateway)
+    rust_pkg_codewire_daemon | rust_pkg_codewire_daemon_bridge)
       want workspace-services ;;
     rust_pkg_codewire_client) want edge-contract workspace-services ;;
     # Workspace inputs, shared contracts, and crates without a narrower suite

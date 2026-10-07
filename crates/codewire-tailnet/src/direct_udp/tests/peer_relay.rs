@@ -1574,3 +1574,56 @@ async fn peer_relay_bind_retry_recovers_bind_answer_loss() {
     let _ = shutdown_tx.send(());
     relay_task.await.unwrap();
 }
+
+#[test]
+fn public_only_ignores_call_me_maybe_via_relays_on_private_addresses() {
+    let local_secret = StaticSecret::random_from_rng(OsRng);
+    let peer_secret = StaticSecret::random_from_rng(OsRng);
+    let local_node = NodePublic::from_raw(PublicKey::from(&local_secret).to_bytes());
+    let peer_node = NodePublic::from_raw(PublicKey::from(&peer_secret).to_bytes());
+    let local_disco = DiscoPrivate::generate(&mut OsRng);
+    let peer_disco = DiscoPrivate::generate(&mut OsRng).public();
+    let options = Options::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        Vec::new(),
+        local_node,
+        local_disco.clone(),
+    )
+    .with_public_peer_endpoints_only(true);
+    let shared = shared_for_test(&options);
+    shared.state.lock().unwrap().peers_by_node.insert(
+        *peer_node.as_bytes(),
+        peer_state(peer_node, peer_disco, "203.0.113.7:41641".parse().unwrap()),
+    );
+    let server_disco = DiscoPrivate::generate(&mut OsRng).public();
+    let private = udp_relay_endpoint(
+        server_disco,
+        local_disco.public(),
+        peer_disco,
+        9001,
+        "10.0.0.8:41641".parse().unwrap(),
+    );
+    let mut state = shared.state.lock().unwrap();
+    let actions = apply_call_me_maybe_via(&mut state, &shared, *peer_node.as_bytes(), private);
+    assert!(actions.is_empty(), "a private relay address is never bound");
+    assert!(state
+        .peers_by_node
+        .get(peer_node.as_bytes())
+        .unwrap()
+        .relay_endpoint
+        .is_none());
+
+    let public = udp_relay_endpoint(
+        server_disco,
+        local_disco.public(),
+        peer_disco,
+        9002,
+        "192.0.2.35:41641".parse().unwrap(),
+    );
+    let actions = apply_call_me_maybe_via(&mut state, &shared, *peer_node.as_bytes(), public);
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(
+        actions[0].message,
+        Message::BindUDPRelayEndpoint(_)
+    ));
+}

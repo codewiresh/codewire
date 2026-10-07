@@ -86,6 +86,10 @@ spec:
 ---
 # Native generated coordinator bidi stream. TLS+ALPN proves HTTP/2 on the
 # client leg; GRPC retains HTTP/2 from ingress-nginx to the coordinator.
+# Workspace daemons dial the same edge from inside the cluster under
+# ingress-nginx's Service name (CODEWIRE_SANDBOX_PUBLIC_COORDINATOR_URL in
+# support.yaml), served with the synthetic coordinator leaf they verify
+# through codewire-coordinator-extra-roots.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -103,8 +107,21 @@ spec:
     - hosts:
         - localhost
       secretName: codewire-kind-ingress-tls
+    - hosts:
+        - ingress-nginx-controller.ingress-nginx.svc.cluster.local
+      secretName: codewire-kind-coordinator-tls
   rules:
     - host: localhost
+      http:
+        paths:
+          - path: /codewire\.internal\.v1\.CoordinatorService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-coordinator
+                port:
+                  name: http
+    - host: ingress-nginx-controller.ingress-nginx.svc.cluster.local
       http:
         paths:
           - path: /codewire\.internal\.v1\.CoordinatorService/

@@ -63,6 +63,9 @@ pub struct CredentialServiceConfig {
     pub(super) keks: KekAuthorityConfig,
     /// `None` when explicitly disabled.
     pub(super) oauth_keepalive: Option<OAuthKeepAliveConfig>,
+    /// This service's own namespace, from the downward API: the server
+    /// namespace it shares with orchestration, the only credential relay.
+    pub(super) relay_namespace: String,
 }
 
 /// Where the credential-service's key-encryption keys come from.
@@ -120,6 +123,11 @@ impl CredentialServiceConfig {
             return Err(RuntimeError::Configuration("credential listener ports"));
         }
         let public_origin = parse_public_origin(&required("CREDENTIAL_PUBLIC_ORIGIN")?)?;
+        // The credential relay must be orchestration in this same namespace.
+        let relay_namespace = required("POD_NAMESPACE")?;
+        if !crate::objects::valid_name(&relay_namespace, true) {
+            return Err(RuntimeError::Configuration("POD_NAMESPACE"));
+        }
         let github_app_authorization = github_app_authorization_config(&lookup, &public_origin)?;
         let private_tls = ServerTlsFiles::new(
             path("CREDENTIAL_BROKER_TLS_CERT_FILE")?,
@@ -190,6 +198,7 @@ impl CredentialServiceConfig {
             runtime_directory: path("CREDENTIAL_RUNTIME_DIR")?,
             keks,
             oauth_keepalive: oauth_keepalive_config(&lookup)?,
+            relay_namespace,
         })
     }
 }
@@ -368,6 +377,7 @@ mod tests {
                 "codewire-tenant-test",
             ),
             ("CREDENTIAL_BAO_EXPECTED_CLUSTER_ID", "synthetic-cluster"),
+            ("POD_NAMESPACE", "codewire-server"),
         ]
         .into_iter()
         .map(|(key, value)| (key, value.into()))
@@ -393,6 +403,15 @@ mod tests {
             "https://codewire.example"
         );
         assert_eq!(config.private_listen.port(), 9443);
+        assert_eq!(config.relay_namespace, "codewire-server");
+        for malformed in ["", "Codewire", "a.b", "-server", "server-"] {
+            let mut values = inputs();
+            values.insert("POD_NAMESPACE", malformed.into());
+            assert!(
+                CredentialServiceConfig::from_lookup(|name| values.get(name).cloned()).is_err(),
+                "relay namespace {malformed:?} was accepted"
+            );
+        }
         for name in inputs().keys() {
             let mut partial = inputs();
             partial.remove(name);

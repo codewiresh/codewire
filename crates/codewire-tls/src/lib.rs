@@ -17,8 +17,11 @@ pub use connect::ConnectOriginTransport;
 
 #[cfg(feature = "test-support")]
 pub mod test_support;
-pub use files::ServerTlsFiles;
+pub use files::{ServerTlsFiles, read_optional_roots};
 pub use incoming::{TlsIncoming, TlsListener};
+
+/// A server connection after [`ServerTlsFiles::accept_http1_only`].
+pub type ServerTlsStream = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
 
 use std::time::Duration;
 

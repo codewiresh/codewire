@@ -6,15 +6,15 @@ and migration evidence live in
 here instead of restating or extending the credential model.
 
 Codewire issues four authentication credential flavors: three user-facing and
-one platform-internal. Kubernetes supplies the separate Pod-bound identity used
-to bootstrap gateway binding.
+one platform-internal. Kubernetes supplies the separate Pod-bound identity a
+workspace daemon uses to fetch its binding.
 
 | # | Flavor | Presenter | Acquisition and boundary |
 |---|---|---|---|
 | 1 | Session cookie | Browsers | The IDP login page issues the HttpOnly, SameSite session cookie. Browsers use it for same-origin product calls and identity pages. |
 | 2 | OAuth user bearer | Native apps | PKCE authorization code where a system browser exists; OAuth device grant where none does. Both yield the same opaque access/refresh token species and use one `TokenProvider`. Product access requires exact `codewire.api`. |
 | 3 | `cw_` API key | Machines, SDKs, CI, and agents | `ApiKeyService` creates a revocable key bound to exactly one organization. It is not a user token or an OAuth client-credentials grant. |
-| 4 | HMAC sidecar token | Gateway, coordinator, and daemon service hops | The control plane mints a scope-bound service credential for the internal hot path. It never becomes a user credential. |
+| 4 | HMAC sidecar token | Coordinator and daemon service hops | The control plane mints a scope-bound service credential for the internal hot path. It never becomes a user credential. |
 
 ## Credential rules
 
@@ -105,7 +105,7 @@ than claiming that database token revocation does so.
   key through their generated Connect client wrapper for organization APIs.
   Personal access profiles instead require the existing user OAuth bearer;
   supplying an organization API key cannot act as its owning user.
-- Gateway binding bootstrap uses an exact-audience, Pod-bound Kubernetes token.
+- Workspace binding uses an exact-audience, Pod-bound Kubernetes token.
   Coordinator and daemon calls use distinct environment-scoped HMAC
   capabilities; the retired environment bearer is unsupported.
 - Public repositories enter environment creation as explicit URL, revision,
@@ -174,14 +174,21 @@ is not admission. Subsequent admission replies are protocol errors.
 
 ### Kubernetes Pod identity
 
-The optional `codewire-server-core/kubernetes-identity` verifier has three
-fixed purposes: gateway binding, credential gateway, and credential workspace.
-Their audiences are distinct. A caller cannot choose an arbitrary audience or
-substitute a token issued for another purpose. Existing gateway binding retains
-`codewire.internal.gateway-binding.v1`; credential purposes use
-`codewire.internal.credential-gateway.v1` and
-`codewire.internal.credential-workspace.v1`. These are Kubernetes projected Pod
+The optional `codewire-server-core/kubernetes-identity` verifier has fixed
+purposes: credential relay, credential workspace and workspace binding. Their
+audiences are distinct. A caller cannot choose an arbitrary audience or
+substitute a token issued for another purpose. They are
+`codewire.internal.credential-relay.v1`,
+`codewire.internal.credential-workspace.v1` and
+`codewire.internal.workspace-binding.v1`. These are Kubernetes projected Pod
 tokens, not another Codewire user bearer flavor.
+
+The credential relay is orchestration (design §4 of
+`docs/plans/2026-10-06-daemon-hosted-access.md`): only the
+`codewire-orchestration` ServiceAccount may present the relay audience, and the
+broker additionally requires the relay Pod to be in its own namespace. The
+broker takes the environment from the workspace Pod's live binding, never from
+a label, and reviews the workspace Pod's token as before.
 
 The shared verifier requires one bounded canonical bearer, a successful
 exact-audience TokenReview, the expected ServiceAccount and singular reviewed

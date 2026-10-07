@@ -407,3 +407,107 @@ fn accept_errors_pause_with_growing_backoff_and_a_bounded_log_rate() {
         ACCEPT_BACKOFF_INITIAL
     );
 }
+
+/// An upgrade that never completes, like a client stalling its handshake.
+#[derive(Clone)]
+struct StalledUpgrade;
+
+impl ConnectionUpgrade for StalledUpgrade {
+    type Io = TcpStream;
+
+    async fn upgrade(&self, _stream: TcpStream) -> std::io::Result<TcpStream> {
+        std::future::pending().await
+    }
+}
+
+/// An upgrade that fails, like a refused handshake.
+#[derive(Clone)]
+struct RefusedUpgrade;
+
+impl ConnectionUpgrade for RefusedUpgrade {
+    type Io = TcpStream;
+
+    async fn upgrade(&self, _stream: TcpStream) -> std::io::Result<TcpStream> {
+        Err(std::io::Error::other("refused"))
+    }
+}
+
+async fn start_upgraded(
+    limits: BoundedHttp1Limits,
+    upgrade: impl ConnectionUpgrade,
+) -> (Server, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let handled = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = handled.clone();
+    let app = Router::new().route(
+        "/counted",
+        post(move || async move {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            "handled"
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        serve_bounded_http1_upgraded_until(app, listener, limits, upgrade, async {
+            let _ = stopped.await;
+        })
+        .await
+        .unwrap();
+    });
+    (
+        Server {
+            addr,
+            stop: Some(stop),
+        },
+        handled,
+    )
+}
+
+#[tokio::test]
+async fn a_stalled_upgrade_holds_its_slots_and_closes_at_the_read_deadline() {
+    let limits = BoundedHttp1Limits {
+        header_read_timeout: Duration::from_millis(300),
+        request_read_timeout: Duration::from_millis(300),
+        ..limits()
+    };
+    let (server, handled) = start_upgraded(limits, StalledUpgrade).await;
+    let started = Instant::now();
+    let mut first = TcpStream::connect(server.addr).await.unwrap();
+    let mut second = TcpStream::connect(server.addr).await.unwrap();
+    // The stalled upgrades hold this peer's two slots: a third is refused.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut third = TcpStream::connect(server.addr).await.unwrap();
+    assert_eq!(
+        read_until_closed(&mut third, Duration::from_millis(200)).await,
+        Some(String::new())
+    );
+    first
+        .write_all(b"POST /counted HTTP/1.1\r\nhost: b\r\ncontent-length: 0\r\n\r\n")
+        .await
+        .unwrap();
+    assert_eq!(
+        read_until_closed(&mut first, Duration::from_secs(3)).await,
+        Some(String::new())
+    );
+    assert_eq!(
+        read_until_closed(&mut second, Duration::from_secs(3)).await,
+        Some(String::new())
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(handled.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_failed_upgrade_closes_without_a_response() {
+    let (server, handled) = start_upgraded(limits(), RefusedUpgrade).await;
+    let mut stream = TcpStream::connect(server.addr).await.unwrap();
+    let _ = stream
+        .write_all(b"POST /counted HTTP/1.1\r\nhost: b\r\ncontent-length: 0\r\n\r\n")
+        .await;
+    assert_eq!(
+        read_until_closed(&mut stream, Duration::from_secs(3)).await,
+        Some(String::new())
+    );
+    assert_eq!(handled.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

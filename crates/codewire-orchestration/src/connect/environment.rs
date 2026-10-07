@@ -45,6 +45,7 @@ use crate::api::environments::{
     get_environment_core, list_environments_core, protect_environment_core, require_org_member,
     start_environment_core, stop_environment_core, unprotect_environment_core,
 };
+use crate::api::host_key::{RecordedHostKeys, get_environment_host_key_core};
 use crate::api::logs::{
     EnvironmentLog as ApiEnvironmentLog, LogStreamEvent, open_environment_log_stream,
 };
@@ -148,6 +149,29 @@ impl proto::EnvironmentService for EnvironmentConnectService {
             )
             .into(),
             poll_interval: poll_interval.into(),
+            ..Default::default()
+        })
+    }
+
+    async fn get_environment_host_key(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::GetEnvironmentHostKeyRequest>,
+    ) -> ServiceResult<proto::GetEnvironmentHostKeyResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let key = get_environment_host_key_core(
+            &self.state,
+            &user,
+            request.org_id,
+            request.environment_id,
+            &RecordedHostKeys(&self.state.pool),
+        )
+        .await
+        .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto::GetEnvironmentHostKeyResponse {
+            generation: key.generation,
+            public_key_openssh: key.public_key_openssh,
             ..Default::default()
         })
     }
@@ -1325,8 +1349,6 @@ fn proto_trust_report(report: EnvironmentTrustReport) -> proto::EnvironmentTrust
         images: Some(proto::TrustReportImages {
             workspace_image: report.images.workspace_image.unwrap_or_default(),
             workspace_image_id: report.images.workspace_image_id.unwrap_or_default(),
-            gateway_image: report.images.gateway_image.unwrap_or_default(),
-            gateway_image_id: report.images.gateway_image_id.unwrap_or_default(),
             dind_image: report.images.dind_image.unwrap_or_default(),
             dind_image_id: report.images.dind_image_id.unwrap_or_default(),
             daemon_init_image: report.images.daemon_init_image.unwrap_or_default(),

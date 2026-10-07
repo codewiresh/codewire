@@ -61,7 +61,6 @@ readonly BAKE_FILE='docker-bake.hcl'
 readonly WORKSPACE_DOCKERFILE='images/workspace/Dockerfile'
 readonly -a CURATED_MANIFESTS=(
   'deployments/docker/derp.Cargo.toml'
-  'deployments/docker/gateway.Cargo.toml'
 )
 readonly -a DETACHED_MANIFESTS=(
   'crates/codewire-desktop/Cargo.toml'

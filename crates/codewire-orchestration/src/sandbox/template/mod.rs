@@ -1,8 +1,8 @@
 //! Per-environment SandboxTemplate and zero-replica SandboxWarmPool rendering facade.
 //!
 //! Runtime decisions, deterministic encoding, names/selectors, workspace
-//! objects, gateway objects, and network policies live in one-way internal
-//! modules. This facade owns their stable internal API.
+//! objects, and network objects live in one-way internal modules. This facade
+//! owns their stable internal API.
 
 use std::fmt;
 use std::time::Duration;
@@ -13,36 +13,22 @@ use super::{EXTENSIONS_API_VERSION, LABEL_ENV_ID, LABEL_TYPE};
 
 mod credentials;
 mod encoding;
-mod gateway;
 mod naming;
 mod network;
 mod runtime_policy;
 mod workspace;
 
-pub use credentials::{
-    CredentialRuntimeTemplateConfig, MANAGED_CREDENTIAL_CLIENTS_ENV, credential_codex_config_name,
-    credential_gateway_certificate_name,
-};
+pub use credentials::{CredentialRuntimeTemplateConfig, MANAGED_CREDENTIAL_CLIENTS_ENV};
 
 #[cfg(test)]
 use encoding::gzip_base64;
-#[cfg(test)]
-use gateway::{GATEWAY_BINDING_TOKEN_VOLUME, build_sidecar_env};
-pub use gateway::{
-    ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP, orchestration_internal_tls_host,
-    render_gateway_deployment, render_gateway_direct_udp_service, render_gateway_host_key_secret,
-    render_gateway_service,
-};
 pub use naming::{
-    SANDBOX_UID_LABEL, gateway_direct_udp_service_name, gateway_host_key_secret_name,
-    gateway_network_policy_name, gateway_service_name, gateway_workload_name,
-    warm_member_daemon_bridge_name, warm_member_gateway_bridge_name,
+    SANDBOX_UID_LABEL, direct_udp_service_name, warm_member_daemon_bridge_name,
     workspace_daemon_network_policy_name, workspace_daemon_service_addr,
     workspace_daemon_service_name,
 };
 pub use network::{
-    render_gateway_network_policy, render_warm_member_bridge,
-    render_workspace_daemon_network_policy,
+    render_direct_udp_service, render_warm_member_bridge, render_workspace_daemon_network_policy,
 };
 pub use runtime_policy::{
     DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, DOCKER_MODE_NONE,
@@ -57,7 +43,10 @@ pub(crate) use workspace::{
     CLIENT_BOOTSTRAP_CONTAINER, DAEMON_INIT_CONTAINER, DAEMON_VOLUME,
     render_workspace_client_bootstrap,
 };
-pub use workspace::{render_sandbox_template, render_workspace_daemon_service};
+pub use workspace::{
+    ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP, orchestration_internal_tls_host,
+    render_sandbox_template, render_workspace_daemon_service,
+};
 
 /// Return the exact raw TOML bytes that the hypervisor annotation compresses
 /// and the SNP verifier hashes into HOST_DATA. Callers use this single source
@@ -79,9 +68,8 @@ pub(crate) fn confidential_init_data(opts: &TemplateOpts) -> anyhow::Result<Stri
 }
 
 /// How long one create or start waits for a workspace to become ready. The
-/// gateway's startup probe and rollout deadline, and the workspace's Docker
-/// startup probe, use the same budget, so Kubernetes never restarts or fails
-/// either during a start that can still succeed.
+/// workspace's Docker startup probe uses the same budget, so Kubernetes never
+/// restarts it during a start that can still succeed.
 pub const WORKSPACE_READY_TIMEOUT: Duration = Duration::from_secs(600);
 /// Confidential guests initialize encrypted storage before the daemon listens.
 pub const CONFIDENTIAL_WORKSPACE_READY_TIMEOUT: Duration = Duration::from_secs(1_800);
@@ -89,25 +77,11 @@ pub const CONFIDENTIAL_WORKSPACE_READY_TIMEOUT: Duration = Duration::from_secs(1
 // Canonical sandbox and daemon contract constants.
 pub const DEFAULT_GATEWAY_IMAGE: &str = codewire_server_core::runtime_images::DEFAULT_GATEWAY_IMAGE;
 pub const DEFAULT_DIND_IMAGE: &str = "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c";
-pub const DEFAULT_GATEWAY_READYZ_PORT: i64 = 2223;
-pub const DEFAULT_GATEWAY_SSH_PORT: i64 = 2222;
-pub const GATEWAY_TAILNET_UDP_PORT: i64 = 31000;
-pub const GATEWAY_TAILNET_UDP_LISTEN_ADDR: &str = "0.0.0.0:31000";
-pub const GATEWAY_HOST_KEY_SECRET_KEY: &str = "host_ed25519";
-pub const GATEWAY_HOST_KEY_SECRET_MOUNT_PATH: &str = "/codewire/gateway-host-key";
-pub const GATEWAY_HOST_KEY_PATH: &str = "/codewire/gateway/ssh/host_ed25519";
 pub const WORKSPACE_DAEMON_PORT: i64 = 7777;
 pub const WORKSPACE_DAEMON_LISTEN_ADDR: &str = "0.0.0.0:7777";
-pub const SANDBOX_SERVICE_ACCOUNT: &str = codewire_gateway_proto::GATEWAY_BINDING_SERVICE_ACCOUNT;
+pub const SANDBOX_SERVICE_ACCOUNT: &str = codewire_gateway_proto::SANDBOX_SERVICE_ACCOUNT;
 pub const DIND_SOCKET_PATH: &str = "/var/run/docker/docker.sock";
 pub const DAEMON_AUTH_TOKEN_ENV: &str = "CODEWIRE_DAEMON_AUTH_TOKEN";
-pub const GATEWAY_BINDING_URL_ENV: &str = "CODEWIRE_BINDING_URL";
-pub const GATEWAY_TAILNET_UDP_LISTEN_ADDR_ENV: &str = "CODEWIRE_TAILNET_UDP_LISTEN_ADDR";
-pub const GATEWAY_TAILNET_DIRECT_UDP_ADVERTISE_ENDPOINTS_ENV: &str =
-    "CODEWIRE_TAILNET_DIRECT_UDP_ADVERTISE_ENDPOINTS";
-pub const GATEWAY_UDP_RELAY_ALLOCATOR_URL_ENV: &str = "CODEWIRE_UDP_RELAY_ALLOCATOR_URL";
-pub const GATEWAY_UDP_RELAY_ALLOCATOR_TOKEN_ENV: &str = "CODEWIRE_UDP_RELAY_ALLOCATOR_TOKEN";
-pub const GATEWAY_UDP_RELAY_BIND_ADDRS_ENV: &str = "CODEWIRE_UDP_RELAY_BIND_ADDRS";
 pub const KATA_COCO_INIT_DATA_ANNOTATION_KEY: &str =
     "io.katacontainers.config.hypervisor.cc_init_data";
 pub const KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY: &str =
@@ -119,8 +93,6 @@ pub const CONFIDENTIAL_WORKSPACE_STORAGE_CLASS: &str = "longhorn-confidential";
 pub const KATA_CONFIDENTIAL_VOLUME_ANNOTATION: &str = "io.katacontainers.volume.confidential";
 pub const KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH: &str = "/dev/codewire-workspace";
 const WORKSPACE_EPHEMERAL_STORAGE_GI: i64 = 8;
-const INTERNAL_DERP_TLS_PORT: i64 = 8443;
-const INTERNAL_DERP_STUN_PORT: i64 = 3478;
 const HOME_ROOT: &str = "/home/codewire";
 const WORKSPACE_ANNOTATION_KEY: &str = "codewire.sh/workspace";
 const WORKSPACE_DISK_GIB_ANNOTATION_KEY: &str = "codewire.sh/disk-gib";
@@ -133,9 +105,8 @@ const APP_PREVIEW_MAX_PORT: i64 = 65535;
 pub enum WorkspaceIdentity {
     /// Today's rendering: the environment-wide daemon token, environment ID,
     /// generation, projection digest and managed clients are rendered into
-    /// the workspace container. Confidential Pods always use it (B2c), and
-    /// `SANDBOX_WORKSPACE_IDENTITY_MODE=environment-token` selects it for
-    /// rollback.
+    /// the workspace container. Only confidential Pods use it, until B2c: such
+    /// a Pod never serves SSH or the tailnet.
     #[default]
     EnvironmentToken,
     /// Identity-free: the Pod carries only a Pod-bound projected token for the
@@ -165,20 +136,19 @@ pub struct TemplateOpts {
     /// Exact clients selected by the captured immutable profile revision.
     pub managed_credential_clients: codewire_access::ManagedCredentialClients,
     pub confidential_storage_manifest_uri: String,
-    pub gateway_token: String,
     pub daemon_auth_token: String,
     /// How the workspace Pod is bound to this environment.
     pub workspace_identity: WorkspaceIdentity,
-    /// The gateway fetches the bound Pod's daemon credential with
-    /// `IssueGatewayDaemonCredential` instead of a rendered token. True for
-    /// every non-confidential workspace whose gateway can reach its binding,
-    /// in both identity modes: an identity-free daemon accepts only its
-    /// per-Pod credential, and under rollback a legacy Pod's binding answers
-    /// with the environment token, so one gateway rendering serves both.
-    pub gateway_daemon_credential_from_binding: bool,
     pub api_base_url: String,
     pub coordinator_url: String,
     pub server_namespace: String,
+    /// Mount `COORDINATOR_EXTRA_ROOTS_CONFIGMAP` for the daemon's coordinator
+    /// trust (local clusters only).
+    pub coordinator_extra_roots: bool,
+    /// The ingress controller workspace egress may reach on 80/443; empty
+    /// fields keep RKE2's `kube-system`/`rke2-ingress-nginx`.
+    pub ingress_namespace: String,
+    pub ingress_pod_name: String,
     pub derp_host: String,
     pub derp_port: i64,
     pub stun_host: String,
@@ -238,13 +208,8 @@ impl fmt::Debug for TemplateOpts {
                 "confidential_storage_manifest_uri",
                 &self.confidential_storage_manifest_uri,
             )
-            .field("gateway_token", &"<redacted>")
             .field("daemon_auth_token", &"<redacted>")
             .field("workspace_identity", &self.workspace_identity)
-            .field(
-                "gateway_daemon_credential_from_binding",
-                &self.gateway_daemon_credential_from_binding,
-            )
             .field("api_base_url", &self.api_base_url)
             .field("coordinator_url", &self.coordinator_url)
             .field("server_namespace", &self.server_namespace)
@@ -305,8 +270,8 @@ impl fmt::Debug for TemplateOpts {
     }
 }
 
-/// The support image a rendering uses for the gateway and the workspace
-/// daemon: the configured one, or this release's default. A resume re-pins a
+/// The support image a rendering mounts the workspace daemon from: the
+/// configured one, or this release's default. A resume re-pins a
 /// Sandbox's daemon image volume to this same value.
 pub fn effective_support_image(configured: &str) -> &str {
     if configured.is_empty() {

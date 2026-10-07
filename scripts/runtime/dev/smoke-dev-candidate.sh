@@ -59,7 +59,8 @@ Usage:
 
 Images:
   services    Rust services image used by idp, orchestration, billing, coordinator
-  gateway     Rust sandbox gateway image selected through SANDBOX_GATEWAY_IMAGE
+  gateway     Workspace daemon image (`cw`) selected through
+              SANDBOX_GATEWAY_IMAGE; the image keeps its gateway name
   derp        DERP/STUN image
   mesh        Hosted Mesh image
   dashboard   Dashboard image
@@ -96,7 +97,7 @@ Secret handling:
 Environment:
   DOCKER_BUILD_NO_CACHE=1    Build candidate images with docker buildx
                              --no-cache. Useful when proving a local Rust
-                             gateway/tailnet change against dev.
+                             daemon/tailnet change against dev.
   CANDIDATE_WORKER_LOOPS     Temporarily set WORKER_LOOPS while the candidate
                              smoke mutates dev, then restore it on exit.
   EXPECTED_RUNTIME_NODE_SELECTOR
@@ -1187,8 +1188,8 @@ run_smoke() {
   export EXPECTED_RUNTIME_TRANSPORT_REGION
 
   if [[ -n "${IMAGE_SELECTED[gateway]:-}" ]]; then
-    export EXPECTED_GATEWAY_IMAGE
-    EXPECTED_GATEWAY_IMAGE="$(image_ref gateway)"
+    export EXPECTED_DAEMON_IMAGE
+    EXPECTED_DAEMON_IMAGE="$(image_ref gateway)"
   fi
 
   log "running commodity smoke in sandbox namespace $namespace"

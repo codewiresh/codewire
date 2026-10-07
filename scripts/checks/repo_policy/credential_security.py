@@ -17,7 +17,6 @@ def assert_credential_service(
          f'rules: - apiGroups: - "" resourceNames: - {name} resources: - serviceaccounts/token verbs: - create'),
         ("Role", f"{name}-runtime", sandbox,
          'rules: - apiGroups: - "" resources: - pods verbs: - get '
-         '- apiGroups: - apps resources: - deployments - replicasets verbs: - get '
          '- apiGroups: - agents.x-k8s.io resources: - sandboxes verbs: - get '
          '- apiGroups: - extensions.agents.x-k8s.io resources: - sandboxclaims verbs: - get'),
     ]
@@ -117,14 +116,12 @@ def assert_credential_service(
         f"{ingress_labels}"
         "- podSelector: matchLabels: app.kubernetes.io/component: dashboard "
         "app.kubernetes.io/name: codewire ports: - port: 8086 protocol: TCP "
-        "- from: - namespaceSelector: matchLabels: "
-        f"kubernetes.io/metadata.name: {sandbox} podSelector: matchLabels: "
-        "app.kubernetes.io/managed-by: codewire app.kubernetes.io/name: codewire-gateway "
-        "codewire.sh/type: gateway ports: - port: 9443 protocol: TCP "
+        "- from: - podSelector: matchLabels: app.kubernetes.io/component: orchestration "
+        "app.kubernetes.io/name: codewire ports: - port: 9443 protocol: TCP "
         "podSelector: matchLabels: app.kubernetes.io/component: credential-service "
         "app.kubernetes.io/name: codewire policyTypes: - Ingress"
     ):
-        failures.append(f"{label}: credential ingress must separate the public edge/same-namespace dashboard and managed gateways")
+        failures.append(f"{label}: credential ingress must separate the public edge/same-namespace dashboard and the same-namespace credential relay")
 
 
 def credential_service_self_test(resources: list[str], target: dict[str, str]) -> None:
@@ -150,11 +147,16 @@ def credential_service_self_test(resources: list[str], target: dict[str, str]) -
         ("Certificate", "codewire-credential-broker", "isCA: false", "isCA: true", "exact DNS"),
         ("Certificate", "codewire-credential-broker",
          f".{target['subject_namespace']}.svc.cluster.local", ".foreign.svc.cluster.local", "exact DNS"),
-        ("NetworkPolicy", "codewire-credential-service", "codewire.sh/type: gateway", "codewire.sh/type: workspace", "managed gateways"),
-        ("NetworkPolicy", "codewire-credential-service", "port: 9443", "port: 8086", "managed gateways"),
+        ("NetworkPolicy", "codewire-credential-service", "app.kubernetes.io/component: orchestration",
+         "app.kubernetes.io/component: workspace", "credential relay"),
+        ("NetworkPolicy", "codewire-credential-service", "port: 9443", "port: 8086", "credential relay"),
+        ("NetworkPolicy", "codewire-credential-service",
+         "    - podSelector:\n        matchLabels:\n          app.kubernetes.io/component: orchestration",
+         "    - namespaceSelector: {}\n      podSelector:\n        matchLabels:\n          app.kubernetes.io/component: orchestration",
+         "credential relay"),
         ("NetworkPolicy", "codewire-credential-service", "app.kubernetes.io/component: dashboard",
          "app.kubernetes.io/component: coordinator", "same-namespace dashboard"),
-        ("NetworkPolicy", "codewire-credential-service", "port: 8086", "port: 9443", "managed gateways"),
+        ("NetworkPolicy", "codewire-credential-service", "port: 8086", "port: 9443", "credential relay"),
         ("NetworkPolicy", "codewire-credential-service",
          "    - podSelector:\n        matchLabels:\n          app.kubernetes.io/component: dashboard",
          "    - namespaceSelector: {}\n      podSelector:\n        matchLabels:\n          app.kubernetes.io/component: dashboard",

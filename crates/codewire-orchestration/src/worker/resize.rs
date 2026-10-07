@@ -20,6 +20,11 @@ const RESIZE_MUTATION_STATES: &[&str] = &["resizing"];
 const RESTART_TIMEOUT: Duration = Duration::from_secs(600);
 const IN_PLACE_RESIZE_TIMEOUT: Duration = Duration::from_secs(600);
 const STORAGE_RESIZE_TIMEOUT: Duration = Duration::from_secs(600);
+/// A running environment's runtime is already bound and access-ready, so the
+/// identity reconcile before its resize takes seconds. One that has not
+/// converged by then is not resized: the operation fails with that reason
+/// instead of waiting out the cold-start access budget.
+const RUNNING_RUNTIME_RECONCILE_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug)]
 pub struct TerminalResizeFailure {
@@ -289,14 +294,24 @@ pub async fn handle_environment_resize(
 
     if operation.previous_state == "running" {
         let env = load_environment(&ctx.pool, environment_id).await?;
-        super::create::reconcile_runtime_identity(
-            ctx,
-            &env,
-            &backend,
-            authority,
-            RESIZE_MUTATION_STATES,
+        tokio::time::timeout(
+            RUNNING_RUNTIME_RECONCILE_TIMEOUT,
+            super::create::reconcile_runtime_identity(
+                ctx,
+                &env,
+                &backend,
+                authority,
+                RESIZE_MUTATION_STATES,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| TerminalResizeFailure {
+            code: "runtime_not_ready",
+            message: format!(
+                "the running workspace did not become access-ready within {} seconds; the resize was not applied",
+                RUNNING_RUNTIME_RECONCILE_TIMEOUT.as_secs()
+            ),
+        })??;
     }
 
     let pod_state = if operation.previous_state == "running" {

@@ -37,8 +37,6 @@ pub mod connect_error;
 pub mod connect_testing;
 pub mod db;
 pub mod error;
-#[cfg(feature = "kubernetes-identity")]
-pub mod gateway_authority;
 pub mod health;
 pub mod http;
 pub mod internal_hmac;
@@ -50,6 +48,7 @@ pub mod obs;
 pub mod org;
 pub mod org_deletion;
 pub mod organization_slug;
+pub mod peer_token;
 #[cfg(feature = "kubernetes-identity")]
 pub mod pod_identity;
 pub mod rest_sunset;

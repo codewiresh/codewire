@@ -605,7 +605,7 @@ mod tests {
                 panic!("environment-token mode expected");
             };
             let HostedDaemonMode::Binding(binding) = mode(&[
-                (WORKSPACE_BINDING_URL_ENV, "http://binding.test:8087"),
+                (WORKSPACE_BINDING_URL_ENV, "https://binding.test:8087"),
                 (WORKSPACE_POD_UID_ENV, POD),
             ]) else {
                 panic!("binding mode expected");

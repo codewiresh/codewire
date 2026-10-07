@@ -72,6 +72,14 @@ impl Harness {
     }
 
     async fn with_replacement(bridge: CredentialBridge, replacement: EpochReplacement) -> Self {
+        let (prepared, output) = Self::prepare(&bridge).await;
+        Self::activate(bridge, prepared, output, replacement).await
+    }
+
+    /// A successor that has sent Ready but is not yet activated.
+    async fn prepare(
+        bridge: &CredentialBridge,
+    ) -> (PreparedBridgeConnection, CredentialBridgeOutput) {
         let (prepared, mut output) = bridge.prepare_connection().unwrap();
         let ready = bounded(output.next()).await.unwrap().unwrap();
         let Some(GuestPayload::Ready(ready)) = ready.payload else {
@@ -80,6 +88,15 @@ impl Harness {
         assert_eq!(ready.protocol_version, CREDENTIAL_BRIDGE_PROTOCOL_VERSION);
         assert_eq!(ready.environment_id, bridge.environment_id.to_string());
         assert_eq!(ready.environment_generation, bridge.environment_generation);
+        (prepared, output)
+    }
+
+    async fn activate(
+        bridge: CredentialBridge,
+        prepared: PreparedBridgeConnection,
+        output: CredentialBridgeOutput,
+        replacement: EpochReplacement,
+    ) -> Self {
         let (input, receiver) = mpsc::channel(32);
         let connection = prepared
             .activate_with_replacement(ReceiverStream::new(receiver), &[], replacement)
@@ -752,6 +769,36 @@ async fn a_draining_epoch_finishes_its_request_while_new_work_uses_the_successor
         assert!(state.draining.is_none());
         assert_eq!(state.active.as_ref().unwrap().epoch, second.epoch);
     }
+    second.stop().await;
+}
+
+/// A request issued at any point of a drain handoff has an epoch: while the
+/// successor is only prepared it goes to the current epoch, from activation
+/// on to the successor, and the predecessor's end changes nothing for it.
+/// Activation replaces the active epoch under the state lock, so there is
+/// no instant with neither.
+#[tokio::test]
+async fn a_request_at_every_point_of_a_drain_handoff_has_an_epoch() {
+    let mut first = Harness::new().await;
+    let bridge = first.bridge.clone();
+    let (prepared, output) = Harness::prepare(&bridge).await;
+    // Prepared, Ready sent, not activated: the current epoch takes it.
+    let (before_task, before_request) = first.submit().await;
+    let mut second =
+        Harness::activate(bridge.clone(), prepared, output, EpochReplacement::Drain).await;
+    // Activated: the successor takes it; the predecessor is told nothing.
+    let (during_task, during_request) = second.submit().await;
+    first.quiet().await;
+    complete(&first, &before_request, b"before").await;
+    complete(&second, &during_request, b"during").await;
+    assert_eq!(body_of(before_task).await, "before");
+    assert_eq!(body_of(during_task).await, "during");
+    // The predecessor's stream ends at its expiry: the successor still takes it.
+    drop(first.end_stream().await);
+    let (after_task, after_request) = second.submit().await;
+    complete(&second, &after_request, b"after").await;
+    assert_eq!(body_of(after_task).await, "after");
+    assert_eq!(in_flight(&bridge).await, 0);
     second.stop().await;
 }
 

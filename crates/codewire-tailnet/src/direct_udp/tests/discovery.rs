@@ -271,3 +271,248 @@ fn call_me_maybe_endpoint_filter_matches_magicsock() {
         "[fe80::1]:41641".parse().unwrap()
     ));
 }
+
+#[test]
+fn public_only_peer_endpoints_refuse_local_and_private_ranges() {
+    for refused in [
+        "127.0.0.1:41641",
+        "10.1.2.3:41641",
+        "172.16.0.9:41641",
+        "192.168.1.20:41641",
+        "169.254.10.1:41641",
+        "100.64.0.1:41641",
+        "100.127.255.254:41641",
+        "0.1.2.3:41641",
+        "255.255.255.255:41641",
+        "224.0.0.251:5353",
+        "[::1]:41641",
+        "[fd7a:115c:a1e0::1]:41641",
+        "[fe80::1]:41641",
+        "[fec0::1]:41641",
+        "[ff02::1]:41641",
+        "[::ffff:10.0.0.1]:41641",
+        "[::ffff:127.0.0.1]:41641",
+    ] {
+        let endpoint = refused.parse().unwrap();
+        assert!(
+            !is_acceptable_peer_endpoint(endpoint, true),
+            "{refused} must be refused"
+        );
+    }
+    for accepted in [
+        "203.0.113.7:41641",
+        "192.0.2.34:31000",
+        "100.128.0.1:41641",
+        "[2001:db8::1]:41641",
+        "[2a01:4f8::1]:41641",
+        "[::ffff:192.0.2.34]:41641",
+    ] {
+        let endpoint = accepted.parse().unwrap();
+        assert!(
+            is_acceptable_peer_endpoint(endpoint, true),
+            "{accepted} must be accepted"
+        );
+    }
+    // Without the policy, local endpoints stay usable (LAN Mesh peers).
+    assert!(is_acceptable_peer_endpoint(
+        "192.168.1.20:41641".parse().unwrap(),
+        false
+    ));
+}
+
+#[test]
+fn public_only_drops_private_node_endpoints_and_unverifies_private_sources() {
+    let local_secret = StaticSecret::random_from_rng(OsRng);
+    let peer_secret = StaticSecret::random_from_rng(OsRng);
+    let local_node = NodePublic::from_raw(PublicKey::from(&local_secret).to_bytes());
+    let peer_node = NodePublic::from_raw(PublicKey::from(&peer_secret).to_bytes());
+    let local_disco = DiscoPrivate::generate(&mut OsRng);
+    let peer_disco = DiscoPrivate::generate(&mut OsRng);
+    let public: SocketAddr = "203.0.113.7:41641".parse().unwrap();
+    let options = Options::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        Vec::new(),
+        local_node,
+        local_disco,
+    )
+    .with_public_peer_endpoints_only(true);
+    let shared = shared_for_test(&options);
+
+    let actions = apply_peer_update(
+        &shared,
+        vec![node_with_endpoints(
+            peer_node,
+            peer_disco.public(),
+            vec![
+                "127.0.0.1:22".parse().unwrap(),
+                "10.0.0.5:41641".parse().unwrap(),
+                public,
+            ],
+            B_IP,
+        )],
+    );
+    let pinged = actions
+        .iter()
+        .map(|action| match action.target {
+            DiscoTarget::Udp(addr) => addr,
+            _ => panic!("only direct pings are expected"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pinged, [public], "only the public endpoint is probed");
+    let mut state = shared.state.lock().unwrap();
+    assert_eq!(
+        state
+            .peers_by_node
+            .get(peer_node.as_bytes())
+            .unwrap()
+            .endpoints,
+        [public]
+    );
+    // A disco source on a private address never becomes the direct path.
+    state.verify_endpoint(*peer_node.as_bytes(), "192.168.1.20:41641".parse().unwrap());
+    assert!(state
+        .peers_by_node
+        .get(peer_node.as_bytes())
+        .unwrap()
+        .verified_endpoint
+        .is_none());
+    state.verify_endpoint(*peer_node.as_bytes(), public);
+    assert_eq!(
+        state
+            .peers_by_node
+            .get(peer_node.as_bytes())
+            .unwrap()
+            .verified_endpoint
+            .as_ref()
+            .map(|verified| verified.addr),
+        Some(public)
+    );
+}
+
+#[tokio::test]
+async fn public_only_never_pings_private_call_me_maybe_candidates() {
+    let a_secret = StaticSecret::random_from_rng(OsRng);
+    let b_secret = StaticSecret::random_from_rng(OsRng);
+    let a_node = NodePublic::from_raw(PublicKey::from(&a_secret).to_bytes());
+    let b_node = NodePublic::from_raw(PublicKey::from(&b_secret).to_bytes());
+    let a_disco = DiscoPrivate::generate(&mut OsRng);
+    let b_disco = DiscoPrivate::generate(&mut OsRng);
+    let a_endpoint = reserve_local_endpoint();
+    let b_endpoint = reserve_local_endpoint();
+    let call_endpoint = reserve_local_endpoint();
+    let options = Options::new(a_endpoint, Vec::new(), a_node, a_disco.clone())
+        .with_public_peer_endpoints_only(true);
+    let shared = shared_arc_for_test(&options);
+    {
+        let mut state = shared.state.lock().unwrap();
+        state.peers_by_node.insert(
+            *b_node.as_bytes(),
+            peer_state(b_node, b_disco.public(), b_endpoint),
+        );
+        state.peers_by_disco.insert(
+            *b_disco.public().as_bytes(),
+            DiscoPeerIndex::Unique(*b_node.as_bytes()),
+        );
+    }
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let listen = UdpSocket::bind(call_endpoint).await.unwrap();
+    let (fallback, _fallback_rx, _fallback_in_tx) = recording_fallback();
+    // An environment peer asks the client to probe a loopback service.
+    let packet = b_disco
+        .seal_to(
+            &a_disco.public(),
+            &Message::CallMeMaybe(CallMeMaybe {
+                endpoints: vec![call_endpoint],
+            }),
+            &mut OsRng,
+        )
+        .unwrap();
+
+    handle_disco_packet(
+        &shared,
+        &socket,
+        &fallback.to_transport,
+        None,
+        Some(derp_public_from_node(b_node)),
+        &packet,
+    )
+    .await;
+
+    let mut got = [0u8; UDP_PACKET_LIMIT];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), listen.recv_from(&mut got))
+            .await
+            .is_err(),
+        "a public-only client must not ping a loopback CallMeMaybe candidate"
+    );
+    assert!(shared.state.lock().unwrap().pending_tx.is_empty());
+}
+
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Verify `endpoint` for a fresh peer under a subscriber at `level` and
+/// return what it logged.
+fn logged_while_verifying(endpoint: SocketAddr, level: tracing::Level) -> String {
+    let local_secret = StaticSecret::random_from_rng(OsRng);
+    let peer_secret = StaticSecret::random_from_rng(OsRng);
+    let local_node = NodePublic::from_raw(PublicKey::from(&local_secret).to_bytes());
+    let peer_node = NodePublic::from_raw(PublicKey::from(&peer_secret).to_bytes());
+    let options = Options::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        Vec::new(),
+        local_node,
+        DiscoPrivate::generate(&mut OsRng),
+    );
+    let shared = shared_for_test(&options);
+    let mut state = shared.state.lock().unwrap();
+    state.peers_by_node.insert(
+        *peer_node.as_bytes(),
+        peer_state(
+            peer_node,
+            DiscoPrivate::generate(&mut OsRng).public(),
+            endpoint,
+        ),
+    );
+    let logs = CapturedLogs::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(level)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        state.verify_endpoint(*peer_node.as_bytes(), endpoint);
+    });
+    assert!(state
+        .peers_by_node
+        .get(peer_node.as_bytes())
+        .unwrap()
+        .verified_endpoint
+        .is_some());
+    let bytes = logs.0.lock().unwrap().clone();
+    String::from_utf8(bytes).unwrap()
+}
+
+#[test]
+fn a_peers_verified_endpoint_is_never_logged_at_info() {
+    let endpoint: SocketAddr = "198.51.100.23:51820".parse().unwrap();
+    let info = logged_while_verifying(endpoint, tracing::Level::INFO);
+    assert!(
+        !info.contains("198.51.100.23"),
+        "a person's address must stay out of info logs: {info}"
+    );
+    let debug = logged_while_verifying(endpoint, tracing::Level::DEBUG);
+    assert!(debug.contains("198.51.100.23:51820"), "{debug}");
+}

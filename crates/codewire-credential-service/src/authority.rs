@@ -26,18 +26,14 @@ use codewire_server_core::pod_identity::{
     KubernetesPodIdentityVerifier, PodIdentityError, PodIdentityPurpose, VerifiedPodIdentity,
 };
 use http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
-use k8s_openapi::api::core::v1::Pod;
-use kube::{Api, Client};
+use kube::Client;
 use sqlx::PgPool;
 use tokio::time::Instant;
 use tonic::metadata::MetadataMap;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::objects::{
-    Lineage, LineageNames, LineageReads, gateway_environment, live_pod, validate_lineage,
-    verified_shape,
-};
+use crate::objects::{Lineage, LineageNames, valid_name, validate_lineage, verified_shape};
 use crate::projection::ProjectionMetadata;
 
 pub(crate) const WORKSPACE_AUTHORIZATION: &str = "x-codewire-workspace-authorization-bin";
@@ -82,8 +78,14 @@ impl RuntimeKekAuthorities {
         &self,
         client: Client,
         pool: PgPool,
+        relay_namespace: String,
     ) -> KubernetesPlatformBridgeAuthenticator {
-        KubernetesPlatformBridgeAuthenticator::new(client, pool, self.application.clone())
+        KubernetesPlatformBridgeAuthenticator::new(
+            client,
+            pool,
+            self.application.clone(),
+            relay_namespace,
+        )
     }
 
     #[cfg(feature = "enrollment")]
@@ -155,25 +157,37 @@ mod timed_kek {
 /// Production-only construction: callers cannot inject purported verified IDs.
 ///
 /// Private metadata is exactly one ordinary authorization bearer for the
-/// gateway and one binary x-codewire-workspace-authorization-bin whose decoded
-/// bytes are canonical "Bearer ..." for the workspace. The gateway producer
-/// must mark that binary metadata value sensitive. The ASCII lookalike is
-/// rejected, not treated as a fallback. Only fixed purpose TokenReviews
-/// establish identity; no cookie, public user bearer or guest scope is accepted.
+/// credential relay (orchestration) and one binary
+/// x-codewire-workspace-authorization-bin whose decoded bytes are canonical
+/// "Bearer ..." for the workspace. The relay must mark that binary metadata
+/// value sensitive. The ASCII lookalike is rejected, not treated as a fallback.
+/// Only fixed purpose TokenReviews establish identity; no cookie, public user
+/// bearer or guest scope is accepted.
+///
+/// The relay identity is pinned to orchestration's service account (by its
+/// purpose) and to `relay_namespace`, the server namespace this service and
+/// orchestration share. A pod-bound relay token stops reviewing once its Pod
+/// is gone, so no Pod read is needed for it.
 pub struct KubernetesPlatformBridgeAuthenticator {
     client: Client,
     pool: PgPool,
-    gateway_verifier: KubernetesPodIdentityVerifier,
+    relay_verifier: KubernetesPodIdentityVerifier,
     workspace_verifier: KubernetesPodIdentityVerifier,
+    relay_namespace: String,
     provider: Arc<dyn KekProvider>,
 }
 
 impl KubernetesPlatformBridgeAuthenticator {
-    pub fn new(client: Client, pool: PgPool, provider: Arc<dyn KekProvider>) -> Self {
+    pub fn new(
+        client: Client,
+        pool: PgPool,
+        provider: Arc<dyn KekProvider>,
+        relay_namespace: String,
+    ) -> Self {
         Self {
-            gateway_verifier: KubernetesPodIdentityVerifier::new(
+            relay_verifier: KubernetesPodIdentityVerifier::new(
                 Some(client.clone()),
-                PodIdentityPurpose::CredentialGateway,
+                PodIdentityPurpose::CredentialRelay,
             ),
             workspace_verifier: KubernetesPodIdentityVerifier::new(
                 Some(client.clone()),
@@ -181,6 +195,7 @@ impl KubernetesPlatformBridgeAuthenticator {
             ),
             client,
             pool,
+            relay_namespace,
             provider,
         }
     }
@@ -195,19 +210,20 @@ impl PlatformBridgeAuthenticator for KubernetesPlatformBridgeAuthenticator {
         metadata: &MetadataMap,
     ) -> Result<Arc<Self::Authority>, PlatformBridgeAuthenticationError> {
         // Validate both complete inputs before either verifier/network call.
-        let (gateway_headers, workspace_headers) = authentication_headers(metadata)?;
+        let (relay_headers, workspace_headers) = authentication_headers(metadata)?;
         tokio::time::timeout(AUTHORITY_TIMEOUT, async {
             // Two concurrent TokenReviews; the epoch line records their wall time.
-            let (gateway, workspace) = timing::timed_count(Phase::TokenReview, 2, async {
+            let (relay, workspace) = timing::timed_count(Phase::TokenReview, 2, async {
                 tokio::try_join!(
-                    self.gateway_verifier.authenticate(&gateway_headers),
+                    self.relay_verifier.authenticate(&relay_headers),
                     self.workspace_verifier.authenticate(&workspace_headers),
                 )
             })
             .await
             .map_err(authentication_error)?;
             // Only these metadata-only opaque verifier results are retained.
-            let identities = Identities::new(gateway, workspace).map_err(runtime_auth_error)?;
+            let identities = Identities::new(relay, workspace, &self.relay_namespace)
+                .map_err(runtime_auth_error)?;
             let authority = AuthoritySource {
                 client: self.client.clone(),
                 pool: self.pool.clone(),
@@ -236,7 +252,7 @@ impl PlatformBridgeAuthenticator for KubernetesPlatformBridgeAuthenticator {
 /// initial database/profile/controller selection. No public constructor, wire
 /// deserializer, credential value or protected-material cache exists. Each
 /// later resolve reads every Kubernetes object again; from the initial one it
-/// takes only the environment and two object names to read under.
+/// takes only the environment and the Sandbox name to read under.
 pub struct KubernetesPlatformRuntimeAuthority {
     pub(crate) authority: AuthoritySource,
     pub(crate) identities: Identities,
@@ -269,24 +285,32 @@ impl PlatformRuntimeAuthority for KubernetesPlatformRuntimeAuthority {
 }
 
 pub(crate) struct Identities {
-    gateway: VerifiedPodIdentity,
+    relay: VerifiedPodIdentity,
     workspace: VerifiedPodIdentity,
     expires_at_unix: u64,
     deadline: Instant,
 }
 
 impl Identities {
-    fn new(gateway: VerifiedPodIdentity, workspace: VerifiedPodIdentity) -> Result<Self, Error> {
-        verified_shape(&gateway)?;
+    /// The relay must be orchestration (its purpose pins the service account)
+    /// in the server namespace this service runs in; the workspace's own
+    /// namespace is checked against its binding's scope at every resolve.
+    pub(crate) fn new(
+        relay: VerifiedPodIdentity,
+        workspace: VerifiedPodIdentity,
+        relay_namespace: &str,
+    ) -> Result<Self, Error> {
+        verified_shape(&relay)?;
         verified_shape(&workspace)?;
-        if gateway.purpose() != PodIdentityPurpose::CredentialGateway
+        if relay.purpose() != PodIdentityPurpose::CredentialRelay
             || workspace.purpose() != PodIdentityPurpose::CredentialWorkspace
-            || gateway.namespace() != workspace.namespace()
-            || gateway.pod_uid() == workspace.pod_uid()
+            || !valid_name(relay_namespace, true)
+            || relay.namespace() != relay_namespace
+            || relay.pod_uid() == workspace.pod_uid()
         {
             return Err(Error::Denied);
         }
-        let expires_at_unix = gateway.expires_at_unix().min(workspace.expires_at_unix());
+        let expires_at_unix = relay.expires_at_unix().min(workspace.expires_at_unix());
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| Error::Unavailable)?;
@@ -296,7 +320,7 @@ impl Identities {
             .ok_or(Error::Denied)?;
         let deadline = Instant::now().checked_add(remaining).ok_or(Error::Denied)?;
         Ok(Self {
-            gateway,
+            relay,
             workspace,
             expires_at_unix,
             deadline,
@@ -415,8 +439,8 @@ pub(crate) struct Resolved {
     binding: Option<PlatformBindingMetadata>,
     profile: Option<AccessProfile>,
     lineage: Lineage,
-    /// The names this resolve read its ReplicaSet and Sandbox under, which
-    /// the epoch's later resolves start their reads from. Not authority.
+    /// The name this resolve read its Sandbox under, which the epoch's later
+    /// resolves start their reads from. Not authority.
     names: LineageNames,
 }
 
@@ -481,6 +505,14 @@ macro_rules! scope_query {
 }
 pub(crate) const SCOPE_QUERY: &str = scope_query!();
 
+/// The environment the reviewed workspace Pod is bound to: its live claim-time
+/// binding, keyed by the Pod UID (migration 0034's primary key, which never
+/// moves to another environment). The scope query then also requires the
+/// backend pointer to name this Pod. Every column read here is already granted
+/// to the restricted role for the scope query's join.
+const BOUND_ENVIRONMENT_QUERY: &str = "SELECT w.environment_id FROM public.sandbox_workspace_bindings w \
+     WHERE w.pod_uid=$1 AND w.released_at IS NULL";
+
 /// One statement in place of `SCOPE_QUERY` followed by `METADATA_QUERY`. Both
 /// are plain reads that lock nothing, so one snapshot for both is the separate
 /// reads when nothing commits between them.
@@ -518,6 +550,17 @@ struct ScopeAndMetadata {
 }
 
 impl AuthoritySource {
+    /// The environment of the workspace Pod's live binding. An unbound or
+    /// released Pod never scopes.
+    async fn bound_environment(&self, workspace_pod_uid: &str) -> Result<String, Error> {
+        sqlx::query_scalar(BOUND_ENVIRONMENT_QUERY)
+            .bind(workspace_pod_uid)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|_| Error::Unavailable)?
+            .ok_or(Error::Denied)
+    }
+
     /// The scope and its projection metadata, read together.
     async fn scope_and_metadata(&self, environment: &str) -> Result<ScopeAndMetadata, Error> {
         // Membership is an INNER JOIN, never the public environment API's
@@ -554,51 +597,25 @@ impl AuthoritySource {
         kubernetes: &mut Duration,
     ) -> Result<Resolved, Error> {
         identities.ensure_live()?;
-        // The scope query needs the environment. At admission only the gateway
-        // Pod's label names it, so that Pod is read and checked first. Every
-        // later resolve in the epoch must reach the admission's scope anyway
-        // (`same_authority` compares whole scopes), so it queries the
-        // admission's environment and reads the gateway Pod with its lineage,
-        // where the same checks hold for the fresh Pod.
-        //
-        // Residual differences, which fail closed: a later resolve's gateway
-        // Pod is now checked after the SQL and alongside the other reads, not
-        // before them.
-        // - Which error a request gets can change when two failures coincide:
-        //   a gateway Pod that would be Denied, with the database or another
-        //   read Unavailable, may now return Unavailable.
-        // - A request whose gateway Pod would be denied now still runs the
-        //   scope SQL first and, with a profile, the binding transaction's
-        //   short `FOR SHARE` owner and environment locks (migration 0021).
-        //   Both only read, under the transaction's timeouts, and only for
-        //   the environment this admitted epoch already holds, until its
-        //   deadline.
-        let admission_gateway: Pod;
-        let (environment, reads) = match admission {
-            None => {
-                admission_gateway = kubernetes_read(
-                    kubernetes,
-                    Api::namespaced(self.client.clone(), identities.gateway.namespace())
-                        .get(identities.gateway.pod_name()),
-                )
-                .await
-                .map_err(kube_error)?;
-                live_pod(&admission_gateway, &identities.gateway)?;
-                (
-                    gateway_environment(&admission_gateway)?,
-                    LineageReads::Admission(&admission_gateway),
-                )
-            }
+        // The scope query needs the environment. At admission it is the one the
+        // reviewed workspace Pod is bound to, by its UID; no label names it.
+        // Every later resolve in the epoch must reach the admission's scope
+        // anyway (`same_authority` compares whole scopes), so it queries the
+        // admission's environment and starts its Sandbox read under the
+        // admission's name.
+        let (environment, names) = match admission {
+            None => (
+                self.bound_environment(identities.workspace.pod_uid())
+                    .await?,
+                None,
+            ),
             Some(admission) => (
                 admission.scope.environment_id.clone(),
-                LineageReads::Epoch {
-                    gateway: &identities.gateway,
-                    names: &admission.names,
-                },
+                Some(&admission.names),
             ),
         };
         let ScopeAndMetadata { scope, metadata } = self.scope_and_metadata(&environment).await?;
-        if scope.namespace != identities.gateway.namespace() {
+        if scope.namespace != identities.workspace.namespace() {
             return Err(Error::Denied);
         }
         let mut context = scope.context()?;
@@ -673,7 +690,7 @@ impl AuthoritySource {
         // not their sum.
         let (lineage, names) = kubernetes_read(
             kubernetes,
-            validate_lineage(&self.client, &scope, reads, &identities.workspace),
+            validate_lineage(&self.client, &scope, names, &identities.workspace),
         )
         .await?;
         // Selecting a GitHub repository needs no profile. Orchestration records
@@ -697,7 +714,7 @@ impl AuthoritySource {
         }
         identities.ensure_live()?;
         let session = PlatformRuntimeSession::new(
-            platform_pod(&identities.gateway)?,
+            platform_pod(&identities.relay)?,
             platform_pod(&identities.workspace)?,
             context,
             owner,
@@ -743,8 +760,8 @@ fn authentication_headers(
     if metadata.contains_key(ASCII_WORKSPACE_AUTHORIZATION) {
         return Err(denied);
     }
-    let mut gateway = metadata.get_all("authorization").iter();
-    let gateway = match (gateway.next(), gateway.next()) {
+    let mut relay = metadata.get_all("authorization").iter();
+    let relay = match (relay.next(), relay.next()) {
         (Some(value), None) => value,
         _ => return Err(denied),
     };
@@ -758,7 +775,7 @@ fn authentication_headers(
     }
     let workspace = Zeroizing::new(workspace.to_bytes().map_err(|_| denied)?.to_vec());
     Ok((
-        canonical_headers(gateway.as_encoded_bytes())?,
+        canonical_headers(relay.as_encoded_bytes())?,
         canonical_headers(&workspace)?,
     ))
 }

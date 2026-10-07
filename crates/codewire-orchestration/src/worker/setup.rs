@@ -23,11 +23,13 @@ use super::scripts::{build_git_identity_command, build_workspace_env_script};
 use super::setup_lease::{
     PhaseAcquire, PhasePreparation, SetupActivityIdentity, SetupLeaseRecord, SetupPhaseAuthority,
 };
+use super::workspace_binding::{BindRefused, bind_replacement_runtime};
 use super::{JobPayload, WorkerContext};
 use crate::repository_mount::{canonical_repository_mount, validate_repository_mounts};
-use crate::sandbox::client::{ProbeResult, SandboxClient};
+use crate::sandbox::client::{ProbeResult, SandboxClient, WorkspacePodIdentity};
 use crate::sandbox::exec::{StderrTap, WorkspaceExecResult};
-use crate::sandbox::sidecar::DEFAULT_GATEWAY_SSH_PORT;
+use crate::sandbox::host_keys::RecordedHostKeys;
+use crate::sandbox::sidecar::WORKSPACE_SSH_PORT;
 
 const DEFAULT_SIDECAR_READY_TIMEOUT: Duration = Duration::from_secs(180);
 const SIDECAR_READY_TIMEOUT_ENV: &str = "SIDECAR_READY_TIMEOUT_SECS";
@@ -642,6 +644,44 @@ fn replacement_runtime_is_current(
         && !probe.pod_ip.is_empty()
 }
 
+/// How far one replacement attempt of setup recovery got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplacementAccess {
+    /// Bound, and its access wait succeeded.
+    Ready,
+    /// Its chain has not converged on the replacement yet; observe again.
+    NotYetBindable,
+}
+
+/// Design §10: an identity-free daemon serves SSH and records its host key
+/// only once bound, so a replacement Pod binds before its access wait, as a
+/// daemon repair's does. A refusal that clears while the replacement's chain
+/// converges asks the caller to observe again; any other refusal fails, and
+/// the access wait never starts for an unbound Pod.
+async fn bind_replacement_then_await_access(
+    bind: impl std::future::Future<Output = anyhow::Result<()>>,
+    access: impl std::future::Future<Output = anyhow::Result<()>>,
+) -> anyhow::Result<ReplacementAccess> {
+    match bind.await {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.downcast_ref::<BindRefused>(),
+                Some(
+                    BindRefused::NotConverged
+                        | BindRefused::PodChanged
+                        | BindRefused::ChainUnverified
+                )
+            ) =>
+        {
+            return Ok(ReplacementAccess::NotYetBindable);
+        }
+        Err(error) => return Err(error),
+    }
+    access.await?;
+    Ok(ReplacementAccess::Ready)
+}
+
 pub struct WorkerSetupOps<'a> {
     pub ctx: &'a WorkerContext,
     pub env: EnvironmentRow,
@@ -823,31 +863,50 @@ impl WorkerSetupOps<'_> {
             // Pending/not-Ready observations within the one recovery bound.
             let probe = sandbox.probe_environment(&input.environment_id).await?;
             if replacement_runtime_is_current(&pod_name, old_uid, &probe) {
-                let replacement_uid = probe.pod_uid.clone();
+                let replacement = WorkspacePodIdentity {
+                    name: probe.pod_name.clone(),
+                    uid: probe.pod_uid.clone(),
+                };
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
                     anyhow::bail!(
                         "setup recovery timed out waiting for replacement Pod {pod_name} readiness"
                     );
                 }
-                let ready = tokio::time::timeout(
+                let kube = self.ctx.kube.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("workspace setup: sandbox backend not configured")
+                })?;
+                // Boxed: the bind and access futures are large, and inline
+                // they would grow every setup activity's future, not only a
+                // recovery's.
+                let attempt = tokio::time::timeout(
                     remaining,
-                    wait_for_sidecar(self.ctx, &input.namespace, &input.environment_id),
+                    Box::pin(bind_replacement_then_await_access(
+                        bind_replacement_runtime(
+                            kube,
+                            self.authority,
+                            SETUP_MUTATION_STATES,
+                            &replacement,
+                            remaining,
+                        ),
+                        wait_for_sidecar(self.ctx, &input.namespace, &input.environment_id),
+                    )),
                 );
-                await_setup_or_cancel(&self.activity_ctx, async {
-                    ready.await.map_err(|_| {
+                let reached = await_setup_or_cancel(&self.activity_ctx, async {
+                    attempt.await.map_err(|_| {
                         anyhow::anyhow!(
                             "setup recovery timed out waiting for replacement Pod {pod_name} readiness"
                         )
-                    })??;
-                    Ok(())
+                    })?
                 })
                 .await?;
-                let final_probe = sandbox.probe_environment(&input.environment_id).await?;
-                if final_probe.pod_uid == replacement_uid
-                    && replacement_runtime_is_current(&pod_name, old_uid, &final_probe)
-                {
-                    return Ok(final_probe);
+                if reached == ReplacementAccess::Ready {
+                    let final_probe = sandbox.probe_environment(&input.environment_id).await?;
+                    if final_probe.pod_uid == replacement.uid
+                        && replacement_runtime_is_current(&pod_name, old_uid, &final_probe)
+                    {
+                        return Ok(final_probe);
+                    }
                 }
             }
             if tokio::time::Instant::now() >= deadline {
@@ -1748,6 +1807,15 @@ impl SetupOps for WorkerSetupOps<'_> {
                 count = input.app_ports.len(),
                 "post-boot: auto-registered ports"
             );
+            // The bound daemon serves these on its tailnet address (#2460).
+            crate::api::environment_daemon::push_environment_app_ports(
+                &self.ctx.pool,
+                self.ctx.kube.as_ref(),
+                &self.ctx.sandbox_cfg.session_secret,
+                None,
+                &input.environment_id,
+            )
+            .await;
         }
         Ok(())
     }
@@ -1797,7 +1865,7 @@ pub(crate) async fn wait_for_sidecar(
         let attempt_timeout = remaining.min(SIDECAR_READY_ATTEMPT_TIMEOUT);
         match tokio::time::timeout(
             attempt_timeout,
-            client.check_sidecar_ready(env_id, DEFAULT_GATEWAY_SSH_PORT),
+            client.check_sidecar_ready(env_id, WORKSPACE_SSH_PORT, &RecordedHostKeys(&ctx.pool)),
         )
         .await
         {
@@ -2529,6 +2597,71 @@ mod tests {
                 .calls
                 .contains(&"log:health_check:completed".to_string())
         );
+    }
+
+    /// Setup recovery binds the replacement Pod before its access wait: an
+    /// identity-free daemon serves SSH only once bound (design §10).
+    #[tokio::test]
+    async fn recovery_binds_the_replacement_before_its_access_wait() {
+        let steps = Arc::new(Mutex::new(Vec::new()));
+        let step = |name: &'static str, result: anyhow::Result<()>| {
+            let steps = Arc::clone(&steps);
+            async move {
+                steps.lock().unwrap().push(name);
+                result
+            }
+        };
+
+        let reached =
+            bind_replacement_then_await_access(step("bind", Ok(())), step("access", Ok(())))
+                .await
+                .unwrap();
+        assert_eq!(reached, ReplacementAccess::Ready);
+        assert_eq!(*steps.lock().unwrap(), ["bind", "access"]);
+
+        for refusal in [
+            BindRefused::NotConverged,
+            BindRefused::PodChanged,
+            BindRefused::ChainUnverified,
+        ] {
+            steps.lock().unwrap().clear();
+            let reached = bind_replacement_then_await_access(
+                step("bind", Err(refusal.into())),
+                step("access", Ok(())),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reached, ReplacementAccess::NotYetBindable);
+            assert_eq!(*steps.lock().unwrap(), ["bind"], "{refusal:?}");
+        }
+
+        for failure in [
+            anyhow::Error::from(BindRefused::BoundElsewhere),
+            anyhow::Error::from(BindRefused::Denied("released binding")),
+            anyhow::Error::from(super::super::activity_authority::AuthorityLost),
+        ] {
+            steps.lock().unwrap().clear();
+            assert!(
+                bind_replacement_then_await_access(
+                    step("bind", Err(failure)),
+                    step("access", Ok(())),
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(*steps.lock().unwrap(), ["bind"]);
+        }
+
+        steps.lock().unwrap().clear();
+        assert!(
+            bind_replacement_then_await_access(
+                step("bind", Ok(())),
+                step("access", Err(anyhow::anyhow!("access timed out"))),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(*steps.lock().unwrap(), ["bind", "access"]);
     }
 
     #[test]

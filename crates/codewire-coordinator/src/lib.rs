@@ -25,10 +25,9 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 mod connect;
+mod peer;
 mod session;
-mod sidecar_token;
 
-const SCOPE_COORDINATE: &str = "coordinate";
 const COORDINATOR_BUCKET: &str = "coordinator-nodes";
 const COORDINATOR_BUCKET_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const SIDECAR_KV_REFRESH: Duration = Duration::from_secs(5 * 60);
@@ -134,8 +133,19 @@ impl CoordinationPlane {
         Ok(())
     }
 
-    async fn put_sidecar_node(&self, env_id: Uuid, node: &Node) -> anyhow::Result<()> {
-        let data = serde_json::to_vec(node)?;
+    /// Records the environment peer's node stamped with the operation
+    /// generation it proved, so a reader can ignore a node from a generation
+    /// that has moved on.
+    async fn put_sidecar_node(
+        &self,
+        env_id: Uuid,
+        generation: i64,
+        node: &Node,
+    ) -> anyhow::Result<()> {
+        let data = serde_json::to_vec(&StampedNode {
+            generation,
+            node: node.clone(),
+        })?;
         self.kv
             .put(sidecar_key(env_id), Bytes::from(data))
             .await
@@ -143,12 +153,32 @@ impl CoordinationPlane {
             .map_err(Into::into)
     }
 
-    async fn get_sidecar_node(&self, env_id: Uuid) -> anyhow::Result<Option<Node>> {
+    /// The recorded environment peer node and its generation.
+    async fn get_sidecar_node(&self, env_id: Uuid) -> anyhow::Result<Option<(i64, Node)>> {
         let Some(data) = self.kv.get(sidecar_key(env_id)).await? else {
             return Ok(None);
         };
-        Ok(Some(serde_json::from_slice(&data)?))
+        let stamped: StampedNode = serde_json::from_slice(&data)?;
+        Ok(Some((stamped.generation, stamped.node)))
     }
+
+    /// Deletes the recorded environment peer node when it is still the one
+    /// stamped with `generation`, so a revoked generation leaves no node for
+    /// clients to dial.
+    async fn delete_sidecar_node(&self, env_id: Uuid, generation: i64) -> anyhow::Result<()> {
+        if let Some((stamped, _)) = self.get_sidecar_node(env_id).await?
+            && stamped <= generation
+        {
+            self.kv.delete(sidecar_key(env_id)).await?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(serde::Deserialize, Serialize)]
+struct StampedNode {
+    generation: i64,
+    node: Node,
 }
 
 fn agent_subject(env_id: Uuid) -> String {
@@ -351,57 +381,6 @@ fn permission_level(permission: &str) -> i32 {
         "owner" => 3,
         _ => 0,
     }
-}
-
-async fn authorize_sidecar(
-    state: &CoordinatorState,
-    sidecar_id: Uuid,
-    token: &str,
-) -> Result<(), Response> {
-    let claims = sidecar_token::validate(&state.session_secret, token)
-        .map_err(|_| json_error(StatusCode::UNAUTHORIZED, "invalid sidecar token"))?;
-    if claims.scope != SCOPE_COORDINATE {
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "invalid sidecar token scope",
-        ));
-    }
-
-    let env_id: Option<String> = match sqlx::query_scalar(
-        r#"
-        SELECT id
-          FROM environments
-         WHERE id = $1
-           AND state NOT IN ('destroyed', 'destroying')
-        "#,
-    )
-    .bind(&claims.environment_id)
-    .fetch_optional(&state.pool)
-    .await
-    {
-        Ok(env_id) => env_id,
-        Err(err) => {
-            tracing::error!(error = ?err, "coordinator sidecar environment lookup failed");
-            return Err(text_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal error",
-            ));
-        }
-    };
-
-    let Some(env_id) = env_id else {
-        return Err(json_error(
-            StatusCode::UNAUTHORIZED,
-            "invalid or expired sidecar token",
-        ));
-    };
-    if env_id != sidecar_id.to_string() {
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "sidecar_id does not match token",
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -743,15 +722,56 @@ struct RegistryInner {
 struct Peer {
     node: Option<Node>,
     tx: mpsc::UnboundedSender<PeerEvent>,
+    /// The session that owns this entry. Only it updates or removes it.
+    owner: Uuid,
+    /// An environment peer's proven `(generation, expiry)`. A second session
+    /// for the same environment replaces this one only with a newer rank.
+    rank: Option<(i64, i64)>,
+}
+
+/// One session's registry entry.
+struct Registration {
+    events: mpsc::UnboundedReceiver<PeerEvent>,
+    owner: Uuid,
 }
 
 impl PeerRegistry {
-    fn register(&self, id: Uuid) -> mpsc::UnboundedReceiver<PeerEvent> {
+    /// Registers a session for `id`. An environment peer (`rank` set)
+    /// replaces an existing session for the same environment only when its
+    /// rank is strictly newer; otherwise it is refused (`None`).
+    fn register(&self, id: Uuid, rank: Option<(i64, i64)>) -> Option<Registration> {
         let (tx, rx) = mpsc::unbounded_channel();
+        let owner = Uuid::new_v4();
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.peers.insert(id, Peer { node: None, tx });
+        if let (Some(existing), Some(rank)) =
+            (inner.peers.get(&id).and_then(|peer| peer.rank), rank)
+            && rank <= existing
+        {
+            return None;
+        }
+        // Replacing drops the previous session's sender, which ends it.
+        inner.peers.insert(
+            id,
+            Peer {
+                node: None,
+                tx,
+                owner,
+                rank,
+            },
+        );
         Self::send_all_client_peers(&inner, id);
-        rx
+        Some(Registration { events: rx, owner })
+    }
+
+    /// Raises the owner's proven rank after an in-band proof.
+    fn raise_rank(&self, id: Uuid, owner: Uuid, rank: (i64, i64)) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(peer) = inner.peers.get_mut(&id)
+            && peer.owner == owner
+            && peer.rank.is_some_and(|current| rank > current)
+        {
+            peer.rank = Some(rank);
+        }
     }
 
     fn add_tunnel(&self, client_id: Uuid, sidecar_id: Uuid) {
@@ -769,11 +789,14 @@ impl PeerRegistry {
         Self::send_all_client_peers(&inner, sidecar_id);
     }
 
-    fn update_node(&self, id: Uuid, node: Node) {
+    fn update_node(&self, id: Uuid, owner: Uuid, node: Node) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(peer) = inner.peers.get_mut(&id) else {
             return;
         };
+        if peer.owner != owner {
+            return;
+        }
         peer.node = Some(node.clone());
 
         let tunnels: Vec<(Uuid, Uuid)> = inner
@@ -793,8 +816,13 @@ impl PeerRegistry {
         }
     }
 
-    fn deregister(&self, id: Uuid) {
+    /// Removes the entry only while `owner` still owns it: a session that was
+    /// replaced never tears down its replacement.
+    fn deregister(&self, id: Uuid, owner: Uuid) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.peers.get(&id).is_none_or(|peer| peer.owner != owner) {
+            return;
+        }
         inner.peers.remove(&id);
 
         let tunnels: Vec<(Uuid, Uuid)> = inner
@@ -960,10 +988,24 @@ mod tests {
 
         let env_id = Uuid::new_v4();
         let sidecar_node = sample_node(env_id, 11);
-        plane.put_sidecar_node(env_id, &sidecar_node).await.unwrap();
-        let got = plane.get_sidecar_node(env_id).await.unwrap().unwrap();
+        plane
+            .put_sidecar_node(env_id, 3, &sidecar_node)
+            .await
+            .unwrap();
+        let (generation, got) = plane.get_sidecar_node(env_id).await.unwrap().unwrap();
+        assert_eq!(generation, 3);
         assert_eq!(got.id, env_id);
         assert_eq!(got.preferred_derp, 11);
+        // A revocation for an older generation leaves a newer node in place;
+        // the stamped generation's revocation removes it.
+        plane.delete_sidecar_node(env_id, 2).await.unwrap();
+        assert!(plane.get_sidecar_node(env_id).await.unwrap().is_some());
+        plane.delete_sidecar_node(env_id, 3).await.unwrap();
+        assert!(plane.get_sidecar_node(env_id).await.unwrap().is_none());
+        plane
+            .put_sidecar_node(env_id, 3, &sidecar_node)
+            .await
+            .unwrap();
 
         let mut agent_sub = plane.subscribe_agent(env_id).await.unwrap();
         plane
@@ -992,18 +1034,21 @@ mod tests {
         plane.kv.delete(sidecar_key(env_id)).await.unwrap();
     }
 
+    fn register(registry: &PeerRegistry, id: Uuid, rank: Option<(i64, i64)>) -> Registration {
+        registry.register(id, rank).expect("registration accepted")
+    }
+
     #[tokio::test]
     async fn registry_exchanges_nodes_when_sidecar_registers_first() {
         let registry = PeerRegistry::default();
         let sidecar_id = Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
         let client_id = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap();
-        let mut sidecar_rx = registry.register(sidecar_id);
-        let mut client_rx = registry.register(client_id);
+        let mut sidecar = register(&registry, sidecar_id, Some((1, 100)));
+        let mut client = register(&registry, client_id, None);
         registry.add_tunnel(client_id, sidecar_id);
 
-        let sidecar_node = sample_node(sidecar_id, 1);
-        registry.update_node(sidecar_id, sidecar_node);
-        match client_rx.recv().await.unwrap() {
+        registry.update_node(sidecar_id, sidecar.owner, sample_node(sidecar_id, 1));
+        match client.events.recv().await.unwrap() {
             PeerEvent::Update(nodes) => {
                 assert_eq!(nodes.len(), 1);
                 assert_eq!(nodes[0].id, sidecar_id);
@@ -1011,9 +1056,8 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
 
-        let client_node = sample_node(client_id, 2);
-        registry.update_node(client_id, client_node);
-        match sidecar_rx.recv().await.unwrap() {
+        registry.update_node(client_id, client.owner, sample_node(client_id, 2));
+        match sidecar.events.recv().await.unwrap() {
             PeerEvent::Update(nodes) => {
                 assert_eq!(nodes.len(), 1);
                 assert_eq!(nodes[0].id, client_id);
@@ -1021,8 +1065,8 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
 
-        registry.deregister(client_id);
-        match sidecar_rx.recv().await.unwrap() {
+        registry.deregister(client_id, client.owner);
+        match sidecar.events.recv().await.unwrap() {
             PeerEvent::Remove(peer_id) => assert_eq!(peer_id, client_id),
             other => panic!("unexpected event: {other:?}"),
         }
@@ -1033,13 +1077,13 @@ mod tests {
         let registry = PeerRegistry::default();
         let sidecar_id = Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
         let client_id = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap();
-        let _client_rx = registry.register(client_id);
+        let client = register(&registry, client_id, None);
         registry.add_tunnel(client_id, sidecar_id);
 
-        registry.update_node(client_id, sample_node(client_id, 2));
-        let mut sidecar_rx = registry.register(sidecar_id);
+        registry.update_node(client_id, client.owner, sample_node(client_id, 2));
+        let mut sidecar = register(&registry, sidecar_id, Some((1, 100)));
 
-        match sidecar_rx.recv().await.unwrap() {
+        match sidecar.events.recv().await.unwrap() {
             PeerEvent::Update(nodes) => {
                 assert_eq!(nodes.len(), 1);
                 assert_eq!(nodes[0].id, client_id);
@@ -1053,35 +1097,57 @@ mod tests {
         let registry = PeerRegistry::default();
         let sidecar_id = Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
         let client_id = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap();
-        let mut client_rx = registry.register(client_id);
-        let mut sidecar_rx = registry.register(sidecar_id);
+        let mut client = register(&registry, client_id, None);
+        let mut sidecar = register(&registry, sidecar_id, Some((1, 100)));
         registry.add_tunnel(client_id, sidecar_id);
-        registry.update_node(client_id, sample_node(client_id, 2));
+        registry.update_node(client_id, client.owner, sample_node(client_id, 2));
         assert!(matches!(
-            sidecar_rx.recv().await,
+            sidecar.events.recv().await,
             Some(PeerEvent::Update(nodes)) if nodes.len() == 1 && nodes[0].id == client_id
         ));
 
-        registry.deregister(sidecar_id);
+        registry.deregister(sidecar_id, sidecar.owner);
         assert!(matches!(
-            client_rx.recv().await,
+            client.events.recv().await,
             Some(PeerEvent::Remove(peer_id)) if peer_id == sidecar_id
         ));
 
-        let mut reconnected_sidecar_rx = registry.register(sidecar_id);
+        let mut reconnected = register(&registry, sidecar_id, Some((1, 100)));
         assert!(matches!(
-            reconnected_sidecar_rx.recv().await,
+            reconnected.events.recv().await,
             Some(PeerEvent::Update(nodes)) if nodes.len() == 1 && nodes[0].id == client_id
         ));
 
-        registry.deregister(client_id);
+        registry.deregister(client_id, client.owner);
         assert!(matches!(
-            reconnected_sidecar_rx.recv().await,
+            reconnected.events.recv().await,
             Some(PeerEvent::Remove(peer_id)) if peer_id == client_id
         ));
 
-        registry.deregister(sidecar_id);
-        let mut final_sidecar_rx = registry.register(sidecar_id);
-        assert!(final_sidecar_rx.try_recv().is_err());
+        registry.deregister(sidecar_id, reconnected.owner);
+        let mut final_sidecar = register(&registry, sidecar_id, Some((1, 100)));
+        assert!(final_sidecar.events.try_recv().is_err());
+    }
+
+    #[test]
+    fn registry_ranks_environment_peers_and_scopes_teardown_to_the_owner() {
+        let registry = PeerRegistry::default();
+        let env_id = Uuid::new_v4();
+        let first = register(&registry, env_id, Some((4, 1_000)));
+        // Equal or older proofs are refused.
+        assert!(registry.register(env_id, Some((4, 1_000))).is_none());
+        assert!(registry.register(env_id, Some((4, 999))).is_none());
+        assert!(registry.register(env_id, Some((3, 9_999))).is_none());
+        // A raised rank refuses what would have outranked the original.
+        registry.raise_rank(env_id, first.owner, (4, 1_500));
+        assert!(registry.register(env_id, Some((4, 1_200))).is_none());
+        // A newer proof replaces the holder; the replaced owner can neither
+        // update nor remove its replacement.
+        let second = register(&registry, env_id, Some((5, 100)));
+        registry.raise_rank(env_id, first.owner, (9, 9_999));
+        registry.deregister(env_id, first.owner);
+        assert!(registry.register(env_id, Some((5, 50))).is_none());
+        registry.deregister(env_id, second.owner);
+        assert!(registry.register(env_id, Some((1, 1))).is_some());
     }
 }

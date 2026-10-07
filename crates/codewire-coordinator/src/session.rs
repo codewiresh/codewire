@@ -4,11 +4,13 @@
 //! fanout, heartbeat cadence, and teardown live here.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use codewire_tailnet::node::Node;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use uuid::Uuid;
 
+use super::peer::{PeerProof, PeerVerifier, ProofError, unix_now};
 use super::{
     COORDINATE_HEARTBEAT_INTERVAL, CoordinationPlane, PeerEvent, PeerKind, PeerRegistry,
     SIDECAR_KV_REFRESH, Transport, build_derp_map, derp_map_config_from_env, log_node,
@@ -19,6 +21,8 @@ use super::{
 pub(crate) enum SessionInput {
     Node(Node),
     Ping,
+    /// A fresh peer token re-proving an environment peer's session.
+    Proof(String),
     /// An open transport frame with no session-level meaning. Returning it
     /// yields control to the outer session select before reading another frame.
     Noop,
@@ -51,6 +55,27 @@ pub(crate) struct SessionPeer {
     pub(crate) sidecar_id: Option<Uuid>,
     pub(crate) kind: PeerKind,
     pub(crate) transport: Transport,
+    /// An environment peer's proof at connect. Required for `Sidecar`.
+    pub(crate) proof: Option<PeerProof>,
+}
+
+/// The checks behind environment-peer sessions and the cadence of their
+/// re-checks.
+#[derive(Clone)]
+pub(crate) struct PeerChecks {
+    pub(crate) verifier: Arc<dyn PeerVerifier>,
+    pub(crate) recheck: Duration,
+}
+
+/// Why an environment-peer session ended on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerEnd {
+    /// No valid proof arrived before the last proven token expired.
+    ProofLapsed,
+    /// The operation generation moved on or the environment is going away.
+    Revoked,
+    /// The peer presented an invalid proof.
+    BadProof,
 }
 
 /// Run one authorized coordinator peer until its transport closes.
@@ -60,6 +85,7 @@ pub(crate) async fn run_peer_session<Source, Sink>(
     peers: Arc<PeerRegistry>,
     coordination: Option<Arc<CoordinationPlane>>,
     peer: SessionPeer,
+    checks: Option<PeerChecks>,
 ) where
     Source: SessionSource,
     Sink: SessionSink,
@@ -69,8 +95,26 @@ pub(crate) async fn run_peer_session<Source, Sink>(
         sidecar_id,
         kind,
         transport,
+        proof,
     } = peer;
-    let mut events = peers.register(peer_id);
+    // An environment peer without a proof, or without checks, never runs.
+    let mut proof = match (kind, proof, checks.as_ref()) {
+        (PeerKind::Sidecar, Some(proof), Some(_)) => Some(proof),
+        (PeerKind::Sidecar, _, _) => {
+            tracing::warn!(env_id = %peer_id, "coordinator environment peer without proof refused");
+            return;
+        }
+        (PeerKind::Client, _, _) => None,
+    };
+    let Some(registration) = peers.register(peer_id, proof.map(PeerProof::rank)) else {
+        tracing::info!(
+            env_id = %peer_id,
+            "coordinator environment peer refused: a newer session holds this environment"
+        );
+        return;
+    };
+    let owner = registration.owner;
+    let mut events = registration.events;
     let env_id = sidecar_id.unwrap_or(peer_id);
     tracing::info!(
         %env_id,
@@ -98,16 +142,21 @@ pub(crate) async fn run_peer_session<Source, Sink>(
                         }
                     }
                     match coordination.get_sidecar_node(env_id).await {
-                        Ok(Some(node)) => {
-                            log_node(
-                                "coordinator KV hit for sidecar node",
-                                env_id,
-                                peer_id,
-                                PeerKind::Sidecar,
-                                &node,
-                                Some(transport),
-                            );
-                            let _ = remote_tx.send(PeerEvent::Update(vec![node]));
+                        Ok(Some((generation, node))) => {
+                            if stamped_generation_current(checks.as_ref(), env_id, generation).await
+                            {
+                                log_node(
+                                    "coordinator KV hit for sidecar node",
+                                    env_id,
+                                    peer_id,
+                                    PeerKind::Sidecar,
+                                    &node,
+                                    Some(transport),
+                                );
+                                let _ = remote_tx.send(PeerEvent::Update(vec![node]));
+                            } else {
+                                tracing::info!(%env_id, %peer_id, generation, "coordinator sidecar KV node is from a past generation");
+                            }
                         }
                         Ok(None) => {
                             tracing::warn!(%env_id, %peer_id, "coordinator sidecar KV miss");
@@ -135,6 +184,7 @@ pub(crate) async fn run_peer_session<Source, Sink>(
         }
     }
 
+    let generation = proof.map(|proof| proof.generation).unwrap_or_default();
     let refresh_task = if matches!(kind, PeerKind::Sidecar) {
         coordination.as_ref().map(|coordination| {
             let coordination = coordination.clone();
@@ -147,7 +197,7 @@ pub(crate) async fn run_peer_session<Source, Sink>(
                         tracing::warn!(env_id = %peer_id, "coordinator sidecar KV refresh skipped");
                         continue;
                     };
-                    if let Err(err) = coordination.put_sidecar_node(peer_id, &node).await {
+                    if let Err(err) = coordination.put_sidecar_node(peer_id, generation, &node).await {
                         tracing::warn!(error = ?err, env_id = %peer_id, "coordinator sidecar KV refresh failed");
                     }
                 }
@@ -159,7 +209,7 @@ pub(crate) async fn run_peer_session<Source, Sink>(
 
     let derp_map = build_derp_map(derp_map_config_from_env());
     if !sink.send(SessionOutput::DerpMap(derp_map)).await {
-        peers.deregister(peer_id);
+        peers.deregister(peer_id, owner);
         if let Some(task) = refresh_task {
             task.abort();
         }
@@ -177,7 +227,15 @@ pub(crate) async fn run_peer_session<Source, Sink>(
     let mut heartbeat = tokio::time::interval(COORDINATE_HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat.tick().await;
+    let recheck_every = checks
+        .as_ref()
+        .map(|checks| checks.recheck)
+        .unwrap_or(Duration::from_secs(3600));
+    let mut recheck = tokio::time::interval(recheck_every);
+    recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    recheck.tick().await;
 
+    let mut ended = None;
     loop {
         tokio::select! {
             event = events.recv() => {
@@ -203,16 +261,54 @@ pub(crate) async fn run_peer_session<Source, Sink>(
                     break;
                 }
             }
+            _ = recheck.tick(), if proof.is_some() => {
+                let current = proof.expect("checked above");
+                if current.lapsed(unix_now()) {
+                    ended = Some(PeerEnd::ProofLapsed);
+                    break;
+                }
+                let checks = checks.as_ref().expect("environment peers carry checks");
+                match checks.verifier.is_current(peer_id, current.generation).await {
+                    Ok(true) | Err(ProofError::Unavailable) => {}
+                    Ok(false) | Err(ProofError::Refused) => {
+                        ended = Some(PeerEnd::Revoked);
+                        break;
+                    }
+                }
+            }
             input = source.next() => {
                 match input {
                     Some(SessionInput::Node(node)) => {
                         handle_node_update(
                             &peers,
+                            owner,
                             coordination.as_deref(),
                             &last_sidecar_node,
                             peer,
+                            generation,
                             node,
                         ).await;
+                    }
+                    Some(SessionInput::Proof(token)) => {
+                        let (Some(current), Some(checks)) = (proof, checks.as_ref()) else {
+                            // A client never proves; ignore it.
+                            continue;
+                        };
+                        match checks.verifier.verify(peer_id, &token).await {
+                            Ok(next) if next.generation == current.generation => {
+                                let raised = PeerProof {
+                                    generation: current.generation,
+                                    expires_at: current.expires_at.max(next.expires_at),
+                                };
+                                peers.raise_rank(peer_id, owner, raised.rank());
+                                proof = Some(raised);
+                            }
+                            Err(ProofError::Unavailable) => {}
+                            Ok(_) | Err(ProofError::Refused) => {
+                                ended = Some(PeerEnd::BadProof);
+                                break;
+                            }
+                        }
                     }
                     Some(SessionInput::Ping | SessionInput::Noop) => {}
                     None => break,
@@ -226,9 +322,10 @@ pub(crate) async fn run_peer_session<Source, Sink>(
         %peer_id,
         kind = kind.as_str(),
         transport = transport.as_str(),
+        ended = ?ended,
         "coordinator peer disconnected"
     );
-    peers.deregister(peer_id);
+    peers.deregister(peer_id, owner);
     if let (PeerKind::Client, Some(env_id), Some(coordination)) =
         (kind, sidecar_id, coordination.as_ref())
         && let Err(err) = coordination.publish_remove(env_id, peer_id).await
@@ -238,13 +335,40 @@ pub(crate) async fn run_peer_session<Source, Sink>(
     if let Some(task) = refresh_task {
         task.abort();
     }
+    // A revoked generation leaves no recorded node for clients to dial.
+    if ended == Some(PeerEnd::Revoked)
+        && let Some(coordination) = coordination.as_ref()
+        && let Err(err) = coordination.delete_sidecar_node(peer_id, generation).await
+    {
+        tracing::warn!(error = ?err, env_id = %peer_id, "coordinator revoked sidecar KV delete failed");
+    }
+}
+
+/// Whether a KV node stamped with `generation` belongs to the environment's
+/// current generation. Without checks (hermetic tests) every node is kept;
+/// when the records are unavailable the node is kept and the client's own
+/// connect then fails closed if the peer is gone.
+async fn stamped_generation_current(
+    checks: Option<&PeerChecks>,
+    env_id: Uuid,
+    generation: i64,
+) -> bool {
+    let Some(checks) = checks else {
+        return true;
+    };
+    !matches!(
+        checks.verifier.is_current(env_id, generation).await,
+        Ok(false) | Err(ProofError::Refused)
+    )
 }
 
 async fn handle_node_update(
     peers: &PeerRegistry,
+    owner: Uuid,
     coordination: Option<&CoordinationPlane>,
     last_sidecar_node: &Arc<AsyncMutex<Option<Node>>>,
     peer: SessionPeer,
+    generation: i64,
     mut node: Node,
 ) {
     let SessionPeer {
@@ -252,9 +376,10 @@ async fn handle_node_update(
         sidecar_id,
         kind,
         transport,
+        ..
     } = peer;
     node.id = peer_id;
-    peers.update_node(peer_id, node.clone());
+    peers.update_node(peer_id, owner, node.clone());
 
     match kind {
         PeerKind::Client => {
@@ -300,7 +425,10 @@ async fn handle_node_update(
             let Some(coordination) = coordination else {
                 return;
             };
-            if let Err(err) = coordination.put_sidecar_node(peer_id, &node).await {
+            if let Err(err) = coordination
+                .put_sidecar_node(peer_id, generation, &node)
+                .await
+            {
                 tracing::warn!(error = ?err, env_id = %peer_id, "coordinator sidecar KV put failed");
             } else {
                 tracing::info!(
@@ -355,6 +483,10 @@ mod tests {
     ) {
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let (output_tx, output_rx) = mpsc::unbounded_channel();
+        let proof = matches!(kind, PeerKind::Sidecar).then(|| PeerProof {
+            generation: 1,
+            expires_at: unix_now() + 600,
+        });
         let task = tokio::spawn(run_peer_session(
             ChannelSource { rx: input_rx },
             ChannelSink { tx: output_tx },
@@ -365,9 +497,290 @@ mod tests {
                 sidecar_id,
                 kind,
                 transport: Transport::Connect,
+                proof,
             },
+            Some(test_checks(Some(1), Duration::from_secs(3600))),
         ));
         (input_tx, output_rx, task)
+    }
+
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    const SECRET: &str = "session-secret";
+
+    /// Peer checks over a current generation the test can move (0 = gone).
+    struct MovableVerifier {
+        generation: AtomicI64,
+    }
+
+    impl PeerVerifier for MovableVerifier {
+        fn verify<'a>(
+            &'a self,
+            env_id: Uuid,
+            token: &'a str,
+        ) -> crate::peer::BoxFuture<'a, Result<PeerProof, ProofError>> {
+            Box::pin(async move {
+                let claims = codewire_server_core::peer_token::validate(SECRET, token, unix_now())
+                    .map_err(|_| ProofError::Refused)?;
+                let current = match self.generation.load(Ordering::SeqCst) {
+                    0 => None,
+                    generation => Some(generation),
+                };
+                crate::peer::check_claims(&claims, env_id, current)
+            })
+        }
+
+        fn is_current<'a>(
+            &'a self,
+            _env_id: Uuid,
+            generation: i64,
+        ) -> crate::peer::BoxFuture<'a, Result<bool, ProofError>> {
+            Box::pin(async move { Ok(self.generation.load(Ordering::SeqCst) == generation) })
+        }
+    }
+
+    fn test_checks(generation: Option<i64>, recheck: Duration) -> PeerChecks {
+        movable_checks(
+            Arc::new(MovableVerifier {
+                generation: AtomicI64::new(generation.unwrap_or_default()),
+            }),
+            recheck,
+        )
+    }
+
+    fn movable_checks(verifier: Arc<MovableVerifier>, recheck: Duration) -> PeerChecks {
+        PeerChecks { verifier, recheck }
+    }
+
+    fn token(env_id: Uuid, generation: i64, expires_at: i64) -> String {
+        codewire_server_core::peer_token::issue(SECRET, &env_id.to_string(), generation, expires_at)
+            .unwrap()
+    }
+
+    fn spawn_peer(
+        peers: Arc<PeerRegistry>,
+        env_id: Uuid,
+        proof: PeerProof,
+        checks: PeerChecks,
+    ) -> (
+        mpsc::UnboundedSender<SessionInput>,
+        mpsc::UnboundedReceiver<SessionOutput>,
+        JoinHandle<()>,
+    ) {
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (output_tx, output_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_peer_session(
+            ChannelSource { rx: input_rx },
+            ChannelSink { tx: output_tx },
+            peers,
+            None,
+            SessionPeer {
+                peer_id: env_id,
+                sidecar_id: None,
+                kind: PeerKind::Sidecar,
+                transport: Transport::Connect,
+                proof: Some(proof),
+            },
+            Some(checks),
+        ));
+        (input_tx, output_rx, task)
+    }
+
+    async fn ends(task: JoinHandle<()>) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("session did not end")
+            .expect("session task panicked");
+    }
+
+    #[tokio::test]
+    async fn a_lapsed_proof_ends_the_session() {
+        let env_id = Uuid::new_v4();
+        let peers = Arc::new(PeerRegistry::default());
+        let lapsed = PeerProof {
+            generation: 1,
+            expires_at: unix_now() - crate::peer::PEER_RECHECK_INTERVAL.as_secs() as i64 * 10,
+        };
+        let (_input, mut output, task) = spawn_peer(
+            peers.clone(),
+            env_id,
+            lapsed,
+            test_checks(Some(1), Duration::from_millis(20)),
+        );
+        assert!(matches!(
+            next_output(&mut output).await,
+            SessionOutput::DerpMap(_)
+        ));
+        ends(task).await;
+        // Its entry is gone, so the next peer registers freely.
+        assert!(peers.register(env_id, Some((1, unix_now()))).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_generation_change_revokes_the_session() {
+        let env_id = Uuid::new_v4();
+        let verifier = Arc::new(MovableVerifier {
+            generation: AtomicI64::new(1),
+        });
+        let (_input, mut output, task) = spawn_peer(
+            Arc::new(PeerRegistry::default()),
+            env_id,
+            PeerProof {
+                generation: 1,
+                expires_at: unix_now() + 600,
+            },
+            movable_checks(verifier.clone(), Duration::from_millis(20)),
+        );
+        assert!(matches!(
+            next_output(&mut output).await,
+            SessionOutput::DerpMap(_)
+        ));
+        verifier.generation.store(2, Ordering::SeqCst);
+        ends(task).await;
+    }
+
+    #[tokio::test]
+    async fn only_a_newer_proof_replaces_a_session_and_the_old_one_never_tears_it_down() {
+        let env_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let peers = Arc::new(PeerRegistry::default());
+        let now = unix_now();
+        let checks = || test_checks(Some(1), Duration::from_secs(3600));
+
+        let (first_tx, mut first_out, first_task) = spawn_peer(
+            peers.clone(),
+            env_id,
+            PeerProof {
+                generation: 1,
+                expires_at: now + 600,
+            },
+            checks(),
+        );
+        assert!(matches!(
+            next_output(&mut first_out).await,
+            SessionOutput::DerpMap(_)
+        ));
+
+        // An older or equal proof (a stolen token) is refused outright.
+        for expires_at in [now + 300, now + 600] {
+            let (_tx, mut out, task) = spawn_peer(
+                peers.clone(),
+                env_id,
+                PeerProof {
+                    generation: 1,
+                    expires_at,
+                },
+                checks(),
+            );
+            ends(task).await;
+            assert!(out.try_recv().is_err(), "a refused session sends nothing");
+        }
+
+        // An in-band proof raises the holder's rank, so a token that would
+        // have outranked the connect-time proof no longer does.
+        first_tx
+            .send(SessionInput::Proof(token(env_id, 1, now + 590)))
+            .unwrap();
+        first_tx
+            .send(SessionInput::Proof(token(env_id, 1, now + 650)))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (_tx, _out, refused) = spawn_peer(
+            peers.clone(),
+            env_id,
+            PeerProof {
+                generation: 1,
+                expires_at: now + 620,
+            },
+            checks(),
+        );
+        ends(refused).await;
+
+        // A newer proof replaces the holder, which then ends without removing
+        // its replacement.
+        let (second_tx, mut second_out, second_task) = spawn_peer(
+            peers.clone(),
+            env_id,
+            PeerProof {
+                generation: 1,
+                expires_at: now + 700,
+            },
+            checks(),
+        );
+        assert!(matches!(
+            next_output(&mut second_out).await,
+            SessionOutput::DerpMap(_)
+        ));
+        ends(first_task).await;
+        drop(first_tx);
+
+        let (client_tx, mut client_out, client_task) =
+            spawn_session(peers.clone(), client_id, Some(env_id), PeerKind::Client);
+        assert!(matches!(
+            next_output(&mut client_out).await,
+            SessionOutput::DerpMap(_)
+        ));
+        second_tx
+            .send(SessionInput::Node(sample_node(env_id, 4)))
+            .unwrap();
+        let nodes = expect_peer_update(next_output(&mut client_out).await);
+        assert_eq!(nodes[0].id, env_id, "the replacement is still registered");
+
+        drop(client_tx);
+        drop(second_tx);
+        ends(client_task).await;
+        ends(second_task).await;
+    }
+
+    #[tokio::test]
+    async fn a_bad_proof_ends_the_session() {
+        let env_id = Uuid::new_v4();
+        for bad in [
+            token(env_id, 2, unix_now() + 600),
+            token(Uuid::new_v4(), 1, unix_now() + 600),
+            "not-a-token".to_owned(),
+        ] {
+            let (input, mut output, task) = spawn_peer(
+                Arc::new(PeerRegistry::default()),
+                env_id,
+                PeerProof {
+                    generation: 1,
+                    expires_at: unix_now() + 600,
+                },
+                test_checks(Some(1), Duration::from_secs(3600)),
+            );
+            assert!(matches!(
+                next_output(&mut output).await,
+                SessionOutput::DerpMap(_)
+            ));
+            input.send(SessionInput::Proof(bad)).unwrap();
+            ends(task).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_environment_peer_without_proof_never_registers() {
+        let env_id = Uuid::new_v4();
+        let peers = Arc::new(PeerRegistry::default());
+        let (_input_tx, input_rx) = mpsc::unbounded_channel();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+        run_peer_session(
+            ChannelSource { rx: input_rx },
+            ChannelSink { tx: output_tx },
+            peers.clone(),
+            None,
+            SessionPeer {
+                peer_id: env_id,
+                sidecar_id: None,
+                kind: PeerKind::Sidecar,
+                transport: Transport::Connect,
+                proof: None,
+            },
+            Some(test_checks(Some(1), Duration::from_secs(3600))),
+        )
+        .await;
+        assert!(output_rx.try_recv().is_err());
+        assert!(peers.register(env_id, Some((1, 0))).is_some());
     }
 
     async fn next_output(rx: &mut mpsc::UnboundedReceiver<SessionOutput>) -> SessionOutput {

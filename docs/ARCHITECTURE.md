@@ -253,7 +253,7 @@ The secret-bearing broker stays outside the sandbox:
 
 ```text
 local:    child -> local relay -> guest edge -> host broker -> provider
-platform: child -> local relay -> gateway Pod -> internal broker -> provider
+platform: child -> local relay -> daemon bridge -> orchestration relay -> internal broker -> provider
 ```
 
 The relay and edge hold no provider credential. The platform workspace daemon
@@ -263,7 +263,7 @@ boundary. The one listed
 is the Sandbox creator's own personal Codex ChatGPT access and ID tokens,
 because Codex enables `/usage`, analytics and account routing only with its own
 login. The broker seals them to a recipient key the workspace daemon holds and
-the gateway relays only ciphertext; once the daemon writer ships, the daemon
+orchestration relays only ciphertext; the daemon
 writes them as Codex's own `~/.codex/auth.json`. The refresh token stays in the
 broker. A delivered token is a bearer token for the creator's ChatGPT account
 that every process in the Sandbox can read until it expires. `av-credential-proxy` and `av-proxy-helper` are reusable libraries
@@ -510,18 +510,16 @@ The bootstrap verifies the target is mounted as ext4 specifically, because
 For local kind, tests may use `SANDBOX_DOCKER_MODE=local-dind-direct`, which
 injects the existing `docker:dind` sidecar.
 
-The sandbox gateway is a separate per-environment workload. It reaches the
-workspace daemon through the environment-local daemon Service and does not
-currently mount Docker sockets in the split commodity path.
+The workspace daemon serves the workspace's SSH, tailnet and credential
+bridge itself, once bound; there is no per-environment gateway workload.
 
-See `docs/dev/SANDBOX-GATEWAY-DAEMON.md` for the gateway, daemon, Docker
-hardening, and validation contract.
+See `docs/dev/SANDBOX-DAEMON.md` for the daemon, Docker hardening, and
+validation contract.
 
 ### Security boundary
 
-The VM/runtime boundary is the security boundary. The gateway does not receive
-a Docker socket. If any path ever forwards to host Docker, that is a node-escape
-regression.
+The VM/runtime boundary is the security boundary. If any path ever forwards to
+host Docker, that is a node-escape regression.
 
 ---
 
@@ -554,14 +552,16 @@ sequenceDiagram
     SC->>K8s: create/update zero-replica SandboxWarmPool
     Worker->>SC: CreateSandboxClaim
     SC->>K8s: create SandboxClaim
-    Worker->>SC: EnsureGatewayStack
-    SC->>K8s: create/update private gateway workload
+    Worker->>SC: EnsureAccessStack
+    SC->>K8s: create/update daemon Service, UDP LoadBalancer, NetworkPolicy
     K8s->>Ctrl: reconcile claim
     Ctrl->>K8s: create Sandbox
     Ctrl->>K8s: create Pod (RuntimeClass from profile)
     K8s->>Node: schedule pod
     Node->>Node: runtime creates sandbox boundary
     Node->>Node: workspace starts cw __hosted-daemon
+    Worker->>DB: record binding (Pod UID -> environment)
+    Node->>Worker: daemon BindWorkspace on 8087, then serves SSH and tailnet
     Worker->>SC: WaitForReady (watch claim)
     Ctrl-->>K8s: Ready=True
     SC-->>Worker: ready (pod IP, pod name)
@@ -574,16 +574,13 @@ sequenceDiagram
 sequenceDiagram
     participant Client as CLI / Web
     participant API as Rust Orchestration API
-    participant Gateway as Environment Gateway
     participant Daemon as Hosted Daemon
     participant Child as Child Process
 
     Client->>API: POST /environments/{id}/terminal (get ticket)
     API-->>Client: authenticated connection metadata
-    Client->>Gateway: tailnet or WebSocket transport
-    Gateway->>Daemon: authenticated gRPC ExecuteCommand
+    Client->>Daemon: SSH over tailnet, or WebSocket through orchestration
     Daemon->>Child: launch requested process
     Child-->>Daemon: stdout/stderr
-    Daemon-->>Gateway: gRPC stream
-    Gateway-->>Client: terminal stream
+    Daemon-->>Client: terminal stream
 ```

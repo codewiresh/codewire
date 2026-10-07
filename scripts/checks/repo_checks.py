@@ -12,7 +12,7 @@ from repo_policy.turnstile_security import check_turnstile_access_projection
 from repo_policy.licensing import check_license_map
 from repo_policy.material_cache import check_epoch_material_cache_owner
 from repo_policy.mesh import check_mesh_surface_freeze
-from repo_policy.orchestration_security import check_orchestration_host_key_authz
+from repo_policy.orchestration_security import check_orchestration_authz
 from repo_policy.permanent_raw import check_permanent_raw_surface
 from repo_policy.production import check_production_source_ownership
 from repo_policy.proto import check_proto_package_boundaries
@@ -51,9 +51,9 @@ def main(argv: list[str] | None = None) -> int:
     identity_free_parser = subparsers.add_parser("identity-free-workspace")
     identity_free_parser.add_argument("--self-test", action="store_true")
     identity_free_parser.set_defaults(func=check_identity_free_workspace)
-    host_key_parser = subparsers.add_parser("orchestration-host-key-authz")
-    host_key_parser.add_argument("--self-test", action="store_true")
-    host_key_parser.set_defaults(func=check_orchestration_host_key_authz)
+    orchestration_authz_parser = subparsers.add_parser("orchestration-authz")
+    orchestration_authz_parser.add_argument("--self-test", action="store_true")
+    orchestration_authz_parser.set_defaults(func=check_orchestration_authz)
     idp_parser = subparsers.add_parser("idp-signing-kek-isolation")
     idp_parser.add_argument("--live", action="store_true")
     idp_parser.add_argument("--context", default="kind-codewire")

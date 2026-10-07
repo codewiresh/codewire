@@ -91,7 +91,7 @@ async fn admitted(
     let authorities =
         crate::authority::RuntimeKekAuthorities::new(Arc::new(TestKekProvider), provider);
     Ok(authorities
-        .kubernetes_authenticator(f.kube.client(), f.pool.clone())
+        .kubernetes_authenticator(f.kube.client(), f.pool.clone(), RELAY_NAMESPACE.to_owned())
         .authenticate(&headers(unix_now()? + 600))
         .await?)
 }
@@ -711,7 +711,7 @@ async fn credential_needing_reconnect_withholds_only_its_capability_and_launches
                 "past-deadline" => { sqlx::query("UPDATE platform_credentials SET status='active',expires_at_unix=1 WHERE id=$1").bind(codex.as_str()).execute(&f.db.pool).await?; }
                 _ => {}
             }
-            // A new gateway/workspace bridge is still admitted, and every launch
+            // A new relay/workspace bridge is still admitted, and every launch
             // still receives its environment projection.
             let authority = admitted(&f, Arc::new(ObservedProvider::default())).await
                 .with_context(|| format!("{state}: bridge admission was refused"))?;

@@ -11,98 +11,35 @@ from .kubernetes import (
 )
 
 
-def assert_credential_bootstrap(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
-    """Static permission/intent checks; actual CEL denial is a Kind assertion."""
-    name = "codewire-orchestration-credential-bootstrap"
-    role = exactly_one(resources, "Role", name, label, output)
-    binding = exactly_one(resources, "RoleBinding", name, label, output)
+INTERNAL_ROOTS_ROLE = "codewire-orchestration-internal-roots"
+
+
+def assert_internal_roots(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
+    """Orchestration reads exactly the published roots of its internal TLS
+    listeners in the sandbox namespace, and writes nothing there."""
+    role = exactly_one(resources, "Role", INTERNAL_ROOTS_ROLE, label, output)
+    binding = exactly_one(resources, "RoleBinding", INTERNAL_ROOTS_ROLE, label, output)
     expected_rules = compact('''
         rules:
         - apiGroups:
-          - cert-manager.io
-          resources:
-          - certificates
-          verbs:
-          - get
-          - create
-          - update
-          - delete
-        - apiGroups:
           - ""
+          resourceNames:
+          - codewire-orchestration-internal-roots
           resources:
           - configmaps
           verbs:
           - get
-          - create
-          - update
-          - delete
     ''')
-    if role and (metadata_field(role, "namespace") != target["role_namespace"] or compact(top_level_block(role, "rules")) != expected_rules):
-        output.append(f"{label}: credential bootstrap Role must grant only exact namespaced public-object CRUD")
+    if role and (metadata_field(role, "namespace") != target["role_namespace"]
+            or compact(top_level_block(role, "rules")) != expected_rules):
+        output.append(f"{label}: internal roots Role must grant only get of the published roots ConfigMap")
     if binding:
-        expected_ref = compact(f"roleRef: apiGroup: rbac.authorization.k8s.io kind: Role name: {name}")
+        expected_ref = compact(f"roleRef: apiGroup: rbac.authorization.k8s.io kind: Role name: {INTERNAL_ROOTS_ROLE}")
         expected_subject = compact(f"subjects: - kind: ServiceAccount name: codewire-orchestration namespace: {target['subject_namespace']}")
         if (metadata_field(binding, "namespace") != target["role_namespace"]
                 or compact(top_level_block(binding, "roleRef")) != expected_ref
                 or compact(top_level_block(binding, "subjects")) != expected_subject):
-            output.append(f"{label}: credential bootstrap binding escaped its namespace or identity")
-    required_by_policy = {
-        name: [
-            "operations: - CREATE - UPDATE - DELETE",
-            "resources: - certificates", "resources: - configmaps",
-            "request.operation == 'DELETE' ? oldObject : object",
-            "request.resource.resource == 'certificates' ? 'cw-credential-gateway-' : 'cw-credential-codex-'",
-            "variables.environment.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')",
-            "request.name == variables.prefix + variables.environment",
-            "variables.target.metadata.namespace == request.namespace",
-            "oldObject.metadata.labels['codewire.sh/environment-id'] == variables.environment",
-            "oldObject.metadata.labels['codewire.sh/org-id'] == variables.labels['codewire.sh/org-id']",
-            "oldObject.metadata.labels['app.kubernetes.io/managed-by'] == 'codewire'",
-            "oldObject.metadata.labels['codewire.sh/type'] == 'credential-bootstrap'",
-            "size(object.data) == 1 && 'config.toml' in object.data && !has(object.binaryData)",
-            "object.spec.secretName == request.name",
-            "object.spec.issuerRef == {'name':'codewire-credential-gateway','kind':'Issuer','group':'cert-manager.io'}",
-            "object.spec.dnsNames == ['cw-gateway-svc-' + variables.environment + '.' + request.namespace + '.svc.cluster.local']",
-            "object.spec.isCA == false",
-            "object.spec.usages == ['digital signature', 'server auth']",
-            "object.spec.duration == '24h' && object.spec.renewBefore == '8h'",
-            "object.spec.privateKey == {'algorithm':dyn('ECDSA'),'size':dyn(256),'encoding':dyn('PKCS8'),'rotationPolicy':dyn('Always')}",
-            "object.spec.revisionHistoryLimit == 1",
-            "object.spec.secretTemplate.labels == variables.labels",
-        ] + [f"!has(object.spec.{field})" for field in [
-            "subject", "literalSubject", "commonName", "ipAddresses", "uris", "emailAddresses", "otherNames",
-            "nameConstraints", "keystores", "additionalOutputFormats", "renewBeforePercentage", "secretTemplate.annotations",
-        ]],
-        "codewire-orchestration-credential-leaf-cleanup": [
-            "operations: - CREATE - UPDATE - DELETE", "resources: - secrets",
-            "request.name.startsWith('cw-credential-gateway-')",
-            "expression: request.operation == 'DELETE'",
-            "oldObject.type == 'kubernetes.io/tls'",
-            "oldObject.metadata.namespace == request.namespace",
-            "request.name == 'cw-credential-gateway-' + oldObject.metadata.labels['codewire.sh/environment-id']",
-            "oldObject.metadata.labels['app.kubernetes.io/managed-by'] == 'codewire'",
-            "oldObject.metadata.labels['codewire.sh/type'] == 'credential-bootstrap'",
-            "owner.apiVersion == 'cert-manager.io/v1' && owner.kind == 'Certificate'",
-            "owner.name == request.name && size(owner.uid) > 0 && has(owner.controller) && owner.controller",
-        ],
-    }
-    for policy_name, required in required_by_policy.items():
-        policy = exactly_one(resources, "ValidatingAdmissionPolicy", policy_name, label, output)
-        binding = exactly_one(resources, "ValidatingAdmissionPolicyBinding", policy_name, label, output)
-        if policy:
-            # Kustomize single-quotes scalar CEL ternaries and YAML doubles
-            # their embedded apostrophes. Compare the decoded spelling.
-            normalized = compact(top_level_block(policy, "spec")).replace("''", "'")
-            for fragment in ["failurePolicy: Fail", "matchPolicy: Equivalent",
-                    "request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')", *required]:
-                if fragment not in normalized:
-                    output.append(f"{label}: {policy_name} missing {fragment}")
-            if metadata_field(policy, "namespace") is not None:
-                output.append(f"{label}: {policy_name} must remain cluster-scoped")
-        if binding:
-            expected = compact(f"spec: policyName: {policy_name} validationActions: - Deny")
-            if metadata_field(binding, "namespace") is not None or compact(top_level_block(binding, "spec")) != expected:
-                output.append(f"{label}: {policy_name} must deny by identity without mutable namespace selectors")
+            output.append(f"{label}: internal roots binding escaped its namespace or identity")
 
 
 IMAGE_CACHE_ROLE = "codewire-orchestration-image-cache"
@@ -249,6 +186,11 @@ WARM_POOL_KIND_TARGETS = ("deployments/k8s/overlays/local-kind", "deployments/k8
 # Kind e2e overlay's side-loaded gateway image (C4). Every other target admits
 # digest-pinned images alone.
 WARM_POOL_LOCAL_IMAGES = {"tests/e2e/kind": ["codewire-gateway:e2e"]}
+# The public roots ConfigMaps a pool template mounts, each only as its ca.crt:
+# orchestration's internal roots everywhere, and the Kind e2e coordinator's
+# extra roots there alone (SANDBOX_COORDINATOR_EXTRA_ROOTS).
+WARM_POOL_ROOTS_CONFIGMAPS = ["codewire-orchestration-internal-roots"]
+WARM_POOL_EXTRA_ROOTS_CONFIGMAPS = {"tests/e2e/kind": ["codewire-coordinator-extra-roots"]}
 
 
 def cel_list(values: tuple[str, ...] | list[str]) -> str:
@@ -311,7 +253,11 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             "c.env.exists_one(e, e.name == 'CODEWIRE_WORKSPACE_POOL_REVISION')",
             "e.value == object.metadata.annotations['codewire.sh/pool-revision']",
             "variables.volumes.all(v, dyn(v).all(k, k in ['name', 'image', 'emptyDir', 'configMap', 'projected'])",
-            "v.configMap.name == 'codewire-credential-gateway-roots'",
+            "v.configMap.name in variables.rootsConfigMaps",
+            "dyn(v.configMap).all(k, k in ['name', 'items', 'defaultMode'])",
+            "has(v.configMap.items) && size(v.configMap.items) == 1",
+            "dyn(v.configMap.items[0]).all(k, k in ['key', 'path'])",
+            "v.configMap.items[0].key == 'ca.crt' && v.configMap.items[0].path == 'ca.crt'",
             "v.projected.sources.all(s, dyn(s).all(k, k == 'serviceAccountToken')",
             "has(s.serviceAccountToken.audience) && s.serviceAccountToken.audience in variables.audiences",
             "variables.pod.serviceAccountName == 'codewire-sandbox'",
@@ -360,35 +306,34 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
                 if not found or found.group(1) != cel_list(local):
                     output.append(f"{label}: {policy_name} local images must be exactly {cel_list(local)}, second: "
                                   f"{found.group(1) if found else None}")
+                # Only the Kind e2e overlay adds its coordinator's roots, third.
+                roots = WARM_POOL_ROOTS_CONFIGMAPS + WARM_POOL_EXTRA_ROOTS_CONFIGMAPS.get(target["path"], [])
+                found = re.search(r"name: localImages - expression: '?(\[[^\]]*\])'? name: rootsConfigMaps ", normalized)
+                if not found or found.group(1) != cel_list(roots):
+                    output.append(f"{label}: {policy_name} roots ConfigMaps must be exactly {cel_list(roots)}, third: "
+                                  f"{found.group(1) if found else None}")
         if binding:
             expected = compact(f"spec: policyName: {policy_name} validationActions: - Deny")
             if metadata_field(binding, "namespace") is not None or compact(top_level_block(binding, "spec")) != expected:
                 output.append(f"{label}: {policy_name} must deny by identity without mutable namespace selectors")
 
 
-GATEWAY_REPLICASET_ROLE = "codewire-orchestration-gateway-replicaset"
-
-
-def assert_gateway_replicaset(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
-    """IssueGatewayDaemonCredential reads the gateway Pod's controlling
-    ReplicaSet in the sandbox namespace. Without this exact grant every call is
-    a 403 and the RPC can only answer unavailable."""
-    role = exactly_one(resources, "Role", GATEWAY_REPLICASET_ROLE, label, output)
-    binding = exactly_one(resources, "RoleBinding", GATEWAY_REPLICASET_ROLE, label, output)
-    expected_rules = compact("rules: - apiGroups: - apps resources: - replicasets verbs: - get")
-    if role and (metadata_field(role, "namespace") != target["role_namespace"]
-            or compact(top_level_block(role, "rules")) != expected_rules):
-        output.append(f"{label}: gateway ReplicaSet Role must grant only ReplicaSet get in the sandbox namespace")
-    if binding:
-        expected_ref = compact(f"roleRef: apiGroup: rbac.authorization.k8s.io kind: Role name: {GATEWAY_REPLICASET_ROLE}")
-        expected_subject = compact(f"subjects: - kind: ServiceAccount name: codewire-orchestration namespace: {target['subject_namespace']}")
-        if (metadata_field(binding, "namespace") != target["role_namespace"]
-                or compact(top_level_block(binding, "roleRef")) != expected_ref
-                or compact(top_level_block(binding, "subjects")) != expected_subject):
-            output.append(f"{label}: gateway ReplicaSet binding escaped its namespace or identity")
-
-
 WORKSPACE_BINDING_INGRESS = "codewire-orchestration-workspace-binding"
+
+
+def own_pod_selector(policy: str) -> str:
+    """A NetworkPolicy's own spec.podSelector, not the selectors of its peers:
+    the credential service admits orchestration as a peer without selecting
+    orchestration's Pods."""
+    lines = top_level_block(policy, "spec").split("\n")
+    start = next((index for index, line in enumerate(lines) if line == "  podSelector:"), -1)
+    if start < 0:
+        return ""
+    end = next(
+        (index for index in range(start + 1, len(lines)) if not lines[index].startswith("    ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
 
 
 def assert_workspace_binding_ingress(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
@@ -446,7 +391,7 @@ def assert_workspace_binding_ingress(resources: list[str], target: dict[str, str
         if top_level_field(resource, "kind") == "NetworkPolicy"
         and metadata_field(resource, "namespace") == target["subject_namespace"]
         and metadata_field(resource, "name") != WORKSPACE_BINDING_INGRESS
-        and "component: orchestration" in top_level_block(resource, "spec")
+        and "component: orchestration" in own_pod_selector(resource)
     ]
     if others:
         output.append(f"{label}: another NetworkPolicy also selects orchestration Pods")
@@ -460,15 +405,30 @@ def assert_workspace_binding_ingress(resources: list[str], target: dict[str, str
 WARM_BRIDGE_FIXTURE_DIR = "crates/codewire-orchestration/tests/fixtures/sandbox"
 WARM_BRIDGE_FIXTURES = {
     "daemon": f"{WARM_BRIDGE_FIXTURE_DIR}/warm-member-bridge-daemon-networkpolicy.golden.json",
-    "gw": f"{WARM_BRIDGE_FIXTURE_DIR}/warm-member-bridge-gateway-networkpolicy.golden.json",
 }
 WARM_BRIDGE_RENDERER = "crates/codewire-orchestration/src/sandbox/template/network.rs"
 WARM_BRIDGE_NAMING = "crates/codewire-orchestration/src/sandbox/template/naming.rs"
 AGENTS_LABEL_PREFIX = "agents.x-k8s.io/"
 SANDBOX_UID_LABEL = "agents.x-k8s.io/sandbox-uid"
 CANONICAL_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-WARM_BRIDGE_NAME = re.compile(rf"cw-(daemon|gw)-warm-({CANONICAL_UUID})")
+WARM_BRIDGE_NAME = re.compile(rf"cw-(daemon)-warm-({CANONICAL_UUID})")
 ORCHESTRATION_PEER_POD = {"app.kubernetes.io/name": "codewire", "app.kubernetes.io/component": "orchestration"}
+# The daemon's tailnet UDP port admits the world only (design §5, N1): every
+# cluster and Pod range is excepted.
+WORKSPACE_TAILNET_UDP_PORTS = [{"port": 31000, "protocol": "UDP"}]
+WORLD_EXCEPTIONS = {
+    "0.0.0.0/0": {"10.0.0.0/8", "100.64.0.0/10", "172.16.0.0/12", "192.168.0.0/16"},
+    "::/0": {"fc00::/7"},
+}
+
+
+def world_peer(peer: Any) -> bool:
+    """An ipBlock peer for the whole world less every cluster and Pod range."""
+    if not isinstance(peer, dict) or set(peer) != {"ipBlock"} or not isinstance(peer["ipBlock"], dict):
+        return False
+    block = peer["ipBlock"]
+    required = WORLD_EXCEPTIONS.get(block.get("cidr"))
+    return required is not None and set(block) == {"cidr", "except"} and required <= set(block.get("except") or [])
 
 
 def label_selectors(policy: dict[str, Any]) -> list[Any]:
@@ -498,19 +458,18 @@ def uses_agents_selector(policy: dict[str, Any]) -> bool:
 
 def warm_bridge_violations(policy: dict[str, Any], label: str) -> list[str]:
     """A NetworkPolicy selecting through any agents.x-k8s.io label must be one
-    half of one environment's warm-member bridge: named cw-daemon-warm-<env>
-    or cw-gw-warm-<env>, selecting the member by exactly its Sandbox UID and
-    the workspace type, and peering only that environment's gateway (plus,
-    on the member half, the orchestration source cw-daemon-net-<env> admits)."""
+    environment's warm-member bridge: named cw-daemon-warm-<env>, selecting
+    the member by exactly its Sandbox UID and the workspace type, and
+    admitting only what cw-daemon-net-<env> admits: orchestration, and the
+    world on the tailnet UDP port. There is no gateway to peer."""
     if not uses_agents_selector(policy):
         return []
     output: list[str] = []
     name = str((policy.get("metadata") or {}).get("name", ""))
     matched = WARM_BRIDGE_NAME.fullmatch(name)
     if policy.get("kind") != "NetworkPolicy" or not matched:
-        return [f"{label}: {name!r} selects through an agents.x-k8s.io label but is not cw-daemon-warm-<env> or cw-gw-warm-<env>"]
-    half, environment = matched.groups()
-    gateway = {"matchLabels": {"codewire.sh/environment-id": environment, "codewire.sh/type": "gateway"}}
+        return [f"{label}: {name!r} selects through an agents.x-k8s.io label but is not cw-daemon-warm-<env>"]
+    _, environment = matched.groups()
     members = [selector for selector in label_selectors(policy) if any(key.startswith(AGENTS_LABEL_PREFIX) for key in selector_keys(selector))]
     uids = set()
     for selector in members:
@@ -524,9 +483,8 @@ def warm_bridge_violations(policy: dict[str, Any], label: str) -> list[str]:
         output.append(f"{label}: the bridge names more than one Sandbox UID: {sorted(uids)}")
     member = members[0] if len(members) > 0 else None
     spec = policy.get("spec") if isinstance(policy.get("spec"), dict) else {}
-    expected_selected = member if half == "daemon" else gateway
-    if spec.get("podSelector") != expected_selected:
-        output.append(f"{label}: the {half} half must apply to {'the member' if half == 'daemon' else 'its own gateway'} alone: {spec.get('podSelector')}")
+    if spec.get("podSelector") != member:
+        output.append(f"{label}: the bridge must apply to the member alone: {spec.get('podSelector')}")
     expected_types = [direction.capitalize() for direction in ("ingress", "egress") if spec.get(direction)]
     if spec.get("policyTypes") != expected_types:
         output.append(f"{label}: policyTypes must be exactly the granted directions {expected_types}: {spec.get('policyTypes')}")
@@ -537,18 +495,18 @@ def warm_bridge_violations(policy: dict[str, Any], label: str) -> list[str]:
                 output.append(f"{label}: a {direction} rule without {peers_key!r} peers admits every source or destination")
                 continue
             for peer in peers:
-                if half == "gw":
-                    allowed = peer == {"podSelector": member}
-                else:
-                    allowed = peer == {"podSelector": gateway} or (
-                        direction == "ingress"
+                allowed = direction == "ingress" and (
+                    (
+                        isinstance(peer, dict)
                         and set(peer) == {"namespaceSelector", "podSelector"}
                         and set((peer["namespaceSelector"] or {}).get("matchLabels") or {}) == {"kubernetes.io/metadata.name"}
                         and set(peer["namespaceSelector"]) == {"matchLabels"}
                         and peer["podSelector"] == {"matchLabels": ORCHESTRATION_PEER_POD}
                     )
+                    or (world_peer(peer) and (rule or {}).get("ports") == WORKSPACE_TAILNET_UDP_PORTS)
+                )
                 if not allowed:
-                    output.append(f"{label}: the {half} half peers something other than environment {environment}'s gateway: {peer}")
+                    output.append(f"{label}: environment {environment}'s bridge admits something other than orchestration or the world's tailnet traffic: {peer}")
     return output
 
 
@@ -619,12 +577,15 @@ def warm_bridge_self_test(goldens: dict[str, Any], manifests: list[str]) -> None
     if warm_bridge_violations(legacy, "unchanged cw-daemon-net"):
         raise RuntimeError("an environment policy without agents.x-k8s.io selectors was rejected")
     rejected("name-hash bridge (old design)", "daemon", lambda f: name_hash(member_labels(f)))
-    rejected("name-hash gateway peer (old design)", "gw", lambda f: name_hash(f["spec"]["egress"][0]["to"][0]["podSelector"]["matchLabels"]))
 
     def name_hash_term(f: dict[str, Any]) -> None:
         f["metadata"]["name"] = f["metadata"]["name"].replace("cw-daemon-warm-", "cw-daemon-net-")
         name_hash(member_labels(f))
 
+    def world_rule(f: dict[str, Any]) -> dict[str, Any]:
+        return next(rule for rule in f["spec"]["ingress"] if any("ipBlock" in peer for peer in rule["from"]))
+
+    environment = goldens["daemon"]["metadata"]["labels"]["codewire.sh/environment-id"]
     rejected("name-hash term on cw-daemon-net (old design)", "daemon", name_hash_term)
     rejected("name hash beside the UID", "daemon", lambda f: member_labels(f).__setitem__("agents.x-k8s.io/sandbox-name-hash", "d0258436"))
     rejected("claim UID instead of the Sandbox UID", "daemon", lambda f: member_labels(f).__setitem__(
@@ -636,31 +597,21 @@ def warm_bridge_self_test(goldens: dict[str, Any], manifests: list[str]) -> None
         "matchExpressions": [{"key": SANDBOX_UID_LABEL, "operator": "Exists"}], "matchLabels": {"codewire.sh/type": "workspace"}}))
     rejected("another name", "daemon", lambda f: f["metadata"].__setitem__("name", "cw-pool-member-bridge"))
     rejected("unsuffixed name", "daemon", lambda f: f["metadata"].__setitem__("name", "cw-daemon-warm"))
-    rejected("another environment's gateway", "daemon", lambda f: f["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"].__setitem__(
-        "codewire.sh/environment-id", other_environment))
-    rejected("name for another environment", "daemon", lambda f: f["metadata"].__setitem__(
-        "name", f"cw-daemon-warm-{other_environment}"))
-    rejected("any gateway", "daemon", lambda f: f["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"].pop("codewire.sh/environment-id"))
+    rejected("gateway half name", "daemon", lambda f: f["metadata"].__setitem__("name", f"cw-gw-warm-{environment}"))
+    rejected("this environment's gateway (old design)", "daemon", lambda f: f["spec"]["ingress"][0]["from"].append(
+        {"podSelector": {"matchLabels": {"codewire.sh/environment-id": environment, "codewire.sh/type": "gateway"}}}))
+    rejected("a server Pod other than orchestration", "daemon", lambda f: f["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"].__setitem__(
+        "app.kubernetes.io/component", "gateway"))
     rejected("every Pod in the namespace", "daemon", lambda f: f["spec"]["ingress"][0]["from"].append({"podSelector": {}}))
     rejected("every namespace", "daemon", lambda f: f["spec"]["ingress"][0]["from"].append({"namespaceSelector": {}}))
-    rejected("an address block", "daemon", lambda f: f["spec"]["ingress"][0]["from"].append({"ipBlock": {"cidr": "10.0.0.0/8"}}))
+    rejected("an address block on the daemon ports", "daemon", lambda f: f["spec"]["ingress"][0]["from"].append({"ipBlock": {"cidr": "10.0.0.0/8"}}))
+    rejected("cluster addresses on the tailnet port", "daemon", lambda f: world_rule(f)["from"][0]["ipBlock"].__setitem__("except", ["127.0.0.0/8"]))
+    rejected("the world on a TCP port", "daemon", lambda f: world_rule(f).__setitem__("ports", [{"port": 31000, "protocol": "TCP"}]))
     rejected("every source", "daemon", lambda f: f["spec"]["ingress"][0].pop("from"))
     rejected("orchestration egress", "daemon", lambda f: f["spec"].update(
-        egress=[{"to": f["spec"]["ingress"][1]["from"], "ports": [{"port": 8084, "protocol": "TCP"}]}],
+        egress=[{"to": f["spec"]["ingress"][0]["from"], "ports": [{"port": 8084, "protocol": "TCP"}]}],
         policyTypes=["Ingress", "Egress"]))
     rejected("isolating an ungranted direction", "daemon", lambda f: f["spec"]["policyTypes"].append("Egress"))
-    rejected("gateway half on every gateway", "gw", lambda f: f["spec"]["podSelector"]["matchLabels"].pop("codewire.sh/environment-id"))
-    rejected("gateway half on another environment's gateway", "gw", lambda f: f["spec"]["podSelector"]["matchLabels"].__setitem__(
-        "codewire.sh/environment-id", other_environment))
-    rejected("gateway half on the member", "gw", lambda f: f["spec"].__setitem__("podSelector", f["spec"]["egress"][0]["to"][0]["podSelector"]))
-    rejected("gateway half to another member", "gw", lambda f: f["spec"]["egress"].append(
-        {"to": [{"podSelector": {"matchLabels": {SANDBOX_UID_LABEL: "5e2d8c41-7a3b-4f90-b6e1-2c9d0a8f7b34", "codewire.sh/type": "workspace"}}}]}))
-    rejected("gateway half to the environment's workspaces", "gw", lambda f: f["spec"]["egress"][0]["to"].append(
-        {"podSelector": {"matchLabels": {"codewire.sh/environment-id": f["metadata"]["labels"]["codewire.sh/environment-id"], "codewire.sh/type": "workspace"}}}))
-    rejected("gateway half from orchestration", "gw", lambda f: f["spec"].update(
-        ingress=[{"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "dev"}},
-                            "podSelector": {"matchLabels": ORCHESTRATION_PEER_POD}}]}],
-        policyTypes=["Ingress", "Egress"]))
     if not warm_bridge_source_violations('json!({"agents.x-k8s.io/sandbox-name-hash": hash})', 'pub const SANDBOX_UID_LABEL: &str = "agents.x-k8s.io/sandbox-uid";'):
         raise RuntimeError("negative bridge source fixture (renderer names a label key) was accepted")
     if not warm_bridge_source_violations("", 'pub const SANDBOX_UID_LABEL: &str = "agents.x-k8s.io/sandbox-name-hash";'):
@@ -697,11 +648,9 @@ def check_warm_member_bridge(self_test: bool, manifests: list[str]) -> list[str]
     return failures
 
 
-def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
-    name = "codewire-orchestration-gateway-host-key"
+def check_orchestration_authz(args: argparse.Namespace) -> int:
     orchestration = "codewire-orchestration"
     token_request_name = "codewire-orchestration-tokenrequest"
-    forbidden_secret_verbs = ["get", "list", "watch", "update", "patch"]
     targets = [
         {"path": "deployments/k8s/orchestration", "role_namespace": "prod-sandboxes", "subject_namespace": "prod"},
         {"path": "deployments/k8s/overlays/dev", "role_namespace": "dev-sandboxes", "subject_namespace": "dev"},
@@ -716,61 +665,8 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         role = exactly_one(resources, "ClusterRole", orchestration, label, output)
         if role and re.search(r"^\s*- secrets\s*$", role, re.MULTILINE):
             output.append(f"{label}: cluster-wide orchestration role still grants Secret access")
-
-    def assert_role(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
-        role = exactly_one(resources, "Role", name, label, output)
-        if not role:
-            return
-        if metadata_field(role, "namespace") != target["role_namespace"]:
-            output.append(f"{label}: host-key Role must live in {target['role_namespace']}")
-        expected_rules = compact(
-            """
-            rules:
-            - apiGroups:
-              - ""
-              resources:
-              - secrets
-              verbs:
-              - create
-              - delete
-            """
-        )
-        actual_rules = compact(top_level_block(role, "rules"))
-        if actual_rules != expected_rules:
-            output.append(f"{label}: host-key Role must grant only Secret create/delete")
-        for verb in forbidden_secret_verbs:
-            if re.search(rf"^\s*- {verb}\s*$", role, re.MULTILINE):
-                output.append(f"{label}: host-key Role grants forbidden Secret verb {verb}")
-
-    def assert_role_binding(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
-        binding = exactly_one(resources, "RoleBinding", name, label, output)
-        if not binding:
-            return
-        if metadata_field(binding, "namespace") != target["role_namespace"]:
-            output.append(f"{label}: host-key RoleBinding must live in {target['role_namespace']}")
-        expected_role_ref = compact(
-            f"""
-            roleRef:
-              apiGroup: rbac.authorization.k8s.io
-              kind: Role
-              name: {name}
-            """
-        )
-        if compact(top_level_block(binding, "roleRef")) != expected_role_ref:
-            output.append(f"{label}: host-key RoleBinding must reference Role/{name}")
-        expected_subjects = compact(
-            f"""
-            subjects:
-            - kind: ServiceAccount
-              name: {orchestration}
-              namespace: {target['subject_namespace']}
-            """
-        )
-        if compact(top_level_block(binding, "subjects")) != expected_subjects:
-            output.append(
-                f"{label}: host-key RoleBinding must select "
-                f"{target['subject_namespace']}/{orchestration}"
-            )
+        if role and re.search(r"^\s*- deployments\s*$", role, re.MULTILINE):
+            output.append(f"{label}: cluster-wide orchestration role still grants Deployment access")
 
     def assert_token_request_authz(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
         role = exactly_one(resources, "Role", token_request_name, label, output)
@@ -839,10 +735,8 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         expected = sorted(
             [
                 f"ClusterRoleBinding/<cluster>/{orchestration}",
-                f"RoleBinding/{target['role_namespace']}/{name}",
-                f"RoleBinding/{target['role_namespace']}/codewire-orchestration-credential-bootstrap",
+                f"RoleBinding/{target['role_namespace']}/{INTERNAL_ROOTS_ROLE}",
                 f"RoleBinding/{target['role_namespace']}/{IMAGE_CACHE_ROLE}",
-                f"RoleBinding/{target['role_namespace']}/{GATEWAY_REPLICASET_ROLE}",
                 f"RoleBinding/{target['subject_namespace']}/{RELEASE_REVISION_ROLE}",
                 f"RoleBinding/{target['subject_namespace']}/{token_request_name}",
             ]
@@ -853,83 +747,19 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
                 f"{', '.join(actual) if actual else 'empty'}"
             )
 
-    def assert_admission(resources: list[str], label: str, output: list[str]) -> None:
-        policy = exactly_one(resources, "ValidatingAdmissionPolicy", name, label, output)
-        binding = exactly_one(resources, "ValidatingAdmissionPolicyBinding", name, label, output)
-        if policy:
-            if metadata_field(policy, "namespace") is not None:
-                output.append(f"{label}: ValidatingAdmissionPolicy must remain cluster-scoped")
-            normalized = compact(top_level_block(policy, "spec"))
-            required = [
-                "failurePolicy: Fail",
-                "matchPolicy: Equivalent",
-                "operations: - CREATE - DELETE",
-                "resources: - secrets",
-                "request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')",
-                "request.name.startsWith('cw-gateway-host-key-')",
-                "(request.operation == 'DELETE' && request.name.startsWith('cw-credential-gateway-'))",
-                "request.operation != 'CREATE' || object.type == 'Opaque'",
-                "object.metadata.labels['app.kubernetes.io/name'] == 'codewire-gateway'",
-                "object.metadata.labels['app.kubernetes.io/component'] == 'gateway-host-key'",
-                "object.metadata.labels['app.kubernetes.io/managed-by'] == 'codewire'",
-                "object.metadata.labels['codewire.sh/type'] == 'gateway-host-key'",
-                "request.name == 'cw-gateway-host-key-' + object.metadata.labels['codewire.sh/environment-id']",
-            ]
-            for fragment in required:
-                if fragment not in normalized:
-                    output.append(f"{label}: admission policy is missing {fragment}")
-        if binding:
-            if metadata_field(binding, "namespace") is not None:
-                output.append(f"{label}: ValidatingAdmissionPolicyBinding must remain cluster-scoped")
-            expected = compact(
-                f"""
-                spec:
-                  matchResources:
-                    namespaceSelector:
-                      matchLabels:
-                        codewire.sh/resource-type: sandbox
-                  policyName: {name}
-                  validationActions:
-                  - Deny
-                """
-            )
-            if compact(top_level_block(binding, "spec")) != expected:
-                output.append(f"{label}: admission binding must fail closed in sandbox-labeled namespaces")
-
     def verify_resources(resources: list[str], target: dict[str, str], label: str) -> list[str]:
         output: list[str] = []
         assert_cluster_role(resources, label, output)
-        assert_role(resources, target, label, output)
-        assert_role_binding(resources, target, label, output)
         assert_token_request_authz(resources, target, label, output)
         assert_bound_surface(resources, target, label, output)
-        assert_admission(resources, label, output)
-        assert_credential_bootstrap(resources, target, label, output)
+        assert_internal_roots(resources, target, label, output)
         assert_image_cache(resources, target, label, output)
         assert_warm_pool(resources, target, label, output)
-        assert_gateway_replicaset(resources, target, label, output)
         assert_workspace_binding_ingress(resources, target, label, output)
         output.extend(warm_bridge_manifest_violations(resources, label))
         if target["path"] != "deployments/k8s/orchestration":
             assert_credential_service(resources, target, label, output)
         return output
-
-    def expected_admission_allows(operation: str, secret_name: str, obj: dict[str, Any] | None = None) -> bool:
-        obj = obj or {}
-        if not secret_name.startswith("cw-gateway-host-key-"):
-            return False
-        if operation == "DELETE":
-            return True
-        if operation != "CREATE" or obj.get("type") != "Opaque":
-            return False
-        labels = ((obj.get("metadata") or {}).get("labels") or {})
-        return (
-            labels.get("app.kubernetes.io/name") == "codewire-gateway"
-            and labels.get("app.kubernetes.io/component") == "gateway-host-key"
-            and labels.get("app.kubernetes.io/managed-by") == "codewire"
-            and labels.get("codewire.sh/type") == "gateway-host-key"
-            and secret_name == f"cw-gateway-host-key-{labels.get('codewire.sh/environment-id')}"
-        )
 
     def self_test() -> None:
         target = targets[0]
@@ -943,22 +773,29 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
         expect_rejected(
             "application namespace binding",
             lambda resources: resources
-            + [resources_by_kind_and_name(resources, "RoleBinding", name)[0].replace("namespace: prod-sandboxes", "namespace: prod")],
+            + [resources_by_kind_and_name(resources, "RoleBinding", INTERNAL_ROOTS_ROLE)[0].replace("namespace: prod-sandboxes", "namespace: prod")],
         )
+        for internal_roots_label, before, after in [
+            ("any ConfigMap", "  resourceNames:\n  - codewire-orchestration-internal-roots\n", ""),
+            ("another ConfigMap", "  - codewire-orchestration-internal-roots", "  - codewire-credential-broker-roots"),
+            ("ConfigMap list", "  - get", "  - get\n  - list"),
+            ("ConfigMap write", "  - get", "  - get\n  - update"),
+            ("Secrets", "  - configmaps", "  - secrets"),
+        ]:
+            expect_rejected(
+                f"internal roots {internal_roots_label}",
+                lambda resources, before=before, after=after: [
+                    resource.replace(before, after)
+                    if top_level_field(resource, "kind") == "Role" and metadata_field(resource, "name") == INTERNAL_ROOTS_ROLE
+                    else resource
+                    for resource in resources
+                ],
+            )
         expect_rejected(
-            "wildcard Secret grant",
+            "cluster-wide Deployment grant",
             lambda resources: [
-                resource.replace("  - secrets", '  - "*"')
-                if top_level_field(resource, "kind") == "Role" and metadata_field(resource, "name") == name
-                else resource
-                for resource in resources
-            ],
-        )
-        expect_rejected(
-            "Secret get verb",
-            lambda resources: [
-                resource.replace("  - delete", "  - delete\n  - get")
-                if top_level_field(resource, "kind") == "Role" and metadata_field(resource, "name") == name
+                resource.replace('  - services\n', '  - services\n- apiGroups:\n  - apps\n  resources:\n  - deployments\n  verbs:\n  - get\n', 1)
+                if top_level_field(resource, "kind") == "ClusterRole" and metadata_field(resource, "name") == orchestration
                 else resource
                 for resource in resources
             ],
@@ -991,38 +828,6 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
                 if not (top_level_field(resource, "kind") or "").startswith("ValidatingAdmissionPolicy")
             ],
         )
-        expect_rejected(
-            "unrelated Secret guard",
-            lambda resources: [
-                resource.replace("cw-gateway-host-key-", "cw-any-secret-")
-                if top_level_field(resource, "kind") == "ValidatingAdmissionPolicy"
-                else resource
-                for resource in resources
-            ],
-        )
-        for before, after in [
-            ("  - certificates", "  - issuers"),
-            ("  - configmaps", "  - secrets"),
-            ("kind: Role\n  name: codewire-orchestration-credential-bootstrap", "kind: ClusterRole\n  name: codewire-orchestration-credential-bootstrap"),
-            ("'name':'codewire-credential-gateway'", "'name':'unrelated-issuer'"),
-            ("'kind':'Issuer'", "'kind':'ClusterIssuer'"),
-            ("object.spec.isCA == false", "object.spec.isCA == true"),
-            ("'size':dyn(256)", "'size':dyn(384)"),
-            ("'rotationPolicy':dyn('Always')", "'rotationPolicy':dyn('Never')"),
-            ("'size':dyn(256)", "'size':256"),
-            ("!has(object.spec.uris)", "true"),
-            ("!has(object.spec.keystores)", "true"),
-            ("!has(object.binaryData)", "true"),
-            ("oldObject.metadata.labels['codewire.sh/environment-id'] == variables.environment", "true"),
-            ("size(owner.uid) > 0", "true"),
-            ("has(owner.controller) && owner.controller", "true"),
-        ]:
-            expect_rejected(f"credential guard {before}", lambda resources, before=before, after=after: [resource.replace(before, after) for resource in resources])
-        expect_rejected("credential namespace-label bypass", lambda resources: [
-            resource.replace("spec:\n", "spec:\n  matchResources:\n    namespaceSelector:\n      matchLabels:\n        codewire.sh/resource-type: sandbox\n", 1)
-            if top_level_field(resource, "kind") == "ValidatingAdmissionPolicyBinding" and metadata_field(resource, "name") == "codewire-orchestration-credential-bootstrap"
-            else resource for resource in resources
-        ])
         def image_cache_rejected(label: str, kind: str, before: str, after: str, name: str = IMAGE_CACHE_ROLE) -> None:
             # Rendered CEL folds across lines at spaces, and single-quoted
             # YAML scalars double embedded apostrophes; match either spelling.
@@ -1092,7 +897,15 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
             (WARM_POOL_TEMPLATE_POLICY, "dyn(e.valueFrom).all(k, k == 'fieldRef')", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "e.valueFrom.fieldRef.fieldPath == 'metadata.uid'", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "'configMap', 'projected'])", "'configMap', 'projected', 'hostPath'])"),
-            (WARM_POOL_TEMPLATE_POLICY, "v.configMap.name == 'codewire-credential-gateway-roots'", "true"),
+            # Only the public roots ConfigMaps, each only as its ca.crt.
+            (WARM_POOL_TEMPLATE_POLICY, "v.configMap.name in variables.rootsConfigMaps", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "dyn(v.configMap).all(k, k in ['name', 'items', 'defaultMode'])", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "size(v.configMap.items) == 1", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "dyn(v.configMap.items[0]).all(k, k in ['key', 'path'])", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "v.configMap.items[0].key == 'ca.crt'", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "v.configMap.items[0].path == 'ca.crt'", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "['codewire-orchestration-internal-roots']",
+             "['codewire-orchestration-internal-roots', 'codewire-credential-broker-roots']"),
             (WARM_POOL_TEMPLATE_POLICY, "dyn(s).all(k, k == 'serviceAccountToken')", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "s.serviceAccountToken.audience in variables.audiences", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "'codewire.internal.credential-workspace.v1']", "'codewire.internal.credential-workspace.v1', 'https://kubernetes.default.svc']"),
@@ -1130,17 +943,6 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
             ("  - runtimeclasses\n  verbs:\n  - get", "  - runtimeclasses\n  verbs:\n  - get\n  - update"),
         ]:
             image_cache_rejected(f"warm pool ClusterRole {after.split()[-1]}", "ClusterRole", before, after, orchestration)
-        expect_rejected("missing gateway ReplicaSet grant", lambda resources: [
-            resource for resource in resources
-            if metadata_field(resource, "name") != GATEWAY_REPLICASET_ROLE
-        ])
-        image_cache_rejected("gateway ReplicaSet list", "Role", "  - get", "  - get\n  - list", GATEWAY_REPLICASET_ROLE)
-        image_cache_rejected("gateway ReplicaSet Pods", "Role", "  - replicasets", "  - replicasets\n  - pods", GATEWAY_REPLICASET_ROLE)
-        image_cache_rejected("gateway ReplicaSet in orchestration namespace", "Role",
-                             "namespace: prod-sandboxes", "namespace: prod", GATEWAY_REPLICASET_ROLE)
-        image_cache_rejected("gateway ReplicaSet other identity", "RoleBinding",
-                             "kind: ServiceAccount\n  name: codewire-orchestration", "kind: ServiceAccount\n  name: default",
-                             GATEWAY_REPLICASET_ROLE)
         expect_rejected("missing workspace binding ingress", lambda resources: [
             resource for resource in resources
             if not (top_level_field(resource, "kind") == "NetworkPolicy"
@@ -1174,12 +976,10 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
             .replace(f"name: {WORKSPACE_BINDING_INGRESS}", "name: codewire-orchestration-extra")
         ])
         expect_rejected("image cache cluster-wide DaemonSets", lambda resources: [
-            resource.replace("  - deployments\n", "  - deployments\n  - daemonsets\n", 1)
+            resource.replace("  - services\n", "  - services\n  - daemonsets\n", 1)
             if top_level_field(resource, "kind") == "ClusterRole" and metadata_field(resource, "name") == orchestration
             else resource for resource in resources
         ])
-        if expected_admission_allows("CREATE", "unrelated-secret", {"type": "Opaque", "metadata": {"labels": {}}}) or expected_admission_allows("DELETE", "unrelated-secret"):
-            raise RuntimeError("unrelated Secret create/delete fixture was accepted")
 
     try:
         credential_target = {"subject_namespace": "prod", "role_namespace": "prod-sandboxes"}
@@ -1202,7 +1002,7 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
 
     if failures:
         for failure in failures:
-            print(f"::error::orchestration host-key authorization: {failure}", file=sys.stderr)
+            print(f"::error::orchestration authorization: {failure}", file=sys.stderr)
         return 1
-    print(f"orchestration host-key authorization: OK ({len(targets)} rendered target(s))")
+    print(f"orchestration authorization: OK ({len(targets)} rendered target(s))")
     return 0

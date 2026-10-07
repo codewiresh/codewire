@@ -220,6 +220,13 @@ patches:
       - op: replace
         path: /spec/variables/1/expression
         value: "['codewire-gateway:e2e']"
+      # SANDBOX_COORDINATOR_EXTRA_ROOTS mounts the coordinator's extra roots.
+      - op: test
+        path: /spec/variables/2/name
+        value: rootsConfigMaps
+      - op: replace
+        path: /spec/variables/2/expression
+        value: "['codewire-orchestration-internal-roots', 'codewire-coordinator-extra-roots']"
 
 # Namespace transforms do not rewrite DNS SANs inside custom resources.
 replacements:
@@ -254,6 +261,7 @@ replacements:
           name: codewire-orchestration-internal
         fieldPaths:
           - spec.dnsNames.0
+          - spec.dnsNames.1
         options:
           delimiter: "."
           index: 1
@@ -279,9 +287,6 @@ transformers:
     metadata:
       name: codewire-credential-service-peers
     patch: |-
-      - op: replace
-        path: /spec/ingress/1/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
-        value: dev-sandboxes
       - op: replace
         path: /spec/ingress/0/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
         value: ingress-nginx
@@ -310,7 +315,7 @@ transformers:
     apiVersion: builtin
     kind: PatchTransformer
     metadata:
-      name: codewire-orchestration-gateway-host-key-dev-sandboxes
+      name: codewire-orchestration-sandbox-roles-dev-sandboxes
     patch: |-
       - op: replace
         path: /metadata/namespace
@@ -319,12 +324,12 @@ transformers:
       group: rbac.authorization.k8s.io
       version: v1
       kind: Role|RoleBinding
-      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap|image-cache|gateway-replicaset)|credential-service-runtime)
+      name: codewire-(orchestration-(internal-roots|image-cache)|credential-service-runtime)
   - |-
     apiVersion: builtin
     kind: PatchTransformer
     metadata:
-      name: codewire-orchestration-gateway-host-key-codewire-e2e-subject
+      name: codewire-orchestration-sandbox-roles-codewire-e2e-subject
     patch: |-
       - op: replace
         path: /subjects/0/namespace
@@ -333,12 +338,12 @@ transformers:
       group: rbac.authorization.k8s.io
       version: v1
       kind: RoleBinding
-      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap|image-cache|gateway-replicaset)|credential-service-runtime)
+      name: codewire-(orchestration-(internal-roots|image-cache)|credential-service-runtime)
   - |-
     apiVersion: builtin
     kind: PatchTransformer
     metadata:
-      name: codewire-orchestration-gateway-host-key-admission-cluster-scope
+      name: codewire-orchestration-sandbox-roles-admission-cluster-scope
     patch: |-
       - op: remove
         path: /metadata/namespace
@@ -346,7 +351,7 @@ transformers:
       group: admissionregistration.k8s.io
       version: v1
       kind: ValidatingAdmissionPolicy|ValidatingAdmissionPolicyBinding
-      name: codewire-orchestration-(gateway-host-key|credential-bootstrap|credential-leaf-cleanup|image-cache|warm-pool|warm-pool-template|warm-pool-member)
+      name: codewire-orchestration-(image-cache|warm-pool|warm-pool-template|warm-pool-member)
   - |-
     apiVersion: builtin
     kind: PatchTransformer

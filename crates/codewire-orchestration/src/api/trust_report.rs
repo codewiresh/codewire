@@ -10,16 +10,14 @@ use std::collections::BTreeMap;
 use axum::http::StatusCode;
 use codewire_server_core::AppResult;
 use codewire_server_core::auth::AuthUser;
-use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{Node, Pod};
 use kube::Api;
-use kube::api::ListParams;
 use sqlx::Row;
 
 use crate::sandbox::template::{
     DAEMON_INIT_CONTAINER, DAEMON_VOLUME, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_CONFIDENTIAL,
     RUNTIME_CLASS_RUNC, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL,
-    RUNTIME_PROFILE_NONE, RUNTIME_PROFILE_RUNC, gateway_workload_name, runtime_profile_spec,
+    RUNTIME_PROFILE_NONE, RUNTIME_PROFILE_RUNC, runtime_profile_spec,
 };
 
 use super::ApiState;
@@ -72,8 +70,6 @@ pub struct TrustReportPlacement {
 pub struct TrustReportImages {
     pub workspace_image: Option<String>,
     pub workspace_image_id: Option<String>,
-    pub gateway_image: Option<String>,
-    pub gateway_image_id: Option<String>,
     pub dind_image: Option<String>,
     pub dind_image_id: Option<String>,
     pub daemon_init_image: Option<String>,
@@ -257,8 +253,6 @@ async fn observe_live_runtime(state: &ApiState, row: &TrustReportRow) -> LiveObs
         images: TrustReportImages {
             workspace_image: None,
             workspace_image_id: None,
-            gateway_image: None,
-            gateway_image_id: None,
             dind_image: None,
             dind_image_id: None,
             daemon_init_image: None,
@@ -292,24 +286,6 @@ async fn observe_live_runtime(state: &ApiState, row: &TrustReportRow) -> LiveObs
             }
         }
     }
-
-    let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-    let gateway_name = gateway_workload_name(&row.id);
-    match deployments.get(&gateway_name).await {
-        Ok(deployment) => {
-            observation.images.gateway_image =
-                deployment_container_image(&deployment, "codewire-gateway");
-        }
-        Err(err) => {
-            tracing::debug!(
-                %err,
-                namespace,
-                gateway_name,
-                "trust report gateway deployment lookup failed"
-            );
-        }
-    }
-    observe_gateway_pod(client, namespace, &row.id, &mut observation).await;
 
     observation
 }
@@ -358,33 +334,6 @@ async fn observe_node(client: kube::Client, node_name: &str, observation: &mut L
         }
         Err(err) => {
             tracing::debug!(%err, node_name, "trust report node lookup failed");
-        }
-    }
-}
-
-async fn observe_gateway_pod(
-    client: kube::Client,
-    namespace: &str,
-    env_id: &str,
-    observation: &mut LiveObservation,
-) {
-    let pods: Api<Pod> = Api::namespaced(client, namespace);
-    let selector = format!("codewire.sh/environment-id={env_id},codewire.sh/type=gateway");
-    match pods.list(&ListParams::default().labels(&selector)).await {
-        Ok(list) => {
-            let Some(pod) = list.items.into_iter().next() else {
-                return;
-            };
-            observation.images.gateway_image = observation
-                .images
-                .gateway_image
-                .take()
-                .or_else(|| spec_container_image(&pod, "codewire-gateway"));
-            observation.images.gateway_image_id =
-                status_container_image_id(&pod, "codewire-gateway");
-        }
-        Err(err) => {
-            tracing::debug!(%err, namespace, env_id, "trust report gateway pod lookup failed");
         }
     }
 }
@@ -450,20 +399,6 @@ fn status_init_container_image_id(pod: &Pod, name: &str) -> Option<String> {
         .iter()
         .find(|status| status.name == name)
         .map(|status| status.image_id.clone())
-        .and_then(trimmed_optional)
-}
-
-fn deployment_container_image(deployment: &Deployment, name: &str) -> Option<String> {
-    deployment
-        .spec
-        .as_ref()?
-        .template
-        .spec
-        .as_ref()?
-        .containers
-        .iter()
-        .find(|container| container.name == name)
-        .and_then(|container| container.image.clone())
         .and_then(trimmed_optional)
 }
 
@@ -641,8 +576,6 @@ mod tests {
                 images: TrustReportImages {
                     workspace_image: None,
                     workspace_image_id: None,
-                    gateway_image: None,
-                    gateway_image_id: None,
                     dind_image: None,
                     dind_image_id: None,
                     daemon_init_image: None,
@@ -655,7 +588,7 @@ mod tests {
                 observation.images.daemon_init_image_id,
             )
         };
-        let image = "registry.example/codewire/gateway@sha256:1111";
+        let image = "registry.example/codewire/support@sha256:1111";
         let workspace = serde_json::json!({"name": "workspace", "image": "workspace"});
         assert_eq!(
             observe(

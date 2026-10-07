@@ -75,11 +75,6 @@ NS=codewire-e2e
 SANDBOX_NS=dev-sandboxes
 # shellcheck source=scripts/ci/verify/kind/credentials.sh
 source "$ROOT/scripts/ci/verify/kind/credentials.sh"
-AUTHZ_TMPDIR=""
-GATEWAY_SMOKE_TMPDIR=""
-GATEWAY_PORT_FORWARD_PID=""
-GATEWAY_PORT_FORWARD_PORT=""
-GATEWAY_PUBLIC_FINGERPRINT=""
 KIND_E2E_COMPATIBILITY_VERSION=1
 KIND_E2E_PREPARED_CONFIGMAP=codewire-kind-e2e-prepared
 RETAINED_KUBECONFIG=""
@@ -343,19 +338,12 @@ dump_cluster_state() {
 
 cleanup() {
   local status=$?
-  stop_gateway_port_forward
   if [ "$status" -ne 0 ]; then
     dump_cluster_state
   fi
   stop_remote_dind_kind_forwarding
   if [ "$KEEP_KIND_CLUSTER" != "1" ]; then
     kind delete cluster --name "$KIND_CLUSTER_NAME" >/dev/null 2>&1 || true
-  fi
-  if [ -n "$AUTHZ_TMPDIR" ]; then
-    rm -rf "$AUTHZ_TMPDIR"
-  fi
-  if [ -n "$GATEWAY_SMOKE_TMPDIR" ]; then
-    rm -rf "$GATEWAY_SMOKE_TMPDIR"
   fi
   exit "$status"
 }
@@ -386,30 +374,14 @@ assert_kind_idp_topology() {
 
 retained_suite_cleanup() {
   local status=$?
-  stop_gateway_port_forward
   if [ "$status" -ne 0 ]; then
     dump_cluster_state
-  fi
-  if [ -n "$AUTHZ_TMPDIR" ]; then
-    rm -rf "$AUTHZ_TMPDIR"
-  fi
-  if [ -n "$GATEWAY_SMOKE_TMPDIR" ]; then
-    rm -rf "$GATEWAY_SMOKE_TMPDIR"
   fi
   if [ -n "$RETAINED_KUBECONFIG" ]; then
     rm -f "$RETAINED_KUBECONFIG"
   fi
   log "retained suite left Kind cluster ${KIND_CLUSTER_NAME} intact"
   exit "$status"
-}
-
-stop_gateway_port_forward() {
-  if [ -n "$GATEWAY_PORT_FORWARD_PID" ]; then
-    kill "$GATEWAY_PORT_FORWARD_PID" >/dev/null 2>&1 || true
-    wait "$GATEWAY_PORT_FORWARD_PID" >/dev/null 2>&1 || true
-    GATEWAY_PORT_FORWARD_PID=""
-    GATEWAY_PORT_FORWARD_PORT=""
-  fi
 }
 
 require_tool() {
@@ -757,10 +729,6 @@ auth_token_for_environment_scope() {
       | openssl base64 -A | tr '+/' '-_' | tr -d '='
   )"
   printf '%s.%s' "$encoded_payload" "$signature"
-}
-
-gateway_auth_token_for_environment() {
-  auth_token_for_environment_scope "$1" coordinate
 }
 
 daemon_auth_token_for_environment() {
@@ -2258,17 +2226,17 @@ connect_edge_probes() {
 # `codewire.internal.v1` is the sole listener-isolation exception to the
 # public `/codewire.` fallback. Prove both sides of that boundary against the
 # rendered Kind Service: public ingress reaches the ordinary public 8084
-# not-found, an authenticated ClusterIP Service-DNS request proves the binding
-# success path, and a direct port-forward proves anonymous and cross-capability
-# requests fail closed on the internal listener.
+# not-found, and a port-forward to the TLS internal listener, verified with
+# the published roots and the Service's DNS name, proves anonymous and
+# cross-capability requests fail closed there.
 coordinator_runtime_smokes() {
-  # The internal binding and public coordinator probes share one environment.
-  # Keep its live runtime until every consumer finishes; otherwise the normal
+  # The internal listener and coordinator probes share one environment. Keep
+  # its live runtime until every consumer finishes; otherwise the normal
   # reconciler correctly invalidates the later public running-state check.
   log "running internal Connect listener isolation probes"
-  local public_base="${KIND_INGRESS_URL}/codewire.internal.v1.GatewayBindingService"
+  local public_base="${KIND_INGRESS_URL}/codewire.internal.v1.MeshAuthorizationService"
   curl_settled -X POST -H 'content-type: application/json' -d '{}' \
-    "${public_base}/IssueGatewayBinding"
+    "${public_base}/ResolveMeshAuthorization"
   if [ "$PROBE_CODE" != "404" ]; then
     echo "::error::public internal Connect path returned ${PROBE_CODE}, want public-listener 404: ${PROBE_BODY}"
     exit 1
@@ -2279,14 +2247,11 @@ coordinator_runtime_smokes() {
     exit 1
   fi
 
-  # The binding service rejects database-only runtime identities: the
-  # referenced SandboxClaim and workspace Pod must both be live and current.
-  # It resolves the Pod only through the runtime chain (Program #2238 B2):
-  # the Claim's status names its bound Sandbox, the Sandbox names its Pod,
-  # and there is no Claim-name fallback. Install the checked-in claim and
-  # Sandbox CRDs before the full controller deployment so this listener probe
-  # can build that exact chain without a controller racing its synthetic
-  # status.
+  # The coordinator probe's environment keeps a live runtime chain (Claim,
+  # Sandbox, Pod) so the reconciler leaves it running for every consumer.
+  # Install the checked-in claim and Sandbox CRDs before the full controller
+  # deployment so this probe can build that exact chain without a controller
+  # racing its synthetic status.
   kubectl_apply --validate=false \
     -f "$ROOT/deployments/k8s/agent-sandbox/base/crds/extensions.agents.x-k8s.io_sandboxclaims.yaml" \
     -f "$ROOT/deployments/k8s/agent-sandbox/base/crds/agents.x-k8s.io_sandboxes.yaml"
@@ -2295,19 +2260,16 @@ coordinator_runtime_smokes() {
     crd/sandboxes.agents.x-k8s.io
 
   (
-    # Admit the stopped UUID-addressed coordinator fixture. The binding
-    # endpoint must mint a token the real coordinator accepts, rather than
-    # merely returning a syntactically plausible token from its own process.
+    # Admit the stopped UUID-addressed coordinator fixture. The real
+    # coordinator must accept its coordinate-scoped token.
     local bound_environment_id=00000000-0000-4000-8000-000000000501
     local bound_claim="sandbox-${bound_environment_id}"
-    # A warm-pool member's name, as adoption leaves it: never the Claim's
-    # name, so the binding succeeds only by following the bound chain.
+    # A warm-pool member's name, as adoption leaves it: never the Claim's name.
     local bound_sandbox="kind-internal-ready-fixture-${bound_environment_id##*-}"
     local bound_pod="$bound_sandbox"
-    local bound_gateway="cw-binding-gateway-${bound_environment_id}"
     local bound_claim_uid bound_sandbox_uid bound_pod_ip bound_claim_status
     local bound_port_id=port_internal_connect_kind
-    local port_forward_log port_forward_pid local_port i sidecar_token in_cluster_probe
+    local port_forward_log port_forward_pid local_port i sidecar_token
     local internal_roots
     port_forward_log="$(mktemp)"
     # Public roots of the TLS internal listener, for host-side probes.
@@ -2345,8 +2307,6 @@ SQL
         --ignore-not-found=true --wait=true >/dev/null 2>&1 || cleanup_status=1
       kubectl -n "$NS" delete pod "$bound_pod" \
         --ignore-not-found=true --wait=true >/dev/null 2>&1 || cleanup_status=1
-      kubectl -n "$NS" delete pod "$bound_gateway" \
-        --ignore-not-found=true --wait=true >/dev/null 2>&1 || cleanup_status=1
       rm -f "$port_forward_log" "$internal_roots"
       [ "$status" -ne 0 ] || status="$cleanup_status"
       exit "$status"
@@ -2359,57 +2319,7 @@ SQL
       --ignore-not-found=true --wait=true >/dev/null
     kubectl -n "$NS" delete pod "$bound_pod" \
       --ignore-not-found=true --wait=true >/dev/null
-    kubectl -n "$NS" delete pod "$bound_gateway" \
-      --ignore-not-found=true --wait=true >/dev/null
     kubectl_apply -f - <<EOF
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: codewire-sandbox
-  namespace: ${NS}
-automountServiceAccountToken: false
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: ${bound_gateway}
-  namespace: ${NS}
-  labels:
-    codewire.sh/environment-id: ${bound_environment_id}
-    codewire.sh/type: gateway
-spec:
-  serviceAccountName: codewire-sandbox
-  automountServiceAccountToken: false
-  restartPolicy: Always
-  securityContext:
-    runAsUser: 1000
-    runAsGroup: 1000
-    fsGroup: 1000
-  containers:
-    - name: gateway-binding-caller
-      image: ${KIND_POSTGRES_LOCAL_IMAGE}
-      imagePullPolicy: Never
-      command: ["sleep", "600"]
-      volumeMounts:
-        - name: gateway-binding-identity
-          mountPath: /var/run/secrets/codewire/gateway-binding
-          readOnly: true
-        - name: orchestration-internal-roots
-          mountPath: /run/codewire-orchestration-internal-roots
-          readOnly: true
-  volumes:
-    - name: orchestration-internal-roots
-      configMap:
-        name: codewire-orchestration-internal-roots
-    - name: gateway-binding-identity
-      projected:
-        defaultMode: 288
-        sources:
-          - serviceAccountToken:
-              audience: codewire.internal.gateway-binding.v1
-              expirationSeconds: 600
-              path: token
----
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
@@ -2481,8 +2391,6 @@ spec:
 EOF
     kubectl -n "$NS" wait "pod/${bound_pod}" \
       --for=condition=Ready --timeout=60s
-    kubectl -n "$NS" wait "pod/${bound_gateway}" \
-      --for=condition=Ready --timeout=60s
     bound_pod_ip="$(
       kubectl -n "$NS" get pod "$bound_pod" -o jsonpath='{.status.podIP}'
     )"
@@ -2495,7 +2403,7 @@ EOF
       jq -cn --arg sandbox "$bound_sandbox" --arg pod_ip "$bound_pod_ip" '{status: {
         sandbox: {name: $sandbox, podIPs: [$pod_ip]},
         conditions: [{lastTransitionTime: "2026-01-01T00:00:00Z",
-          message: "Kind internal binding fixture is ready", reason: "Ready",
+          message: "Kind internal Connect fixture is ready", reason: "Ready",
           status: "True", type: "Ready"}]}}'
     )"
     kubectl -n "$NS" patch sandboxclaim "$bound_claim" \
@@ -2515,31 +2423,9 @@ SET state = 'running', desired_state = 'started', error_reason = NULL
 WHERE id = '$bound_environment_id';
 COMMIT;
 SQL
-    # This originates in a gateway-labeled Pod and addresses the ClusterIP by
-    # Service DNS over the TLS-only internal listener, verified like a gateway
-    # verifies it: with the published roots and the leaf's exact DNS name. The
-    # caller rereads its exact-audience projected token, and sends no Pod
-    # coordinates; orchestration derives name, namespace, and UID exclusively
-    # from TokenReview before resolving the environment label.
+    # The coordinator's own coordinate-scoped capability for this environment.
+    sidecar_token="$(auth_token_for_environment_scope "$bound_environment_id" coordinate)"
     local internal_host="codewire-orchestration.${NS}.svc.cluster.local"
-    # shellcheck disable=SC2016 # The shell inside the fixture Pod expands the token.
-    in_cluster_probe="$(kubectl -n "$NS" exec "$bound_gateway" -- sh -ec '
-      token="$(cat /var/run/secrets/codewire/gateway-binding/token)"
-      SSL_CERT_FILE=/run/codewire-orchestration-internal-roots/ca.crt exec wget -q -O - \
-        --header="content-type: application/json" \
-        --header="authorization: Bearer ${token}" \
-        --post-data="{}" \
-        "https://$1:8088/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
-    ' sh "$internal_host")"
-    if ! jq -e --arg environment_id "$bound_environment_id" --arg pod_ip "$bound_pod_ip" \
-      '(.environmentId // .environment_id) == $environment_id
-       and (.workspacePodIp // .workspace_pod_ip) == $pod_ip
-       and ((.appPorts // .app_ports // []) | index(3000)) != null
-       and ((.sidecarToken // .sidecar_token // "") | length > 0)' \
-      <<<"$in_cluster_probe" >/dev/null; then
-      echo "::error::in-cluster Service-DNS binding request did not reach the internal TLS mount: $in_cluster_probe"
-      exit 1
-    fi
 
     kubectl -n "$NS" get configmap codewire-orchestration-internal-roots \
       -o 'jsonpath={.data.ca\.crt}' >"$internal_roots"
@@ -2568,55 +2454,36 @@ SQL
     curl_settled --cacert "$internal_roots" \
       --resolve "${internal_host}:${local_port}:127.0.0.1" \
       -X POST -H 'content-type: application/json' -d '{}' \
-      "https://${internal_host}:${local_port}/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
+      "https://${internal_host}:${local_port}/codewire.internal.v1.MeshAuthorizationService/ResolveMeshAuthorization"
     if [ "$PROBE_CODE" != "401" ] || ! echo "$PROBE_BODY" | grep -q '"code":"unauthenticated"'; then
-      echo "::error::anonymous internal binding command was not rejected: code=$PROBE_CODE body=$PROBE_BODY"
+      echo "::error::anonymous internal command was not rejected: code=$PROBE_CODE body=$PROBE_BODY"
       exit 1
     fi
     if ! grep -qi '^x-codewire-service: codewire-orchestration-internal' "$PROBE_HEADERS"; then
-      echo "::error::ClusterIP internal binding command did not reach the internal listener"
+      echo "::error::ClusterIP internal command did not reach the internal listener"
       cat "$PROBE_HEADERS"
       exit 1
     fi
 
-    sidecar_token="$(jq -er '.sidecarToken // .sidecar_token // empty' <<<"$in_cluster_probe")"
-
-    # A freshly issued coordinate-scoped Codewire HMAC bearer must not be
-    # accepted as a gateway bootstrap identity. There is no HMAC or anonymous
-    # fallback around the exact-audience Kubernetes TokenReview boundary.
+    # A coordinate-scoped Codewire HMAC bearer is not the Mesh service's
+    # method-scoped HMAC: no other capability crosses into the listener.
     curl_settled --cacert "$internal_roots" \
       --resolve "${internal_host}:${local_port}:127.0.0.1" \
       -X POST -H 'content-type: application/json' \
       -H "authorization: Bearer ${sidecar_token}" -d '{}' \
-      "https://${internal_host}:${local_port}/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
+      "https://${internal_host}:${local_port}/codewire.internal.v1.MeshAuthorizationService/ResolveMeshAuthorization"
     if [ "$PROBE_CODE" != "401" ] || ! echo "$PROBE_BODY" | grep -q '"code":"unauthenticated"'; then
-      echo "::error::coordinate capability crossed into gateway binding: code=$PROBE_CODE body=$PROBE_BODY"
+      echo "::error::coordinate capability crossed into the internal listener: code=$PROBE_CODE body=$PROBE_BODY"
       exit 1
     fi
 
-    # The one Rust client core opens a real generated Coordinate stream. Its
-    # successful setup proves the just-issued HMAC token crossed the service
-    # boundary and was accepted by the coordinator, not only parsed by the
-    # issuer.
-    for i in $(seq 1 20); do
-      if KIND_COORDINATOR_DIRECT_URL="$KIND_COORDINATOR_DIRECT_URL" \
-        KIND_COORDINATOR_ENVIRONMENT="$bound_environment_id" \
-        KIND_COORDINATOR_SIDECAR_TOKEN="$sidecar_token" \
-        KIND_COORDINATOR_BINDING_PROBE=1 \
-        timeout --kill-after=5s 15s "$CARGO_CI_DIR/examples/coordinator-ingress-smoke"; then
-        break
-      fi
-      if [ "$i" = 20 ]; then
-        echo "::error::coordinator did not accept the internal binding token"
-        exit 1
-      fi
-      echo "internal binding coordinator probe not ready (${i}/20)"
-      sleep 2
-    done
-
     log "internal Connect listener isolation probes OK"
     mesh_product_connect_ownership_smoke
-    coordinator_ingress_smoke
+    # The direct Coordinate stream proves the same token is accepted by the
+    # coordinator for this live environment.
+    KIND_COORDINATOR_ENVIRONMENT="$bound_environment_id" \
+      KIND_COORDINATOR_SIDECAR_TOKEN="$sidecar_token" \
+      coordinator_ingress_smoke
   )
 }
 
@@ -2773,10 +2640,8 @@ file_service_smoke() (
   # The Sandbox that controls the daemon Pod, named like it, as the
   # controller names a Sandbox's own Pod.
   local sandbox_name="$daemon_pod"
-  local gateway_token daemon_token original_replicas pod_ip pod_uid ready
+  local original_replicas pod_ip pod_uid ready
   local claim_uid sandbox_uid pod_owner
-  gateway_token="$(gateway_auth_token_for_environment "$environment_id")"
-  daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
 
   original_replicas="$(
     kubectl -n agent-sandbox-system get deploy/agent-sandbox-controller \
@@ -2983,13 +2848,10 @@ SQL
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
     CRD_SMOKE_SERVER_NAMESPACE="$NS" \
     CRD_SMOKE_WORKSPACE_IMAGE="$workspace_image" \
-    CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" \
-    CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
-    CRD_SMOKE_GATEWAY_PHASE=cleanup \
-    CRD_SMOKE_LOCAL_GATEWAY=1 \
+    CRD_SMOKE_ACCESS_PHASE=cleanup \
+    CRD_SMOKE_LOCAL_IMAGES=1 \
     "$CARGO_CI_DIR/crd-smoke"
   kubectl -n "$SANDBOX_NS" delete pod "$daemon_pod" --wait=true >/dev/null
-  rm -rf "$GATEWAY_SMOKE_TMPDIR"
   log "daemon-native FileService streaming and black-box Connect contract green"
 )
 
@@ -3196,14 +3058,138 @@ deploy_agent_sandbox() {
 }
 
 workspace_service_smokes() {
-  gateway_host_key_restart_smoke
+  workspace_access_stack_smoke
 
   log "running workspace exec smoke"
   SMOKE_NAMESPACE="$SANDBOX_NS" SMOKE_POD_NAME=crd-smoke-workspace-daemon \
     "$CARGO_CI_DIR/exec-smoke"
   file_service_smoke
   environment_resize_smoke
+  workspace_user_ssh_smoke
 }
+
+# Bound on a new Sandbox answering its first OpenSSH command, from the create
+# request.
+KIND_USER_SSH_READY_SECONDS=180
+
+# The user's SSH path, exactly as a user gets it: a synthetic personal login,
+# the block `cw config-ssh` writes, and real OpenSSH through it (its
+# ProxyCommand and its only host-key trust, `cw ssh known-hosts`). A new
+# Sandbox must answer its first command within the bound; then a command line
+# the workspace shell parses keeps its exit status, scp round-trips in SFTP
+# and legacy mode, sftp and rsync work, and a key other than the recorded one
+# is refused.
+workspace_user_ssh_smoke() (
+  log "running the user SSH journey through the block cw config-ssh writes"
+  require_tool ssh
+  require_tool scp
+  require_tool sftp
+  umask 077
+  local name="kind-ssh-${RANDOM}${RANDOM}" environment="" image config host started first
+  local output status up
+  KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-ssh.XXXXXX)" || return 1
+  # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
+  cleanup_workspace_user_ssh_smoke() {
+    local status=$?
+    trap - EXIT
+    set +e
+    if [ -n "$environment" ]; then
+      kind_credential_cli env --platform rm "$environment" --yes --output json >/dev/null ||
+        status=1
+      wait_kind_credential_environment "$environment" destroyed || status=1
+    fi
+    rm -rf -- "$KIND_CREDENTIAL_CLI_HOME" || status=1
+    exit "$status"
+  }
+  trap cleanup_workspace_user_ssh_smoke EXIT
+  prepare_kind_credential_cli
+  kind_credential_cli org set org_contract_1 >/dev/null
+  config="$KIND_CREDENTIAL_CLI_HOME/ssh_config"
+  kind_credential_cli config-ssh --ssh-config-file "$config" >/dev/null
+  # OpenSSH's TOOL with the ssh config CONFIG. The block names the cw that
+  # wrote it by absolute path, and its commands find the server and login
+  # as that cw does, from this environment.
+  kind_user_ssh_tool() {
+    local ssh_config="$1" tool="$2"
+    shift 2
+    env -i PATH=/usr/bin:/bin HOME="$KIND_CREDENTIAL_CLI_HOME" \
+      XDG_CONFIG_HOME="$KIND_CREDENTIAL_CLI_HOME/config" \
+      CW_CONFIG_DIR="$KIND_CREDENTIAL_CLI_HOME/cw" \
+      CODEWIRE_SERVER_URL="$KIND_INGRESS_URL" \
+      timeout 60 "$tool" -F "$ssh_config" -o BatchMode=yes -o LogLevel=ERROR "$@" </dev/null
+  }
+  image="$(kind_workspace_runtime_image)"
+  host="cw-$name"
+  started="$SECONDS"
+  environment="$(kind_credential_cli env --platform create --name "$name" --image "$image" \
+    --cpu 500 --memory 1Gi --disk 1Gi --ttl 1h --yes --output json | jq -er '.id')"
+  first=""
+  while [ $((SECONDS - started)) -lt "$KIND_USER_SSH_READY_SECONDS" ]; do
+    if output="$(kind_user_ssh_tool "$config" ssh "$host" 'echo ready' 2>/dev/null)" &&
+      [ "$output" = ready ]; then
+      first=$((SECONDS - started))
+      break
+    fi
+    sleep 1
+  done
+  [ -n "$first" ] || {
+    echo "::error::ssh $host did not answer within ${KIND_USER_SSH_READY_SECONDS}s of the create request"
+    return 1
+  }
+  log "first OpenSSH command answered ${first}s after the create request"
+
+  status=0
+  output="$(kind_user_ssh_tool "$config" ssh "$host" \
+    'printf a && printf b | tr b B; echo " $((1+2)) $HOME"; exit 7')" || status=$?
+  [ "$output" = "aB 3 /home/codewire" ] && [ "$status" -eq 7 ] || {
+    echo "::error::ssh did not run a shell command line: output '$output', exit $status"
+    return 1
+  }
+
+  up="$KIND_CREDENTIAL_CLI_HOME/up.txt"
+  printf 'kind-ssh-%s\n' "$RANDOM" >"$up"
+  kind_user_ssh_tool "$config" scp "$up" "$host:sftp-mode.txt" &&
+    kind_user_ssh_tool "$config" scp "$host:sftp-mode.txt" "$KIND_CREDENTIAL_CLI_HOME/sftp-mode.txt" &&
+    cmp -s "$up" "$KIND_CREDENTIAL_CLI_HOME/sftp-mode.txt" || {
+    echo '::error::scp (SFTP mode) did not round-trip a file through the home directory'
+    return 1
+  }
+  kind_user_ssh_tool "$config" scp -O "$up" "$host:legacy-mode.txt" &&
+    kind_user_ssh_tool "$config" scp -O "$host:legacy-mode.txt" "$KIND_CREDENTIAL_CLI_HOME/legacy-mode.txt" &&
+    cmp -s "$up" "$KIND_CREDENTIAL_CLI_HOME/legacy-mode.txt" || {
+    echo '::error::scp (legacy mode) did not round-trip a file through the home directory'
+    return 1
+  }
+  printf 'pwd\nls sftp-mode.txt\nrm sftp-mode.txt\n' >"$KIND_CREDENTIAL_CLI_HOME/sftp-batch"
+  kind_user_ssh_tool "$config" sftp -b "$KIND_CREDENTIAL_CLI_HOME/sftp-batch" "$host" >/dev/null || {
+    echo '::error::an sftp batch (pwd, ls, rm) failed'
+    return 1
+  }
+  if command -v rsync >/dev/null 2>&1; then
+    env -i PATH=/usr/bin:/bin HOME="$KIND_CREDENTIAL_CLI_HOME" \
+      XDG_CONFIG_HOME="$KIND_CREDENTIAL_CLI_HOME/config" \
+      CW_CONFIG_DIR="$KIND_CREDENTIAL_CLI_HOME/cw" \
+      CODEWIRE_SERVER_URL="$KIND_INGRESS_URL" \
+      timeout 60 rsync -e "ssh -F $config -o BatchMode=yes -o LogLevel=ERROR" \
+      "$up" "$host:rsync.txt" </dev/null || {
+      echo '::error::rsync over the managed block failed'
+      return 1
+    }
+  else
+    log "rsync is not installed on this host; its step did not run"
+  fi
+
+  # A key other than the recorded one, in place of the block's trust source.
+  sed 's|KnownHostsCommand .*|KnownHostsCommand /bin/echo %H ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFak|' \
+    "$config" >"$config.forged"
+  status=0
+  kind_user_ssh_tool "$config.forged" ssh "$host" 'echo trusted' >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 255 ] || {
+    echo "::error::ssh trusted a host key the platform did not record (exit $status)"
+    return 1
+  }
+  log "user SSH journey: shell syntax and exit status, scp in both modes, sftp, a forged key refused"
+)
 
 environment_resize_smoke() (
   log "running public environment resize against the agent-sandbox controller"
@@ -3215,21 +3201,20 @@ environment_resize_smoke() (
   local template_name shadow_pool_name
   local claim_name="sandbox-${environment_id}"
   local daemon_service="cw-daemon-${environment_id}"
-  local gateway_token daemon_token sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid
+  local sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid
   local operation_id operation_state response runtime_state marker image resources
   local resize_manifest="$RUN_DIR/resize-$environment_id.json"
   trap 'rm -f -- "$resize_manifest"' EXIT
-  gateway_token="$(gateway_auth_token_for_environment "$environment_id")"
-  daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
 
   # Render through the same production code that runtime reconciliation validates.
   # No cluster mutation occurs before these exact object identities are known.
+  # The workspace is identity-free, as every commodity workspace is: Ready on
+  # its daemon's local marker, and bound by the resize's runtime-identity
+  # reconcile, which then waits for its SSH access as a start does.
   CRD_SMOKE_RESIZE_PHASE=render CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id" \
     CRD_SMOKE_NAMESPACE="$SANDBOX_NS" CRD_SMOKE_SERVER_NAMESPACE="$NS" \
-    CRD_SMOKE_LOCAL_GATEWAY=1 CRD_SMOKE_WORKSPACE_IMAGE=codewire-gateway:e2e \
+    CRD_SMOKE_LOCAL_IMAGES=1 CRD_SMOKE_WORKSPACE_IMAGE=codewire-gateway:e2e \
     SANDBOX_CREDENTIAL_BROKER_NAMESPACE="$NS" \
-    SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP=codewire-credential-broker-roots \
-    CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
     "$CARGO_CI_DIR/crd-smoke" >"$resize_manifest"
   template_name="$(jq -er '.items[] | select(.kind == "SandboxTemplate") | .metadata.name' "$resize_manifest")"
   shadow_pool_name="$(jq -er '.items[] | select(.kind == "SandboxWarmPool") | .metadata.name' "$resize_manifest")"
@@ -3252,28 +3237,17 @@ DELETE FROM environment_presets WHERE id = '$preset_id' AND org_id = 'org_contra
 COMMIT;
 SQL
     [ "$?" -eq 0 ] || status=1
-    # Runtime identity reconciliation creates the ordinary gateway stack.
-    # Stop its Deployment, and any legacy gateway Certificate, before deleting
-    # a key; never delete the shared fixture Issuers or public root ConfigMaps.
-    if CRD_SMOKE_RESIZE_PHASE=release CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id" \
+    # Runtime identity reconciliation creates the environment's access
+    # objects. Never delete the shared fixture Issuers or public root
+    # ConfigMaps.
+    CRD_SMOKE_RESIZE_PHASE=release CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id" \
       CRD_SMOKE_NAMESPACE="$SANDBOX_NS" "$CARGO_CI_DIR/crd-smoke" &&
       kubectl -n "$SANDBOX_NS" delete \
       "sandboxclaim/$claim_name" "sandboxwarmpool/$shadow_pool_name" \
       "sandboxtemplate/$template_name" "service/$daemon_service" \
-      "deployment/cw-gateway-$environment_id" \
-      "service/cw-gateway-svc-$environment_id" "service/cw-gateway-udp-$environment_id" \
-      "networkpolicy/cw-gw-net-$environment_id" "networkpolicy/cw-daemon-net-$environment_id" \
-      --ignore-not-found=true --cascade=foreground --wait=true --timeout=120s >/dev/null; then
-      if delete_kind_credential_bootstrap "$environment_id"; then
-        kubectl -n "$SANDBOX_NS" delete \
-          "secret/cw-gateway-host-key-$environment_id" \
-          --ignore-not-found=true --wait=true --timeout=120s >/dev/null || status=1
-      else
-        status=1
-      fi
-    else
+      "service/cw-tailnet-udp-$environment_id" "networkpolicy/cw-daemon-net-$environment_id" \
+      --ignore-not-found=true --cascade=foreground --wait=true --timeout=120s >/dev/null ||
       status=1
-    fi
     rm -f -- "$resize_manifest" || status=1
     exit "$status"
   }
@@ -3504,6 +3478,7 @@ SQL
     return 1
   fi
 
+
   local as_user="system:serviceaccount:${NS}:codewire-orchestration"
   if [ "$(kubectl auth can-i get storageclasses.storage.k8s.io --as "$as_user")" != "yes" ] \
       || [ "$(kubectl auth can-i patch persistentvolumeclaims --namespace "$SANDBOX_NS" --as "$as_user")" != "yes" ]; then
@@ -3559,7 +3534,6 @@ temporal_fencing_smoke() {
 
 deploy_agent_sandbox_and_smoke() {
   deploy_agent_sandbox
-  kind_credential_bootstrap_smoke
   kind_credential_native_smoke
   kind_credential_claude_session
   workspace_service_smokes
@@ -3682,89 +3656,23 @@ assert_sandbox_supply_chain() {
   log "sandbox token automount disabled and observed workspace/DinD references are immutable"
 }
 
-start_gateway_port_forward() {
-  local label="$1"
-  local log_file="$GATEWAY_SMOKE_TMPDIR/port-forward-${label}.log"
-  local i
-
-  stop_gateway_port_forward
-  kubectl -n "$SANDBOX_NS" port-forward --address=127.0.0.1 \
-    service/cw-gateway-svc-env-crd-smoke :2222 >"$log_file" 2>&1 &
-  GATEWAY_PORT_FORWARD_PID=$!
-  for i in $(seq 1 30); do
-    GATEWAY_PORT_FORWARD_PORT="$(
-      sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) -> 2222$/\1/p' \
-        "$log_file" | sed -n '1p'
-    )"
-    if [ -n "$GATEWAY_PORT_FORWARD_PORT" ]; then
-      return 0
-    fi
-    if ! kill -0 "$GATEWAY_PORT_FORWARD_PID" >/dev/null 2>&1; then
-      echo "::error::gateway port-forward exited before becoming ready"
-      sed -n '1,80p' "$log_file" >&2
-      return 1
-    fi
-    sleep 1
-  done
-  echo "::error::gateway port-forward did not publish a local port"
-  sed -n '1,80p' "$log_file" >&2
-  return 1
-}
-
-capture_gateway_public_fingerprint() {
-  local label="$1"
-  local public_key=""
-  local i
-
-  start_gateway_port_forward "$label"
-  for i in $(seq 1 30); do
-    public_key="$(
-      { ssh-keyscan -T 2 -t ed25519 -p "$GATEWAY_PORT_FORWARD_PORT" 127.0.0.1 \
-          2>/dev/null || true; } | awk '$2 == "ssh-ed25519" { print; exit }'
-    )"
-    if [ -n "$public_key" ]; then
-      break
-    fi
-    sleep 1
-  done
-  stop_gateway_port_forward
-  if [ -z "$public_key" ]; then
-    echo "::error::gateway did not present an Ed25519 SSH host key during ${label} probe"
-    return 1
-  fi
-  GATEWAY_PUBLIC_FINGERPRINT="$(
-    printf '%s\n' "$public_key" | ssh-keygen -lf - -E sha256 | awk '{ print $2 }'
-  )"
-  if [[ "$GATEWAY_PUBLIC_FINGERPRINT" != SHA256:* ]]; then
-    echo "::error::gateway ${label} SSH fingerprint was malformed"
-    return 1
-  fi
-}
-
-gateway_host_key_restart_smoke() {
+workspace_access_stack_smoke() {
   local workspace_image
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   local daemon_pod=crd-smoke-workspace-daemon
-  local gateway_deploy=cw-gateway-env-crd-smoke
-  local host_key_secret=cw-gateway-host-key-env-crd-smoke
-  local gateway_token daemon_token
-  local before_fingerprint after_fingerprint before_uid after_uid
+  local daemon_token
 
-  log "running CRD round-trip and gateway host-key restart smoke"
-  gateway_token="$(gateway_auth_token_for_environment env-crd-smoke)"
+  log "running CRD round-trip and access-object smoke (no gateway objects)"
   daemon_token="$(daemon_auth_token_for_environment env-crd-smoke)"
-  GATEWAY_SMOKE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/codewire-kind-gateway.XXXXXX")"
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
     CRD_SMOKE_SERVER_NAMESPACE="$NS" \
     CRD_SMOKE_WORKSPACE_IMAGE="$workspace_image" \
-    CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" \
-    CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
-    CRD_SMOKE_GATEWAY_PHASE=setup \
-    CRD_SMOKE_LOCAL_GATEWAY=1 \
+    CRD_SMOKE_ACCESS_PHASE=setup \
+    CRD_SMOKE_LOCAL_IMAGES=1 \
     "$CARGO_CI_DIR/crd-smoke"
 
   # Pod specs are immutable. Recreate only this owned daemon fixture when a
-  # retained service smoke is repeated; preserve the gateway and host-key Secret.
+  # retained service smoke is repeated; the access objects stay in place.
   kubectl -n "$SANDBOX_NS" delete "pod/${daemon_pod}" \
     --ignore-not-found=true --wait=true --timeout=120s
   kubectl_apply -f - <<EOF
@@ -3827,32 +3735,8 @@ spec:
 EOF
   kubectl -n "$SANDBOX_NS" wait "pod/${daemon_pod}" \
     --for=condition=Ready --timeout=120s
-  kubectl -n "$SANDBOX_NS" rollout status "deployment/${gateway_deploy}" --timeout=180s
 
-  before_uid="$(
-    kubectl -n "$SANDBOX_NS" get secret "$host_key_secret" -o jsonpath='{.metadata.uid}'
-  )"
-  capture_gateway_public_fingerprint before-restart
-  before_fingerprint="$GATEWAY_PUBLIC_FINGERPRINT"
-
-  kubectl -n "$SANDBOX_NS" rollout restart "deployment/${gateway_deploy}" >/dev/null
-  kubectl -n "$SANDBOX_NS" rollout status "deployment/${gateway_deploy}" --timeout=180s
-  after_uid="$(
-    kubectl -n "$SANDBOX_NS" get secret "$host_key_secret" -o jsonpath='{.metadata.uid}'
-  )"
-  capture_gateway_public_fingerprint after-restart
-  after_fingerprint="$GATEWAY_PUBLIC_FINGERPRINT"
-
-  if [ "$after_uid" != "$before_uid" ]; then
-    echo "::error::gateway host-key Secret identity changed across gateway restart"
-    return 1
-  fi
-  if [ "$after_fingerprint" != "$before_fingerprint" ]; then
-    echo "::error::gateway SSH host-key fingerprint changed across gateway restart"
-    return 1
-  fi
-
-  log "gateway host-key Secret identity and SSH fingerprint survived restart; retaining the stack for FileService"
+  log "access objects verified with no gateway objects; retaining the daemon fixture for FileService"
 }
 
 billing_contract_through_ingress() {
@@ -3898,138 +3782,41 @@ rust_reconciler_ttl_e2e() {
     "$CARGO_CI_DIR/reconciler-ttl-smoke"
 }
 
-host_key_authorization_smoke() {
-  log "proving orchestration host-key RBAC and admission"
+orchestration_authorization_smoke() {
+  log "proving orchestration has no Secret or Deployment authority and reads only its published roots"
   local as_user="system:serviceaccount:${NS}:codewire-orchestration"
-  local env_id="kind-authz-${RANDOM}-${RANDOM}"
-  local secret_name="cw-gateway-host-key-${env_id}"
-  local unrelated_name="kind-unrelated-${RANDOM}-${RANDOM}"
-  local stderr
-  AUTHZ_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/codewire-kind-authz.XXXXXX")"
-  stderr="$AUTHZ_TMPDIR/stderr"
-
-  expect_denied() {
-    local label="$1" message="$2"
-    shift 2
-    if "$@" >"$stderr" 2>&1; then
-      echo "::error::${label} unexpectedly succeeded"
-      return 1
-    fi
-    if ! grep -Fq "$message" "$stderr"; then
-      echo "::error::${label} failed outside the expected boundary"
-      sed -n '1,80p' "$stderr" >&2
-      return 1
-    fi
-  }
-
-  host_key_manifest() {
-    local namespace="$1" name="$2" environment_id="$3" managed_by="${4:-codewire}"
-    cat <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ${name}
-  namespace: ${namespace}
-  labels:
-    app.kubernetes.io/name: codewire-gateway
-    app.kubernetes.io/component: gateway-host-key
-    app.kubernetes.io/managed-by: ${managed_by}
-    codewire.sh/environment-id: ${environment_id}
-    codewire.sh/type: gateway-host-key
-type: Opaque
-stringData:
-  host_ed25519: kind-e2e-synthetic-host-key
-EOF
-  }
-
-  kubectl -n "$SANDBOX_NS" delete secret "$secret_name" "$unrelated_name" \
-    --ignore-not-found >/dev/null
-
-  local verb allowed
-  for verb in get list watch update patch; do
-    allowed="$(kubectl auth can-i "$verb" secrets -n "$SANDBOX_NS" --as "$as_user" || true)"
+  local namespace verb allowed
+  for namespace in "$SANDBOX_NS" "$NS"; do
+    for verb in get list watch create update patch delete; do
+      allowed="$(kubectl auth can-i "$verb" secrets -n "$namespace" --as "$as_user" || true)"
+      if [ "$allowed" != "no" ]; then
+        echo "::error::orchestration can-i ${verb} Secrets in ${namespace} returned ${allowed}, want no"
+        return 1
+      fi
+    done
+    allowed="$(kubectl auth can-i create deployments.apps -n "$namespace" --as "$as_user" || true)"
     if [ "$allowed" != "no" ]; then
-      echo "::error::orchestration can-i ${verb} sandbox Secrets returned ${allowed}, want no"
+      echo "::error::orchestration can-i create Deployments in ${namespace} returned ${allowed}, want no"
       return 1
     fi
   done
-  for verb in create delete; do
-    allowed="$(kubectl auth can-i "$verb" secrets -n "$SANDBOX_NS" --as "$as_user" || true)"
-    if [ "$allowed" != "yes" ]; then
-      echo "::error::orchestration can-i ${verb} sandbox Secrets returned ${allowed}, want yes"
-      return 1
-    fi
-    allowed="$(kubectl auth can-i "$verb" secrets -n "$NS" --as "$as_user" || true)"
+  allowed="$(kubectl auth can-i get configmaps/codewire-orchestration-internal-roots \
+    -n "$SANDBOX_NS" --as "$as_user" || true)"
+  if [ "$allowed" != "yes" ]; then
+    echo "::error::orchestration cannot read its published internal roots: ${allowed}"
+    return 1
+  fi
+  for verb in list update delete; do
+    allowed="$(kubectl auth can-i "$verb" configmaps -n "$SANDBOX_NS" --as "$as_user" || true)"
     if [ "$allowed" != "no" ]; then
-      echo "::error::orchestration can-i ${verb} application Secrets returned ${allowed}, want no"
+      echo "::error::orchestration can-i ${verb} sandbox ConfigMaps returned ${allowed}, want no"
       return 1
     fi
   done
-
-  expect_denied "sandbox Secret read" "forbidden" \
-    kubectl --as "$as_user" -n "$SANDBOX_NS" get secret "$secret_name"
-  expect_denied "application Secret read" "forbidden" \
-    kubectl --as "$as_user" -n "$NS" get secret codewire-secrets
-  expect_denied "sandbox Secret list" "forbidden" \
-    kubectl --as "$as_user" -n "$SANDBOX_NS" get secrets
-  expect_denied "sandbox Secret patch" "forbidden" \
-    kubectl --as "$as_user" -n "$SANDBOX_NS" patch secret "$secret_name" \
-      --type=merge -p '{"metadata":{"labels":{"unexpected":"true"}}}'
-
-  if ! host_key_manifest "$SANDBOX_NS" "$secret_name" "$env_id" |
-      kubectl --as "$as_user" create -f - >/dev/null; then
-    echo "::error::correctly shaped sandbox host-key Secret create was denied"
+  allowed="$(kubectl auth can-i get configmaps/codewire-coordinator-extra-roots \
+    -n "$SANDBOX_NS" --as "$as_user" || true)"
+  if [ "$allowed" != "no" ]; then
+    echo "::error::orchestration can read another sandbox ConfigMap: ${allowed}"
     return 1
   fi
-  kubectl -n "$SANDBOX_NS" get secret "$secret_name" >/dev/null
-  kubectl --as "$as_user" -n "$SANDBOX_NS" delete secret "$secret_name" >/dev/null
-
-  if host_key_manifest "$NS" "$secret_name" "$env_id" |
-      kubectl --as "$as_user" create -f - >"$stderr" 2>&1; then
-    echo "::error::application namespace host-key Secret create unexpectedly succeeded"
-    return 1
-  fi
-  grep -Fq "forbidden" "$stderr" || {
-    echo "::error::application namespace create failed outside RBAC"
-    sed -n '1,80p' "$stderr" >&2
-    return 1
-  }
-
-  if host_key_manifest "$SANDBOX_NS" "$unrelated_name" "$env_id" |
-      kubectl --as "$as_user" create -f - >"$stderr" 2>&1; then
-    echo "::error::unrelated Secret create unexpectedly succeeded"
-    return 1
-  fi
-  grep -Fq "may only create or delete gateway host-key Secrets" "$stderr" || {
-    echo "::error::unrelated Secret create failed outside admission prefix enforcement"
-    sed -n '1,80p' "$stderr" >&2
-    return 1
-  }
-
-  if host_key_manifest "$SANDBOX_NS" "$secret_name" "$env_id" unexpected-manager |
-      kubectl --as "$as_user" create -f - >"$stderr" 2>&1; then
-    echo "::error::incorrectly labeled host-key Secret create unexpectedly succeeded"
-    return 1
-  fi
-  grep -Fq "must retain the renderer's management labels" "$stderr" || {
-    echo "::error::incorrect label fixture failed outside admission label enforcement"
-    sed -n '1,80p' "$stderr" >&2
-    return 1
-  }
-
-  kubectl -n "$SANDBOX_NS" create secret generic "$unrelated_name" \
-    --from-literal=value=kind-e2e >/dev/null
-  if kubectl --as "$as_user" -n "$SANDBOX_NS" delete secret "$unrelated_name" \
-      >"$stderr" 2>&1; then
-    echo "::error::unrelated Secret delete unexpectedly succeeded"
-    return 1
-  fi
-  grep -Fq "may only create or delete gateway host-key Secrets" "$stderr" || {
-    echo "::error::unrelated Secret delete failed outside admission prefix enforcement"
-    sed -n '1,80p' "$stderr" >&2
-    return 1
-  }
-  kubectl -n "$SANDBOX_NS" delete secret "$unrelated_name" >/dev/null
-  rm -rf "$AUTHZ_TMPDIR"
-  AUTHZ_TMPDIR=""
 }

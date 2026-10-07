@@ -1,6 +1,8 @@
 pub mod config;
 mod console_client;
 mod environment_client;
+#[cfg(target_os = "linux")]
+mod hosted_access;
 #[cfg(unix)]
 mod hosted_binding;
 mod hosted_exec;
@@ -155,6 +157,11 @@ enum Command {
     Vscode(VscodeArgs),
     #[command(about = "Open a shell session in the selected or named environment")]
     Shell(EnvironmentShellArgs),
+    #[command(name = "ssh", hide = true, about = "OpenSSH integration helpers")]
+    Ssh {
+        #[command(subcommand)]
+        command: SshCommand,
+    },
     #[command(about = "Run a durable session in the selected or named environment")]
     Run(EnvironmentRunArgs),
     #[command(about = "Manage environments")]
@@ -353,6 +360,7 @@ where
         Command::Init(args) => handle_init_command(&globals, args).await,
         Command::Vscode(args) => handle_vscode_command(&globals, args).await,
         Command::Shell(args) => handle_environment_shell_command(&globals, args).await,
+        Command::Ssh { command } => handle_ssh_command(&globals, command).await,
         Command::Run(args) => handle_environment_run_command(&globals, args).await,
         Command::Env(args) => handle_env_command(&globals, args).await,
         Command::Cost(args) => handle_cost_command(&globals, args).await,
@@ -412,13 +420,17 @@ where
 async fn run_hosted_daemon() -> anyhow::Result<()> {
     use tracing_subscriber::EnvFilter;
 
+    // Info by default: binding, host-key and access failures must be visible
+    // without RUST_LOG. Every daemon log line is value-blind.
     let _ = tracing_subscriber::fmt()
         .json()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .try_init();
     match codewire_daemon::HostedDaemonMode::from_env()? {
         codewire_daemon::HostedDaemonMode::EnvironmentToken(config) => {
-            serve_hosted_daemon(*config, false).await
+            serve_hosted_daemon(*config, false, None, None).await
         }
         codewire_daemon::HostedDaemonMode::Binding(config) => run_bound_hosted_daemon(config).await,
     }
@@ -436,17 +448,66 @@ async fn run_bound_hosted_daemon(
         .mark_ready()
         .context("write hosted daemon readiness marker")?;
     tracing::info!("hosted environment daemon waiting for its workspace binding");
-    let client = hosted_binding::BindingClient::new(
-        config.binding_url(),
-        config.token_path(),
-        hosted_binding::BindTiming::default(),
-    )
-    .context("configure workspace binding client")?;
-    let binding = hosted_binding::bind_until_accepted(&client, &config).await;
+    let client = std::sync::Arc::new(
+        hosted_binding::BindingClient::new(
+            config.binding_url(),
+            config.tls_roots_file(),
+            config.token_path(),
+            hosted_binding::BindTiming::default(),
+        )
+        .context("configure workspace binding client")?,
+    );
+    let bound = hosted_binding::bind_until_accepted(&client, &config).await;
     paths
-        .install_binding(&binding)
+        .install_binding(&bound.binding)
         .context("install hosted daemon binding")?;
-    serve_hosted_daemon(config.into_config(&binding), true).await
+    let daemon_config = config.into_config(&bound.binding);
+    // Workspace access (#2460): the daemon serves SSH itself, reaching its
+    // own gRPC service in-process, and the environment's application ports
+    // on its tailnet address.
+    let (connector, local) = codewire_daemon::local_transport::local_transport();
+    let (app_ports, _) = tokio::sync::watch::channel(
+        bound
+            .access
+            .as_ref()
+            .map(|grant| grant.app_ports().clone())
+            .unwrap_or_default(),
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let (_access_shutdown, access_shutdown_rx) = tokio::sync::watch::channel(false);
+        let daemon_port = daemon_config
+            .listen_addr
+            .parse::<std::net::SocketAddr>()
+            .map(|address| address.port())
+            .ok();
+        let access = hosted_access::serve(
+            paths.clone(),
+            hosted_access::BoundAccess {
+                environment_id: bound.binding.environment_id(),
+                generation: bound.binding.operation_generation(),
+                daemon_credential: bound.binding.daemon_credential().clone(),
+                grant: bound.access.clone(),
+                daemon_port,
+                exec_shell: codewire_daemon::env::default_shell_for(&daemon_config),
+            },
+            connector,
+            client.clone(),
+            app_ports.clone(),
+            access_shutdown_rx,
+        );
+        tokio::spawn(async move {
+            // The sender lives as long as the access task, which ends with
+            // the daemon process.
+            let _keep = _access_shutdown;
+            if let Err(error) = access.await {
+                tracing::error!(error = %format!("{error:#}"), "workspace access stopped");
+            }
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    drop(connector);
+    serve_hosted_daemon(daemon_config, true, Some(local), Some(app_ports)).await
 }
 
 #[cfg(not(unix))]
@@ -456,7 +517,12 @@ async fn run_bound_hosted_daemon(
     anyhow::bail!("workspace binding requires a Unix hosted daemon")
 }
 
-async fn serve_hosted_daemon(config: codewire_daemon::Config, bound: bool) -> anyhow::Result<()> {
+async fn serve_hosted_daemon(
+    config: codewire_daemon::Config,
+    bound: bool,
+    local: Option<codewire_daemon::local_transport::LocalDaemonIncoming>,
+    app_ports: Option<codewire_daemon::app_ports::AppPortsSender>,
+) -> anyhow::Result<()> {
     use tokio_stream::wrappers::TcpListenerStream;
 
     config
@@ -490,23 +556,43 @@ async fn serve_hosted_daemon(config: codewire_daemon::Config, bound: bool) -> an
     {
         tracing::warn!(error = %error, "hosted daemon readiness marker unavailable");
     }
+    // One server, one session engine: the network listener and, for a bound
+    // daemon, its own in-process workspace access connections.
+    let local = local.unwrap_or_else(|| codewire_daemon::local_transport::local_transport().1);
+    let incoming = codewire_daemon::local_transport::with_local_connections(
+        TcpListenerStream::new(listener),
+        local,
+    );
     // Once listening, the hosted daemon also keeps Codex's own ChatGPT login
     // while the broker delivers one, in the same home.
     #[cfg(target_os = "linux")]
-    return codewire_daemon::serve_hosted_grpc_with_incoming(
-        config,
-        codewire_daemon::codex_home::CodexHome::default(),
-        TcpListenerStream::new(listener),
-        hosted_daemon_shutdown_signal(),
-    )
-    .await;
+    return match app_ports {
+        // A bound daemon also accepts orchestration's application-port pushes.
+        Some(app_ports) => {
+            codewire_daemon::serve_bound_hosted_grpc_with_incoming(
+                config,
+                codewire_daemon::codex_home::CodexHome::default(),
+                app_ports,
+                incoming,
+                hosted_daemon_shutdown_signal(),
+            )
+            .await
+        }
+        None => {
+            codewire_daemon::serve_hosted_grpc_with_incoming(
+                config,
+                codewire_daemon::codex_home::CodexHome::default(),
+                incoming,
+                hosted_daemon_shutdown_signal(),
+            )
+            .await
+        }
+    };
     #[cfg(not(target_os = "linux"))]
-    codewire_daemon::serve_grpc_with_incoming(
-        config,
-        TcpListenerStream::new(listener),
-        hosted_daemon_shutdown_signal(),
-    )
-    .await
+    let _ = app_ports;
+    #[cfg(not(target_os = "linux"))]
+    codewire_daemon::serve_grpc_with_incoming(config, incoming, hosted_daemon_shutdown_signal())
+        .await
 }
 
 async fn hosted_daemon_shutdown_signal() {

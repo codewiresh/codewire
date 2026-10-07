@@ -880,6 +880,7 @@ pub(crate) async fn create_environment_core(
             ));
         }
     };
+    crate::confidential_storage::refuse_confidential_isolation(isolation_tier)?;
     require_interactive_access(state.confidential_storage_flags, user, isolation_tier)?;
     apply_project_spec_defaults(&mut body)?;
     if !body.project_spec.image.is_empty() {

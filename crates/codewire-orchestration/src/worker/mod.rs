@@ -17,11 +17,12 @@ pub mod agents;
 pub mod billing_sessions;
 pub mod cloudflare;
 pub mod create;
+pub mod credential_relay;
 pub mod env_data;
 pub mod env_log;
+pub mod environment_auth;
 #[cfg(feature = "kind-e2e")]
 pub mod fencing_evidence;
-pub mod gatewayauth;
 pub mod image_cache;
 pub mod lifecycle;
 pub mod loops;
@@ -94,6 +95,79 @@ pub struct WorkerContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The size of the future `f` returns, read from its type alone.
+    fn future_size<F, Fut>(_: &F) -> usize
+    where
+        Fut: std::future::Future,
+        F: FnOnce() -> Fut,
+    {
+        std::mem::size_of::<Fut>()
+    }
+
+    /// Activity futures live inline in the Temporal activity's own future and
+    /// are moved before they are pinned. One that grows by an inline state
+    /// machine overflows the worker thread's stack in an unoptimised build, so
+    /// a large rarely-taken branch is boxed instead. Each bound leaves room
+    /// for ordinary growth; reaching one means boxing, not raising it.
+    #[test]
+    fn activity_futures_stay_small_enough_to_move_on_the_worker_stack() {
+        const BOUND: usize = 128 * 1024;
+        fn never<T>() -> T {
+            unreachable!("only the type is measured")
+        }
+        let sizes = [
+            (
+                "setup",
+                future_size(&|| {
+                    setup::handle_environment_setup(never(), never(), never(), never(), never())
+                }),
+            ),
+            (
+                "post-start configuration",
+                future_size(&|| {
+                    setup::handle_post_start_configuration(
+                        never(),
+                        never(),
+                        never(),
+                        never(),
+                        never(),
+                    )
+                }),
+            ),
+            (
+                "start",
+                future_size(&|| {
+                    lifecycle::handle_environment_start(never(), never(), never(), never(), never())
+                }),
+            ),
+            (
+                "create",
+                future_size(&|| {
+                    create::handle_environment_create_without_setup_publish(
+                        never(),
+                        never(),
+                        never(),
+                    )
+                }),
+            ),
+            (
+                "stop",
+                future_size(&|| lifecycle::handle_environment_stop(never(), never(), never())),
+            ),
+            (
+                "destroy",
+                future_size(&|| lifecycle::handle_environment_destroy(never(), never(), never())),
+            ),
+        ];
+        for (activity, size) in sizes {
+            eprintln!("{activity} activity future: {size} bytes");
+            assert!(
+                size <= BOUND,
+                "{activity} activity future is {size} bytes, over {BOUND}"
+            );
+        }
+    }
 
     #[test]
     fn internal_payload_round_trips() {

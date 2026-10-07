@@ -1416,6 +1416,7 @@ name = "codewire-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum 0.8.9",
  "base64",
  "buffa",
@@ -1433,7 +1434,9 @@ dependencies = [
  "codewire-project-proto",
  "codewire-protected-store",
  "codewire-proto",
+ "codewire-tls",
  "codewire-workload-secrets",
+ "codewire-workspace-access",
  "connectrpc",
  "futures",
  "http 1.4.1",
@@ -1806,53 +1809,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codewire-gateway"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum 0.8.9",
- "boringtun",
- "bytes",
- "chrono",
- "codewire-client",
- "codewire-credential-bridge",
- "codewire-credential-broker",
- "codewire-daemon",
- "codewire-gateway-proto",
- "codewire-proto",
- "codewire-tailnet",
- "codewire-tls",
- "connectrpc",
- "ed25519-dalek 2.2.0",
- "http 1.4.1",
- "libc",
- "prometheus",
- "prost-types",
- "rand 0.8.6",
- "rcgen",
- "reqwest 0.12.28",
- "russh",
- "russh-sftp",
- "serde",
- "serde_json",
- "shell-words",
- "ssh-key",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic 0.14.6",
- "tower 0.5.3",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "codewire-gateway-proto"
 version = "0.1.0"
 dependencies = [
@@ -2089,6 +2045,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "prometheus",
+ "prost 0.14.4",
  "rand 0.8.6",
  "regorus",
  "reqwest 0.12.28",
@@ -2111,6 +2068,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.28.0",
+ "tokio-util",
  "toml",
  "tonic 0.14.6",
  "tower 0.5.3",
@@ -2271,6 +2229,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "webpki-roots 1.0.7",
 ]
@@ -2371,6 +2330,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire-workspace-access"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.9",
+ "boringtun",
+ "chrono",
+ "codewire-client",
+ "codewire-credential-bridge",
+ "codewire-credential-broker",
+ "codewire-daemon",
+ "codewire-gateway-proto",
+ "codewire-proto",
+ "codewire-tailnet",
+ "codewire-tls",
+ "connectrpc",
+ "ed25519-dalek 2.2.0",
+ "futures",
+ "http 1.4.1",
+ "hyper-util",
+ "libc",
+ "prost-types",
+ "rand 0.8.6",
+ "russh",
+ "russh-sftp",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "ssh-key",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.14.6",
+ "tower 0.5.3",
+ "tracing",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2407,6 +2410,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "percent-encoding",
  "pin-project",
  "serde",
@@ -2416,6 +2420,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tower 0.5.3",
+ "tower-http",
  "tracing",
  "wasm-bindgen-futures",
  "zstd",

@@ -217,8 +217,6 @@ pub struct TrustReportPlacement {
 pub struct TrustReportImages {
     pub workspace_image: Option<String>,
     pub workspace_image_id: Option<String>,
-    pub gateway_image: Option<String>,
-    pub gateway_image_id: Option<String>,
     pub dind_image: Option<String>,
     pub dind_image_id: Option<String>,
     pub daemon_init_image: Option<String>,

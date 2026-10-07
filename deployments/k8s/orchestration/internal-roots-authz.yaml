@@ -1,0 +1,33 @@
+# Orchestration checks its internal TLS leaf against the public roots it
+# publishes to workspaces before it serves. It reads exactly that one
+# sandbox-namespace ConfigMap and writes nothing there.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: codewire-orchestration-internal-roots
+  namespace: prod-sandboxes
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["codewire-orchestration-internal-roots"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: codewire-orchestration-internal-roots
+  namespace: prod-sandboxes
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: codewire-orchestration-internal-roots
+subjects:
+  - kind: ServiceAccount
+    name: codewire-orchestration
+    namespace: prod

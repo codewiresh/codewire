@@ -63,7 +63,7 @@ impl PlatformBridgeAuthenticator for KindBridgeAuthenticator {
             &scope.environment_id,
             generation,
             &tokens.workspace_pod_uid,
-            &tokens.gateway_pod_uid,
+            &tokens.relay_pod_uid,
             tokens.workspace_sha256,
         )?;
         tracing::info!(
@@ -72,7 +72,7 @@ impl PlatformBridgeAuthenticator for KindBridgeAuthenticator {
             environment_id = scope.environment_id.as_str(),
             generation,
             workspace_pod_uid = tokens.workspace_pod_uid.as_str(),
-            gateway_pod_uid = tokens.gateway_pod_uid.as_str(),
+            relay_pod_uid = tokens.relay_pod_uid.as_str(),
             auth_sequence,
             workspace_token_changed,
             "bridge_authenticated"
@@ -93,7 +93,7 @@ struct PreviousAuthentication {
     environment_id: String,
     generation: u64,
     workspace_pod_uid: String,
-    gateway_pod_uid: String,
+    relay_pod_uid: String,
     workspace_sha256: [u8; 32],
 }
 
@@ -103,7 +103,7 @@ impl EvidenceState {
         environment_id: &str,
         generation: u64,
         workspace_pod_uid: &str,
-        gateway_pod_uid: &str,
+        relay_pod_uid: &str,
         workspace_sha256: [u8; 32],
     ) -> Result<(u64, bool), PlatformBridgeAuthenticationError> {
         let auth_sequence = self
@@ -114,7 +114,7 @@ impl EvidenceState {
             previous.environment_id == environment_id
                 && previous.generation == generation
                 && previous.workspace_pod_uid == workspace_pod_uid
-                && previous.gateway_pod_uid == gateway_pod_uid
+                && previous.relay_pod_uid == relay_pod_uid
                 && previous.workspace_sha256 != workspace_sha256
         });
         self.auth_sequence = auth_sequence;
@@ -122,7 +122,7 @@ impl EvidenceState {
             environment_id: environment_id.to_owned(),
             generation,
             workspace_pod_uid: workspace_pod_uid.to_owned(),
-            gateway_pod_uid: gateway_pod_uid.to_owned(),
+            relay_pod_uid: relay_pod_uid.to_owned(),
             workspace_sha256,
         });
         Ok((auth_sequence, changed))
@@ -130,26 +130,26 @@ impl EvidenceState {
 }
 
 struct PresentedTokens {
-    gateway_pod_uid: String,
+    relay_pod_uid: String,
     workspace_pod_uid: String,
     workspace_sha256: [u8; 32],
 }
 
 impl PresentedTokens {
     fn from_metadata(metadata: &MetadataMap) -> Result<Self, PlatformBridgeAuthenticationError> {
-        let gateway = only_gateway_authorization(metadata)?;
+        let relay = only_relay_authorization(metadata)?;
         let workspace = only_workspace_authorization(metadata)?;
-        let gateway_token = bearer(&gateway)?;
+        let relay_token = bearer(&relay)?;
         let workspace_token = bearer(&workspace)?;
         Ok(Self {
-            gateway_pod_uid: projected_pod_uid(gateway_token)?,
+            relay_pod_uid: projected_pod_uid(relay_token)?,
             workspace_pod_uid: projected_pod_uid(workspace_token)?,
             workspace_sha256: Sha256::digest(workspace_token).into(),
         })
     }
 }
 
-fn only_gateway_authorization(
+fn only_relay_authorization(
     metadata: &MetadataMap,
 ) -> Result<Zeroizing<Vec<u8>>, PlatformBridgeAuthenticationError> {
     let mut values = metadata.get_all("authorization").iter();
@@ -222,7 +222,7 @@ mod tests {
     use super::*;
     use tonic::metadata::MetadataValue;
 
-    const GATEWAY_UID: &str = "0d63a03b-d1e8-4ca9-9dd3-46c20afc513e";
+    const RELAY_UID: &str = "0d63a03b-d1e8-4ca9-9dd3-46c20afc513e";
     const WORKSPACE_UID: &str = "64c23db1-5362-407a-a02a-710b99684cb2";
     const OTHER_WORKSPACE_UID: &str = "a79588a6-6ca7-4d3d-ae50-4e822ce192b4";
 
@@ -241,7 +241,7 @@ mod tests {
         let mut metadata = MetadataMap::new();
         metadata.insert(
             "authorization",
-            format!("Bearer {}", token(GATEWAY_UID, "gateway"))
+            format!("Bearer {}", token(RELAY_UID, "relay"))
                 .parse()
                 .unwrap(),
         );
@@ -259,13 +259,7 @@ mod tests {
         generation: u64,
         digest: [u8; 32],
     ) -> Result<(u64, bool), PlatformBridgeAuthenticationError> {
-        state.record(
-            environment_id,
-            generation,
-            WORKSPACE_UID,
-            GATEWAY_UID,
-            digest,
-        )
+        state.record(environment_id, generation, WORKSPACE_UID, RELAY_UID, digest)
     }
 
     #[test]
@@ -273,7 +267,7 @@ mod tests {
         let first = PresentedTokens::from_metadata(&metadata("old")).unwrap();
         let same = PresentedTokens::from_metadata(&metadata("old")).unwrap();
         let changed = PresentedTokens::from_metadata(&metadata("new")).unwrap();
-        assert_eq!(first.gateway_pod_uid, GATEWAY_UID);
+        assert_eq!(first.relay_pod_uid, RELAY_UID);
         assert_eq!(first.workspace_pod_uid, WORKSPACE_UID);
         assert_eq!(first.workspace_sha256, same.workspace_sha256);
         assert_ne!(first.workspace_sha256, changed.workspace_sha256);
@@ -318,7 +312,7 @@ mod tests {
                     "environment-b",
                     8,
                     OTHER_WORKSPACE_UID,
-                    GATEWAY_UID,
+                    RELAY_UID,
                     changed.workspace_sha256,
                 )
                 .unwrap(),
