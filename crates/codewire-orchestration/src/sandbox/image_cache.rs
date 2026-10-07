@@ -1,6 +1,6 @@
 //! Orchestration-owned node image cache (Program #2238 A2b, slice 1).
 //!
-//! A new release changes the gateway image (which the workspace Pod also
+//! A new release changes the daemon support image (which the workspace Pod
 //! mounts or copies the daemon from) and sometimes the workspace and
 //! DinD images. Without a cache, the first sandbox on a runtime node after a
 //! release waits for those pulls. Orchestration renders those exact digests,
@@ -87,7 +87,7 @@ pub const APPROVED_IMAGE_REGISTRIES: [&str; 2] = ["registry.example.invalid/", "
 pub const APPROVED_IMAGE_PATTERN: &str = "^(registry[.]example[.]invalid|docker[.]io/library)/[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$";
 
 const MAX_SETS: usize = 2;
-/// Workspace, gateway and DinD per set.
+/// Workspace, daemon and DinD per set.
 const MAX_SET_IMAGES: usize = 3;
 /// The admission policy's image volume bound.
 pub const MAX_CACHED_IMAGES: usize = MAX_SETS * MAX_SET_IMAGES;
@@ -193,20 +193,16 @@ pub struct DesiredSet {
 }
 
 impl DesiredSet {
-    /// Workspace default, gateway (also the daemon-init source) and DinD, in
+    /// Workspace default, daemon (also the daemon-init source) and DinD, in
     /// that order. An empty `dind_image` means the template default.
-    pub fn from_rendered(gateway_image: &str, dind_image: &str) -> Self {
+    pub fn from_rendered(daemon_image: &str, dind_image: &str) -> Self {
         let dind = match dind_image.trim() {
             "" => DEFAULT_DIND_IMAGE,
             image => image,
         };
         let mut images = Vec::new();
         let mut skipped = 0;
-        for image in [
-            CANONICAL_WORKSPACE_RUNTIME_IMAGE,
-            gateway_image.trim(),
-            dind,
-        ] {
+        for image in [CANONICAL_WORKSPACE_RUNTIME_IMAGE, daemon_image.trim(), dind] {
             if !is_approved_image(image) {
                 skipped += 1;
             } else if !images.iter().any(|held| held == image) {
@@ -630,6 +626,8 @@ mod tests {
 
     const WORKSPACE: &str = "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111";
     const DIND: &str = DEFAULT_DIND_IMAGE;
+    // The support image's repository before its rename to `codewire/daemon`:
+    // the render history hashes below are computed over these references.
     const GATEWAY_A: &str = "registry.example.invalid/codewire/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const GATEWAY_B: &str = "registry.example.invalid/codewire/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const GATEWAY_C: &str = "registry.example.invalid/codewire/gateway@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -743,14 +741,14 @@ mod tests {
     }
 
     #[test]
-    fn desired_set_is_workspace_gateway_and_dind() {
-        let gateway = codewire_server_core::runtime_images::DEFAULT_GATEWAY_IMAGE;
-        let set = DesiredSet::from_rendered(gateway, "");
+    fn desired_set_is_workspace_daemon_and_dind() {
+        let daemon = codewire_server_core::runtime_images::DEFAULT_DAEMON_IMAGE;
+        let set = DesiredSet::from_rendered(daemon, "");
         assert_eq!(
             set.images,
             [
                 CANONICAL_WORKSPACE_RUNTIME_IMAGE,
-                gateway,
+                daemon,
                 DEFAULT_DIND_IMAGE
             ]
         );
@@ -760,9 +758,9 @@ mod tests {
 
     #[test]
     fn unpinned_or_unapproved_references_are_skipped() {
-        // Kind renders a side-loaded gateway tag and a local DinD alias.
+        // Kind renders a side-loaded daemon tag and a local DinD alias.
         let set = DesiredSet::from_rendered(
-            "codewire-gateway:e2e",
+            "codewire-daemon:e2e",
             "localhost/codewire-ci/docker-dind:verified-66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e",
         );
         assert_eq!(set.images, [CANONICAL_WORKSPACE_RUNTIME_IMAGE]);
@@ -780,18 +778,18 @@ mod tests {
             assert!(is_approved_image(image), "{image}");
         }
         for image in [
-            "codewire-gateway:e2e",
-            "registry.example.invalid/codewire/gateway:main",
+            "codewire-daemon:e2e",
+            "registry.example.invalid/codewire/daemon:main",
             "docker.io/library/docker:29-dind",
             "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff",
             "docker.io/evil/docker@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
             "registry.example.invalid.evil/x@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
-            "registry.example.invalid/codewire/gateway@sha256:E8FAAD5A8DC5279DFF929AFC5449F2791736912FFF9F99351D742DB2FAD01B4C",
-            "registry.example.invalid/codewire/gateway@sha256:e8faad",
-            "registry.example.invalid//gateway@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
-            "registry.example.invalid/Codewire/gateway@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
-            "registry.example.invalid/codewire/gateway:@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
-            "registry.example.invalid/codewire/gateway:-x@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
+            "registry.example.invalid/codewire/daemon@sha256:E8FAAD5A8DC5279DFF929AFC5449F2791736912FFF9F99351D742DB2FAD01B4C",
+            "registry.example.invalid/codewire/daemon@sha256:e8faad",
+            "registry.example.invalid//daemon@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
+            "registry.example.invalid/Codewire/daemon@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
+            "registry.example.invalid/codewire/daemon:@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
+            "registry.example.invalid/codewire/daemon:-x@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
         ] {
             assert!(!is_approved_image(image), "{image}");
         }
@@ -894,9 +892,9 @@ mod tests {
     fn retired_history_is_bounded_and_deduplicated() {
         let mut state = CacheState::default();
         for index in 0..40u64 {
-            let gateway = format!("registry.example.invalid/codewire/gateway@sha256:{index:064x}");
+            let daemon = format!("registry.example.invalid/codewire/daemon@sha256:{index:064x}");
             assert_eq!(
-                merge(&mut state, &release(&gateway, index + 1)),
+                merge(&mut state, &release(&daemon, index + 1)),
                 MergeOutcome::Added
             );
         }
@@ -942,7 +940,7 @@ mod tests {
             merge(
                 &mut disjoint,
                 &DesiredSet {
-                    images: vec![image("workspace"), image("gateway"), image("dind")],
+                    images: vec![image("workspace"), image("daemon"), image("dind")],
                     skipped: 0,
                     release: index as u64 + 1,
                 },

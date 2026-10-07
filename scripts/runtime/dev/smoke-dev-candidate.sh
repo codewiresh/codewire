@@ -59,8 +59,8 @@ Usage:
 
 Images:
   services    Rust services image used by idp, orchestration, billing, coordinator
-  gateway     Workspace daemon image (`cw`) selected through
-              SANDBOX_GATEWAY_IMAGE; the image keeps its gateway name
+  daemon      Workspace daemon image (`cw`) selected through
+              SANDBOX_DAEMON_IMAGE
   derp        DERP/STUN image
   mesh        Hosted Mesh image
   dashboard   Dashboard image
@@ -116,7 +116,7 @@ Examples:
     -- --skip-docker
 
   scripts/runtime/dev/smoke-dev-candidate.sh \
-    --image gateway \
+    --image daemon \
     --force-shared-dev \
     -- --timeout-seconds 1200
 USAGE
@@ -342,13 +342,13 @@ preflight_runtime_node_storage() {
   ' <<<"$nodes_json")
 }
 
-current_gateway_image_ref() {
-  if [[ -n "${IMAGE_SELECTED[gateway]:-}" ]]; then
-    image_ref gateway
+current_daemon_image_ref() {
+  if [[ -n "${IMAGE_SELECTED[daemon]:-}" ]]; then
+    image_ref daemon
     return 0
   fi
   kubectl_dev -n "$CODEWIRE_SERVER_NAMESPACE" get configmap "$CONFIGMAP_NAME" -o json |
-    jq -r '.data.SANDBOX_GATEWAY_IMAGE // empty'
+    jq -r '.data.SANDBOX_DAEMON_IMAGE // empty'
 }
 
 run_or_log() {
@@ -429,7 +429,7 @@ image_ref() {
 
 image_dockerfile() {
   case "$1" in
-    gateway) printf 'deployments/docker/gateway.Dockerfile' ;;
+    daemon) printf 'deployments/docker/daemon.Dockerfile' ;;
     derp) printf 'deployments/docker/derp.Dockerfile' ;;
     services) printf 'deployments/docker/services.Dockerfile' ;;
     mesh) printf 'deployments/docker/mesh.Dockerfile' ;;
@@ -442,16 +442,16 @@ select_image() {
   local image="$1"
   case "$image" in
     all)
-      select_image gateway
+      select_image daemon
       select_image derp
       select_image services
       select_image mesh
       select_image dashboard
       ;;
     server)
-      die "server image is retired from dev runtime; request services, gateway, mesh, derp, or dashboard"
+      die "server image is retired from dev runtime; request services, daemon, mesh, derp, or dashboard"
       ;;
-    gateway|derp|services|mesh|dashboard)
+    daemon|derp|services|mesh|dashboard)
       if [[ -z "${IMAGE_SELECTED[$image]:-}" ]]; then
         IMAGE_SELECTED[$image]=1
         REQUESTED_IMAGES+=("$image")
@@ -995,20 +995,20 @@ apply_candidate_images() {
     patch_config_key CODEWIRE_DIRECT_UDP_LB_SHARING_KEY "codewire-direct-udp"
     patch_config_key CODEWIRE_DIRECT_UDP_TRANSPORT_ZONE "$EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE"
   fi
-  if [[ -n "${IMAGE_SELECTED[gateway]:-}" ]]; then
-    ref="$(image_ref gateway)"
+  if [[ -n "${IMAGE_SELECTED[daemon]:-}" ]]; then
+    ref="$(image_ref daemon)"
     # Every Start re-pins an existing Sandbox's daemon to the configured
     # support image, so Sandboxes started during this smoke run the candidate
     # daemon until their first Start after the restore re-pins them back.
-    patch_config_key SANDBOX_GATEWAY_IMAGE "$ref"
-    set_deployment_env codewire-orchestration orchestration SANDBOX_GATEWAY_IMAGE "$ref"
+    patch_config_key SANDBOX_DAEMON_IMAGE "$ref"
+    set_deployment_env codewire-orchestration orchestration SANDBOX_DAEMON_IMAGE "$ref"
   fi
   delete_obsolete_stun_nodeport
 
   for image in "${REQUESTED_IMAGES[@]}"; do
     ref="$(image_ref "$image")"
     case "$image" in
-      gateway)
+      daemon)
         :
         ;;
       derp)
@@ -1187,9 +1187,9 @@ run_smoke() {
   export EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE
   export EXPECTED_RUNTIME_TRANSPORT_REGION
 
-  if [[ -n "${IMAGE_SELECTED[gateway]:-}" ]]; then
+  if [[ -n "${IMAGE_SELECTED[daemon]:-}" ]]; then
     export EXPECTED_DAEMON_IMAGE
-    EXPECTED_DAEMON_IMAGE="$(image_ref gateway)"
+    EXPECTED_DAEMON_IMAGE="$(image_ref daemon)"
   fi
 
   log "running commodity smoke in sandbox namespace $namespace"

@@ -20,7 +20,7 @@ fn dev_cfg(shapes: &str) -> SandboxWorkerCfg {
     SandboxWorkerCfg {
         sandbox_namespace: NAMESPACE.into(),
         credential_runtime: Some(CredentialRuntimeTemplateConfig::synthetic(NAMESPACE)),
-        gateway_image: "registry.example.invalid/codewire/gateway@sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
+        daemon_image: "registry.example.invalid/codewire/daemon@sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
         dind_image: "docker.io/library/docker:29.7.1-dind@sha256:3333333333333333333333333333333333333333333333333333333333333333".into(),
         runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
         docker_mode: DOCKER_MODE_PROFILE_DEFAULT.into(),

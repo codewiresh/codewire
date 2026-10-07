@@ -7,7 +7,7 @@ use crate::sandbox::template::{
 
 const NAMESPACE: &str = "dev-sandboxes";
 const WORKSPACE_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111";
-const SUPPORT_IMAGE: &str = "registry.example.invalid/codewire/gateway@sha256:2222222222222222222222222222222222222222222222222222222222222222";
+const SUPPORT_IMAGE: &str = "registry.example.invalid/codewire/daemon@sha256:2222222222222222222222222222222222222222222222222222222222222222";
 const DIND_IMAGE: &str = "docker.io/library/docker:29.7.1-dind@sha256:3333333333333333333333333333333333333333333333333333333333333333";
 const BINDING_URL: &str =
     "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087";
@@ -267,7 +267,7 @@ fn each_image_digest_changes_the_revision() {
             ..pool_opts()
         },
         TemplateOpts {
-            support_image: format!("registry.example.invalid/codewire/gateway@sha256:{digest}"),
+            support_image: format!("registry.example.invalid/codewire/daemon@sha256:{digest}"),
             ..pool_opts()
         },
     ];
@@ -289,7 +289,7 @@ fn each_image_digest_changes_the_revision() {
         ..pool_opts()
     };
     let runc_changed = TemplateOpts {
-        support_image: format!("registry.example.invalid/codewire/gateway@sha256:{digest}"),
+        support_image: format!("registry.example.invalid/codewire/daemon@sha256:{digest}"),
         ..runc.clone()
     };
     assert_ne!(render(&runc).revision, render(&runc_changed).revision);
@@ -391,16 +391,16 @@ fn pool_images_must_be_digest_pinned_outside_diagnostic_runtimes() {
             ..pool_opts()
         },
         TemplateOpts {
-            support_image: "git.example.invalid/codewire/gateway:main-4b5b65d".into(),
+            support_image: "git.example.invalid/codewire/daemon:main-4b5b65d".into(),
             ..pool_opts()
         },
         TemplateOpts {
-            support_image: "git.example.invalid/codewire/gateway@sha256:short".into(),
+            support_image: "git.example.invalid/codewire/daemon@sha256:short".into(),
             ..pool_opts()
         },
         TemplateOpts {
             runtime_profile: RUNTIME_PROFILE_RUNC.into(),
-            support_image: "git.example.com/codewire/gateway:local".into(),
+            support_image: "git.example.com/codewire/daemon:local".into(),
             ..pool_opts()
         },
     ];
@@ -412,7 +412,7 @@ fn pool_images_must_be_digest_pinned_outside_diagnostic_runtimes() {
     // A tag plus digest is pinned.
     let tag_and_digest = TemplateOpts {
         support_image: format!(
-            "git.example.invalid/codewire/gateway:main-4b5b65d@sha256:{}",
+            "git.example.invalid/codewire/daemon:main-4b5b65d@sha256:{}",
             "5".repeat(64)
         ),
         ..pool_opts()

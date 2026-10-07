@@ -43,7 +43,7 @@ grep -Fq 'ldd "$chromium"' "$CHROMIUM_INSTALLER" ||
 for dockerfile in \
   deployments/docker/services.Dockerfile \
   deployments/docker/mesh.Dockerfile \
-  deployments/docker/gateway.Dockerfile \
+  deployments/docker/daemon.Dockerfile \
   deployments/docker/derp.Dockerfile; do
   if grep -Eq '\b(apt-get|apt)\b' "$ROOT/$dockerfile"; then
     fail "$dockerfile must not install operating-system packages at build time"

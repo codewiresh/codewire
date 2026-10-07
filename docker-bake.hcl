@@ -35,11 +35,11 @@ variable "CODEWIRE_RUST_PROFILE" {
 }
 
 group "default" {
-  targets = ["dashboard", "services", "mesh", "gateway", "derp"]
+  targets = ["dashboard", "services", "mesh", "daemon", "derp"]
 }
 
 group "kind" {
-  targets = ["dashboard-ci", "services-ci", "mesh-ci", "gateway-ci"]
+  targets = ["dashboard-ci", "services-ci", "mesh-ci", "daemon-ci"]
 }
 
 target "rust-base" {
@@ -98,12 +98,12 @@ target "mesh" {
   }
 }
 
-target "gateway" {
+target "daemon" {
   inherits   = ["_rust-product"]
-  dockerfile = "deployments/docker/gateway.Dockerfile"
-  tags       = ["${IMAGE_PREFIX}-gateway:${IMAGE_TAG}"]
+  dockerfile = "deployments/docker/daemon.Dockerfile"
+  tags       = ["${IMAGE_PREFIX}-daemon:${IMAGE_TAG}"]
   labels = {
-    "org.opencontainers.image.title" = "codewire-gateway"
+    "org.opencontainers.image.title" = "codewire-daemon"
   }
 }
 
@@ -177,8 +177,8 @@ target "mesh-ci" {
   }
 }
 
-target "gateway-ci" {
-  inherits = ["gateway"]
+target "daemon-ci" {
+  inherits = ["daemon"]
   args = {
     CODEWIRE_RUST_PROFILE = "ci"
   }

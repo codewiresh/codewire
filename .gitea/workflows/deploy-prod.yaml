@@ -92,8 +92,8 @@ jobs:
           printf 'release_tag=%s\n' "$selected_tag" >> "$GITHUB_OUTPUT"
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
 
-  build-gateway-image:
-    name: Alias Existing Gateway Image
+  build-daemon-image:
+    name: Alias Existing Daemon Image
     runs-on: ci-protected
     needs: [release-selection]
     outputs:
@@ -107,14 +107,14 @@ jobs:
           ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
           path: .release-source
 
-      - name: Reuse and alias gateway image
+      - name: Reuse and alias daemon image
         id: build
         env:
           CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
           CODEWIRE_SOURCE_DIR: .release-source
           REQUIRE_EXISTING_SOURCE_IMAGE: '1'
-        run: scripts/ci/images/build-push-image.sh gateway .release-source/deployments/docker/gateway.Dockerfile .release-source
+        run: scripts/ci/images/build-push-image.sh daemon .release-source/deployments/docker/daemon.Dockerfile .release-source
 
   build-derp:
     name: Alias Existing DERP Relay Image
@@ -278,7 +278,7 @@ jobs:
     runs-on: ci-protected
     needs:
       - release-selection
-      - build-gateway-image
+      - build-daemon-image
       - build-derp
       - build-services-image
       - build-mesh-image
@@ -307,7 +307,7 @@ jobs:
             --output "$bundle" \
             --candidate dashboard "${{ needs.build-dashboard-image.outputs.source_sha }}" "${{ needs.build-dashboard-image.outputs.candidate_ref }}" \
             --candidate derp "${{ needs.build-derp.outputs.source_sha }}" "${{ needs.build-derp.outputs.candidate_ref }}" \
-            --candidate gateway "${{ needs.build-gateway-image.outputs.source_sha }}" "${{ needs.build-gateway-image.outputs.candidate_ref }}" \
+            --candidate daemon "${{ needs.build-daemon-image.outputs.source_sha }}" "${{ needs.build-daemon-image.outputs.candidate_ref }}" \
             --candidate services "${{ needs.build-services-image.outputs.source_sha }}" "${{ needs.build-services-image.outputs.candidate_ref }}" \
             --candidate mesh "${{ needs.build-mesh-image.outputs.source_sha }}" "${{ needs.build-mesh-image.outputs.candidate_ref }}"
           scripts/ci/images/publish-image-to-harbor.sh \
@@ -319,8 +319,8 @@ jobs:
             registry.example.invalid/codewire/derp \
             "$SOURCE_SHA" "$RELEASE_TAG"
           scripts/ci/images/publish-image-to-harbor.sh \
-            "${{ needs.build-gateway-image.outputs.candidate_ref }}" \
-            registry.example.invalid/codewire/gateway \
+            "${{ needs.build-daemon-image.outputs.candidate_ref }}" \
+            registry.example.invalid/codewire/daemon \
             "$SOURCE_SHA" "$RELEASE_TAG"
           scripts/ci/images/publish-image-to-harbor.sh \
             "${{ needs.build-services-image.outputs.candidate_ref }}" \
@@ -347,8 +347,8 @@ jobs:
             ghcr.io/codewiresh/derp \
             "$SOURCE_SHA" "$RELEASE_TAG"
           scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ needs.build-gateway-image.outputs.candidate_ref }}" \
-            ghcr.io/codewiresh/gateway \
+            "${{ needs.build-daemon-image.outputs.candidate_ref }}" \
+            ghcr.io/codewiresh/daemon \
             "$SOURCE_SHA" "$RELEASE_TAG"
           scripts/ci/images/publish-image-to-ghcr.sh \
             "${{ needs.build-services-image.outputs.candidate_ref }}" \

@@ -726,8 +726,8 @@ fn workspace_daemon_image(spec: &Value) -> anyhow::Result<Option<&str>> {
 }
 
 /// The repository an image reference names, without its digest or tag:
-/// `registry.example.invalid/codewire/gateway` for
-/// `registry.example.invalid/codewire/gateway:v1@sha256:…`. A registry port's colon
+/// `registry.example.invalid/codewire/daemon` for
+/// `registry.example.invalid/codewire/daemon:v1@sha256:…`. A registry port's colon
 /// precedes a `/`, a tag's colon does not.
 fn image_repository(reference: &str) -> &str {
     let name = reference
@@ -825,7 +825,7 @@ fn daemon_named_entry<'a>(
 /// volume (e374b1f11), runc and Kind use. Either is re-pinned from an image in
 /// [`SUPPORT_IMAGE_REPOSITORIES`] to a digest-pinned support image, except on
 /// a confidential runtime. A Dev candidate smoke that swaps
-/// `SANDBOX_GATEWAY_IMAGE` (`scripts/runtime/dev/smoke-dev-candidate.sh`)
+/// `SANDBOX_DAEMON_IMAGE` (`scripts/runtime/dev/smoke-dev-candidate.sh`)
 /// therefore re-pins Sandboxes started while it runs, and their next Start
 /// after the restore re-pins them back. A malformed or ambiguous daemon
 /// source fails closed: no Pod can be built from it, and nothing here can
@@ -5254,7 +5254,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    const SUPPORT_IMAGE: &str = crate::sandbox::template::DEFAULT_GATEWAY_IMAGE;
+    const SUPPORT_IMAGE: &str = crate::sandbox::template::DEFAULT_DAEMON_IMAGE;
     const MODE_CLAIM_PATH: &str = "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxclaims/sandbox-env-test";
     const MODE_SANDBOX_PATH: &str =
         "/apis/agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxes/workspace-env-test";

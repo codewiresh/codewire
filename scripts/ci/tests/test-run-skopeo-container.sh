@@ -54,7 +54,7 @@ export FAKE_DOCKER_ARGS="$work/docker-args"
 export FAKE_DOCKER_ATTEMPTS="$work/docker-attempts"
 export FAKE_DOCKER_CHECKS="$work/docker-checks"
 export FAKE_STDIN_PREFIX="$work/stdin"
-TEST_REF="docker://git.example.invalid/codewire/gateway@sha256:$(printf 'a%.0s' {1..64})"
+TEST_REF="docker://git.example.invalid/codewire/daemon@sha256:$(printf 'a%.0s' {1..64})"
 readonly TEST_REF
 "$RUNNER" --check >"$work/check.out"
 grep -qxF 'SKOPEO_RUNTIME_READY' "$work/check.out" ||

@@ -183,9 +183,9 @@ WARM_POOL_ENVIRONMENT = (
 WARM_POOL_AUDIENCES = ("codewire.internal.workspace-binding.v1", "codewire.internal.credential-workspace.v1")
 WARM_POOL_KIND_TARGETS = ("deployments/k8s/overlays/local-kind", "deployments/k8s/overlays/local-kind-static", "tests/e2e/kind")
 # Images without a registry digest a pool template may still run: only the
-# Kind e2e overlay's side-loaded gateway image (C4). Every other target admits
+# Kind e2e overlay's side-loaded daemon image (C4). Every other target admits
 # digest-pinned images alone.
-WARM_POOL_LOCAL_IMAGES = {"tests/e2e/kind": ["codewire-gateway:e2e"]}
+WARM_POOL_LOCAL_IMAGES = {"tests/e2e/kind": ["codewire-daemon:e2e"]}
 # The public roots ConfigMaps a pool template mounts, each only as its ca.crt:
 # orchestration's internal roots everywhere, and the Kind e2e coordinator's
 # extra roots there alone (SANDBOX_COORDINATOR_EXTRA_ROOTS).
@@ -885,7 +885,7 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
             (WARM_POOL_TEMPLATE_POLICY, "|| c.image in variables.localImages", "|| true"),
             (WARM_POOL_TEMPLATE_POLICY, "|| v.image.reference in variables.localImages", "|| true"),
             # C4: only the Kind e2e overlay admits a local image.
-            (WARM_POOL_TEMPLATE_POLICY, "- expression: '[]'", "- expression: '[''codewire-gateway:e2e'']'"),
+            (WARM_POOL_TEMPLATE_POLICY, "- expression: '[]'", "- expression: '[''codewire-daemon:e2e'']'"),
             (WARM_POOL_TEMPLATE_POLICY, "variables.pod.runtimeClassName != 'confidential'", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "size(object.spec.networkPolicy.ingress) == 0", "true"),
             (WARM_POOL_TEMPLATE_POLICY, "variables.pod.automountServiceAccountToken == false", "true"),

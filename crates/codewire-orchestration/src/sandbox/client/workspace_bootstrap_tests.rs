@@ -1267,7 +1267,7 @@ async fn newly_selected_codex_publishes_only_its_environment_and_no_config_map()
     }
 }
 
-const DAEMON_IMAGE: &str = "registry.example.invalid/codewire/gateway@sha256:48549d19114407c712d043af3ba2136d97052a2c30c82935190f75a3a61f13ab";
+const DAEMON_IMAGE: &str = "registry.example.invalid/codewire/daemon@sha256:48549d19114407c712d043af3ba2136d97052a2c30c82935190f75a3a61f13ab";
 
 /// A commodity recipe whose daemon is an image volume: no init container
 /// until a selected client needs its bootstrap.
@@ -1920,11 +1920,12 @@ async fn a_pool_born_restart_refuses_anything_but_codewires_identity_free_pool()
 
 // ------------------- daemon image re-pin on resume (owner decision 2026-10-05)
 
-/// The image a Sandbox was created with, before a support-image rollout.
+/// The image a Sandbox was created with, before a support-image rollout and
+/// the image's rename from `codewire/gateway` to `codewire/daemon`.
 const OLD_DAEMON_IMAGE: &str = "registry.example.invalid/codewire/gateway@sha256:a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0";
 const OLD_DAEMON_DIGEST: &str =
     "sha256:a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0";
-const CONCURRENT_DAEMON_IMAGE: &str = "registry.example.invalid/codewire/gateway@sha256:3333333333333333333333333333333333333333333333333333333333333333";
+const CONCURRENT_DAEMON_IMAGE: &str = "registry.example.invalid/codewire/daemon@sha256:3333333333333333333333333333333333333333333333333333333333333333";
 
 fn daemon_reference_mut(object: &mut Value) -> &mut Value {
     object["spec"]["podTemplate"]["spec"]["volumes"]
@@ -2277,7 +2278,7 @@ async fn resume_keeps_a_current_unlisted_or_unpinned_daemon_image() {
             || {
                 let mut fixture = stale_daemon_fixture();
                 *daemon_reference_mut(&mut fixture.sandbox) = json!(format!(
-                    "registry.example/codewire/gateway@{OLD_DAEMON_DIGEST}"
+                    "registry.example/codewire/daemon@{OLD_DAEMON_DIGEST}"
                 ));
                 fixture
             },
@@ -2288,7 +2289,7 @@ async fn resume_keeps_a_current_unlisted_or_unpinned_daemon_image() {
             || {
                 let mut fixture = stale_daemon_fixture();
                 *daemon_reference_mut(&mut fixture.sandbox) = json!(format!(
-                    "mirror.example/registry.example.invalid/codewire/gateway@{OLD_DAEMON_DIGEST}"
+                    "mirror.example/registry.example.invalid/codewire/daemon@{OLD_DAEMON_DIGEST}"
                 ));
                 fixture
             },
@@ -2299,7 +2300,7 @@ async fn resume_keeps_a_current_unlisted_or_unpinned_daemon_image() {
             || {
                 let mut fixture = stale_copy_fixture(None);
                 fixture.sandbox["spec"]["podTemplate"]["spec"]["initContainers"][0]["image"] = json!(
-                    format!("registry.example.invalid/codewire/gateway-next@{OLD_DAEMON_DIGEST}")
+                    format!("registry.example.invalid/codewire/daemon-next@{OLD_DAEMON_DIGEST}")
                 );
                 fixture
             },
@@ -2330,12 +2331,12 @@ async fn resume_keeps_a_current_unlisted_or_unpinned_daemon_image() {
         (
             "Kind's unpinned support image",
             || stale_copy_fixture(Some("runc")),
-            "codewire-gateway:e2e",
+            "codewire-daemon:e2e",
         ),
         (
             "a tag-only support image",
             stale_daemon_fixture,
-            "registry.example.invalid/codewire/gateway:v0.3.400",
+            "registry.example.invalid/codewire/daemon:v0.3.400",
         ),
     ];
     for (label, before, support_image) in cases {
@@ -2507,30 +2508,30 @@ async fn a_claimed_warm_member_is_re_pinned_and_its_pool_template_is_not() {
 fn daemon_image_plan_compares_repositories_not_tags_or_digests() {
     for (reference, repository) in [
         (
-            "registry.example.invalid/codewire/gateway@sha256:aa",
-            "registry.example.invalid/codewire/gateway",
+            "registry.example.invalid/codewire/daemon@sha256:aa",
+            "registry.example.invalid/codewire/daemon",
         ),
         (
-            "git.example.invalid/codewire/gateway:v0.3.359@sha256:aa",
-            "git.example.invalid/codewire/gateway",
+            "git.example.invalid/codewire/daemon:v0.3.359@sha256:aa",
+            "git.example.invalid/codewire/daemon",
         ),
         (
-            "registry.example.invalid/codewire/gateway:main-4b5b65d",
-            "registry.example.invalid/codewire/gateway",
+            "registry.example.invalid/codewire/daemon:main-4b5b65d",
+            "registry.example.invalid/codewire/daemon",
         ),
         (
-            "localhost:5000/codewire/gateway:local",
-            "localhost:5000/codewire/gateway",
+            "localhost:5000/codewire/daemon:local",
+            "localhost:5000/codewire/daemon",
         ),
         (
-            "localhost:5000/codewire/gateway",
-            "localhost:5000/codewire/gateway",
+            "localhost:5000/codewire/daemon",
+            "localhost:5000/codewire/daemon",
         ),
-        ("codewire-gateway:e2e", "codewire-gateway"),
+        ("codewire-daemon:e2e", "codewire-daemon"),
     ] {
         assert_eq!(image_repository(reference), repository, "{reference}");
     }
-    let tagged_current = "registry.example.invalid/codewire/gateway:v0.3.400@sha256:1f5972c44d7063815d4d5163f06fc8db5428a5a57dacc4816841cc5cd97ce190";
+    let tagged_current = "registry.example.invalid/codewire/daemon:v0.3.400@sha256:1f5972c44d7063815d4d5163f06fc8db5428a5a57dacc4816841cc5cd97ce190";
     let volume = |reference: &str| {
         json!({"spec":{"podTemplate":{"spec":{"runtimeClassName":"commodity","volumes":[
             {"name":"workspace","persistentVolumeClaim":{"claimName":"saved-pvc"}},
@@ -2552,8 +2553,8 @@ fn daemon_image_plan_compares_repositories_not_tags_or_digests() {
         DaemonImagePlan::Current
     );
     for unpinned in [
-        "registry.example.invalid/codewire/gateway:v0.3.400",
-        "registry.example.invalid/codewire/gateway@sha256:1f59",
+        "registry.example.invalid/codewire/daemon:v0.3.400",
+        "registry.example.invalid/codewire/daemon@sha256:1f59",
     ] {
         assert_eq!(
             plan_daemon_image(&old, unpinned).unwrap(),
@@ -2715,7 +2716,7 @@ async fn a_pod_replacement_writes_only_a_re_pinnable_daemon() {
         ("unlisted", {
             let mut fixture = running(stale_daemon_fixture());
             *daemon_reference_mut(&mut fixture.sandbox) = json!(format!(
-                "registry.example/codewire/gateway@{OLD_DAEMON_DIGEST}"
+                "registry.example/codewire/daemon@{OLD_DAEMON_DIGEST}"
             ));
             fixture
         }),

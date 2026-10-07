@@ -875,7 +875,7 @@ assert_prebuilt_release_product_images() {
     echo "::error::prebuilt release images require one exact expected source SHA"
     return 2
   fi
-  for image in dashboard services mesh gateway; do
+  for image in dashboard services mesh daemon; do
     image_ref="codewire-${image}:e2e"
     docker image inspect "$image_ref" >/dev/null || {
       echo "::error::prebuilt release image is missing: ${image_ref}"
@@ -1122,7 +1122,7 @@ load_images_into_kind() {
       codewire-dashboard:e2e \
       codewire-services:e2e \
       codewire-mesh:e2e \
-      codewire-gateway:e2e \
+      codewire-daemon:e2e \
       "$KIND_POSTGRES_LOCAL_IMAGE" \
       "$KIND_TEMPORAL_LOCAL_IMAGE"; do
     log "loading ${image} into kind"
@@ -2730,7 +2730,7 @@ spec:
     spec:
       containers:
         - name: workspace
-          image: codewire-gateway:e2e
+          image: codewire-daemon:e2e
 EOF
   sandbox_uid="$(
     kubectl -n "$SANDBOX_NS" get sandbox "$sandbox_name" -o jsonpath='{.metadata.uid}'
@@ -3213,7 +3213,7 @@ environment_resize_smoke() (
   # reconcile, which then waits for its SSH access as a start does.
   CRD_SMOKE_RESIZE_PHASE=render CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id" \
     CRD_SMOKE_NAMESPACE="$SANDBOX_NS" CRD_SMOKE_SERVER_NAMESPACE="$NS" \
-    CRD_SMOKE_LOCAL_IMAGES=1 CRD_SMOKE_WORKSPACE_IMAGE=codewire-gateway:e2e \
+    CRD_SMOKE_LOCAL_IMAGES=1 CRD_SMOKE_WORKSPACE_IMAGE=codewire-daemon:e2e \
     SANDBOX_CREDENTIAL_BROKER_NAMESPACE="$NS" \
     "$CARGO_CI_DIR/crd-smoke" >"$resize_manifest"
   template_name="$(jq -er '.items[] | select(.kind == "SandboxTemplate") | .metadata.name' "$resize_manifest")"
@@ -3282,9 +3282,9 @@ BEGIN;
 -- deliberately missing runtime configuration for the Temporal failure test.
 INSERT INTO environment_presets (id, org_id, name, official, project_spec)
 VALUES ('$preset_id', 'org_contract_1', '$preset_id', false,
-        '{"schema_version":1,"image":"codewire-gateway:e2e","working_directory":"/workspace"}'::jsonb);
+        '{"schema_version":1,"image":"codewire-daemon:e2e","working_directory":"/workspace"}'::jsonb);
 INSERT INTO sandbox_template_config (preset_id, image_ref, sandbox_template_name)
-VALUES ('$preset_id', 'codewire-gateway:e2e', 'resize-template');
+VALUES ('$preset_id', 'codewire-daemon:e2e', 'resize-template');
 INSERT INTO environments (
   id, org_id, created_by, type, name, state, desired_state, preset_id,
   cpu_millicores, memory_mb, disk_gb,
@@ -3391,7 +3391,7 @@ SQL
     -o jsonpath='{.spec.containers[?(@.name=="workspace")].image}')"
   marker="$(kubectl -n "$SANDBOX_NS" exec "$pod_name" -c workspace -- \
     sh -ceu 'cat /workspace/resize-smoke-marker')"
-  if [ "$resources" != "500m:512Mi" ] || [ "$image" != "codewire-gateway:e2e" ] \
+  if [ "$resources" != "500m:512Mi" ] || [ "$image" != "codewire-daemon:e2e" ] \
       || [ "$marker" != "codewire-resize-data" ]; then
     echo "::error::live-resized Pod lost resources/image/data: resources=$resources image=$image marker=$marker"
     return 1
@@ -3689,7 +3689,7 @@ spec:
   restartPolicy: Always
   initContainers:
     - name: codewire-daemon-init
-      image: codewire-gateway:e2e
+      image: codewire-daemon:e2e
       imagePullPolicy: Never
       command:
         - sh
@@ -3702,7 +3702,7 @@ spec:
           mountPath: /codewire/run
   containers:
     - name: workspace
-      image: codewire-gateway:e2e
+      image: codewire-daemon:e2e
       imagePullPolicy: Never
       command: ["/codewire/bin/cw", "__hosted-daemon"]
       env:

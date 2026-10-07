@@ -21,7 +21,7 @@
 #   immutable environment; no environment identity label; and no ingress
 #   before adoption (the controller's template-owned NetworkPolicy then denies
 #   all ingress to unclaimed members). The Kind e2e overlay also admits its
-#   one side-loaded gateway image, which has no registry digest;
+#   one side-loaded daemon image, which has no registry digest;
 # - orchestration never creates or changes an unclaimed member Sandbox; only
 #   the agent-sandbox controller writes those.
 #
@@ -118,7 +118,7 @@ spec:
     - name: runtimeClasses
       expression: "['commodity']"
     # The Kind e2e overlay replaces this second variable with its side-loaded
-    # gateway image, which has no registry digest; keep it second. Every
+    # daemon image, which has no registry digest; keep it second. Every
     # deployed cluster admits only digest-pinned images.
     - name: localImages
       expression: "[]"
@@ -170,7 +170,7 @@ spec:
         (has(v.image.reference) && (v.image.reference.matches('^[^@ ]+@sha256:[0-9a-f]{64}$') ||
         v.image.reference in variables.localImages))) &&
         !has(variables.pod.ephemeralContainers)
-      message: a warm-pool template runs and mounts only digest-pinned images (Kind adds its side-loaded gateway image)
+      message: a warm-pool template runs and mounts only digest-pinned images (Kind adds its side-loaded daemon image)
     - expression: >-
         variables.containers.all(c, !has(c.envFrom) &&
         (!has(c.env) || c.env.all(e, e.name in variables.environment &&

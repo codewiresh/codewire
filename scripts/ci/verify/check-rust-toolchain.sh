@@ -50,8 +50,8 @@ readonly -a PINNED_WORKFLOWS=(
 readonly CANARY_WORKFLOW='.gitea/workflows/rust-latest-canary.yaml'
 readonly -a SHIPPED_RUST_DOCKERFILES=(
   'apps/dashboard/Dockerfile'
+  'deployments/docker/daemon.Dockerfile'
   'deployments/docker/derp.Dockerfile'
-  'deployments/docker/gateway.Dockerfile'
   'deployments/docker/mesh.Dockerfile'
   'deployments/docker/services.Dockerfile'
 )

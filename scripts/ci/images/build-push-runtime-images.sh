@@ -89,7 +89,7 @@ is_nexus_backup_unavailable() {
 # tag, identity mismatch) fails closed to a full source build.
 carry_forward="${CODEWIRE_RUNTIME_CARRY_FORWARD:-0}"
 baseline_sha=''
-image_families=(services mesh dashboard gateway derp)
+image_families=(services mesh dashboard daemon derp)
 declare -a carried_families=()
 declare -a build_families=()
 
@@ -312,7 +312,7 @@ carried_families=(${resolved_carried[@]+"${resolved_carried[@]}"})
 # One Bake graph anchored by services lets BuildKit schedule at most two
 # independent product builds concurrently while deduplicating their shared
 # rust-base target. Product targets remain separate so Cargo feature
-# unification and the gateway lockfile cannot change shipped binaries. The
+# unification and the daemon lockfile cannot change shipped binaries. The
 # anchor engages only when services itself builds; carried families already
 # have exact source tags and drop out of the transaction's missing set.
 services_runtime_set=0
@@ -326,7 +326,7 @@ done
 build_one services deployments/docker/services.Dockerfile "$services_runtime_set"
 build_one mesh deployments/docker/mesh.Dockerfile
 build_one dashboard apps/dashboard/Dockerfile
-build_one gateway deployments/docker/gateway.Dockerfile
+build_one daemon deployments/docker/daemon.Dockerfile
 build_one derp deployments/docker/derp.Dockerfile
 
 if [ "${#carried_families[@]}" -gt 0 ]; then

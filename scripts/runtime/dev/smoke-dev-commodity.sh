@@ -266,7 +266,7 @@ Environment:
                            host-network diagnostic. Captures route metadata and
                            UDP headers for the configured peer relay without payload.
   EXPECTED_DAEMON_IMAGE    Optional exact assertion for the daemon image the
-                           workspace Pod mounts (SANDBOX_GATEWAY_IMAGE)
+                           workspace Pod mounts (SANDBOX_DAEMON_IMAGE)
   EXPECTED_DOCKER_MODE     Expected workspace Docker mode. Defaults to
                            guest-dind, expecting workspace+dind containers.
                            Set none for focused KBS/CoCo proofs that do not

@@ -62,7 +62,7 @@ readonly dashboard_dockerfile='apps/dashboard/Dockerfile'
 readonly rust_base_dockerfile='deployments/docker/rust-base.Dockerfile'
 readonly -a runtime_dockerfiles=(
   "$dashboard_dockerfile"
-  'deployments/docker/gateway.Dockerfile'
+  'deployments/docker/daemon.Dockerfile'
   'deployments/docker/derp.Dockerfile'
   'deployments/docker/services.Dockerfile'
   'deployments/docker/mesh.Dockerfile'

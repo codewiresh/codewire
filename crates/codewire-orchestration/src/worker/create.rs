@@ -178,7 +178,7 @@ impl SandboxWorkerCfg {
     /// The support image this worker renders, which every resume and Pod
     /// replacement re-pins a Sandbox's daemon to.
     pub fn support_image(&self) -> &str {
-        crate::sandbox::template::effective_support_image(&self.gateway_image)
+        crate::sandbox::template::effective_support_image(&self.daemon_image)
     }
 
     /// Review L2: a commodity workspace binds through the binding Service in
@@ -233,7 +233,7 @@ pub struct SandboxWorkerCfg {
     pub session_secret: String,
     pub sandbox_namespace: String,
     pub credential_runtime: Option<crate::sandbox::template::CredentialRuntimeTemplateConfig>,
-    pub gateway_image: String,
+    pub daemon_image: String,
     pub dind_image: String,
     pub runtime_profile: String,
     pub docker_mode: String,
@@ -325,9 +325,9 @@ impl SandboxWorkerCfg {
             session_secret: getenv("SESSION_SECRET", ""),
             sandbox_namespace,
             credential_runtime,
-            gateway_image: getenv(
-                "SANDBOX_GATEWAY_IMAGE",
-                codewire_server_core::runtime_images::DEFAULT_GATEWAY_IMAGE,
+            daemon_image: getenv(
+                "SANDBOX_DAEMON_IMAGE",
+                codewire_server_core::runtime_images::DEFAULT_DAEMON_IMAGE,
             ),
             dind_image: getenv("SANDBOX_DIND_IMAGE", ""),
             runtime_profile: std::env::var("SANDBOX_RUNTIME_PROFILE").unwrap_or_default(),
@@ -539,7 +539,7 @@ pub fn shape_template_opts(
         // Cluster and shape.
         image: image_ref.to_string(),
         image_command,
-        support_image: cfg.gateway_image.clone(),
+        support_image: cfg.daemon_image.clone(),
         dind_image: cfg.dind_image.clone(),
         runtime_profile: runtime_spec.profile.clone(),
         docker_mode: runtime_spec.docker_mode.clone(),
@@ -3297,7 +3297,7 @@ mod tests {
     #[test]
     fn template_opts_use_only_the_runtime_profile() {
         let cfg = SandboxWorkerCfg {
-            gateway_image: "gw:1".into(),
+            daemon_image: "daemon:1".into(),
             runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_COMMODITY.into(),
             api_base_url: "https://api".into(),
             derp_port: "".into(),

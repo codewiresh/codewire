@@ -272,7 +272,7 @@
               "-c",
               "umask 077; mkdir -p /codewire/run/processes && chmod 0700 /codewire/run/processes && cp /usr/local/bin/cw /codewire/bin/.cw.tmp && chmod 0755 /codewire/bin/.cw.tmp && mv /codewire/bin/.cw.tmp /codewire/bin/cw"
             ],
-            "image": "git.example.invalid/codewire/gateway:golden",
+            "image": "git.example.invalid/codewire/daemon:golden",
             "name": "codewire-daemon-init",
             "resources": {
               "limits": {

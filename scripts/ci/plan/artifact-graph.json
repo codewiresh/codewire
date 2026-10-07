@@ -149,14 +149,14 @@
         "proto/**"
       ]
     },
-    "gateway_image": {
+    "daemon_image": {
       "kind": "file-set",
       "inputs": [
         "Cargo.toml",
         "Cargo.lock",
         "crates/**",
-        "deployments/docker/gateway.Dockerfile",
-        "deployments/docker/gateway.Dockerfile.dockerignore",
+        "deployments/docker/daemon.Dockerfile",
+        "deployments/docker/daemon.Dockerfile.dockerignore",
         "deployments/docker/rust-base.Dockerfile",
         "docker-bake.hcl",
         "libs/gateway-proto/**",
@@ -266,7 +266,7 @@
         "dev_release_tree",
         "dev_acceptance_harness",
         "dashboard_image",
-        "gateway_image",
+        "daemon_image",
         "derp_image",
         "services_image",
         "mesh_image"

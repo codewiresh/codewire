@@ -344,7 +344,7 @@
           {
             "image": {
               "pullPolicy": "IfNotPresent",
-              "reference": "git.example.invalid/codewire/gateway:golden"
+              "reference": "git.example.invalid/codewire/daemon:golden"
             },
             "name": "codewire-bin"
           },

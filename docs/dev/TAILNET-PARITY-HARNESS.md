@@ -41,8 +41,7 @@ handled, and which fallback must still work.
 ### 1. Fast Fixtures
 
 Fast fixtures run on normal PRs touching `libs/tailnet`,
-`crates/codewire-tailnet`, `crates/codewire-gateway`, gateway orchestration, or
-CLI tailnet code.
+`crates/codewire-tailnet`, `crates/codewire-daemon`, or CLI tailnet code.
 
 Current checked-in shape:
 

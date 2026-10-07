@@ -11,7 +11,7 @@ NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"
 WAIT_SECONDS="${PRIVATE_PULL_WAIT_SECONDS:-360}"
 KEEP_PROBE="${PRIVATE_PULL_KEEP_PROBE:-0}"
 ENCRYPTED_EMPTYDIR="${PRIVATE_PULL_ENCRYPTED_EMPTYDIR:-0}"
-IMAGE_ROLE="${PRIVATE_PULL_IMAGE_ROLE:-gateway}"
+IMAGE_ROLE="${PRIVATE_PULL_IMAGE_ROLE:-daemon}"
 ASSERT_REST_DISABLED="${PRIVATE_PULL_ASSERT_REST_DISABLED:-0}"
 PROBE_UUID="${PRIVATE_PULL_PROBE_UUID:-}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-}"
@@ -28,9 +28,9 @@ registry authorization without creating a Codewire environment or PVC.
 
 Options:
   --node NAME          Confidential SNP node (default: cw-dev-prod-node-1)
-  --image-role ROLE    Exact active image: gateway, workspace, dind, or the
+  --image-role ROLE    Exact active image: daemon, workspace, dind, or the
                        combined product image/cache shape
-                       (default: gateway)
+                       (default: daemon)
   --assert-rest-disabled
                        Prove the workload cannot reach a guest-local CDH REST
                        listener (workspace/product only)
@@ -116,9 +116,9 @@ done
 [[ "$WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "--wait-seconds must be a positive integer"
 (( WAIT_SECONDS > IMAGE_RESOURCE_TIMEOUT_SECS )) || \
   die "--wait-seconds must exceed the ${IMAGE_RESOURCE_TIMEOUT_SECS}s guest image-resource timeout"
-[[ "$IMAGE_ROLE" == "gateway" || "$IMAGE_ROLE" == "workspace" || \
+[[ "$IMAGE_ROLE" == "daemon" || "$IMAGE_ROLE" == "workspace" || \
    "$IMAGE_ROLE" == "dind" || "$IMAGE_ROLE" == "product" ]] || \
-  die "--image-role must be gateway, workspace, dind, or product"
+  die "--image-role must be daemon, workspace, dind, or product"
 [[ "$ASSERT_REST_DISABLED" == "0" || "$ASSERT_REST_DISABLED" == "1" ]] || \
   die "PRIVATE_PULL_ASSERT_REST_DISABLED must be 0 or 1"
 if [[ "$ASSERT_REST_DISABLED" == "1" ]]; then
@@ -171,8 +171,8 @@ active_configmap=""
 for configmap_name in "${configmap_names[@]}"; do
   candidate="$EVIDENCE_DIR/configmap-$configmap_name.json"
   kubectl_dev -n "$SERVER_NAMESPACE" get configmap "$configmap_name" -o json >"$candidate"
-  if jq -e '.data.SANDBOX_GATEWAY_IMAGE != null' "$candidate" >/dev/null; then
-    [[ -z "$active_configmap" ]] || die "multiple runtime ConfigMaps provide SANDBOX_GATEWAY_IMAGE"
+  if jq -e '.data.SANDBOX_DAEMON_IMAGE != null' "$candidate" >/dev/null; then
+    [[ -z "$active_configmap" ]] || die "multiple runtime ConfigMaps provide SANDBOX_DAEMON_IMAGE"
     active_configmap="$configmap_name"
     mv "$candidate" "$configmap_json"
   else
@@ -181,15 +181,15 @@ for configmap_name in "${configmap_names[@]}"; do
 done
 [[ -n "$active_configmap" ]] || die "active orchestration runtime ConfigMap was not found"
 
-gateway_image="$(jq -er '.data.SANDBOX_GATEWAY_IMAGE' "$configmap_json")"
+daemon_image="$(jq -er '.data.SANDBOX_DAEMON_IMAGE' "$configmap_json")"
 dind_image="$(jq -er '.data.SANDBOX_DIND_IMAGE' "$configmap_json")"
 kbs_url="$(jq -er '.data.SANDBOX_KATA_COCO_KBS_URL' "$configmap_json")"
 registry_auth_uri="$(jq -er '.data.SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI' "$configmap_json")"
 coco_enabled="$(jq -er '.data.SANDBOX_KATA_COCO_INIT_DATA_ENABLED' "$configmap_json")"
 test_resource_uri="$(jq -er '.data.SANDBOX_KATA_COCO_TEST_RESOURCE_URI' "$configmap_json")"
 
-[[ "$gateway_image" =~ ^registry\.example\.invalid/codewire/gateway@sha256:[a-f0-9]{64}$ ]] || \
-  die "promoted gateway image is not an exact Harbor digest"
+[[ "$daemon_image" =~ ^registry\.example\.invalid/codewire/daemon@sha256:[a-f0-9]{64}$ ]] || \
+  die "promoted daemon image is not an exact Harbor digest"
 [[ "$dind_image" =~ ^docker\.io/library/docker:[0-9]+\.[0-9]+\.[0-9]+-dind@sha256:[a-f0-9]{64}$ ]] || \
   die "active dind image is not an exact official Docker digest"
 [[ "$kbs_url" == "https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080" ]] || \
@@ -200,7 +200,7 @@ test_resource_uri="$(jq -er '.data.SANDBOX_KATA_COCO_TEST_RESOURCE_URI' "$config
 [[ "$test_resource_uri" == "kbs:///default/codewire/runtime-test-resource" ]] || \
   die "unexpected CoCo test-resource URI"
 
-probe_image="$gateway_image"
+probe_image="$daemon_image"
 probe_container_name=version
 probe_command='/usr/local/bin/cw'
 probe_args_yaml='["--version"]'
@@ -232,7 +232,7 @@ if [[ "$IMAGE_ROLE" == "workspace" || "$IMAGE_ROLE" == "product" ]]; then
       dind_image) resolved_dind_image="$release_value" ;;
     esac
   done < <("$ROOT/scripts/runtime/confidential/resolve-coco-support-lock.sh" \
-    --gateway-image "$gateway_image" \
+    --daemon-image "$daemon_image" \
     --source-sha "$source_sha")
   [[ "$probe_image" =~ ^ghcr\.io/codewiresh/workspace@sha256:[a-f0-9]{64}$ ]] || \
     die "support lock did not resolve an exact workspace image"
@@ -400,7 +400,7 @@ if [[ "$ENCRYPTED_EMPTYDIR" == "1" ]]; then
   emptydir_init_yaml="$(printf '%s\n' \
     '  initContainers:' \
     '    - name: secure-scratch-init' \
-    "      image: $gateway_image" \
+    "      image: $daemon_image" \
     '      imagePullPolicy: Always' \
     '      command: ["/usr/local/bin/cw"]' \
     '      args: ["--version"]' \
