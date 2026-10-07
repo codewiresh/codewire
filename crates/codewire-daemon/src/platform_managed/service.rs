@@ -3,8 +3,8 @@
 //! current actor/grant and complete captured binding before its Issued journal.
 use super::*;
 use crate::durable_session::SessionEngine;
-use codewire_gateway_proto::daemon::v1::platform_managed_service_server::PlatformManagedService;
-use codewire_gateway_proto::{DAEMON_AUTH_TOKEN_HEADER, daemon::v1, platform_managed as wire};
+use codewire_daemon_proto::daemon::v1::platform_managed_service_server::PlatformManagedService;
+use codewire_daemon_proto::{DAEMON_AUTH_TOKEN_HEADER, daemon::v1, platform_managed as wire};
 use prost::Message;
 use std::collections::BTreeSet;
 use std::path::PathBuf;

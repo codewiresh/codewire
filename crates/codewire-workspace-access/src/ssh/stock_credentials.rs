@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use codewire_credential_bridge::{CredentialBridge, serve_ssh_agent};
 use codewire_credential_broker::ssh_agent::{SelectedSshAgent, SshAgentConfig, SshAgentOwner};
-use codewire_gateway_proto::codewire::bridge::v1;
-use codewire_gateway_proto::ssh::{SshOperation, agent, remaining_deadline, validate_request};
+use codewire_daemon_proto::codewire::bridge::v1;
+use codewire_daemon_proto::ssh::{SshOperation, agent, remaining_deadline, validate_request};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::process::{Child, Command};

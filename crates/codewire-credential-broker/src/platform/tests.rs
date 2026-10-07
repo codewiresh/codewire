@@ -1151,14 +1151,14 @@ async fn shared_shutdown_drains_platform_publication_after_guest_and_session_los
             async move {
                 broker
                     .execute(
-                        codewire_gateway_proto::codewire::bridge::v1::CredentialBridgeRequest {
+                        codewire_daemon_proto::codewire::bridge::v1::CredentialBridgeRequest {
                             capability_slot: "codex".into(),
                             route: "openai-api".into(),
                             request_id: Uuid::new_v4().to_string(),
                             method: "POST".into(),
                             path: "/responses".into(),
                             headers: vec![
-                                codewire_gateway_proto::codewire::bridge::v1::CredentialHttpHeader {
+                                codewire_daemon_proto::codewire::bridge::v1::CredentialHttpHeader {
                                     name: "content-type".into(),
                                     value: b"application/json".to_vec(),
                                 },

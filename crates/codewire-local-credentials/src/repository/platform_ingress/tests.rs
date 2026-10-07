@@ -1,5 +1,5 @@
 use codewire_credential_bridge::CredentialBridgeOutput;
-use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_daemon_proto::codewire::bridge::v1;
 use futures::{FutureExt as _, StreamExt as _};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::{mpsc, oneshot};
@@ -478,7 +478,7 @@ async fn declared_oversized_body_is_rejected_before_bridge_or_body_polling() {
             "\r\n\r\n",
             &format!(
                 "\r\nContent-Length: {}\r\n\r\n",
-                codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES + 1
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES + 1
             ),
         );
     let response = raw_exchange(fixture.address, request).await;

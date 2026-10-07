@@ -9,8 +9,8 @@ use codewire_credential_broker::platform::PlatformRuntimeError;
 use codewire_credential_broker::platform::bridge::{
     PlatformBridgeAuthenticationError, PlatformBridgeAuthenticator, PlatformCredentialBridgeService,
 };
-use codewire_gateway_proto::codewire::bridge::v1 as bridge;
-use codewire_gateway_proto::{
+use codewire_daemon_proto::codewire::bridge::v1 as bridge;
+use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES, CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
 };
 use codewire_platform_credentials::PlatformAccessProfileStore;

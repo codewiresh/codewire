@@ -44,7 +44,7 @@ ARG SCCACHE_ENDPOINT
 ARG CODEWIRE_SCCACHE_PREFIX
 # Exactly one actual compiler RUN; source admission, compiler completion and
 # dep-info/byte export remain inside this vertex. Its history is distinct from
-# a later gateway/workspace COPY and must be joined by the owning cache gate.
+# a later daemon/workspace COPY and must be joined by the owning cache gate.
 RUN --mount=type=bind,from=cw-source,source=source,target=/src,readonly \
     --mount=type=bind,from=cw-source,source=git,target=/source-git,readonly \
     --mount=type=bind,from=cw-source,source=request.json,target=/run/cw-source-request.json,readonly \

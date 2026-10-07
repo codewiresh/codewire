@@ -229,7 +229,7 @@ class ArtifactTests(unittest.TestCase):
 
     def test_oci_index_refuses_duplicate_manifest_digest_across_distinct_tags(self):
         def change(state):
-            tag = "codewire-gateway:e2e"
+            tag = "codewire-daemon:e2e"
             state["expected"][tag] = state["expected"]["codewire-services:e2e"]
             descriptor = copy.deepcopy(state["index"]["manifests"][0])
             descriptor["annotations"]["io.containerd.image.name"] = "docker.io/library/" + tag

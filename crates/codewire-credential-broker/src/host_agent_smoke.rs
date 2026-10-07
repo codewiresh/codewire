@@ -22,7 +22,7 @@ use codewire_access::{
     CredentialAuthKind, EnvironmentAccessBinding, EnvironmentId, GrantPermission, ProviderCatalog,
     ProviderDefinition, ProviderId,
 };
-use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_local_credentials::{
     CredentialOperationLease, CredentialOperationLeaseRequest, LocalCredentialAuthority,
     NewCredential,
@@ -507,7 +507,7 @@ async fn handle(
         Err(status) => return Ok(fixed_response(status)),
     };
     let (parts, incoming) = request.into_parts();
-    let limit = codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES;
+    let limit = codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES;
     if incoming
         .size_hint()
         .upper()
@@ -576,7 +576,7 @@ fn stream_response(response: BrokerHttpResponse, cancel: CancellationToken) -> R
                 Ok(None) => None,
                 Ok(Some(chunk)) => match bytes
                     .checked_add(chunk.len())
-                    .filter(|n| *n <= codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES)
+                    .filter(|n| *n <= codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES)
                 {
                     Some(total) => Some((Ok(Frame::data(chunk)), (body, cancel, total, false))),
                     None => Some((
@@ -854,7 +854,7 @@ mod tests {
             "POST /codex/v1/responses HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n",
             fixture.state.host,
             fixture.state.capability.as_str(),
-            codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES + 1
+            codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES + 1
         );
         socket.write_all(request.as_bytes()).await.unwrap();
         let mut output = Vec::new();

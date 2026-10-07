@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use codewire_daemon::client::{
     CredentialBridgeConnection, CredentialBridgeResponseSender, SessionClientError,
 };
-use codewire_gateway_proto::codewire::bridge::v1;
-use codewire_gateway_proto::{
+use codewire_daemon_proto::codewire::bridge::v1;
+use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES, CREDENTIAL_BRIDGE_MAX_HEADER_BYTES,
     CREDENTIAL_BRIDGE_MAX_HEADER_NAME_BYTES, CREDENTIAL_BRIDGE_MAX_HEADER_VALUE_BYTES,
     CREDENTIAL_BRIDGE_MAX_HEADERS, CREDENTIAL_BRIDGE_MAX_IN_FLIGHT,
@@ -413,7 +413,7 @@ where
                 match message.payload {
                     Some(v1::credential_bridge_guest_message::Payload::Ssh(request)) => {
                         let request_id = request.request_id.clone();
-                        if !codewire_gateway_proto::ssh::valid_request_id(&request_id)
+                        if !codewire_daemon_proto::ssh::valid_request_id(&request_id)
                             || active.contains_key(&request_id)
                         {
                             tasks.shutdown().await;
@@ -681,7 +681,7 @@ async fn send_composition_response<S: CredentialBridgeResponseSink>(
             if !response.sealed_platform_fragment.is_empty()
                 && response.sealed_platform_fragment.len()
                     <= MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES
-                && codewire_gateway_proto::projection::decode_platform_inventories(
+                && codewire_daemon_proto::projection::decode_platform_inventories(
                     &response.platform_inventories,
                 )
                 .is_ok() =>

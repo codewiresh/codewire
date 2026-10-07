@@ -93,7 +93,7 @@ grep -Fq "if: \${{ always() }}" <<<"$selection_job" ||
 grep -Fq "rm -f -- \"\$RUNNER_TEMP/codewire-deployed-source-candidate.json\"" \
   <<<"$selection_job" || fail "untrusted deployed-source candidate cleanup is missing"
 for output in deploy_dev reason matched_categories \
-  dashboard_image_state gateway_image_state derp_image_state services_image_state mesh_image_state \
+  dashboard_image_state daemon_image_state derp_image_state services_image_state mesh_image_state \
   baseline_sha head_sha head_tree ci_plan_sha256 ci_policy_sha256 baseline_valid; do
   # shellcheck disable=SC2016
   grep -Fq "$output: \${{ steps.select.outputs.$output }}" <<<"$selection_job" ||
@@ -171,7 +171,7 @@ grep -Fq "          CODEWIRE_RUNTIME_CARRY_FORWARD: '0'" <<<"$build_job" ||
 grep -Fq '          CODEWIRE_DEPLOY_BASELINE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}' \
   <<<"$build_job" ||
   fail "runtime build does not receive the planner-certified deployed baseline"
-for family in DASHBOARD DERP GATEWAY SERVICES MESH; do
+for family in DASHBOARD DERP DAEMON SERVICES MESH; do
   lc="$(tr 'A-Z' 'a-z' <<<"$family")"
   # shellcheck disable=SC2016 # Match the literal workflow expression.
   grep -Fq "          CODEWIRE_IMAGE_STATE_${family}: \${{ needs.deploy-selection.outputs.${lc}_image_state }}" \
@@ -180,7 +180,7 @@ for family in DASHBOARD DERP GATEWAY SERVICES MESH; do
 done
 [[ "$(grep -Fc 'scripts/ci/images/sign-runtime-image-set.sh' <<<"$build_job")" -eq 2 ]] ||
   fail "runtime workflow does not sign the Harbor set and GHCR mirror exactly once each"
-for family in DASHBOARD DERP GATEWAY SERVICES MESH; do
+for family in DASHBOARD DERP DAEMON SERVICES MESH; do
   lc="$(tr 'A-Z' 'a-z' <<<"$family")"
   # shellcheck disable=SC2016 # Match the literal workflow expression.
   [[ "$(grep -Fc "          CODEWIRE_BUILT_FROM_${family}: \${{ steps.build.outputs.${lc}_built_from }}" <<<"$build_job")" -eq 2 ]] ||
@@ -191,18 +191,18 @@ done
 if grep -Fq 'scripts/ci/verify/kind-e2e.sh' <<<"$build_job"; then
   fail "protected delivery duplicates the locally required Kind gate"
 fi
-for family in dashboard derp gateway services mesh; do
+for family in dashboard derp daemon services mesh; do
   # shellcheck disable=SC2016
   [[ "$(grep -Fc "\${{ steps.build.outputs.${family}_candidate_ref }}" <<<"$build_job")" -eq 1 ]] ||
     fail "runtime bundle construction does not consume the exact $family candidate once"
 done
-if grep -Eq '^  (build-(gateway-image|dashboard-image|derp|services-image|mesh-image)|publish-runtime-images):' "$WORKFLOW"; then
+if grep -Eq '^  (build-(daemon-image|dashboard-image|derp|services-image|mesh-image)|publish-runtime-images):' "$WORKFLOW"; then
   fail "runtime products still allocate independent protected workers"
 fi
 
 bash -n "$RUNTIME_BUILDER"
 [[ -x "$RUNTIME_BUILDER" ]] || fail "runtime image-set builder is not executable"
-[[ "$(grep -Ec '^build_one (dashboard|derp|gateway|mesh|services) ' "$RUNTIME_BUILDER")" -eq 5 ]] ||
+[[ "$(grep -Ec '^build_one (dashboard|derp|daemon|mesh|services) ' "$RUNTIME_BUILDER")" -eq 5 ]] ||
   fail "runtime image-set builder does not build exactly five separate product targets"
 grep -Fq "'  max-parallelism = 2'" "$RUNTIME_BUILDER" ||
   fail "runtime image-set builder lacks the CPX42 memory bound"
@@ -284,7 +284,7 @@ openssl pkey -pubin -in "$RUNTIME_PUBLIC_KEY" -pubcheck -noout >/dev/null 2>&1 |
 if grep -Fq 'promote-image-bundle.sh' <<<"$publish_job"; then
   fail "source workflow retains the retired deploy-writing promotion wrapper"
 fi
-for family in dashboard derp gateway services mesh; do
+for family in dashboard derp daemon services mesh; do
   grep -Fq -- "--candidate $family \"\$GITHUB_SHA\"" <<<"$publish_job" ||
     fail "runtime bundle omits $family"
 done
@@ -341,8 +341,8 @@ if grep -Fq '$imagepolicy' \
 fi
 grep -Fq 'name: git.example.com/codewire/dashboard' "$DEV_KUSTOMIZATION" ||
   fail "dev workload render input was removed with its setter marker"
-grep -Fq 'SANDBOX_GATEWAY_IMAGE:' "$DEV_CONFIG_IMAGES" ||
-  fail "dev gateway render input was removed with its setter marker"
+grep -Fq 'SANDBOX_DAEMON_IMAGE:' "$DEV_CONFIG_IMAGES" ||
+  fail "dev daemon render input was removed with its setter marker"
 grep -Fq 'name: codewire-mesh' "$DEV_MESH_RELEASE" ||
   fail "dev Mesh render input was removed with its setter marker"
 

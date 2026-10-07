@@ -67,7 +67,7 @@ command=("$docker_bin" buildx build
   "${build_args[@]}" \
   "$context")
 case "$(realpath -m -- "$dockerfile")" in
-  "$(realpath -m -- "$context")/deployments/docker/gateway.Dockerfile"|"$(realpath -m -- "$context")/images/workspace/Dockerfile")
+  "$(realpath -m -- "$context")/deployments/docker/daemon.Dockerfile"|"$(realpath -m -- "$context")/images/workspace/Dockerfile")
     umask 077
     mkdir -p "$ROOT/.tmp"
     cw_local_work="$(mktemp -d "$ROOT/.tmp/cw-local-image.XXXXXX")"

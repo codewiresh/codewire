@@ -961,9 +961,9 @@ mod tests {
     use crate::daemon::DaemonSessionClient;
     use crate::host_key;
     use boringtun::x25519::{PublicKey, StaticSecret};
-    use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
-    use codewire_gateway_proto::daemon::v1;
-    use codewire_gateway_proto::daemon::v1::daemon_service_server::{
+    use codewire_daemon_proto::codewire::bridge::v1 as bridge_v1;
+    use codewire_daemon_proto::daemon::v1;
+    use codewire_daemon_proto::daemon::v1::daemon_service_server::{
         DaemonService, DaemonServiceServer,
     };
     use codewire_tailnet::conn::{
@@ -2025,7 +2025,7 @@ mod tests {
         let daemon_addr = spawn_recording_tonic_daemon(daemon.clone()).await;
         let daemon_client = DaemonSessionClient::connect_endpoint(
             format!("http://{daemon_addr}"),
-            codewire_gateway_proto::DaemonAuthToken::new("gateway-ssh-test-token").unwrap(),
+            codewire_daemon_proto::DaemonAuthToken::new("gateway-ssh-test-token").unwrap(),
         )
         .await
         .unwrap();
@@ -2069,7 +2069,7 @@ mod tests {
         let daemon_addr = spawn_recording_tonic_daemon(daemon.clone()).await;
         let daemon_client = DaemonSessionClient::connect_endpoint(
             format!("http://{daemon_addr}"),
-            codewire_gateway_proto::DaemonAuthToken::new("gateway-ssh-test-token").unwrap(),
+            codewire_daemon_proto::DaemonAuthToken::new("gateway-ssh-test-token").unwrap(),
         )
         .await
         .unwrap();

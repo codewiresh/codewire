@@ -1,7 +1,7 @@
 //! Typed original-channel private platform client. No discovery or latest-token
 //! fallback, mutation retry, command or credential projection is available here.
 use super::*;
-use codewire_gateway_proto::platform_managed as wire;
+use codewire_daemon_proto::platform_managed as wire;
 use sha2::{Digest, Sha256};
 
 pub fn platform_managed_request_fingerprint(

@@ -16,7 +16,7 @@ EXPECTED_RUNTIME_NODE_SELECTOR="${EXPECTED_RUNTIME_NODE_SELECTOR:-katacontainers
 MATRIX_WORKER_LOOPS="${MATRIX_WORKER_LOOPS:-env-reconciler,sandbox-liveness,billing-session}"
 MATRIX_DAEMON_TAG="${MATRIX_DAEMON_TAG:-}"
 MATRIX_BUILD_DAEMON="${MATRIX_BUILD_DAEMON:-0}"
-MATRIX_CANDIDATE_IMAGES="${MATRIX_CANDIDATE_IMAGES:-services gateway}"
+MATRIX_CANDIDATE_IMAGES="${MATRIX_CANDIDATE_IMAGES:-services daemon}"
 SMOKE_TAILNET_DIRECT_WAIT="${SMOKE_TAILNET_DIRECT_WAIT:-5s}"
 SMOKE_TAILNET_PEER_TIMEOUT="${SMOKE_TAILNET_PEER_TIMEOUT:-30s}"
 SMOKE_TAILNET_DIAL_TIMEOUT="${SMOKE_TAILNET_DIAL_TIMEOUT:-60s}"
@@ -59,12 +59,12 @@ Environment:
   MATRIX_WORKER_LOOPS               WORKER_LOOPS override for the candidate
                                     window
   MATRIX_DAEMON_TAG                 Workspace daemon image tag to test (the
-                                    "gateway" image, SANDBOX_GATEWAY_IMAGE).
+                                    "daemon" image, SANDBOX_DAEMON_IMAGE).
                                     Defaults to the currently deployed dev tag.
   MATRIX_BUILD_DAEMON               Build and push MATRIX_DAEMON_TAG when 1,
                                     default 0
   MATRIX_CANDIDATE_IMAGES           Space-separated candidate images to deploy,
-                                    default "services gateway"
+                                    default "services daemon"
   EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB
                                     Runtime node storage preflight passed to
                                     the candidate smoke, default 400 for fresh
@@ -174,9 +174,9 @@ current_daemon_tag() {
   [[ -n "$configmap" ]] || die "failed to resolve dev runtime ConfigMap from codewire-orchestration"
 
   image="$(kubectl_dev -n "$CODEWIRE_SERVER_NAMESPACE" get configmap "$configmap" -o json |
-    jq -r '.data.SANDBOX_GATEWAY_IMAGE // empty')"
-  [[ "$image" == git.example.invalid/codewire/gateway:* ]] || \
-    die "dev SANDBOX_GATEWAY_IMAGE=$image, expected git.example.invalid/codewire/gateway:<tag>"
+    jq -r '.data.SANDBOX_DAEMON_IMAGE // empty')"
+  [[ "$image" == git.example.invalid/codewire/daemon:* ]] || \
+    die "dev SANDBOX_DAEMON_IMAGE=$image, expected git.example.invalid/codewire/daemon:<tag>"
   printf '%s\n' "${image##*:}"
 }
 

@@ -18,7 +18,7 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-use codewire_gateway_proto::{WORKSPACE_SSH_PORT, WORKSPACE_TAILNET_UDP_PORT};
+use codewire_daemon_proto::{WORKSPACE_SSH_PORT, WORKSPACE_TAILNET_UDP_PORT};
 use codewire_orchestration::sandbox::client::SandboxClient;
 use codewire_orchestration::sandbox::template::{
     CredentialRuntimeTemplateConfig, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_RUNC, TemplateOpts,
@@ -36,7 +36,7 @@ use kube::Api;
 use serde_json::{Value, json};
 
 const RESIZE_TEMPLATE_BASE: &str = "resize-template";
-const RESIZE_FIXTURE_IMAGE: &str = "codewire-gateway:e2e";
+const RESIZE_FIXTURE_IMAGE: &str = "codewire-daemon:e2e";
 const RESIZE_MARKER_KEY: &str = "codewire.sh/resize-smoke-marker";
 const RESIZE_MARKER_ENV: &str = "CODEWIRE_RESIZE_SMOKE_IDENTITY";
 const RESIZE_MARKER_VALUE: &str = "preserved";
@@ -381,9 +381,9 @@ fn access_template_opts(namespace: &str) -> TemplateOpts {
         name: "tmpl-crd-smoke".into(),
         image: workspace_image,
         support_image: if local_images {
-            "codewire-gateway:e2e".into()
+            "codewire-daemon:e2e".into()
         } else {
-            "ghcr.io/codewiresh/gateway:crd-smoke".into()
+            "ghcr.io/codewiresh/daemon:crd-smoke".into()
         },
         runtime_profile: if local_images {
             "runc".into()
@@ -736,7 +736,7 @@ mod tests {
             .find(|container| container["name"] == "codewire-daemon-init")
             .unwrap();
         let init_mounts = init["volumeMounts"].as_array().unwrap();
-        assert_eq!(init["image"], "codewire-gateway:e2e");
+        assert_eq!(init["image"], "codewire-daemon:e2e");
         assert_eq!(init["imagePullPolicy"], "Never");
         for name in ["codewire-bin", "codewire-run"] {
             assert!(init_mounts.iter().any(|mount| mount["name"] == name));
@@ -747,7 +747,7 @@ mod tests {
             .iter()
             .find(|container| container["name"] == "workspace")
             .unwrap();
-        assert_eq!(workspace["image"], "codewire-gateway:e2e");
+        assert_eq!(workspace["image"], "codewire-daemon:e2e");
         assert_eq!(workspace["imagePullPolicy"], "Never");
         // Ready on the daemon's local marker, written before it binds: the
         // resize's reconcile binds it, as a start binds a replacement Pod.

@@ -25,7 +25,6 @@ A `(bin)` marker means the crate produces a service/app binary.
 
 | Crate                  | Role                                                                               | License      |
 | ---------------------- | ---------------------------------------------------------------------------------- | ------------ |
-| `codewire-gateway`     | Sandbox gateway (bin): SSH/tailnet adapter, typed gRPC to the daemon.               | AGPL-3.0-only |
 | `codewire-daemon`      | Workspace daemon library: authenticated exec, PTY, and file RPCs behind private `cw __hosted-daemon`. | AGPL-3.0-only |
 | `codewire-derp`        | DERP relay core (bin).                                                             | BSD-3-Clause  |
 | `codewire-udp-relay`   | UDP peer-relay allocation and forwarding (bin).                                    | AGPL-3.0-only |
@@ -40,7 +39,7 @@ A `(bin)` marker means the crate produces a service/app binary.
 | `codewire-project`      | I/O-free versioned project parsing, validation, and normalization. | AGPL-3.0-only |
 | `codewire-project-proto` | Lossless adapters between project intent and the public protobuf contract. | AGPL-3.0-only |
 | `codewire-proto`        | Generated Connect-RPC contract types for the control-plane API. | AGPL-3.0-only   |
-| `codewire-gateway-proto`| Generated protobuf types for the gateway/daemon boundary.      | AGPL-3.0-only   |
+| `codewire-daemon-proto`| Generated protobuf types for the daemon and broker boundary.   | AGPL-3.0-only   |
 | `codewire-vmm-guest-probe` | Static guest init and daemon probe (bin) for the local microVM boundary. | AGPL-3.0-only |
 
 ### Auth library

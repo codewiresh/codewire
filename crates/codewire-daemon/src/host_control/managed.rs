@@ -1,7 +1,7 @@
 //! Closed, bounded invocation of the cw-bearing target owner's record helper.
 //! No requested program, provider endpoint or raw environment is accepted.
 use super::{Error, Origin, Scope, canonical_uuid, session_id};
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -90,7 +90,7 @@ pub(crate) fn validate_launch(value: &v1::HostControlManagedLaunch) -> Result<()
     if value.working_dir.len() > 4096
         || value.working_dir.contains('\0')
         || (!value.working_dir.is_empty() && !Path::new(&value.working_dir).is_absolute())
-        || (!value.name.is_empty() && !codewire_gateway_proto::valid_session_name(&value.name))
+        || (!value.name.is_empty() && !codewire_daemon_proto::valid_session_name(&value.name))
     {
         return Err(Error::Invalid);
     }

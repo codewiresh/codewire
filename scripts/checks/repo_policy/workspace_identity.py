@@ -426,7 +426,7 @@ def pool_self_test(template: dict[str, Any], pool: dict[str, Any]) -> None:
         {"name": "TOKEN", "valueFrom": {"secretKeyRef": {"name": "env", "key": "token"}}}))
     rejected("tagged workspace image", lambda f: workspace(f).__setitem__("image", "registry.example.invalid/codewire/workspace:main"))
     rejected("tagged support image", lambda f: next(v for v in pod_spec(f)["volumes"] if "image" in v)["image"].__setitem__(
-        "reference", "git.example.invalid/codewire/gateway:main-4b5b65d"))
+        "reference", "git.example.invalid/codewire/daemon:main-4b5b65d"))
     rejected("confidential runtime", lambda f: pod_spec(f).__setitem__("runtimeClassName", "confidential"))
     rejected("confidential tier label", lambda f: f["template"]["spec"]["podTemplate"]["metadata"]["labels"].__setitem__(
         "codewire.sh/isolation-tier", "confidential"))

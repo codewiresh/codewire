@@ -17,7 +17,7 @@ PLAN_SCHEMA = "codewire.ci-plan/v1"
 BASELINE_SCHEMA = "codewire.ci-baseline/v1"
 RUNTIME_ARTIFACTS = (
     "dashboard_image",
-    "gateway_image",
+    "daemon_image",
     "derp_image",
     "services_image",
     "mesh_image",

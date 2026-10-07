@@ -71,7 +71,7 @@ codewire-daemon-bridge = { workspace = true }
 codewire-egress-broker = { workspace = true }
 codewire-egress-policy = { workspace = true }
 codewire-netstack = { workspace = true }
-codewire-gateway-proto = { workspace = true }
+codewire-daemon-proto = { workspace = true }
 codewire-vmm-guest-probe = { workspace = true }
 connectrpc = { workspace = true, features = ["axum", "client"] }
 futures = { workspace = true }

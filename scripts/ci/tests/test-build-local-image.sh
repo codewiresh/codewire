@@ -163,9 +163,9 @@ print(value['work'])
 PY
 }
 
-for recipe in deployments/docker/gateway.Dockerfile images/workspace/Dockerfile; do
+for recipe in deployments/docker/daemon.Dockerfile images/workspace/Dockerfile; do
   case "$recipe" in
-    deployments/docker/gateway.Dockerfile) family=gateway ;;
+    deployments/docker/daemon.Dockerfile) family=daemon ;;
     images/workspace/Dockerfile) family=workspace ;;
   esac
   : >"$work/docker.log"
@@ -196,7 +196,7 @@ for recipe in deployments/docker/gateway.Dockerfile images/workspace/Dockerfile;
 done
 
 set +e
-run_cw_helper cw-cleanup-failure deployments/docker/gateway.Dockerfile 0 33 \
+run_cw_helper cw-cleanup-failure deployments/docker/daemon.Dockerfile 0 33 \
   >"$work/cw-cleanup-failure.out" 2>&1
 status=$?
 set -e
@@ -207,7 +207,7 @@ owned_cw_work+=("$cw_work")
 
 : >"$work/docker.log"
 set +e
-run_cw_helper cw-producer-failure deployments/docker/gateway.Dockerfile 0 0 44 \
+run_cw_helper cw-producer-failure deployments/docker/daemon.Dockerfile 0 0 44 \
   >"$work/cw-producer-failure.out" 2>&1
 status=$?
 set -e

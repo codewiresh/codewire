@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use codewire_credential_broker::provider_enrollment::validate_private_directory;
 use codewire_credential_broker::ssh_agent::{SshAgentConfig, SshAgentError, SshAgentOwner};
-use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_local_credentials::{LocalSshSignError, LocalSshSignRequest, LocalSshSigner};
 use codewire_protected_store::ssh_material::SshAgentMaterial;
 use sha2::{Digest, Sha256};

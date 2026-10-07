@@ -7,8 +7,8 @@
 !proto
 !proto/**
 !libs
-!libs/gateway-proto
-!libs/gateway-proto/**
+!libs/daemon-proto
+!libs/daemon-proto/**
 !deployments
 !deployments/docker
 !deployments/docker/licenses

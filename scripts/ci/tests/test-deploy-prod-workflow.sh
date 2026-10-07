@@ -35,7 +35,7 @@ first_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$p
 [[ -n "$validation_line" && -n "$first_copy_line" && "$validation_line" -lt "$first_copy_line" ]] ||
   fail "complete production validation does not precede registry publication"
 
-for job in build-gateway-image build-dashboard-image build-derp build-services-image build-mesh-image; do
+for job in build-daemon-image build-dashboard-image build-derp build-services-image build-mesh-image; do
   grep -Fq "      - $job" <<<"$publish_job" ||
     fail "production aggregate does not require $job"
 done

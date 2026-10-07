@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use codewire_gateway_proto::daemon::v1;
-use codewire_gateway_proto::{DAEMON_AUTH_TOKEN_HEADER, DaemonAuthToken};
+use codewire_daemon_proto::daemon::v1;
+use codewire_daemon_proto::{DAEMON_AUTH_TOKEN_HEADER, DaemonAuthToken};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
@@ -595,9 +595,9 @@ pub fn file_set_stat_request(request: FileSetStatRequest) -> v1::SetStatRequest 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_gateway_proto::DaemonAuthToken;
-    use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
-    use codewire_gateway_proto::daemon::v1::daemon_service_server::{
+    use codewire_daemon_proto::DaemonAuthToken;
+    use codewire_daemon_proto::codewire::bridge::v1 as bridge_v1;
+    use codewire_daemon_proto::daemon::v1::daemon_service_server::{
         DaemonService, DaemonServiceServer,
     };
     use std::net::SocketAddr;

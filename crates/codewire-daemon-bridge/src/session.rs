@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use buffa_types::Timestamp;
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 use codewire_proto::codewire::v1 as proto;
 use connectrpc::{InboundStream, RequestContext, ServiceRequest, ServiceResult, ServiceStream};
 use futures::StreamExt as _;
@@ -313,7 +313,7 @@ where
             Some(&request.session_id),
         );
         if request.data.is_empty()
-            || request.data.len() > codewire_gateway_proto::SESSION_INPUT_MAX_BYTES
+            || request.data.len() > codewire_daemon_proto::SESSION_INPUT_MAX_BYTES
         {
             violations.push(violation("/data", "must contain 1..65536 bytes"));
         }
@@ -624,7 +624,7 @@ fn launch_violations(request: &proto::LaunchSessionRequest) -> Vec<FieldViolatio
     if request.command.is_empty() {
         violations.push(violation("/command", "must not be empty"));
     }
-    if !codewire_gateway_proto::valid_session_name(&request.name) {
+    if !codewire_daemon_proto::valid_session_name(&request.name) {
         violations.push(violation(
             "/name",
             "must be a safe name of at most 64 ASCII bytes",
@@ -1089,11 +1089,11 @@ mod tests {
         let bridge = EnvironmentSessionBridge::new(backend);
         for data in [
             vec![],
-            vec![0; codewire_gateway_proto::SESSION_INPUT_MAX_BYTES + 1],
+            vec![0; codewire_daemon_proto::SESSION_INPUT_MAX_BYTES + 1],
             vec![0xff, 0, b'\n'],
         ] {
             let valid =
-                !data.is_empty() && data.len() <= codewire_gateway_proto::SESSION_INPUT_MAX_BYTES;
+                !data.is_empty() && data.len() <= codewire_daemon_proto::SESSION_INPUT_MAX_BYTES;
             let message = proto::SendSessionInputRequest {
                 org_id: "org".into(),
                 environment_id: "env".into(),

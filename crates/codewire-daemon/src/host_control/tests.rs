@@ -348,7 +348,7 @@ async fn host_control_authorization_and_service_are_host_only() {
     assert_eq!(missing.code(), tonic::Code::Unauthenticated);
     let mut request = tonic::Request::new(v1::HostControlInfoRequest {});
     request.metadata_mut().insert(
-        codewire_gateway_proto::DAEMON_AUTH_TOKEN_HEADER,
+        codewire_daemon_proto::DAEMON_AUTH_TOKEN_HEADER,
         "synthetic-host-control-owner".parse().unwrap(),
     );
     let info = service
@@ -438,7 +438,7 @@ async fn host_control_service_pages_large_actual_records_without_drop_or_truncat
             ..Default::default()
         });
         request.metadata_mut().insert(
-            codewire_gateway_proto::DAEMON_AUTH_TOKEN_HEADER,
+            codewire_daemon_proto::DAEMON_AUTH_TOKEN_HEADER,
             "synthetic-host-control-owner".parse().unwrap(),
         );
         let response = service

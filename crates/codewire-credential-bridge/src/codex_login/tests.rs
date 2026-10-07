@@ -10,7 +10,7 @@ type LoginResult = v1::codex_login_response::Result;
 const ACCESS: &str = "synthetic.access-token.canary";
 
 fn capabilities() -> Vec<String> {
-    vec![codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN.to_owned()]
+    vec![codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN.to_owned()]
 }
 
 struct Harness {
@@ -159,8 +159,8 @@ async fn malformed_capability_lists_refuse_activation() {
     for capabilities in [
         vec!["Codex-Login".to_owned()],
         vec![String::new()],
-        vec!["x".repeat(codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITY_BYTES + 1)],
-        vec!["a".to_owned(); codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES + 1],
+        vec!["x".repeat(codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITY_BYTES + 1)],
+        vec!["a".to_owned(); codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES + 1],
     ] {
         let bridge = bridge();
         let (prepared, _output) = bridge.prepare_connection().unwrap();

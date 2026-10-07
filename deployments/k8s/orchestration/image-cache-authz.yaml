@@ -1,7 +1,7 @@
 # Runtime-node image cache (Program #2238 A2b). Orchestration reconciles one
 # DaemonSet, cw-image-cache, in the shared sandbox namespace. On every
 # katacontainers.io/kata-runtime node it mounts each image orchestration renders
-# (workspace default, gateway and daemon-init, DinD) for the current and
+# (workspace default, daemon support image, DinD) for the current and
 # previous release as a read-only OCI image volume, so the kubelet pulls them
 # and its image garbage collector keeps them in use. A sandbox start after a
 # release then does not wait for a pull.

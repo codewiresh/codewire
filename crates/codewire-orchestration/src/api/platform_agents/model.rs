@@ -3,8 +3,8 @@
 //! Private live requests are validated and hashed in memory. Only their digest,
 //! identifiers and original nonsecret scope enter this module's durable model.
 
-use codewire_gateway_proto::daemon::v1 as private;
-use codewire_gateway_proto::platform_managed as wire;
+use codewire_daemon_proto::daemon::v1 as private;
+use codewire_daemon_proto::platform_managed as wire;
 use codewire_server_core::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

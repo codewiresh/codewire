@@ -231,7 +231,6 @@ run_retained_runtime_acceptance_suite() {{
   RETAINED_KUBECONFIG="$RUN_DIR/second-context"
   printf second >"$RETAINED_KUBECONFIG"
 }}
-stop_gateway_port_forward() {{ :; }}
 dump_cluster_state() {{ :; }}
 stop_remote_dind_kind_forwarding() {{ printf stopped >"$RUN_DIR/forwarding"; }}
 delete_owned_kind_cluster() {{ printf deletion >"$RUN_DIR/deletion"; }}
@@ -256,7 +255,6 @@ KIND_CREATED_BY_TRANSACTION={created}
 KIND_TRANSACTION_NODE_ID={"4" * 64}
 RETAINED_KUBECONFIG="$RUN_DIR/suite-context"
 printf suite >"$RETAINED_KUBECONFIG"
-stop_gateway_port_forward() {{ :; }}
 dump_cluster_state() {{ :; }}
 stop_remote_dind_kind_forwarding() {{ printf stopped >"$RUN_DIR/forwarding"; }}
 docker() {{ printf '%s\\n' {observed}; }}
@@ -276,7 +274,6 @@ KIND_SHARD_TRANSACTION=1
 RETAINED_KUBECONFIG="$RUN_DIR/suite-context"
 printf suite >"$RETAINED_KUBECONFIG"
 rm() { return 51; }
-stop_gateway_port_forward() { :; }
 dump_cluster_state() { :; }
 stop_remote_dind_kind_forwarding() { printf stopped >"$RUN_DIR/forwarding"; }
 trap retained_suite_cleanup EXIT
@@ -534,10 +531,8 @@ NS=synthetic-namespace
 SANDBOX_NS=synthetic-sandbox
 KEEP_KIND_CLUSTER=1
 AUTHZ_TMPDIR=
-GATEWAY_SMOKE_TMPDIR=
 kind() {{ printf '%s\\n' synthetic-profile; }}
 kubectl() {{ {shlex.quote(sys.executable)} {shlex.quote(str(fixture))} "$@"; }}
-stop_gateway_port_forward() {{ :; }}
 stop_remote_dind_kind_forwarding() {{ :; }}
 {finish}
 ''')

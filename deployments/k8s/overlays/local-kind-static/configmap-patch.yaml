@@ -26,7 +26,7 @@ data:
   SANDBOX_NETWORK_POLICY_MANAGEMENT: "Unmanaged"
   # No shared warm pool here (Program #2238 C4): pool templates admit no
   # ingress before adoption, so they need Managed network policy, and this
-  # overlay's gateway image is a local tag without a registry digest. The
+  # overlay's daemon image is a local tag without a registry digest. The
   # retained harness cluster (tests/e2e/kind, make kind-up) runs pools.
   SANDBOX_WARM_POOL_SHAPES: ""
   CODEWIRE_API_URL: "http://codewire-orchestration.default.svc.cluster.local:8084"
@@ -40,7 +40,7 @@ data:
   BILLING_CONTROLLER_REQUEUE_SECONDS: "60"
   BILLING_SESSION_LEDGER_CANONICAL: "true"
   SANDBOX_IMAGE_PULL_SECRET: ""
-  SANDBOX_GATEWAY_IMAGE: "git.example.com/codewire/gateway:local"
+  SANDBOX_DAEMON_IMAGE: "git.example.com/codewire/daemon:local"
   SANDBOX_DIND_ENABLED: "true"
   PREVIEW_BASE_DOMAIN: "codewire-dev.local"
   SKIP_2FA_SETUP: "true"

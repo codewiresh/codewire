@@ -7,7 +7,7 @@
 # Services: idp, orchestration, credential-service, billing, coordinator,
 # dashboard (what the cluster ingress serves, so `make kind-test` exercises the
 # current dashboard source; `make kind-watch` serves it for review), and daemon
-# (the in-workspace `cw` carried by the gateway image; sandboxes created
+# (the in-workspace `cw` carried by the daemon image; sandboxes created
 # afterwards run it). Each image is always the gate-built base plus every
 # binary deployed since, so repeated deploys never stack layers; a new base
 # from the gate or `up` resets it. credential-service also rebuilds the
@@ -51,7 +51,7 @@ case "$SERVICE" in
     destination=/srv/codewire/
     ;;
   daemon)
-    image=codewire-gateway
+    image=codewire-daemon
     crate=codewire-cli-bin
     bin=cw
     destination=/usr/local/bin/
@@ -192,7 +192,7 @@ fi
 kube() { kubectl --context "kind-${KIND_CLUSTER_NAME}" -n "$NAMESPACE" "$@"; }
 if [ "$SERVICE" = daemon ]; then
   # The renderer reads this Deployment environment for future sandboxes.
-  # Loading a new tag alone would leave it using the original gateway image.
+  # Loading a new tag alone would leave it using the original daemon image.
   deployment=codewire-orchestration
 fi
 # A rollout reports done while the previous pods are still terminating and can
@@ -207,8 +207,8 @@ previous="$(kube get pods -l "$selector" -o name)"
 if [ "$KIND_PROFILE" = 1 ]; then
   if [ "$SERVICE" = daemon ]; then
     current_image="$(kube get "deployment/${deployment}" \
-      -o 'jsonpath={.spec.template.spec.containers[?(@.name=="orchestration")].env[?(@.name=="SANDBOX_GATEWAY_IMAGE")].value}')"
-    kube set env "deployment/${deployment}" --containers=orchestration "SANDBOX_GATEWAY_IMAGE=$IMAGE" >/dev/null
+      -o 'jsonpath={.spec.template.spec.containers[?(@.name=="orchestration")].env[?(@.name=="SANDBOX_DAEMON_IMAGE")].value}')"
+    kube set env "deployment/${deployment}" --containers=orchestration "SANDBOX_DAEMON_IMAGE=$IMAGE" >/dev/null
   else
     current_image="$(kube get "deployment/${deployment}" \
       -o "jsonpath={.spec.template.spec.containers[?(@.name==\"${SERVICE}\")].image}")"

@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use codewire_gateway_proto::codewire::bridge::v1;
-use codewire_gateway_proto::ssh::{self, SshOperation};
+use codewire_daemon_proto::codewire::bridge::v1;
+use codewire_daemon_proto::ssh::{self, SshOperation};
 
 use super::*;
 

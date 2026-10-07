@@ -569,7 +569,7 @@ where
     async fn repository_ssh_operation(
         &self,
         request: Request<v1::RepositorySshOperationRequest>,
-    ) -> Result<Response<codewire_gateway_proto::codewire::bridge::v1::CredentialSshResponse>, Status>
+    ) -> Result<Response<codewire_daemon_proto::codewire::bridge::v1::CredentialSshResponse>, Status>
     {
         self.run_ssh_operation(request.into_inner()).await
     }

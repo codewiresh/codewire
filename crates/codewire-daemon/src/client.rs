@@ -8,14 +8,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
-pub use codewire_gateway_proto::daemon::v1;
-use codewire_gateway_proto::ssh::{self, SshOperation};
-use codewire_gateway_proto::{
+use codewire_daemon_proto::codewire::bridge::v1 as bridge_v1;
+pub use codewire_daemon_proto::daemon::v1;
+use codewire_daemon_proto::ssh::{self, SshOperation};
+use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES, DAEMON_AUTH_TOKEN_HEADER, DAEMON_CAPABILITY_ATTACH,
     DAEMON_CAPABILITY_SESSIONS,
 };
-pub use codewire_gateway_proto::{DAEMON_MINIMUM_PROTOCOL_VERSION, DAEMON_PROTOCOL_VERSION};
+pub use codewire_daemon_proto::{DAEMON_MINIMUM_PROTOCOL_VERSION, DAEMON_PROTOCOL_VERSION};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
@@ -800,10 +800,10 @@ impl PreparedHostedCredentialBridge {
     ) -> Result<CredentialBridgeResponseSender, SessionClientError> {
         let mut forwarded = Vec::new();
         for capability in capabilities {
-            if codewire_gateway_proto::CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES
+            if codewire_daemon_proto::CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES
                 .contains(&capability.as_str())
                 && !forwarded.contains(capability)
-                && forwarded.len() < codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
+                && forwarded.len() < codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
             {
                 forwarded.push(capability.clone());
             }
@@ -951,8 +951,7 @@ impl SessionClient {
             .send(bridge_v1::CredentialBridgeHostMessage {
                 payload: Some(bridge_v1::credential_bridge_host_message::Payload::Open(
                     bridge_v1::CredentialBridgeOpen {
-                        protocol_version:
-                            codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                        protocol_version: codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
                         environment_id: environment_id.to_string(),
                         environment_generation,
                         // Local brokers serve no optional operation.
@@ -1037,7 +1036,7 @@ impl SessionClient {
                     return Err(SessionClientError::InvalidCredential);
                 };
                 if ready.protocol_version
-                    != codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION
+                    != codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION
                     || ready.environment_id != environment_id.to_string()
                     || ready.environment_generation != environment_generation
                 {
@@ -1064,7 +1063,7 @@ impl SessionClient {
         request: v1::LaunchSessionRequest,
     ) -> Result<v1::SessionRecord, SessionClientError> {
         if !request.name.is_empty() || request.parent_session_id.is_some() {
-            self.require_capability(codewire_gateway_proto::DAEMON_CAPABILITY_SESSION_METADATA)
+            self.require_capability(codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_METADATA)
                 .await?;
         }
         let mut client = self.inner.clone();
@@ -1164,7 +1163,7 @@ impl SessionClient {
         session_id: &str,
         data: Vec<u8>,
     ) -> Result<(), SessionClientError> {
-        use codewire_gateway_proto::{
+        use codewire_daemon_proto::{
             DAEMON_CAPABILITY_SESSION_INPUT, SESSION_INPUT_MAX_BYTES, SESSION_INPUT_TIMEOUT,
         };
         if data.is_empty() || data.len() > SESSION_INPUT_MAX_BYTES {
@@ -1491,8 +1490,8 @@ mod session_input_capability_tests {
     #[test]
     fn old_daemon_rejects_new_input_and_metadata_capabilities_before_dispatch() {
         for capability in [
-            codewire_gateway_proto::DAEMON_CAPABILITY_SESSION_INPUT,
-            codewire_gateway_proto::DAEMON_CAPABILITY_SESSION_METADATA,
+            codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_INPUT,
+            codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_METADATA,
         ] {
             let old = v1::GetCapabilitiesResponse {
                 state: v1::DaemonState::Ready as i32,

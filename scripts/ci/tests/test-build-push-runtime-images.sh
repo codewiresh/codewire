@@ -137,7 +137,7 @@ sleep_log="$work/sleep.log"
   fail "wrapper did not emit exactly ten runtime outputs"
 [[ "$(wc -l <"$build_log" | tr -d ' ')" -eq 5 ]] ||
   fail "wrapper did not verify exactly five product images"
-for family in dashboard derp gateway mesh services; do
+for family in dashboard derp daemon mesh services; do
   grep -Eq "^${family}_candidate_ref=.*${family}@sha256:[0-9a-f]{64}$" "$output" ||
     fail "wrapper omitted exact $family output"
   grep -qx "${family}_built_from=0123456789abcdef0123456789abcdef01234567" "$output" ||
@@ -282,7 +282,7 @@ grep -Fq "buildx rm --force $builder" "$docker_log" ||
   fail "wrapper did not destroy its BuildKit daemon"
 [[ "$(grep -Ec '^pull registry\.example\.invalid/codewire/' "$docker_log")" -eq 5 ]] ||
   fail "wrapper did not pull all five protected candidates by digest"
-for family in dashboard derp gateway mesh services; do
+for family in dashboard derp daemon mesh services; do
   grep -Eq "^image tag .*codewire/${family}@sha256:[0-9a-f]{64} codewire-${family}:e2e$" \
     "$docker_log" || fail "wrapper did not materialize the exact $family candidate locally"
 done
@@ -403,7 +403,7 @@ ui_output="$work/ui-output"
 ui_docker_log="$work/ui-docker.log"
 ui_build_log="$work/ui-build.log"
 ui_carried="$work/ui-carried"
-printf '%s\n' services mesh gateway derp >"$ui_carried"
+printf '%s\n' services mesh daemon derp >"$ui_carried"
 run_wrapper "$ui_output" "$ui_docker_log" "$ui_build_log" "$work/ui-sleep.log" 47 \
   FAKE_BASELINE_SHA="$baseline_sha" \
   CARRIED_FAMILIES_FILE="$ui_carried" \
@@ -411,7 +411,7 @@ run_wrapper "$ui_output" "$ui_docker_log" "$ui_build_log" "$work/ui-sleep.log" 4
   CODEWIRE_DEPLOY_BASELINE_SHA="$baseline_sha" \
   CODEWIRE_IMAGE_STATE_DASHBOARD=affected \
   CODEWIRE_IMAGE_STATE_DERP=unaffected \
-  CODEWIRE_IMAGE_STATE_GATEWAY=unaffected \
+  CODEWIRE_IMAGE_STATE_DAEMON=unaffected \
   CODEWIRE_IMAGE_STATE_SERVICES=unaffected \
   CODEWIRE_IMAGE_STATE_MESH=unaffected
 [[ "$(wc -l <"$ui_build_log" | tr -d ' ')" -eq 1 ]] ||
@@ -420,7 +420,7 @@ run_wrapper "$ui_output" "$ui_docker_log" "$ui_build_log" "$work/ui-sleep.log" 4
   fail "UI-only change anchored the runtime-set Bake without a services build"
 [[ "$(wc -l <"$ui_output" | tr -d ' ')" -eq 10 ]] ||
   fail "UI-only change did not emit the complete five-image set"
-for family in services mesh gateway derp; do
+for family in services mesh daemon derp; do
   grep -qx "${family}_candidate_ref=registry.example.invalid/codewire/${family}@sha256:$(carried_digest "$family")" \
     "$ui_output" ||
     fail "UI-only change did not carry forward the exact deployed $family digest"
@@ -435,7 +435,7 @@ grep -qx "dashboard_built_from=${head_sha}" "$ui_output" ||
   fail "UI-only change did not authenticate once for carry-forward resolution"
 [[ "$(grep -Ec '^pull registry\.example\.invalid/codewire/' "$ui_docker_log")" -eq 5 ]] ||
   fail "UI-only change did not materialize all five candidates locally"
-for family in dashboard derp gateway mesh services; do
+for family in dashboard derp daemon mesh services; do
   grep -Eq "^image tag .*codewire/${family}@sha256:[0-9a-f]{64} codewire-${family}:e2e$" \
     "$ui_docker_log" ||
     fail "UI-only change did not materialize the exact $family candidate locally"
@@ -445,7 +445,7 @@ services_output="$work/services-output"
 services_docker_log="$work/services-docker.log"
 services_build_log="$work/services-build.log"
 services_carried="$work/services-carried"
-printf '%s\n' dashboard derp gateway mesh >"$services_carried"
+printf '%s\n' dashboard derp daemon mesh >"$services_carried"
 run_wrapper "$services_output" "$services_docker_log" "$services_build_log" \
   "$work/services-sleep.log" 48 \
   FAKE_BASELINE_SHA="$baseline_sha" \
@@ -454,14 +454,14 @@ run_wrapper "$services_output" "$services_docker_log" "$services_build_log" \
   CODEWIRE_DEPLOY_BASELINE_SHA="$baseline_sha" \
   CODEWIRE_IMAGE_STATE_DASHBOARD=unaffected \
   CODEWIRE_IMAGE_STATE_DERP=unaffected \
-  CODEWIRE_IMAGE_STATE_GATEWAY=unaffected \
+  CODEWIRE_IMAGE_STATE_DAEMON=unaffected \
   CODEWIRE_IMAGE_STATE_SERVICES=affected \
   CODEWIRE_IMAGE_STATE_MESH=unaffected
 [[ "$(wc -l <"$services_build_log" | tr -d ' ')" -eq 1 ]] ||
   fail "services-input change rebuilt a certified-unaffected image"
 [[ "$(awk -F'|' '$1 == "services" { print $6 }' "$services_build_log")" = 1 ]] ||
   fail "services-input change did not anchor the runtime-set Bake on services"
-for family in dashboard derp gateway mesh; do
+for family in dashboard derp daemon mesh; do
   grep -qx "${family}_candidate_ref=registry.example.invalid/codewire/${family}@sha256:$(carried_digest "$family")" \
     "$services_output" ||
     fail "services-input change did not carry forward the exact deployed $family digest"
@@ -481,7 +481,7 @@ run_wrapper "$gate_off_output" "$gate_off_docker_log" "$gate_off_build_log" \
   CODEWIRE_DEPLOY_BASELINE_SHA="$baseline_sha" \
   CODEWIRE_IMAGE_STATE_DASHBOARD=unaffected \
   CODEWIRE_IMAGE_STATE_DERP=unaffected \
-  CODEWIRE_IMAGE_STATE_GATEWAY=unaffected \
+  CODEWIRE_IMAGE_STATE_DAEMON=unaffected \
   CODEWIRE_IMAGE_STATE_SERVICES=unaffected \
   CODEWIRE_IMAGE_STATE_MESH=unaffected
 [[ "$(wc -l <"$gate_off_build_log" | tr -d ' ')" -eq 5 ]] ||
@@ -489,7 +489,7 @@ run_wrapper "$gate_off_output" "$gate_off_docker_log" "$gate_off_build_log" \
 if grep -Eq 'imagetools (inspect|create)|^login ' "$gate_off_docker_log"; then
   fail "disabled carry-forward consulted the deployed baseline"
 fi
-for family in dashboard derp gateway mesh services; do
+for family in dashboard derp daemon mesh services; do
   grep -qx "${family}_built_from=${head_sha}" "$gate_off_output" ||
     fail "disabled carry-forward did not build $family from the exact head"
 done
@@ -508,7 +508,7 @@ missing_output="$work/missing-output"
 missing_docker_log="$work/missing-docker.log"
 missing_build_log="$work/missing-build.log"
 missing_carried="$work/missing-carried"
-printf '%s\n' services gateway derp >"$missing_carried"
+printf '%s\n' services daemon derp >"$missing_carried"
 run_wrapper "$missing_output" "$missing_docker_log" "$missing_build_log" \
   "$work/missing-sleep.log" 51 \
   FAKE_BASELINE_SHA="$baseline_sha" \
@@ -518,7 +518,7 @@ run_wrapper "$missing_output" "$missing_docker_log" "$missing_build_log" \
   CODEWIRE_DEPLOY_BASELINE_SHA="$baseline_sha" \
   CODEWIRE_IMAGE_STATE_DASHBOARD=affected \
   CODEWIRE_IMAGE_STATE_DERP=unaffected \
-  CODEWIRE_IMAGE_STATE_GATEWAY=unaffected \
+  CODEWIRE_IMAGE_STATE_DAEMON=unaffected \
   CODEWIRE_IMAGE_STATE_SERVICES=unaffected \
   CODEWIRE_IMAGE_STATE_MESH=unaffected \
   >"$work/missing.stdout" 2>"$work/missing.stderr"
@@ -530,14 +530,14 @@ grep -Fq 'Carry-forward of mesh failed closed; rebuilding it from source' \
   fail "unresolvable baseline tag anchored the Bake transaction without a services build"
 grep -qx "mesh_built_from=${head_sha}" "$missing_output" ||
   fail "unresolvable baseline tag did not record the rebuilt mesh source"
-grep -qx "gateway_candidate_ref=registry.example.invalid/codewire/gateway@sha256:$(carried_digest gateway)" \
+grep -qx "daemon_candidate_ref=registry.example.invalid/codewire/daemon@sha256:$(carried_digest daemon)" \
   "$missing_output" || fail "resolvable carried images did not survive an unresolvable sibling"
 
 stateless_output="$work/stateless-output"
 stateless_docker_log="$work/stateless-docker.log"
 stateless_build_log="$work/stateless-build.log"
 stateless_carried="$work/stateless-carried"
-printf '%s\n' dashboard derp gateway services >"$stateless_carried"
+printf '%s\n' dashboard derp daemon services >"$stateless_carried"
 run_wrapper "$stateless_output" "$stateless_docker_log" "$stateless_build_log" \
   "$work/stateless-sleep.log" 52 \
   FAKE_BASELINE_SHA="$baseline_sha" \
@@ -546,7 +546,7 @@ run_wrapper "$stateless_output" "$stateless_docker_log" "$stateless_build_log" \
   CODEWIRE_DEPLOY_BASELINE_SHA="$baseline_sha" \
   CODEWIRE_IMAGE_STATE_DASHBOARD=unaffected \
   CODEWIRE_IMAGE_STATE_DERP=unaffected \
-  CODEWIRE_IMAGE_STATE_GATEWAY=unaffected \
+  CODEWIRE_IMAGE_STATE_DAEMON=unaffected \
   CODEWIRE_IMAGE_STATE_SERVICES=unaffected \
   >"$work/stateless.stdout" 2>"$work/stateless.stderr"
 grep -Fq 'Runtime image mesh has no trusted planner state; building it from source' \

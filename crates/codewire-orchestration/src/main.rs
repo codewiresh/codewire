@@ -42,7 +42,7 @@ const PUBLIC_CONNECT_METHODS: [&str; 1] = ["/codewire.v1.OrganizationService/Get
 // The internal Connect app (Mesh authorization) is served only behind TLS.
 const ORCHESTRATION_INTERNAL_TLS_PORT_ENV: &str = "ORCHESTRATION_INTERNAL_TLS_PORT";
 const DEFAULT_ORCHESTRATION_INTERNAL_TLS_PORT: u16 =
-    codewire_gateway_proto::ORCHESTRATION_INTERNAL_TLS_PORT;
+    codewire_daemon_proto::ORCHESTRATION_INTERNAL_TLS_PORT;
 const ORCHESTRATION_INTERNAL_TLS_CERT_FILE_ENV: &str = "ORCHESTRATION_INTERNAL_TLS_CERT_FILE";
 const ORCHESTRATION_INTERNAL_TLS_KEY_FILE_ENV: &str = "ORCHESTRATION_INTERNAL_TLS_KEY_FILE";
 const ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV: &str =
@@ -224,7 +224,7 @@ fn workspace_binding_bind_addr(
         public_bind_addr,
         ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV,
         configured_port,
-        codewire_gateway_proto::WORKSPACE_BINDING_PORT,
+        codewire_daemon_proto::WORKSPACE_BINDING_PORT,
     )
 }
 

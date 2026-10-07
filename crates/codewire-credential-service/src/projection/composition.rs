@@ -3,8 +3,8 @@
 
 use std::collections::BTreeMap;
 
-use codewire_gateway_proto::codewire::bridge::v1;
-use codewire_gateway_proto::projection::{decode_local_inventories, encode_platform_inventories};
+use codewire_daemon_proto::codewire::bridge::v1;
+use codewire_daemon_proto::projection::{decode_local_inventories, encode_platform_inventories};
 use codewire_project::PlatformProjectionSelection;
 use codewire_workload_secrets::{
     ProjectionCompositionPlan, ProjectionContext, ProjectionContributor, ProjectionSourceInventory,

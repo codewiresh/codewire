@@ -17,7 +17,7 @@ use axum::extract::ws::{CloseFrame, Message, WebSocketUpgrade};
 use axum::http::{HeaderMap, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 use codewire_server_core::auth::{SESSION_COOKIE_NAME, authenticate, hash_session_token};
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};

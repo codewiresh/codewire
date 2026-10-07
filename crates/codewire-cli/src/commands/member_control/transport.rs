@@ -5,7 +5,7 @@ use super::{
 };
 use anyhow::{Context, ensure};
 use codewire_client::member_tailnet::{MemberTailnet, MemberTransportOptions};
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 use codewire_tailnet::netstack::TcpStream;
 use prost::Message;
 use sha2::{Digest, Sha256};

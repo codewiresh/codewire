@@ -345,7 +345,7 @@ mod enabled {
                 .env("ENVIRONMENT", "local")
                 .env("SESSION_SECRET", "kind-e2e-not-a-real-secret")
                 .env("SANDBOX_NAMESPACE", SANDBOX_NAMESPACE)
-                .env("SANDBOX_GATEWAY_IMAGE", "codewire-gateway:e2e")
+                .env("SANDBOX_DAEMON_IMAGE", "codewire-daemon:e2e")
                 .env("SANDBOX_RUNTIME_PROFILE", "runc")
                 .env("SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME", "true")
                 .env("SANDBOX_WORKSPACE_STORAGE_CLASS", "example-volumes")

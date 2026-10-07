@@ -21,7 +21,7 @@ fn dev_cfg(shapes: &str) -> SandboxWorkerCfg {
     SandboxWorkerCfg {
         sandbox_namespace: NAMESPACE.into(),
         credential_runtime: Some(CredentialRuntimeTemplateConfig::synthetic(NAMESPACE)),
-        gateway_image: "registry.example.invalid/codewire/gateway@sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
+        daemon_image: "registry.example.invalid/codewire/daemon@sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
         dind_image: "docker.io/library/docker:29.7.1-dind@sha256:3333333333333333333333333333333333333333333333333333333333333333".into(),
         runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
         docker_mode: DOCKER_MODE_PROFILE_DEFAULT.into(),
@@ -82,7 +82,7 @@ fn configured_shapes_render_through_the_identity_free_pool_renderer() {
     confidential.runtime_profile = RUNTIME_PROFILE_CONFIDENTIAL.into();
     assert!(WarmPoolConfig::from_cfg(&confidential, true).is_err());
     let mut unpinned = dev_cfg("1000m/4096Mi/10Gi=1");
-    unpinned.gateway_image = "registry.example.invalid/codewire/gateway:main".into();
+    unpinned.daemon_image = "registry.example.invalid/codewire/daemon:main".into();
     assert!(WarmPoolConfig::from_cfg(&unpinned, true).is_err());
     let mut no_namespace = dev_cfg("1000m/4096Mi/10Gi=1");
     no_namespace.sandbox_namespace.clear();

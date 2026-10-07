@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use codewire_daemon::client::{SessionClient, SessionClientError};
 use codewire_daemon::service::DaemonRuntimeState;
-use codewire_gateway_proto::daemon::v1;
-use codewire_gateway_proto::{
+use codewire_daemon_proto::daemon::v1;
+use codewire_daemon_proto::{
     DAEMON_CAPABILITIES, DAEMON_CAPABILITY_ATTACH, DAEMON_CAPABILITY_EXEC,
     DAEMON_CAPABILITY_SESSIONS, DAEMON_PROTOCOL_VERSION,
 };

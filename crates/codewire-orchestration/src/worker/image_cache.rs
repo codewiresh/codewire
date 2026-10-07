@@ -65,7 +65,7 @@ impl ImageCacheConfig {
             render: RenderConfig {
                 namespace: namespace.to_owned(),
             },
-            desired: DesiredSet::from_rendered(&sandbox.gateway_image, &sandbox.dind_image),
+            desired: DesiredSet::from_rendered(&sandbox.daemon_image, &sandbox.dind_image),
         }))
     }
 }
@@ -424,7 +424,7 @@ mod tests {
             sandbox_namespace: "dev-sandboxes".into(),
             ..Default::default()
         };
-        cfg.gateway_image = codewire_server_core::runtime_images::DEFAULT_GATEWAY_IMAGE.into();
+        cfg.daemon_image = codewire_server_core::runtime_images::DEFAULT_DAEMON_IMAGE.into();
         cfg
     }
 

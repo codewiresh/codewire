@@ -4,7 +4,7 @@
 use super::*;
 use crate::platform_managed::{CleanupLink, Owner, ProviderPin, RestartAdvance};
 use crate::platform_managed::{Error, ImagePin, Origin, peer_packet};
-use codewire_gateway_proto::platform_managed as wire;
+use codewire_daemon_proto::platform_managed as wire;
 use serde_json::{Value, json};
 
 pub(super) fn refuse_platform_managed_bypass(

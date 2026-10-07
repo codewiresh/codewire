@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use codewire_access::{
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, GrantPermission,
 };
-use codewire_gateway_proto::codewire::bridge::v1 as daemon_v1;
-use codewire_gateway_proto::ssh::{
+use codewire_daemon_proto::codewire::bridge::v1 as daemon_v1;
+use codewire_daemon_proto::ssh::{
     SshOperation, remaining_deadline, validate_request, validate_response,
 };
 use codewire_protected_store::ssh_material::{

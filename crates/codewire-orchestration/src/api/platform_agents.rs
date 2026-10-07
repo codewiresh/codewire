@@ -5,7 +5,7 @@ pub mod model;
 mod wire;
 
 use buffa::Message as _;
-use codewire_gateway_proto::{daemon::v1 as private, platform_managed as native};
+use codewire_daemon_proto::{daemon::v1 as private, platform_managed as native};
 use codewire_proto::codewire::v1 as proto;
 use codewire_server_core::{AppResult, auth::AuthUser};
 use sha2::{Digest as _, Sha256};

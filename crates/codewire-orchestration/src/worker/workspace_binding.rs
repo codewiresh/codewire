@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use codewire_gateway_proto::{SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
+use codewire_daemon_proto::{SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
 use k8s_openapi::api::core::v1::{Container, ContainerStatus, Pod};
 use kube::api::DynamicObject;
 use prometheus::{IntCounterVec, Opts, register_int_counter_vec};

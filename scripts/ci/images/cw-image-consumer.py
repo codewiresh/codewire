@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bind an admitted CW producer to a canonical gateway/workspace build.
+"""Bind an admitted CW producer to a canonical daemon/workspace build.
 
 The cache and builder owners retain their existing policy and lifecycle. This
 owner keeps the source, producer assets and private named context open across
@@ -42,10 +42,10 @@ asset = load("cw_consumer_asset", ROOT / "scripts/ci/images/prepare-cw-image-con
 image_source = load("cw_consumer_image_source", ROOT / "scripts/ci/images/cw-image-source.py")
 release, owner = producer.release, producer.owner
 SCHEMA = "codewire.cw.image-consumer/v1"
-PRODUCTS = {"dashboard", "services", "mesh", "gateway", "derp"}
-RECIPES = {"deployments/docker/gateway.Dockerfile", "images/workspace/Dockerfile"}
+PRODUCTS = {"dashboard", "services", "mesh", "daemon", "derp"}
+RECIPES = {"deployments/docker/daemon.Dockerfile", "images/workspace/Dockerfile"}
 BOUND = 10800
-GROUPS = {"default": sorted(PRODUCTS), "kind": [name + "-ci" for name in ("dashboard", "services", "mesh", "gateway")]}
+GROUPS = {"default": sorted(PRODUCTS), "kind": [name + "-ci" for name in ("dashboard", "services", "mesh", "daemon")]}
 BAKE_TARGETS = PRODUCTS | {name + "-ci" for name in PRODUCTS if name != "derp"}
 BUILD_ARGS = {"BASE_IMAGE_REF", "DEBIAN_IMAGE", "CODEWIRE_RUST_PROFILE", "CODEWIRE_SCCACHE_MODE",
               "SCCACHE_BUCKET", "SCCACHE_ENDPOINT", "CODEWIRE_SCCACHE_PREFIX", "NODE_VERSION", "GO_VERSION",
@@ -171,7 +171,7 @@ def canonical_plan(command, source_dir, cwd, profile, docker_bin="docker"):
         asset.require(recipe in {source_dir / name for name in RECIPES}, "consumer recipe differs from selected source")
         asset.require(len(operands) == 1 and Path(os.path.abspath(cwd / operands[0])) == source_dir,
                       "consumer context differs from selected source")
-        targets = ["workspace" if recipe.name == "Dockerfile" else "gateway"]
+        targets = ["workspace" if recipe.name == "Dockerfile" else "daemon"]
         selected = None
         for key, value in values:
             if key == "--platform":
@@ -204,7 +204,7 @@ def canonical_plan(command, source_dir, cwd, profile, docker_bin="docker"):
         asset.require(operands and all(name in BAKE_TARGETS or name in GROUPS for name in operands),
                       "consumer Bake targets refused")
         selected_targets = sorted({target for name in operands for target in GROUPS.get(name, [name])})
-        targets = [target for target in selected_targets if target in ("gateway", "gateway-ci")]
+        targets = [target for target in selected_targets if target in ("daemon", "daemon-ci")]
         base_profile = os.environ.get("CODEWIRE_RUST_PROFILE", "release")
         effective_profiles = {target: "ci" if target.endswith("-ci") else base_profile for target in selected_targets}
         effective_platforms = {target: None for target in selected_targets}

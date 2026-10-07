@@ -1102,7 +1102,7 @@ mod tests {
             BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError, BrokerRequestError,
             CanonicalCodexOAuthBundle, OpenAiBroker,
         };
-        use codewire_gateway_proto::codewire::bridge::v1::{
+        use codewire_daemon_proto::codewire::bridge::v1::{
             CredentialBridgeRequest, CredentialHttpHeader,
         };
         use futures::StreamExt;

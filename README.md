@@ -18,7 +18,7 @@ apps/
   ios/         native iOS client
 
 libs/
-  gateway-proto/      internal gateway/daemon Connect contract
+  daemon-proto/       internal daemon and broker protobuf contract
   gen-go/, gen-python/  generated public Connect clients
   sdk-go/, sdk-ts/, sdk-python/  public language SDKs
   tailnet/            bounded Tailscale interoperability support

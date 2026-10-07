@@ -42,7 +42,7 @@ NODE_PORTS = {"http": 80, "tls": 443, "orchestration": 30084,
               "coordinator": 30090, "temporal": 30733, "postgres": 30432}
 DEFAULT_PORTS = {"http": 8090, "tls": 10443, "orchestration": 8084,
                  "coordinator": 18092, "temporal": 7233, "postgres": 25432}
-IMAGE_NAMES = ("dashboard", "services", "mesh", "gateway")
+IMAGE_NAMES = ("dashboard", "services", "mesh", "daemon")
 PROFILE_KEYS = {"schema", "cluster_name", "docker_id", "ownership_nonce", "created_at",
                 "lifecycle", "ports", "origins", "node", "artifacts"}
 ARTIFACT_KEYS = {"schema", "cluster_name", "docker_id", "ownership_nonce",

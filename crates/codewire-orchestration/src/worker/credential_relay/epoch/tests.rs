@@ -6,14 +6,14 @@ mod relay;
 use super::*;
 use crate::worker::credential_relay::budget::Limits;
 use crate::worker::credential_relay::connection::DaemonTarget;
-use codewire_gateway_proto::broker::v1::credential_broker_service_server::{
+use codewire_daemon_proto::broker::v1::credential_broker_service_server::{
     CredentialBrokerService, CredentialBrokerServiceServer,
 };
-use codewire_gateway_proto::daemon::v1 as daemon_v1;
-use codewire_gateway_proto::daemon::v1::daemon_service_server::{
+use codewire_daemon_proto::daemon::v1 as daemon_v1;
+use codewire_daemon_proto::daemon::v1::daemon_service_server::{
     DaemonService, DaemonServiceServer,
 };
-use codewire_gateway_proto::{CREDENTIAL_BRIDGE_PROTOCOL_VERSION, DAEMON_AUTH_TOKEN_HEADER};
+use codewire_daemon_proto::{CREDENTIAL_BRIDGE_PROTOCOL_VERSION, DAEMON_AUTH_TOKEN_HEADER};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_stream::{
@@ -150,13 +150,13 @@ impl CredentialBrokerService for SyntheticBroker {
         let mut response = Response::new(ReceiverStream::new(receiver));
         for capability in self.capabilities.lock().unwrap().iter() {
             response.metadata_mut().append(
-                codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
                 tonic::metadata::MetadataValue::from_static(capability),
             );
         }
         for value in self.expires_at.lock().unwrap().iter() {
             response.metadata_mut().append(
-                codewire_gateway_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,
                 value.parse().unwrap(),
             );
         }
@@ -576,21 +576,21 @@ fn only_bounded_canonical_capability_headers_are_copied() {
     ] {
         if let Ok(value) = value.parse() {
             metadata.append(
-                codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
                 value,
             );
         }
     }
     assert_eq!(broker_capabilities(&metadata), ["codex-login", "future-op"]);
-    for _ in 0..codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES * 2 {
+    for _ in 0..codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES * 2 {
         metadata.append(
-            codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
+            codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
             "padding".parse().unwrap(),
         );
     }
     assert_eq!(
         broker_capabilities(&metadata).len(),
-        codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
+        codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
     );
     assert!(broker_capabilities(&tonic::metadata::MetadataMap::new()).is_empty());
 }
@@ -899,7 +899,7 @@ fn broker_expiry_header_is_parsed_strictly() {
     assert_eq!(broker_expiry(&metadata), Err(ExpiryRejected::Absent));
     let ahead = unix_now() + 120;
     metadata.insert(
-        codewire_gateway_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,
+        codewire_daemon_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,
         ahead.to_string().parse().unwrap(),
     );
     let expiry = broker_expiry(&metadata).unwrap();
@@ -908,7 +908,7 @@ fn broker_expiry_header_is_parsed_strictly() {
     assert!(remaining > Duration::from_secs(118) && remaining <= Duration::from_secs(120));
     // Two values are ambiguous, never a choice.
     metadata.append(
-        codewire_gateway_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,
+        codewire_daemon_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,
         ahead.to_string().parse().unwrap(),
     );
     assert_eq!(broker_expiry(&metadata), Err(ExpiryRejected::Ambiguous));

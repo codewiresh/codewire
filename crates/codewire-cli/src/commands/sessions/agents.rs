@@ -1352,7 +1352,7 @@ pub(crate) async fn handle_agent_interrupt_command(
         return super::super::member_control::managed::action(
             globals,
             args,
-            codewire_gateway_proto::daemon::v1::HostManagedAction::Interrupt,
+            codewire_daemon_proto::daemon::v1::HostManagedAction::Interrupt,
         )
         .await;
     }

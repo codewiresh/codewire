@@ -76,7 +76,7 @@ elif tool == "kubectl":
         elif any("command[0]" in a for a in args): print("/codewire-kind-fixtures/credential-service")
         elif any("FRONTEND_URL" in a or "CREDENTIAL_PUBLIC_ORIGIN" in a for a in args):
             print(os.environ.get("KIND_PUBLIC_ORIGIN", "http://legacy-review:4174"))
-        elif any("SANDBOX_GATEWAY_IMAGE" in a for a in args): print("codewire-gateway:e2e")
+        elif any("SANDBOX_DAEMON_IMAGE" in a for a in args): print("codewire-daemon:e2e")
         elif any(a.startswith("jsonpath=") and a.endswith(".image}") for a in args):
             if os.environ.get("FAKE_SAME_IMAGE") == "1": print((state / "last-image").read_text())
             else: print("codewire-services:e2e")
@@ -208,7 +208,7 @@ class DeveloperProfileTests(unittest.TestCase):
             "KIND_PROFILE_SOURCE_HEAD": "b" * 40, "KIND_PROFILE_SOURCE_TREE": "c" * 40,
             "KIND_PROFILE_IMAGE_PREFIX": "codewire-kind-" + name + "-" + ("d" if name == "dev-a" else "e") * 12,
             "KIND_PROFILE_DASHBOARD_IMAGE_ID": IMAGE_ID, "KIND_PROFILE_SERVICES_IMAGE_ID": IMAGE_ID,
-            "KIND_PROFILE_MESH_IMAGE_ID": IMAGE_ID, "KIND_PROFILE_GATEWAY_IMAGE_ID": IMAGE_ID,
+            "KIND_PROFILE_MESH_IMAGE_ID": IMAGE_ID, "KIND_PROFILE_DAEMON_IMAGE_ID": IMAGE_ID,
         }
         for key, position in (("KIND_INGRESS_HTTP_HOST_PORT", 0), ("KIND_INGRESS_TLS_HOST_PORT", 1),
                               ("KIND_ORCHESTRATION_HOST_PORT", 2), ("KIND_COORDINATOR_HOST_PORT", 3),
@@ -562,9 +562,9 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         result = self.run_script("deploy-service.sh", "daemon")
         self.assertEqual(result.returncode, 0, result.stderr)
         output = (self.state / "last-image").read_text()
-        self.assertTrue(output.startswith(self.values["KIND_PROFILE_IMAGE_PREFIX"] + "-gateway:dev-"))
+        self.assertTrue(output.startswith(self.values["KIND_PROFILE_IMAGE_PREFIX"] + "-daemon:dev-"))
         kube = self.calls("kubectl")
-        self.assertTrue([call for call in kube if "SANDBOX_GATEWAY_IMAGE=" + output in call["args"] and "deployment/codewire-orchestration" in call["args"]])
+        self.assertTrue([call for call in kube if "SANDBOX_DAEMON_IMAGE=" + output in call["args"] and "deployment/codewire-orchestration" in call["args"]])
         self.assertTrue([call for call in kube if "wait" in call["args"]])
 
     def test_old_pod_cleanup_failure_is_not_success(self) -> None:

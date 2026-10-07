@@ -12,7 +12,7 @@ use super::runtime_policy::{
     docker_data_size_gib, kata_coco_kernel_params_annotation, uses_kata_policy_init_data,
     workspace_storage_class,
 };
-use codewire_gateway_proto::{
+use codewire_daemon_proto::{
     WORKSPACE_BINDING_TLS_ROOTS_MOUNT_PATH, WORKSPACE_BINDING_TOKEN_AUDIENCE,
     WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS, WORKSPACE_BINDING_TOKEN_MOUNT_PATH,
     WORKSPACE_BINDING_URL_ENV, WORKSPACE_POD_UID_ENV,
@@ -409,7 +409,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
                 .expect("workspace mounts")
                 .push(json!({
                     "name": COORDINATOR_EXTRA_ROOTS_VOLUME,
-                    "mountPath": codewire_gateway_proto::COORDINATOR_EXTRA_ROOTS_MOUNT_PATH,
+                    "mountPath": codewire_daemon_proto::COORDINATOR_EXTRA_ROOTS_MOUNT_PATH,
                     "readOnly": true,
                 }));
         }
@@ -621,7 +621,7 @@ fn coordinator_extra_roots_volume() -> Value {
     json!({
         "name": COORDINATOR_EXTRA_ROOTS_VOLUME,
         "configMap": {
-            "name": codewire_gateway_proto::COORDINATOR_EXTRA_ROOTS_CONFIGMAP,
+            "name": codewire_daemon_proto::COORDINATOR_EXTRA_ROOTS_CONFIGMAP,
             "items": [{ "key": "ca.crt", "path": "ca.crt" }],
             "defaultMode": 0o444,
         },
@@ -779,7 +779,7 @@ fn build_workspace_env(opts: &TemplateOpts) -> Vec<Value> {
             }),
         ];
     }
-    codewire_gateway_proto::DaemonAuthToken::new(opts.daemon_auth_token.clone())
+    codewire_daemon_proto::DaemonAuthToken::new(opts.daemon_auth_token.clone())
         .expect("hosted workspace requires a canonical daemon auth token");
     let mut environment = vec![
         json!({ "name": "CODEWIRE_WORKSPACE_SHIM_ADDR", "value": WORKSPACE_DAEMON_LISTEN_ADDR }),

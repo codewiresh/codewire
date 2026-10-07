@@ -10,7 +10,7 @@ use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
 use super::SessionClientError;
-use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_daemon_proto::codewire::bridge::v1;
 
 pub(super) struct HostedLifetime(CancellationToken);
 impl Drop for HostedLifetime {

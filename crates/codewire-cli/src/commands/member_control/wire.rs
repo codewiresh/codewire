@@ -1,6 +1,6 @@
 //! Application authentication is independent of Mesh routing names and UDP keys.
 use anyhow::{Context, ensure};
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 use codewire_tailnet::derp::key::{NodePrivate, NodePublic};
 use prost::Message;
 use rand::{RngCore, rngs::OsRng};

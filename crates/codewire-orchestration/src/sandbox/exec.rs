@@ -450,7 +450,7 @@ fn classify_workspace_exec_status(
         // A helper transport failure cannot be mistaken for a child failure:
         // setup must recycle the exact admitted Pod before reporting completion.
         // A legitimate child exit 125 is deliberately treated conservatively.
-        if code == codewire_gateway_proto::HOSTED_EXEC_AMBIGUOUS_EXIT_CODE {
+        if code == codewire_daemon_proto::HOSTED_EXEC_AMBIGUOUS_EXIT_CODE {
             anyhow::bail!("workspace exec daemon completion is ambiguous");
         }
         result.exit_code = code;

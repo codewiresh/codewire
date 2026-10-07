@@ -26,9 +26,9 @@ use codewire_credential_broker::platform::{
 use codewire_credential_broker::{
     BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, import_codex_auth_json,
 };
-use codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION;
-use codewire_gateway_proto::broker::v1::credential_broker_service_client::CredentialBrokerServiceClient;
-use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION;
+use codewire_daemon_proto::broker::v1::credential_broker_service_client::CredentialBrokerServiceClient;
+use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_platform_credentials::{CredentialRecord, OAuthRefreshState};
 use codewire_protected_store::secret_envelope::TestKekProvider;
 use codewire_tls::ClientTlsEndpoint;

@@ -41,9 +41,9 @@ class Consumer(unittest.TestCase):
         self.source.mkdir()
         (self.source / "deployments/docker").mkdir(parents=True)
         (self.source / ".dockerignore").write_text(".git\n.env*\ntarget\nnode_modules\n**/.tmp\n**/__pycache__\n")
-        (self.source / "deployments/docker/gateway.Dockerfile").write_text("FROM scratch\nCOPY cw /cw\n")
+        (self.source / "deployments/docker/daemon.Dockerfile").write_text("FROM scratch\nCOPY cw /cw\n")
         self.command = ["docker", "buildx", "build", "--file",
-                        str(self.source / "deployments/docker/gateway.Dockerfile"), str(self.source)]
+                        str(self.source / "deployments/docker/daemon.Dockerfile"), str(self.source)]
         self.args = SimpleNamespace(source_dir=str(self.source), source_sha=fixture.REVISION,
                                     profile="ci", version=fixture.VERSION, output=str(self.base / "consume"),
                                     producer_receipt=str(self.base / "build.json"), producer_sha256="1" * 64,
@@ -78,42 +78,42 @@ class Consumer(unittest.TestCase):
                       ["--build-context=cw-builder-amd64=/tmp/untrusted"],
                       ["--target", "cw-builder"], ["--target=cw-builder-amd64"],
                       ["--build-arg", "TARGETARCH=arm64"], ["--build-arg=TARGETPLATFORM=linux/arm64"],
-                      ["--call=check"], ["--unknown", "gateway"]):
+                      ["--call=check"], ["--unknown", "daemon"]):
             with self.subTest(extra=extra), self.assertRaises(consumer.asset.Refused):
                 self.validate(extra + self.command[3:])
 
     def test_reserved_bake_context_and_profile_overrides(self):
-        for key in ("gateway.contexts.codewire-verified-cw", "*.contexts.codewire-verified-cw",
-                    "gateway.contexts.*", "*.contexts", "gateway.args.CODEWIRE_RUST_PROFILE"):
+        for key in ("daemon.contexts.codewire-verified-cw", "*.contexts.codewire-verified-cw",
+                    "daemon.contexts.*", "*.contexts", "daemon.args.CODEWIRE_RUST_PROFILE"):
             command = ["docker", "buildx", "bake", "--file", str(self.source / "docker-bake.hcl"),
-                       "--set", key + "=untrusted", "gateway-ci"]
+                       "--set", key + "=untrusted", "daemon-ci"]
             with self.subTest(key=key), self.assertRaises(consumer.asset.Refused):
                 self.validate(command=command)
 
     def test_bake_recipe_context_and_stage_overrides_refuse_both_spellings(self):
-        for key in ("gateway-ci.dockerfile", "*.dockerfile", "gateway-ci.context", "*.context",
-                    "gateway-ci.target", "*.target", "gateway-ci.contexts.cw-builder-amd64",
+        for key in ("daemon-ci.dockerfile", "*.dockerfile", "daemon-ci.context", "*.context",
+                    "daemon-ci.target", "*.target", "daemon-ci.contexts.cw-builder-amd64",
                     "*.contexts.*", "*.args.TARGETARCH"):
             for spelling in (["--set", key + "=/tmp/foreign"], ["--set=" + key + "=/tmp/foreign"]):
                 command = ["docker", "buildx", "bake", "-f", str(self.source / "docker-bake.hcl"),
-                           *spelling, "gateway-ci"]
+                           *spelling, "daemon-ci"]
                 with self.subTest(key=key, spelling=spelling), self.assertRaises(consumer.asset.Refused):
                     self.validate(command=command)
 
     def test_effective_bake_platforms_are_bound_for_remote_builders(self):
         prefix = ["docker", "buildx", "bake", "-f", str(self.source / "docker-bake.hcl"), "--builder", "remote"]
-        for selection, expected in (("*.platforms=linux/amd64", True), ("gateway-ci.platforms=linux/arm64", False),
+        for selection, expected in (("*.platforms=linux/amd64", True), ("daemon-ci.platforms=linux/arm64", False),
                                     ("*.platforms=linux/amd64,linux/arm64", True)):
-            plan = consumer.canonical_plan(prefix + ["--set", selection, "gateway-ci"], self.source, Path.cwd(), "ci")
+            plan = consumer.canonical_plan(prefix + ["--set", selection, "daemon-ci"], self.source, Path.cwd(), "ci")
             self.assertIs(plan["needs_cw_asset"], expected)
-            self.assertIn("gateway-ci.platforms=" + selection.split("=", 1)[1], plan["command"])
+            self.assertIn("daemon-ci.platforms=" + selection.split("=", 1)[1], plan["command"])
         with self.assertRaises(consumer.asset.Refused):
             consumer.canonical_plan(prefix + ["--set", "*.platforms=linux/arm64", "--set",
-                                               "gateway-ci.platforms=linux/amd64", "gateway-ci"], self.source, Path.cwd(), "ci")
+                                               "daemon-ci.platforms=linux/amd64", "daemon-ci"], self.source, Path.cwd(), "ci")
         with patch.object(consumer.os, "uname", return_value=SimpleNamespace(machine="arm64")):
-            plan = consumer.canonical_plan(prefix + ["gateway-ci"], self.source, Path.cwd(), "ci")
-            self.assertEqual(plan["platforms"]["gateway-ci"], ["linux/arm64"])
-            self.assertIn("gateway-ci.platforms=linux/arm64", plan["command"])
+            plan = consumer.canonical_plan(prefix + ["daemon-ci"], self.source, Path.cwd(), "ci")
+            self.assertEqual(plan["platforms"]["daemon-ci"], ["linux/arm64"])
+            self.assertIn("daemon-ci.platforms=linux/arm64", plan["command"])
 
     def test_bake_from_foreign_cwd_binds_selected_and_dependency_contexts(self):
         foreign = self.base / "foreign"
@@ -122,13 +122,13 @@ class Consumer(unittest.TestCase):
         plan = consumer.canonical_plan(prefix + ["kind"], self.source, foreign, "ci")
         settings = [plan["command"][index + 1] for index, value in enumerate(plan["command"])
                     if value == "--set"]
-        for target in ("dashboard-ci", "services-ci", "mesh-ci", "gateway-ci", "rust-base"):
+        for target in ("dashboard-ci", "services-ci", "mesh-ci", "daemon-ci", "rust-base"):
             self.assertIn(target + ".context=" + str(self.source), settings)
         with self.assertRaises(consumer.asset.Refused):
             consumer.canonical_plan(prefix + ["--set", "*.context=.", "kind"], self.source, foreign, "ci")
 
     def test_selected_frontend_directives_precede_ordinary_comments(self):
-        for recipe, directive in (("deployments/docker/gateway.Dockerfile", "# syntax=docker/dockerfile:1.20"),
+        for recipe, directive in (("deployments/docker/daemon.Dockerfile", "# syntax=docker/dockerfile:1.20"),
                                   ("images/workspace/Dockerfile", "# syntax=docker/dockerfile:1.7")):
             with self.subTest(recipe=recipe):
                 self.assertEqual((ROOT / recipe).read_text().splitlines()[0], directive)
@@ -141,15 +141,15 @@ class Consumer(unittest.TestCase):
         prefix = ["docker", "buildx", "bake", "-f", str(self.source / "docker-bake.hcl")]
         with patch.dict(os.environ, {"CODEWIRE_RUST_PROFILE": "release"}):
             with self.assertRaises(consumer.asset.Refused):
-                consumer.canonical_plan(prefix + ["gateway", "gateway-ci"], self.source, Path.cwd(), "release")
-            plan = consumer.canonical_plan(prefix + ["gateway", "dashboard-ci"], self.source, Path.cwd(), "release")
-            self.assertEqual(plan["targets"], ["gateway"])
-            self.assertIn("gateway.args.CODEWIRE_RUST_PROFILE=release", plan["command"])
+                consumer.canonical_plan(prefix + ["daemon", "daemon-ci"], self.source, Path.cwd(), "release")
+            plan = consumer.canonical_plan(prefix + ["daemon", "dashboard-ci"], self.source, Path.cwd(), "release")
+            self.assertEqual(plan["targets"], ["daemon"])
+            self.assertIn("daemon.args.CODEWIRE_RUST_PROFILE=release", plan["command"])
         plan = consumer.canonical_plan(self.command, self.source, Path.cwd(), "ci")
         self.assertIn("CODEWIRE_RUST_PROFILE=ci", plan["command"])
 
-    def test_bake_groups_bind_only_the_selected_gateway(self):
-        for group, profile, expected in (("default", "release", "gateway"), ("kind", "ci", "gateway-ci")):
+    def test_bake_groups_bind_only_the_selected_daemon(self):
+        for group, profile, expected in (("default", "release", "daemon"), ("kind", "ci", "daemon-ci")):
             command = ["docker", "buildx", "bake", "--file", str(self.source / "docker-bake.hcl"), group]
             targets, required = consumer.canonical_command(command, self.source, Path.cwd(), profile)
             self.assertEqual(targets, [expected])
@@ -170,7 +170,7 @@ class Consumer(unittest.TestCase):
                 self.validate(["--platform", platforms, *self.command[3:]])
 
     def test_foreign_recipe_context_and_non_docker_command_refuse(self):
-        candidates = [self.command[:3] + ["--file", "/tmp/gateway.Dockerfile", str(self.source)],
+        candidates = [self.command[:3] + ["--file", "/tmp/daemon.Dockerfile", str(self.source)],
                       self.command[:-1] + [str(self.base)], ["echo", *self.command[1:]],
                       self.command[:3] + ["--file", self.command[4], "--file", self.command[4], str(self.source)]]
         for command in candidates:
@@ -256,7 +256,7 @@ class Consumer(unittest.TestCase):
             self.assertEqual(json.loads((context / "provenance.json").read_bytes())["payload"], admitted.summary["payload"])
             Path(log).write_bytes(b"synthetic consumer callback; no Docker execution\n")
             if mutate == "recipe":
-                recipe = self.source / "deployments/docker/gateway.Dockerfile"
+                recipe = self.source / "deployments/docker/daemon.Dockerfile"
                 recipe.write_bytes(recipe.read_bytes() + b"# changed during solve\n")
             elif mutate == "namespace":
                 transient = self.source / "transient"
@@ -296,7 +296,7 @@ class Consumer(unittest.TestCase):
             self.assertFalse((Path(self.args.output) / "consumer.json").exists())
 
     def test_symlinked_recipe_refuses_before_docker(self):
-        recipe = self.source / "deployments/docker/gateway.Dockerfile"
+        recipe = self.source / "deployments/docker/daemon.Dockerfile"
         recipe.unlink()
         recipe.symlink_to(self.base / "foreign")
         with patch.object(consumer.owner, "run_owned") as docker, self.assertRaises(ValueError):
@@ -307,7 +307,7 @@ class Consumer(unittest.TestCase):
         image_dir = self.base / "image-source"
         shutil.copytree(self.source, image_dir)
         self.args.image_source_dir = str(image_dir)
-        command = ["docker", "buildx", "build", "--file", str(image_dir / "deployments/docker/gateway.Dockerfile"), str(image_dir)]
+        command = ["docker", "buildx", "build", "--file", str(image_dir / "deployments/docker/daemon.Dockerfile"), str(image_dir)]
         admitted, _ = self.completed()
         with patch.object(consumer.producer, "reopen", return_value=admitted) as reopen:
             with patch.object(consumer.owner, "run_owned", return_value={"fixture": "no Docker"}), patch.object(consumer, "stream_log"):
@@ -380,7 +380,7 @@ class OwnedFailureDiagnostics(unittest.TestCase):
                                 "--producer-sha256", self.receipt_sha256))
             command.extend(("--", str(docker), "buildx", "build", "--platform",
                             "linux/arm64" if operation == "native" else "linux/amd64", "--file",
-                            str(self.source / "deployments/docker/gateway.Dockerfile"), str(self.source)))
+                            str(self.source / "deployments/docker/daemon.Dockerfile"), str(self.source)))
         process = subprocess.Popen(command, cwd=ROOT, env=self.environment, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:

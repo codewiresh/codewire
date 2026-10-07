@@ -122,8 +122,8 @@ fn file_client_error(error: DaemonClientError) -> AppError {
     }
 }
 
-fn daemon_readiness_error(state: codewire_gateway_proto::daemon::v1::DaemonState) -> AppError {
-    use codewire_gateway_proto::daemon::v1::DaemonState;
+fn daemon_readiness_error(state: codewire_daemon_proto::daemon::v1::DaemonState) -> AppError {
+    use codewire_daemon_proto::daemon::v1::DaemonState;
 
     match state {
         DaemonState::Starting => {

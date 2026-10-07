@@ -20,8 +20,8 @@ other_digest="sha256:$(printf 'b%.0s' {1..64})"
 base_digest="sha256:$(printf 'd%.0s' {1..64})"
 workspace_digest="sha256:$(printf 'e%.0s' {1..64})"
 source_sha="$(printf 'c%.0s' {1..40})"
-source_ref="registry.example.invalid/codewire/gateway@$expected_digest"
-target_repository='ghcr.io/codewiresh/gateway'
+source_ref="registry.example.invalid/codewire/daemon@$expected_digest"
+target_repository='ghcr.io/codewiresh/daemon'
 base_source_ref="registry.example.invalid/codewire/base@$base_digest"
 workspace_source_ref="registry.example.invalid/codewire/workspace@$workspace_digest"
 base_repository='ghcr.io/codewiresh/base'
@@ -172,7 +172,7 @@ python3 "$ROOT/scripts/ci/images/image-bundle.py" create \
   --output "$runtime_bundle" \
   --candidate dashboard "$source_sha" "registry.example.invalid/codewire/dashboard@$expected_digest" \
   --candidate derp "$source_sha" "registry.example.invalid/codewire/derp@$expected_digest" \
-  --candidate gateway "$source_sha" "registry.example.invalid/codewire/gateway@$expected_digest" \
+  --candidate daemon "$source_sha" "registry.example.invalid/codewire/daemon@$expected_digest" \
   --candidate services "$source_sha" "registry.example.invalid/codewire/services@$expected_digest" \
   --candidate mesh "$source_sha" "registry.example.invalid/codewire/mesh@$expected_digest"
 : >"$FAKE_HARBOR_FETCH_CALLS"
@@ -190,7 +190,7 @@ mapfile -t runtime_copy_calls <"$FAKE_COPY_CALLS"
 [[ "${#runtime_copy_calls[@]}" -eq 5 ]] ||
   fail 'runtime bundle did not perform exactly five immutable copy operations'
 for index in "${!runtime_copy_calls[@]}"; do
-  family=(dashboard derp gateway services mesh)
+  family=(dashboard derp daemon services mesh)
   expected_source="registry.example.invalid/codewire/${family[$index]}@$expected_digest"
   expected_target="ghcr.io/codewiresh/${family[$index]}"
   [[ "${runtime_copy_calls[$index]}" == "$expected_source $expected_target $source_sha" ]] ||
@@ -252,7 +252,7 @@ fi
   fail 'credential fetch failure reached the copy helper'
 
 fetch_calls_before="$(wc -l <"$FAKE_GHCR_FETCH_CALLS")"
-if "$PUBLISH_IMAGE" 'registry.example.invalid/codewire/gateway:latest' \
+if "$PUBLISH_IMAGE" 'registry.example.invalid/codewire/daemon:latest' \
     "$target_repository" "$source_sha" >"$work/moving-source.out" 2>&1; then
   fail 'moving source reference was accepted'
 fi

@@ -7,7 +7,7 @@ use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 
 use codewire_credential_bridge::{SshAgentRelay, serve_ssh_agent};
-use codewire_gateway_proto::codewire::bridge::v1::{CredentialSshRequest, CredentialSshResponse};
+use codewire_daemon_proto::codewire::bridge::v1::{CredentialSshRequest, CredentialSshResponse};
 use codewire_project::{
     RepositorySshHost, canonical_repository_known_hosts, parse_repository_ssh_host,
 };

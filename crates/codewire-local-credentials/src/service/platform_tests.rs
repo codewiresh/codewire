@@ -1,6 +1,6 @@
 use super::*;
 
-use codewire_gateway_proto::codewire::bridge::v1::CredentialBridgeReady;
+use codewire_daemon_proto::codewire::bridge::v1::CredentialBridgeReady;
 use codewire_protected_store::EphemeralProtectedStore;
 use futures::future::BoxFuture;
 

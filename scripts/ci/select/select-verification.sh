@@ -684,7 +684,7 @@ if [ "$event_selected" = false ]; then
         select_token rust_pkg_codewire_credential_broker
         select_token rust_pkg_codewire_credential_service
         select_token rust_pkg_codewire_daemon
-        select_token rust_pkg_codewire_gateway_proto
+        select_token rust_pkg_codewire_daemon_proto
         select_token rust_pkg_codewire_local_credentials
         select_token rust_pkg_codewire_local_vmm
         select_token rust_pkg_codewire_proto
@@ -740,8 +740,8 @@ if [ "$event_selected" = false ]; then
 
     case "$path" in
       apps/api/*|autoagent/*|libs/gatewayauth/*|\
-      libs/gateway-proto/gen/*|libs/gateway-proto/buf.gen.yaml|\
-      libs/gateway-proto/go.mod|libs/gateway-proto/go.sum|\
+      libs/daemon-proto/gen/*|libs/daemon-proto/buf.gen.yaml|\
+      libs/daemon-proto/go.mod|libs/daemon-proto/go.sum|\
       tests/contract/coordinator/*|tests/contract/file/*|\
       tests/contract/orchestration/*)
         if [ -e "$repo_root/$path" ]; then
@@ -750,13 +750,13 @@ if [ "$event_selected" = false ]; then
         fi
         recognized=true
         ;;
-      libs/gateway-proto/proto/*|libs/gateway-proto/buf.yaml)
+      libs/daemon-proto/proto/*|libs/daemon-proto/buf.yaml)
         select_token rust
         # Both daemon-initiated local and gateway-initiated platform brokerage
         # consume these private frames. Rust owns both broker feature graphs.
         select_token rust_pkg_codewire_credential_bridge
         select_token rust_pkg_codewire_credential_broker
-        select_token rust_pkg_codewire_gateway_proto
+        select_token rust_pkg_codewire_daemon_proto
         select_token transport
         select_token transport_pkg_codewire_daemon
         select_token transport_pkg_codewire_local_vmm
@@ -995,7 +995,7 @@ if [ "$event_selected" = false ]; then
       fi
       if [ "$path" = "crates/$crate/Cargo.toml" ]; then
         case "$crate" in
-          codewire-daemon|codewire-gateway-proto|codewire-tls|\
+          codewire-daemon|codewire-daemon-proto|codewire-tls|\
           codewire-local-vmm|codewire-netstack|codewire-proto|codewire-tailnet|codewire-derp|\
           codewire-vmm-guest-probe)
             select_token rust_curated_locks
@@ -1058,7 +1058,7 @@ if [ "$event_selected" = false ]; then
         select_token transport_pkg_codewire_local_vmm
         select_token transport_pkg_codewire_vmm_guest_probe
         ;;
-      crates/codewire-gateway-proto/*)
+      crates/codewire-daemon-proto/*)
         # The extracted state machine has direct private-frame unit coverage.
         select_token rust
         select_token rust_pkg_codewire_credential_bridge
@@ -1186,7 +1186,7 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      crates/codewire-gateway-proto/src/lib.rs)
+      crates/codewire-daemon-proto/src/lib.rs)
         # Shared fixed Pod-token audiences are consumed by the optional
         # server-core verifier, not just by the private protocol endpoints.
         select_token rust_pkg_codewire_server_core

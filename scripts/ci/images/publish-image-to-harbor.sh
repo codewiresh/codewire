@@ -7,7 +7,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
-readonly source_pattern='^registry\.example\.invalid/codewire/(dashboard|derp|gateway|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})$'
+# `gateway` is the daemon image's repository before its rename to `daemon`:
+# the compiled-in default daemon image still names a digest there, which
+# --pinned-defaults keeps until that default moves to a `daemon` digest.
+readonly source_pattern='^registry\.example\.invalid/codewire/(dashboard|derp|daemon|gateway|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})$'
 readonly HARBOR_HOST='registry.example.invalid'
 readonly HARBOR_PROJECT="$HARBOR_HOST/codewire"
 readonly PUBLIC_MIRROR='ghcr.io/codewiresh'
@@ -111,15 +114,15 @@ case "${1:-}" in
   --pinned-defaults)
     [ "$#" -eq 1 ] || usage
     mode=keep
-    # Sandboxes and gateways default to Harbor digests compiled into the
+    # Sandboxes and their daemons default to Harbor digests compiled into the
     # product. Keep each one in Harbor before any deployment references it.
     mapfile -t keep_refs < <(
-      grep -ohE 'registry\.example\.invalid/codewire/(workspace|gateway)@sha256:[0-9a-f]{64}' \
+      grep -ohE 'registry\.example\.invalid/codewire/(workspace|daemon|gateway)@sha256:[0-9a-f]{64}' \
         "$ROOT/crates/codewire-server-core/src/runtime_images.rs" |
         sort -u
     )
     [ "${#keep_refs[@]}" -ge 2 ] || {
-      echo 'Pinned Harbor workspace and gateway defaults were not found in source' >&2
+      echo 'Pinned Harbor workspace and daemon defaults were not found in source' >&2
       exit 1
     }
     for keep_ref in "${keep_refs[@]}"; do

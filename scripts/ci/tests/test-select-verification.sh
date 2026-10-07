@@ -563,19 +563,19 @@ run_paths_case retired_go_migration_deletion pull_request refs/pull/600/head fal
   'policy' apps/api/db/migrations/0001_baseline.sql
 run_paths_case retired_go_harness_deletion pull_request refs/pull/6010/head false \
   'policy' autoagent/agent.py libs/gatewayauth/token.go \
-  libs/gateway-proto/gen/daemon/v1/daemon.pb.go
-run_paths_case gateway_proto_source pull_request refs/pull/6011/head false \
-  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
-  libs/gateway-proto/proto/daemon/v1/daemon.proto
+  libs/daemon-proto/gen/daemon/v1/daemon.pb.go
+run_paths_case daemon_proto_source pull_request refs/pull/6011/head false \
+  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_daemon_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  libs/daemon-proto/proto/daemon/v1/daemon.proto
 run_paths_case private_broker_proto_source pull_request refs/pull/6011/head false \
-  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
-  libs/gateway-proto/proto/broker/v1/broker.proto
+  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_daemon_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  libs/daemon-proto/proto/broker/v1/broker.proto
 run_paths_case neutral_credential_bridge_proto_source pull_request refs/pull/6011/head false \
-  'contracts contracts_proto go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_credential_service rust_pkg_codewire_daemon rust_pkg_codewire_gateway_proto rust_pkg_codewire_local_credentials rust_pkg_codewire_local_vmm rust_pkg_codewire_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'contracts contracts_proto go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_credential_service rust_pkg_codewire_daemon rust_pkg_codewire_daemon_proto rust_pkg_codewire_local_credentials rust_pkg_codewire_local_vmm rust_pkg_codewire_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   proto/codewire/bridge/v1/bridge.proto
 run_paths_case private_broker_proto_rust_module pull_request refs/pull/6011/head false \
-  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto rust_pkg_codewire_server_core transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
-  crates/codewire-gateway-proto/src/lib.rs
+  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_daemon_proto rust_pkg_codewire_server_core transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  crates/codewire-daemon-proto/src/lib.rs
 run_paths_case broker_daemon_transport_consumer pull_request refs/pull/6011/head false \
   'policy rust rust_pkg_codewire_credential_broker transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   crates/codewire-daemon/src/client.rs
@@ -1494,7 +1494,7 @@ for retired_path in \
     autoagent \
     libs/gen-go/coordinator \
     libs/gatewayauth \
-    libs/gateway-proto/gen \
+    libs/daemon-proto/gen \
     tests/contract/coordinator \
     tests/contract/file \
     tests/contract/orchestration; do

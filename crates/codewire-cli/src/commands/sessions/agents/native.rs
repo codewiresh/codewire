@@ -593,7 +593,7 @@ pub(super) fn validate_launch(config: &AgentConfig) -> anyhow::Result<()> {
     {
         anyhow::bail!("the working directory must be an absolute guest path");
     }
-    if !config.name.is_empty() && !codewire_gateway_proto::valid_session_name(&config.name) {
+    if !config.name.is_empty() && !codewire_daemon_proto::valid_session_name(&config.name) {
         anyhow::bail!("the conversation name must be a valid session name");
     }
     if let Some(id) = &config.initial_message_id {

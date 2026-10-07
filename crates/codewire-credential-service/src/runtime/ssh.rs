@@ -142,7 +142,7 @@ mod tests {
     #[ignore = "requires packaged service image, UID65532, read-only root and runtime tmpfs"]
     async fn packaged_agent_signs_and_drains() {
         use codewire_credential_broker::ssh_agent::sign_once;
-        use codewire_gateway_proto::codewire::bridge::v1::CredentialSshSignRequest;
+        use codewire_daemon_proto::codewire::bridge::v1::CredentialSshSignRequest;
         use codewire_protected_store::ssh_material::{
             decode_protected_material, generate_ed25519, import_openssh,
         };

@@ -44,8 +44,8 @@ mod linux {
         DaemonClient, DaemonClientError, DaemonRunInput, DaemonRunOutput, DaemonRunReceiver,
         DaemonRunSender, DaemonRunStart,
     };
-    use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
-    use codewire_gateway_proto::{
+    use codewire_daemon_proto::codewire::bridge::v1 as bridge_v1;
+    use codewire_daemon_proto::{
         CREDENTIAL_BRIDGE_LOOPBACK_PORT, CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
         DAEMON_CAPABILITY_CREDENTIAL_BRIDGE,
     };

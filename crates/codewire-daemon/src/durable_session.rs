@@ -6,8 +6,8 @@ use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use codewire_gateway_proto::daemon::v1;
-use codewire_gateway_proto::{SESSION_INPUT_MAX_BYTES, SESSION_INPUT_TIMEOUT};
+use codewire_daemon_proto::daemon::v1;
+use codewire_daemon_proto::{SESSION_INPUT_MAX_BYTES, SESSION_INPUT_TIMEOUT};
 use portable_pty::{PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -3960,7 +3960,7 @@ fn validate_session_id(session_id: &str) -> Result<(), SessionError> {
 }
 
 fn validate_session_name(name: &str) -> Result<(), SessionError> {
-    if !codewire_gateway_proto::valid_session_name(name) {
+    if !codewire_daemon_proto::valid_session_name(name) {
         return Err(SessionError::InvalidArgument("session name must be 1..64 ASCII bytes, alphanumeric first, then alphanumeric, dot, underscore or hyphen".into()));
     }
     Ok(())

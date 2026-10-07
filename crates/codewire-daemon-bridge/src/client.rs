@@ -6,8 +6,8 @@
 
 use std::time::Duration;
 
-pub use codewire_gateway_proto::daemon::v1;
-use codewire_gateway_proto::{
+pub use codewire_daemon_proto::daemon::v1;
+use codewire_daemon_proto::{
     DAEMON_AUTH_TOKEN_HEADER, DAEMON_CAPABILITY_EXEC, DAEMON_CAPABILITY_PTY,
     DAEMON_PROTOCOL_VERSION,
 };
@@ -127,8 +127,8 @@ impl DaemonClient {
             platform: v1::platform_managed_service_client::PlatformManagedServiceClient::new(
                 channel,
             )
-            .max_decoding_message_size(codewire_gateway_proto::platform_managed::FRAME_BYTES)
-            .max_encoding_message_size(codewire_gateway_proto::platform_managed::REQUEST_BYTES),
+            .max_decoding_message_size(codewire_daemon_proto::platform_managed::FRAME_BYTES)
+            .max_encoding_message_size(codewire_daemon_proto::platform_managed::REQUEST_BYTES),
             auth_token,
         })
     }
@@ -279,7 +279,7 @@ impl DaemonClient {
         &self,
         request: v1::SendSessionInputRequest,
     ) -> Result<(), DaemonClientError> {
-        use codewire_gateway_proto::{
+        use codewire_daemon_proto::{
             DAEMON_CAPABILITY_SESSION_INPUT, SESSION_INPUT_MAX_BYTES, SESSION_INPUT_TIMEOUT,
         };
         if request.data.is_empty() || request.data.len() > SESSION_INPUT_MAX_BYTES {
@@ -512,7 +512,7 @@ mod split_tests;
 mod tests {
     use std::time::Duration;
 
-    use codewire_gateway_proto::{DAEMON_CAPABILITY_EXEC, DAEMON_CAPABILITY_FILES};
+    use codewire_daemon_proto::{DAEMON_CAPABILITY_EXEC, DAEMON_CAPABILITY_FILES};
 
     use super::*;
     use crate::test_support::DaemonHarness;

@@ -282,21 +282,21 @@ class FixtureRepository:
                         "apps/dashboard/runtime-inventory.json",
                         "apps/docs/zola/**",
                         "crates/**",
-                        "libs/gateway-proto/**",
+                        "libs/daemon-proto/**",
                         "packages/codewire-design/**",
                         "proto/**",
                     ],
                 },
-                "gateway_image": {
+                "daemon_image": {
                     "kind": "composite",
                     "dependencies": ["cw_runtime_image_asset"],
                     "inputs": [
                         "Cargo.toml",
                         "Cargo.lock",
                         "crates/**",
-                        "deployments/docker/gateway.Dockerfile",
-                        "deployments/docker/gateway.Dockerfile.dockerignore",
-                        "libs/gateway-proto/**",
+                        "deployments/docker/daemon.Dockerfile",
+                        "deployments/docker/daemon.Dockerfile.dockerignore",
+                        "libs/daemon-proto/**",
                         "proto/**",
                     ],
                 },
@@ -322,7 +322,7 @@ class FixtureRepository:
                         "crates/**",
                         "deployments/docker/services.Dockerfile",
                         "deployments/docker/services.Dockerfile.dockerignore",
-                        "libs/gateway-proto/**",
+                        "libs/daemon-proto/**",
                         "proto/**",
                     ],
                 },
@@ -367,7 +367,7 @@ class FixtureRepository:
                         "dev_release_tree",
                         "dev_acceptance_harness",
                         "dashboard_image",
-                        "gateway_image",
+                        "daemon_image",
                         "derp_image",
                         "services_image",
                         "mesh_image",
@@ -608,11 +608,11 @@ dependencies = ["core"]
         self.write("crates/codewire-proto/src/lib.rs", "pub fn proto() {}\n")
         self.write("crates/codewire-tailnet/src/lib.rs", "pub fn tailnet() {}\n")
         self.write("crates/unrelated/src/lib.rs", "pub fn runtime_unrelated() {}\n")
-        self.write("libs/gateway-proto/proto/gateway.proto", "syntax = \"proto3\";\n")
+        self.write("libs/daemon-proto/proto/gateway.proto", "syntax = \"proto3\";\n")
         self.write("libs/sdk-go/environment.go", "package codewire\n")
         self.write("packages/codewire-design/styles.css", ":root {}\n")
         self.write("proto/codewire/v1/api.proto", "syntax = \"proto3\";\n")
-        for family in ("gateway", "derp", "services", "mesh"):
+        for family in ("daemon", "derp", "services", "mesh"):
             self.write(
                 f"deployments/docker/{family}.Dockerfile",
                 f"FROM fixture-{family}@sha256:one\n",
@@ -621,7 +621,7 @@ dependencies = ["core"]
                 f"deployments/docker/{family}.Dockerfile.dockerignore",
                 "*\n!fixture\n",
             )
-        for family in ("gateway", "derp"):
+        for family in ("derp",):
             self.write(f"deployments/docker/{family}.Cargo.toml", "[workspace]\n")
             self.write(f"deployments/docker/{family}.Cargo.lock", "version = 4\n")
         self.write("images/base/Dockerfile", "FROM fixture-base@sha256:base\n")
@@ -776,7 +776,7 @@ class PlannerFixtureTests(unittest.TestCase):
             artifacts[name]["state"]
             for name in (
                 "dashboard_image",
-                "gateway_image",
+                "daemon_image",
                 "derp_image",
                 "services_image",
                 "mesh_image",
@@ -968,7 +968,7 @@ class PlannerFixtureTests(unittest.TestCase):
     def test_each_runtime_direct_input_and_cw_identity_select_its_consumers(self) -> None:
         cases = (
             ("apps/dashboard/runtime-inventory.json", '{"changed":true}\n', 0),
-            ("deployments/docker/gateway.Dockerfile", "FROM changed-gateway\n", 1),
+            ("deployments/docker/daemon.Dockerfile", "FROM changed-daemon\n", 1),
             ("deployments/docker/derp.Cargo.lock", "version = 4\n# changed\n", 2),
             (
                 "deployments/docker/services.Dockerfile.dockerignore",
@@ -986,7 +986,7 @@ class PlannerFixtureTests(unittest.TestCase):
                 expected = ["unaffected"] * 5
                 expected[affected_index] = "affected"
                 if path.endswith(".lock"):
-                    expected[1] = "affected"  # Gateway contains the source-bound CW asset.
+                    expected[1] = "affected"  # The daemon image contains the source-bound CW asset.
                 document = repository.plan()
                 self.assertEqual(self.runtime_states(document), tuple(expected))
                 self.assertEqual(
@@ -995,9 +995,9 @@ class PlannerFixtureTests(unittest.TestCase):
                 )
 
     def test_runtime_artifact_fact_does_not_change_capability_ownership(self) -> None:
-        path = "deployments/docker/gateway.Dockerfile"
+        path = "deployments/docker/daemon.Dockerfile"
         capabilities_before = select_capabilities([path])
-        self.repo.change(path, "FROM changed-gateway\n")
+        self.repo.change(path, "FROM changed-daemon\n")
         self.assertEqual(
             self.runtime_states(self.repo.plan()),
             ("unaffected", "affected", "unaffected", "unaffected", "unaffected"),
@@ -1035,9 +1035,9 @@ class PlannerFixtureTests(unittest.TestCase):
         )
         self.assertEqual(self.runtime_states(self.repo.plan()), ("affected",) * 5)
 
-    def test_gateway_proto_input_affects_exact_consumers(self) -> None:
+    def test_daemon_proto_input_affects_exact_consumers(self) -> None:
         self.repo.change(
-            "libs/gateway-proto/proto/gateway.proto",
+            "libs/daemon-proto/proto/gateway.proto",
             'syntax = "proto3";\n// changed\n',
         )
         self.assertEqual(
@@ -1153,7 +1153,7 @@ class PlannerFixtureTests(unittest.TestCase):
     def test_each_runtime_positive_is_visible_from_deployed_source(self) -> None:
         cases = (
             ("apps/dashboard/runtime-inventory.json", '{"changed":true}\n', 0),
-            ("deployments/docker/gateway.Dockerfile", "FROM changed-gateway\n", 1),
+            ("deployments/docker/daemon.Dockerfile", "FROM changed-daemon\n", 1),
             ("deployments/docker/derp.Cargo.lock", "version = 4\n# changed\n", 2),
             ("deployments/docker/services.Dockerfile.dockerignore", "*\n!changed\n", 3),
             ("deployments/docker/mesh.Dockerfile", "FROM changed-mesh\n", 4),
@@ -1175,7 +1175,7 @@ class PlannerFixtureTests(unittest.TestCase):
                         document["artifacts"][name]["state"]
                         for name in (
                             "dashboard_image",
-                            "gateway_image",
+                            "daemon_image",
                             "derp_image",
                             "services_image",
                             "mesh_image",
@@ -1475,7 +1475,7 @@ class PlannerFixtureTests(unittest.TestCase):
             with self.subTest(path=path):
                 head = self.repo.change(path, "Changed source identity input\n")
                 document = self.repo.plan()
-                for artifact in ("cw_cli_release_assets", "cw_runtime_image_asset", "gateway_image",
+                for artifact in ("cw_cli_release_assets", "cw_runtime_image_asset", "daemon_image",
                                  "workspace_image_verification", "workspace_image"):
                     self.assertEqual(document["artifacts"][artifact]["state"], "affected")
                 # The new transport binds the full declared source digest;

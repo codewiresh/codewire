@@ -16,7 +16,7 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 codewire-access = { workspace = true }
 codewire-credential-bridge = { workspace = true }
-codewire-gateway-proto = { workspace = true }
+codewire-daemon-proto = { workspace = true }
 codewire-workload-secrets = { workspace = true }
 filetime = { workspace = true }
 portable-pty = { workspace = true }

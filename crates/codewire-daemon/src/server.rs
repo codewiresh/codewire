@@ -8,8 +8,8 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
-use codewire_gateway_proto::daemon::v1::daemon_service_server::DaemonServiceServer;
+use codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
+use codewire_daemon_proto::daemon::v1::daemon_service_server::DaemonServiceServer;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::futures::OwnedNotified;
 use tokio::sync::{Notify, watch};
@@ -387,14 +387,14 @@ where
     let router = Server::builder().add_service(configure_grpc_service(implementation));
     #[cfg(target_os = "linux")]
     let router = router.add_optional_service(host_control.map(|service|
-        codewire_gateway_proto::daemon::v1::host_control_service_server::HostControlServiceServer::new(service)
+        codewire_daemon_proto::daemon::v1::host_control_service_server::HostControlServiceServer::new(service)
             .max_decoding_message_size(crate::host_control::HOST_CONTROL_MAX_MESSAGE_BYTES)
             .max_encoding_message_size(crate::host_control::HOST_CONTROL_MAX_MESSAGE_BYTES)));
     #[cfg(target_os="linux")]
     let router=router.add_optional_service(platform_managed.map(|service|
-        codewire_gateway_proto::daemon::v1::platform_managed_service_server::PlatformManagedServiceServer::new(service)
-            .max_decoding_message_size(codewire_gateway_proto::platform_managed::REQUEST_BYTES)
-            .max_encoding_message_size(codewire_gateway_proto::platform_managed::FRAME_BYTES)));
+        codewire_daemon_proto::daemon::v1::platform_managed_service_server::PlatformManagedServiceServer::new(service)
+            .max_decoding_message_size(codewire_daemon_proto::platform_managed::REQUEST_BYTES)
+            .max_encoding_message_size(codewire_daemon_proto::platform_managed::FRAME_BYTES)));
     let serving = router.serve_with_incoming_shutdown(incoming, observed_shutdown);
     let mut shutdown_started = shutdown_rx.clone();
     let ingress_shutdown = shutdown_rx.clone();

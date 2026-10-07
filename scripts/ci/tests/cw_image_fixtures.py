@@ -37,7 +37,7 @@ artifact = load("cw_fixture_artifact", ROOT / "scripts/ci/verify/workspace-image
 binary_fixture = load("cw_fixture_record", ROOT / "scripts/ci/tests/cw_release_fixtures.py")
 EXTRA_INPUTS = (
     "docker-bake.hcl", "deployments/docker/rust-base.Dockerfile",
-    "deployments/docker/gateway.Dockerfile", "scripts/ci/images/cw-image-consumer.py",
+    "deployments/docker/daemon.Dockerfile", "scripts/ci/images/cw-image-consumer.py",
     "scripts/ci/images/cw-image-consumer.sh", "scripts/ci/images/cw-image-source.py",
     "scripts/ci/images/build-product-images.sh", "scripts/ci/tests/canary-workspace-r2-cache.sh",
 )

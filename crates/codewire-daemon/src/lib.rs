@@ -27,7 +27,7 @@ pub mod server;
 pub mod service;
 pub mod session;
 
-pub use codewire_gateway_proto::{DaemonAuthToken, HOSTED_EXEC_AMBIGUOUS_EXIT_CODE};
+pub use codewire_daemon_proto::{DaemonAuthToken, HOSTED_EXEC_AMBIGUOUS_EXIT_CODE};
 pub use config::{
     BindResponseFields, Config, ConfigError, CredentialBridgeConfig, CredentialBridgeTransport,
     DEFAULT_HOME_ROOT, DEFAULT_LISTEN_ADDR, DEFAULT_WORKSPACE_ROOT, HOME_ROOT_ENV, HostConfig,

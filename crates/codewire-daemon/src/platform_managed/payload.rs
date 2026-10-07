@@ -1,7 +1,7 @@
 //! Fixed original stock native clients. Neither a request nor PATH chooses a
 //! program. Hash/version admission is independent of release A/B cw selection.
 use super::{Agent, Error, Stamp, stamp};
-use codewire_gateway_proto::platform_managed::PROVIDER_BYTES;
+use codewire_daemon_proto::platform_managed::PROVIDER_BYTES;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};

@@ -3,10 +3,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
-use codewire_gateway_proto::daemon::v1;
-use codewire_gateway_proto::daemon::v1::daemon_service_server::DaemonService;
-use codewire_gateway_proto::{
+use codewire_daemon_proto::codewire::bridge::v1 as bridge_v1;
+use codewire_daemon_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1::daemon_service_server::DaemonService;
+use codewire_daemon_proto::{
     DAEMON_AUTH_TOKEN_HEADER, DAEMON_CAPABILITIES, DAEMON_CAPABILITY_CREDENTIAL_BRIDGE,
     DAEMON_MINIMUM_PROTOCOL_VERSION, DAEMON_PROTOCOL_VERSION,
 };
@@ -789,7 +789,7 @@ fn is_attached_session_live(state: i32) -> bool {
 impl DaemonServiceImpl {
     fn capabilities(&self, request: v1::GetCapabilitiesRequest) -> v1::GetCapabilitiesResponse {
         let selected = if self.config.host.is_some() {
-            codewire_gateway_proto::HOST_DAEMON_CAPABILITIES
+            codewire_daemon_proto::HOST_DAEMON_CAPABILITIES
         } else {
             DAEMON_CAPABILITIES
         };
@@ -806,7 +806,7 @@ impl DaemonServiceImpl {
         #[cfg(target_os = "linux")]
         let supported = if crate::platform_managed::Service::available(&self.config) {
             let mut supported = supported;
-            supported.push(codewire_gateway_proto::platform_managed::CAPABILITY.into());
+            supported.push(codewire_daemon_proto::platform_managed::CAPABILITY.into());
             supported
         } else {
             supported
@@ -905,8 +905,8 @@ fn validate_timestamp(timestamp: Option<&prost_types::Timestamp>) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_gateway_proto::daemon::v1::daemon_service_client::DaemonServiceClient;
-    use codewire_gateway_proto::{DAEMON_AUTH_TOKEN_HEADER, DaemonAuthToken};
+    use codewire_daemon_proto::daemon::v1::daemon_service_client::DaemonServiceClient;
+    use codewire_daemon_proto::{DAEMON_AUTH_TOKEN_HEADER, DaemonAuthToken};
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
     use tokio::sync::{mpsc, oneshot};
@@ -1822,7 +1822,7 @@ mod tests {
             .into_inner();
         assert_eq!(
             capabilities.capabilities,
-            codewire_gateway_proto::HOST_DAEMON_CAPABILITIES
+            codewire_daemon_proto::HOST_DAEMON_CAPABILITIES
         );
         assert_eq!(
             service

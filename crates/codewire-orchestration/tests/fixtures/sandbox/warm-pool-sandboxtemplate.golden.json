@@ -3,7 +3,7 @@
   "kind": "SandboxTemplate",
   "metadata": {
     "annotations": {
-      "codewire.sh/pool-revision": "69f8de109dd0190a846807804db6cabcf0a320a11d8f98e10a11abbdb5f83947"
+      "codewire.sh/pool-revision": "b765a95039f106f9b8c57d96e91747aedc006906004c2422b0258548de76bee7"
     },
     "labels": {
       "app.kubernetes.io/managed-by": "codewire",
@@ -184,7 +184,7 @@
               },
               {
                 "name": "CODEWIRE_WORKSPACE_POOL_REVISION",
-                "value": "69f8de109dd0190a846807804db6cabcf0a320a11d8f98e10a11abbdb5f83947"
+                "value": "b765a95039f106f9b8c57d96e91747aedc006906004c2422b0258548de76bee7"
               }
             ],
             "image": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -355,7 +355,7 @@
           {
             "image": {
               "pullPolicy": "IfNotPresent",
-              "reference": "registry.example.invalid/codewire/gateway@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              "reference": "registry.example.invalid/codewire/daemon@sha256:2222222222222222222222222222222222222222222222222222222222222222"
             },
             "name": "codewire-bin"
           },

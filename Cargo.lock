@@ -1428,7 +1428,7 @@ dependencies = [
  "codewire-credential-broker",
  "codewire-cw-release",
  "codewire-daemon",
- "codewire-gateway-proto",
+ "codewire-daemon-proto",
  "codewire-local-credentials",
  "codewire-local-vmm",
  "codewire-project",
@@ -1573,7 +1573,7 @@ dependencies = [
  "axum 0.8.9",
  "bytes",
  "codewire-access",
- "codewire-gateway-proto",
+ "codewire-daemon-proto",
  "codewire-workload-secrets",
  "tokio",
  "tokio-stream",
@@ -1593,7 +1593,7 @@ dependencies = [
  "bytes",
  "codewire-access",
  "codewire-daemon",
- "codewire-gateway-proto",
+ "codewire-daemon-proto",
  "codewire-local-credentials",
  "codewire-platform-credentials",
  "codewire-protected-store",
@@ -1639,7 +1639,7 @@ dependencies = [
  "codewire-access",
  "codewire-client",
  "codewire-credential-broker",
- "codewire-gateway-proto",
+ "codewire-daemon-proto",
  "codewire-platform-credentials",
  "codewire-project",
  "codewire-protected-store",
@@ -1697,7 +1697,7 @@ dependencies = [
  "axum 0.8.9",
  "codewire-access",
  "codewire-credential-bridge",
- "codewire-gateway-proto",
+ "codewire-daemon-proto",
  "codewire-workload-secrets",
  "filetime",
  "libc",
@@ -1730,7 +1730,7 @@ dependencies = [
  "buffa-types",
  "bytes",
  "codewire-daemon",
- "codewire-gateway-proto",
+ "codewire-daemon-proto",
  "codewire-proto",
  "connectrpc",
  "futures",
@@ -1743,6 +1743,19 @@ dependencies = [
  "tokio-stream",
  "tonic 0.14.6",
  "uuid",
+]
+
+[[package]]
+name = "codewire-daemon-proto"
+version = "0.1.0"
+dependencies = [
+ "codewire-workload-secrets",
+ "prost 0.14.4",
+ "prost-types",
+ "sha2 0.10.9",
+ "tonic 0.14.6",
+ "tonic-prost",
+ "tonic-prost-build",
 ]
 
 [[package]]
@@ -1840,19 +1853,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codewire-gateway-proto"
-version = "0.1.0"
-dependencies = [
- "codewire-workload-secrets",
- "prost 0.14.4",
- "prost-types",
- "sha2 0.10.9",
- "tonic 0.14.6",
- "tonic-prost",
- "tonic-prost-build",
-]
-
-[[package]]
 name = "codewire-idp"
 version = "0.1.0"
 dependencies = [
@@ -1893,7 +1893,7 @@ dependencies = [
  "base64",
  "codewire-access",
  "codewire-credential-bridge",
- "codewire-gateway-proto",
+ "codewire-daemon-proto",
  "codewire-project",
  "codewire-protected-store",
  "codewire-workload-secrets",
@@ -1936,9 +1936,9 @@ dependencies = [
  "codewire-cw-release",
  "codewire-daemon",
  "codewire-daemon-bridge",
+ "codewire-daemon-proto",
  "codewire-egress-broker",
  "codewire-egress-policy",
- "codewire-gateway-proto",
  "codewire-local-credentials",
  "codewire-netstack",
  "codewire-project",
@@ -2059,7 +2059,7 @@ dependencies = [
  "codewire-cw-release",
  "codewire-daemon",
  "codewire-daemon-bridge",
- "codewire-gateway-proto",
+ "codewire-daemon-proto",
  "codewire-platform-credentials",
  "codewire-project",
  "codewire-project-proto",
@@ -2210,7 +2210,7 @@ dependencies = [
  "buffa",
  "buffa-types",
  "chrono",
- "codewire-gateway-proto",
+ "codewire-daemon-proto",
  "codewire-proto",
  "connectrpc",
  "futures",
@@ -2329,7 +2329,7 @@ dependencies = [
  "anyhow",
  "codewire-access",
  "codewire-daemon",
- "codewire-gateway-proto",
+ "codewire-daemon-proto",
  "codewire-project",
  "codewire-workload-secrets",
  "flate2",
@@ -2377,7 +2377,7 @@ dependencies = [
  "codewire-credential-bridge",
  "codewire-credential-broker",
  "codewire-daemon",
- "codewire-gateway-proto",
+ "codewire-daemon-proto",
  "codewire-proto",
  "codewire-tailnet",
  "codewire-tls",

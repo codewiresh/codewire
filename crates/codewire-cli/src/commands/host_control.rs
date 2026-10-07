@@ -1,7 +1,7 @@
 //! Local owner administration for trusted-host delegation. Network discovery
 //! and caller authentication belong to the host-peer adapter, not these verbs.
 use super::*;
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 
 #[derive(Debug, Args)]
 pub(crate) struct HostControlArgs {

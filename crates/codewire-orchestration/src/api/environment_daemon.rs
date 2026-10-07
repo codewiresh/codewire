@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codewire_daemon_bridge::client::DaemonClient;
-use codewire_gateway_proto::daemon::v1;
-use codewire_gateway_proto::{
+use codewire_daemon_proto::daemon::v1;
+use codewire_daemon_proto::{
     DAEMON_AUTH_TOKEN_HEADER, DAEMON_CAPABILITY_ATTACH, DAEMON_CAPABILITY_FILES,
     DAEMON_CAPABILITY_HEALTH, DAEMON_CAPABILITY_SESSIONS, DAEMON_PROTOCOL_VERSION,
 };
@@ -200,7 +200,7 @@ pub async fn launch_environment_daemon_session_core(
     let required = if !request.name.is_empty() || request.parent_session_id.is_some() {
         &[
             DAEMON_CAPABILITY_SESSIONS,
-            codewire_gateway_proto::DAEMON_CAPABILITY_SESSION_METADATA,
+            codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_METADATA,
         ][..]
     } else {
         &[DAEMON_CAPABILITY_SESSIONS][..]
@@ -410,12 +410,12 @@ pub async fn send_environment_daemon_session_input_core(
         user,
         org_id,
         environment_id,
-        &[codewire_gateway_proto::DAEMON_CAPABILITY_SESSION_INPUT],
+        &[codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_INPUT],
         DaemonRequestBudget::Control,
     )
     .await?;
     let mut request = authorize(request, &token)?;
-    request.set_timeout(codewire_gateway_proto::SESSION_INPUT_TIMEOUT);
+    request.set_timeout(codewire_daemon_proto::SESSION_INPUT_TIMEOUT);
     client.send_session_input(request).await.map_err(|error| match error.code() {
         tonic::Code::DeadlineExceeded | tonic::Code::Cancelled | tonic::Code::Unavailable => AppError::Precondition(
             "session input outcome is ambiguous; input may have been written; do not retry automatically".into()),
@@ -1380,7 +1380,7 @@ async fn resolve_pod_name(
 mod tests {
     use codewire_daemon::service::DaemonRuntimeState;
     use codewire_daemon::{Config, DaemonAuthToken, server};
-    use codewire_gateway_proto::DAEMON_CAPABILITY_HEALTH;
+    use codewire_daemon_proto::DAEMON_CAPABILITY_HEALTH;
     use tempfile::TempDir;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;

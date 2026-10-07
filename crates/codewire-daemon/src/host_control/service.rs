@@ -1,6 +1,6 @@
-use codewire_gateway_proto::DAEMON_AUTH_TOKEN_HEADER;
-use codewire_gateway_proto::daemon::v1;
-use codewire_gateway_proto::daemon::v1::host_control_service_server::HostControlService as Rpc;
+use codewire_daemon_proto::DAEMON_AUTH_TOKEN_HEADER;
+use codewire_daemon_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1::host_control_service_server::HostControlService as Rpc;
 use prost::Message;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;

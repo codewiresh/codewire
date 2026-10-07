@@ -11,7 +11,7 @@ if [[ "$#" == 0 ]]; then
 fi
 for argument in "${arguments[@]}"; do
   case "$argument" in
-    kind|gateway-ci) profile=ci ;;
+    kind|daemon-ci) profile=ci ;;
   esac
 done
 source "$ROOT/scripts/ci/images/cw-image-consumer.sh"

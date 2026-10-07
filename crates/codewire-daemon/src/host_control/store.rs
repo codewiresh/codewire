@@ -5,7 +5,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};

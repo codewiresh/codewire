@@ -296,7 +296,7 @@ pub trait PlatformRuntimeAuthority: Send + Sync {
     /// authority. An identity-only test adapter remains explicitly deny-only.
     async fn project_environment(
         &self,
-        _request: codewire_gateway_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
+        _request: codewire_daemon_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
     ) -> Result<Vec<u8>, PlatformRuntimeError> {
         Err(PlatformRuntimeError::Denied)
     }
@@ -306,9 +306,9 @@ pub trait PlatformRuntimeAuthority: Send + Sync {
     /// source outside the channel's immutable platform selection.
     async fn project_environment_fragment(
         &self,
-        _request: codewire_gateway_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
+        _request: codewire_daemon_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
     ) -> Result<
-        codewire_gateway_proto::codewire::bridge::v1::EnvironmentProjectionComposition,
+        codewire_daemon_proto::codewire::bridge::v1::EnvironmentProjectionComposition,
         PlatformRuntimeError,
     > {
         Err(PlatformRuntimeError::Denied)
@@ -972,9 +972,9 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
 
     async fn project_environment_fragment(
         &self,
-        request: codewire_gateway_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
+        request: codewire_daemon_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
     ) -> Result<
-        codewire_gateway_proto::codewire::bridge::v1::EnvironmentProjectionComposition,
+        codewire_daemon_proto::codewire::bridge::v1::EnvironmentProjectionComposition,
         BrokerLeaseError,
     > {
         self.session().await?;
@@ -997,7 +997,7 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
 
     async fn project_environment(
         &self,
-        request: codewire_gateway_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
+        request: codewire_daemon_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
     ) -> Result<Vec<u8>, BrokerLeaseError> {
         self.session().await?;
         let deadline = request.deadline_unix_ms;
@@ -1046,10 +1046,10 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
     #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
     async fn ssh_operation(
         &self,
-        request: codewire_gateway_proto::codewire::bridge::v1::CredentialSshRequest,
+        request: codewire_daemon_proto::codewire::bridge::v1::CredentialSshRequest,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<
-        codewire_gateway_proto::codewire::bridge::v1::credential_ssh_response::Result,
+        codewire_daemon_proto::codewire::bridge::v1::credential_ssh_response::Result,
         BrokerLeaseError,
     > {
         self.retained_ssh_operation(request, cancellation).await

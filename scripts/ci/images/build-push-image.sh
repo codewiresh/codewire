@@ -591,7 +591,7 @@ fi
 case "$image_name:$dockerfile_from_context" in
   dashboard:apps/dashboard/Dockerfile) product_bake_target=dashboard ;;
   derp:deployments/docker/derp.Dockerfile) product_bake_target=derp ;;
-  gateway:deployments/docker/gateway.Dockerfile) product_bake_target=gateway ;;
+  daemon:deployments/docker/daemon.Dockerfile) product_bake_target=daemon ;;
   mesh:deployments/docker/mesh.Dockerfile) product_bake_target=mesh ;;
   services:deployments/docker/services.Dockerfile) product_bake_target=services ;;
 esac
@@ -605,7 +605,7 @@ fi
 # already published by a partially successful attempt.
 if [ "$build_runtime_set" = 1 ]; then
   missing_runtime_targets=()
-  for runtime_target in dashboard services mesh gateway derp; do
+  for runtime_target in dashboard services mesh daemon derp; do
     runtime_source_tag="${REGISTRY_REPOSITORY_PREFIX}/${runtime_target}:${source_sha}"
     if inspect_manifest_digest "$runtime_source_tag" >/dev/null; then
       continue

@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use codewire_gateway_proto::CREDENTIAL_RELAY_TOKEN_PATH;
+use codewire_daemon_proto::CREDENTIAL_RELAY_TOKEN_PATH;
 use codewire_tls::ClientTlsEndpoint;
 use sqlx::PgPool;
 use sqlx::postgres::PgListener;

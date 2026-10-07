@@ -1718,7 +1718,7 @@ fn pool_cfg() -> SandboxWorkerCfg {
         credential_runtime: Some(
             crate::sandbox::template::CredentialRuntimeTemplateConfig::synthetic(NAMESPACE),
         ),
-        gateway_image: "registry.example.invalid/codewire/gateway@sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
+        daemon_image: "registry.example.invalid/codewire/daemon@sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
         dind_image: "docker.io/library/docker:29.7.1-dind@sha256:3333333333333333333333333333333333333333333333333333333333333333".into(),
         runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_COMMODITY.into(),
         docker_mode: crate::sandbox::template::DOCKER_MODE_PROFILE_DEFAULT.into(),

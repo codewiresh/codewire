@@ -240,7 +240,7 @@ impl Tree {
                 continue;
             }
             let id = name.strip_suffix(".bin").ok_or(Error::Refused)?;
-            if !codewire_gateway_proto::platform_managed::valid_uuid(id) {
+            if !codewire_daemon_proto::platform_managed::valid_uuid(id) {
                 return Err(Error::Refused);
             }
             self.read(name, 128 * 1024)?.ok_or(Error::Refused)?;
@@ -254,7 +254,7 @@ impl Tree {
     }
 }
 pub(crate) fn publish_session(root: &Path, session: &str, bytes: &[u8]) -> Result<(), Error> {
-    if !codewire_gateway_proto::platform_managed::valid_session(session) || bytes.len() > 128 * 1024
+    if !codewire_daemon_proto::platform_managed::valid_session(session) || bytes.len() > 128 * 1024
     {
         return Err(Error::Refused);
     }

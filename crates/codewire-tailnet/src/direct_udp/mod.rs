@@ -50,6 +50,12 @@ pub struct Options {
     pub stun_timeout: Duration,
     /// How often to refresh mapped endpoints from STUN after startup.
     pub stun_refresh_interval: Duration,
+    /// Query STUN before [`wrap_transport`] returns, so the first published
+    /// node already carries the mapped endpoint. When false, the transport
+    /// starts at once and publishes the endpoint through
+    /// [`crate::conn::Transport::local_endpoint_updates`] when STUN answers;
+    /// WireGuard rides DERP meanwhile.
+    pub stun_before_start: bool,
     /// Whether direct peer UDP candidates may be discovered and selected.
     /// UDP peer-relay negotiation remains enabled when this is false.
     pub peer_direct_udp_enabled: bool,
@@ -78,6 +84,7 @@ impl Options {
             stun_servers: Vec::new(),
             stun_timeout: STUN_DISCOVERY_TIMEOUT,
             stun_refresh_interval: STUN_REFRESH_INTERVAL,
+            stun_before_start: true,
             peer_direct_udp_enabled: true,
             public_peer_endpoints_only: false,
             local_node_key,
@@ -100,6 +107,13 @@ impl Options {
     /// Override the STUN refresh interval.
     pub fn with_stun_refresh_interval(mut self, interval: Duration) -> Self {
         self.stun_refresh_interval = interval;
+        self
+    }
+
+    /// Choose whether startup waits for STUN; see
+    /// [`stun_before_start`](Self::stun_before_start).
+    pub fn with_stun_before_start(mut self, wait: bool) -> Self {
+        self.stun_before_start = wait;
         self
     }
 

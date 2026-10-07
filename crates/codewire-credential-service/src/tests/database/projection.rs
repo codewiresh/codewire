@@ -8,7 +8,7 @@ use codewire_credential_broker::{
     BrokerCredentialLease, BrokerLeaseError, BrokerLeaseProvider,
     platform::PlatformBrokerLeaseProvider,
 };
-use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_platform_credentials::PlatformCredentialStore;
 use codewire_protected_store::secret_envelope::{
     DEK_BYTES, DekContext, GeneratedDek, KekProvider, KekProviderKind, SecretCoordinates,

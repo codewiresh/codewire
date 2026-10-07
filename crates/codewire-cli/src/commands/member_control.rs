@@ -2,7 +2,7 @@
 //! daemon or coordinator; only `member up` launches the retained member helper.
 use super::*;
 use anyhow::ensure;
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 use codewire_tailnet::wg::PublicKey;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

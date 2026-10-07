@@ -114,7 +114,7 @@
       "event": "pull_request",
       "ref": "refs/pull/1714/head",
       "kind_e2e_opt_in": false,
-      "paths": ["deployments/docker/gateway.Dockerfile"],
+      "paths": ["deployments/docker/daemon.Dockerfile"],
       "expected": {
         "classification": "changed",
         "selection_tokens": ["deploy", "go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "release", "runtime_confidential"],

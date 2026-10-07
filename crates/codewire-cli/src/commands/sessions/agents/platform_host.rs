@@ -28,7 +28,7 @@ fn save_request_at(
     request: &rpc::MutateEnvironmentAgentRequest,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
-        codewire_gateway_proto::platform_managed::valid_uuid(&request.request_id),
+        codewire_daemon_proto::platform_managed::valid_uuid(&request.request_id),
         "managed request UUID must be canonical and nonnil"
     );
     let encoded = request.encode_to_vec();
@@ -116,7 +116,7 @@ fn request_id(value: Option<&str>) -> anyhow::Result<String> {
         .transpose()?
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     anyhow::ensure!(
-        codewire_gateway_proto::platform_managed::valid_uuid(&id),
+        codewire_daemon_proto::platform_managed::valid_uuid(&id),
         "request UUID must be canonical and nonnil"
     );
     Ok(id)
@@ -248,7 +248,7 @@ async fn conversation(
         .strip_prefix("session-")
         .context("managed session has invalid identity")?;
     anyhow::ensure!(
-        codewire_gateway_proto::platform_managed::valid_uuid(driver_id),
+        codewire_daemon_proto::platform_managed::valid_uuid(driver_id),
         "managed driver UUID is invalid"
     );
     Ok(Conversation {
@@ -394,7 +394,7 @@ pub(super) async fn run(
         .prompt
         .as_ref()
         .map(|_| {
-            codewire_gateway_proto::platform_managed::platform_managed_initial_prompt_id(&id)
+            codewire_daemon_proto::platform_managed::platform_managed_initial_prompt_id(&id)
                 .map_err(|_| anyhow::anyhow!("initial managed message UUID is invalid"))
         })
         .transpose()?;
@@ -663,7 +663,7 @@ async fn wait_location(
         location.version == 1
             && location.launch_generation > 0
             && location.session_id == format!("session-{}", location.driver_id)
-            && codewire_gateway_proto::platform_managed::valid_uuid(&location.message_id),
+            && codewire_daemon_proto::platform_managed::valid_uuid(&location.message_id),
         "managed message index is invalid"
     );
     let deadline = Instant::now() + timeout;

@@ -15,7 +15,7 @@ readonly SERVICES_DOCKERFILE="$ROOT/deployments/docker/services.Dockerfile"
 readonly SERVICES_DOCKERIGNORE="$ROOT/deployments/docker/services.Dockerfile.dockerignore"
 readonly DASHBOARD_DOCKERFILE="$ROOT/apps/dashboard/Dockerfile"
 readonly MESH_DOCKERFILE="$ROOT/deployments/docker/mesh.Dockerfile"
-readonly GATEWAY_DOCKERFILE="$ROOT/deployments/docker/gateway.Dockerfile"
+readonly DAEMON_DOCKERFILE="$ROOT/deployments/docker/daemon.Dockerfile"
 readonly DERP_DOCKERFILE="$ROOT/deployments/docker/derp.Dockerfile"
 readonly CW_FIXTURE="$ROOT/scripts/ci/tests/cw_image_fixtures.py"
 readonly SERVICES_BINARY_ARTIFACTS=(
@@ -95,11 +95,11 @@ verify_services_dockerfile_contract() {
     grep -qF -- "--mount=type=cache,${mount}" "$SERVICES_DOCKERFILE" ||
       fail "services image is missing cache mount ${mount}"
   done
-  grep -qF 'COPY libs/gateway-proto ./libs/gateway-proto' "$SERVICES_DOCKERFILE" ||
+  grep -qF 'COPY libs/daemon-proto ./libs/daemon-proto' "$SERVICES_DOCKERFILE" ||
     fail 'services image does not receive the environment daemon protocol schema'
-  grep -qF '!libs/gateway-proto/**' "$SERVICES_DOCKERIGNORE" ||
+  grep -qF '!libs/daemon-proto/**' "$SERVICES_DOCKERIGNORE" ||
     fail 'services build context excludes the environment daemon protocol schema'
-  grep -qF 'find Cargo.toml Cargo.lock crates proto libs/gateway-proto -type f -exec touch {} +' \
+  grep -qF 'find Cargo.toml Cargo.lock crates proto libs/daemon-proto -type f -exec touch {} +' \
     "$SERVICES_DOCKERFILE" ||
     fail 'services image does not revalidate copied workspace inputs'
   # shellcheck disable=SC2016
@@ -236,7 +236,7 @@ verify_kind_build_cache_contract() {
       "$DASHBOARD_DOCKERFILE" \
       "$SERVICES_DOCKERFILE" \
       "$MESH_DOCKERFILE" \
-      "$GATEWAY_DOCKERFILE" \
+      "$DAEMON_DOCKERFILE" \
       "$DERP_DOCKERFILE"; do
     grep -qF 'FROM codewire-rust-base AS ' "$dockerfile" ||
       fail "$(basename "$dockerfile") omits the shared Rust build base"
@@ -261,7 +261,7 @@ verify_kind_build_cache_contract() {
 
   [[ "$(grep -cF 'codewire-rust-base = "target:rust-base"' "$BAKE_FILE")" -eq 1 ]] ||
     fail 'Bake does not build the shared Rust base once as a linked target'
-  for target in dashboard-ci services-ci mesh-ci gateway-ci; do
+  for target in dashboard-ci services-ci mesh-ci daemon-ci; do
     grep -qF "\"$target\"" "$BAKE_FILE" || fail "Bake omits Kind target $target"
   done
   grep -qF 'default = "disabled"' "$BAKE_FILE" ||
@@ -293,7 +293,7 @@ verify_kind_build_cache_contract() {
   if grep -Eq 'AWS_IAM_CREDENTIALS_URL|aws_iam_credentials_url' \
       "$RUST_BUILD_WRAPPER" "$KIND_BUILDER" "$BUILDER" \
       "$DASHBOARD_DOCKERFILE" "$SERVICES_DOCKERFILE" \
-      "$MESH_DOCKERFILE" "$GATEWAY_DOCKERFILE" "$DERP_DOCKERFILE"; then
+      "$MESH_DOCKERFILE" "$DAEMON_DOCKERFILE" "$DERP_DOCKERFILE"; then
     fail 'the unsupported credential-URL contract remains in an R2 build path'
   fi
   grep -qF 'export CARGO_INCREMENTAL=0' "$RUST_BUILD_WRAPPER" ||
@@ -315,13 +315,13 @@ verify_kind_build_cache_contract() {
   grep -qF 'dev.codewire.promotable"    = "false"' "$BAKE_FILE" ||
     fail 'Kind images are not marked non-promotable'
   # shellcheck disable=SC2016
-  count="$(grep -cF 'cargo build --locked --profile "$CODEWIRE_RUST_PROFILE"' "$GATEWAY_DOCKERFILE")"
+  count="$(grep -cF 'cargo build --locked --profile "$CODEWIRE_RUST_PROFILE"' "$DAEMON_DOCKERFILE")"
   [[ "$count" -eq 1 ]] || fail 'the support image must build only cw, profile-selected'
-  grep -qF -- '-p codewire-cli-bin --bin cw' "$GATEWAY_DOCKERFILE" ||
-    fail 'gateway support image does not build the self-contained cw binary'
+  grep -qF -- '-p codewire-cli-bin --bin cw' "$DAEMON_DOCKERFILE" ||
+    fail 'daemon support image does not build the self-contained cw binary'
   if grep -Eq -- '--bin codewire-daemon|/usr/local/bin/(daemon|codewire-daemon)' \
-      "$GATEWAY_DOCKERFILE"; then
-    fail 'gateway support image retained a standalone daemon binary or alias'
+      "$DAEMON_DOCKERFILE"; then
+    fail 'daemon support image retained a standalone daemon binary or alias'
   fi
 }
 
@@ -702,12 +702,12 @@ case "${1:-} ${2:-} ${3:-}" in
         "dashboard-ci": {},
         "services-ci": {},
         "mesh-ci": {},
-        "gateway-ci": {}
+        "daemon-ci": {}
       }' >"$metadata"
       exit 0
     fi
     if [ "${#targets[@]}" -eq 1 ] && [ "${targets[0]}" = default ]; then
-      targets=(dashboard services mesh gateway derp)
+      targets=(dashboard services mesh daemon derp)
     fi
     printf '{}\n' >"$metadata"
     for target in "${targets[@]}"; do
@@ -842,15 +842,15 @@ grep -qF 'SCCACHE_DIR=/var/cache/sccache MULTILEVEL=disk,s3' "$FAKE_SCCACHE_CALL
 
 (
   cd "$source_fixture"
-  "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+  "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 )
 
-grep -qxF 'family=gateway' "$GITHUB_OUTPUT" || fail 'candidate family is absent'
+grep -qxF 'family=daemon' "$GITHUB_OUTPUT" || fail 'candidate family is absent'
 grep -qxF "source_sha=$source_sha" "$GITHUB_OUTPUT" ||
   fail 'candidate source SHA is absent'
-grep -qxF "candidate_ref=registry.example.invalid/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
+grep -qxF "candidate_ref=registry.example.invalid/codewire/daemon@$digest" "$GITHUB_OUTPUT" ||
   fail 'candidate digest ref is absent'
-grep -qF -- "gateway.tags=registry.example.invalid/codewire/gateway:$source_sha" "$FAKE_DOCKER_CALLS" ||
+grep -qF -- "daemon.tags=registry.example.invalid/codewire/daemon:$source_sha" "$FAKE_DOCKER_CALLS" ||
   fail 'immutable source tag did not reach canonical Bake target'
 grep -qF -- "CODEWIRE_IMAGE_SOURCE_SHA=$source_sha" "$FAKE_DOCKER_CALLS" ||
   fail 'exact source revision did not reach canonical Bake'
@@ -896,7 +896,7 @@ grep -qF -- 'buildx rm --force codewire-publish-' "$FAKE_DOCKER_CALLS" ||
 [[ "$(build_invocation_count)" -eq 1 ]] ||
   fail 'image was not built exactly once'
 [[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
-  fail 'gateway did not use exactly one original CW producer'
+  fail 'daemon did not use exactly one original CW producer'
 assert_cw_context release
 [[ "$(git -C "$source_fixture" remote get-url origin)" == "$source_remote_before" ]] ||
   fail 'protected image publication did not restore the checkout origin remote'
@@ -904,7 +904,7 @@ assert_cw_context release
 if ! (
   cd "$source_fixture"
   FAKE_PROVENANCE_ENVELOPE=true \
-    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+    "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 ); then
   fail 'protected image build rejected the valid SLSA v1 statement envelope'
 fi
@@ -914,7 +914,7 @@ fi
 if (
   cd "$source_fixture"
   CODEWIRE_PROVENANCE_BUILDER_ID=https://attacker.invalid/builder \
-    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+    "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 ) >"$work/unrecognized-builder.out" 2>"$work/unrecognized-builder.err"; then
   fail 'protected image build accepted an unrecognized builder identity'
 fi
@@ -925,7 +925,7 @@ grep -qF 'unrecognized provenance builder identity' \
 if (
   cd "$source_fixture"
   FAKE_PROVENANCE_BUILDER_ID=https://attacker.invalid/builder \
-    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+    "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 ) >"$work/invalid-provenance.out" 2>"$work/invalid-provenance.err"; then
   fail 'protected image build accepted provenance from a different builder'
 fi
@@ -938,7 +938,7 @@ grep -qF 'Protected image provenance is invalid' \
 if (
   cd "$source_fixture"
   FAKE_SBOM_INVALID=1 \
-    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+    "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 ) >"$work/invalid-sbom.out" 2>"$work/invalid-sbom.err"; then
   fail 'protected image build accepted an invalid SPDX SBOM'
 fi
@@ -953,7 +953,7 @@ login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 (
   cd "$source_fixture"
   FAKE_LOGIN_FAILURES=1 FAKE_LOGIN_STATE="$work/login-state" \
-    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+    "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 ) >"$work/transient-login.out" 2>&1
 grep -qF 'Registry login was rejected; retrying authentication' \
   "$work/transient-login.out" || fail 'transient initial registry login was not reported'
@@ -967,7 +967,7 @@ login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
   cd "$source_fixture"
   FAKE_LOGIN_NEXUS_FAILURES=2 \
   FAKE_LOGIN_NEXUS_STATE="$work/login-nexus-state" \
-    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+    "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 ) >"$work/transient-nexus-login.out" 2>&1
 [[ "$(cat "$work/login-nexus-state")" -eq 2 ]] ||
   fail 'transient registry login did not consume both simulated failures'
@@ -983,13 +983,13 @@ grep -qF 'retrying registry.example.invalid (2/61)' \
 (
   cd "$source_fixture"
   FAKE_DIGEST="$second_digest" \
-    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+    "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 )
 [[ "$(build_invocation_count)" -eq 1 ]] ||
   fail 'existing source-SHA image was rebuilt'
 [[ "$(cw_producer_invocation_count)" -eq 1 ]] ||
   fail 'source-SHA reuse needlessly rebuilt CW'
-grep -qxF "candidate_ref=registry.example.invalid/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
+grep -qxF "candidate_ref=registry.example.invalid/codewire/daemon@$digest" "$GITHUB_OUTPUT" ||
   fail 'source-SHA rerun did not preserve the original digest'
 
 : >"$GITHUB_OUTPUT"
@@ -1018,12 +1018,12 @@ create_calls_before="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" |
   REQUIRE_EXISTING_SOURCE_IMAGE=1 \
   CODEWIRE_RELEASE_TAG='v0.3.999' \
   CODEWIRE_SOURCE_SHA="$source_sha" \
-    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+    "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 )
-grep -qxF "candidate_ref=registry.example.invalid/codewire/gateway@$digest" "$GITHUB_OUTPUT" ||
+grep -qxF "candidate_ref=registry.example.invalid/codewire/daemon@$digest" "$GITHUB_OUTPUT" ||
   fail 'release alias did not preserve the source-SHA digest'
 awk -F '\t' \
-  -v reference='registry.example.invalid/codewire/gateway:v0.3.999' \
+  -v reference='registry.example.invalid/codewire/daemon:v0.3.999' \
   -v digest="$digest" \
   '$1 == reference && $2 == digest { found = 1 } END { exit !found }' \
   "$FAKE_MANIFESTS" ||
@@ -1054,7 +1054,7 @@ grep -qF 'Required immutable source image is missing' \
   cd "$source_fixture"
   CODEWIRE_RELEASE_TAG='v0.3.999' \
   CODEWIRE_SOURCE_SHA="$source_sha" \
-    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+    "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 )
 [[ "$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS")" -eq $((create_calls_before + 1)) ]] ||
   fail 'matching release alias was rewritten'
@@ -1064,11 +1064,11 @@ login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 create_calls_before_auth="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" || true)"
 (
   cd "$source_fixture"
-  FAKE_INSPECT_AUTH_ONCE_REF='registry.example.invalid/codewire/gateway:v0.3.997' \
+  FAKE_INSPECT_AUTH_ONCE_REF='registry.example.invalid/codewire/daemon:v0.3.997' \
   FAKE_INSPECT_AUTH_STATE="$work/inspect-auth-state" \
   CODEWIRE_RELEASE_TAG='v0.3.997' \
   CODEWIRE_SOURCE_SHA="$source_sha" \
-    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+    "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 ) >"$work/transient-auth.out" 2>&1
 grep -qF 'Registry authentication expired while inspecting' \
   "$work/transient-auth.out" || fail 'transient registry auth was not reported'
@@ -1082,11 +1082,11 @@ login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
 create_calls_before_auth="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" || true)"
 (
   cd "$source_fixture"
-  FAKE_CREATE_AUTH_ONCE_REF='registry.example.invalid/codewire/gateway:v0.3.996' \
+  FAKE_CREATE_AUTH_ONCE_REF='registry.example.invalid/codewire/daemon:v0.3.996' \
   FAKE_CREATE_AUTH_STATE="$work/create-auth-state" \
   CODEWIRE_RELEASE_TAG='v0.3.996' \
   CODEWIRE_SOURCE_SHA="$source_sha" \
-    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+    "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 ) >"$work/transient-create-auth.out" 2>&1
 grep -qF 'Registry authentication expired while creating' \
   "$work/transient-create-auth.out" || fail 'transient create auth was not reported'
@@ -1096,13 +1096,13 @@ grep -qF 'Registry authentication expired while creating' \
   fail 'transient create auth was not retried exactly once'
 
 printf '%s\t%s\n' \
-  'registry.example.invalid/codewire/gateway:v0.3.998' "$mismatch_digest" \
+  'registry.example.invalid/codewire/daemon:v0.3.998' "$mismatch_digest" \
   >>"$FAKE_MANIFESTS"
 if (
   cd "$source_fixture"
   CODEWIRE_RELEASE_TAG='v0.3.998' \
   CODEWIRE_SOURCE_SHA="$source_sha" \
-    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+    "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 ) >"$work/mismatched-alias.out" 2>&1; then
   fail 'mismatched immutable release alias was accepted'
 fi
@@ -1131,7 +1131,7 @@ fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"
 if (
   cd "$source_fixture"
   REQUIRE_EXISTING_SOURCE_IMAGE=yes \
-    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+    "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 ) >"$work/invalid-require-existing.out" 2>&1; then
   fail 'invalid existing-source requirement was accepted'
 fi
@@ -1154,7 +1154,7 @@ fi
 if (
   cd "$source_fixture"
   CODEWIRE_BASE_IMAGE_REF="$base_ref" \
-    "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+    "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 ) >"$work/non-workspace-base.out" 2>&1; then
   fail 'workspace base argument was accepted for another image family'
 fi
@@ -1210,7 +1210,7 @@ if grep -qE 'untrusted-(access-key|secret-key)' "$FAKE_DOCKER_CALLS"; then
   fail 'R2 credential material reached Docker command arguments'
 fi
 
-for family in dashboard services mesh gateway derp; do
+for family in dashboard services mesh daemon derp; do
   awk -F '\t' \
     -v reference="registry.example.invalid/codewire/${family}:$source_sha" \
     '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
@@ -1238,7 +1238,7 @@ grep -Eq ' buildx bake .* default $' "$FAKE_DOCKER_CALLS" ||
 runtime_set_call="$(grep -E ' buildx bake .* default $' "$FAKE_DOCKER_CALLS" | tail -1)"
 [[ "$(grep -oF 'secrets+=id=aws_shared_credentials\,src=' <<<"$runtime_set_call" | wc -l)" -eq 5 ]] ||
   fail 'protected runtime Bake did not bind the private cache credential to all five targets'
-for family in dashboard services mesh gateway derp; do
+for family in dashboard services mesh daemon derp; do
   grep -qF -- "${family}.tags=registry.example.invalid/codewire/${family}:$source_sha" \
     "$FAKE_DOCKER_CALLS" || fail "protected runtime Bake omitted exact $family source tag"
   awk -F '\t' \
@@ -1561,7 +1561,7 @@ printf 'untrusted build input\n' >"$source_fixture/forbidden-untracked-input"
 fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"
 if (
   cd "$source_fixture"
-  "$BUILDER" gateway deployments/docker/gateway.Dockerfile .
+  "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
 ) >"$work/dirty-source.out" 2>&1; then
   fail 'protected image build accepted an untracked source input'
 fi

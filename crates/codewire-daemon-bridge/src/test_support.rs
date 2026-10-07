@@ -11,7 +11,7 @@ use std::time::Duration;
 use codewire_daemon::execution::ProcessExecution;
 use codewire_daemon::service::DaemonServiceImpl;
 use codewire_daemon::{Config, DaemonAuthToken, serve_grpc_with_incoming};
-use codewire_gateway_proto::daemon::v1::daemon_service_server::DaemonServiceServer;
+use codewire_daemon_proto::daemon::v1::daemon_service_server::DaemonServiceServer;
 use connectrpc::http_body::{Body as HttpBody, Frame};
 use prost::Message as _;
 use tempfile::TempDir;
@@ -239,8 +239,7 @@ impl Service<http::Request<Body>> for GatedDaemonService {
                 if let Ok(frame) = &frame {
                     size += frame.data_ref().map_or(0, bytes::Bytes::len);
                     assert!(
-                        size <= codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES
-                            + 5,
+                        size <= codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES + 5,
                         "gated unary fixture exceeded the daemon message limit"
                     );
                 }
@@ -385,10 +384,10 @@ impl DaemonHarness {
         let service = GatedDaemonService {
             inner: DaemonServiceServer::new(DaemonServiceImpl::new(config))
                 .max_decoding_message_size(
-                    codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES,
+                    codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES,
                 )
                 .max_encoding_message_size(
-                    codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES,
+                    codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES,
                 ),
             gate: Arc::clone(&gate),
         };

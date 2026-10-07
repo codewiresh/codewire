@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use codewire_daemon_bridge::client::DaemonClient;
-use codewire_gateway_proto::{DAEMON_CAPABILITY_EXEC, DAEMON_CAPABILITY_FILES};
+use codewire_daemon_proto::{DAEMON_CAPABILITY_EXEC, DAEMON_CAPABILITY_FILES};
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::{AppError, AppResult};
 use tonic::transport::Endpoint;

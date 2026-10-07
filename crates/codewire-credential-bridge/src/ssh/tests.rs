@@ -223,7 +223,7 @@ async fn ssh_invalid_or_unadmitted_requests_register_and_dispatch_nothing() {
                 request.operation = Some(v1::credential_ssh_request::Operation::Sign(
                     v1::CredentialSshSignRequest {
                         public_key_blob: vec![1],
-                        data: vec![1; codewire_gateway_proto::ssh::MAX_SIGNING_DATA_BYTES + 1],
+                        data: vec![1; codewire_daemon_proto::ssh::MAX_SIGNING_DATA_BYTES + 1],
                         flags: 0,
                     },
                 ));

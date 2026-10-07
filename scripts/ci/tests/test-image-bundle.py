@@ -139,19 +139,19 @@ class ImageBundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             metadata = Path(directory) / "metadata.json"
             metadata.write_text(
-                json.dumps({"containerimage.digest": DIGESTS["gateway"]}),
+                json.dumps({"containerimage.digest": DIGESTS["daemon"]}),
                 encoding="utf-8",
             )
             self.assertEqual(
                 image_bundle._candidate_from_metadata(
-                    "gateway", SOURCE_SHA,
+                    "daemon", SOURCE_SHA,
                     "registry.example.invalid/codewire",
                     metadata,
                 ),
                 (
-                    "gateway",
+                    "daemon",
                     SOURCE_SHA,
-                    f"registry.example.invalid/codewire/gateway@{DIGESTS['gateway']}",
+                    f"registry.example.invalid/codewire/daemon@{DIGESTS['daemon']}",
                 ),
             )
 
@@ -215,19 +215,19 @@ class ImageBundleTests(unittest.TestCase):
             metadata.write_text("{}", encoding="utf-8")
             with self.assertRaises(image_bundle.BundleError):
                 image_bundle._candidate_from_metadata(
-                    "gateway", SOURCE_SHA, "unapproved.example/oci", metadata
+                    "daemon", SOURCE_SHA, "unapproved.example/oci", metadata
                 )
 
     def test_candidate_for_other_registry_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             metadata = Path(directory) / "metadata.json"
             metadata.write_text(
-                json.dumps({"containerimage.digest": DIGESTS["gateway"]}),
+                json.dumps({"containerimage.digest": DIGESTS["daemon"]}),
                 encoding="utf-8",
             )
             with self.assertRaises(image_bundle.BundleError):
                 image_bundle._candidate_from_metadata(
-                    "gateway", SOURCE_SHA, "registry.invalid", metadata
+                    "daemon", SOURCE_SHA, "registry.invalid", metadata
                 )
 
 

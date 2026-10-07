@@ -13,7 +13,7 @@ use codewire_access::{
 use codewire_credential_broker::platform::{
     PlatformRuntimeAuthority, PlatformRuntimeError as Error, PlatformRuntimeSession,
 };
-use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_platform_credentials::{PlatformAccessProfileStore, PlatformProfileError};
 use codewire_project::{PlatformProjectionSelection, platform_projection_reserved_keys};
 use codewire_protected_store::secret_envelope::KekProvider;

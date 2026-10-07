@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as AsyncMutex, watch};
@@ -249,7 +249,7 @@ impl Mutation {
                     || request.working_dir.contains('\0')
                     || (!request.working_dir.is_empty()
                         && !std::path::Path::new(&request.working_dir).is_absolute())
-                    || !codewire_gateway_proto::valid_session_name(&request.name)
+                    || !codewire_daemon_proto::valid_session_name(&request.name)
                     || request.term.len() > 64
                     || request.term.chars().any(char::is_control)
                     || !(0..=4096).contains(&request.width)
@@ -263,7 +263,7 @@ impl Mutation {
                 session_id(&request.session_id)?;
                 if request.expected_launch_generation == 0
                     || request.data.is_empty()
-                    || request.data.len() > codewire_gateway_proto::SESSION_INPUT_MAX_BYTES
+                    || request.data.len() > codewire_daemon_proto::SESSION_INPUT_MAX_BYTES
                 {
                     return Err(Error::Invalid);
                 }

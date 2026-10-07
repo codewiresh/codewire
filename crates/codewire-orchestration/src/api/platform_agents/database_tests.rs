@@ -3,7 +3,7 @@ use super::*;
 use crate::test_database_support::TestDatabase;
 use crate::worker::workspace_binding::live_cw_runtime_binding;
 use anyhow::{Result, ensure};
-use codewire_gateway_proto::daemon::v1 as private;
+use codewire_daemon_proto::daemon::v1 as private;
 use codewire_server_core::migrate::application_migrator;
 use sha2::{Digest, Sha384};
 const ORG: &str = "runtime-journal-org";

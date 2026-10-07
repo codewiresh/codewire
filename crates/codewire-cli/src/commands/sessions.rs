@@ -198,7 +198,7 @@ impl EnvironmentSessionTarget {
                 let response = host_session_client(environment)
                     .await?
                     .read_output(
-                        codewire_gateway_proto::daemon::v1::ReadSessionOutputRequest {
+                        codewire_daemon_proto::daemon::v1::ReadSessionOutputRequest {
                             session_id: session_id.into(),
                             offset,
                             limit: 0,
@@ -278,7 +278,7 @@ impl EnvironmentSessionTarget {
             Self::Host { environment, .. } => {
                 let session = host_session_client(environment)
                     .await?
-                    .launch(codewire_gateway_proto::daemon::v1::LaunchSessionRequest {
+                    .launch(codewire_daemon_proto::daemon::v1::LaunchSessionRequest {
                         command,
                         working_dir,
                         env: env.into_iter().map(|(k, v)| format!("{k}={v}")).collect(),
@@ -616,9 +616,9 @@ fn platform_environment_session_view(
 
 #[cfg(unix)]
 pub(super) fn host_environment_session_view(
-    session: codewire_gateway_proto::daemon::v1::SessionRecord,
+    session: codewire_daemon_proto::daemon::v1::SessionRecord,
 ) -> EnvironmentSessionView {
-    use codewire_gateway_proto::daemon::v1::SessionLifecycleState as State;
+    use codewire_daemon_proto::daemon::v1::SessionLifecycleState as State;
     let state = match State::try_from(session.state).ok() {
         Some(State::Starting) => "Starting",
         Some(State::Running) => "Running",
@@ -794,7 +794,7 @@ pub(crate) async fn handle_restart_command(
         return super::member_control::managed::action(
             globals,
             args,
-            codewire_gateway_proto::daemon::v1::HostManagedAction::Restart,
+            codewire_daemon_proto::daemon::v1::HostManagedAction::Restart,
         )
         .await;
     }
@@ -923,7 +923,7 @@ async fn attach_host_environment_session(
     raw_output: bool,
     ansi: &mut LogsAnsiFilter,
 ) -> anyhow::Result<AttachExit> {
-    use codewire_gateway_proto::daemon::v1::session_attach_message::Payload;
+    use codewire_daemon_proto::daemon::v1::session_attach_message::Payload;
     let client = host_session_client(environment).await?;
     let mut attachment = client.attach(&session.session_id, offset).await?;
     let input = attachment.input_handle();

@@ -7,7 +7,7 @@ use codewire_access::{
     AccessProfileName, CapabilityPolicy, CredentialAuthKind, EnvironmentAccessBinding,
     EnvironmentId, ProviderCatalog, ProviderDefinition, ProviderId,
 };
-use codewire_gateway_proto::codewire::bridge::v1 as daemon_v1;
+use codewire_daemon_proto::codewire::bridge::v1 as daemon_v1;
 use codewire_protected_store::ProtectedStorePersistence;
 use codewire_protected_store::ssh_material::generate_ed25519;
 use tokio::net::UnixStream;
