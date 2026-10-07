@@ -590,11 +590,11 @@ fn admit_physical_endpoint(
             "runtime transport is not the authoritative VM endpoint",
         ));
     }
-    let persisted = crate::linux::state::PersistedVmState::read(&vm_root.join("state.json"))
+    let persisted = crate::state::PersistedVmState::read(&vm_root.join("state.json"))
         .map_err(|_| Status::failed_precondition("runtime VM state is unavailable"))?;
     if persisted.vm_id != id
         || persisted.generation != identity.generation
-        || persisted.phase != crate::linux::state::VmPhase::Running
+        || persisted.phase != crate::state::VmPhase::Running
     {
         return Err(Status::failed_precondition(
             "runtime VM incarnation changed",

@@ -1813,7 +1813,7 @@ mod tests {
             project_spec_json: String::from_utf8(project_spec_json.to_vec()).unwrap(),
             artifact_generation: "c".repeat(64),
             image,
-            root_disk_bytes: crate::linux::state::MINIMUM_ROOT_DISK_BYTES,
+            root_disk_bytes: crate::state::MINIMUM_ROOT_DISK_BYTES,
             skill_snapshot: None,
         }
     }
@@ -1855,7 +1855,7 @@ mod tests {
             state,
             vcpus: 2,
             memory_mib: 16 * 1024,
-            disk_bytes: crate::linux::state::MINIMUM_STATE_DISK_BYTES,
+            disk_bytes: crate::state::MINIMUM_STATE_DISK_BYTES,
             docker_disk_bytes: 0,
             generation: 7,
             host_ports: vec![HostPortBinding::new(18_080, 3_000).unwrap()],
@@ -3054,7 +3054,7 @@ mod tests {
         let (_parent, root) = root();
         let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
         let mut environment = environment(StoredEnvironmentState::Stopped, None);
-        environment.docker_disk_bytes = crate::linux::state::MINIMUM_DOCKER_DISK_BYTES;
+        environment.docker_disk_bytes = crate::state::MINIMUM_DOCKER_DISK_BYTES;
         let environment_id = environment.id;
         let expected = state(environment);
         store.replace_state(&expected).unwrap();
@@ -3081,7 +3081,7 @@ mod tests {
         assert_eq!(loaded, expected);
         assert_eq!(
             loaded.environments["dev"].docker_disk_bytes,
-            crate::linux::state::MINIMUM_DOCKER_DISK_BYTES
+            crate::state::MINIMUM_DOCKER_DISK_BYTES
         );
     }
 

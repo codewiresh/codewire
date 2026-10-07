@@ -18,10 +18,10 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::linux::path::{PrivateRoot, current_uid};
-use crate::linux::state::{
+use crate::oci::ContentStore;
+use crate::state::{
     MINIMUM_DOCKER_DISK_BYTES, MINIMUM_STATE_DISK_BYTES, StateDiskIdentity, VmPaths,
 };
-use crate::oci::ContentStore;
 pub use crate::supervisor_metadata::workspace::WorkspaceSourceMode;
 use crate::workspace_plan::{WorkspaceInput, WorkspacePlan};
 use codewire_vmm_guest_probe::DIRECT_SHARE_PLAN_RELATIVE_PATH;
@@ -2076,7 +2076,7 @@ pub enum WorkspaceError {
     #[error(transparent)]
     Path(#[from] crate::linux::path::PathError),
     #[error(transparent)]
-    State(#[from] crate::linux::state::StateError),
+    State(#[from] crate::state::StateError),
     #[error(transparent)]
     Plan(#[from] crate::workspace_plan::WorkspacePlanError),
     #[error(transparent)]

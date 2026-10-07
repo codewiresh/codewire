@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 use uuid::Uuid;
 
 use crate::linux::path::PrivateRoot;
-use crate::linux::state::{
+use crate::state::{
     MAXIMUM_ROOT_GENERATIONS, RootGenerationPaths, StateDiskIdentity, VmPaths,
     admitted_generation_names,
 };
@@ -235,7 +235,7 @@ pub enum GenerationError {
     #[error(transparent)]
     Path(#[from] crate::linux::path::PathError),
     #[error(transparent)]
-    State(#[from] crate::linux::state::StateError),
+    State(#[from] crate::state::StateError),
     #[error("filesystem operation failed for {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
 }
@@ -320,7 +320,7 @@ mod tests {
                 MINIMUM_ROOT_DISK_BYTES,
             ),
             Err(GenerationError::State(
-                crate::linux::state::StateError::InvalidRootGeneration
+                crate::state::StateError::InvalidRootGeneration
             ))
         ));
     }

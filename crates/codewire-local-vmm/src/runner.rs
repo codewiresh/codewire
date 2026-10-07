@@ -38,11 +38,18 @@ use crate::egress_broker::{
     EgressBrokerStartupStatus, decode_egress_broker_startup_status,
     encode_developer_egress_broker_bootstrap,
 };
+use crate::host::path::{FileIdentity, PathError, PrivateRoot, current_uid, set_socket_private};
+use crate::host::process::{LiveProcess, RecoveryError, signal_unreaped_child};
 use crate::host_port::{
     HOST_PORT_CONTROL_KEY_LEN, HostPortBinding, HostPortControlFrame,
     validate_canonical_host_port_bindings,
 };
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
+use crate::linux::confinement::{
+    PreparedFilesystemDomain, install_identity_preserving_setgroups_filter,
+    lock_exec_process_privileges, lock_process_privileges, prepare_virtiofsd_filesystem_domain,
+};
+use crate::linux::preflight::{PreflightError, PreflightReport, preflight};
 use crate::mesh_enrollment::{
     MESH_ENROLLMENT_BOOTSTRAP_FD, MESH_ENROLLMENT_CONFINE_MESSAGE,
     MESH_ENROLLMENT_PREPARED_MESSAGE, MESH_ENROLLMENT_READY_MESSAGE,
@@ -68,15 +75,7 @@ use crate::network_worker::{
     send_mesh_ingress_descriptor, send_worker_broker_descriptor, send_worker_host_port_descriptor,
     send_worker_network_descriptor,
 };
-
-use super::confinement::{
-    PreparedFilesystemDomain, install_identity_preserving_setgroups_filter,
-    lock_exec_process_privileges, lock_process_privileges, prepare_virtiofsd_filesystem_domain,
-};
-use super::path::{FileIdentity, PathError, PrivateRoot, current_uid, set_socket_private};
-use super::preflight::{PreflightError, PreflightReport, preflight};
-use super::process::{LiveProcess, RecoveryError, signal_unreaped_child};
-use super::state::{
+use crate::state::{
     MINIMUM_ROOT_DISK_BYTES, MINIMUM_STATE_DISK_BYTES, PERSISTED_STATE_SCHEMA_VERSION,
     PersistedVmState, RootGenerationPaths, StateDiskIdentity, StateError, VmLock, VmPaths, VmPhase,
     publish_seed, valid_root_generation,
@@ -1012,7 +1011,7 @@ impl RunningVm {
         &self.paths
     }
 
-    pub fn process_identity(&self) -> &super::process::ProcessIdentity {
+    pub fn process_identity(&self) -> &crate::host::process::ProcessIdentity {
         self.process.identity()
     }
 
@@ -1334,20 +1333,24 @@ impl RunningVm {
         }
     }
 
-    pub fn network_worker_process_identity(&self) -> Option<&super::process::ProcessIdentity> {
+    pub fn network_worker_process_identity(
+        &self,
+    ) -> Option<&crate::host::process::ProcessIdentity> {
         self.network_worker
             .as_ref()
             .map(|worker| worker.process.identity())
     }
 
-    pub fn egress_broker_process_identity(&self) -> Option<&super::process::ProcessIdentity> {
+    pub fn egress_broker_process_identity(&self) -> Option<&crate::host::process::ProcessIdentity> {
         self.network_worker
             .as_ref()
             .and_then(|worker| worker.broker.as_ref())
             .map(|broker| broker.process.identity())
     }
 
-    pub fn mesh_transport_process_identity(&self) -> Option<&super::process::ProcessIdentity> {
+    pub fn mesh_transport_process_identity(
+        &self,
+    ) -> Option<&crate::host::process::ProcessIdentity> {
         self.network_worker
             .as_ref()
             .and_then(|worker| worker.mesh_transport.as_ref())
@@ -3751,8 +3754,7 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
         || request.state_disk_bytes < MINIMUM_STATE_DISK_BYTES
         || !request.state_disk_bytes.is_multiple_of(1024 * 1024)
         || request.docker_disk_bytes.is_some_and(|bytes| {
-            bytes < crate::linux::state::MINIMUM_DOCKER_DISK_BYTES
-                || !bytes.is_multiple_of(1024 * 1024)
+            bytes < crate::state::MINIMUM_DOCKER_DISK_BYTES || !bytes.is_multiple_of(1024 * 1024)
         })
         || !valid_root_generation(&request.root_generation)
         || request
@@ -4672,9 +4674,9 @@ mod tests {
     use crate::host_port::RESERVED_GUEST_DAEMON_PORT;
     use crate::linux::path::{FileIdentity, current_uid};
     use crate::linux::process::ProcessIdentity;
-    use crate::linux::state::RootGenerationPaths;
     use crate::mesh_ingress::{MESH_INGRESS_CONTROL_FRAME_LEN, MeshIngressControlReceiver};
     use crate::network_worker::receive_mesh_ingress_descriptor;
+    use crate::state::RootGenerationPaths;
     use codewire_vmm_guest_probe::DirectShareMount;
 
     fn test_runner() -> (tempfile::TempDir, CloudHypervisorRunner) {
@@ -5158,9 +5160,9 @@ mod tests {
         ));
 
         let mut valid_docker = request(2, 16_384);
-        valid_docker.docker_disk_bytes = Some(crate::linux::state::MINIMUM_DOCKER_DISK_BYTES);
+        valid_docker.docker_disk_bytes = Some(crate::state::MINIMUM_DOCKER_DISK_BYTES);
         assert!(validate_request(&valid_docker).is_ok());
-        valid_docker.docker_disk_bytes = Some(crate::linux::state::MINIMUM_DOCKER_DISK_BYTES - 1);
+        valid_docker.docker_disk_bytes = Some(crate::state::MINIMUM_DOCKER_DISK_BYTES - 1);
         assert!(matches!(
             validate_request(&valid_docker),
             Err(RunnerError::InvalidRequest)
@@ -5512,7 +5514,7 @@ mod tests {
         let paths = VmPaths::create(&runner.state_root, vm_id).unwrap();
         let mut request = request(2, 16_384);
         request.vm_id = vm_id;
-        request.docker_disk_bytes = Some(crate::linux::state::MINIMUM_DOCKER_DISK_BYTES);
+        request.docker_disk_bytes = Some(crate::state::MINIMUM_DOCKER_DISK_BYTES);
         assert!(matches!(
             admit_docker_disk(&paths, &request, None),
             Err(RunnerError::MissingPreformattedDockerDisk)
@@ -5524,17 +5526,13 @@ mod tests {
             .write(true)
             .open(&paths.docker_disk)
             .unwrap()
-            .set_len(crate::linux::state::MINIMUM_DOCKER_DISK_BYTES)
+            .set_len(crate::state::MINIMUM_DOCKER_DISK_BYTES)
             .unwrap();
         let admitted = admit_docker_disk(&paths, &request, None).unwrap().unwrap();
-        assert_eq!(
-            admitted.file.size,
-            crate::linux::state::MINIMUM_DOCKER_DISK_BYTES
-        );
+        assert_eq!(admitted.file.size, crate::state::MINIMUM_DOCKER_DISK_BYTES);
 
         let mut wrong_size = request.clone();
-        wrong_size.docker_disk_bytes =
-            Some(crate::linux::state::MINIMUM_DOCKER_DISK_BYTES + 1024 * 1024);
+        wrong_size.docker_disk_bytes = Some(crate::state::MINIMUM_DOCKER_DISK_BYTES + 1024 * 1024);
         assert!(matches!(
             admit_docker_disk(&paths, &wrong_size, None),
             Err(RunnerError::DockerDiskSizeMismatch { .. })
@@ -5568,7 +5566,7 @@ mod tests {
             .write(true)
             .open(&replacement)
             .unwrap()
-            .set_len(crate::linux::state::MINIMUM_DOCKER_DISK_BYTES)
+            .set_len(crate::state::MINIMUM_DOCKER_DISK_BYTES)
             .unwrap();
         fs::rename(&replacement, &paths.docker_disk).unwrap();
         assert!(matches!(
@@ -5936,7 +5934,7 @@ mod tests {
     async fn endpoint_readiness_wait_has_a_bounded_deadline() {
         let (_parent, runner) = test_runner();
         let paths = VmPaths::create(&runner.state_root, Uuid::new_v4()).unwrap();
-        let identity = super::super::process::ProcessIdentity::capture(std::process::id()).unwrap();
+        let identity = crate::host::process::ProcessIdentity::capture(std::process::id()).unwrap();
         let process = LiveProcess::recover(&identity).unwrap();
 
         let result = tokio::time::timeout(
@@ -6027,7 +6025,7 @@ mod tests {
     fn direct_share_ruleset_fd3_is_restricted_before_source_remap() {
         const CHILD_MODE: &str = "CW_SYNTHETIC_DIRECT_SHARE_FD3";
         const TEST_NAME: &str =
-            "linux::runner::tests::direct_share_ruleset_fd3_is_restricted_before_source_remap";
+            "runner::tests::direct_share_ruleset_fd3_is_restricted_before_source_remap";
         if std::env::var_os(CHILD_MODE).is_some() {
             // Only this env-cleared, single-test subprocess changes descriptor
             // allocation. Never reserve/close FD 3 in the parallel test host.

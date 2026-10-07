@@ -35,8 +35,8 @@ use crate::direct_share::{DirectShareIdentity, DirectShareRequest};
 use crate::host_port::{HostPortBinding, canonical_host_port_bindings};
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
 use crate::linux::path::PrivateRoot;
-use crate::linux::runner::ExitClass;
 use crate::mesh_ingress::{MeshAttachment, MeshEnrollmentAuthSource};
+use crate::runner::ExitClass;
 use crate::uds::{UdsError, bind_owner_only, connect_owner_only, remove_bound_socket};
 use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerError, RunningVm};
 
@@ -470,7 +470,7 @@ impl RunnerEvents {
         cw_runtime_catalog_generation: Option<&str>,
     ) -> Result<v1::RunnerEvent, Status> {
         if cw_runtime_catalog_generation
-            .is_some_and(|generation| !crate::linux::state::valid_root_generation(generation))
+            .is_some_and(|generation| !crate::state::valid_root_generation(generation))
         {
             return Err(Status::internal("runner runtime attachment is invalid"));
         }
@@ -1395,7 +1395,7 @@ fn parse_cw_runtime_catalog_generation(
     if generation.is_empty() {
         return Ok(None);
     }
-    if !crate::linux::state::valid_root_generation(generation) {
+    if !crate::state::valid_root_generation(generation) {
         return Err(Status::invalid_argument(
             "invalid cw runtime catalog generation",
         ));

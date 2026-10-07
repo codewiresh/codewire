@@ -215,7 +215,7 @@ mod tests {
 
     use super::*;
     use crate::linux::path::PrivateRoot;
-    use crate::linux::state::{
+    use crate::state::{
         DeletionTreeLocation, VmPaths, cleanup_trashed_vm, deletion_tree_location,
         move_stopped_vm_to_trash,
     };

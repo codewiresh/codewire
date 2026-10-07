@@ -33,7 +33,7 @@ const DEFAULT_NATIVE_VCPUS: u32 = 2;
 const DEFAULT_NATIVE_MEMORY_MIB: u32 = 4 * 1024;
 const DEFAULT_NATIVE_DISK_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const DEFAULT_NATIVE_DOCKER_DISK_BYTES: u64 =
-    codewire_local_vmm::linux::state::DEFAULT_DOCKER_DISK_BYTES;
+    codewire_local_vmm::state::DEFAULT_DOCKER_DISK_BYTES;
 const NATIVE_CREDENTIAL_AUTHORITY_UNAVAILABLE: &str = "local credential authority is unavailable";
 
 pub(crate) async fn run_native_supervisor(args: NativeSupervisorArgs) -> anyhow::Result<()> {

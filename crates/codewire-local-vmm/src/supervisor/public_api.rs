@@ -1798,7 +1798,7 @@ fn private_resources(
     let disk_bytes = u64::try_from(disk_gb)
         .ok()
         .and_then(|value| value.checked_mul(GIB))
-        .filter(|value| *value >= crate::linux::state::MINIMUM_STATE_DISK_BYTES)
+        .filter(|value| *value >= crate::state::MINIMUM_STATE_DISK_BYTES)
         .ok_or_else(|| {
             connectrpc::ConnectError::invalid_argument("local disk resources are out of range")
         })?;

@@ -18,11 +18,11 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::linux::path::{PathError, PrivateRoot};
-use crate::linux::state::{RootGenerationPaths, StateError, VmPaths};
 use crate::oci::{
     ContentStore, ContentStoreError, OciArchitecture, RegistryResolverError, ResolvedImage,
     Sha256Digest,
 };
+use crate::state::{RootGenerationPaths, StateError, VmPaths};
 
 const SETUP_FILE_NAME: &str = "setup.raw";
 const OCI_LAYER: &str = "application/vnd.oci.image.layer.v1.tar";

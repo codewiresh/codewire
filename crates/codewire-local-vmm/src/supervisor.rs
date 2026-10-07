@@ -55,19 +55,14 @@ use crate::control::v1::local_supervisor_service_server::{
 };
 use crate::cw_runtime::{AdmittedCwRuntimeDisk, CwRuntimeError, CwRuntimeStore};
 use crate::generation::{GenerationError, ensure_root_generation};
+use crate::host::path::{PathError, PrivateRoot, SocketIdentity};
+#[cfg(test)]
+use crate::host::process::ProcessIdentity;
+use crate::host::process::{LiveProcess, RecoveryError, signal_unreaped_child};
 use crate::host_port::{
     HostPortBinding, canonical_host_port_bindings, validate_canonical_host_port_bindings,
 };
 use crate::lifecycle::{EffectDurability, LifecycleEffect, next_effect};
-#[cfg(test)]
-use crate::linux::ProcessIdentity;
-use crate::linux::path::{PathError, PrivateRoot, SocketIdentity};
-use crate::linux::process::signal_unreaped_child;
-use crate::linux::state::{
-    DeletionTreeLocation, StateError, cleanup_trashed_vm, cleanup_unreferenced_root_generations,
-    deletion_tree_location, move_stopped_vm_to_trash,
-};
-use crate::linux::{LiveProcess, RecoveryError, VmPaths};
 use crate::mesh_ingress::{MeshAttachment, MeshEnrollmentAuthSource};
 use crate::oci::{
     ContentStore, ContentStoreError, RegistryReference, RegistryReferenceError, RegistryResolver,
@@ -78,6 +73,10 @@ use crate::setup_pack::{SetupPackError, SetupPackRequest, ensure_setup_pack};
 use crate::skill_snapshot::{
     SkillSnapshotPreparationError, SkillSnapshotRequest, cleanup_interrupted_skill_snapshot,
     prepare_skill_snapshot,
+};
+use crate::state::{
+    DeletionTreeLocation, StateError, VmPaths, cleanup_trashed_vm,
+    cleanup_unreferenced_root_generations, deletion_tree_location, move_stopped_vm_to_trash,
 };
 pub use crate::supervisor_client::NativeSupervisorClient;
 use crate::supervisor_client::{SupervisorClientError, operation_watch_failure};
@@ -5364,10 +5363,10 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
         || request.vcpus == 0
         || request.vcpus > 32
         || !(128..=65_536).contains(&request.memory_mib)
-        || request.disk_bytes < crate::linux::state::MINIMUM_STATE_DISK_BYTES
+        || request.disk_bytes < crate::state::MINIMUM_STATE_DISK_BYTES
         || !request.disk_bytes.is_multiple_of(1024 * 1024)
         || (request.docker_disk_bytes != 0
-            && (request.docker_disk_bytes < crate::linux::state::MINIMUM_DOCKER_DISK_BYTES
+            && (request.docker_disk_bytes < crate::state::MINIMUM_DOCKER_DISK_BYTES
                 || !request.docker_disk_bytes.is_multiple_of(1024 * 1024)))
         || validate_project_intent(
             &request.project_spec_json,
@@ -5556,7 +5555,7 @@ fn validate_resize(request: &v1::ResizeEnvironmentRequest) -> Result<Uuid, Super
         || request.vcpus == 0
         || request.vcpus > 32
         || !(128..=65_536).contains(&request.memory_mib)
-        || request.disk_bytes < crate::linux::state::MINIMUM_STATE_DISK_BYTES
+        || request.disk_bytes < crate::state::MINIMUM_STATE_DISK_BYTES
         || !request.disk_bytes.is_multiple_of(1024 * 1024)
         || request.public_request_id.len() > 128
         || !matches!(
@@ -6514,8 +6513,7 @@ fn resize_operation_parameters(
         .get("disk_bytes")
         .and_then(serde_json::Value::as_u64)
         .filter(|value| {
-            *value >= crate::linux::state::MINIMUM_STATE_DISK_BYTES
-                && value.is_multiple_of(1024 * 1024)
+            *value >= crate::state::MINIMUM_STATE_DISK_BYTES && value.is_multiple_of(1024 * 1024)
         })
         .ok_or(SupervisorError::InvalidState)?;
     let was_running = fields
@@ -7401,7 +7399,7 @@ mod tests {
                 },
                 layers: Vec::new(),
             },
-            crate::linux::state::MINIMUM_ROOT_DISK_BYTES,
+            crate::state::MINIMUM_ROOT_DISK_BYTES,
         )
         .unwrap()
     }
@@ -9998,7 +9996,7 @@ mod tests {
             assert!(boot.setup_header_sha256.is_empty());
             assert_eq!(boot.setup_total_bytes, 0);
             assert_eq!(
-                crate::linux::state::StateDiskIdentity::capture(&root.path).unwrap(),
+                crate::state::StateDiskIdentity::capture(&root.path).unwrap(),
                 identity
             );
             assert_eq!(
@@ -10447,7 +10445,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 16 * 1024,
             disk_bytes: 20 * 1024 * 1024 * 1024,
-            docker_disk_bytes: crate::linux::state::MINIMUM_DOCKER_DISK_BYTES,
+            docker_disk_bytes: crate::state::MINIMUM_DOCKER_DISK_BYTES,
             request_id: Uuid::new_v4().to_string(),
             project_spec_json,
             project_spec_sha256,
@@ -10478,7 +10476,7 @@ mod tests {
             Err(SupervisorError::InvalidRequest)
         ));
         let mut invalid_docker = request.clone();
-        invalid_docker.docker_disk_bytes = crate::linux::state::MINIMUM_DOCKER_DISK_BYTES - 1;
+        invalid_docker.docker_disk_bytes = crate::state::MINIMUM_DOCKER_DISK_BYTES - 1;
         assert!(matches!(
             validate_create(&invalid_docker),
             Err(SupervisorError::InvalidRequest)
@@ -11485,8 +11483,7 @@ mod tests {
         environment.active_workspace_generation = Some(active);
         let paths = VmPaths::create(&engine, environment.id).unwrap();
         for storage in [&active_storage, &stale_storage] {
-            let generation =
-                crate::linux::state::RootGenerationPaths::create(&paths, storage).unwrap();
+            let generation = crate::state::RootGenerationPaths::create(&paths, storage).unwrap();
             fs::write(&generation.root_disk, b"root").unwrap();
             fs::set_permissions(&generation.root_disk, fs::Permissions::from_mode(0o600)).unwrap();
         }
@@ -13814,8 +13811,7 @@ mod tests {
         let stale_storage = "f".repeat(64);
         let paths = VmPaths::create(&engine, create.environment("dev").unwrap().id).unwrap();
         for storage in [&candidate_storage, &stale_storage] {
-            let generation =
-                crate::linux::state::RootGenerationPaths::create(&paths, storage).unwrap();
+            let generation = crate::state::RootGenerationPaths::create(&paths, storage).unwrap();
             fs::write(&generation.root_disk, b"root").unwrap();
             fs::set_permissions(&generation.root_disk, fs::Permissions::from_mode(0o600)).unwrap();
         }
@@ -14265,7 +14261,7 @@ mod tests {
             state: StoredEnvironmentState::Running,
             vcpus: 2,
             memory_mib: 16 * 1024,
-            disk_bytes: crate::linux::state::MINIMUM_STATE_DISK_BYTES,
+            disk_bytes: crate::state::MINIMUM_STATE_DISK_BYTES,
             docker_disk_bytes: 0,
             generation: 1,
             host_ports: Vec::new(),

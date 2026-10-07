@@ -9,8 +9,8 @@ use uuid::Uuid;
 use crate::cw_runtime::AdmittedCwRuntimeDisk;
 use codewire_vmm_guest_probe::MAX_DIRECT_SHARES;
 
-use super::path::{FileIdentity, PathError, PrivateRoot, SocketIdentity};
-use super::process::ProcessIdentity;
+use crate::host::path::{FileIdentity, PathError, PrivateRoot, SocketIdentity};
+use crate::host::process::ProcessIdentity;
 
 pub const PERSISTED_STATE_SCHEMA_VERSION: u32 = 1;
 pub use crate::supervisor_metadata::legacy::{
@@ -866,7 +866,7 @@ mod tests {
                     device: 1,
                     inode: 2,
                     size: 3,
-                    uid: super::super::path::current_uid(),
+                    uid: crate::host::path::current_uid(),
                     mode: 0o100500,
                     links: 1,
                 },
@@ -877,7 +877,7 @@ mod tests {
                     device: 1,
                     inode: 3,
                     size: MINIMUM_STATE_DISK_BYTES,
-                    uid: super::super::path::current_uid(),
+                    uid: crate::host::path::current_uid(),
                     mode: 0o100600,
                     links: 1,
                 },
@@ -1017,7 +1017,7 @@ mod tests {
         let socket = SocketIdentity {
             device: 1,
             inode: 4,
-            uid: super::super::path::current_uid(),
+            uid: crate::host::path::current_uid(),
             mode: 0o140600,
         };
         state.api_socket = Some(socket.clone());

@@ -67,6 +67,9 @@ pub(crate) use supervisor_metadata::workspace_plan;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+// Host primitives with the same names on each supported platform.
+#[cfg(target_os = "linux")]
+pub(crate) use linux as host;
 #[cfg(target_os = "linux")]
 pub mod oci;
 #[cfg(target_os = "macos")]
@@ -76,11 +79,15 @@ mod orphan;
 #[cfg(target_os = "linux")]
 pub mod public_client;
 #[cfg(target_os = "linux")]
+pub mod runner;
+#[cfg(target_os = "linux")]
 pub mod runner_service;
 #[cfg(target_os = "linux")]
 pub mod setup_pack;
 #[cfg(target_os = "linux")]
 mod skill_snapshot;
+#[cfg(target_os = "linux")]
+pub mod state;
 #[cfg(target_os = "linux")]
 pub mod supervisor;
 #[cfg(target_os = "linux")]
@@ -93,10 +100,14 @@ mod workspace_generation;
 #[cfg(target_os = "linux")]
 pub use direct_share::DirectShareRequest;
 #[cfg(target_os = "linux")]
-pub use linux::{
-    CloudHypervisorRunner, CreateVmRequest, ExitClass, LiveProcess, PreparedVm, ProcessIdentity,
-    RecoveredVm, RecoveryError, RunnerConfig, RunnerError, RunningVm, StateDiskIdentity, VmPaths,
+pub use linux::{LiveProcess, ProcessIdentity, RecoveryError};
+#[cfg(target_os = "linux")]
+pub use runner::{
+    CloudHypervisorRunner, CreateVmRequest, ExitClass, PreparedVm, RecoveredVm, RunnerConfig,
+    RunnerError, RunningVm,
 };
+#[cfg(target_os = "linux")]
+pub use state::{StateDiskIdentity, VmPaths};
 
 #[cfg(not(target_os = "linux"))]
 mod unsupported;
