@@ -19,10 +19,12 @@ use std::time::{Duration, SystemTime};
 
 use codewire_daemon::access::{AccessFields, WorkspaceAccessGrant};
 use codewire_daemon::{BindResponseFields, WorkspaceBinding, WorkspaceBindingConfig};
+#[cfg(any(target_os = "linux", test))]
 use codewire_proto::codewire::internal::v1::{
-    AllocatePeerRelayRequest, AllocatePeerRelayResponse, BindWorkspaceRequest,
-    BindWorkspaceResponse, RecordHostKeyRequest, RefreshAccessRequest, WorkspaceAccess,
-    WorkspaceBindingServiceClient,
+    AllocatePeerRelayRequest, AllocatePeerRelayResponse, RecordHostKeyRequest, RefreshAccessRequest,
+};
+use codewire_proto::codewire::internal::v1::{
+    BindWorkspaceRequest, BindWorkspaceResponse, WorkspaceAccess, WorkspaceBindingServiceClient,
 };
 use codewire_tls::ConnectOriginTransport;
 use connectrpc::client::{CallOptions, ClientConfig};
@@ -200,6 +202,7 @@ impl BindingClient {
     }
 
     /// A fresh access grant for the bound Pod.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) async fn refresh_access(&self) -> Result<WorkspaceAccessGrant, AttemptError> {
         let _in_flight = self.in_flight.lock().await;
         let options = self.authorized().await?;
@@ -223,6 +226,7 @@ impl BindingClient {
     /// Record this Pod's SSH host public key (`ssh-ed25519 <base64>`).
     /// Recording the same key again succeeds; a different key for the same
     /// environment and generation is `failed_precondition`.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) async fn record_host_key(
         &self,
         public_key_openssh: &str,
@@ -243,6 +247,7 @@ impl BindingClient {
 
     /// Allocate a UDP peer-relay endpoint between this environment's node
     /// (`disco_keys[0]`) and one peer (`disco_keys[1]`).
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) async fn allocate_peer_relay(
         &self,
         disco_keys: [String; 2],

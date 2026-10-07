@@ -532,19 +532,31 @@ mod tests {
     }
 
     #[cfg(not(target_os = "linux"))]
-    #[tokio::test]
-    async fn local_rejection_precedes_key_input_and_platform_configuration() {
-        let error = crate::run_from([
-            "cw",
-            "credentials",
-            "--local",
-            "add",
-            "ssh",
-            "--name=work",
-            "--key-file=/deliberately-absent-sensitive-key",
-        ])
-        .await
-        .unwrap_err();
+    #[test]
+    fn local_rejection_precedes_key_input_and_platform_configuration() {
+        // A debug build of the whole CLI future needs more than a test thread's
+        // 2 MiB stack; the cw binary runs it on the 8 MiB main thread.
+        let error = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(crate::run_from([
+                        "cw",
+                        "credentials",
+                        "--local",
+                        "add",
+                        "ssh",
+                        "--name=work",
+                        "--key-file=/deliberately-absent-sensitive-key",
+                    ]))
+                    .unwrap_err()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
         assert!(error.to_string().contains("available only on Linux"));
     }
 

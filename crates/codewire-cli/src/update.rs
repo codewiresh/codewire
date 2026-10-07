@@ -877,7 +877,9 @@ mod tests {
     fn local_release_refuses_fifo_and_symlink_identities_promptly() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(LOCAL_RELEASE_IDENTITY);
-        rfs::mkfifoat(rfs::CWD, &path, Mode::from_raw_mode(0o600)).unwrap();
+        let fifo_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `fifo_path` is a live, NUL-terminated path for this call.
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
         let started = std::time::Instant::now();
         assert!(local_release(directory.path(), &"a".repeat(64)).is_err());
         assert!(started.elapsed() < std::time::Duration::from_secs(1));

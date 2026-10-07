@@ -50,7 +50,7 @@ impl FixedHttp {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(super) fn synthetic(origin: &str, timeout: Duration) -> anyhow::Result<Self> {
         Self::build(origin, false, timeout, timeout)
     }

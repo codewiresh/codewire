@@ -5,7 +5,8 @@ use std::io::Write as _;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 
 fn fixture() -> (tempfile::TempDir, CwPayloadIdentity) {
-    let directory = tempfile::tempdir().unwrap();
+    // Ancestry admission refuses symlinks, such as Darwin's /tmp and /var.
+    let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let identity = CwPayloadIdentity {
         schema_version: 2,
         protocol_version: 1,
