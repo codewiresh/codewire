@@ -504,6 +504,7 @@ run_paths_case local_vmm_kvm_smoke pull_request refs/pull/5014/head false \
   scripts/ci/verify/smoke-local-vmm-cloud-hypervisor.sh
 for kernel_input in scripts/ci/verify/build-linux-vmm-kernel.py \
     scripts/ci/verify/linux-vmm-kernel/x86_64.config \
+    scripts/ci/verify/linux-vmm-kernel/arm64.config \
     scripts/ci/verify/linux-vmm-kernel/dax.patch \
     scripts/ci/verify/linux-vmm-kernel/provenance.json \
     scripts/ci/tests/test-linux-vmm-kernel.py; do
