@@ -725,7 +725,7 @@ pub async fn run_inherited_worker(vm_id: Uuid, generation: u64) -> Result<(), Ne
         bootstrap
             .set_write_timeout(Some(HANDSHAKE_TIMEOUT))
             .map_err(|_| NetworkWorkerError::BootstrapIo)?;
-        if std::env::vars_os().next().is_some() {
+        if ambient_environment_present() {
             return Err(NetworkWorkerError::AmbientEnvironment);
         }
         require_single_threaded_process()?;
@@ -812,7 +812,7 @@ pub async fn run_inherited_worker_with_broker<B: EgressBroker>(
         bootstrap
             .set_write_timeout(Some(HANDSHAKE_TIMEOUT))
             .map_err(|_| NetworkWorkerError::BootstrapIo)?;
-        if std::env::vars_os().next().is_some() {
+        if ambient_environment_present() {
             return Err(NetworkWorkerError::AmbientEnvironment);
         }
         require_single_threaded_process()?;
@@ -1201,6 +1201,15 @@ fn read_worker_bytes(descriptor: RawFd, buffer: &mut [u8]) -> io::Result<usize> 
     }
 }
 
+/// Whether this process inherited any environment variable. On macOS,
+/// CoreFoundation (which cw links) sets `__CF_USER_TEXT_ENCODING` itself while
+/// the process loads, from the user ID rather than from the parent, so that
+/// one name is not ambient input.
+pub(crate) fn ambient_environment_present() -> bool {
+    std::env::vars_os()
+        .any(|(name, _)| !(cfg!(target_os = "macos") && name == "__CF_USER_TEXT_ENCODING"))
+}
+
 fn send_worker_bytes(descriptor: RawFd, buffer: &[u8]) -> io::Result<usize> {
     loop {
         let written = unsafe { libc::write(descriptor, buffer.as_ptr().cast(), buffer.len()) };
@@ -1224,21 +1233,25 @@ fn install_deny_all_filesystem_domain() -> Result<(), NetworkWorkerError> {
     restrict_filesystem().map_err(|_| NetworkWorkerError::FilesystemConfinement)
 }
 
-// Darwin has no confinement for this worker yet. Refuse to start rather than
-// run unconfined; a Seatbelt profile replaces Landlock and seccomp here.
 #[cfg(target_os = "macos")]
 fn require_single_threaded_process() -> Result<(), NetworkWorkerError> {
-    Err(NetworkWorkerError::ThreadConfinement)
+    crate::host::sandbox::require_single_thread().map_err(|_| NetworkWorkerError::ThreadConfinement)
 }
 
+/// Darwin replaces Landlock with a deny-all Seatbelt profile: the worker
+/// keeps only the descriptors it already holds or later receives.
 #[cfg(target_os = "macos")]
 fn install_deny_all_filesystem_domain() -> Result<(), NetworkWorkerError> {
-    Err(NetworkWorkerError::FilesystemConfinement)
+    crate::host::sandbox::deny_all().map_err(|_| NetworkWorkerError::FilesystemConfinement)
 }
 
+/// The deny-all Seatbelt profile already refuses dials, binds, process
+/// creation and signals, which the Linux syscall layer adds to Landlock. It
+/// leaves only unnamed socketpairs, which reach nothing. There is no separate
+/// layer to install.
 #[cfg(target_os = "macos")]
 fn install_network_worker_seccomp() -> Result<(), NetworkWorkerError> {
-    Err(NetworkWorkerError::SyscallConfinement)
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -2528,6 +2541,57 @@ mod tests {
             .expect("worker did not terminate after guest transport loss")
             .unwrap();
         assert!(matches!(result, Err(NetworkWorkerError::FrameIo)));
+    }
+
+    /// The confined worker still completes its descriptor protocol: status
+    /// writes, SCM_RIGHTS receipt and Tokio I/O on a received stream.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_confined_worker_keeps_its_descriptor_protocol() {
+        use std::io::Read as _;
+        use tokio::io::AsyncReadExt as _;
+
+        const CHILD_MARKER: &str = "CODEWIRE_TEST_NETWORK_WORKER_SEATBELT";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .unwrap();
+            let (control, mut runner) = StdUnixStream::pair().unwrap();
+            let (broker, mut broker_peer) = StdUnixStream::pair().unwrap();
+            install_deny_all_filesystem_domain().unwrap();
+            install_network_worker_seccomp().unwrap();
+            control.set_read_timeout(None).unwrap();
+            write_worker_control_message(&control, WORKER_PREPARED_MESSAGE).unwrap();
+            let mut prepared = [0_u8; WORKER_PREPARED_MESSAGE.len()];
+            runner.read_exact(&mut prepared).unwrap();
+            assert_eq!(&prepared, WORKER_PREPARED_MESSAGE);
+            send_worker_broker_descriptor(runner.as_raw_fd(), broker.as_raw_fd()).unwrap();
+            drop(broker);
+            let received = receive_worker_broker_descriptor(control.as_raw_fd()).unwrap();
+            runtime.block_on(async {
+                let mut stream = transferred_tokio_unix_stream(received).unwrap();
+                broker_peer.write_all(b"ok").unwrap();
+                let mut bytes = [0_u8; 2];
+                tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut bytes))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(&bytes, b"ok");
+            });
+            assert!(std::fs::File::open("/etc/hosts").is_err());
+            assert!(std::net::TcpStream::connect("127.0.0.1:9").is_err());
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("network_worker::tests::seatbelt_confined_worker_keeps_its_descriptor_protocol")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 
     #[cfg(target_os = "linux")]

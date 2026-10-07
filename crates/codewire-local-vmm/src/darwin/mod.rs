@@ -5,6 +5,7 @@
 mod acl;
 pub mod path;
 pub mod process;
+pub(crate) mod sandbox;
 mod store;
 pub mod supervisor;
 pub(crate) mod supervisor_peer;

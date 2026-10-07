@@ -96,26 +96,28 @@ const BROKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[libc::SYS_fork, libc::SYS
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const BROKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[];
 
-// Darwin has no confinement for this broker yet. Refuse to start rather than
-// run unconfined.
+// The macOS broker runs unconfined for now: it must dial the developer
+// network, and a Seatbelt profile that allows only outbound INET is later
+// work (Program #2064 M4). It still runs single-threaded, with no ambient
+// environment, and exits when its worker closes the IPC stream.
 #[cfg(target_os = "macos")]
 fn require_single_threaded_process() -> io::Result<()> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
+    crate::host::sandbox::require_single_thread()
 }
 
 #[cfg(target_os = "macos")]
 fn lock_process_privileges() -> io::Result<()> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn install_deny_all_filesystem_domain() -> io::Result<()> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn install_inet_socket_only_syscalls() -> io::Result<()> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,7 +442,7 @@ fn prepare_broker(
     generation: u64,
 ) -> Result<(PreparedBroker, SystemDnsResolver), EgressBrokerProcessError> {
     validate_identity(environment_id, generation)?;
-    if std::env::vars_os().next().is_some() {
+    if crate::network_worker::ambient_environment_present() {
         return Err(EgressBrokerProcessError::AmbientEnvironment);
     }
     require_single_threaded_process().map_err(|_| EgressBrokerProcessError::ThreadConfinement)?;
