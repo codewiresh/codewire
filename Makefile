@@ -104,7 +104,7 @@ export TEST_USER_PASSWORD ?= testpassword123
 export TEST_USER_NAME ?= Test User
 REGISTRY ?= git.example.com
 BUF ?= $(shell command -v buf 2>/dev/null || echo "$(HOME)/go/bin/buf")
-GO_BIN ?= $(shell go env GOPATH)/bin
+GO_BIN ?= $(shell go env GOPATH 2>/dev/null)/bin
 SUPPLYCHAIN ?= supplychain
 override SUPPLYCHAIN_REQUIRED_REVISION := ea79415
 # protoc is pinned because buf.gen.codewire.yaml uses protoc's built-in
