@@ -1,5 +1,31 @@
 # macOS VZ runner feasibility slice
 
+## Product VM mode
+
+`codewire-vz-runner vm --config FILE` is the macOS counterpart of the Cloud
+Hypervisor process that the Linux runner owns. The JSON configuration
+(`VMConfiguration`, schema 1) names the kernel, initial ramdisk, kernel
+command line, CPU count, memory and virtio-blk disks by absolute path, with
+each disk's serial and read-only flag. The Rust runner admits every path under
+its private state root before writing the file. Unknown or missing fields fail
+closed.
+
+The helper binds the configured hybrid-vsock Unix socket owner-only and never
+replaces an existing path. A client writes `CONNECT <port>\n`. The helper dials
+that guest vsock port and answers `OK <n>\n`, then copies bytes both ways,
+forwarding each EOF as a write shutdown. An unreachable port closes the
+connection without an acknowledgement. This is the protocol the Rust
+hybrid-vsock client already speaks to Cloud Hypervisor.
+
+SIGTERM or SIGINT stops the VM. The process exits 0 after the guest powers off
+or a requested stop completes, and 1 when the VM fails to start or stops with
+an error. It removes the socket only if that path is still the one it bound.
+The VM has no network, directory-sharing, console or graphics device. The
+helper needs the `com.apple.security.virtualization` entitlement; developer
+builds are signed ad hoc with `developer-entitlements.plist`.
+
+The sections below describe the earlier fixed-topology developer fixtures.
+
 `codewire-vz-runner` is an additive, currently unreachable Swift helper for
 validating a fixed Virtualization.framework configuration on macOS 26 or later
 on Apple Silicon. It is not linked from Cargo, `codewire-local-vmm`, or `cw`, and
