@@ -3520,6 +3520,59 @@ SQL
     return 1
   fi
 
+  # The API server enforces the UID and resourceVersion that Codewire binds a
+  # live resize to on pods/resize (#2473). Replace the Pod under the same name;
+  # Codewire's request shape, bound to the old incarnation, is refused and the
+  # replacement keeps its resources.
+  local stale_uid stale_version replacement_uid="" replacement_cpu patch_output
+  stale_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')"
+  stale_version="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.resourceVersion}')"
+  if ! kubectl -n "$SANDBOX_NS" delete pod "$pod_name" --wait=true --timeout=120s >/dev/null; then
+    echo "::error::could not delete the workspace Pod to exercise its replacement"
+    return 1
+  fi
+  for _ in $(seq 1 120); do
+    replacement_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+    if [ -n "$replacement_uid" ] && [ "$replacement_uid" != "$stale_uid" ]; then
+      break
+    fi
+    sleep 1
+  done
+  if [ -z "$replacement_uid" ] || [ "$replacement_uid" = "$stale_uid" ]; then
+    echo "::error::the Sandbox did not replace the deleted workspace Pod"
+    return 1
+  fi
+  if ! kubectl -n "$SANDBOX_NS" wait "pod/${pod_name}" --for=condition=Ready --timeout=180s >/dev/null; then
+    echo "::error::the replacement workspace Pod did not become Ready"
+    return 1
+  fi
+  replacement_cpu="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.spec.containers[?(@.name=="workspace")].resources.requests.cpu}')"
+  bound_resize() {
+    printf '{"metadata":{"uid":"%s","resourceVersion":"%s"},"spec":{"containers":[{"name":"workspace","resources":{"requests":{"cpu":"1000m","memory":"384Mi"},"limits":{"cpu":"1000m","memory":"384Mi"}}}]}}' "$1" "$2"
+  }
+  if patch_output="$(kubectl -n "$SANDBOX_NS" patch pod "$pod_name" --subresource=resize \
+      --type=strategic -p "$(bound_resize "$stale_uid" "$stale_version")" 2>&1)" \
+      || ! grep -q 'Conflict' <<<"$patch_output"; then
+    echo "::error::a resize bound to the replaced Pod was not refused as a conflict: $patch_output"
+    return 1
+  fi
+  # The UID is enforced on its own: the replacement's current resourceVersion
+  # with the old UID is invalid. Retry only a concurrent status update.
+  for _ in $(seq 1 5); do
+    if patch_output="$(kubectl -n "$SANDBOX_NS" patch pod "$pod_name" --subresource=resize --type=strategic \
+        -p "$(bound_resize "$stale_uid" "$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.resourceVersion}')")" 2>&1)"; then
+      echo "::error::a resize bound to the replaced Pod UID mutated the replacement"
+      return 1
+    fi
+    grep -q 'Conflict' <<<"$patch_output" || break
+  done
+  if ! grep -q 'metadata.uid' <<<"$patch_output" \
+      || [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.spec.containers[?(@.name=="workspace")].resources.requests.cpu}')" != "$replacement_cpu" ]; then
+    echo "::error::the replacement Pod was not protected by the UID precondition: $patch_output"
+    return 1
+  fi
+  log "pods/resize refused requests bound to replaced Pod $stale_uid; replacement $replacement_uid unchanged"
+
 
   local as_user="system:serviceaccount:${NS}:codewire-orchestration"
   if [ "$(kubectl auth can-i get storageclasses.storage.k8s.io --as "$as_user")" != "yes" ] \

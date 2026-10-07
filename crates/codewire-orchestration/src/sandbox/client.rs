@@ -193,6 +193,18 @@ pub struct WorkspacePodResizeState {
     pub incompatibility_reason: Option<String>,
 }
 
+/// A `pods/resize` request the API server accepted for one exact Pod
+/// incarnation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AcceptedPodResize {
+    /// The observation the request was conditioned on.
+    before: WorkspacePodResizeState,
+}
+
+/// Bound on re-resolving the workspace Pod after the API server refuses a
+/// `/resize` request because the Pod changed since it was observed.
+const POD_RESIZE_SUBMIT_ATTEMPTS: usize = 5;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceStorage {
     pub pvc_name: String,
@@ -1642,18 +1654,14 @@ impl SandboxClient {
     }
 
     /// Read the runtime facts that determine whether CPU/memory can be
-    /// changed without replacing or restarting the workspace container.
+    /// changed without replacing or restarting the workspace container, from
+    /// the Pod the environment's current Sandbox controls.
     pub async fn workspace_pod_resize_state(
         &self,
         env_id: &str,
     ) -> anyhow::Result<WorkspacePodResizeState> {
-        let pod_name = self.get_pod_name(env_id).await?;
-        let pod = self
-            .pods()
-            .get(&pod_name)
-            .await
-            .map_err(|error| anyhow::anyhow!("get workspace Pod {pod_name}: {error}"))?;
-        workspace_pod_resize_state(&pod, &pod_name)
+        let pod = self.current_workspace_pod_object(env_id).await?;
+        workspace_pod_resize_state(&pod, "")
     }
 
     /// Apply CPU and memory through the Kubernetes Pod `/resize` subresource
@@ -1673,11 +1681,55 @@ impl SandboxClient {
         if cpu_millicores <= 0 || memory_mb <= 0 {
             anyhow::bail!("workspace CPU and memory must be greater than zero");
         }
+        let cpu = format!("{cpu_millicores}m");
+        let memory = format!("{memory_mb}Mi");
+        let accepted = self
+            .submit_workspace_pod_resize(env_id, expected_uid, &cpu, &memory)
+            .await?;
+        self.wait_for_workspace_pod_resize(&accepted, &cpu, &memory, timeout)
+            .await
+    }
 
-        let before = self.workspace_pod_resize_state(env_id).await?;
+    /// Submit a `/resize` request bound to the exact Pod incarnation the
+    /// environment's current Sandbox controls. A refusal because the Pod
+    /// changed re-resolves it through the Sandbox and rechecks its identity
+    /// and resize policy before submitting again.
+    async fn submit_workspace_pod_resize(
+        &self,
+        env_id: &str,
+        expected_uid: &str,
+        cpu: &str,
+        memory: &str,
+    ) -> anyhow::Result<AcceptedPodResize> {
+        for _ in 0..POD_RESIZE_SUBMIT_ATTEMPTS {
+            let pod = self.current_workspace_pod_object(env_id).await?;
+            if let Some(accepted) = self
+                .submit_pod_resize_once(&pod, expected_uid, cpu, memory)
+                .await?
+            {
+                return Ok(accepted);
+            }
+        }
+        anyhow::bail!(
+            "workspace Pod changed before each of {POD_RESIZE_SUBMIT_ATTEMPTS} live resize submissions; nothing was resized"
+        )
+    }
+
+    /// One `/resize` request conditioned on `pod`, the observed incarnation.
+    /// The patch carries its UID and resourceVersion, which the API server
+    /// enforces: a replacement under the same name, or any change since the
+    /// observation, is refused without mutation (`Ok(None)`).
+    async fn submit_pod_resize_once(
+        &self,
+        pod: &Pod,
+        expected_uid: &str,
+        cpu: &str,
+        memory: &str,
+    ) -> anyhow::Result<Option<AcceptedPodResize>> {
+        let before = workspace_pod_resize_state(pod, "")?;
         if before.identity.uid != expected_uid {
             anyhow::bail!(
-                "workspace Pod identity changed before live resize: expected UID {expected_uid}, got {}",
+                "workspace Pod was replaced before live resize: expected UID {expected_uid}, got {}",
                 before.identity.uid
             );
         }
@@ -1690,34 +1742,41 @@ impl SandboxClient {
                     .unwrap_or("incompatible resize policy")
             );
         }
-
-        let cpu = format!("{cpu_millicores}m");
-        let memory = format!("{memory_mb}Mi");
-        let patch = serde_json::json!({
-            "spec": {
-                "containers": [{
-                    "name": "workspace",
-                    "resources": {
-                        "requests": { "cpu": cpu, "memory": memory },
-                        "limits": { "cpu": cpu, "memory": memory },
-                    },
-                }],
-            },
-        });
-        self.pods()
+        let resource_version = pod
+            .metadata
+            .resource_version
+            .as_deref()
+            .filter(|version| !version.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("workspace Pod has no resourceVersion"))?;
+        let patch = pod_resize_patch(expected_uid, resource_version, cpu, memory);
+        match self
+            .pods()
             .patch_resize(
                 &before.identity.name,
                 &PatchParams::default(),
                 &Patch::Strategic(&patch),
             )
             .await
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "resize workspace Pod {} through /resize: {error}",
-                    before.identity.name
-                )
-            })?;
+        {
+            Ok(_) => Ok(Some(AcceptedPodResize { before })),
+            Err(kube::Error::Api(error)) if error.code == 409 => Ok(None),
+            Err(error) => anyhow::bail!(
+                "resize workspace Pod {} through /resize: {error}",
+                before.identity.name
+            ),
+        }
+    }
 
+    /// Wait until the kubelet reports the requested resources on the same
+    /// incarnation.
+    async fn wait_for_workspace_pod_resize(
+        &self,
+        accepted: &AcceptedPodResize,
+        cpu: &str,
+        memory: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<WorkspacePodResizeState> {
+        let before = &accepted.before;
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let pod = self
@@ -1731,9 +1790,10 @@ impl SandboxClient {
                     )
                 })?;
             let observed = workspace_pod_resize_state(&pod, &before.identity.name)?;
-            if observed.identity.uid != expected_uid {
+            if observed.identity.uid != before.identity.uid {
                 anyhow::bail!(
-                    "workspace Pod was replaced during live resize: expected UID {expected_uid}, got {}",
+                    "workspace Pod was replaced during live resize: expected UID {}, got {}",
+                    before.identity.uid,
                     observed.identity.uid
                 );
             }
@@ -1747,7 +1807,7 @@ impl SandboxClient {
             if let Some(failure) = terminal_pod_resize_failure(&pod) {
                 anyhow::bail!("workspace Pod live resize failed: {failure}");
             }
-            if workspace_resources_match(&pod, &cpu, &memory) {
+            if workspace_resources_match(&pod, cpu, memory) {
                 return Ok(observed);
             }
             if tokio::time::Instant::now() >= deadline {
@@ -5130,6 +5190,25 @@ fn parse_decimal_ratio(number: &str) -> Option<(i128, i128)> {
     ))
 }
 
+/// The workspace container's `/resize` request: CPU and memory only, bound
+/// to the observed incarnation. The API server refuses the patch when the Pod
+/// no longer has this UID (the field is immutable) or this resourceVersion
+/// (optimistic concurrency), so it can never apply to a replacement.
+fn pod_resize_patch(uid: &str, resource_version: &str, cpu: &str, memory: &str) -> Value {
+    serde_json::json!({
+        "metadata": { "uid": uid, "resourceVersion": resource_version },
+        "spec": {
+            "containers": [{
+                "name": "workspace",
+                "resources": {
+                    "requests": { "cpu": cpu, "memory": memory },
+                    "limits": { "cpu": cpu, "memory": memory },
+                },
+            }],
+        },
+    })
+}
+
 fn terminal_pod_resize_failure(pod: &Pod) -> Option<String> {
     pod.status
         .as_ref()?
@@ -7218,5 +7297,302 @@ mod tests {
                 .and_then(Value::as_str),
             Some("10.43.12.34")
         );
+    }
+
+    /// Live Pod resize (#2473) against a fake API server that enforces
+    /// Kubernetes' UID and resourceVersion preconditions on `pods/resize`.
+    mod live_resize {
+        use super::*;
+
+        const ENV: &str = "env-test";
+        const SANDBOX_PATH: &str =
+            "/apis/agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxes/workspace-env-test";
+        const POD_PATH: &str = "/api/v1/namespaces/dev-sandboxes/pods/workspace-pod";
+        const RESIZE_PATH: &str = "/api/v1/namespaces/dev-sandboxes/pods/workspace-pod/resize";
+        const UID: &str = "uid-1";
+        const PREVIOUS: (i32, i32) = (500, 1024);
+        const REQUESTED: (i32, i32) = (1000, 2048);
+        const WAIT: Duration = Duration::from_millis(800);
+
+        /// A change another writer makes right after the first Pod read.
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Race {
+            None,
+            ReplacePod,
+            StatusUpdate,
+            RestartPolicy,
+        }
+
+        struct Fake {
+            pod: Value,
+            race: Race,
+            /// The kubelet applies an accepted change on the next Pod read.
+            unsynced: bool,
+            reads: usize,
+            accepted: Vec<Value>,
+            refused: Vec<u16>,
+        }
+
+        impl Fake {
+            fn new(pod: Value, race: Race) -> Self {
+                Self {
+                    pod,
+                    race,
+                    unsynced: false,
+                    reads: 0,
+                    accepted: Vec::new(),
+                    refused: Vec::new(),
+                }
+            }
+
+            fn bump(&mut self) {
+                let version: u64 = self.pod["metadata"]["resourceVersion"]
+                    .as_str()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                self.pod["metadata"]["resourceVersion"] = json!((version + 1).to_string());
+            }
+
+            fn race(&mut self) {
+                match self.race {
+                    Race::None => return,
+                    Race::ReplacePod => self.pod["metadata"]["uid"] = json!("uid-replacement"),
+                    Race::StatusUpdate => self.pod["status"]["podIP"] = json!("10.0.0.9"),
+                    Race::RestartPolicy => {
+                        self.pod["spec"]["containers"][0]["resizePolicy"][1]["restartPolicy"] =
+                            json!("RestartContainer");
+                    }
+                }
+                self.bump();
+            }
+
+            fn read(&mut self) -> (StatusCode, Value) {
+                self.reads += 1;
+                if self.unsynced {
+                    self.unsynced = false;
+                    self.pod["status"]["containerStatuses"][0]["resources"] =
+                        self.pod["spec"]["containers"][0]["resources"].clone();
+                    self.bump();
+                }
+                let observed = self.pod.clone();
+                if self.reads == 1 {
+                    self.race();
+                }
+                (StatusCode::OK, observed)
+            }
+
+            /// Kubernetes' order: optimistic concurrency, then UID immutability.
+            /// A patch without either field is unconditional, as in Kubernetes.
+            fn resize(&mut self, body: Value) -> (StatusCode, Value) {
+                let differs = |field: &str| {
+                    body.pointer(field)
+                        .is_some_and(|value| Some(value) != self.pod.pointer(field))
+                };
+                if differs("/metadata/resourceVersion") {
+                    self.refused.push(409);
+                    return (StatusCode::CONFLICT, kubernetes_status("Conflict", 409));
+                }
+                if differs("/metadata/uid") {
+                    self.refused.push(422);
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        kubernetes_status("Invalid", 422),
+                    );
+                }
+                assert_eq!(body["spec"]["containers"][0]["name"], "workspace");
+                let requested = body["spec"]["containers"][0]["resources"].clone();
+                self.accepted.push(body);
+                if self.pod["spec"]["containers"][0]["resources"] != requested {
+                    self.pod["spec"]["containers"][0]["resources"] = requested;
+                    self.bump();
+                    self.unsynced = true;
+                }
+                (StatusCode::OK, self.pod.clone())
+            }
+        }
+
+        fn api(fake: Fake) -> (SandboxClient, Arc<Mutex<Fake>>) {
+            let state = Arc::new(Mutex::new(fake));
+            let shared = Arc::clone(&state);
+            let service = Router::new().fallback(move |request: Request<Body>| {
+                let shared = Arc::clone(&shared);
+                async move {
+                    let method = request.method().clone();
+                    let path = request.uri().path().to_string();
+                    let content_type = request
+                        .headers()
+                        .get(header::CONTENT_TYPE)
+                        .map(|value| value.to_str().unwrap().to_string());
+                    let bytes = axum::body::to_bytes(request.into_body(), 64 * 1024)
+                        .await
+                        .unwrap();
+                    let mut fake = shared.lock().unwrap();
+                    let (status, body) = if method == Method::GET && path == MODE_CLAIM_PATH {
+                        (
+                            StatusCode::OK,
+                            json!({
+                                "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+                                "kind": "SandboxClaim",
+                                "metadata": {"name": "sandbox-env-test", "namespace": "dev-sandboxes"},
+                                "status": {"sandbox": {"name": "workspace-env-test"}}
+                            }),
+                        )
+                    } else if method == Method::GET && path == SANDBOX_PATH {
+                        (
+                            StatusCode::OK,
+                            json!({
+                                "apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+                                "metadata": {
+                                    "name": "workspace-env-test", "namespace": "dev-sandboxes",
+                                    "uid": "sandbox-incarnation",
+                                    "annotations": {"agents.x-k8s.io/pod-name": "workspace-pod"}
+                                }
+                            }),
+                        )
+                    } else if method == Method::GET && path == POD_PATH {
+                        fake.read()
+                    } else if method == Method::PATCH && path == RESIZE_PATH {
+                        assert_eq!(
+                            content_type.as_deref(),
+                            Some("application/strategic-merge-patch+json")
+                        );
+                        fake.resize(serde_json::from_slice(&bytes).unwrap())
+                    } else {
+                        panic!("unexpected Kubernetes request {method} {path}");
+                    };
+                    Response::builder()
+                        .status(status)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap()
+                }
+            });
+            (
+                SandboxClient::new(Client::new(service, "default"), "dev-sandboxes"),
+                state,
+            )
+        }
+
+        fn quantities((cpu, memory): (i32, i32)) -> Value {
+            let (cpu, memory) = (format!("{cpu}m"), format!("{memory}Mi"));
+            json!({
+                "requests": {"cpu": cpu, "memory": memory},
+                "limits": {"cpu": cpu, "memory": memory}
+            })
+        }
+
+        fn pod(uid: &str, spec: (i32, i32), actual: (i32, i32)) -> Value {
+            json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {
+                    "name": "workspace-pod", "namespace": "dev-sandboxes", "uid": uid,
+                    "resourceVersion": "100", "generation": 1,
+                    "ownerReferences": [{
+                        "apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+                        "name": "workspace-env-test", "uid": "sandbox-incarnation",
+                        "controller": true
+                    }]
+                },
+                "spec": {"containers": [{
+                    "name": "workspace", "image": "workspace:test",
+                    "resizePolicy": [
+                        {"resourceName": "cpu", "restartPolicy": "NotRequired"},
+                        {"resourceName": "memory", "restartPolicy": "NotRequired"}
+                    ],
+                    "resources": quantities(spec)
+                }]},
+                "status": {
+                    "observedGeneration": 1,
+                    "containerStatuses": [{
+                        "name": "workspace", "image": "workspace:test",
+                        "imageID": "workspace:test", "ready": true, "restartCount": 2,
+                        "started": true,
+                        "state": {"running": {"startedAt": "2026-10-07T00:00:00Z"}},
+                        "resources": quantities(actual)
+                    }]
+                }
+            })
+        }
+
+        fn spec_of(fake: &Fake) -> &Value {
+            &fake.pod["spec"]["containers"][0]["resources"]
+        }
+
+        fn actual_of(fake: &Fake) -> &Value {
+            &fake.pod["status"]["containerStatuses"][0]["resources"]
+        }
+
+        async fn resize(client: &SandboxClient) -> anyhow::Result<WorkspacePodResizeState> {
+            client
+                .resize_workspace_pod_in_place(ENV, UID, REQUESTED.0, REQUESTED.1, WAIT)
+                .await
+        }
+
+        /// #2473: the replacement under the same name receives no mutation.
+        #[tokio::test]
+        async fn resize_never_mutates_a_pod_replaced_between_observation_and_patch() {
+            let (client, fake) = api(Fake::new(pod(UID, PREVIOUS, PREVIOUS), Race::ReplacePod));
+            let error = resize(&client).await.unwrap_err();
+            assert!(
+                format!("{error:#}").contains("replaced before live resize"),
+                "{error:#}"
+            );
+            let fake = fake.lock().unwrap();
+            assert!(fake.accepted.is_empty());
+            assert_eq!(fake.refused, [409]);
+            assert_eq!(fake.pod["metadata"]["uid"], "uid-replacement");
+            assert_eq!(spec_of(&fake), &quantities(PREVIOUS));
+        }
+
+        /// #2473: a concurrent change is revalidated, never overwritten blind.
+        #[tokio::test]
+        async fn resize_revalidates_identity_and_policy_after_a_concurrent_change() {
+            let (client, fake) = api(Fake::new(pod(UID, PREVIOUS, PREVIOUS), Race::StatusUpdate));
+            let resized = resize(&client).await.unwrap();
+            assert_eq!(resized.identity.uid, UID);
+            {
+                let observed = fake.lock().unwrap();
+                assert_eq!(observed.refused, [409]);
+                assert_eq!(observed.accepted.len(), 1);
+                assert_eq!(
+                    observed.accepted[0]["metadata"],
+                    json!({"uid": UID, "resourceVersion": "101"})
+                );
+                assert_eq!(actual_of(&observed), &quantities(REQUESTED));
+            }
+
+            let (client, fake) = api(Fake::new(pod(UID, PREVIOUS, PREVIOUS), Race::RestartPolicy));
+            let error = resize(&client).await.unwrap_err();
+            assert!(
+                format!("{error:#}").contains("cannot be resized live"),
+                "{error:#}"
+            );
+            let fake = fake.lock().unwrap();
+            assert!(fake.accepted.is_empty());
+            assert_eq!(fake.refused, [409]);
+            assert_eq!(spec_of(&fake), &quantities(PREVIOUS));
+        }
+
+        /// #2473: a normal resize goes through `pods/resize`, bound to the
+        /// observed incarnation, and keeps its UID and restart count.
+        #[tokio::test]
+        async fn normal_resize_uses_the_resize_subresource_bound_to_the_observed_pod() {
+            let (client, fake) = api(Fake::new(pod(UID, PREVIOUS, PREVIOUS), Race::None));
+            let resized = resize(&client).await.unwrap();
+            assert_eq!(resized.identity.uid, UID);
+            assert_eq!(resized.restart_count, 2);
+            let fake = fake.lock().unwrap();
+            assert!(fake.refused.is_empty());
+            assert_eq!(fake.accepted.len(), 1);
+            assert_eq!(
+                fake.accepted[0],
+                json!({
+                    "metadata": {"uid": UID, "resourceVersion": "100"},
+                    "spec": {"containers": [{"name": "workspace", "resources": quantities(REQUESTED)}]}
+                })
+            );
+            assert_eq!(actual_of(&fake), &quantities(REQUESTED));
+        }
     }
 }
