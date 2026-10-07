@@ -31,4 +31,6 @@ go-server/.tmp
 **/*.pyo
 **/.venv
 **/.venv-*
+**/playwright-report
+**/test-results
 **/.npmrc
