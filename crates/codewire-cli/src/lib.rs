@@ -346,6 +346,12 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(about = "Manage pinned trusted host members")]
     Member(MemberArgs),
+    #[cfg(not(target_os = "linux"))]
+    #[command(about = "Manage trusted Mesh access to a local host (Linux only)")]
+    Control(UnavailableMemberControlArgs),
+    #[cfg(not(target_os = "linux"))]
+    #[command(about = "Manage pinned trusted host members (Linux only)")]
+    Member(UnavailableMemberControlArgs),
     #[command(name = "__hosted-daemon", hide = true)]
     HostedDaemon,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -538,6 +544,22 @@ fn require_local_broker_smoke_executable() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Delegated member control keeps custody of every process a member session
+/// starts, including descendants whose parent has exited. Linux tracks that
+/// family with pidfds and a subreaper. On macOS only a private libproc
+/// record (the original parent's unique ID) survives reparenting to launchd,
+/// and Codewire uses no private API, so a Mac host cannot be a member.
+#[cfg(not(target_os = "linux"))]
+const MEMBER_CONTROL_REQUIRES_LINUX: &str = "delegated member control (cw control, cw member, --member) requires Linux: macOS offers no public way to find a session's processes after their parent exits, which member control needs to stop them all; on a Mac, run sessions in a local VM (cw env create --local) instead";
+
+/// `cw control` and `cw member` are refused before their arguments are read.
+#[cfg(not(target_os = "linux"))]
+#[derive(Debug, clap::Args)]
+pub(crate) struct UnavailableMemberControlArgs {
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+    _arguments: Vec<std::ffi::OsString>,
+}
+
 fn validate_member_mutation_flags(cli: &Cli) -> anyhow::Result<()> {
     if cli.member.is_none() {
         match &cli.command {
@@ -589,7 +611,7 @@ where
             "--member supports run, list, send, logs, wait, stop, restart, msg, steer, interrupt, inbox and member commands"
         );
         #[cfg(not(target_os = "linux"))]
-        anyhow::bail!("trusted host member commands require Linux");
+        anyhow::bail!(MEMBER_CONTROL_REQUIRES_LINUX);
     }
     // Validate an explicitly selected Mesh state root before any ordinary
     // command effects, including routes that otherwise need only platform state.
@@ -651,6 +673,8 @@ where
         Command::Control(args) => handle_host_control_command(&globals, args).await,
         #[cfg(target_os = "linux")]
         Command::Member(args) => handle_member_command(&globals, args).await,
+        #[cfg(not(target_os = "linux"))]
+        Command::Control(_) | Command::Member(_) => anyhow::bail!(MEMBER_CONTROL_REQUIRES_LINUX),
         Command::HostedDaemon => run_hosted_daemon().await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeSupervisor(args) => run_native_supervisor(args).await,

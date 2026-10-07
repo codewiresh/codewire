@@ -304,6 +304,39 @@ fn orchestration_arguments_preserve_terminal_and_semantic_boundaries() {
     assert!(Cli::try_parse_from(["cw", "wait", "--message", "task-id", "shell"]).is_err());
 }
 
+/// A Mac host cannot be a member: Codewire has no public macOS API to keep
+/// custody of a session's whole process family. Every member-control entry
+/// point says so and why, before reading its arguments.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn member_control_is_refused_off_linux_with_its_reason() {
+    // The complete command future needs more than a test thread's stack.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            for arguments in [
+                &["cw", "member", "up", "--json"][..],
+                &["cw", "control", "status"][..],
+                &["cw", "--member", "studio", "list"][..],
+            ] {
+                let error = runtime
+                    .block_on(crate::run_from(arguments.iter().copied()))
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("requires Linux"), "{error}");
+                assert!(error.contains("process"), "{error}");
+                assert!(error.contains("cw env create --local"), "{error}");
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn host_creation_is_explicit_and_rejects_vm_or_provider_projection_options() {
