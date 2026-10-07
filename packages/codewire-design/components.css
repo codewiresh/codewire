@@ -267,13 +267,14 @@ dialog.cw-discard-dialog {
 
 /* The same status as a compact tinted pill for dense tables. */
 .cw-status--pill {
+  min-height: calc(var(--text-small) * var(--leading-ui));
   gap: var(--space-1-5);
   padding: 0 var(--space-2);
   border-radius: var(--radius-pill);
   background: var(--bg-surface);
   color: var(--fg-secondary);
   font-size: var(--text-small);
-  line-height: var(--leading-ui);
+  line-height: var(--leading-none);
 }
 
 .cw-status--pill::before {
@@ -343,11 +344,21 @@ dialog.cw-discard-dialog {
   font-family: var(--font-sans);
   font-size: var(--text-small);
   font-weight: var(--weight-semibold);
-  line-height: var(--leading-tight);
+  line-height: var(--leading-none);
   cursor: help;
 }
 
 .cw-field-help-trigger:hover { color: var(--fg-primary); border-color: var(--border-hover); }
+
+/* The "i" centres by its trimmed capital, as text-only buttons do. */
+@supports (text-box: trim-both cap alphabetic) {
+  .cw-field-help-trigger {
+    display: inline-block;
+    align-content: center;
+    text-align: center;
+    text-box: trim-both cap alphabetic;
+  }
+}
 
 .cw-field-help-popover {
   position: fixed;

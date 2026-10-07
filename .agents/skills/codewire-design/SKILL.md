@@ -49,6 +49,27 @@ patterns and proofs that keep those rules true; do not restate them elsewhere.
   `apps/dashboard/e2e/ssr-dashboard.repository-picker.ssr.ts`. Run it against
   the previous CSS once and see it fail before trusting it.
 
+### Text inside single-line controls
+
+- Single-line controls carry no leading. `line-height: var(--leading-none)` is
+  set on `.cw-button`, `.cw-icon-button`, `.cw-badge`, `.cw-status--pill`,
+  `.cw-toggle-chip > span`, `.cw-field-help-trigger` and
+  `.cw-github-repository-action`.
+- Size them with `min-height` and padding, never with the line box. A pill's
+  `min-height` is one UI line plus its border.
+- Centre the capitals, not a line box. Where
+  `text-box: trim-both cap alphabetic` is supported (the block at the end of
+  `styles.css`):
+  - a text-only `.cw-button`, `.cw-badge` or chip becomes a one-line block,
+    centred with `align-content: center`;
+  - a `<span>` label inside a `.cw-button` is trimmed.
+- The trim cannot reach a bare text node beside an icon. Give a button with an
+  icon a `<span>` label, as the Create submit's `.cw-submit-idle` does.
+- Prove it: `capitalsOffset` in
+  `apps/dashboard/e2e/ssr-dashboard.design-system.ssr.ts` measures the
+  capitals' centre against the control's padding box. It must be within
+  0.75 px at 1440 and 390.
+
 ## 2. Status and visibility pills
 
 - Use `.cw-badge`: a rounded pill whose text names the state (Private, Public,

@@ -128,7 +128,9 @@
 .cw-github-repository-copy { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); min-width: 0; }
 .cw-github-repository-badges { display: inline-flex; flex-wrap: wrap; gap: var(--space-1); }
 .cw-github-repository-badges .cw-badge { margin-left: 0; }
-.cw-github-repository-action { color: var(--accent-text); font-size: var(--text-small); font-weight: var(--weight-semibold); white-space: nowrap; }
+/* The action label is a block of one line: no leading, and where supported
+   its box is trimmed to the capitals so the row centres them. */
+.cw-github-repository-action { color: var(--accent-text); font-size: var(--text-small); font-weight: var(--weight-semibold); line-height: var(--leading-none); white-space: nowrap; text-box: trim-both cap alphabetic; }
 .cw-github-repository-list [data-repository-selected="true"] .cw-github-repository-action { color: var(--fg-secondary); }
 .cw-github-repository-list button:disabled .cw-github-repository-action { color: var(--fg-disabled); }
 .cw-github-status { display: flex; align-items: center; gap: var(--space-1-5); min-width: 0; }

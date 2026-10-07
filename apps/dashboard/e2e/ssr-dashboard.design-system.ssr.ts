@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 test.use({ storageState: { cookies: [], origins: [] }, contextOptions: { reducedMotion: "reduce" } });
 
@@ -200,3 +200,41 @@ for (const fixture of fixtures) {
     }
   });
 }
+
+// Distance from the centre of a control's padding box (a row's separator
+// border is not part of what its label centres in) to the centre of its
+// label's capitals. The baseline sits the font's ascent below the top of the
+// text's own box (a Range over the text, never the line box, so leading cannot
+// hide in it), and the capitals rise their measured height above it.
+async function capitalsOffset(control: Locator, label: Locator) {
+  const middle = await control.evaluate((node) => node.getBoundingClientRect().top + node.clientTop + node.clientHeight / 2);
+  const centre = await label.evaluate((node) => {
+    const text = [...node.childNodes].find((child) => child.nodeType === Node.TEXT_NODE && child.textContent!.trim())!;
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    const style = getComputedStyle(node);
+    const context = document.createElement("canvas").getContext("2d")!;
+    context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+    const metrics = context.measureText("H");
+    return range.getClientRects()[0].top + metrics.fontBoundingBoxAscent - metrics.actualBoundingBoxAscent / 2;
+  });
+  return centre - middle;
+}
+
+test("single-line controls centre their capitals, not a line box", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system for fixture checks");
+  await page.goto(`${origin}/reference/fixtures/create-sandbox.html`);
+  const submit = page.locator(".cw-drawer-footer .cw-button");
+  const docs = page.locator('[data-repository-name="codewiresh/docs"]');
+  const pill = docs.locator(".cw-badge");
+  const chip = page.locator(".cw-toggle-chip > span").first();
+  for (const [name, control, label] of [
+    ["Create Sandbox button", submit, submit.locator(".cw-submit-idle")],
+    ["Public pill", pill, pill],
+    ["+ Add row action", docs, docs.locator("[data-github-repository-action]")],
+    ["agent chip", chip, chip],
+  ] as const) {
+    expect.soft(Math.abs(await capitalsOffset(control, label)), name).toBeLessThanOrEqual(0.75);
+  }
+});
