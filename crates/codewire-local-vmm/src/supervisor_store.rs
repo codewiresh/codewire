@@ -5,6 +5,7 @@
 //! records keep every lifecycle transition recoverable across process death.
 
 use std::collections::BTreeMap;
+#[cfg(any(target_os = "linux", test))]
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -20,10 +21,10 @@ use rusqlite::{
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::host::path::{PathError, PrivateRoot};
 #[cfg(test)]
 use crate::host_port::HostPortBinding;
 use crate::host_port::validate_canonical_host_port_bindings;
-use crate::linux::path::{PathError, PrivateRoot};
 #[cfg(test)]
 use crate::mesh_ingress::MeshAttachment;
 #[cfg(test)]
@@ -388,6 +389,7 @@ impl SupervisorStore {
 
     /// Observation-only fence for live runtime controls. Do not dispatch the
     /// selected or any other environment's pending lifecycle work here.
+    #[cfg(target_os = "linux")]
     pub(crate) fn has_pending_lifecycle_operation(
         &self,
         environment_id: Uuid,
@@ -416,6 +418,7 @@ impl SupervisorStore {
         rows.map(|row| row.map_err(Into::into)).collect()
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn cw_runtime_operation_by_id(
         &self,
         operation_id: Uuid,
@@ -424,6 +427,7 @@ impl SupervisorStore {
         operation_for_id(&self.connection, operation_id)
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn completed_cw_runtime_operations(
         &self,
         environment_id: Uuid,
@@ -445,6 +449,7 @@ impl SupervisorStore {
         Ok(records)
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn interrupted_cw_runtime_operations(
         &self,
         environment_id: Uuid,
@@ -469,6 +474,7 @@ impl SupervisorStore {
     // A reboot invalidates the old process, not its possible selector effect.
     // Only an exact retained guest receipt may close that particular runtime
     // interruption. No ordinary terminal operation is rewound or replayed.
+    #[cfg(target_os = "linux")]
     pub(crate) fn resolve_interrupted_cw_runtime(
         &self,
         operation: &OperationRecord,
@@ -1681,6 +1687,7 @@ fn validate_database_files(root: &PrivateRoot, writable: bool) -> Result<(), Sup
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn current_boot_id() -> Result<String, SupervisorStoreError> {
     let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id").map_err(|source| {
         SupervisorStoreError::Io {
@@ -1689,6 +1696,16 @@ fn current_boot_id() -> Result<String, SupervisorStoreError> {
         }
     })?;
     let boot_id = boot_id.trim().to_owned();
+    validate_boot_id(&boot_id)?;
+    Ok(boot_id)
+}
+
+/// Darwin's boot session UUID stands in for the Linux kernel boot ID.
+#[cfg(target_os = "macos")]
+fn current_boot_id() -> Result<String, SupervisorStoreError> {
+    let boot_id = crate::host::process::BootSessionId::current()
+        .map_err(|_| SupervisorStoreError::InvalidBootId)?
+        .to_hyphenated();
     validate_boot_id(&boot_id)?;
     Ok(boot_id)
 }
@@ -1707,6 +1724,7 @@ fn validate_boot_id(boot_id: &str) -> Result<(), SupervisorStoreError> {
 
 fn path_error_is_not_found(error: &PathError) -> bool {
     match error {
+        #[cfg(target_os = "linux")]
         PathError::Openat2 { source, .. } => *source == rustix::io::Errno::NOENT,
         PathError::Io { source, .. } => source.kind() == io::ErrorKind::NotFound,
         _ => false,
@@ -1722,8 +1740,8 @@ mod tests {
     use codewire_vmm_guest_probe::{SetupArchitecture, Sha256Value, oci_root_generation};
     use sha2::{Digest as _, Sha256};
 
-    use crate::linux::path::{FileIdentity, SocketIdentity, current_uid};
-    use crate::linux::process::ProcessIdentity;
+    use crate::host::path::{FileIdentity, SocketIdentity, current_uid};
+    use crate::host::process::ProcessIdentity;
     use crate::oci::{
         OciArchitecture, ResolvedDescriptor, ResolvedImage, ResolvedLayer, Sha256Digest,
     };
@@ -3749,6 +3767,7 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn live_runtime_journal_reopens_without_replay_or_resetting_unknown_effect() {
         let (_parent, root) = root();

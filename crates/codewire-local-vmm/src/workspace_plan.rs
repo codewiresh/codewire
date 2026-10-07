@@ -28,7 +28,7 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::direct_share::{AdmittedDirectShare, admit_direct_share, reopen_direct_share};
-use crate::linux::path::{PrivateRoot, current_uid};
+use crate::host::path::{PrivateRoot, current_uid};
 use crate::oci::{ContentStore, Sha256Digest};
 #[cfg(test)]
 use crate::supervisor_metadata::workspace_plan::{

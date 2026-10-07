@@ -25,6 +25,8 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+#[cfg(target_os = "linux")]
+use crate::AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES;
 use crate::broker_channel::{
     BrokerChannelRefreshLifetime, BrokerLeaseAuditLog, BrokerLeaseChannelControl,
     LocalSshOperationRuntime, LocalSshSigner, MAX_BROKER_LEASE_AUDIT_LIST_LIMIT,
@@ -40,12 +42,11 @@ use crate::transport::{
     remove_bound_socket,
 };
 use crate::{
-    AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, AccessProfileRecord, AccessProfileRevisionRecord,
-    CredentialRecord, EnvironmentAccessBindingRecord, EnvironmentBrokerRuntime,
-    LocalBrokerProcessConfig, LocalBrokerProcessSpawner, LocalCredentialAuthority,
-    LocalCredentialError, LocalSecretProject, NewCredential, RepositoryCredentialLeaseRequest,
-    ResolvedWorkloadSecretMetadata, WorkloadSecretMetadata, WorkloadSecretSelection,
-    WorkloadSecretSource,
+    AccessProfileRecord, AccessProfileRevisionRecord, CredentialRecord,
+    EnvironmentAccessBindingRecord, EnvironmentBrokerRuntime, LocalBrokerProcessConfig,
+    LocalBrokerProcessSpawner, LocalCredentialAuthority, LocalCredentialError, LocalSecretProject,
+    NewCredential, RepositoryCredentialLeaseRequest, ResolvedWorkloadSecretMetadata,
+    WorkloadSecretMetadata, WorkloadSecretSelection, WorkloadSecretSource,
 };
 
 const MAX_RPC_MESSAGE_BYTES: usize = MAX_PROTECTED_VALUE_BYTES + 64 * 1024;

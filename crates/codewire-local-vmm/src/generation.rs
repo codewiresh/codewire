@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 
 use uuid::Uuid;
 
-use crate::linux::path::PrivateRoot;
+use crate::host::path::PrivateRoot;
 use crate::state::{
     MAXIMUM_ROOT_GENERATIONS, RootGenerationPaths, StateDiskIdentity, VmPaths,
     admitted_generation_names,
@@ -233,7 +233,7 @@ pub enum GenerationError {
     #[error("root generation seed directory is invalid: {0}")]
     InvalidSeedDirectory(PathBuf),
     #[error(transparent)]
-    Path(#[from] crate::linux::path::PathError),
+    Path(#[from] crate::host::path::PathError),
     #[error(transparent)]
     State(#[from] crate::state::StateError),
     #[error("filesystem operation failed for {path}: {source}")]
@@ -281,6 +281,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn creation_is_reported_only_by_the_publishing_invocation() {
         let engine = tempfile::tempdir().unwrap();
@@ -346,6 +347,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn skill_snapshot_generation_requires_explicit_seed_before_publication() {
         let engine = tempfile::tempdir().unwrap();

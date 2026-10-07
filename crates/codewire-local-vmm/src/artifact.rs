@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
-use crate::linux::path::{FileIdentity, PathError, PrivateRoot};
+use crate::host::path::{FileIdentity, PathError, PrivateRoot};
 
 pub const ARTIFACT_LOCK_SCHEMA_VERSION: u32 = 1;
 pub const CLOUD_HYPERVISOR_RELEASE: &str = "v53.0";
@@ -1003,9 +1003,15 @@ mod tests {
         let outside = outside_dir.path().join("outside-lock.json");
         std::fs::write(&outside, lock_json()).unwrap();
         symlink(&outside, &lock).unwrap();
+        #[cfg(target_os = "linux")]
         assert!(matches!(
             ArtifactLock::read(&lock),
             Err(ArtifactError::ConfinedPath(PathError::Openat2 { .. }))
+        ));
+        #[cfg(target_os = "macos")]
+        assert!(matches!(
+            ArtifactLock::read(&lock),
+            Err(ArtifactError::ConfinedPath(_))
         ));
     }
 

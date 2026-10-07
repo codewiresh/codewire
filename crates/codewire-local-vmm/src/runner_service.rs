@@ -32,9 +32,9 @@ use crate::control::v1::environment_runner_service_server::{
     EnvironmentRunnerService, EnvironmentRunnerServiceServer,
 };
 use crate::direct_share::{DirectShareIdentity, DirectShareRequest};
+use crate::host::path::PrivateRoot;
 use crate::host_port::{HostPortBinding, canonical_host_port_bindings};
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
-use crate::linux::path::PrivateRoot;
 use crate::mesh_ingress::{MeshAttachment, MeshEnrollmentAuthSource};
 use crate::runner::ExitClass;
 use crate::uds::{UdsError, bind_owner_only, connect_owner_only, remove_bound_socket};
@@ -542,6 +542,10 @@ fn guest_boot_stage_proto(stage: GuestBootStage) -> v1::GuestBootStage {
 }
 
 pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerServiceError> {
+    // Darwin has no parent-death signal: the runner exits with its supervisor
+    // and is never adopted by another one.
+    #[cfg(target_os = "macos")]
+    crate::host::process::exit_with_parent().map_err(|_| RunnerServiceError::Configuration)?;
     if !config.mesh_data_dir.is_absolute() || !config.platform_config_dir.is_absolute() {
         return Err(RunnerServiceError::Configuration);
     }
@@ -588,6 +592,7 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
     };
     let server = tokio::spawn(serve_runner_rpc(config.socket, service));
     let adoption = adoption_rx.recv().await.ok_or(RunnerServiceError::Serve)?;
+    #[cfg(target_os = "linux")]
     clear_parent_death_signal().map_err(|_| RunnerServiceError::Adoption)?;
     let _ = adoption.acknowledged.send(());
     server.await.map_err(|_| RunnerServiceError::Serve)?
@@ -1585,10 +1590,12 @@ fn network_start_error_code(error: &RunnerError) -> &'static str {
         RunnerError::MeshTransportSpawn => "mesh_transport_spawn",
         RunnerError::MeshTransportStartTimeout => "mesh_transport_start_timeout",
         RunnerError::MeshTransportBootstrap => "mesh_transport_bootstrap",
+        #[cfg(target_os = "linux")]
         RunnerError::MeshTransportStartup(failure) => failure.runner_error_code(),
         RunnerError::MeshEnrollmentBrokerSpawn => "mesh_enrollment_broker_spawn",
         RunnerError::MeshEnrollmentBrokerStartTimeout => "mesh_enrollment_broker_start_timeout",
         RunnerError::MeshEnrollmentBrokerBootstrap => "mesh_enrollment_broker_bootstrap",
+        #[cfg(target_os = "linux")]
         RunnerError::MeshEnrollmentBrokerStartup(failure) => failure.runner_error_code(),
         RunnerError::MeshProcessWait => "mesh_process_wait",
         RunnerError::MeshProcessKillTimeout => "mesh_process_kill_timeout",
@@ -1865,6 +1872,7 @@ async fn wait_for_guest_daemon(
     result?
 }
 
+#[cfg(target_os = "linux")]
 fn clear_parent_death_signal() -> Result<(), Status> {
     // SAFETY: PR_SET_PDEATHSIG with zero only clears the calling process's
     // parent-death signal and has no pointer argument.
@@ -1937,12 +1945,18 @@ mod tests {
         (parent, listener, access)
     }
 
+    #[cfg(target_os = "linux")]
     fn current_process_liveness() -> OwnedFd {
         rustix::process::pidfd_open(
             rustix::process::getpid(),
             rustix::process::PidfdFlags::empty(),
         )
         .unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn current_process_liveness() -> OwnedFd {
+        crate::host::process::exit_queue(std::process::id()).unwrap()
     }
 
     fn bootstrap_rpc() -> (tempfile::TempDir, RunnerRpc) {
@@ -2420,9 +2434,19 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let pid = rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap();
-        let descriptor =
-            rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).unwrap();
+        #[cfg(target_os = "linux")]
+        let descriptor = {
+            let pid = rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap();
+            rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).unwrap()
+        };
+        #[cfg(target_os = "macos")]
+        let descriptor = crate::host::process::LiveProcess::capture_child(
+            child.id().unwrap(),
+            std::path::Path::new("/bin/sleep"),
+        )
+        .unwrap()
+        .duplicate_wait_descriptor()
+        .unwrap();
         let _guard = cell.install(1, access, descriptor).unwrap();
         assert!(cell.get(environment_id, 1).is_ok());
         child.kill().await.unwrap();
@@ -2752,12 +2776,14 @@ mod tests {
             network_start_error_code(&RunnerError::MeshTransportStartTimeout),
             "mesh_transport_start_timeout"
         );
+        #[cfg(target_os = "linux")]
         assert_eq!(
             network_start_error_code(&RunnerError::MeshTransportStartup(
                 crate::mesh_process::MeshTransportStartupFailure::TransportSetup,
             )),
             "mesh_transport_transport_setup"
         );
+        #[cfg(target_os = "linux")]
         assert_eq!(
             network_start_error_code(&RunnerError::MeshEnrollmentBrokerStartup(
                 crate::mesh_enrollment::MeshEnrollmentStartupFailure::EnrollmentRequest,
@@ -2858,6 +2884,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn private_start_binds_direct_shares_to_exact_host_identity_and_guest_order() {
         let source = tempfile::tempdir().unwrap();
@@ -2931,7 +2958,10 @@ mod tests {
 
     #[tokio::test]
     async fn authenticated_guest_progress_stream_is_fixed_port_and_terminal() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
         let socket = temp.path().join("hybrid.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -2987,7 +3017,10 @@ mod tests {
 
     #[test]
     fn guest_progress_validator_rejects_replay_regression_and_flood() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
         let socket = temp.path().join("hybrid.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();

@@ -7,30 +7,21 @@
 
 use std::collections::BTreeSet;
 
-#[cfg(any(target_os = "linux", test))]
 use hmac::{Hmac, Mac as _};
 use serde::{Deserialize, Serialize};
-#[cfg(any(target_os = "linux", test))]
 use sha2::Sha256;
-#[cfg(any(target_os = "linux", test))]
 use uuid::Uuid;
 
-#[cfg(any(target_os = "linux", test))]
 pub const HOST_PORT_CONTROL_KEY_LEN: usize = 32;
-#[cfg(any(target_os = "linux", test))]
 pub const HOST_PORT_CONTROL_FRAME_LEN: usize = 80;
 pub const MAX_HOST_PORT_BINDINGS: usize = 64;
 pub const RESERVED_GUEST_DAEMON_PORT: u16 = 7_777;
 
-#[cfg(any(target_os = "linux", test))]
 const HOST_PORT_CONTROL_MAGIC: &[u8; 8] = b"CWHOSTP1";
-#[cfg(any(target_os = "linux", test))]
 const HOST_PORT_CONTROL_TAG_OFFSET: usize = 48;
 
-#[cfg(any(target_os = "linux", test))]
 type HmacSha256 = Hmac<Sha256>;
 
-#[cfg(target_os = "linux")]
 pub(crate) fn is_host_port_control_frame(frame: &[u8; HOST_PORT_CONTROL_FRAME_LEN]) -> bool {
     &frame[..HOST_PORT_CONTROL_MAGIC.len()] == HOST_PORT_CONTROL_MAGIC
 }
@@ -43,7 +34,6 @@ pub struct HostPortBinding {
 }
 
 impl HostPortBinding {
-    #[cfg(any(target_os = "linux", test))]
     pub fn new(host_port: u16, guest_port: u16) -> Result<Self, HostPortError> {
         let binding = Self {
             host_port,
@@ -65,7 +55,6 @@ impl HostPortBinding {
 }
 
 /// Sort and validate one complete immutable environment binding set.
-#[cfg(any(target_os = "linux", test))]
 pub fn canonical_host_port_bindings(
     mut bindings: Vec<HostPortBinding>,
 ) -> Result<Vec<HostPortBinding>, HostPortError> {
@@ -101,13 +90,11 @@ pub fn validate_canonical_host_port_bindings(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(any(target_os = "linux", test))]
 pub struct HostPortControlFrame {
     pub binding: HostPortBinding,
     pub sequence: u64,
 }
 
-#[cfg(any(target_os = "linux", test))]
 impl HostPortControlFrame {
     pub fn encode(
         vm_id: Uuid,
@@ -131,14 +118,12 @@ impl HostPortControlFrame {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
 pub struct HostPortControlReceiver {
     vm_id: Uuid,
     generation: u64,
     next_sequence: u64,
 }
 
-#[cfg(any(target_os = "linux", test))]
 impl HostPortControlReceiver {
     pub fn new(vm_id: Uuid, generation: u64) -> Result<Self, HostPortError> {
         if vm_id.is_nil() || generation == 0 {
@@ -191,7 +176,6 @@ impl HostPortControlReceiver {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
 fn validate_control_identity(
     vm_id: Uuid,
     generation: u64,
@@ -207,7 +191,6 @@ fn validate_control_identity(
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", test))]
 fn authenticate(
     message: &[u8],
     key: &[u8; HOST_PORT_CONTROL_KEY_LEN],
@@ -225,19 +208,14 @@ pub enum HostPortError {
     TooManyBindings,
     #[error("host-port bindings are duplicated or not canonical")]
     DuplicateBinding,
-    #[cfg(any(target_os = "linux", test))]
     #[error("host-port control identity is invalid")]
     InvalidIdentity,
-    #[cfg(any(target_os = "linux", test))]
     #[error("host-port control key is invalid")]
     InvalidKey,
-    #[cfg(any(target_os = "linux", test))]
     #[error("host-port control frame is invalid")]
     InvalidFrame,
-    #[cfg(any(target_os = "linux", test))]
     #[error("host-port control authentication failed")]
     Authentication,
-    #[cfg(any(target_os = "linux", test))]
     #[error("host-port control sequence overflowed")]
     SequenceOverflow,
 }

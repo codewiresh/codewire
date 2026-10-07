@@ -110,6 +110,7 @@ pub(in crate::darwin) fn environment(name: &str) -> EnvironmentRecord {
         access_profile: None,
         access_binding: None,
         platform_source_authority: None,
+        cw_runtime: None,
         runner: None,
         active_artifact_generation: Some("c".repeat(64)),
         staging_artifact_generation: None,

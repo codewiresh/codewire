@@ -21,6 +21,7 @@ use tokio::io::AsyncWriteExt as _;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+#[cfg(target_os = "linux")]
 use crate::linux::confinement::{
     install_deny_all_filesystem_domain, install_inet_socket_only_syscalls, lock_process_privileges,
     require_single_threaded_process,
@@ -41,6 +42,7 @@ const KEY_OFFSET: usize = POLICY_DIGEST_END;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(20);
 
+#[cfg(target_os = "linux")]
 const BROKER_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_socketpair,
     libc::SYS_listen,
@@ -89,10 +91,32 @@ const BROKER_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_prctl,
 ];
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const BROKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[libc::SYS_fork, libc::SYS_vfork];
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const BROKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[];
+
+// Darwin has no confinement for this broker yet. Refuse to start rather than
+// run unconfined.
+#[cfg(target_os = "macos")]
+fn require_single_threaded_process() -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+#[cfg(target_os = "macos")]
+fn lock_process_privileges() -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+#[cfg(target_os = "macos")]
+fn install_deny_all_filesystem_domain() -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+#[cfg(target_os = "macos")]
+fn install_inet_socket_only_syscalls() -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EgressBrokerStartupFailure {
@@ -363,8 +387,14 @@ pub async fn run_inherited_egress_broker(
                 .map_err(|_| EgressBrokerProcessError::FilesystemConfinement)
         })
         .and_then(|()| {
-            install_inet_socket_only_syscalls(BROKER_DENIED_SYSCALLS, BROKER_ARCH_DENIED_SYSCALLS)
-                .map_err(|_| EgressBrokerProcessError::SyscallConfinement)
+            #[cfg(target_os = "linux")]
+            let installed = install_inet_socket_only_syscalls(
+                BROKER_DENIED_SYSCALLS,
+                BROKER_ARCH_DENIED_SYSCALLS,
+            );
+            #[cfg(target_os = "macos")]
+            let installed = install_inet_socket_only_syscalls();
+            installed.map_err(|_| EgressBrokerProcessError::SyscallConfinement)
         });
     if let Err(error) = confinement {
         let _ = write_status(&bootstrap, error.startup_failure().message());
@@ -475,10 +505,15 @@ fn validate_identity(
 }
 
 fn inherited_std_unix_stream(descriptor: RawFd) -> Result<StdUnixStream, EgressBrokerProcessError> {
+    // Darwin has no SO_DOMAIN and cannot read SO_ACCEPTCONN; the connected
+    // AF_UNIX peer address below proves the domain and that it is no listener.
+    #[cfg(target_os = "linux")]
     if socket_option(descriptor, libc::SO_DOMAIN)? != libc::AF_UNIX
-        || socket_option(descriptor, libc::SO_TYPE)? != libc::SOCK_STREAM
         || socket_option(descriptor, libc::SO_ACCEPTCONN)? != 0
     {
+        return Err(EgressBrokerProcessError::InheritedDescriptor);
+    }
+    if socket_option(descriptor, libc::SO_TYPE)? != libc::SOCK_STREAM {
         return Err(EgressBrokerProcessError::InheritedDescriptor);
     }
     let mut peer: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -537,7 +572,9 @@ fn write_status(stream: &StdUnixStream, message: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use std::net::Ipv4Addr;
+    #[cfg(target_os = "linux")]
     use std::sync::mpsc;
 
     fn identity() -> (Uuid, u64) {
@@ -646,6 +683,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn single_thread_guard_rejects_an_extra_thread() {
         let (ready_sender, ready_receiver) = mpsc::channel();
@@ -660,6 +698,7 @@ mod tests {
         thread.join().unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn broker_confinement_denies_files_processes_and_non_inet_sockets() {
         const CHILD_MARKER: &str = "CODEWIRE_TEST_EGRESS_BROKER_CONFINEMENT";

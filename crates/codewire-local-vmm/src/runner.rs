@@ -25,12 +25,17 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::artifact::{AdmittedArtifacts, ArtifactError, ArtifactLock};
+#[cfg(target_os = "linux")]
 use crate::ch_api::{ChApiClient, ChApiError, VmInfo};
+#[cfg(target_os = "linux")]
 use crate::cloud_hypervisor::{
     CloudHypervisorConfig, CloudHypervisorConfigError, CommandSpec, VirtioFsConfig,
 };
+#[cfg(target_os = "linux")]
 use crate::cw_runtime::{AdmittedCwRuntimeDisk, CwRuntimeError, CwRuntimeStore};
-use crate::direct_share::{AdmittedDirectShare, DirectShareRequest};
+#[cfg(target_os = "linux")]
+use crate::direct_share::AdmittedDirectShare;
+use crate::direct_share::DirectShareRequest;
 use crate::egress_broker::{
     EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE,
     EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT, EGRESS_BROKER_PREPARED_MESSAGE,
@@ -38,18 +43,25 @@ use crate::egress_broker::{
     EgressBrokerStartupStatus, decode_egress_broker_startup_status,
     encode_developer_egress_broker_bootstrap,
 };
-use crate::host::path::{FileIdentity, PathError, PrivateRoot, current_uid, set_socket_private};
-use crate::host::process::{LiveProcess, RecoveryError, signal_unreaped_child};
+use crate::host::path::{FileIdentity, PathError, PrivateRoot};
+#[cfg(target_os = "linux")]
+use crate::host::path::{current_uid, set_socket_private};
+#[cfg(target_os = "linux")]
+use crate::host::process::signal_unreaped_child;
+use crate::host::process::{LiveProcess, RecoveryError};
 use crate::host_port::{
     HOST_PORT_CONTROL_KEY_LEN, HostPortBinding, HostPortControlFrame,
     validate_canonical_host_port_bindings,
 };
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
+#[cfg(target_os = "linux")]
 use crate::linux::confinement::{
     PreparedFilesystemDomain, install_identity_preserving_setgroups_filter,
     lock_exec_process_privileges, lock_process_privileges, prepare_virtiofsd_filesystem_domain,
 };
+#[cfg(target_os = "linux")]
 use crate::linux::preflight::{PreflightError, PreflightReport, preflight};
+#[cfg(target_os = "linux")]
 use crate::mesh_enrollment::{
     MESH_ENROLLMENT_BOOTSTRAP_FD, MESH_ENROLLMENT_CONFINE_MESSAGE,
     MESH_ENROLLMENT_PREPARED_MESSAGE, MESH_ENROLLMENT_READY_MESSAGE,
@@ -61,12 +73,14 @@ use crate::mesh_ingress::{
     AcceptedMeshIngress, MESH_INGRESS_CONTROL_KEY_LEN, MeshAttachment, MeshIngressControlFrame,
     MeshIngressPublisher, mesh_ingress_channel,
 };
+#[cfg(target_os = "linux")]
 use crate::mesh_process::{
     MESH_TRANSPORT_BOOTSTRAP_FD, MESH_TRANSPORT_CONFINE_MESSAGE, MESH_TRANSPORT_CONFINED_MESSAGE,
     MESH_TRANSPORT_ENROLLMENT_FD, MESH_TRANSPORT_PREPARED_MESSAGE, MESH_TRANSPORT_READY_MESSAGE,
     MESH_TRANSPORT_STATUS_MAX_BYTES, MeshTransportStartupFailure, MeshTransportStartupStatus,
     decode_mesh_transport_startup_status, encode_mesh_transport_bootstrap,
 };
+#[cfg(target_os = "linux")]
 use crate::mesh_transport::{MeshTransportError, receive_mesh_ingress_submissions};
 use crate::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, NetworkWorkerStartupStatus,
@@ -76,11 +90,13 @@ use crate::network_worker::{
     send_worker_network_descriptor,
 };
 use crate::state::{
-    MINIMUM_ROOT_DISK_BYTES, MINIMUM_STATE_DISK_BYTES, PERSISTED_STATE_SCHEMA_VERSION,
-    PersistedVmState, RootGenerationPaths, StateDiskIdentity, StateError, VmLock, VmPaths, VmPhase,
-    publish_seed, valid_root_generation,
+    MINIMUM_ROOT_DISK_BYTES, MINIMUM_STATE_DISK_BYTES, PersistedVmState, RootGenerationPaths,
+    StateDiskIdentity, StateError, VmLock, VmPaths, publish_seed, valid_root_generation,
 };
+#[cfg(target_os = "linux")]
+use crate::state::{PERSISTED_STATE_SCHEMA_VERSION, VmPhase};
 
+#[cfg(target_os = "linux")]
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 // Guest cleanup can drain daemon, workspace, Docker and network for five
 // seconds each before sync/reboot. One overall bound includes RPC dispatch.
@@ -93,6 +109,7 @@ const NETWORK_WORKER_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const EGRESS_BROKER_READY_TIMEOUT: Duration =
     EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT.saturating_add(Duration::from_secs(5));
 const NETWORK_WORKER_ATTACH_TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(target_os = "linux")]
 const MESH_STACK_ATTACH_TIMEOUT: Duration = Duration::from_secs(45);
 const NETWORK_WORKER_PROGRESS_FRAME_LIMIT: usize = 64;
 const NETWORK_WORKER_HANDSHAKE_ATTEMPT_LIMIT: usize = 8;
@@ -101,7 +118,9 @@ const HOST_PORT_ACCEPT_QUEUE: usize = 64;
 const VMM_CASCADE_EXIT_TIMEOUT: Duration = Duration::from_millis(250);
 const E2FSCK: &str = "/usr/bin/e2fsck";
 const RESIZE2FS: &str = "/usr/bin/resize2fs";
+#[cfg(target_os = "linux")]
 const DIRECT_SHARE_SOURCE_FD: RawFd = 3;
+#[cfg(target_os = "linux")]
 const DIRECT_SHARE_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
@@ -139,6 +158,7 @@ struct SetupDiskIdentity {
     file: FileIdentity,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 struct PreparedDirectShare {
     request: DirectShareRequest,
@@ -190,6 +210,7 @@ impl CloudHypervisorRunner {
         })
     }
 
+    #[cfg(target_os = "linux")]
     pub fn preflight(&self) -> Result<PreflightReport, RunnerError> {
         preflight().map_err(RunnerError::from)
     }
@@ -203,9 +224,11 @@ impl CloudHypervisorRunner {
     }
 
     pub async fn prepare(&self, request: CreateVmRequest) -> Result<PreparedVm, RunnerError> {
+        #[cfg(target_os = "linux")]
         preflight()?;
         validate_request(&request)?;
         self.artifacts.require_current_guest_seed_abi()?;
+        #[cfg(target_os = "linux")]
         let cw_runtime_disk = request
             .cw_runtime_catalog_generation
             .as_deref()
@@ -215,6 +238,7 @@ impl CloudHypervisorRunner {
         let paths = VmPaths::create(&self.state_root, request.vm_id)?;
         let lock = paths.lock()?;
         let persisted = read_stopped_persisted_state(&paths, request.vm_id)?;
+        #[cfg(target_os = "linux")]
         if let Some(disk) = persisted
             .as_ref()
             .and_then(|state| state.cw_runtime_disk.as_ref())
@@ -224,9 +248,13 @@ impl CloudHypervisorRunner {
         let state_disk = admit_state_disk(&paths, &request, persisted.as_ref())?;
         let docker_disk = admit_docker_disk(&paths, &request, persisted.as_ref())?;
         let (root_disk_path, root_disk) = admit_root_disk(&paths, &request, persisted.as_ref())?;
+        // Darwin builds no VMM configuration yet, so nothing attaches the disk.
+        #[cfg(target_os = "macos")]
+        let _ = root_disk_path;
         let setup_disk = admit_setup_disk(&paths, &request)?;
         paths.clear_stale_runtime_endpoints()?;
 
+        #[cfg(target_os = "linux")]
         let direct_shares = self.prepare_direct_shares(&request, &paths)?;
         let direct_share_plan = direct_share_plan(&request.direct_shares)?;
         let direct_shares_sha256 = direct_share_plan
@@ -255,6 +283,7 @@ impl CloudHypervisorRunner {
             None => seed,
         };
         let seed = seed.with_managed_credential_clients(request.managed_credential_clients);
+        #[cfg(target_os = "linux")]
         let seed = match &cw_runtime_disk {
             Some(disk) => seed.with_cw_runtime_catalog_sha256(
                 Sha256Value::parse_hex(&disk.generation)
@@ -265,6 +294,7 @@ impl CloudHypervisorRunner {
         publish_seed(&paths.seed_disk, &seed.encode())?;
         paths.prepare_diagnostics()?;
 
+        #[cfg(target_os = "linux")]
         let config = match &setup_disk {
             Some(setup) => CloudHypervisorConfig::new_with_setup(
                 &self.artifacts,
@@ -307,6 +337,7 @@ impl CloudHypervisorRunner {
                 })
                 .collect(),
         )?;
+        #[cfg(target_os = "linux")]
         let command = config.command()?;
         Ok(PreparedVm {
             request,
@@ -315,15 +346,19 @@ impl CloudHypervisorRunner {
             docker_disk,
             root_disk,
             setup_disk,
+            #[cfg(target_os = "linux")]
             cw_runtime_disk,
+            #[cfg(target_os = "linux")]
             direct_shares,
             token,
+            #[cfg(target_os = "linux")]
             command,
             host_port_listeners,
             lock,
         })
     }
 
+    #[cfg(target_os = "linux")]
     fn prepare_direct_shares(
         &self,
         request: &CreateVmRequest,
@@ -363,6 +398,7 @@ impl CloudHypervisorRunner {
     }
 
     pub async fn start(&self, prepared: PreparedVm) -> Result<RunningVm, RunnerError> {
+        #[cfg(target_os = "linux")]
         preflight()?;
         self.artifacts.revalidate()?;
         prepared.state_disk.revalidate(&prepared.paths.state_disk)?;
@@ -376,6 +412,7 @@ impl CloudHypervisorRunner {
         if let Some(setup) = &prepared.setup_disk {
             revalidate_setup_disk(setup, prepared.request.setup)?;
         }
+        #[cfg(target_os = "linux")]
         if let Some(disk) = &prepared.cw_runtime_disk {
             CwRuntimeStore::create(&self.state_root)?.revalidate_attachment(disk)?;
         }
@@ -383,6 +420,18 @@ impl CloudHypervisorRunner {
             &prepared.paths.seed_disk,
             prepared.request.cw_runtime_catalog_generation.as_deref(),
         )?;
+        self.launch(prepared).await
+    }
+
+    /// The Darwin VMM is the signed Virtualization.framework helper, which is
+    /// not wired yet. Refuse after admission, before any process exists.
+    #[cfg(target_os = "macos")]
+    async fn launch(&self, _prepared: PreparedVm) -> Result<RunningVm, RunnerError> {
+        Err(RunnerError::VmmUnsupported)
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn launch(&self, prepared: PreparedVm) -> Result<RunningVm, RunnerError> {
         let mut direct_share_startup = DirectShareStartup::start(
             self.artifacts
                 .virtiofsd
@@ -508,6 +557,7 @@ impl CloudHypervisorRunner {
         if state.vm_id != vm_id {
             return Err(RunnerError::PersistedIdentityMismatch);
         }
+        #[cfg(target_os = "linux")]
         let cw_runtime_disk = state
             .cw_runtime_disk
             .as_ref()
@@ -527,6 +577,7 @@ impl CloudHypervisorRunner {
             identity.revalidate(&paths.vsock_socket)?;
         }
         let process = LiveProcess::recover(&state.process)?;
+        #[cfg(target_os = "linux")]
         let api = state
             .api_socket
             .as_ref()
@@ -536,7 +587,9 @@ impl CloudHypervisorRunner {
             paths,
             state,
             process,
+            #[cfg(target_os = "linux")]
             api,
+            #[cfg(target_os = "linux")]
             cw_runtime_disk,
             _lock: lock,
         })
@@ -572,7 +625,10 @@ impl CloudHypervisorRunner {
             }
             Err(error) => return Err(error.into()),
         };
+        #[cfg(target_os = "linux")]
         terminate_exact_process(&process, None).await?;
+        #[cfg(target_os = "macos")]
+        terminate_exact_process(&process).await?;
         Ok(Some(generation))
     }
 
@@ -718,11 +774,13 @@ async fn run_resize2fs(disk: &Path) -> Result<(), RunnerError> {
 /// completed. `Drop` cannot wait, but it always sends an exact-child kill; the
 /// Tokio process driver reaps a dropped child asynchronously. Synchronous error
 /// paths additionally use the bounded cleanup helpers below before returning.
+#[cfg(target_os = "linux")]
 struct StartupOwnership {
     child: Option<tokio::process::Child>,
     process: Option<LiveProcess>,
 }
 
+#[cfg(target_os = "linux")]
 impl StartupOwnership {
     fn new(child: tokio::process::Child) -> Self {
         Self {
@@ -778,6 +836,7 @@ impl StartupOwnership {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for StartupOwnership {
     fn drop(&mut self) {
         if let Some(process) = &self.process {
@@ -791,16 +850,19 @@ impl Drop for StartupOwnership {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct DirectShareProcess {
     child: tokio::process::Child,
     process: LiveProcess,
     socket: PathBuf,
 }
 
+#[cfg(target_os = "linux")]
 struct DirectShareStartup {
     processes: Vec<DirectShareProcess>,
 }
 
+#[cfg(target_os = "linux")]
 impl DirectShareStartup {
     async fn start(
         executable: Option<&Path>,
@@ -853,6 +915,7 @@ impl DirectShareStartup {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for DirectShareStartup {
     fn drop(&mut self) {
         for process in &mut self.processes {
@@ -895,29 +958,43 @@ pub struct PreparedVm {
     docker_disk: Option<StateDiskIdentity>,
     root_disk: StateDiskIdentity,
     setup_disk: Option<SetupDiskIdentity>,
+    #[cfg(target_os = "linux")]
     cw_runtime_disk: Option<AdmittedCwRuntimeDisk>,
+    #[cfg(target_os = "linux")]
     direct_shares: Vec<PreparedDirectShare>,
     token: Zeroizing<String>,
+    #[cfg(target_os = "linux")]
     command: CommandSpec,
+    #[cfg_attr(
+        target_os = "macos",
+        expect(dead_code, reason = "no Darwin VMM launch yet")
+    )]
     host_port_listeners: Vec<ReservedHostPort>,
+    #[cfg_attr(
+        target_os = "macos",
+        expect(dead_code, reason = "no Darwin VMM launch yet")
+    )]
     lock: VmLock,
 }
 
 impl fmt::Debug for PreparedVm {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PreparedVm")
+        let mut debug = formatter.debug_struct("PreparedVm");
+        debug
             .field("request", &self.request)
             .field("paths", &self.paths)
             .field("state_disk", &self.state_disk)
             .field("docker_disk", &self.docker_disk)
             .field("root_disk", &self.root_disk)
-            .field("setup_disk", &self.setup_disk)
+            .field("setup_disk", &self.setup_disk);
+        #[cfg(target_os = "linux")]
+        debug
             .field("cw_runtime_disk", &self.cw_runtime_disk)
-            .field("direct_share_count", &self.direct_shares.len())
-            .field("token", &"[REDACTED]")
-            .field("command", &self.command)
-            .finish_non_exhaustive()
+            .field("direct_share_count", &self.direct_shares.len());
+        debug.field("token", &"[REDACTED]");
+        #[cfg(target_os = "linux")]
+        debug.field("command", &self.command);
+        debug.finish_non_exhaustive()
     }
 }
 
@@ -946,10 +1023,12 @@ impl PreparedVm {
         &self.root_disk
     }
 
+    #[cfg(target_os = "linux")]
     pub fn cw_runtime_disk(&self) -> Option<&AdmittedCwRuntimeDisk> {
         self.cw_runtime_disk.as_ref()
     }
 
+    #[cfg(target_os = "linux")]
     pub fn cw_runtime_catalog_generation(&self) -> Option<&str> {
         self.cw_runtime_disk
             .as_ref()
@@ -968,11 +1047,14 @@ pub struct RunningVm {
     docker_disk: Option<StateDiskIdentity>,
     root_disk: StateDiskIdentity,
     setup_disk: Option<SetupDiskIdentity>,
+    #[cfg(target_os = "linux")]
     cw_runtime_disk: Option<AdmittedCwRuntimeDisk>,
+    #[cfg(target_os = "linux")]
     direct_shares: Vec<DirectShareProcess>,
     token: Zeroizing<String>,
     child: tokio::process::Child,
     process: LiveProcess,
+    #[cfg(target_os = "linux")]
     api: ChApiClient,
     hybrid: HybridVsockTarget,
     network_worker: Option<NetworkWorkerProcess>,
@@ -982,16 +1064,19 @@ pub struct RunningVm {
 
 impl fmt::Debug for RunningVm {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RunningVm")
+        let mut debug = formatter.debug_struct("RunningVm");
+        debug
             .field("request", &self.request)
             .field("paths", &self.paths)
             .field("state_disk", &self.state_disk)
             .field("docker_disk", &self.docker_disk)
             .field("root_disk", &self.root_disk)
-            .field("setup_disk", &self.setup_disk)
+            .field("setup_disk", &self.setup_disk);
+        #[cfg(target_os = "linux")]
+        debug
             .field("cw_runtime_disk", &self.cw_runtime_disk)
-            .field("direct_share_count", &self.direct_shares.len())
+            .field("direct_share_count", &self.direct_shares.len());
+        debug
             .field("process", &self.process)
             .field("token", &"[REDACTED]")
             .finish_non_exhaustive()
@@ -1027,16 +1112,24 @@ impl RunningVm {
         &self.root_disk
     }
 
+    #[cfg(target_os = "linux")]
     pub fn cw_runtime_disk(&self) -> Option<&AdmittedCwRuntimeDisk> {
         self.cw_runtime_disk.as_ref()
     }
 
+    /// cw runtime catalogs are Linux-only; Darwin never attaches one.
     pub fn cw_runtime_catalog_generation(&self) -> Option<&str> {
-        self.cw_runtime_disk
-            .as_ref()
-            .map(|disk| disk.generation.as_str())
+        #[cfg(target_os = "linux")]
+        {
+            self.cw_runtime_disk
+                .as_ref()
+                .map(|disk| disk.generation.as_str())
+        }
+        #[cfg(target_os = "macos")]
+        None
     }
 
+    #[cfg(target_os = "linux")]
     pub fn api(&self) -> &ChApiClient {
         &self.api
     }
@@ -1222,6 +1315,7 @@ impl RunningVm {
                 generation: self.request.generation,
                 deadline,
                 mesh: self.request.mesh.as_ref(),
+                #[cfg(target_os = "linux")]
                 mesh_credential_roots,
             };
             match spawn_network_stack_processes(&launch, key, mode).await {
@@ -1247,6 +1341,7 @@ impl RunningVm {
                             }
                             return Err(error);
                         }
+                        #[cfg(target_os = "linux")]
                         if launch.mesh.is_some() {
                             let Some(publisher) = worker.mesh_ingress_publisher.clone() else {
                                 let _ = stop_network_worker_process(&mut worker).await;
@@ -1348,6 +1443,7 @@ impl RunningVm {
             .map(|broker| broker.process.identity())
     }
 
+    #[cfg(target_os = "linux")]
     pub fn mesh_transport_process_identity(
         &self,
     ) -> Option<&crate::host::process::ProcessIdentity> {
@@ -1373,6 +1469,7 @@ impl RunningVm {
 
     /// Signal the exact runner-owned Mesh transport birth for checked-in
     /// qualified-host lifecycle verification.
+    #[cfg(target_os = "linux")]
     #[doc(hidden)]
     pub fn force_kill_mesh_transport_for_verification(&self) -> Result<(), RunnerError> {
         let mesh = self
@@ -1402,6 +1499,7 @@ impl RunningVm {
         if vmm != ExitClass::StillRunning {
             return Ok(vmm);
         }
+        #[cfg(target_os = "linux")]
         for share in &mut self.direct_shares {
             match share.child.try_wait() {
                 Ok(Some(status)) => return Ok(ExitClass::DirectShareFailure(status.code())),
@@ -1426,6 +1524,7 @@ impl RunningVm {
                 Err(_) => return Err(RunnerError::EgressBrokerWait),
             }
         }
+        #[cfg(target_os = "linux")]
         if let Some(mesh) = worker.mesh_transport.as_mut() {
             match mesh.child.try_wait() {
                 Ok(Some(status)) => {
@@ -1503,6 +1602,7 @@ impl RunningVm {
         {
             return self.wait_reaped().await;
         }
+        #[cfg(target_os = "linux")]
         let _ = self.api.shutdown().await;
         if self.process.wait_exited(GRACEFUL_STOP_TIMEOUT).await? {
             return self.wait_reaped().await;
@@ -1530,6 +1630,13 @@ impl RunningVm {
         }
     }
 
+    /// Direct shares (virtiofsd) are Linux-only; Darwin never starts one.
+    #[cfg(target_os = "macos")]
+    async fn stop_direct_shares(&mut self) -> Result<(), RunnerError> {
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
     async fn stop_direct_shares(&mut self) -> Result<(), RunnerError> {
         let mut shares = std::mem::take(&mut self.direct_shares);
         let mut first_error = None;
@@ -1689,17 +1796,20 @@ struct EgressBrokerLaunch {
     key: Zeroizing<[u8; BROKER_IPC_KEY_LEN]>,
 }
 
+#[cfg(target_os = "linux")]
 struct MeshTransportProcess {
     child: tokio::process::Child,
     process: LiveProcess,
     ingress_receiver: Option<JoinHandle<Result<(), MeshTransportError>>>,
 }
 
+#[cfg(target_os = "linux")]
 struct MeshProcessStartup {
     child: Option<tokio::process::Child>,
     process: Option<LiveProcess>,
 }
 
+#[cfg(target_os = "linux")]
 impl MeshProcessStartup {
     fn new(child: tokio::process::Child) -> Self {
         Self {
@@ -1731,6 +1841,7 @@ impl MeshProcessStartup {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for MeshProcessStartup {
     fn drop(&mut self) {
         if let Some(process) = &self.process {
@@ -1742,12 +1853,14 @@ impl Drop for MeshProcessStartup {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct PreparedMeshTransport {
     startup: MeshProcessStartup,
     control: tokio::net::UnixStream,
     submission_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
 }
 
+#[cfg(target_os = "linux")]
 struct PreparedMeshEnrollment {
     startup: MeshProcessStartup,
     control: tokio::net::UnixStream,
@@ -1761,6 +1874,7 @@ struct NetworkStackLaunch<'a> {
     generation: u64,
     deadline: tokio::time::Instant,
     mesh: Option<&'a MeshAttachment>,
+    #[cfg(target_os = "linux")]
     mesh_credential_roots: Option<(&'a Path, &'a Path)>,
 }
 
@@ -1773,6 +1887,7 @@ struct NetworkWorkerProcess {
     mesh_ingress_key: Option<Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>>,
     mesh_ingress_publisher: Option<MeshIngressPublisher>,
     ingress_forwarder: Option<JoinHandle<Result<(), RunnerError>>>,
+    #[cfg(target_os = "linux")]
     mesh_transport: Option<MeshTransportProcess>,
 }
 
@@ -1795,6 +1910,7 @@ fn take_ingress_forwarder_failure(
     !matches!(outcome, Ok(Ok(())))
 }
 
+#[cfg(target_os = "linux")]
 fn take_mesh_ingress_receiver_exit(
     receiver: &mut Option<JoinHandle<Result<(), MeshTransportError>>>,
 ) -> bool {
@@ -1859,6 +1975,7 @@ impl NetworkWorkerStartup {
             mesh_ingress_key,
             mesh_ingress_publisher: None,
             ingress_forwarder: None,
+            #[cfg(target_os = "linux")]
             mesh_transport: None,
         }
     }
@@ -1962,11 +2079,17 @@ async fn reap_failed_egress_broker_startup(
 }
 
 async fn stop_network_worker_process(worker: &mut NetworkWorkerProcess) -> Result<(), RunnerError> {
+    #[cfg(target_os = "linux")]
     let mesh_result = match worker.mesh_transport.as_mut() {
         Some(mesh) => stop_mesh_transport_process(mesh).await,
         None => Ok(()),
     };
-    worker.mesh_transport = None;
+    #[cfg(target_os = "linux")]
+    {
+        worker.mesh_transport = None;
+    }
+    #[cfg(target_os = "macos")]
+    let mesh_result = Ok(());
     let worker_result = stop_network_worker_process_inner(worker).await;
     match (mesh_result, worker_result) {
         (Ok(()), Ok(())) => Ok(()),
@@ -2016,6 +2139,7 @@ async fn stop_network_worker_process_inner(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 async fn stop_mesh_transport_process(mesh: &mut MeshTransportProcess) -> Result<(), RunnerError> {
     if let Some(receiver) = mesh.ingress_receiver.take() {
         receiver.abort();
@@ -2186,7 +2310,10 @@ async fn run_ingress_forwarder(
     let mut monitors = JoinSet::new();
     for (dependency, descriptor) in process_wait_descriptors {
         monitors.spawn(async move {
-            let descriptor = AsyncFd::new(descriptor).map_err(|_| RunnerError::IngressControl)?;
+            // Process wait descriptors only become readable. Darwin's kqueue
+            // descriptor also cannot be registered for writability.
+            let descriptor = AsyncFd::with_interest(descriptor, tokio::io::Interest::READABLE)
+                .map_err(|_| RunnerError::IngressControl)?;
             let _ready = descriptor
                 .readable()
                 .await
@@ -2347,6 +2474,7 @@ async fn transfer_mesh_ingress_connection(
     .map_err(|_| RunnerError::IngressControl)
 }
 
+#[cfg(target_os = "linux")]
 async fn spawn_mesh_stack_processes(
     context: &NetworkStackLaunch<'_>,
     publisher: MeshIngressPublisher,
@@ -2564,6 +2692,7 @@ async fn spawn_mesh_stack_processes(
     })
 }
 
+#[cfg(target_os = "linux")]
 async fn spawn_mesh_transport_process(
     context: &NetworkStackLaunch<'_>,
     attachment: &MeshAttachment,
@@ -2686,6 +2815,7 @@ async fn spawn_mesh_transport_process(
     })
 }
 
+#[cfg(target_os = "linux")]
 async fn spawn_mesh_enrollment_process(
     context: &NetworkStackLaunch<'_>,
     attachment: &MeshAttachment,
@@ -2806,12 +2936,14 @@ async fn spawn_mesh_enrollment_process(
     Ok(PreparedMeshEnrollment { startup, control })
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MeshStatusReadError {
     Timeout,
     Protocol,
 }
 
+#[cfg(target_os = "linux")]
 async fn write_mesh_control_frame(
     control: &mut tokio::net::UnixStream,
     frame: &[u8],
@@ -2826,6 +2958,7 @@ async fn write_mesh_control_frame(
     .map_err(|_| MeshStatusReadError::Protocol)
 }
 
+#[cfg(target_os = "linux")]
 async fn read_mesh_status_frame(
     control: &mut tokio::net::UnixStream,
     maximum_bytes: usize,
@@ -2851,6 +2984,7 @@ async fn read_mesh_status_frame(
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn mesh_transport_exit_or(
     startup: &mut MeshProcessStartup,
     fallback: RunnerError,
@@ -2877,6 +3011,7 @@ async fn mesh_transport_exit_or(
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn mesh_enrollment_exit_or(
     startup: &mut MeshProcessStartup,
     fallback: RunnerError,
@@ -2903,6 +3038,7 @@ async fn mesh_enrollment_exit_or(
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn reap_mesh_stack_startup(
     transport: &mut MeshProcessStartup,
     enrollment: &mut MeshProcessStartup,
@@ -2915,6 +3051,7 @@ async fn reap_mesh_stack_startup(
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn reap_failed_mesh_process_startup(
     startup: &mut MeshProcessStartup,
 ) -> Result<(), RunnerError> {
@@ -3505,6 +3642,7 @@ fn duplicate_inherited_descriptor(descriptor: i32) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
 }
 
+#[cfg(target_os = "linux")]
 fn prepare_isolated_child(
     expected_parent: libc::pid_t,
     bootstrap_fd: RawFd,
@@ -3535,6 +3673,28 @@ fn prepare_isolated_child(
     lock_process_privileges()
 }
 
+/// Darwin has no parent-death signal, close_range or privilege lock: the
+/// child exits with its parent on its own, and std opens every other
+/// descriptor close-on-exec.
+#[cfg(target_os = "macos")]
+fn prepare_isolated_child(
+    expected_parent: libc::pid_t,
+    bootstrap_fd: RawFd,
+    target_fd: RawFd,
+) -> io::Result<()> {
+    if unsafe { libc::getppid() } != expected_parent {
+        return Err(io::Error::from_raw_os_error(libc::ECHILD));
+    }
+    if bootstrap_fd != target_fd && unsafe { libc::dup2(bootstrap_fd, target_fd) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(target_fd, libc::F_SETFD, 0) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn prepare_isolated_child_pair(
     expected_parent: libc::pid_t,
     first_source: RawFd,
@@ -3667,7 +3827,9 @@ pub struct RecoveredVm {
     paths: VmPaths,
     state: PersistedVmState,
     process: LiveProcess,
+    #[cfg(target_os = "linux")]
     api: Option<ChApiClient>,
+    #[cfg(target_os = "linux")]
     cw_runtime_disk: Option<AdmittedCwRuntimeDisk>,
     _lock: VmLock,
 }
@@ -3695,29 +3857,38 @@ impl RecoveredVm {
     /// A supervisor restart cannot recover the per-boot daemon token. An
     /// orphan is therefore terminated and booted with a fresh generation.
     pub async fn terminate_orphan(&self) -> Result<(), RunnerError> {
-        if let Some(disk) = &self.cw_runtime_disk {
-            // Recovery never adopts an orphan's daemon authority. If a live
-            // API is present, also fence the saved attachment against vm.info.
-            if let Some(api) = &self.api {
-                validate_live_cw_runtime_disk(&api.info().await?, disk)?;
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(disk) = &self.cw_runtime_disk {
+                // Recovery never adopts an orphan's daemon authority. If a live
+                // API is present, also fence the saved attachment against vm.info.
+                if let Some(api) = &self.api {
+                    validate_live_cw_runtime_disk(&api.info().await?, disk)?;
+                }
             }
+            terminate_exact_process(&self.process, self.api.as_ref()).await
         }
-        terminate_exact_process(&self.process, self.api.as_ref()).await
+        #[cfg(target_os = "macos")]
+        terminate_exact_process(&self.process).await
     }
 }
 
 async fn terminate_exact_process(
     process: &LiveProcess,
-    api: Option<&ChApiClient>,
+    #[cfg(target_os = "linux")] api: Option<&ChApiClient>,
 ) -> Result<(), RunnerError> {
+    #[cfg(target_os = "linux")]
     let graceful_timeout = if api.is_some() {
         GRACEFUL_STOP_TIMEOUT
     } else {
         Duration::from_millis(250)
     };
+    #[cfg(target_os = "linux")]
     if let Some(api) = api {
         let _ = api.shutdown().await;
     }
+    #[cfg(target_os = "macos")]
+    let graceful_timeout = Duration::from_millis(250);
     if process.wait_exited(graceful_timeout).await? {
         return Ok(());
     }
@@ -3738,7 +3909,10 @@ async fn terminate_exact_process(
 fn signal_or_observe_exit(process: &LiveProcess, signal: Signal) -> Result<bool, RunnerError> {
     match process.signal(signal) {
         Ok(()) => Ok(false),
+        #[cfg(target_os = "linux")]
         Err(RecoveryError::Pidfd(error)) if error == rustix::io::Errno::SRCH => Ok(true),
+        #[cfg(target_os = "macos")]
+        Err(RecoveryError::ProcessExited) => Ok(true),
         Err(error) => Err(error.into()),
     }
 }
@@ -3774,6 +3948,15 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
         || direct_share_plan
             .as_ref()
             .is_some_and(|plan| plan.sha256().is_err())
+    {
+        return Err(RunnerError::InvalidRequest);
+    }
+    // Direct shares, host ports, Mesh and cw runtime catalogs are Linux-only.
+    #[cfg(target_os = "macos")]
+    if !request.direct_shares.is_empty()
+        || !request.host_ports.is_empty()
+        || request.mesh.is_some()
+        || request.cw_runtime_catalog_generation.is_some()
     {
         return Err(RunnerError::InvalidRequest);
     }
@@ -4053,6 +4236,7 @@ fn validate_seed_file(path: &Path, catalog_generation: Option<&str>) -> Result<(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn validate_live_cw_runtime_disk(
     info: &VmInfo,
     expected: &AdmittedCwRuntimeDisk,
@@ -4108,6 +4292,7 @@ fn validate_live_cw_runtime_disk(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn cloud_hypervisor_process(
     command: &CommandSpec,
     working_directory: &Path,
@@ -4162,6 +4347,7 @@ fn cloud_hypervisor_process(
     Ok(process)
 }
 
+#[cfg(target_os = "linux")]
 fn spawn_cloud_hypervisor(
     command: &CommandSpec,
     working_directory: &Path,
@@ -4171,6 +4357,7 @@ fn spawn_cloud_hypervisor(
         .map_err(|_| RunnerError::Spawn)
 }
 
+#[cfg(target_os = "linux")]
 async fn start_direct_share(
     executable: &Path,
     share: &PreparedDirectShare,
@@ -4240,12 +4427,14 @@ async fn start_direct_share(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn virtiofsd_pid_path(socket: &Path) -> PathBuf {
     let mut name = socket.as_os_str().to_os_string();
     name.push(".pid");
     PathBuf::from(name)
 }
 
+#[cfg(target_os = "linux")]
 fn cleanup_direct_share_endpoints(socket: &Path) -> Result<(), RunnerError> {
     let parent = socket.parent().ok_or(RunnerError::InvalidRequest)?;
     let socket_name = socket
@@ -4263,6 +4452,7 @@ fn cleanup_direct_share_endpoints(socket: &Path) -> Result<(), RunnerError> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn virtiofsd_pid_file_matches(path: &Path, expected_pid: u32) -> Result<bool, RunnerError> {
     let parent = path.parent().ok_or(RunnerError::InvalidRequest)?;
     let name = path
@@ -4282,6 +4472,7 @@ fn virtiofsd_pid_file_matches(path: &Path, expected_pid: u32) -> Result<bool, Ru
     Ok(contents.trim().parse::<u32>().ok() == Some(expected_pid))
 }
 
+#[cfg(target_os = "linux")]
 fn direct_share_process(
     executable: &Path,
     share: &PreparedDirectShare,
@@ -4302,6 +4493,7 @@ fn direct_share_process(
     direct_share_process_with_domain(executable, share, working_directory, filesystem_domain)
 }
 
+#[cfg(target_os = "linux")]
 fn direct_share_process_with_domain(
     executable: &Path,
     share: &PreparedDirectShare,
@@ -4399,6 +4591,7 @@ fn direct_share_process_with_domain(
     Ok(process)
 }
 
+#[cfg(target_os = "linux")]
 async fn stop_direct_share_process(process: &mut DirectShareProcess) -> Result<(), RunnerError> {
     if process
         .child
@@ -4421,6 +4614,7 @@ async fn stop_direct_share_process(process: &mut DirectShareProcess) -> Result<(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 async fn terminate_failed_launch(
     process: &LiveProcess,
     child: &mut tokio::process::Child,
@@ -4443,6 +4637,7 @@ async fn terminate_failed_launch(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 async fn terminate_unadmitted_child(
     pid: u32,
     child: &mut tokio::process::Child,
@@ -4462,6 +4657,7 @@ async fn terminate_unadmitted_child(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 async fn wait_for_endpoints(
     paths: &VmPaths,
     process: &LiveProcess,
@@ -4470,6 +4666,7 @@ async fn wait_for_endpoints(
     wait_for_endpoints_with_timeout(paths, process, daemon_vsock_port, START_TIMEOUT).await
 }
 
+#[cfg(target_os = "linux")]
 async fn wait_for_endpoints_with_timeout(
     paths: &VmPaths,
     process: &LiveProcess,
@@ -4499,6 +4696,7 @@ async fn wait_for_endpoints_with_timeout(
 pub enum RunnerError {
     #[error("cw runtime catalog attachment changed or its live disk is invalid")]
     CwRuntimeDiskChanged,
+    #[cfg(target_os = "linux")]
     #[error(transparent)]
     CwRuntime(#[from] CwRuntimeError),
     #[error("invalid VM create request")]
@@ -4513,12 +4711,15 @@ pub enum RunnerError {
     Path(#[from] PathError),
     #[error(transparent)]
     State(#[from] StateError),
+    #[cfg(target_os = "linux")]
     #[error(transparent)]
     Preflight(#[from] PreflightError),
     #[error(transparent)]
     Recovery(#[from] RecoveryError),
+    #[cfg(target_os = "linux")]
     #[error(transparent)]
     Config(#[from] CloudHypervisorConfigError),
+    #[cfg(target_os = "linux")]
     #[error(transparent)]
     Api(#[from] ChApiError),
     #[error(transparent)]
@@ -4575,6 +4776,9 @@ pub enum RunnerError {
     GenerationNotAdvanced { previous: u64, requested: u64 },
     #[error("Cloud Hypervisor process spawn failed")]
     Spawn,
+    #[cfg(target_os = "macos")]
+    #[error("local VMs are not yet supported on macOS")]
+    VmmUnsupported,
     #[error("Cloud Hypervisor exited during startup")]
     ExitedDuringStart,
     #[error("Cloud Hypervisor startup timed out")]
@@ -4633,6 +4837,7 @@ pub enum RunnerError {
     MeshTransportStartTimeout,
     #[error("Mesh transport private bootstrap failed")]
     MeshTransportBootstrap,
+    #[cfg(target_os = "linux")]
     #[error("Mesh transport startup failed: {0:?}")]
     MeshTransportStartup(MeshTransportStartupFailure),
     #[error("Mesh enrollment broker process spawn failed")]
@@ -4641,6 +4846,7 @@ pub enum RunnerError {
     MeshEnrollmentBrokerStartTimeout,
     #[error("Mesh enrollment broker private bootstrap failed")]
     MeshEnrollmentBrokerBootstrap,
+    #[cfg(target_os = "linux")]
     #[error("Mesh enrollment broker startup failed: {0:?}")]
     MeshEnrollmentBrokerStartup(MeshEnrollmentStartupFailure),
     #[error("wait for isolated Mesh process failed")]
@@ -4666,17 +4872,20 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::{Seek, SeekFrom, Write};
+    #[cfg(target_os = "linux")]
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     use crate::artifact::AdmittedArtifact;
+    #[cfg(target_os = "linux")]
     use crate::direct_share::admit_direct_share;
+    use crate::host::path::{FileIdentity, current_uid, set_socket_private};
+    use crate::host::process::ProcessIdentity;
     use crate::host_port::RESERVED_GUEST_DAEMON_PORT;
-    use crate::linux::path::{FileIdentity, current_uid};
-    use crate::linux::process::ProcessIdentity;
     use crate::mesh_ingress::{MESH_INGRESS_CONTROL_FRAME_LEN, MeshIngressControlReceiver};
     use crate::network_worker::receive_mesh_ingress_descriptor;
-    use crate::state::RootGenerationPaths;
+    use crate::state::{PERSISTED_STATE_SCHEMA_VERSION, RootGenerationPaths, VmPhase};
+    #[cfg(target_os = "linux")]
     use codewire_vmm_guest_probe::DirectShareMount;
 
     fn test_runner() -> (tempfile::TempDir, CloudHypervisorRunner) {
@@ -4720,6 +4929,7 @@ mod tests {
             docker_disk: None,
             root_generation: None,
             root_disk: None,
+            #[cfg(target_os = "linux")]
             cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
@@ -4769,7 +4979,13 @@ mod tests {
     async fn wait_for_exec(pid: u32, executable: &Path) {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                if fs::read_link(format!("/proc/{pid}/exe")).ok().as_deref() == Some(executable) {
+                #[cfg(target_os = "linux")]
+                let current = fs::read_link(format!("/proc/{pid}/exe")).ok();
+                #[cfg(target_os = "macos")]
+                let current = ProcessIdentity::capture(pid)
+                    .ok()
+                    .map(|identity| identity.executable);
+                if current.as_deref() == Some(executable) {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -4779,6 +4995,7 @@ mod tests {
         .expect("child did not reach its expected executable");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn cw_runtime_request_and_seed_bind_the_same_catalog() {
         let mut valid = request(1, 512);
@@ -4817,7 +5034,10 @@ mod tests {
     }
 
     async fn spawn_admitted_sleep(duration: &str) -> (tokio::process::Child, LiveProcess) {
+        #[cfg(target_os = "linux")]
         let executable = std::fs::canonicalize("/usr/bin/sleep").unwrap();
+        #[cfg(target_os = "macos")]
+        let executable = std::fs::canonicalize("/bin/sleep").unwrap();
         let child = tokio::process::Command::new(&executable)
             .arg(duration)
             .env_clear()
@@ -5041,11 +5261,13 @@ mod tests {
             network_stack_attach_timeout(Duration::from_secs(15), NetworkWorkerMode::Product)
                 > EGRESS_BROKER_READY_TIMEOUT
         );
+        #[cfg(target_os = "linux")]
         assert!(
             MESH_STACK_ATTACH_TIMEOUT
                 > crate::mesh_process::MESH_TRANSPORT_CONFINEMENT_ADMISSION_TIMEOUT,
             "the Mesh stack must retain a margin around exact child admission"
         );
+        #[cfg(target_os = "linux")]
         assert!(
             crate::mesh_process::MESH_TRANSPORT_CONFINEMENT_ADMISSION_TIMEOUT
                 >= crate::mesh_enrollment::MESH_ENROLLMENT_CONFINEMENT_ADMISSION_TIMEOUT
@@ -5080,6 +5302,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn network_stack_stop_reaps_worker_broker_and_mesh_independently() {
         let (worker_child, worker_process) = spawn_admitted_sleep("30").await;
@@ -5170,7 +5393,13 @@ mod tests {
 
         let mut valid_host_port = request(2, 16_384);
         valid_host_port.host_ports = vec![HostPortBinding::new(18_080, 3_000).unwrap()];
+        #[cfg(target_os = "linux")]
         assert!(validate_request(&valid_host_port).is_ok());
+        #[cfg(target_os = "macos")]
+        assert!(matches!(
+            validate_request(&valid_host_port),
+            Err(RunnerError::InvalidRequest)
+        ));
 
         let mut duplicate_host_port = request(2, 16_384);
         duplicate_host_port.host_ports = vec![
@@ -5203,7 +5432,13 @@ mod tests {
             )
             .unwrap(),
         );
+        #[cfg(target_os = "linux")]
         assert!(validate_request(&valid_mesh).is_ok());
+        #[cfg(target_os = "macos")]
+        assert!(matches!(
+            validate_request(&valid_mesh),
+            Err(RunnerError::InvalidRequest)
+        ));
 
         let mut noncanonical_mesh = valid_mesh;
         noncanonical_mesh
@@ -5471,6 +5706,7 @@ mod tests {
             docker_disk: None,
             root_generation: None,
             root_disk: None,
+            #[cfg(target_os = "linux")]
             cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
@@ -5556,6 +5792,7 @@ mod tests {
             docker_disk: Some(admitted),
             root_generation: None,
             root_disk: None,
+            #[cfg(target_os = "linux")]
             cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
@@ -5598,6 +5835,7 @@ mod tests {
             docker_disk: None,
             root_generation: Some(generation.clone()),
             root_disk: Some(admitted.clone()),
+            #[cfg(target_os = "linux")]
             cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
@@ -5732,6 +5970,7 @@ mod tests {
             docker_disk: None,
             root_generation: Some(previous_generation),
             root_disk: Some(previous_identity),
+            #[cfg(target_os = "linux")]
             cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
@@ -5810,6 +6049,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn failed_launch_cleanup_uses_pidfd_and_reaps_child() {
         let (mut child, process) = spawn_admitted_sleep("30").await;
@@ -5818,6 +6058,7 @@ mod tests {
         assert!(process.is_exited().unwrap());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn aborting_start_after_durable_starting_state_kills_the_exact_child() {
         let (_parent, runner) = test_runner();
@@ -5887,6 +6128,7 @@ mod tests {
         assert!(process.is_exited().unwrap());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn cascading_vmm_exit_is_reaped_before_a_sidecar_failure_is_reported() {
         let (mut child, process) = spawn_admitted_sleep("30").await;
@@ -5909,6 +6151,7 @@ mod tests {
         assert!(child.try_wait().unwrap().is_some());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn endpoint_early_exit_is_reaped() {
         let (_parent, runner) = test_runner();
@@ -5930,6 +6173,7 @@ mod tests {
         drop(lock);
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn endpoint_readiness_wait_has_a_bounded_deadline() {
         let (_parent, runner) = test_runner();
@@ -5946,6 +6190,7 @@ mod tests {
         assert!(matches!(result, Err(RunnerError::StartTimeout)));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn child_never_inherits_the_supervisor_working_directory() {
         let private = tempfile::tempdir().unwrap();
@@ -5959,6 +6204,7 @@ mod tests {
         assert_eq!(process.as_std().get_current_dir(), Some(private.path()));
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn direct_share_helper_uses_only_the_fixed_descriptor_and_enters_confinement() {
         let source = tempfile::tempdir().unwrap();
@@ -6021,6 +6267,7 @@ mod tests {
         assert!(status.success());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn direct_share_ruleset_fd3_is_restricted_before_source_remap() {
         const CHILD_MODE: &str = "CW_SYNTHETIC_DIRECT_SHARE_FD3";
@@ -6130,6 +6377,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn direct_share_startup_cleanup_normalizes_daemon_socket_permissions() {
         let private = tempfile::tempdir().unwrap();
@@ -6147,6 +6395,7 @@ mod tests {
         assert!(!pid_file.exists());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn child_exec_closes_an_explicitly_inheritable_host_descriptor() {
         let private = tempfile::tempdir().unwrap();

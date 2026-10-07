@@ -7,17 +7,19 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
-use std::os::fd::{AsFd as _, BorrowedFd};
+use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use rustix::fs::{Dir, Mode, OFlags, ResolveFlags, openat2, readlinkat};
+use rustix::fs::{Dir, Mode, OFlags, readlinkat};
+#[cfg(target_os = "linux")]
+use rustix::fs::{ResolveFlags, openat2};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use crate::linux::path::{PrivateRoot, current_uid};
+use crate::host::path::{PrivateRoot, current_uid};
 use crate::oci::ContentStore;
 use crate::state::{
     MINIMUM_DOCKER_DISK_BYTES, MINIMUM_STATE_DISK_BYTES, StateDiskIdentity, VmPaths,
@@ -40,9 +42,15 @@ const MAXIMUM_COPY_ENTRIES: u64 = 1_000_000;
 const MAXIMUM_COPY_DEPTH: usize = 128;
 const MAXIMUM_COPY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 const COPY_MANIFEST_SCHEMA: &[u8] = b"codewire-workspace-copy-v1\0";
+#[cfg(target_os = "linux")]
 const RESOLVE_SOURCE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_MAGICLINKS)
     .union(ResolveFlags::NO_XDEV);
+// Darwin has no O_PATH; a read-only directory open serves the identity check.
+#[cfg(target_os = "linux")]
+const IDENTITY_ONLY: OFlags = OFlags::PATH;
+#[cfg(target_os = "macos")]
+const IDENTITY_ONLY: OFlags = OFlags::RDONLY;
 
 pub fn workspace_content_limit(disk_bytes: u64) -> u64 {
     disk_bytes.saturating_sub(MINIMUM_EXT4_HEADROOM)
@@ -958,12 +966,11 @@ pub(crate) fn snapshot_confined_open_directory(
     maximum_bytes: u64,
     maximum_entries: u64,
 ) -> Result<DirectorySnapshot, WorkspaceError> {
-    let directory = openat2(
+    let directory = open_beneath(
         root_descriptor,
         Path::new("."),
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-        RESOLVE_SOURCE.union(ResolveFlags::NO_SYMLINKS),
+        true,
     )
     .map_err(|source| WorkspaceError::SourceOpen {
         path: requested_root.to_owned(),
@@ -996,12 +1003,11 @@ fn snapshot_confined_source_directory(
     }
     validate_copy_path(relative)?;
     let selected_path = root.path.join(relative);
-    let directory = openat2(
+    let directory = open_beneath(
         root.directory.as_fd(),
         relative,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-        RESOLVE_SOURCE.union(ResolveFlags::NO_SYMLINKS),
+        true,
     )
     .map_err(|source| WorkspaceError::SourceOpen {
         path: selected_path.clone(),
@@ -1024,12 +1030,11 @@ fn snapshot_confined_source_directory(
     let snapshot =
         copy_directory_manifest(&source, Some(destination), maximum_bytes, maximum_entries)?;
 
-    let reopened = openat2(
+    let reopened = open_beneath(
         root.directory.as_fd(),
         relative,
-        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-        RESOLVE_SOURCE.union(ResolveFlags::NO_SYMLINKS),
+        IDENTITY_ONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        true,
     )
     .map_err(|source| WorkspaceError::SourceOpen {
         path: selected_path.clone(),
@@ -1039,7 +1044,7 @@ fn snapshot_confined_source_directory(
         path: selected_path.clone(),
         source,
     })?;
-    if reopened.st_dev != metadata.dev() || reopened.st_ino != metadata.ino() {
+    if !same_object(&reopened, &metadata) {
         return Err(WorkspaceError::SourceRootChanged(selected_path));
     }
     verify_source_root(&root)?;
@@ -1184,12 +1189,10 @@ fn copy_directory_level(
                 walk,
             )?;
         } else if metadata.file_type().is_symlink() {
-            let target =
-                readlinkat(&identity, Path::new(""), Vec::new()).map_err(|source_error| {
-                    WorkspaceError::SourceOpen {
-                        path: source.path.join(&entry_relative),
-                        source: source_error,
-                    }
+            let target = read_source_symlink(directory, Path::new(&name), &identity, &metadata)
+                .map_err(|source_error| WorkspaceError::SourceOpen {
+                    path: source.path.join(&entry_relative),
+                    source: source_error,
                 })?;
             let target = PathBuf::from(OsString::from_vec(target.to_bytes().to_vec()));
             validate_internal_symlink(&entry_relative, &target)?;
@@ -1230,17 +1233,58 @@ fn copy_directory_level(
     Ok(())
 }
 
+/// Open beneath a retained source directory: openat2 on Linux; on Darwin,
+/// O_RESOLVE_BENEATH plus O_NOFOLLOW_ANY where Linux adds RESOLVE_NO_SYMLINKS.
+/// Darwin has no RESOLVE_NO_XDEV, so callers compare device numbers.
+#[cfg(target_os = "linux")]
+fn open_beneath(
+    directory: BorrowedFd<'_>,
+    path: &Path,
+    flags: OFlags,
+    no_symlinks: bool,
+) -> rustix::io::Result<OwnedFd> {
+    let resolve = if no_symlinks {
+        RESOLVE_SOURCE.union(ResolveFlags::NO_SYMLINKS)
+    } else {
+        RESOLVE_SOURCE
+    };
+    openat2(directory, path, flags, Mode::empty(), resolve)
+}
+
+#[cfg(target_os = "macos")]
+fn open_beneath(
+    directory: BorrowedFd<'_>,
+    path: &Path,
+    flags: OFlags,
+    no_symlinks: bool,
+) -> rustix::io::Result<OwnedFd> {
+    const O_RESOLVE_BENEATH: libc::c_int = 0x1000;
+    let mut flags = flags | OFlags::from_bits_retain(O_RESOLVE_BENEATH as _);
+    if no_symlinks {
+        // O_NOFOLLOW_ANY covers the final component; Darwin rejects both.
+        flags.remove(OFlags::NOFOLLOW);
+        flags |= OFlags::from_bits_retain(libc::O_NOFOLLOW_ANY as _);
+    }
+    rustix::fs::openat(directory, path, flags, Mode::empty())
+}
+
+/// `st_dev` is `u64` on Linux and `i32` on Darwin; std widens it the same way.
+#[allow(clippy::unnecessary_cast)]
+fn same_object(stat: &rustix::fs::Stat, metadata: &fs::Metadata) -> bool {
+    stat.st_dev as u64 == metadata.dev() && stat.st_ino as u64 == metadata.ino()
+}
+
+#[cfg(target_os = "linux")]
 fn open_source_entry(
     directory: &File,
     name: &Path,
     relative: &Path,
 ) -> Result<File, WorkspaceError> {
-    let owned = openat2(
+    let owned = open_beneath(
         directory.as_fd(),
         name,
         OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-        RESOLVE_SOURCE,
+        false,
     )
     .map_err(|source| WorkspaceError::SourceOpen {
         path: relative.to_owned(),
@@ -1249,17 +1293,77 @@ fn open_source_entry(
     Ok(File::from(owned))
 }
 
+/// Darwin has no O_PATH. Inspect the entry without opening it, never open a
+/// device, FIFO or socket, and open a symbolic link itself with O_SYMLINK.
+#[cfg(target_os = "macos")]
+fn open_source_entry(
+    directory: &File,
+    name: &Path,
+    relative: &Path,
+) -> Result<File, WorkspaceError> {
+    let named = rustix::fs::statat(directory, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|source| WorkspaceError::SourceOpen {
+            path: relative.to_owned(),
+            source,
+        })?;
+    let flags = match named.st_mode & libc::S_IFMT {
+        libc::S_IFDIR | libc::S_IFREG => OFlags::RDONLY | OFlags::NOFOLLOW,
+        libc::S_IFLNK => OFlags::RDONLY | OFlags::from_bits_retain(libc::O_SYMLINK as _),
+        _ => return Err(WorkspaceError::UnsupportedCopyEntry(relative.to_owned())),
+    };
+    let owned = open_beneath(directory.as_fd(), name, flags | OFlags::CLOEXEC, false).map_err(
+        |source| WorkspaceError::SourceOpen {
+            path: relative.to_owned(),
+            source,
+        },
+    )?;
+    let opened = rustix::fs::fstat(&owned).map_err(|source| WorkspaceError::SourceOpen {
+        path: relative.to_owned(),
+        source,
+    })?;
+    if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino) {
+        return Err(WorkspaceError::SourceEntryChanged(relative.to_owned()));
+    }
+    Ok(File::from(owned))
+}
+
+#[cfg(target_os = "linux")]
+fn read_source_symlink(
+    _directory: &File,
+    _name: &Path,
+    identity: &File,
+    _metadata: &fs::Metadata,
+) -> rustix::io::Result<std::ffi::CString> {
+    readlinkat(identity, Path::new(""), Vec::new())
+}
+
+/// Darwin cannot read a link through its descriptor, so read it by name and
+/// require the name to still be the admitted link afterwards.
+#[cfg(target_os = "macos")]
+fn read_source_symlink(
+    directory: &File,
+    name: &Path,
+    _identity: &File,
+    metadata: &fs::Metadata,
+) -> rustix::io::Result<std::ffi::CString> {
+    let target = readlinkat(directory, name, Vec::new())?;
+    let named = rustix::fs::statat(directory, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
+    if !same_object(&named, metadata) {
+        return Err(rustix::io::Errno::STALE);
+    }
+    Ok(target)
+}
+
 fn open_source_directory_entry(
     directory: &File,
     name: &Path,
     relative: &Path,
 ) -> Result<File, WorkspaceError> {
-    let owned = openat2(
+    let owned = open_beneath(
         directory.as_fd(),
         name,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-        RESOLVE_SOURCE,
+        false,
     )
     .map_err(|source| WorkspaceError::SourceOpen {
         path: relative.to_owned(),
@@ -1273,12 +1377,11 @@ fn open_source_regular_entry(
     name: &Path,
     relative: &Path,
 ) -> Result<File, WorkspaceError> {
-    let owned = openat2(
+    let owned = open_beneath(
         directory.as_fd(),
         name,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-        RESOLVE_SOURCE,
+        false,
     )
     .map_err(|source| WorkspaceError::SourceOpen {
         path: relative.to_owned(),
@@ -2074,7 +2177,7 @@ pub enum WorkspaceError {
     #[error("mkfs.ext4 failed to create the workspace disk")]
     MkfsFailed,
     #[error(transparent)]
-    Path(#[from] crate::linux::path::PathError),
+    Path(#[from] crate::host::path::PathError),
     #[error(transparent)]
     State(#[from] crate::state::StateError),
     #[error(transparent)]
@@ -2175,6 +2278,7 @@ mod tests {
         assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"preserve");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn docker_data_disk_is_formatted_then_replayed_by_exact_identity() {
         let engine = tempfile::tempdir().unwrap();
@@ -2608,6 +2712,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn clone_provisioning_builds_the_ext4_workspace_disk() {
         let source = tempfile::tempdir().unwrap();
@@ -2647,6 +2752,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn nested_copy_input_provisioning_builds_the_ext4_workspace_disk() {
         let source = tempfile::tempdir().unwrap();

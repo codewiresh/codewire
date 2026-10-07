@@ -13,10 +13,7 @@ use super::*;
 use crate::control::v1::local_supervisor_service_server::{
     LocalSupervisorService, LocalSupervisorServiceServer,
 };
-#[cfg(target_os = "macos")]
-use crate::darwin::path as host_path;
-#[cfg(target_os = "linux")]
-use crate::linux::path as host_path;
+use crate::host::path as host_path;
 use crate::supervisor_config::{NATIVE_SUPERVISOR_PROTOCOL_VERSION, NativeRuntimeConfig};
 
 #[derive(Clone)]

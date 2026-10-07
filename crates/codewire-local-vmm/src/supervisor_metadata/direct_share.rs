@@ -1,9 +1,7 @@
 //! Persisted Linux direct-share identity and its closed codec validation.
 
-#[cfg(any(target_os = "linux", test))]
 use std::path::PathBuf;
 
-#[cfg(any(target_os = "linux", test))]
 use codewire_vmm_guest_probe::DirectSharePlanError;
 use serde::{Deserialize, Serialize};
 
@@ -48,7 +46,6 @@ impl DirectShareIdentity {
         }
     }
 
-    #[cfg(any(target_os = "linux", test))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         device_major: u32,
@@ -70,32 +67,26 @@ impl DirectShareIdentity {
         Ok(identity)
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn device_major(&self) -> u32 {
         self.device_major
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn device_minor(&self) -> u32 {
         self.device_minor
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn inode(&self) -> u64 {
         self.inode
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn mount_id(&self) -> u64 {
         self.mount_id
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn owner_uid(&self) -> u32 {
         self.owner_uid
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn filesystem_magic(&self) -> i64 {
         self.filesystem_magic
     }
@@ -133,7 +124,6 @@ pub(crate) fn allowed_filesystem(magic: i64) -> bool {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DirectShareError {
-    #[cfg(any(target_os = "linux", test))]
     #[error("direct-share source path is invalid: {0}")]
     InvalidPath(PathBuf),
     #[cfg(any(target_os = "linux", test))]
@@ -145,7 +135,6 @@ pub(crate) enum DirectShareError {
     #[cfg(any(target_os = "linux", test))]
     #[error("direct-share source is not owned by the current user: {0}")]
     WrongOwner(PathBuf),
-    #[cfg(any(target_os = "linux", test))]
     #[error("direct-share source filesystem is unsupported: {0}")]
     UnsupportedFilesystem(PathBuf),
     #[cfg(any(target_os = "linux", test))]
@@ -154,7 +143,6 @@ pub(crate) enum DirectShareError {
     #[cfg(any(target_os = "linux", test))]
     #[error("direct-share source contains a nested mount: {0}")]
     NestedMount(PathBuf),
-    #[cfg(any(target_os = "linux", test))]
     #[error("direct-share source changed after admission: {0}")]
     SourceChanged(PathBuf),
     #[error("direct-share source is not a valid directory")]
@@ -165,7 +153,6 @@ pub(crate) enum DirectShareError {
     #[cfg(any(target_os = "linux", test))]
     #[error("host mount table is malformed")]
     InvalidMountTable,
-    #[cfg(any(target_os = "linux", test))]
     #[error(transparent)]
     GuestPlan(#[from] DirectSharePlanError),
     #[cfg(target_os = "linux")]

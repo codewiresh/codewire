@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::artifact::{AdmittedArtifact, AdmittedArtifacts, ArtifactLock, ArtifactSpec};
-use crate::linux::path::{PathError, PrivateRoot, current_uid};
+use crate::host::path::{PathError, PrivateRoot, current_uid};
 
 const STORE_DIRECTORY: &str = "runtime-artifacts";
 const BLOBS_DIRECTORY: &str = "blobs";
@@ -1460,6 +1460,7 @@ pub(crate) enum RuntimeArtifactStoreError {
 impl RuntimeArtifactStoreError {
     fn is_not_found(&self) -> bool {
         match self {
+            #[cfg(target_os = "linux")]
             Self::Path(PathError::Openat2 { source, .. }) => *source == rustix::io::Errno::NOENT,
             Self::Path(PathError::Io { source, .. }) | Self::Io { source, .. } => {
                 source.kind() == io::ErrorKind::NotFound

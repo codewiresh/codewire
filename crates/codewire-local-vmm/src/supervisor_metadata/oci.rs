@@ -38,7 +38,6 @@ impl OciArchitecture {
         }
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Amd64 => "amd64",
@@ -46,7 +45,6 @@ impl OciArchitecture {
         }
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn admits_variant(self, variant: Option<&str>) -> bool {
         match self {
             Self::Amd64 => variant.is_none(),
@@ -165,70 +163,52 @@ pub(crate) fn is_manifest_media_type(media_type: &str) -> bool {
 pub enum RegistryResolverError {
     #[error("this host architecture is not supported by the native OCI resolver")]
     UnsupportedHostArchitecture,
-    #[cfg(any(target_os = "linux", test))]
     #[error("construct native OCI registry client failed")]
     Client,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI registry transport failed")]
     Transport,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI registry URL is unsafe")]
     UnsafeUrl,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI registry redirect is unsafe")]
     UnsafeRedirect,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI registry redirect limit exceeded")]
     TooManyRedirects,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI registry authentication is required")]
     AuthenticationRequired,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI registry authentication failed")]
     AuthenticationFailed,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI registry object was not found")]
     NotFound,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI registry returned an unsupported response")]
     RegistryResponse,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI document exceeds its size bound")]
     DocumentTooLarge,
     #[error("OCI object digest does not match its descriptor")]
     DigestMismatch,
     #[error("OCI object does not match its descriptor")]
     DescriptorMismatch,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI media type is unsupported")]
     UnsupportedMediaType,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI digest algorithm is unsupported")]
     UnsupportedDigest,
     #[error("OCI descriptor is invalid")]
     InvalidDescriptor,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI image index is invalid")]
     InvalidIndex,
     #[error("OCI image manifest is invalid")]
     InvalidManifest,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI image configuration is invalid")]
     InvalidConfiguration,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI image does not contain the required native Linux platform")]
     PlatformUnavailable,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI image contains more than one matching native Linux platform")]
     AmbiguousPlatform,
-    #[cfg(any(target_os = "linux", test))]
     #[error("OCI image platform is unsupported")]
     UnsupportedPlatform,
     #[error("OCI image exceeds the local compressed-content bound")]
     ImageTooLarge,
     #[error(transparent)]
     Reference(#[from] RegistryReferenceError),
-    #[cfg(target_os = "linux")]
     #[error(transparent)]
     Content(#[from] crate::oci::ContentStoreError),
 }

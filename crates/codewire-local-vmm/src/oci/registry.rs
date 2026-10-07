@@ -832,7 +832,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::linux::path::PrivateRoot;
+    use crate::host::path::PrivateRoot;
     use crate::oci::ContentStoreError;
 
     struct Fixture {

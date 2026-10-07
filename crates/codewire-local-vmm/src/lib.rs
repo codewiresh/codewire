@@ -5,9 +5,9 @@
 //! implementation behind the same higher-level supervisor, not a lowest-common-
 //! denominator VMM abstraction.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod artifact;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod artifact_store;
 #[cfg(target_os = "linux")]
 pub mod ch_api;
@@ -18,19 +18,19 @@ pub mod control;
 pub mod cw_runtime;
 #[cfg(target_os = "macos")]
 pub mod darwin;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod direct_share;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod egress_broker;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod generation;
 #[cfg(target_os = "linux")]
 pub mod host_port;
 #[cfg(target_os = "macos")]
 pub(crate) mod host_port;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod hybrid_vsock;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod lifecycle;
 #[cfg(all(target_os = "linux", feature = "macos-console-pair-fixture"))]
 pub mod macos_console_pair_fixture;
@@ -44,9 +44,9 @@ pub(crate) mod mesh_ingress;
 pub mod mesh_process;
 #[cfg(target_os = "linux")]
 pub mod mesh_transport;
-#[cfg(any(target_os = "linux", feature = "macos-production-init-fixture"))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod network_session;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod network_worker;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod supervisor_client;
@@ -58,58 +58,56 @@ pub(crate) mod supervisor_metadata;
 mod supervisor_store_codec;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod supervisor_store_error;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod workspace;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod workspace_plan;
-#[cfg(target_os = "macos")]
-pub(crate) use supervisor_metadata::workspace_plan;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
 // Host primitives with the same names on each supported platform.
+#[cfg(target_os = "macos")]
+pub(crate) use darwin as host;
 #[cfg(target_os = "linux")]
 pub(crate) use linux as host;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod oci;
-#[cfg(target_os = "macos")]
-pub(crate) mod oci;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod orphan;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod public_client;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod runner;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod runner_service;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod setup_pack;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod skill_snapshot;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod state;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod supervisor;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod supervisor_store;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod uds;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod workspace_generation;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use direct_share::DirectShareRequest;
-#[cfg(target_os = "linux")]
-pub use linux::{LiveProcess, ProcessIdentity, RecoveryError};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use host::process::{LiveProcess, ProcessIdentity, RecoveryError};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use runner::{
     CloudHypervisorRunner, CreateVmRequest, ExitClass, PreparedVm, RecoveredVm, RunnerConfig,
     RunnerError, RunningVm,
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use state::{StateDiskIdentity, VmPaths};
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod unsupported;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub use unsupported::{CloudHypervisorRunner, RunnerConfig, RunnerError};

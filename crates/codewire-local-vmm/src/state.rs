@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use rustix::fs::{FlockOperation, flock};
 use uuid::Uuid;
 
+#[cfg(target_os = "linux")]
 use crate::cw_runtime::AdmittedCwRuntimeDisk;
 use codewire_vmm_guest_probe::MAX_DIRECT_SHARES;
 
@@ -246,6 +247,7 @@ pub struct PersistedVmState {
     pub root_generation: Option<String>,
     #[serde(default)]
     pub root_disk: Option<StateDiskIdentity>,
+    #[cfg(target_os = "linux")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cw_runtime_disk: Option<AdmittedCwRuntimeDisk>,
     pub api_socket: Option<SocketIdentity>,
@@ -315,11 +317,15 @@ impl PersistedVmState {
                 .as_ref()
                 .is_some_and(|disk| disk.filesystem_uuid.is_nil())
             || !valid_root
-            || self
-                .cw_runtime_disk
-                .as_ref()
-                .is_some_and(|disk| disk.validate_metadata().is_err())
             || !valid_phase
+        {
+            return Err(StateError::InvalidPersistedState);
+        }
+        #[cfg(target_os = "linux")]
+        if self
+            .cw_runtime_disk
+            .as_ref()
+            .is_some_and(|disk| disk.validate_metadata().is_err())
         {
             return Err(StateError::InvalidPersistedState);
         }
@@ -400,13 +406,20 @@ pub fn move_stopped_vm_to_trash(
     if let Err(error) =
         vms.move_private_directory_to(Path::new(&source), &trash, Path::new(&destination))
     {
-        if matches!(
+        #[cfg(target_os = "linux")]
+        let conflict = matches!(
             error,
             PathError::Openat2 {
                 source: rustix::io::Errno::EXIST,
                 ..
             }
-        ) {
+        );
+        #[cfg(target_os = "macos")]
+        let conflict = matches!(
+            &error,
+            PathError::Io { source, .. } if source.raw_os_error() == Some(libc::EEXIST)
+        );
+        if conflict {
             return Err(StateError::TrashConflict(destination_path));
         }
         return Err(error.into());
@@ -730,6 +743,7 @@ fn ensure_only_entries(path: &Path, allowed: &[&str]) -> Result<(), StateError> 
 
 fn path_error_is_not_found(error: &PathError) -> bool {
     match error {
+        #[cfg(target_os = "linux")]
         PathError::Openat2 { source, .. } => *source == rustix::io::Errno::NOENT,
         PathError::Io { source, .. } => source.kind() == io::ErrorKind::NotFound,
         _ => false,
@@ -801,6 +815,7 @@ pub enum StateError {
 impl StateError {
     pub(crate) fn is_not_found(&self) -> bool {
         match self {
+            #[cfg(target_os = "linux")]
             Self::Path(PathError::Openat2 { source, .. }) => *source == rustix::io::Errno::NOENT,
             Self::Path(PathError::Io { source, .. }) | Self::Io { source, .. } => {
                 source.kind() == io::ErrorKind::NotFound
@@ -886,6 +901,7 @@ mod tests {
             docker_disk: None,
             root_generation: None,
             root_disk: None,
+            #[cfg(target_os = "linux")]
             cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
@@ -998,6 +1014,7 @@ mod tests {
         assert!(!names.to_ascii_lowercase().contains("credential"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn legacy_persisted_state_defaults_to_no_cw_runtime_attachment() {
         let original = persisted(VmPhase::Starting);

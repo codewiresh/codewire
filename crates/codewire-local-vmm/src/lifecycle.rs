@@ -214,7 +214,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
-    use crate::linux::path::PrivateRoot;
+    use crate::host::path::PrivateRoot;
     use crate::state::{
         DeletionTreeLocation, VmPaths, cleanup_trashed_vm, deletion_tree_location,
         move_stopped_vm_to_trash,

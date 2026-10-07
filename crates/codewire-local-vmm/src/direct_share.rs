@@ -5,18 +5,28 @@
 //! host-only runner boundary.  The persisted identity binds the directory,
 //! filesystem, and mount instance; every launch reopens the path without
 //! following symlinks and refuses replacement or mount-topology changes.
+//! Admission is Linux-only for now: Darwin refuses every direct share.
 
+#[cfg(target_os = "linux")]
 use std::ffi::OsString;
 use std::fmt;
+#[cfg(target_os = "linux")]
 use std::fs;
-use std::os::fd::{AsRawFd as _, OwnedFd};
-use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd as _;
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt as _;
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Component, Path, PathBuf};
 
 use codewire_vmm_guest_probe::DirectShareMount;
+#[cfg(target_os = "linux")]
 use rustix::fs::{AtFlags, Mode, OFlags, ResolveFlags, StatxFlags, openat2, statx};
 
+#[cfg(target_os = "linux")]
 use crate::linux::path::current_uid;
+#[cfg(target_os = "linux")]
 use crate::supervisor_metadata::direct_share::allowed_filesystem;
 pub(crate) use crate::supervisor_metadata::direct_share::{DirectShareError, DirectShareIdentity};
 
@@ -76,6 +86,7 @@ impl DirectShareRequest {
         })
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn reopen(
         &self,
         forbidden_roots: &[PathBuf],
@@ -86,6 +97,7 @@ impl DirectShareRequest {
 
 /// Admit a canonical user-owned directory that is disjoint from all private
 /// Codewire state supplied by the caller and from common credential stores.
+#[cfg(target_os = "linux")]
 pub(crate) fn admit_direct_share(
     requested: &Path,
     forbidden_roots: &[PathBuf],
@@ -120,6 +132,17 @@ pub(crate) fn admit_direct_share(
     })
 }
 
+/// Direct shares are not yet supported on Darwin; refuse before any effect.
+#[cfg(target_os = "macos")]
+pub(crate) fn admit_direct_share(
+    requested: &Path,
+    _forbidden_roots: &[PathBuf],
+) -> Result<AdmittedDirectShare, DirectShareError> {
+    Err(DirectShareError::UnsupportedFilesystem(
+        requested.to_owned(),
+    ))
+}
+
 /// Reopen a durable direct-share path and require its exact admitted identity.
 pub(crate) fn reopen_direct_share(
     path: &Path,
@@ -133,6 +156,7 @@ pub(crate) fn reopen_direct_share(
     Ok(admitted)
 }
 
+#[cfg(target_os = "linux")]
 fn open_exact_directory(path: &Path) -> Result<OwnedFd, DirectShareError> {
     openat2(
         rustix::fs::CWD,
@@ -147,6 +171,7 @@ fn open_exact_directory(path: &Path) -> Result<OwnedFd, DirectShareError> {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn descriptor_path(descriptor: &OwnedFd) -> Result<PathBuf, DirectShareError> {
     let link = PathBuf::from(format!("/proc/self/fd/{}", descriptor.as_raw_fd()));
     let path =
@@ -162,6 +187,7 @@ fn descriptor_path(descriptor: &OwnedFd) -> Result<PathBuf, DirectShareError> {
     Ok(path)
 }
 
+#[cfg(target_os = "linux")]
 fn capture_identity(descriptor: &OwnedFd) -> Result<DirectShareIdentity, DirectShareError> {
     let required = StatxFlags::TYPE | StatxFlags::UID | StatxFlags::INO | StatxFlags::MNT_ID;
     let metadata = statx(
@@ -207,6 +233,7 @@ fn validate_normal_absolute_path(path: &Path) -> Result<(), DirectShareError> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn validate_source_policy(
     path: &Path,
     forbidden_roots: &[PathBuf],
@@ -252,6 +279,7 @@ fn validate_source_policy(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn current_home_directory() -> Result<PathBuf, DirectShareError> {
     let passwd = fs::read_to_string("/etc/passwd").map_err(|source| DirectShareError::Io {
         path: PathBuf::from("/etc/passwd"),
@@ -269,10 +297,12 @@ fn current_home_directory() -> Result<PathBuf, DirectShareError> {
     Err(DirectShareError::MissingHomeDirectory)
 }
 
+#[cfg(target_os = "linux")]
 fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
+#[cfg(target_os = "linux")]
 fn reject_mount_alias_or_submounts(
     path: &Path,
     source_mount_id: u64,
@@ -284,6 +314,7 @@ fn reject_mount_alias_or_submounts(
     reject_mount_alias_or_submounts_from(path, source_mount_id, &mountinfo)
 }
 
+#[cfg(target_os = "linux")]
 fn reject_mount_alias_or_submounts_from(
     path: &Path,
     source_mount_id: u64,
@@ -309,11 +340,13 @@ fn reject_mount_alias_or_submounts_from(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn parse_u64(bytes: &[u8]) -> Option<u64> {
     let text = std::str::from_utf8(bytes).ok()?;
     text.parse().ok()
 }
 
+#[cfg(target_os = "linux")]
 fn unescape_mount_field(field: &[u8]) -> Result<Vec<u8>, DirectShareError> {
     let mut output = Vec::with_capacity(field.len());
     let mut index = 0;
@@ -339,7 +372,7 @@ fn unescape_mount_field(field: &[u8]) -> Result<Vec<u8>, DirectShareError> {
     Ok(output)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;

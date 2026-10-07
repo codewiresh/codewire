@@ -2,8 +2,8 @@
 //!
 //! Connection admission checks socket identity, owner UID and the exact protocol.
 //! Only configuration-aware callers additionally bind an expected digest. None
-//! of these checks is process adoption. Linux startup and restart effects remain
-//! in the native supervisor; Darwin can only connect to an existing endpoint.
+//! of these checks is process adoption. Linux also pins the supervisor's
+//! socket-derived process birth; Darwin admits the owner-only socket.
 
 use std::path::Path;
 use std::time::Duration;
@@ -13,17 +13,11 @@ use uuid::Uuid;
 
 use crate::control::v1;
 use crate::control::v1::local_supervisor_service_client::LocalSupervisorServiceClient;
-#[cfg(target_os = "linux")]
-use crate::linux::supervisor_peer::SupervisorPeerPin;
-#[cfg(target_os = "linux")]
+use crate::host::supervisor_peer::SupervisorPeerPin;
 use crate::supervisor_config::NativeRuntimeConfig;
 use crate::supervisor_config::{SupervisorConfigError, admit_supervisor_info};
 pub use crate::uds::UdsError;
-#[cfg(target_os = "macos")]
-use crate::uds::connect_owner_only;
-#[cfg(target_os = "linux")]
 use crate::uds::{capture_supervisor_peer, connect_supervisor_peer};
-#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
 const SUPERVISOR_INFO_TIMEOUT: Duration = Duration::from_secs(3);
@@ -31,20 +25,17 @@ const SUPERVISOR_INFO_TIMEOUT: Duration = Duration::from_secs(3);
 #[derive(Clone)]
 pub struct NativeSupervisorClient {
     inner: LocalSupervisorServiceClient<tonic::transport::Channel>,
-    #[cfg(target_os = "linux")]
     pub(crate) peer_pin: Arc<SupervisorPeerPin>,
-    #[cfg(target_os = "linux")]
     pub(crate) expected_configuration_digest: [u8; 32],
-    #[cfg(target_os = "linux")]
     pub(crate) reconnect_enabled: bool,
 }
 
 impl NativeSupervisorClient {
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(test)]
     pub(crate) fn into_rpc_client_for_test(
         self,
     ) -> LocalSupervisorServiceClient<tonic::transport::Channel> {
-        // The Linux source-transition regression must submit and disconnect
+        // The source-transition regression must submit and disconnect
         // before following completion. Keep this escape hatch test-only.
         self.inner
     }
@@ -53,21 +44,10 @@ impl NativeSupervisorClient {
         socket: &Path,
         expected_configuration_digest: Option<[u8; 32]>,
     ) -> Result<Self, SupervisorClientError> {
-        #[cfg(target_os = "linux")]
-        {
-            let pin = capture_supervisor_peer(socket, None).await?;
-            Self::connect_pinned(pin, expected_configuration_digest, false).await
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let channel = connect_owner_only(socket).await?;
-            let mut inner = LocalSupervisorServiceClient::new(channel);
-            query_supervisor_info(&mut inner, expected_configuration_digest).await?;
-            Ok(Self { inner })
-        }
+        let pin = capture_supervisor_peer(socket, None).await?;
+        Self::connect_pinned(pin, expected_configuration_digest, false).await
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) async fn connect_configured(
         config: &NativeRuntimeConfig,
     ) -> Result<Self, SupervisorClientError> {
@@ -79,7 +59,6 @@ impl NativeSupervisorClient {
         Self::connect_pinned(pin, Some(expected), true).await
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) async fn connect_pinned(
         peer_pin: Arc<SupervisorPeerPin>,
         expected_configuration_digest: Option<[u8; 32]>,
@@ -97,7 +76,6 @@ impl NativeSupervisorClient {
         })
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn supervisor_peer_pin(&self) -> Arc<SupervisorPeerPin> {
         self.peer_pin.clone()
     }
@@ -515,21 +493,6 @@ fn mutation_selector(name: &str) -> v1::EnvironmentSelector {
         name: name.to_owned(),
         request_id: Uuid::new_v4().to_string(),
         environment_id: String::new(),
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl NativeSupervisorClient {
-    /// Connect without creating/restarting a supervisor or binding its configuration.
-    pub async fn connect(socket: &Path) -> Result<Self, SupervisorClientError> {
-        Self::connect_admitted(socket, None).await
-    }
-
-    async fn reconnect_after_watch_failure(&mut self, operation_id: &str) -> Result<(), Status> {
-        Err(operation_watch_failure(
-            operation_id,
-            Status::unavailable("local supervisor reconnect is unavailable"),
-        ))
     }
 }
 

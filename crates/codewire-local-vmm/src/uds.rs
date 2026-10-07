@@ -3,23 +3,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
-#[cfg(target_os = "linux")]
 use tokio::net::unix::SocketAddr;
 use tokio::net::{UnixListener, UnixStream};
 use tokio_stream::{Stream, StreamExt as _, wrappers::UnixListenerStream};
 use tonic::transport::{Channel, Endpoint};
 
-#[cfg(target_os = "macos")]
-use crate::darwin::path as host_path;
-#[cfg(target_os = "linux")]
-use crate::linux::path as host_path;
-#[cfg(target_os = "linux")]
-use crate::linux::supervisor_peer::SupervisorPeerPin;
-#[cfg(target_os = "linux")]
+use crate::host::path as host_path;
+use crate::host::supervisor_peer::SupervisorPeerPin;
 use crate::supervisor_config::NativeRuntimeConfig;
 use host_path::{PrivateRoot, set_socket_private};
 use host_path::{SocketIdentity, current_uid};
-#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -83,13 +76,11 @@ pub(crate) fn bind_owner_only_with_uid(
 /// Peer credentials are checked before Hyper can parse a request, so private
 /// Tonic and public Connect handlers share exactly the same OS authorization
 /// boundary. Rejected peers observe only a closed Unix connection.
-#[cfg(target_os = "linux")]
 pub(crate) struct OwnerOnlyUnixListener {
     inner: UnixListener,
     uid: u32,
 }
 
-#[cfg(target_os = "linux")]
 impl axum::serve::Listener for OwnerOnlyUnixListener {
     type Io = UnixStream;
     type Addr = SocketAddr;
@@ -113,7 +104,6 @@ impl axum::serve::Listener for OwnerOnlyUnixListener {
     }
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn bind_owner_only_listener(
     socket: &Path,
 ) -> Result<(OwnerOnlyUnixListener, SocketIdentity), UdsError> {
@@ -151,7 +141,6 @@ pub(crate) async fn connect_owner_only(socket: &Path) -> Result<Channel, UdsErro
         .map_err(|_| UdsError::Connect)
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) async fn capture_supervisor_peer(
     socket: &Path,
     config: Option<&NativeRuntimeConfig>,
@@ -168,18 +157,18 @@ pub(crate) async fn capture_supervisor_peer(
     SupervisorPeerPin::capture(&stream, socket, identity, config).map_err(supervisor_peer_error)
 }
 
-#[cfg(target_os = "linux")]
-fn supervisor_peer_error(error: crate::linux::supervisor_peer::PeerError) -> UdsError {
-    use crate::linux::supervisor_peer::PeerError;
+fn supervisor_peer_error(error: crate::host::supervisor_peer::PeerError) -> UdsError {
+    use crate::host::supervisor_peer::PeerError;
     UdsError::SupervisorPeerAdmission(match error {
         PeerError::Kernel => "kernel socket-derived process identity is unavailable",
         PeerError::Identity => "process, socket or executable identity changed",
+        #[cfg(target_os = "linux")]
         PeerError::Role => "role or configuration arguments do not match",
+        #[cfg(target_os = "linux")]
         PeerError::Provenance => "retained executable provenance is unavailable or changed",
     })
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) async fn connect_supervisor_peer(
     pin: Arc<SupervisorPeerPin>,
 ) -> Result<Channel, UdsError> {
@@ -191,7 +180,6 @@ pub(crate) async fn connect_supervisor_peer(
         .map_err(|_| UdsError::Connect)
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn supervisor_peer_connector(
     pin: Arc<SupervisorPeerPin>,
 ) -> impl tower::Service<
@@ -293,7 +281,6 @@ pub(crate) fn remove_bound_socket(
 
 #[derive(Debug, thiserror::Error)]
 pub enum UdsError {
-    #[cfg(target_os = "linux")]
     #[error("native supervisor admission refused: {0}")]
     SupervisorPeerAdmission(&'static str),
     #[error("invalid private Unix socket path: {0}")]

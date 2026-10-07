@@ -17,7 +17,7 @@ use codewire_vmm_guest_probe::{
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use crate::linux::path::{PathError, PrivateRoot};
+use crate::host::path::{PathError, PrivateRoot};
 use crate::oci::{
     ContentStore, ContentStoreError, OciArchitecture, RegistryResolverError, ResolvedImage,
     Sha256Digest,
@@ -373,6 +373,7 @@ impl Drop for TemporarySetup {
 
 fn path_error_is_not_found(error: &PathError) -> bool {
     match error {
+        #[cfg(target_os = "linux")]
         PathError::Openat2 { source, .. } => *source == rustix::io::Errno::NOENT,
         PathError::Io { source, .. } => source.kind() == io::ErrorKind::NotFound,
         _ => false,

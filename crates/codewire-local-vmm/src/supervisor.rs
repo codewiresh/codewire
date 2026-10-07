@@ -6,6 +6,7 @@
 
 mod bootstrap;
 mod metadata;
+#[cfg(target_os = "linux")]
 mod runtime;
 mod sources;
 #[cfg(test)]
@@ -53,7 +54,8 @@ use crate::control::v1;
 use crate::control::v1::local_supervisor_service_server::{
     LocalSupervisorService, LocalSupervisorServiceServer,
 };
-use crate::cw_runtime::{AdmittedCwRuntimeDisk, CwRuntimeError, CwRuntimeStore};
+#[cfg(target_os = "linux")]
+use crate::cw_runtime::{CwRuntimeError, CwRuntimeStore};
 use crate::generation::{GenerationError, ensure_root_generation};
 use crate::host::path::{PathError, PrivateRoot, SocketIdentity};
 #[cfg(test)]
@@ -135,6 +137,7 @@ async fn request_runner_shutdown_and_observe(
     let _ = client.shutdown(environment_id, generation).await;
     live.wait_exited(RUNNER_EXIT_TIMEOUT).await
 }
+#[cfg(target_os = "linux")]
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
 mod public_api;
@@ -168,12 +171,14 @@ struct OperationProgress {
     event: v1::RunnerEvent,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 struct LinuxCapabilityHeader {
     version: u32,
     pid: i32,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct LinuxCapabilityData {
@@ -400,6 +405,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         state,
         children: HashMap::new(),
         live_runners: HashMap::new(),
+        #[cfg(target_os = "linux")]
         runtime_operations: BTreeSet::new(),
         incompatible_runners: BTreeSet::new(),
         operation_progress: operation_progress.clone(),
@@ -563,6 +569,7 @@ struct SupervisorCore {
     state: SupervisorState,
     children: HashMap<Uuid, Child>,
     live_runners: HashMap<Uuid, LiveProcess>,
+    #[cfg(target_os = "linux")]
     runtime_operations: BTreeSet<Uuid>,
     // Observation only: an unsupported protocol never grants runner RPC or
     // retirement authority, and does not rewrite the durable lifecycle state.
@@ -885,6 +892,7 @@ impl SupervisorCore {
                 .map_err(|_| SupervisorError::ArtifactStore)?
                 .require_live_cw_runtime_publisher()?;
         }
+        #[cfg(target_os = "linux")]
         crate::linux::preflight::preflight().map_err(RunnerError::from)?;
         Ok(artifact_generation)
     }
@@ -1460,14 +1468,14 @@ impl SupervisorCore {
                     } else {
                         let artifact_generation = self.preflight().await?;
                         let cw_runtime =
-                            self.admit_installed_cw_runtime()
-                                .await?
-                                .map(|disk| CwRuntimeBinding {
+                            self.admit_installed_cw_runtime().await?.map(|generation| {
+                                CwRuntimeBinding {
                                     schema_version: 1,
-                                    active_catalog_generation: disk.generation,
+                                    active_catalog_generation: generation,
                                     staging_catalog_generation: None,
                                     rollback_catalog_generation: None,
-                                });
+                                }
+                            });
                         let vcpus = u8::try_from(request.vcpus)
                             .map_err(|_| SupervisorError::InvalidRequest)?;
                         next_state.environments.insert(
@@ -1596,6 +1604,7 @@ impl SupervisorCore {
     async fn run_pending_operations(&mut self, recovering: bool) -> Result<(), SupervisorError> {
         for operation in self.store.pending_operations()? {
             if operation.kind.cw_runtime() {
+                #[cfg(target_os = "linux")]
                 if !self.runtime_operations.contains(&operation.operation_id) {
                     runtime::recover(self, &operation).await?;
                 }
@@ -2457,6 +2466,7 @@ impl SupervisorCore {
         // SAFETY: these libc calls use only scalar arguments between fork and
         // exec. PDEATHSIG closes the spawn-to-manifest orphan window; the
         // runner clears it only after its exact identity is durable.
+        #[cfg(target_os = "linux")]
         unsafe {
             command.pre_exec(move || {
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0
@@ -2469,6 +2479,19 @@ impl SupervisorCore {
                         libc::CLOSE_RANGE_CLOEXEC,
                     ) != 0
                 {
+                    return Err(io::Error::last_os_error());
+                }
+                libc::umask(0o077);
+                Ok(())
+            });
+        }
+        // SAFETY: as above. Darwin has no parent-death signal or close_range:
+        // the runner watches this process and exits with it, and std opens
+        // every descriptor close-on-exec.
+        #[cfg(target_os = "macos")]
+        unsafe {
+            command.pre_exec(move || {
+                if libc::getppid() != expected_parent || libc::setsid() < 0 {
                     return Err(io::Error::last_os_error());
                 }
                 libc::umask(0o077);
@@ -2610,9 +2633,9 @@ impl SupervisorCore {
         Ok(())
     }
 
-    async fn admit_installed_cw_runtime(
-        &mut self,
-    ) -> Result<Option<AdmittedCwRuntimeDisk>, SupervisorError> {
+    /// Admit the installed cw runtime source and return its catalog generation.
+    #[cfg(target_os = "linux")]
+    async fn admit_installed_cw_runtime(&mut self) -> Result<Option<String>, SupervisorError> {
         let engine_root = self.config.engine_root();
         let source = self.config.cw_runtime_lock();
         tokio::task::spawn_blocking(move || {
@@ -2626,17 +2649,20 @@ impl SupervisorCore {
             let asset = store.admit_source(&source)?;
             store
                 .prepare_catalog(&asset.provenance, &BTreeMap::new())
-                .map(Some)
+                .map(|disk| Some(disk.generation))
         })
         .await
         .map_err(|_| SupervisorError::CwRuntimeProvisionTask)?
         .map_err(Into::into)
     }
 
+    /// Revalidate an environment's bound cw runtime catalog and return its
+    /// generation.
+    #[cfg(target_os = "linux")]
     async fn admit_environment_cw_runtime(
         &mut self,
         name: &str,
-    ) -> Result<Option<AdmittedCwRuntimeDisk>, SupervisorError> {
+    ) -> Result<Option<String>, SupervisorError> {
         // Unbound legacy/raw environments remain unbound across an ordinary
         // start or restart. Only creation or explicit update selects a source.
         let Some(binding) = self.environment(name)?.cw_runtime.clone() else {
@@ -2652,11 +2678,29 @@ impl SupervisorCore {
                 .unwrap_or(&binding.active_catalog_generation);
             CwRuntimeStore::create(&engine)?
                 .open_catalog(selected)
-                .map(Some)
+                .map(|disk| Some(disk.generation))
         })
         .await
         .map_err(|_| SupervisorError::CwRuntimeProvisionTask)?
         .map_err(Into::into)
+    }
+
+    /// cw runtime catalogs are Linux-only; Darwin never installs one.
+    #[cfg(target_os = "macos")]
+    async fn admit_installed_cw_runtime(&mut self) -> Result<Option<String>, SupervisorError> {
+        Ok(None)
+    }
+
+    /// Darwin never binds a cw runtime catalog, so a binding is invalid state.
+    #[cfg(target_os = "macos")]
+    async fn admit_environment_cw_runtime(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<String>, SupervisorError> {
+        if self.environment(name)?.cw_runtime.is_some() {
+            return Err(SupervisorError::InvalidState);
+        }
+        Ok(None)
     }
 
     async fn ensure_vm_started(
@@ -2674,10 +2718,7 @@ impl SupervisorCore {
         self.require_environment_guest_seed_abi(name, staging)
             .await?;
         let cw_runtime = self.admit_environment_cw_runtime(name).await?;
-        let expected_cw_runtime_generation = cw_runtime
-            .as_ref()
-            .map(|disk| disk.generation.clone())
-            .unwrap_or_default();
+        let expected_cw_runtime_generation = cw_runtime.clone().unwrap_or_default();
         validate_environment_workload_secret_delivery(&environment, staging)?;
         let mut client = self
             .runner_client_for_artifact(name, &expected_artifact_generation)
@@ -2696,6 +2737,7 @@ impl SupervisorCore {
             {
                 return Err(SupervisorError::InvalidRunnerResponse);
             }
+            #[cfg(target_os = "linux")]
             if cw_runtime.is_some() {
                 let access = client
                     .daemon_access()
@@ -2856,6 +2898,7 @@ impl SupervisorCore {
             let _ = client.stop().await;
             return Err(SupervisorError::InvalidRunnerResponse);
         }
+        #[cfg(target_os = "linux")]
         if cw_runtime.is_some() {
             let confirmation = match client.daemon_access().await {
                 Ok(access) => runtime::confirm_boot(self, name, generation, access).await,
@@ -2874,7 +2917,7 @@ impl SupervisorCore {
             .runner
             .as_mut()
             .ok_or(SupervisorError::InvalidState)?
-            .cw_runtime_catalog_generation = cw_runtime.map(|disk| disk.generation);
+            .cw_runtime_catalog_generation = cw_runtime;
         self.save()
     }
 
@@ -4674,6 +4717,18 @@ impl LocalSupervisorService for SupervisorRpc {
             .map_err(Status::from)
     }
 
+    /// cw runtime catalogs are Linux-only.
+    #[cfg(target_os = "macos")]
+    async fn get_managed_runtime(
+        &self,
+        _request: Request<v1::EnvironmentSelector>,
+    ) -> Result<Response<v1::ManagedRuntime>, Status> {
+        Err(Status::failed_precondition(
+            "running VM has no admitted cw runtime catalog",
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
     async fn get_managed_runtime(
         &self,
         request: Request<v1::EnvironmentSelector>,
@@ -5038,13 +5093,20 @@ fn operation_result_proto(
     result: &serde_json::Value,
 ) -> Result<v1::OperationResult, Status> {
     if operation.kind.cw_runtime() {
-        let reply = runtime::decode_result(operation, result)?;
-        return Ok(v1::OperationResult {
-            value: Some(v1::operation_result::Value::CwRuntime(runtime::status(
-                &reply,
-                Some(operation),
-            )?)),
-        });
+        #[cfg(target_os = "linux")]
+        {
+            let reply = runtime::decode_result(operation, result)?;
+            return Ok(v1::OperationResult {
+                value: Some(v1::operation_result::Value::CwRuntime(runtime::status(
+                    &reply,
+                    Some(operation),
+                )?)),
+            });
+        }
+        #[cfg(target_os = "macos")]
+        return Err(Status::failed_precondition(
+            "cw runtime operations are unavailable on this host",
+        ));
     }
     let fields = result
         .as_object()
@@ -5184,6 +5246,7 @@ fn runner_cw_runtime_identity_matches(
         && (state != StoredEnvironmentState::Stopped || attached.is_none())
 }
 
+#[cfg(target_os = "linux")]
 fn managed_runtime_artifact_generation(
     environment: &EnvironmentRecord,
     expected: Uuid,
@@ -6845,6 +6908,7 @@ fn spawn_supervisor(config: &NativeRuntimeConfig) -> Result<Child, SupervisorErr
     // SAFETY: scalar-only libc operations and one fixed-layout capset syscall
     // prepare a capability-empty, no-new-privileges, FD-clean detached
     // singleton before exec. The supervisor intentionally outlives this CLI.
+    #[cfg(target_os = "linux")]
     unsafe {
         command.pre_exec(|| {
             confine_spawned_process()?;
@@ -6856,6 +6920,18 @@ fn spawn_supervisor(config: &NativeRuntimeConfig) -> Result<Child, SupervisorErr
                     libc::CLOSE_RANGE_CLOEXEC,
                 ) != 0
             {
+                return Err(io::Error::last_os_error());
+            }
+            libc::umask(0o077);
+            Ok(())
+        });
+    }
+    // SAFETY: scalar-only libc operations before exec. Darwin has no capset or
+    // close_range; std opens every descriptor close-on-exec.
+    #[cfg(target_os = "macos")]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
                 return Err(io::Error::last_os_error());
             }
             libc::umask(0o077);
@@ -6874,6 +6950,7 @@ fn terminate_unadmitted_child(child: &mut Child) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn confine_spawned_process() -> io::Result<()> {
     let header = LinuxCapabilityHeader {
         version: LINUX_CAPABILITY_VERSION_3,
@@ -6941,8 +7018,9 @@ impl From<SupervisorError> for Status {
             SupervisorError::Runner(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::Artifact(
                 crate::artifact::ArtifactError::GuestSeedProtocolUnsupported(_),
-            )
-            | SupervisorError::CwRuntime(_) => Status::failed_precondition(error.to_string()),
+            ) => Status::failed_precondition(error.to_string()),
+            #[cfg(target_os = "linux")]
+            SupervisorError::CwRuntime(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::VmStart(_)
             | SupervisorError::VmStop
             | SupervisorError::VmResize
@@ -7071,8 +7149,10 @@ pub enum SupervisorError {
     Artifact(#[from] crate::artifact::ArtifactError),
     #[error("runtime artifact store operation failed")]
     ArtifactStore,
+    #[cfg(target_os = "linux")]
     #[error(transparent)]
     CwRuntime(#[from] CwRuntimeError),
+    #[cfg(target_os = "linux")]
     #[error("cw runtime catalog preparation task failed")]
     CwRuntimeProvisionTask,
     #[error("{0}")]
@@ -7478,6 +7558,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn direct_workspace_plan(source: &Path) -> WorkspacePlan {
         let admitted = crate::direct_share::admit_direct_share(source, &[]).unwrap();
         WorkspacePlan::from_inputs(vec![WorkspaceInput::direct(
@@ -7726,6 +7807,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            #[cfg(target_os = "linux")]
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
@@ -7932,6 +8014,19 @@ mod tests {
         attach_named_test_runner_process(core, "dev", socket_identity)
     }
 
+    fn running_executable(pid: u32) -> Option<PathBuf> {
+        #[cfg(target_os = "linux")]
+        {
+            fs::read_link(format!("/proc/{pid}/exe")).ok()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            ProcessIdentity::capture(pid)
+                .ok()
+                .map(|identity| identity.executable)
+        }
+    }
+
     // These two shutdown fixtures retain the unreaped Child before any readiness
     // assertion, including the single strict LiveProcess capture.
     struct ShutdownTestChild(Child);
@@ -7944,11 +8039,7 @@ mod tests {
                     self.0.try_wait().unwrap().is_none(),
                     "shutdown test child exited before its expected executable"
                 );
-                if fs::read_link(format!("/proc/{}/exe", self.0.id()))
-                    .ok()
-                    .as_deref()
-                    == Some(executable)
-                {
+                if running_executable(self.0.id()).as_deref() == Some(executable) {
                     break;
                 }
                 assert!(
@@ -8082,11 +8173,7 @@ mod tests {
         let executable = fs::canonicalize("/bin/sleep").unwrap();
         let child = Command::new(&executable).arg("60").spawn().unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while fs::read_link(format!("/proc/{}/exe", child.id()))
-            .ok()
-            .as_deref()
-            != Some(executable.as_path())
-        {
+        while running_executable(child.id()).as_deref() != Some(executable.as_path()) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "test runner child did not reach its expected executable"
@@ -8175,6 +8262,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            #[cfg(target_os = "linux")]
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
@@ -9850,7 +9938,7 @@ mod tests {
                 boot_id: "boot".to_owned(),
                 start_time_ticks: 7,
                 executable: PathBuf::from("/proc/self/exe"),
-                executable_file: crate::linux::path::FileIdentity {
+                executable_file: crate::host::path::FileIdentity {
                     device: 1,
                     inode: 2,
                     size: 3,
@@ -9919,6 +10007,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn admitted_active_workspace_boots_without_registry_or_cas_access() {
         let engine = tempfile::tempdir().unwrap();
@@ -9954,6 +10043,7 @@ mod tests {
         assert!(!engine.path().join("content").exists());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn source_only_changes_reuse_the_admitted_root_setup_and_skill_identity() {
         let engine = tempfile::tempdir().unwrap();
@@ -10291,6 +10381,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn staging_workspace_never_boots_when_exact_cached_content_is_absent() {
         let engine = tempfile::tempdir().unwrap();
@@ -10747,6 +10838,7 @@ mod tests {
         plan.validate_for_project(&project).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn create_preparation_binds_an_explicit_direct_mount_for_durable_replay() {
         let source = tempfile::tempdir().unwrap();
@@ -10836,6 +10928,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn create_revalidates_a_direct_share_before_its_first_lifecycle_effect() {
         let source = tempfile::tempdir().unwrap();
@@ -10902,6 +10995,7 @@ mod tests {
         assert!(core.live_runners.is_empty());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn replayed_create_quarantines_its_live_runner_when_private_roots_are_unresolvable() {
         let source = tempfile::tempdir().unwrap();
@@ -10983,6 +11077,7 @@ mod tests {
         runner_server.await.unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn start_revalidates_a_direct_share_before_access_and_runner_effects() {
         let source = tempfile::tempdir().unwrap();
@@ -11025,6 +11120,7 @@ mod tests {
         assert!(core.live_runners.is_empty());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn workspace_transition_revalidates_a_direct_share_before_access_and_staging() {
         let source = tempfile::tempdir().unwrap();
@@ -11082,6 +11178,7 @@ mod tests {
         assert!(core.live_runners.is_empty());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn restart_revalidates_a_direct_share_before_access_and_stop_effects() {
         let source = tempfile::tempdir().unwrap();
@@ -11131,6 +11228,7 @@ mod tests {
         assert!(core.live_runners.is_empty());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn ensure_vm_started_revalidates_a_direct_share_as_defense_in_depth() {
         let source = tempfile::tempdir().unwrap();
@@ -11152,6 +11250,7 @@ mod tests {
         assert!(core.environment("dev").unwrap().runner.is_none());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn ensure_vm_started_quarantines_a_live_runner_for_an_unresolvable_private_root() {
         let source = tempfile::tempdir().unwrap();
@@ -11527,6 +11626,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            #[cfg(target_os = "linux")]
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
@@ -11746,6 +11846,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn credential_broker_rpc_quarantines_an_unsafe_runner_before_authority_use() {
         let source = tempfile::tempdir().unwrap();
@@ -11822,6 +11923,8 @@ mod tests {
         assert!(environment.runner.is_none());
     }
 
+    // Adopts the detached runner through recovery, which Darwin never does.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn credential_broker_rejects_a_replaced_runner_socket_before_authority_use() {
         let environment = project_environment_with_access();
@@ -11911,11 +12014,11 @@ mod tests {
                 boot_id: "synthetic-boot".to_owned(),
                 start_time_ticks: u64::from(pid),
                 executable: PathBuf::from("/usr/bin/true"),
-                executable_file: crate::linux::path::FileIdentity {
+                executable_file: crate::host::path::FileIdentity {
                     device: 1,
                     inode,
                     size: 1,
-                    uid: crate::linux::path::current_uid(),
+                    uid: crate::host::path::current_uid(),
                     mode: 0o100755,
                     links: 1,
                 },
@@ -11924,7 +12027,7 @@ mod tests {
             socket: SocketIdentity {
                 device: 1,
                 inode,
-                uid: crate::linux::path::current_uid(),
+                uid: crate::host::path::current_uid(),
                 mode: 0o140600,
             },
             artifact_generation: "b".repeat(64),
@@ -12000,6 +12103,7 @@ mod tests {
         assert_eq!(core.environment("dev").unwrap(), &before);
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn startup_quarantines_an_exposing_unsafe_runner_before_listen_but_preserves_an_idle_one()
     {
@@ -12085,6 +12189,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn startup_replay_cannot_restore_a_runner_quarantined_for_an_unsafe_share() {
         let source = tempfile::tempdir().unwrap();
@@ -12175,6 +12280,7 @@ mod tests {
         runner_server.await.unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn startup_quarantines_an_exposing_runner_when_a_private_root_is_unresolvable() {
         let source = tempfile::tempdir().unwrap();
@@ -12220,6 +12326,7 @@ mod tests {
         runner_server.await.unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn startup_quarantines_every_unsafe_runner_before_returning_an_earlier_runner_error() {
         let unsafe_source = tempfile::tempdir().unwrap();
@@ -12911,9 +13018,16 @@ mod tests {
         );
         // The production entry additionally refuses this non-role process,
         // before any startup fallback or metadata effects.
+        #[cfg(target_os = "linux")]
         assert!(matches!(
             NativeSupervisorClient::connect_or_start(&wrong_config).await,
             Err(SupervisorError::Uds(UdsError::SupervisorPeerAdmission(_)))
+        ));
+        // Darwin admits the owner-only socket, then refuses the digest.
+        #[cfg(target_os = "macos")]
+        assert!(matches!(
+            NativeSupervisorClient::connect_or_start(&wrong_config).await,
+            Err(SupervisorError::SupervisorConfigurationMismatch)
         ));
         // The incompatible live process remains available; only this reuse
         // attempt failed, and no replacement was started over its socket.
@@ -12924,6 +13038,7 @@ mod tests {
         remove_bound_socket(&socket, &socket_identity).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn reconcile_quarantines_an_unsafe_recovered_runner_without_trusting_its_socket() {
         for replace_socket in [false, true] {
@@ -13461,7 +13576,7 @@ mod tests {
                 boot_id: "boot".to_owned(),
                 start_time_ticks: 1,
                 executable: PathBuf::from("/bin/cw"),
-                executable_file: crate::linux::path::FileIdentity {
+                executable_file: crate::host::path::FileIdentity {
                     device: 1,
                     inode: 1,
                     size: 1,
@@ -14313,6 +14428,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            #[cfg(target_os = "linux")]
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
@@ -14381,6 +14497,7 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
+            #[cfg(target_os = "linux")]
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
@@ -14416,6 +14533,7 @@ mod tests {
         assert!(!runner_artifact_identity_matches("", ""));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn managed_cw_runtime_binds_selected_uuid_and_active_runner_artifacts() {
         let mut environment = project_environment();
@@ -14428,7 +14546,7 @@ mod tests {
                 boot_id: "synthetic".to_owned(),
                 start_time_ticks: 7,
                 executable: PathBuf::from("/proc/self/exe"),
-                executable_file: crate::linux::path::FileIdentity {
+                executable_file: crate::host::path::FileIdentity {
                     device: 1,
                     inode: 2,
                     size: 3,

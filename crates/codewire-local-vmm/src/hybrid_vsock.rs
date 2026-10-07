@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tonic::transport::Endpoint;
 
-use crate::linux::path::{PathError, SocketIdentity};
+use crate::host::path::{PathError, SocketIdentity};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -50,10 +50,11 @@ pub async fn connect_hybrid_vsock(
 
 /// Fixed live-runtime port; no caller-selected guest routing or fallback. The
 /// connected peer is birth-pinned before sending even the CONNECT handshake.
+#[cfg(target_os = "linux")]
 pub(crate) async fn connect_runtime_publisher(
     socket: &Path,
     identity: &SocketIdentity,
-    expected_vmm: &crate::linux::ProcessIdentity,
+    expected_vmm: &crate::host::process::ProcessIdentity,
 ) -> Result<(UnixStream, std::os::fd::OwnedFd), HybridVsockError> {
     let port = codewire_vmm_guest_probe::cw_runtime_live::LIVE_RUNTIME_VSOCK_PORT;
     validate_target(socket, port)?;
@@ -276,6 +277,14 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
+    /// Socket identity requires an owner-private parent on Darwin.
+    fn private_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap()
+    }
+
     async fn read_connect(stream: &mut UnixStream) -> String {
         let mut line = Vec::new();
         loop {
@@ -290,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn fake_hybrid_socket_serves_authenticated_daemon_without_host_tcp_listener() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let workspace = temp.path().join("workspace");
         let home = temp.path().join("home");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -354,7 +363,7 @@ mod tests {
 
     #[tokio::test]
     async fn acknowledgement_parser_does_not_consume_following_bytes() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let socket = temp.path().join("hybrid.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         privatize(&socket);
@@ -376,7 +385,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_acknowledgements_fail_closed() {
         for acknowledgement in [b"NO 42\n".as_slice(), b"OK 0\n", b"OK 1 extra\n"] {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = private_tempdir();
             let socket = temp.path().join("hybrid.sock");
             let listener = UnixListener::bind(&socket).unwrap();
             privatize(&socket);
@@ -395,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_daemon_token_is_rejected_through_hybrid_transport() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let workspace = temp.path().join("workspace");
         let home = temp.path().join("home");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -442,7 +451,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_and_eof_acknowledgements_fail_closed() {
         for acknowledgement in [Some(vec![b'A'; MAX_ACK_BYTES]), None] {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = private_tempdir();
             let socket = temp.path().join("hybrid.sock");
             let listener = UnixListener::bind(&socket).unwrap();
             privatize(&socket);
@@ -469,7 +478,7 @@ mod tests {
             Err(HybridVsockError::ConnectTimeout)
         ));
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let socket = temp.path().join("hybrid.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         privatize(&socket);

@@ -34,6 +34,7 @@ use crate::host_port::{
     HOST_PORT_CONTROL_FRAME_LEN, HOST_PORT_CONTROL_KEY_LEN, HostPortBinding,
     HostPortControlReceiver, is_host_port_control_frame,
 };
+#[cfg(target_os = "linux")]
 use crate::linux::confinement::{
     install_denied_syscalls, install_deny_all_filesystem_domain as restrict_filesystem,
     require_single_threaded_process as require_single_thread,
@@ -75,30 +76,41 @@ const WORKER_HOST_PORT_DESCRIPTOR_MARKER: u8 = b'P';
 const WORKER_MESH_INGRESS_DESCRIPTOR_MARKER: u8 = b'M';
 const WORKER_CONTROL_BYTES: usize = 64;
 
-#[cfg(target_env = "musl")]
+#[cfg(any(target_env = "musl", target_os = "macos"))]
 type ControlLength = libc::socklen_t;
-#[cfg(not(target_env = "musl"))]
+#[cfg(not(any(target_env = "musl", target_os = "macos")))]
 type ControlLength = libc::size_t;
 
-#[cfg(target_env = "musl")]
+#[cfg(any(target_env = "musl", target_os = "macos"))]
 fn encode_control_length(value: usize) -> Option<ControlLength> {
     value.try_into().ok()
 }
 
-#[cfg(not(target_env = "musl"))]
+#[cfg(not(any(target_env = "musl", target_os = "macos")))]
 fn encode_control_length(value: usize) -> Option<ControlLength> {
     Some(value)
 }
 
-#[cfg(target_env = "musl")]
+#[cfg(any(target_env = "musl", target_os = "macos"))]
 fn decode_control_length(value: ControlLength) -> usize {
     value as usize
 }
 
-#[cfg(not(target_env = "musl"))]
+#[cfg(not(any(target_env = "musl", target_os = "macos")))]
 fn decode_control_length(value: ControlLength) -> usize {
     value
 }
+
+// Darwin has neither MSG_NOSIGNAL nor MSG_CMSG_CLOEXEC: the sender sets
+// SO_NOSIGPIPE, and each received descriptor is marked close-on-exec at once.
+#[cfg(target_os = "linux")]
+const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
+#[cfg(target_os = "macos")]
+const SEND_FLAGS: libc::c_int = 0;
+#[cfg(target_os = "linux")]
+const RECEIVE_FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
+#[cfg(target_os = "macos")]
+const RECEIVE_FLAGS: libc::c_int = 0;
 
 const BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB1\0";
 const BOOTSTRAP_LEN: usize = 64;
@@ -365,7 +377,23 @@ fn send_worker_descriptor(bootstrap: RawFd, descriptor: RawFd, marker: u8) -> io
                 })?;
         std::ptr::write(libc::CMSG_DATA(header).cast::<RawFd>(), descriptor);
     }
-    let sent = unsafe { libc::sendmsg(bootstrap, &raw const message, libc::MSG_NOSIGNAL) };
+    #[cfg(target_os = "macos")]
+    {
+        let enabled: libc::c_int = 1;
+        if unsafe {
+            libc::setsockopt(
+                bootstrap,
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                (&raw const enabled).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    let sent = unsafe { libc::sendmsg(bootstrap, &raw const message, SEND_FLAGS) };
     if sent == marker.len() as isize {
         Ok(())
     } else if sent == -1 {
@@ -427,7 +455,7 @@ fn receive_worker_descriptor(bootstrap: RawFd, expected_marker: u8) -> io::Resul
     message.msg_control = unsafe { control.bytes.as_mut_ptr().cast() };
     message.msg_controllen = encode_control_length(WORKER_CONTROL_BYTES)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid control length"))?;
-    let received = unsafe { libc::recvmsg(bootstrap, &raw mut message, libc::MSG_CMSG_CLOEXEC) };
+    let received = unsafe { libc::recvmsg(bootstrap, &raw mut message, RECEIVE_FLAGS) };
     if received == -1 {
         return Err(io::Error::last_os_error());
     }
@@ -465,6 +493,10 @@ fn receive_worker_descriptor(bootstrap: RawFd, expected_marker: u8) -> io::Resul
                 continue;
             }
             descriptors.push(unsafe { OwnedFd::from_raw_fd(descriptor) });
+            #[cfg(target_os = "macos")]
+            if unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                valid_control = false;
+            }
         }
         header = unsafe { libc::CMSG_NXTHDR(&raw const message, header) };
     }
@@ -1182,14 +1214,34 @@ fn send_worker_bytes(descriptor: RawFd, buffer: &[u8]) -> io::Result<usize> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn require_single_threaded_process() -> Result<(), NetworkWorkerError> {
     require_single_thread().map_err(|_| NetworkWorkerError::ThreadConfinement)
 }
 
+#[cfg(target_os = "linux")]
 fn install_deny_all_filesystem_domain() -> Result<(), NetworkWorkerError> {
     restrict_filesystem().map_err(|_| NetworkWorkerError::FilesystemConfinement)
 }
 
+// Darwin has no confinement for this worker yet. Refuse to start rather than
+// run unconfined; a Seatbelt profile replaces Landlock and seccomp here.
+#[cfg(target_os = "macos")]
+fn require_single_threaded_process() -> Result<(), NetworkWorkerError> {
+    Err(NetworkWorkerError::ThreadConfinement)
+}
+
+#[cfg(target_os = "macos")]
+fn install_deny_all_filesystem_domain() -> Result<(), NetworkWorkerError> {
+    Err(NetworkWorkerError::FilesystemConfinement)
+}
+
+#[cfg(target_os = "macos")]
+fn install_network_worker_seccomp() -> Result<(), NetworkWorkerError> {
+    Err(NetworkWorkerError::SyscallConfinement)
+}
+
+#[cfg(target_os = "linux")]
 const NETWORK_WORKER_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_socket,
     libc::SYS_socketpair,
@@ -1237,14 +1289,15 @@ const NETWORK_WORKER_DENIED_SYSCALLS: &[libc::c_long] = &[
 // fork or vfork syscall numbers. Keep the legacy x86_64 entry points denied
 // where they exist without making the release build depend on absent libc
 // constants on AArch64.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const NETWORK_WORKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[libc::SYS_fork, libc::SYS_vfork];
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const NETWORK_WORKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[];
 
 /// Install the worker's dedicated syscall layer only after the exact
 /// single-threaded Tokio runtime has created its private internal wakeup
 /// descriptor. No guest-controlled byte is read before this filter is active.
+#[cfg(target_os = "linux")]
 fn install_network_worker_seccomp() -> Result<(), NetworkWorkerError> {
     install_denied_syscalls(
         NETWORK_WORKER_DENIED_SYSCALLS,
@@ -1261,10 +1314,15 @@ fn inherited_std_unix_stream(descriptor: RawFd) -> Result<StdUnixStream, Network
 }
 
 fn validate_inherited_unix_socket(descriptor: RawFd) -> Result<(), NetworkWorkerError> {
+    // Darwin has no SO_DOMAIN and cannot read SO_ACCEPTCONN; the connected
+    // AF_UNIX peer address below proves the domain and that it is no listener.
+    #[cfg(target_os = "linux")]
     if socket_option(descriptor, libc::SO_DOMAIN)? != libc::AF_UNIX
-        || socket_option(descriptor, libc::SO_TYPE)? != libc::SOCK_STREAM
         || socket_option(descriptor, libc::SO_ACCEPTCONN)? != 0
     {
+        return Err(NetworkWorkerError::InheritedDescriptor);
+    }
+    if socket_option(descriptor, libc::SO_TYPE)? != libc::SOCK_STREAM {
         return Err(NetworkWorkerError::InheritedDescriptor);
     }
 
@@ -1290,10 +1348,15 @@ fn validate_connected_ipv4_stream(
     descriptor: RawFd,
     expected: Option<HostPortBinding>,
 ) -> Result<(SocketAddrV4, SocketAddrV4), NetworkWorkerError> {
+    // Darwin has no SO_DOMAIN and cannot read SO_ACCEPTCONN; the AF_INET
+    // local and peer addresses below prove the domain and a connection.
+    #[cfg(target_os = "linux")]
     if socket_option(descriptor, libc::SO_DOMAIN)? != libc::AF_INET
-        || socket_option(descriptor, libc::SO_TYPE)? != libc::SOCK_STREAM
         || socket_option(descriptor, libc::SO_ACCEPTCONN)? != 0
     {
+        return Err(NetworkWorkerError::InheritedDescriptor);
+    }
+    if socket_option(descriptor, libc::SO_TYPE)? != libc::SOCK_STREAM {
         return Err(NetworkWorkerError::InheritedDescriptor);
     }
     let local = ipv4_socket_address(descriptor, false)?;
@@ -2467,6 +2530,7 @@ mod tests {
         assert!(matches!(result, Err(NetworkWorkerError::FrameIo)));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn deny_all_landlock_blocks_new_path_access() {
         const CHILD_MARKER: &str = "CODEWIRE_TEST_NETWORK_WORKER_LANDLOCK";
@@ -2486,6 +2550,7 @@ mod tests {
         assert!(status.success());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn seccomp_denies_dial_process_and_async_io_authority() {
         const CHILD_MARKER: &str = "CODEWIRE_TEST_NETWORK_WORKER_SECCOMP";
@@ -2563,6 +2628,7 @@ mod tests {
         assert!(status.success());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn confined_transferred_tcp_stream_uses_only_read_write_authority() {
         const CHILD_MARKER: &str = "CODEWIRE_TEST_TRANSFERRED_TCP_SECCOMP";
