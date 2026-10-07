@@ -58,10 +58,14 @@ pub async fn wrap_transport(
     );
 
     let mut endpoint_tracker = EndpointTracker::default();
-    let discovered_endpoints = if options.peer_direct_udp_enabled {
+    // Without a startup wait, the loop's first STUN refresh fires at once
+    // and its answer republishes our endpoints.
+    let discovered_endpoints = if !options.peer_direct_udp_enabled {
+        options.advertise_endpoints.clear();
+        Vec::new()
+    } else if options.stun_before_start {
         stun::discover_mapped_addrs(&socket, &options.stun_servers, options.stun_timeout).await
     } else {
-        options.advertise_endpoints.clear();
         Vec::new()
     };
     let discovered_endpoint_count = discovered_endpoints.len();
@@ -71,11 +75,13 @@ pub async fn wrap_transport(
         }
     }
     options.advertise_endpoints = endpoint_tracker.update(options.advertise_endpoints.clone());
-    tracing::info!(
-        discovered_endpoint_count,
-        advertised_endpoint_count = options.advertise_endpoints.len(),
-        "rust tailnet startup STUN discovery complete"
-    );
+    if options.stun_before_start {
+        tracing::info!(
+            discovered_endpoint_count,
+            advertised_endpoint_count = options.advertise_endpoints.len(),
+            "rust tailnet startup STUN discovery complete"
+        );
+    }
     let socket = Arc::new(socket);
 
     let stun_servers = if options.peer_direct_udp_enabled {
