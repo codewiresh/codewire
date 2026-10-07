@@ -3367,6 +3367,31 @@ mod tests {
         organization: &OrganizationContext,
         environment: crate::view::EnvironmentRow,
     ) -> String {
+        let view = crate::view::DashboardView {
+            user_name: "Resize".into(),
+            csrf_token: Default::default(),
+            is_admin: false,
+            organizations: Vec::new(),
+            has_organizations: false,
+            organization_navigation_unavailable: false,
+            new_organization_url: "/organizations/new/".into(),
+            settings_url: "/settings/".into(),
+            has_selected_organization: false,
+            selected_organization_name: String::new(),
+            selected_organization_slug: String::new(),
+            selected_organization_url: String::new(),
+            sandboxes: Vec::new(),
+            recent_sandboxes: Vec::new(),
+            sandbox_rail_available: false,
+            sandbox_rail_loading: false,
+            sandbox_total: 0,
+            sandbox_running: 0,
+            sandbox_stopped: 0,
+            sandbox_attention: 0,
+            provisioned_cpu_millicores: 0,
+            provisioned_memory_mb: 0,
+            provisioned_disk_gb: 0,
+        };
         let terminal_page = crate::view::TerminalPageView {
             account_id: "account".into(),
             organization_id: organization.id.clone(),
@@ -3378,6 +3403,7 @@ mod tests {
             error: String::new(),
         };
         crate::templates::TerminalTemplate {
+            view: &view,
             organization,
             page: &terminal_page,
             csrf_token: "csrf",

@@ -153,6 +153,12 @@ async function advance(page: Page, ms: number) {
 test("the workspace keeps the terminal between its tab bar and status bar, with alerts and short viewports", async ({ page }) => {
   const state = await transport(page);
   await openFixture(page);
+  // With no tab open, the message fills the one column the bars span.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.locator("[data-terminal-empty]")).toBeVisible();
+  const empty = await page.evaluate(() => [".cw-durable-terminal", ".cw-terminal-tabs-bar", "[data-terminal-empty]",
+    ".cw-workspace-statusbar"].map((selector) => document.querySelector(selector)!.getBoundingClientRect().width));
+  for (const width of empty.slice(1)) expect(Math.abs(width - empty[0]), `${empty}`).toBeLessThanOrEqual(1);
   await page.getByRole("button", { name: "New terminal", exact: true }).click();
   await expect(page.getByRole("tab")).toHaveCount(1);
   await expect.poll(() => state.connections.length).toBe(1);
@@ -171,19 +177,22 @@ test("the workspace keeps the terminal between its tab bar and status bar, with 
         const box = (selector: string) => document.querySelector(selector)!.getBoundingClientRect().toJSON() as DOMRect;
         const main = document.querySelector(".cw-workspace-main")!;
         return { output: box("[data-terminal-root]"), tabs: box(".cw-terminal-tabs-bar"), status: box(".cw-workspace-statusbar"),
+          sidebar: box(".cw-sidebar-slot"),
           horizontal: document.documentElement.scrollWidth - innerWidth, page: document.documentElement.scrollHeight - innerHeight,
           main: main.scrollHeight - main.clientHeight,
           sections: [...main.children].map((node) => ({ name: node.tagName, class: node.className,
             height: Math.round(node.getBoundingClientRect().height) })) };
       });
       const context = `${viewport.width}×${viewport.height}, lifecycle alert ${showAlert ? "visible" : "hidden"}: ${JSON.stringify(layout.sections)}`;
-      // The window never scrolls; the output runs edge to edge from the tab
-      // bar down to the status bar.
+      // The window never scrolls; the output fills the main column beside the
+      // sidebar (under the menu bar below 1024 px) from the tab bar down to the
+      // status bar.
       expect(layout.horizontal, context).toBeLessThanOrEqual(0);
       expect(layout.page, context).toBeLessThanOrEqual(0);
       expect(Math.abs(layout.output.top - layout.tabs.bottom), context).toBeLessThanOrEqual(1);
       expect(Math.abs(layout.output.bottom - layout.status.top), context).toBeLessThanOrEqual(1);
-      expect(Math.abs(layout.output.left), context).toBeLessThanOrEqual(1);
+      expect(Math.abs(layout.output.left - (viewport.width >= 1024 ? layout.sidebar.right : 0)), context).toBeLessThanOrEqual(1);
+      if (viewport.width >= 1024) expect(layout.sidebar.width, context).toBeGreaterThan(0);
       expect(Math.abs(layout.output.right - viewport.width), context).toBeLessThanOrEqual(1);
       expect(layout.status.height, context).toBeLessThan(viewport.width >= 1024 ? 40 : 100);
       if (viewport.height >= 844) expect(layout.main, context).toBeLessThanOrEqual(1);
@@ -244,13 +253,12 @@ test("the header keeps its actions on one line and the selected tab carries the 
       expect(Math.abs(line[0] - line[1]), `${width}: ${line}`).toBeLessThanOrEqual(1);
       expect(centres[0]).toBeGreaterThan(line[0]);
     }
-    // Each control's capitals sit on its centre. Buttons and pills still
-    // carry UI leading here (about 1 px high); the shared primitives' trim
-    // brings that within 0.75 px, and this bound tightens with it.
+    // Each control's capitals sit on its centre: the shared primitives carry
+    // no leading and trim their labels to the capitals.
     const offsets: number[] = [];
     for (const control of [...actions.slice(0, 3), page.locator("[data-sandbox-state]")]) {
       offsets.push(await capitalsOffset(control));
-      expect.soft(Math.abs(offsets.at(-1)!), `${width}: ${await control.textContent()}`).toBeLessThanOrEqual(1.5);
+      expect.soft(Math.abs(offsets.at(-1)!), `${width}: ${await control.textContent()}`).toBeLessThanOrEqual(0.75);
     }
     expect(Math.max(...offsets) - Math.min(...offsets), `${width}: ${offsets}`).toBeLessThanOrEqual(0.5);
     // The selected tab, and only it, carries the bar across its top edge.
@@ -294,6 +302,12 @@ test("the status bar follows the selected terminal's connection", async ({ page 
   await expect(shown).toHaveText("Connected");
   await expect(shown).toHaveAttribute("data-tone", "success");
   expect(await dot()).toBe("rgb(63, 185, 80)");
+  // The dot, centred on the row, sits on the label's capitals at every width.
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    expect(Math.abs(await capitalsOffset(shown)), `${width}`).toBeLessThanOrEqual(0.75);
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
   // Rendered text, as read: the hidden tab's group is not part of it.
   await expect.poll(() => bar.innerText()).toMatch(/^Connected\s+Disconnect\s+Last event\s+just now\s+Auto-delete\s+off(\s+Sandbox ID\s+bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb)?$/);
   await page.clock.pauseAt(new Date(Date.now() + 1000));
@@ -378,6 +392,20 @@ test("tabs answer the keyboard and a double-click like a desktop terminal", asyn
   await expect(page.locator("[data-terminal-message]")).toHaveText("Tab removed from this browser. No terminal stop was requested.");
   expect(state.stops).toBe(0);
   expect(state.launches).toBe(0);
+});
+
+test("the selected tab stays in view when the window narrows", async ({ page }) => {
+  await transport(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openFixture(page);
+  for (let count = 1; count <= 3; count += 1) {
+    await page.getByRole("button", { name: "New terminal", exact: true }).click();
+    await expect(page.getByRole("tab")).toHaveCount(count);
+  }
+  const selected = page.getByRole("tab", { selected: true });
+  await expect(selected).toHaveAccessibleName("Terminal 3");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(selected).toBeInViewport({ ratio: 1 });
 });
 
 test("workspace menus close after an in-place action and stay open behind a dialog", async ({ page }) => {

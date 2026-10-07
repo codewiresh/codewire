@@ -11,36 +11,76 @@
 </head>
 <body class="cw-body cw-terminal-page">
   <!-- Setup progress fixture. Events are synthetic; the browser spec answers this page's event stream. -->
-  <div class="cw-workspace" data-dashboard-app>
-    <header class="cw-workspace-header">
-      <div class="cw-workspace-title"><a class="cw-terminal-back" href="sandboxes.html" aria-label="Back to Sandboxes">←</a><h1>Fixture Sandbox</h1><span class="cw-status cw-status--pill" data-tone="warning">starting</span><span class="cw-workspace-resources">2 vCPU · 8 GiB · 10 GiB</span></div>
-      <div class="cw-workspace-actions">
-        <button class="cw-button cw-button--outline cw-button--small" type="button">Ports</button>
-        <details class="cw-menu">
-          <summary class="cw-button cw-button--outline cw-button--small cw-workspace-more" title="More actions"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-more"/></svg><span class="cw-sr-only">More actions</span></summary>
-          <div class="cw-menu-panel cw-menu-panel--end cw-workspace-menu-panel">
-            <button class="cw-menu-item" type="button" disabled>Resize</button>
-            <p class="cw-row-menu-note">Resize is available when setup finishes.</p>
-            <hr class="cw-menu-separator">
-            <button class="cw-menu-item cw-menu-danger" type="button">Delete</button>
+  <div class="cw-app" data-dashboard-app data-mobile-open="false">
+    <aside class="cw-sidebar-slot">
+      <nav class="cw-sidebar cw-console-sidebar" aria-label="Main navigation">
+        <header class="cw-console-brand-row"><a class="cw-brand cw-console-brand" href="index.html"><img src="../../assets/console-logo.svg" alt=""><span>codewire</span></a><button class="cw-icon-button" type="button" data-sidebar-close aria-label="Collapse navigation"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-sidebar"/></svg></button></header>
+        <div class="cw-console-org-switcher">
+          <details class="cw-menu cw-org-switcher">
+            <summary class="cw-button cw-button--outline cw-button--pill"><span class="cw-org-initial" aria-hidden="true">P</span><span class="cw-org-switcher-label">Personal</span><svg class="cw-icon cw-org-chevron" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-down"/></svg></summary>
+            <section class="cw-menu-panel cw-menu-panel--fill cw-org-menu"><h2 class="cw-menu-heading">Organizations</h2><ul><li><a href="#personal">Personal <span class="cw-menu-meta">owner</span></a></li><li><a href="#new-organization">＋ New Organization</a></li></ul></section>
+          </details>
+        </div>
+        <section class="cw-console-sandboxes" aria-label="Sandboxes">
+          <a class="cw-console-create cw-button cw-button--accent cw-button--pill" href="create-sandbox.html"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg><span>Create Sandbox</span></a>
+          <header class="cw-console-rail-heading">
+            <h2><a href="#sandbox-inventory">View all sandboxes <span aria-hidden="true">→</span></a></h2>
+          </header>
+          <div class="cw-console-rail">
+            <ul class="cw-rail-list">
+              <li><a class="cw-rail-row" href="#quiet-mesa"><span class="cw-rail-dot" data-tone="success" aria-hidden="true"></span><span class="cw-rail-name">quiet-mesa</span><span class="cw-rail-state">eu</span></a></li>
+              <li><a class="cw-rail-row" href="#amber-loop"><span class="cw-rail-dot" data-tone="success" aria-hidden="true"></span><span class="cw-rail-name">amber-loop</span><span class="cw-rail-state">eu</span></a></li>
+              <li><a class="cw-rail-row" href="#dry-harbor"><span class="cw-rail-dot" aria-hidden="true"></span><span class="cw-rail-name">dry-harbor</span><span class="cw-rail-state">us</span></a></li>
+            </ul>
           </div>
-        </details>
-      </div>
-    </header>
-    <main class="cw-workspace-main">
-      <div class="cw-workspace-notices"><p class="cw-alert" role="status">Sandbox creation started.</p></div>
-      <section class="cw-setup-progress" aria-labelledby="setup-progress-title" data-setup-progress data-setup-environment-id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" data-setup-org-slug="fixture-org"><h2 id="setup-progress-title">Setup</h2><p class="cw-setup-progress-status" role="status" data-setup-status>Waiting for setup progress…</p><p class="cw-alert cw-alert--error" role="alert" data-setup-failure hidden></p><ol class="cw-setup-stages" data-setup-stages></ol><noscript><p class="cw-setup-progress-status">Live setup progress needs JavaScript. Reload this page to check setup.</p></noscript></section>
-      <section class="cw-sandbox-terminal cw-durable-terminal" aria-label="Sandbox terminal">
-        <header class="cw-terminal-tabs-bar">
-          <nav aria-label="Terminal tabs"><ul role="tablist" aria-label="Terminal tabs"></ul></nav>
-          <button class="cw-icon-button cw-terminal-new" type="button" disabled aria-label="New terminal" title="New terminal"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg></button>
-        </header>
-        <p class="cw-terminal-empty">Sandbox setup is not complete. Terminal controls will be available when setup completes.</p>
-        <footer class="cw-workspace-statusbar">
-          <dl class="cw-workspace-facts"><div><dt>Last event</dt><dd>just now</dd></div><div><dt>Auto-delete</dt><dd>off</dd></div><div class="cw-workspace-fact-id"><dt class="cw-sr-only">Sandbox ID</dt><dd>bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb</dd></div></dl>
-        </footer>
-      </section>
-    </main>
+        </section>
+        <ul class="cw-console-get-started">
+          <li><a class="cw-nav-link" href="#docs-getting-started">Get Started</a></li>
+        </ul>
+        <ul class="cw-console-footer">
+          <li><a class="cw-nav-link" href="#settings"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-settings"/></svg>Settings</a></li>
+          <li><a class="cw-nav-link" href="#docs"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-book"/></svg>Docs</a></li>
+          <li><form data-sign-out><button class="cw-nav-link" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-right"/></svg>Sign Out</button></form></li>
+        </ul>
+      </nav>
+    </aside>
+    <header class="cw-mobile-bar"><button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-menu"/></svg></button><a class="cw-brand" href="index.html"><img src="../../assets/console-logo.svg" alt=""><span class="cw-sr-only">Codewire</span></a></header>
+    <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
+    <aside class="cw-mobile-drawer"><nav class="cw-sidebar cw-console-sidebar" aria-label="Main navigation">
+      <header class="cw-console-brand-row"><a class="cw-brand cw-console-brand" href="index.html"><img src="../../assets/console-logo.svg" alt=""><span>codewire</span></a><button class="cw-icon-button" type="button" data-sidebar-close aria-label="Collapse navigation"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-sidebar"/></svg></button></header>
+      <ul class="cw-console-footer"><li><a class="cw-nav-link" href="settings-account.html"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-settings"/></svg>Settings</a></li></ul>
+    </nav></aside>
+    <div class="cw-main cw-workspace">
+      <header class="cw-workspace-header">
+        <div class="cw-workspace-title"><a class="cw-terminal-back" href="sandboxes.html" aria-label="Back to Sandboxes">←</a><h1>Fixture Sandbox</h1><span class="cw-status cw-status--pill" data-tone="warning">starting</span><span class="cw-workspace-resources">2 vCPU · 8 GiB · 10 GiB</span></div>
+        <div class="cw-workspace-actions">
+          <button class="cw-button cw-button--outline cw-button--small" type="button">Ports</button>
+          <details class="cw-menu">
+            <summary class="cw-button cw-button--outline cw-button--small cw-workspace-more" title="More actions"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-more"/></svg><span class="cw-sr-only">More actions</span></summary>
+            <div class="cw-menu-panel cw-menu-panel--end cw-workspace-menu-panel">
+              <button class="cw-menu-item" type="button" disabled>Resize</button>
+              <p class="cw-row-menu-note">Resize is available when setup finishes.</p>
+              <hr class="cw-menu-separator">
+              <button class="cw-menu-item cw-menu-danger" type="button">Delete</button>
+            </div>
+          </details>
+        </div>
+      </header>
+      <main class="cw-workspace-main">
+        <div class="cw-workspace-notices"><p class="cw-alert" role="status">Sandbox creation started.</p></div>
+        <section class="cw-setup-progress" aria-labelledby="setup-progress-title" data-setup-progress data-setup-environment-id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" data-setup-org-slug="fixture-org"><h2 id="setup-progress-title">Setup</h2><p class="cw-setup-progress-status" role="status" data-setup-status>Waiting for setup progress…</p><p class="cw-alert cw-alert--error" role="alert" data-setup-failure hidden></p><ol class="cw-setup-stages" data-setup-stages></ol><noscript><p class="cw-setup-progress-status">Live setup progress needs JavaScript. Reload this page to check setup.</p></noscript></section>
+        <section class="cw-sandbox-terminal cw-durable-terminal" aria-label="Sandbox terminal">
+          <header class="cw-terminal-tabs-bar">
+            <nav aria-label="Terminal tabs"><ul role="tablist" aria-label="Terminal tabs"></ul></nav>
+            <button class="cw-icon-button cw-terminal-new" type="button" disabled aria-label="New terminal" title="New terminal"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg></button>
+          </header>
+          <p class="cw-terminal-empty">Sandbox setup is not complete. Terminal controls will be available when setup completes.</p>
+          <footer class="cw-workspace-statusbar">
+            <dl class="cw-workspace-facts"><div><dt>Last event</dt><dd>just now</dd></div><div><dt>Auto-delete</dt><dd>off</dd></div><div class="cw-workspace-fact-id"><dt class="cw-sr-only">Sandbox ID</dt><dd>bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb</dd></div></dl>
+          </footer>
+        </section>
+      </main>
+    </div>
   </div>
 </body>
 </html>

@@ -21,79 +21,119 @@
 </head>
 <body class="cw-body cw-terminal-page" data-durable-terminal-page>
   <!-- Browser control fixture. Responses are synthetic; this page does not launch a real shell. -->
-  <div class="cw-workspace" data-dashboard-app data-sandbox-observation data-sandbox-environment-id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb">
-    <header class="cw-workspace-header">
-      <div class="cw-workspace-title"><a class="cw-terminal-back" href="sandboxes.html?search=quiet-mesa&amp;state=running" aria-label="Back to Sandboxes">←</a><h1>Fixture Sandbox</h1><span class="cw-status cw-status--pill" data-sandbox-state data-tone="success">running</span><span class="cw-workspace-resources" data-sandbox-resources>1 vCPU · 2 GiB · 10 GiB</span></div>
-      <div class="cw-workspace-actions" data-sandbox-actions>
-        <noscript><a class="cw-button cw-button--outline cw-button--small" href="/fixture-org/?ports=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb">Manage Ports</a></noscript>
-        <button class="cw-button cw-button--outline cw-button--small" type="button" data-dialog-open="sandbox-ports" data-sandbox-action="ports">Ports</button>
-        <a class="cw-button cw-button--outline cw-button--small" href="vscode://vscode-remote/ssh-remote+cw-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/workspace" data-sandbox-action="connect">Open in VS Code</a>
-        <button class="cw-button cw-button--outline cw-button--small" type="button" data-dialog-open="sandbox-stop" data-sandbox-action="stop">Stop</button>
-        <form method="post" action="/fixture-org/_actions/sandboxes/start"><input type="hidden" name="_csrf" value="synthetic-fixture-csrf"><input type="hidden" name="return_to" value="detail"><input type="hidden" name="environment_id" value="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"><input type="hidden" name="list_search" value="quiet-mesa"><input type="hidden" name="list_state" value="running"><button class="cw-button cw-button--outline cw-button--small" type="submit" data-sandbox-action="start" hidden>Start</button></form>
-        <details class="cw-menu" data-sandbox-menu data-menu-close-on-action>
-          <summary class="cw-button cw-button--outline cw-button--small cw-workspace-more" title="More actions"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-more"/></svg><span class="cw-sr-only">More actions</span></summary>
-          <div class="cw-menu-panel cw-menu-panel--end cw-workspace-menu-panel">
-            <section class="cw-workspace-details" aria-labelledby="sandbox-details-title"><h2 class="cw-menu-heading" id="sandbox-details-title">Sandbox</h2><dl><div><dt>Preset</dt><dd>Custom</dd></div><div><dt>Resources</dt><dd data-sandbox-resources>1 vCPU · 2 GiB · 10 GiB</dd></div><div><dt>Created</dt><dd>just now</dd></div><div><dt>Running time</dt><dd>6m</dd></div><div><dt>Rate</dt><dd>$0.02/h</dd></div><div><dt>ID</dt><dd>bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb</dd></div></dl></section>
-            <hr class="cw-menu-separator">
-            <details class="cw-disclosure cw-menu-resize" data-sandbox-resize><summary>Resize</summary><form method="post" action="/fixture-org/_actions/sandboxes/resize/plan"><input type="hidden" name="_csrf" value="synthetic-fixture-csrf"><input type="hidden" name="environment_id" value="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"><div class="cw-field"><label class="cw-label" for="resize-fallback-cpu">CPU</label><select class="cw-select" id="resize-fallback-cpu" name="cpu_millicores" required><option value="1000" selected>1 vCPU</option><option value="2000">2 vCPU</option><option value="4000">4 vCPU</option><option value="8000">8 vCPU</option></select></div><div class="cw-field"><label class="cw-label" for="resize-fallback-memory">Memory</label><select class="cw-select" id="resize-fallback-memory" name="memory_mb" required><option value="2048" selected>2 GiB</option><option value="4096">4 GiB</option><option value="8192">8 GiB</option><option value="16384">16 GiB</option></select></div><div class="cw-field"><label class="cw-label" for="resize-fallback-disk">Disk (GiB)</label><input class="cw-input" id="resize-fallback-disk" name="disk_gb" type="number" min="1" max="16384" value="10" required></div><button class="cw-button cw-button--small" type="submit" data-sandbox-action="resize" data-sandbox-confirm>Review resize</button></form></details>
-            <p class="cw-row-menu-note" id="sandbox-resize-setup-note" data-resize-setup-note hidden>Resize is available when setup finishes.</p>
-            <button class="cw-menu-item" type="button" data-terminal-readiness-refresh>Refresh sandbox status</button>
-            <hr class="cw-menu-separator">
-            <button class="cw-menu-item cw-menu-danger" type="button" aria-haspopup="dialog" data-dialog-open="sandbox-delete" data-sandbox-action="delete">Delete</button>
+  <div class="cw-app" data-dashboard-app data-mobile-open="false">
+    <aside class="cw-sidebar-slot">
+      <nav class="cw-sidebar cw-console-sidebar" aria-label="Main navigation">
+        <header class="cw-console-brand-row"><a class="cw-brand cw-console-brand" href="index.html"><img src="../../assets/console-logo.svg" alt=""><span>codewire</span></a><button class="cw-icon-button" type="button" data-sidebar-close aria-label="Collapse navigation"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-sidebar"/></svg></button></header>
+        <div class="cw-console-org-switcher">
+          <details class="cw-menu cw-org-switcher">
+            <summary class="cw-button cw-button--outline cw-button--pill"><span class="cw-org-initial" aria-hidden="true">P</span><span class="cw-org-switcher-label">Personal</span><svg class="cw-icon cw-org-chevron" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-down"/></svg></summary>
+            <section class="cw-menu-panel cw-menu-panel--fill cw-org-menu"><h2 class="cw-menu-heading">Organizations</h2><ul><li><a href="#personal">Personal <span class="cw-menu-meta">owner</span></a></li><li><a href="#new-organization">＋ New Organization</a></li></ul></section>
+          </details>
+        </div>
+        <section class="cw-console-sandboxes" aria-label="Sandboxes">
+          <a class="cw-console-create cw-button cw-button--accent cw-button--pill" href="create-sandbox.html"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg><span>Create Sandbox</span></a>
+          <header class="cw-console-rail-heading">
+            <h2><a href="#sandbox-inventory">View all sandboxes <span aria-hidden="true">→</span></a></h2>
+          </header>
+          <div class="cw-console-rail">
+            <ul class="cw-rail-list">
+              <li><a class="cw-rail-row" href="#quiet-mesa"><span class="cw-rail-dot" data-tone="success" aria-hidden="true"></span><span class="cw-rail-name">quiet-mesa</span><span class="cw-rail-state">eu</span></a></li>
+              <li><a class="cw-rail-row" href="#amber-loop"><span class="cw-rail-dot" data-tone="success" aria-hidden="true"></span><span class="cw-rail-name">amber-loop</span><span class="cw-rail-state">eu</span></a></li>
+              <li><a class="cw-rail-row" href="#dry-harbor"><span class="cw-rail-dot" aria-hidden="true"></span><span class="cw-rail-name">dry-harbor</span><span class="cw-rail-state">us</span></a></li>
+            </ul>
           </div>
-        </details>
-      </div>
-    </header>
-    <main class="cw-workspace-main">
-      <div class="cw-workspace-notices">
-        <p class="cw-alert" role="status" id="fixture-lifecycle-message" hidden>Sandbox start accepted. Waiting for its observed state.</p>
-        <p class="cw-alert" data-sandbox-observation-status role="status" hidden></p>
-        <p class="cw-field-help" data-sandbox-deleted hidden><a class="cw-link-button" href="sandboxes.html?search=quiet-mesa&amp;state=running">Back to Sandboxes</a></p>
-        <a class="cw-field-help" href="terminal-tabs.html?list_search=quiet-mesa&amp;list_state=running" data-sandbox-observation-reload hidden>Reload Sandbox status</a>
-        <section class="cw-alert cw-alert--warning cw-workspace-attention" aria-labelledby="sandbox-attention-title"><h2 id="sandbox-attention-title">Needs attention</h2><ul class="cw-credential-attention"><li><a class="cw-link-button" href="settings-credentials.html">Codex needs Reconnect</a></li></ul></section>
-      </div>
-      <dialog class="cw-dialog" data-dialog id="sandbox-stop" aria-labelledby="sandbox-stop-title"><header class="cw-dialog-header"><h2 id="sandbox-stop-title">Stop Fixture Sandbox?</h2></header><p class="cw-dialog-body">Running processes and terminal sessions will end. Workspace files are kept so you can start the Sandbox again. Stopping does not cancel automatic deletion. Starting again reschedules the deadline when a lifetime is configured. Protected Sandboxes are exempt from automatic deletion.</p><form class="cw-dialog-actions" method="post" action="/fixture-org/_actions/sandboxes/stop"><input type="hidden" name="_csrf" value="synthetic-fixture-csrf"><input type="hidden" name="environment_id" value="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"><input type="hidden" name="return_to" value="detail"><input type="hidden" name="list_search" value="quiet-mesa"><input type="hidden" name="list_state" value="running"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit" data-sandbox-action="stop" data-sandbox-confirm>Stop Sandbox</button></form></dialog>
-      <dialog class="cw-dialog" data-dialog id="sandbox-delete" aria-labelledby="sandbox-delete-title"><header class="cw-dialog-header"><h2 id="sandbox-delete-title">Delete Fixture Sandbox?</h2></header><p class="cw-dialog-body">This permanently deletes the Sandbox and its workspace files. This cannot be undone.</p><form class="cw-dialog-actions" method="post" action="/fixture-org/_actions/sandboxes/delete"><input type="hidden" name="_csrf" value="synthetic-fixture-csrf"><input type="hidden" name="environment_id" value="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"><input type="hidden" name="return_to" value="detail"><input type="hidden" name="list_search" value="quiet-mesa"><input type="hidden" name="list_state" value="running"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button cw-danger-button" type="submit" data-sandbox-action="delete" data-sandbox-confirm>Delete Sandbox</button></form></dialog>
-      <dialog class="cw-dialog cw-port-dialog" data-dialog id="sandbox-ports" aria-labelledby="sandbox-ports-title" hx-get="terminal-ports.html" hx-trigger="codewire:dialog-open" hx-request='{"timeout":30000}' hx-target="#sandbox-ports-content">
-        <header class="cw-dialog-header"><h2 id="sandbox-ports-title">Ports · Fixture Sandbox</h2></header>
-        <p class="cw-dialog-body cw-alert cw-alert--error" data-dialog-load-error role="alert" hidden>The ports could not be refreshed. Reopen this dialog to check the current state before trying again.</p>
-        <div class="cw-dialog-body" id="sandbox-ports-content"><p>Loading preview ports…</p></div>
-        <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Done</button></footer>
-      </dialog>
-      <section class="cw-sandbox-terminal cw-durable-terminal" aria-label="Sandbox terminal" data-durable-terminal data-terminal-readiness data-terminal-org-id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" data-terminal-environment-id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" data-terminal-org-slug="fixture-org" data-terminal-running="true">
-        <input type="hidden" name="_csrf" value="synthetic-fixture-csrf">
-        <header class="cw-terminal-tabs-bar">
-          <nav aria-label="Terminal tabs"><ul role="tablist" aria-label="Terminal tabs" data-terminal-tabs></ul></nav>
-          <button class="cw-icon-button cw-terminal-new" type="button" data-terminal-new disabled aria-label="New terminal" title="New terminal"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg></button>
-          <details class="cw-menu cw-terminal-menu" data-terminal-menu data-menu-close-on-action>
-            <summary class="cw-icon-button" title="Terminal actions"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-down"/></svg><span class="cw-sr-only">Terminal actions</span></summary>
-            <div class="cw-menu-panel cw-menu-panel--end cw-terminal-menu-panel">
-              <button class="cw-menu-item" type="button" aria-haspopup="dialog" data-terminal-rename disabled aria-keyshortcuts="F2">Rename terminal<span class="cw-menu-meta" aria-hidden="true">F2</span></button>
-              <div class="cw-terminal-tab-actions" data-terminal-tab-actions></div>
-              <form class="cw-menu-section cw-terminal-existing" data-terminal-existing-form><label for="existing-terminal">Existing terminal</label><select class="cw-select" id="existing-terminal" data-terminal-existing disabled><option value="">Choose an existing terminal</option></select><button class="cw-button cw-button--outline cw-button--small" type="submit" disabled>Open terminal</button></form>
-              <button class="cw-menu-item" type="button" data-terminal-refresh>Refresh sessions</button>
+        </section>
+        <ul class="cw-console-get-started">
+          <li><a class="cw-nav-link" href="#docs-getting-started">Get Started</a></li>
+        </ul>
+        <ul class="cw-console-footer">
+          <li><a class="cw-nav-link" href="#settings"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-settings"/></svg>Settings</a></li>
+          <li><a class="cw-nav-link" href="#docs"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-book"/></svg>Docs</a></li>
+          <li><form data-sign-out><button class="cw-nav-link" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-right"/></svg>Sign Out</button></form></li>
+        </ul>
+      </nav>
+    </aside>
+    <header class="cw-mobile-bar"><button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-menu"/></svg></button><a class="cw-brand" href="index.html"><img src="../../assets/console-logo.svg" alt=""><span class="cw-sr-only">Codewire</span></a></header>
+    <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
+    <aside class="cw-mobile-drawer"><nav class="cw-sidebar cw-console-sidebar" aria-label="Main navigation">
+      <header class="cw-console-brand-row"><a class="cw-brand cw-console-brand" href="index.html"><img src="../../assets/console-logo.svg" alt=""><span>codewire</span></a><button class="cw-icon-button" type="button" data-sidebar-close aria-label="Collapse navigation"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-sidebar"/></svg></button></header>
+      <ul class="cw-console-footer"><li><a class="cw-nav-link" href="settings-account.html"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-settings"/></svg>Settings</a></li></ul>
+    </nav></aside>
+    <div class="cw-main cw-workspace" data-sandbox-observation data-sandbox-environment-id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb">
+      <header class="cw-workspace-header">
+        <div class="cw-workspace-title"><a class="cw-terminal-back" href="sandboxes.html?search=quiet-mesa&amp;state=running" aria-label="Back to Sandboxes">←</a><h1>Fixture Sandbox</h1><span class="cw-status cw-status--pill" data-sandbox-state data-tone="success">running</span><span class="cw-workspace-resources" data-sandbox-resources>1 vCPU · 2 GiB · 10 GiB</span></div>
+        <div class="cw-workspace-actions" data-sandbox-actions>
+          <noscript><a class="cw-button cw-button--outline cw-button--small" href="/fixture-org/?ports=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb">Manage Ports</a></noscript>
+          <button class="cw-button cw-button--outline cw-button--small" type="button" data-dialog-open="sandbox-ports" data-sandbox-action="ports">Ports</button>
+          <a class="cw-button cw-button--outline cw-button--small" href="vscode://vscode-remote/ssh-remote+cw-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/workspace" data-sandbox-action="connect">Open in VS Code</a>
+          <button class="cw-button cw-button--outline cw-button--small" type="button" data-dialog-open="sandbox-stop" data-sandbox-action="stop">Stop</button>
+          <form method="post" action="/fixture-org/_actions/sandboxes/start"><input type="hidden" name="_csrf" value="synthetic-fixture-csrf"><input type="hidden" name="return_to" value="detail"><input type="hidden" name="environment_id" value="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"><input type="hidden" name="list_search" value="quiet-mesa"><input type="hidden" name="list_state" value="running"><button class="cw-button cw-button--outline cw-button--small" type="submit" data-sandbox-action="start" hidden>Start</button></form>
+          <details class="cw-menu" data-sandbox-menu data-menu-close-on-action>
+            <summary class="cw-button cw-button--outline cw-button--small cw-workspace-more" title="More actions"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-more"/></svg><span class="cw-sr-only">More actions</span></summary>
+            <div class="cw-menu-panel cw-menu-panel--end cw-workspace-menu-panel">
+              <section class="cw-workspace-details" aria-labelledby="sandbox-details-title"><h2 class="cw-menu-heading" id="sandbox-details-title">Sandbox</h2><dl><div><dt>Preset</dt><dd>Custom</dd></div><div><dt>Resources</dt><dd data-sandbox-resources>1 vCPU · 2 GiB · 10 GiB</dd></div><div><dt>Created</dt><dd>just now</dd></div><div><dt>Running time</dt><dd>6m</dd></div><div><dt>Rate</dt><dd>$0.02/h</dd></div><div><dt>ID</dt><dd>bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb</dd></div></dl></section>
+              <hr class="cw-menu-separator">
+              <details class="cw-disclosure cw-menu-resize" data-sandbox-resize><summary>Resize</summary><form method="post" action="/fixture-org/_actions/sandboxes/resize/plan"><input type="hidden" name="_csrf" value="synthetic-fixture-csrf"><input type="hidden" name="environment_id" value="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"><div class="cw-field"><label class="cw-label" for="resize-fallback-cpu">CPU</label><select class="cw-select" id="resize-fallback-cpu" name="cpu_millicores" required><option value="1000" selected>1 vCPU</option><option value="2000">2 vCPU</option><option value="4000">4 vCPU</option><option value="8000">8 vCPU</option></select></div><div class="cw-field"><label class="cw-label" for="resize-fallback-memory">Memory</label><select class="cw-select" id="resize-fallback-memory" name="memory_mb" required><option value="2048" selected>2 GiB</option><option value="4096">4 GiB</option><option value="8192">8 GiB</option><option value="16384">16 GiB</option></select></div><div class="cw-field"><label class="cw-label" for="resize-fallback-disk">Disk (GiB)</label><input class="cw-input" id="resize-fallback-disk" name="disk_gb" type="number" min="1" max="16384" value="10" required></div><button class="cw-button cw-button--small" type="submit" data-sandbox-action="resize" data-sandbox-confirm>Review resize</button></form></details>
+              <p class="cw-row-menu-note" id="sandbox-resize-setup-note" data-resize-setup-note hidden>Resize is available when setup finishes.</p>
+              <button class="cw-menu-item" type="button" data-terminal-readiness-refresh>Refresh sandbox status</button>
+              <hr class="cw-menu-separator">
+              <button class="cw-menu-item cw-menu-danger" type="button" aria-haspopup="dialog" data-dialog-open="sandbox-delete" data-sandbox-action="delete">Delete</button>
             </div>
           </details>
-        </header>
-        <p class="cw-terminal-limit" id="terminal-limit" data-terminal-limit hidden>Up to 8 terminals can be open at once. Close one to open another.</p>
-        <p class="cw-terminal-session-message" role="status" data-terminal-message>Loading terminal sessions…</p><a class="cw-terminal-reload" href="terminal-tabs.html?list_search=quiet-mesa&amp;list_state=running" data-terminal-reload hidden>Reload page</a>
-        <p class="cw-terminal-empty" data-terminal-empty>Choose New terminal to start a shell. Leaving this page disconnects the browser; the shell keeps running until you close it or stop the Sandbox.</p>
-        <dialog class="cw-dialog" data-dialog data-terminal-rename-dialog id="rename-terminal" aria-labelledby="rename-terminal-title" aria-describedby="rename-terminal-description">
-          <header class="cw-dialog-header"><h2 id="rename-terminal-title">Rename terminal</h2></header>
-          <form method="dialog" data-terminal-rename-form>
-            <section class="cw-dialog-body" aria-label="Terminal naming"><label class="cw-label" for="terminal-name">Terminal name</label><input class="cw-input" id="terminal-name" data-terminal-name maxlength="64" required autocomplete="off" spellcheck="false"><p class="cw-field-help" id="rename-terminal-description">Saved in this browser tab. Renaming does not change or restart the shell. Do not put secrets in the name.</p></section>
-            <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close>Cancel</button><button class="cw-button" type="submit">Save name</button></footer>
-          </form>
+        </div>
+      </header>
+      <main class="cw-workspace-main">
+        <div class="cw-workspace-notices">
+          <p class="cw-alert" role="status" id="fixture-lifecycle-message" hidden>Sandbox start accepted. Waiting for its observed state.</p>
+          <p class="cw-alert" data-sandbox-observation-status role="status" hidden></p>
+          <p class="cw-field-help" data-sandbox-deleted hidden><a class="cw-link-button" href="sandboxes.html?search=quiet-mesa&amp;state=running">Back to Sandboxes</a></p>
+          <a class="cw-field-help" href="terminal-tabs.html?list_search=quiet-mesa&amp;list_state=running" data-sandbox-observation-reload hidden>Reload Sandbox status</a>
+          <section class="cw-alert cw-alert--warning cw-workspace-attention" aria-labelledby="sandbox-attention-title"><h2 id="sandbox-attention-title">Needs attention</h2><ul class="cw-credential-attention"><li><a class="cw-link-button" href="settings-credentials.html">Codex needs Reconnect</a></li></ul></section>
+        </div>
+        <dialog class="cw-dialog" data-dialog id="sandbox-stop" aria-labelledby="sandbox-stop-title"><header class="cw-dialog-header"><h2 id="sandbox-stop-title">Stop Fixture Sandbox?</h2></header><p class="cw-dialog-body">Running processes and terminal sessions will end. Workspace files are kept so you can start the Sandbox again. Stopping does not cancel automatic deletion. Starting again reschedules the deadline when a lifetime is configured. Protected Sandboxes are exempt from automatic deletion.</p><form class="cw-dialog-actions" method="post" action="/fixture-org/_actions/sandboxes/stop"><input type="hidden" name="_csrf" value="synthetic-fixture-csrf"><input type="hidden" name="environment_id" value="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"><input type="hidden" name="return_to" value="detail"><input type="hidden" name="list_search" value="quiet-mesa"><input type="hidden" name="list_state" value="running"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit" data-sandbox-action="stop" data-sandbox-confirm>Stop Sandbox</button></form></dialog>
+        <dialog class="cw-dialog" data-dialog id="sandbox-delete" aria-labelledby="sandbox-delete-title"><header class="cw-dialog-header"><h2 id="sandbox-delete-title">Delete Fixture Sandbox?</h2></header><p class="cw-dialog-body">This permanently deletes the Sandbox and its workspace files. This cannot be undone.</p><form class="cw-dialog-actions" method="post" action="/fixture-org/_actions/sandboxes/delete"><input type="hidden" name="_csrf" value="synthetic-fixture-csrf"><input type="hidden" name="environment_id" value="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"><input type="hidden" name="return_to" value="detail"><input type="hidden" name="list_search" value="quiet-mesa"><input type="hidden" name="list_state" value="running"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button cw-danger-button" type="submit" data-sandbox-action="delete" data-sandbox-confirm>Delete Sandbox</button></form></dialog>
+        <dialog class="cw-dialog cw-port-dialog" data-dialog id="sandbox-ports" aria-labelledby="sandbox-ports-title" hx-get="terminal-ports.html" hx-trigger="codewire:dialog-open" hx-request='{"timeout":30000}' hx-target="#sandbox-ports-content">
+          <header class="cw-dialog-header"><h2 id="sandbox-ports-title">Ports · Fixture Sandbox</h2></header>
+          <p class="cw-dialog-body cw-alert cw-alert--error" data-dialog-load-error role="alert" hidden>The ports could not be refreshed. Reopen this dialog to check the current state before trying again.</p>
+          <div class="cw-dialog-body" id="sandbox-ports-content"><p>Loading preview ports…</p></div>
+          <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Done</button></footer>
         </dialog>
-        <div class="cw-terminal-panels" data-terminal-panels hidden></div>
-        <template data-terminal-tab-template><li class="cw-terminal-tab-item" role="presentation" data-terminal-tab-item><button class="cw-terminal-tab" type="button" role="tab" aria-selected="false" tabindex="-1" aria-keyshortcuts="F2 Delete" data-terminal-tab><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-prompt"/></svg><span class="cw-terminal-tab-label" data-terminal-tab-label></span></button><button class="cw-terminal-tab-close" type="button" tabindex="-1" title="Close terminal" data-terminal-close-session><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-close"/></svg></button><button class="cw-terminal-tab-close" type="button" tabindex="-1" title="Remove tab" data-terminal-remove-tab hidden><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-close"/></svg></button></li><section class="cw-terminal-tab-panel" data-terminal-tab-panel role="tabpanel"><h2 class="cw-sr-only">Terminal</h2><p class="cw-terminal-notice" data-terminal-history-gap role="status" hidden>Older terminal output is unavailable. Showing recent history.</p><div class="cw-terminal-panel cw-terminal-panel--fullscreen" data-terminal-root aria-label="Interactive terminal"></div></section><div class="cw-terminal-session-status" data-terminal-session-status><p class="cw-terminal-connection" data-terminal-connection role="status" data-tone="warning">Connecting…</p><button class="cw-link-button" type="button" data-terminal-toggle>Disconnect</button><p class="cw-terminal-copy-status" data-terminal-copy-status role="status"></p></div><div class="cw-terminal-tab-action-group" data-terminal-tab-action-group><button class="cw-menu-item" type="button" data-terminal-copy disabled>Copy selection</button><button class="cw-menu-item" type="button" data-terminal-replay>Replay recent output</button></div></template>
-        <dialog class="cw-dialog" data-dialog data-terminal-close-dialog aria-labelledby="close-terminal-title"><header class="cw-dialog-header"><h2 id="close-terminal-title">Close terminal?</h2></header><p class="cw-dialog-body">This stops this terminal’s shell and its processes. Leaving the page or disconnecting keeps the shell running.</p><footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-terminal-cancel-close>Cancel</button><button class="cw-button cw-danger-button" type="button" data-terminal-confirm-close>Close terminal</button></footer></dialog>
-        <footer class="cw-workspace-statusbar">
-          <div class="cw-terminal-statuses" data-terminal-statuses></div>
-          <dl class="cw-workspace-facts"><div><dt>Last event</dt><dd data-sandbox-last-event>just now</dd></div><div><dt>Auto-delete</dt><dd data-sandbox-lifetime>off</dd></div><div class="cw-workspace-fact-id"><dt class="cw-sr-only">Sandbox ID</dt><dd>bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb</dd></div></dl>
-        </footer>
-      </section>
-    </main>
+        <section class="cw-sandbox-terminal cw-durable-terminal" aria-label="Sandbox terminal" data-durable-terminal data-terminal-readiness data-terminal-org-id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" data-terminal-environment-id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" data-terminal-org-slug="fixture-org" data-terminal-running="true">
+          <input type="hidden" name="_csrf" value="synthetic-fixture-csrf">
+          <header class="cw-terminal-tabs-bar">
+            <nav aria-label="Terminal tabs"><ul role="tablist" aria-label="Terminal tabs" data-terminal-tabs></ul></nav>
+            <button class="cw-icon-button cw-terminal-new" type="button" data-terminal-new disabled aria-label="New terminal" title="New terminal"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg></button>
+            <details class="cw-menu cw-terminal-menu" data-terminal-menu data-menu-close-on-action>
+              <summary class="cw-icon-button" title="Terminal actions"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-down"/></svg><span class="cw-sr-only">Terminal actions</span></summary>
+              <div class="cw-menu-panel cw-menu-panel--end cw-terminal-menu-panel">
+                <button class="cw-menu-item" type="button" aria-haspopup="dialog" data-terminal-rename disabled aria-keyshortcuts="F2">Rename terminal<span class="cw-menu-meta" aria-hidden="true">F2</span></button>
+                <div class="cw-terminal-tab-actions" data-terminal-tab-actions></div>
+                <form class="cw-menu-section cw-terminal-existing" data-terminal-existing-form><label for="existing-terminal">Existing terminal</label><select class="cw-select" id="existing-terminal" data-terminal-existing disabled><option value="">Choose an existing terminal</option></select><button class="cw-button cw-button--outline cw-button--small" type="submit" disabled>Open terminal</button></form>
+                <button class="cw-menu-item" type="button" data-terminal-refresh>Refresh sessions</button>
+              </div>
+            </details>
+          </header>
+          <p class="cw-terminal-limit" id="terminal-limit" data-terminal-limit hidden>Up to 8 terminals can be open at once. Close one to open another.</p>
+          <p class="cw-terminal-session-message" role="status" data-terminal-message>Loading terminal sessions…</p><a class="cw-terminal-reload" href="terminal-tabs.html?list_search=quiet-mesa&amp;list_state=running" data-terminal-reload hidden>Reload page</a>
+          <p class="cw-terminal-empty" data-terminal-empty>Choose New terminal to start a shell. Leaving this page disconnects the browser; the shell keeps running until you close it or stop the Sandbox.</p>
+          <dialog class="cw-dialog" data-dialog data-terminal-rename-dialog id="rename-terminal" aria-labelledby="rename-terminal-title" aria-describedby="rename-terminal-description">
+            <header class="cw-dialog-header"><h2 id="rename-terminal-title">Rename terminal</h2></header>
+            <form method="dialog" data-terminal-rename-form>
+              <section class="cw-dialog-body" aria-label="Terminal naming"><label class="cw-label" for="terminal-name">Terminal name</label><input class="cw-input" id="terminal-name" data-terminal-name maxlength="64" required autocomplete="off" spellcheck="false"><p class="cw-field-help" id="rename-terminal-description">Saved in this browser tab. Renaming does not change or restart the shell. Do not put secrets in the name.</p></section>
+              <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close>Cancel</button><button class="cw-button" type="submit">Save name</button></footer>
+            </form>
+          </dialog>
+          <div class="cw-terminal-panels" data-terminal-panels hidden></div>
+          <template data-terminal-tab-template><li class="cw-terminal-tab-item" role="presentation" data-terminal-tab-item><button class="cw-terminal-tab" type="button" role="tab" aria-selected="false" tabindex="-1" aria-keyshortcuts="F2 Delete" data-terminal-tab><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-prompt"/></svg><span class="cw-terminal-tab-label" data-terminal-tab-label></span></button><button class="cw-terminal-tab-close" type="button" tabindex="-1" title="Close terminal" data-terminal-close-session><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-close"/></svg></button><button class="cw-terminal-tab-close" type="button" tabindex="-1" title="Remove tab" data-terminal-remove-tab hidden><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-close"/></svg></button></li><section class="cw-terminal-tab-panel" data-terminal-tab-panel role="tabpanel"><h2 class="cw-sr-only">Terminal</h2><p class="cw-terminal-notice" data-terminal-history-gap role="status" hidden>Older terminal output is unavailable. Showing recent history.</p><div class="cw-terminal-panel cw-terminal-panel--fullscreen" data-terminal-root aria-label="Interactive terminal"></div></section><div class="cw-terminal-session-status" data-terminal-session-status><p class="cw-terminal-connection" data-terminal-connection role="status" data-tone="warning"><span data-terminal-connection-label>Connecting…</span></p><button class="cw-link-button" type="button" data-terminal-toggle>Disconnect</button><p class="cw-terminal-copy-status" data-terminal-copy-status role="status"></p></div><div class="cw-terminal-tab-action-group" data-terminal-tab-action-group><button class="cw-menu-item" type="button" data-terminal-copy disabled>Copy selection</button><button class="cw-menu-item" type="button" data-terminal-replay>Replay recent output</button></div></template>
+          <dialog class="cw-dialog" data-dialog data-terminal-close-dialog aria-labelledby="close-terminal-title"><header class="cw-dialog-header"><h2 id="close-terminal-title">Close terminal?</h2></header><p class="cw-dialog-body">This stops this terminal’s shell and its processes. Leaving the page or disconnecting keeps the shell running.</p><footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-terminal-cancel-close>Cancel</button><button class="cw-button cw-danger-button" type="button" data-terminal-confirm-close>Close terminal</button></footer></dialog>
+          <footer class="cw-workspace-statusbar">
+            <div class="cw-terminal-statuses" data-terminal-statuses></div>
+            <dl class="cw-workspace-facts"><div><dt>Last event</dt><dd data-sandbox-last-event>just now</dd></div><div><dt>Auto-delete</dt><dd data-sandbox-lifetime>off</dd></div><div class="cw-workspace-fact-id"><dt class="cw-sr-only">Sandbox ID</dt><dd>bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb</dd></div></dl>
+          </footer>
+        </section>
+      </main>
+    </div>
   </div>
 </body>
 </html>

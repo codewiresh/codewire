@@ -1,7 +1,8 @@
-/* The Sandbox workspace: one window like a desktop terminal. A header with the
-   Sandbox and its actions, a tab bar with one tab per terminal session, the
-   terminal itself, and a status bar. The header, tab bar and status bar keep
-   their own height; the terminal takes the rest and refits as it changes. */
+/* The Sandbox workspace fills the console's main column beside the sidebar,
+   like a desktop terminal window: a header with the Sandbox and its actions,
+   a tab bar with one tab per terminal session, the terminal itself, and a
+   status bar. The header, tab bar and status bar keep their own height; the
+   terminal takes the rest and refits as it changes. */
 .cw-terminal-page { overflow: hidden; background: var(--bg-base); }
 .cw-workspace { display: grid; height: 100dvh; min-width: 0; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; background: var(--bg-base); }
 
@@ -41,7 +42,10 @@
 .cw-durable-terminal > .cw-terminal-limit { grid-row: 2; }
 .cw-durable-terminal > .cw-terminal-session-message { grid-row: 3; }
 .cw-durable-terminal > .cw-terminal-reload { grid-row: 4; }
-.cw-durable-terminal > .cw-terminal-empty, .cw-durable-terminal > .cw-terminal-panels { grid-row: 5; }
+.cw-durable-terminal > .cw-terminal-empty, .cw-durable-terminal > .cw-terminal-panels { grid-row: 5; grid-column: 1; }
+/* With no tabs open the output container is shown but empty; the message
+   shares its cell and stays above it. */
+.cw-durable-terminal > .cw-terminal-empty { z-index: 1; }
 .cw-durable-terminal > .cw-workspace-statusbar { grid-row: 6; }
 
 /* Tabs scroll inside the bar, never the page. New terminal stays in reach
@@ -101,6 +105,8 @@
 .cw-terminal-connection[data-tone="warning"]::before { background: var(--warning); }
 .cw-terminal-connection[data-tone="danger"]::before { background: var(--destructive); }
 .cw-terminal-connection[data-tone="danger"] { color: var(--destructive); }
+/* The dot centres on the label's capitals, as a button's icon does. */
+@supports (text-box: trim-both cap alphabetic) { .cw-terminal-connection > span { text-box: trim-both cap alphabetic; } }
 .cw-workspace-facts { display: flex; min-width: 0; flex: 1 1 auto; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-5); margin: 0; }
 .cw-workspace-facts > div { display: flex; min-width: 0; gap: var(--space-1-5); }
 .cw-workspace-facts dd { margin: 0; color: var(--fg-secondary); }

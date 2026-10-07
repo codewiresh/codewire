@@ -213,7 +213,7 @@
       store();
     }
     function connectionText(tab, text, tone = "neutral") {
-      tab.connection.textContent = text;
+      tab.connectionLabel.textContent = text;
       tab.connection.dataset.tone = tone;
     }
     function finalAfterRender(tab, text, tone) {
@@ -621,6 +621,7 @@
       const tab = { id: session.sessionId, state: session.state, item, button, panel, status, actions,
         label: defaultLabel, labelNode: button.querySelector("[data-terminal-tab-label]"),
         root: panel.querySelector("[data-terminal-root]"), connection: status.querySelector("[data-terminal-connection]"),
+        connectionLabel: status.querySelector("[data-terminal-connection-label]"),
         historyGap: panel.querySelector("[data-terminal-history-gap]"),
         toggle: status.querySelector("[data-terminal-toggle]"), reset: actions.querySelector("[data-terminal-replay]"),
         copy: actions.querySelector("[data-terminal-copy]"), copyStatus: status.querySelector("[data-terminal-copy-status]"),
@@ -946,6 +947,11 @@
       const next = event.key === "Home" ? 0 : event.key === "End" ? ids.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + ids.length) % ids.length;
       choose(ids[next], true);
     });
+    // A narrower window or a rotated phone keeps the selected tab in view.
+    const strip = tabList.closest("nav");
+    if (strip && typeof ResizeObserver === "function") {
+      new ResizeObserver(() => { if (tabs.has(active)) reveal(tabs.get(active)); }).observe(strip);
+    }
     window.addEventListener("pagehide", () => {
       suspended = true;
       epoch += 1;
