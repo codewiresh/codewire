@@ -1690,6 +1690,9 @@ mod tests {
         assert_generation_intact(&store, &retained_lock);
     }
 
+    // Darwin private roots require serialized namespace mutation: a directory
+    // changed between its two metadata reads fails closed.
+    #[cfg(target_os = "linux")]
     #[test]
     fn concurrent_identical_publishers_converge_without_partial_objects() {
         let (parent, engine) = private_root();
