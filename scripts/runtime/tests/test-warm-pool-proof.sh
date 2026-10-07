@@ -31,6 +31,7 @@ refuses '--min-hits must be 0-3' env CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF" --hit
 refuses 'stats requires --sql-cmd' env CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF" --journeys stats
 refuses 'OFF_SHAPE_CPU must differ' env CODEWIRE_DEV_SMOKE_API_KEY=x OFF_SHAPE_CPU=1000 "$PROOF"
 refuses 'shell tracing is enabled' env CODEWIRE_DEV_SMOKE_API_KEY=x bash -x "$PROOF"
+refuses '--first-ssh-transport must be' env CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF" --first-ssh-transport websocket
 
 # Kubernetes access is read-only: kubectl_ro is the only kubectl call, and it
 # allows get alone.
@@ -95,4 +96,14 @@ fi
 if grep -nE 'echo[^\n]*\$(own|stolen|token|CODEWIRE_API_KEY|CODEWIRE_DEV_SMOKE_API_KEY)\b' "$PROOF"; then
   fail 'a token may be printed'
 fi
+# Speed is measured to the first OpenSSH command over an asserted tailnet
+# path, from the accepted create, for every hit and the cold off-shape
+# create; cw refuses a WebSocket fallback when the path is asserted.
+grep -qF 'CW_TAILNET_EXPECTED_TRANSPORT="$FIRST_SSH_TRANSPORT"' "$PROOF" ||
+  fail 'the timed first SSH does not assert its tailnet path'
+grep -qF 'FIRST_SSH_TRANSPORT="${FIRST_SSH_TRANSPORT:-direct_udp}"' "$PROOF" ||
+  fail 'the timed first SSH does not default to direct UDP'
+[[ "$(grep -cF 'start_first_ssh "$id" "$started"' "$PROOF")" -eq 2 ]] ||
+  fail 'hits and the off-shape create do not both time the first SSH from the create'
+grep -qF 'TARGET_FIRST_SSH_P50_MS=5000' "$PROOF" || fail 'no first-SSH p50 target'
 printf 'warm pool proof tests: OK\n'
