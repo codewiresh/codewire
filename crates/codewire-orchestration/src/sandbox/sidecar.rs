@@ -7,7 +7,6 @@
 
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::Api;
-use std::borrow::Cow;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -147,17 +146,7 @@ impl russh::client::Handler for AcceptAllKeys {
 }
 
 fn sidecar_ssh_config() -> Arc<russh::client::Config> {
-    let mut config = russh::client::Config::default();
-    // Keep the in-cluster readiness/file client on the conservative KEX set
-    // OpenSSH clients negotiate with the environment's SSH server; russh and
-    // other servers' post-quantum ML-KEM hybrids have not interoperated
-    // reliably.
-    config.preferred.kex = Cow::Borrowed(&[
-        russh::kex::CURVE25519,
-        russh::kex::CURVE25519_PRE_RFC_8731,
-        russh::kex::DH_G14_SHA256,
-    ]);
-    Arc::new(config)
+    Arc::new(russh::client::Config::default())
 }
 
 impl SandboxClient {
@@ -682,18 +671,6 @@ mod tests {
             !russh::client::Handler::check_server_key(&mut AcceptAllKeys, &certificate)
                 .await
                 .unwrap()
-        );
-    }
-
-    #[test]
-    fn sidecar_config_uses_classic_kex() {
-        let config = sidecar_ssh_config();
-        assert_eq!(config.preferred.kex[0], russh::kex::CURVE25519);
-        assert!(
-            !config
-                .preferred
-                .kex
-                .contains(&russh::kex::MLKEM768X25519_SHA256)
         );
     }
 }
