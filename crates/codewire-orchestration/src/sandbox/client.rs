@@ -225,6 +225,19 @@ impl std::fmt::Display for PodResizeInfeasible {
 
 impl std::error::Error for PodResizeInfeasible {}
 
+/// What a failed resize operation left on the workspace Pod incarnation it
+/// may have asked to resize.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FailedLiveResize {
+    /// The Pod runs, and asks for, the previous CPU and memory, and the
+    /// kubelet has seen that request: nothing is pending.
+    Settled,
+    /// The Pod runs, and asks for, the requested CPU and memory.
+    Applied,
+    /// The outcome could not be established on that incarnation.
+    Unknown(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceStorage {
     pub pvc_name: String,
@@ -1854,6 +1867,75 @@ impl SandboxClient {
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
+    }
+
+    /// Settle what a failed resize left on the workspace Pod incarnation it
+    /// may have asked to resize. An applied request is kept. A pending one is
+    /// withdrawn by a preconditioned `/resize` back to the previous CPU and
+    /// memory on that same incarnation; if the Pod changes first, it is
+    /// classified again, so an increase that lands meanwhile is kept rather
+    /// than shrunk. Another incarnation is never mutated: a replaced,
+    /// terminating or unreadable Pod is `Unknown`.
+    pub async fn settle_failed_live_resize(
+        &self,
+        env_id: &str,
+        expected_uid: &str,
+        previous: (i32, i32),
+        requested: (i32, i32),
+        timeout: Duration,
+    ) -> FailedLiveResize {
+        let (cpu, memory) = (format!("{}m", previous.0), format!("{}Mi", previous.1));
+        let mut withdrawal = None;
+        for _ in 0..POD_RESIZE_SUBMIT_ATTEMPTS {
+            let pod = match self.observe_failed_live_resize(env_id, expected_uid).await {
+                Ok(pod) => pod,
+                Err(error) => return FailedLiveResize::Unknown(format!("{error:#}")),
+            };
+            if let Some(outcome) = failed_live_resize_outcome(&pod, previous, requested) {
+                return outcome;
+            }
+            if let Some(error) = withdrawal {
+                return FailedLiveResize::Unknown(format!(
+                    "withdrawing the pending request did not settle: {error:#}"
+                ));
+            }
+            let accepted = match self
+                .submit_pod_resize_once(&pod, expected_uid, &cpu, &memory)
+                .await
+            {
+                Ok(Some(accepted)) => accepted,
+                Ok(None) => continue,
+                Err(error) => {
+                    withdrawal = Some(error);
+                    continue;
+                }
+            };
+            match self
+                .wait_for_workspace_pod_resize(&accepted, &cpu, &memory, timeout)
+                .await
+            {
+                Ok(_) => return FailedLiveResize::Settled,
+                Err(error) => withdrawal = Some(error),
+            }
+        }
+        FailedLiveResize::Unknown(match withdrawal {
+            Some(error) => format!("withdrawing the pending request did not settle: {error:#}"),
+            None => "the workspace Pod changed during every withdrawal attempt".into(),
+        })
+    }
+
+    async fn observe_failed_live_resize(
+        &self,
+        env_id: &str,
+        expected_uid: &str,
+    ) -> anyhow::Result<Pod> {
+        let pod = self.current_workspace_pod_object(env_id).await?;
+        let uid = pod.metadata.uid.as_deref().unwrap_or_default();
+        anyhow::ensure!(
+            uid == expected_uid,
+            "the workspace Pod was replaced (UID {uid}, expected {expected_uid}) and is not compensated"
+        );
+        Ok(pod)
     }
 
     /// Enumerate every Pod carrying the stable environment label. Recovery
@@ -5313,6 +5395,27 @@ fn pod_resize_acknowledged(pod: &Pod, generation: Option<i64>) -> bool {
     }
 }
 
+/// `Applied` or `Settled` when the Pod's spec and kubelet-reported resources
+/// agree on one side of a failed resize; `None` while anything is pending.
+fn failed_live_resize_outcome(
+    pod: &Pod,
+    previous: (i32, i32),
+    requested: (i32, i32),
+) -> Option<FailedLiveResize> {
+    let runs = |(cpu, memory): (i32, i32)| {
+        let (cpu, memory) = (format!("{cpu}m"), format!("{memory}Mi"));
+        workspace_spec_resources_match(pod, &cpu, &memory)
+            && workspace_resources_match(pod, &cpu, &memory)
+    };
+    if runs(requested) {
+        Some(FailedLiveResize::Applied)
+    } else if runs(previous) && pod_resize_acknowledged(pod, pod.metadata.generation) {
+        Some(FailedLiveResize::Settled)
+    } else {
+        None
+    }
+}
+
 fn set_workspace_resources(data: &mut Value, cpu: &str, memory: &str) -> anyhow::Result<()> {
     let containers = data
         .pointer_mut("/spec/podTemplate/spec/containers")
@@ -7407,6 +7510,7 @@ mod tests {
             Applies,
             Defers,
             Infeasible,
+            Stalls,
         }
 
         /// A change another writer makes right after the first Pod read.
@@ -7416,6 +7520,7 @@ mod tests {
             ReplacePod,
             StatusUpdate,
             RestartPolicy,
+            KubeletApplies,
         }
 
         struct Fake {
@@ -7425,6 +7530,9 @@ mod tests {
             /// Pod reads after an accepted change that still see the old status.
             lag: usize,
             unsynced: Option<usize>,
+            /// Pod reads after an accepted change that fail.
+            failing_reads: usize,
+            failing: usize,
             generations: bool,
             reads: usize,
             accepted: Vec<Value>,
@@ -7439,6 +7547,8 @@ mod tests {
                     race,
                     lag: 0,
                     unsynced: None,
+                    failing_reads: 0,
+                    failing: 0,
                     generations: true,
                     reads: 0,
                     accepted: Vec::new(),
@@ -7456,6 +7566,9 @@ mod tests {
             }
 
             fn sync(&mut self) {
+                if self.kubelet == Kubelet::Stalls {
+                    return;
+                }
                 let spec = self.pod["spec"]["containers"][0]["resources"].clone();
                 let generation = self.pod["metadata"]["generation"].clone();
                 let status = &mut self.pod["status"];
@@ -7469,6 +7582,7 @@ mod tests {
                         }
                         Kubelet::Defers => Some("Deferred"),
                         Kubelet::Infeasible => Some("Infeasible"),
+                        Kubelet::Stalls => unreachable!(),
                     }
                 };
                 status["conditions"] = match reason {
@@ -7496,6 +7610,13 @@ mod tests {
                         self.pod["spec"]["containers"][0]["resizePolicy"][1]["restartPolicy"] =
                             json!("RestartContainer");
                     }
+                    Race::KubeletApplies => {
+                        self.pod["status"]["containerStatuses"][0]["resources"] =
+                            self.pod["spec"]["containers"][0]["resources"].clone();
+                        self.pod["status"]["conditions"] = json!([]);
+                        self.pod["status"]["observedGeneration"] =
+                            self.pod["metadata"]["generation"].clone();
+                    }
                 }
                 self.bump();
             }
@@ -7509,6 +7630,13 @@ mod tests {
                     }
                     Some(reads) => self.unsynced = Some(reads - 1),
                     None => {}
+                }
+                if self.failing > 0 {
+                    self.failing -= 1;
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        kubernetes_status("InternalError", 500),
+                    );
                 }
                 let observed = self.pod.clone();
                 if self.reads == 1 {
@@ -7546,6 +7674,7 @@ mod tests {
                     }
                     self.bump();
                     self.unsynced = Some(self.lag);
+                    self.failing = self.failing_reads;
                 }
                 (StatusCode::OK, self.pod.clone())
             }
@@ -7677,6 +7806,12 @@ mod tests {
         async fn resize(client: &SandboxClient) -> anyhow::Result<WorkspacePodResizeState> {
             client
                 .resize_workspace_pod_in_place(ENV, UID, REQUESTED.0, REQUESTED.1, WAIT)
+                .await
+        }
+
+        async fn settle(client: &SandboxClient) -> FailedLiveResize {
+            client
+                .settle_failed_live_resize(ENV, UID, PREVIOUS, REQUESTED, WAIT)
                 .await
         }
 
@@ -7885,6 +8020,93 @@ mod tests {
                     "{requested:?} {observed:?}"
                 );
             }
+        }
+
+        /// #2474: a request still Deferred when the operation fails is
+        /// withdrawn on the same Pod, so nothing applies later.
+        #[tokio::test]
+        async fn failed_resize_withdraws_a_deferred_request_on_the_same_pod() {
+            let (client, fake) = api(Fake::new(
+                pending(UID, REQUESTED, PREVIOUS, "Deferred"),
+                Kubelet::Defers,
+                Race::None,
+            ));
+            assert_eq!(settle(&client).await, FailedLiveResize::Settled);
+            let fake = fake.lock().unwrap();
+            assert_eq!(fake.accepted.len(), 1);
+            assert_eq!(
+                fake.accepted[0]["metadata"],
+                json!({"uid": UID, "resourceVersion": "100"})
+            );
+            assert_eq!(spec_of(&fake), &quantities(PREVIOUS));
+            assert_eq!(actual_of(&fake), &quantities(PREVIOUS));
+            assert_eq!(fake.pod["status"]["conditions"], json!([]));
+            assert_eq!(fake.pod["status"]["observedGeneration"], 3);
+        }
+
+        /// #2474: an increase applied before observation failed is kept and
+        /// reported, never withdrawn.
+        #[tokio::test]
+        async fn failed_resize_keeps_a_request_the_pod_already_applied() {
+            let mut fake = Fake::new(pod(UID, PREVIOUS, PREVIOUS), Kubelet::Applies, Race::None);
+            fake.failing_reads = 1;
+            let (client, fake) = api(fake);
+            let error = resize(&client).await.unwrap_err();
+            assert!(
+                format!("{error:#}").contains("observe resized workspace Pod"),
+                "{error:#}"
+            );
+            assert_eq!(settle(&client).await, FailedLiveResize::Applied);
+            let fake = fake.lock().unwrap();
+            assert_eq!(fake.accepted.len(), 1, "no withdrawal");
+            assert_eq!(actual_of(&fake), &quantities(REQUESTED));
+        }
+
+        /// #2474: an increase landing during withdrawal changes the Pod, so the
+        /// withdrawal is refused and the applied increase is kept.
+        #[tokio::test]
+        async fn failed_resize_keeps_an_increase_that_lands_during_withdrawal() {
+            let (client, fake) = api(Fake::new(
+                pending(UID, REQUESTED, PREVIOUS, "Deferred"),
+                Kubelet::Defers,
+                Race::KubeletApplies,
+            ));
+            assert_eq!(settle(&client).await, FailedLiveResize::Applied);
+            let fake = fake.lock().unwrap();
+            assert!(fake.accepted.is_empty());
+            assert_eq!(fake.refused, [409]);
+            assert_eq!(spec_of(&fake), &quantities(REQUESTED));
+        }
+
+        /// #2474: compensation never reaches another Pod incarnation.
+        #[tokio::test]
+        async fn failed_resize_never_compensates_a_replacement_pod() {
+            let (client, fake) = api(Fake::new(
+                pending("uid-replacement", REQUESTED, PREVIOUS, "Deferred"),
+                Kubelet::Defers,
+                Race::None,
+            ));
+            let FailedLiveResize::Unknown(reason) = settle(&client).await else {
+                panic!("a replacement Pod must not be settled");
+            };
+            assert!(reason.contains("replaced"), "{reason}");
+            let fake = fake.lock().unwrap();
+            assert!(fake.accepted.is_empty() && fake.refused.is_empty());
+        }
+
+        /// #2474: a withdrawal that does not settle leaves the outcome unknown.
+        #[tokio::test]
+        async fn failed_resize_is_unknown_when_withdrawal_does_not_settle() {
+            let (client, fake) = api(Fake::new(
+                pod(UID, REQUESTED, (1000, 1024)),
+                Kubelet::Stalls,
+                Race::None,
+            ));
+            let FailedLiveResize::Unknown(reason) = settle(&client).await else {
+                panic!("an unsettled withdrawal must stay unknown");
+            };
+            assert!(reason.contains("did not settle"), "{reason}");
+            assert_eq!(fake.lock().unwrap().accepted.len(), 1);
         }
     }
 }

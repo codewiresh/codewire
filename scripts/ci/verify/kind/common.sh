@@ -3244,6 +3244,7 @@ environment_resize_smoke() (
   local claim_name="sandbox-${environment_id}"
   local daemon_service="cw-daemon-${environment_id}"
   local sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid
+  local resize_scoped_quota=false
   local operation_id operation_state response runtime_state marker image resources
   local resize_manifest="$RUN_DIR/resize-$environment_id.json"
   trap 'rm -f -- "$resize_manifest"' EXIT
@@ -3279,6 +3280,11 @@ DELETE FROM environment_presets WHERE id = '$preset_id' AND org_id = 'org_contra
 COMMIT;
 SQL
     [ "$?" -eq 0 ] || status=1
+    if [ "${resize_scoped_quota:-false}" = true ]; then
+      kubectl -n "$NS" exec deploy/postgres -- psql -U codewire -d codewire -v ON_ERROR_STOP=1 -Atc \
+        "DELETE FROM environment_quotas WHERE org_id = 'org_contract_1'" >/dev/null ||
+        status=1
+    fi
     # Runtime identity reconciliation creates the environment's access
     # objects. Never delete the shared fixture Issuers or public root
     # ConfigMaps.
@@ -3497,11 +3503,54 @@ SQL
     kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.spec.containers[?(@.name=="workspace")].resources.requests.cpu}:{.status.containerStatuses[?(@.name=="workspace")].resources.requests.cpu}:{.status.conditions[?(@.type=="PodResizePending")].reason}'
   }
 
-  # A CPU request above the node's allocatable CPU is infeasible.
+  # A request above the node's allocatable CPU is infeasible. It fails
+  # actionably, and its accepted request is withdrawn from the same Pod before
+  # the reservation is released, leaving nothing to apply later (#2474).
   local node_name infeasible_cpu
   node_name="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.spec.nodeName}')"
   infeasible_cpu="$(kubectl get node "$node_name" -o jsonpath='{.status.allocatable.cpu}' |
     python3 -c 'import sys; v = sys.stdin.read().strip(); print((int(v[:-1]) if v.endswith("m") else int(float(v) * 1000)) + 1000)')"
+  # The contract org's default quota (32 CPUs) may be smaller than a large
+  # node. Unless the org has its own quota row, scope an unlimited CPU quota
+  # to this one request.
+  if [ -n "$(kubectl -n "$NS" exec deploy/postgres -- psql -U codewire -d codewire -v ON_ERROR_STOP=1 -Atc \
+      "INSERT INTO environment_quotas (org_id, max_concurrent_environments, max_concurrent_sandbox, max_cpu_millicores, max_memory_mb)
+       VALUES ('org_contract_1', 10, 50, -1, 65536) ON CONFLICT (org_id) DO NOTHING RETURNING org_id")" ]; then
+    resize_scoped_quota=true
+  fi
+  resize_until_terminal "${request_id}-infeasible" "$infeasible_cpu" 512 || return 1
+  if [ "$resize_scoped_quota" = true ]; then
+    kubectl -n "$NS" exec deploy/postgres -- psql -U codewire -d codewire -v ON_ERROR_STOP=1 -Atc \
+      "DELETE FROM environment_quotas WHERE org_id = 'org_contract_1'" >/dev/null
+    resize_scoped_quota=false
+  fi
+  if ! jq -e '
+      .operation.state == "ENVIRONMENT_RESIZE_OPERATION_STATE_FAILED"
+      and .operation.failure.code == "runtime_apply_failed"
+      and (.operation.failure.message | contains("request a smaller size"))
+      and .operation.lastAppliedResources == {"cpuMillicores":500,"memoryMb":512,"diskGb":1}
+      and .environment.cpuMillicores == 500
+      and .environment.memoryMb == 512
+    ' <<<"$response" >/dev/null; then
+    echo "::error::infeasible live resize did not fail actionably with the running resources recorded: $response"
+    return 1
+  fi
+  if [ "$(live_resources)" != "500m:500m:" ]; then
+    echo "::error::infeasible live resize request was not withdrawn from the workspace Pod: $(live_resources)"
+    return 1
+  fi
+  if [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')" != "$old_pod_uid" ] \
+      || [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.containerStatuses[?(@.name=="workspace")].restartCount}')" != "$old_restart_count" ]; then
+    echo "::error::infeasible live resize changed the workspace Pod identity or restart count"
+    return 1
+  fi
+  if [ "$(kubectl -n "$SANDBOX_NS" get sandbox "$sandbox_name" -o jsonpath='{.spec.podTemplate.spec.containers[?(@.name=="workspace")].resources.requests.cpu}')" != "500m" ] \
+      || [ "$(kubectl -n "$NS" exec deploy/postgres -- psql -U codewire -d codewire -Atc \
+        "SELECT state || ':' || cpu_millicores || ':' || memory_mb FROM environments WHERE id = '$environment_id'")" != "running:500:512" ]; then
+    echo "::error::infeasible live resize left desired or durable resources changed"
+    return 1
+  fi
+  log "infeasible live resize failed actionably and its request was withdrawn from Pod $old_pod_uid"
 
   # An Infeasible condition from an earlier Pod generation does not fail a
   # new feasible request (#2475). Leave one out of band, then recover live.
