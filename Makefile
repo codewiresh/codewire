@@ -56,7 +56,7 @@ help:
 	@echo "  make cli-install        - Install CLI for the current user"
 	@echo "  make cli-install-user   - Install CLI to XDG_BIN_HOME or ~/.local/bin"
 	@echo "  make cli-install-system - Install CLI to /usr/local/bin"
-	@echo "  make macos-local-runtime KERNEL=/abs/Image INITRAMFS=/abs/cpio - Install the macOS local VM runtime"
+	@echo "  make macos-local-runtime KERNEL=/abs/Image INITRAMFS=/abs/cpio [CW_RUNTIME=/abs/dir] - Install the macOS local VM runtime"
 	@echo ""
 	@echo "Kind (local k8s):"
 	@echo "  make up           - Build images + deploy everything into kind"
@@ -392,7 +392,7 @@ cli-install-system:
 # arm64 kernel Image and guest root, and install all three with the artifact
 # lock cw reads (docs/dev/MACOS-CLI.md). REPLACE=1 replaces a different lock.
 macos-local-runtime:
-	python3 scripts/dev/macos-local-runtime.py --kernel "$(KERNEL)" --initramfs "$(INITRAMFS)" $(if $(filter 1,$(REPLACE)),--replace)
+	python3 scripts/dev/macos-local-runtime.py --kernel "$(KERNEL)" --initramfs "$(INITRAMFS)" $(if $(CW_RUNTIME),--cw-runtime "$(CW_RUNTIME)") $(if $(filter 1,$(REPLACE)),--replace)
 
 # Build the workspace daemon support image for kind/local runtime smoke.
 build-daemon:

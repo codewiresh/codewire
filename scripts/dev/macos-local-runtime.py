@@ -5,9 +5,11 @@ Developer tooling for an Apple Silicon Mac; it runs on the system Python 3.9.
 It builds the Virtualization.framework helper in release mode, signs it ad hoc
 with exactly developer-entitlements.plist, checks the supplied arm64 kernel
 Image and Codewire guest root the way artifact admission does, and installs the
-three files with the Darwin artifact lock that `cw` reads. Nothing is
-downloaded. A different existing lock is replaced only with --replace, and a
-Linux (Cloud Hypervisor) lock is never modified.
+three files with the Darwin artifact lock that `cw` reads. With --cw-runtime it
+also installs a sealed aarch64 cw runtime (cw-runtime.lock.json and
+runtime.pack from `cw-runtime-image.py pack`) beside that lock, as on Linux.
+Nothing is downloaded. A different existing lock is replaced only with
+--replace, and a Linux (Cloud Hypervisor) lock is never modified.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ SWIFT = "swift"
 CODESIGN = "/usr/bin/codesign"
 # The runtime looks only in Homebrew's keg-only e2fsprogs directories.
 E2FSPROGS_DIRECTORIES = ("/opt/homebrew/opt/e2fsprogs/sbin", "/usr/local/opt/e2fsprogs/sbin")
-E2FSPROGS_PROGRAMS = ("mkfs.ext4", "e2fsck", "resize2fs")
+E2FSPROGS_PROGRAMS = ("mkfs.ext4", "e2fsck", "resize2fs", "debugfs")
 ROOT_ENV = "CODEWIRE_NATIVE_ARTIFACT_ROOT"
 LOCK_ENV = "CODEWIRE_NATIVE_ARTIFACT_LOCK"
 # Lock key, installed file name inside the artifact root, and exact mode.
@@ -59,6 +61,19 @@ BASIC_BUSYBOX_APPLETS = (
 ELF_MACHINE_AARCH64 = 183
 GUEST_ROOT_HINT = ("build it on an x86_64 Linux host with scripts/ci/verify/build-local-vmm-initramfs.sh "
                    "--verify-root --target aarch64-unknown-linux-musl")
+# The sealed cw runtime cw installs beside the artifact lock, as written by
+# scripts/dev/cw-runtime-image.py pack (crates/codewire-local-vmm cw_runtime.rs).
+CW_RUNTIME_LOCK = "cw-runtime.lock.json"
+CW_RUNTIME_PACK = "runtime.pack"
+CW_RUNTIME_TARGET = "aarch64-unknown-linux-musl"
+CW_RUNTIME_PACK_MAGIC = b"CWRPACK1"
+CW_RUNTIME_MAX_PROVENANCE = 16 * 1024
+CW_RUNTIME_MAX_BYTES = 256 * 1024 * 1024
+CW_RUNTIME_MAX_PACK = 24 + CW_RUNTIME_MAX_PROVENANCE + CW_RUNTIME_MAX_BYTES
+# A guest root without its trusted live publisher cannot boot with a cw runtime.
+LIVE_RUNTIME_CAPABILITY_MARKER = b"CODEWIRE_NATIVE_CW_LIVE_PUBLISHER_V1\0"
+CW_RUNTIME_HINT = ("build it on an arm64 Linux host with scripts/dev/build-native-managed-agent.py "
+                   "--target aarch64-unknown-linux-musl, then cw-runtime-image.py build and pack")
 
 
 class InstallError(Exception):
@@ -256,6 +271,76 @@ def check_initramfs(path: Path) -> None:
     raise InstallError("%s is not an arm64 Codewire guest root: %s; %s" % (path, reason, GUEST_ROOT_HINT))
 
 
+def hex_digest(value) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def check_cw_runtime(directory: Path) -> dict:
+    """Mirror cw's admission of a sealed cw runtime source; return its lock."""
+
+    def refuse(reason: str) -> None:
+        raise InstallError("%s is not a sealed aarch64 cw runtime: %s; %s" % (directory, reason, CW_RUNTIME_HINT))
+
+    lock_path, pack_path = directory / CW_RUNTIME_LOCK, directory / CW_RUNTIME_PACK
+    for path in (lock_path, pack_path):
+        try:
+            status = os.lstat(path)
+        except FileNotFoundError:
+            refuse("%s is missing" % path.name)
+        if not stat.S_ISREG(status.st_mode):
+            refuse("%s is not a regular file" % path.name)
+    try:
+        lock = json.loads(lock_path.read_bytes())
+    except ValueError:
+        lock = None
+    pack_entry = lock.get("pack") if isinstance(lock, dict) else None
+    if (not isinstance(lock, dict) or set(lock) != {"schema_version", "image_index_sha256", "pack"}
+            or lock["schema_version"] != 1 or not hex_digest(lock["image_index_sha256"])
+            or not isinstance(pack_entry, dict) or set(pack_entry) != {"path", "size", "sha256"}
+            or pack_entry["path"] != CW_RUNTIME_PACK or type(pack_entry["size"]) is not int
+            or not hex_digest(pack_entry["sha256"])):
+        refuse("%s is not a schema 1 cw runtime lock" % CW_RUNTIME_LOCK)
+    pack = pack_path.read_bytes()
+    if (len(pack) != pack_entry["size"] or not 24 <= len(pack) <= CW_RUNTIME_MAX_PACK
+            or hashlib.sha256(pack).hexdigest() != pack_entry["sha256"]):
+        refuse("%s does not match its lock's size and SHA-256" % CW_RUNTIME_PACK)
+    provenance_size = int.from_bytes(pack[8:16], "little")
+    payload_size = int.from_bytes(pack[16:24], "little")
+    if (pack[:8] != CW_RUNTIME_PACK_MAGIC or not 1 <= provenance_size <= CW_RUNTIME_MAX_PROVENANCE
+            or not 64 <= payload_size <= CW_RUNTIME_MAX_BYTES
+            or 24 + provenance_size + payload_size != len(pack)):
+        refuse("%s has invalid framing" % CW_RUNTIME_PACK)
+    payload = pack[24 + provenance_size:]
+    try:
+        provenance = json.loads(pack[24:24 + provenance_size])
+        identity = provenance["payload"]
+        valid = (provenance["image_index_sha256"] == lock["image_index_sha256"]
+                 and identity["target"] == CW_RUNTIME_TARGET
+                 and identity["sha256"] == hashlib.sha256(payload).hexdigest()
+                 and identity["size"] == len(payload))
+    except (ValueError, KeyError, TypeError):
+        valid = False
+    if not valid:
+        refuse("its provenance does not bind this image and a %s payload" % CW_RUNTIME_TARGET)
+    if not static_elf(payload):
+        refuse("its payload is not a static aarch64 ELF")
+    return lock
+
+
+def check_live_publisher(initramfs: Path) -> None:
+    init = newc_entry(initramfs.read_bytes(), b"init") or b""
+    if init.count(LIVE_RUNTIME_CAPABILITY_MARKER) != 1:
+        raise InstallError("%s has no trusted live cw publisher, so it cannot boot with a cw runtime; "
+                           "rebuild the guest root from current source; %s" % (initramfs, GUEST_ROOT_HINT))
+
+
+def read_existing(path: Path):
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
 def check_helper(path: Path) -> None:
     """A thin arm64 Mach-O executable signed with exactly the developer entitlements."""
     with path.open("rb") as stream:
@@ -340,13 +425,24 @@ def unlink_if_present(path: Path) -> None:
         pass
 
 
-def install(kernel: Path, initramfs: Path, replace: bool, environ) -> int:
+def install(kernel: Path, initramfs: Path, replace: bool, environ, cw_runtime=None) -> int:
     require_host()
     require_e2fsprogs()
     root, lock = artifact_paths(environ)
     existing = read_existing_lock(lock)
     check_kernel(kernel)
     check_initramfs(initramfs)
+    runtime_files = {}
+    if cw_runtime is not None:
+        check_cw_runtime(cw_runtime)
+        check_live_publisher(initramfs)
+        runtime_files = {name: (cw_runtime / name).read_bytes() for name in (CW_RUNTIME_LOCK, CW_RUNTIME_PACK)}
+        existing_runtime = read_existing(lock.parent / CW_RUNTIME_LOCK)
+        if (existing_runtime is not None and existing_runtime != runtime_files[CW_RUNTIME_LOCK]
+                and not replace):
+            raise InstallError("%s already pins a different cw runtime; rerun with --replace "
+                               "(make macos-local-runtime ... REPLACE=1) to replace it"
+                               % (lock.parent / CW_RUNTIME_LOCK))
     helper = build_helper()
 
     private_directory(lock.parent)
@@ -354,6 +450,7 @@ def install(kernel: Path, initramfs: Path, replace: bool, environ) -> int:
     sources = {"vz_runner": helper, "kernel": kernel, "initramfs": initramfs}
     staged = {key: root / (".%s.partial" % name) for key, name, _ in ARTIFACTS}
     lock_staged = lock.parent / (".%s.partial" % lock.name)
+    runtime_staged = {name: lock.parent / (".%s.partial" % name) for name in runtime_files}
     try:
         new_lock = {"schema_version": 1}
         for key, name, mode in ARTIFACTS:
@@ -387,9 +484,21 @@ def install(kernel: Path, initramfs: Path, replace: bool, environ) -> int:
             os.fsync(writer.fileno())
         os.chmod(lock_staged, 0o400)
         os.replace(lock_staged, lock)
+        # The pack first: its lock commits the runtime cw admits.
+        for name in (CW_RUNTIME_PACK, CW_RUNTIME_LOCK):
+            if name not in runtime_files:
+                continue
+            unlink_if_present(runtime_staged[name])
+            descriptor = os.open(runtime_staged[name], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "wb") as writer:
+                writer.write(runtime_files[name])
+                writer.flush()
+                os.fsync(writer.fileno())
+            os.chmod(runtime_staged[name], 0o400)
+            os.replace(runtime_staged[name], lock.parent / name)
         sync_directory(lock.parent)
     finally:
-        for path in (*staged.values(), lock_staged):
+        for path in (*staged.values(), lock_staged, *runtime_staged.values()):
             unlink_if_present(path)
 
     state = "unchanged" if existing == new_lock else ("replaced" if existing is not None else "written")
@@ -397,6 +506,10 @@ def install(kernel: Path, initramfs: Path, replace: bool, environ) -> int:
     for key, name, _ in ARTIFACTS:
         log("%-9s %s sha256=%s size=%d" % (key, root / name, new_lock[key]["sha256"],
                                            new_lock[key]["size"]))
+    if runtime_files:
+        pinned = json.loads(runtime_files[CW_RUNTIME_LOCK])
+        log("cw runtime %s image_index_sha256=%s pack sha256=%s" % (
+            lock.parent / CW_RUNTIME_LOCK, pinned["image_index_sha256"], pinned["pack"]["sha256"]))
     return 0
 
 
@@ -405,11 +518,19 @@ def main(argv=None, environ=None) -> int:
     parser.add_argument("--kernel", default="", help="absolute path to the arm64 Linux kernel Image")
     parser.add_argument("--initramfs", default="", help="absolute path to the arm64 guest root")
     parser.add_argument("--replace", action="store_true", help="replace a different existing macOS lock")
+    parser.add_argument("--cw-runtime", default="",
+                        help="absolute directory holding a sealed aarch64 cw-runtime.lock.json and runtime.pack")
     args = parser.parse_args(argv)
     try:
         kernel = input_file(args.kernel, "KERNEL")
         initramfs = input_file(args.initramfs, "INITRAMFS")
-        return install(kernel, initramfs, args.replace, os.environ if environ is None else environ)
+        cw_runtime = None
+        if args.cw_runtime:
+            cw_runtime = Path(args.cw_runtime)
+            if not cw_runtime.is_absolute() or not cw_runtime.is_dir():
+                raise InstallError("CW_RUNTIME must be an absolute directory: %s" % args.cw_runtime)
+        return install(kernel, initramfs, args.replace, os.environ if environ is None else environ,
+                       cw_runtime)
     except (InstallError, OSError) as error:
         print("macos-local-runtime: ERROR: %s" % error, file=sys.stderr)
         return 1

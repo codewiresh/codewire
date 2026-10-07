@@ -49,6 +49,24 @@ def guest_root(**overrides) -> bytes:
     return runtime.canonical_guest_root(parts["init"], parts["busybox"], parts["runc"])
 
 
+def cw_runtime(directory: Path, target: str = "aarch64-unknown-linux-musl", payload: bytes = None,
+               corrupt: bool = False) -> Path:
+    """A sealed runtime pack and lock in the shape cw-runtime-image.py pack writes."""
+    payload = elf() + b"cw" if payload is None else payload
+    index = "1" * 64
+    provenance = json.dumps({"schema_version": 1, "image_index_sha256": index,
+                             "payload": {"target": target, "sha256": hashlib.sha256(payload).hexdigest(),
+                                         "size": len(payload)}}).encode()
+    pack = b"CWRPACK1" + len(provenance).to_bytes(8, "little") + len(payload).to_bytes(8, "little")
+    pack += provenance + payload
+    lock = {"schema_version": 1, "image_index_sha256": index,
+            "pack": {"path": "runtime.pack", "size": len(pack), "sha256": hashlib.sha256(pack).hexdigest()}}
+    directory.mkdir()
+    (directory / "runtime.pack").write_bytes(pack[:-1] + b"X" if corrupt else pack)
+    (directory / "cw-runtime.lock.json").write_text(json.dumps(lock) + "\n")
+    return directory
+
+
 def kernel_image() -> bytes:
     image = bytearray(4096)
     image[0x38:0x3C] = b"ARM\x64"
@@ -132,7 +150,7 @@ class InstallTests(unittest.TestCase):
             status = runtime.main(argv, environ=self.environ)
         return status, stdout.getvalue(), stderr.getvalue()
 
-    def assert_installed(self, root, lock):
+    def assert_installed(self, root, lock, cw_runtime=False):
         document = json.loads(lock.read_text())
         self.assertEqual(list(document), ["schema_version", "vz_runner", "kernel", "initramfs"])
         self.assertEqual(document["schema_version"], 1)
@@ -149,8 +167,9 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
         self.assertEqual(sorted(path.name for path in root.iterdir()),
                          sorted(name for _, name, _ in runtime.ARTIFACTS))
+        runtime_files = ["cw-runtime.lock.json", "runtime.pack"] if cw_runtime else []
         self.assertEqual(sorted(path.name for path in lock.parent.iterdir()),
-                         sorted([root.name, lock.name]))
+                         sorted([root.name, lock.name, *runtime_files]))
         self.assertEqual((root / "kernel").read_bytes(), self.kernel.read_bytes())
         self.assertEqual((root / "initramfs").read_bytes(), self.initramfs.read_bytes())
         return document
@@ -181,6 +200,63 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(status, 0, stderr)
         self.assertIn("lock %s unchanged" % self.lock, stdout)
         self.assertEqual(json.loads(self.lock.read_text()), document)
+
+    def live_guest_root(self):
+        self.initramfs.write_bytes(guest_root(init=elf() + b"init" + runtime.LIVE_RUNTIME_CAPABILITY_MARKER))
+
+    def test_installs_a_sealed_arm64_cw_runtime_beside_the_lock(self):
+        self.live_guest_root()
+        source = cw_runtime(self.inputs / "runtime")
+        status, stdout, stderr = self.install("--cw-runtime", str(source))
+        self.assertEqual(status, 0, stderr)
+        self.assert_installed(self.root, self.lock, cw_runtime=True)
+        for name in ("cw-runtime.lock.json", "runtime.pack"):
+            installed = self.parent / name
+            self.assertEqual(installed.read_bytes(), (source / name).read_bytes())
+            self.assertEqual(stat.S_IMODE(installed.stat().st_mode), 0o400)
+        self.assertIn("cw runtime %s image_index_sha256=%s" % (self.parent / "cw-runtime.lock.json", "1" * 64),
+                      stdout)
+        # Rerunning without CW_RUNTIME leaves the installed runtime in place.
+        self.assertEqual(self.install()[0], 0)
+        self.assert_installed(self.root, self.lock, cw_runtime=True)
+        before = self.snapshot(self.parent)
+        other = cw_runtime(self.inputs / "other", payload=elf() + b"other cw")
+        status, _stdout, stderr = self.install("--cw-runtime", str(other))
+        self.assertEqual(status, 1)
+        self.assertIn("already pins a different cw runtime; rerun with --replace", stderr)
+        self.assertEqual(self.snapshot(self.parent), before)
+        status, _stdout, stderr = self.install("--cw-runtime", str(other), "--replace")
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual((self.parent / "runtime.pack").read_bytes(), (other / "runtime.pack").read_bytes())
+
+    def test_invalid_cw_runtime_or_guest_root_fails_before_effects(self):
+        self.live_guest_root()
+        cases = {
+            "x86_64 target": (cw_runtime(self.inputs / "x86", target="x86_64-unknown-linux-musl"), None,
+                              "provenance does not bind this image and a aarch64-unknown-linux-musl payload"),
+            "x86_64 payload": (cw_runtime(self.inputs / "elf", payload=elf(machine=62) + b"cw"), None,
+                               "payload is not a static aarch64 ELF"),
+            "corrupted pack": (cw_runtime(self.inputs / "corrupt", corrupt=True), None,
+                               "does not match its lock's size and SHA-256"),
+            "no live publisher": (cw_runtime(self.inputs / "valid"), guest_root(init=elf() + b"init"),
+                                  "has no trusted live cw publisher"),
+        }
+        (self.inputs / "empty").mkdir()
+        cases["missing pack"] = (self.inputs / "empty", None, "cw-runtime.lock.json is missing")
+        for label, (source, root, message) in cases.items():
+            with self.subTest(label):
+                initramfs = None
+                if root is not None:
+                    initramfs = self.inputs / "old-initramfs.cpio"
+                    initramfs.write_bytes(root)
+                status, _stdout, stderr = self.install("--cw-runtime", str(source), initramfs=initramfs)
+                self.assertEqual(status, 1)
+                self.assertIn(message, stderr)
+                self.assertEqual(list(self.home.iterdir()), [])
+                self.assertEqual(self.tools.calls, [])
+        status, _stdout, stderr = self.install("--cw-runtime", "relative")
+        self.assertEqual(status, 1)
+        self.assertIn("CW_RUNTIME must be an absolute directory", stderr)
 
     def test_different_lock_requires_replace(self):
         self.assertEqual(self.install()[0], 0)
@@ -413,6 +489,21 @@ class SourceContractTests(unittest.TestCase):
         directories = re.search(r"E2FSPROGS_DIRECTORIES: \[&str; \d+\] = \[(.*?)\];", darwin, re.DOTALL)
         self.assertEqual(runtime.E2FSPROGS_DIRECTORIES, tuple(re.findall(r'"([^"]+)"', directories.group(1))))
         self.assertIn('Command::new("/usr/bin/codesign")', darwin)
+        cw_runtime = self.read("crates/codewire-local-vmm/src/cw_runtime.rs")
+        for program in runtime.E2FSPROGS_PROGRAMS:
+            self.assertTrue(program in cw_runtime or program in self.read("crates/codewire-local-vmm/src/runner.rs")
+                            or program in self.read("crates/codewire-local-vmm/src/workspace.rs"), program)
+        self.assertIn('lock.pack.path != Path::new("%s")' % runtime.CW_RUNTIME_PACK, cw_runtime)
+        config = self.read("crates/codewire-local-vmm/src/supervisor_config.rs")
+        self.assertIn('with_file_name("%s")' % runtime.CW_RUNTIME_LOCK, config)
+        probe = self.read("crates/codewire-vmm-guest-probe/src/cw_runtime.rs")
+        self.assertIn('CW_RUNTIME_PACK_MAGIC: &[u8; 8] = b"%s";' % runtime.CW_RUNTIME_PACK_MAGIC.decode(), probe)
+        self.assertIn('pub const CW_RUNTIME_TARGET: &str = "%s";' % runtime.CW_RUNTIME_TARGET, probe)
+        self.assertIn("CW_RUNTIME_MAX_PROVENANCE: usize = 16 * 1024;", probe)
+        self.assertIn("CW_RUNTIME_MAX_BYTES: usize = 256 * 1024 * 1024;", probe)
+        live = self.read("crates/codewire-vmm-guest-probe/src/cw_runtime_live.rs")
+        self.assertIn('LIVE_RUNTIME_CAPABILITY_MARKER: &[u8] = b"%s\\0";'
+                      % runtime.LIVE_RUNTIME_CAPABILITY_MARKER[:-1].decode(), live)
         native = self.read("crates/codewire-cli/src/commands/native.rs")
         self.assertIn('NATIVE_ARTIFACT_ROOT_ENV: &str = "%s";' % runtime.ROOT_ENV, native)
         self.assertIn('NATIVE_ARTIFACT_LOCK_ENV: &str = "%s";' % runtime.LOCK_ENV, native)

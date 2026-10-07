@@ -1816,8 +1816,8 @@ def main():
         parser.exit(0 if contract_tests() else 1)
     if not args.cw or not args.environment or not args.cw_image_receipt:
         parser.error("--cw, --environment and --cw-image-receipt are required for the native VM journey")
-    if not sys.platform.startswith("linux"):
-        parser.error("native Linux VM managed acceptance requires Linux")
+    if not sys.platform.startswith(("linux", "darwin")):
+        parser.error("native Linux VM managed acceptance requires a Linux or macOS host")
     if not (os.path.isabs(args.cw) and os.path.isfile(args.cw) and os.access(args.cw, os.X_OK)):
         parser.error("--cw must be an absolute executable file")
     if not is_uuid(args.environment):
