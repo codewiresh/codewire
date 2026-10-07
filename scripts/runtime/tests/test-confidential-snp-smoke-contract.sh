@@ -156,7 +156,7 @@ mkdir -p "$forward_dir/evidence"
   export CODEWIRE_SERVER_NAMESPACE=contract-server
   export SANDBOX_NAMESPACE=contract-sandboxes
   export KUBE_CONTEXT=contract-context
-  export COCO_DAEMON_IMAGE=nexus.example.invalid/daemon@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export COCO_DAEMON_IMAGE=example.invalid/daemon@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   export COCO_WORKSPACE_IMAGE=example.invalid/workspace@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   export COCO_DIND_IMAGE=example.invalid/dind@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
   export COCO_GATEWAY_STUN_HOST=stun.example.invalid

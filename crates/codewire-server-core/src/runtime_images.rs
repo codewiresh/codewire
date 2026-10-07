@@ -20,7 +20,7 @@ pub const DEFAULT_DAEMON_IMAGE: &str = "registry.example.invalid/codewire/gatewa
 /// suffix. Add a repository here before deployments render from it. The
 /// image was named `gateway` until 2026-10-07; Sandboxes created before then
 /// still run their daemon from a `gateway` repository.
-pub const SUPPORT_IMAGE_REPOSITORIES: [&str; 8] = [
+pub const SUPPORT_IMAGE_REPOSITORIES: [&str; 5] = [
     // Harbor, Dev and Production since 2026-10-07.
     "registry.example.invalid/codewire/daemon",
     // The Forgejo registry: Dev candidate smokes and Production's checked-in
@@ -28,13 +28,6 @@ pub const SUPPORT_IMAGE_REPOSITORIES: [&str; 8] = [
     "git.example.invalid/codewire/daemon",
     // Harbor, Dev and Production from 2026-09-25 to 2026-10-07.
     "registry.example.invalid/codewire/gateway",
-    // Nexus, Dev and Production from 2026-08-15 to 2026-09-28.
-    "nexus.example.invalid/oci-approved/codewire/gateway",
-    // Nexus over the tailnet, Dev and Production from 2026-08-12 to 2026-08-15.
-    "nexus-system-cluster.example.invalid/oci-approved/codewire/gateway",
-    // Nexus release candidates, which Dev candidate smokes rendered from
-    // 2026-08-12 to 2026-09-24.
-    "nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway",
     // GHCR, Dev and Production from 2026-08-04 to 2026-08-15.
     "ghcr.io/codewiresh/gateway",
     // The Forgejo registry: deployments before 2026-08-04, and Production's

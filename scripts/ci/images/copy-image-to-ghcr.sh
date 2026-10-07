@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copy one exact Harbor manifest, unchanged, to another tag in its Harbor
 # repository (the registry every deployment pulls from) or to the public GHCR
-# mirror. Images are built and pushed to Harbor; nothing reads Nexus here.
+# mirror. Images are built and pushed to Harbor.
 set -euo pipefail
 
 if [ "$#" -lt 3 ]; then

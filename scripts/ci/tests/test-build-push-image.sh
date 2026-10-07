@@ -4,8 +4,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly BUILDER="$ROOT/scripts/ci/images/build-push-image.sh"
-readonly RUNTIME_BUILDER="$ROOT/scripts/ci/images/build-push-runtime-images.sh"
-readonly NEXUS_RETRY_CONTRACT="$ROOT/scripts/ci/images/nexus-publication-retry-contract.sh"
 readonly KIND_BUILDER="$ROOT/scripts/ci/images/build-kind-images.sh"
 readonly RUST_BUILD_WRAPPER="$ROOT/scripts/ci/images/run-rust-build.sh"
 readonly RUST_BASE_DOCKERFILE="$ROOT/deployments/docker/rust-base.Dockerfile"
@@ -40,20 +38,6 @@ grep -Fq 'CODEWIRE_EXTERNAL_DOCKER_CONFIG' "$BUILDER" ||
   fail 'published-image builder cannot share private job-scoped registry auth'
 grep -Fq 'buildx_builder_owned=0' "$BUILDER" ||
   fail 'published-image builder does not distinguish caller-owned BuildKit state'
-for protected_builder in "$BUILDER" "$RUNTIME_BUILDER"; do
-  # shellcheck disable=SC2016 # Match the literal sourced contract path.
-  grep -Fq 'source "$ROOT/scripts/ci/images/nexus-publication-retry-contract.sh"' \
-    "$protected_builder" || fail "$(basename "$protected_builder") bypasses the shared Nexus retry contract"
-  if grep -Eq '^readonly NEXUS_BACKUP_RETRY_(ATTEMPTS|DELAY_SECONDS)=' "$protected_builder"; then
-    fail "$(basename "$protected_builder") duplicates the shared Nexus retry contract"
-  fi
-done
-grep -Fq 'NEXUS_BACKUP_RETRY_ATTEMPTS=61' "$NEXUS_RETRY_CONTRACT" ||
-  fail 'shared Nexus retry contract lacks sixty bounded maintenance waits'
-grep -Fq 'NEXUS_BACKUP_RETRY_DELAY_SECONDS=60' "$NEXUS_RETRY_CONTRACT" ||
-  fail 'shared Nexus retry contract changed its fixed one-minute delay'
-grep -Fq '503 Service (Temporarily )?Unavailable' "$BUILDER" ||
-  fail 'published-image retry is not restricted to the observed Nexus outage'
 # shellcheck disable=SC2016 # This assertion intentionally matches literal shell source.
 grep -Fq 'docker buildx inspect "$buildx_builder"' "$BUILDER" ||
   fail 'published-image builder does not validate an external BuildKit daemon'
@@ -409,14 +393,9 @@ case "${1:-} ${2:-} ${3:-}" in
         exit 1
       fi
     fi
-    if [ -n "${FAKE_LOGIN_NEXUS_FAILURES:-}" ]; then
-      login_state="${FAKE_LOGIN_NEXUS_STATE:?}"
-      login_count="$(cat "$login_state")"
-      if [ "$login_count" -lt "$FAKE_LOGIN_NEXUS_FAILURES" ]; then
-        printf '%s\n' "$((login_count + 1))" >"$login_state"
-        echo "Error response from daemon: login attempt to https://registry.example.invalid/v2/ failed with status: 503 Service Unavailable" >&2
-        exit 1
-      fi
+    if [ "${FAKE_LOGIN_UNAVAILABLE:-0}" = 1 ]; then
+      echo "Error response from daemon: login attempt to https://registry.example.invalid/v2/ failed with status: 503 Service Unavailable" >&2
+      exit 1
     fi
     mkdir -p "${DOCKER_CONFIG:?}"
     printf '{}\n' >"$DOCKER_CONFIG/config.json"
@@ -537,17 +516,8 @@ case "${1:-} ${2:-} ${3:-}" in
     [[ "$*" == *' --force '* ]]
     ;;
   buildx\ bake\ *)
-    if [ -n "${FAKE_BUILD_NEXUS_FAILURES:-}" ]; then
-      build_state="${FAKE_BUILD_STATE:?}"
-      build_count="$(cat "$build_state")"
-      if [ "$build_count" -lt "$FAKE_BUILD_NEXUS_FAILURES" ]; then
-        printf '%s\n' "$((build_count + 1))" >"$build_state"
-        echo 'unexpected status from HEAD request to https://registry.example.invalid/v2/codewire/test/blobs/sha256:test: 503 Service Temporarily Unavailable' >&2
-        exit 1
-      fi
-    fi
     if [ "${FAKE_BUILD_FATAL:-0}" = 1 ]; then
-      echo 'non-retryable BuildKit failure' >&2
+      echo 'unexpected status from HEAD request to https://registry.example.invalid/v2/codewire/test/blobs/sha256:test: 503 Service Unavailable' >&2
       exit 1
     fi
     metadata=''
@@ -614,17 +584,8 @@ case "${1:-} ${2:-} ${3:-}" in
     esac
     ;;
   buildx\ build\ *)
-    if [ -n "${FAKE_BUILD_NEXUS_FAILURES:-}" ]; then
-      build_state="${FAKE_BUILD_STATE:?}"
-      build_count="$(cat "$build_state")"
-      if [ "$build_count" -lt "$FAKE_BUILD_NEXUS_FAILURES" ]; then
-        printf '%s\n' "$((build_count + 1))" >"$build_state"
-        echo 'unexpected status from HEAD request to https://registry.example.invalid/v2/codewire/test/blobs/sha256:test: 503 Service Temporarily Unavailable' >&2
-        exit 1
-      fi
-    fi
     if [ "${FAKE_BUILD_FATAL:-0}" = 1 ]; then
-      echo 'non-retryable BuildKit failure' >&2
+      echo 'unexpected status from HEAD request to https://registry.example.invalid/v2/codewire/test/blobs/sha256:test: 503 Service Unavailable' >&2
       exit 1
     fi
     metadata=''
@@ -678,13 +639,7 @@ printf 'AWS_SHARED_CREDENTIALS_FILE=%s AWS_PROFILE=%s AWS_EC2_METADATA_DISABLED=
   "${SCCACHE_IGNORE_SERVER_IO_ERROR:-}" "$*" \
   >>"${FAKE_SCCACHE_CALLS:?}"
 EOF
-cat >"$work/bin/sleep" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >>"${FAKE_SLEEP_CALLS:?}"
-EOF
-chmod +x "$work/bin/fetch-harbor" "$work/bin/docker" "$work/bin/sccache" \
-  "$work/bin/sleep"
+chmod +x "$work/bin/fetch-harbor" "$work/bin/docker" "$work/bin/sccache"
 
 export PATH="$work/bin:$PATH"
 export OPENBAO_HARBOR_CREDENTIAL_FETCHER="$work/bin/fetch-harbor"
@@ -693,7 +648,6 @@ export FAKE_REGISTRY_PASSWORD="$registry_password"
 export FAKE_FETCH_CALLS="$work/fetch-calls"
 export FAKE_DOCKER_CALLS="$work/docker-calls"
 export FAKE_SCCACHE_CALLS="$work/sccache-calls"
-export FAKE_SLEEP_CALLS="$work/sleep-calls"
 export FAKE_MANIFESTS="$work/manifests"
 export FAKE_DIGEST="$digest"
 export FAKE_PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/protected-delivery/v1'
@@ -757,13 +711,14 @@ grep -qF -- '--sbom=generator=registry.example.invalid/oci-approved/docker/build
   fail 'protected publication did not request an SBOM from the approved exact generator'
 grep -qF ' login registry.example.invalid ' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not use its scoped promoted-output login'
-# Publication targets Harbor only: no retired Nexus host appears in any login,
-# build, push or tag call.
-if grep -qF 'nexus' "$FAKE_DOCKER_CALLS"; then
-  fail 'protected publication contacted the retired Nexus registry'
+# Publication targets Harbor only: every login and every pushed or applied tag
+# names registry.example.invalid.
+if grep -F ' login ' "$FAKE_DOCKER_CALLS" | grep -vF ' login registry.example.invalid ' >/dev/null; then
+  fail 'protected publication logged in to a registry other than Harbor'
 fi
-if grep -Eq '(--tag|-t)[ =]nexus|\.tags=nexus' "$FAKE_DOCKER_CALLS"; then
-  fail 'protected publication pushed or tagged an image in Nexus'
+if grep -Eo '(--tag|-t)[ =][^ ]+|\.tags=[^ ]+' "$FAKE_DOCKER_CALLS" |
+    grep -Ev '^((--tag|-t)[ =]|\.tags=)registry\.example\.invalid/codewire/' >/dev/null; then
+  fail 'protected publication pushed or tagged an image outside Harbor'
 fi
 grep -Eq '(--tag|-t)[ =]registry\.example\.invalid/codewire/|\.tags=registry\.example\.invalid/codewire/' "$FAKE_DOCKER_CALLS" ||
   fail 'protected publication did not tag its image in Harbor'
@@ -837,24 +792,21 @@ grep -qF 'Registry login was rejected; retrying authentication' \
 [[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 2)) ]] ||
   fail 'transient initial registry login was not retried exactly once'
 
-printf '0\n' >"$work/login-nexus-state"
-: >"$FAKE_SLEEP_CALLS"
+# Only a rejected credential is retried; an unavailable registry fails the
+# login at once.
 login_calls_before="$(grep -c ' login ' "$FAKE_DOCKER_CALLS" || true)"
-(
+if (
   cd "$ROOT"
-  FAKE_LOGIN_NEXUS_FAILURES=2 \
-  FAKE_LOGIN_NEXUS_STATE="$work/login-nexus-state" \
+  FAKE_LOGIN_UNAVAILABLE=1 \
     "$BUILDER" daemon deployments/docker/daemon.Dockerfile .
-) >"$work/transient-nexus-login.out" 2>&1
-[[ "$(cat "$work/login-nexus-state")" -eq 2 ]] ||
-  fail 'transient registry login did not consume both simulated failures'
-[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 3)) ]] ||
-  fail 'transient registry login did not retry exactly twice'
-[[ "$(grep -cxF '60' "$FAKE_SLEEP_CALLS")" -eq 2 ]] ||
-  fail 'transient registry login did not use the bounded retry delay'
-grep -qF 'retrying registry.example.invalid (2/61)' \
-  "$work/transient-nexus-login.out" ||
-  fail 'transient registry login retry was not attributable'
+) >"$work/unavailable-login.out" 2>&1; then
+  fail 'unavailable registry login was accepted'
+fi
+[[ "$(grep -c ' login ' "$FAKE_DOCKER_CALLS")" -eq $((login_calls_before + 1)) ]] ||
+  fail 'unavailable registry login was retried'
+grep -qF 'Unable to authenticate to registry registry.example.invalid' \
+  "$work/unavailable-login.out" ||
+  fail 'unavailable registry login was not attributable'
 
 : >"$GITHUB_OUTPUT"
 (
@@ -1186,41 +1138,17 @@ base_source_tag="registry.example.invalid/codewire/base:$source_sha"
 awk -F '\t' -v reference="$base_source_tag" \
   '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
 mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
-printf '0\n' >"$work/build-state"
-: >"$FAKE_SLEEP_CALLS"
-retry_builds_before="$(build_invocation_count)"
-(
-  cd "$ROOT"
-  FAKE_BUILD_NEXUS_FAILURES=2 \
-    FAKE_BUILD_STATE="$work/build-state" \
-    "$BUILDER" base images/base/Dockerfile images/base
-) >"$work/nexus-retry.out" 2>&1
-[[ "$(cat "$work/build-state")" -eq 2 ]] ||
-  fail 'published-image build did not consume both simulated Nexus failures'
-[[ "$(build_invocation_count)" -eq $((retry_builds_before + 3)) ]] ||
-  fail 'published-image build did not retry twice and then succeed'
-[[ "$(grep -cxF '60' "$FAKE_SLEEP_CALLS")" -eq 2 ]] ||
-  fail 'published-image build did not use the bounded Nexus retry delay'
-grep -qF 'retrying the exact base build (2/61)' "$work/nexus-retry.out" ||
-  fail 'published-image Nexus retry was not attributable'
-
-awk -F '\t' -v reference="$base_source_tag" \
-  '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
-mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
-: >"$FAKE_SLEEP_CALLS"
 fatal_builds_before="$(build_invocation_count)"
 if (
   cd "$ROOT"
   FAKE_BUILD_FATAL=1 "$BUILDER" base images/base/Dockerfile images/base
-) >"$work/non-retryable-build.out" 2>&1; then
-  fail 'non-Nexus BuildKit failure was retried to success'
+) >"$work/failed-build.out" 2>&1; then
+  fail 'failed protected publication was accepted'
 fi
 [[ "$(build_invocation_count)" -eq $((fatal_builds_before + 1)) ]] ||
-  fail 'non-Nexus BuildKit failure did not stop after one attempt'
-[[ ! -s "$FAKE_SLEEP_CALLS" ]] ||
-  fail 'non-Nexus BuildKit failure entered the retry delay'
-grep -qF 'non-retryable BuildKit failure' "$work/non-retryable-build.out" ||
-  fail 'non-Nexus BuildKit failure was not preserved'
+  fail 'failed protected publication was retried'
+grep -qF '503 Service Unavailable' "$work/failed-build.out" ||
+  fail 'failed protected publication was not preserved'
 
 # Workspace publication retains the protected compiler-cache API, but no
 # untrusted external layer cache may reach any publisher, even on source reuse.

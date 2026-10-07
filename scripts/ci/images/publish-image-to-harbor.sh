@@ -2,7 +2,7 @@
 # Finish publication of images the build already pushed to Harbor, the registry
 # every Codewire deployment pulls from: apply the requested tags without
 # rebuilding, then prove each digest with the pull-only identity that Dev,
-# Prod and sandbox consumers use. Nexus is not part of publication.
+# Prod and sandbox consumers use.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"

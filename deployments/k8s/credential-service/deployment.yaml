@@ -28,7 +28,6 @@ spec:
         app.kubernetes.io/component: credential-service
     spec:
       imagePullSecrets:
-        - name: nexus-registry
         - name: harbor-registry
       serviceAccountName: codewire-credential-service
       topologySpreadConstraints:

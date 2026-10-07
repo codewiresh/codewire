@@ -42,9 +42,6 @@ case "$url" in
   */v1/auth/forgejo-jwt/login)
     printf '%s\n' '{"auth":{"client_token":"synthetic-openbao-token"}}' >"$output"
     ;;
-  */v1/platform/data/nexus/oci-promoter)
-    printf '%s\n' '{"data":{"data":{"username":"nexus-user","password":"synthetic-nexus-password"}}}' >"$output"
-    ;;
   */v1/platform/data/ci/codewire/ghcr-publisher)
     printf '%s\n' '{"data":{"data":{"username":"ghcr-user","token":"synthetic-ghcr-token"}}}' >"$output"
     ;;
@@ -119,8 +116,7 @@ printf '\n' >>"$DOCKER_LOG"
 case "${1:-} ${2:-} ${3:-}" in
   login\ *)
     credential="$(cat)"
-    [[ "$credential" == synthetic-nexus-password || "$credential" == synthetic-ghcr-token \
-      || "$credential" == synthetic-harbor-password ]]
+    [[ "$credential" == synthetic-ghcr-token || "$credential" == synthetic-harbor-password ]]
     mkdir -p "${DOCKER_CONFIG:?}"
     printf '%s\n' '{}' >"$DOCKER_CONFIG/config.json"
     ;;
@@ -241,9 +237,6 @@ fi
   fail 'signer did not mint one initial and one per-signature Forgejo identity'
 [[ "$(grep -c '/v1/auth/forgejo-jwt/login$' "$curl_log")" -eq 6 ]] ||
   fail 'signer reused one short-lived OpenBao token across registry signatures'
-if grep -q '/v1/platform/data/nexus/' "$curl_log"; then
-  fail 'delivery signing fetched a Nexus credential'
-fi
 [[ "$(grep -c '/v1/platform/data/ci/codewire/harbor-publisher$' "$curl_log")" -eq 1 ]] ||
   fail 'signer fetched Harbor credentials more than once'
 if grep -q '/v1/platform/data/ci/codewire/ghcr-publisher$' "$curl_log"; then
@@ -265,12 +258,9 @@ fi
   fail 'signer did not verify provenance for every Harbor reference'
 [[ "$(grep -c "buildx imagetools inspect .*SBOM.SPDX" "$docker_log")" -eq 5 ]] ||
   fail 'signer did not verify SBOMs for every Harbor reference'
-if grep -q 'nexus-system-cluster.example.invalid/codewire\|oci-promoted' "$docker_log" "$cosign_log"; then
-  fail 'delivery signing touched a Nexus publication reference'
-fi
 grep -Fq 'Verified and signed the exact five-image runtime set in Harbor' \
   "$work/first.out" || fail 'signer omitted its complete-set result'
-if rg -n 'synthetic-(request|forgejo|openbao|nexus-password|ghcr-token|harbor-password)' \
+if rg -n 'synthetic-(request|forgejo|openbao|ghcr-token|harbor-password)' \
   "$work/first.out" "$work/first.err" "$docker_log" "$cosign_log"; then
   fail 'signer exposed short-lived identity or registry credential material'
 fi
@@ -328,7 +318,7 @@ fi
   fail 'GHCR mirror signing did not sign all five mirror references'
 [[ "$(grep -c '/v1/platform/data/ci/codewire/ghcr-publisher$' "$curl_log")" -eq 1 ]] ||
   fail 'GHCR mirror signing did not fetch the GHCR credential once'
-if grep -Eq '/v1/platform/data/(nexus/oci-promoter|ci/codewire/harbor-publisher)$' "$curl_log"; then
+if grep -q '/v1/platform/data/ci/codewire/harbor-publisher$' "$curl_log"; then
   fail 'GHCR mirror signing fetched delivery registry credentials'
 fi
 grep -Fq 'runtime set in the GHCR mirror' "$work/mirror.out" ||

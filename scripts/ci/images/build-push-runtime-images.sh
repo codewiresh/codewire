@@ -8,7 +8,6 @@ readonly PROVENANCE_BUILDER_ID='https://git.example.invalid/infra/ci/builders/pr
 readonly PUBLISH_REGISTRY_HOST='registry.example.invalid'
 readonly PROTECTED_SCCACHE_BUCKET='example-ci-cache-protected'
 readonly PROTECTED_SCCACHE_ENDPOINT='https://00000000000000000000000000000000.r2.cloudflarestorage.com'
-source "$ROOT/scripts/ci/images/nexus-publication-retry-contract.sh"
 
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
@@ -68,15 +67,6 @@ DOCKER_CONFIG="$docker_config" docker buildx create \
   --driver-opt provenance-add-gha=false \
   --buildkitd-config "$buildkit_config" \
   --bootstrap >/dev/null
-
-is_nexus_backup_unavailable() {
-  local log_file="$1"
-
-  if ! grep -Fq "https://${PUBLISH_REGISTRY_HOST}/v2/" "$log_file"; then
-    return 1
-  fi
-  grep -Eq '503 Service (Temporarily )?Unavailable' "$log_file"
-}
 
 # The deploy-selection job's trusted planner certifies, per runtime image
 # family, whether the exact canonical head changes that family's inputs
@@ -215,43 +205,15 @@ run_protected_build() {
   local dockerfile="$2"
   local output="$3"
   local build_runtime_set="$4"
-  local attempt build_log build_status tee_status
-  local -a pipeline_status
 
-  for (( attempt = 1; attempt <= NEXUS_BACKUP_RETRY_ATTEMPTS; attempt++ )); do
-    build_log="$work/$image_name.build-attempt.log"
-    : >"$output"
-    : >"$build_log"
-
-    set +e
-    GITHUB_OUTPUT="$output" \
-      CODEWIRE_EXTERNAL_BUILDX_BUILDER="$builder" \
-      CODEWIRE_EXTERNAL_DOCKER_CONFIG="$docker_config" \
-      CODEWIRE_PROVENANCE_BUILDER_ID="$PROVENANCE_BUILDER_ID" \
-      CODEWIRE_SCCACHE_MODE="${CODEWIRE_SCCACHE_MODE:-local}" \
-      CODEWIRE_BUILD_RUNTIME_SET="$build_runtime_set" \
-      scripts/ci/images/build-push-image.sh "$image_name" "$dockerfile" . \
-        2>&1 | tee "$build_log"
-    pipeline_status=("${PIPESTATUS[@]}")
-    build_status="${pipeline_status[0]}"
-    tee_status="${pipeline_status[1]}"
-    set -e
-
-    if [ "$build_status" -eq 0 ] && [ "$tee_status" -eq 0 ]; then
-      return 0
-    fi
-    if [ "$tee_status" -ne 0 ]; then
-      return "$tee_status"
-    fi
-    if [ "$attempt" -ge "$NEXUS_BACKUP_RETRY_ATTEMPTS" ] \
-        || ! is_nexus_backup_unavailable "$build_log"; then
-      return "$build_status"
-    fi
-
-    printf 'Registry is temporarily unavailable during protected publication; retrying the exact %s build (%d/%d)\n' \
-      "$image_name" "$((attempt + 1))" "$NEXUS_BACKUP_RETRY_ATTEMPTS" >&2
-    sleep "$NEXUS_BACKUP_RETRY_DELAY_SECONDS"
-  done
+  : >"$output"
+  GITHUB_OUTPUT="$output" \
+    CODEWIRE_EXTERNAL_BUILDX_BUILDER="$builder" \
+    CODEWIRE_EXTERNAL_DOCKER_CONFIG="$docker_config" \
+    CODEWIRE_PROVENANCE_BUILDER_ID="$PROVENANCE_BUILDER_ID" \
+    CODEWIRE_SCCACHE_MODE="${CODEWIRE_SCCACHE_MODE:-local}" \
+    CODEWIRE_BUILD_RUNTIME_SET="$build_runtime_set" \
+    scripts/ci/images/build-push-image.sh "$image_name" "$dockerfile" .
 }
 
 build_one() {

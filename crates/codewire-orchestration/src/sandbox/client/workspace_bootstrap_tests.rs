@@ -2150,9 +2150,9 @@ async fn generic_resume_re_pins_and_suspend_never_does() {
     }
 }
 
-/// Production pins `git.example.invalid`, and Dev moved through GHCR, Nexus and
-/// Harbor: a daemon from any repository a release rendered the support image
-/// from re-pins, with a tag, a digest or both.
+/// Production pins `git.example.invalid`, and Dev moved through GHCR and Harbor: a
+/// daemon from any repository a release rendered the support image from
+/// re-pins, with a tag, a digest or both.
 #[tokio::test]
 async fn every_listed_repository_re_pins_to_the_support_image() {
     let mut froms = vec![

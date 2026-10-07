@@ -2027,10 +2027,6 @@ grep -Fq "KIND_WORKSPACE_IMAGE: $SEALED_WORKSPACE_IMAGE" \
   "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the Forgejo-proven workspace image'
 grep -Fq "KIND_DIND_IMAGE: $SEALED_DIND_IMAGE" \
   "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved Docker DinD image'
-if grep -Fq 'nexus-system-cluster.example.invalid/oci-approved/' \
-    "$ROOT/.gitea/workflows/ci.yaml"; then
-  fail 'Forgejo CI still uses the Nexus recovery alias for an approved Kind input'
-fi
 
 # The CI gate shards the retained suites across four matrix legs, each with its
 # own cluster and a 45-minute ceiling; Required verification aggregates the one

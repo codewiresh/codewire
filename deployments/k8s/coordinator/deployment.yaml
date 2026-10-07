@@ -24,7 +24,6 @@ spec:
         app.kubernetes.io/component: coordinator
     spec:
       imagePullSecrets:
-        - name: nexus-registry
         - name: harbor-registry
       # Coordinate WebSockets are long-lived; give clients time to reconnect
       # elsewhere before the pod goes away.

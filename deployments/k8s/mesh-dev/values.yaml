@@ -6,7 +6,6 @@ image:
   digest: ""
 
 imagePullSecrets:
-  - name: nexus-registry
   - name: harbor-registry
 
 # Infra owns Cluster/dev/codewire-mesh-db and CNPG generates this Secret.

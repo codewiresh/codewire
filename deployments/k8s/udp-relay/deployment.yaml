@@ -23,7 +23,6 @@ spec:
         app.kubernetes.io/component: udp-relay
     spec:
       imagePullSecrets:
-        - name: nexus-registry
         - name: harbor-registry
       terminationGracePeriodSeconds: 15
       containers:

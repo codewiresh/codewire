@@ -302,8 +302,4 @@ if env -u HARBOR_PUBLISH_PASSWORD_FILE HARBOR_PUBLISH_USERNAME=x \
   fail 'Harbor publication without its credential was accepted'
 fi
 
-if grep -qF 'nexus' "$FAKE_CALLS"; then
-  fail 'the copy helper contacted Nexus'
-fi
-
 echo 'copy-image-to-ghcr tests passed'
