@@ -1920,9 +1920,8 @@ async fn a_pool_born_restart_refuses_anything_but_codewires_identity_free_pool()
 
 // ------------------- daemon image re-pin on resume (owner decision 2026-10-05)
 
-/// The image a Sandbox was created with, before a support-image rollout and
-/// the image's rename from `codewire/gateway` to `codewire/daemon`.
-const OLD_DAEMON_IMAGE: &str = "registry.example.invalid/codewire/gateway@sha256:a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0";
+/// The image a Sandbox was created with, before a support-image rollout.
+const OLD_DAEMON_IMAGE: &str = "registry.example.invalid/codewire/daemon@sha256:a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0";
 const OLD_DAEMON_DIGEST: &str =
     "sha256:a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0a59dfec0";
 const CONCURRENT_DAEMON_IMAGE: &str = "registry.example.invalid/codewire/daemon@sha256:3333333333333333333333333333333333333333333333333333333333333333";
@@ -2150,14 +2149,13 @@ async fn generic_resume_re_pins_and_suspend_never_does() {
     }
 }
 
-/// Production pins `git.example.invalid`, and Dev moved through GHCR and Harbor: a
-/// daemon from any repository a release rendered the support image from
+/// A daemon from any repository a release renders the support image from
 /// re-pins, with a tag, a digest or both.
 #[tokio::test]
 async fn every_listed_repository_re_pins_to_the_support_image() {
     let mut froms = vec![
-        "git.example.invalid/codewire/gateway:v0.3.359@sha256:1bc918a7c16ac72c4d3f84641efb12343372fa70a0e8839466ab26e660c81173".to_owned(),
-        "registry.example.invalid/codewire/gateway:main-4b5b65d".to_owned(),
+        "git.example.invalid/codewire/daemon:v0.3.359@sha256:1bc918a7c16ac72c4d3f84641efb12343372fa70a0e8839466ab26e660c81173".to_owned(),
+        "registry.example.invalid/codewire/daemon:main-4b5b65d".to_owned(),
     ];
     for repository in SUPPORT_IMAGE_REPOSITORIES {
         froms.push(format!("{repository}@{OLD_DAEMON_DIGEST}"));

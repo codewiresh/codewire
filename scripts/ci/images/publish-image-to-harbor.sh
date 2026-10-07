@@ -7,10 +7,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
-# `gateway` is the daemon image's repository before its rename to `daemon`:
-# the compiled-in default daemon image still names a digest there, which
-# --pinned-defaults keeps until that default moves to a `daemon` digest.
-readonly source_pattern='^registry\.example\.invalid/codewire/(dashboard|derp|daemon|gateway|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})$'
+readonly source_pattern='^registry\.example\.invalid/codewire/(dashboard|derp|daemon|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})$'
 readonly HARBOR_HOST='registry.example.invalid'
 readonly HARBOR_PROJECT="$HARBOR_HOST/codewire"
 readonly PUBLIC_MIRROR='ghcr.io/codewiresh'
@@ -117,7 +114,7 @@ case "${1:-}" in
     # Sandboxes and their daemons default to Harbor digests compiled into the
     # product. Keep each one in Harbor before any deployment references it.
     mapfile -t keep_refs < <(
-      grep -ohE 'registry\.example\.invalid/codewire/(workspace|daemon|gateway)@sha256:[0-9a-f]{64}' \
+      grep -ohE 'registry\.example\.invalid/codewire/(workspace|daemon)@sha256:[0-9a-f]{64}' \
         "$ROOT/crates/codewire-server-core/src/runtime_images.rs" |
         sort -u
     )
