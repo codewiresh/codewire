@@ -10,9 +10,13 @@ dist/
 apps/docs/.astro/
 
 # Claude Code (settings.json is checked in: it disables commit/PR
-# attribution for every session; local overrides stay ignored)
+# attribution for every session; local overrides stay ignored). Repository
+# skills live in .agents/skills; .claude/skills tracks only links to them.
 .claude/*
 !.claude/settings.json
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/codewire-design/
 
 # Git worktrees
 .worktrees/
