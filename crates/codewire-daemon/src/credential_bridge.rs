@@ -12,8 +12,8 @@ use axum::http::{Request, Response};
 use codewire_credential_bridge::{
     CredentialBridge as SharedCredentialBridge, CredentialBridgeOutput, EpochReplacement,
 };
-use codewire_gateway_proto::codewire::bridge::v1;
-use codewire_gateway_proto::{CREDENTIAL_BRIDGE_LOOPBACK_PORT, CREDENTIAL_BRIDGE_PROTOCOL_VERSION};
+use codewire_daemon_proto::codewire::bridge::v1;
+use codewire_daemon_proto::{CREDENTIAL_BRIDGE_LOOPBACK_PORT, CREDENTIAL_BRIDGE_PROTOCOL_VERSION};
 use tokio::net::{TcpListener, TcpSocket, TcpStream, UnixListener, UnixStream, unix::SocketAddr};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_stream::{Stream, StreamExt};
@@ -410,10 +410,11 @@ where
             "credential bridge identity is invalid",
         ));
     }
-    if open.capabilities.len() > codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
-        || !open.capabilities.iter().all(|capability| {
-            codewire_gateway_proto::valid_credential_bridge_capability(capability)
-        })
+    if open.capabilities.len() > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
+        || !open
+            .capabilities
+            .iter()
+            .all(|capability| codewire_daemon_proto::valid_credential_bridge_capability(capability))
     {
         return Err(Status::invalid_argument(
             "credential bridge capabilities are invalid",
@@ -735,8 +736,8 @@ mod ingress_tests;
 mod tests {
     use std::os::unix::fs::MetadataExt as _;
 
-    use codewire_gateway_proto::DAEMON_CAPABILITY_CREDENTIAL_BRIDGE;
-    use codewire_gateway_proto::codewire::bridge::v1::credential_bridge_guest_message::Payload as GuestPayload;
+    use codewire_daemon_proto::DAEMON_CAPABILITY_CREDENTIAL_BRIDGE;
+    use codewire_daemon_proto::codewire::bridge::v1::credential_bridge_guest_message::Payload as GuestPayload;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::sync::oneshot;
     use tokio_stream::wrappers::TcpListenerStream;

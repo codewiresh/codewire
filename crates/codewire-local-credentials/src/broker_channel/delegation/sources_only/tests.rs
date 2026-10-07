@@ -4,7 +4,7 @@ mod owner_flow;
 mod selection;
 
 use codewire_access::builtin_provider_catalog;
-use codewire_gateway_proto::projection::{decode_local_inventories, encode_platform_inventories};
+use codewire_daemon_proto::projection::{decode_local_inventories, encode_platform_inventories};
 use codewire_project::PlatformProjectionSelection;
 use codewire_protected_store::{EphemeralProtectedStore, ProtectedValue};
 use codewire_workload_secrets::{

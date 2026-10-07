@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use codewire_gateway_proto::projection::{decode_platform_inventories, encode_local_inventories};
+use codewire_daemon_proto::projection::{decode_platform_inventories, encode_local_inventories};
 use codewire_project::PlatformProjectionSelection;
 use codewire_workload_secrets::{
     MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES, ProjectionCompositionPlan, ProjectionContext,
@@ -137,8 +137,7 @@ impl<S: ProtectedStore + 'static> ProjectionComposer<S> {
             deadline_unix_ms: request.deadline_unix_ms,
         };
         self.live(&context)?;
-        if self.pending.lock().await.len()
-            >= codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_IN_FLIGHT
+        if self.pending.lock().await.len() >= codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_IN_FLIGHT
         {
             return Err(Status::resource_exhausted(
                 "environment projection authority is busy",

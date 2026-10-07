@@ -6,7 +6,7 @@ use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 use portable_pty::{PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};

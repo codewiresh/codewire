@@ -13,7 +13,7 @@ use codewire_credential_broker::platform::bridge::{
 use codewire_credential_broker::{
     BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport,
 };
-use codewire_gateway_proto::{
+use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES, CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES,
     CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
 };

@@ -1,7 +1,7 @@
 //! One selected-key worker per signing operation; no key cache or new owner.
 
-use codewire_gateway_proto::codewire::bridge::v1;
-use codewire_gateway_proto::ssh::{SshOperation, agent};
+use codewire_daemon_proto::codewire::bridge::v1;
+use codewire_daemon_proto::ssh::{SshOperation, agent};
 use codewire_protected_store::ssh_material::SshAgentMaterial;
 
 use super::*;
@@ -42,7 +42,7 @@ where
         _ = std::future::ready(()) => {}
     }
     let now = Instant::now();
-    if deadline <= now || deadline > now + codewire_gateway_proto::ssh::MAX_DEADLINE {
+    if deadline <= now || deadline > now + codewire_daemon_proto::ssh::MAX_DEADLINE {
         return Err(SshAgentError::Expired);
     }
     let (key, passphrase) = material.into_parts();

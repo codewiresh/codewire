@@ -18,7 +18,7 @@ fn dev_cfg() -> SandboxWorkerCfg {
     SandboxWorkerCfg {
         sandbox_namespace: SANDBOX_NAMESPACE.into(),
         credential_runtime: Some(CredentialRuntimeTemplateConfig::synthetic(SANDBOX_NAMESPACE)),
-        gateway_image: "registry.example.invalid/codewire/gateway@sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
+        daemon_image: "registry.example.invalid/codewire/daemon@sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
         dind_image: "docker.io/library/docker:29.7.1-dind@sha256:3333333333333333333333333333333333333333333333333333333333333333".into(),
         runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
         docker_mode: crate::sandbox::template::DOCKER_MODE_PROFILE_DEFAULT.into(),
@@ -214,7 +214,7 @@ fn unbindable_and_unmanaged_runtimes_render_no_pool() {
     // also use side-loaded tagged images.
     let diagnostic = SandboxWorkerCfg {
         runtime_profile: RUNTIME_PROFILE_RUNC.into(),
-        gateway_image: "git.example.com/codewire/gateway:local".into(),
+        daemon_image: "git.example.com/codewire/daemon:local".into(),
         ..dev_cfg()
     };
     assert!(warm_pool_template_opts(&diagnostic, shape).is_err());
@@ -226,7 +226,7 @@ fn unbindable_and_unmanaged_runtimes_render_no_pool() {
 
     // A managed cluster pools only digest-pinned images.
     let tagged = SandboxWorkerCfg {
-        gateway_image: "git.example.invalid/codewire/gateway:main-4b5b65d-1783969421".into(),
+        daemon_image: "git.example.invalid/codewire/daemon:main-4b5b65d-1783969421".into(),
         ..dev_cfg()
     };
     let error = render_configured_warm_pool(&tagged, shape, 2).unwrap_err();
@@ -297,7 +297,7 @@ fn rendered_pool_templates_pass_the_admission_volume_rule() {
         kind,
         [
             "codewire-orchestration-internal-roots",
-            codewire_gateway_proto::COORDINATOR_EXTRA_ROOTS_CONFIGMAP
+            codewire_daemon_proto::COORDINATOR_EXTRA_ROOTS_CONFIGMAP
         ]
     );
     for (cfg, allowed, mounted) in [

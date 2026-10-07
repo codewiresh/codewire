@@ -103,7 +103,7 @@ bundle="$work/bundle.json"
 python3 "$ROOT/scripts/ci/images/image-bundle.py" create --source-sha "$source_sha" --output "$bundle" \
   --candidate dashboard "$source_sha" "$harbor/dashboard@$digest" \
   --candidate derp "$source_sha" "$harbor/derp@$digest" \
-  --candidate gateway "$source_sha" "$harbor/gateway@$digest" \
+  --candidate daemon "$source_sha" "$harbor/daemon@$digest" \
   --candidate services "$source_sha" "$harbor/services@$digest" \
   --candidate mesh "$source_sha" "$harbor/mesh@$digest"
 
@@ -113,7 +113,7 @@ export GITHUB_OUTPUT="$work/output"
 "$PUBLISH" --runtime-bundle "$bundle" >"$work/runtime.out" 2>&1 ||
   { cat "$work/runtime.out" >&2; fail 'runtime bundle publication failed'; }
 [[ "$(wc -l <"$FAKE_COPY_LOG")" -eq 5 ]] || fail 'runtime bundle did not confirm five source tags'
-for family in dashboard derp gateway services mesh; do
+for family in dashboard derp daemon services mesh; do
   grep -qxF "$harbor/$family@$digest $harbor/$family $source_sha" "$FAKE_COPY_LOG" ||
     fail "runtime publication for $family is not the exact source-tagged Harbor image"
   grep -qxF "${family}_harbor_ref=$harbor/$family@$digest" "$GITHUB_OUTPUT" ||
@@ -143,7 +143,7 @@ grep -qxF "$harbor/workspace@$digest $harbor/workspace $source_sha latest" "$FAK
   fail 'support workspace did not receive its source tag and latest alias'
 
 reset_logs
-"$PUBLISH" --keep "$harbor/workspace@$digest" "$harbor/gateway@$digest" >"$work/keep.out" 2>&1 ||
+"$PUBLISH" --keep "$harbor/workspace@$digest" "$harbor/daemon@$digest" >"$work/keep.out" 2>&1 ||
   { cat "$work/keep.out" >&2; fail 'keep publication failed'; }
 grep -qxF "$harbor/workspace@$digest $harbor/workspace keep-${digest/:/-}" "$FAKE_COPY_LOG" ||
   fail 'keep publication did not use the exact-digest keep tag'
@@ -152,10 +152,10 @@ grep -qxF "$harbor/workspace@$digest $harbor/workspace keep-${digest/:/-}" "$FAK
 # Compiled-in defaults already in Harbor are only kept; the public mirror is
 # never contacted.
 mapfile -t pinned < <(
-  grep -ohE 'registry\.example\.invalid/codewire/(workspace|gateway)@sha256:[0-9a-f]{64}' \
+  grep -ohE 'registry\.example\.invalid/codewire/(workspace|daemon|gateway)@sha256:[0-9a-f]{64}' \
     "$ROOT/crates/codewire-server-core/src/runtime_images.rs" | sort -u
 )
-[[ "${#pinned[@]}" -ge 2 ]] || fail 'source does not pin Harbor workspace and gateway defaults'
+[[ "${#pinned[@]}" -ge 2 ]] || fail 'source does not pin Harbor workspace and daemon defaults'
 reset_logs
 "$PUBLISH" --pinned-defaults >"$work/pinned.out" 2>&1 ||
   { cat "$work/pinned.out" >&2; fail 'pinned defaults publication failed'; }
@@ -190,15 +190,15 @@ fi
 reset_logs
 "$PUBLISH" "$harbor/confidential-probe@$digest" "$harbor/confidential-probe" "$source_sha" \
   >"$work/single.out" 2>&1 || { cat "$work/single.out" >&2; fail 'single publication failed'; }
-if "$PUBLISH" "$harbor/gateway@$digest" "$harbor/services" "$source_sha" \
+if "$PUBLISH" "$harbor/daemon@$digest" "$harbor/services" "$source_sha" \
     >"$work/mismatch.out" 2>&1; then
   fail 'a Harbor repository for another family was accepted'
 fi
 if "$PUBLISH" --keep "ghcr.io/codewiresh/workspace@$digest" >"$work/bad-keep.out" 2>&1; then
   fail 'a non-Harbor keep source was accepted'
 fi
-if "$PUBLISH" "nexus-system-cluster.example.invalid/oci-promoted/codewire/gateway@$digest" \
-    "$harbor/gateway" "$source_sha" >"$work/nexus-source.out" 2>&1; then
+if "$PUBLISH" "nexus-system-cluster.example.invalid/oci-promoted/codewire/daemon@$digest" \
+    "$harbor/daemon" "$source_sha" >"$work/nexus-source.out" 2>&1; then
   fail 'a Nexus source reference was accepted'
 fi
 

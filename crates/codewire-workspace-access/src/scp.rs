@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 use russh::Channel;
 use russh::server;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};

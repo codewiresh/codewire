@@ -67,7 +67,7 @@ render_prod_manifests() {
     cd "$tmp_dir/deployments/k8s/overlays/production"
     kustomize edit set image \
       "git.example.com/codewire/services=${REGISTRY_HOST}/codewire/services:${DEPLOY_TAG}"
-    sed -i "s|^  SANDBOX_GATEWAY_IMAGE:.*|  SANDBOX_GATEWAY_IMAGE: ${REGISTRY_HOST}/codewire/gateway:${DEPLOY_TAG}|" config-images.yaml
+    sed -i "s|^  SANDBOX_DAEMON_IMAGE:.*|  SANDBOX_DAEMON_IMAGE: ${REGISTRY_HOST}/codewire/daemon:${DEPLOY_TAG}|" config-images.yaml
     kubectl kustomize . > "$out_dir/production.yaml"
   )
 
@@ -90,7 +90,7 @@ render_prod_manifests() {
     printf 'tag=%s\n' "$DEPLOY_TAG"
     printf 'registry=%s\n' "$REGISTRY_HOST"
     printf 'services=%s/codewire/services:%s\n' "$REGISTRY_HOST" "$DEPLOY_TAG"
-    printf 'gateway=%s/codewire/gateway:%s\n' "$REGISTRY_HOST" "$DEPLOY_TAG"
+    printf 'daemon=%s/codewire/daemon:%s\n' "$REGISTRY_HOST" "$DEPLOY_TAG"
     printf 'derp=%s/codewire/derp:%s\n' "$REGISTRY_HOST" "$DEPLOY_TAG"
     printf 'mesh=%s/codewire/mesh:%s\n' "$REGISTRY_HOST" "$DEPLOY_TAG"
   } > "$out_dir/images.env"
@@ -98,7 +98,7 @@ render_prod_manifests() {
   if grep -REn 'codewire-server|WORKER_ENABLED|WORKER_URL' "$out_dir"; then
     bad=1
   fi
-  if grep -REn 'git\.example\.com/codewire/(services|gateway|derp)|codewire/(services|gateway|derp|mesh):latest' "$out_dir"; then
+  if grep -REn 'git\.example\.com/codewire/(services|daemon|derp)|codewire/(services|daemon|derp|mesh):latest' "$out_dir"; then
     bad=1
   fi
   if [ "$bad" != "0" ]; then

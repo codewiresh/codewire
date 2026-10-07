@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use codewire_gateway_proto::ssh::{remaining_deadline, validate_request, validate_response};
+use codewire_daemon_proto::ssh::{remaining_deadline, validate_request, validate_response};
 use tokio::time::Instant;
 
 use super::*;

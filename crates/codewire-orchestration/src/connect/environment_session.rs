@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use codewire_daemon_bridge::session::{
     EnvironmentSessionAttachment as BridgeAttachment, EnvironmentSessionBackend, FieldViolation,
 };
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 use codewire_server_core::connect::{auth_user, wire_error};
 use codewire_server_core::{AppError, ValidationIssue};
 use connectrpc::RequestContext;

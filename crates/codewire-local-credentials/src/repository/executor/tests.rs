@@ -202,7 +202,7 @@ async fn brokered_checkout_rejects_invalid_inputs_before_spawning_git() {
 #[test]
 fn brokered_checkout_retains_the_shared_256_mib_response_ceiling() {
     assert_eq!(
-        codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES,
+        codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES,
         256 * 1024 * 1024
     );
 }

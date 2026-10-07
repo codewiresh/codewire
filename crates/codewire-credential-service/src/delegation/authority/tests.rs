@@ -11,7 +11,7 @@ use codewire_access::{
     AccessProfileName, CapabilitySlot, CredentialAuthKind, Owner, OwnerId, ProviderId,
     builtin_provider_catalog,
 };
-use codewire_gateway_proto::projection::{decode_local_inventories, decode_platform_inventories};
+use codewire_daemon_proto::projection::{decode_local_inventories, decode_platform_inventories};
 use codewire_platform_credentials::{CredentialRegistration, PlatformAccessProfileStore};
 use codewire_protected_store::ProtectedValue;
 use codewire_protected_store::secret_envelope::{

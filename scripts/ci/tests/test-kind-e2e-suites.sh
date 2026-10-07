@@ -60,9 +60,9 @@ record() {
 # render names SANDBOX_WARM_POOL_SHAPES once, with valid exact shapes of at
 # most 16 members each. A render that configures a pool, or whose suite
 # configures one at run time ("pool-suite"), must admit, through the pool
-# template policy, exactly the gateway image its orchestration runs.
+# template policy, exactly the daemon image its orchestration runs.
 assert_warm_pool_config() {
-  local rendered="$1" want="$2" admit="${3:-}" shapes shape gateway
+  local rendered="$1" want="$2" admit="${3:-}" shapes shape daemon
   shape='[1-9][0-9]{0,9}m/[1-9][0-9]{0,9}Mi/[1-9][0-9]{0,9}Gi=([0-9]|1[0-6])'
   if grep -Eq 'SANDBOX_(FULL_WARM_PROFILES|WARM_POOL_WORKSPACE_IMAGE)' "$rendered"; then
     echo "retired shared warm-pool configuration in ${rendered}" >&2
@@ -78,11 +78,11 @@ assert_warm_pool_config() {
     return 1
   fi
   [ -n "$shapes" ] || [ "$admit" = pool-suite ] || return 0
-  gateway="$(grep -A1 -- '- name: SANDBOX_GATEWAY_IMAGE' "$rendered" | sed -n 's/^ *value: *//p')"
-  if [ -z "$gateway" ] ||
-      ! grep -Fxq "  - expression: '[''${gateway}'']'" "$rendered" ||
-      ! grep -A1 -Fx "  - expression: '[''${gateway}'']'" "$rendered" | grep -Fxq '    name: localImages'; then
-    echo "the pool template policy in ${rendered} does not admit exactly its gateway image ${gateway:-missing}" >&2
+  daemon="$(grep -A1 -- '- name: SANDBOX_DAEMON_IMAGE' "$rendered" | sed -n 's/^ *value: *//p')"
+  if [ -z "$daemon" ] ||
+      ! grep -Fxq "  - expression: '[''${daemon}'']'" "$rendered" ||
+      ! grep -A1 -Fx "  - expression: '[''${daemon}'']'" "$rendered" | grep -Fxq '    name: localImages'; then
+    echo "the pool template policy in ${rendered} does not admit exactly its daemon image ${daemon:-missing}" >&2
     return 1
   fi
 }
@@ -231,7 +231,7 @@ grep -Fq "environment_id=\"\$(python3 -c 'import uuid; print(uuid.uuid4())')\"" 
   fail 'resize fixture does not use the canonical environment identity shape'
 grep -Fq "'kind-resize-smoke', 'running', 'started', '\$preset_id'" <<<"$resize_fixture" ||
   fail 'resize fixture does not use its own runnable preset'
-grep -Fq "VALUES ('\$preset_id', 'codewire-gateway:e2e', 'resize-template');" <<<"$resize_fixture" ||
+grep -Fq "VALUES ('\$preset_id', 'codewire-daemon:e2e', 'resize-template');" <<<"$resize_fixture" ||
   fail 'resize fixture image/template base does not match its runtime'
 grep -Fq 'INSERT INTO environment_presets (id, org_id, name, official, project_spec)' <<<"$resize_fixture" ||
   fail 'resize fixture does not own its preset'
@@ -1155,7 +1155,6 @@ for consumed_binary in \
   printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/consumed-ci/$consumed_binary"
   chmod +x "$FIXTURE/consumed-ci/$consumed_binary"
 done
-: >"$FIXTURE/consumed-run/credential-bootstrap-build.jsonl"
 : >"$FIXTURE/consumed-run/billing-contract-build.jsonl"
 (
   CARGO_CI_DIR="$FIXTURE/consumed-ci"
@@ -1195,6 +1194,7 @@ suite_block = common.split("build_retained_kind_smokes() {", 1)[1].split("\n}", 
 verified = set()
 for span in re.findall(r"for consumed in(.*?); do", suite_block, re.S):
     verified |= set(re.findall(r"[a-z][a-z0-9.-]+(?:/[a-z0-9.-]+)*", span))
+verified |= set(re.findall(r'\[ ! -f "\$RUN_DIR/([a-z0-9.-]+)" \]', suite_block))
 smoke_block = artifacts.split("SMOKE_FILES = {", 1)[1].split("}", 1)[0]
 transport = set(re.findall(r'^\s{4}"[a-z0-9-]+": "((?:examples/)?[a-z0-9-]+)",$',
                            smoke_block, re.M))
@@ -1531,7 +1531,7 @@ kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-services:e2e
 wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-mesh:e2e
 wait-api
-kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-gateway:e2e
+kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-daemon:e2e
 wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_POSTGRES_LOCAL_IMAGE}
 wait-api
@@ -1690,12 +1690,12 @@ PY
   [ "$(grep -Fc 'SANDBOX_IMAGE_CACHE: disabled' "$kind_rendered")" -eq 1 ] ||
     fail 'sealed Kind overlay does not disable the public-image cache'
   # The e2e overlay runs no pool (the warm-pools suite configures its own),
-  # but still admits its side-loaded gateway for the suite's pool template.
+  # but still admits its side-loaded daemon for the suite's pool template.
   assert_warm_pool_config "$kind_rendered" '' pool-suite ||
     fail 'sealed Kind overlay warm-pool configuration is retired, repeated, invalid or active'
   # Old and new fixtures: each retired key, a repeated or malformed key, an
   # oversized pool, a pool left configured for every suite and an unadmitted
-  # gateway image all fail the guard.
+  # daemon image all fail the guard.
   for warm_fixture in \
       's/^  SANDBOX_WARM_POOL_SHAPES: .*$/  SANDBOX_WARM_POOL_SHAPES: 500m\/1024Mi\/5Gi=1/' \
       's/^  SANDBOX_WARM_POOL_SHAPES: .*$/&\n  SANDBOX_FULL_WARM_PROFILES: full/' \
@@ -1703,7 +1703,7 @@ PY
       's/^  SANDBOX_WARM_POOL_SHAPES: .*$/&\n  SANDBOX_WARM_POOL_SHAPES: 500m\/1024Mi\/5Gi=1/' \
       's/^  SANDBOX_WARM_POOL_SHAPES: .*$/  SANDBOX_WARM_POOL_SHAPES: 500m\/1Gi\/5Gi=1/' \
       's/^  SANDBOX_WARM_POOL_SHAPES: .*$/  SANDBOX_WARM_POOL_SHAPES: 500m\/1024Mi\/5Gi=17/' \
-      "s/^  - expression: '\[''codewire-gateway:e2e'']'$/  - expression: '[]'/"; do
+      "s/^  - expression: '\[''codewire-daemon:e2e'']'$/  - expression: '[]'/"; do
     sed -e "$warm_fixture" "$kind_rendered" >"$FIXTURE/warm-pool-config.yaml"
     if cmp -s "$kind_rendered" "$FIXTURE/warm-pool-config.yaml"; then
       fail "warm-pool guard fixture did not change the render: ${warm_fixture}"
@@ -1821,7 +1821,7 @@ kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-services:e2e
 wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-mesh:e2e
 wait-api
-kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-gateway:e2e
+kind:load docker-image --name ${KIND_CLUSTER_NAME} codewire-daemon:e2e
 wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_POSTGRES_LOCAL_IMAGE}
 wait-api

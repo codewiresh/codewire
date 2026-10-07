@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use codewire_daemon::service::DaemonRuntimeState;
 use codewire_daemon::{Config, DaemonAuthToken, server};
-use codewire_gateway_proto::DAEMON_AUTH_TOKEN_HEADER;
-use codewire_gateway_proto::daemon::v1;
-use codewire_gateway_proto::daemon::v1::daemon_service_client::DaemonServiceClient;
+use codewire_daemon_proto::DAEMON_AUTH_TOKEN_HEADER;
+use codewire_daemon_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1::daemon_service_client::DaemonServiceClient;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 #[cfg(unix)]

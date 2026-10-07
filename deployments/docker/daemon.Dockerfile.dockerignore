@@ -9,6 +9,6 @@ crates/**/target
 !proto
 !proto/**
 !libs
-!libs/gateway-proto
-!libs/gateway-proto/**
+!libs/daemon-proto
+!libs/daemon-proto/**
 **/.tmp

@@ -36,7 +36,7 @@ are compiled for Rust at build time by `crates/codewire-proto`.
 | `codewire.bridge.v1` | None; neutral material-free credential bridge frames. | Native and platform credential transports; generated public types do not grant a route or authority. |
 | `codewire.internal.v1` | `CoordinatorService`, `MeshCoordinatorService`, gateway binding, and Mesh authorization. | First-party runtime clients only |
 
-`libs/gateway-proto/proto/` holds the Rust-consumed private `daemon.v1` and
+`libs/daemon-proto/proto/` holds the Rust-consumed private `daemon.v1` and
 `broker.v1` services. They import the neutral `codewire.bridge.v1` messages but
 have no independent Go module or generated Go copy. New client-facing contracts
 belong under `proto/codewire/`.
@@ -45,7 +45,7 @@ To build the combined neutral/private descriptor without duplicating the
 neutral source, run from the repository root:
 
 ```sh
-buf build --config libs/gateway-proto/buf.yaml --as-file-descriptor-set -o /dev/null
+buf build --config libs/daemon-proto/buf.yaml --as-file-descriptor-set -o /dev/null
 ```
 
 ## Vendored third-party protos

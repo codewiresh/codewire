@@ -30,17 +30,17 @@ for file in production.yaml derp.yaml mesh.yaml images.env; do
   test -s "$out/$file"
 done
 
-for family in services gateway derp mesh; do
+for family in services daemon derp mesh; do
   grep -Fq "registry.test/codewire/${family}:v9.8.7" "$out/images.env"
 done
 
 grep -Fq 'registry.test/codewire/services:v9.8.7' "$out/production.yaml"
-grep -Fq 'registry.test/codewire/gateway:v9.8.7' "$out/production.yaml"
+grep -Fq 'registry.test/codewire/daemon:v9.8.7' "$out/production.yaml"
 grep -Fq 'registry.test/codewire/derp:v9.8.7' "$out/derp.yaml"
 grep -Fq 'registry.test/codewire/mesh:v9.8.7' "$out/mesh.yaml"
 
 # shellcheck disable=SC2016 # Literal Flux marker, not shell expansion.
-if grep -REn '\$imagepolicy|git\.example\.com/codewire|codewire/(services|gateway|derp|mesh):latest' "$out"; then
+if grep -REn '\$imagepolicy|git\.example\.com/codewire|codewire/(services|daemon|derp|mesh):latest' "$out"; then
   echo 'production render contains retired setters or mutable/placeholder images' >&2
   exit 1
 fi

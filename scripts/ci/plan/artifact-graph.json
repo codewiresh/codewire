@@ -86,7 +86,7 @@
         "codewire-local-credentials": ["crates/codewire-local-credentials/proto/**"],
         "codewire-local-vmm": ["crates/codewire-local-vmm/proto/**"],
         "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"],
-        "codewire-gateway-proto": ["libs/gateway-proto/proto/**"]
+        "codewire-daemon-proto": ["libs/daemon-proto/proto/**"]
       },
       "explicit_inputs": [
         "rust-toolchain.toml",
@@ -126,7 +126,7 @@
         "codewire-local-credentials": ["crates/codewire-local-credentials/proto/**"],
         "codewire-local-vmm": ["crates/codewire-local-vmm/proto/**"],
         "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"],
-        "codewire-gateway-proto": ["libs/gateway-proto/proto/**"]
+        "codewire-daemon-proto": ["libs/daemon-proto/proto/**"]
       },
       "explicit_inputs": ["rust-toolchain.toml"]
     },
@@ -144,22 +144,22 @@
         "crates/**",
         "deployments/docker/rust-base.Dockerfile",
         "docker-bake.hcl",
-        "libs/gateway-proto/**",
+        "libs/daemon-proto/**",
         "packages/codewire-design/**",
         "proto/**"
       ]
     },
-    "gateway_image": {
+    "daemon_image": {
       "kind": "file-set",
       "inputs": [
         "Cargo.toml",
         "Cargo.lock",
         "crates/**",
-        "deployments/docker/gateway.Dockerfile",
-        "deployments/docker/gateway.Dockerfile.dockerignore",
+        "deployments/docker/daemon.Dockerfile",
+        "deployments/docker/daemon.Dockerfile.dockerignore",
         "deployments/docker/rust-base.Dockerfile",
         "docker-bake.hcl",
-        "libs/gateway-proto/**",
+        "libs/daemon-proto/**",
         "proto/**"
       ]
     },
@@ -189,7 +189,7 @@
         "deployments/docker/services.Dockerfile.dockerignore",
         "deployments/docker/rust-base.Dockerfile",
         "docker-bake.hcl",
-        "libs/gateway-proto/**",
+        "libs/daemon-proto/**",
         "proto/**"
       ]
     },
@@ -266,7 +266,7 @@
         "dev_release_tree",
         "dev_acceptance_harness",
         "dashboard_image",
-        "gateway_image",
+        "daemon_image",
         "derp_image",
         "services_image",
         "mesh_image"

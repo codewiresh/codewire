@@ -56,7 +56,7 @@ def load_production_source_files(root: Path) -> dict[str, Any]:
 
     return {
         "kustomization": read("deployments/k8s/overlays/production/kustomization.yaml"),
-        "gateway_patch": read("deployments/k8s/overlays/production/config-images.yaml"),
+        "daemon_patch": read("deployments/k8s/overlays/production/config-images.yaml"),
         "mesh_release": read("deployments/k8s/flux/production/mesh-helmrelease.yaml"),
         "deploy_script": read("scripts/ci/deploy/deploy-prod.sh"),
         "ci_workflow": read(".gitea/workflows/ci.yaml"),
@@ -105,13 +105,13 @@ def validate_production_source(files: dict[str, Any]) -> str:
         tags[name] = pin.group(1)
         digests[name] = pin.group(2)
 
-    gateway = one_match(
-        files["gateway_patch"],
-        r"^\s*SANDBOX_GATEWAY_IMAGE:\s*git\.example\.invalid/codewire/gateway:(v\d+\.\d+\.\d+)@(sha256:[0-9a-f]{64})\s*$",
-        "gateway image",
+    daemon = one_match(
+        files["daemon_patch"],
+        r"^\s*SANDBOX_DAEMON_IMAGE:\s*git\.example\.invalid/codewire/daemon:(v\d+\.\d+\.\d+)@(sha256:[0-9a-f]{64})\s*$",
+        "daemon image",
     )
-    tags["gateway"] = gateway.group(1)
-    digests["gateway"] = gateway.group(2)
+    tags["daemon"] = daemon.group(1)
+    digests["daemon"] = daemon.group(2)
 
     mesh = one_match(
         files["mesh_release"],
@@ -195,10 +195,10 @@ def production_source_self_test(files: dict[str, Any]) -> None:
         raise RuntimeError(f"self-test accepted {label}")
 
     fixture = dict(files)
-    fixture["gateway_patch"] = re.sub(
-        r"gateway:v\d+\.\d+\.\d+@",
-        "gateway:v999.999.999@",
-        files["gateway_patch"],
+    fixture["daemon_patch"] = re.sub(
+        r"daemon:v\d+\.\d+\.\d+@",
+        "daemon:v999.999.999@",
+        files["daemon_patch"],
     )
     expect_rejected("mixed image tags", fixture, "mixed credential-free source tags")
 

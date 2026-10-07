@@ -60,7 +60,7 @@ codewire-workspace-access = { workspace = true }
 futures = { workspace = true }
 prost = { workspace = true }
 codewire-credential-broker = { workspace = true, features = ["codex-enrollment", "ssh-agent"] }
-codewire-gateway-proto = { workspace = true }
+codewire-daemon-proto = { workspace = true }
 codewire-local-credentials = { workspace = true }
 codewire-local-vmm = { path = "../codewire-local-vmm" }
 rustix = { workspace = true }

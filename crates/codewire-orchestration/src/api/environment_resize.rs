@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::http::StatusCode;
 use chrono::NaiveDateTime;
-use codewire_gateway_proto::daemon::v1::SessionLifecycleState;
+use codewire_daemon_proto::daemon::v1::SessionLifecycleState;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org_deletion::{
     OrganizationRuntimeMutationError, run_environment_runtime_mutation,

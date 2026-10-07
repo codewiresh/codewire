@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use codewire_access::{
     EnvironmentId, GrantContext, GrantPlacement, Owner, OwnerId, builtin_provider_catalog,
 };
-use codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION;
-use codewire_gateway_proto::broker::v1::credential_broker_service_client::CredentialBrokerServiceClient;
+use codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION;
+use codewire_daemon_proto::broker::v1::credential_broker_service_client::CredentialBrokerServiceClient;
 use codewire_protected_store::secret_envelope::{
     DEK_BYTES, DekContext, GeneratedDek, KekProvider, KekProviderKind, SecretEnvelopeError,
     TestKekProvider, WrappedDek,
@@ -576,7 +576,7 @@ async fn admitted_streams_carry_their_expiry_and_overlapping_epochs_hold_two_slo
     let expiry = |response: &Response<Streaming<v1::CredentialBridgeHostMessage>>| {
         let values: Vec<_> = response
             .metadata()
-            .get_all(codewire_gateway_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER)
+            .get_all(codewire_daemon_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER)
             .iter()
             .map(|value| value.to_str().unwrap().to_owned())
             .collect();
@@ -988,7 +988,7 @@ async fn admitted_streams_list_codex_login_and_answer_it_under_the_lease_budget(
         let response = response.unwrap();
         let capabilities: Vec<_> = response
             .metadata()
-            .get_all(codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER)
+            .get_all(codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER)
             .iter()
             .map(|value| value.to_str().unwrap().to_owned())
             .collect();

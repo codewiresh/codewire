@@ -202,10 +202,10 @@ audit_sources() {
     apps/cli/demo/broker
     apps/cli/internal
     apps/cli/internal/relay
-    libs/gateway-proto/buf.gen.yaml
-    libs/gateway-proto/gen
-    libs/gateway-proto/go.mod
-    libs/gateway-proto/go.sum
+    libs/daemon-proto/buf.gen.yaml
+    libs/daemon-proto/gen
+    libs/daemon-proto/go.mod
+    libs/daemon-proto/go.sum
     libs/gatewayauth
     tests/contract/coordinator
     tests/contract/file

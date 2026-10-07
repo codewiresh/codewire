@@ -4,8 +4,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use codewire_access::ManagedCredentialClients;
-use codewire_gateway_proto::DaemonAuthToken;
-pub use codewire_gateway_proto::{
+use codewire_daemon_proto::DaemonAuthToken;
+pub use codewire_daemon_proto::{
     HOSTED_DAEMON_ACCESS_READY_FILE, HOSTED_DAEMON_CREDENTIAL_FILE, HOSTED_DAEMON_READY_FILE,
     HOSTED_DAEMON_STATE_DIRECTORY, WORKSPACE_BINDING_TLS_ROOTS_FILE, WORKSPACE_BINDING_TOKEN_PATH,
     WORKSPACE_BINDING_URL_ENV, WORKSPACE_BINDING_WAIT_SECONDS, WORKSPACE_POD_UID_ENV,

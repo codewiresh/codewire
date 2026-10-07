@@ -96,9 +96,9 @@ rg -F 'phase == "confidential-snp"' "$SMOKE" >/dev/null
 rg -F 'if [[ "$RUN_COCO_PRODUCT" != "1" ]]; then' "$SMOKE" >/dev/null
 rg -F 'log "skipping product release image resolution"' "$SMOKE" >/dev/null
 rg -F 'if [[ "$RUN_COCO_PRODUCT" == "1" ]]; then' "$SMOKE" >/dev/null
-rg -F 'registry\.example\.invalid/codewire/gateway@sha256:' "$SMOKE" >/dev/null
-if rg -F 'git\.example\.invalid/codewire/gateway@sha256:' "$SMOKE" "$RESOLVER"; then
-  printf 'confidential smoke accepts the retired Gitea gateway authority\n' >&2
+rg -F 'registry\.example\.invalid/codewire/daemon@sha256:' "$SMOKE" >/dev/null
+if rg -F 'git\.example\.invalid/codewire/daemon@sha256:' "$SMOKE" "$RESOLVER"; then
+  printf 'confidential smoke accepts the retired Gitea daemon authority\n' >&2
   exit 1
 fi
 rg -F 'restore the commodity source profile' "$SMOKE" >/dev/null
@@ -124,7 +124,7 @@ if rg -F 'with-dev-smoke-auth.sh' "$SMOKE"; then
   printf 'admin-only confidential smoke must not use the API-key auth wrapper\n' >&2
   exit 1
 fi
-rg -F -- '--gateway-image' "$RESOLVER" >/dev/null
+rg -F -- '--daemon-image' "$RESOLVER" >/dev/null
 rg -F -- '--source-sha' "$RESOLVER" >/dev/null
 
 forward_dir="$(mktemp -d "$ROOT/.tmp/confidential-smoke-forwarding.XXXXXX")"
@@ -156,7 +156,7 @@ mkdir -p "$forward_dir/evidence"
   export CODEWIRE_SERVER_NAMESPACE=contract-server
   export SANDBOX_NAMESPACE=contract-sandboxes
   export KUBE_CONTEXT=contract-context
-  export COCO_GATEWAY_IMAGE=nexus.example.invalid/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export COCO_DAEMON_IMAGE=nexus.example.invalid/daemon@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   export COCO_WORKSPACE_IMAGE=example.invalid/workspace@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   export COCO_DIND_IMAGE=example.invalid/dind@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
   export COCO_GATEWAY_STUN_HOST=stun.example.invalid

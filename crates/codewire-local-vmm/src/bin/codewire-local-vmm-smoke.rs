@@ -88,8 +88,8 @@ mod linux {
 
     use async_trait::async_trait;
     use codewire_daemon::client::{SessionClient, SessionClientError, v1};
-    use codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT;
-    use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
+    use codewire_daemon_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT;
+    use codewire_daemon_proto::codewire::bridge::v1 as bridge_v1;
     use codewire_local_vmm::ch_api::VmInfo;
     use codewire_local_vmm::generation::{RootGenerationDisk, ensure_empty_root_generation};
     use codewire_local_vmm::host_port::HostPortBinding;
@@ -2337,7 +2337,7 @@ mod linux {
         else {
             return Err(failure("credential bridge did not begin with readiness"));
         };
-        if ready.protocol_version != codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION
+        if ready.protocol_version != codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION
             || ready.environment_id != vm_id.to_string()
             || ready.environment_generation != generation
         {

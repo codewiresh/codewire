@@ -55,7 +55,7 @@ const BROKER_CHANNEL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration:
 const MAX_BROKER_LEASE_RPC_MESSAGE_BYTES: usize =
     codewire_workload_secrets::MAX_ENVIRONMENT_PROJECTION_BYTES + 64 * 1024;
 const MAX_BROKER_DELEGATION_RPC_MESSAGE_BYTES: usize =
-    codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES + 8;
+    codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES + 8;
 const MAX_BROKER_LEASE_RPC_CONCURRENCY: usize = 16;
 const MAX_BROKER_PROTECTED_STORE_OPERATIONS: usize = 1;
 pub(crate) const MAX_RECENT_BROKER_LEASE_AUDIT_EVENTS: usize = 4_096;
@@ -217,17 +217,17 @@ where
     /// authority's bounded worker drain; no SSH material is read client-side.
     pub async fn ssh_operation(
         &mut self,
-        request: codewire_gateway_proto::codewire::bridge::v1::CredentialSshRequest,
+        request: codewire_daemon_proto::codewire::bridge::v1::CredentialSshRequest,
     ) -> Result<
-        codewire_gateway_proto::codewire::bridge::v1::CredentialSshResponse,
+        codewire_daemon_proto::codewire::bridge::v1::CredentialSshResponse,
         BrokerLeaseChannelError,
     > {
-        use codewire_gateway_proto::codewire::bridge::v1::credential_ssh_response::Result as SshResult;
-        let operation = codewire_gateway_proto::ssh::validate_request(&request)
+        use codewire_daemon_proto::codewire::bridge::v1::credential_ssh_response::Result as SshResult;
+        let operation = codewire_daemon_proto::ssh::validate_request(&request)
             .map_err(|_| BrokerLeaseChannelError::InvalidRequest)?;
         let request_id = request.request_id.clone();
         let original_deadline = request.deadline_unix_ms;
-        let remaining = codewire_gateway_proto::ssh::remaining_deadline(original_deadline)
+        let remaining = codewire_daemon_proto::ssh::remaining_deadline(original_deadline)
             .map_err(|_| BrokerLeaseChannelError::InvalidRequest)?;
         let mut rpc_request = Request::new(v1::BrokerSshRequest {
             protocol_version: BROKER_LEASE_PROTOCOL_VERSION,
@@ -242,12 +242,12 @@ where
             .map_err(map_client_status)?
             .into_inner();
         if response.request_id != request_id
-            || codewire_gateway_proto::ssh::validate_response(&response, operation).is_err()
+            || codewire_daemon_proto::ssh::validate_response(&response, operation).is_err()
         {
             return Err(BrokerLeaseChannelError::InvalidResponse);
         }
         if !matches!(response.result, Some(SshResult::Failure(_)))
-            && codewire_gateway_proto::ssh::remaining_deadline(original_deadline).is_err()
+            && codewire_daemon_proto::ssh::remaining_deadline(original_deadline).is_err()
         {
             return Err(BrokerLeaseChannelError::InvalidResponse);
         }
@@ -634,7 +634,7 @@ where
     /// authenticated and opened the matching guest-daemon bridge.
     pub async fn report_ready(
         &mut self,
-        ready: codewire_gateway_proto::codewire::bridge::v1::CredentialBridgeReady,
+        ready: codewire_daemon_proto::codewire::bridge::v1::CredentialBridgeReady,
     ) -> Result<(), BrokerLeaseChannelError> {
         if !delegation::ready_matches(&self.environment_id, self.environment_generation, &ready) {
             return Err(BrokerLeaseChannelError::InvalidRequest);
@@ -1027,7 +1027,7 @@ where
         &self,
         request: Request<
             tonic::Streaming<
-                codewire_gateway_proto::codewire::bridge::v1::CredentialBridgeGuestMessage,
+                codewire_daemon_proto::codewire::bridge::v1::CredentialBridgeGuestMessage,
             >,
         >,
     ) -> Result<Response<Self::DelegateCredentialsStream>, Status> {
@@ -1037,7 +1037,7 @@ where
     async fn ssh_operation(
         &self,
         request: Request<v1::BrokerSshRequest>,
-    ) -> Result<Response<codewire_gateway_proto::codewire::bridge::v1::CredentialSshResponse>, Status>
+    ) -> Result<Response<codewire_daemon_proto::codewire::bridge::v1::CredentialSshResponse>, Status>
     {
         self.require_local_mode()?;
         self.run_ssh_operation(request.into_inner()).await

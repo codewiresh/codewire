@@ -219,7 +219,7 @@ mod tests {
                 "scope": SCOPE_WORKSPACE_DAEMON,
             })
         );
-        assert!(codewire_gateway_proto::DaemonAuthToken::new(credential).is_ok());
+        assert!(codewire_daemon_proto::DaemonAuthToken::new(credential).is_ok());
     }
 
     #[test]

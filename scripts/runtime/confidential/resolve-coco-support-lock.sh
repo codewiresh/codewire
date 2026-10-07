@@ -3,17 +3,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 LOCK_PATH="$ROOT/deployments/k8s/runtime-profiles/confidential/coco-support-images.lock.json"
-GATEWAY_IMAGE=""
+DAEMON_IMAGE=""
 SOURCE_SHA=""
 
 usage() {
   cat <<'USAGE'
 Usage:
   scripts/runtime/confidential/resolve-coco-support-lock.sh \
-    --gateway-image IMAGE --source-sha SHA [--lock PATH]
+    --daemon-image IMAGE --source-sha SHA [--lock PATH]
 
 Validates the committed confidential-runtime support-image lock and derives the
-public gateway/workspace references for the exact active Flux source SHA. This
+public daemon/workspace references for the exact active Flux source SHA. This
 is release evidence, not a mechanism for selecting mutable image tags.
 USAGE
 }
@@ -30,9 +30,9 @@ while [[ "$#" -gt 0 ]]; do
       LOCK_PATH="$2"
       shift 2
       ;;
-    --gateway-image)
-      [[ "$#" -ge 2 ]] || die "--gateway-image requires a value"
-      GATEWAY_IMAGE="$2"
+    --daemon-image)
+      [[ "$#" -ge 2 ]] || die "--daemon-image requires a value"
+      DAEMON_IMAGE="$2"
       shift 2
       ;;
     --source-sha)
@@ -55,8 +55,8 @@ command -v skopeo >/dev/null 2>&1 || die "missing required command: skopeo"
   die "--source-sha must be one exact non-zero lowercase object ID"
 # The active input comes from Deploy's Harbor registry overlay. GHCR below is
 # only an independently readable digest/revision oracle for that same image.
-[[ "$GATEWAY_IMAGE" =~ ^registry\.example\.invalid/codewire/gateway@sha256:[0-9a-f]{64}$ ]] || \
-  die "--gateway-image must be the digest-pinned canonical Dev gateway reference"
+[[ "$DAEMON_IMAGE" =~ ^registry\.example\.invalid/codewire/daemon@sha256:[0-9a-f]{64}$ ]] || \
+  die "--daemon-image must be the digest-pinned canonical Dev daemon reference"
 
 jq -e '
   type == "object" and
@@ -67,8 +67,8 @@ jq -e '
   die "lock must contain schemaVersion 2 and exactly one versioned, digest-pinned official Docker DinD image"
 
 dind_image="$(jq -r '.images.dind' "$LOCK_PATH")"
-gateway_digest="${GATEWAY_IMAGE##*@}"
-gateway_public_image="ghcr.io/codewiresh/gateway@$gateway_digest"
+daemon_digest="${DAEMON_IMAGE##*@}"
+daemon_public_image="ghcr.io/codewiresh/daemon@$daemon_digest"
 workspace_tag="ghcr.io/codewiresh/workspace:$SOURCE_SHA"
 
 inspect_image() {
@@ -90,13 +90,13 @@ inspect_image() {
   printf '%s' "$inspect_json"
 }
 
-gateway_inspect="$(inspect_image gateway "$gateway_public_image")"
-gateway_actual_digest="$(jq -r '.Digest // empty' <<<"$gateway_inspect")"
-[[ "$gateway_actual_digest" == "$gateway_digest" ]] || \
-  die "gateway image resolved to $gateway_actual_digest, expected $gateway_digest"
-gateway_revision="$(jq -r '.Labels["org.opencontainers.image.revision"] // empty' <<<"$gateway_inspect")"
-[[ "$gateway_revision" == "$SOURCE_SHA" ]] || \
-  die "gateway OCI revision $gateway_revision does not match active Flux source $SOURCE_SHA"
+daemon_inspect="$(inspect_image daemon "$daemon_public_image")"
+daemon_actual_digest="$(jq -r '.Digest // empty' <<<"$daemon_inspect")"
+[[ "$daemon_actual_digest" == "$daemon_digest" ]] || \
+  die "daemon image resolved to $daemon_actual_digest, expected $daemon_digest"
+daemon_revision="$(jq -r '.Labels["org.opencontainers.image.revision"] // empty' <<<"$daemon_inspect")"
+[[ "$daemon_revision" == "$SOURCE_SHA" ]] || \
+  die "daemon OCI revision $daemon_revision does not match active Flux source $SOURCE_SHA"
 
 workspace_inspect="$(inspect_image workspace "$workspace_tag")"
 workspace_digest="$(jq -r '.Digest // empty' <<<"$workspace_inspect")"
@@ -113,7 +113,7 @@ dind_actual_digest="$(jq -r '.Digest // empty' <<<"$dind_inspect")"
   die "dind image resolved to $dind_actual_digest, expected $dind_digest"
 
 printf 'source_sha=%s\n' "$SOURCE_SHA"
-printf 'gateway_image=%s\n' "$GATEWAY_IMAGE"
-printf 'gateway_public_image=%s\n' "$gateway_public_image"
+printf 'daemon_image=%s\n' "$DAEMON_IMAGE"
+printf 'daemon_public_image=%s\n' "$daemon_public_image"
 printf 'workspace_image=ghcr.io/codewiresh/workspace@%s\n' "$workspace_digest"
 printf 'dind_image=%s\n' "$dind_image"

@@ -30,7 +30,7 @@ EVIDENCE_DIR="${EVIDENCE_DIR:-}"
 COCO_SUPPORT_LOCK="${COCO_SUPPORT_LOCK:-$ROOT/deployments/k8s/runtime-profiles/confidential/coco-support-images.lock.json}"
 RUNTIME_CONFIGMAP_SELECTOR="$ROOT/scripts/runtime/confidential/select-required-runtime-configmap.jq"
 READY_CURRENT_SELECTOR="$ROOT/scripts/runtime/confidential/select-ready-current.jq"
-COCO_GATEWAY_IMAGE=""
+COCO_DAEMON_IMAGE=""
 COCO_WORKSPACE_IMAGE=""
 COCO_DIND_IMAGE=""
 COCO_SOURCE_SHA=""
@@ -335,25 +335,25 @@ resolve_active_release() {
     die "orchestration does not reference exactly one required generated runtime ConfigMap"
   kubectl_dev -n "$CODEWIRE_SERVER_NAMESPACE" get configmap "$configmap" -o json \
     >"$EVIDENCE_DIR/active-runtime-config.json"
-  image="$(jq -r '.data.SANDBOX_GATEWAY_IMAGE // empty' "$EVIDENCE_DIR/active-runtime-config.json")"
+  image="$(jq -r '.data.SANDBOX_DAEMON_IMAGE // empty' "$EVIDENCE_DIR/active-runtime-config.json")"
   # Deploy owns the Dev registry overlay. Require its canonical private Harbor
   # authority here; accepting the source-template or public mirror hides drift.
-  [[ "$image" =~ ^registry\.example\.invalid/codewire/gateway@sha256:[0-9a-f]{64}$ ]] || \
-    die "active dev ConfigMap has no digest-pinned private gateway image"
+  [[ "$image" =~ ^registry\.example\.invalid/codewire/daemon@sha256:[0-9a-f]{64}$ ]] || \
+    die "active dev ConfigMap has no digest-pinned private daemon image"
 
   while IFS= read -r line; do
     key="${line%%=*}"
     value="${line#*=}"
     case "$key" in
-      gateway_image) COCO_GATEWAY_IMAGE="$value" ;;
+      daemon_image) COCO_DAEMON_IMAGE="$value" ;;
       workspace_image) COCO_WORKSPACE_IMAGE="$value" ;;
       dind_image) COCO_DIND_IMAGE="$value" ;;
     esac
   done < <("$ROOT/scripts/runtime/confidential/resolve-coco-support-lock.sh" \
     --lock "$COCO_SUPPORT_LOCK" \
-    --gateway-image "$image" \
+    --daemon-image "$image" \
     --source-sha "$COCO_SOURCE_SHA")
-  [[ -n "$COCO_GATEWAY_IMAGE" && -n "$COCO_WORKSPACE_IMAGE" && -n "$COCO_DIND_IMAGE" ]] || \
+  [[ -n "$COCO_DAEMON_IMAGE" && -n "$COCO_WORKSPACE_IMAGE" && -n "$COCO_DIND_IMAGE" ]] || \
     die "CoCo support resolver returned incomplete active release data"
 
   assert_jq "active default runtime profile is not commodity" \
@@ -407,10 +407,10 @@ resolve_active_release() {
   jq -n \
     --arg source_sha "$COCO_SOURCE_SHA" \
     --arg config_map "$configmap" \
-    --arg gateway_image "$COCO_GATEWAY_IMAGE" \
+    --arg daemon_image "$COCO_DAEMON_IMAGE" \
     --arg workspace_image "$COCO_WORKSPACE_IMAGE" \
     --arg dind_image "$COCO_DIND_IMAGE" \
-    '{sourceSha: $source_sha, configMap: $config_map, gatewayImage: $gateway_image, workspaceImage: $workspace_image, dindImage: $dind_image}' \
+    '{sourceSha: $source_sha, configMap: $config_map, daemonImage: $daemon_image, workspaceImage: $workspace_image, dindImage: $dind_image}' \
     >"$EVIDENCE_DIR/active-release-images.json"
 }
 
@@ -556,7 +556,7 @@ run_product_command() {
     EXPECTED_TAILNET_DIRECT_UDP_LB_IP="$COCO_DIRECT_UDP_LB_IP" \
     EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE="$COCO_DIRECT_UDP_TRANSPORT_ZONE" \
     EXPECTED_RUNTIME_CLASS=confidential \
-    EXPECTED_DAEMON_IMAGE="$COCO_GATEWAY_IMAGE" \
+    EXPECTED_DAEMON_IMAGE="$COCO_DAEMON_IMAGE" \
     EXPECTED_DOCKER_MODE=guest-dind \
     EXPECTED_DIND_IMAGE="$COCO_DIND_IMAGE" \
     EXPECTED_NODE="${EXPECTED_NODE:-$NODE}" \

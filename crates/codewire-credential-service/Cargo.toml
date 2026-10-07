@@ -33,7 +33,7 @@ codewire-access = { workspace = true }
 # The workspace's existing broker edge enables local by default. This isolated
 # service explicitly selects platform without changing any existing consumer.
 codewire-credential-broker = { path = "../codewire-credential-broker", default-features = false, features = ["platform", "ssh-agent"] }
-codewire-gateway-proto = { workspace = true }
+codewire-daemon-proto = { workspace = true }
 codewire-platform-credentials = { workspace = true }
 codewire-project = { workspace = true }
 codewire-protected-store = { workspace = true, features = ["platform", "ssh-material"] }
@@ -67,7 +67,7 @@ zeroize = { workspace = true }
 anyhow = { workspace = true }
 base64 = { workspace = true }
 codewire-client = { workspace = true }
-codewire-gateway-proto = { workspace = true }
+codewire-daemon-proto = { workspace = true }
 codewire-protected-store = { workspace = true, features = ["platform-test-support"] }
 flate2 = { workspace = true }
 rcgen = "0.13"

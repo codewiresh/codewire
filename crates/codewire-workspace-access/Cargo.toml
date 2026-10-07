@@ -13,7 +13,7 @@ async-trait = { workspace = true }
 codewire-client = { workspace = true }
 codewire-credential-bridge = { workspace = true }
 codewire-daemon = { workspace = true }
-codewire-gateway-proto = { workspace = true }
+codewire-daemon-proto = { workspace = true }
 codewire-tailnet = { workspace = true }
 codewire-tls = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["rand_core"] }

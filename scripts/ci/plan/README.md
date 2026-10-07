@@ -2,7 +2,7 @@
 
 This directory classifies artifact impact for the packaged `cw` CLI, desktop
 package, workspace `cw` binary and content verification, atomic base/workspace
-support-image pair, and the dashboard, gateway, DERP, services, and mesh runtime
+support-image pair, and the dashboard, daemon, DERP, services, and mesh runtime
 images.
 Verification capabilities are owned only by
 `scripts/ci/select/select-verification.sh`; the planner never adds or removes

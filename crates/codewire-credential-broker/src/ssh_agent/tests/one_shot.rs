@@ -1,4 +1,4 @@
-use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_protected_store::ssh_material::{
     SshAgentMaterial, decode_protected_material, generate_ed25519, import_openssh,
 };

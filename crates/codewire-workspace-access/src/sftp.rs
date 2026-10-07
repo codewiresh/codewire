@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 use russh_sftp::protocol::{
     Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
 };

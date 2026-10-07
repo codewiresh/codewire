@@ -4,8 +4,8 @@
 use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use codewire_gateway_proto::codewire::bridge::v1;
-use codewire_gateway_proto::ssh::{
+use codewire_daemon_proto::codewire::bridge::v1;
+use codewire_daemon_proto::ssh::{
     MAX_DEADLINE, SshOperation, agent, remaining_deadline, validate_request, validate_response,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};

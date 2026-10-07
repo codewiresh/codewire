@@ -8,8 +8,8 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
-use codewire_gateway_proto::daemon::v1::daemon_service_server::DaemonServiceServer;
+use codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
+use codewire_daemon_proto::daemon::v1::daemon_service_server::DaemonServiceServer;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::futures::OwnedNotified;
 use tokio::sync::{Notify, watch};

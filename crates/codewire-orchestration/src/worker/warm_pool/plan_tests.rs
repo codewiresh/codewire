@@ -25,7 +25,7 @@ fn dev_cfg(shapes: &str) -> SandboxWorkerCfg {
     SandboxWorkerCfg {
         sandbox_namespace: NAMESPACE.into(),
         credential_runtime: Some(CredentialRuntimeTemplateConfig::synthetic(NAMESPACE)),
-        gateway_image: "registry.example.invalid/codewire/gateway@sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
+        daemon_image: "registry.example.invalid/codewire/daemon@sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
         dind_image: "docker.io/library/docker:29.7.1-dind@sha256:3333333333333333333333333333333333333333333333333333333333333333".into(),
         runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
         docker_mode: DOCKER_MODE_PROFILE_DEFAULT.into(),
@@ -730,7 +730,7 @@ fn the_image_cache_gate_needs_every_cacheable_image_held_and_rolled_out() {
     assert!(!image_cache_warm(Some(&unreadable), &images));
     // An image the cache never holds does not block.
     let mut with_local = images.clone();
-    with_local.push("codewire-gateway:e2e");
+    with_local.push("codewire-daemon:e2e");
     assert!(image_cache_warm(Some(&cache(&images, true)), &with_local));
 }
 

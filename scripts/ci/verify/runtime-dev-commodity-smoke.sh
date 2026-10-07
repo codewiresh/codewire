@@ -155,10 +155,9 @@ if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then
       die "SANDBOX_KATA_AGENT_POLICY_ENABLED=$kata_agent_policy_enabled, want true for commodity policy smoke"
   fi
 
-  # The workspace daemon's image keeps its configuration key
-  # (SANDBOX_GATEWAY_IMAGE) from when it also ran the gateway.
+  # The workspace daemon's support image (SANDBOX_DAEMON_IMAGE).
   if [[ -z "${EXPECTED_DAEMON_IMAGE:-}" ]]; then
-    EXPECTED_DAEMON_IMAGE="$(jq -r '.data.SANDBOX_GATEWAY_IMAGE // empty' "$config_json")"
+    EXPECTED_DAEMON_IMAGE="$(jq -r '.data.SANDBOX_DAEMON_IMAGE // empty' "$config_json")"
     export EXPECTED_DAEMON_IMAGE
   fi
   [[ -n "$EXPECTED_DAEMON_IMAGE" ]] || die "EXPECTED_DAEMON_IMAGE is empty and could not be resolved from $runtime_configmap"

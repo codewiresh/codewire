@@ -27,7 +27,7 @@ import sys
 
 release = {
     "source": {"repository": "codewire/codewire", "sha": sys.argv[2]},
-    "images": {"gateway": "sha256:" + "1" * 64},
+    "images": {"daemon": "sha256:" + "1" * 64},
 }
 encoded = base64.b64encode(json.dumps(release).encode()).decode()
 Path(sys.argv[1]).write_text(

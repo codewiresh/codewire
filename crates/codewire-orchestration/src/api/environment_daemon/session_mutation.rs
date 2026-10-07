@@ -5,7 +5,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 use codewire_server_core::org_deletion::{
     OrganizationRuntimeMutationError, run_environment_runtime_mutation,
 };

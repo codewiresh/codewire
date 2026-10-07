@@ -8,8 +8,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use codewire_access::EnvironmentId;
-use codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION;
-use codewire_gateway_proto::codewire::bridge::v1 as bridge;
+use codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION;
+use codewire_daemon_proto::codewire::bridge::v1 as bridge;
 use futures::{Stream, StreamExt as _, stream};
 use hyper_util::rt::TokioIo;
 use prost::Message as _;
@@ -374,7 +374,7 @@ pub(super) fn ready_matches(
     ready.protocol_version == CREDENTIAL_BRIDGE_PROTOCOL_VERSION
         && ready.environment_id == environment_id.to_string()
         && ready.environment_generation == environment_generation
-        && ready.encoded_len() <= codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES
+        && ready.encoded_len() <= codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES
 }
 
 fn validate_admission(
@@ -390,7 +390,7 @@ fn validate_admission(
 }
 
 fn valid_remaining_frame(frame: &bridge::CredentialBridgeGuestMessage) -> bool {
-    frame.encoded_len() <= codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES
+    frame.encoded_len() <= codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES
         && !matches!(&frame.payload,
             Some(bridge::credential_bridge_guest_message::Payload::EnvironmentProjection(request))
                 if !request.local_inventories.is_empty())
@@ -404,7 +404,7 @@ fn valid_remaining_frame(frame: &bridge::CredentialBridgeGuestMessage) -> bool {
 }
 
 fn valid_host_frame(frame: &bridge::CredentialBridgeHostMessage) -> bool {
-    frame.encoded_len() <= codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES
+    frame.encoded_len() <= codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES
         && !matches!(&frame.payload,
             Some(bridge::credential_bridge_host_message::Payload::EnvironmentProjection(response))
                 if matches!(response.result, Some(bridge::environment_projection_response::Result::Composition(_))))

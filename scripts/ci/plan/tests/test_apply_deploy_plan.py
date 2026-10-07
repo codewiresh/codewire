@@ -14,7 +14,7 @@ TREE = "b" * 40
 BASE = "c" * 40
 RUNTIME_ARTIFACTS = (
     "dashboard_image",
-    "gateway_image",
+    "daemon_image",
     "derp_image",
     "services_image",
     "mesh_image",

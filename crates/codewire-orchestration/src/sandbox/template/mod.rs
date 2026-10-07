@@ -75,11 +75,11 @@ pub const WORKSPACE_READY_TIMEOUT: Duration = Duration::from_secs(600);
 pub const CONFIDENTIAL_WORKSPACE_READY_TIMEOUT: Duration = Duration::from_secs(1_800);
 
 // Canonical sandbox and daemon contract constants.
-pub const DEFAULT_GATEWAY_IMAGE: &str = codewire_server_core::runtime_images::DEFAULT_GATEWAY_IMAGE;
+pub const DEFAULT_DAEMON_IMAGE: &str = codewire_server_core::runtime_images::DEFAULT_DAEMON_IMAGE;
 pub const DEFAULT_DIND_IMAGE: &str = "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c";
 pub const WORKSPACE_DAEMON_PORT: i64 = 7777;
 pub const WORKSPACE_DAEMON_LISTEN_ADDR: &str = "0.0.0.0:7777";
-pub const SANDBOX_SERVICE_ACCOUNT: &str = codewire_gateway_proto::SANDBOX_SERVICE_ACCOUNT;
+pub const SANDBOX_SERVICE_ACCOUNT: &str = codewire_daemon_proto::SANDBOX_SERVICE_ACCOUNT;
 pub const DIND_SOCKET_PATH: &str = "/var/run/docker/docker.sock";
 pub const DAEMON_AUTH_TOKEN_ENV: &str = "CODEWIRE_DAEMON_AUTH_TOKEN";
 pub const KATA_COCO_INIT_DATA_ANNOTATION_KEY: &str =
@@ -275,7 +275,7 @@ impl fmt::Debug for TemplateOpts {
 /// Sandbox's daemon image volume to this same value.
 pub fn effective_support_image(configured: &str) -> &str {
     if configured.is_empty() {
-        DEFAULT_GATEWAY_IMAGE
+        DEFAULT_DAEMON_IMAGE
     } else {
         configured
     }

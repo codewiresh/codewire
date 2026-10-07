@@ -19,8 +19,8 @@ expected_digest="sha256:$(printf 'a%.0s' {1..64})"
 other_digest="sha256:$(printf 'b%.0s' {1..64})"
 source_sha="$(printf 'c%.0s' {1..40})"
 release_tag="v1.2.3"
-source_ref="registry.example.invalid/codewire/gateway@$expected_digest"
-target_repository="ghcr.io/codewiresh/gateway"
+source_ref="registry.example.invalid/codewire/daemon@$expected_digest"
+target_repository="ghcr.io/codewiresh/daemon"
 
 printf 'harbor-test-password' >"$work/harbor-password"
 printf 'ghcr-test-token' >"$work/ghcr-token"
@@ -251,7 +251,7 @@ copy_calls_before="$(grep -c '^copy ' "$FAKE_CALLS")"
   'ghcr.io/codewiresh/workspace' latest >/dev/null ||
   fail "workspace compatibility alias was rejected"
 
-if "$COPY_IMAGE" 'registry.example.invalid/codewire/gateway:latest' "$target_repository" \
+if "$COPY_IMAGE" 'registry.example.invalid/codewire/daemon:latest' "$target_repository" \
     "$source_sha" >"$work/moving-source.out" 2>&1; then
   fail "moving source reference was accepted"
 fi
@@ -265,7 +265,7 @@ fi
 printf 'harbor-test-password' >"$work/harbor-password"
 chmod 600 "$work/harbor-password"
 rm -f "$work/state/"*
-harbor_repository='registry.example.invalid/codewire/gateway'
+harbor_repository='registry.example.invalid/codewire/daemon'
 : >"$GITHUB_OUTPUT"
 env -u GHCR_PUBLISH_USERNAME -u GHCR_PUBLISH_TOKEN_FILE \
   HARBOR_PUBLISH_USERNAME='robot$codewire+publisher' \
@@ -292,7 +292,7 @@ if "$COPY_IMAGE" "$source_ref" "$target_repository" "keep-${expected_digest/:/-}
     >"$work/ghcr-keep.out" 2>&1; then
   fail 'a Harbor keep tag was accepted for the GHCR mirror'
 fi
-if "$COPY_IMAGE" "$source_ref" 'registry.example.invalid/other/gateway' "$source_sha" \
+if "$COPY_IMAGE" "$source_ref" 'registry.example.invalid/other/daemon' "$source_sha" \
     >"$work/harbor-project.out" 2>&1; then
   fail 'a Harbor repository outside the codewire project was accepted'
 fi

@@ -2,7 +2,7 @@
 //! This is neither an agent socket nor key/algorithm authorization: those
 //! boundaries remain with the adapter and the selected-agent authority.
 
-use codewire_gateway_proto::ssh::{
+use codewire_daemon_proto::ssh::{
     SshOperation, remaining_deadline, validate_request, validate_response,
 };
 

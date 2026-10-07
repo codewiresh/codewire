@@ -105,8 +105,8 @@ ensure_review_origin() {
 }
 
 # Every image a default Sandbox runs that the Kind gate does not build; the
-# gateway and daemon-init come from the locally built gateway image. Each row
-# is the product constant a default Sandbox renders (the Kind overlay's
+# daemon comes from the locally built daemon image. Each row is the product
+# constant a default Sandbox renders (the Kind overlay's
 # SANDBOX_DIND_IMAGE names the same reference):
 #
 #   name  file defining it  constant  accepted reference  public source

@@ -23,7 +23,7 @@ use codewire_daemon::access::WorkspaceAccessGrant;
 use codewire_daemon::app_ports::AppPortsSender;
 use codewire_daemon::hosted_state::HostedStatePaths;
 use codewire_daemon::local_transport::LocalDaemonConnector;
-use codewire_gateway_proto::{WORKSPACE_SSH_PORT, WORKSPACE_TAILNET_UDP_PORT};
+use codewire_daemon_proto::{WORKSPACE_SSH_PORT, WORKSPACE_TAILNET_UDP_PORT};
 use codewire_workspace_access::daemon::DaemonSessionClient;
 use codewire_workspace_access::daemon_access::{
     AccessControlPlane, ControlPlaneError, DaemonSshRunners, HostKeyStore, PeerRelayAllocation,

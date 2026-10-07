@@ -106,7 +106,7 @@ bake_args=(
   --load
 )
 if [ "$sccache_mode" = r2 ]; then
-  for target in dashboard-ci services-ci mesh-ci gateway-ci; do
+  for target in dashboard-ci services-ci mesh-ci daemon-ci; do
     bake_args+=(
       --set "$target.secrets+=id=aws_shared_credentials,src=$credentials_file"
     )
@@ -116,7 +116,7 @@ CODEWIRE_SCCACHE_MODE="$sccache_mode" \
   "$docker_bin" buildx bake "${bake_args[@]}" kind
 elapsed="$(( $(date +%s) - started_at ))"
 
-for image in dashboard services mesh gateway; do
+for image in dashboard services mesh daemon; do
   image_ref="codewire-${image}:e2e"
   "$docker_bin" image inspect "$image_ref" >/dev/null
   [ "$("$docker_bin" image inspect --format '{{ index .Config.Labels "dev.codewire.build.profile" }}' "$image_ref")" = ci ] || {

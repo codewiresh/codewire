@@ -1,11 +1,11 @@
 [package]
-name = "codewire-gateway-proto"
+name = "codewire-daemon-proto"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license = "AGPL-3.0-only"
-description = "Generated protobuf message types for the Codewire gateway and daemon boundary."
+description = "Generated protobuf message types for the Codewire daemon and broker boundary."
 
 [dependencies]
 codewire-workload-secrets = { workspace = true }

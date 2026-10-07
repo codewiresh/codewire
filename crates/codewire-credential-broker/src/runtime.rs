@@ -9,7 +9,7 @@ use codewire_access::{
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, CredentialId,
     DerivedGrant, GrantPermission, PROVIDER_REFRESH_TIMEOUT_SECONDS, codex_login_permission,
 };
-use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_workload_secrets::{
     CodexLogin, CodexLoginBinding, CodexLoginContext, MAX_CODEX_LOGIN_LIFETIME_MS,
     seal_codex_login, validate_projection_recipient,
@@ -2103,8 +2103,8 @@ impl ValidatedGuestRequest {
             ("codex" | "openai", "openai-api")
                 | ("anthropic", "anthropic-api")
                 | ("github", "github-api" | "github-https")
-        ) || request.body.len() > codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES
-            || request.headers.len() > codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_HEADERS
+        ) || request.body.len() > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES
+            || request.headers.len() > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_HEADERS
             || request.path.len() > 2048
             || request.query.len() > 4096
         {
@@ -2128,17 +2128,15 @@ impl ValidatedGuestRequest {
         let mut headers = HeaderMap::new();
         let mut header_bytes = 0_usize;
         for header in request.headers {
-            if header.name.len() > codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_HEADER_NAME_BYTES
+            if header.name.len() > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_HEADER_NAME_BYTES
                 || header.value.len()
-                    > codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_HEADER_VALUE_BYTES
+                    > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_HEADER_VALUE_BYTES
             {
                 return Err(BrokerRequestError::InvalidRequest);
             }
             header_bytes = header_bytes
                 .checked_add(header.name.len() + header.value.len())
-                .filter(|bytes| {
-                    *bytes <= codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_HEADER_BYTES
-                })
+                .filter(|bytes| *bytes <= codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_HEADER_BYTES)
                 .ok_or(BrokerRequestError::InvalidRequest)?;
             let name = HeaderName::from_bytes(header.name.as_bytes())
                 .map_err(|_| BrokerRequestError::InvalidRequest)?;
@@ -3984,8 +3982,7 @@ mod tests {
             .send(v1::CredentialBridgeGuestMessage {
                 payload: Some(v1::credential_bridge_guest_message::Payload::Ready(
                     v1::CredentialBridgeReady {
-                        protocol_version:
-                            codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                        protocol_version: codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
                         environment_id: environment_id.to_string(),
                         environment_generation: 4,
                     },
@@ -4117,8 +4114,7 @@ mod tests {
             .send(v1::CredentialBridgeGuestMessage {
                 payload: Some(v1::credential_bridge_guest_message::Payload::Ready(
                     v1::CredentialBridgeReady {
-                        protocol_version:
-                            codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                        protocol_version: codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
                         environment_id: environment_id.to_string(),
                         environment_generation: 4,
                     },

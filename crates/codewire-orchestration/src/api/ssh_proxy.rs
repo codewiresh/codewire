@@ -6,7 +6,7 @@ use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use codewire_daemon_bridge::client::DaemonClient;
-use codewire_gateway_proto::daemon::v1::DaemonState;
+use codewire_daemon_proto::daemon::v1::DaemonState;
 use codewire_server_core::AppError;
 use codewire_server_core::org_deletion::{
     RuntimeMutationOutcome, run_environment_runtime_mutation_with_outcome,

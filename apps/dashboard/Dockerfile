@@ -36,7 +36,7 @@ WORKDIR /workspace
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY proto ./proto
-COPY libs/gateway-proto ./libs/gateway-proto
+COPY libs/daemon-proto ./libs/daemon-proto
 COPY packages/codewire-design ./packages/codewire-design
 COPY apps/cli/install.sh ./apps/cli/install.sh
 ARG CODEWIRE_SCCACHE_MODE=disabled
@@ -48,7 +48,7 @@ RUN --mount=type=cache,id=codewire-dashboard-cargo-registry,target=/usr/local/ca
     --mount=type=cache,id=codewire-dashboard-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=codewire-sccache-v2,target=/var/cache/sccache,sharing=shared \
     --mount=type=secret,id=aws_shared_credentials \
-    find Cargo.toml Cargo.lock crates proto libs/gateway-proto packages/codewire-design apps/cli/install.sh \
+    find Cargo.toml Cargo.lock crates proto libs/daemon-proto packages/codewire-design apps/cli/install.sh \
       -type f -exec touch {} + && \
     codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" -p codewire-dashboard-web \
   && mkdir -p /out \

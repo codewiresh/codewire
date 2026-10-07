@@ -310,8 +310,8 @@ impl BrokerUpstreamTransport for Provider {
     }
 }
 
-fn proxied_request() -> codewire_gateway_proto::codewire::bridge::v1::CredentialBridgeRequest {
-    codewire_gateway_proto::codewire::bridge::v1::CredentialBridgeRequest {
+fn proxied_request() -> codewire_daemon_proto::codewire::bridge::v1::CredentialBridgeRequest {
+    codewire_daemon_proto::codewire::bridge::v1::CredentialBridgeRequest {
         capability_slot: "codex".into(),
         route: "openai-api".into(),
         request_id: Uuid::new_v4().to_string(),
@@ -319,7 +319,7 @@ fn proxied_request() -> codewire_gateway_proto::codewire::bridge::v1::Credential
         path: "/responses".into(),
         query: String::new(),
         headers: vec![
-            codewire_gateway_proto::codewire::bridge::v1::CredentialHttpHeader {
+            codewire_daemon_proto::codewire::bridge::v1::CredentialHttpHeader {
                 name: "content-type".into(),
                 value: b"application/json".to_vec(),
             },
@@ -349,7 +349,7 @@ async fn concurrent_logins_and_proxied_requests_across_epochs_refresh_once() -> 
         let mut logins = Vec::new();
         for broker in [&first, &first, &first, &second, &second] {
             let recipient = ProjectionRecipient::new();
-            let request = codewire_gateway_proto::codewire::bridge::v1::CodexLoginRequest {
+            let request = codewire_daemon_proto::codewire::bridge::v1::CodexLoginRequest {
                 request_id: Uuid::new_v4().to_string(),
                 recipient_public_key: recipient.public_key().to_vec(),
                 deadline_unix_ms: unix_now()? * 1_000 + 25_000,
@@ -428,7 +428,7 @@ async fn a_login_selected_by_a_new_profile_revision_is_rechecked_after_refresh()
         };
         let broker = Arc::new(OpenAiBroker::new(f.second().await?.1, provider.clone())?);
         let recipient = ProjectionRecipient::new();
-        let request = codewire_gateway_proto::codewire::bridge::v1::CodexLoginRequest {
+        let request = codewire_daemon_proto::codewire::bridge::v1::CodexLoginRequest {
             request_id: Uuid::new_v4().to_string(),
             recipient_public_key: recipient.public_key().to_vec(),
             deadline_unix_ms: unix_now()? * 1_000 + 25_000,

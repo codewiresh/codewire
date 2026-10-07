@@ -206,7 +206,7 @@ python3 "$ROOT/scripts/ci/images/image-bundle.py" create \
   --output "$bundle" \
   --candidate dashboard "$source_sha" "registry.example.invalid/codewire/dashboard@$digest" \
   --candidate derp "$source_sha" "registry.example.invalid/codewire/derp@$digest" \
-  --candidate gateway "$source_sha" "registry.example.invalid/codewire/gateway@$digest" \
+  --candidate daemon "$source_sha" "registry.example.invalid/codewire/daemon@$digest" \
   --candidate services "$source_sha" "registry.example.invalid/codewire/services@$digest" \
   --candidate mesh "$source_sha" "registry.example.invalid/codewire/mesh@$digest"
 
@@ -346,7 +346,7 @@ python3 "$ROOT/scripts/ci/images/image-bundle.py" create \
   --output "$carried_bundle" \
   --candidate dashboard "$source_sha" "registry.example.invalid/codewire/dashboard@$digest" \
   --candidate derp "$source_sha" "registry.example.invalid/codewire/derp@$digest" \
-  --candidate gateway "$source_sha" "registry.example.invalid/codewire/gateway@$digest" \
+  --candidate daemon "$source_sha" "registry.example.invalid/codewire/daemon@$digest" \
   --candidate services "$source_sha" "registry.example.invalid/codewire/services@$digest" \
   --candidate mesh "$source_sha" "$carried_ref"
 

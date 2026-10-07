@@ -7,7 +7,7 @@
 # Services: idp, orchestration, credential-service, billing, coordinator,
 # dashboard (what the cluster ingress serves, so `make kind-test` exercises the
 # current dashboard source; `make kind-watch` serves it for review), and daemon
-# (the in-workspace `cw` carried by the gateway image; sandboxes created
+# (the in-workspace `cw` carried by the daemon image; sandboxes created
 # afterwards run it). Each image is always the gate-built base plus every
 # binary deployed since, so repeated deploys never stack layers; a new base
 # from the gate or `up` resets it. credential-service also rebuilds the
@@ -48,7 +48,7 @@ case "$SERVICE" in
     destination=/srv/codewire/
     ;;
   daemon)
-    image=codewire-gateway
+    image=codewire-daemon
     crate=codewire-cli-bin
     bin=cw
     destination=/usr/local/bin/

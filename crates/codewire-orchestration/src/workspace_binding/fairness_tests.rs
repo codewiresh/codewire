@@ -16,7 +16,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, header::AUTHORIZATION};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use codewire_gateway_proto::{SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
+use codewire_daemon_proto::{SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewStatus, UserInfo};
 use serde_json::{Value, json};
 use tower::service_fn;

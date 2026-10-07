@@ -1,8 +1,8 @@
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
-use codewire_gateway_proto::codewire::bridge::v1;
-use codewire_gateway_proto::ssh::{SshOperation, agent};
+use codewire_daemon_proto::codewire::bridge::v1;
+use codewire_daemon_proto::ssh::{SshOperation, agent};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -39,7 +39,7 @@ fn daemon_config(root: &Path) -> Config {
         listen_addr: "127.0.0.1:0".into(),
         workspace_root: root.into(),
         home_root: root.into(),
-        auth_token: codewire_gateway_proto::DaemonAuthToken::new("synthetic-ssh-daemon-token")
+        auth_token: codewire_daemon_proto::DaemonAuthToken::new("synthetic-ssh-daemon-token")
             .unwrap(),
         process_execution: crate::execution::ProcessExecution::Native,
         credential_bridge: Some(config(
@@ -112,8 +112,7 @@ impl Harness {
             .send(Ok(v1::CredentialBridgeHostMessage {
                 payload: Some(v1::credential_bridge_host_message::Payload::Open(
                     v1::CredentialBridgeOpen {
-                        protocol_version:
-                            codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                        protocol_version: codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
                         environment_id: config.environment_id.to_string(),
                         environment_generation: config.environment_generation,
                         capabilities: Vec::new(),

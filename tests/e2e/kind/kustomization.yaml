@@ -114,11 +114,11 @@ patches:
                     value: runc
                   - name: SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME
                     value: "true"
-                  # Workspace pod's gateway container = the kind-loaded Rust image (the
-                  # default git.example.com/codewire/gateway:latest is unpullable
-                  # in kind → ImagePullBackOff → env never reaches running).
-                  - name: SANDBOX_GATEWAY_IMAGE
-                    value: codewire-gateway:e2e
+                  # Workspace Pods run their daemon from the kind-loaded support
+                  # image (the compiled-in Harbor default is unpullable in kind
+                  # → ImagePullBackOff → env never reaches running).
+                  - name: SANDBOX_DAEMON_IMAGE
+                    value: codewire-daemon:e2e
                   # Mount the Connect conformance probe (docs/plans/
                   # connect-rpc/03 D8) — kind/e2e manifests only, never
                   # base or production.
@@ -200,7 +200,7 @@ patches:
                 imagePullPolicy: Never
   # Warm-pool members on Kind run a diagnostic runtime: runc, or the node
   # default ('') when SANDBOX_RUNTIME_PROFILE is none. They mount the
-  # side-loaded gateway image (SANDBOX_GATEWAY_IMAGE above), which has no
+  # side-loaded daemon image (SANDBOX_DAEMON_IMAGE above), which has no
   # registry digest. The test ops pin each variable's position in the base
   # policy.
   - target:
@@ -219,7 +219,7 @@ patches:
         value: localImages
       - op: replace
         path: /spec/variables/1/expression
-        value: "['codewire-gateway:e2e']"
+        value: "['codewire-daemon:e2e']"
       # SANDBOX_COORDINATOR_EXTRA_ROOTS mounts the coordinator's extra roots.
       - op: test
         path: /spec/variables/2/name

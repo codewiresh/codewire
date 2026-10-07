@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
+use codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// One epoch stream: two of the largest frames the bridge admits.
