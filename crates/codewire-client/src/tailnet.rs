@@ -741,7 +741,12 @@ fn derp_map_diagnostic(map: Option<&Value>) -> Option<TailnetDerpMapDiagnostic> 
             if !stun_only {
                 derp_nodes += 1;
             }
-            if node.get("STUNPort").and_then(Value::as_i64).is_some() {
+            // A relay node publishes `STUNPort: -1`: it serves no STUN.
+            if node
+                .get("STUNPort")
+                .and_then(Value::as_i64)
+                .is_some_and(|port| port > 0)
+            {
                 stun_nodes += 1;
             }
         }
@@ -1350,6 +1355,15 @@ mod tests {
                 host: "stun.codewire.test".into(),
                 port: 3478,
             }]
+        );
+        let diagnostic = derp_map_diagnostic(Some(&map)).unwrap();
+        assert_eq!(
+            (
+                diagnostic.regions,
+                diagnostic.derp_nodes,
+                diagnostic.stun_nodes
+            ),
+            (1, 1, 1)
         );
     }
 
