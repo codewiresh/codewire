@@ -33,6 +33,24 @@ async function stage(name: string, operation: () => Promise<void>, started = Dat
   passed(name, started);
 }
 
+// Why a shell command's marker did not appear, from fixed tokens only: the
+// selected terminal was paused by the Sandbox readiness check or account
+// check, or detached, at that moment; or the command's own echo is on screen
+// with no output, with different values, or not at all. Each read is
+// immediate, so a terminal that reconnects later is not mistaken for one
+// that stayed attached.
+async function shellFailure(page: Page, rows: Locator, echo: string, marker: RegExp): Promise<string> {
+  const status = page.locator("[data-terminal-session-status]:not([hidden])");
+  const read = async (locator: Locator) => (await locator.textContent({ timeout: 1_000 }).catch(() => "")) ?? "";
+  const connection = (await read(status.locator("[data-terminal-connection]"))).trim();
+  const toggle = (await read(status.locator("[data-terminal-toggle]"))).trim();
+  const text = await rows.innerText({ timeout: 1_000 }).catch(() => "");
+  if (/^(Sandbox status is unavailable|Checking )/.test(connection)) return "paused";
+  if (toggle !== "Disconnect") return "detached";
+  if (marker.test(text)) return "mismatch";
+  return text.includes(echo) ? "no-output" : "no-echo";
+}
+
 async function visit(page: Page, path: string): Promise<void> {
   await page.goto(`${ORIGIN}${path}`, { waitUntil: "domcontentloaded" });
   const actual = new URL(page.url());
@@ -544,14 +562,34 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(page.getByRole("tab", { name: "UX logs", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", secondId!);
   });
-  await stage("terminal-tabs-reconnect", async () => {
+  // Each step of the reconnect journey reports itself, so a Dev failure
+  // names the step rather than the whole journey.
+  await stage("terminal-tabs-reconnect-select", async () => {
     await page.getByRole("tab", { name: "UX shell", exact: true }).click();
+  });
+  // A restored tab may still be attaching after the reload.
+  await stage("terminal-tabs-reconnect-attached", async () => {
+    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
+  });
+  await stage("terminal-tabs-reconnect-disconnect", async () => {
     await button(page, "Disconnect").click();
+    await expect(button(page, "Reconnect")).toBeEnabled();
+  });
+  await stage("terminal-tabs-reconnect-retained", async () => {
     await expect(rows).toContainText(`__UX_PID__${pid}__`);
+  });
+  await stage("terminal-tabs-reconnect-attach", async () => {
     await button(page, "Reconnect").click();
     await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
-    await send("test \"$(jobs -pr)\" = \"$CW_UX_JOB\" && kill -0 \"$CW_UX_JOB\" && printf '__UX_RESUMED__%s__%s__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\" \"$PWD\" \"$CW_UX_JOB\"");
-    await expect(rows).toContainText(`__UX_RESUMED__preserved__${pid}__/tmp__${job}__`);
+  });
+  await stage("terminal-tabs-reconnect-shell", async () => {
+    // Always print, so a changed shell reports a mismatch instead of silence.
+    await send("printf '__UX_RESUMED__%s__%s__%s__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\" \"$PWD\" \"$CW_UX_JOB\" \"$(test \"$(jobs -pr)\" = \"$CW_UX_JOB\" && kill -0 \"$CW_UX_JOB\" 2>/dev/null && echo alive || echo gone)\"");
+    try {
+      await expect(rows).toContainText(`__UX_RESUMED__preserved__${pid}__/tmp__${job}__alive__`);
+    } catch {
+      throw new DevUxError(`terminal-tabs-reconnect-shell-${await shellFailure(page, rows, "__UX_RESUMED__%s", /__UX_RESUMED__(?!%s)/)}`);
+    }
   });
   await stage("terminal-tabs-switch", async () => {
     await page.getByRole("tab", { name: "UX shell", exact: true }).press("ArrowRight");
@@ -585,16 +623,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     try {
       await expect(rows).toContainText(`__UX_SURVIVOR__preserved__${pid}__/tmp__${job}__${job}__alive__`);
     } catch {
-      // Value-blind classification from fixed tokens only: lost input or
-      // redraw, a command that ran without output, different values, or a
-      // terminal that detached.
-      const text = await rows.innerText().catch(() => "");
-      const detached = !(await button(page, "Disconnect").isEnabled().catch(() => false));
-      const kind = detached ? "detached"
-        : /__UX_SURVIVOR__(?!%s)/.test(text) ? "mismatch"
-        : text.includes("jobs -pr") ? "no-output"
-        : "no-echo";
-      throw new DevUxError(`terminal-tabs-survivor-shell-${kind}`);
+      throw new DevUxError(`terminal-tabs-survivor-shell-${await shellFailure(page, rows, "__UX_SURVIVOR__%s", /__UX_SURVIVOR__(?!%s)/)}`);
     }
   });
   await stage("terminal-tabs-mobile-fit", async () => {
