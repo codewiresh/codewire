@@ -2594,6 +2594,63 @@ mod tests {
         assert!(status.success());
     }
 
+    /// The deny-all worker reads and writes a connected TCP stream it receives
+    /// after confinement (the broker's dials and host-port connections), and
+    /// still cannot dial one itself.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_confined_worker_uses_a_received_tcp_stream() {
+        const CHILD_MARKER: &str = "CODEWIRE_TEST_NETWORK_WORKER_SEATBELT_TCP";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut peer, _) = listener.accept().unwrap();
+            let (control, runner) = StdUnixStream::pair().unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .unwrap();
+            install_deny_all_filesystem_domain().unwrap();
+            install_network_worker_seccomp().unwrap();
+            send_worker_host_port_descriptor(runner.as_raw_fd(), client.as_raw_fd()).unwrap();
+            drop(client);
+            let received =
+                receive_worker_descriptor(control.as_raw_fd(), WORKER_HOST_PORT_DESCRIPTOR_MARKER)
+                    .unwrap();
+            let mut transferred = {
+                let _runtime_context = runtime.enter();
+                transferred_stream(received).unwrap()
+            };
+            runtime.block_on(async {
+                transferred.write_all(b"worker-to-peer").await.unwrap();
+                let mut received = [0_u8; 14];
+                std::io::Read::read_exact(&mut peer, &mut received).unwrap();
+                assert_eq!(&received, b"worker-to-peer");
+                std::io::Write::write_all(&mut peer, b"peer-to-worker").unwrap();
+                let mut returned = [0_u8; 14];
+                tokio::time::timeout(
+                    Duration::from_secs(2),
+                    transferred.read_exact(&mut returned),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(&returned, b"peer-to-worker");
+            });
+            assert!(std::net::TcpStream::connect(listener.local_addr().unwrap()).is_err());
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("network_worker::tests::seatbelt_confined_worker_uses_a_received_tcp_stream")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn deny_all_landlock_blocks_new_path_access() {

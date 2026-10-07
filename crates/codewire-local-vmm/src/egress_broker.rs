@@ -96,25 +96,30 @@ const BROKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[libc::SYS_fork, libc::SYS
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const BROKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[];
 
-// The macOS broker runs unconfined for now: it must dial the developer
-// network, and a Seatbelt profile that allows only outbound INET is later
-// work (Program #2064 M4). It still runs single-threaded, with no ambient
-// environment, and exits when its worker closes the IPC stream.
 #[cfg(target_os = "macos")]
 fn require_single_threaded_process() -> io::Result<()> {
     crate::host::sandbox::require_single_thread()
 }
 
+/// Darwin has no no-new-privileges or dumpability switch; the broker never
+/// executes anything after the Seatbelt profile below refuses process
+/// creation.
 #[cfg(target_os = "macos")]
 fn lock_process_privileges() -> io::Result<()> {
     Ok(())
 }
 
+/// Darwin replaces Landlock and the INET-only syscall filter with one Seatbelt
+/// profile, installed at the same point: outbound TCP and the broker's own DNS
+/// remain, and files, processes, signals, Mach services, Unix sockets and
+/// listeners are refused.
 #[cfg(target_os = "macos")]
 fn install_deny_all_filesystem_domain() -> io::Result<()> {
-    Ok(())
+    crate::host::sandbox::confine_egress_broker()
 }
 
+/// The Seatbelt profile installed with the filesystem layer already covers
+/// what the Linux syscall layer adds.
 #[cfg(target_os = "macos")]
 fn install_inet_socket_only_syscalls() -> io::Result<()> {
     Ok(())
