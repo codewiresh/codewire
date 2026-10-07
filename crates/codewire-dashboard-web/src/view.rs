@@ -697,6 +697,8 @@ pub(crate) struct DashboardView {
     pub(crate) provisioned_cpu_millicores: i64,
     pub(crate) provisioned_memory_mb: i64,
     pub(crate) provisioned_disk_gb: i64,
+    /// This browser collapsed the desktop sidebar to its rail.
+    pub(crate) sidebar_collapsed: bool,
 }
 
 impl DashboardView {

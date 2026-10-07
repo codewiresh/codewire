@@ -51,6 +51,26 @@ async function refresh(page: Page, changes: Change[] = [], search?: string) {
   }, { changes, search });
 }
 
+test("the desktop sidebar collapses to a rail and expands again, remembered in a cookie", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openInventory(page);
+  const slot = page.locator(".cw-sidebar-slot");
+  const main = page.locator("main.cw-main");
+  const wide = (await slot.boundingBox())!.width;
+  await slot.getByRole("button", { name: "Collapse navigation", exact: true }).click();
+  const expand = slot.getByRole("button", { name: "Expand navigation", exact: true });
+  await expect(expand).toBeFocused();
+  await expect(slot.getByRole("link", { name: "Create Sandbox" })).toBeHidden();
+  const rail = (await slot.boundingBox())!.width;
+  expect(rail).toBeLessThan(wide / 3);
+  expect(Math.abs((await main.boundingBox())!.x - rail)).toBeLessThanOrEqual(1);
+  expect(await page.evaluate(() => document.cookie)).toContain("codewire.sidebar=collapsed");
+  await expand.click();
+  await expect(slot.getByRole("button", { name: "Collapse navigation", exact: true })).toBeFocused();
+  expect(Math.abs((await slot.boundingBox())!.width - wide)).toBeLessThanOrEqual(1);
+  expect(await page.evaluate(() => document.cookie)).not.toContain("codewire.sidebar");
+});
+
 test("a Sandbox being deleted stays listed as Deleting with only its detail page", async ({ page }) => {
   await openInventory(page);
   const row = page.locator(`tr[data-environment-id="${oldPier}"]`);

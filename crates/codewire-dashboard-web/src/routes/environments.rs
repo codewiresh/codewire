@@ -3391,6 +3391,7 @@ mod tests {
             provisioned_cpu_millicores: 0,
             provisioned_memory_mb: 0,
             provisioned_disk_gb: 0,
+            sidebar_collapsed: false,
         };
         let terminal_page = crate::view::TerminalPageView {
             account_id: "account".into(),

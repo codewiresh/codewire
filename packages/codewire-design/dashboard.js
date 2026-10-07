@@ -530,6 +530,16 @@ document.addEventListener("htmx:afterSwap", (event) => {
 
 if (app) {
   const closeSidebar = () => app.setAttribute("data-mobile-open", "false");
+  // The desktop sidebar collapses to a rail and expands again. The choice is
+  // this browser's own, kept in a cookie so every page renders it at once.
+  const setSidebarCollapsed = (collapsed) => {
+    app.setAttribute("data-sidebar-collapsed", String(collapsed));
+    const secure = window.location.protocol === "https:" ? "; Secure" : "";
+    document.cookie = collapsed
+      ? `codewire.sidebar=collapsed; Path=/; Max-Age=31536000; SameSite=Lax${secure}`
+      : `codewire.sidebar=; Path=/; Max-Age=0; SameSite=Lax${secure}`;
+    app.querySelector(`.cw-sidebar-slot ${collapsed ? "[data-sidebar-expand]" : "[data-sidebar-close]"}`)?.focus();
+  };
   const currentDrawer = () => document.querySelector("[data-drawer]");
   let historyIndex = 0;
   let historyRollback = null;
@@ -644,6 +654,10 @@ if (app) {
     }
     if (target?.closest("[data-quick-search-open]")) {
       openQuickSearch();
+      return;
+    }
+    if (target?.closest(".cw-sidebar-slot [data-sidebar-close], .cw-sidebar-slot [data-sidebar-expand]")) {
+      setSidebarCollapsed(!!target.closest("[data-sidebar-close]"));
       return;
     }
     if (target?.closest("[data-sidebar-close], .cw-mobile-drawer a")) {
