@@ -31,6 +31,8 @@ use super::peer_relay::*;
 #[allow(clippy::wildcard_imports)]
 use super::state::*;
 
+#[path = "tests/derp_first.rs"]
+mod derp_first;
 #[path = "tests/disco_transport.rs"]
 mod disco_transport;
 #[path = "tests/discovery.rs"]

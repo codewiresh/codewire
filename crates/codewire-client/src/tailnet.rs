@@ -27,6 +27,10 @@ use uuid::Uuid;
 
 pub const DEFAULT_PEER_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_DIAL_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long `cw shell --stdio` waits for the path named by
+/// `CW_TAILNET_EXPECTED_TRANSPORT` before dialing. With no expectation it
+/// dials at once: WireGuard rides DERP until disco proves a UDP path, then
+/// moves to it under the open stream.
 pub const DEFAULT_DIRECT_WAIT: Duration = Duration::from_secs(2);
 const DEFAULT_DIRECT_PROBE_PERIOD: Duration = Duration::from_millis(250);
 
@@ -114,12 +118,18 @@ async fn connect_tailnet_ssh(
 ) -> anyhow::Result<TailnetConnection> {
     let peer_timeout = duration_from_env("CW_TAILNET_PEER_TIMEOUT", DEFAULT_PEER_TIMEOUT, false);
     let dial_timeout = duration_from_env("CW_TAILNET_DIAL_TIMEOUT", DEFAULT_DIAL_TIMEOUT, false);
-    let direct_wait = duration_from_env("CW_TAILNET_DIRECT_WAIT", DEFAULT_DIRECT_WAIT, true);
     let force_derp = std::env::var_os("CW_DERP_ONLY").is_some();
     let expected_transport = expected_transport_from_env()?;
+    let direct_wait = ssh_path_wait(
+        expected_transport,
+        duration_from_env("CW_TAILNET_DIRECT_WAIT", DEFAULT_DIRECT_WAIT, true),
+    );
 
+    let started = Instant::now();
     let session =
         connect_tailnet_session(client, org_id, environment_id, peer_timeout, force_derp).await?;
+    debug_phase("session", started);
+    let path_started = Instant::now();
     wait_for_preferred_path(
         &session.conn,
         &session.peer,
@@ -127,6 +137,7 @@ async fn connect_tailnet_ssh(
         expected_transport,
     )
     .await?;
+    debug_phase("path", path_started);
 
     let agent_addr = prefix_from_uuid(&session.environment_uuid);
     let dst = SocketAddr::new(agent_addr.addr(), 22);
@@ -145,6 +156,18 @@ async fn connect_tailnet_ssh(
         _conn: session.conn,
         coordinator_task: session.coordinator_task,
     })
+}
+
+/// How long an SSH connection waits for a better path before dialing. Only an
+/// explicit expectation waits; otherwise the stream starts on DERP and the
+/// transport upgrades it in place once disco proves a UDP path.
+fn ssh_path_wait(expected: ExpectedTransport, configured: Duration) -> Duration {
+    match expected {
+        ExpectedTransport::Any => Duration::ZERO,
+        ExpectedTransport::DirectUdp
+        | ExpectedTransport::PeerRelay
+        | ExpectedTransport::DerpRelay => configured,
+    }
 }
 
 /// Native application façade over the single generated Connect client.
@@ -227,9 +250,12 @@ async fn connect_tailnet_session(
         .with_context(|| format!("parse environment ID {environment_id:?}"))?;
     let identity = PrimaryCoordinateIdentity::client(org_id, environment_uuid);
 
+    let phase = Instant::now();
     let derp_map = fetch_initial_derp_map(client, identity.clone(), peer_timeout)
         .await
         .context("fetch coordinator DERP map")?;
+    debug_phase("derp_map", phase);
+    let phase = Instant::now();
     let derp_target = derp_target_from_map(derp_map.as_ref())
         .unwrap_or_else(|| derp_target_from_platform_url(client.server_url()));
     let stun_servers = if force_derp {
@@ -240,15 +266,19 @@ async fn connect_tailnet_session(
             .context("resolve DERP map STUN servers")?
     };
     let suppress_peer_direct_udp = suppress_peer_direct_udp_from_env(force_derp);
+    debug_phase("stun_resolve", phase);
 
     let client_id = Uuid::new_v4();
     let client_addr = prefix_from_uuid(&client_id);
     let secret = StaticSecret::random_from_rng(OsRng);
     let local_node_key = NodePublic::from_raw(PublicKey::from(&secret).to_bytes());
     let disco_private = DiscoPrivate::generate(&mut OsRng);
+    let phase = Instant::now();
     let fallback_transport = connect_derp_transport(&derp_target, &secret)
         .await
         .context("connect DERP relay")?;
+    debug_phase("derp_connect", phase);
+    let phase = Instant::now();
 
     let (transport, endpoints, direct_udp) = if force_derp {
         (fallback_transport, Vec::new(), None)
@@ -273,8 +303,10 @@ async fn connect_tailnet_session(
     conn_options.endpoints = endpoints;
     conn_options.private_key = Some(secret);
     conn_options.disco_private = Some(disco_private);
+    debug_phase("direct_udp_bind", phase);
     let conn = Arc::new(Conn::new(conn_options, transport).context("create tailnet conn")?);
     conn.set_preferred_derp(1);
+    let phase = Instant::now();
 
     let target_peer = Arc::new(Mutex::new(None::<Node>));
     let target_notify = Arc::new(Notify::new());
@@ -282,6 +314,8 @@ async fn connect_tailnet_session(
         .connect_primary_coordinator_with_setup_timeout(identity, peer_timeout)
         .await
         .context("set up typed coordinator session")?;
+    debug_phase("coordinator", phase);
+    let phase = Instant::now();
     let coordinator_task = spawn_coordinator_task(
         conn.clone(),
         coordinator,
@@ -294,6 +328,7 @@ async fn connect_tailnet_session(
     let peer = wait_for_target_peer(target_peer, target_notify, peer_timeout)
         .await
         .with_context(|| format!("wait for environment peer {environment_id}"))?;
+    debug_phase("peer", phase);
 
     Ok(TailnetSession {
         environment_uuid,
@@ -322,6 +357,9 @@ fn tailnet_direct_udp_options(
         local_disco,
     )
     .with_stun_servers(stun_servers)
+    // Reach the peer over DERP at once; the mapped endpoint is published when
+    // STUN answers, and a UDP path takes over once disco proves it.
+    .with_stun_before_start(false)
     .with_peer_direct_udp_enabled(!suppress_peer_direct_udp)
     // The environment peer runs inside the sandbox: never let it steer this
     // client's UDP at loopback or private networks.
@@ -629,6 +667,7 @@ async fn wait_for_preferred_path(
     expected: ExpectedTransport,
 ) -> anyhow::Result<()> {
     if wait.is_zero() || std::env::var_os("CW_DERP_ONLY").is_some() {
+        debug_path_probe(conn.probe_peer_path(peer)?.transport);
         return validate_expected_path(conn, peer, expected);
     }
 
@@ -702,7 +741,12 @@ fn derp_map_diagnostic(map: Option<&Value>) -> Option<TailnetDerpMapDiagnostic> 
             if !stun_only {
                 derp_nodes += 1;
             }
-            if node.get("STUNPort").and_then(Value::as_i64).is_some() {
+            // A relay node publishes `STUNPort: -1`: it serves no STUN.
+            if node
+                .get("STUNPort")
+                .and_then(Value::as_i64)
+                .is_some_and(|port| port > 0)
+            {
                 stun_nodes += 1;
             }
         }
@@ -789,6 +833,15 @@ fn stage_fail(
 fn expected_transport_from_env() -> anyhow::Result<ExpectedTransport> {
     ExpectedTransport::parse(&std::env::var("CW_TAILNET_EXPECTED_TRANSPORT").unwrap_or_default())
         .map_err(|err| anyhow!("invalid CW_TAILNET_EXPECTED_TRANSPORT: {err}"))
+}
+
+fn debug_phase(phase: &str, started: Instant) {
+    if std::env::var_os("CW_DEBUG_TAILNET").is_some() {
+        eprintln!(
+            "cw tailnet: phase={phase} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+    }
 }
 
 fn debug_path_probe(transport: PeerTransport) {
@@ -1303,6 +1356,15 @@ mod tests {
                 port: 3478,
             }]
         );
+        let diagnostic = derp_map_diagnostic(Some(&map)).unwrap();
+        assert_eq!(
+            (
+                diagnostic.regions,
+                diagnostic.derp_nodes,
+                diagnostic.stun_nodes
+            ),
+            (1, 1, 1)
+        );
     }
 
     #[test]
@@ -1389,6 +1451,34 @@ mod tests {
             ExpectedTransport::Any,
             PeerTransport::DerpRelay
         ));
+    }
+
+    #[test]
+    fn ssh_dials_at_once_unless_a_transport_is_expected() {
+        let configured = Duration::from_secs(7);
+        assert_eq!(
+            ssh_path_wait(ExpectedTransport::Any, configured),
+            Duration::ZERO
+        );
+        for expected in [
+            ExpectedTransport::DirectUdp,
+            ExpectedTransport::PeerRelay,
+            ExpectedTransport::DerpRelay,
+        ] {
+            assert_eq!(ssh_path_wait(expected, configured), configured);
+        }
+    }
+
+    #[test]
+    fn client_transport_does_not_wait_for_stun_before_reaching_its_peer() {
+        let options = tailnet_direct_udp_options(
+            NodePublic::from_raw([4; 32]),
+            DiscoPrivate::generate(&mut rand::rngs::OsRng),
+            vec!["127.0.0.1:3478".parse().unwrap()],
+            false,
+        );
+        assert!(!options.stun_before_start);
+        assert_eq!(options.stun_servers.len(), 1);
     }
 
     #[test]
