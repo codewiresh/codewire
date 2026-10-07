@@ -1,5 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::{
@@ -18,7 +18,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::lookup_host;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -78,6 +78,7 @@ pub async fn pipe_shell_stdio(
 
     match connect_tailnet_ssh(client, org_id, environment_id).await {
         Ok(tailnet) => tailnet.pipe_stdio().await,
+        Err(err) if !websocket_fallback_allowed(expected_transport_from_env()?) => Err(err),
         Err(err) => {
             if std::env::var_os("CW_DEBUG_TAILNET").is_some() {
                 eprintln!("cw tailnet: tailnet SSH failed, falling back to WebSocket: {err:#}");
@@ -161,6 +162,12 @@ async fn connect_tailnet_ssh(
 /// How long an SSH connection waits for a better path before dialing. Only an
 /// explicit expectation waits; otherwise the stream starts on DERP and the
 /// transport upgrades it in place once disco proves a UDP path.
+/// An expected tailnet path is an assertion about how the connection was
+/// carried, so a tailnet failure must not succeed over WebSocket instead.
+fn websocket_fallback_allowed(expected: ExpectedTransport) -> bool {
+    expected == ExpectedTransport::Any
+}
+
 fn ssh_path_wait(expected: ExpectedTransport, configured: Duration) -> Duration {
     match expected {
         ExpectedTransport::Any => Duration::ZERO,
@@ -308,8 +315,7 @@ async fn connect_tailnet_session(
     conn.set_preferred_derp(1);
     let phase = Instant::now();
 
-    let target_peer = Arc::new(Mutex::new(None::<Node>));
-    let target_notify = Arc::new(Notify::new());
+    let (target_peer, target_peer_rx) = watch::channel(None::<Node>);
     let coordinator = client
         .connect_primary_coordinator_with_setup_timeout(identity, peer_timeout)
         .await
@@ -320,12 +326,11 @@ async fn connect_tailnet_session(
         conn.clone(),
         coordinator,
         environment_uuid,
-        target_peer.clone(),
-        target_notify.clone(),
+        target_peer,
         suppress_peer_direct_udp,
     );
 
-    let peer = wait_for_target_peer(target_peer, target_notify, peer_timeout)
+    let peer = wait_for_target_peer(target_peer_rx, peer_timeout)
         .await
         .with_context(|| format!("wait for environment peer {environment_id}"))?;
     debug_phase("peer", phase);
@@ -370,8 +375,7 @@ fn spawn_coordinator_task(
     conn: Arc<Conn>,
     mut coordinator: CoordinatorPeerSession,
     environment_uuid: Uuid,
-    target_peer: Arc<Mutex<Option<Node>>>,
-    target_notify: Arc<Notify>,
+    target_peer: watch::Sender<Option<Node>>,
     suppress_peer_direct_udp: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -386,8 +390,7 @@ fn spawn_coordinator_task(
                 let nodes = maybe_suppress_peer_direct_udp(nodes, suppress_peer_direct_udp);
                 let _ = update_conn.update_peers(&nodes);
                 if let Some(peer) = nodes.iter().find(|node| node.id == environment_uuid) {
-                    *target_peer.lock().unwrap() = Some(peer.clone());
-                    target_notify.notify_waiters();
+                    target_peer.send_replace(Some(peer.clone()));
                 }
             },
             on_derp_map: |_| {},
@@ -411,29 +414,24 @@ fn maybe_suppress_peer_direct_udp(nodes: &[Node], suppress: bool) -> Vec<Node> {
         .collect()
 }
 
+/// The environment's node, once the coordinator has sent it. A watch keeps
+/// the latest value, so a node that arrives before this starts waiting (the
+/// coordinator often sends it during session setup, and the session replays
+/// it as soon as its task starts) is still seen.
 async fn wait_for_target_peer(
-    target_peer: Arc<Mutex<Option<Node>>>,
-    target_notify: Arc<Notify>,
+    mut target_peer: watch::Receiver<Option<Node>>,
     timeout: Duration,
 ) -> anyhow::Result<Node> {
-    if let Some(peer) = target_peer.lock().unwrap().clone() {
-        return Ok(peer);
-    }
-    tokio::time::timeout(timeout, async {
-        loop {
-            target_notify.notified().await;
-            if let Some(peer) = target_peer.lock().unwrap().clone() {
-                return peer;
-            }
-        }
-    })
-    .await
-    .map_err(|_| {
-        anyhow!(
+    match tokio::time::timeout(timeout, target_peer.wait_for(Option::is_some)).await {
+        Ok(Ok(peer)) => Ok(peer.clone().expect("waited for a node")),
+        Ok(Err(_)) => Err(anyhow!(
+            "coordinator session ended before the environment peer arrived"
+        )),
+        Err(_) => Err(anyhow!(
             "timeout waiting for peer update after {}",
             humantime(timeout)
-        )
-    })
+        )),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1282,6 +1280,62 @@ pub fn humantime(duration: Duration) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn environment_node(id: Uuid) -> Node {
+        Node {
+            id,
+            as_of: chrono::Utc::now(),
+            key: NodePublic::from_raw([1; 32]),
+            disco_key: DiscoPrivate::generate(&mut rand::rngs::OsRng).public(),
+            preferred_derp: 1,
+            derp_latency: None,
+            endpoints: Vec::new(),
+            addresses: vec![prefix_from_uuid(&id)],
+        }
+    }
+
+    #[tokio::test]
+    async fn target_peer_sent_before_the_wait_is_not_lost() {
+        let id = Uuid::new_v4();
+        let (tx, rx) = watch::channel(None::<Node>);
+        tx.send_replace(Some(environment_node(id)));
+        let peer = wait_for_target_peer(rx, Duration::from_millis(50))
+            .await
+            .expect("an earlier node is seen");
+        assert_eq!(peer.id, id);
+    }
+
+    #[tokio::test]
+    async fn target_peer_sent_during_the_wait_is_seen() {
+        let id = Uuid::new_v4();
+        let (tx, rx) = watch::channel(None::<Node>);
+        let wait = tokio::spawn(wait_for_target_peer(rx, Duration::from_secs(5)));
+        tokio::task::yield_now().await;
+        tx.send_replace(Some(environment_node(id)));
+        assert_eq!(wait.await.unwrap().expect("a later node is seen").id, id);
+    }
+
+    #[tokio::test]
+    async fn target_peer_wait_ends_with_the_session() {
+        let (tx, rx) = watch::channel(None::<Node>);
+        drop(tx);
+        let err = wait_for_target_peer(rx, Duration::from_secs(5))
+            .await
+            .expect_err("no node after the session ended");
+        assert!(err.to_string().contains("session ended"), "{err}");
+    }
+
+    #[test]
+    fn only_an_unasserted_path_may_fall_back_to_websocket() {
+        assert!(websocket_fallback_allowed(ExpectedTransport::Any));
+        for expected in [
+            ExpectedTransport::DirectUdp,
+            ExpectedTransport::PeerRelay,
+            ExpectedTransport::DerpRelay,
+        ] {
+            assert!(!websocket_fallback_allowed(expected), "{expected:?}");
+        }
+    }
 
     #[test]
     fn native_shell_facade_uses_the_typed_connect_run_start() {

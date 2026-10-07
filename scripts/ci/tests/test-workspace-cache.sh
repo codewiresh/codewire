@@ -42,8 +42,10 @@ case "$1 $2" in
       sleep "${FAKE_CANARY_READY_DELAY:-0}"
       sleep 30 &
       child_pid=$!
-      printf '%s\n' "$child_pid" >"$FAKE_CANARY_CHILD"
+      # Arm the handler before publishing readiness: the test signals as
+      # soon as the child file appears.
       trap 'kill "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true; exit 143' TERM INT
+      printf '%s\n' "$child_pid" >"$FAKE_CANARY_CHILD"
       wait "$child_pid"
       exit 0
     fi
