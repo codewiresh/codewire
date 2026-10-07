@@ -154,8 +154,7 @@ async fn generated_disconnect_before_challenge_and_during_envelope_preparation_d
     .await
 }
 
-async fn disconnect_before_challenge_and_during_envelope_preparation_drains() -> Result<()>
-{
+async fn disconnect_before_challenge_and_during_envelope_preparation_drains() -> Result<()> {
     let h = Harness::new().await?;
     let result = async {
         h.hold_challenge()?;
