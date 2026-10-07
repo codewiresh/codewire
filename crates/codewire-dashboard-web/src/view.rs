@@ -1501,11 +1501,20 @@ pub(crate) struct EnvironmentCreateFormView {
     pub(crate) form_error: String,
 }
 
+/// Repository rows one Create form may submit (indexes `0..MAX`). The browser
+/// stops offering GitHub repositories at this count instead of submitting a
+/// form the server refuses.
+pub(crate) const MAX_CREATE_REPOSITORIES: usize = 108;
+
 impl EnvironmentCreateFormView {
     /// The product's default workspace image, rendered as the image field's
     /// placeholder so the browser reset control needs no copy of it.
     pub(crate) fn default_image(&self) -> &'static str {
         codewire_server_core::runtime_images::DEFAULT_WORKSPACE_IMAGE
+    }
+
+    pub(crate) fn repository_limit(&self) -> usize {
+        MAX_CREATE_REPOSITORIES
     }
 }
 

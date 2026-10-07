@@ -1,7 +1,7 @@
 <dialog class="cw-dialog" data-dialog data-sandbox-resize id="sandbox-resize"
   data-resize-account-id="{{ page.account_id }}" data-resize-environment-id="{{ page.environment.id }}"
   data-resize-org-slug="{{ organization.slug }}" aria-labelledby="sandbox-resize-title">
-  <header class="cw-dialog-header"><button class="cw-button cw-button--ghost cw-dialog-back" type="button" data-resize-back hidden><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevron-left"/></svg>Back</button><h2 id="sandbox-resize-title">Resize {{ page.environment.name }}</h2></header>
+  <header class="cw-dialog-header"><button class="cw-button cw-button--ghost cw-dialog-back" type="button" data-resize-back hidden><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevron-left"/></svg><span>Back</span></button><h2 id="sandbox-resize-title">Resize {{ page.environment.name }}</h2></header>
   <section class="cw-dialog-body" aria-label="Resize resources" data-resize-content>
     <p>Review the proposed change before applying it. Some changes require a restart.</p>
     <form id="sandbox-resize-plan-form" data-resize-plan-form>

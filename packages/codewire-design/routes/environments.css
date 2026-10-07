@@ -74,16 +74,15 @@
 .cw-workspace-mount { min-width: 0; }
 .cw-workspace-mount > span { flex: none; }
 
-/* Repositories and preview ports: rows of fields with a remove button. */
+/* Repositories and preview ports: .cw-field-row rows of fields with a remove
+   button centred on their input line. These rules set only the columns. */
 .cw-manual-repositories { display: grid; gap: var(--space-3); margin-top: var(--space-3); }
 .cw-manual-repositories .cw-stack { gap: var(--space-2); }
 .cw-manual-actions { display: flex; justify-content: space-between; }
-.cw-repository-row { display: grid; min-width: 0; grid-template-columns: minmax(0, 1.4fr) minmax(8rem, .6fr) auto; align-items: end; gap: var(--space-2); }
+.cw-repository-row { grid-template-columns: minmax(0, 1.4fr) minmax(8rem, .6fr) auto; }
 .cw-environment-create .cw-repository-row { grid-template-columns: minmax(0, 1fr) 5.25rem minmax(0, .75fr) auto; }
-.cw-app-port-row { display: grid; grid-template-columns: 7rem minmax(8rem, 1fr) 9rem auto; align-items: start; gap: var(--space-2); }
+.cw-app-port-row { grid-template-columns: 7rem minmax(8rem, 1fr) 9rem auto; }
 .cw-environment-create .cw-app-port-row { grid-template-columns: 5.125rem minmax(0, 1fr) minmax(9rem, 1fr) auto; }
-.cw-repository-row > .cw-icon-button,
-.cw-app-port-row > .cw-icon-button { align-self: center; }
 .cw-app-port-row .cw-field { min-width: 0; }
 .cw-app-port-row .cw-field-error { overflow-wrap: anywhere; }
 .cw-port-rows, .cw-port-actions { margin: 0; padding: 0; list-style: none; }
@@ -125,9 +124,16 @@
 .cw-github-results-scroll { min-height: 6rem; max-height: 11.25rem; overflow-y: auto; overscroll-behavior: contain; border: var(--border-width) solid var(--border); border-radius: var(--radius-sm); background: var(--bg-surface); }
 .cw-github-results-scroll:focus-within { border-color: var(--focus-ring); }
 .cw-github-repository-list { margin: 0; padding: 0; list-style: none; }
-.cw-github-repository-copy { display: grid; gap: var(--space-0-5); min-width: 0; }
-.cw-github-repository-action { color: var(--accent-text); font-size: var(--text-small); font-weight: var(--weight-semibold); }
-.cw-github-repository-list small { color: var(--fg-secondary); }
+/* Each result: the full name, its visibility pills, and what a click does. */
+.cw-github-repository-copy { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); min-width: 0; }
+.cw-github-repository-badges { display: inline-flex; flex-wrap: wrap; gap: var(--space-1); }
+.cw-github-repository-badges .cw-badge { margin-left: 0; }
+/* The action label is a block of one line: no leading, and where supported
+   its box is trimmed to the capitals so the row centres them. */
+.cw-github-repository-action { color: var(--accent-text); font-size: var(--text-small); font-weight: var(--weight-semibold); line-height: var(--leading-none); white-space: nowrap; text-box: trim-both cap alphabetic; }
+.cw-github-repository-list [data-repository-selected="true"] .cw-github-repository-action { color: var(--fg-secondary); }
+.cw-github-repository-list button:disabled .cw-github-repository-action { color: var(--fg-disabled); }
+.cw-github-status { display: flex; align-items: center; gap: var(--space-1-5); min-width: 0; }
 .cw-github-browser-actions { display: flex; align-items: center; gap: var(--space-2); }
 .cw-github-browser-actions:not(:has(> :not([hidden]))) { display: none; }
 .cw-create-draft-tools { display: grid; gap: var(--space-2); }
@@ -141,7 +147,8 @@
 .cw-port-row { display: grid; grid-template-columns: minmax(8rem, 1fr) auto auto; align-items: center; gap: var(--space-3); padding: var(--space-3) 0; border-bottom: var(--border-width) solid var(--border-subtle); }
 .cw-port-row strong, .cw-port-row small { display: block; }
 .cw-port-row small { margin-top: var(--space-0-5); color: var(--fg-tertiary); }
-.cw-port-form { display: grid; grid-template-columns: 7rem minmax(8rem, 1fr) minmax(15rem, 1fr) auto; align-items: end; gap: var(--space-3); }
+/* The add-port form is a .cw-field-row: Add port sits on the input line. */
+.cw-port-form { grid-template-columns: 7rem minmax(8rem, 1fr) minmax(15rem, 1fr) auto; column-gap: var(--space-3); }
 .cw-port-preview-url { display: block; overflow-wrap: anywhere; font-size: var(--text-small); }
 .cw-port-dialog { width: min(42rem, calc(100% - var(--space-8))); }
 
@@ -164,9 +171,12 @@
   .cw-sandbox-table th:nth-child(2) { width: 6rem; }
   .cw-sandbox-table th:last-child { width: var(--space-10); }
   .cw-create-resources { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .cw-repository-row, .cw-app-port-row, .cw-port-form, .cw-port-row,
+  .cw-port-form, .cw-port-row { grid-template-columns: minmax(0, 1fr); }
+  .cw-port-form > .cw-button { grid-row: auto; }
+  /* The first field keeps the remove button on its input line; the other
+     fields take the full width below. */
+  .cw-repository-row, .cw-app-port-row,
   .cw-environment-create .cw-repository-row,
-  .cw-environment-create .cw-app-port-row { grid-template-columns: minmax(0, 1fr); }
-  .cw-repository-row > .cw-icon-button,
-  .cw-app-port-row > .cw-icon-button { justify-self: end; }
+  .cw-environment-create .cw-app-port-row { grid-template-columns: minmax(0, 1fr) auto; }
+  :is(.cw-repository-row, .cw-app-port-row) > .cw-field:not(:first-child) { grid-column: 1 / -1; }
 }

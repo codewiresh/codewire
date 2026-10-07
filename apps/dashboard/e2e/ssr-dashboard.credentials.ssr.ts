@@ -380,7 +380,8 @@ test.describe("managed provider credential browser journey", () => {
       // through the account's GitHub connection with no profile selected.
       await expect(page.getByRole("combobox", { name: "Credential profile", exact: true })).toHaveValue("");
       await source.getByRole("textbox", { name: "Branch", exact: true }).fill("my-working-branch");
-      await browser.getByRole("button", { name: /synthetic-user\/repository-01/ }).click();
+      // Added once: the result now offers Remove, and nothing is duplicated.
+      await expect(browser.getByRole("button", { name: /^Remove synthetic-user\/repository-01 / })).toContainText("− Remove");
       await expect(page.locator("[data-repository-row]")).toHaveCount(1);
       await expect(source.getByRole("textbox", { name: "Branch", exact: true })).toHaveValue("my-working-branch");
       await expect(page.getByRole("textbox", { name: "Name", exact: true })).toHaveValue(githubCheckoutName);

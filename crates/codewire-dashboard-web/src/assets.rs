@@ -537,6 +537,32 @@ mod tests {
     }
 
     #[test]
+    fn field_rows_put_their_action_on_the_control_line_in_templates_and_fixtures() {
+        assert!(STYLES.contains(
+            ".cw-field-row > .cw-field { grid-row: span 2; grid-template-rows: subgrid; }"
+        ));
+        for html in [
+            include_str!("../templates/environment-create-form.html"),
+            include_str!(
+                "../../../packages/codewire-design/reference/fixtures/create-sandbox.html"
+            ),
+        ] {
+            assert!(html.contains("class=\"cw-field-row cw-repository-row\" data-repository-row"));
+            assert!(html.contains("class=\"cw-field-row cw-app-port-row\" data-app-port-row"));
+            assert!(!html.contains("class=\"cw-repository-row\""));
+            assert!(!html.contains("class=\"cw-app-port-row\""));
+        }
+        for html in [
+            include_str!("../templates/environment-ports.html"),
+            include_str!(
+                "../../../packages/codewire-design/reference/fixtures/terminal-ports.html"
+            ),
+        ] {
+            assert!(html.contains("<form class=\"cw-field-row cw-port-form\""));
+        }
+    }
+
+    #[test]
     fn durable_terminal_template_and_fixture_share_controls_and_presentation() {
         let production = include_str!("../templates/terminal.html");
         let fixture =

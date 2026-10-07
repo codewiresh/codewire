@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codewire Design"
+  short_description: "Dashboard UI patterns and their proof"
+  default_prompt: "Use $codewire-design for this Codewire dashboard UI change."
