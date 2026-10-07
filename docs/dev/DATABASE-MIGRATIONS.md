@@ -1017,22 +1017,22 @@ Pod UID from the reviewed binding, never from the request. Each row holds the
 environment, the operation generation, the recording Pod's UID, the key and
 `recorded_at`:
 
-- the primary key `(environment_id, operation_generation)` allows one key per
-  generation, and orchestration, the only writer, inserts with `ON CONFLICT DO
-  NOTHING`, so a recorded key is never replaced. A different key for the same
-  generation is refused (`failed_precondition`); the same key again is
-  idempotent;
+- the primary key `pod_uid` allows one key per bound Pod, and orchestration,
+  the only writer, inserts with `ON CONFLICT DO NOTHING`, so a recorded key is
+  never replaced. A different key for the same Pod is refused
+  (`failed_precondition`); the same key again is idempotent. A Pod that
+  replaces another, even within one operation generation, records its own key;
 - CHECK constraints require a positive generation, a lowercase Kubernetes Pod
   UID, and exactly one OpenSSH Ed25519 key line: `ssh-ed25519`, one space and
   the 68-character base64 encoding of its 51-byte blob, with no comment;
-- rows cascade with their environment. When a new generation records its key,
-  the writer deletes that environment's earlier generations in the same
-  transaction.
+- rows cascade with their environment. When the environment's next Pod records
+  its key, the writer deletes the keys of its released bindings in the same
+  transaction. The environment and generation are recorded facts.
 
-Clients trust only the key of the environment's current generation
-(`environments.environment_operation_generation`), so a start, stop or resize
-rotates trust with the generation, and a key recorded late for a superseded
-generation is never trusted.
+Clients trust only the key of the Pod the environment is currently bound to,
+read through the authenticated API, so replacing the Pod (a start, a stop, a
+resize with restart or a repair) rotates trust with it, and a key recorded
+late by a replaced Pod is never trusted.
 
 **Compatibility.** Version-36 binaries never read or write the table. As with
 every migration, a version-36 binary cannot restart against a version-37
@@ -1047,7 +1047,7 @@ value. No earlier fixture needed a change: the migration adds no helper and
 touches no compared row. The fixtures prove:
 
 - fresh apply, with every constraint and its SQLSTATE: 23505 for a second key
-  for one generation, 23514 for the generation, Pod UID and key-format checks
+  for one Pod, 23514 for the generation, Pod UID and key-format checks
   (a comment, a trailing newline, a truncated key, another algorithm, an empty
   key), 23503 for an unknown environment, and the cascade that removes one
   environment's keys and no other's;
@@ -1055,9 +1055,9 @@ touches no compared row. The fixtures prove:
   and a second startup that is a no-op.
 
 A separate orchestration matrix (`workspace_binding::store::database_tests`,
-3 tests) proves the writer: write-once per generation, trust only at the
-current generation, pruning on the next generation, and the generation the
-live binding carries.
+3 tests) proves the writer: write-once per Pod, trust only in the currently
+bound Pod's key, pruning of released bindings' keys when the next Pod records,
+and the generation the live binding carries.
 
 **Rollback.** Because 0037 only adds one table, it has an in-place rollback
 that keeps every other row:
