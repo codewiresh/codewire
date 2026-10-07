@@ -1218,6 +1218,8 @@ run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head fal
   "$policy" scripts/dev/macos-cli.py scripts/dev/test-macos-cli.py
 run_present_paths_case macos_formatter_developer_tool pull_request refs/pull/2064/head false \
   "$policy" scripts/dev/macos-ext4-tool.py scripts/dev/test-macos-ext4-tool.py
+run_present_paths_case macos_local_runtime_installer pull_request refs/pull/2064/head false \
+  "$policy" Makefile scripts/dev/macos-local-runtime.py scripts/dev/test-macos-local-runtime.py
 run_present_paths_case macos_formatter_with_runtime_source pull_request refs/pull/2064/head false \
   'policy transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-ext4-tool.py crates/codewire-local-vmm/src/lib.rs

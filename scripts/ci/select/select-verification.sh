@@ -389,6 +389,7 @@ if [ "$event_selected" = false ]; then
       scripts/dev/dashboard-watch.py|\
       scripts/dev/macos-cli.py|scripts/dev/test-macos-cli.py|\
       scripts/dev/macos-ext4-tool.py|scripts/dev/test-macos-ext4-tool.py|\
+      scripts/dev/macos-local-runtime.py|scripts/dev/test-macos-local-runtime.py|\
       scripts/dev/macos-app-sandbox-canary.py|scripts/dev/test-macos-app-sandbox-canary.py|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
       scripts/ci/select/emit-verification-matrices.sh|\
