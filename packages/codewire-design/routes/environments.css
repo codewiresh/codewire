@@ -74,20 +74,15 @@
 .cw-workspace-mount { min-width: 0; }
 .cw-workspace-mount > span { flex: none; }
 
-/* Repositories and preview ports: rows of fields with a remove button. */
+/* Repositories and preview ports: .cw-field-row rows of fields with a remove
+   button centred on their input line. These rules set only the columns. */
 .cw-manual-repositories { display: grid; gap: var(--space-3); margin-top: var(--space-3); }
 .cw-manual-repositories .cw-stack { gap: var(--space-2); }
 .cw-manual-actions { display: flex; justify-content: space-between; }
-/* A repository row has two lines: every field's label, then its input. The
-   fields share the row's lines, so the inputs line up and the remove button
-   is centred on the input line, not on the label stack above it. */
-.cw-repository-row { display: grid; min-width: 0; grid-template-columns: minmax(0, 1.4fr) minmax(8rem, .6fr) auto; grid-template-rows: auto auto; gap: var(--space-1-5) var(--space-2); }
+.cw-repository-row { grid-template-columns: minmax(0, 1.4fr) minmax(8rem, .6fr) auto; }
 .cw-environment-create .cw-repository-row { grid-template-columns: minmax(0, 1fr) 5.25rem minmax(0, .75fr) auto; }
-.cw-repository-row > .cw-field { grid-row: span 2; grid-template-rows: subgrid; }
-.cw-repository-row > .cw-icon-button { grid-row: 2; grid-column: -2; align-self: center; }
-.cw-app-port-row { display: grid; grid-template-columns: 7rem minmax(8rem, 1fr) 9rem auto; align-items: start; gap: var(--space-2); }
+.cw-app-port-row { grid-template-columns: 7rem minmax(8rem, 1fr) 9rem auto; }
 .cw-environment-create .cw-app-port-row { grid-template-columns: 5.125rem minmax(0, 1fr) minmax(9rem, 1fr) auto; }
-.cw-app-port-row > .cw-icon-button { align-self: center; }
 .cw-app-port-row .cw-field { min-width: 0; }
 .cw-app-port-row .cw-field-error { overflow-wrap: anywhere; }
 .cw-port-rows, .cw-port-actions { margin: 0; padding: 0; list-style: none; }
@@ -150,7 +145,8 @@
 .cw-port-row { display: grid; grid-template-columns: minmax(8rem, 1fr) auto auto; align-items: center; gap: var(--space-3); padding: var(--space-3) 0; border-bottom: var(--border-width) solid var(--border-subtle); }
 .cw-port-row strong, .cw-port-row small { display: block; }
 .cw-port-row small { margin-top: var(--space-0-5); color: var(--fg-tertiary); }
-.cw-port-form { display: grid; grid-template-columns: 7rem minmax(8rem, 1fr) minmax(15rem, 1fr) auto; align-items: end; gap: var(--space-3); }
+/* The add-port form is a .cw-field-row: Add port sits on the input line. */
+.cw-port-form { grid-template-columns: 7rem minmax(8rem, 1fr) minmax(15rem, 1fr) auto; column-gap: var(--space-3); }
 .cw-port-preview-url { display: block; overflow-wrap: anywhere; font-size: var(--text-small); }
 .cw-port-dialog { width: min(42rem, calc(100% - var(--space-8))); }
 
@@ -173,12 +169,12 @@
   .cw-sandbox-table th:nth-child(2) { width: 6rem; }
   .cw-sandbox-table th:last-child { width: var(--space-10); }
   .cw-create-resources { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .cw-app-port-row, .cw-port-form, .cw-port-row,
-  .cw-environment-create .cw-app-port-row { grid-template-columns: minmax(0, 1fr); }
-  .cw-app-port-row > .cw-icon-button { justify-self: end; }
-  /* The repository URL keeps the remove button on its input line; branch and
-     mount path take the full width below. */
-  .cw-repository-row,
-  .cw-environment-create .cw-repository-row { grid-template-columns: minmax(0, 1fr) auto; }
-  .cw-repository-row > .cw-field:not(:first-child) { grid-column: 1 / -1; }
+  .cw-port-form, .cw-port-row { grid-template-columns: minmax(0, 1fr); }
+  .cw-port-form > .cw-button { grid-row: auto; }
+  /* The first field keeps the remove button on its input line; the other
+     fields take the full width below. */
+  .cw-repository-row, .cw-app-port-row,
+  .cw-environment-create .cw-repository-row,
+  .cw-environment-create .cw-app-port-row { grid-template-columns: minmax(0, 1fr) auto; }
+  :is(.cw-repository-row, .cw-app-port-row) > .cw-field:not(:first-child) { grid-column: 1 / -1; }
 }

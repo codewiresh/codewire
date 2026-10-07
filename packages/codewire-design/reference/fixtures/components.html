@@ -101,6 +101,16 @@
     </div>
   </section>
 
+  <section class="cw-card" aria-labelledby="field-row-title">
+    <header class="cw-card-header"><h2 id="field-row-title" class="cw-card-title">Field row</h2><p class="cw-card-description">Fields side by side with a trailing action. Labels share one line and controls the next, so the action is centred on the controls, not on the labels. A route sets the columns when a row holds more than one field.</p></header>
+    <div class="cw-card-content">
+      <ul class="gallery-list cw-stack">
+        <li class="cw-field-row"><div class="cw-field"><label class="cw-label" for="g-row-url">Repository URL</label><input class="cw-input" id="g-row-url" type="url" value="https://github.com/codewiresh/codewire.git"></div><button class="cw-icon-button" type="button" aria-label="Remove repository"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-close"/></svg></button></li>
+        <li class="cw-field-row"><div class="cw-field"><label class="cw-label" for="g-row-port">Internal port</label><input class="cw-input cw-mono" id="g-row-port" type="number" value="0" aria-invalid="true" aria-describedby="g-row-port-error"><p class="cw-field-error" id="g-row-port-error">Use a port from 1 to 65535.</p></div><button class="cw-icon-button" type="button" aria-label="Remove preview port"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-close"/></svg></button></li>
+      </ul>
+    </div>
+  </section>
+
   <section class="cw-card" aria-labelledby="choices-title">
     <header class="cw-card-header"><h2 id="choices-title" class="cw-card-title">Choices</h2><p class="cw-card-description">Checkboxes, radios and chips share one accent and one focus ring.</p></header>
     <div class="cw-card-content cw-stack">

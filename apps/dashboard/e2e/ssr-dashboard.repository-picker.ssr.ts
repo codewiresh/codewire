@@ -329,27 +329,81 @@ test("at the repository limit, rows not yet added are disabled with the reason",
   await expect(browser.getByRole("button", { name: "Add codewiresh/docs Public", exact: true })).toBeEnabled();
 });
 
-test("a selected repository's remove button sits on its input line", async ({ page }) => {
-  const row = page.locator("[data-repository-row]").first();
-  const centre = async (locator: ReturnType<Page["locator"]>) => {
+// Vertical centre of each element, for alignment checks.
+async function centres(...locators: ReturnType<Page["locator"]>[]) {
+  return Promise.all(locators.map(async (locator) => {
     const box = (await locator.boundingBox())!;
     return box.y + box.height / 2;
-  };
-  const remove = await centre(row.getByRole("button", { name: "Remove repository" }));
-  const url = await centre(row.getByRole("textbox", { name: "Repository URL", exact: true }));
-  expect(Math.abs(remove - url)).toBeLessThanOrEqual(1);
-  if (page.viewportSize()!.width >= 1024) {
-    // On a wide drawer every input shares that line.
-    expect(Math.abs(remove - await centre(row.getByRole("textbox", { name: "Branch", exact: true })))).toBeLessThanOrEqual(1);
-    expect(Math.abs(remove - await centre(row.locator(".cw-workspace-mount")))).toBeLessThanOrEqual(1);
-  } else {
-    // On a phone the button stays beside the URL; branch and mount path wrap below.
-    const box = (await row.getByRole("button", { name: "Remove repository" }).boundingBox())!;
-    const field = (await row.getByRole("textbox", { name: "Repository URL", exact: true }).boundingBox())!;
-    expect(box.x).toBeGreaterThanOrEqual(field.x + field.width);
-    expect((await row.getByRole("textbox", { name: "Branch", exact: true }).boundingBox())!.y).toBeGreaterThan(field.y + field.height);
+  }));
+}
+
+// A row's trailing action sits on its controls' line, not on the label stack.
+// On a wide drawer every control shares that line; on a phone the first
+// control keeps the action beside it and the other fields wrap below.
+async function expectActionOnControlLine(page: Page, action: ReturnType<Page["locator"]>, controls: ReturnType<Page["locator"]>[]) {
+  const [actionCentre, ...controlCentres] = await centres(action, ...controls);
+  const wide = page.viewportSize()!.width >= 1024;
+  for (const centre of wide ? controlCentres : controlCentres.slice(0, 1)) expect(Math.abs(actionCentre - centre)).toBeLessThanOrEqual(1);
+  if (!wide) {
+    const first = (await controls[0].boundingBox())!;
+    expect((await action.boundingBox())!.x).toBeGreaterThanOrEqual(first.x + first.width);
+    for (const control of controls.slice(1)) expect((await control.boundingBox())!.y).toBeGreaterThan(first.y + first.height);
   }
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+}
+
+test("a selected repository's remove button sits on its input line", async ({ page }) => {
+  const row = page.locator("[data-repository-row]").first();
+  await expectActionOnControlLine(page, row.getByRole("button", { name: "Remove repository" }), [
+    row.getByRole("textbox", { name: "Repository URL", exact: true }),
+    row.getByRole("textbox", { name: "Branch", exact: true }),
+    row.locator(".cw-workspace-mount"),
+  ]);
+});
+
+// The row the server renders for a preview port it rejected.
+const rejectedPortRow = '<li class="cw-field-row cw-app-port-row" data-app-port-row><div class="cw-field"><label class="cw-label" for="app-port-0">Internal port</label><input class="cw-input cw-mono" id="app-port-0" name="app_port_0" type="number" min="1" max="65535" value="0" placeholder="3000" required aria-invalid="true" aria-describedby="app-port-error-0"><p class="cw-field-error" id="app-port-error-0" role="alert">Use a port from 1 to 65535.</p></div><div class="cw-field"><label class="cw-label" for="app-label-0">Preview label</label><input class="cw-input cw-mono" id="app-label-0" name="app_label_0" value="web" placeholder="web" required></div><div class="cw-field"><label class="cw-label" for="app-access-0">Who can open the preview?</label><select class="cw-select" id="app-access-0" name="app_access_0"><option value="creator" selected>Sandbox creator</option></select></div><button class="cw-icon-button" type="button" data-remove-app-port aria-label="Remove preview port"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-close"/></svg></button></li>';
+
+for (const state of ["added", "rejected"] as const) {
+  test(`a preview port's remove button sits on its input line (${state})`, async ({ page }) => {
+    if (state === "added") await page.getByRole("button", { name: "Add", exact: true }).click();
+    else {
+      await page.route((url) => url.pathname === fixturePath, async (route) => {
+        const response = await route.fetch();
+        const body = (await response.text()).replace('<li class="cw-empty-inline" data-empty-app-ports>No preview ports configured</li>', rejectedPortRow);
+        await route.fulfill({ response, body });
+      });
+      await page.reload();
+      await expect(page.getByRole("alert").filter({ hasText: "Use a port from 1 to 65535." })).toBeVisible();
+    }
+    const row = page.locator("[data-app-port-row]").first();
+    await expectActionOnControlLine(page, row.getByRole("button", { name: "Remove preview port" }), [
+      row.locator('[name^="app_port_"]'), row.locator('[name^="app_label_"]'), row.locator('[name^="app_access_"]'),
+    ]);
+  });
+}
+
+test("Add port sits on the input line of the ports form, even beside an error", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN!;
+  await page.route("**/reference/fixtures/terminal-ports.html", async (route) => {
+    const response = await route.fetch();
+    const body = (await response.text()).replace('maxlength="22" required>', 'maxlength="22" required aria-invalid="true" aria-describedby="managed-label-error"><p class="cw-field-error" id="managed-label-error" role="alert">Use lowercase letters, digits and hyphens.</p>');
+    await route.fulfill({ response, body });
+  });
+  await page.goto(`${origin}/reference/fixtures/terminal.html`);
+  await page.getByRole("button", { name: "Ports", exact: true }).click();
+  const form = page.getByRole("dialog", { name: "Ports · Example Sandbox", exact: true }).locator(".cw-port-form");
+  await expect(form.getByRole("alert")).toBeVisible();
+  const add = form.getByRole("button", { name: "Add port", exact: true });
+  const controls = [form.getByLabel("Internal port"), form.getByLabel("Preview label"), form.getByLabel("Who can open the preview?")];
+  const [addCentre, ...controlCentres] = await centres(add, ...controls);
+  if (page.viewportSize()!.width >= 1024) {
+    for (const centre of controlCentres) expect(Math.abs(addCentre - centre)).toBeLessThanOrEqual(1);
+  } else {
+    // On a phone the form is one column and Add port comes after every field.
+    expect((await add.boundingBox())!.y).toBeGreaterThan(Math.max(...controlCentres));
+  }
+  expect(await form.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
 });
 
 test("a cached-page return restarts the repository load the page left", async ({ page }) => {
