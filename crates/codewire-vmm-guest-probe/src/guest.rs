@@ -4022,6 +4022,16 @@ fn docker_tooling_present(root: &Path) -> bool {
         .all(|path| fs::symlink_metadata(root.join(path)).is_ok())
 }
 
+/// A musl image, such as Alpine's `docker:dind`, keeps its dynamic loader and
+/// C library in a real `/lib` directory. Glibc images keep theirs beneath
+/// `/usr`, which the private Docker root already shares.
+fn musl_library_directory(root: &Path) -> bool {
+    let loader = format!("lib/ld-musl-{}.so.1", std::env::consts::ARCH);
+    fs::symlink_metadata(root.join("lib")).is_ok_and(|metadata| metadata.file_type().is_dir())
+        && fs::symlink_metadata(root.join(loader))
+            .is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
 fn prepare_docker_root(plan: &WorkspacePlan) -> Result<()> {
     create_dir(Path::new(DOCKER_ROOT_PATH), 0o700)?;
     mount_fs(
@@ -4115,11 +4125,19 @@ fn prepare_docker_root(plan: &WorkspacePlan) -> Result<()> {
     };
     create_dir(&Path::new(DOCKER_ROOT_PATH).join("lib"), 0o755)?;
     create_dir(&Path::new(DOCKER_ROOT_PATH).join("lib64"), 0o755)?;
-    create_symlink(
-        &format!("/usr/lib/{library_directory}"),
-        &format!("{DOCKER_ROOT_PATH}/lib/{library_directory}"),
-    )?;
-    create_symlink(loader_target, &format!("{DOCKER_ROOT_PATH}/{loader_link}"))?;
+    if musl_library_directory(Path::new(ROOT_MERGED_PATH)) {
+        // The image's iptables tools load musl from /lib, outside /usr.
+        bind_mount_read_only(
+            &format!("{ROOT_MERGED_PATH}/lib"),
+            &format!("{DOCKER_ROOT_PATH}/lib"),
+        )?;
+    } else {
+        create_symlink(
+            &format!("/usr/lib/{library_directory}"),
+            &format!("{DOCKER_ROOT_PATH}/lib/{library_directory}"),
+        )?;
+        create_symlink(loader_target, &format!("{DOCKER_ROOT_PATH}/{loader_link}"))?;
+    }
 
     let iptables = Path::new(DOCKER_ROOT_PATH).join("usr/sbin/xtables-nft-multi");
     let metadata =
@@ -7469,6 +7487,29 @@ mod tests {
         fs::create_dir_all(root.path().join("usr/sbin")).unwrap();
         fs::write(root.path().join("usr/sbin/xtables-nft-multi"), b"").unwrap();
         assert!(docker_tooling_present(root.path()));
+    }
+
+    #[test]
+    fn only_a_real_lib_directory_with_the_musl_loader_selects_the_musl_layout() {
+        let loader = format!("ld-musl-{}.so.1", std::env::consts::ARCH);
+        // Glibc (usr-merged): /lib is a symlink into /usr.
+        let glibc = tempfile::tempdir().unwrap();
+        fs::create_dir_all(glibc.path().join("usr/lib")).unwrap();
+        std::os::unix::fs::symlink("usr/lib", glibc.path().join("lib")).unwrap();
+        fs::write(glibc.path().join("usr/lib").join(&loader), b"").unwrap();
+        assert!(!musl_library_directory(glibc.path()));
+        // A real /lib without the musl loader.
+        let other = tempfile::tempdir().unwrap();
+        fs::create_dir_all(other.path().join("lib")).unwrap();
+        assert!(!musl_library_directory(other.path()));
+        // A symlinked loader is not admitted.
+        std::os::unix::fs::symlink("/elsewhere", other.path().join("lib").join(&loader)).unwrap();
+        assert!(!musl_library_directory(other.path()));
+        // Alpine: the loader is a regular file in a real /lib.
+        let musl = tempfile::tempdir().unwrap();
+        fs::create_dir_all(musl.path().join("lib")).unwrap();
+        fs::write(musl.path().join("lib").join(&loader), b"").unwrap();
+        assert!(musl_library_directory(musl.path()));
     }
 
     #[test]
