@@ -349,7 +349,17 @@ case "${1:-} ${2:-}" in
       fi
     fi
     if [[ -n "${CODEWIRE_WORKSPACE_CACHE_CASE:-}" ]]; then
-      sleep 0.1
+      measurement_sleep_pid=''
+      trap 'trap "" TERM INT
+        measurement_sleep_pid="${measurement_sleep_pid:-${!:-}}";
+        if [[ -n "$measurement_sleep_pid" ]]; then
+          wait "$measurement_sleep_pid" 2>/dev/null || true
+        fi
+        exit 143' TERM INT
+      sleep 0.1 &
+      measurement_sleep_pid=$!
+      wait "$measurement_sleep_pid"
+      trap - TERM INT
       if [[ -n "$archive_file" ]]; then
         if [[ "${FAKE_FAIL:-}" == sampler-bookkeeping ]]; then
           mkdir "$CODEWIRE_WORKSPACE_CACHE_REPORT_DIR/sampler-stop-request"
@@ -472,8 +482,12 @@ PY
     ;;
   *)
     if [[ "$1" == exec && "${3:-}" == sh ]]; then
-      if tr '\0' ' ' <"/proc/$PPID/cmdline" | grep -q 'workspace-cache-report.py sample '; then
-        printf '%s\n' "$PPID" >"$FAKE_SAMPLER_PROCESS"
+      if tr '\0' ' ' <"/proc/$PPID/cmdline" | grep -q 'workspace-cache-report.py sample ' \
+          && [[ ! -e "$FAKE_SAMPLER_PROCESS" ]]; then
+        # Publish one complete private identity without unlinking an open reader.
+        sampler_identity="$(mktemp "$FAKE_SAMPLER_PROCESS.XXXXXX")"
+        printf '%s\n' "$PPID" >"$sampler_identity"
+        mv -T -- "$sampler_identity" "$FAKE_SAMPLER_PROCESS"
       fi
       printf '1000 10000 2000 8000 3000 4000\n'
       exit 0
