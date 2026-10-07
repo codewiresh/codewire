@@ -90,6 +90,21 @@ const WG_BUF: usize = 64 << 10;
 /// `update_timers` on a ~100–250 ms cadence.
 const TIMER_TICK: std::time::Duration = std::time::Duration::from_millis(120);
 
+/// First resend of the initiation that opens a peer's first session.
+///
+/// The coordinator tells both peers about each other at about the same time,
+/// so the first initiation often reaches the peer a few milliseconds before
+/// the peer knows our key, and the peer drops it; boringtun alone would try
+/// again only after its 5 s `REKEY_TIMEOUT`. We resend the identical bytes:
+/// a peer that dropped the original accepts the copy, and one that already
+/// answered rejects it as a replay, so a response still in flight on a slow
+/// path stays valid. Each further resend doubles the delay.
+const FIRST_HANDSHAKE_RESEND: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Resends before boringtun's own retransmit takes over: about 0.05, 0.15,
+/// 0.35, 0.75, 1.55 and 3.15 s after the initiation.
+const FIRST_HANDSHAKE_RESENDS: u32 = 6;
+
 /// Errors from the top-level [`Conn`].
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -244,6 +259,27 @@ struct Peer {
     /// The ULA addresses this peer owns (its `AllowedIPs`); used to route an
     /// outbound IP packet by destination to the right peer.
     addresses: Vec<Prefix>,
+    /// Pending resends of an initiation sent while the peer had no session.
+    first_handshake: Option<FirstHandshake>,
+}
+
+/// Resend schedule for the initiation that opens a peer's first session.
+struct FirstHandshake {
+    initiation: Vec<u8>,
+    next_at: tokio::time::Instant,
+    delay: std::time::Duration,
+    remaining: u32,
+}
+
+impl FirstHandshake {
+    fn start(initiation: &[u8], now: tokio::time::Instant) -> Self {
+        Self {
+            initiation: initiation.to_vec(),
+            next_at: now + FIRST_HANDSHAKE_RESEND,
+            delay: FIRST_HANDSHAKE_RESEND,
+            remaining: FIRST_HANDSHAKE_RESENDS,
+        }
+    }
 }
 
 /// The node-change callback (Go `func(*Node)`): invoked whenever local node
@@ -464,6 +500,7 @@ impl Conn {
                         tunn: existing.tunn,
                         derp_key: DerpPublic::from_raw(wg_pub),
                         addresses: node.addresses.clone(),
+                        first_handshake: existing.first_handshake,
                     },
                 );
                 continue;
@@ -488,6 +525,7 @@ impl Conn {
                     tunn,
                     derp_key: DerpPublic::from_raw(wg_pub),
                     addresses: node.addresses.clone(),
+                    first_handshake: None,
                 },
             );
         }
@@ -691,13 +729,23 @@ async fn pump_loop(ctx: PumpCtx) {
 
     let mut timer = tokio::time::interval(TIMER_TICK);
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // When the next unanswered first-session initiation is due again.
+    let mut resend_at: Option<tokio::time::Instant> = None;
 
     loop {
+        let resend_due = async {
+            match resend_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             // Outbound: a bare IP packet the netstack wants to send.
             maybe_pkt = ns_out_rx.recv() => {
                 let Some(pkt) = maybe_pkt else { return; };
-                send_outbound(&peers, &to_transport, pkt);
+                if let Some(at) = send_outbound(&peers, &to_transport, pkt) {
+                    resend_at = Some(resend_at.map_or(at, |current| current.min(at)));
+                }
             }
 
             // Inbound: an encrypted WG datagram off the transport.
@@ -711,24 +759,34 @@ async fn pump_loop(ctx: PumpCtx) {
             _ = timer.tick() => {
                 drive_timers(&peers, &to_transport);
             }
+
+            () = resend_due => {
+                resend_at = resend_first_handshakes(
+                    &peers,
+                    &to_transport,
+                    tokio::time::Instant::now(),
+                );
+            }
         }
     }
 }
 
 /// Route an outbound IP packet to the owning peer, `encapsulate` it, and relay
-/// the resulting encrypted datagram(s) over the transport.
+/// the resulting encrypted datagram(s) over the transport. Returns when a
+/// newly sent first-session initiation is due for a resend.
 fn send_outbound(
     peers: &Arc<Mutex<HashMap<[u8; 32], Peer>>>,
     to_transport: &mpsc::UnboundedSender<WgDatagram>,
     pkt: Vec<u8>,
-) {
+) -> Option<tokio::time::Instant> {
+    let mut resend_at = None;
     let mut guard = peers.lock().unwrap();
     let Some(dst_ip) = dst_ip_of(&pkt) else {
         tracing::debug!(
             packet_len = pkt.len(),
             "rust tailnet dropped outbound IP packet with unknown destination"
         );
-        return;
+        return None;
     };
     // Route by AllowedIPs; single-peer tunnels fall back to the only peer.
     let key = match route_key(&guard, dst_ip).or_else(|| single_peer_key(&guard)) {
@@ -740,7 +798,7 @@ fn send_outbound(
                 peer_count = guard.len(),
                 "rust tailnet dropped outbound IP packet with no peer route"
             );
-            return;
+            return None;
         }
     };
     let peer = guard.get_mut(&key).unwrap();
@@ -755,6 +813,14 @@ fn send_outbound(
                 wg_packet_len = p.len(),
                 "rust tailnet encapsulated outbound IP packet"
             );
+            if is_handshake_initiation(p)
+                && peer.first_handshake.is_none()
+                && peer.tunn.time_since_last_handshake().is_none()
+            {
+                let pending = FirstHandshake::start(p, tokio::time::Instant::now());
+                resend_at = Some(pending.next_at);
+                peer.first_handshake = Some(pending);
+            }
             let _ = to_transport.send(WgDatagram {
                 peer: derp_key.clone(),
                 data: p.to_vec(),
@@ -780,6 +846,7 @@ fn send_outbound(
             _ => break,
         }
     }
+    resend_at
 }
 
 /// Decrypt an inbound encrypted datagram. boringtun may emit handshake/cookie
@@ -879,6 +946,47 @@ fn drive_timers(
             });
         }
     }
+}
+
+/// Resend each due first-session initiation that is still unanswered, and
+/// return when the next one falls due.
+fn resend_first_handshakes(
+    peers: &Arc<Mutex<HashMap<[u8; 32], Peer>>>,
+    to_transport: &mpsc::UnboundedSender<WgDatagram>,
+    now: tokio::time::Instant,
+) -> Option<tokio::time::Instant> {
+    let mut guard = peers.lock().unwrap();
+    let mut next = None::<tokio::time::Instant>;
+    for peer in guard.values_mut() {
+        let Some(pending) = peer.first_handshake.as_mut() else {
+            continue;
+        };
+        if peer.tunn.time_since_last_handshake().is_some() {
+            peer.first_handshake = None;
+            continue;
+        }
+        if now >= pending.next_at {
+            tracing::debug!("rust tailnet resent unanswered first handshake initiation");
+            let _ = to_transport.send(WgDatagram {
+                peer: peer.derp_key.clone(),
+                data: pending.initiation.clone(),
+            });
+            pending.remaining -= 1;
+            pending.delay *= 2;
+            pending.next_at = now + pending.delay;
+            if pending.remaining == 0 {
+                peer.first_handshake = None;
+                continue;
+            }
+        }
+        next = Some(next.map_or(pending.next_at, |at| at.min(pending.next_at)));
+    }
+    next
+}
+
+/// A WireGuard handshake initiation: message type 1, fixed 148 bytes.
+fn is_handshake_initiation(packet: &[u8]) -> bool {
+    packet.len() == 148 && packet[..4] == [1, 0, 0, 0]
 }
 
 /// Extract the destination IP from a bare IP packet (v4 or v6 header).

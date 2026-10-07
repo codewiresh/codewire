@@ -766,3 +766,58 @@ async fn a_peer_cannot_send_from_an_address_it_does_not_own() {
     );
     dial.abort();
 }
+
+/// The coordinator tells both peers about each other at about the same time,
+/// so the dialer's first initiation can reach the listener a moment before
+/// the listener knows the dialer's key. The dialer must not wait for
+/// boringtun's 5 s `REKEY_TIMEOUT` to try again.
+#[tokio::test]
+async fn first_handshake_survives_a_peer_that_learns_of_us_late() {
+    let a_secret = StaticSecret::random_from_rng(OsRng);
+    let b_secret = StaticSecret::random_from_rng(OsRng);
+    let a_pub = PublicKey::from(&a_secret);
+    let b_pub = PublicKey::from(&b_secret);
+    let (a_transport, b_transport) = shim(
+        DerpPublic::from_raw(a_pub.to_bytes()),
+        DerpPublic::from_raw(b_pub.to_bytes()),
+    );
+    let a = Conn::new(conn_opts(&a_secret, A_IP), a_transport).expect("Conn A");
+    let b = Conn::new(conn_opts(&b_secret, B_IP), b_transport).expect("Conn B");
+    a.update_peers(&[peer_node(&b_pub, B_IP)]).expect("A peers");
+
+    let mut listener = b.listen("tcp", ":2225").await.expect("B listen");
+    let serve = tokio::spawn(async move {
+        let mut stream = listener.accept().await.expect("B accepts");
+        stream.write_all(b"banner").await.expect("B writes");
+        stream.flush().await.expect("B flushes");
+        stream
+    });
+
+    let started = tokio::time::Instant::now();
+    let dial = tokio::spawn(async move {
+        let mut stream = a
+            .dial_context_tcp(SocketAddr::new(IpAddr::V6(B_IP), 2225))
+            .await
+            .expect("A dials");
+        let mut banner = [0u8; 6];
+        stream.read_exact(&mut banner).await.expect("A reads");
+        (a, stream, banner)
+    });
+
+    // B learns of A only after A's first initiation has arrived and been
+    // dropped as coming from an unknown key.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    b.update_peers(&[peer_node(&a_pub, A_IP)]).expect("B peers");
+
+    let (_a, _stream, banner) = tokio::time::timeout(Duration::from_secs(2), dial)
+        .await
+        .expect("first byte well before boringtun's 5 s handshake retransmit")
+        .expect("dial task");
+    assert_eq!(&banner, b"banner");
+    assert!(
+        started.elapsed() < Duration::from_millis(600),
+        "first byte took {:?}",
+        started.elapsed()
+    );
+    serve.await.expect("serve task");
+}
