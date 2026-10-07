@@ -824,10 +824,18 @@ reclaim_cancelled_ci_clusters() {
   fi
 
   # The checked-in config names the default host ports; this run binds their
-  # requested renderings, so the ownership check runs against those.
+  # requested renderings, so the ownership check runs against those. A saved
+  # profile's config is already rendered to its own requested ports.
   local requested requested_ports=""
   while IFS= read -r port; do
-    if ! requested="$(awk -F: -v port="$port" \
+    if [ "${KIND_PROFILE:-0}" = 1 ]; then
+      if ! kind_host_port_mappings | awk -F: -v port="$port" \
+          '$2 == port { found = 1 } END { exit !found }'; then
+        echo "::error::Kind profile config host port ${port} is not one of its KIND_*_HOST_PORT values"
+        return 1
+      fi
+      requested="$port"
+    elif ! requested="$(awk -F: -v port="$port" \
         '$1 == port { print $2; found = 1 } END { exit !found }' \
         < <(kind_host_port_mappings))"; then
       echo "::error::Kind config host port ${port} has no KIND_*_HOST_PORT mapping"

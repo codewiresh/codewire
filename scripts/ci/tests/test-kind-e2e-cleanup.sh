@@ -178,6 +178,48 @@ grep -Fq 'fixed Kind host port 18090 remains occupied' "$FIXTURE/shifted-occupie
   fail 'shifted occupied-port error does not name the requested port'
 [ ! -s "$DELETIONS" ] || fail 'requested-port holder triggered a Kind deletion outside the CI prefix'
 
+# A saved profile's config is already rendered to its requested ports. They
+# are admitted as requested, a holder of one still blocks startup, and a port
+# that is not one of the profile's requested ports is refused.
+cat > "$FIXTURE/profile-kind-config.yaml" <<'EOF'
+kind: Cluster
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 39985
+      - containerPort: 443
+        hostPort: 52383
+EOF
+reset_fixture
+printf '%s\n' personal-kind > "$CLUSTERS"
+(
+  KIND_PROFILE=1 KIND_INGRESS_HOST_PORT=39985 KIND_INGRESS_TLS_HOST_PORT=52383
+  reclaim_cancelled_ci_clusters "$FIXTURE/profile-kind-config.yaml"
+) || fail 'profile startup refused its own rendered host ports'
+reset_fixture
+printf '%s\n' personal-kind > "$CLUSTERS"
+printf 'abc123\tunrelated-postgres\t127.0.0.1:39985->5432/tcp\n' > "$DOCKER_PS"
+if (
+  KIND_PROFILE=1 KIND_INGRESS_HOST_PORT=39985 KIND_INGRESS_TLS_HOST_PORT=52383
+  reclaim_cancelled_ci_clusters "$FIXTURE/profile-kind-config.yaml"
+) >"$FIXTURE/profile-occupied.out" 2>&1; then
+  fail 'profile requested-port holder did not block startup'
+fi
+grep -Fq 'fixed Kind host port 39985 remains occupied' "$FIXTURE/profile-occupied.out" ||
+  fail 'profile occupied-port error does not name the requested port'
+reset_fixture
+printf '%s\n' personal-kind > "$CLUSTERS"
+if (
+  KIND_PROFILE=1 KIND_INGRESS_HOST_PORT=39985 KIND_INGRESS_TLS_HOST_PORT=40000
+  reclaim_cancelled_ci_clusters "$FIXTURE/profile-kind-config.yaml"
+) >"$FIXTURE/profile-unknown.out" 2>&1; then
+  fail 'profile startup admitted a host port it never requested'
+fi
+grep -Fq 'host port 52383 is not one of its KIND_*_HOST_PORT values' "$FIXTURE/profile-unknown.out" ||
+  fail 'profile unknown-port error does not name the port'
+[ ! -s "$DELETIONS" ] || fail 'profile startup deleted a cluster'
+
 # Failure to prove fixed-port release is itself fatal.
 reset_fixture
 DOCKER_PS_FAILURE=1
