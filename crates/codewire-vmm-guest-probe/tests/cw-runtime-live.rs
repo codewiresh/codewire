@@ -1,4 +1,5 @@
-#![cfg(target_os = "linux")]
+// The synthetic payloads are x86_64 machine code.
+#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 //! Actual kernel mounts and the source-built trusted launcher. The tiny A/B
 //! ELFs are closed synthetic workload fixtures, not production cw/image proof.

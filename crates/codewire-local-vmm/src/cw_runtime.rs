@@ -1239,7 +1239,9 @@ mod tests {
         let mut cw = vec![0_u8; 136];
         cw[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
         cw[16..18].copy_from_slice(&2_u16.to_le_bytes());
-        cw[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        cw[18..20].copy_from_slice(
+            &codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_ELF_MACHINE.to_le_bytes(),
+        );
         cw[32..40].copy_from_slice(&64_u64.to_le_bytes());
         cw[54..56].copy_from_slice(&56_u16.to_le_bytes());
         cw[56..58].copy_from_slice(&1_u16.to_le_bytes());
@@ -1261,7 +1263,7 @@ mod tests {
                 protocol_version: 1,
                 record_version: 1,
                 package_version: "0.1.0".into(),
-                target: "x86_64-unknown-linux-musl".into(),
+                target: codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_TARGET.into(),
                 source_revision: format!("{marker:040x}"),
                 source_tree_sha256: "c".repeat(64),
                 rustc: "rustc 1.93.0 (synthetic fixture)".into(),

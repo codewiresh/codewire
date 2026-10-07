@@ -17,6 +17,18 @@ pub const CW_RUNTIME_PACK_HEADER_BYTES: usize = 24;
 pub const CW_RUNTIME_MAX_PACK: usize =
     CW_RUNTIME_PACK_HEADER_BYTES + CW_RUNTIME_MAX_PROVENANCE + CW_RUNTIME_MAX_BYTES;
 const CW_RUNTIME_PACK_MAGIC: &[u8; 8] = b"CWRPACK1";
+/// A local VM runs the host's own architecture, and this crate is built for
+/// that architecture on both sides: the host `cw` and the guest init. A cw
+/// runtime payload is a static musl Linux executable for the same one.
+#[cfg(target_arch = "x86_64")]
+pub const CW_RUNTIME_TARGET: &str = "x86_64-unknown-linux-musl";
+#[cfg(target_arch = "aarch64")]
+pub const CW_RUNTIME_TARGET: &str = "aarch64-unknown-linux-musl";
+/// The ELF `e_machine` of [`CW_RUNTIME_TARGET`]: EM_X86_64 or EM_AARCH64.
+#[cfg(target_arch = "x86_64")]
+pub const CW_RUNTIME_ELF_MACHINE: u16 = 62;
+#[cfg(target_arch = "aarch64")]
+pub const CW_RUNTIME_ELF_MACHINE: u16 = 183;
 
 /// A fixed two-object transport, with no archive paths, links or extension
 /// records. The externally admitted pack digest and image index select it.
@@ -188,7 +200,7 @@ impl CwRuntimeProvenance {
                 .package_version
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
-            || payload.target != "x86_64-unknown-linux-musl"
+            || payload.target != CW_RUNTIME_TARGET
             || !hex(&payload.source_revision, 40)
             || !hex(&payload.source_tree_sha256, 64)
             || !hex(&payload.sha256, 64)
@@ -220,14 +232,15 @@ impl CwRuntimeProvenance {
     }
 }
 
-/// A static x86_64 ELF may contain a static PIE dynamic table, but may neither
-/// request a guest interpreter nor name a shared-library dependency.
+/// A static [`CW_RUNTIME_TARGET`] ELF may contain a static PIE dynamic table,
+/// but may neither request a guest interpreter nor name a shared-library
+/// dependency.
 pub fn validate_static_cw(bytes: &[u8]) -> Result<(), &'static str> {
-    let invalid = "cw must be a bounded static x86_64 ELF";
+    let invalid = "cw must be a bounded static ELF for this host architecture";
     if !(64..=CW_RUNTIME_MAX_BYTES).contains(&bytes.len())
         || &bytes[..7] != b"\x7fELF\x02\x01\x01"
         || !matches!(u16::from_le_bytes(bytes[16..18].try_into().unwrap()), 2 | 3)
-        || u16::from_le_bytes(bytes[18..20].try_into().unwrap()) != 62
+        || u16::from_le_bytes(bytes[18..20].try_into().unwrap()) != CW_RUNTIME_ELF_MACHINE
     {
         return Err(invalid);
     }
@@ -274,7 +287,7 @@ pub(crate) fn fixture() -> (Vec<u8>, Vec<u8>) {
     let mut cw = vec![0_u8; 136];
     cw[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
     cw[16..18].copy_from_slice(&2_u16.to_le_bytes());
-    cw[18..20].copy_from_slice(&62_u16.to_le_bytes());
+    cw[18..20].copy_from_slice(&CW_RUNTIME_ELF_MACHINE.to_le_bytes());
     cw[32..40].copy_from_slice(&64_u64.to_le_bytes());
     cw[54..56].copy_from_slice(&56_u16.to_le_bytes());
     cw[56..58].copy_from_slice(&1_u16.to_le_bytes());
@@ -295,7 +308,7 @@ pub(crate) fn fixture() -> (Vec<u8>, Vec<u8>) {
             protocol_version: 1,
             record_version: 1,
             package_version: "0.1.0".to_owned(),
-            target: "x86_64-unknown-linux-musl".to_owned(),
+            target: CW_RUNTIME_TARGET.to_owned(),
             source_revision: "a".repeat(40),
             source_tree_sha256: "b".repeat(64),
             rustc: "rustc 1.93.0 (synthetic fixture)".to_owned(),

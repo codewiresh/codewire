@@ -14,7 +14,8 @@ use codewire_vmm_guest_probe::canonical_guest_root_newc_with_cw;
 use codewire_vmm_guest_probe::canonical_newc;
 use codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_PROVENANCE_ENTRY;
 pub use codewire_vmm_guest_probe::cw_runtime::{
-    CW_RUNTIME_ROOT, CwRuntimeCatalog, CwRuntimeProvenance, validate_static_cw,
+    CW_RUNTIME_ELF_MACHINE, CW_RUNTIME_ROOT, CW_RUNTIME_TARGET, CwRuntimeCatalog,
+    CwRuntimeProvenance, validate_static_cw,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1483,6 +1484,9 @@ mod tests {
         ));
     }
 
+    // Only an x86_64 guest root may embed a cw, and only an x86_64 host
+    // admits an x86_64 cw payload.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn cw_image_boot_bundle_refuses_payload_provenance_and_mode_tampering() {
         use codewire_vmm_guest_probe::cw_runtime::{CwImageDescriptor, CwImagePayload};

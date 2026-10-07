@@ -1050,14 +1050,17 @@ mod tests {
         let mut elf = vec![0_u8; 136];
         elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
         elf[16..18].copy_from_slice(&2_u16.to_le_bytes());
-        elf[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        let machine = codewire_local_vmm::artifact::CW_RUNTIME_ELF_MACHINE;
+        elf[18..20].copy_from_slice(&machine.to_le_bytes());
         elf[32..40].copy_from_slice(&64_u64.to_le_bytes());
         elf[54..56].copy_from_slice(&56_u16.to_le_bytes());
         elf[56..58].copy_from_slice(&1_u16.to_le_bytes());
         elf[64..68].copy_from_slice(&1_u32.to_le_bytes());
         assert!(codewire_local_vmm::artifact::validate_static_cw(&elf).is_ok());
         let mut other = elf.clone();
-        other[18..20].copy_from_slice(&183_u16.to_le_bytes());
+        // EM_X86_64 and EM_AARCH64: the other architecture is refused.
+        let foreign = if machine == 62 { 183_u16 } else { 62_u16 };
+        other[18..20].copy_from_slice(&foreign.to_le_bytes());
         assert!(codewire_local_vmm::artifact::validate_static_cw(&other).is_err());
         let mut loader = elf.clone();
         loader[64..68].copy_from_slice(&3_u32.to_le_bytes());
