@@ -3452,6 +3452,85 @@ SQL
     return 1
   fi
 
+  # The live resize waited for the kubelet to acknowledge its Pod generation
+  # (#2475); record that this node reports both generation fields.
+  local generation observed_generation
+  generation="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.generation}')"
+  observed_generation="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.observedGeneration}')"
+  if [ -z "$generation" ] || [ "$observed_generation" != "$generation" ]; then
+    echo "::error::live-resized Pod does not report an acknowledged generation: generation=${generation:-missing} observed=${observed_generation:-missing}"
+    return 1
+  fi
+  log "live resize: Pod generation=$generation observedGeneration=$observed_generation on $(kubectl version -o json | jq -r .serverVersion.gitVersion)"
+
+  # Submit one public resize and poll it until it is terminal, in $response.
+  resize_until_terminal() {
+    local id="$1" cpu="$2" memory="$3" operation
+    curl_settled -X POST \
+      -H 'cookie: codewire.session_token=contract-admin-session-token' \
+      -H 'content-type: application/json' \
+      -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"cpuMillicores\":${cpu},\"memoryMb\":${memory},\"diskGb\":1,\"requestId\":\"${id}\"}" \
+      "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/ResizeEnvironment"
+    operation="$(jq -r '.operation.id // empty' <<<"$PROBE_BODY")"
+    if [ "$PROBE_CODE" != "200" ] || [ -z "$operation" ]; then
+      echo "::error::resize request $id failed: code=$PROBE_CODE body=$PROBE_BODY"
+      return 1
+    fi
+    for _ in $(seq 1 240); do
+      curl_settled -X POST \
+        -H 'cookie: codewire.session_token=contract-admin-session-token' \
+        -H 'content-type: application/json' \
+        -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"operationId\":\"${operation}\"}" \
+        "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/GetEnvironmentResizeOperation"
+      response="$PROBE_BODY"
+      case "$(jq -r '.operation.state // empty' <<<"$response")" in
+        ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED | ENVIRONMENT_RESIZE_OPERATION_STATE_FAILED) return 0 ;;
+      esac
+      sleep 1
+    done
+    echo "::error::resize $id did not reach a terminal state: $response"
+    return 1
+  }
+
+  # Live workspace resources and pending resize reason, as cpu:cpu:reason.
+  live_resources() {
+    kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.spec.containers[?(@.name=="workspace")].resources.requests.cpu}:{.status.containerStatuses[?(@.name=="workspace")].resources.requests.cpu}:{.status.conditions[?(@.type=="PodResizePending")].reason}'
+  }
+
+  # A CPU request above the node's allocatable CPU is infeasible.
+  local node_name infeasible_cpu
+  node_name="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.spec.nodeName}')"
+  infeasible_cpu="$(kubectl get node "$node_name" -o jsonpath='{.status.allocatable.cpu}' |
+    python3 -c 'import sys; v = sys.stdin.read().strip(); print((int(v[:-1]) if v.endswith("m") else int(float(v) * 1000)) + 1000)')"
+
+  # An Infeasible condition from an earlier Pod generation does not fail a
+  # new feasible request (#2475). Leave one out of band, then recover live.
+  kubectl -n "$SANDBOX_NS" patch pod "$pod_name" --subresource=resize --type=strategic \
+    -p "{\"spec\":{\"containers\":[{\"name\":\"workspace\",\"resources\":{\"requests\":{\"cpu\":\"${infeasible_cpu}m\"},\"limits\":{\"cpu\":\"${infeasible_cpu}m\"}}}]}}" >/dev/null
+  if ! kubectl -n "$SANDBOX_NS" wait "pod/${pod_name}" --timeout=60s \
+      --for=jsonpath='{.status.conditions[?(@.type=="PodResizePending")].reason}'=Infeasible >/dev/null; then
+    echo "::error::the out-of-band infeasible request was not reported Infeasible: $(live_resources)"
+    return 1
+  fi
+  log "stale Infeasible condition at generation $(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.conditions[?(@.type=="PodResizePending")].observedGeneration}')"
+  resize_until_terminal "${request_id}-recover" 750 512 || return 1
+  if ! jq -e '
+      .operation.state == "ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED"
+      and .operation.appliedMode == "ENVIRONMENT_RESIZE_EXECUTION_MODE_IN_PLACE"
+      and .operation.lastAppliedResources == {"cpuMillicores":750,"memoryMb":512,"diskGb":1}
+      and .environment.cpuMillicores == 750
+    ' <<<"$response" >/dev/null; then
+    echo "::error::live resize did not recover from a stale Infeasible condition: $response"
+    return 1
+  fi
+  if [ "$(live_resources)" != "750m:750m:" ] \
+      || [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')" != "$old_pod_uid" ] \
+      || [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.containerStatuses[?(@.name=="workspace")].restartCount}')" != "$old_restart_count" ]; then
+    echo "::error::live resize recovery changed the workspace Pod or left a request pending: $(live_resources)"
+    return 1
+  fi
+  log "live resize recovered from a stale Infeasible condition on Pod $old_pod_uid"
+
   # A restart-class plan queries the daemon to enforce the active-session
   # policy. The in-place Pod /resize acknowledgement precedes Service endpoint
   # reconciliation, so prove the existing daemon is ready before exercising
@@ -3476,7 +3555,7 @@ SQL
   curl_settled -X POST \
     -H 'cookie: codewire.session_token=contract-admin-session-token' \
     -H 'content-type: application/json' \
-    -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"cpuMillicores\":500,\"memoryMb\":384,\"diskGb\":1,\"requestId\":\"${request_id}\",\"disruptionPolicy\":\"ENVIRONMENT_RESIZE_DISRUPTION_POLICY_ALLOW_RESTART\"}" \
+    -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"cpuMillicores\":750,\"memoryMb\":384,\"diskGb\":1,\"requestId\":\"${request_id}\",\"disruptionPolicy\":\"ENVIRONMENT_RESIZE_DISRUPTION_POLICY_ALLOW_RESTART\"}" \
     "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/ResizeEnvironment"
   if [ "$PROBE_CODE" != "200" ]; then
     echo "::error::explicit restart resize request failed: code=$PROBE_CODE body=$PROBE_BODY"

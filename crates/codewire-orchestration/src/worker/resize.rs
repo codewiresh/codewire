@@ -13,7 +13,7 @@ use crate::api::environment_resize::{
     classify_execution_mode, scan_operation,
 };
 use crate::resize_metrics;
-use crate::sandbox::client::{SandboxClient, WorkspaceStorageResizeOutcome};
+use crate::sandbox::client::{PodResizeInfeasible, SandboxClient, WorkspaceStorageResizeOutcome};
 use codewire_daemon_proto::daemon::v1::SessionLifecycleState;
 
 const RESIZE_MUTATION_STATES: &[&str] = &["resizing"];
@@ -44,6 +44,19 @@ pub fn terminal_failure(error: &anyhow::Error) -> Option<&TerminalResizeFailure>
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<TerminalResizeFailure>())
+}
+
+/// A request the kubelet acknowledged as infeasible fails the operation
+/// without the retries that cannot change the answer.
+fn infeasible_is_terminal(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<PodResizeInfeasible>() {
+        Some(infeasible) => TerminalResizeFailure {
+            code: "runtime_apply_failed",
+            message: format!("{infeasible}; request a smaller size"),
+        }
+        .into(),
+        None => error,
+    }
 }
 
 fn active_session(state: i32) -> bool {
@@ -442,7 +455,8 @@ pub async fn handle_environment_resize(
                         IN_PLACE_RESIZE_TIMEOUT,
                     ),
                 )
-                .await?;
+                .await
+                .map_err(infeasible_is_terminal)?;
         }
         return complete_resize(
             authority,
@@ -596,6 +610,21 @@ mod tests {
         assert!(active_session(SessionLifecycleState::Running as i32));
         assert!(!active_session(SessionLifecycleState::Stopped as i32));
         assert!(!active_session(SessionLifecycleState::Exited as i32));
+    }
+
+    /// #2475: an acknowledged infeasible request fails without retries and
+    /// says what to do; any other error stays retryable.
+    #[test]
+    fn acknowledged_infeasible_request_is_a_terminal_actionable_failure() {
+        let error = infeasible_is_terminal(
+            PodResizeInfeasible("Node didn't have enough capacity".into()).into(),
+        );
+        let failure = terminal_failure(&error).expect("terminal");
+        assert_eq!(failure.code, "runtime_apply_failed");
+        assert!(failure.message.contains("Node didn't have enough capacity"));
+        assert!(failure.message.ends_with("request a smaller size"));
+        let error = infeasible_is_terminal(anyhow::anyhow!("timeout waiting"));
+        assert!(terminal_failure(&error).is_none());
     }
 
     #[test]
