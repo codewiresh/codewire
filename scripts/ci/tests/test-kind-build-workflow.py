@@ -516,9 +516,9 @@ kubectl() {
     *) printf 'unexpected synthetic kubectl: %s\n' "$args" >&2; return 63 ;;
   esac
 }
-auth_token_for_environment_scope() {
-  [ "$1" = 00000000-0000-4000-8000-000000000501 ] && [ "$2" = coordinate ] || return 65
-  printf synthetic-coordinate
+peer_token_for_environment() {
+  [ "$1" = 00000000-0000-4000-8000-000000000501 ] || return 65
+  printf synthetic-peer
 }
 curl_settled() {
   PROBE_BODY='{"code":"unauthenticated"}'
@@ -539,6 +539,7 @@ mesh_product_connect_ownership_smoke() {
 }
 coordinator_ingress_smoke() {
   [ -f "$FIXTURE/backend" ] && [ "$(<"$FIXTURE/state")" = running ] || return 66
+  [ "$KIND_COORDINATOR_SIDECAR_TOKEN" = synthetic-peer ] || return 68
   record coordinator
   [ "$FAILURE" != coordinator ] || return 37
 }
@@ -646,6 +647,35 @@ coordinator_ingress_smoke() {
         seed = (ROOT / "tests/e2e/kind/coordinator-seed.sql").read_text()
         self.assertIn("state, desired_state, name", seed)
         self.assertRegex(seed, r"'sandbox',\s*'stopped',\s*'stopped',")
+        # A peer token is refused at generation 0, the column default.
+        self.assertRegex(seed, r"environment_operation_generation\n\)")
+        self.assertRegex(seed, r"'::jsonb,\s*1\s*\);")
+
+    def test_peer_token_matches_the_coordinator_wire_vector(self) -> None:
+        # The Rust issuer pins an independently computed vector; the shell
+        # minter must produce exactly that token for the same claims.
+        rust = (ROOT / "crates/codewire-server-core/src/peer_token.rs").read_text()
+        secret = re.search(r'const SECRET: &str = "([^"]+)";', rust).group(1)
+        environment = re.search(r'const ENVIRONMENT: &str = "([^"]+)";', rust).group(1)
+        now = int(re.search(r"const NOW: i64 = ([0-9_]+);", rust).group(1).replace("_", ""))
+        pinned = re.search(r'const PINNED: &str = "([^"]+)";', rust).group(1)
+        self.assertIn("issue(SECRET, ENVIRONMENT, 7, NOW + 600)", rust)
+        source = COMMON.read_text(encoding="utf-8")
+        function = "peer_token() {" + source.split("\npeer_token() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+        result = subprocess.run(
+            ["bash", "-c", function + 'peer_token "$@"', "peer-token",
+             secret, environment, "7", str(now + 600)],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, pinned)
+        refused = subprocess.run(
+            ["bash", "-c", function + 'peer_token "$@"', "peer-token",
+             secret, environment, "0", str(now + 600)],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        self.assertEqual(refused.returncode, 1)
+        self.assertEqual(refused.stdout, "")
 
 
 class SelectorContractTests(unittest.TestCase):
