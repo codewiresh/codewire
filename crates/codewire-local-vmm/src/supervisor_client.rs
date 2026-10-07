@@ -488,6 +488,9 @@ fn operation_error_hint(error_code: &str) -> &'static str {
         "create_guest_docker_tooling_missing" => {
             " (the image has no Docker tooling; create with --no-docker or choose an image that includes Docker)"
         }
+        "delete_failed" | "delete_interrupted" => {
+            " (nothing was removed and the environment was kept; see cw env info, then run cw env rm again)"
+        }
         "create_direct_share_changed" | "start_direct_share_changed" => {
             " (a direct-mount source directory was moved, removed or replaced since it was admitted; put the original directory back at its path, or remove and recreate the environment)"
         }

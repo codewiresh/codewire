@@ -1754,7 +1754,20 @@ impl SupervisorCore {
                 continue;
             }
             if operation.kind == OperationKind::Delete {
-                let (operation, cleanup_pending) = self.delete(name, &operation).await?;
+                let (operation, cleanup_pending) = match self.delete(name, &operation).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let error_code = if recovering {
+                            "delete_interrupted"
+                        } else {
+                            "delete_failed"
+                        };
+                        if self.retain_failed_delete(&operation, name, error_code)? {
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                };
                 let result = serde_json::json!({
                     "name": name,
                     "removed": true,
@@ -1967,6 +1980,46 @@ impl SupervisorCore {
             .ok_or(SupervisorError::InvalidState)?;
         self.fail_operation_with_environment_error(&current, name, error_code)?;
         Ok(())
+    }
+
+    /// Nothing is removed until the environment tree moves to trash. A delete
+    /// that fails before then keeps the environment, marks it `error` and
+    /// records why, so a retry starts over and later supervisors do not stop
+    /// at replay. Returns false once the tree is in trash: only finishing the
+    /// same delete is safe then.
+    fn retain_failed_delete(
+        &mut self,
+        failed: &OperationRecord,
+        name: &str,
+        error_code: &str,
+    ) -> Result<bool, SupervisorError> {
+        let current = self
+            .store
+            .operation_by_request(failed.request_id)?
+            .ok_or(SupervisorError::InvalidState)?;
+        let environment_id = current
+            .environment_id
+            .ok_or(SupervisorError::InvalidState)?;
+        let trashed = matches!(
+            deletion_tree_location(
+                &self.config.engine_root(),
+                environment_id,
+                current.operation_id
+            ),
+            Ok(DeletionTreeLocation::Trash(_))
+        );
+        if trashed
+            || supervisor_effect(current.kind, current.checkpoint)?.is_none_or(|effect| {
+                !matches!(
+                    effect,
+                    LifecycleEffect::PrepareDelete | LifecycleEffect::MoveToTrash
+                )
+            })
+        {
+            return Ok(false);
+        }
+        self.fail_operation_with_environment_error(&current, name, error_code)?;
+        Ok(true)
     }
 
     fn fail_pending_operation(
@@ -3335,7 +3388,7 @@ impl SupervisorCore {
                 return Ok(());
             }
             let artifact_generation =
-                artifact_generation_for_boot(self.environment(name)?, false)?.to_owned();
+                delete_cleanup_artifact_generation(self.environment(name)?)?.to_owned();
             let _ = self
                 .runner_client_for_artifact(name, &artifact_generation)
                 .await?;
@@ -4634,6 +4687,14 @@ impl LocalSupervisorService for SupervisorRpc {
         // read remain queued and are de-duplicated by checkpoint below.
         let mut events = self.operation_events.subscribe();
         let mut progress_events = self.operation_progress.subscribe();
+        // A supervisor stopping after a failed operation drains its open
+        // connections; a watch of an unfinished operation must end, not wait.
+        let mut shutdown = self.shutdown.subscribe();
+        if *shutdown.borrow() {
+            return Err(Status::unavailable(
+                "native local supervisor stopped before the operation finished; run the command again",
+            ));
+        }
         let initial = self.operation(operation_id).await?;
         let initial_terminal = initial.phase.terminal();
         let initial_checkpoint = initial.checkpoint;
@@ -4649,6 +4710,16 @@ impl LocalSupervisorService for SupervisorRpc {
             let mut progress_open = true;
             loop {
                 tokio::select! {
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            let _ = sender
+                                .send(Err(Status::unavailable(
+                                    "native local supervisor stopped before the operation finished; run the command again",
+                                )))
+                                .await;
+                            return;
+                        }
+                    }
                     journal = events.recv() => {
                         let operation = match journal {
                             Ok(operation)
@@ -6281,6 +6352,17 @@ fn runner_artifact_disposition(
         return RunnerArtifactDisposition::RejectLiveMismatch;
     }
     RunnerArtifactDisposition::ReplaceStopped
+}
+
+/// The artifact generation a replacement runner boots to clean up before a
+/// delete. A create that failed at VM start reserved generation 1 but never
+/// promoted its staged workspace, so it has only the staged generation.
+fn delete_cleanup_artifact_generation(
+    environment: &EnvironmentRecord,
+) -> Result<&str, SupervisorError> {
+    let staged_only = environment.active_workspace_generation.is_none()
+        && environment.staging_workspace_generation.is_some();
+    artifact_generation_for_boot(environment, staged_only)
 }
 
 fn artifact_generation_for_boot(
@@ -13008,6 +13090,141 @@ mod tests {
         );
         assert!(paths.vm_dir.exists());
         drop(listener);
+    }
+
+    #[test]
+    fn delete_cleanup_boots_the_staged_artifact_of_a_create_that_failed_at_vm_start() {
+        let mut environment = project_environment();
+        let artifact = environment.active_artifact_generation.clone().unwrap();
+        environment.generation = 1;
+        environment.state = StoredEnvironmentState::Error;
+        // Without any workspace generation there is nothing to boot.
+        assert!(matches!(
+            delete_cleanup_artifact_generation(&environment),
+            Err(SupervisorError::InvalidState)
+        ));
+        let generation = test_workspace_generation_with_artifact(
+            environment.project_spec_json.as_deref().unwrap(),
+            environment.project_spec_sha256.as_deref().unwrap(),
+            &artifact,
+            b"failed-at-vm-start",
+        );
+        environment.staging_workspace_generation = Some(generation.clone());
+        assert_eq!(
+            delete_cleanup_artifact_generation(&environment).unwrap(),
+            artifact
+        );
+        // A promoted environment keeps using its active generation.
+        environment.active_workspace_generation = Some(generation);
+        environment.staging_workspace_generation = None;
+        assert_eq!(
+            delete_cleanup_artifact_generation(&environment).unwrap(),
+            artifact
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delete_that_fails_before_trash_is_retained_and_does_not_stop_the_worker() {
+        for recovering in [true, false] {
+            let mut environment = project_environment();
+            // Booted, no runner and no workspace to boot: PrepareDelete fails.
+            environment.generation = 1;
+            environment.state = StoredEnvironmentState::Stopped;
+            let environment_id = environment.id;
+            let (_parent, mut core) = test_supervisor_core(environment);
+            let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+            let paths = VmPaths::create(&engine, environment_id).unwrap();
+            let delete = core
+                .store
+                .begin_operation(
+                    Uuid::new_v4(),
+                    Some(environment_id),
+                    OperationKind::Delete,
+                    &serde_json::json!({"name": "dev", "revoke_access": false}),
+                )
+                .unwrap();
+
+            if recovering {
+                core.replay_pending_operations().await.unwrap();
+            } else {
+                core.execute_pending_operations().await.unwrap();
+            }
+
+            let failed = SupervisorOperationReader::open(&core.root)
+                .unwrap()
+                .operation_by_id(delete.operation_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(failed.phase, OperationPhase::Failed);
+            assert_eq!(
+                failed.error_code.as_deref(),
+                Some(if recovering {
+                    "delete_interrupted"
+                } else {
+                    "delete_failed"
+                })
+            );
+            assert_eq!(
+                core.environment("dev").unwrap().state,
+                StoredEnvironmentState::Error
+            );
+            assert!(paths.vm_dir.exists());
+            assert!(core.store.pending_operations().unwrap().is_empty());
+            // Replaying again finds nothing to do.
+            core.replay_pending_operations().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_watch_of_an_unfinished_operation_ends_when_the_supervisor_stops() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let service = test_supervisor_service(core);
+        let operation = {
+            let core = service.core.lock().await;
+            let environment = core.environment("dev").unwrap();
+            core.store
+                .begin_operation(
+                    Uuid::new_v4(),
+                    Some(environment.id),
+                    OperationKind::Delete,
+                    &serde_json::json!({"name": "dev", "revoke_access": false}),
+                )
+                .unwrap()
+        };
+        let mut stream = service
+            .watch_operation(Request::new(v1::WatchOperationRequest {
+                operation_id: operation.operation_id.to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let initial = tokio::time::timeout(
+            Duration::from_secs(5),
+            futures::StreamExt::next(&mut stream),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(initial.is_ok());
+        service.shutdown.send(true).unwrap();
+        let ended = tokio::time::timeout(
+            Duration::from_secs(5),
+            futures::StreamExt::next(&mut stream),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(ended.code(), tonic::Code::Unavailable);
+        assert!(ended.message().contains("run the command again"));
+        let refused = service
+            .watch_operation(Request::new(v1::WatchOperationRequest {
+                operation_id: operation.operation_id.to_string(),
+            }))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(refused.code(), tonic::Code::Unavailable);
     }
 
     #[tokio::test]
