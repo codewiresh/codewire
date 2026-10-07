@@ -76,6 +76,23 @@ async function openRowActions(row: Locator) {
 // The Sandbox workspace keeps terminal actions (Rename, Copy selection, the
 // existing-session picker, Refresh sessions) and Sandbox actions (Resize,
 // Refresh sandbox status, Delete) in two menus.
+// Chromium can evict a response body before the test reads it (#2346), so
+// these JSON responses are read in a route as they pass through.
+async function jsonResponses(page: Page, suffix: string) {
+  const seen: { status: number; body: Record<string, unknown> }[] = [];
+  let read = 0;
+  await page.route((url) => url.pathname.endsWith(suffix), async (route) => {
+    const response = await route.fetch();
+    const body = await response.text();
+    seen.push({ status: response.status(), body: JSON.parse(body) });
+    await route.fulfill({ response, body });
+  });
+  return async () => {
+    await expect.poll(() => seen.length).toBeGreaterThan(read);
+    return seen[read++];
+  };
+}
+
 async function workspaceMenu(page: Page, menu: "Terminal actions" | "More actions") {
   const details = page.locator(menu === "Terminal actions" ? "[data-terminal-menu]" : "[data-sandbox-menu]");
   if (!(await details.evaluate((node) => (node as HTMLDetailsElement).open))) await details.locator(":scope > summary").click();
@@ -1169,23 +1186,23 @@ test.describe.serial("server-rendered environments", () => {
     // A no-op resource review must use the in-place private route and leave
     // the current terminal root, session and shell alive.
     const originalTerminalRoot = (await terminalRoot.elementHandle())!;
+    const nextPlan = await jsonResponses(page, "/_actions/resize/plan");
+    const nextApply = await jsonResponses(page, "/_actions/resize/apply");
     await (await workspaceMenu(page, "More actions")).getByRole("button", { name: "Resize", exact: true }).click();
     const resizeDialog = page.getByRole("dialog", { name: `Resize ${environmentName}`, exact: true });
-    const noopReview = page.waitForResponse((response) => response.url().endsWith("/_actions/resize/plan"));
     await resizeDialog.getByRole("button", { name: "Review resize", exact: true }).click();
-    const reviewed = await noopReview;
-    expect(reviewed.status()).toBe(200);
-    const noopPlan = await reviewed.json();
+    const reviewed = await nextPlan();
+    expect(reviewed.status).toBe(200);
+    const noopPlan = reviewed.body;
     expect(noopPlan.mode).toBe("noop");
     expect(noopPlan.environmentId).toBe(environmentId);
     expect(noopPlan.requestId).toMatch(/^[0-9a-f]{32}$/);
     await expect(resizeDialog.locator("[data-resize-restart-consent]")).not.toBeVisible();
     await expect(resizeDialog.locator("[data-resize-session-consent]")).not.toBeVisible();
-    const noopAck = page.waitForResponse((response) => response.url().endsWith("/_actions/resize/apply"));
     await resizeDialog.getByRole("button", { name: "Apply resize", exact: true }).click();
-    const applied = await noopAck;
-    expect(applied.status()).toBe(200);
-    const noopOperation = await applied.json();
+    const applied = await nextApply();
+    expect(applied.status).toBe(200);
+    const noopOperation = applied.body;
     expect(noopOperation.requestId).toBe(noopPlan.requestId);
     expect(noopOperation.desiredResources).toEqual(noopPlan.desiredResources);
     await expect(resizeDialog.locator("[data-resize-status]")).toContainText("Resize completed", { timeout: 120_000 });
@@ -1277,19 +1294,17 @@ test.describe.serial("server-rendered environments", () => {
     await (await workspaceMenu(page, "More actions")).getByRole("button", { name: "Resize", exact: true }).click();
     await resizeDialog.getByLabel("CPU", { exact: true }).selectOption("2000");
     await resizeDialog.getByLabel("Memory", { exact: true }).selectOption("4096");
-    const stoppedReview = page.waitForResponse((response) => response.url().endsWith("/_actions/resize/plan"));
     await resizeDialog.getByRole("button", { name: "Review resize", exact: true }).click();
-    const stoppedPlanResponse = await stoppedReview;
-    expect(stoppedPlanResponse.status()).toBe(200);
-    const stoppedPlan = await stoppedPlanResponse.json();
+    const stoppedPlanResponse = await nextPlan();
+    expect(stoppedPlanResponse.status).toBe(200);
+    const stoppedPlan = stoppedPlanResponse.body;
     expect(stoppedPlan.mode).toBe("apply-on-start");
     expect(stoppedPlan.restartRequired).toBe(false);
     expect(stoppedPlan.sessionsWillTerminate).toBe(false);
-    const stoppedAck = page.waitForResponse((response) => response.url().endsWith("/_actions/resize/apply"));
     await resizeDialog.getByRole("button", { name: "Apply resize", exact: true }).click();
-    const stoppedResponse = await stoppedAck;
-    expect(stoppedResponse.status()).toBe(200);
-    expect((await stoppedResponse.json()).requestId).toBe(stoppedPlan.requestId);
+    const stoppedResponse = await nextApply();
+    expect(stoppedResponse.status).toBe(200);
+    expect(stoppedResponse.body.requestId).toBe(stoppedPlan.requestId);
     await expect(resizeDialog.locator("[data-resize-status]")).toContainText("Resize completed", { timeout: 120_000 });
     await resizeDialog.getByRole("button", { name: "Done", exact: true }).click();
     const [deferred] = await sql`SELECT state, cpu_millicores, memory_mb FROM environments WHERE id = ${environmentId}`;
