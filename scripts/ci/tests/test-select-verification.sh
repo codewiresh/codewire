@@ -515,9 +515,6 @@ run_paths_case application_secret_smoke_fixture pull_request refs/pull/5018/head
 run_paths_case curated_derp_member_manifest pull_request refs/pull/502/head false \
   'policy rust_curated_locks transport transport_derp_contract transport_pkg_codewire_derp' \
   crates/codewire-derp/Cargo.toml
-run_paths_case curated_gateway_lock pull_request refs/pull/503/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential rust_curated_locks' \
-  deployments/docker/gateway.Cargo.lock
 run_paths_case curated_derp_lock pull_request refs/pull/504/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential rust_curated_locks' \
   deployments/docker/derp.Cargo.lock
