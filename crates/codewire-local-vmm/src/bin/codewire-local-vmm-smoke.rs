@@ -1186,6 +1186,7 @@ mod linux {
             RunnerError::NetworkWorkerSpawn => "network-worker-spawn",
             RunnerError::NetworkWorkerStartTimeout => "network-worker-start-timeout",
             RunnerError::NetworkWorkerBootstrap => "network-worker-bootstrap",
+            RunnerError::GuestDockerToolingMissing => "guest-docker-tooling-missing",
             RunnerError::NetworkWorkerStartup(failure) => failure.code(),
             RunnerError::NetworkWorkerWait => "network-worker-wait",
             RunnerError::NetworkWorkerKillTimeout => "network-worker-kill-timeout",
