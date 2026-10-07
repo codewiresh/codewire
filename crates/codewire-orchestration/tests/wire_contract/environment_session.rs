@@ -339,6 +339,7 @@ fn assert_public_session(harness: &Harness, session: &EnvironmentSession) {
                 "exitCode",
                 "outputEndOffset",
                 "statusMessage",
+                "launchGeneration",
             ]
             .contains(&field.as_str()),
             "unexpected public session field {field}"
