@@ -140,6 +140,29 @@ async fn finish(owner: &Owner, engine: &SessionEngine) {
     engine.shutdown().await.unwrap();
 }
 
+/// Reopen the store in the same process after its previous owner was dropped.
+/// A daemon restart releases the owner lock with its process; here the last
+/// clone of the dropped owner can still be releasing it, so a busy lock is
+/// retried briefly. A store that stays unreadable still fails the test.
+async fn reopen_owner(config: &crate::Config, engine: &SessionEngine) -> Owner {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match Owner::new(
+            config,
+            HostControlBinding::new(scope().environment_id).unwrap(),
+            engine.clone(),
+        )
+        .await
+        {
+            Ok(owner) => return owner,
+            Err(Error::Storage) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("reopen host control owner: {error:?}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn host_control_duplicate_launch_input_and_stop_have_one_effect() {
     let temp = tempfile::tempdir().unwrap();
@@ -297,13 +320,7 @@ async fn host_control_receipt_loss_is_unknown_and_never_relaunches_after_reload(
     drop(engine);
     let config = config(temp.path());
     let engine = SessionEngine::new(&config, CredentialBridge::new(None));
-    let owner = Owner::new(
-        &config,
-        HostControlBinding::new(scope().environment_id).unwrap(),
-        engine.clone(),
-    )
-    .await
-    .unwrap();
+    let owner = reopen_owner(&config, &engine).await;
     let observed = owner.observe(&request.request_id, &scope()).await.unwrap();
     assert_eq!(observed.reason, "recovered_unknown");
     assert_eq!(
