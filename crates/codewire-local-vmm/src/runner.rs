@@ -3862,9 +3862,8 @@ fn prepare_isolated_child_pair(
     Ok(())
 }
 
-/// Darwin has no parent-death signal or close_range: each Mesh child ends
-/// when its control stream reaches EOF, and std opens every other descriptor
-/// close-on-exec.
+/// Darwin has no parent-death signal: each Mesh child ends when its control
+/// stream reaches EOF.
 #[cfg(target_os = "macos")]
 fn prepare_isolated_child_pair(
     expected_parent: libc::pid_t,
@@ -3879,6 +3878,7 @@ fn prepare_isolated_child_pair(
     if unsafe { libc::getppid() } != expected_parent {
         return Err(io::Error::from_raw_os_error(libc::ECHILD));
     }
+    crate::darwin::process::mark_inherited_descriptors_close_on_exec();
     for (source, target) in [(first_source, first_target), (second_source, second_target)] {
         if source != target && unsafe { libc::dup2(source, target) } == -1 {
             return Err(io::Error::last_os_error());

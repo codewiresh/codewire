@@ -326,13 +326,15 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .arg("--exact")
-            .arg(test)
-            .arg("--nocapture")
-            .env(marker, port.to_string())
-            .spawn()
-            .unwrap();
+        let mut child = crate::test_child(&mut std::process::Command::new(
+            std::env::current_exe().unwrap(),
+        ))
+        .arg("--exact")
+        .arg(test)
+        .arg("--nocapture")
+        .env(marker, port.to_string())
+        .spawn()
+        .unwrap();
         let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
