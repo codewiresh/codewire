@@ -731,7 +731,7 @@ run_release() {
   scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh
   scripts/ci/tests/test-fetch-openbao-nexus-credentials.sh
   scripts/ci/tests/test-forgejo-action-mirrors.sh
-  scripts/ci/tests/test-nexus-runtime-pull-contract.sh
+  scripts/ci/tests/test-harbor-runtime-pull-contract.sh
   scripts/ci/tests/test-verify-release-tag-ref.sh
   scripts/ci/tests/test-verify-release-tag-receipt.sh
   scripts/ci/tests/test-mirror-git-tags.sh

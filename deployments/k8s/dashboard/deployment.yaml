@@ -24,7 +24,6 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       imagePullSecrets:
-        - name: nexus-registry
         - name: harbor-registry
       containers:
         - name: dashboard

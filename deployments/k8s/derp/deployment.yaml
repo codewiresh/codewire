@@ -24,7 +24,6 @@ spec:
         app.kubernetes.io/component: derp
     spec:
       imagePullSecrets:
-        - name: nexus-registry
         - name: harbor-registry
       terminationGracePeriodSeconds: 60
       containers:
