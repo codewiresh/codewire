@@ -1,4 +1,4 @@
-import { expect, test, type Page, type WebSocketRoute } from "@playwright/test";
+import { expect, test, type Locator, type Page, type WebSocketRoute } from "@playwright/test";
 
 // Browser controller proof on the checked-in design server. These explicitly
 // synthetic BFF/WS responses do not qualify real daemon or authentication flows.
@@ -192,6 +192,226 @@ test("the workspace keeps the terminal between its tab bar and status bar, with 
       await expect(statusBar).toBeInViewport();
     }
   }
+});
+
+// Distance from the centre of a control's padding box to the centre of its
+// label's capitals: the baseline sits the font's ascent below the top of the
+// text's own box (a Range, never the line box), and the capitals rise their
+// measured height above it.
+async function capitalsOffset(control: Locator) {
+  return control.evaluate((node) => {
+    const bounds = node.getBoundingClientRect();
+    const middle = bounds.top + node.clientTop + node.clientHeight / 2;
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, { acceptNode: (text) =>
+      text.textContent!.trim() && (text.parentElement!.offsetParent !== null || text.parentElement === node)
+        && !text.parentElement!.closest(".cw-sr-only") ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT });
+    const text = walker.nextNode()!;
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    const style = getComputedStyle(text.parentElement!);
+    const context = document.createElement("canvas").getContext("2d")!;
+    context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+    const metrics = context.measureText("H");
+    return range.getClientRects()[0].top + metrics.fontBoundingBoxAscent - metrics.actualBoundingBoxAscent / 2 - middle;
+  });
+}
+
+async function centreY(locator: Locator) {
+  const box = (await locator.boundingBox())!;
+  return box.y + box.height / 2;
+}
+
+test("the header keeps its actions on one line and the selected tab carries the indicator", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [1, 2, 3].map((index) => ({ sessionId: sessionId(index), state: "running" }));
+  await openFixture(page);
+  await expect(page.getByRole("tab")).toHaveCount(3);
+  await expect(page.getByRole("link", { name: "Open in VS Code", exact: true })).toBeVisible();
+  const actions = [
+    page.getByRole("button", { name: "Ports", exact: true }),
+    page.getByRole("link", { name: "Open in VS Code", exact: true }),
+    page.getByRole("button", { name: "Stop", exact: true }),
+    page.locator("[data-sandbox-menu] > summary"),
+  ];
+  const title = [page.getByRole("heading", { level: 1 }), page.locator("[data-sandbox-state]")];
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width > 1024 ? 900 : 844 });
+    // Actions share one centre line; on a desktop the name and state share it too.
+    const centres = await Promise.all((width > 1024 ? [...actions, ...title] : actions).map(centreY));
+    expect(Math.max(...centres) - Math.min(...centres), `${width}: ${centres}`).toBeLessThanOrEqual(1);
+    if (width <= 1024) {
+      const line = await Promise.all(title.map(centreY));
+      expect(Math.abs(line[0] - line[1]), `${width}: ${line}`).toBeLessThanOrEqual(1);
+      expect(centres[0]).toBeGreaterThan(line[0]);
+    }
+    // Each control's capitals sit on its centre. Buttons and pills still
+    // carry UI leading here (about 1 px high); the shared primitives' trim
+    // brings that within 0.75 px, and this bound tightens with it.
+    const offsets: number[] = [];
+    for (const control of [...actions.slice(0, 3), page.locator("[data-sandbox-state]")]) {
+      offsets.push(await capitalsOffset(control));
+      expect.soft(Math.abs(offsets.at(-1)!), `${width}: ${await control.textContent()}`).toBeLessThanOrEqual(1.5);
+    }
+    expect(Math.max(...offsets) - Math.min(...offsets), `${width}: ${offsets}`).toBeLessThanOrEqual(0.5);
+    // The selected tab, and only it, carries the bar across its top edge.
+    const indicators = await page.locator("[data-terminal-tab-item]").evaluateAll((items) => items.map((item) => {
+      const mark = getComputedStyle(item, "::before");
+      return { selected: item.querySelector('[role="tab"]')!.getAttribute("aria-selected") === "true",
+        content: mark.content, height: parseFloat(mark.height), width: parseFloat(mark.width),
+        item: item.clientWidth, color: mark.backgroundColor };
+    }));
+    expect(indicators.filter((item) => item.selected)).toHaveLength(1);
+    for (const item of indicators) {
+      if (item.selected) {
+        expect(item.content).not.toBe("none");
+        expect(item.height).toBe(2);
+        expect(Math.abs(item.width - item.item)).toBeLessThanOrEqual(1);
+        expect(item.color).toBe("rgb(237, 237, 237)");
+      } else expect(item.content).toBe("none");
+    }
+    // Tabs scroll inside their strip; New terminal and the page stay put.
+    await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeInViewport();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.getByRole("tab", { name: "Terminal 3", exact: true }).click();
+    await expect(page.getByRole("tab", { name: "Terminal 3", exact: true })).toBeInViewport({ ratio: 1 });
+    await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
+    await expect(page.getByRole("tab", { name: "Terminal 1", exact: true })).toBeInViewport({ ratio: 1 });
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.screenshot({ path: test.info().outputPath("workspace-1440.png") });
+});
+
+test("the status bar follows the selected terminal's connection", async ({ page }) => {
+  await page.clock.install();
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }, { sessionId: sessionId(2), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(2);
+  const bar = page.locator(".cw-workspace-statusbar");
+  const shown = bar.locator("[data-terminal-session-status]:not([hidden]) [data-terminal-connection]");
+  const dot = () => shown.evaluate((node) => getComputedStyle(node, "::before").backgroundColor);
+  await expect(bar.locator("[data-terminal-session-status]:not([hidden])")).toHaveCount(1);
+  await expect(shown).toHaveText("Connected");
+  await expect(shown).toHaveAttribute("data-tone", "success");
+  expect(await dot()).toBe("rgb(63, 185, 80)");
+  // Rendered text, as read: the hidden tab's group is not part of it.
+  await expect.poll(() => bar.innerText()).toMatch(/^Connected\s+Disconnect\s+Last event\s+just now\s+Auto-delete\s+off(\s+Sandbox ID\s+bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb)?$/);
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await settleReadiness(page);
+  // Transport loss: the selected tab reads Reconnecting in amber.
+  attached(state, sessionId(1))[0].route.close({ code: 1011, reason: "upstream restarted" });
+  await expect(shown).toHaveText("Disconnected. Reconnecting…");
+  await expect(shown).toHaveAttribute("data-tone", "warning");
+  expect(await dot()).toBe("rgb(210, 153, 34)");
+  // Another tab's state shows only while that tab is selected.
+  await page.getByRole("tab", { name: "Terminal 2", exact: true }).click();
+  await expect(shown).toHaveText("Connected");
+  await expect(bar.locator("[data-terminal-session-status]:not([hidden])")).toHaveAttribute("data-terminal-session-id", sessionId(2));
+  await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
+  await advance(page, 1000);
+  await expect.poll(() => attached(state, sessionId(1)).length).toBe(2);
+  await expect(shown).toHaveText("Connected");
+  await expect(shown).toHaveAttribute("data-tone", "success");
+  // An explicit Disconnect is neutral and offers Reconnect beside it.
+  await bar.getByRole("button", { name: "Disconnect", exact: true }).click();
+  await expect(shown).toHaveText("Disconnected");
+  await expect(shown).toHaveAttribute("data-tone", "neutral");
+  await expect(bar.getByRole("button", { name: "Reconnect", exact: true })).toBeEnabled();
+  // A Sandbox status outage pauses it in amber, then a terminal that cannot
+  // continue reads in red.
+  state.statusAvailable = false;
+  await advance(page, 5000);
+  await expect(shown).toHaveText("Sandbox status is unavailable. Terminal controls are paused.");
+  await expect(shown).toHaveAttribute("data-tone", "warning");
+  state.statusAvailable = true;
+  await advance(page, 5000);
+  await expect.poll(() => attached(state, sessionId(2)).length).toBe(2);
+  await page.getByRole("tab", { name: "Terminal 2", exact: true }).click();
+  await expect(shown).toHaveText("Connected");
+  output(attached(state, sessionId(2))[1], "out-of-order", 7n);
+  await expect(shown).toHaveText("Connection closed because terminal output could not be verified.");
+  await expect(shown).toHaveAttribute("data-tone", "danger");
+  expect(await dot()).toBe("rgb(232, 112, 95)");
+  expect(state.launches).toBe(0);
+  expect(state.stops).toBe(0);
+});
+
+test("tabs answer the keyboard and a double-click like a desktop terminal", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }, { sessionId: sessionId(2), state: "exited" }];
+  await openFixture(page);
+  await expect(page.getByRole("tab")).toHaveCount(1);
+  const first = page.getByRole("tab", { name: "Terminal 1", exact: true });
+  const rename = page.getByRole("dialog", { name: "Rename terminal", exact: true });
+  // F2 renames the focused tab and returns focus to it.
+  await first.focus();
+  await page.keyboard.press("F2");
+  await expect(rename.getByLabel("Terminal name", { exact: true })).toBeFocused();
+  await rename.getByLabel("Terminal name", { exact: true }).fill("Build");
+  await page.keyboard.press("Enter");
+  const build = page.getByRole("tab", { name: "Build", exact: true });
+  await expect(build).toBeFocused();
+  // A double-click on the selected tab renames it too.
+  await build.dblclick();
+  await expect(rename).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(build).toBeFocused();
+  // Delete asks before closing a live shell, and Escape keeps it.
+  await page.keyboard.press("Delete");
+  const close = page.getByRole("dialog", { name: "Close terminal?", exact: true });
+  await expect(close.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(close).toBeHidden();
+  await expect(build).toBeFocused();
+  await expect(page.getByRole("button", { name: "Close Build", exact: true })).toBeVisible();
+  expect(state.stops).toBe(0);
+  // An ended session's tab is removed from this browser without a stop.
+  await (await openMenu(page, "Terminal actions")).getByLabel("Existing terminal", { exact: true }).selectOption(sessionId(2));
+  await (await terminalAction(page, "Open terminal")).click();
+  const ended = page.getByRole("tab", { name: "Terminal 2", exact: true });
+  await expect(ended).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("button", { name: "Remove Terminal 2 tab", exact: true })).toBeVisible();
+  await ended.focus();
+  await page.keyboard.press("Delete");
+  await expect(page.getByRole("tab")).toHaveCount(1);
+  await expect(build).toBeFocused();
+  await expect(page.locator("[data-terminal-message]")).toHaveText("Tab removed from this browser. No terminal stop was requested.");
+  expect(state.stops).toBe(0);
+  expect(state.launches).toBe(0);
+});
+
+test("workspace menus close after an in-place action and stay open behind a dialog", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(9), state: "running" }];
+  await openFixture(page);
+  await expect(page.getByRole("tab")).toHaveCount(1);
+  const more = menuOf(page, "More actions");
+  const terminalMenu = menuOf(page, "Terminal actions");
+  await (await sandboxAction(page, "Refresh sandbox status")).click();
+  await expect(more).toHaveJSProperty("open", false);
+  await expect(more.locator(":scope > summary")).toBeFocused();
+  // Rename opens a dialog, so its menu stays open to take focus back.
+  const rename = await terminalAction(page, "Rename terminal");
+  await rename.click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Rename terminal", exact: true })).toBeHidden();
+  await expect(terminalMenu).toHaveJSProperty("open", true);
+  await expect(rename).toBeFocused();
+  await (await terminalAction(page, "Refresh sessions")).click();
+  await expect(terminalMenu).toHaveJSProperty("open", false);
+  await expect(terminalMenu.locator(":scope > summary")).toBeFocused();
+  // On a phone the More actions panel covers the tab bar while it is open;
+  // once its action has run, the tab bar is in reach again.
+  await page.setViewportSize({ width: 390, height: 844 });
+  const panel = (await openMenu(page, "More actions")).locator(":scope > .cw-menu-panel");
+  const box = (await panel.boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(390);
+  await (await sandboxAction(page, "Refresh sandbox status")).click();
+  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await expect(page.getByRole("tab")).toHaveCount(2);
+  expect(state.launches).toBe(1);
+  expect(state.stops).toBe(0);
 });
 
 async function holdRenderCallbacks(page: Page) {
