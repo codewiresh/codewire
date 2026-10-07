@@ -4,7 +4,7 @@ A hosted commodity workspace Pod carries no environment identity: no daemon
 token, environment ID, operation generation, projection digest, managed-client
 selection or derived client variables; no Codex ConfigMap or init-container
 copy; no environment label on its SandboxTemplate; and no template egress to
-the environment's own gateway. It carries only the Pod-bound
+any per-environment gateway. It carries only the Pod-bound
 workspace-binding token (workspace container only), the https binding URL and
 its own UID from the downward API, plus exactly one new egress rule to the
 binding listener. Its one ConfigMap volume is the exact exception of

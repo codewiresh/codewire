@@ -743,9 +743,9 @@ def assert_internal_connect_listener_exemption(
 ) -> None:
     """Validate the closed cluster-local listener exceptions.
 
-    Two listener classes exist: internal-connect (8088, TLS-only) for the gateway and
-    Mesh, and workspace-binding (8087), which tenant workloads can reach and
-    which therefore carries only WorkspaceBindingService.
+    Two listener classes exist: internal-connect (8088, TLS-only) for Mesh,
+    and workspace-binding (8087), which tenant workloads can reach and which
+    therefore carries only WorkspaceBindingService.
     """
     for service, record in unrouted.items():
         listener = next(
