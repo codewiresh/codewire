@@ -61,6 +61,9 @@ DESIGN_MARKUP_REQUIRED = {
     "input:radio": ("cw-radio",),
     "details": ("cw-disclosure", "cw-menu"),
 }
+HTML_VOID_ELEMENTS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr",
+}
 
 CSS_WHITESPACE = " \t\r\n\f"
 CSS_CLOSERS = {"(": ")", "[": "]", "{": "}"}
@@ -874,23 +877,44 @@ class DesignMarkupParser(HTMLParser):
         self.elements: list[tuple[str, list[tuple[str, str | None]], str]] = []
         self.styles: list[str] = []
         self._style: list[str] | None = None
+        # Elements whose own content mixes a child element with bare text.
+        self.mixed: set[int] = set()
+        # Open elements: tag, index in elements, has a child element, has own text.
+        self._open: list[list[Any]] = []
+
+    def _child(self, tag: str, attrs: list[tuple[str, str | None]]) -> int:
+        if self._open:
+            self._open[-1][2] = True
+        self.elements.append((tag, attrs, self.get_starttag_text() or f"<{tag}>"))
+        return len(self.elements) - 1
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.elements.append((tag, attrs, self.get_starttag_text() or f"<{tag}>"))
+        index = self._child(tag, attrs)
+        if tag not in HTML_VOID_ELEMENTS:
+            self._open.append([tag, index, False, False])
         if tag == "style":
             self._style = []
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.elements.append((tag, attrs, self.get_starttag_text() or f"<{tag}>"))
+        self._child(tag, attrs)
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "style" and self._style is not None:
             self.styles.append("".join(self._style))
             self._style = None
+        depth = next((depth for depth in range(len(self._open) - 1, -1, -1) if self._open[depth][0] == tag), None)
+        if depth is None:
+            return
+        for _, index, has_element, has_text in self._open[depth:]:
+            if has_element and has_text:
+                self.mixed.add(index)
+        del self._open[depth:]
 
     def handle_data(self, data: str) -> None:
         if self._style is not None:
             self._style.append(data)
+        if self._open and data.strip():
+            self._open[-1][3] = True
 
 
 def neutralize_askama(text: str) -> str:
@@ -1055,6 +1079,7 @@ class DesignElement:
     input_type: str
     style: str | None
     snippet: str
+    mixed: bool
 
 
 @dataclass
@@ -1200,7 +1225,7 @@ def design_scan_markup(scan: DesignScan, rel: str, text: str, *, template: bool)
     parser.close()
     for stylesheet in parser.styles:
         design_scan_stylesheet(scan, rel, stylesheet, token_file=False)
-    for tag, attributes, start in parser.elements:
+    for position, (tag, attributes, start) in enumerate(parser.elements):
         classes: set[str] = set()
         style: str | None = None
         input_type = ""
@@ -1227,6 +1252,7 @@ def design_scan_markup(scan: DesignScan, rel: str, text: str, *, template: bool)
                 input_type=input_type,
                 style=css_normalize(style) if style is not None else None,
                 snippet=re.sub(r"\s+", " ", start).strip(),
+                mixed=position in parser.mixed,
             )
         )
 
@@ -1411,6 +1437,8 @@ def design_token_violations(
         failures.append(f"js_hook_classes entry {item} is defined in CSS or no longer used; remove it")
 
     # R5 markup: native controls carry their primitive class; no inline styles.
+    # A .cw-button that holds an icon or other element keeps its label in an
+    # element too: the capital-height trim cannot reach a bare text node.
     for element in scan.elements:
         key = f"input:{element.input_type}" if element.tag == "input" else element.tag
         required = DESIGN_MARKUP_REQUIRED.get(key)
@@ -1420,6 +1448,8 @@ def design_token_violations(
             emit("markup", element.file, "<button>", "class", element.snippet)
         if element.style is not None:
             emit("markup", element.file, f"<{element.tag}>", "style", element.style)
+        if element.mixed and "cw-button" in element.classes:
+            emit("markup", element.file, f"<{element.tag}>", "label", element.snippet)
 
     # R6 gallery: every core primitive appears in the component gallery.
     gallery = policy["gallery_file"]
@@ -1606,6 +1636,15 @@ def design_tokens_self_test(policy: dict[str, Any], violations: list[str], corpu
         ("template style attribute", "markup", {template: '<p class="cw-card" style="display: none">x</p>'}, None),
         ("template content", "markup", {template: "<template><select></select></template>"}, None),
         (
+            "bare label beside an icon",
+            "markup",
+            {template: '<button class="cw-button" type="button"><svg aria-hidden="true"><use href="#i"/></svg>Add</button>'},
+            f'markup|{template}|<button>|label|<button class="cw-button" type="button">',
+        ),
+        ("bare Askama label beside an icon", "markup", {template: '<summary class="cw-button">{{ name }}<svg></svg></summary>'}, None),
+        ("bare label beside a hidden name", "markup", {DESIGN_SELF_TEST_FIXTURE: '<a class="cw-button" href="/x">Open<span> docs</span></a>'}, None),
+        ("bare label after a void element", "markup", {template: '<button class="cw-button"><img alt="">Add</button>'}, None),
+        (
             "gallery gap",
             "gallery",
             {DESIGN_SELF_TEST_STYLES: base[DESIGN_SELF_TEST_STYLES] + ".cw-new { color: var(--fg); }\n"},
@@ -1679,6 +1718,8 @@ def design_tokens_self_test(policy: dict[str, Any], violations: list[str], corpu
                     '<input type="radio" class="cw-radio"><details class="cw-menu"><summary>x</summary></details>'
                     '<button class="{% if a %}cw-button{% else %}cw-button cw-button--outline{% endif %}" '
                     "hx-vals='{\"a\": \"{{ b }}\"}'>x</button><template><select class=\"cw-select\"></select></template>"
+                    '<summary class="cw-button">\n  {% if a %}<svg aria-hidden="true"><use href="#i"/></svg>{% endif %}\n  '
+                    "<span>{{ label }}</span>\n</summary>"
                 ),
                 DESIGN_SELF_TEST_FIXTURE: (
                     "<style>.cw-local { --local: var(--fg); color: var(--local); }</style>"

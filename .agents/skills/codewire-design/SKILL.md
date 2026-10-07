@@ -63,12 +63,21 @@ patterns and proofs that keep those rules true; do not restate them elsewhere.
   - a text-only `.cw-button`, `.cw-badge` or chip becomes a one-line block,
     centred with `align-content: center`;
   - a `<span>` label inside a `.cw-button` is trimmed.
-- The trim cannot reach a bare text node beside an icon. Give a button with an
-  icon a `<span>` label, as the Create submit's `.cw-submit-idle` does.
-- Prove it: `capitalsOffset` in
-  `apps/dashboard/e2e/ssr-dashboard.design-system.ssr.ts` measures the
-  capitals' centre against the control's padding box. It must be within
-  0.75 px at 1440 and 390.
+- The trim cannot reach a bare text node beside an icon. A `.cw-button` (a
+  `button`, link or `summary`) that holds an icon, a spinner, a `.cw-sr-only`
+  name or any other element keeps its visible label in a plain `<span>`:
+  `<a class="cw-button" href="new/"><svg class="cw-icon" aria-hidden="true">…</svg><span>Create Sandbox</span></a>`
+  and `<button class="cw-button"><span>Reconnect</span><span class="cw-sr-only"> Work Codex</span></button>`.
+  The accessible name does not change. A text-only button needs no span.
+- Guards: the `markup` rule of
+  `python3 scripts/checks/repo_checks.py design-tokens` rejects a bare label
+  beside an element in templates and fixtures, and the per-fixture spec in
+  `apps/dashboard/e2e/ssr-dashboard.design-system.ssr.ts` rejects it in the
+  rendered fixtures, including hidden dialogs and `<template>` content.
+- Prove centring with `capitalsOffset` in the same spec: it measures the
+  capitals' centre against the control's padding box and must be within
+  0.75 px at 1440 and 390. "buttons with an icon centre their label's
+  capitals" covers Create Sandbox, Add custom Git URL, Reconnect and Back.
 
 ## 2. Status and visibility pills
 

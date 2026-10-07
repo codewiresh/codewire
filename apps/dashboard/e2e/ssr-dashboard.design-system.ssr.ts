@@ -110,8 +110,15 @@ async function inspect(page: Page, marketing: boolean) {
     const select = [...document.querySelectorAll("select")]
       .filter((element) => getComputedStyle(element).appearance !== "base-select")
       .map((element) => `${describe(element)} appearance ${getComputedStyle(element).appearance}`);
+    // A button that holds an icon or other element keeps its label in a span:
+    // the capital-height trim cannot reach a bare text node. Hidden dialogs and
+    // <template> content count too.
+    const labels = [document, ...[...document.querySelectorAll("template")].map((template) => template.content)]
+      .flatMap((scope) => [...scope.querySelectorAll(".cw-button")])
+      .filter((element) => element.firstElementChild && ownText(element))
+      .map((element) => `${describe(element)} "${element.textContent?.trim().replace(/\s+/g, " ").slice(0, 40)}"`);
     const root = document.scrollingElement ?? document.documentElement;
-    return { overflow: root.scrollWidth - root.clientWidth, scale, contrast, select };
+    return { overflow: root.scrollWidth - root.clientWidth, scale, contrast, select, labels };
   }, marketing);
 }
 
@@ -190,6 +197,7 @@ for (const fixture of fixtures) {
     const viewport: Viewport = testInfo.project.name.endsWith("mobile") ? "mobile" : "desktop";
     expect.soft(findings.overflow, "the page scrolls sideways").toBe(0);
     expect.soft(findings.select, "selects must render the styled base-select picker").toEqual([]);
+    expect.soft(findings.labels, "buttons with an icon must wrap their label in a span").toEqual([]);
     for (const check of ["scale", "contrast", "focus"] as const) {
       const cap = pending[fixture]?.[`${viewport} ${check}`] ?? 0;
       expect.soft(findings[check].length, `${viewport} ${check} findings (cap ${cap}): ${findings[check].join(" | ")}`)
@@ -203,16 +211,22 @@ for (const fixture of fixtures) {
 
 // Distance from the centre of a control's padding box (a row's separator
 // border is not part of what its label centres in) to the centre of its
-// label's capitals. The baseline sits the font's ascent below the top of the
-// text's own box (a Range over the text, never the line box, so leading cannot
-// hide in it), and the capitals rise their measured height above it.
-async function capitalsOffset(control: Locator, label: Locator) {
+// label's capitals. The label is the first visible text in `label`, wherever
+// it sits. The baseline sits the font's ascent below the top of the text's own
+// box (a Range over the text, never the line box, so leading cannot hide in
+// it), and the capitals rise their measured height above it.
+async function capitalsOffset(control: Locator, label: Locator = control) {
   const middle = await control.evaluate((node) => node.getBoundingClientRect().top + node.clientTop + node.clientHeight / 2);
   const centre = await label.evaluate((node) => {
-    const text = [...node.childNodes].find((child) => child.nodeType === Node.TEXT_NODE && child.textContent!.trim())!;
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, {
+      acceptNode: (child) => child.textContent!.trim() && !child.parentElement!.closest(".cw-sr-only")
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_REJECT,
+    });
+    const text = walker.nextNode()!;
     const range = document.createRange();
     range.selectNodeContents(text);
-    const style = getComputedStyle(node);
+    const style = getComputedStyle(text.parentElement!);
     const context = document.createElement("canvas").getContext("2d")!;
     context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
     const metrics = context.measureText("H");
@@ -236,5 +250,22 @@ test("single-line controls centre their capitals, not a line box", async ({ page
     ["agent chip", chip, chip],
   ] as const) {
     expect.soft(Math.abs(await capitalsOffset(control, label)), name).toBeLessThanOrEqual(0.75);
+  }
+});
+
+// An icon beside a bare text node keeps the label off centre by up to 1.5 px
+// at 390; a span label is trimmed like a text-only button's.
+test("buttons with an icon centre their label's capitals", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system for fixture checks");
+  for (const [fixture, name, control] of [
+    ["sandboxes.html", "+ Create Sandbox", page.locator("main").getByRole("link", { name: "Create Sandbox" })],
+    ["create-sandbox.html", "+ Add custom Git URL", page.getByRole("button", { name: "Add custom Git URL" })],
+    ["settings-credentials.html", "Reconnect", page.getByRole("button", { name: "Reconnect Work Codex" })],
+    ["components.html", "< Back", page.getByRole("button", { name: "Back" })],
+  ] as const) {
+    await page.goto(`${origin}/reference/fixtures/${fixture}`);
+    await page.evaluate(() => document.fonts.ready);
+    expect.soft(Math.abs(await capitalsOffset(control)), name).toBeLessThanOrEqual(0.75);
   }
 });
