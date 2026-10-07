@@ -3,6 +3,82 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+
+# This isolated fixture owns the helpers started by its original nested tests.
+# The existing kernel owner supplies Linux subreaper admission and initial ECHILD.
+fixture_owner_marker='codewire.release-tag-fixture-owner/v1'
+fixture_body_argument='--codewire-release-tag-fixture-body-v1'
+if [[ ${CW_RELEASE_TAG_FIXTURE_OWNER+x} || ${CW_RELEASE_TAG_FIXTURE_OWNER_PID+x} ||
+      ${CW_RELEASE_TAG_FIXTURE_OWNER_ARGC+x} ]]; then
+  if [[ ${CW_RELEASE_TAG_FIXTURE_OWNER:-} != "$fixture_owner_marker" ||
+        ${CW_RELEASE_TAG_FIXTURE_OWNER_PID:-} != "$PPID" ||
+        ${CW_RELEASE_TAG_FIXTURE_OWNER_ARGC:-} != "$#" ||
+        ${1:-} != "$fixture_body_argument" ||
+        ${BASH_SOURCE[0]} != "$ROOT/scripts/ci/tests/test-verify-release-tag-ref.sh" ]]; then
+    echo 'release tag fixture owner marker/argv is invalid' >&2
+    exit 1
+  fi
+  shift
+  unset CW_RELEASE_TAG_FIXTURE_OWNER CW_RELEASE_TAG_FIXTURE_OWNER_PID CW_RELEASE_TAG_FIXTURE_OWNER_ARGC
+else
+  if [[ ${1:-} == "$fixture_body_argument" ]]; then
+    echo 'release tag fixture body requires its owning process' >&2
+    exit 1
+  fi
+  exec python3 -I -B - "$ROOT" "$ROOT/scripts/ci/tests/test-verify-release-tag-ref.sh" "$@" <<'PY_OWNER'
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+root = Path(sys.argv[1]).resolve(strict=True)
+script = root / "scripts/ci/tests/test-verify-release-tag-ref.sh"
+if Path(sys.argv[2]).resolve(strict=True) != script:
+    raise SystemExit("release tag fixture script identity is wrong")
+spec = importlib.util.spec_from_file_location(
+    "release_tag_fixture_custody", root / "scripts/ci/verify/build-linux-vmm-kernel.py")
+owner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(owner)
+owner.arm_custody()
+
+environment = dict(os.environ)
+environment.update({"CW_RELEASE_TAG_FIXTURE_OWNER": "codewire.release-tag-fixture-owner/v1",
+                    "CW_RELEASE_TAG_FIXTURE_OWNER_PID": str(os.getpid()),
+                    "CW_RELEASE_TAG_FIXTURE_OWNER_ARGC": str(len(sys.argv[3:]) + 1)})
+body = subprocess.Popen(["/bin/bash", str(script), "--codewire-release-tag-fixture-body-v1",
+                         *sys.argv[3:]], env=environment)
+status = body.wait()  # Preserve the original body's direct-child wait and exit.
+
+# Original traps, nested direct waits and Signer.close have all finished.
+# Reap only this isolated owner's adopted helpers; no cleanup signals are sent.
+deadline = time.monotonic() + 5
+try:
+    while True:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("release tag fixture cleanup did not reach ECHILD")
+        try:
+            reaped, _ = os.waitpid(-1, os.WNOHANG | owner.WALL)
+        except ChildProcessError:
+            break
+        except InterruptedError:
+            continue
+        if not reaped:
+            time.sleep(0.01)
+except (OSError, RuntimeError) as error:
+    print(str(error), file=sys.stderr)
+    raise SystemExit(status if status > 0 else 1)
+
+if status < 0:
+    print(f"release tag fixture body terminated by signal {-status}", file=sys.stderr)
+if status == 0:
+    print("release tag dispatch guard tests: OK", flush=True)
+# Preserve normal exits; a signaled child remains an explicit shell-style refusal.
+raise SystemExit(status if status >= 0 else 128 - status)
+PY_OWNER
+fi
+unset fixture_owner_marker fixture_body_argument
 VERIFY="$ROOT/scripts/ci/release/verify-release-tag-ref.sh"
 COMPUTE_TAGS="$ROOT/scripts/ci/images/compute-image-tags.sh"
 
@@ -501,7 +577,7 @@ if grep -Fq 'date +%s' "$image_builder"; then
 fi
 grep -Fq 'source_dir="${CODEWIRE_SOURCE_DIR:-.}"' "$image_builder"
 grep -Fq '    DOCKER_CONFIG="$docker_config"' "$image_builder"
-grep -Fq '      docker buildx build --builder "$buildx_builder" --push' \
+grep -Fq '    image_command=(docker buildx build --builder "$buildx_builder" --push' \
   "$image_builder"
 grep -Fq -- '--provenance="$provenance"' "$image_builder"
 grep -Fq -- '--metadata-file "$build_metadata"' "$image_builder"
@@ -521,5 +597,3 @@ if [[ -e "$ROOT/keys/production-release.asc" ]]; then
   echo 'release tags are trusted through Forgejo; no pinned production key file may remain' >&2
   exit 1
 fi
-
-printf 'release tag dispatch guard tests: OK\n'
