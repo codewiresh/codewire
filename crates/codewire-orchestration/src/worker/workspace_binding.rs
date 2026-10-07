@@ -1355,6 +1355,21 @@ pub(crate) async fn bind_workspace_runtime(
 /// How often [`bind_before_ready`] re-reads the chain while the caller waits.
 const EARLY_BIND_POLL: Duration = Duration::from_millis(500);
 
+/// A warm member's adoption converges within a few hundred milliseconds of
+/// its claim, and its daemon serves SSH only once the binding is recorded, so
+/// for this long after the wait begins the chain is re-read every
+/// [`EARLY_BIND_FAST_POLL`] instead; a cold Pod still takes seconds to start.
+const EARLY_BIND_FAST_WINDOW: Duration = Duration::from_secs(2);
+const EARLY_BIND_FAST_POLL: Duration = Duration::from_millis(100);
+
+fn early_bind_poll(waited: Duration) -> Duration {
+    if waited < EARLY_BIND_FAST_WINDOW {
+        EARLY_BIND_FAST_POLL
+    } else {
+        EARLY_BIND_POLL
+    }
+}
+
 /// Design §10 (amended): while the caller waits for the gateway or for Claim
 /// Ready, record an identity-free Pod's binding as soon as the exact chain is
 /// bind-ready ([`BindableRuntime::bind_ready`]), so its daemon listens and the
@@ -1375,6 +1390,7 @@ pub(crate) async fn bind_before_ready(
     states: &[&str],
 ) -> anyhow::Result<Option<RecordedBind>> {
     let pool = authority.pool();
+    let started = tokio::time::Instant::now();
     loop {
         let env = load_environment(pool, authority.environment_id()).await?;
         let backend = super::env_data::load_backend_row(pool, authority.environment_id())
@@ -1422,7 +1438,7 @@ pub(crate) async fn bind_before_ready(
                 }
             }
         }
-        tokio::time::sleep(EARLY_BIND_POLL).await;
+        tokio::time::sleep(early_bind_poll(started.elapsed())).await;
     }
 }
 

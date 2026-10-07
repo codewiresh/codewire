@@ -466,3 +466,15 @@ fn enforced_refusals_are_value_blind_closed_categories() {
     let debug = format!("{:?}", environment_binding(7, Some(DIGEST), "v2:0"));
     assert!(!debug.contains(DIGEST));
 }
+
+#[test]
+fn early_bind_polls_fast_only_while_a_warm_adoption_can_converge() {
+    assert_eq!(early_bind_poll(Duration::ZERO), EARLY_BIND_FAST_POLL);
+    assert_eq!(
+        early_bind_poll(EARLY_BIND_FAST_WINDOW - Duration::from_millis(1)),
+        EARLY_BIND_FAST_POLL
+    );
+    assert_eq!(early_bind_poll(EARLY_BIND_FAST_WINDOW), EARLY_BIND_POLL);
+    assert_eq!(early_bind_poll(Duration::from_secs(30)), EARLY_BIND_POLL);
+    assert!(EARLY_BIND_FAST_POLL < EARLY_BIND_POLL);
+}
