@@ -1,7 +1,9 @@
 (() => {
   "use strict";
 
-  function open(root, styleNonce, { onResize } = {}) {
+  // A caller may place the copy button and its announcement outside the
+  // output's section, as the workspace's terminal menu and status bar do.
+  function open(root, styleNonce, { onResize, copyButton: copyControl, copyStatus } = {}) {
     if (onResize !== undefined && typeof onResize !== "function") {
       throw new TypeError("Terminal onResize must be a function");
     }
@@ -13,8 +15,8 @@
     const document = root.ownerDocument;
     const view = document.defaultView;
     const section = root.closest("[data-terminal-tab-panel]") || root.closest(".cw-sandbox-terminal");
-    const copyButton = section?.querySelector("[data-terminal-copy]");
-    const feedback = section?.querySelector("[data-terminal-copy-status]");
+    const copyButton = copyControl ?? section?.querySelector("[data-terminal-copy]");
+    const feedback = copyStatus ?? section?.querySelector("[data-terminal-copy-status]");
     const fontFamily = view.getComputedStyle(root).getPropertyValue("--font-mono").trim() || "monospace";
     const fit = new globalThis.FitAddon.FitAddon();
     const terminal = globalThis.CodewireTerminalRenderer.open(root, {

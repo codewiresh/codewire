@@ -290,7 +290,6 @@ pub(crate) struct EnvironmentResizeOperationTemplate<'a> {
 #[derive(Template)]
 #[template(path = "terminal.html")]
 pub(crate) struct TerminalTemplate<'a> {
-    pub(crate) view: &'a DashboardView,
     pub(crate) organization: &'a OrganizationContext,
     pub(crate) page: &'a TerminalPageView,
     pub(crate) csrf_token: &'a str,

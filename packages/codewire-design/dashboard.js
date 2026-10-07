@@ -651,6 +651,19 @@ if (app) {
     }
   });
 
+  // A menu marked data-menu-close-on-action closes once one of its actions has
+  // run, as a desktop menu does, and returns focus to its own button. An
+  // action that opens a dialog (aria-haspopup) leaves it open so the dialog
+  // can return focus to that action.
+  document.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const action = target?.closest("button:not([aria-haspopup])");
+    const menu = action?.closest("details[data-menu-close-on-action][open]");
+    if (!menu || action.closest("summary") || !menu.querySelector(":scope > .cw-menu-panel")?.contains(action)) return;
+    menu.removeAttribute("open");
+    menu.querySelector(":scope > summary")?.focus({ preventScroll: true });
+  });
+
   document.addEventListener("keydown", (event) => {
     // Native modal dialogs own Escape, focus and keyboard interaction above a
     // drawer. Do not close the underlying Create Sandbox draft as well.

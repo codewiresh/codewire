@@ -908,6 +908,16 @@ impl EnvironmentRow {
         }
     }
 
+    /// The workspace status bar's short automatic-deletion value, read after
+    /// "Auto-delete". A scheduled deadline renders its `<time>` instead.
+    pub(crate) fn auto_delete_label(&self) -> &'static str {
+        match self.deletion_state {
+            "protected" => "off (protected)",
+            "unavailable" => "unavailable",
+            _ => "off",
+        }
+    }
+
     /// Delete was accepted: the Sandbox is going or gone, so no lifecycle,
     /// resource or connection action applies to it any more.
     pub(crate) fn deletion_started(&self) -> bool {

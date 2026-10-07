@@ -95,7 +95,6 @@ pub(super) async fn page(
     with_csrf_cookie(
         render_terminal_page(
             TerminalTemplate {
-                view: &dashboard,
                 organization: &organization,
                 page: &view,
                 csrf_token: &token,

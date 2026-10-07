@@ -73,6 +73,16 @@ async function openRowActions(row: Locator) {
   await trigger.click();
 }
 
+// The Sandbox workspace keeps terminal actions (Rename, Copy selection, the
+// existing-session picker, Refresh sessions) and Sandbox actions (Resize,
+// Refresh sandbox status, Delete) in two menus.
+async function workspaceMenu(page: Page, menu: "Terminal actions" | "More actions") {
+  const details = page.locator(menu === "Terminal actions" ? "[data-terminal-menu]" : "[data-sandbox-menu]");
+  if (!(await details.evaluate((node) => (node as HTMLDetailsElement).open))) await details.locator(":scope > summary").click();
+  await expect(details).toHaveJSProperty("open", true);
+  return details;
+}
+
 async function assertExplicitCreateRecovery(page: Page) {
   const dispatches: string[] = [];
   const personalKey = `CREATE_RETURN_${crypto.randomUUID().replaceAll("-", "_")}`;
@@ -929,13 +939,15 @@ test.describe.serial("server-rendered environments", () => {
       || (await page.locator("[data-terminal-message]").innerText()).includes("change could not be confirmed"), { timeout: 90_000 }).toBe(true);
     const recoveredLaunch = await page.getByRole("tab").count() === 0;
     if (recoveredLaunch) {
-      await page.getByRole("button", { name: "Refresh sessions", exact: true }).click();
-      const existing = page.getByLabel("Existing terminal", { exact: true });
+      await (await workspaceMenu(page, "Terminal actions")).getByRole("button", { name: "Refresh sessions", exact: true }).click();
+      // Refresh closes the menu; open it again to choose the recovered session.
+      const terminalMenu = await workspaceMenu(page, "Terminal actions");
+      const existing = terminalMenu.getByLabel("Existing terminal", { exact: true });
       const recovered = existing.locator('option:not([value=""])');
       await expect(recovered).toHaveCount(1);
       await expect(recovered).toContainText(/ · (starting|running)$/);
       await existing.selectOption((await recovered.getAttribute("value"))!);
-      await page.getByRole("button", { name: "Open terminal", exact: true }).click();
+      await terminalMenu.getByRole("button", { name: "Open terminal", exact: true }).click();
     }
     await expect(page.getByRole("tab")).toHaveCount(1, { timeout: 15_000 });
     expect(launchRequests).toBe(1);
@@ -947,7 +959,7 @@ test.describe.serial("server-rendered environments", () => {
     expect(firstSessionId).toMatch(/^session-[0-9a-f-]{36}$/);
     await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled({ timeout: 15_000 });
     expect((await terminalRoot.boundingBox())!.height).toBeGreaterThan(180);
-    expect((await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).boundingBox())!.height).toBeLessThan(60);
+    expect((await page.locator(".cw-workspace-statusbar").boundingBox())!.height).toBeLessThan(60);
     await expect.poll(() => page.evaluate(() => (
       ((window as Window & { __terminalFrames?: TerminalClientFrame[] }).__terminalFrames || [])
         .filter((frame) => frame.type === "resize" && frame.columns > 0 && frame.rows > 0).length
@@ -993,8 +1005,8 @@ test.describe.serial("server-rendered environments", () => {
     await page.mouse.move(copyBounds.x + copyBounds.width, copyBounds.y + copyBounds.height / 2, { steps: 12 });
     await page.mouse.up();
     await expect(terminalRoot.locator(".xterm-selection div").first()).toBeVisible();
-    await page.getByRole("button", { name: "Copy selection", exact: true }).click();
-    await expect(page.locator("[data-terminal-copy-status]")).toHaveText("Selection copied.");
+    await (await workspaceMenu(page, "Terminal actions")).getByRole("button", { name: "Copy selection", exact: true }).click();
+    await expect(page.locator("[data-terminal-session-status]:not([hidden]) [data-terminal-copy-status]")).toHaveText("Selection copied.");
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("__SSR_COPY_234__");
     const inputBeforeCopy = await page.evaluate(() => ((window as Window & { __terminalFrames?: TerminalClientFrame[] }).__terminalFrames || []).filter((frame) => frame.type === "input").length);
     await terminalRoot.locator("textarea").focus();
@@ -1009,7 +1021,7 @@ test.describe.serial("server-rendered environments", () => {
     await page.keyboard.press("Enter");
     await expect(terminalRows).toContainText(/__DURABLE_PID__\d+__/);
     const firstPid = /__DURABLE_PID__(\d+)__/.exec(await terminalRows.innerText())![1];
-    await page.getByRole("button", { name: "Rename terminal", exact: true }).click();
+    await (await workspaceMenu(page, "Terminal actions")).getByRole("button", { name: "Rename terminal", exact: true }).click();
     const rename = page.getByRole("dialog", { name: "Rename terminal", exact: true });
     await rename.getByLabel("Terminal name", { exact: true }).fill("Build shell");
     await rename.getByRole("button", { name: "Save name", exact: true }).click();
@@ -1055,7 +1067,7 @@ test.describe.serial("server-rendered environments", () => {
     await page.keyboard.press("Enter");
     await expect(terminalRoot.locator(".xterm-rows")).toContainText(/__SECOND_TERMINAL__unset__\d+__/);
     expect(/__SECOND_TERMINAL__unset__(\d+)__/.exec(await terminalRoot.locator(".xterm-rows").innerText())![1]).not.toBe(firstPid);
-    await page.getByRole("button", { name: "Rename terminal", exact: true }).click();
+    await (await workspaceMenu(page, "Terminal actions")).getByRole("button", { name: "Rename terminal", exact: true }).click();
     await rename.getByLabel("Terminal name", { exact: true }).fill("Log shell");
     await rename.getByRole("button", { name: "Save name", exact: true }).click();
     await page.getByRole("tab", { name: "Build shell", exact: true }).click();
@@ -1064,7 +1076,7 @@ test.describe.serial("server-rendered environments", () => {
     await page.getByRole("tab", { name: "Build shell", exact: true }).press("ArrowRight");
     await expect(page.getByRole("tab", { name: "Log shell", exact: true })).toBeFocused();
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", secondSessionId!);
-    await page.getByRole("button", { name: "Close terminal", exact: true }).click();
+    await page.getByRole("button", { name: "Close Log shell", exact: true }).click();
     await page.getByRole("dialog", { name: "Close terminal?" }).getByRole("button", { name: "Close terminal", exact: true }).click();
     await expect(page.getByRole("tab")).toHaveCount(1);
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstSessionId!);
@@ -1072,7 +1084,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByRole("tab", { name: "Build shell", exact: true })).toHaveAttribute("aria-selected", "true");
     // Restore the ordinary label before the existing chrome goldens. Rename
     // behavior is asserted above; snapshot names stay deterministic.
-    await page.getByRole("button", { name: "Rename terminal", exact: true }).click();
+    await (await workspaceMenu(page, "Terminal actions")).getByRole("button", { name: "Rename terminal", exact: true }).click();
     await rename.getByLabel("Terminal name", { exact: true }).fill("Terminal 1");
     await rename.getByRole("button", { name: "Save name", exact: true }).click();
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -1080,7 +1092,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator(".cw-terminal-page .xterm")).toBeVisible({ timeout: 15_000 });
     await page.setViewportSize({ width: 390, height: 844 });
     expect((await terminalRoot.boundingBox())!.height).toBeGreaterThanOrEqual(180);
-    expect((await page.locator(".cw-terminal-footer").boundingBox())!.height).toBeLessThan(100);
+    expect((await page.locator(".cw-workspace-statusbar").boundingBox())!.height).toBeLessThan(100);
     await expect(page.locator("[data-sandbox-lifetime] time")).toBeVisible();
     await expect(page.locator("[data-sandbox-lifetime] time")).toHaveAttribute("datetime", await sourceDeletionDeadline());
     await expect(page.locator("[data-sandbox-lifetime] time")).toHaveText(/^\d{2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2} UTC$/);
@@ -1157,7 +1169,7 @@ test.describe.serial("server-rendered environments", () => {
     // A no-op resource review must use the in-place private route and leave
     // the current terminal root, session and shell alive.
     const originalTerminalRoot = (await terminalRoot.elementHandle())!;
-    await page.getByRole("button", { name: "Resize", exact: true }).click();
+    await (await workspaceMenu(page, "More actions")).getByRole("button", { name: "Resize", exact: true }).click();
     const resizeDialog = page.getByRole("dialog", { name: `Resize ${environmentName}`, exact: true });
     const noopReview = page.waitForResponse((response) => response.url().endsWith("/_actions/resize/plan"));
     await resizeDialog.getByRole("button", { name: "Review resize", exact: true }).click();
@@ -1189,7 +1201,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(terminalRoot.locator(".xterm-rows")).toContainText(`__RESIZE_NOOP__${firstPid}__`);
     expect(launchRequests).toBe(2);
     expect(stopRequests).toBe(1);
-    await page.getByRole("button", { name: "Close terminal", exact: true }).click();
+    await page.getByRole("button", { name: "Close Terminal 1", exact: true }).click();
     await page.getByRole("dialog", { name: "Close terminal?" }).getByRole("button", { name: "Close terminal", exact: true }).click();
     await expect(page.getByRole("tab")).toHaveCount(0);
     await expectTerminalLeaseDrained();
@@ -1262,7 +1274,7 @@ test.describe.serial("server-rendered environments", () => {
     expect(stillStopped.state).toBe("stopped");
     await page.goto(filteredDetailPath);
     // Stopped compute changes are saved for Start, not a disguised restart.
-    await page.getByRole("button", { name: "Resize", exact: true }).click();
+    await (await workspaceMenu(page, "More actions")).getByRole("button", { name: "Resize", exact: true }).click();
     await resizeDialog.getByLabel("CPU", { exact: true }).selectOption("2000");
     await resizeDialog.getByLabel("Memory", { exact: true }).selectOption("4096");
     const stoppedReview = page.waitForResponse((response) => response.url().endsWith("/_actions/resize/plan"));
@@ -1326,10 +1338,10 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", lifecycleSessionId!);
     await expect(page.locator("[data-terminal-connection]")).toHaveText(/interrupted|stopped|exited|failed|no longer available/i, { timeout: 60_000 });
     expect(launchRequests).toBe(launchesBeforeStop + 1);
-    await page.getByRole("button", { name: "Remove tab", exact: true }).click();
+    await page.locator('[data-terminal-tab-item]:has([aria-selected="true"]) [data-terminal-remove-tab]').click();
     await expect(page.getByRole("tab")).toHaveCount(0);
     await expectTerminalLeaseDrained();
-    await page.getByRole("button", { name: "Delete", exact: true }).click();
+    await (await workspaceMenu(page, "More actions")).getByRole("button", { name: "Delete", exact: true }).click();
     const deleteDialog = page.getByRole("dialog", { name: `Delete ${environmentName}?`, exact: true });
     await expect(deleteDialog).toBeVisible();
     await expect(deleteDialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();

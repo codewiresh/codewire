@@ -3367,31 +3367,6 @@ mod tests {
         organization: &OrganizationContext,
         environment: crate::view::EnvironmentRow,
     ) -> String {
-        let view = crate::view::DashboardView {
-            user_name: "Resize".into(),
-            csrf_token: Default::default(),
-            is_admin: false,
-            organizations: Vec::new(),
-            has_organizations: false,
-            organization_navigation_unavailable: false,
-            new_organization_url: "/organizations/new/".into(),
-            settings_url: "/settings/".into(),
-            has_selected_organization: false,
-            selected_organization_name: String::new(),
-            selected_organization_slug: String::new(),
-            selected_organization_url: String::new(),
-            sandboxes: Vec::new(),
-            recent_sandboxes: Vec::new(),
-            sandbox_rail_available: false,
-            sandbox_rail_loading: false,
-            sandbox_total: 0,
-            sandbox_running: 0,
-            sandbox_stopped: 0,
-            sandbox_attention: 0,
-            provisioned_cpu_millicores: 0,
-            provisioned_memory_mb: 0,
-            provisioned_disk_gb: 0,
-        };
         let terminal_page = crate::view::TerminalPageView {
             account_id: "account".into(),
             organization_id: organization.id.clone(),
@@ -3403,7 +3378,6 @@ mod tests {
             error: String::new(),
         };
         crate::templates::TerminalTemplate {
-            view: &view,
             organization,
             page: &terminal_page,
             csrf_token: "csrf",
@@ -3613,7 +3587,7 @@ mod tests {
 
         let waiting = render_terminal(&organization, setup);
         assert!(waiting.contains(&format!(
-            "<p class=\"cw-field-help\" id=\"sandbox-resize-setup-note\" data-resize-setup-note>{NOTE}</p>"
+            "<p class=\"cw-row-menu-note\" id=\"sandbox-resize-setup-note\" data-resize-setup-note>{NOTE}</p>"
         )));
         assert!(waiting.contains(
             "data-resize-open aria-describedby=\"sandbox-resize-setup-note\" hidden>Resize</button>"
@@ -3628,7 +3602,7 @@ mod tests {
         assert!(offered.contains(
             "data-sandbox-action=\"resize\" data-sandbox-confirm>Review resize</button>"
         ));
-        // Only the readiness v2 and Resize v3 controllers keep this reason
+        // Only the readiness v3 and Resize v3 controllers keep this reason
         // and the Resize button in step. A cached older script would leave
         // the reason stale beside an enabled Resize, so both URLs moved.
         for path in [
@@ -3639,7 +3613,7 @@ mod tests {
         }
         assert_eq!(
             crate::assets::TERMINAL_READINESS_SCRIPT_PATH,
-            "/assets/codewire/terminal-readiness-v2.js"
+            "/assets/codewire/terminal-readiness-v3.js"
         );
         assert_eq!(
             page_error("setup-running"),
@@ -3866,7 +3840,7 @@ mod tests {
             "data-sandbox-observation-status role=\"status\">This Sandbox is being deleted.</p>"
         ));
         assert!(
-            deleting.contains("<div class=\"cw-sandbox-actions\" data-sandbox-actions hidden>")
+            deleting.contains("<div class=\"cw-workspace-actions\" data-sandbox-actions hidden>")
         );
         assert!(deleting.contains("data-terminal-running=\"false\" hidden>"));
         assert!(deleting.contains("data-sandbox-deleted hidden><a class=\"cw-link-button\""));
@@ -3878,13 +3852,51 @@ mod tests {
         assert!(deleted.contains(
             "<p class=\"cw-field-help\" data-sandbox-deleted><a class=\"cw-link-button\" href=\"/test/\">Back to Sandboxes</a></p>"
         ));
-        assert!(deleted.contains("<div class=\"cw-sandbox-actions\" data-sandbox-actions hidden>"));
+        assert!(
+            deleted.contains("<div class=\"cw-workspace-actions\" data-sandbox-actions hidden>")
+        );
         assert!(deleted.contains("data-terminal-running=\"false\" hidden>"));
         let running = detail(EnvironmentState::Running);
         assert!(running.contains("data-sandbox-observation-status role=\"status\" hidden></p>"));
-        assert!(running.contains("<div class=\"cw-sandbox-actions\" data-sandbox-actions>"));
+        assert!(running.contains("<div class=\"cw-workspace-actions\" data-sandbox-actions>"));
         assert!(running.contains("data-sandbox-deleted hidden>"));
         assert!(running.contains("data-terminal-running=\"true\">"));
+    }
+
+    /// The workspace reads like a desktop terminal: the header names the
+    /// Sandbox, its state and resources; the status bar reads the last event
+    /// and automatic deletion in short words after their labels.
+    #[test]
+    fn workspace_header_and_status_bar_read_the_sandbox_in_short_words() {
+        use codewire_proto::codewire::v1::EnvironmentState;
+        const ID: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let organization = test_organization();
+        let mut row = lifecycle_test_row(ID, "quiet-mesa", EnvironmentState::Running);
+        row.resources = "1 vCPU · 2 GiB · 10 GiB".into();
+        row.last_event = "6m ago".into();
+        let html = render_terminal(&organization, row.clone());
+        assert!(html.contains("<h1>quiet-mesa</h1><span class=\"cw-status cw-status--pill\" data-sandbox-state data-tone=\"success\">running</span><span class=\"cw-workspace-resources\" data-sandbox-resources>1 vCPU · 2 GiB · 10 GiB</span>"));
+        assert!(html.contains("<dt>Last event</dt><dd data-sandbox-last-event>6m ago</dd>"));
+        assert!(html.contains(&format!("href=\"vscode://vscode-remote/ssh-remote+cw-{ID}/workspace\" data-sandbox-action=\"connect\">Open in VS Code</a>")));
+        for (state, label) in [
+            ("unscheduled", "off"),
+            ("protected", "off (protected)"),
+            ("unavailable", "unavailable"),
+        ] {
+            row.deletion_state = state;
+            let html = render_terminal(&organization, row.clone());
+            assert!(
+                html.contains(&format!(
+                    "<dt>Auto-delete</dt><dd data-sandbox-lifetime>{label}</dd>"
+                )),
+                "{state}"
+            );
+        }
+        row.deletion_state = "scheduled";
+        row.shutdown_at = Some("2026-09-17T00:26:00.123456789Z".into());
+        row.shutdown_at_label = "17 Sep 2026, 00:26 UTC".into();
+        let html = render_terminal(&organization, row);
+        assert!(html.contains("<dt>Auto-delete</dt><dd data-sandbox-lifetime><time datetime=\"2026-09-17T00:26:00.123456789Z\">17 Sep 2026, 00:26 UTC</time></dd>"));
     }
 
     #[test]

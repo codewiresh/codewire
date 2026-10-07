@@ -10,6 +10,14 @@ const ORIGIN = "https://codewire-dev.sh";
 const TERMINAL_ATTACH_MS = 30_000;
 const button = (owner: Page | Locator, name: string) => owner.getByRole("button", { name, exact: true });
 const dialog = (page: Page, name: string) => page.getByRole("dialog", { name, exact: true });
+// The Sandbox workspace keeps terminal actions and Sandbox actions in two
+// menus; open one, as a person does, before using what it holds.
+async function workspaceMenu(page: Page, menu: "Terminal actions" | "More actions"): Promise<Locator> {
+  const details = page.locator(menu === "Terminal actions" ? "[data-terminal-menu]" : "[data-sandbox-menu]");
+  if (!(await details.evaluate((node) => (node as HTMLDetailsElement).open))) await details.locator(":scope > summary").click();
+  await expect(details).toHaveJSProperty("open", true);
+  return details;
+}
 
 function passed(name: string, started: number): void {
   console.error(`[dev-ux] ${name}:passed duration_ms=${Date.now() - started}`);
@@ -488,8 +496,8 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await page.mouse.down();
     await page.mouse.move(bounds.x + bounds.width, bounds.y + bounds.height / 2, { steps: 12 });
     await page.mouse.up();
-    await button(page, "Copy selection").click();
-    await expect(page.locator("[data-terminal-copy-status]")).toHaveText("Selection copied.");
+    await button(await workspaceMenu(page, "Terminal actions"), "Copy selection").click();
+    await expect(page.locator("[data-terminal-session-status]:not([hidden]) [data-terminal-copy-status]")).toHaveText("Selection copied.");
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("__UX_COPY__");
   });
   const rename = dialog(page, "Rename terminal");
@@ -503,7 +511,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     job = /__UX_JOB__(\d+)__/.exec(await rows.innerText())![1];
   });
   await stage("terminal-tabs-rename", async () => {
-    await button(page, "Rename terminal").click();
+    await button(await workspaceMenu(page, "Terminal actions"), "Rename terminal").click();
     await rename.getByLabel("Terminal name", { exact: true }).fill("UX shell");
     await button(rename, "Save name").click();
   });
@@ -526,7 +534,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     expect(/__UX_SECOND__unset__(\d+)__/.exec(await rows.innerText())![1]).not.toBe(pid);
   });
   await stage("terminal-tabs-reload", async () => {
-    await button(page, "Rename terminal").click();
+    await button(await workspaceMenu(page, "Terminal actions"), "Rename terminal").click();
     await rename.getByLabel("Terminal name", { exact: true }).fill("UX logs");
     await button(rename, "Save name").click();
     await page.reload({ waitUntil: "domcontentloaded" });
@@ -549,10 +557,11 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", secondId!);
   });
   await stage("terminal-tabs-close", async () => {
-    await button(page, "Close terminal").click();
+    // Each tab carries its own close button, named for the tab.
+    await button(page, "Close UX logs").click();
     await button(close, "Cancel").click();
     await expect(page.getByRole("tab")).toHaveCount(2);
-    await button(page, "Close terminal").click();
+    await button(page, "Close UX logs").click();
     await button(close, "Close terminal").click();
   });
   await stage("terminal-tabs-survivor-tab", async () => {
@@ -686,7 +695,8 @@ export async function runDevUxWalkthrough(page: Page, options: {
     const deadline = Date.parse((await page.locator("[data-sandbox-lifetime] time").getAttribute("datetime")) ?? "");
     expect(deadline).toBeGreaterThan(Date.now());
     expect(deadline).toBeLessThanOrEqual(Date.now() + 65 * 60_000);
-    await button(page, "Resize").click();
+    const sandboxMenu = await workspaceMenu(page, "More actions");
+    await button(sandboxMenu, "Resize").click();
     const resize = dialog(page, `Resize ${owned.name}`);
     await expect(resize).toBeVisible();
     // Resize offers Create's choices with the current resources selected.
@@ -696,7 +706,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(resize.getByLabel("Disk (GiB)", { exact: true })).toHaveValue("10");
     await page.mouse.click(2, 2);
     await expect(resize).not.toBeVisible();
-    await expect(button(page, "Resize")).toBeFocused();
+    await expect(button(sandboxMenu, "Resize")).toBeFocused();
   });
   await stage("lifecycle-live-state", async () => {
     await button(page, "Stop").click();
@@ -715,12 +725,12 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(page).toHaveURL(`${ORIGIN}${detailPath}?message=environment-started`);
     await expect(page.locator("[data-sandbox-state]")).toHaveText("running", { timeout: 240_000 });
     await expect(button(page, "New terminal")).toBeEnabled({ timeout: 60_000 });
-    await button(page, "Delete").click();
+    await button(await workspaceMenu(page, "More actions"), "Delete").click();
     const deletion = dialog(page, `Delete ${owned.name}?`);
     await expect(button(deletion, "Cancel")).toBeFocused();
     await expect(deletion).toContainText("This permanently deletes the Sandbox and its workspace files.");
     await button(deletion, "Cancel").click();
-    await button(page, "Delete").click();
+    await button(await workspaceMenu(page, "More actions"), "Delete").click();
     await button(deletion, "Delete Sandbox").click();
     await expect(page).toHaveURL(`${ORIGIN}/${slug}/?message=environment-destroying&environment=${id}`);
     // Independent CLI finally cleanup proves terminal destruction, even when
