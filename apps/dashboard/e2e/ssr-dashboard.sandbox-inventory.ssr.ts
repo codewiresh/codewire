@@ -51,6 +51,24 @@ async function refresh(page: Page, changes: Change[] = [], search?: string) {
   }, { changes, search });
 }
 
+test("a click anywhere on a row opens its Sandbox, except on the row menu", async ({ page }) => {
+  await openInventory(page);
+  const row = page.locator(`tr[data-environment-id="${quietMesa}"]`);
+  const href = await row.locator("a.cw-environment-name").getAttribute("href");
+  const list = page.url();
+  // The menu opens where it is and the list stays.
+  const menu = row.locator("details.cw-row-menu");
+  await menu.locator(":scope > summary").click();
+  await expect(menu).toHaveJSProperty("open", true);
+  expect(page.url()).toBe(list);
+  await menu.locator(":scope > summary").click();
+  await expect(menu).toHaveJSProperty("open", false);
+  // A click on the State cell, away from the name, lands on the row's one link.
+  const state = (await row.locator("td").nth(1).boundingBox())!;
+  await page.mouse.click(state.x + state.width / 2, state.y + state.height / 2);
+  await expect(page).toHaveURL(new URL(href!, list).href);
+});
+
 test("the desktop sidebar collapses to a rail and expands again, remembered in a cookie", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openInventory(page);

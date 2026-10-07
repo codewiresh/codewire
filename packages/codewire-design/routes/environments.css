@@ -27,6 +27,11 @@
 .cw-sandbox-table .cw-sandbox-lifetime { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 .cw-environment-table .cw-status > span { width: var(--icon-size-sm); text-align: center; }
 .cw-row-menu { display: inline-block; }
+/* A click anywhere on a row opens its Sandbox: the name link's hit area
+   covers the row, and the row's menu cell sits above it. */
+.cw-sandbox-table tbody tr { position: relative; }
+.cw-sandbox-table .cw-environment-name::after { position: absolute; inset: 0; content: ""; }
+.cw-sandbox-table .cw-action-cell { position: relative; z-index: 1; }
 .cw-row-menu-meta { padding: var(--space-1) var(--space-2) var(--space-1-5); border-bottom: var(--border-width) solid var(--border-subtle); color: var(--fg-tertiary); font-size: var(--text-small); }
 /* Why an action is not offered, on the menu items' inset. */
 .cw-row-menu-note { margin: 0; padding: var(--space-1-5) var(--space-2); color: var(--fg-tertiary); font-size: var(--text-small); line-height: var(--leading-body); }
