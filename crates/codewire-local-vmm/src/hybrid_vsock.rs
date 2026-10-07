@@ -50,7 +50,6 @@ pub async fn connect_hybrid_vsock(
 
 /// Fixed live-runtime port; no caller-selected guest routing or fallback. The
 /// connected peer is birth-pinned before sending even the CONNECT handshake.
-#[cfg(target_os = "linux")]
 pub(crate) async fn connect_runtime_publisher(
     socket: &Path,
     identity: &SocketIdentity,
@@ -60,7 +59,7 @@ pub(crate) async fn connect_runtime_publisher(
     validate_target(socket, port)?;
     identity.revalidate(socket)?;
     let stream = connect_stream(UnixStream::connect(socket), CONNECT_TIMEOUT).await?;
-    let peer = crate::linux::supervisor_peer::admit_known_process_stream(&stream, expected_vmm)
+    let peer = crate::host::supervisor_peer::admit_known_process_stream(&stream, expected_vmm)
         .map_err(|_| HybridVsockError::InvalidAcknowledgement)?;
     identity.revalidate(socket)?;
     let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, complete_handshake(stream, port))

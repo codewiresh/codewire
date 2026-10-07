@@ -389,7 +389,6 @@ impl SupervisorStore {
 
     /// Observation-only fence for live runtime controls. Do not dispatch the
     /// selected or any other environment's pending lifecycle work here.
-    #[cfg(target_os = "linux")]
     pub(crate) fn has_pending_lifecycle_operation(
         &self,
         environment_id: Uuid,
@@ -418,7 +417,6 @@ impl SupervisorStore {
         rows.map(|row| row.map_err(Into::into)).collect()
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn cw_runtime_operation_by_id(
         &self,
         operation_id: Uuid,
@@ -427,7 +425,6 @@ impl SupervisorStore {
         operation_for_id(&self.connection, operation_id)
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn completed_cw_runtime_operations(
         &self,
         environment_id: Uuid,
@@ -449,7 +446,6 @@ impl SupervisorStore {
         Ok(records)
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn interrupted_cw_runtime_operations(
         &self,
         environment_id: Uuid,
@@ -474,7 +470,6 @@ impl SupervisorStore {
     // A reboot invalidates the old process, not its possible selector effect.
     // Only an exact retained guest receipt may close that particular runtime
     // interruption. No ordinary terminal operation is rewound or replayed.
-    #[cfg(target_os = "linux")]
     pub(crate) fn resolve_interrupted_cw_runtime(
         &self,
         operation: &OperationRecord,
@@ -3771,7 +3766,6 @@ mod tests {
             .unwrap();
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn live_runtime_journal_reopens_without_replay_or_resetting_unknown_effect() {
         let (_parent, root) = root();

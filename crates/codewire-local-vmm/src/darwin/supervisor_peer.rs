@@ -12,7 +12,7 @@
 //! whose executable is not this cw is admitted under that executable only when
 //! the managed store retains it as a version with the same digest.
 
-use std::os::fd::AsRawFd as _;
+use std::os::fd::{AsRawFd as _, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +21,7 @@ use codewire_cw_release::store::Store;
 use tokio::net::UnixStream;
 
 use super::path::{SocketIdentity, current_uid};
-use super::process::ProcessIdentity;
+use super::process::{ProcessIdentity, WatchedProcess};
 use crate::supervisor_config::NativeRuntimeConfig;
 
 #[derive(Debug, thiserror::Error)]
@@ -100,6 +100,28 @@ impl SupervisorPeerPin {
         }
         Ok(())
     }
+}
+
+/// Admit a stream against an ALREADY authoritative process birth, as Linux
+/// does with its socket-derived pidfd. The kernel names the peer's PID
+/// (`LOCAL_PEERPID`); that PID must carry the expected birth, and the returned
+/// kqueue becomes readable when it exits. This does not discover a role,
+/// adopt or signal a process, or admit executable provenance.
+pub(crate) fn admit_known_process_stream(
+    stream: &UnixStream,
+    expected: &ProcessIdentity,
+) -> Result<OwnedFd, PeerError> {
+    let credential = stream.peer_cred().map_err(|_| PeerError::Kernel)?;
+    if credential.uid() != current_uid() || peer_pid(stream)? != expected.pid {
+        return Err(PeerError::Identity);
+    }
+    let watched = WatchedProcess::watch(expected).map_err(|_| PeerError::Identity)?;
+    // The PID was read before the birth check; read it again so a peer that
+    // exited and was replaced in between is refused.
+    if peer_pid(stream)? != expected.pid || watched.is_exited().map_err(|_| PeerError::Kernel)? {
+        return Err(PeerError::Identity);
+    }
+    Ok(watched.into_exit_descriptor())
 }
 
 /// The peer's executable must be a version the managed store retains, with the

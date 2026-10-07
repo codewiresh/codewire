@@ -6,7 +6,6 @@
 
 mod bootstrap;
 mod metadata;
-#[cfg(target_os = "linux")]
 mod runtime;
 mod sources;
 #[cfg(test)]
@@ -54,7 +53,6 @@ use crate::control::v1;
 use crate::control::v1::local_supervisor_service_server::{
     LocalSupervisorService, LocalSupervisorServiceServer,
 };
-#[cfg(target_os = "linux")]
 use crate::cw_runtime::{CwRuntimeError, CwRuntimeStore};
 use crate::generation::{GenerationError, ensure_root_generation};
 use crate::host::path::{PathError, PrivateRoot, SocketIdentity};
@@ -431,7 +429,6 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         state,
         children: HashMap::new(),
         live_runners: HashMap::new(),
-        #[cfg(target_os = "linux")]
         runtime_operations: BTreeSet::new(),
         incompatible_runners: BTreeSet::new(),
         operation_progress: operation_progress.clone(),
@@ -595,7 +592,6 @@ struct SupervisorCore {
     state: SupervisorState,
     children: HashMap<Uuid, Child>,
     live_runners: HashMap<Uuid, LiveProcess>,
-    #[cfg(target_os = "linux")]
     runtime_operations: BTreeSet<Uuid>,
     // Observation only: an unsupported protocol never grants runner RPC or
     // retirement authority, and does not rewrite the durable lifecycle state.
@@ -1647,7 +1643,6 @@ impl SupervisorCore {
     async fn run_pending_operations(&mut self, recovering: bool) -> Result<(), SupervisorError> {
         for operation in self.store.pending_operations()? {
             if operation.kind.cw_runtime() {
-                #[cfg(target_os = "linux")]
                 if !self.runtime_operations.contains(&operation.operation_id) {
                     runtime::recover(self, &operation).await?;
                 }
@@ -2759,7 +2754,6 @@ impl SupervisorCore {
     }
 
     /// Admit the installed cw runtime source and return its catalog generation.
-    #[cfg(target_os = "linux")]
     async fn admit_installed_cw_runtime(&mut self) -> Result<Option<String>, SupervisorError> {
         let engine_root = self.config.engine_root();
         let source = self.config.cw_runtime_lock();
@@ -2783,7 +2777,6 @@ impl SupervisorCore {
 
     /// Revalidate an environment's bound cw runtime catalog and return its
     /// generation.
-    #[cfg(target_os = "linux")]
     async fn admit_environment_cw_runtime(
         &mut self,
         name: &str,
@@ -2808,24 +2801,6 @@ impl SupervisorCore {
         .await
         .map_err(|_| SupervisorError::CwRuntimeProvisionTask)?
         .map_err(Into::into)
-    }
-
-    /// cw runtime catalogs are Linux-only; Darwin never installs one.
-    #[cfg(target_os = "macos")]
-    async fn admit_installed_cw_runtime(&mut self) -> Result<Option<String>, SupervisorError> {
-        Ok(None)
-    }
-
-    /// Darwin never binds a cw runtime catalog, so a binding is invalid state.
-    #[cfg(target_os = "macos")]
-    async fn admit_environment_cw_runtime(
-        &mut self,
-        name: &str,
-    ) -> Result<Option<String>, SupervisorError> {
-        if self.environment(name)?.cw_runtime.is_some() {
-            return Err(SupervisorError::InvalidState);
-        }
-        Ok(None)
     }
 
     async fn ensure_vm_started(
@@ -2862,7 +2837,6 @@ impl SupervisorCore {
             {
                 return Err(SupervisorError::InvalidRunnerResponse);
             }
-            #[cfg(target_os = "linux")]
             if cw_runtime.is_some() {
                 let access = client
                     .daemon_access()
@@ -3029,7 +3003,6 @@ impl SupervisorCore {
             let _ = client.stop().await;
             return Err(SupervisorError::InvalidRunnerResponse);
         }
-        #[cfg(target_os = "linux")]
         if cw_runtime.is_some() {
             let confirmation = match client.daemon_access().await {
                 Ok(access) => runtime::confirm_boot(self, name, generation, access).await,
@@ -4866,18 +4839,6 @@ impl LocalSupervisorService for SupervisorRpc {
             .map_err(Status::from)
     }
 
-    /// cw runtime catalogs are Linux-only.
-    #[cfg(target_os = "macos")]
-    async fn get_managed_runtime(
-        &self,
-        _request: Request<v1::EnvironmentSelector>,
-    ) -> Result<Response<v1::ManagedRuntime>, Status> {
-        Err(Status::failed_precondition(
-            "running VM has no admitted cw runtime catalog",
-        ))
-    }
-
-    #[cfg(target_os = "linux")]
     async fn get_managed_runtime(
         &self,
         request: Request<v1::EnvironmentSelector>,
@@ -5242,20 +5203,13 @@ fn operation_result_proto(
     result: &serde_json::Value,
 ) -> Result<v1::OperationResult, Status> {
     if operation.kind.cw_runtime() {
-        #[cfg(target_os = "linux")]
-        {
-            let reply = runtime::decode_result(operation, result)?;
-            return Ok(v1::OperationResult {
-                value: Some(v1::operation_result::Value::CwRuntime(runtime::status(
-                    &reply,
-                    Some(operation),
-                )?)),
-            });
-        }
-        #[cfg(target_os = "macos")]
-        return Err(Status::failed_precondition(
-            "cw runtime operations are unavailable on this host",
-        ));
+        let reply = runtime::decode_result(operation, result)?;
+        return Ok(v1::OperationResult {
+            value: Some(v1::operation_result::Value::CwRuntime(runtime::status(
+                &reply,
+                Some(operation),
+            )?)),
+        });
     }
     let fields = result
         .as_object()
@@ -5395,7 +5349,6 @@ fn runner_cw_runtime_identity_matches(
         && (state != StoredEnvironmentState::Stopped || attached.is_none())
 }
 
-#[cfg(target_os = "linux")]
 fn managed_runtime_artifact_generation(
     environment: &EnvironmentRecord,
     expected: Uuid,
@@ -7183,7 +7136,6 @@ impl From<SupervisorError> for Status {
             SupervisorError::Artifact(
                 crate::artifact::ArtifactError::GuestSeedProtocolUnsupported(_),
             ) => Status::failed_precondition(error.to_string()),
-            #[cfg(target_os = "linux")]
             SupervisorError::CwRuntime(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::VmStart(_)
             | SupervisorError::GuestDockerToolingMissing
@@ -7342,10 +7294,8 @@ pub enum SupervisorError {
     Artifact(#[from] crate::artifact::ArtifactError),
     #[error("runtime artifact store operation failed")]
     ArtifactStore,
-    #[cfg(target_os = "linux")]
     #[error(transparent)]
     CwRuntime(#[from] CwRuntimeError),
-    #[cfg(target_os = "linux")]
     #[error("cw runtime catalog preparation task failed")]
     CwRuntimeProvisionTask,
     #[error("{0}")]
@@ -8008,7 +7958,6 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
-            #[cfg(target_os = "linux")]
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
@@ -8553,7 +8502,6 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
-            #[cfg(target_os = "linux")]
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
@@ -11917,7 +11865,6 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
-            #[cfg(target_os = "linux")]
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
@@ -14856,7 +14803,6 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
-            #[cfg(target_os = "linux")]
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
@@ -14925,7 +14871,6 @@ mod tests {
             state,
             children: HashMap::new(),
             live_runners: HashMap::new(),
-            #[cfg(target_os = "linux")]
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,

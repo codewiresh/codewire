@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use rustix::fs::{FlockOperation, flock};
 use uuid::Uuid;
 
-#[cfg(target_os = "linux")]
 use crate::cw_runtime::AdmittedCwRuntimeDisk;
 use codewire_vmm_guest_probe::MAX_DIRECT_SHARES;
 
@@ -253,7 +252,6 @@ pub struct PersistedVmState {
     pub root_generation: Option<String>,
     #[serde(default)]
     pub root_disk: Option<StateDiskIdentity>,
-    #[cfg(target_os = "linux")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cw_runtime_disk: Option<AdmittedCwRuntimeDisk>,
     pub api_socket: Option<SocketIdentity>,
@@ -334,7 +332,6 @@ impl PersistedVmState {
         {
             return Err(StateError::InvalidPersistedState);
         }
-        #[cfg(target_os = "linux")]
         if self
             .cw_runtime_disk
             .as_ref()
@@ -922,7 +919,6 @@ mod tests {
             docker_disk: None,
             root_generation: None,
             root_disk: None,
-            #[cfg(target_os = "linux")]
             cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
@@ -1035,7 +1031,6 @@ mod tests {
         assert!(!names.to_ascii_lowercase().contains("credential"));
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn legacy_persisted_state_defaults_to_no_cw_runtime_attachment() {
         let original = persisted(VmPhase::Starting);

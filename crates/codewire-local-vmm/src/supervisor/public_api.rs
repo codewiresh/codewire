@@ -84,7 +84,6 @@ pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
         .layer(axum::middleware::from_fn(enforce_connect_only));
 
     let router = axum::Router::new();
-    #[cfg(target_os = "linux")]
     let router = router.route_service(
         "/codewire.local.v1.LinuxCwRuntimeService/{*method}",
         v1::linux_cw_runtime_service_server::LinuxCwRuntimeServiceServer::new(supervisor.clone()),

@@ -260,7 +260,6 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
-    #[cfg(target_os = "linux")]
     async fn runtime_client(
         &self,
     ) -> Result<
@@ -283,7 +282,6 @@ impl NativeSupervisorClient {
         Ok(v1::linux_cw_runtime_service_client::LinuxCwRuntimeServiceClient::new(channel))
     }
 
-    #[cfg(target_os = "linux")]
     pub async fn runtime_resolve(&self, selector: &str) -> Result<String, Status> {
         let resolved = self
             .runtime_client()
@@ -305,7 +303,6 @@ impl NativeSupervisorClient {
         Ok(resolved.environment_id)
     }
 
-    #[cfg(target_os = "linux")]
     pub async fn runtime_info(
         &self,
         environment_id: &str,
@@ -319,7 +316,6 @@ impl NativeSupervisorClient {
             .await
             .map(|response| response.into_inner())
     }
-    #[cfg(target_os = "linux")]
     pub async fn runtime_update(
         &self,
         request: v1::LinuxCwRuntimeMutation,
@@ -330,7 +326,6 @@ impl NativeSupervisorClient {
             .await
             .map(|response| response.into_inner())
     }
-    #[cfg(target_os = "linux")]
     pub async fn runtime_rollback(
         &self,
         request: v1::LinuxCwRuntimeMutation,
@@ -341,7 +336,6 @@ impl NativeSupervisorClient {
             .await
             .map(|response| response.into_inner())
     }
-    #[cfg(target_os = "linux")]
     pub async fn runtime_observe(
         &self,
         environment_id: &str,
@@ -356,7 +350,6 @@ impl NativeSupervisorClient {
             .await
             .map(|response| response.into_inner())
     }
-    #[cfg(target_os = "linux")]
     pub async fn runtime_cancel(
         &self,
         environment_id: &str,

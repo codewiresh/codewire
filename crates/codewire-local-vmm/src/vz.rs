@@ -12,6 +12,7 @@ use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_DISK_SERIAL;
 use codewire_vmm_guest_probe::{
     DOCKER_DISK_SERIAL, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SETUP_DISK_SERIAL, STATE_DISK_SERIAL,
 };
@@ -94,6 +95,8 @@ pub(crate) struct VzDisks<'a> {
     pub(crate) root: &'a Path,
     pub(crate) seed: &'a Path,
     pub(crate) setup: Option<&'a Path>,
+    /// The read-only cw runtime catalog the guest mounts at `/codewire-cw`.
+    pub(crate) cw_runtime: Option<&'a Path>,
 }
 
 impl VzConfiguration {
@@ -120,6 +123,11 @@ impl VzConfiguration {
         attached.push(disk(disks.root, ROOT_DISK_SERIAL, false));
         attached.push(disk(disks.seed, SEED_DISK_SERIAL, true));
         attached.extend(disks.setup.map(|path| disk(path, SETUP_DISK_SERIAL, true)));
+        attached.extend(
+            disks
+                .cw_runtime
+                .map(|path| disk(path, CW_RUNTIME_DISK_SERIAL, true)),
+        );
         Self {
             schema_version: SCHEMA_VERSION,
             kernel: kernel.to_owned(),
@@ -191,6 +199,7 @@ mod tests {
                 root: Path::new("/vm/generations/x/root.raw"),
                 seed: Path::new("/vm/seed/seed.raw"),
                 setup: Some(Path::new("/vm/setup.raw")),
+                cw_runtime: Some(Path::new("/engine/cw-runtimes/catalogs/c/runtime.raw")),
             },
             vec![VzShare {
                 tag: "cw-direct-00".to_owned(),
@@ -237,6 +246,7 @@ mod tests {
                 (ROOT_DISK_SERIAL.to_owned(), false),
                 (SEED_DISK_SERIAL.to_owned(), true),
                 (SETUP_DISK_SERIAL.to_owned(), true),
+                (CW_RUNTIME_DISK_SERIAL.to_owned(), true),
             ]
         );
         assert_eq!(value["schemaVersion"], 2);

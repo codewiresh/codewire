@@ -448,6 +448,54 @@ impl LiveProcess {
     }
 }
 
+/// A recorded process this process did not spawn, observed for liveness only.
+/// It is never adopted or signaled. Its kqueue becomes readable when that
+/// exact birth exits, like a Linux pidfd recovered for the same identity.
+#[derive(Debug)]
+pub(crate) struct WatchedProcess {
+    identity: ProcessIdentity,
+    exit: OwnedFd,
+}
+
+impl WatchedProcess {
+    /// Register for the exit first, then require the recorded birth, so an
+    /// exit or PID reuse after the check is still reported by the queue.
+    pub(crate) fn watch(expected: &ProcessIdentity) -> Result<Self, RecoveryError> {
+        let exit = exit_queue(expected.pid)?;
+        match LiveProcess::recover(expected) {
+            Err(RecoveryError::Unowned) => Ok(Self {
+                identity: expected.clone(),
+                exit,
+            }),
+            Err(error) => Err(error),
+            Ok(_) => unreachable!("Darwin recovery never adopts a process"),
+        }
+    }
+
+    pub(crate) fn identity(&self) -> &ProcessIdentity {
+        &self.identity
+    }
+
+    pub(crate) fn is_exited(&self) -> Result<bool, RecoveryError> {
+        let mut pollfd = libc::pollfd {
+            fd: self.exit.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one initialized entry for the call; zero timeout never blocks.
+        let result = unsafe { libc::poll(&mut pollfd, 1, 0) };
+        if result < 0 {
+            return Err(RecoveryError::ReadProcess(io::Error::last_os_error()));
+        }
+        Ok(result != 0)
+    }
+
+    /// The exit queue alone, for a caller that only polls it.
+    pub(crate) fn into_exit_descriptor(self) -> OwnedFd {
+        self.exit
+    }
+}
+
 /// Register for one process's exit. A child that already exited fails
 /// registration with ESRCH; because it is still unreaped, that means exited.
 pub(crate) fn exit_queue(pid: u32) -> Result<OwnedFd, RecoveryError> {
@@ -459,6 +507,10 @@ pub(crate) fn exit_queue(pid: u32) -> Result<OwnedFd, RecoveryError> {
     }
     // SAFETY: raw is a fresh descriptor that nothing else owns.
     let queue = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: scalar fcntl on the owned descriptor; no child inherits it.
+    if unsafe { libc::fcntl(queue.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+        return Err(RecoveryError::ReadProcess(io::Error::last_os_error()));
+    }
     match register_exit(&queue, pid) {
         Ok(()) => Ok(queue),
         Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {

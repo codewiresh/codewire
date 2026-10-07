@@ -31,7 +31,6 @@ use crate::ch_api::{ChApiClient, ChApiError, VmInfo};
 use crate::cloud_hypervisor::{
     CloudHypervisorConfig, CloudHypervisorConfigError, CommandSpec, VirtioFsConfig,
 };
-#[cfg(target_os = "linux")]
 use crate::cw_runtime::{AdmittedCwRuntimeDisk, CwRuntimeError, CwRuntimeStore};
 use crate::direct_share::{AdmittedDirectShare, DirectShareRequest};
 use crate::egress_broker::{
@@ -222,7 +221,6 @@ impl CloudHypervisorRunner {
         preflight()?;
         validate_request(&request)?;
         self.artifacts.require_current_guest_seed_abi()?;
-        #[cfg(target_os = "linux")]
         let cw_runtime_disk = request
             .cw_runtime_catalog_generation
             .as_deref()
@@ -232,7 +230,6 @@ impl CloudHypervisorRunner {
         let paths = VmPaths::create(&self.state_root, request.vm_id)?;
         let lock = paths.lock()?;
         let persisted = read_stopped_persisted_state(&paths, request.vm_id)?;
-        #[cfg(target_os = "linux")]
         if let Some(disk) = persisted
             .as_ref()
             .and_then(|state| state.cw_runtime_disk.as_ref())
@@ -276,7 +273,6 @@ impl CloudHypervisorRunner {
             None => seed,
         };
         let seed = seed.with_managed_credential_clients(request.managed_credential_clients);
-        #[cfg(target_os = "linux")]
         let seed = match &cw_runtime_disk {
             Some(disk) => seed.with_cw_runtime_catalog_sha256(
                 Sha256Value::parse_hex(&disk.generation)
@@ -339,7 +335,6 @@ impl CloudHypervisorRunner {
             docker_disk,
             root_disk,
             setup_disk,
-            #[cfg(target_os = "linux")]
             cw_runtime_disk,
             direct_shares,
             token,
@@ -434,7 +429,6 @@ impl CloudHypervisorRunner {
         if let Some(setup) = &prepared.setup_disk {
             revalidate_setup_disk(setup, prepared.request.setup)?;
         }
-        #[cfg(target_os = "linux")]
         if let Some(disk) = &prepared.cw_runtime_disk {
             CwRuntimeStore::create(&self.state_root)?.revalidate_attachment(disk)?;
         }
@@ -492,6 +486,10 @@ impl CloudHypervisorRunner {
                     .setup_disk
                     .as_ref()
                     .map(|setup| setup.path.as_path()),
+                cw_runtime: prepared
+                    .cw_runtime_disk
+                    .as_ref()
+                    .map(|disk| disk.path.as_path()),
             },
             shares,
             &prepared.paths.vsock_socket,
@@ -534,6 +532,7 @@ impl CloudHypervisorRunner {
             docker_disk: prepared.docker_disk.clone(),
             root_generation: Some(prepared.request.root_generation.clone()),
             root_disk: Some(prepared.root_disk.clone()),
+            cw_runtime_disk: prepared.cw_runtime_disk.clone(),
             api_socket: None,
             vsock_socket: None,
         };
@@ -571,6 +570,7 @@ impl CloudHypervisorRunner {
             docker_disk: prepared.docker_disk,
             root_disk: prepared.root_disk,
             setup_disk: prepared.setup_disk,
+            cw_runtime_disk: prepared.cw_runtime_disk,
             token: prepared.token,
             child,
             process,
@@ -1124,7 +1124,6 @@ pub struct PreparedVm {
     docker_disk: Option<StateDiskIdentity>,
     root_disk: StateDiskIdentity,
     setup_disk: Option<SetupDiskIdentity>,
-    #[cfg(target_os = "linux")]
     cw_runtime_disk: Option<AdmittedCwRuntimeDisk>,
     direct_shares: Vec<PreparedDirectShare>,
     token: Zeroizing<String>,
@@ -1144,7 +1143,6 @@ impl fmt::Debug for PreparedVm {
             .field("docker_disk", &self.docker_disk)
             .field("root_disk", &self.root_disk)
             .field("setup_disk", &self.setup_disk);
-        #[cfg(target_os = "linux")]
         debug.field("cw_runtime_disk", &self.cw_runtime_disk);
         debug.field("direct_share_count", &self.direct_shares.len());
         debug.field("token", &"[REDACTED]");
@@ -1179,12 +1177,10 @@ impl PreparedVm {
         &self.root_disk
     }
 
-    #[cfg(target_os = "linux")]
     pub fn cw_runtime_disk(&self) -> Option<&AdmittedCwRuntimeDisk> {
         self.cw_runtime_disk.as_ref()
     }
 
-    #[cfg(target_os = "linux")]
     pub fn cw_runtime_catalog_generation(&self) -> Option<&str> {
         self.cw_runtime_disk
             .as_ref()
@@ -1203,7 +1199,6 @@ pub struct RunningVm {
     docker_disk: Option<StateDiskIdentity>,
     root_disk: StateDiskIdentity,
     setup_disk: Option<SetupDiskIdentity>,
-    #[cfg(target_os = "linux")]
     cw_runtime_disk: Option<AdmittedCwRuntimeDisk>,
     #[cfg(target_os = "linux")]
     direct_shares: Vec<DirectShareProcess>,
@@ -1228,10 +1223,9 @@ impl fmt::Debug for RunningVm {
             .field("docker_disk", &self.docker_disk)
             .field("root_disk", &self.root_disk)
             .field("setup_disk", &self.setup_disk);
+        debug.field("cw_runtime_disk", &self.cw_runtime_disk);
         #[cfg(target_os = "linux")]
-        debug
-            .field("cw_runtime_disk", &self.cw_runtime_disk)
-            .field("direct_share_count", &self.direct_shares.len());
+        debug.field("direct_share_count", &self.direct_shares.len());
         debug
             .field("process", &self.process)
             .field("token", &"[REDACTED]")
@@ -1268,21 +1262,14 @@ impl RunningVm {
         &self.root_disk
     }
 
-    #[cfg(target_os = "linux")]
     pub fn cw_runtime_disk(&self) -> Option<&AdmittedCwRuntimeDisk> {
         self.cw_runtime_disk.as_ref()
     }
 
-    /// cw runtime catalogs are Linux-only; Darwin never attaches one.
     pub fn cw_runtime_catalog_generation(&self) -> Option<&str> {
-        #[cfg(target_os = "linux")]
-        {
-            self.cw_runtime_disk
-                .as_ref()
-                .map(|disk| disk.generation.as_str())
-        }
-        #[cfg(target_os = "macos")]
-        None
+        self.cw_runtime_disk
+            .as_ref()
+            .map(|disk| disk.generation.as_str())
     }
 
     #[cfg(target_os = "linux")]
@@ -4106,11 +4093,6 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
     {
         return Err(RunnerError::InvalidRequest);
     }
-    // cw runtime catalogs are Linux-only.
-    #[cfg(target_os = "macos")]
-    if request.cw_runtime_catalog_generation.is_some() {
-        return Err(RunnerError::InvalidRequest);
-    }
     Ok(())
 }
 
@@ -4904,7 +4886,6 @@ pub enum RunnerError {
     OrphanedVmm(u32),
     #[error("cw runtime catalog attachment changed or its live disk is invalid")]
     CwRuntimeDiskChanged,
-    #[cfg(target_os = "linux")]
     #[error(transparent)]
     CwRuntime(#[from] CwRuntimeError),
     #[error("invalid VM create request")]
@@ -5136,7 +5117,6 @@ mod tests {
             docker_disk: None,
             root_generation: None,
             root_disk: None,
-            #[cfg(target_os = "linux")]
             cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
@@ -5202,7 +5182,6 @@ mod tests {
         .expect("child did not reach its expected executable");
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn cw_runtime_request_and_seed_bind_the_same_catalog() {
         let mut valid = request(1, 512);
@@ -5900,7 +5879,6 @@ mod tests {
             docker_disk: None,
             root_generation: None,
             root_disk: None,
-            #[cfg(target_os = "linux")]
             cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
@@ -5986,7 +5964,6 @@ mod tests {
             docker_disk: Some(admitted),
             root_generation: None,
             root_disk: None,
-            #[cfg(target_os = "linux")]
             cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
@@ -6029,7 +6006,6 @@ mod tests {
             docker_disk: None,
             root_generation: Some(generation.clone()),
             root_disk: Some(admitted.clone()),
-            #[cfg(target_os = "linux")]
             cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
@@ -6164,7 +6140,6 @@ mod tests {
             docker_disk: None,
             root_generation: Some(previous_generation),
             root_disk: Some(previous_identity),
-            #[cfg(target_os = "linux")]
             cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
