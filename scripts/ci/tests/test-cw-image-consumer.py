@@ -102,18 +102,18 @@ class Consumer(unittest.TestCase):
 
     def test_effective_bake_platforms_are_bound_for_remote_builders(self):
         prefix = ["docker", "buildx", "bake", "-f", str(self.source / "docker-bake.hcl"), "--builder", "remote"]
-        for selection, expected in (("*.platforms=linux/amd64", True), ("daemon-ci.platforms=linux/arm64", False),
-                                    ("*.platforms=linux/amd64,linux/arm64", True)):
+        for selection, expected in (("*.platform=linux/amd64", True), ("daemon-ci.platform=linux/arm64", False),
+                                    ("*.platform=linux/amd64,linux/arm64", True)):
             plan = consumer.canonical_plan(prefix + ["--set", selection, "daemon-ci"], self.source, Path.cwd(), "ci")
             self.assertIs(plan["needs_cw_asset"], expected)
-            self.assertIn("daemon-ci.platforms=" + selection.split("=", 1)[1], plan["command"])
+            self.assertIn("daemon-ci.platform=" + selection.split("=", 1)[1], plan["command"])
         with self.assertRaises(consumer.asset.Refused):
-            consumer.canonical_plan(prefix + ["--set", "*.platforms=linux/arm64", "--set",
-                                               "daemon-ci.platforms=linux/amd64", "daemon-ci"], self.source, Path.cwd(), "ci")
+            consumer.canonical_plan(prefix + ["--set", "*.platform=linux/arm64", "--set",
+                                               "daemon-ci.platform=linux/amd64", "daemon-ci"], self.source, Path.cwd(), "ci")
         with patch.object(consumer.os, "uname", return_value=SimpleNamespace(machine="arm64")):
             plan = consumer.canonical_plan(prefix + ["daemon-ci"], self.source, Path.cwd(), "ci")
             self.assertEqual(plan["platforms"]["daemon-ci"], ["linux/arm64"])
-            self.assertIn("daemon-ci.platforms=linux/arm64", plan["command"])
+            self.assertIn("daemon-ci.platform=linux/arm64", plan["command"])
 
     def test_bake_from_foreign_cwd_binds_selected_and_dependency_contexts(self):
         foreign = self.base / "foreign"

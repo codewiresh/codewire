@@ -219,7 +219,7 @@ def canonical_plan(command, source_dir, cwd, profile, docker_bin="docker"):
             if field == "context":
                 asset.require(Path(os.path.abspath(cwd / value)) == source_dir,
                               "consumer Bake context differs from selected source")
-            elif field == "platforms":
+            elif field == "platform":
                 selected = platforms(value)
                 for target in affected:
                     if target in effective_platforms:
@@ -247,7 +247,7 @@ def canonical_plan(command, source_dir, cwd, profile, docker_bin="docker"):
                 effective_platforms[target] = [client_platform()]
             # Always bind the effective selection, including overrides, in the
             # actual command. The remote/default builder cannot choose it.
-            injected += ["--set", target + ".platforms=" + ",".join(effective_platforms[target])]
+            injected += ["--set", target + ".platform=" + ",".join(effective_platforms[target])]
             # HCL context='.' is resolved from the invoking process, even with
             # an absolute Bake file. Bind every selected context to held bytes.
             injected += ["--set", target + ".context=" + str(source_dir)]
