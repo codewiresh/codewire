@@ -50,36 +50,7 @@ const STOP_SIGNALS: [(libc::c_int, &str); 3] = [
 // Durable custody records
 // ---------------------------------------------------------------------------
 
-/// Immutable binding of one guardian instance to its conversation, session,
-/// driver process birth and boot. `peer-current.json` holds the current one.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(super) struct PeerIdentity {
-    pub(super) environment_id: String,
-    pub(super) driver_id: String,
-    pub(super) session_id: String,
-    pub(super) instance_id: String,
-    pub(super) driver_started_at: String,
-    pub(super) boot_id: String,
-    pub(super) driver_pid: u32,
-    pub(super) driver_start_ticks: u64,
-}
-
-/// Per-instance custody state. It names processes only; provider launch
-/// values never appear here.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(super) struct PeerReceipt {
-    pub(super) version: u32,
-    pub(super) identity: PeerIdentity,
-    pub(super) guardian_pid: Option<u32>,
-    pub(super) guardian_start_ticks: Option<u64>,
-    pub(super) provider_pid: Option<u32>,
-    pub(super) cleanup_unknown: bool,
-    pub(super) finished_at: Option<String>,
-    pub(super) exit_code: Option<i32>,
-    pub(super) error: Option<String>,
-}
+pub(super) use super::guest_custody::{PeerIdentity, PeerReceipt};
 
 impl PeerIdentity {
     /// Exact conversation binding plus a process birth from the current boot.

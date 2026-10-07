@@ -825,7 +825,6 @@ fn native_environment_name_for_id<'a>(
 }
 
 /// Managed guests use a selected typed proxy, never the host agent's login.
-#[cfg(target_os = "linux")]
 pub(crate) async fn require_native_agent_profile(
     environment_id: &str,
     provider: &str,
@@ -1083,7 +1082,6 @@ pub(crate) async fn native_environment_data_client(
     .map_err(anyhow::Error::from)
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) async fn native_environment_managed_runtime(
     environment_id: &str,
 ) -> anyhow::Result<codewire_local_vmm::artifact::CwRuntimeProvenance> {
@@ -1094,7 +1092,6 @@ pub(crate) async fn native_environment_managed_runtime(
         .map_err(anyhow::Error::msg)
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) async fn native_environment_managed_runtime_catalog(
     environment_id: &str,
 ) -> anyhow::Result<codewire_local_vmm::artifact::CwRuntimeCatalog> {
@@ -1149,7 +1146,6 @@ pub(crate) async fn native_environment_managed_runtime_catalog(
     Ok(selection.catalog)
 }
 
-#[cfg(target_os = "linux")]
 fn native_runtime_digest_valid(value: &str) -> bool {
     value.len() == 64
         && value
@@ -1341,7 +1337,6 @@ fn format_binary_bytes(bytes: u64) -> String {
     }
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) async fn native_runtime_control_client() -> anyhow::Result<NativeSupervisorClient> {
     NativeSupervisorClient::connect_runtime(&native_runtime_config()?)
         .await

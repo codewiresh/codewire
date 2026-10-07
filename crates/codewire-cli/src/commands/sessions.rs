@@ -768,7 +768,6 @@ pub(crate) async fn handle_stop_command(
             && args.cleanup_request_id.is_none(),
         "request and generation flags require --member or a managed platform session"
     );
-    #[cfg(target_os = "linux")]
     if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) && managed_session(&session) {
         let stopped = agents::stop_native_managed(&target, &session).await?;
         return print_environment_sessions(std::slice::from_ref(&stopped), args.output);
@@ -821,7 +820,6 @@ pub(crate) async fn handle_restart_command(
     if session.cleanup_unknown {
         anyhow::bail!("session cleanup is unknown; restart is fenced");
     }
-    #[cfg(target_os = "linux")]
     if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) && managed_session(&session) {
         let restarted = agents::restart_native_managed(&target, &session).await?;
         return print_environment_sessions(std::slice::from_ref(&restarted), args.output);

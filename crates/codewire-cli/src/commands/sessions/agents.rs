@@ -1,4 +1,6 @@
 //! Managed agent conversations on trusted hosts and native Linux guests.
+//! A macOS host controls its local VMs' Linux guests with the same host-side
+//! code; the guest driver, guardian and control helper run only in the guest.
 //!
 //! `cw run --agent` launches `cw _agent-driver` as an ordinary durable session.
 //! The driver owns the installed native agent's stdio protocol. The CLI reaches
@@ -15,13 +17,13 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWriteExt as _};
 
+mod guest_custody;
 #[cfg(target_os = "linux")]
 mod guest_peer;
 #[cfg(target_os = "linux")]
 pub(super) mod host_control;
 #[cfg(target_os = "linux")]
 mod native;
-#[cfg(target_os = "linux")]
 mod native_host;
 #[cfg(target_os = "linux")]
 mod platform_control;
@@ -35,7 +37,6 @@ pub(crate) use platform_control::run_platform_agent_control;
 #[cfg(target_os = "linux")]
 pub(crate) use platform_control::{run_platform_agent_driver, run_platform_agent_peer};
 
-#[cfg(target_os = "linux")]
 const GUEST_AGENT_PROTOCOL_VERSION: u32 = 1;
 
 /// The guest owns only its local journals and provider subprocesses. It never
@@ -508,7 +509,6 @@ fn control_line(driver_id: &str, message_id: &str) -> anyhow::Result<Vec<u8>> {
     Ok(line)
 }
 
-#[cfg(target_os = "linux")]
 fn shutdown_control_line(driver_id: &str, operation_id: &str) -> anyhow::Result<Vec<u8>> {
     let mut line = serde_json::to_vec(&ControlLine {
         v: 1,
@@ -887,7 +887,6 @@ pub(crate) fn is_managed_session(view: &EnvironmentSessionView) -> bool {
     })
 }
 
-#[cfg(target_os = "linux")]
 pub(super) async fn stop_native_managed(
     target: &EnvironmentSessionTarget,
     session: &EnvironmentSessionView,
@@ -895,7 +894,6 @@ pub(super) async fn stop_native_managed(
     native_host::stop(target.clone(), session).await
 }
 
-#[cfg(target_os = "linux")]
 pub(super) async fn restart_native_managed(
     target: &EnvironmentSessionTarget,
     session: &EnvironmentSessionView,
@@ -1092,13 +1090,8 @@ pub(super) async fn handle_agent_run_command(
     if matches!(target, EnvironmentSessionTarget::Platform { .. }) {
         return platform_host::run(target, args).await;
     }
-    #[cfg(target_os = "linux")]
     if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
         return native_host::run(target, args).await;
-    }
-    #[cfg(target_os = "macos")]
-    if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
-        anyhow::bail!("managed agents are not available in macOS local environments yet");
     }
     let environment = host_placement(&target)?.clone();
     let agent = match args.agent.as_deref() {
@@ -1302,7 +1295,6 @@ pub(crate) async fn handle_agent_message_command(
     if matches!(target, EnvironmentSessionTarget::Platform { .. }) {
         return platform_host::message(target, session, &args, text, steer).await;
     }
-    #[cfg(target_os = "linux")]
     {
         let target = resolve_environment_session_target(globals, environment).await?;
         if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
@@ -1381,7 +1373,6 @@ pub(crate) async fn handle_agent_interrupt_command(
         )
         .await;
     }
-    #[cfg(target_os = "linux")]
     {
         let target = resolve_environment_session_target(globals, environment).await?;
         if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
@@ -1432,7 +1423,6 @@ pub(crate) async fn handle_agent_inbox_command(
     if matches!(target, EnvironmentSessionTarget::Platform { .. }) {
         return platform_host::inbox(target, session, args.output).await;
     }
-    #[cfg(target_os = "linux")]
     {
         let target = resolve_environment_session_target(globals, environment).await?;
         if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
@@ -1548,12 +1538,10 @@ pub(crate) async fn wait_agent_message(
     if platform_host::wait(globals, &message_id, timeout, output).await? {
         return Ok(());
     }
-    #[cfg(target_os = "linux")]
     if native_host::wait(globals, &message_id, timeout, output).await? {
         return Ok(());
     }
     let Some((environment, dir)) = find_message(&message_id)? else {
-        #[cfg(target_os = "linux")]
         if native_host::recover_and_wait(globals, &message_id, timeout, output).await? {
             return Ok(());
         }

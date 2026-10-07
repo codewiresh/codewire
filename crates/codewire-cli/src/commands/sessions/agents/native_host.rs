@@ -241,8 +241,8 @@ fn checked_peer_status(
     environment_id: &str,
     driver_id: &str,
     session_id: &str,
-) -> anyhow::Result<guest_peer::PeerReceipt> {
-    let peer: guest_peer::PeerReceipt = serde_json::from_value(
+) -> anyhow::Result<guest_custody::PeerReceipt> {
+    let peer: guest_custody::PeerReceipt = serde_json::from_value(
         status
             .get("peer")
             .cloned()
@@ -270,13 +270,13 @@ fn checked_peer_status(
 
 fn checked_shutdown(
     status: &Value,
-    peer: &guest_peer::PeerReceipt,
-) -> anyhow::Result<Option<native::ShutdownRecord>> {
+    peer: &guest_custody::PeerReceipt,
+) -> anyhow::Result<Option<guest_custody::ShutdownRecord>> {
     let record = status
         .get("shutdown")
         .filter(|value| !value.is_null())
         .cloned()
-        .map(serde_json::from_value::<native::ShutdownRecord>)
+        .map(serde_json::from_value::<guest_custody::ShutdownRecord>)
         .transpose()?;
     if let Some(record) = &record {
         canonical_uuid(&record.operation_id)?;
@@ -293,8 +293,8 @@ async fn wait_clean_driver(
     guest: &Guest,
     driver_id: &str,
     session_id: &str,
-    identity: &guest_peer::PeerIdentity,
-    shutdown: Option<&native::ShutdownRecord>,
+    identity: &guest_custody::PeerIdentity,
+    shutdown: Option<&guest_custody::ShutdownRecord>,
     expected_launch_generation: u64,
 ) -> anyhow::Result<EnvironmentSessionView> {
     let deadline = Instant::now() + MANAGED_STOP_TIMEOUT;
@@ -985,7 +985,7 @@ mod tests {
         })
     }
 
-    fn validate_custody(status: &Value) -> anyhow::Result<guest_peer::PeerReceipt> {
+    fn validate_custody(status: &Value) -> anyhow::Result<guest_custody::PeerReceipt> {
         checked_peer_status(
             status,
             "00000000-0000-4000-8000-000000000001",
