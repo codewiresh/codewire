@@ -485,6 +485,9 @@ pub(crate) fn operation_outcome(operation: v1::Operation) -> Result<v1::Operatio
 /// does not tell the user what to change.
 fn operation_error_hint(error_code: &str) -> &'static str {
     match error_code {
+        "create_guest_docker_tooling_missing" => {
+            " (the image has no Docker tooling; create with --no-docker or choose an image that includes Docker)"
+        }
         #[cfg(target_os = "macos")]
         "create_registry_platform" => {
             " (the image has no linux/arm64 variant; macOS local environments run arm64 Linux, so choose a multi-architecture or arm64 image)"

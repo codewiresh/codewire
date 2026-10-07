@@ -1525,6 +1525,9 @@ impl RunningVm {
             .await
             {
                 Ok(stage) if !stage.is_failure() => return Ok(()),
+                Ok(GuestBootStage::DockerToolingMissing) => {
+                    return Err(RunnerError::GuestDockerToolingMissing);
+                }
                 Ok(_) => return Err(RunnerError::NetworkWorkerBootstrap),
                 Err(NetworkProgressAttemptError::Retry)
                     if tokio::time::Instant::now() < deadline =>
@@ -4855,6 +4858,10 @@ async fn lock_after_previous_helper(paths: &VmPaths) -> Result<VmLock, RunnerErr
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
+    #[error(
+        "Docker is enabled but the workspace image has no Docker tooling (dockerd, xtables-nft-multi); create with --no-docker or choose an image that includes Docker"
+    )]
+    GuestDockerToolingMissing,
     #[cfg(target_os = "macos")]
     #[error(
         "a previous VM helper (pid {0}) is still running after its runner exited; it is never adopted, so stop that process and start again"

@@ -2942,6 +2942,9 @@ impl SupervisorCore {
             (Ok(info), None) => info,
             (Err(status), Some(error_code)) => {
                 self.record_runner_start_failure(name, &error_code)?;
+                if error_code == crate::runner_service::GUEST_DOCKER_TOOLING_MISSING {
+                    return Err(SupervisorError::GuestDockerToolingMissing);
+                }
                 return Err(SupervisorError::VmStart(status.message().to_owned()));
             }
             (Ok(_), Some(_)) | (Err(_), None) => {
@@ -7086,6 +7089,7 @@ impl From<SupervisorError> for Status {
             #[cfg(target_os = "linux")]
             SupervisorError::CwRuntime(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::VmStart(_)
+            | SupervisorError::GuestDockerToolingMissing
             | SupervisorError::VmStop
             | SupervisorError::VmResize
             | SupervisorError::VmDelete => Status::failed_precondition(error.to_string()),
@@ -7212,6 +7216,10 @@ pub enum SupervisorError {
     ArtifactGenerationChanged,
     #[error("native VM start failed: {0}")]
     VmStart(String),
+    #[error(
+        "Docker is enabled but the workspace image has no Docker tooling (dockerd, xtables-nft-multi); create with --no-docker or choose an image that includes Docker"
+    )]
+    GuestDockerToolingMissing,
     #[error("native VM stop failed")]
     VmStop,
     #[error("native VM resize failed")]
@@ -7279,6 +7287,7 @@ pub enum SupervisorError {
 // or owner paths. The existing operation error_code is the diagnostic surface.
 fn create_failure_code(error: &SupervisorError) -> &'static str {
     match error {
+        SupervisorError::GuestDockerToolingMissing => "create_guest_docker_tooling_missing",
         #[cfg(target_os = "macos")]
         SupervisorError::VzHelperMissing(_) => "create_vz_helper_missing",
         #[cfg(target_os = "macos")]
@@ -14432,6 +14441,10 @@ mod tests {
                 "create_filesystem",
             ),
             (SupervisorError::VmStart(CANARY.to_owned()), "create_failed"),
+            (
+                SupervisorError::GuestDockerToolingMissing,
+                "create_guest_docker_tooling_missing",
+            ),
         ];
         for (error, expected) in cases {
             let code = create_failure_code(&error);

@@ -451,6 +451,12 @@ pub fn run_init() -> Result<()> {
         }
     };
     prepare_workspace_generation(&plan)?;
+    // Report an image without Docker tooling before readiness, so the host
+    // can name it instead of seeing the guest stop during network attachment.
+    if seed.docker_data_disk() && !docker_tooling_present(Path::new(ROOT_MERGED_PATH)) {
+        record_boot_stage("workspace-docker-tooling-missing")?;
+        bail!("Docker is enabled but the workspace image has no dockerd or xtables-nft-multi");
+    }
     record_boot_stage("root-generation-ready")?;
     if let Err(error) = mount_direct_shares(&seed) {
         record_boot_stage("workspace-direct-share-failed")?;
@@ -4005,6 +4011,16 @@ fn prepare_docker_runtime(seed: &Seed, workspace_identity: &WorkspaceIdentity) -
     .context("publish isolated Docker resolver configuration")
 }
 
+/// The image paths the private Docker root needs before any validation of
+/// their metadata.
+const DOCKER_TOOLING_PATHS: [&str; 2] = ["usr/local/bin/dockerd", "usr/sbin/xtables-nft-multi"];
+
+fn docker_tooling_present(root: &Path) -> bool {
+    DOCKER_TOOLING_PATHS
+        .iter()
+        .all(|path| fs::symlink_metadata(root.join(path)).is_ok())
+}
+
 fn prepare_docker_root(plan: &WorkspacePlan) -> Result<()> {
     create_dir(Path::new(DOCKER_ROOT_PATH), 0o700)?;
     mount_fs(
@@ -7440,6 +7456,18 @@ mod tests {
                 "index=off,metacopy=off,redirect_dir=off,xino=off,nfs_export=off"
             )
         );
+    }
+
+    #[test]
+    fn docker_tooling_requires_dockerd_and_iptables_in_the_image() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!docker_tooling_present(root.path()));
+        fs::create_dir_all(root.path().join("usr/local/bin")).unwrap();
+        fs::write(root.path().join("usr/local/bin/dockerd"), b"").unwrap();
+        assert!(!docker_tooling_present(root.path()));
+        fs::create_dir_all(root.path().join("usr/sbin")).unwrap();
+        fs::write(root.path().join("usr/sbin/xtables-nft-multi"), b"").unwrap();
+        assert!(docker_tooling_present(root.path()));
     }
 
     #[test]

@@ -537,7 +537,9 @@ fn guest_boot_stage_proto(stage: GuestBootStage) -> v1::GuestBootStage {
         GuestBootStage::WorkspaceRunning => v1::GuestBootStage::WorkspaceRunning,
         GuestBootStage::DaemonStarted => v1::GuestBootStage::DaemonStarted,
         GuestBootStage::SetupFailed => v1::GuestBootStage::SetupFailed,
-        GuestBootStage::WorkspaceFailed => v1::GuestBootStage::WorkspaceFailed,
+        GuestBootStage::WorkspaceFailed | GuestBootStage::DockerToolingMissing => {
+            v1::GuestBootStage::WorkspaceFailed
+        }
     }
 }
 
@@ -1570,12 +1572,16 @@ fn map_start_error(error: RunnerError) -> Status {
     Status::failed_precondition(error.to_string())
 }
 
+/// The runner error code for a guest whose image lacks Docker tooling.
+pub(crate) const GUEST_DOCKER_TOOLING_MISSING: &str = "guest_docker_tooling_missing";
+
 fn network_start_error_code(error: &RunnerError) -> &'static str {
     match error {
         RunnerError::InvalidNetworkWorker => "network_worker_invalid",
         RunnerError::NetworkWorkerSpawn => "network_worker_spawn",
         RunnerError::NetworkWorkerStartTimeout => "network_worker_start_timeout",
         RunnerError::NetworkWorkerBootstrap => "network_worker_bootstrap",
+        RunnerError::GuestDockerToolingMissing => GUEST_DOCKER_TOOLING_MISSING,
         RunnerError::NetworkWorkerStartup(failure) => failure.runner_error_code(),
         RunnerError::NetworkWorkerWait => "network_worker_wait",
         RunnerError::NetworkWorkerKillTimeout => "network_worker_kill_timeout",
