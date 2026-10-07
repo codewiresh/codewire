@@ -806,7 +806,7 @@ test("fast multibyte keystrokes batch once in order and continuous typing cannot
   expect(state.stops).toBe(0);
 });
 
-for (const transition of ["disconnect", "foreground", "stopping", "exited"] as const) {
+for (const transition of ["disconnect", "stopping", "exited"] as const) {
   test(`staged input is discarded on ${transition} without replay or a spurious deadline`, async ({ page }) => {
     await page.clock.install();
     const state = await transport(page);
@@ -819,9 +819,6 @@ for (const transition of ["disconnect", "foreground", "stopping", "exited"] as c
     if (transition === "disconnect") {
       await page.locator("[data-terminal-toggle]").evaluate((button: HTMLButtonElement) => button.click());
       await page.getByRole("button", { name: "Reconnect", exact: true }).click();
-      await expect.poll(() => state.connections.length).toBe(2);
-    } else if (transition === "foreground") {
-      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
       await expect.poll(() => state.connections.length).toBe(2);
     } else {
       state.connections[0].route.send(JSON.stringify({ type: "status", state: transition }));
@@ -1374,7 +1371,7 @@ test("terminal labels preserve v1 references and reject malformed or differently
   expect(state.stops).toBe(0);
 });
 
-test("account revalidation hides terminal labels and invalidates a stale rename editor", async ({ page }) => {
+test("an account change found on return clears terminal labels and a stale rename editor", async ({ page }) => {
   const state = await transport(page);
   state.sessions = [{ sessionId: sessionId(1), state: "running" }];
   await openFixture(page);
@@ -1382,16 +1379,14 @@ test("account revalidation hides terminal labels and invalidates a stale rename 
   await renameTerminal(page, "Private account name");
   await (await terminalAction(page, "Rename terminal")).click();
   await page.getByLabel("Terminal name", { exact: true }).fill("Unsaved private name");
-  let release!: () => void;
-  state.listGate = new Promise<void>((resolve) => { release = resolve; });
   state.accountId = "account-b";
   await page.evaluate(() => dispatchEvent(new Event("focus")));
-  await expect.poll(() => state.lists).toBe(2);
-  await expect(page.locator("[data-terminal-tabs]")).toBeHidden();
+  // The background check finds the new account, then a full refresh clears.
+  await expect.poll(() => state.lists).toBe(3);
   await expect(page.getByRole("dialog", { name: "Rename terminal", exact: true })).toBeHidden();
   await expect(page.locator("[data-terminal-name]")).toHaveValue("");
-  release();
   await expect(page.getByRole("tab", { name: "Terminal 2", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Private account name", exact: true })).toHaveCount(0);
   await page.locator("[data-terminal-rename-form]").evaluate((form) => {
     form.querySelector<HTMLInputElement>("input")!.value = "Stale rename";
     (form as HTMLFormElement).requestSubmit();
@@ -2504,22 +2499,50 @@ test("a prevented native lifecycle submit does not leave the submission lock lat
   expect(state.stops).toBe(0);
 });
 
-test("foreground account revalidation hides old output until fresh identity is known", async ({ page }) => {
+test("returning to the page with the same account keeps the terminal connected and on screen", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  output(state.connections[0], "kept-on-return\r\n");
+  const panel = page.getByRole("tabpanel");
+  await expect(panel).toContainText("kept-on-return");
+  // Record any moment the output or the status-bar group is hidden.
+  await page.evaluate(() => {
+    const hidden: string[] = [];
+    for (const selector of ["[data-terminal-panels]", "[data-terminal-statuses]"]) {
+      const node = document.querySelector<HTMLElement>(selector)!;
+      new MutationObserver(() => { if (node.hidden) hidden.push(selector); })
+        .observe(node, { attributes: true, attributeFilter: ["hidden"] });
+    }
+    Object.assign(window, { hiddenOnReturn: hidden });
+  });
+  const lists = state.lists;
+  await page.evaluate(() => { dispatchEvent(new Event("blur")); dispatchEvent(new Event("focus")); });
+  await expect.poll(() => state.lists).toBe(lists + 1);
+  await expect(page.locator("[data-terminal-connection]")).toHaveText("Connected");
+  await page.locator(".xterm-helper-textarea").focus();
+  await page.keyboard.insertText("after-return");
+  await expect.poll(() => state.connections[0].frames.filter((frame) => frame.type === "input").map((frame) => frame.data).join(""))
+    .toContain("after-return");
+  expect(state.connections).toHaveLength(1);
+  expect(state.connections[0].closed).toBeFalsy();
+  expect(await page.evaluate(() => (window as unknown as { hiddenOnReturn: string[] }).hiddenOnReturn)).toEqual([]);
+  await expect(panel).toContainText("kept-on-return");
+});
+
+test("an account change found on return clears the old account's output", async ({ page }) => {
   const state = await transport(page);
   state.sessions = [{ sessionId: sessionId(1), state: "running" }];
   await openFixture(page);
   await expect.poll(() => state.connections.length).toBe(1);
   output(state.connections[0], "old-foreground-account\r\n");
   await expect(page.getByRole("tabpanel")).toContainText("old-foreground-account");
-  let release!: () => void;
-  state.listGate = new Promise<void>((resolve) => { release = resolve; });
   state.accountId = "account-b";
   state.sessions = [];
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-  await expect.poll(() => state.lists).toBe(2);
-  await expect(page.locator("[data-terminal-panels]")).toBeHidden();
+  await expect.poll(() => state.lists).toBe(3);
   await expect.poll(() => state.connections[0].closed).toBe(true);
-  release();
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
   await expect(page.locator(".xterm")).toHaveCount(0);
   expect(await page.evaluate(() => sessionStorage.getItem("codewire:terminal:v1:account"))).toBe("account-b");

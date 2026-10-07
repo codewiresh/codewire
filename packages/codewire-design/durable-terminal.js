@@ -541,13 +541,13 @@
       let data;
       try { data = await request("list"); } catch (error) {
         if (stale()) return;
-        // Identity doubts pause every transport and hide output, as on focus.
-        if (error.authorization) foreground();
+        // Identity doubts pause every transport and hide output.
+        if (error.authorization) doubtAccount();
         else scheduleReconnect(tab);
         return;
       }
       if (stale()) return;
-      if (data.accountId !== account) { foreground(); return; }
+      if (data.accountId !== account) { doubtAccount(); return; }
       const session = data.sessions.find((item) => item.sessionId === tab.id);
       if (!session) {
         tab.available = false;
@@ -969,7 +969,10 @@
       suspended = false;
       void refresh();
     });
-    function foreground() {
+    // An identity doubt pauses every terminal and hides output until a full
+    // refresh re-reads the account, clearing this page's terminals if it
+    // changed or access ended.
+    function doubtAccount() {
       if (suspended) return;
       authorized = false;
       invalidateRename();
@@ -978,6 +981,46 @@
       for (const tab of tabs.values()) pauseForIdentity(tab);
       updateControls();
       if (!document.hidden && !pending) void refresh();
+    }
+    // Returning to the page re-reads the account in the background, as a
+    // desktop terminal keeps its windows: the terminals stay connected and on
+    // screen, and only a changed account or ended access tears them down.
+    async function checkAccount() {
+      const current = epoch;
+      let data;
+      try { data = await request("list"); } catch (error) {
+        if (current === epoch && !suspended && error.authorization) doubtAccount();
+        return;
+      }
+      if (current !== epoch || suspended || pending || document.hidden) return;
+      let previous;
+      try { previous = sessionStorage.getItem(`${storagePrefix}account`); } catch { /* Optional storage. */ }
+      if ((account && account !== data.accountId) || (previous && previous !== data.accountId)) {
+        doubtAccount();
+        return;
+      }
+      inventory = data.sessions;
+      const available = new Map(inventory.map((session) => [session.sessionId, session]));
+      for (const tab of tabs.values()) {
+        const session = available.get(tab.id);
+        if (!session) {
+          if (tab.available) {
+            detach(tab, "This terminal is no longer available.", false, "danger");
+            announce("A saved terminal is no longer available. Choose an existing terminal or start a new one.");
+          }
+          tab.available = false;
+          continue;
+        }
+        tab.state = session.state;
+        // A reconnect paused while the page was hidden resumes now.
+        if (automatic(tab) && !tab.socket && !tab.retryTimer) void connect(tab);
+      }
+      showInventory();
+    }
+    function foreground() {
+      if (suspended || document.hidden) return;
+      if (pending) { foregroundCheck = true; return; }
+      void checkAccount();
     }
     document.addEventListener("visibilitychange", foreground);
     window.addEventListener("focus", foreground);
