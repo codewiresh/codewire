@@ -1903,16 +1903,10 @@ impl SessionEngine {
         }
         #[cfg(unix)]
         if self.inner.config.host.is_some() {
-            // SAFETY: setsid is async-signal-safe and does not touch allocator
-            // state after fork. Host launches own a fresh session and group.
+            // SAFETY: prepare_host_child makes only async-signal-safe calls
+            // and does not touch allocator state after fork.
             unsafe {
-                process.pre_exec(|| {
-                    if libc::setsid() == -1 {
-                        Err(std::io::Error::last_os_error())
-                    } else {
-                        Ok(())
-                    }
-                });
+                process.pre_exec(prepare_host_child);
             }
         }
 
@@ -4158,6 +4152,35 @@ pub fn status_from_session_error(error: SessionError) -> Status {
     }
 }
 
+/// Prepare a host launch between fork and exec: it owns a fresh session and
+/// group, and on Darwin inherits no descriptor beyond stdio.
+#[cfg(unix)]
+fn prepare_host_child() -> std::io::Result<()> {
+    // SAFETY: setsid takes no arguments.
+    if unsafe { libc::setsid() } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(target_os = "macos")]
+    mark_inherited_descriptors_close_on_exec();
+    Ok(())
+}
+
+/// Darwin creates pipes and sockets close-on-exec only in a second call, so a
+/// descriptor another thread is creating can reach a child spawned in between:
+/// another session's pipe, for example, which then stays open until this
+/// child exits. Between fork and exec, mark every descriptor beyond stdio
+/// close-on-exec, as Linux's atomic close-on-exec flags already ensure.
+#[cfg(target_os = "macos")]
+fn mark_inherited_descriptors_close_on_exec() {
+    // SAFETY: getdtablesize and fcntl take only scalar arguments. A number
+    // that is not an open descriptor fails with EBADF and is skipped.
+    unsafe {
+        for descriptor in 3..libc::getdtablesize() {
+            libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5170,6 +5193,44 @@ mod tests {
             tokio::fs::metadata(output_path).await.unwrap().len(),
             OUTPUT_FRAME_HEADER_SIZE as u64 + 3
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn host_launch_inherits_no_descriptor_beyond_stdio() {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::process::CommandExt as _;
+        // An inheritable pipe end stands in for a pipe another session's
+        // launch has created but not yet marked close-on-exec.
+        let mut ends = [0; 2];
+        // SAFETY: a two-element output array.
+        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+        // SAFETY: both are fresh descriptors that only this test owns.
+        let (read, _write) =
+            unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
+        // SAFETY: a scalar fcntl on an owned descriptor.
+        assert_eq!(
+            unsafe { libc::fcntl(read.as_raw_fd(), libc::F_SETFD, 0) },
+            0
+        );
+        let inherited = |prepare: bool| {
+            let mut command = std::process::Command::new("/bin/test");
+            command
+                .arg("-e")
+                .arg(format!("/dev/fd/{}", read.as_raw_fd()));
+            if prepare {
+                // SAFETY: as in the host launch.
+                unsafe {
+                    command.pre_exec(prepare_host_child);
+                }
+            }
+            command.status().unwrap().success()
+        };
+        assert!(
+            inherited(false),
+            "control: an inheritable descriptor reaches the child"
+        );
+        assert!(!inherited(true));
     }
 }
 

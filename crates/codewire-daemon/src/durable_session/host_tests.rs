@@ -968,11 +968,7 @@ async fn host_stop_owns_shell_descendants_for_pipe_and_pty_preserving_unrelated_
     for pty in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let engine = host_engine(temp.path());
-        let mut unrelated = tokio::process::Command::new("/bin/sleep")
-            .arg("60")
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+        let mut unrelated = unrelated_sleep();
         let unrelated_pid = unrelated.id().unwrap();
         let descendant = temp.path().join("descendant.pid");
         let script = format!(
@@ -1156,11 +1152,7 @@ async fn recovered_host_live_records_are_fenced_without_signaling_persisted_pid(
     let temp = tempfile::tempdir().unwrap();
     let engine = host_engine(temp.path());
     engine.ensure_initialized().await.unwrap();
-    let mut unrelated = tokio::process::Command::new("/bin/sleep")
-        .arg("60")
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
+    let mut unrelated = unrelated_sleep();
     for state in [
         v1::SessionLifecycleState::Starting,
         v1::SessionLifecycleState::Running,
@@ -2072,4 +2064,19 @@ async fn guarded_restart_legacy_records_remain_unfenced_until_actual_new_admissi
     assert_eq!(replacement.launch_generation, 1);
     assert_eq!(replacement.state, v1::SessionLifecycleState::Running as i32);
     recovered.shutdown().await.unwrap();
+}
+
+/// A process outside every owned session. It must not keep another test's
+/// socket or pipe open, so on Darwin it gets the host launch's descriptor sweep.
+fn unrelated_sleep() -> tokio::process::Child {
+    let mut command = tokio::process::Command::new("/bin/sleep");
+    // SAFETY: the sweep makes only scalar libc calls.
+    #[cfg(target_os = "macos")]
+    unsafe {
+        command.pre_exec(|| {
+            super::mark_inherited_descriptors_close_on_exec();
+            Ok(())
+        });
+    }
+    command.arg("60").kill_on_drop(true).spawn().unwrap()
 }
