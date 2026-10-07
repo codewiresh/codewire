@@ -360,10 +360,10 @@ enum Command {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-egress-broker", hide = true)]
     NativeEgressBroker(NativeEgressBrokerArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-mesh-transport", hide = true)]
     NativeMeshTransport(NativeMeshTransportArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-mesh-enrollment-broker", hide = true)]
     NativeMeshEnrollmentBroker(NativeMeshEnrollmentBrokerArgs),
     #[cfg(target_os = "linux")]
@@ -510,7 +510,7 @@ pub fn native_egress_broker_exit_code(error: &anyhow::Error) -> Option<i32> {
 
 /// Preserve the fixed private Mesh-process failure taxonomy without printing
 /// credential-adjacent process detail to ambient stderr.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn native_mesh_transport_exit_code(error: &anyhow::Error) -> Option<i32> {
     error
         .downcast_ref::<codewire_local_vmm::mesh_process::MeshTransportProcessError>()
@@ -519,7 +519,7 @@ pub fn native_mesh_transport_exit_code(error: &anyhow::Error) -> Option<i32> {
 
 /// Preserve the fixed one-shot enrollment-issuer failure taxonomy without
 /// exposing credential-adjacent detail on ambient stderr.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn native_mesh_enrollment_broker_exit_code(error: &anyhow::Error) -> Option<i32> {
     error
         .downcast_ref::<codewire_local_vmm::mesh_enrollment::MeshEnrollmentProcessError>()
@@ -660,9 +660,9 @@ where
         Command::NativeNetworkWorker(args) => run_native_network_worker(args).await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeEgressBroker(args) => run_native_egress_broker(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeMeshTransport(args) => run_native_mesh_transport(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeMeshEnrollmentBroker(args) => run_native_mesh_enrollment_broker(args).await,
         #[cfg(target_os = "linux")]
         Command::LocalCredentialAuthority(args) => run_local_credential_authority(args).await,

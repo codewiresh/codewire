@@ -24,6 +24,9 @@ use url::{Host, Url};
 use uuid::Uuid;
 use zeroize::{Zeroize as _, Zeroizing};
 
+#[cfg(target_os = "macos")]
+use crate::host::sandbox::require_single_thread as require_single_threaded_process;
+#[cfg(target_os = "linux")]
 use crate::linux::confinement::{
     install_deny_all_filesystem_domain, install_inet_stream_only_syscalls, lock_process_privileges,
     require_single_threaded_process,
@@ -48,6 +51,7 @@ const ENROLLMENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const ENROLLMENT_TTL_SECONDS: i64 = 10 * 60;
 const MAX_RESPONSE_FIELD_BYTES: usize = 512;
 
+#[cfg(target_os = "linux")]
 const ENROLLMENT_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_listen,
     libc::SYS_accept,
@@ -96,10 +100,46 @@ const ENROLLMENT_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_prctl,
 ];
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const ENROLLMENT_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[libc::SYS_fork, libc::SYS_vfork];
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const ENROLLMENT_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[];
+
+/// Darwin has no dumpability or no-new-privileges switch. The issuer is an
+/// owner process, not a boundary against the same user, and the Seatbelt
+/// profile it enters before its one request refuses process creation.
+#[cfg(target_os = "macos")]
+fn lock_process_privileges() -> io::Result<()> {
+    Ok(())
+}
+
+/// Enter the issuer's confined domain before its one enrollment request:
+/// Landlock plus an INET-stream syscall filter on Linux. Darwin's Seatbelt
+/// profile admits only TCP to the Mesh origin's port.
+fn enter_enrollment_confinement(origin_port: u16) -> Result<(), MeshEnrollmentProcessError> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = origin_port;
+        install_deny_all_filesystem_domain()
+            .map_err(|_| MeshEnrollmentProcessError::FilesystemConfinement)?;
+        install_inet_stream_only_syscalls(
+            ENROLLMENT_DENIED_SYSCALLS,
+            ENROLLMENT_ARCH_DENIED_SYSCALLS,
+        )
+        .map_err(|_| MeshEnrollmentProcessError::SyscallConfinement)
+    }
+    #[cfg(target_os = "macos")]
+    crate::host::sandbox::confine_mesh_enrollment(origin_port)
+        .map_err(|_| MeshEnrollmentProcessError::FilesystemConfinement)
+}
+
+/// The TCP port of the already-validated Mesh origin.
+fn origin_port(mesh_url: &str) -> Result<u16, MeshEnrollmentProcessError> {
+    Url::parse(mesh_url)
+        .ok()
+        .and_then(|url| url.port_or_known_default())
+        .ok_or(MeshEnrollmentProcessError::InvalidBootstrap)
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -373,16 +413,10 @@ pub async fn run_inherited_mesh_enrollment_broker(
         Ok(authorized) => authorized,
         Err(error) => return fail_startup(&control, error),
     };
-    if install_deny_all_filesystem_domain().is_err() {
-        return fail_startup(&control, MeshEnrollmentProcessError::FilesystemConfinement);
-    }
-    if install_inet_stream_only_syscalls(
-        ENROLLMENT_DENIED_SYSCALLS,
-        ENROLLMENT_ARCH_DENIED_SYSCALLS,
-    )
-    .is_err()
-    {
-        return fail_startup(&control, MeshEnrollmentProcessError::SyscallConfinement);
+    let confined =
+        origin_port(&authorized.attachment.mesh_url).and_then(enter_enrollment_confinement);
+    if let Err(error) = confined {
+        return fail_startup(&control, error);
     }
 
     let enrollment = match create_enrollment(authorized).await {
@@ -426,17 +460,10 @@ pub async fn run_inherited_mesh_enrollment_fixture(
     if lock_process_privileges().is_err() {
         return fail_startup(&control, MeshEnrollmentProcessError::PrivilegeConfinement);
     }
+    let confined = origin_port(&prepared.attachment.mesh_url);
     drop(prepared);
-    if install_deny_all_filesystem_domain().is_err() {
-        return fail_startup(&control, MeshEnrollmentProcessError::FilesystemConfinement);
-    }
-    if install_inet_stream_only_syscalls(
-        ENROLLMENT_DENIED_SYSCALLS,
-        ENROLLMENT_ARCH_DENIED_SYSCALLS,
-    )
-    .is_err()
-    {
-        return fail_startup(&control, MeshEnrollmentProcessError::SyscallConfinement);
+    if let Err(error) = confined.and_then(enter_enrollment_confinement) {
+        return fail_startup(&control, error);
     }
 
     let enrollment = qualified_host_fixture_enrollment(environment_id, generation);
@@ -470,7 +497,7 @@ async fn prepare_enrollment(
     generation: u64,
 ) -> Result<PreparedEnrollment, MeshEnrollmentProcessError> {
     validate_identity(environment_id, generation)?;
-    if std::env::vars_os().next().is_some() {
+    if crate::network_worker::ambient_environment_present() {
         return Err(MeshEnrollmentProcessError::AmbientEnvironment);
     }
     require_single_threaded_process().map_err(|_| MeshEnrollmentProcessError::ThreadConfinement)?;
@@ -676,11 +703,15 @@ fn validate_identity(
 }
 
 fn inherited_std_unix_stream(fd: RawFd) -> Result<StdUnixStream, MeshEnrollmentProcessError> {
-    if fd < 3
-        || socket_option(fd, libc::SO_DOMAIN)? != libc::AF_UNIX
-        || socket_option(fd, libc::SO_TYPE)? != libc::SOCK_STREAM
+    // Darwin has no SO_DOMAIN and cannot read SO_ACCEPTCONN; the connected
+    // AF_UNIX peer address below proves the domain and that it is no listener.
+    #[cfg(target_os = "linux")]
+    if socket_option(fd, libc::SO_DOMAIN)? != libc::AF_UNIX
         || socket_option(fd, libc::SO_ACCEPTCONN)? != 0
     {
+        return Err(MeshEnrollmentProcessError::InheritedDescriptor);
+    }
+    if fd < 3 || socket_option(fd, libc::SO_TYPE)? != libc::SOCK_STREAM {
         return Err(MeshEnrollmentProcessError::InheritedDescriptor);
     }
     let mut peer: libc::sockaddr_un = unsafe { std::mem::zeroed() };

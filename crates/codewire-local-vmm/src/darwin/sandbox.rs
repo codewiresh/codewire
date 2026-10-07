@@ -4,7 +4,7 @@
 //! one thread also binds every other thread. The single-thread check still
 //! guards the workers' design: nothing runs beside the confined event loop.
 
-use std::ffi::{CStr, c_char, c_int};
+use std::ffi::{CStr, CString, c_char, c_int};
 use std::io;
 
 unsafe extern "C" {
@@ -31,6 +31,20 @@ const EGRESS_BROKER_PROFILE: &CStr = c"(version 1)(deny default)\
 (allow network-bind (local udp \"*:*\"))\
 (allow network-inbound (local udp \"*:*\"))";
 
+/// The Mesh transport's profile. After confinement it dials TCP to its DERP
+/// relay (reconnecting as needed) and runs direct UDP: one bound socket that
+/// sends STUN probes and WireGuard/disco datagrams to any peer address and
+/// port and receives unconnected replies. Each Mesh stream it hands to the
+/// runner is an unnamed socketpair, which Seatbelt does not mediate. Files,
+/// processes, signals, Mach services, named Unix sockets and TCP listeners
+/// are refused, as Landlock and the INET/socketpair syscall filter refuse
+/// them on Linux.
+const MESH_TRANSPORT_PROFILE: &CStr = c"(version 1)(deny default)\
+(allow network-outbound (remote tcp \"*:*\"))\
+(allow network-outbound (remote udp \"*:*\"))\
+(allow network-bind (local udp \"*:*\"))\
+(allow network-inbound (local udp \"*:*\"))";
+
 /// Irreversibly confine this process to the descriptors it already holds.
 pub(crate) fn deny_all() -> io::Result<()> {
     apply(DENY_ALL_PROFILE)
@@ -39,6 +53,26 @@ pub(crate) fn deny_all() -> io::Result<()> {
 /// Irreversibly confine the egress broker to outbound TCP and its own DNS.
 pub(crate) fn confine_egress_broker() -> io::Result<()> {
     apply(EGRESS_BROKER_PROFILE)
+}
+
+/// Irreversibly confine the Mesh transport to TCP dials and direct UDP.
+pub(crate) fn confine_mesh_transport() -> io::Result<()> {
+    apply(MESH_TRANSPORT_PROFILE)
+}
+
+/// Irreversibly confine the one-shot Mesh enrollment issuer to TCP dials to
+/// its Mesh origin's port. It has already pinned the origin's addresses, so
+/// it needs no DNS; the only request it makes after confinement is the one
+/// enrollment.
+pub(crate) fn confine_mesh_enrollment(origin_port: u16) -> io::Result<()> {
+    if origin_port == 0 {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    let profile = CString::new(format!(
+        "(version 1)(deny default)(allow network-outbound (remote tcp \"*:{origin_port}\"))"
+    ))
+    .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    apply(&profile)
 }
 
 fn apply(profile: &CStr) -> io::Result<()> {
@@ -190,8 +224,103 @@ mod tests {
             assert!(std::net::TcpListener::bind("127.0.0.1:0").is_err());
             return;
         }
-        // The parent keeps sending the "reply" datagram to the child's DNS
-        // port until the child exits; only inbound UDP lets the child see it.
+        assert!(
+            run_child_receiving_udp(
+                "darwin::sandbox::tests::egress_broker_profile_admits_only_tcp_dials_and_dns",
+                CHILD_MARKER,
+            )
+            .success()
+        );
+    }
+
+    /// The Mesh transport profile admits TCP dials and direct UDP to any
+    /// address and port, and unnamed socketpairs for Mesh streams, and
+    /// refuses everything else.
+    #[test]
+    fn mesh_transport_profile_admits_only_tcp_dials_and_direct_udp() {
+        const CHILD_MARKER: &str = "CODEWIRE_TEST_DARWIN_MESH_TRANSPORT";
+        if let Some(port) = std::env::var_os(CHILD_MARKER) {
+            let port: u16 = port.to_str().unwrap().parse().unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            confine_mesh_transport().unwrap();
+
+            std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut stream, mut peer) = UnixStream::pair().unwrap();
+            stream.write_all(b"m").unwrap();
+            let mut byte = [0_u8; 1];
+            peer.read_exact(&mut byte).unwrap();
+
+            let udp = std::net::UdpSocket::bind(("0.0.0.0", port)).unwrap();
+            udp.send_to(b"stun", "127.0.0.1:3478").unwrap();
+            udp.send_to(b"wireguard", "127.0.0.1:41641").unwrap();
+            udp.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut reply = [0_u8; 5];
+            let (length, _) = udp.recv_from(&mut reply).unwrap();
+            assert_eq!(&reply[..length], b"reply");
+
+            let error = std::fs::File::open("/etc/hosts").unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+            assert!(
+                std::process::Command::new("/usr/bin/true")
+                    .status()
+                    .is_err()
+            );
+            assert!(UnixStream::connect("/var/run/mDNSResponder").is_err());
+            assert!(std::net::TcpListener::bind("127.0.0.1:0").is_err());
+            return;
+        }
+        assert!(
+            run_child_receiving_udp(
+                "darwin::sandbox::tests::mesh_transport_profile_admits_only_tcp_dials_and_direct_udp",
+                CHILD_MARKER,
+            )
+            .success()
+        );
+    }
+
+    /// The enrollment issuer may dial only its Mesh origin's port.
+    #[test]
+    fn mesh_enrollment_profile_admits_only_its_origin_port() {
+        const CHILD_MARKER: &str = "CODEWIRE_TEST_DARWIN_MESH_ENROLLMENT";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let origin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            assert!(confine_mesh_enrollment(0).is_err());
+            confine_mesh_enrollment(origin.local_addr().unwrap().port()).unwrap();
+
+            std::net::TcpStream::connect(origin.local_addr().unwrap()).unwrap();
+            let refused = std::net::TcpStream::connect(other.local_addr().unwrap()).unwrap_err();
+            assert_eq!(refused.raw_os_error(), Some(libc::EPERM));
+            assert!(
+                std::net::UdpSocket::bind("0.0.0.0:0")
+                    .and_then(|socket| socket.send_to(b"query", "127.0.0.1:53"))
+                    .is_err()
+            );
+            let error = std::fs::File::open("/etc/hosts").unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+            assert!(
+                std::process::Command::new("/usr/bin/true")
+                    .status()
+                    .is_err()
+            );
+            assert!(UnixStream::connect("/var/run/mDNSResponder").is_err());
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("darwin::sandbox::tests::mesh_enrollment_profile_admits_only_its_origin_port")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    /// Run one confined test child and keep sending a "reply" datagram to the
+    /// UDP port named in its marker until it exits; only inbound UDP lets
+    /// the child see it.
+    fn run_child_receiving_udp(test: &str, marker: &str) -> std::process::ExitStatus {
         let port = std::net::UdpSocket::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -199,25 +328,24 @@ mod tests {
             .port();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
-            .arg("darwin::sandbox::tests::egress_broker_profile_admits_only_tcp_dials_and_dns")
+            .arg(test)
             .arg("--nocapture")
-            .env(CHILD_MARKER, port.to_string())
+            .env(marker, port.to_string())
             .spawn()
             .unwrap();
         let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        let status = loop {
+        loop {
             if let Some(status) = child.try_wait().unwrap() {
-                break status;
+                return status;
             }
             if std::time::Instant::now() > deadline {
                 child.kill().unwrap();
                 child.wait().unwrap();
-                panic!("the confined broker probe did not finish");
+                panic!("the confined probe {test} did not finish");
             }
             let _ = sender.send_to(b"reply", ("127.0.0.1", port));
             std::thread::sleep(std::time::Duration::from_millis(20));
-        };
-        assert!(status.success());
+        }
     }
 }

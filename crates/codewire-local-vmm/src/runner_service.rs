@@ -1607,12 +1607,10 @@ fn network_start_error_code(error: &RunnerError) -> &'static str {
         RunnerError::MeshTransportSpawn => "mesh_transport_spawn",
         RunnerError::MeshTransportStartTimeout => "mesh_transport_start_timeout",
         RunnerError::MeshTransportBootstrap => "mesh_transport_bootstrap",
-        #[cfg(target_os = "linux")]
         RunnerError::MeshTransportStartup(failure) => failure.runner_error_code(),
         RunnerError::MeshEnrollmentBrokerSpawn => "mesh_enrollment_broker_spawn",
         RunnerError::MeshEnrollmentBrokerStartTimeout => "mesh_enrollment_broker_start_timeout",
         RunnerError::MeshEnrollmentBrokerBootstrap => "mesh_enrollment_broker_bootstrap",
-        #[cfg(target_os = "linux")]
         RunnerError::MeshEnrollmentBrokerStartup(failure) => failure.runner_error_code(),
         RunnerError::MeshProcessWait => "mesh_process_wait",
         RunnerError::MeshProcessKillTimeout => "mesh_process_kill_timeout",
@@ -2790,14 +2788,12 @@ mod tests {
             network_start_error_code(&RunnerError::MeshTransportStartTimeout),
             "mesh_transport_start_timeout"
         );
-        #[cfg(target_os = "linux")]
         assert_eq!(
             network_start_error_code(&RunnerError::MeshTransportStartup(
                 crate::mesh_process::MeshTransportStartupFailure::TransportSetup,
             )),
             "mesh_transport_transport_setup"
         );
-        #[cfg(target_os = "linux")]
         assert_eq!(
             network_start_error_code(&RunnerError::MeshEnrollmentBrokerStartup(
                 crate::mesh_enrollment::MeshEnrollmentStartupFailure::EnrollmentRequest,

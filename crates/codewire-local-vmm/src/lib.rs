@@ -34,15 +34,13 @@ pub mod hybrid_vsock;
 mod lifecycle;
 #[cfg(all(target_os = "linux", feature = "macos-console-pair-fixture"))]
 pub mod macos_console_pair_fixture;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod mesh_enrollment;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod mesh_ingress;
-#[cfg(target_os = "macos")]
-pub(crate) mod mesh_ingress;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod mesh_process;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod mesh_transport;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod network_session;

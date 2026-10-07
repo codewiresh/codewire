@@ -274,7 +274,7 @@ pub(crate) struct NativeEgressBrokerArgs {
     pub(crate) generation: u64,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct NativeMeshTransportArgs {
     #[arg(long)]
@@ -283,7 +283,7 @@ pub(crate) struct NativeMeshTransportArgs {
     pub(crate) generation: u64,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct NativeMeshEnrollmentBrokerArgs {
     #[arg(long)]

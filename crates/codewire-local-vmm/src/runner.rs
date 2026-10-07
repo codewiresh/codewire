@@ -57,7 +57,6 @@ use crate::linux::confinement::{
 };
 #[cfg(target_os = "linux")]
 use crate::linux::preflight::{PreflightError, PreflightReport, preflight};
-#[cfg(target_os = "linux")]
 use crate::mesh_enrollment::{
     MESH_ENROLLMENT_BOOTSTRAP_FD, MESH_ENROLLMENT_CONFINE_MESSAGE,
     MESH_ENROLLMENT_PREPARED_MESSAGE, MESH_ENROLLMENT_READY_MESSAGE,
@@ -69,14 +68,12 @@ use crate::mesh_ingress::{
     AcceptedMeshIngress, MESH_INGRESS_CONTROL_KEY_LEN, MeshAttachment, MeshIngressControlFrame,
     MeshIngressPublisher, mesh_ingress_channel,
 };
-#[cfg(target_os = "linux")]
 use crate::mesh_process::{
     MESH_TRANSPORT_BOOTSTRAP_FD, MESH_TRANSPORT_CONFINE_MESSAGE, MESH_TRANSPORT_CONFINED_MESSAGE,
     MESH_TRANSPORT_ENROLLMENT_FD, MESH_TRANSPORT_PREPARED_MESSAGE, MESH_TRANSPORT_READY_MESSAGE,
     MESH_TRANSPORT_STATUS_MAX_BYTES, MeshTransportStartupFailure, MeshTransportStartupStatus,
     decode_mesh_transport_startup_status, encode_mesh_transport_bootstrap,
 };
-#[cfg(target_os = "linux")]
 use crate::mesh_transport::{MeshTransportError, receive_mesh_ingress_submissions};
 use crate::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, NetworkWorkerStartupStatus,
@@ -103,7 +100,6 @@ const NETWORK_WORKER_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const EGRESS_BROKER_READY_TIMEOUT: Duration =
     EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT.saturating_add(Duration::from_secs(5));
 const NETWORK_WORKER_ATTACH_TIMEOUT: Duration = Duration::from_secs(20);
-#[cfg(target_os = "linux")]
 const MESH_STACK_ATTACH_TIMEOUT: Duration = Duration::from_secs(45);
 const NETWORK_WORKER_PROGRESS_FRAME_LIMIT: usize = 64;
 const NETWORK_WORKER_HANDSHAKE_ATTEMPT_LIMIT: usize = 8;
@@ -1475,7 +1471,6 @@ impl RunningVm {
                 generation: self.request.generation,
                 deadline,
                 mesh: self.request.mesh.as_ref(),
-                #[cfg(target_os = "linux")]
                 mesh_credential_roots,
             };
             match spawn_network_stack_processes(&launch, key, mode).await {
@@ -1501,7 +1496,6 @@ impl RunningVm {
                             }
                             return Err(error);
                         }
-                        #[cfg(target_os = "linux")]
                         if launch.mesh.is_some() {
                             let Some(publisher) = worker.mesh_ingress_publisher.clone() else {
                                 let _ = stop_network_worker_process(&mut worker).await;
@@ -1606,7 +1600,6 @@ impl RunningVm {
             .map(|broker| broker.process.identity())
     }
 
-    #[cfg(target_os = "linux")]
     pub fn mesh_transport_process_identity(
         &self,
     ) -> Option<&crate::host::process::ProcessIdentity> {
@@ -1632,7 +1625,6 @@ impl RunningVm {
 
     /// Signal the exact runner-owned Mesh transport birth for checked-in
     /// qualified-host lifecycle verification.
-    #[cfg(target_os = "linux")]
     #[doc(hidden)]
     pub fn force_kill_mesh_transport_for_verification(&self) -> Result<(), RunnerError> {
         let mesh = self
@@ -1687,7 +1679,6 @@ impl RunningVm {
                 Err(_) => return Err(RunnerError::EgressBrokerWait),
             }
         }
-        #[cfg(target_os = "linux")]
         if let Some(mesh) = worker.mesh_transport.as_mut() {
             match mesh.child.try_wait() {
                 Ok(Some(status)) => {
@@ -1959,20 +1950,17 @@ struct EgressBrokerLaunch {
     key: Zeroizing<[u8; BROKER_IPC_KEY_LEN]>,
 }
 
-#[cfg(target_os = "linux")]
 struct MeshTransportProcess {
     child: tokio::process::Child,
     process: LiveProcess,
     ingress_receiver: Option<JoinHandle<Result<(), MeshTransportError>>>,
 }
 
-#[cfg(target_os = "linux")]
 struct MeshProcessStartup {
     child: Option<tokio::process::Child>,
     process: Option<LiveProcess>,
 }
 
-#[cfg(target_os = "linux")]
 impl MeshProcessStartup {
     fn new(child: tokio::process::Child) -> Self {
         Self {
@@ -2004,7 +1992,6 @@ impl MeshProcessStartup {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl Drop for MeshProcessStartup {
     fn drop(&mut self) {
         if let Some(process) = &self.process {
@@ -2016,14 +2003,12 @@ impl Drop for MeshProcessStartup {
     }
 }
 
-#[cfg(target_os = "linux")]
 struct PreparedMeshTransport {
     startup: MeshProcessStartup,
     control: tokio::net::UnixStream,
     submission_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
 }
 
-#[cfg(target_os = "linux")]
 struct PreparedMeshEnrollment {
     startup: MeshProcessStartup,
     control: tokio::net::UnixStream,
@@ -2037,7 +2022,6 @@ struct NetworkStackLaunch<'a> {
     generation: u64,
     deadline: tokio::time::Instant,
     mesh: Option<&'a MeshAttachment>,
-    #[cfg(target_os = "linux")]
     mesh_credential_roots: Option<(&'a Path, &'a Path)>,
 }
 
@@ -2050,7 +2034,6 @@ struct NetworkWorkerProcess {
     mesh_ingress_key: Option<Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>>,
     mesh_ingress_publisher: Option<MeshIngressPublisher>,
     ingress_forwarder: Option<JoinHandle<Result<(), RunnerError>>>,
-    #[cfg(target_os = "linux")]
     mesh_transport: Option<MeshTransportProcess>,
 }
 
@@ -2073,7 +2056,6 @@ fn take_ingress_forwarder_failure(
     !matches!(outcome, Ok(Ok(())))
 }
 
-#[cfg(target_os = "linux")]
 fn take_mesh_ingress_receiver_exit(
     receiver: &mut Option<JoinHandle<Result<(), MeshTransportError>>>,
 ) -> bool {
@@ -2138,7 +2120,6 @@ impl NetworkWorkerStartup {
             mesh_ingress_key,
             mesh_ingress_publisher: None,
             ingress_forwarder: None,
-            #[cfg(target_os = "linux")]
             mesh_transport: None,
         }
     }
@@ -2242,17 +2223,11 @@ async fn reap_failed_egress_broker_startup(
 }
 
 async fn stop_network_worker_process(worker: &mut NetworkWorkerProcess) -> Result<(), RunnerError> {
-    #[cfg(target_os = "linux")]
     let mesh_result = match worker.mesh_transport.as_mut() {
         Some(mesh) => stop_mesh_transport_process(mesh).await,
         None => Ok(()),
     };
-    #[cfg(target_os = "linux")]
-    {
-        worker.mesh_transport = None;
-    }
-    #[cfg(target_os = "macos")]
-    let mesh_result = Ok(());
+    worker.mesh_transport = None;
     let worker_result = stop_network_worker_process_inner(worker).await;
     match (mesh_result, worker_result) {
         (Ok(()), Ok(())) => Ok(()),
@@ -2302,7 +2277,6 @@ async fn stop_network_worker_process_inner(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 async fn stop_mesh_transport_process(mesh: &mut MeshTransportProcess) -> Result<(), RunnerError> {
     if let Some(receiver) = mesh.ingress_receiver.take() {
         receiver.abort();
@@ -2637,7 +2611,6 @@ async fn transfer_mesh_ingress_connection(
     .map_err(|_| RunnerError::IngressControl)
 }
 
-#[cfg(target_os = "linux")]
 async fn spawn_mesh_stack_processes(
     context: &NetworkStackLaunch<'_>,
     publisher: MeshIngressPublisher,
@@ -2855,7 +2828,6 @@ async fn spawn_mesh_stack_processes(
     })
 }
 
-#[cfg(target_os = "linux")]
 async fn spawn_mesh_transport_process(
     context: &NetworkStackLaunch<'_>,
     attachment: &MeshAttachment,
@@ -2978,7 +2950,6 @@ async fn spawn_mesh_transport_process(
     })
 }
 
-#[cfg(target_os = "linux")]
 async fn spawn_mesh_enrollment_process(
     context: &NetworkStackLaunch<'_>,
     attachment: &MeshAttachment,
@@ -3099,14 +3070,12 @@ async fn spawn_mesh_enrollment_process(
     Ok(PreparedMeshEnrollment { startup, control })
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MeshStatusReadError {
     Timeout,
     Protocol,
 }
 
-#[cfg(target_os = "linux")]
 async fn write_mesh_control_frame(
     control: &mut tokio::net::UnixStream,
     frame: &[u8],
@@ -3121,7 +3090,6 @@ async fn write_mesh_control_frame(
     .map_err(|_| MeshStatusReadError::Protocol)
 }
 
-#[cfg(target_os = "linux")]
 async fn read_mesh_status_frame(
     control: &mut tokio::net::UnixStream,
     maximum_bytes: usize,
@@ -3147,7 +3115,6 @@ async fn read_mesh_status_frame(
     }
 }
 
-#[cfg(target_os = "linux")]
 async fn mesh_transport_exit_or(
     startup: &mut MeshProcessStartup,
     fallback: RunnerError,
@@ -3174,7 +3141,6 @@ async fn mesh_transport_exit_or(
     }
 }
 
-#[cfg(target_os = "linux")]
 async fn mesh_enrollment_exit_or(
     startup: &mut MeshProcessStartup,
     fallback: RunnerError,
@@ -3201,7 +3167,6 @@ async fn mesh_enrollment_exit_or(
     }
 }
 
-#[cfg(target_os = "linux")]
 async fn reap_mesh_stack_startup(
     transport: &mut MeshProcessStartup,
     enrollment: &mut MeshProcessStartup,
@@ -3214,7 +3179,6 @@ async fn reap_mesh_stack_startup(
     }
 }
 
-#[cfg(target_os = "linux")]
 async fn reap_failed_mesh_process_startup(
     startup: &mut MeshProcessStartup,
 ) -> Result<(), RunnerError> {
@@ -3898,6 +3862,34 @@ fn prepare_isolated_child_pair(
     Ok(())
 }
 
+/// Darwin has no parent-death signal or close_range: each Mesh child ends
+/// when its control stream reaches EOF, and std opens every other descriptor
+/// close-on-exec.
+#[cfg(target_os = "macos")]
+fn prepare_isolated_child_pair(
+    expected_parent: libc::pid_t,
+    first_source: RawFd,
+    first_target: RawFd,
+    second_source: RawFd,
+    second_target: RawFd,
+) -> io::Result<()> {
+    if first_source == second_source || first_target == second_target {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    if unsafe { libc::getppid() } != expected_parent {
+        return Err(io::Error::from_raw_os_error(libc::ECHILD));
+    }
+    for (source, target) in [(first_source, first_target), (second_source, second_target)] {
+        if source != target && unsafe { libc::dup2(source, target) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(target, libc::F_SETFD, 0) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 async fn observe_guest_poweroff<D, W, F>(
     dispatch: D,
     wait: W,
@@ -4114,9 +4106,9 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
     {
         return Err(RunnerError::InvalidRequest);
     }
-    // Mesh and cw runtime catalogs are Linux-only.
+    // cw runtime catalogs are Linux-only.
     #[cfg(target_os = "macos")]
-    if request.mesh.is_some() || request.cw_runtime_catalog_generation.is_some() {
+    if request.cw_runtime_catalog_generation.is_some() {
         return Err(RunnerError::InvalidRequest);
     }
     Ok(())
@@ -5058,7 +5050,6 @@ pub enum RunnerError {
     MeshTransportStartTimeout,
     #[error("Mesh transport private bootstrap failed")]
     MeshTransportBootstrap,
-    #[cfg(target_os = "linux")]
     #[error("Mesh transport startup failed: {0:?}")]
     MeshTransportStartup(MeshTransportStartupFailure),
     #[error("Mesh enrollment broker process spawn failed")]
@@ -5067,7 +5058,6 @@ pub enum RunnerError {
     MeshEnrollmentBrokerStartTimeout,
     #[error("Mesh enrollment broker private bootstrap failed")]
     MeshEnrollmentBrokerBootstrap,
-    #[cfg(target_os = "linux")]
     #[error("Mesh enrollment broker startup failed: {0:?}")]
     MeshEnrollmentBrokerStartup(MeshEnrollmentStartupFailure),
     #[error("wait for isolated Mesh process failed")]
@@ -5480,13 +5470,11 @@ mod tests {
             network_stack_attach_timeout(Duration::from_secs(15), NetworkWorkerMode::Product)
                 > EGRESS_BROKER_READY_TIMEOUT
         );
-        #[cfg(target_os = "linux")]
         assert!(
             MESH_STACK_ATTACH_TIMEOUT
                 > crate::mesh_process::MESH_TRANSPORT_CONFINEMENT_ADMISSION_TIMEOUT,
             "the Mesh stack must retain a margin around exact child admission"
         );
-        #[cfg(target_os = "linux")]
         assert!(
             crate::mesh_process::MESH_TRANSPORT_CONFINEMENT_ADMISSION_TIMEOUT
                 >= crate::mesh_enrollment::MESH_ENROLLMENT_CONFINEMENT_ADMISSION_TIMEOUT
@@ -5521,7 +5509,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn network_stack_stop_reaps_worker_broker_and_mesh_independently() {
         let (worker_child, worker_process) = spawn_admitted_sleep("30").await;
@@ -5645,13 +5632,7 @@ mod tests {
             )
             .unwrap(),
         );
-        #[cfg(target_os = "linux")]
         assert!(validate_request(&valid_mesh).is_ok());
-        #[cfg(target_os = "macos")]
-        assert!(matches!(
-            validate_request(&valid_mesh),
-            Err(RunnerError::InvalidRequest)
-        ));
 
         let mut noncanonical_mesh = valid_mesh;
         noncanonical_mesh

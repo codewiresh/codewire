@@ -65,12 +65,12 @@ fn local_vm_roles_are_hidden_and_other_host_effect_entrypoints_stay_unavailable(
         "__native-runner",
         "__native-network-worker",
         "__native-egress-broker",
+        "__native-mesh-transport",
+        "__native-mesh-enrollment-broker",
     ] {
         assert!(!help.contains(hidden), "{hidden}");
     }
     for entrypoint in [
-        "__native-mesh-transport",
-        "__native-mesh-enrollment-broker",
         "__local-credential-authority",
         "__local-credential-broker",
     ] {

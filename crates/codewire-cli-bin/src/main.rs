@@ -188,7 +188,7 @@ fn main() {
     });
     if let Err(err) = runtime.block_on(codewire_cli::run()) {
         if isolated_process {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             let exit_code = if network_worker {
                 codewire_cli::native_network_worker_exit_code(&err)
             } else if egress_broker {
@@ -197,15 +197,6 @@ fn main() {
                 codewire_cli::native_mesh_transport_exit_code(&err)
             } else if mesh_enrollment_broker {
                 codewire_cli::native_mesh_enrollment_broker_exit_code(&err)
-            } else {
-                None
-            }
-            .unwrap_or(1);
-            #[cfg(target_os = "macos")]
-            let exit_code = if network_worker {
-                codewire_cli::native_network_worker_exit_code(&err)
-            } else if egress_broker {
-                codewire_cli::native_egress_broker_exit_code(&err)
             } else {
                 None
             }
