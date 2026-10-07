@@ -274,13 +274,15 @@ fn verify_production_process_confinement() -> Result<(), AuthorityRuntimeError> 
 /// macOS has no capabilities or no-new-privileges bit. The launcher
 /// supplies a new session, an empty environment and only standard
 /// descriptors (`posix_spawn` with `POSIX_SPAWN_CLOEXEC_DEFAULT`); the
-/// authority never runs as root.
+/// authority never runs as root. CoreFoundation, which cw links, sets
+/// `__CF_USER_TEXT_ENCODING` itself while the process loads, from the user
+/// ID rather than from the parent, so that one name is not ambient input.
 #[cfg(target_os = "macos")]
 fn verify_production_process_confinement() -> Result<(), AuthorityRuntimeError> {
     if rustix::process::geteuid().is_root()
         || rustix::process::getsid(None).map_err(|_| AuthorityRuntimeError::ProcessNotConfined)?
             != rustix::process::getpid()
-        || std::env::vars_os().next().is_some()
+        || std::env::vars_os().any(|(name, _)| name != "__CF_USER_TEXT_ENCODING")
     {
         return Err(AuthorityRuntimeError::ProcessNotConfined);
     }
