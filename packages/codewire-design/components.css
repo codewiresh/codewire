@@ -775,8 +775,10 @@ dialog.cw-discard-dialog {
 }
 
 /* Row button: one choice in a picker list, such as a repository result. The
-   whole row is the target; separators and the focus ring stay inside the list. */
-.cw-row-button {
+   whole row is the target; separators and the focus ring stay inside the list.
+   A skeleton row holds the same place, with the same inset, while rows load. */
+.cw-row-button,
+.cw-row-skeleton {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -786,6 +788,9 @@ dialog.cw-discard-dialog {
   padding: var(--space-2) var(--space-3);
   border: 0;
   border-bottom: var(--border-width) solid var(--border-subtle);
+}
+
+.cw-row-button {
   background: none;
   color: var(--fg-primary);
   font: inherit;
@@ -798,6 +803,38 @@ dialog.cw-discard-dialog {
 .cw-row-button:hover { background: var(--bg-surface-hover); }
 .cw-row-button:focus-visible { outline-offset: calc(-1 * var(--focus-ring-width)); }
 .cw-row-button:disabled { color: var(--fg-disabled); cursor: not-allowed; }
+.cw-row-skeleton > .cw-skeleton:first-child { width: 60%; }
+.cw-row-skeleton > .cw-skeleton:last-child { width: var(--space-10); }
+
+/* Loading: a spinner beside the status that names what is loading, and
+   skeleton bars in the shape of the content to come. Both hold still when
+   motion is reduced; the status text carries the meaning. */
+.cw-spinner {
+  display: inline-block;
+  flex: none;
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+  border: 2px solid var(--border-hover);
+  border-top-color: var(--accent-text);
+  border-radius: var(--radius-pill);
+  animation: cw-spin 0.8s linear infinite;
+}
+
+.cw-skeleton {
+  display: block;
+  height: var(--space-3);
+  border-radius: var(--radius-pill);
+  background: var(--border);
+  animation: cw-skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes cw-spin {
+  to { transform: rotate(1turn); }
+}
+
+@keyframes cw-skeleton-pulse {
+  50% { opacity: 0.4; }
+}
 
 /* Context navigation: the side panel of Settings and Organization pages.
    Group labels are .cw-section-label and links are .cw-nav-link, as in the
@@ -921,5 +958,7 @@ dialog.cw-discard-dialog {
 
 @media (prefers-reduced-motion: reduce) {
   .cw-drawer,
-  .cw-toast { animation: none; }
+  .cw-toast,
+  .cw-spinner,
+  .cw-skeleton { animation: none; }
 }

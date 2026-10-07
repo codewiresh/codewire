@@ -234,12 +234,17 @@
   </section>
 
   <section class="cw-card" aria-labelledby="row-button-title">
-    <header class="cw-card-header"><h2 id="row-button-title" class="cw-card-title">Row button</h2><p class="cw-card-description">One choice in a picker list: the whole row is the target.</p></header>
+    <header class="cw-card-header"><h2 id="row-button-title" class="cw-card-title">Row button</h2><p class="cw-card-description">One choice in a picker list: the whole row is the target. While rows load, a spinner sits beside the status and skeleton rows hold their place.</p></header>
     <div class="cw-card-content">
       <ul class="gallery-list">
         <li><button class="cw-row-button" type="button"><span>codewiresh/codewire<br><small class="cw-muted">Private</small></span><span>Add</span></button></li>
         <li><button class="cw-row-button" type="button" disabled><span>codewiresh/docs<br><small class="cw-muted">Already added</small></span><span>Added</span></button></li>
       </ul>
+      <ul class="gallery-list" aria-hidden="true">
+        <li class="cw-row-skeleton"><span class="cw-skeleton"></span><span class="cw-skeleton"></span></li>
+        <li class="cw-row-skeleton"><span class="cw-skeleton"></span><span class="cw-skeleton"></span></li>
+      </ul>
+      <p class="cw-help"><span class="cw-spinner" aria-hidden="true"></span> Loading GitHub repositories…</p>
     </div>
   </section>
 

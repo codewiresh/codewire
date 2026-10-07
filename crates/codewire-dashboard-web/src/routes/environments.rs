@@ -52,7 +52,7 @@ use crate::{
     },
 };
 
-const MAX_REPOSITORIES: usize = 108;
+const MAX_REPOSITORIES: usize = crate::view::MAX_CREATE_REPOSITORIES;
 const MAX_APP_PORTS: usize = 16;
 const MAX_FIELD: usize = 16_384;
 const PROTECTED_SECRET_ACCESS_UNAVAILABLE: &str =
@@ -4760,12 +4760,36 @@ mod tests {
         );
         assert!(html.contains("<h4 id=\"github-browser-title\""));
         assert!(!html.contains("data-github-repository-picker"));
+        // The browser stops offering repositories at the count the form
+        // parser accepts, and says why.
+        assert!(html.contains(&format!(
+            "data-repository-rows data-repository-limit=\"{MAX_REPOSITORIES}\""
+        )));
+        assert!(html.contains(&format!(
+            "<p class=\"cw-field-help\" hidden data-github-repository-limit>This Sandbox has the most repositories it can take ({MAX_REPOSITORIES}). Remove one to add another.</p>"
+        )));
+        // Loaded choices render the list idle: no spinner, skeleton or busy list.
+        assert!(html.contains("data-github-results></section><ul class=\"cw-github-repository-list\" aria-hidden=\"true\" data-github-placeholder hidden>"));
+        assert_eq!(html.matches("<li class=\"cw-row-skeleton\">").count(), 4);
+        assert!(html.contains("<span class=\"cw-spinner\" aria-hidden=\"true\" data-github-spinner hidden></span><p class=\"cw-field-help\" role=\"status\" data-github-status>"));
         assert!(!form.sources.credential_selection_enabled);
         // Browsing uses the account's one GitHub connection; profiles never
         // select or gate it.
         assert!(!html.contains("data-github-profile"));
         assert!(!html.contains("data-show-github-repositories"));
         assert!(!html.contains("GitHub connected"));
+
+        // While choices load, the account is unknown and the list is busy.
+        let mut loading = form;
+        loading.options_loading = true;
+        let html = EnvironmentCreateFormTemplate {
+            organization: &organization,
+            form: &loading,
+        }
+        .render()
+        .expect("loading environment form");
+        assert!(html.contains("data-github-results aria-busy=\"true\"></section><ul class=\"cw-github-repository-list\" aria-hidden=\"true\" data-github-placeholder>"));
+        assert!(html.contains("<span class=\"cw-spinner\" aria-hidden=\"true\" data-github-spinner></span><p class=\"cw-field-help\" role=\"status\" data-github-status>Loading GitHub account…</p>"));
     }
 
     #[test]
