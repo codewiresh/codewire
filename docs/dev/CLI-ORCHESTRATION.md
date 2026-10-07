@@ -326,8 +326,10 @@ scripts/dev/test-cli-host.py --cw target/debug/cw --native-agents
 The first journey uses independent synthetic native peers and owned runtime
 fixtures. It covers input, names, process ownership, parent wake, native
 controls, durable outbox recovery, startup failure, and launch projection
-recovery. The second uses ordinary installed Codex/Claude login and observes
-conversation resume, Claude xhigh and a resumed lead invoking `cw` itself.
+recovery. It runs on Linux and macOS; [MACOS-CLI.md](MACOS-CLI.md) describes
+the macOS process-ownership check. The second uses ordinary installed
+Codex/Claude login and observes conversation resume, Claude xhigh and a resumed
+lead invoking `cw` itself.
 Neither replaces the matching native Linux hardware or retained Kind sandbox
 journey. Program #2255 holds current commands, outcomes and landing evidence.
 
