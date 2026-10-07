@@ -114,6 +114,10 @@ use crate::workspace_plan::{
 
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a new supervisor waits for a previous supervisor's runner, which
+/// exits as soon as it sees its parent exit.
+#[cfg(target_os = "macos")]
+const PREVIOUS_RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 const _: () = assert!(
     RUNNER_EXIT_TIMEOUT.as_nanos() > crate::runner_service::RUNNER_SERVER_DRAIN_TIMEOUT.as_nanos()
 );
@@ -862,6 +866,21 @@ impl SupervisorCore {
             .map_err(|_| SupervisorError::ArtifactStore)
     }
 
+    #[cfg(target_os = "macos")]
+    fn require_vz_helper(&self) -> Result<(), SupervisorError> {
+        let lock = crate::artifact::ArtifactLock::read(&self.config.artifact_lock)?;
+        let helper = self.config.artifact_root.join(&lock.vz_runner.path);
+        match crate::host::vz_helper_problem(&helper) {
+            None => Ok(()),
+            Some(crate::host::VzHelperProblem::Missing) => {
+                Err(SupervisorError::VzHelperMissing(helper))
+            }
+            Some(crate::host::VzHelperProblem::Unentitled) => {
+                Err(SupervisorError::VzHelperUnentitled(helper))
+            }
+        }
+    }
+
     async fn admit_cached_artifact_generation(
         &mut self,
         artifact_generation: &str,
@@ -876,6 +895,8 @@ impl SupervisorCore {
     }
 
     async fn preflight(&mut self) -> Result<String, SupervisorError> {
+        #[cfg(target_os = "macos")]
+        self.require_vz_helper()?;
         let artifact_generation = self.admit_current_artifact_generation().await?;
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         RuntimeArtifactStore::create(&engine)
@@ -2135,6 +2156,23 @@ impl SupervisorCore {
                 }
                 Err(RecoveryError::IdentityMismatch) => {
                     self.mark_orphaned(name)?;
+                    return Ok(());
+                }
+                // A runner exits with its supervisor on Darwin. One still
+                // alive belongs to the previous supervisor; wait for it to
+                // finish exiting, and never adopt it.
+                #[cfg(target_os = "macos")]
+                Err(RecoveryError::Unowned) => {
+                    if LiveProcess::wait_recorded_exit(
+                        &record.process,
+                        PREVIOUS_RUNNER_EXIT_TIMEOUT,
+                    )
+                    .await?
+                    {
+                        self.mark_runner_dead(name)?;
+                    } else {
+                        self.mark_orphaned(name)?;
+                    }
                     return Ok(());
                 }
                 Err(error) => return Err(error.into()),
@@ -7016,6 +7054,10 @@ impl From<SupervisorError> for Status {
                 Status::failed_precondition(resolver.to_string())
             }
             SupervisorError::Runner(_) => Status::failed_precondition(error.to_string()),
+            #[cfg(target_os = "macos")]
+            SupervisorError::VzHelperMissing(_) | SupervisorError::VzHelperUnentitled(_) => {
+                Status::failed_precondition(error.to_string())
+            }
             SupervisorError::Artifact(
                 crate::artifact::ArtifactError::GuestSeedProtocolUnsupported(_),
             ) => Status::failed_precondition(error.to_string()),
@@ -7059,6 +7101,8 @@ impl From<SupervisorConfigError> for SupervisorError {
                 Self::SupervisorConfigurationMismatch
             }
             SupervisorConfigError::Io { path, source } => Self::Io { path, source },
+            #[cfg(target_os = "macos")]
+            SupervisorConfigError::SocketPathTooLong(root) => Self::SocketPathTooLong(root),
         }
     }
 }
@@ -7067,6 +7111,19 @@ impl From<SupervisorConfigError> for SupervisorError {
 pub enum SupervisorError {
     #[error("native runtime configuration is invalid")]
     InvalidConfiguration,
+    #[cfg(target_os = "macos")]
+    #[error(
+        "local state root {0} is too long for macOS Unix sockets (103 bytes); choose a shorter path"
+    )]
+    SocketPathTooLong(PathBuf),
+    #[cfg(target_os = "macos")]
+    #[error("the Virtualization.framework helper {0} is missing")]
+    VzHelperMissing(PathBuf),
+    #[cfg(target_os = "macos")]
+    #[error(
+        "the Virtualization.framework helper {0} lacks the com.apple.security.virtualization entitlement"
+    )]
+    VzHelperUnentitled(PathBuf),
     #[error("native environment request is invalid")]
     InvalidRequest,
     #[error("local environment {0:?} already exists")]
@@ -7196,6 +7253,10 @@ pub enum SupervisorError {
 // or owner paths. The existing operation error_code is the diagnostic surface.
 fn create_failure_code(error: &SupervisorError) -> &'static str {
     match error {
+        #[cfg(target_os = "macos")]
+        SupervisorError::VzHelperMissing(_) => "create_vz_helper_missing",
+        #[cfg(target_os = "macos")]
+        SupervisorError::VzHelperUnentitled(_) => "create_vz_helper_unentitled",
         SupervisorError::CredentialAuthorityUnavailable => {
             "create_credential_authority_unavailable"
         }
@@ -7273,10 +7334,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
-    use crate::artifact::{
-        ARTIFACT_LOCK_SCHEMA_VERSION, ArtifactArchitecture, ArtifactLock, ArtifactSpec,
-        CLOUD_HYPERVISOR_RELEASE, ExecutableArtifactSpec,
-    };
+    use crate::artifact::{ArtifactArchitecture, ArtifactLock, ArtifactSpec};
     use crate::oci::{OciArchitecture, ResolvedDescriptor, ResolvedImage, Sha256Digest};
     use crate::uds::bind_owner_only;
     use codewire_access::builtin_provider_catalog;
@@ -7318,16 +7376,8 @@ mod tests {
         let cloud_hypervisor = spec("bin/cloud-hypervisor", b"cloud-hypervisor");
         let kernel = spec("boot/kernel", kernel_bytes);
         let initramfs = spec("boot/initramfs", b"initramfs");
-        let lock = ArtifactLock {
-            schema_version: ARTIFACT_LOCK_SCHEMA_VERSION,
-            cloud_hypervisor: ExecutableArtifactSpec {
-                artifact: cloud_hypervisor.clone(),
-                version: CLOUD_HYPERVISOR_RELEASE.to_owned(),
-            },
-            virtiofsd: None,
-            kernel: kernel.clone(),
-            initramfs: initramfs.clone(),
-        };
+        let lock =
+            ArtifactLock::for_test(cloud_hypervisor.clone(), kernel.clone(), initramfs.clone());
         RuntimeArtifactStore::create(engine).unwrap();
         let blobs = engine.path().join("runtime-artifacts/blobs");
         for (prefix, artifact, bytes, permissions) in [
@@ -7403,16 +7453,11 @@ mod tests {
         let cloud_hypervisor = spec("bin/cloud-hypervisor", &elf);
         let kernel_spec = spec("boot/kernel", &kernel);
         let initramfs_spec = spec("boot/initramfs", &initramfs);
-        let lock = ArtifactLock {
-            schema_version: ARTIFACT_LOCK_SCHEMA_VERSION,
-            cloud_hypervisor: ExecutableArtifactSpec {
-                artifact: cloud_hypervisor.clone(),
-                version: CLOUD_HYPERVISOR_RELEASE.to_owned(),
-            },
-            virtiofsd: None,
-            kernel: kernel_spec.clone(),
-            initramfs: initramfs_spec.clone(),
-        };
+        let lock = ArtifactLock::for_test(
+            cloud_hypervisor.clone(),
+            kernel_spec.clone(),
+            initramfs_spec.clone(),
+        );
         RuntimeArtifactStore::create(engine).unwrap();
         let store = engine.path().join("runtime-artifacts");
         for (prefix, spec, bytes, mode) in [

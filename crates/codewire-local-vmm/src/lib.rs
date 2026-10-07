@@ -92,6 +92,8 @@ pub mod supervisor;
 mod supervisor_store;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod uds;
+#[cfg(target_os = "macos")]
+mod vz;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod workspace_generation;
 

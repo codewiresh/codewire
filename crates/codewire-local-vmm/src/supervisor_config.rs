@@ -13,14 +13,9 @@ use sha2::{Digest as _, Sha256};
 use crate::control::v1;
 
 // Bump for every detached-supervisor behavior change, even if the protobuf
-// message layout itself remains wire-compatible.
-// The first Darwin stopped-state dispatcher joins version 6: there is no older
-// detached Darwin service, and Linux behavior and wire/configuration contracts
-// are unchanged. Subsequent Darwin behavior changes follow the same bump rule.
-#[cfg(target_os = "linux")]
+// message layout itself remains wire-compatible. Linux and Darwin serve the
+// same shared supervisor; Darwin's former stopped-state dispatcher was 8.
 pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 9;
-#[cfg(not(target_os = "linux"))]
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 8;
 const NATIVE_SUPERVISOR_CONFIG_DIGEST_DOMAIN: &[u8] =
     b"codewire.native-supervisor.runtime-config.sha256.v1";
 
@@ -81,6 +76,31 @@ impl NativeRuntimeConfig {
             })?;
         if executable != self.executable {
             return Err(SupervisorConfigError::InvalidConfiguration);
+        }
+        #[cfg(target_os = "macos")]
+        self.validate_socket_paths()?;
+        Ok(())
+    }
+
+    /// Darwin's `sun_path` holds 103 bytes. Check the longest socket under
+    /// this root before anything is created: the supervisor socket, a runner
+    /// socket and a VM's hybrid-vsock socket (`engine/vms/<uuid>/vsock/v`).
+    #[cfg(target_os = "macos")]
+    fn validate_socket_paths(&self) -> Result<(), SupervisorConfigError> {
+        const MAXIMUM_SOCKET_PATH_BYTES: usize = 103;
+        let id = "00000000-0000-0000-0000-000000000000";
+        for socket in [
+            self.supervisor_socket(),
+            self.root.join("runners").join(format!("{id}.sock")),
+            self.root
+                .join("engine/vms")
+                .join(id)
+                .join("vsock")
+                .join(crate::state::VSOCK_SOCKET_NAME),
+        ] {
+            if socket.as_os_str().len() > MAXIMUM_SOCKET_PATH_BYTES {
+                return Err(SupervisorConfigError::SocketPathTooLong(self.root.clone()));
+            }
         }
         Ok(())
     }
@@ -172,6 +192,11 @@ pub enum SupervisorConfigError {
     InvalidSupervisorInfo,
     #[error("the running native supervisor uses a different runtime configuration")]
     SupervisorConfigurationMismatch,
+    #[cfg(target_os = "macos")]
+    #[error(
+        "local state root {0} is too long for macOS Unix sockets (103 bytes); choose a shorter path"
+    )]
+    SocketPathTooLong(PathBuf),
     #[error("filesystem operation failed for {path}: {source}")]
     Io {
         path: PathBuf,
@@ -202,10 +227,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        #[cfg(target_os = "linux")]
         assert_eq!(info.protocol_version, 9);
-        #[cfg(not(target_os = "linux"))]
-        assert_eq!(info.protocol_version, 8);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(

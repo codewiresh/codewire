@@ -20,6 +20,12 @@ pub use crate::supervisor_metadata::legacy::{
 pub const DEFAULT_ROOT_DISK_BYTES: u64 = 1024 * 1024 * 1024;
 pub const DEFAULT_DOCKER_DISK_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub(crate) const MAXIMUM_ROOT_GENERATIONS: usize = 64;
+/// The hybrid-vsock socket inside `vsock/`. Darwin's `sun_path` holds 103
+/// bytes, so macOS uses a one-byte name; see `max_socket_path_bytes`.
+#[cfg(target_os = "linux")]
+pub(crate) const VSOCK_SOCKET_NAME: &str = "vsock.sock";
+#[cfg(target_os = "macos")]
+pub(crate) const VSOCK_SOCKET_NAME: &str = "v";
 const EXT4_SUPERBLOCK_OFFSET: u64 = 1024;
 const EXT4_SUPERBLOCK_BYTES: usize = 0x78;
 const EXT4_MAGIC_OFFSET: usize = 0x38;
@@ -63,7 +69,7 @@ impl VmPaths {
         let diagnostics_dir = vm_root.ensure_dir(Path::new("diagnostics"), 0o700)?;
         Ok(Self {
             api_socket: api_dir.join("api.sock"),
-            vsock_socket: vsock_dir.join("vsock.sock"),
+            vsock_socket: vsock_dir.join(VSOCK_SOCKET_NAME),
             virtiofs_dir,
             state_disk: disks_dir.join("state.raw"),
             docker_disk: disks_dir.join("docker.raw"),
@@ -99,7 +105,7 @@ impl VmPaths {
 
     pub fn clear_stale_runtime_endpoints(&self) -> Result<(), StateError> {
         PrivateRoot::open(&self.api_dir)?.remove_private_socket(Path::new("api.sock"))?;
-        PrivateRoot::open(&self.vsock_dir)?.remove_private_socket(Path::new("vsock.sock"))?;
+        PrivateRoot::open(&self.vsock_dir)?.remove_private_socket(Path::new(VSOCK_SOCKET_NAME))?;
         let virtiofs = PrivateRoot::open(&self.virtiofs_dir)?;
         for index in 0..MAX_DIRECT_SHARES {
             virtiofs.remove_private_socket_with_permissions(
@@ -293,9 +299,16 @@ impl PersistedVmState {
     }
 
     fn validate(&self) -> Result<(), StateError> {
+        // Darwin's helper has no API socket; Cloud Hypervisor's always has.
+        #[cfg(target_os = "linux")]
         let valid_phase = matches!(
             (self.phase, &self.api_socket, &self.vsock_socket),
             (VmPhase::Starting, None, None) | (VmPhase::Running, Some(_), Some(_))
+        );
+        #[cfg(target_os = "macos")]
+        let valid_phase = matches!(
+            (self.phase, &self.api_socket, &self.vsock_socket),
+            (VmPhase::Starting, None, None) | (VmPhase::Running, None, Some(_))
         );
         let valid_root = match (&self.root_generation, &self.root_disk) {
             (None, None) => true,
@@ -451,7 +464,7 @@ pub fn cleanup_trashed_vm(
         vm.remove_empty_private_directory(Path::new("api"))?;
     }
     if let Some(vsock) = optional_private_directory(&vm, Path::new("vsock"))? {
-        vsock.remove_private_socket(Path::new("vsock.sock"))?;
+        vsock.remove_private_socket(Path::new(VSOCK_SOCKET_NAME))?;
         vm.remove_empty_private_directory(Path::new("vsock"))?;
     }
     if let Some(virtiofs) = optional_private_directory(&vm, Path::new("fs"))? {
@@ -491,6 +504,8 @@ pub fn cleanup_trashed_vm(
         }
         vm.remove_empty_private_directory(Path::new("generations"))?;
     }
+    #[cfg(target_os = "macos")]
+    vm.remove_private_regular(Path::new(crate::vz::CONFIG_NAME), 0o600)?;
     vm.remove_private_regular(Path::new("state.json"), 0o600)?;
     vm.remove_private_regular(Path::new("vm.lock"), 0o600)?;
     drop(vm);
@@ -574,20 +589,26 @@ fn optional_private_directory(
 }
 
 pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError> {
-    ensure_only_entries(
-        vm.path(),
-        &[
-            "api",
-            "vsock",
-            "fs",
-            "disks",
-            "seed",
-            "diagnostics",
-            "generations",
-            "vm.lock",
-            "state.json",
-        ],
-    )?;
+    const ENTRIES: [&str; 9] = [
+        "api",
+        "vsock",
+        "fs",
+        "disks",
+        "seed",
+        "diagnostics",
+        "generations",
+        "vm.lock",
+        "state.json",
+    ];
+    #[cfg(target_os = "linux")]
+    ensure_only_entries(vm.path(), &ENTRIES)?;
+    // Darwin also keeps the helper's configuration beside the state.
+    #[cfg(target_os = "macos")]
+    {
+        let mut entries = ENTRIES.to_vec();
+        entries.push(crate::vz::CONFIG_NAME);
+        ensure_only_entries(vm.path(), &entries)?;
+    }
     if let Some(virtiofs) = optional_private_directory(vm, Path::new("fs"))? {
         for entry in fs::read_dir(virtiofs.path()).map_err(|source| StateError::Io {
             path: virtiofs.path().to_owned(),
@@ -628,7 +649,7 @@ pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError>
             "api",
             &[(&"api.sock", 0o600, true), (&"api.sock.lock", 0o600, false)][..],
         ),
-        ("vsock", &[(&"vsock.sock", 0o600, true)][..]),
+        ("vsock", &[(&VSOCK_SOCKET_NAME, 0o600, true)][..]),
         (
             "disks",
             &[
@@ -1049,7 +1070,18 @@ mod tests {
             Err(StateError::InvalidPersistedState)
         ));
         state.vsock_socket = Some(socket);
+        #[cfg(target_os = "linux")]
         assert!(state.validate().is_ok());
+        // The Darwin VMM has no API socket: a running VM records only vsock.
+        #[cfg(target_os = "macos")]
+        {
+            assert!(matches!(
+                state.validate(),
+                Err(StateError::InvalidPersistedState)
+            ));
+            state.api_socket = None;
+            assert!(state.validate().is_ok());
+        }
     }
 
     #[test]

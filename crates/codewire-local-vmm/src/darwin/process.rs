@@ -366,6 +366,30 @@ impl LiveProcess {
         &self.identity
     }
 
+    /// Wait for a recorded process that this process does not own to exit.
+    /// Owned descendants watch their parent, so after an owner exits they stop
+    /// on their own; this only observes that, never signals. `false` means the
+    /// same birth is still alive at the deadline.
+    pub async fn wait_recorded_exit(
+        expected: &ProcessIdentity,
+        timeout: Duration,
+    ) -> Result<bool, RecoveryError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match Self::recover(expected) {
+                Err(RecoveryError::ProcessExited | RecoveryError::IdentityMismatch) => {
+                    return Ok(true);
+                }
+                Err(RecoveryError::Unowned) if Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(RecoveryError::Unowned) => return Ok(false),
+                Err(error) => return Err(error),
+                Ok(_) => unreachable!("Darwin recovery never adopts a process"),
+            }
+        }
+    }
+
     /// Signal the owned child. As with a Linux pidfd, signaling an exited but
     /// unreaped child has no effect and a reaped one reports `ProcessExited`.
     /// The birth is rechecked first, so a reused PID is never signaled.

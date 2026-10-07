@@ -784,6 +784,10 @@ fn git_output(
     let stdout_limit = maximum_stdout
         .checked_add(1)
         .ok_or(WorkspaceError::GitOutputTooLarge)? as u64;
+    #[cfg(target_os = "macos")]
+    if !crate::host::developer_tools_present() {
+        return Err(WorkspaceError::GitUnavailable);
+    }
     let mut command = Command::new(GIT);
     command
         .args(GIT_FOREGROUND_MAINTENANCE)
@@ -1690,6 +1694,10 @@ fn import_git_bundle(
     destination: &Path,
     template: &Path,
 ) -> Result<(), WorkspaceError> {
+    #[cfg(target_os = "macos")]
+    if !crate::host::developer_tools_present() {
+        return Err(WorkspaceError::GitUnavailable);
+    }
     let initialized = Command::new(GIT)
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
@@ -1997,10 +2005,13 @@ fn bounded_staging_regular_bytes(root: &Path, maximum: u64) -> Result<u64, Works
 }
 
 fn format_ext4(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
+    #[cfg(target_os = "linux")]
     let mkfs = ["/usr/sbin/mkfs.ext4", "/usr/bin/mkfs.ext4"]
         .into_iter()
         .find(|candidate| Path::new(candidate).is_file())
         .ok_or(WorkspaceError::MkfsUnavailable)?;
+    #[cfg(target_os = "macos")]
+    let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
     let status = Command::new(mkfs)
         .args([
             OsStr::new("-q"),
@@ -2025,10 +2036,13 @@ fn format_ext4(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
 }
 
 fn format_empty_ext4(disk: &Path) -> Result<(), WorkspaceError> {
+    #[cfg(target_os = "linux")]
     let mkfs = ["/usr/sbin/mkfs.ext4", "/usr/bin/mkfs.ext4"]
         .into_iter()
         .find(|candidate| Path::new(candidate).is_file())
         .ok_or(WorkspaceError::MkfsUnavailable)?;
+    #[cfg(target_os = "macos")]
+    let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
     let status = Command::new(mkfs)
         .args(["-q", "-F", "-m", "0"])
         .arg(disk)
@@ -2117,7 +2131,17 @@ pub enum WorkspaceError {
     SubmoduleUnsupported,
     #[error("workspace Git tree is malformed")]
     InvalidTree,
-    #[error("workspace source entry could not be opened safely at {path}: {source}")]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        error("workspace source entry could not be opened safely at {path}: {source}")
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error(
+            "workspace source entry could not be opened safely at {path}: {source}{}",
+            crate::host::privacy_hint(.source.raw_os_error())
+        )
+    )]
     SourceOpen {
         path: PathBuf,
         source: rustix::io::Errno,
@@ -2140,7 +2164,14 @@ pub enum WorkspaceError {
     UnsafeCopySymlink(PathBuf),
     #[error("workspace content does not fit on the requested disk")]
     WorkspaceTooLarge,
-    #[error("/usr/bin/git is required for native clone-mode workspaces")]
+    #[cfg_attr(
+        target_os = "linux",
+        error("/usr/bin/git is required for native clone-mode workspaces")
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error("Git requires the Xcode Command Line Tools; install them: xcode-select --install")
+    )]
     GitUnavailable,
     #[error("Git could not inspect the requested clean commit")]
     GitCommandFailed,
@@ -2172,7 +2203,14 @@ pub enum WorkspaceError {
         expected: u64,
         actual: u64,
     },
-    #[error("mkfs.ext4 is required for native workspace provisioning")]
+    #[cfg_attr(
+        target_os = "linux",
+        error("mkfs.ext4 is required for native workspace provisioning")
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error("mkfs.ext4 is required; install e2fsprogs: brew install e2fsprogs")
+    )]
     MkfsUnavailable,
     #[error("mkfs.ext4 failed to create the workspace disk")]
     MkfsFailed,
@@ -2184,7 +2222,17 @@ pub enum WorkspaceError {
     Plan(#[from] crate::workspace_plan::WorkspacePlanError),
     #[error(transparent)]
     Content(#[from] crate::oci::ContentStoreError),
-    #[error("filesystem operation failed for {path}: {source}")]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        error("filesystem operation failed for {path}: {source}")
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error(
+            "filesystem operation failed for {path}: {source}{}",
+            crate::host::privacy_hint(.source.raw_os_error().unwrap_or(0))
+        )
+    )]
     Io { path: PathBuf, source: io::Error },
 }
 

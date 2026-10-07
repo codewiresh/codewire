@@ -470,13 +470,34 @@ pub(crate) fn operation_outcome(operation: v1::Operation) -> Result<v1::Operatio
                 operation.error_code.as_str()
             };
             Err(Status::failed_precondition(format!(
-                "local lifecycle operation {} failed: {error_code}",
-                operation.operation_id
+                "local lifecycle operation {} failed: {error_code}{}",
+                operation.operation_id,
+                operation_error_hint(error_code)
             )))
         }
         _ => Err(Status::internal(
             "local lifecycle operation is not terminal",
         )),
+    }
+}
+
+/// A plain-language reason for an operation error code, where the code alone
+/// does not tell the user what to change.
+fn operation_error_hint(error_code: &str) -> &'static str {
+    match error_code {
+        #[cfg(target_os = "macos")]
+        "create_registry_platform" => {
+            " (the image has no linux/arm64 variant; macOS local environments run arm64 Linux, so choose a multi-architecture or arm64 image)"
+        }
+        #[cfg(target_os = "macos")]
+        "create_vz_helper_missing" => {
+            " (the Virtualization.framework helper named by the local VM artifact lock is missing; install the signed codewire-vz-runner at that path)"
+        }
+        #[cfg(target_os = "macos")]
+        "create_vz_helper_unentitled" => {
+            " (the Virtualization.framework helper is not signed with the com.apple.security.virtualization entitlement; sign it with codesign --entitlements and update its artifact lock entry)"
+        }
+        _ => "",
     }
 }
 

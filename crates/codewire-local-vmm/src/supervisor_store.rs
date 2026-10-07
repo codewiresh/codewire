@@ -1277,7 +1277,11 @@ fn write_state(
             ("state_disk", format!("{vm}/disks/state.raw"), None),
             ("vmm_api_socket", format!("{vm}/api/api.sock"), None),
             ("vmm_api_lock", format!("{vm}/api/api.sock.lock"), None),
-            ("hybrid_vsock", format!("{vm}/vsock/vsock.sock"), None),
+            (
+                "hybrid_vsock",
+                format!("{vm}/vsock/{}", crate::state::VSOCK_SOCKET_NAME),
+                None,
+            ),
         ] {
             transaction.execute(
                 "INSERT INTO owned_objects(

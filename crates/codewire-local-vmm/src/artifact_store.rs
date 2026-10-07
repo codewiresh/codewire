@@ -64,13 +64,8 @@ impl RuntimeArtifactStore {
         }
 
         let admitted = lock.admit(artifact_root).await?;
-        self.publish_blob(
-            &admitted.cloud_hypervisor,
-            &lock.cloud_hypervisor.artifact,
-            true,
-        )?;
-        if let (Some(artifact), Some(spec)) = (&admitted.virtiofsd, &lock.virtiofsd) {
-            self.publish_blob(artifact, &spec.artifact, true)?;
+        for (artifact, spec) in admitted.executables().into_iter().zip(lock.executables()) {
+            self.publish_blob(artifact, spec, true)?;
         }
         self.publish_blob(&admitted.kernel, &lock.kernel, false)?;
         self.publish_blob(&admitted.initramfs, &lock.initramfs, false)?;
@@ -128,9 +123,8 @@ impl RuntimeArtifactStore {
             let lock = manifests
                 .get(generation)
                 .ok_or_else(|| RuntimeArtifactStoreError::MissingGeneration(generation.clone()))?;
-            retain_blob(&mut retained_blobs, &lock.cloud_hypervisor.artifact, true)?;
-            if let Some(virtiofsd) = &lock.virtiofsd {
-                retain_blob(&mut retained_blobs, &virtiofsd.artifact, true)?;
+            for spec in lock.executables() {
+                retain_blob(&mut retained_blobs, spec, true)?;
             }
             retain_blob(&mut retained_blobs, &lock.kernel, false)?;
             retain_blob(&mut retained_blobs, &lock.initramfs, false)?;
@@ -200,10 +194,8 @@ impl RuntimeArtifactStore {
         lock: &ArtifactLock,
     ) -> Result<AdmittedArtifacts, RuntimeArtifactStoreError> {
         let mut cached = lock.clone();
-        cached.cloud_hypervisor.artifact.path =
-            blob_name(&cached.cloud_hypervisor.artifact, true).into();
-        if let Some(virtiofsd) = &mut cached.virtiofsd {
-            virtiofsd.artifact.path = blob_name(&virtiofsd.artifact, true).into();
+        for spec in cached.executables_mut() {
+            spec.path = blob_name(spec, true).into();
         }
         cached.kernel.path = blob_name(&cached.kernel, false).into();
         cached.initramfs.path = blob_name(&cached.initramfs, false).into();
@@ -1103,14 +1095,13 @@ fn retain_diagnostic_blobs(
     lock: &ArtifactLock,
 ) -> Result<(), ()> {
     let mut next = retained.clone();
+    let mut executables = lock.executables().into_iter();
     let mut specs = vec![
-        (&lock.cloud_hypervisor.artifact, true),
+        (executables.next().ok_or(())?, true),
         (&lock.kernel, false),
         (&lock.initramfs, false),
     ];
-    if let Some(virtiofsd) = &lock.virtiofsd {
-        specs.push((&virtiofsd.artifact, true));
-    }
+    specs.extend(executables.map(|spec| (spec, true)));
     for (spec, executable) in specs {
         let name = blob_name(spec, executable);
         let candidate = DiagnosticRetainedBlob {
@@ -1473,11 +1464,10 @@ impl RuntimeArtifactStoreError {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(target_os = "linux")]
     use std::sync::{Arc, Barrier};
 
-    use crate::artifact::{
-        ARTIFACT_LOCK_SCHEMA_VERSION, ArtifactArchitecture, ExecutableArtifactSpec,
-    };
+    use crate::artifact::ArtifactArchitecture;
 
     use super::*;
 
@@ -1498,16 +1488,11 @@ mod tests {
     }
 
     fn lock() -> ArtifactLock {
-        ArtifactLock {
-            schema_version: ARTIFACT_LOCK_SCHEMA_VERSION,
-            cloud_hypervisor: ExecutableArtifactSpec {
-                artifact: spec("bin/cloud-hypervisor", b"cloud-hypervisor"),
-                version: crate::artifact::CLOUD_HYPERVISOR_RELEASE.to_owned(),
-            },
-            virtiofsd: None,
-            kernel: spec("boot/kernel", b"kernel"),
-            initramfs: spec("boot/initramfs", b"initramfs"),
-        }
+        ArtifactLock::for_test(
+            spec("bin/cloud-hypervisor", b"cloud-hypervisor"),
+            spec("boot/kernel", b"kernel"),
+            spec("boot/initramfs", b"initramfs"),
+        )
     }
 
     fn lock_with_kernel(kernel: &[u8]) -> ArtifactLock {
@@ -1539,7 +1524,7 @@ mod tests {
         let kernel = admitted(&source.join("kernel"), kernel, false);
         let initramfs = admitted(&source.join("initramfs"), b"initramfs", false);
         store
-            .publish_blob(&cloud_hypervisor, &lock.cloud_hypervisor.artifact, true)
+            .publish_blob(&cloud_hypervisor, lock.vmm(), true)
             .unwrap();
         store.publish_blob(&kernel, &lock.kernel, false).unwrap();
         store
@@ -1553,14 +1538,8 @@ mod tests {
     fn assert_generation_intact(store: &RuntimeArtifactStore, lock: &ArtifactLock) {
         let generation = lock.generation().unwrap();
         assert_eq!(store.read_generation(&generation).unwrap(), *lock);
-        let mut specs = vec![
-            (&lock.cloud_hypervisor.artifact, true),
-            (&lock.kernel, false),
-            (&lock.initramfs, false),
-        ];
-        if let Some(virtiofsd) = &lock.virtiofsd {
-            specs.push((&virtiofsd.artifact, true));
-        }
+        let mut specs = vec![(&lock.kernel, false), (&lock.initramfs, false)];
+        specs.extend(lock.executables().into_iter().map(|spec| (spec, true)));
         for (spec, executable) in specs {
             store.verify_blob(spec, executable).unwrap();
         }
@@ -1587,7 +1566,7 @@ mod tests {
         let initramfs = admitted(&source.join("initramfs"), b"initramfs", false);
 
         store
-            .publish_blob(&cloud_hypervisor, &lock.cloud_hypervisor.artifact, true)
+            .publish_blob(&cloud_hypervisor, lock.vmm(), true)
             .unwrap();
         store.publish_blob(&kernel, &lock.kernel, false).unwrap();
         store
@@ -1721,7 +1700,7 @@ mod tests {
                     let store = RuntimeArtifactStore::create(&engine).unwrap();
                     barrier.wait();
                     store
-                        .publish_blob(&cloud_hypervisor, &lock.cloud_hypervisor.artifact, true)
+                        .publish_blob(&cloud_hypervisor, lock.vmm(), true)
                         .unwrap();
                     store.publish_blob(&kernel, &lock.kernel, false).unwrap();
                     store
@@ -1756,11 +1735,7 @@ mod tests {
         let kernel = admitted(&candidate_source.join("kernel"), b"candidate-kernel", false);
         let initramfs = admitted(&candidate_source.join("initramfs"), b"initramfs", false);
         store
-            .publish_blob(
-                &cloud_hypervisor,
-                &candidate_lock.cloud_hypervisor.artifact,
-                true,
-            )
+            .publish_blob(&cloud_hypervisor, candidate_lock.vmm(), true)
             .unwrap();
         store
             .publish_blob(&kernel, &candidate_lock.kernel, false)
@@ -1934,7 +1909,7 @@ mod tests {
                 .exists()
         );
         for (spec, executable) in [
-            (&retained_lock.cloud_hypervisor.artifact, true),
+            (retained_lock.vmm(), true),
             (&retained_lock.kernel, false),
             (&retained_lock.initramfs, false),
         ] {
@@ -2061,7 +2036,7 @@ mod tests {
                 .any(|diagnostic| diagnostic.path == retained_manifest)
         );
         for (spec, executable) in [
-            (&retained_lock.cloud_hypervisor.artifact, true),
+            (retained_lock.vmm(), true),
             (&retained_lock.kernel, false),
             (&retained_lock.initramfs, false),
         ] {

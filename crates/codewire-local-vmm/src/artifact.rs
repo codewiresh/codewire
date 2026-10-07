@@ -2,7 +2,9 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::Stdio;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
 #[cfg(test)]
@@ -16,14 +18,19 @@ pub use codewire_vmm_guest_probe::cw_runtime::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "linux")]
 use tokio::io::AsyncReadExt;
 
 use crate::host::path::{FileIdentity, PathError, PrivateRoot};
 
 pub const ARTIFACT_LOCK_SCHEMA_VERSION: u32 = 1;
+#[cfg(target_os = "linux")]
 pub const CLOUD_HYPERVISOR_RELEASE: &str = "v53.0";
+#[cfg(target_os = "linux")]
 pub const VIRTIOFSD_RELEASE: &str = "v1.14.0";
+#[cfg(target_os = "linux")]
 const VERSION_OUTPUT_LIMIT: u64 = 4096;
+#[cfg(target_os = "linux")]
 const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 const ARTIFACT_LOCK_LIMIT: u64 = 1024 * 1024;
 const INITRAMFS_LIMIT: u64 = 512 * 1024 * 1024;
@@ -75,9 +82,15 @@ pub struct ExecutableArtifactSpec {
 #[serde(deny_unknown_fields)]
 pub struct ArtifactLock {
     pub schema_version: u32,
+    #[cfg(target_os = "linux")]
     pub cloud_hypervisor: ExecutableArtifactSpec,
+    #[cfg(target_os = "linux")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virtiofsd: Option<ExecutableArtifactSpec>,
+    /// The signed Virtualization.framework helper. Its SHA-256 pins the exact
+    /// signed bytes, so admission checks only its arm64 Mach-O header.
+    #[cfg(target_os = "macos")]
+    pub vz_runner: ArtifactSpec,
     pub kernel: ArtifactSpec,
     pub initramfs: ArtifactSpec,
 }
@@ -177,21 +190,57 @@ impl AdmittedArtifact {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmittedArtifacts {
+    #[cfg(target_os = "linux")]
     pub cloud_hypervisor: AdmittedArtifact,
+    #[cfg(target_os = "linux")]
     pub virtiofsd: Option<AdmittedArtifact>,
+    #[cfg(target_os = "macos")]
+    pub vz_runner: AdmittedArtifact,
     pub kernel: AdmittedArtifact,
     pub initramfs: AdmittedArtifact,
 }
 
 impl AdmittedArtifacts {
     pub fn revalidate(&self) -> Result<(), ArtifactError> {
-        self.cloud_hypervisor.revalidate()?;
-        if let Some(virtiofsd) = &self.virtiofsd {
-            virtiofsd.revalidate()?;
+        for executable in self.executables() {
+            executable.revalidate()?;
         }
         self.kernel.revalidate()?;
         self.initramfs.revalidate()?;
         Ok(())
+    }
+
+    /// The admitted executables, in the order of `ArtifactLock::executables`.
+    pub(crate) fn executables(&self) -> Vec<&AdmittedArtifact> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut executables = vec![&self.cloud_hypervisor];
+            executables.extend(&self.virtiofsd);
+            executables
+        }
+        #[cfg(target_os = "macos")]
+        {
+            vec![&self.vz_runner]
+        }
+    }
+
+    /// Test artifacts whose host VMM executable is `vmm`, with no other helper.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        vmm: AdmittedArtifact,
+        kernel: AdmittedArtifact,
+        initramfs: AdmittedArtifact,
+    ) -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            cloud_hypervisor: vmm,
+            #[cfg(target_os = "linux")]
+            virtiofsd: None,
+            #[cfg(target_os = "macos")]
+            vz_runner: vmm,
+            kernel,
+            initramfs,
+        }
     }
 
     pub(crate) fn read_guest_busybox(&self) -> Result<Vec<u8>, ArtifactError> {
@@ -280,16 +329,22 @@ pub enum ArtifactError {
     DigestMismatch(PathBuf),
     #[error("artifact has an invalid or wrong-architecture ELF header: {0}")]
     InvalidElf(PathBuf),
+    #[error("artifact is not a thin arm64 Mach-O executable: {0}")]
+    InvalidMachO(PathBuf),
     #[error("kernel artifact has an invalid or wrong-architecture image header: {0}")]
     InvalidKernel(PathBuf),
     #[error("initramfs is not an exact canonical Codewire guest-root newc archive: {0}")]
     InvalidInitramfs(PathBuf),
+    #[cfg(target_os = "linux")]
     #[error("Cloud Hypervisor lock must pin release {expected}")]
     WrongCloudHypervisorRelease { expected: &'static str },
+    #[cfg(target_os = "linux")]
     #[error("virtiofsd lock must pin release {expected}")]
     WrongVirtiofsdRelease { expected: &'static str },
+    #[cfg(target_os = "linux")]
     #[error("runtime executable version probe failed")]
     VersionProbe,
+    #[cfg(target_os = "linux")]
     #[error("runtime executable reported an unexpected version")]
     VersionMismatch,
 }
@@ -303,26 +358,85 @@ impl ArtifactLock {
         Ok(format!("{:x}", Sha256::digest(self.canonical_json()?)))
     }
 
+    /// The executable entries in publication order.
+    pub(crate) fn executables(&self) -> Vec<&ArtifactSpec> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut executables = vec![&self.cloud_hypervisor.artifact];
+            executables.extend(self.virtiofsd.iter().map(|spec| &spec.artifact));
+            executables
+        }
+        #[cfg(target_os = "macos")]
+        {
+            vec![&self.vz_runner]
+        }
+    }
+
+    /// A test lock whose host VMM executable is `vmm`, with no other helper.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        vmm: ArtifactSpec,
+        kernel: ArtifactSpec,
+        initramfs: ArtifactSpec,
+    ) -> Self {
+        Self {
+            schema_version: ARTIFACT_LOCK_SCHEMA_VERSION,
+            #[cfg(target_os = "linux")]
+            cloud_hypervisor: ExecutableArtifactSpec {
+                artifact: vmm,
+                version: CLOUD_HYPERVISOR_RELEASE.to_owned(),
+            },
+            #[cfg(target_os = "linux")]
+            virtiofsd: None,
+            #[cfg(target_os = "macos")]
+            vz_runner: vmm,
+            kernel,
+            initramfs,
+        }
+    }
+
+    /// The host VMM executable entry.
+    #[cfg(test)]
+    pub(crate) fn vmm(&self) -> &ArtifactSpec {
+        self.executables()[0]
+    }
+
+    pub(crate) fn executables_mut(&mut self) -> Vec<&mut ArtifactSpec> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut executables = vec![&mut self.cloud_hypervisor.artifact];
+            executables.extend(self.virtiofsd.iter_mut().map(|spec| &mut spec.artifact));
+            executables
+        }
+        #[cfg(target_os = "macos")]
+        {
+            vec![&mut self.vz_runner]
+        }
+    }
+
     pub(crate) fn validate_metadata(&self) -> Result<ArtifactArchitecture, ArtifactError> {
         if self.schema_version != ARTIFACT_LOCK_SCHEMA_VERSION {
             return Err(ArtifactError::UnsupportedSchema(self.schema_version));
         }
         let architecture = ArtifactArchitecture::host()?;
-        for spec in [
-            &self.cloud_hypervisor.artifact,
-            &self.kernel,
-            &self.initramfs,
-        ] {
+        for spec in self
+            .executables()
+            .into_iter()
+            .chain([&self.kernel, &self.initramfs])
+        {
             validate_spec(spec, architecture)?;
         }
-        if let Some(virtiofsd) = &self.virtiofsd {
-            validate_spec(&virtiofsd.artifact, architecture)?;
-            if virtiofsd.version != VIRTIOFSD_RELEASE {
-                return Err(ArtifactError::WrongVirtiofsdRelease {
-                    expected: VIRTIOFSD_RELEASE,
-                });
-            }
+        #[cfg(target_os = "linux")]
+        if self
+            .virtiofsd
+            .as_ref()
+            .is_some_and(|virtiofsd| virtiofsd.version != VIRTIOFSD_RELEASE)
+        {
+            return Err(ArtifactError::WrongVirtiofsdRelease {
+                expected: VIRTIOFSD_RELEASE,
+            });
         }
+        #[cfg(target_os = "linux")]
         if self.cloud_hypervisor.version != CLOUD_HYPERVISOR_RELEASE {
             return Err(ArtifactError::WrongCloudHypervisorRelease {
                 expected: CLOUD_HYPERVISOR_RELEASE,
@@ -367,22 +481,15 @@ impl ArtifactLock {
     pub async fn admit(&self, root_path: &Path) -> Result<AdmittedArtifacts, ArtifactError> {
         let architecture = self.validate_metadata()?;
         let root = PrivateRoot::open(root_path).map_err(ArtifactError::ConfinedPath)?;
-
-        let cloud_hypervisor = admit_one(&root, &self.cloud_hypervisor.artifact, true)?;
-        with_opened(&root, &cloud_hypervisor, |file| {
-            validate_elf(file, cloud_hypervisor.path(), architecture)
-        })?;
-        verify_cloud_hypervisor_version(cloud_hypervisor.path()).await?;
-
-        let virtiofsd = if let Some(spec) = &self.virtiofsd {
-            let artifact = admit_one(&root, &spec.artifact, true)?;
+        #[cfg(target_os = "linux")]
+        let executables = self.admit_linux_executables(&root, architecture).await?;
+        #[cfg(target_os = "macos")]
+        let vz_runner = {
+            let artifact = admit_one(&root, &self.vz_runner, true)?;
             with_opened(&root, &artifact, |file| {
-                validate_elf(file, artifact.path(), architecture)
+                validate_arm64_macho(file, artifact.path())
             })?;
-            verify_virtiofsd_version(artifact.path()).await?;
-            Some(artifact)
-        } else {
-            None
+            artifact
         };
 
         let kernel = admit_one(&root, &self.kernel, false)?;
@@ -395,12 +502,43 @@ impl ArtifactLock {
             validate_initramfs(file, initramfs.path(), architecture)
         })?;
 
+        #[cfg(target_os = "linux")]
+        let (cloud_hypervisor, virtiofsd) = executables;
         Ok(AdmittedArtifacts {
+            #[cfg(target_os = "linux")]
             cloud_hypervisor,
+            #[cfg(target_os = "linux")]
             virtiofsd,
+            #[cfg(target_os = "macos")]
+            vz_runner,
             kernel,
             initramfs,
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn admit_linux_executables(
+        &self,
+        root: &PrivateRoot,
+        architecture: ArtifactArchitecture,
+    ) -> Result<(AdmittedArtifact, Option<AdmittedArtifact>), ArtifactError> {
+        let cloud_hypervisor = admit_one(root, &self.cloud_hypervisor.artifact, true)?;
+        with_opened(root, &cloud_hypervisor, |file| {
+            validate_elf(file, cloud_hypervisor.path(), architecture)
+        })?;
+        verify_cloud_hypervisor_version(cloud_hypervisor.path()).await?;
+
+        let virtiofsd = if let Some(spec) = &self.virtiofsd {
+            let artifact = admit_one(root, &spec.artifact, true)?;
+            with_opened(root, &artifact, |file| {
+                validate_elf(file, artifact.path(), architecture)
+            })?;
+            verify_virtiofsd_version(artifact.path()).await?;
+            Some(artifact)
+        } else {
+            None
+        };
+        Ok((cloud_hypervisor, virtiofsd))
     }
 }
 
@@ -560,6 +698,7 @@ fn sha256_file(file: &File, path: &Path) -> Result<String, ArtifactError> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+#[cfg(target_os = "linux")]
 fn validate_elf(
     file: &mut File,
     path: &Path,
@@ -579,6 +718,31 @@ fn valid_elf_header(bytes: &[u8], architecture: ArtifactArchitecture) -> bool {
         && bytes[5] == 1
         && matches!(u16::from_le_bytes([bytes[16], bytes[17]]), 2 | 3)
         && u16::from_le_bytes([bytes[18], bytes[19]]) == architecture.elf_machine()
+}
+
+/// A thin 64-bit arm64 Mach-O executable (MH_MAGIC_64, CPU_TYPE_ARM64,
+/// MH_EXECUTE). Universal binaries are refused.
+#[cfg(target_os = "macos")]
+fn validate_arm64_macho(file: &mut File, path: &Path) -> Result<(), ArtifactError> {
+    let bytes = read_prefix(file, path, 16)?;
+    if !valid_arm64_macho_header(&bytes) {
+        return Err(ArtifactError::InvalidMachO(path.to_owned()));
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn valid_arm64_macho_header(bytes: &[u8]) -> bool {
+    const MH_MAGIC_64: u32 = 0xfeed_facf;
+    const CPU_TYPE_ARM64: u32 = 0x0100_000c;
+    const MH_EXECUTE: u32 = 2;
+    let word = |offset: usize| {
+        bytes
+            .get(offset..offset + 4)
+            .and_then(|value| value.try_into().ok())
+            .map(u32::from_le_bytes)
+    };
+    word(0) == Some(MH_MAGIC_64) && word(4) == Some(CPU_TYPE_ARM64) && word(12) == Some(MH_EXECUTE)
 }
 
 fn validate_kernel(
@@ -805,14 +969,17 @@ fn read_prefix(file: &mut File, path: &Path, limit: usize) -> Result<Vec<u8>, Ar
     Ok(bytes)
 }
 
+#[cfg(target_os = "linux")]
 async fn verify_cloud_hypervisor_version(path: &Path) -> Result<(), ArtifactError> {
     verify_executable_version(path, expected_cloud_hypervisor_version_output).await
 }
 
+#[cfg(target_os = "linux")]
 async fn verify_virtiofsd_version(path: &Path) -> Result<(), ArtifactError> {
     verify_executable_version(path, expected_virtiofsd_version_output).await
 }
 
+#[cfg(target_os = "linux")]
 async fn verify_executable_version(
     path: &Path,
     expected: fn(&[u8]) -> bool,
@@ -859,10 +1026,12 @@ async fn verify_executable_version(
     result
 }
 
+#[cfg(target_os = "linux")]
 fn expected_virtiofsd_version_output(bytes: &[u8]) -> bool {
     matches!(bytes, b"virtiofsd 1.14.0" | b"virtiofsd 1.14.0\n")
 }
 
+#[cfg(target_os = "linux")]
 fn expected_cloud_hypervisor_version_output(bytes: &[u8]) -> bool {
     matches!(
         bytes,
@@ -893,34 +1062,30 @@ mod tests {
 
     fn lock_json() -> Vec<u8> {
         let architecture = ArtifactArchitecture::host().unwrap();
-        serde_json::to_vec(&ArtifactLock {
-            schema_version: ARTIFACT_LOCK_SCHEMA_VERSION,
-            cloud_hypervisor: ExecutableArtifactSpec {
-                artifact: ArtifactSpec {
-                    path: "cloud-hypervisor".into(),
-                    size: 1,
-                    sha256: "a".repeat(64),
-                    architecture,
-                },
-                version: CLOUD_HYPERVISOR_RELEASE.to_owned(),
+        serde_json::to_vec(&ArtifactLock::for_test(
+            ArtifactSpec {
+                path: "cloud-hypervisor".into(),
+                size: 1,
+                sha256: "a".repeat(64),
+                architecture,
             },
-            virtiofsd: None,
-            kernel: ArtifactSpec {
+            ArtifactSpec {
                 path: "kernel".into(),
                 size: 1,
                 sha256: "b".repeat(64),
                 architecture,
             },
-            initramfs: ArtifactSpec {
+            ArtifactSpec {
                 path: "initramfs".into(),
                 size: 1,
                 sha256: "c".repeat(64),
                 architecture,
             },
-        })
+        ))
         .unwrap()
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn version_probe_accepts_exact_v53_release_output_only() {
         for accepted in [
@@ -939,6 +1104,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn virtiofsd_version_probe_accepts_only_the_pinned_release() {
         for accepted in [
@@ -1016,6 +1182,41 @@ mod tests {
     }
 
     #[test]
+    fn helper_header_admits_only_a_thin_arm64_executable() {
+        let header = |magic: u32, cpu: u32, file_type: u32| {
+            let mut bytes = Vec::new();
+            for word in [magic, cpu, 0, file_type] {
+                bytes.extend_from_slice(&word.to_le_bytes());
+            }
+            bytes
+        };
+        assert!(valid_arm64_macho_header(&header(
+            0xfeed_facf,
+            0x0100_000c,
+            2
+        )));
+        // x86_64, a dylib, a universal (fat) header and a short read.
+        assert!(!valid_arm64_macho_header(&header(
+            0xfeed_facf,
+            0x0100_0007,
+            2
+        )));
+        assert!(!valid_arm64_macho_header(&header(
+            0xfeed_facf,
+            0x0100_000c,
+            6
+        )));
+        assert!(!valid_arm64_macho_header(&header(
+            0xbeba_feca,
+            0x0100_000c,
+            2
+        )));
+        assert!(!valid_arm64_macho_header(
+            &header(0xfeed_facf, 0x0100_000c, 2)[..12]
+        ));
+    }
+
+    #[test]
     fn parameter_paths_reject_argument_injection_characters() {
         for path in ["a,b", "a=b", "a\nb", "a\rb"] {
             assert!(matches!(
@@ -1059,19 +1260,22 @@ mod tests {
             ArtifactArchitecture::Aarch64 => ArtifactArchitecture::X86_64,
         };
 
-        let elf_path = staging.path().join("wrong-architecture.elf");
-        let mut elf = vec![0_u8; 64];
-        elf[..4].copy_from_slice(b"\x7fELF");
-        elf[4] = 2;
-        elf[5] = 1;
-        elf[16..18].copy_from_slice(&2_u16.to_le_bytes());
-        elf[18..20].copy_from_slice(&wrong_architecture.elf_machine().to_le_bytes());
-        write_artifact(&elf_path, &elf, 0o400);
-        let mut elf_file = File::open(&elf_path).unwrap();
-        assert!(matches!(
-            validate_elf(&mut elf_file, &elf_path, host),
-            Err(ArtifactError::InvalidElf(rejected)) if rejected == elf_path
-        ));
+        #[cfg(target_os = "linux")]
+        {
+            let elf_path = staging.path().join("wrong-architecture.elf");
+            let mut elf = vec![0_u8; 64];
+            elf[..4].copy_from_slice(b"\x7fELF");
+            elf[4] = 2;
+            elf[5] = 1;
+            elf[16..18].copy_from_slice(&2_u16.to_le_bytes());
+            elf[18..20].copy_from_slice(&wrong_architecture.elf_machine().to_le_bytes());
+            write_artifact(&elf_path, &elf, 0o400);
+            let mut elf_file = File::open(&elf_path).unwrap();
+            assert!(matches!(
+                validate_elf(&mut elf_file, &elf_path, host),
+                Err(ArtifactError::InvalidElf(rejected)) if rejected == elf_path
+            ));
+        }
 
         let kernel_path = staging.path().join("wrong-architecture.kernel");
         let mut kernel = vec![0_u8; 0x240];
@@ -1138,12 +1342,11 @@ mod tests {
             let name = format!("boot-{index}");
             write_artifact(&root.path().join(&name), &archive, 0o400);
             let admitted = admit_one(&root, &spec(&name, &archive), false).unwrap();
-            let artifacts = AdmittedArtifacts {
-                cloud_hypervisor: AdmittedArtifact::for_test("/unused/ch"),
-                virtiofsd: None,
-                kernel: AdmittedArtifact::for_test("/unused/kernel"),
-                initramfs: admitted,
-            };
+            let artifacts = AdmittedArtifacts::for_test(
+                AdmittedArtifact::for_test("/unused/ch"),
+                AdmittedArtifact::for_test("/unused/kernel"),
+                admitted,
+            );
             assert_eq!(
                 artifacts.require_current_guest_seed_abi().is_ok(),
                 index == 1
@@ -1189,12 +1392,11 @@ mod tests {
             let archive = canonical_newc(&init).unwrap();
             let name = format!("publisher-{index}");
             write_artifact(&root.path().join(&name), &archive, 0o400);
-            let artifacts = AdmittedArtifacts {
-                cloud_hypervisor: AdmittedArtifact::for_test("/unused/ch"),
-                virtiofsd: None,
-                kernel: AdmittedArtifact::for_test("/unused/kernel"),
-                initramfs: admit_one(&root, &spec(&name, &archive), false).unwrap(),
-            };
+            let artifacts = AdmittedArtifacts::for_test(
+                AdmittedArtifact::for_test("/unused/ch"),
+                AdmittedArtifact::for_test("/unused/kernel"),
+                admit_one(&root, &spec(&name, &archive), false).unwrap(),
+            );
             // Seed9/disk support alone must never imply a trusted publisher.
             artifacts.require_current_guest_seed_abi().unwrap();
             assert_eq!(

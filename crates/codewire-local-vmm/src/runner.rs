@@ -43,12 +43,10 @@ use crate::egress_broker::{
     EgressBrokerStartupStatus, decode_egress_broker_startup_status,
     encode_developer_egress_broker_bootstrap,
 };
-use crate::host::path::{FileIdentity, PathError, PrivateRoot};
 #[cfg(target_os = "linux")]
-use crate::host::path::{current_uid, set_socket_private};
-#[cfg(target_os = "linux")]
-use crate::host::process::signal_unreaped_child;
-use crate::host::process::{LiveProcess, RecoveryError};
+use crate::host::path::current_uid;
+use crate::host::path::{FileIdentity, PathError, PrivateRoot, set_socket_private};
+use crate::host::process::{LiveProcess, RecoveryError, signal_unreaped_child};
 use crate::host_port::{
     HOST_PORT_CONTROL_KEY_LEN, HostPortBinding, HostPortControlFrame,
     validate_canonical_host_port_bindings,
@@ -90,13 +88,11 @@ use crate::network_worker::{
     send_worker_network_descriptor,
 };
 use crate::state::{
-    MINIMUM_ROOT_DISK_BYTES, MINIMUM_STATE_DISK_BYTES, PersistedVmState, RootGenerationPaths,
-    StateDiskIdentity, StateError, VmLock, VmPaths, publish_seed, valid_root_generation,
+    MINIMUM_ROOT_DISK_BYTES, MINIMUM_STATE_DISK_BYTES, PERSISTED_STATE_SCHEMA_VERSION,
+    PersistedVmState, RootGenerationPaths, StateDiskIdentity, StateError, VmLock, VmPaths, VmPhase,
+    publish_seed, valid_root_generation,
 };
-#[cfg(target_os = "linux")]
-use crate::state::{PERSISTED_STATE_SCHEMA_VERSION, VmPhase};
 
-#[cfg(target_os = "linux")]
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 // Guest cleanup can drain daemon, workspace, Docker and network for five
 // seconds each before sync/reboot. One overall bound includes RPC dispatch.
@@ -116,7 +112,9 @@ const NETWORK_WORKER_HANDSHAKE_ATTEMPT_LIMIT: usize = 8;
 const HOST_PORT_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
 const HOST_PORT_ACCEPT_QUEUE: usize = 64;
 const VMM_CASCADE_EXIT_TIMEOUT: Duration = Duration::from_millis(250);
+#[cfg(target_os = "linux")]
 const E2FSCK: &str = "/usr/bin/e2fsck";
+#[cfg(target_os = "linux")]
 const RESIZE2FS: &str = "/usr/bin/resize2fs";
 #[cfg(target_os = "linux")]
 const DIRECT_SHARE_SOURCE_FD: RawFd = 3;
@@ -248,7 +246,7 @@ impl CloudHypervisorRunner {
         let state_disk = admit_state_disk(&paths, &request, persisted.as_ref())?;
         let docker_disk = admit_docker_disk(&paths, &request, persisted.as_ref())?;
         let (root_disk_path, root_disk) = admit_root_disk(&paths, &request, persisted.as_ref())?;
-        // Darwin builds no VMM configuration yet, so nothing attaches the disk.
+        // Darwin writes its VMM configuration at launch, from the same paths.
         #[cfg(target_os = "macos")]
         let _ = root_disk_path;
         let setup_disk = admit_setup_disk(&paths, &request)?;
@@ -423,11 +421,115 @@ impl CloudHypervisorRunner {
         self.launch(prepared).await
     }
 
-    /// The Darwin VMM is the signed Virtualization.framework helper, which is
-    /// not wired yet. Refuse after admission, before any process exists.
+    /// Launch the signed Virtualization.framework helper as this VM's VMM.
+    /// The helper inherits the open `vm.lock`, and stops its VM when this
+    /// runner exits. Readiness is its hybrid-vsock socket plus a live helper.
     #[cfg(target_os = "macos")]
-    async fn launch(&self, _prepared: PreparedVm) -> Result<RunningVm, RunnerError> {
-        Err(RunnerError::VmmUnsupported)
+    async fn launch(&self, prepared: PreparedVm) -> Result<RunningVm, RunnerError> {
+        let root_disk = root_disk_path(&prepared.paths, &prepared.request.root_generation)?;
+        let configuration = crate::vz::VzConfiguration::new(
+            self.artifacts.kernel.path(),
+            self.artifacts.initramfs.path(),
+            prepared.request.vcpus,
+            prepared.request.memory_mib,
+            crate::vz::VzDisks {
+                state: &prepared.paths.state_disk,
+                docker: prepared
+                    .docker_disk
+                    .as_ref()
+                    .map(|_| prepared.paths.docker_disk.as_path()),
+                root: &root_disk,
+                seed: &prepared.paths.seed_disk,
+                setup: prepared
+                    .setup_disk
+                    .as_ref()
+                    .map(|setup| setup.path.as_path()),
+            },
+            &prepared.paths.vsock_socket,
+        )
+        .encode()?;
+        prepared.paths.open_vm_root()?.atomic_replace(
+            Path::new(crate::vz::CONFIG_NAME),
+            &configuration,
+            0o600,
+        )?;
+        let executable = self.artifacts.vz_runner.path();
+        // Arm cancellation cleanup in the same synchronous span as spawn.
+        let vmm = crate::vz::spawn(
+            executable,
+            &prepared.paths.vm_dir.join(crate::vz::CONFIG_NAME),
+            &prepared.paths.vm_dir,
+            &prepared.lock,
+        )?;
+        let mut startup = StartupOwnership::new(vmm);
+        let pid = startup.child_mut().id().ok_or(RunnerError::Spawn)?;
+        let process = match LiveProcess::capture_child(pid, executable) {
+            Ok(process) => process,
+            Err(error) => {
+                startup.terminate_unadmitted(pid).await?;
+                return Err(error.into());
+            }
+        };
+        startup.admit(process);
+
+        // As on Linux, persist the helper's identity before any guest wait.
+        let mut state = PersistedVmState {
+            schema_version: PERSISTED_STATE_SCHEMA_VERSION,
+            vm_id: prepared.request.vm_id,
+            generation: prepared.request.generation,
+            vsock_cid: prepared.request.vsock_cid,
+            daemon_vsock_port: prepared.request.daemon_vsock_port,
+            phase: VmPhase::Starting,
+            process: startup.process().identity().clone(),
+            state_disk: prepared.state_disk.clone(),
+            docker_disk: prepared.docker_disk.clone(),
+            root_generation: Some(prepared.request.root_generation.clone()),
+            root_disk: Some(prepared.root_disk.clone()),
+            api_socket: None,
+            vsock_socket: None,
+        };
+        if let Err(error) = state.write_atomic(&prepared.paths.state_file) {
+            startup.terminate_admitted().await?;
+            return Err(error.into());
+        }
+
+        let finalized = async {
+            let (hybrid, vsock_socket) = wait_for_vsock_endpoint(
+                &prepared.paths,
+                startup.process(),
+                prepared.request.daemon_vsock_port,
+            )
+            .await?;
+            prepared.paths.validate_diagnostics()?;
+            state.phase = VmPhase::Running;
+            state.vsock_socket = Some(vsock_socket);
+            state.write_atomic(&prepared.paths.state_file)?;
+            Ok::<_, RunnerError>(hybrid)
+        }
+        .await;
+        let hybrid = match finalized {
+            Ok(hybrid) => hybrid,
+            Err(error) => {
+                startup.terminate_admitted().await?;
+                return Err(error);
+            }
+        };
+        let (child, process) = startup.disarm();
+        Ok(RunningVm {
+            request: prepared.request,
+            paths: prepared.paths,
+            state_disk: prepared.state_disk,
+            docker_disk: prepared.docker_disk,
+            root_disk: prepared.root_disk,
+            setup_disk: prepared.setup_disk,
+            token: prepared.token,
+            child,
+            process,
+            hybrid,
+            network_worker: None,
+            host_port_listeners: prepared.host_port_listeners,
+            _lock: prepared.lock,
+        })
     }
 
     #[cfg(target_os = "linux")]
@@ -605,7 +707,12 @@ impl CloudHypervisorRunner {
         vm_id: Uuid,
     ) -> Result<Option<u64>, RunnerError> {
         let paths = VmPaths::create(&self.state_root, vm_id)?;
+        #[cfg(target_os = "linux")]
         let _lock = paths.lock()?;
+        // A helper whose runner died stops its VM on its own and releases the
+        // inherited lock when it exits. Wait for that; never adopt it.
+        #[cfg(target_os = "macos")]
+        let _lock = lock_after_previous_helper(&paths).await?;
         let state = match PersistedVmState::read(&paths.state_file) {
             Ok(state) => state,
             Err(error) if error.is_not_found() => return Ok(None),
@@ -622,6 +729,15 @@ impl CloudHypervisorRunner {
             }
             Err(RecoveryError::ProcessExited | RecoveryError::IdentityMismatch) => {
                 return Ok(Some(generation));
+            }
+            #[cfg(target_os = "macos")]
+            Err(RecoveryError::Unowned) => {
+                if LiveProcess::wait_recorded_exit(&state.process, PREVIOUS_HELPER_EXIT_TIMEOUT)
+                    .await?
+                {
+                    return Ok(Some(generation));
+                }
+                return Err(RunnerError::OrphanedVmm(state.process.pid));
             }
             Err(error) => return Err(error.into()),
         };
@@ -736,7 +852,11 @@ fn same_disk_object_ignoring_size(
 }
 
 async fn run_e2fsck(disk: &Path) -> Result<(), RunnerError> {
-    let status = tokio::process::Command::new(E2FSCK)
+    #[cfg(target_os = "linux")]
+    let program = E2FSCK;
+    #[cfg(target_os = "macos")]
+    let program = crate::host::e2fsprogs("e2fsck").ok_or(RunnerError::E2fsckUnavailable)?;
+    let status = tokio::process::Command::new(program)
         .args(["-p", "-f"])
         .arg(disk)
         .env_clear()
@@ -754,7 +874,11 @@ async fn run_e2fsck(disk: &Path) -> Result<(), RunnerError> {
 }
 
 async fn run_resize2fs(disk: &Path) -> Result<(), RunnerError> {
-    let status = tokio::process::Command::new(RESIZE2FS)
+    #[cfg(target_os = "linux")]
+    let program = RESIZE2FS;
+    #[cfg(target_os = "macos")]
+    let program = crate::host::e2fsprogs("resize2fs").ok_or(RunnerError::Resize2fsUnavailable)?;
+    let status = tokio::process::Command::new(program)
         .arg(disk)
         .env_clear()
         .env("LC_ALL", "C")
@@ -774,13 +898,11 @@ async fn run_resize2fs(disk: &Path) -> Result<(), RunnerError> {
 /// completed. `Drop` cannot wait, but it always sends an exact-child kill; the
 /// Tokio process driver reaps a dropped child asynchronously. Synchronous error
 /// paths additionally use the bounded cleanup helpers below before returning.
-#[cfg(target_os = "linux")]
 struct StartupOwnership {
     child: Option<tokio::process::Child>,
     process: Option<LiveProcess>,
 }
 
-#[cfg(target_os = "linux")]
 impl StartupOwnership {
     fn new(child: tokio::process::Child) -> Self {
         Self {
@@ -836,7 +958,6 @@ impl StartupOwnership {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl Drop for StartupOwnership {
     fn drop(&mut self) {
         if let Some(process) = &self.process {
@@ -965,15 +1086,7 @@ pub struct PreparedVm {
     token: Zeroizing<String>,
     #[cfg(target_os = "linux")]
     command: CommandSpec,
-    #[cfg_attr(
-        target_os = "macos",
-        expect(dead_code, reason = "no Darwin VMM launch yet")
-    )]
     host_port_listeners: Vec<ReservedHostPort>,
-    #[cfg_attr(
-        target_os = "macos",
-        expect(dead_code, reason = "no Darwin VMM launch yet")
-    )]
     lock: VmLock,
 }
 
@@ -4614,7 +4727,6 @@ async fn stop_direct_share_process(process: &mut DirectShareProcess) -> Result<(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 async fn terminate_failed_launch(
     process: &LiveProcess,
     child: &mut tokio::process::Child,
@@ -4637,7 +4749,6 @@ async fn terminate_failed_launch(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 async fn terminate_unadmitted_child(
     pid: u32,
     child: &mut tokio::process::Child,
@@ -4655,6 +4766,32 @@ async fn terminate_unadmitted_child(
         .map_err(|_| RunnerError::KillTimeout)?
         .map_err(|_| RunnerError::Wait)?;
     Ok(())
+}
+
+/// Darwin readiness: the helper bound its hybrid-vsock socket and is alive.
+#[cfg(target_os = "macos")]
+async fn wait_for_vsock_endpoint(
+    paths: &VmPaths,
+    process: &LiveProcess,
+    daemon_vsock_port: u32,
+) -> Result<(HybridVsockTarget, crate::host::path::SocketIdentity), RunnerError> {
+    let deadline = tokio::time::Instant::now() + START_TIMEOUT;
+    loop {
+        if process.is_exited()? {
+            return Err(RunnerError::ExitedDuringStart);
+        }
+        if paths.vsock_socket.exists() {
+            // As on Linux, make the socket private before the target pins its
+            // identity, so later connections revalidate the same object.
+            let identity = set_socket_private(&paths.vsock_socket)?;
+            let hybrid = HybridVsockTarget::new(paths.vsock_socket.clone(), daemon_vsock_port)?;
+            return Ok((hybrid, identity));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(RunnerError::StartTimeout);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -4692,8 +4829,37 @@ async fn wait_for_endpoints_with_timeout(
     }
 }
 
+/// How long a new runner waits for a previous runner's helper to stop its VM
+/// and exit. The helper stops the VM as soon as it sees its parent exit.
+#[cfg(target_os = "macos")]
+const PREVIOUS_HELPER_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(target_os = "macos")]
+async fn lock_after_previous_helper(paths: &VmPaths) -> Result<VmLock, RunnerError> {
+    let deadline = tokio::time::Instant::now() + PREVIOUS_HELPER_EXIT_TIMEOUT;
+    loop {
+        match paths.lock() {
+            Err(StateError::AlreadyLocked) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(StateError::AlreadyLocked) => {
+                let pid = PersistedVmState::read(&paths.state_file)
+                    .map(|state| state.process.pid)
+                    .unwrap_or(0);
+                return Err(RunnerError::OrphanedVmm(pid));
+            }
+            result => return result.map_err(Into::into),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
+    #[cfg(target_os = "macos")]
+    #[error(
+        "a previous VM helper (pid {0}) is still running after its runner exited; it is never adopted, so stop that process and start again"
+    )]
+    OrphanedVmm(u32),
     #[error("cw runtime catalog attachment changed or its live disk is invalid")]
     CwRuntimeDiskChanged,
     #[cfg(target_os = "linux")]
@@ -4762,11 +4928,19 @@ pub enum RunnerError {
     DiskShrinkUnsupported { current: u64, requested: u64 },
     #[error("state disk identity changed during growth: {0}")]
     StateDiskGrowthIdentityMismatch(PathBuf),
-    #[error("/usr/bin/e2fsck is unavailable")]
+    #[cfg_attr(target_os = "linux", error("/usr/bin/e2fsck is unavailable"))]
+    #[cfg_attr(
+        target_os = "macos",
+        error("e2fsck is unavailable; install e2fsprogs: brew install e2fsprogs")
+    )]
     E2fsckUnavailable,
     #[error("e2fsck failed with status {0:?}")]
     E2fsckFailed(Option<i32>),
-    #[error("/usr/bin/resize2fs is unavailable")]
+    #[cfg_attr(target_os = "linux", error("/usr/bin/resize2fs is unavailable"))]
+    #[cfg_attr(
+        target_os = "macos",
+        error("resize2fs is unavailable; install e2fsprogs: brew install e2fsprogs")
+    )]
     Resize2fsUnavailable,
     #[error("resize2fs failed with status {0:?}")]
     Resize2fsFailed(Option<i32>),
@@ -4776,9 +4950,6 @@ pub enum RunnerError {
     GenerationNotAdvanced { previous: u64, requested: u64 },
     #[error("Cloud Hypervisor process spawn failed")]
     Spawn,
-    #[cfg(target_os = "macos")]
-    #[error("local VMs are not yet supported on macOS")]
-    VmmUnsupported,
     #[error("Cloud Hypervisor exited during startup")]
     ExitedDuringStart,
     #[error("Cloud Hypervisor startup timed out")]
@@ -4896,12 +5067,7 @@ mod tests {
         let artifact = AdmittedArtifact::for_test("/nonexistent/test-artifact");
         let runner = CloudHypervisorRunner {
             state_root: PrivateRoot::open(&state_path).unwrap(),
-            artifacts: AdmittedArtifacts {
-                cloud_hypervisor: artifact.clone(),
-                virtiofsd: None,
-                kernel: artifact.clone(),
-                initramfs: artifact,
-            },
+            artifacts: AdmittedArtifacts::for_test(artifact.clone(), artifact.clone(), artifact),
         };
         (parent, runner)
     }

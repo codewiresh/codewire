@@ -199,11 +199,26 @@ pub enum RegistryResolverError {
     InvalidManifest,
     #[error("OCI image configuration is invalid")]
     InvalidConfiguration,
-    #[error("OCI image does not contain the required native Linux platform")]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        error("OCI image does not contain the required native Linux platform")
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error(
+            "OCI image has no linux/arm64 image; macOS local environments run arm64 Linux, so choose a multi-architecture or arm64 image"
+        )
+    )]
     PlatformUnavailable,
     #[error("OCI image contains more than one matching native Linux platform")]
     AmbiguousPlatform,
-    #[error("OCI image platform is unsupported")]
+    #[cfg_attr(not(target_os = "macos"), error("OCI image platform is unsupported"))]
+    #[cfg_attr(
+        target_os = "macos",
+        error(
+            "OCI image is not a linux/arm64 image; macOS local environments run arm64 Linux, so choose a multi-architecture or arm64 image"
+        )
+    )]
     UnsupportedPlatform,
     #[error("OCI image exceeds the local compressed-content bound")]
     ImageTooLarge,

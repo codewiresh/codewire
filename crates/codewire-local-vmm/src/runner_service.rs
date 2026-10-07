@@ -1967,12 +1967,11 @@ mod tests {
         let artifact = crate::artifact::AdmittedArtifact::for_test("/nonexistent/test-artifact");
         let runner = CloudHypervisorRunner::from_admitted(
             parent.path().join("state"),
-            crate::artifact::AdmittedArtifacts {
-                cloud_hypervisor: artifact.clone(),
-                virtiofsd: None,
-                kernel: artifact.clone(),
-                initramfs: artifact,
-            },
+            crate::artifact::AdmittedArtifacts::for_test(
+                artifact.clone(),
+                artifact.clone(),
+                artifact,
+            ),
         )
         .unwrap();
         let rpc = RunnerRpc {

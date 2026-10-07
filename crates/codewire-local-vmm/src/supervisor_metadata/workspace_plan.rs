@@ -338,7 +338,14 @@ pub enum WorkspacePlanError {
     InvalidRemoteTree,
     #[error("Git submodules are not supported by this repository slice")]
     SubmoduleUnsupported,
-    #[error("Git is required to prepare native remote repositories")]
+    #[cfg_attr(
+        target_os = "linux",
+        error("Git is required to prepare native remote repositories")
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error("Git requires the Xcode Command Line Tools; install them: xcode-select --install")
+    )]
     GitUnavailable,
     #[error("remote Git preparation failed")]
     GitCommandFailed,

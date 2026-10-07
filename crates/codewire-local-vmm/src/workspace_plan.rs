@@ -580,7 +580,17 @@ async fn git_output<'a>(
 }
 
 fn git_command(working_directory: &Path) -> Command {
-    let mut command = Command::new(GIT);
+    // Darwin's stub /usr/bin/git without developer tools fails every command;
+    // the callers then report GitUnavailable with install guidance.
+    #[cfg(target_os = "macos")]
+    let program = if crate::host::developer_tools_present() {
+        GIT
+    } else {
+        "/nonexistent/xcode-command-line-tools/git"
+    };
+    #[cfg(target_os = "linux")]
+    let program = GIT;
+    let mut command = Command::new(program);
     command
         .args([
             "-c",
