@@ -427,8 +427,9 @@ fn parse_disco(text: &str) -> Result<DiscoPublic> {
 }
 
 /// The tailnet endpoint for one allocation. It must answer the request it
-/// was made for: the same disco keys in the same order and the same
-/// generation, with at least one numeric relay address.
+/// was made for: the same two disco keys and the same generation, with at
+/// least one numeric relay address. The relay keeps each pair in its
+/// canonical (sorted) order, so the keys may come back either way round.
 fn relay_endpoint(
     allocation: PeerRelayAllocation,
     requested: [DiscoPublic; 2],
@@ -442,9 +443,15 @@ fn relay_endpoint(
         .iter()
         .map(|key| parse_disco(key))
         .collect::<Result<Vec<_>>>()?;
-    if disco.as_slice() != requested.as_slice() {
+    let [first, second] = disco.as_slice() else {
+        return Err(anyhow!("relay allocation answers other disco keys"));
+    };
+    let same_pair = (*first == requested[0] && *second == requested[1])
+        || (*first == requested[1] && *second == requested[0]);
+    if !same_pair {
         return Err(anyhow!("relay allocation answers other disco keys"));
     }
+    let client_disco = [*first, *second];
     let addr_ports = allocation
         .addr_ports
         .iter()
@@ -458,7 +465,7 @@ fn relay_endpoint(
     }
     Ok(UDPRelayEndpoint {
         server_disco: parse_disco(&allocation.server_disco_key)?,
-        client_disco: requested,
+        client_disco,
         lamport_id: allocation.lamport_id,
         vni: allocation.vni,
         bind_lifetime: Duration::from_nanos(allocation.bind_lifetime_ns),
