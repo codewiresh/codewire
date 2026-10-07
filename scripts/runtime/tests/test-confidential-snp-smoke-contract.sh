@@ -259,6 +259,10 @@ rg -F 'SANDBOX_KATA_COCO_INIT_DATA_ENABLED: "true"' "$CONFIDENTIAL_PROFILE" >/de
 # re-homed onto LINSTOR.
 rg -Fx '  SANDBOX_WORKSPACE_STORAGE_CLASS: linstor-local' "$COMMODITY_PROFILE" >/dev/null
 rg -Fx '  SANDBOX_WORKSPACE_STORAGE_CLASS: longhorn' "$CONFIDENTIAL_PROFILE" >/dev/null
+# Prod commodity workspaces use LINSTOR linstor-local (Program #2238, A3); the
+# renderer default example-volumes cannot attach on the Prod runtime node.
+rg -Fx '        SANDBOX_WORKSPACE_STORAGE_CLASS: linstor-local' \
+  "$ROOT/deployments/k8s/overlays/production/kustomization.yaml" >/dev/null
 rg -F 'SANDBOX_KATA_COCO_KBS_URL: https://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080' \
   "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI: kbs:///default/containers/auth' \
