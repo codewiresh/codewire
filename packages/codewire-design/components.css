@@ -508,6 +508,14 @@ dialog.cw-discard-dialog {
   background: var(--bg-selected);
 }
 
+/* An action that does not apply now stays in place, dimmed, and never highlights. */
+.cw-menu-item:disabled,
+:is(.cw-menu-panel, .cw-menu-panel > ul > li, .cw-menu-panel > section) > button:not(.cw-button, .cw-icon-button, .cw-link-button):disabled {
+  background: transparent;
+  color: var(--fg-disabled);
+  cursor: not-allowed;
+}
+
 .cw-menu-heading {
   margin: 0;
   padding: var(--space-1-5) var(--space-2) var(--space-1);
