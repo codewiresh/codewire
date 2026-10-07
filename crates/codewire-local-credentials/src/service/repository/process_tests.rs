@@ -7,6 +7,17 @@ use super::*;
 
 #[tokio::test]
 async fn ssh_group_reap_waits_for_descendant_stderr_eof_before_runtime_cleanup() {
+    #[cfg(target_os = "linux")]
+    crate::process_test_support::isolated_process_fixture(
+        "service::repository::process_tests::ssh_group_reap_waits_for_descendant_stderr_eof_before_runtime_cleanup",
+        ssh_group_reap_waits_for_descendant_stderr_eof_before_runtime_cleanup_body(),
+    )
+    .await;
+    #[cfg(not(target_os = "linux"))]
+    ssh_group_reap_waits_for_descendant_stderr_eof_before_runtime_cleanup_body().await;
+}
+
+async fn ssh_group_reap_waits_for_descendant_stderr_eof_before_runtime_cleanup_body() {
     let temporary = tempfile::tempdir().unwrap();
     let failed = Arc::new(AtomicBool::new(false));
     let runtime = create_repository_ssh_runtime(temporary.path(), Arc::clone(&failed)).unwrap();

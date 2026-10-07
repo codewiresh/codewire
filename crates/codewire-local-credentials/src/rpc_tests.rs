@@ -358,6 +358,10 @@ pub(crate) fn prepare_test_repository_bundle(staging: &std::path::Path) -> io::R
                 "commit.gpgsign=false",
                 "-c",
                 "core.hooksPath=/dev/null",
+                "-c",
+                "maintenance.autoDetach=false",
+                "-c",
+                "gc.autoDetach=false",
             ]);
         command
     };

@@ -109,6 +109,46 @@ class Inventory(unittest.TestCase):
                              for call in opened.call_args_list
                              if isinstance(call.args[0], (str, os.PathLike))))
 
+    def test_checked_in_root_policy_omits_python_environments_without_inspection(self):
+        root_policy = (ROOT / ".dockerignore").read_bytes()
+        write(self.policy, root_policy)
+        environments = (".venv", ".venv-sdk", ".venv-proto", "libs/sdk-python/.venv",
+                        "libs/sdk-python/.venv-tests", "libs/deeper/.venv", "libs/sdk-python/deeper/.venv-tools")
+        for name in environments[:-1]:
+            write(self.checkout / name / "synthetic-fixture", b"synthetic-unread-python-environment\n")
+        # Match the declared SDK consumer's generated empty, writable lock.
+        write(self.checkout / "libs/sdk-python/.venv/.lock", b"", 0o666)
+        outside = self.base / "owned-python-environment"
+        write(outside / "synthetic-fixture", b"synthetic-unread-python-environment\n")
+        nested_link = self.checkout / environments[-1]
+        nested_link.parent.mkdir(parents=True, exist_ok=True)
+        nested_link.symlink_to(outside, target_is_directory=True)
+        ordinary = ("src/main.rs", "libs/sdk-python/src/public.py", "libs/deeper/src/public.py")
+        for name in ordinary[1:]:
+            write(self.checkout / name)
+        real_open, real_stat, real_readlink = os.open, os.stat, os.readlink
+
+        def environment_path(path):
+            return any(part == ".venv" or part.startswith(".venv-") for part in path.parts)
+
+        with mock.patch.object(source.os, "open", wraps=real_open) as opened, \
+                mock.patch.object(source.os, "stat", wraps=real_stat) as inspected, \
+                mock.patch.object(source.os, "readlink", wraps=real_readlink) as links:
+            with self.admit() as admitted:
+                members = self.members(admitted)
+                self.assertTrue(set(ordinary) <= members.keys())
+                self.assertFalse(any(environment_path(Path(name)) for name in members))
+                for name in ordinary:
+                    self.assertEqual(members[name]["sha256"], hashlib.sha256(b"source\n").hexdigest())
+                before = admitted.summary
+                admitted.revalidate()
+                self.assertEqual(before, admitted.summary)
+            for recorder in (opened, inspected, links):
+                self.assertFalse(any(environment_path(Path(os.fspath(call.args[0])))
+                                     or Path(os.fspath(call.args[0])).is_relative_to(outside)
+                                     for call in recorder.call_args_list
+                                     if isinstance(call.args[0], (str, os.PathLike))))
+
     def test_checked_in_root_policy_omits_nested_npmrc_without_inspection(self):
         root_policy = (ROOT / ".dockerignore").read_bytes()
         write(self.policy, root_policy)
@@ -135,6 +175,51 @@ class Inventory(unittest.TestCase):
                 self.assertFalse(any(".npmrc" in Path(os.fspath(call.args[0])).parts
                                      for call in calls
                                      if isinstance(call.args[0], (str, os.PathLike))))
+
+    def test_checked_in_root_policy_omits_nested_dependencies_without_inspection(self):
+        root_policy = (ROOT / ".dockerignore").read_bytes()
+        write(self.policy, root_policy)
+        dependencies = ("node_modules", "apps/dashboard/node_modules",
+                        "libs/sdk-ts/node_modules", "libs/sdk-ts/deeper/node_modules")
+        for name in dependencies[:-1]:
+            write(self.checkout / name / "synthetic-fixture", b"synthetic-unread-dependency\n")
+        outside = self.base / "owned-dependencies"
+        write(outside / "synthetic-fixture", b"synthetic-unread-dependency\n")
+        nested_link = self.checkout / dependencies[-1]
+        nested_link.parent.mkdir(parents=True, exist_ok=True)
+        nested_link.symlink_to(outside, target_is_directory=True)
+        ordinary = ("src/main.rs", "apps/dashboard/src/public.ts",
+                    "libs/sdk-ts/src/public.ts", "libs/sdk-ts/deeper/src/public.ts")
+        for name in ordinary[1:]:
+            write(self.checkout / name)
+        real_open, real_stat, real_readlink = os.open, os.stat, os.readlink
+
+        def assert_uninspected(*recorders):
+            for recorder in recorders:
+                self.assertFalse(any("node_modules" in Path(os.fspath(call.args[0])).parts
+                                     or Path(os.fspath(call.args[0])).is_relative_to(outside)
+                                     for call in recorder.call_args_list
+                                     if isinstance(call.args[0], (str, os.PathLike))))
+
+        with mock.patch.object(source.os, "open", wraps=real_open) as opened, \
+                mock.patch.object(source.os, "stat", wraps=real_stat) as inspected, \
+                mock.patch.object(source.os, "readlink", wraps=real_readlink) as links:
+            with self.admit() as admitted:
+                self.assertTrue(set(ordinary) <= self.members(admitted).keys())
+                self.assertFalse(any("node_modules" in Path(name).parts for name in self.members(admitted)))
+                before = admitted.summary
+                admitted.revalidate()
+                self.assertEqual(before, admitted.summary)
+            assert_uninspected(opened, inspected, links)
+        for name in dependencies:
+            with self.subTest(negation=name):
+                write(self.policy, root_policy + ("!" + name + "\n").encode("utf-8"))
+                with mock.patch.object(source.os, "open", wraps=real_open) as opened, \
+                        mock.patch.object(source.os, "stat", wraps=real_stat) as inspected, \
+                        mock.patch.object(source.os, "readlink", wraps=real_readlink) as links:
+                    with self.assertRaisesRegex(source.Refused, "protected credential/cache tree"):
+                        self.admit()
+                    assert_uninspected(opened, inspected, links)
 
     def test_complete_context_not_only_recipe_copy_paths_and_repeat_enumeration(self):
         write(self.checkout / "unreferenced/public.txt", b"readonly context mounts can consume this\n")

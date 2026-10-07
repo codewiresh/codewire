@@ -2,7 +2,7 @@
 **/.claude
 .gitea
 target
-node_modules
+**/node_modules
 *.md
 !package.json
 docs
@@ -29,5 +29,6 @@ go-server/.tmp
 **/__pycache__
 **/*.pyc
 **/*.pyo
-.venv-proto
+**/.venv
+**/.venv-*
 **/.npmrc
