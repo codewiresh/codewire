@@ -1717,9 +1717,11 @@ impl SupervisorCore {
                         )?;
                         continue;
                     }
-                    Err(_) => {
+                    Err(error) => {
                         let error_code = if recovering {
                             "start_interrupted"
+                        } else if matches!(error, SupervisorError::HostPortUnavailable) {
+                            "start_host_port_unavailable"
                         } else {
                             "start_failed"
                         };
@@ -3007,6 +3009,9 @@ impl SupervisorCore {
                 self.record_runner_start_failure(name, &error_code)?;
                 if error_code == crate::runner_service::GUEST_DOCKER_TOOLING_MISSING {
                     return Err(SupervisorError::GuestDockerToolingMissing);
+                }
+                if error_code == crate::runner_service::HOST_PORT_UNAVAILABLE {
+                    return Err(SupervisorError::HostPortUnavailable);
                 }
                 return Err(SupervisorError::VmStart(status.message().to_owned()));
             }
@@ -7182,6 +7187,7 @@ impl From<SupervisorError> for Status {
             SupervisorError::CwRuntime(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::VmStart(_)
             | SupervisorError::GuestDockerToolingMissing
+            | SupervisorError::HostPortUnavailable
             | SupervisorError::VmStop
             | SupervisorError::VmResize
             | SupervisorError::VmDelete => Status::failed_precondition(error.to_string()),
@@ -7312,6 +7318,10 @@ pub enum SupervisorError {
         "Docker is enabled but the workspace image has no Docker tooling (dockerd, xtables-nft-multi); create with --no-docker or choose an image that includes Docker"
     )]
     GuestDockerToolingMissing,
+    #[error(
+        "a host port this environment publishes on 127.0.0.1 is in use by another program; stop that program or change host_port in codewire.yaml"
+    )]
+    HostPortUnavailable,
     #[error("native VM stop failed")]
     VmStop,
     #[error("native VM resize failed")]
@@ -7380,6 +7390,7 @@ pub enum SupervisorError {
 fn create_failure_code(error: &SupervisorError) -> &'static str {
     match error {
         SupervisorError::GuestDockerToolingMissing => "create_guest_docker_tooling_missing",
+        SupervisorError::HostPortUnavailable => "create_host_port_unavailable",
         #[cfg(target_os = "macos")]
         SupervisorError::VzHelperMissing(_) => "create_vz_helper_missing",
         #[cfg(target_os = "macos")]
@@ -14681,6 +14692,10 @@ mod tests {
             (
                 SupervisorError::GuestDockerToolingMissing,
                 "create_guest_docker_tooling_missing",
+            ),
+            (
+                SupervisorError::HostPortUnavailable,
+                "create_host_port_unavailable",
             ),
         ];
         for (error, expected) in cases {

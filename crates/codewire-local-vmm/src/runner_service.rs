@@ -995,14 +995,15 @@ impl EnvironmentRunnerService for RunnerRpc {
         {
             Ok(prepared) => prepared,
             Err(error) => {
+                let error_code = prepare_error_code(&error);
                 state.state = v1::EnvironmentState::Error;
-                state.error_code = Some("prepare_failed");
+                state.error_code = Some(error_code);
                 self.events.publish(
                     v1::EnvironmentState::Error,
                     request.generation,
                     v1::RunnerStage::Error,
                     None,
-                    Some("prepare_failed"),
+                    Some(error_code),
                     state.cw_runtime_catalog_generation(),
                 )?;
                 return Err(map_start_error(error));
@@ -1574,6 +1575,16 @@ fn map_start_error(error: RunnerError) -> Status {
 
 /// The runner error code for a guest whose image lacks Docker tooling.
 pub(crate) const GUEST_DOCKER_TOOLING_MISSING: &str = "guest_docker_tooling_missing";
+/// The runner error code for a published host port another program holds.
+pub(crate) const HOST_PORT_UNAVAILABLE: &str = "host_port_unavailable";
+
+/// Name the one prepare failure a user can fix without reading runner logs.
+fn prepare_error_code(error: &RunnerError) -> &'static str {
+    match error {
+        RunnerError::HostPortUnavailable(_) => HOST_PORT_UNAVAILABLE,
+        _ => "prepare_failed",
+    }
+}
 
 fn network_start_error_code(error: &RunnerError) -> &'static str {
     match error {
@@ -1585,7 +1596,7 @@ fn network_start_error_code(error: &RunnerError) -> &'static str {
         RunnerError::NetworkWorkerStartup(failure) => failure.runner_error_code(),
         RunnerError::NetworkWorkerWait => "network_worker_wait",
         RunnerError::NetworkWorkerKillTimeout => "network_worker_kill_timeout",
-        RunnerError::HostPortUnavailable(_) => "host_port_unavailable",
+        RunnerError::HostPortUnavailable(_) => HOST_PORT_UNAVAILABLE,
         RunnerError::IngressControl => "ingress_forwarder_start",
         RunnerError::EgressBrokerSpawn => "egress_broker_spawn",
         RunnerError::EgressBrokerStartTimeout => "egress_broker_start_timeout",
@@ -2800,6 +2811,18 @@ mod tests {
         assert_eq!(
             network_start_error_code(&RunnerError::StartTimeout),
             "network_stack_failed"
+        );
+    }
+
+    #[test]
+    fn prepare_names_only_an_unavailable_host_port() {
+        assert_eq!(
+            prepare_error_code(&RunnerError::HostPortUnavailable(18_080)),
+            HOST_PORT_UNAVAILABLE
+        );
+        assert_eq!(
+            prepare_error_code(&RunnerError::InvalidRequest),
+            "prepare_failed"
         );
     }
 

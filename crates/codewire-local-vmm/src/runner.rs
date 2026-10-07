@@ -1,6 +1,6 @@
 use std::fmt;
 use std::io::{self, Read as _};
-use std::net::{Ipv4Addr, SocketAddrV4, TcpListener as StdTcpListener};
+use std::net::{Ipv4Addr, TcpListener as StdTcpListener};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
@@ -46,7 +46,7 @@ use crate::host::path::current_uid;
 use crate::host::path::{FileIdentity, PathError, PrivateRoot, set_socket_private};
 use crate::host::process::{LiveProcess, RecoveryError, signal_unreaped_child};
 use crate::host_port::{
-    HOST_PORT_CONTROL_KEY_LEN, HostPortBinding, HostPortControlFrame,
+    HOST_PORT_CONTROL_KEY_LEN, HostPortBinding, HostPortControlFrame, bind_loopback_listener,
     validate_canonical_host_port_bindings,
 };
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
@@ -1108,15 +1108,11 @@ fn reserve_host_ports(bindings: &[HostPortBinding]) -> Result<Vec<ReservedHostPo
     validate_canonical_host_port_bindings(bindings).map_err(|_| RunnerError::InvalidRequest)?;
     let mut listeners = Vec::with_capacity(bindings.len());
     for binding in bindings {
-        let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, binding.host_port);
-        let listener = StdTcpListener::bind(address)
+        let listener = bind_loopback_listener(binding.host_port)
             .map_err(|_| RunnerError::HostPortUnavailable(binding.host_port))?;
         listener
             .set_nonblocking(true)
             .map_err(|_| RunnerError::HostPortUnavailable(binding.host_port))?;
-        if listener.local_addr().ok() != Some(address.into()) {
-            return Err(RunnerError::HostPortUnavailable(binding.host_port));
-        }
         listeners.push(ReservedHostPort {
             binding: *binding,
             listener,
@@ -4118,12 +4114,9 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
     {
         return Err(RunnerError::InvalidRequest);
     }
-    // Host ports, Mesh and cw runtime catalogs are Linux-only.
+    // Mesh and cw runtime catalogs are Linux-only.
     #[cfg(target_os = "macos")]
-    if !request.host_ports.is_empty()
-        || request.mesh.is_some()
-        || request.cw_runtime_catalog_generation.is_some()
-    {
+    if request.mesh.is_some() || request.cw_runtime_catalog_generation.is_some() {
         return Err(RunnerError::InvalidRequest);
     }
     Ok(())
@@ -5100,6 +5093,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::{Seek, SeekFrom, Write};
+    use std::net::SocketAddrV4;
     #[cfg(target_os = "linux")]
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -5618,13 +5612,7 @@ mod tests {
 
         let mut valid_host_port = request(2, 16_384);
         valid_host_port.host_ports = vec![HostPortBinding::new(18_080, 3_000).unwrap()];
-        #[cfg(target_os = "linux")]
         assert!(validate_request(&valid_host_port).is_ok());
-        #[cfg(target_os = "macos")]
-        assert!(matches!(
-            validate_request(&valid_host_port),
-            Err(RunnerError::InvalidRequest)
-        ));
 
         let mut duplicate_host_port = request(2, 16_384);
         duplicate_host_port.host_ports = vec![

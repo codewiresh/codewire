@@ -494,6 +494,9 @@ fn operation_error_hint(error_code: &str) -> &'static str {
         "create_direct_share_changed" | "start_direct_share_changed" => {
             " (a direct-mount source directory was moved, removed or replaced since it was admitted; put the original directory back at its path, or remove and recreate the environment)"
         }
+        "create_host_port_unavailable" | "start_host_port_unavailable" => {
+            " (a host port this environment publishes on 127.0.0.1 is in use by another program; `cw env info` lists its ports: stop that program or change host_port in codewire.yaml)"
+        }
         #[cfg(target_os = "macos")]
         "create_registry_platform" => {
             " (the image has no linux/arm64 variant; macOS local environments run arm64 Linux, so choose a multi-architecture or arm64 image)"
