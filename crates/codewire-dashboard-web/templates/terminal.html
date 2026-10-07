@@ -57,7 +57,7 @@
         </header>
         <main class="cw-workspace-main">
           <div class="cw-workspace-notices">
-            {% if !page.message.is_empty() %}<p class="cw-alert" role="status">{{ page.message }}</p>{% endif %}
+            {% if !page.message.is_empty() %}<p class="cw-alert" role="status"{% if page.creation_notice %} data-sandbox-creation-notice{% endif %}>{{ page.message }}</p>{% endif %}
             {% if !page.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ page.error }}</p>{% endif %}
             <p class="cw-alert" data-sandbox-observation-status role="status"{% if !page.environment.deletion_started() %} hidden{% endif %}>{% if page.environment.state == "destroyed" %}This Sandbox was deleted.{% else if page.environment.state == "destroying" %}This Sandbox is being deleted.{% endif %}</p>
             <p class="cw-field-help" data-sandbox-deleted{% if page.environment.state != "destroyed" %} hidden{% endif %}><a class="cw-link-button" href="{{ page.list_url }}">Back to Sandboxes</a></p>

@@ -857,6 +857,8 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page).toHaveURL(
       new RegExp(`^${ssrUrl}/${slug}/[0-9a-f-]{36}/\\?message=environment-created$`),
     );
+    // The creation notice stands until the Sandbox runs, well after this
+    // Kind Sandbox lands here.
     await expect(page.getByRole("status").filter({ hasText: "Sandbox creation started" })).toBeVisible();
     await expect(page.getByRole("region", { name: "Setup", exact: true })).toBeVisible();
     // The rest of this journey starts from the Sandboxes list.

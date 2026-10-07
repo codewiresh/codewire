@@ -3401,6 +3401,7 @@ mod tests {
             list_context: SandboxListContext::default(),
             list_url: "/test/".into(),
             message: String::new(),
+            creation_notice: false,
             error: String::new(),
         };
         crate::templates::TerminalTemplate {

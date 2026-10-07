@@ -94,6 +94,10 @@
       const status = heading.querySelector("[data-sandbox-observation-status]");
       const reload = heading.querySelector("[data-sandbox-observation-reload]");
       heading.dataset.observationAvailable = String(available);
+      // "Sandbox creation started." is news only until the Sandbox runs.
+      if (value?.running === true) {
+        for (const notice of document.querySelectorAll("[data-sandbox-creation-notice]")) notice.hidden = true;
+      }
       if (available) {
         const state = heading.querySelector("[data-sandbox-state]");
         state.textContent = stateLabels[detail.state] || detail.state;
@@ -188,6 +192,9 @@
       document.dispatchEvent(new CustomEvent("codewire:sandbox-status", {
         detail: { environmentId, available, running: value?.running === true,
           setupComplete: value?.setupComplete === true, setupRunning: value?.setupRunning === true,
+          // Asked to run and on its way up, not stopped and not failed.
+          starting: value?.running !== true && value?.detail?.desiredState === "started"
+            && !["error", "build failed"].includes(value?.detail?.state),
           actionsAllowed: value?.detail?.actionsAllowed === true,
           pending: value?.detail?.pending !== false, checking: !settled },
       }));
