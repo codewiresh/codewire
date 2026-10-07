@@ -29,7 +29,7 @@ fn session_mutation_upgrade_retains_accepted_staged27() -> anyhow::Result<()> {
 }
 
 /// Helpers other than this migration's two, migration34's workspace-binding
-/// trigger function and migration37's cw-runtime trigger function, which have
+/// trigger function and migration38's cw-runtime trigger function, which have
 /// their own proof and replace no prior helper.
 async fn prior_helper_definitions(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     Ok(sqlx::query_scalar(

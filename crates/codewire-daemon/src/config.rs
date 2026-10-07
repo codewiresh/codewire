@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use codewire_access::ManagedCredentialClients;
 use codewire_gateway_proto::DaemonAuthToken;
 pub use codewire_gateway_proto::{
-    HOSTED_DAEMON_CREDENTIAL_FILE, HOSTED_DAEMON_READY_FILE, HOSTED_DAEMON_STATE_DIRECTORY,
-    WORKSPACE_BINDING_TOKEN_PATH, WORKSPACE_BINDING_URL_ENV, WORKSPACE_BINDING_WAIT_SECONDS,
-    WORKSPACE_POD_UID_ENV,
+    HOSTED_DAEMON_ACCESS_READY_FILE, HOSTED_DAEMON_CREDENTIAL_FILE, HOSTED_DAEMON_READY_FILE,
+    HOSTED_DAEMON_STATE_DIRECTORY, WORKSPACE_BINDING_TLS_ROOTS_FILE, WORKSPACE_BINDING_TOKEN_PATH,
+    WORKSPACE_BINDING_URL_ENV, WORKSPACE_BINDING_WAIT_SECONDS, WORKSPACE_POD_UID_ENV,
 };
 use uuid::Uuid;
 
@@ -85,7 +85,8 @@ pub struct CredentialBridgeConfig {
 pub enum CredentialBridgeTransport {
     Local,
     /// Existing capability-authenticated, plaintext intra-cluster daemon leg.
-    /// Its gateway separately authenticates both Pod tokens to the TLS broker.
+    /// The credential relay separately authenticates both Pod tokens to the
+    /// TLS broker.
     Hosted,
 }
 
@@ -327,6 +328,9 @@ impl HostedDaemonMode {
             binding_url,
             pod_uid,
             token_path: WORKSPACE_BINDING_TOKEN_PATH.into(),
+            // The listener serves TLS (#2460), verified only against the
+            // mounted internal roots; without them the daemon never binds.
+            tls_roots_file: WORKSPACE_BINDING_TLS_ROOTS_FILE.into(),
             placement: HostedPlacement::from_lookup(&lookup),
         }))
     }
@@ -339,6 +343,7 @@ pub struct WorkspaceBindingConfig {
     binding_url: String,
     pod_uid: String,
     token_path: PathBuf,
+    tls_roots_file: PathBuf,
     placement: HostedPlacement,
 }
 
@@ -349,6 +354,7 @@ impl fmt::Debug for WorkspaceBindingConfig {
             .field("binding_url", &self.binding_url)
             .field("pod_uid", &self.pod_uid)
             .field("token_path", &self.token_path)
+            .field("tls_roots_file", &self.tls_roots_file)
             .finish_non_exhaustive()
     }
 }
@@ -426,9 +432,20 @@ impl WorkspaceBindingConfig {
         &self.token_path
     }
 
+    /// The public roots the binding listener's certificate must chain to.
+    pub fn tls_roots_file(&self) -> &Path {
+        &self.tls_roots_file
+    }
+
     /// Redirect the projected token, for tests of the binding loop.
     pub fn with_token_path(mut self, token_path: impl Into<PathBuf>) -> Self {
         self.token_path = token_path.into();
+        self
+    }
+
+    /// Redirect the listener's roots, for tests of the binding loop.
+    pub fn with_tls_roots_file(mut self, tls_roots_file: impl Into<PathBuf>) -> Self {
+        self.tls_roots_file = tls_roots_file.into();
         self
     }
 
@@ -516,10 +533,10 @@ fn canonical_uid(value: &str) -> bool {
     Uuid::parse_str(value).is_ok_and(|uid| !uid.is_nil() && uid.to_string() == value)
 }
 
-/// A plain in-cluster `http://host[:port]` origin, with no credentials, path,
-/// query or fragment.
+/// An in-cluster `https://host[:port]` origin, with no credentials, path,
+/// query or fragment. Plaintext is refused (#2460).
 fn valid_binding_url(url: &str) -> bool {
-    let Some(authority) = url.strip_prefix("http://") else {
+    let Some(authority) = url.strip_prefix("https://") else {
         return false;
     };
     let authority = authority.strip_suffix('/').unwrap_or(authority);
@@ -869,7 +886,7 @@ mod tests {
     const OTHER_POD: &str = "a1560db3-8899-40c9-b521-500f223b04fb";
     const ENVIRONMENT: &str = "550e8400-e29b-41d4-a716-446655440000";
     const BINDING_URL: &str =
-        "http://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087";
+        "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087";
     const SYNTHETIC_CREDENTIAL: &str = "synthetic-workspace-daemon-credential";
 
     fn lookup_from(values: &[(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
@@ -937,6 +954,10 @@ mod tests {
         assert_eq!(config.binding_url(), BINDING_URL);
         assert_eq!(config.pod_uid(), POD);
         assert_eq!(config.token_path(), Path::new(WORKSPACE_BINDING_TOKEN_PATH));
+        assert_eq!(
+            config.tls_roots_file(),
+            Path::new(WORKSPACE_BINDING_TLS_ROOTS_FILE)
+        );
         assert_eq!(config.listen_addr(), DEFAULT_LISTEN_ADDR);
         let shimmed = binding_mode(&[
             (WORKSPACE_BINDING_URL_ENV, BINDING_URL),
@@ -979,7 +1000,7 @@ mod tests {
     }
 
     #[test]
-    fn binding_mode_requires_a_canonical_pod_uid_and_plain_url() {
+    fn binding_mode_requires_a_canonical_pod_uid_and_tls_url() {
         for pod_uid in [
             "",
             "not-a-uid",
@@ -991,7 +1012,7 @@ mod tests {
             assert_eq!(
                 binding_mode(&[
                     (WORKSPACE_BINDING_URL_ENV, BINDING_URL),
-                    (WORKSPACE_POD_UID_ENV, pod_uid)
+                    (WORKSPACE_POD_UID_ENV, pod_uid),
                 ])
                 .unwrap_err(),
                 ConfigError::InvalidWorkspaceBinding,
@@ -1004,19 +1025,20 @@ mod tests {
         );
         for url in [
             "",
-            "https://binding.test:8087",
-            "http://",
-            "http://user:secret@binding.test:8087",
-            "http://binding.test:8087/path",
-            "http://binding.test:8087?query",
-            "http://Binding.test:8087",
+            // Plaintext is refused: the listener serves TLS only.
+            "http://binding.test:8087",
+            "https://",
+            "https://user:secret@binding.test:8087",
+            "https://binding.test:8087/path",
+            "https://binding.test:8087?query",
+            "https://Binding.test:8087",
             "binding.test:8087",
-            "http://binding.test:8087 ",
+            "https://binding.test:8087 ",
         ] {
             assert_eq!(
                 binding_mode(&[
                     (WORKSPACE_BINDING_URL_ENV, url),
-                    (WORKSPACE_POD_UID_ENV, POD)
+                    (WORKSPACE_POD_UID_ENV, POD),
                 ])
                 .unwrap_err(),
                 ConfigError::InvalidWorkspaceBinding,
@@ -1024,19 +1046,24 @@ mod tests {
             );
         }
         for url in [
-            "http://binding.test:8087",
-            "http://binding.test:8087/",
-            "http://10.0.0.1:8087",
+            "https://binding.test:8087",
+            "https://binding.test:8087/",
+            "https://10.0.0.1:8087",
         ] {
             assert!(
                 binding_mode(&[
                     (WORKSPACE_BINDING_URL_ENV, url),
-                    (WORKSPACE_POD_UID_ENV, POD)
+                    (WORKSPACE_POD_UID_ENV, POD),
                 ])
                 .is_ok(),
                 "{url:?}"
             );
         }
+        // The roots are always the mounted internal CA, never configurable.
+        assert_eq!(
+            binding_config().tls_roots_file(),
+            Path::new(WORKSPACE_BINDING_TLS_ROOTS_FILE)
+        );
     }
 
     #[test]

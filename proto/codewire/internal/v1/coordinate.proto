@@ -34,7 +34,17 @@ message CoordinateRequest {
     CoordinateNode node = 1;
     CoordinateHello hello = 2;
     CoordinatePing ping = 3;
+    // An environment peer re-proves its session with a fresh peer token at
+    // least once per token lifetime; the coordinator ends a session whose
+    // last valid proof has expired. Clients never send it.
+    CoordinateProof proof = 4;
   }
+}
+
+// CoordinateProof carries a fresh peer token for the session's own
+// environment and current operation generation.
+message CoordinateProof {
+  string peer_token = 1 [debug_redact = true];
 }
 
 message CoordinateHello {

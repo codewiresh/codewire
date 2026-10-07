@@ -64,7 +64,6 @@ readonly VMM_INITRAMFS_BUILDER='scripts/ci/verify/build-local-vmm-initramfs.sh'
 readonly RUNTIME_IMAGE_AUDIT='scripts/checks/security/audit-runtime-images.sh'
 readonly -a CURATED_MANIFESTS=(
   'deployments/docker/derp.Cargo.toml'
-  'deployments/docker/gateway.Cargo.toml'
 )
 readonly -a DETACHED_MANIFESTS=(
   'crates/codewire-desktop/Cargo.toml'

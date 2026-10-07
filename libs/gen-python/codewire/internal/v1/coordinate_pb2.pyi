@@ -47,14 +47,22 @@ class CoordinateNode(_message.Message):
     def __init__(self, id: _Optional[str] = ..., as_of: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., key: _Optional[str] = ..., disco_key: _Optional[str] = ..., preferred_derp: _Optional[int] = ..., derp_latency: _Optional[_Mapping[str, float]] = ..., endpoints: _Optional[_Iterable[str]] = ..., addresses: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class CoordinateRequest(_message.Message):
-    __slots__ = ("node", "hello", "ping")
+    __slots__ = ("node", "hello", "ping", "proof")
     NODE_FIELD_NUMBER: _ClassVar[int]
     HELLO_FIELD_NUMBER: _ClassVar[int]
     PING_FIELD_NUMBER: _ClassVar[int]
+    PROOF_FIELD_NUMBER: _ClassVar[int]
     node: CoordinateNode
     hello: CoordinateHello
     ping: CoordinatePing
-    def __init__(self, node: _Optional[_Union[CoordinateNode, _Mapping]] = ..., hello: _Optional[_Union[CoordinateHello, _Mapping]] = ..., ping: _Optional[_Union[CoordinatePing, _Mapping]] = ...) -> None: ...
+    proof: CoordinateProof
+    def __init__(self, node: _Optional[_Union[CoordinateNode, _Mapping]] = ..., hello: _Optional[_Union[CoordinateHello, _Mapping]] = ..., ping: _Optional[_Union[CoordinatePing, _Mapping]] = ..., proof: _Optional[_Union[CoordinateProof, _Mapping]] = ...) -> None: ...
+
+class CoordinateProof(_message.Message):
+    __slots__ = ("peer_token",)
+    PEER_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    peer_token: str
+    def __init__(self, peer_token: _Optional[str] = ...) -> None: ...
 
 class CoordinateHello(_message.Message):
     __slots__ = ("org_id", "environment_id")

@@ -1,6 +1,7 @@
 //! Isolated public mutation and private TLS broker process ownership.
 //!
-//! Neither orchestration nor the gateway constructs these protected handles.
+//! Neither orchestration (the credential relay) nor the daemon constructs these
+//! protected handles.
 //! Configuration never falls back to shared service credentials or kubeconfig;
 //! schema migrations and authority provisioning belong to their existing owners.
 
@@ -244,7 +245,11 @@ async fn run_connected(
         github_app_authorization.clone(),
     ));
     let bridge = PlatformCredentialBridgeService::new(
-        Arc::new(authorities.kubernetes_authenticator(client, pool.clone())),
+        Arc::new(authorities.kubernetes_authenticator(
+            client,
+            pool.clone(),
+            config.relay_namespace.clone(),
+        )),
         store.clone(),
         PlatformAccessProfileStore::new(pool.clone(), builtin_provider_catalog()),
         upstream,

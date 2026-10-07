@@ -561,6 +561,12 @@ const ENVIRONMENT_RPC_SEMANTICS: &[RpcSemantics] = &[
         proto::ENVIRONMENT_SERVICE_GET_ENVIRONMENT_TRUST_REPORT_SPEC,
         RpcBehavior::UnimplementedPlatformOnly,
     ),
+    // A local environment's SSH trust is the local runtime's, not a
+    // platform-recorded host key.
+    rpc(
+        proto::ENVIRONMENT_SERVICE_GET_ENVIRONMENT_HOST_KEY_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
     rpc(
         proto::ENVIRONMENT_SERVICE_GET_ENVIRONMENT_DAEMON_STATUS_SPEC,
         RpcBehavior::Local,
@@ -2510,6 +2516,16 @@ impl proto::EnvironmentService for SupervisorRpc {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, proto::GetEnvironmentTrustReportRequest>,
     ) -> ServiceResult<proto::GetEnvironmentTrustReportResponse> {
+        unsupported()
+    }
+
+    async fn get_environment_host_key(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::GetEnvironmentHostKeyRequest>,
+    ) -> ServiceResult<proto::GetEnvironmentHostKeyResponse> {
+        // A local environment's SSH trust is the local runtime's, not a
+        // platform-recorded host key.
         unsupported()
     }
 

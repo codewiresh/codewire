@@ -9,14 +9,24 @@ use prometheus::{IntCounter, IntCounterVec, Opts, register_int_counter, register
 static REQUESTS: OnceLock<IntCounterVec> = OnceLock::new();
 static TOKEN_REVIEWS: OnceLock<IntCounter> = OnceLock::new();
 
-/// The closed set of `BindWorkspace` outcomes.
-pub(super) const CODES: [&str; 6] = [
+/// The closed set of `WorkspaceBindingService` methods.
+pub(super) const METHODS: [&str; 4] = [
+    "bind_workspace",
+    "refresh_access",
+    "record_host_key",
+    "allocate_peer_relay",
+];
+
+/// The closed set of outcomes.
+pub(super) const CODES: [&str; 8] = [
     "ok",
     "unauthenticated",
     "permission_denied",
     "not_found",
     "resource_exhausted",
     "unavailable",
+    "invalid_argument",
+    "failed_precondition",
 ];
 
 fn requests() -> &'static IntCounterVec {
@@ -24,9 +34,9 @@ fn requests() -> &'static IntCounterVec {
         register_int_counter_vec!(
             Opts::new(
                 "codewire_workspace_binding_requests_total",
-                "BindWorkspace requests by result code."
+                "WorkspaceBindingService requests by method and result code."
             ),
-            &["code"]
+            &["method", "code"]
         )
         .expect("workspace binding request metric registration must be unique")
     })
@@ -42,9 +52,9 @@ fn token_reviews() -> &'static IntCounter {
     })
 }
 
-pub(super) fn observe_request(code: &'static str) {
-    debug_assert!(CODES.contains(&code));
-    requests().with_label_values(&[code]).inc();
+pub(super) fn observe_request(method: &'static str, code: &'static str) {
+    debug_assert!(METHODS.contains(&method) && CODES.contains(&code));
+    requests().with_label_values(&[method, code]).inc();
 }
 
 pub(super) fn observe_token_review() {

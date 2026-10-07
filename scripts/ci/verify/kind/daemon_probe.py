@@ -3,12 +3,10 @@
 
 The caller pipes this file into the actual workspace's python3. Each request
 crosses the daemon's loopback ingress and its long-lived bridge epoch, then
-the gateway and the broker, exactly as stock Codex's proxy provider does. It
-is the path on which one bridge epoch serves many requests, so it is the one
-on which the broker reuses that epoch's authority decision and decrypted
-material, and the one on which an authority change must reach an epoch that
-is still connected. The gateway capability path (credential_probe.py) admits
-a new epoch for every request.
+orchestration's credential relay and the broker, exactly as stock Codex's
+proxy provider does. One bridge epoch serves many requests, so this is where
+the broker reuses that epoch's authority decision and decrypted material, and
+where an authority change must reach an epoch that is still connected.
 The daemon supplies the epoch: no capability, token or provider credential is
 read or sent here.
 

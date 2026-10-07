@@ -20,6 +20,10 @@
 //! - A short, growing pause after accept errors (such as running out of file
 //!   descriptors) with a bounded log rate, so the loop never spins.
 //!
+//! - An optional [`ConnectionUpgrade`], such as a TLS handshake, runs in the
+//!   admitted connection's own task and must finish within the same
+//!   whole-request deadline.
+//!
 //! The peer address is attached to every request as a [`PeerAddr`]
 //! extension so request-level limits can key on it.
 
@@ -35,7 +39,8 @@ use axum::http::{Request, Response, StatusCode, header};
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
-use tokio::net::TcpListener;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
 /// Bounds for one [`serve_bounded_http1`] listener.
@@ -71,6 +76,28 @@ pub struct BoundedHttp1Limits {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeerAddr(pub SocketAddr);
 
+/// Turns an admitted socket into the stream HTTP/1.1 is served on, such as a
+/// server TLS handshake. It runs in the connection's own task, holding the
+/// connection's slots, and must complete within the request read deadline;
+/// an error or a late upgrade closes the socket without a response.
+pub trait ConnectionUpgrade: Clone + Send + Sync + 'static {
+    type Io: AsyncRead + AsyncWrite + Unpin + Send + 'static;
+
+    fn upgrade(&self, stream: TcpStream) -> impl Future<Output = std::io::Result<Self::Io>> + Send;
+}
+
+/// The accepted socket itself, unencrypted.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Plaintext;
+
+impl ConnectionUpgrade for Plaintext {
+    type Io = TcpStream;
+
+    async fn upgrade(&self, stream: TcpStream) -> std::io::Result<TcpStream> {
+        Ok(stream)
+    }
+}
+
 /// Serve `app` on `listener` under `limits` until SIGTERM or SIGINT.
 pub async fn serve_bounded_http1(
     app: Router,
@@ -86,6 +113,30 @@ pub async fn serve_bounded_http1_until(
     app: Router,
     listener: TcpListener,
     limits: BoundedHttp1Limits,
+    shutdown: impl Future<Output = ()>,
+) -> anyhow::Result<()> {
+    serve_bounded_http1_upgraded_until(app, listener, limits, Plaintext, shutdown).await
+}
+
+/// [`serve_bounded_http1`] over connections `upgrade` produces, for example
+/// TLS, until SIGTERM or SIGINT.
+pub async fn serve_bounded_http1_upgraded(
+    app: Router,
+    listener: TcpListener,
+    limits: BoundedHttp1Limits,
+    upgrade: impl ConnectionUpgrade,
+) -> anyhow::Result<()> {
+    serve_bounded_http1_upgraded_until(app, listener, limits, upgrade, crate::shutdown_signal())
+        .await
+}
+
+/// [`serve_bounded_http1_upgraded`] that stops accepting when `shutdown`
+/// completes, then waits for open connections, each bounded by its deadline.
+pub async fn serve_bounded_http1_upgraded_until(
+    app: Router,
+    listener: TcpListener,
+    limits: BoundedHttp1Limits,
+    upgrade: impl ConnectionUpgrade,
     shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
     validate(&limits)?;
@@ -134,12 +185,27 @@ pub async fn serve_bounded_http1_until(
                         )
                     }
                 });
-                let connection = http1_builder(&limits).serve_connection(TokioIo::new(stream), service);
-                let watched = graceful.watch(connection);
-                let deadline = limits.connection_deadline;
+                let builder = http1_builder(&limits);
+                let watcher = graceful.watcher();
+                let upgrade = upgrade.clone();
+                let deadline = tokio::time::Instant::now() + limits.connection_deadline;
                 tokio::spawn(async move {
                     let _slots = (global, per_peer);
-                    match tokio::time::timeout(deadline, watched).await {
+                    // The upgrade spends the request's read budget, so a
+                    // stalled handshake never outlives it.
+                    let io = match tokio::time::timeout_at(read_deadline, upgrade.upgrade(stream)).await {
+                        Ok(Ok(io)) => io,
+                        Ok(Err(error)) => {
+                            tracing::debug!(error = ?error, "bounded listener connection upgrade failed");
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::debug!("bounded listener connection upgrade deadline reached");
+                            return;
+                        }
+                    };
+                    let connection = builder.serve_connection(TokioIo::new(io), service);
+                    match tokio::time::timeout_at(deadline, watcher.watch(connection)).await {
                         Ok(Ok(())) => {}
                         Ok(Err(error)) => {
                             tracing::debug!(error = ?error, "bounded listener connection ended");

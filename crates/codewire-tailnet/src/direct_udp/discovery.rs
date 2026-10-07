@@ -11,10 +11,10 @@ use crate::stun;
 
 use super::peer_relay::apply_known_peer_relay_request;
 use super::state::{
-    derp_public_from_node, is_usable_direct_endpoint, ping_action_with_transaction,
-    register_pending_transaction, DirectProbe, DirectProbeCandidate, DirectProbeState, DiscoAction,
-    DiscoPeerIndex, DiscoTarget, EndpointRefresh, PeerState, PendingStun, Shared, State,
-    VerifiedEndpoint,
+    derp_public_from_node, is_acceptable_peer_endpoint, is_usable_direct_endpoint,
+    ping_action_with_transaction, register_pending_transaction, DirectProbe, DirectProbeCandidate,
+    DirectProbeState, DiscoAction, DiscoPeerIndex, DiscoTarget, EndpointRefresh, PeerState,
+    PendingStun, Shared, State, VerifiedEndpoint,
 };
 use super::DIRECT_PROBE_RETRY_WINDOW;
 
@@ -131,7 +131,8 @@ pub(super) fn apply_peer_update(shared: &Shared, nodes: Vec<Node>) -> Vec<DiscoA
         } else {
             Vec::new()
         };
-        endpoints.retain(|endpoint| is_usable_direct_endpoint(*endpoint));
+        let public_only = state.public_peer_endpoints_only;
+        endpoints.retain(|endpoint| is_acceptable_peer_endpoint(*endpoint, public_only));
         endpoints.sort_unstable();
         endpoints.dedup();
         let previous_peer = previous.get(&raw);

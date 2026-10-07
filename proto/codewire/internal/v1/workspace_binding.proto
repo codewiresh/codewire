@@ -6,12 +6,36 @@ package codewire.internal.v1;
 // environment orchestration recorded for it. The caller is identified only
 // by TokenReview of a Pod-bound projected token with the exact audience
 // codewire.internal.workspace-binding.v1, on the dedicated listener only.
+//
+// Every method also requires the TCP peer to be the bound Pod's own IP, read
+// by the reviewed Pod UID, and the listener serves TLS with the orchestration
+// internal identity.
 service WorkspaceBindingService {
   // Returns this Pod's binding. An unbound Pod waits up to wait_seconds, then
   // gets not_found and retries. A bound Pod gets the same binding again.
   rpc BindWorkspace(BindWorkspaceRequest) returns (BindWorkspaceResponse) {
     option idempotency_level = IDEMPOTENT;
   }
+
+  // Issues a fresh access grant to the bound Pod: a new peer token for the
+  // binding's environment and operation generation. Daemons call it at half
+  // the current token's lifetime.
+  rpc RefreshAccess(RefreshAccessRequest) returns (RefreshAccessResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // Records the bound Pod's SSH host public key for that Pod, noting the
+  // binding's environment and operation generation. Write-once per Pod: the
+  // same key again succeeds, a different key is failed_precondition. A Pod
+  // that replaces another records its own key.
+  rpc RecordHostKey(RecordHostKeyRequest) returns (RecordHostKeyResponse) {
+    option idempotency_level = IDEMPOTENT;
+  }
+
+  // Allocates a UDP peer-relay endpoint between the bound environment's
+  // tailnet node and one peer, with orchestration's own allocator
+  // credential. failed_precondition when the runtime has no peer relay.
+  rpc AllocatePeerRelay(AllocatePeerRelayRequest) returns (AllocatePeerRelayResponse);
 }
 
 message BindWorkspaceRequest {
@@ -31,4 +55,65 @@ message BindWorkspaceResponse {
   string projection_selection_sha256 = 5;
   // Canonical ManagedCredentialClients encoding captured at bind.
   string managed_credential_clients = 6;
+  // The environment's tailnet and SSH access for this Pod.
+  WorkspaceAccess access = 7;
+}
+
+// WorkspaceAccess is everything the bound daemon needs to serve its
+// environment's tailnet peer. It names only public endpoints: the internal
+// coordinator, allocator and relay bind addresses never enter the sandbox.
+message WorkspaceAccess {
+  // Peer token for the coordinator: environment, scope "peer", operation
+  // generation and expiry, signed with a key derived for this purpose only.
+  string peer_token = 1 [debug_redact = true];
+  // Unix seconds at which peer_token expires. Refresh at half its lifetime.
+  int64 peer_token_expires_at = 2;
+  // The operation generation peer_token is bound to.
+  int64 operation_generation = 3;
+  // Public https origin of the coordinator (the CoordinatorService route).
+  string coordinator_url = 4;
+  // host:port endpoints the peer advertises for direct UDP: the
+  // environment's own LoadBalancer. Empty when direct UDP is not configured.
+  repeated string direct_udp_endpoints = 5;
+  // Public host:port endpoints of the UDP peer relay. Empty when the
+  // runtime has no peer relay; allocations use AllocatePeerRelay.
+  repeated string peer_relay_endpoints = 6;
+  // The environment's exposed application ports (1-65535, ascending,
+  // without duplicates). The daemon serves exactly these on its tailnet
+  // address, forwarded to its own loopback; orchestration also pushes each
+  // change to the daemon, and every grant restates the current set.
+  repeated int32 app_ports = 7;
+}
+
+message RefreshAccessRequest {}
+
+message RefreshAccessResponse {
+  WorkspaceAccess access = 1;
+}
+
+message RecordHostKeyRequest {
+  // One OpenSSH public key line: "ssh-ed25519 <base64>", no comment.
+  string public_key_openssh = 1;
+}
+
+message RecordHostKeyResponse {}
+
+message AllocatePeerRelayRequest {
+  // Exactly two disco public keys ("discokey:<64 hex>"): this environment's
+  // node first, then the peer's. The order is preserved in the response.
+  repeated string disco_keys = 1;
+  // The caller's relay-allocation generation, echoed back.
+  uint32 relay_generation = 2;
+}
+
+message AllocatePeerRelayResponse {
+  uint32 relay_generation = 1;
+  string server_disco_key = 2;
+  repeated string disco_keys = 3;
+  uint64 lamport_id = 4;
+  uint32 vni = 5;
+  uint64 bind_lifetime_ns = 6;
+  uint64 steady_state_lifetime_ns = 7;
+  // Public host:port addresses of the relay endpoint.
+  repeated string addr_ports = 8;
 }

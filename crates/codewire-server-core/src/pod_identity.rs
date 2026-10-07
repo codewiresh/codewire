@@ -16,9 +16,8 @@ use axum::http::header::AUTHORIZATION;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codewire_gateway_proto::{
-    CREDENTIAL_GATEWAY_TOKEN_AUDIENCE, CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
-    GATEWAY_BINDING_SERVICE_ACCOUNT, GATEWAY_BINDING_TOKEN_AUDIENCE,
-    WORKSPACE_BINDING_TOKEN_AUDIENCE,
+    CREDENTIAL_RELAY_SERVICE_ACCOUNT, CREDENTIAL_RELAY_TOKEN_AUDIENCE,
+    CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE, SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE,
 };
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec, TokenReviewStatus};
 use kube::api::PostParams;
@@ -35,8 +34,9 @@ const SERVICE_ACCOUNT_USERNAME_PREFIX: &str = "system:serviceaccount:";
 /// Closed authentication purposes. A request cannot choose an arbitrary audience.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PodIdentityPurpose {
-    GatewayBinding,
-    CredentialGateway,
+    /// Orchestration relaying a bound workspace's credential bridge to the
+    /// broker. Only orchestration's own service account may present it.
+    CredentialRelay,
     CredentialWorkspace,
     WorkspaceBinding,
 }
@@ -44,22 +44,20 @@ pub enum PodIdentityPurpose {
 impl PodIdentityPurpose {
     pub const fn audience(self) -> &'static str {
         match self {
-            Self::GatewayBinding => GATEWAY_BINDING_TOKEN_AUDIENCE,
-            Self::CredentialGateway => CREDENTIAL_GATEWAY_TOKEN_AUDIENCE,
+            Self::CredentialRelay => CREDENTIAL_RELAY_TOKEN_AUDIENCE,
             Self::CredentialWorkspace => CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
             Self::WorkspaceBinding => WORKSPACE_BINDING_TOKEN_AUDIENCE,
         }
     }
 
     pub const fn service_account(self) -> &'static str {
-        // Both current workspace and companion gateway Pods use this fixed
-        // account. Distinct audiences prevent purpose substitution; live Pod
-        // role/owner checks are additionally required by the runtime authority.
+        // Workspace Pods use the fixed sandbox account. Distinct audiences
+        // prevent purpose substitution; live Pod role/owner checks are
+        // additionally required by the runtime authority. The relay is
+        // orchestration itself, under its own account.
         match self {
-            Self::GatewayBinding
-            | Self::CredentialGateway
-            | Self::CredentialWorkspace
-            | Self::WorkspaceBinding => GATEWAY_BINDING_SERVICE_ACCOUNT,
+            Self::CredentialWorkspace | Self::WorkspaceBinding => SANDBOX_SERVICE_ACCOUNT,
+            Self::CredentialRelay => CREDENTIAL_RELAY_SERVICE_ACCOUNT,
         }
     }
 }

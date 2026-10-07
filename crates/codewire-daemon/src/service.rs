@@ -16,6 +16,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::app_ports::AppPortsSender;
 use crate::credential_bridge::CredentialBridge;
 use crate::durable_session::{SessionEngine, status_from_session_error};
 use crate::{Config, files, session};
@@ -31,6 +32,9 @@ pub struct DaemonServiceImpl {
     runtime_state: DaemonRuntimeState,
     session_engine: SessionEngine,
     credential_bridge: CredentialBridge,
+    /// A bound daemon's exposed application ports; `None` where the daemon
+    /// serves no tailnet (environment-token mode, local placements).
+    app_ports: Option<AppPortsSender>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -74,6 +78,7 @@ impl DaemonServiceImpl {
             credential_bridge,
             config,
             runtime_state,
+            app_ports: None,
         }
     }
 
@@ -84,6 +89,12 @@ impl DaemonServiceImpl {
             ));
         }
         Ok(())
+    }
+
+    /// Accept `SetAppPorts`, publishing each set to `app_ports`.
+    pub fn with_app_ports(mut self, app_ports: AppPortsSender) -> Self {
+        self.app_ports = Some(app_ports);
+        self
     }
 
     fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
@@ -146,6 +157,24 @@ impl DaemonService for DaemonServiceImpl {
         Ok(Response::new(v1::PoweroffGuestResponse {}))
     }
 
+    async fn set_app_ports(
+        &self,
+        request: Request<v1::SetAppPortsRequest>,
+    ) -> Result<Response<v1::SetAppPortsResponse>, Status> {
+        self.authorize(&request)?;
+        self.require_guest()?;
+        let Some(app_ports) = &self.app_ports else {
+            return Err(Status::failed_precondition(
+                "this daemon serves no application ports",
+            ));
+        };
+        let ports = crate::app_ports::app_ports(&request.into_inner().ports)
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        tracing::info!(app_port_count = ports.len(), "application ports replaced");
+        app_ports.send_replace(ports);
+        Ok(Response::new(v1::SetAppPortsResponse {}))
+    }
+
     async fn credential_bridge(
         &self,
         request: Request<Streaming<bridge_v1::CredentialBridgeHostMessage>>,
@@ -157,7 +186,7 @@ impl DaemonService for DaemonServiceImpl {
         if let Some(value) = connection.workspace_authorization {
             // This existing private capability-authenticated daemon transport
             // is plaintext inside the cluster. Sensitive metadata is redaction,
-            // not encryption; the gateway-to-broker leg separately uses TLS.
+            // not encryption; the relay-to-broker leg separately uses TLS.
             response.metadata_mut().insert_bin(
                 crate::credential_bridge::WORKSPACE_AUTHORIZATION,
                 value.into_metadata(),
@@ -1361,6 +1390,70 @@ mod tests {
         )
     }
 
+    fn app_ports_request(token: Option<&str>, ports: Vec<i32>) -> Request<v1::SetAppPortsRequest> {
+        let mut request = Request::new(v1::SetAppPortsRequest { ports });
+        if let Some(token) = token {
+            request
+                .metadata_mut()
+                .insert(DAEMON_AUTH_TOKEN_HEADER, token.parse().unwrap());
+        }
+        request
+    }
+
+    #[tokio::test]
+    async fn app_ports_are_replaced_only_by_an_authenticated_bound_caller() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            listen_addr: "unused:0".into(),
+            workspace_root: temp.path().to_path_buf(),
+            home_root: temp.path().to_path_buf(),
+            auth_token: DaemonAuthToken::new(TEST_AUTH_TOKEN).unwrap(),
+            process_execution: crate::execution::ProcessExecution::Native,
+            credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            host: None,
+            launch_projection: None,
+        };
+        // A daemon that serves no tailnet refuses the push.
+        let unbound = DaemonServiceImpl::new(config.clone());
+        let error = unbound
+            .set_app_ports(app_ports_request(Some(TEST_AUTH_TOKEN), vec![3000]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+        let (app_ports, current) =
+            tokio::sync::watch::channel(crate::app_ports::AppPorts::from([8080]));
+        let bound = DaemonServiceImpl::new(config).with_app_ports(app_ports);
+        for token in [None, Some("wrong-daemon-token")] {
+            let error = bound
+                .set_app_ports(app_ports_request(token, vec![3000]))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::Unauthenticated);
+        }
+        let error = bound
+            .set_app_ports(app_ports_request(Some(TEST_AUTH_TOKEN), vec![3000, 0]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(*current.borrow(), crate::app_ports::AppPorts::from([8080]));
+
+        bound
+            .set_app_ports(app_ports_request(Some(TEST_AUTH_TOKEN), vec![5173, 3000]))
+            .await
+            .unwrap();
+        assert_eq!(
+            *current.borrow(),
+            crate::app_ports::AppPorts::from([3000, 5173])
+        );
+        bound
+            .set_app_ports(app_ports_request(Some(TEST_AUTH_TOKEN), Vec::new()))
+            .await
+            .unwrap();
+        assert!(current.borrow().is_empty());
+    }
+
     async fn wait_attach_fixture_ready(temp: &tempfile::TempDir) {
         tokio::time::timeout(Duration::from_secs(3), async {
             while !std::fs::read_to_string(temp.path().join("home/attach-ready"))
@@ -1719,7 +1812,9 @@ mod tests {
                 state_root: temp.path().join("state"),
             }),
         };
-        let service = DaemonServiceImpl::new(config);
+        let (app_ports, current_ports) =
+            tokio::sync::watch::channel(crate::app_ports::AppPorts::from([8080]));
+        let service = DaemonServiceImpl::new(config).with_app_ports(app_ports);
         let capabilities = service
             .get_capabilities(authorized(v1::GetCapabilitiesRequest::default()))
             .await
@@ -1728,6 +1823,18 @@ mod tests {
         assert_eq!(
             capabilities.capabilities,
             codewire_gateway_proto::HOST_DAEMON_CAPABILITIES
+        );
+        assert_eq!(
+            service
+                .set_app_ports(authorized(v1::SetAppPortsRequest { ports: vec![3000] }))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            *current_ports.borrow(),
+            crate::app_ports::AppPorts::from([8080])
         );
         assert_eq!(
             service

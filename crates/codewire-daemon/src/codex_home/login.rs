@@ -60,7 +60,7 @@ pub const CODEX_LOGIN_STATE_DIRECTORY: &str = "/tmp/codewire-codex-login";
 pub const CODEX_LOGIN_CHECK_PERIOD: Duration = Duration::from_secs(120);
 /// With no delivery for this long while the bridge fails (no epoch, no
 /// capability, or unavailable), Codewire's login is removed: when the whole
-/// Sandbox loses credential authority, the gateway reports the broker's
+/// Sandbox loses credential authority, the relay reports the broker's
 /// refusal as an epoch failure, never as an explicit denial.
 pub const CODEX_LOGIN_LAPSE: Duration = Duration::from_secs(600);
 const CODEX_LOGIN_RETRY_MIN: Duration = Duration::from_secs(2);

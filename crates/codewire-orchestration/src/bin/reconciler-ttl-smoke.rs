@@ -213,7 +213,7 @@ async fn verify_start_stage_timing(
 ) -> anyhow::Result<()> {
     for phase in [
         "create_claim",
-        "gateway_ready",
+        "access_ready",
         "pod_scheduled",
         "pod_initialized",
     ] {
@@ -256,7 +256,7 @@ async fn verify_start_stage_timing(
         .text()
         .await
         .context("read orchestration metrics")?;
-    for stage in ["create_claim", "gateway_ready", "pod_scheduled"] {
+    for stage in ["create_claim", "access_ready", "pod_scheduled"] {
         let stage_label = format!("stage=\"{stage}\"");
         let observed = metrics.lines().any(|line| {
             line.starts_with("codewire_environment_start_stage_seconds_count{")

@@ -14,7 +14,6 @@ fn main() {
         "codewire/console/v1/billing.proto",
         "codewire/console/v1/environment_setup.proto",
         "codewire/internal/v1/coordinate.proto",
-        "codewire/internal/v1/gateway_binding.proto",
         "codewire/internal/v1/mesh_authorization.proto",
         "codewire/internal/v1/workspace_binding.proto",
         "codewire/v1/access_profile.proto",

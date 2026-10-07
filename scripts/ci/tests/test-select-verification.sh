@@ -418,7 +418,7 @@ run_paths_case idp_kek_boundary pull_request refs/pull/32/head false \
   'deploy policy security security_idp_kek' \
   deployments/k8s/idp/deployment.yaml
 run_paths_case orchestration_host_key_authz pull_request refs/pull/910/head false \
-  'deploy policy security security_idp_kek' deployments/k8s/orchestration/gateway-host-key-authz.yaml
+  'deploy policy security security_idp_kek' deployments/k8s/orchestration/internal-roots-authz.yaml
 run_paths_case leaf_rust pull_request refs/pull/4/head false \
   'policy rust rust_pkg_codewire_cli' \
   crates/codewire-cli/src/commands/info.rs
@@ -541,9 +541,6 @@ run_paths_case application_secret_smoke_fixture pull_request refs/pull/5018/head
 run_paths_case curated_derp_member_manifest pull_request refs/pull/502/head false \
   'policy rust_curated_locks transport transport_derp_contract transport_pkg_codewire_derp' \
   crates/codewire-derp/Cargo.toml
-run_paths_case curated_gateway_lock pull_request refs/pull/503/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential rust_curated_locks' \
-  deployments/docker/gateway.Cargo.lock
 run_paths_case curated_derp_lock pull_request refs/pull/504/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential rust_curated_locks' \
   deployments/docker/derp.Cargo.lock
@@ -568,13 +565,13 @@ run_paths_case retired_go_harness_deletion pull_request refs/pull/6010/head fals
   'policy' autoagent/agent.py libs/gatewayauth/token.go \
   libs/gateway-proto/gen/daemon/v1/daemon.pb.go
 run_paths_case gateway_proto_source pull_request refs/pull/6011/head false \
-  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   libs/gateway-proto/proto/daemon/v1/daemon.proto
 run_paths_case private_broker_proto_source pull_request refs/pull/6011/head false \
-  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   libs/gateway-proto/proto/broker/v1/broker.proto
 run_paths_case neutral_credential_bridge_proto_source pull_request refs/pull/6011/head false \
-  'contracts contracts_proto go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_credential_service rust_pkg_codewire_daemon rust_pkg_codewire_gateway rust_pkg_codewire_gateway_proto rust_pkg_codewire_local_credentials rust_pkg_codewire_local_vmm rust_pkg_codewire_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'contracts contracts_proto go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_credential_service rust_pkg_codewire_daemon rust_pkg_codewire_gateway_proto rust_pkg_codewire_local_credentials rust_pkg_codewire_local_vmm rust_pkg_codewire_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   proto/codewire/bridge/v1/bridge.proto
 run_paths_case private_broker_proto_rust_module pull_request refs/pull/6011/head false \
   'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto rust_pkg_codewire_server_core transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
@@ -583,7 +580,7 @@ run_paths_case broker_daemon_transport_consumer pull_request refs/pull/6011/head
   'policy rust rust_pkg_codewire_credential_broker transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   crates/codewire-daemon/src/client.rs
 run_paths_case material_free_credential_bridge pull_request refs/pull/6011/head false \
-  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   crates/codewire-credential-bridge/src/lib.rs
 run_paths_case concrete_platform_credential_service pull_request refs/pull/6011/head false \
   'database policy rust rust_pkg_codewire_credential_service' \
@@ -601,10 +598,10 @@ run_paths_case credential_service_kind_runtime_with_opt_in pull_request refs/pul
   'database edge_kind kind policy rust rust_pkg_codewire_credential_service' \
   crates/codewire-credential-service/src/runtime/kind/provider.rs
 run_paths_case shared_credential_tls_source pull_request refs/pull/6011/head false \
-  'database policy rust rust_pkg_codewire_credential_service rust_pkg_codewire_tls transport transport_pkg_codewire_gateway' \
+  'database policy rust rust_pkg_codewire_credential_service rust_pkg_codewire_tls transport' \
   crates/codewire-tls/src/files.rs
 run_paths_case shared_credential_tls_manifest pull_request refs/pull/6011/head false \
-  'database policy rust rust_curated_locks rust_pkg_codewire_credential_service rust_pkg_codewire_tls transport transport_pkg_codewire_gateway' \
+  'database policy rust rust_curated_locks rust_pkg_codewire_credential_service rust_pkg_codewire_tls transport' \
   crates/codewire-tls/Cargo.toml
 run_paths_case self_contained_go_workspace pull_request refs/pull/6012/head false \
   'go_consumer_interop go_support go_tailnet policy sdk_go security security_go' \
@@ -1209,9 +1206,9 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
 run_paths_case tag push refs/tags/v1.2.3 false \
   'deploy go_consumer_interop go_support release runtime_confidential' docs/tag-path-is-ignored.md
 
-all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
+all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 # A pull request without the Kind opt-in never selects Kind.
-all_product_pr='contracts contracts_proto database deploy go_consumer_interop go_support go_tailnet policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
+all_product_pr='contracts contracts_proto database deploy go_consumer_interop go_support go_tailnet policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
   "$policy" scripts/dev/dashboard-watch.py
 run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head false \
@@ -1404,7 +1401,7 @@ assert_tokens dispatch_rust \
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=transport "$SELECTOR")"
 assert_tokens dispatch_transport \
-  'transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe' \
+  'transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe' \
   "$dispatch_output"
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=contracts "$SELECTOR")"
@@ -1564,6 +1561,7 @@ grep -qF -- "--skip 'worker::lifecycle::tests::destroy_template_hint_allows_miss
 grep -qF -- "--skip 'worker::create::projection_database_tests::'" <<<"$activity_fencing_block"
 grep -qF -- "--skip 'worker::workspace_binding::database_tests::'" <<<"$activity_fencing_block"
 grep -qF -- "--skip 'worker::billing_sessions::database_tests::'" <<<"$activity_fencing_block"
+grep -qF -- "--skip 'worker::credential_relay::database_tests::'" <<<"$activity_fencing_block"
 grep -qF 'assert_passed_count "orchestration activity fencing matrix" "$logfile" 2' <<<"$activity_fencing_block"
 destroy_hint_block="$(sed -n '/logfile="$RUN_DIR\/environment-destroy-template-hint.log"/,/assert_passed_count "environment destroy template hint matrix"/p' "$integration_runner")"
 grep -qF 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure' <<<"$destroy_hint_block"
@@ -1595,7 +1593,7 @@ grep -qF 'cargo test --locked -p codewire-credential-service --features enrollme
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' "$integration_runner"
 grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
-grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 84' "$integration_runner"
+grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 88' "$integration_runner"
 grep -qF 'assert_passed_count "idp db_flow" "$logfile" 13' "$integration_runner"
 grep -qF 'assert_passed_count "idp two-factor replacement" "$logfile" 11' "$integration_runner"
 grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 23' "$integration_runner"
@@ -1607,17 +1605,19 @@ grep -qF 'assert_passed_count "environment projection capture matrix" "$logfile"
 grep -qF -- "'api::admin::startup_database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "admin startup summary matrix" "$logfile" 2' "$integration_runner"
 grep -qF -- "'worker::workspace_binding::database_tests::'" "$integration_runner"
-grep -qF 'assert_passed_count "workspace binding recorder matrix" "$logfile" 21' "$integration_runner"
+grep -qF 'assert_passed_count "workspace binding recorder matrix" "$logfile" 20' "$integration_runner"
+grep -qF -- "'workspace_binding::store::database_tests::'" "$integration_runner"
+grep -qF 'assert_passed_count "workspace binding access store matrix" "$logfile" 4' "$integration_runner"
 grep -qF -- "'api::environment_resize::tests::db_'" "$integration_runner"
 grep -qF 'assert_passed_count "environment resize admission matrix" "$logfile" 2' "$integration_runner"
 grep -qF -- "'api::ssh_proxy::database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "SSH proxy runtime lease matrix" "$logfile" 2' "$integration_runner"
 grep -qF -- "'api::environment_daemon::repair_database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "environment daemon repair lease matrix" "$logfile" 2' "$integration_runner"
-grep -qF -- "'api::internal::database_tests::'" "$integration_runner"
-grep -qF 'assert_passed_count "gateway RPC ownership matrix" "$logfile" 2' "$integration_runner"
 grep -qF -- "'worker::billing_sessions::database_tests::'" "$integration_runner"
 grep -qF 'assert_passed_count "billing session bind matrix" "$logfile" 4' "$integration_runner"
+grep -qF -- "'worker::credential_relay::database_tests::'" "$integration_runner"
+grep -qF 'assert_passed_count "credential relay target matrix" "$logfile" 1' "$integration_runner"
 grep -qF 'selected service_connectcore && run_connect_auth_matrix' \
   "$integration_runner"
 if rg -n 'run_connectcore|CONNECTCORE_BASE_URLS|go test.*connectcore' \

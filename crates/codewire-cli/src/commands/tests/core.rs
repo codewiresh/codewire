@@ -58,27 +58,66 @@ fn accepted_organization_deletion_is_not_reported_as_deleted() {
     assert!(!stopped.to_ascii_lowercase().contains("deleted"));
 }
 
-#[test]
-fn replace_managed_ssh_section_appends_go_compatible_block() {
-    let rendered =
-        replace_managed_ssh_section("", &ssh_config_block(&SshConfigOptions::default())).unwrap();
+const TEST_CW: &str = "/opt/codewire/bin/cw";
 
-    assert!(rendered.contains("ProxyCommand cw shell --stdio %n"));
-    assert!(rendered.contains("StrictHostKeyChecking accept-new"));
-    assert!(rendered.contains("UserKnownHostsFile "));
-    assert!(rendered.contains(SSH_CONFIG_MARKER_START));
-    assert!(rendered.contains(SSH_CONFIG_MARKER_END));
+fn ssh_test_options(ssh_options: &[&str]) -> SshConfigOptions {
+    SshConfigOptions {
+        cw_command: TEST_CW.to_string(),
+        ssh_options: ssh_options
+            .iter()
+            .map(|option| option.to_string())
+            .collect(),
+    }
+}
+
+const CURRENT_MANAGED_SSH_BLOCK: &str = "# ---- START CODEWIRE ----
+# This section is managed by Codewire. Re-run `cw config-ssh` to update it.
+# It stays first in this file: OpenSSH uses the first value it finds for an option.
+Host cw-*
+    ProxyCommand /opt/codewire/bin/cw shell --stdio %n
+    User codewire
+    StrictHostKeyChecking yes
+    UserKnownHostsFile /dev/null
+    GlobalKnownHostsFile /dev/null
+    KnownHostsCommand /opt/codewire/bin/cw ssh known-hosts %H
+    UpdateHostKeys no
+    ForwardAgent no
+    ForwardX11 no
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    PubkeyAuthentication no
+    GSSAPIAuthentication no
+    GSSAPIDelegateCredentials no
+Host *
+# ---- END CODEWIRE ----";
+
+#[test]
+fn managed_ssh_block_is_fail_closed_and_hardened() {
+    assert_eq!(
+        ssh_config_block(&ssh_test_options(&[])).unwrap(),
+        CURRENT_MANAGED_SSH_BLOCK
+    );
+    assert_eq!(
+        place_managed_ssh_section("", CURRENT_MANAGED_SSH_BLOCK).unwrap(),
+        format!("{CURRENT_MANAGED_SSH_BLOCK}\n")
+    );
 }
 
 #[test]
-fn replace_managed_ssh_section_replaces_existing_block() {
+fn managed_ssh_block_replaces_an_old_first_use_block_and_goes_first() {
     let existing = [
+        "Host *",
+        "    ForwardAgent yes",
+        "",
         "Host github.com",
         "    User git",
         "",
         SSH_CONFIG_MARKER_START,
         "Host cw-*",
-        "    ProxyCommand old",
+        "    ProxyCommand cw shell --stdio %n",
+        "    StrictHostKeyChecking accept-new",
+        "    UserKnownHostsFile ~/.ssh/codewire_known_hosts",
+        "    User codewire",
         SSH_CONFIG_MARKER_END,
         "",
         "Host other",
@@ -87,23 +126,69 @@ fn replace_managed_ssh_section_replaces_existing_block() {
     ]
     .join("\n");
 
-    let rendered = replace_managed_ssh_section(
+    let rendered = place_managed_ssh_section(
         &existing,
-        &ssh_config_block(&SshConfigOptions {
-            ssh_options: vec!["ForwardAgent yes".to_string()],
-        }),
+        &ssh_config_block(&ssh_test_options(&[])).unwrap(),
     )
     .unwrap();
 
-    assert!(!rendered.contains("ProxyCommand old"));
-    assert!(rendered.contains("ForwardAgent yes"));
-    assert!(rendered.contains("Host github.com"));
-    assert!(rendered.contains("Host other"));
+    assert!(rendered.starts_with(&format!("{CURRENT_MANAGED_SSH_BLOCK}\n\nHost *\n")));
+    assert!(!rendered.contains("accept-new"));
+    assert!(!rendered.contains("codewire_known_hosts"));
+    assert_eq!(rendered.matches(SSH_CONFIG_MARKER_START).count(), 1);
+    // The user's own entries are kept, unchanged and in order.
+    let user = rendered
+        .strip_prefix(&format!("{CURRENT_MANAGED_SSH_BLOCK}\n\n"))
+        .unwrap();
+    assert_eq!(
+        user,
+        "Host *\n    ForwardAgent yes\n\nHost github.com\n    User git\n\n\nHost other\n    User someone\n"
+    );
 }
 
 #[test]
-fn replace_managed_ssh_section_rejects_incomplete_markers() {
-    let err = replace_managed_ssh_section(SSH_CONFIG_MARKER_START, "managed").unwrap_err();
+fn managed_ssh_block_placement_is_idempotent() {
+    let options = ssh_test_options(&["ServerAliveInterval 30"]);
+    let block = ssh_config_block(&options).unwrap();
+    let once = place_managed_ssh_section("Host other\n    User someone", &block).unwrap();
+    let twice = place_managed_ssh_section(&once, &block).unwrap();
+    assert_eq!(once, twice);
+    assert!(once.contains("    ServerAliveInterval 30\nHost *\n"));
+}
+
+#[test]
+fn managed_ssh_block_refuses_options_that_would_weaken_it() {
+    for option in [
+        "ForwardAgent yes",
+        "forwardagent=yes",
+        "StrictHostKeyChecking=accept-new",
+        "UserKnownHostsFile ~/.ssh/known_hosts",
+        "KnownHostsCommand /bin/true",
+        "PasswordAuthentication yes",
+        "PubkeyAuthentication yes",
+        "GSSAPIDelegateCredentials yes",
+        "HostKeyAlias other",
+        "ProxyJump bastion",
+        "Host *",
+        "Match all",
+        "Include ~/.ssh/other",
+    ] {
+        let err = ssh_config_block(&ssh_test_options(&[option])).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot be overridden"),
+            "{option}: {err}"
+        );
+    }
+    let err = ssh_config_block(&ssh_test_options(&[
+        "ServerAliveInterval 30\nForwardAgent yes",
+    ]))
+    .unwrap_err();
+    assert!(err.to_string().contains("single line"));
+}
+
+#[test]
+fn remove_managed_ssh_section_rejects_incomplete_markers() {
+    let err = place_managed_ssh_section(SSH_CONFIG_MARKER_START, "managed").unwrap_err();
 
     assert!(
         err.to_string()
@@ -111,22 +196,167 @@ fn replace_managed_ssh_section_rejects_incomplete_markers() {
     );
 }
 
+/// OpenSSH itself accepts every managed directive and resolves the
+/// hardening for Codewire hosts even when the user's own config says
+/// otherwise, while other hosts keep the user's settings. Needs OpenSSH
+/// 8.5 or later (KnownHostsCommand); skipped where `ssh` is absent.
+#[test]
+fn openssh_resolves_the_managed_block_first() {
+    if std::process::Command::new("ssh")
+        .arg("-V")
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_err()
+    {
+        eprintln!("ssh not installed; skipping OpenSSH resolution check");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config");
+    fs::write(
+            &config_path,
+            "Host *\n    ForwardAgent yes\n    PasswordAuthentication yes\n    StrictHostKeyChecking no\n",
+        )
+        .unwrap();
+    let (rendered, changed) =
+        render_managed_ssh_config(&config_path, &ssh_test_options(&[])).unwrap();
+    assert!(changed);
+    fs::write(&config_path, &rendered).unwrap();
+
+    let resolve = |host: &str| {
+        let output = std::process::Command::new("ssh")
+            .arg("-G")
+            .arg("-F")
+            .arg(&config_path)
+            .arg(host)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "ssh -G {host}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let codewire = resolve("cw-demo");
+    // OpenSSH versions spell some booleans differently (`no` or `false`).
+    for (keyword, accepted) in [
+        (
+            "proxycommand",
+            &["/opt/codewire/bin/cw shell --stdio %n"][..],
+        ),
+        ("user", &["codewire"]),
+        ("stricthostkeychecking", &["true", "yes"]),
+        ("userknownhostsfile", &["/dev/null"]),
+        ("globalknownhostsfile", &["/dev/null"]),
+        (
+            "knownhostscommand",
+            &["/opt/codewire/bin/cw ssh known-hosts %H"],
+        ),
+        ("updatehostkeys", &["false", "no"]),
+        ("forwardagent", &["no", "false"]),
+        ("forwardx11", &["no", "false"]),
+        ("passwordauthentication", &["no", "false"]),
+        ("kbdinteractiveauthentication", &["no", "false"]),
+        ("pubkeyauthentication", &["no", "false"]),
+        ("gssapiauthentication", &["no", "false"]),
+        ("gssapidelegatecredentials", &["no", "false"]),
+    ] {
+        let value = codewire
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{keyword} ")))
+            .unwrap_or_else(|| panic!("ssh -G printed no {keyword}:\n{codewire}"));
+        assert!(
+            accepted.contains(&value),
+            "{keyword} resolved to {value:?}, expected one of {accepted:?}"
+        );
+    }
+    let other = resolve("other.example");
+    assert!(other.lines().any(|line| line == "forwardagent yes"));
+    assert!(
+        other
+            .lines()
+            .any(|line| line == "passwordauthentication yes")
+    );
+    assert!(
+        !other
+            .lines()
+            .any(|line| line.starts_with("knownhostscommand"))
+    );
+}
+
+/// OpenSSH runs `KnownHostsCommand` only from an absolute path, and an
+/// editor's Remote-SSH may start `ssh` without the user's `PATH`, so both
+/// commands name `cw` absolutely.
+#[test]
+fn managed_ssh_block_runs_cw_from_an_absolute_path() {
+    let block = ssh_config_block(&ssh_test_options(&[])).unwrap();
+    for keyword in ["ProxyCommand", "KnownHostsCommand"] {
+        let value = block
+            .lines()
+            .find_map(|line| line.trim_start().strip_prefix(&format!("{keyword} ")))
+            .unwrap_or_else(|| panic!("no {keyword} in\n{block}"));
+        assert!(
+            value.starts_with(&format!("{TEST_CW} ")),
+            "{keyword} {value}"
+        );
+    }
+    assert!(current_cw_executable().unwrap().is_absolute());
+    let rendered = ssh_cw_command(&current_cw_executable().unwrap()).unwrap();
+    assert!(rendered.trim_start_matches('"').starts_with('/'));
+}
+
+#[test]
+fn ssh_cw_command_escapes_tokens_and_quotes_whitespace() {
+    assert_eq!(
+        ssh_cw_command(std::path::Path::new("/usr/local/bin/cw")).unwrap(),
+        "/usr/local/bin/cw"
+    );
+    assert_eq!(
+        ssh_cw_command(std::path::Path::new("/Users/a b/bin/cw")).unwrap(),
+        "\"/Users/a b/bin/cw\""
+    );
+    assert_eq!(
+        ssh_cw_command(std::path::Path::new("/opt/100%/cw")).unwrap(),
+        "/opt/100%%/cw"
+    );
+    let err = ssh_cw_command(std::path::Path::new("cw")).unwrap_err();
+    assert!(err.to_string().contains("not absolute"), "{err}");
+    for path in [
+        "/opt/$HOME/cw",
+        "/opt/a\"b/cw",
+        "/opt/a'b/cw",
+        "/opt/a`b`/cw",
+        "/opt/a\\b/cw",
+        "/opt/a\nb/cw",
+    ] {
+        let err = ssh_cw_command(std::path::Path::new(path)).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot be written"),
+            "{path}: {err}"
+        );
+    }
+}
+
+#[test]
+fn managed_ssh_section_is_current_only_for_the_same_cw() {
+    let content = format!("{CURRENT_MANAGED_SSH_BLOCK}\n");
+    assert!(managed_ssh_section_is_current(&content, TEST_CW));
+    assert!(!managed_ssh_section_is_current(&content, "/usr/bin/cw"));
+    let bare = CURRENT_MANAGED_SSH_BLOCK.replace(TEST_CW, "cw");
+    assert!(!managed_ssh_section_is_current(&bare, TEST_CW));
+}
+
 #[test]
 fn render_managed_ssh_config_detects_no_change() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config");
-    let content = ssh_config_block(&SshConfigOptions {
-        ssh_options: vec!["ForwardAgent yes".to_string()],
-    }) + "\n";
+    let options = ssh_test_options(&["ServerAliveInterval 30"]);
+    let content = ssh_config_block(&options).unwrap() + "\n";
     fs::write(&config_path, &content).unwrap();
 
-    let (rendered, changed) = render_managed_ssh_config(
-        &config_path,
-        &SshConfigOptions {
-            ssh_options: vec!["ForwardAgent yes".to_string()],
-        },
-    )
-    .unwrap();
+    let (rendered, changed) = render_managed_ssh_config(&config_path, &options).unwrap();
 
     assert!(!changed);
     assert_eq!(rendered, content);
@@ -254,24 +484,42 @@ fn doctor_ssh_config_check_at_reports_missing_and_managed_section() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config");
 
-    let missing = doctor_ssh_config_check_at(&config_path);
+    let missing = doctor_ssh_config_check_at(&config_path, TEST_CW);
     assert_eq!(missing.status, DoctorStatus::Warn);
     assert!(missing.detail.contains("missing"));
 
     fs::write(&config_path, "Host github.com\n  User git\n").unwrap();
-    let unmanaged = doctor_ssh_config_check_at(&config_path);
+    let unmanaged = doctor_ssh_config_check_at(&config_path, TEST_CW);
     assert_eq!(unmanaged.status, DoctorStatus::Warn);
     assert!(unmanaged.detail.contains("Codewire section missing"));
 
     fs::write(
         &config_path,
         format!(
-            "{}\nHost cw-*\n{}\n",
+            "{}\nHost cw-*\n    StrictHostKeyChecking accept-new\n{}\n",
             SSH_CONFIG_MARKER_START, SSH_CONFIG_MARKER_END
         ),
     )
     .unwrap();
-    let managed = doctor_ssh_config_check_at(&config_path);
+    let outdated = doctor_ssh_config_check_at(&config_path, TEST_CW);
+    assert_eq!(outdated.status, DoctorStatus::Warn);
+    assert!(outdated.detail.contains("outdated or not first"));
+
+    fs::write(
+        &config_path,
+        format!("Host github.com\n  User git\n\n{CURRENT_MANAGED_SSH_BLOCK}\n"),
+    )
+    .unwrap();
+    let not_first = doctor_ssh_config_check_at(&config_path, TEST_CW);
+    assert_eq!(not_first.status, DoctorStatus::Warn);
+    assert!(not_first.detail.contains("outdated or not first"));
+
+    fs::write(
+        &config_path,
+        format!("{CURRENT_MANAGED_SSH_BLOCK}\n\nHost github.com\n  User git\n"),
+    )
+    .unwrap();
+    let managed = doctor_ssh_config_check_at(&config_path, TEST_CW);
     assert_eq!(managed.status, DoctorStatus::Ok);
     assert_eq!(managed.detail, config_path.display().to_string());
 }
@@ -769,8 +1017,6 @@ fn format_env_report_text_marks_confidential_dev_proof() {
             "images": {
                 "workspace_image": "ghcr.io/codewiresh/workspace@sha256:abc",
                 "workspace_image_id": "docker-pullable://ghcr.io/codewiresh/workspace@sha256:abc",
-                "gateway_image": "ghcr.io/codewiresh/codewire-gateway@sha256:def",
-                "gateway_image_id": "docker-pullable://ghcr.io/codewiresh/codewire-gateway@sha256:def",
                 "dind_image": "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
                 "dind_image_id": "docker-pullable://docker.io/library/docker@sha256:123",
                 "daemon_init_image": "ghcr.io/codewiresh/codewire-daemon@sha256:456",
@@ -822,8 +1068,9 @@ fn format_env_report_text_marks_confidential_dev_proof() {
     );
     assert!(text.contains("Node: node1-codewire-dev\n"));
     assert!(text.contains(
-        "Gateway image ID: docker-pullable://ghcr.io/codewiresh/codewire-gateway@sha256:def\n"
+        "Daemon init image ID: docker-pullable://ghcr.io/codewiresh/codewire-daemon@sha256:456\n"
     ));
+    assert!(!text.contains("Gateway"));
     assert!(text.contains("Provenance: not_available\n"));
     assert!(text.contains("Attestation: dev_evidence_available (sev-snp)\n"));
     assert!(text.contains("Resource: kbs:///default/codewire/runtime-test-resource\n"));

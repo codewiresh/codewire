@@ -44,7 +44,6 @@ fn opts(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> anyhow::Result<Template
         "workspace",
         env,
         7,
-        "synthetic-coordinate",
         "synthetic-daemon",
     )
 }

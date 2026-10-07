@@ -121,7 +121,7 @@ class ProjectionTests(unittest.TestCase):
 
     def test_no_legacy_ca_override_fallback(self):
         with codex_home() as home:
-            for value in ("", "/run/codewire-credentials/gateway-roots/ca.crt", "/synthetic/roots"):
+            for value in ("", "/run/codewire-credentials/other-roots/ca.crt", "/synthetic/roots"):
                 with self.subTest(value=value), patch.dict(os.environ, {
                         "CODEX_HOME": str(home),
                         "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex",
@@ -627,10 +627,10 @@ class AcceptanceTests(unittest.TestCase):
         self.assertGreater(clock[0], 600)
         self.assertLess(clock[0], 601)
 
-    def test_epoch_bound_matches_production_gateway(self):
-        gateway = SOURCE.parents[4] / "crates/codewire-gateway/src/hosted_bridge.rs"
+    def test_epoch_bound_matches_production_relay(self):
+        relay = SOURCE.parents[4] / "crates/codewire-orchestration/src/worker/credential_relay/epoch.rs"
         self.assertIn("const EPOCH_MAX_LIFETIME: Duration = Duration::from_secs(600);",
-                      gateway.read_text())
+                      relay.read_text())
         self.assertEqual(driver.HOSTED_EPOCH_MAX_LIFETIME, 600.0)
 
     def test_unchanged_projection_times_out(self):

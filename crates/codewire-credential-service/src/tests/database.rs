@@ -112,6 +112,7 @@ impl Fixture {
             self.kube.client(),
             self.pool.clone(),
             Arc::new(TestKekProvider),
+            RELAY_NAMESPACE.to_owned(),
         )
     }
     async fn admitted(&self) -> Result<Arc<crate::KubernetesPlatformRuntimeAuthority>> {
@@ -220,10 +221,9 @@ async fn restricted_metadata_login_admits_personal_scope_and_pins_exact_binding(
         ensure!(timings.resolve_kubernetes > std::time::Duration::ZERO);
         ensure!(timings.resolve_sql() > std::time::Duration::ZERO);
         ensure!(timings.token_review.count == 0);
-        // A later resolve issues every Kubernetes read at once, the gateway
-        // Pod's included: delaying each costs it one delay, where reading the
-        // gateway Pod, then the Claim, then its Sandbox cost three. The time
-        // recorded is that wall time.
+        // A later resolve issues every Kubernetes read at once: delaying each
+        // costs it one delay, where reading the Claim, then its Sandbox cost
+        // two. The time recorded is that wall time.
         const DELAY: Duration = Duration::from_millis(300);
         let delayed: BTreeMap<String, Duration> = fixture
             .kube
@@ -233,10 +233,7 @@ async fn restricted_metadata_login_admits_personal_scope_and_pins_exact_binding(
             .keys()
             .map(|path| (path.clone(), DELAY))
             .collect();
-        ensure!(
-            delayed.len() == 6,
-            "the gateway Pod and five lineage objects"
-        );
+        ensure!(delayed.len() == 3, "the three lineage objects");
         *fixture.kube.delays.lock().unwrap() = delayed;
         let (session, timings) = timing::measure(authority.current_session()).await;
         fixture.kube.delays.lock().unwrap().clear();
@@ -340,26 +337,6 @@ async fn live_revalidation_denies_membership_consent_backend_lifecycle_and_pod_c
             *fixture.kube.objects.lock().unwrap()=original.clone();
             authority.current_session().await?;
         }
-        // A later resolve reads the gateway Pod with its lineage, after the
-        // scope query, and checks the fresh Pod as admission did: its identity,
-        // liveness and environment label, and the ReplicaSet it now names.
-        for fault in 0..6 {
-            {
-                let mut values=fixture.kube.objects.lock().unwrap();
-                let pod=values.get_mut(&pod_path(GATEWAY)).unwrap();
-                match fault {
-                    0 => pod["metadata"]["uid"]=json!(Uuid::new_v4().to_string()),
-                    1 => pod["metadata"]["deletionTimestamp"]=json!("2026-01-01T00:00:00Z"),
-                    2 => pod["status"]["conditions"][0]["status"]=json!("False"),
-                    3 => pod["metadata"]["labels"]["codewire.sh/environment-id"]=json!(Uuid::new_v4().to_string()),
-                    4 => pod["metadata"]["labels"]["codewire.sh/type"]=json!("workspace"),
-                    _ => pod["metadata"]["ownerReferences"][0]["name"]=json!("synthetic-rs-2"),
-                }
-            }
-            ensure!(matches!(authority.current_session().await,Err(PlatformRuntimeError::Denied)),"gateway fault {fault}");
-            *fixture.kube.objects.lock().unwrap()=original.clone();
-            authority.current_session().await?;
-        }
         // A released binding never scopes again (a release is final), and a
         // pointer moved to the next Pod's binding does not admit this Pod.
         sqlx::query("UPDATE sandbox_workspace_bindings SET released_at=now() WHERE pod_uid=$1")
@@ -436,14 +413,12 @@ async fn final_scope_reread_and_original_expiry_fence_pending_kubernetes() -> Re
 /// objects is admitted.
 #[tokio::test]
 #[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
-async fn later_resolves_deny_a_valid_successor_replica_set_or_sandbox() -> Result<()> {
+async fn later_resolves_deny_a_valid_successor_sandbox() -> Result<()> {
     let fixture = Fixture::create().await?;
     let result = async {
         let authority = fixture.admitted().await?;
         let admitted = authority.current_session().await?;
         let original = fixture.kube.objects.lock().unwrap().clone();
-        let replica_set_path =
-            |name: &str| format!("/apis/apps/v1/namespaces/{NAMESPACE}/replicasets/{name}");
         let sandbox_path = |name: &str| {
             format!("/apis/agents.x-k8s.io/v1beta1/namespaces/{NAMESPACE}/sandboxes/{name}")
         };
@@ -452,33 +427,8 @@ async fn later_resolves_deny_a_valid_successor_replica_set_or_sandbox() -> Resul
             fixture.scope.claim_name
         );
 
-        // A successor ReplicaSet of the same Deployment now controls the
-        // gateway Pod. The database is unchanged, so the scope is too, and
-        // only the lineage's ReplicaSet UID differs.
-        let successor_replica_set = Uuid::new_v4().to_string();
-        {
-            let mut objects = fixture.kube.objects.lock().unwrap();
-            let mut replica_set = objects[&replica_set_path("synthetic-rs")].clone();
-            replica_set["metadata"]["name"] = json!("synthetic-rs-2");
-            replica_set["metadata"]["uid"] = json!(successor_replica_set);
-            objects.insert(replica_set_path("synthetic-rs-2"), replica_set);
-            let owner = &mut objects.get_mut(&pod_path(GATEWAY)).unwrap()["metadata"]
-                ["ownerReferences"][0];
-            owner["name"] = json!("synthetic-rs-2");
-            owner["uid"] = json!(successor_replica_set);
-        }
-        ensure!(
-            matches!(
-                authority.current_session().await,
-                Err(PlatformRuntimeError::Denied)
-            ),
-            "the epoch admitted a successor ReplicaSet"
-        );
-        let successor_epoch = fixture.admitted().await?;
-        successor_epoch.current_session().await?;
-
-        // The Claim and the binding also name a successor Sandbox, which owns
-        // the workspace Pod. A binding is insert-only (migration 0034), so its
+        // The Claim and the binding name a successor Sandbox, which owns the
+        // workspace Pod. A binding is insert-only (migration 0034), so its
         // trigger is suspended for this one update: the state cannot arise in
         // production, and is built here only so that every check but lineage
         // equality admits it. Here the scope's binding Sandbox differs too.
@@ -497,15 +447,13 @@ async fn later_resolves_deny_a_valid_successor_replica_set_or_sandbox() -> Resul
             owner["uid"] = json!(successor_sandbox);
         }
         fixture.bind_sandbox(&successor_sandbox).await?;
-        for (epoch, case) in [(&authority, "first"), (&successor_epoch, "second")] {
-            ensure!(
-                matches!(
-                    epoch.current_session().await,
-                    Err(PlatformRuntimeError::Denied)
-                ),
-                "the {case} epoch admitted a successor Sandbox"
-            );
-        }
+        ensure!(
+            matches!(
+                authority.current_session().await,
+                Err(PlatformRuntimeError::Denied)
+            ),
+            "the epoch admitted a successor Sandbox"
+        );
         fixture.admitted().await?.current_session().await?;
 
         // Restored, the first epoch's lineage is its own again.
@@ -532,6 +480,7 @@ async fn each_runtime_authority_resolve_takes_a_fixed_number_of_statement_round_
             fixture.kube.client(),
             pool.clone(),
             Arc::new(TestKekProvider),
+            RELAY_NAMESPACE.to_owned(),
         );
         let mut observed = Vec::new();
         // Scope and metadata; BEGIN, timeouts, owner and environment locks,

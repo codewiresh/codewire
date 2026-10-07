@@ -16,9 +16,9 @@ use crate::node::DiscoPublic;
 use crate::udp_relay::{self, RelayPacket};
 
 use super::state::{
-    disco_message_kind, is_usable_direct_endpoint, make_relay_ping_action, DiscoAction,
-    DiscoTarget, PeerRelayRequest, PeerState, PendingPeerRelayRequest, RelayKey, RelayPeerEndpoint,
-    Shared, State,
+    disco_message_kind, is_acceptable_peer_endpoint, is_usable_direct_endpoint,
+    make_relay_ping_action, DiscoAction, DiscoTarget, PeerRelayRequest, PeerState,
+    PendingPeerRelayRequest, RelayKey, RelayPeerEndpoint, Shared, State,
 };
 
 pub(super) enum RelayPacketOutcome {
@@ -346,11 +346,16 @@ pub(super) fn apply_call_me_maybe_via(
     state: &mut State,
     shared: &Shared,
     peer_key: [u8; 32],
-    endpoint: UDPRelayEndpoint,
+    mut endpoint: UDPRelayEndpoint,
 ) -> Vec<DiscoAction> {
     let Some(peer) = state.peers_by_node.get(&peer_key).cloned() else {
         return Vec::new();
     };
+    // The relay addresses come from the peer.
+    let public_only = state.public_peer_endpoints_only;
+    endpoint
+        .addr_ports
+        .retain(|addr| is_acceptable_peer_endpoint(*addr, public_only));
     let Some(relay) =
         relay_endpoint_from_descriptor(endpoint, shared.local_disco.public(), peer.disco_key)
     else {

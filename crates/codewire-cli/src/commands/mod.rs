@@ -2108,6 +2108,7 @@ mod mesh_commands;
 mod platform_commands;
 mod secrets;
 mod sessions;
+mod ssh_trust;
 mod storage_placement;
 
 pub(crate) use collaboration::*;
@@ -2119,6 +2120,7 @@ pub(crate) use mesh_commands::*;
 pub(crate) use platform_commands::*;
 pub(crate) use secrets::*;
 pub(crate) use sessions::*;
+pub(crate) use ssh_trust::*;
 
 #[cfg(test)]
 mod tests {
@@ -2131,4 +2133,5 @@ mod tests {
     include!("tests/platform.rs");
     include!("tests/sessions.rs");
     include!("tests/collaboration.rs");
+    include!("tests/ssh_trust.rs");
 }

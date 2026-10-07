@@ -21,8 +21,10 @@ use platform_support::{
 mod additions;
 mod github;
 mod lifecycle;
+mod process_test_support;
 mod ssh;
 pub(crate) mod support;
+use process_test_support::isolated_process_fixture;
 use support::*;
 
 async fn enrolled(h: &Harness, name: &str) -> Result<Value> {
@@ -145,6 +147,15 @@ async fn generated_enrollment_oauth_only_commits_metadata_without_material_leaks
 #[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
 async fn generated_disconnect_before_challenge_and_during_envelope_preparation_drains() -> Result<()>
 {
+    isolated_process_fixture(
+        "mutation::tests::generated_disconnect_before_challenge_and_during_envelope_preparation_drains",
+        disconnect_before_challenge_and_during_envelope_preparation_drains(),
+    )
+    .await
+}
+
+async fn disconnect_before_challenge_and_during_envelope_preparation_drains() -> Result<()>
+{
     let h = Harness::new().await?;
     let result = async {
         h.hold_challenge()?;
@@ -179,6 +190,14 @@ async fn generated_disconnect_before_challenge_and_during_envelope_preparation_d
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
 async fn generated_login_cannot_outlive_original_oauth_revocation_or_expiry() -> Result<()> {
+    isolated_process_fixture(
+        "mutation::tests::generated_login_cannot_outlive_original_oauth_revocation_or_expiry",
+        login_cannot_outlive_original_oauth_revocation_or_expiry(),
+    )
+    .await
+}
+
+async fn login_cannot_outlive_original_oauth_revocation_or_expiry() -> Result<()> {
     let h = Harness::new().await?;
     let result=async {
         let mut response=h.rpc.enroll(Auth::Alice,"revoked-during-login").await?;

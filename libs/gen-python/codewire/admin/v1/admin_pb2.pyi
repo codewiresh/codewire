@@ -152,22 +152,22 @@ class StartupPhaseSummary(_message.Message):
     def __init__(self, phase: _Optional[str] = ..., sample_count: _Optional[int] = ..., p50: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ..., p95: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ...) -> None: ...
 
 class GetEnvironmentStartupSummaryResponse(_message.Message):
-    __slots__ = ("generated_at", "window", "starting_backlog_count", "starting_backlog_over_5m_count", "starting_backlog_over_10m_count", "running_without_gateway_ready_count", "phase_durations")
+    __slots__ = ("generated_at", "window", "starting_backlog_count", "starting_backlog_over_5m_count", "starting_backlog_over_10m_count", "running_without_access_ready_count", "phase_durations")
     GENERATED_AT_FIELD_NUMBER: _ClassVar[int]
     WINDOW_FIELD_NUMBER: _ClassVar[int]
     STARTING_BACKLOG_COUNT_FIELD_NUMBER: _ClassVar[int]
     STARTING_BACKLOG_OVER_5M_COUNT_FIELD_NUMBER: _ClassVar[int]
     STARTING_BACKLOG_OVER_10M_COUNT_FIELD_NUMBER: _ClassVar[int]
-    RUNNING_WITHOUT_GATEWAY_READY_COUNT_FIELD_NUMBER: _ClassVar[int]
+    RUNNING_WITHOUT_ACCESS_READY_COUNT_FIELD_NUMBER: _ClassVar[int]
     PHASE_DURATIONS_FIELD_NUMBER: _ClassVar[int]
     generated_at: _timestamp_pb2.Timestamp
     window: _duration_pb2.Duration
     starting_backlog_count: int
     starting_backlog_over_5m_count: int
     starting_backlog_over_10m_count: int
-    running_without_gateway_ready_count: int
+    running_without_access_ready_count: int
     phase_durations: _containers.RepeatedCompositeFieldContainer[StartupPhaseSummary]
-    def __init__(self, generated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., window: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ..., starting_backlog_count: _Optional[int] = ..., starting_backlog_over_5m_count: _Optional[int] = ..., starting_backlog_over_10m_count: _Optional[int] = ..., running_without_gateway_ready_count: _Optional[int] = ..., phase_durations: _Optional[_Iterable[_Union[StartupPhaseSummary, _Mapping]]] = ...) -> None: ...
+    def __init__(self, generated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., window: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ..., starting_backlog_count: _Optional[int] = ..., starting_backlog_over_5m_count: _Optional[int] = ..., starting_backlog_over_10m_count: _Optional[int] = ..., running_without_access_ready_count: _Optional[int] = ..., phase_durations: _Optional[_Iterable[_Union[StartupPhaseSummary, _Mapping]]] = ...) -> None: ...
 
 class GetEnvironmentStartupTimingsRequest(_message.Message):
     __slots__ = ("environment_id",)

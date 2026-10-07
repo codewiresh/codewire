@@ -73,9 +73,14 @@ fn authority_stamp_removal_pins_the_accepted35_history() -> anyhow::Result<()> {
 #[test]
 fn authority_stamp_removal_restores_the_accepted34_fingerprint() {
     // The database fixtures below measure both values; this keeps the pins
-    // themselves from drifting apart.
+    // themselves from drifting apart. Version 36's schema is the one
+    // migration 37 starts from.
     assert_eq!(
         ACCEPTED_AUTHORITY_STAMP_REMOVAL_SCHEMA_FINGERPRINT,
+        ACCEPTED_PRE_SSH_HOST_KEY_SCHEMA_FINGERPRINT
+    );
+    assert_eq!(
+        ACCEPTED_PRE_SSH_HOST_KEY_SCHEMA_FINGERPRINT,
         ACCEPTED_PRE_AUTHORITY_STAMP_SCHEMA_FINGERPRINT
     );
     assert_ne!(

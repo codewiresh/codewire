@@ -1,8 +1,9 @@
 # The public Connect mutation API is reachable through the normal ingress edge
 # and directly from the same-namespace dashboard BFF.
-# Private broker TLS is reachable from managed gateways, not workspaces.
-# Application authentication independently checks exact Pod/environment
-# lineage. This policy makes no claim to restrict provider egress.
+# Private broker TLS is reachable only from same-namespace orchestration, the
+# credential relay (design §4), never from a sandbox. Application
+# authentication independently checks the relay identity and the exact
+# workspace Pod lineage. This policy makes no claim to restrict provider egress.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -30,14 +31,10 @@ spec:
         - protocol: TCP
           port: 8086
     - from:
-        - namespaceSelector:
+        - podSelector:
             matchLabels:
-              kubernetes.io/metadata.name: prod-sandboxes
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: codewire-gateway
-              app.kubernetes.io/managed-by: codewire
-              codewire.sh/type: gateway
+              app.kubernetes.io/name: codewire
+              app.kubernetes.io/component: orchestration
       ports:
         - protocol: TCP
           port: 9443

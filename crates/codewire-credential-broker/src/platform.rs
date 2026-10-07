@@ -1,7 +1,7 @@
 //! Platform credential storage adapter for an isolated broker, not a listener.
 //!
 //! The runtime authority is a trusted, process-local dependency. Its eventual
-//! implementation must authenticate either the exact gateway/workload Pods or
+//! implementation must authenticate either the exact relay/workload Pods or
 //! the original owner OAuth session delegating to a local runtime, and resolve
 //! current owner/policy from platform authority. The identity variants cannot
 //! substitute for one another. Guest coordinates, a configured token lifetime,
@@ -71,8 +71,10 @@ pub struct PlatformRuntimeSession {
 /// authenticated owner's assertion, never a purported Kubernetes identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RuntimeIdentity {
+    /// The credential relay (orchestration) Pod that carries the bound
+    /// workspace's bridge, and that workspace Pod.
     Hosted {
-        gateway: PlatformPodIdentity,
+        relay: PlatformPodIdentity,
         workspace: PlatformPodIdentity,
     },
     OwnerLocal {
@@ -87,14 +89,14 @@ impl PlatformRuntimeSession {
     /// identity, not `now + projected_token_lifetime`. Token rotation may create
     /// a new session; it cannot extend an already connected broker's authority.
     pub fn new(
-        gateway: PlatformPodIdentity,
+        relay: PlatformPodIdentity,
         workspace: PlatformPodIdentity,
         context: GrantContext,
         credential_owner: Owner,
         identity_expires_at_unix: u64,
     ) -> Result<Self, PlatformRuntimeError> {
         let session = Self {
-            identity: RuntimeIdentity::Hosted { gateway, workspace },
+            identity: RuntimeIdentity::Hosted { relay, workspace },
             context,
             credential_owner,
             identity_expires_at_unix,
@@ -131,11 +133,11 @@ impl PlatformRuntimeSession {
 
     fn validate(&self) -> Result<(), PlatformRuntimeError> {
         match &self.identity {
-            RuntimeIdentity::Hosted { gateway, workspace } => {
-                if gateway == workspace || self.context.placement != GrantPlacement::Platform {
+            RuntimeIdentity::Hosted { relay, workspace } => {
+                if relay == workspace || self.context.placement != GrantPlacement::Platform {
                     return Err(PlatformRuntimeError::Denied);
                 }
-                for pod in [gateway, workspace] {
+                for pod in [relay, workspace] {
                     for value in [&pod.namespace, &pod.name] {
                         if value.is_empty()
                             || value.len() > 253
@@ -243,11 +245,11 @@ impl PlatformRuntimeSession {
     }
 
     #[cfg(test)]
-    fn gateway_mut(&mut self) -> &mut PlatformPodIdentity {
-        let RuntimeIdentity::Hosted { gateway, .. } = &mut self.identity else {
+    fn relay_mut(&mut self) -> &mut PlatformPodIdentity {
+        let RuntimeIdentity::Hosted { relay, .. } = &mut self.identity else {
             panic!("test requires a hosted session");
         };
-        gateway
+        relay
     }
 
     #[cfg(test)]
@@ -449,7 +451,7 @@ struct Admission {
 
 impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
     /// Capture an authenticated session inside the isolated broker. These
-    /// handles must never be installed in a gateway, daemon or metadata service.
+    /// handles must never be installed in a relay, daemon or metadata service.
     pub async fn connect(
         authority: Arc<A>,
         credentials: Arc<PlatformCredentialStore>,

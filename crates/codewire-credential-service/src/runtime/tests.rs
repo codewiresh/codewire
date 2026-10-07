@@ -164,6 +164,7 @@ fn rejecting_authenticator(
             client,
             h.pool.clone(),
             Arc::new(TestKekProvider),
+            "synthetic-server".to_owned(),
         )),
         calls,
     )

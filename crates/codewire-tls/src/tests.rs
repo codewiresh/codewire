@@ -655,3 +655,96 @@ async fn nonregular_fifo_is_rejected_without_a_blocking_open() {
         TlsError::Files
     );
 }
+
+#[tokio::test]
+async fn http1_only_handshakes_negotiate_http1_and_refuse_h2_only_clients() {
+    let ca = Ca::new();
+    let files = Files::new(&ca, "localhost");
+    let socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let identity = files.identity.clone();
+    let server = tokio::spawn(async move {
+        let mut outcomes = Vec::new();
+        for _ in 0..2 {
+            let (stream, _) = socket.accept().await.unwrap();
+            outcomes.push(
+                identity
+                    .accept_http1_only(stream)
+                    .await
+                    .map(|tls| tls.get_ref().1.alpn_protocol().map(<[u8]>::to_vec)),
+            );
+        }
+        outcomes
+    });
+    let client = |alpn: Vec<Vec<u8>>| {
+        let roots = ca.pem();
+        async move {
+            let mut store = rustls::RootCertStore::empty();
+            for root in crate::files::certificates(roots.as_bytes()).unwrap() {
+                store.add(root).unwrap();
+            }
+            let mut config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(store)
+            .with_no_client_auth();
+            config.alpn_protocols = alpn;
+            let stream = TcpStream::connect(address).await.unwrap();
+            tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+                .connect(
+                    rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                    stream,
+                )
+                .await
+                .map(|tls| tls.get_ref().1.alpn_protocol().map(<[u8]>::to_vec))
+        }
+    };
+    let negotiated = client(vec![b"h2".to_vec(), b"http/1.1".to_vec()])
+        .await
+        .unwrap();
+    assert_eq!(negotiated.as_deref(), Some(&b"http/1.1"[..]));
+    assert!(client(vec![b"h2".to_vec()]).await.is_err());
+    let outcomes = tokio::time::timeout(TEST_TIMEOUT, server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcomes[0], Ok(Some(b"http/1.1".to_vec())));
+    assert_eq!(outcomes[1], Err(TlsError::Handshake));
+}
+
+#[tokio::test]
+async fn an_optional_trust_bundle_is_absent_valid_or_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("ca.crt");
+    // Not mounted: no extra trust, and no error.
+    assert_eq!(crate::read_optional_roots(&path).await, Ok(None));
+    // A valid bundle is returned whole.
+    let bundle = format!("{}{}", Ca::new().pem(), Ca::new().pem());
+    write(&path, &bundle);
+    let roots = crate::read_optional_roots(&path).await.unwrap().unwrap();
+    assert_eq!(roots.len(), 2);
+    // A present but empty or malformed bundle fails closed.
+    write(&path, b"");
+    assert_eq!(
+        crate::read_optional_roots(&path).await,
+        Err(TlsError::Files)
+    );
+    write(
+        &path,
+        b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+    );
+    assert_eq!(
+        crate::read_optional_roots(&path).await,
+        Err(TlsError::InvalidPem)
+    );
+    let truncated = format!("{bundle}-----BEGIN CERTIFICATE-----\n");
+    write(&path, truncated);
+    assert!(crate::read_optional_roots(&path).await.is_err());
+    // Only absolute paths name a mount.
+    assert_eq!(
+        crate::read_optional_roots(Path::new("ca.crt")).await,
+        Err(TlsError::Configuration)
+    );
+}

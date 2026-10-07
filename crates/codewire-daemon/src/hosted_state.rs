@@ -7,8 +7,8 @@ use std::io;
 use std::path::Path;
 
 use crate::config::{
-    HOSTED_DAEMON_CREDENTIAL_FILE, HOSTED_DAEMON_READY_FILE, HOSTED_DAEMON_STATE_DIRECTORY,
-    WorkspaceBinding,
+    HOSTED_DAEMON_ACCESS_READY_FILE, HOSTED_DAEMON_CREDENTIAL_FILE, HOSTED_DAEMON_READY_FILE,
+    HOSTED_DAEMON_STATE_DIRECTORY, WorkspaceBinding,
 };
 use crate::private_files::{ensure_private_directory, write_atomically};
 
@@ -23,6 +23,7 @@ pub struct HostedStatePaths {
     pub state_directory: std::path::PathBuf,
     pub ready_file: std::path::PathBuf,
     pub credential_file: std::path::PathBuf,
+    pub access_ready_file: std::path::PathBuf,
 }
 
 impl Default for HostedStatePaths {
@@ -31,6 +32,7 @@ impl Default for HostedStatePaths {
             state_directory: HOSTED_DAEMON_STATE_DIRECTORY.into(),
             ready_file: HOSTED_DAEMON_READY_FILE.into(),
             credential_file: HOSTED_DAEMON_CREDENTIAL_FILE.into(),
+            access_ready_file: HOSTED_DAEMON_ACCESS_READY_FILE.into(),
         }
     }
 }
@@ -42,6 +44,7 @@ impl HostedStatePaths {
         Self {
             ready_file: state_directory.join("ready"),
             credential_file: state_directory.join("credential"),
+            access_ready_file: state_directory.join("access-ready"),
             state_directory,
         }
     }
@@ -58,6 +61,13 @@ impl HostedStatePaths {
     pub fn mark_ready(&self) -> io::Result<()> {
         self.prepare()?;
         write_atomically(&self.ready_file, b"", READY_MODE)
+    }
+
+    /// Mark workspace access ready: SSH listens and its host key is
+    /// recorded. Written once per daemon start, after binding.
+    pub fn mark_access_ready(&self) -> io::Result<()> {
+        self.prepare()?;
+        write_atomically(&self.access_ready_file, b"", READY_MODE)
     }
 
     /// Install the bound credential (0400) before the daemon listens.
@@ -86,7 +96,7 @@ mod tests {
 
     fn binding_config() -> WorkspaceBindingConfig {
         let values = [
-            (WORKSPACE_BINDING_URL_ENV, "http://binding.test:8087"),
+            (WORKSPACE_BINDING_URL_ENV, "https://binding.test:8087"),
             (WORKSPACE_POD_UID_ENV, POD),
         ];
         match HostedDaemonMode::from_lookup(|name| {
@@ -117,6 +127,20 @@ mod tests {
 
     fn mode(path: &Path) -> u32 {
         fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn access_ready_is_a_separate_owner_only_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = HostedStatePaths::under(root.path());
+        paths.mark_ready().unwrap();
+        assert!(!paths.access_ready_file.exists());
+        paths.mark_access_ready().unwrap();
+        assert_eq!(mode(&paths.access_ready_file), 0o600);
+        assert_eq!(
+            HostedStatePaths::default().access_ready_file,
+            Path::new("/codewire/run/daemon/access-ready")
+        );
     }
 
     #[test]

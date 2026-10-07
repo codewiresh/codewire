@@ -40,7 +40,7 @@ pub enum StartStage {
     /// Credential gateway readiness wait. The gateway serves `/readyz` only
     /// after it reaches the workspace daemon, so this covers the workspace
     /// cold start.
-    GatewayReady,
+    AccessReady,
     /// Claim readiness wait, when the claim was not already ready.
     WaitForReady,
     /// Recording the claim-time workspace binding (Program #2238 B2): the
@@ -63,7 +63,7 @@ pub enum StartStage {
 impl StartStage {
     pub const ALL: [Self; 8] = [
         Self::CreateClaim,
-        Self::GatewayReady,
+        Self::AccessReady,
         Self::WaitForReady,
         Self::WorkspaceBind,
         Self::PodScheduled,
@@ -75,7 +75,7 @@ impl StartStage {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::CreateClaim => "create_claim",
-            Self::GatewayReady => "gateway_ready",
+            Self::AccessReady => "access_ready",
             Self::WaitForReady => "wait_for_ready",
             Self::WorkspaceBind => "workspace_bind",
             Self::PodScheduled => "pod_scheduled",
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn renders_the_stage_histogram_with_closed_labels_and_start_buckets() {
         observe_stage(
-            StartStage::GatewayReady,
+            StartStage::AccessReady,
             StartPath::Cold,
             StartProfile::Commodity,
             Duration::from_millis(21_600),
@@ -204,10 +204,10 @@ mod tests {
         let rendered = String::from_utf8(rendered).unwrap();
         assert!(rendered.contains("# TYPE codewire_environment_start_stage_seconds histogram"));
         assert!(rendered.contains(
-            "codewire_environment_start_stage_seconds_bucket{path=\"cold\",profile=\"commodity\",stage=\"gateway_ready\",le=\"0.5\"}"
+            "codewire_environment_start_stage_seconds_bucket{path=\"cold\",profile=\"commodity\",stage=\"access_ready\",le=\"0.5\"}"
         ));
         assert!(rendered.contains(
-            "codewire_environment_start_stage_seconds_bucket{path=\"cold\",profile=\"commodity\",stage=\"gateway_ready\",le=\"600\"}"
+            "codewire_environment_start_stage_seconds_bucket{path=\"cold\",profile=\"commodity\",stage=\"access_ready\",le=\"600\"}"
         ));
         // Only the closed label names (plus the bucket bound) may appear.
         let series: Vec<&str> = rendered

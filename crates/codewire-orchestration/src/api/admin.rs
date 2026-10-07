@@ -378,7 +378,7 @@ pub struct AdminEnvironmentStartupSummary {
     pub starting_backlog_count: i32,
     pub starting_backlog_over_5m_count: i32,
     pub starting_backlog_over_10m_count: i32,
-    pub running_without_gateway_ready_count: i32,
+    pub running_without_access_ready_count: i32,
     pub phase_durations: Vec<AdminEnvironmentStartupPhaseSummary>,
 }
 
@@ -389,7 +389,7 @@ const STARTUP_PHASES: [&str; 9] = [
     "create_claim",
     "wait_for_ready",
     "workspace_bind",
-    "gateway_ready",
+    "access_ready",
     "pod_scheduled",
     "pod_initialized",
     "pod_running",
@@ -409,7 +409,7 @@ const STARTING_BACKLOG_STATES: [&str; 6] = [
 ];
 
 /// Transitions that begin a new runtime incarnation. A running environment's
-/// gateway readiness counts only when recorded at or after the latest one.
+/// access readiness counts only when recorded at or after the latest one.
 const INCARNATION_START_STATES: [&str; 2] = ["creating", "starting"];
 
 fn round_f64_to_i64(v: f64) -> i64 {
@@ -432,10 +432,10 @@ pub(crate) async fn get_admin_environment_startup_summary_core(
     startup_summary(&state.pool, window_minutes).await
 }
 
-/// `running_without_gateway_ready_count` counts running environments whose
-/// current incarnation has no completed `gateway_ready`. Create and restart
+/// `running_without_access_ready_count` counts running environments whose
+/// current incarnation has no completed `access_ready`. Create and restart
 /// both record it, so a completed row from an earlier incarnation no longer
-/// hides a start whose gateway never became ready. An environment with no
+/// hides a start whose access never became ready. An environment with no
 /// recorded incarnation transition falls back to any completed row.
 async fn startup_summary(
     pool: &sqlx::PgPool,
@@ -464,7 +464,7 @@ async fn startup_summary(
                    SELECT 1
                      FROM environment_logs l
                     WHERE l.environment_id = environments.id
-                      AND l.phase = 'gateway_ready'
+                      AND l.phase = 'access_ready'
                       AND l.status = 'completed'
                       AND l.created_at >= COALESCE((
                         SELECT MAX(j.created_at)
@@ -474,7 +474,7 @@ async fn startup_summary(
                            AND j.to_state = ANY($2)
                       ), '-infinity'::timestamptz)
                  )
-             )::int AS running_without_gateway_ready_count
+             )::int AS running_without_access_ready_count
            FROM environments"#,
     )
     .bind(&STARTING_BACKLOG_STATES[..])
@@ -558,8 +558,8 @@ async fn startup_summary(
         starting_backlog_over_10m_count: row
             .try_get("starting_backlog_over_10m_count")
             .map_err(AppError::from)?,
-        running_without_gateway_ready_count: row
-            .try_get("running_without_gateway_ready_count")
+        running_without_access_ready_count: row
+            .try_get("running_without_access_ready_count")
             .map_err(AppError::from)?,
         phase_durations,
     })

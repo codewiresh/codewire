@@ -33,7 +33,7 @@ pub(super) struct PendingCodexLogin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodexLoginFailure {
     /// This epoch's host did not list "codex-login" (an older broker or
-    /// gateway). Nothing was sent: an older host ends its epoch on an unknown
+    /// relay). Nothing was sent: an older host ends its epoch on an unknown
     /// frame.
     Unsupported,
     /// The broker denied delivery: no login is deliverable now (an API key, a

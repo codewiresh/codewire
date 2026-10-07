@@ -155,9 +155,9 @@ fn owner_local_same_binding_fences_selection_and_identity_kind() {
             "placement" => changed.context.placement = GrantPlacement::Platform,
             "hosted" => {
                 changed.identity = RuntimeIdentity::Hosted {
-                    gateway: PlatformPodIdentity {
+                    relay: PlatformPodIdentity {
                         namespace: "synthetic".into(),
-                        name: "gateway".into(),
+                        name: "relay".into(),
                         uid: Uuid::new_v4(),
                     },
                     workspace: PlatformPodIdentity {
@@ -219,16 +219,16 @@ fn hosted_pods() -> (PlatformPodIdentity, PlatformPodIdentity) {
         name: name.into(),
         uid: Uuid::new_v4(),
     };
-    (pod("gateway"), pod("workspace"))
+    (pod("relay"), pod("workspace"))
 }
 
 #[test]
 fn hosted_constructor_rejects_owner_local_context_even_with_valid_pods() {
     let local = owner_local(true);
-    let (gateway, workspace) = hosted_pods();
+    let (relay, workspace) = hosted_pods();
     assert_eq!(
         PlatformRuntimeSession::new(
-            gateway,
+            relay,
             workspace,
             local.context,
             local.credential_owner,
@@ -629,8 +629,8 @@ async fn connected_owner_local_session_rejects_rebinding_before_grant_dispatch()
             }
             "personal policy" => changed.context.allow_personal_credentials = false,
             "hosted" => {
-                let (gateway, workspace) = hosted_pods();
-                changed.identity = RuntimeIdentity::Hosted { gateway, workspace };
+                let (relay, workspace) = hosted_pods();
+                changed.identity = RuntimeIdentity::Hosted { relay, workspace };
                 changed.context.placement = GrantPlacement::Platform;
             }
             _ => {
@@ -740,13 +740,13 @@ async fn connected_owner_local_session_clamps_original_and_newly_shorter_expiry(
 #[test]
 fn hosted_binding_follows_current_authorization_but_fences_every_coordinate() {
     let local = owner_local(true);
-    let (gateway, workspace) = hosted_pods();
+    let (relay, workspace) = hosted_pods();
     let context = GrantContext {
         placement: GrantPlacement::Platform,
         ..local.context.clone()
     };
     let session = PlatformRuntimeSession::new(
-        gateway,
+        relay,
         workspace,
         context,
         local.credential_owner.clone(),
@@ -769,7 +769,7 @@ fn hosted_binding_follows_current_authorization_but_fences_every_coordinate() {
         "user",
         "organization",
         "personal",
-        "gateway",
+        "relay",
         "owner",
     ] {
         let mut changed = session.clone();
@@ -787,7 +787,7 @@ fn hosted_binding_follows_current_authorization_but_fences_every_coordinate() {
                 changed.context.allow_personal_credentials =
                     !changed.context.allow_personal_credentials
             }
-            "gateway" => changed.gateway_mut().uid = Uuid::new_v4(),
+            "relay" => changed.relay_mut().uid = Uuid::new_v4(),
             "owner" => changed.credential_owner = Owner::User(OwnerId::parse("other").unwrap()),
             _ => unreachable!(),
         }
@@ -798,9 +798,9 @@ fn hosted_binding_follows_current_authorization_but_fences_every_coordinate() {
 #[test]
 fn lease_authority_is_the_same_response_apart_from_expiry() {
     let local = owner_local(true);
-    let (gateway, workspace) = hosted_pods();
+    let (relay, workspace) = hosted_pods();
     let session = PlatformRuntimeSession::new(
-        gateway,
+        relay,
         workspace,
         GrantContext {
             placement: GrantPlacement::Platform,
@@ -827,7 +827,7 @@ fn lease_authority_is_the_same_response_apart_from_expiry() {
         "user",
         "organization",
         "personal",
-        "gateway",
+        "relay",
         "workspace",
         "identity kind",
         "owner",
@@ -854,7 +854,7 @@ fn lease_authority_is_the_same_response_apart_from_expiry() {
                 changed.context.allow_personal_credentials =
                     !changed.context.allow_personal_credentials
             }
-            "gateway" => changed.gateway_mut().uid = Uuid::new_v4(),
+            "relay" => changed.relay_mut().uid = Uuid::new_v4(),
             "workspace" => changed.workspace_mut().uid = Uuid::new_v4(),
             "identity kind" => changed.identity = local.identity.clone(),
             "owner" => changed.credential_owner = Owner::User(OwnerId::parse("other").unwrap()),

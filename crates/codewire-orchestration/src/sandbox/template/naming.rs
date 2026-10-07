@@ -2,30 +2,15 @@
 
 use serde_json::{Value, json};
 
-use super::{RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts, WORKSPACE_DAEMON_PORT};
-
-pub fn gateway_workload_name(env_id: &str) -> String {
-    dns_name("cw-gateway", env_id)
-}
+use super::{TemplateOpts, WORKSPACE_DAEMON_PORT};
 
 pub fn workspace_daemon_service_name(env_id: &str) -> String {
     dns_name("cw-daemon", env_id)
 }
 
-pub fn gateway_service_name(env_id: &str) -> String {
-    dns_name("cw-gateway-svc", env_id)
-}
-
-pub fn gateway_direct_udp_service_name(env_id: &str) -> String {
-    dns_name("cw-gateway-udp", env_id)
-}
-
-pub fn gateway_network_policy_name(env_id: &str) -> String {
-    dns_name("cw-gw-net", env_id)
-}
-
-pub fn gateway_host_key_secret_name(env_id: &str) -> String {
-    dns_name("cw-gateway-host-key", env_id)
+/// `cw-tailnet-udp-<env>`: the environment's direct-UDP LoadBalancer.
+pub fn direct_udp_service_name(env_id: &str) -> String {
+    dns_name("cw-tailnet-udp", env_id)
 }
 
 pub fn workspace_daemon_network_policy_name(env_id: &str) -> String {
@@ -40,11 +25,6 @@ pub const SANDBOX_UID_LABEL: &str = "agents.x-k8s.io/sandbox-uid";
 /// `cw-daemon-warm-<env>`: the adopted warm member's half of the bridge.
 pub fn warm_member_daemon_bridge_name(env_id: &str) -> String {
     dns_name("cw-daemon-warm", env_id)
-}
-
-/// `cw-gw-warm-<env>`: the environment gateway's half of the bridge.
-pub fn warm_member_gateway_bridge_name(env_id: &str) -> String {
-    dns_name("cw-gw-warm", env_id)
 }
 
 fn dns_name(prefix: &str, suffix: &str) -> String {
@@ -101,31 +81,4 @@ pub(super) fn workspace_template_labels() -> Value {
     json!({
         "codewire.sh/type": "workspace",
     })
-}
-
-pub(super) fn gateway_selector(opts: &TemplateOpts) -> Value {
-    json!({
-        "codewire.sh/environment-id": opts.environment_id,
-        "codewire.sh/type": "gateway",
-    })
-}
-
-pub(super) fn gateway_labels(opts: &TemplateOpts) -> Value {
-    let mut labels = gateway_selector(opts);
-    let object = labels.as_object_mut().expect("labels object");
-    object.insert(
-        "codewire.sh/org-id".into(),
-        opts.organization_id.clone().into(),
-    );
-    object.insert(
-        super::super::LABEL_OPERATION_GENERATION.into(),
-        opts.operation_generation.to_string().into(),
-    );
-    object.insert("app.kubernetes.io/name".into(), "codewire-gateway".into());
-    object.insert("app.kubernetes.io/component".into(), "gateway".into());
-    object.insert("app.kubernetes.io/managed-by".into(), "codewire".into());
-    if opts.runtime_profile_spec().profile == RUNTIME_PROFILE_CONFIDENTIAL {
-        object.insert("codewire.sh/isolation-tier".into(), "confidential".into());
-    }
-    labels
 }

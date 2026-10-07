@@ -171,7 +171,7 @@ fn context() -> GrantContext {
 
 fn session() -> PlatformRuntimeSession {
     PlatformRuntimeSession::new(
-        pod("gateway"),
+        pod("relay"),
         pod("workspace"),
         context(),
         Owner::User(context().user_id),
@@ -432,7 +432,7 @@ async fn epoch(
 fn session_shape_requires_two_exact_pods_platform_scope_and_finite_live_identity() {
     let valid = session();
     for attack in [
-        "nil gateway",
+        "nil relay",
         "nil workspace",
         "same pod",
         "local",
@@ -443,9 +443,9 @@ fn session_shape_requires_two_exact_pods_platform_scope_and_finite_live_identity
     ] {
         let mut invalid = valid.clone();
         match attack {
-            "nil gateway" => invalid.gateway_mut().uid = Uuid::nil(),
+            "nil relay" => invalid.relay_mut().uid = Uuid::nil(),
             "nil workspace" => invalid.workspace_mut().uid = Uuid::nil(),
-            "same pod" => *invalid.workspace_mut() = invalid.gateway_mut().clone(),
+            "same pod" => *invalid.workspace_mut() = invalid.relay_mut().clone(),
             "local" => invalid.context.placement = GrantPlacement::Local,
             "generation" => invalid.context.environment_generation = 0,
             "organization" => invalid.context.organization_id = None,
@@ -466,10 +466,10 @@ fn session_shape_requires_two_exact_pods_platform_scope_and_finite_live_identity
 #[test]
 fn runtime_binding_includes_both_pod_uids_and_exact_owner_policy() {
     let valid = session();
-    for attack in ["gateway", "workspace", "generation", "user", "policy"] {
+    for attack in ["relay", "workspace", "generation", "user", "policy"] {
         let mut changed = valid.clone();
         match attack {
-            "gateway" => changed.gateway_mut().uid = Uuid::new_v4(),
+            "relay" => changed.relay_mut().uid = Uuid::new_v4(),
             "workspace" => changed.workspace_mut().uid = Uuid::new_v4(),
             "generation" => changed.context.environment_generation += 1,
             "user" => changed.context.user_id = OwnerId::parse("another-user").unwrap(),
@@ -698,7 +698,7 @@ async fn the_material_fence_follows_replacement_and_rejects_revocation_and_expir
 /// Change one coordinate of the synthetic runtime authority's responses.
 fn change_authority(session: &mut PlatformRuntimeSession, mutation: &str) {
     match mutation {
-        "gateway" => session.gateway_mut().uid = Uuid::new_v4(),
+        "relay" => session.relay_mut().uid = Uuid::new_v4(),
         "workspace" => session.workspace_mut().uid = Uuid::new_v4(),
         "policy" => session.context.authorized_credentials.clear(),
         // As after the account deletes and reconnects a credential: the hosted

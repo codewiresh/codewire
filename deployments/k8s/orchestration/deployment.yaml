@@ -44,8 +44,8 @@ spec:
           ports:
             - containerPort: 8084
               name: http
-            # The internal Connect app (gateway binding, Mesh authorization),
-            # TLS-only. Gateways and Mesh verify it with the public roots in
+            # The internal Connect app (Mesh authorization), TLS-only. Mesh
+            # verifies it with the public roots in
             # codewire-orchestration-internal-roots.
             - containerPort: 8088
               name: internal-tls
@@ -85,8 +85,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP
-              value: codewire-credential-broker-roots
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -149,6 +147,15 @@ spec:
             - name: confidential-storage-kbs-ca
               mountPath: /etc/codewire/confidential-storage-kbs
               readOnly: true
+            # The credential relay (design §4) presents this projected token
+            # to the broker, which accepts it only as this ServiceAccount in
+            # this namespace, and verifies the broker with its public roots.
+            - name: credential-relay-identity
+              mountPath: /var/run/secrets/codewire/credential-relay
+              readOnly: true
+            - name: credential-broker-roots
+              mountPath: /run/codewire-credentials/broker-roots
+              readOnly: true
       volumes:
         # cert-manager-owned leaf for the internal TLS listener. Readable by
         # the image's 65532 group only, through the pod fsGroup.
@@ -166,6 +173,22 @@ spec:
         - name: confidential-storage-kbs-ca
           configMap:
             name: codewire-trustee-kbs-ca
+            optional: true
+        # Group-readable through the pod fsGroup, like the internal TLS leaf.
+        - name: credential-relay-identity
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  audience: codewire.internal.credential-relay.v1
+                  expirationSeconds: 600
+                  path: token
+        # Public trust only, provisioned by infrastructure in this namespace.
+        # Until it exists the relay admits no epoch and retries; kubelet adds
+        # it to the running Pod when it appears.
+        - name: credential-broker-roots
+          configMap:
+            name: codewire-credential-broker-roots
             optional: true
 ---
 apiVersion: v1

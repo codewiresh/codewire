@@ -36,6 +36,15 @@ const (
 	// WorkspaceBindingServiceBindWorkspaceProcedure is the fully-qualified name of the
 	// WorkspaceBindingService's BindWorkspace RPC.
 	WorkspaceBindingServiceBindWorkspaceProcedure = "/codewire.internal.v1.WorkspaceBindingService/BindWorkspace"
+	// WorkspaceBindingServiceRefreshAccessProcedure is the fully-qualified name of the
+	// WorkspaceBindingService's RefreshAccess RPC.
+	WorkspaceBindingServiceRefreshAccessProcedure = "/codewire.internal.v1.WorkspaceBindingService/RefreshAccess"
+	// WorkspaceBindingServiceRecordHostKeyProcedure is the fully-qualified name of the
+	// WorkspaceBindingService's RecordHostKey RPC.
+	WorkspaceBindingServiceRecordHostKeyProcedure = "/codewire.internal.v1.WorkspaceBindingService/RecordHostKey"
+	// WorkspaceBindingServiceAllocatePeerRelayProcedure is the fully-qualified name of the
+	// WorkspaceBindingService's AllocatePeerRelay RPC.
+	WorkspaceBindingServiceAllocatePeerRelayProcedure = "/codewire.internal.v1.WorkspaceBindingService/AllocatePeerRelay"
 )
 
 // WorkspaceBindingServiceClient is a client for the codewire.internal.v1.WorkspaceBindingService
@@ -44,6 +53,19 @@ type WorkspaceBindingServiceClient interface {
 	// Returns this Pod's binding. An unbound Pod waits up to wait_seconds, then
 	// gets not_found and retries. A bound Pod gets the same binding again.
 	BindWorkspace(context.Context, *connect.Request[v1.BindWorkspaceRequest]) (*connect.Response[v1.BindWorkspaceResponse], error)
+	// Issues a fresh access grant to the bound Pod: a new peer token for the
+	// binding's environment and operation generation. Daemons call it at half
+	// the current token's lifetime.
+	RefreshAccess(context.Context, *connect.Request[v1.RefreshAccessRequest]) (*connect.Response[v1.RefreshAccessResponse], error)
+	// Records the bound Pod's SSH host public key for that Pod, noting the
+	// binding's environment and operation generation. Write-once per Pod: the
+	// same key again succeeds, a different key is failed_precondition. A Pod
+	// that replaces another records its own key.
+	RecordHostKey(context.Context, *connect.Request[v1.RecordHostKeyRequest]) (*connect.Response[v1.RecordHostKeyResponse], error)
+	// Allocates a UDP peer-relay endpoint between the bound environment's
+	// tailnet node and one peer, with orchestration's own allocator
+	// credential. failed_precondition when the runtime has no peer relay.
+	AllocatePeerRelay(context.Context, *connect.Request[v1.AllocatePeerRelayRequest]) (*connect.Response[v1.AllocatePeerRelayResponse], error)
 }
 
 // NewWorkspaceBindingServiceClient constructs a client for the
@@ -65,17 +87,55 @@ func NewWorkspaceBindingServiceClient(httpClient connect.HTTPClient, baseURL str
 			connect.WithIdempotency(connect.IdempotencyIdempotent),
 			connect.WithClientOptions(opts...),
 		),
+		refreshAccess: connect.NewClient[v1.RefreshAccessRequest, v1.RefreshAccessResponse](
+			httpClient,
+			baseURL+WorkspaceBindingServiceRefreshAccessProcedure,
+			connect.WithSchema(workspaceBindingServiceMethods.ByName("RefreshAccess")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		recordHostKey: connect.NewClient[v1.RecordHostKeyRequest, v1.RecordHostKeyResponse](
+			httpClient,
+			baseURL+WorkspaceBindingServiceRecordHostKeyProcedure,
+			connect.WithSchema(workspaceBindingServiceMethods.ByName("RecordHostKey")),
+			connect.WithIdempotency(connect.IdempotencyIdempotent),
+			connect.WithClientOptions(opts...),
+		),
+		allocatePeerRelay: connect.NewClient[v1.AllocatePeerRelayRequest, v1.AllocatePeerRelayResponse](
+			httpClient,
+			baseURL+WorkspaceBindingServiceAllocatePeerRelayProcedure,
+			connect.WithSchema(workspaceBindingServiceMethods.ByName("AllocatePeerRelay")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // workspaceBindingServiceClient implements WorkspaceBindingServiceClient.
 type workspaceBindingServiceClient struct {
-	bindWorkspace *connect.Client[v1.BindWorkspaceRequest, v1.BindWorkspaceResponse]
+	bindWorkspace     *connect.Client[v1.BindWorkspaceRequest, v1.BindWorkspaceResponse]
+	refreshAccess     *connect.Client[v1.RefreshAccessRequest, v1.RefreshAccessResponse]
+	recordHostKey     *connect.Client[v1.RecordHostKeyRequest, v1.RecordHostKeyResponse]
+	allocatePeerRelay *connect.Client[v1.AllocatePeerRelayRequest, v1.AllocatePeerRelayResponse]
 }
 
 // BindWorkspace calls codewire.internal.v1.WorkspaceBindingService.BindWorkspace.
 func (c *workspaceBindingServiceClient) BindWorkspace(ctx context.Context, req *connect.Request[v1.BindWorkspaceRequest]) (*connect.Response[v1.BindWorkspaceResponse], error) {
 	return c.bindWorkspace.CallUnary(ctx, req)
+}
+
+// RefreshAccess calls codewire.internal.v1.WorkspaceBindingService.RefreshAccess.
+func (c *workspaceBindingServiceClient) RefreshAccess(ctx context.Context, req *connect.Request[v1.RefreshAccessRequest]) (*connect.Response[v1.RefreshAccessResponse], error) {
+	return c.refreshAccess.CallUnary(ctx, req)
+}
+
+// RecordHostKey calls codewire.internal.v1.WorkspaceBindingService.RecordHostKey.
+func (c *workspaceBindingServiceClient) RecordHostKey(ctx context.Context, req *connect.Request[v1.RecordHostKeyRequest]) (*connect.Response[v1.RecordHostKeyResponse], error) {
+	return c.recordHostKey.CallUnary(ctx, req)
+}
+
+// AllocatePeerRelay calls codewire.internal.v1.WorkspaceBindingService.AllocatePeerRelay.
+func (c *workspaceBindingServiceClient) AllocatePeerRelay(ctx context.Context, req *connect.Request[v1.AllocatePeerRelayRequest]) (*connect.Response[v1.AllocatePeerRelayResponse], error) {
+	return c.allocatePeerRelay.CallUnary(ctx, req)
 }
 
 // WorkspaceBindingServiceHandler is an implementation of the
@@ -84,6 +144,19 @@ type WorkspaceBindingServiceHandler interface {
 	// Returns this Pod's binding. An unbound Pod waits up to wait_seconds, then
 	// gets not_found and retries. A bound Pod gets the same binding again.
 	BindWorkspace(context.Context, *connect.Request[v1.BindWorkspaceRequest]) (*connect.Response[v1.BindWorkspaceResponse], error)
+	// Issues a fresh access grant to the bound Pod: a new peer token for the
+	// binding's environment and operation generation. Daemons call it at half
+	// the current token's lifetime.
+	RefreshAccess(context.Context, *connect.Request[v1.RefreshAccessRequest]) (*connect.Response[v1.RefreshAccessResponse], error)
+	// Records the bound Pod's SSH host public key for that Pod, noting the
+	// binding's environment and operation generation. Write-once per Pod: the
+	// same key again succeeds, a different key is failed_precondition. A Pod
+	// that replaces another records its own key.
+	RecordHostKey(context.Context, *connect.Request[v1.RecordHostKeyRequest]) (*connect.Response[v1.RecordHostKeyResponse], error)
+	// Allocates a UDP peer-relay endpoint between the bound environment's
+	// tailnet node and one peer, with orchestration's own allocator
+	// credential. failed_precondition when the runtime has no peer relay.
+	AllocatePeerRelay(context.Context, *connect.Request[v1.AllocatePeerRelayRequest]) (*connect.Response[v1.AllocatePeerRelayResponse], error)
 }
 
 // NewWorkspaceBindingServiceHandler builds an HTTP handler from the service implementation. It
@@ -100,10 +173,36 @@ func NewWorkspaceBindingServiceHandler(svc WorkspaceBindingServiceHandler, opts 
 		connect.WithIdempotency(connect.IdempotencyIdempotent),
 		connect.WithHandlerOptions(opts...),
 	)
+	workspaceBindingServiceRefreshAccessHandler := connect.NewUnaryHandler(
+		WorkspaceBindingServiceRefreshAccessProcedure,
+		svc.RefreshAccess,
+		connect.WithSchema(workspaceBindingServiceMethods.ByName("RefreshAccess")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	workspaceBindingServiceRecordHostKeyHandler := connect.NewUnaryHandler(
+		WorkspaceBindingServiceRecordHostKeyProcedure,
+		svc.RecordHostKey,
+		connect.WithSchema(workspaceBindingServiceMethods.ByName("RecordHostKey")),
+		connect.WithIdempotency(connect.IdempotencyIdempotent),
+		connect.WithHandlerOptions(opts...),
+	)
+	workspaceBindingServiceAllocatePeerRelayHandler := connect.NewUnaryHandler(
+		WorkspaceBindingServiceAllocatePeerRelayProcedure,
+		svc.AllocatePeerRelay,
+		connect.WithSchema(workspaceBindingServiceMethods.ByName("AllocatePeerRelay")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.internal.v1.WorkspaceBindingService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case WorkspaceBindingServiceBindWorkspaceProcedure:
 			workspaceBindingServiceBindWorkspaceHandler.ServeHTTP(w, r)
+		case WorkspaceBindingServiceRefreshAccessProcedure:
+			workspaceBindingServiceRefreshAccessHandler.ServeHTTP(w, r)
+		case WorkspaceBindingServiceRecordHostKeyProcedure:
+			workspaceBindingServiceRecordHostKeyHandler.ServeHTTP(w, r)
+		case WorkspaceBindingServiceAllocatePeerRelayProcedure:
+			workspaceBindingServiceAllocatePeerRelayHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -115,4 +214,16 @@ type UnimplementedWorkspaceBindingServiceHandler struct{}
 
 func (UnimplementedWorkspaceBindingServiceHandler) BindWorkspace(context.Context, *connect.Request[v1.BindWorkspaceRequest]) (*connect.Response[v1.BindWorkspaceResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.WorkspaceBindingService.BindWorkspace is not implemented"))
+}
+
+func (UnimplementedWorkspaceBindingServiceHandler) RefreshAccess(context.Context, *connect.Request[v1.RefreshAccessRequest]) (*connect.Response[v1.RefreshAccessResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.WorkspaceBindingService.RefreshAccess is not implemented"))
+}
+
+func (UnimplementedWorkspaceBindingServiceHandler) RecordHostKey(context.Context, *connect.Request[v1.RecordHostKeyRequest]) (*connect.Response[v1.RecordHostKeyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.WorkspaceBindingService.RecordHostKey is not implemented"))
+}
+
+func (UnimplementedWorkspaceBindingServiceHandler) AllocatePeerRelay(context.Context, *connect.Request[v1.AllocatePeerRelayRequest]) (*connect.Response[v1.AllocatePeerRelayResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.WorkspaceBindingService.AllocatePeerRelay is not implemented"))
 }

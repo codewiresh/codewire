@@ -13,7 +13,6 @@ use crate::sandbox::template::{
     CredentialRuntimeTemplateConfig, DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_PROFILE_COMMODITY,
     RUNTIME_PROFILE_CONFIDENTIAL,
 };
-use crate::worker::create::WorkspaceIdentityMode;
 
 const NAMESPACE: &str = "dev-sandboxes";
 const API: &str = "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes";
@@ -32,7 +31,6 @@ fn dev_cfg(shapes: &str) -> SandboxWorkerCfg {
         api_base_url: "https://codewire-dev.sh".into(),
         coordinator_url: "http://codewire-coordinator.dev.svc.cluster.local:8090".into(),
         pod_namespace: "dev".into(),
-        workspace_identity_mode: WorkspaceIdentityMode::Binding,
         warm_pool_shapes: shapes.into(),
         ..Default::default()
     }
@@ -77,9 +75,9 @@ fn configured_shapes_render_through_the_identity_free_pool_renderer() {
 
     // Every renderer refusal refuses the whole configuration.
     assert!(WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi"), true).is_err());
-    let mut rollback = dev_cfg("1000m/4096Mi/10Gi=1");
-    rollback.workspace_identity_mode = WorkspaceIdentityMode::EnvironmentToken;
-    assert!(WarmPoolConfig::from_cfg(&rollback, true).is_err());
+    let mut unbindable = dev_cfg("1000m/4096Mi/10Gi=1");
+    unbindable.pod_namespace.clear();
+    assert!(WarmPoolConfig::from_cfg(&unbindable, true).is_err());
     let mut confidential = dev_cfg("1000m/4096Mi/10Gi=1");
     confidential.runtime_profile = RUNTIME_PROFILE_CONFIDENTIAL.into();
     assert!(WarmPoolConfig::from_cfg(&confidential, true).is_err());
@@ -406,10 +404,10 @@ fn an_invalid_configuration_drains_and_none_is_inert() {
             Startup::Inert => panic!("{shapes} must drain"),
         }
     }
-    let mut rollback = dev_cfg("1000m/4096Mi/10Gi=2");
-    rollback.workspace_identity_mode = WorkspaceIdentityMode::EnvironmentToken;
+    let mut unbindable = dev_cfg("1000m/4096Mi/10Gi=2");
+    unbindable.pod_namespace.clear();
     assert!(matches!(
-        startup(&rollback, Ok(false)),
+        startup(&unbindable, Ok(false)),
         Startup::Reconcile(WarmPoolConfig { draining: true, .. })
     ));
     match startup(&dev_cfg("1000m/4096Mi/10Gi=2"), Ok(true)) {

@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .workspace_binding_pb2 import BindWorkspaceRequest, BindWorkspaceResponse
+from .workspace_binding_pb2 import AllocatePeerRelayRequest, AllocatePeerRelayResponse, BindWorkspaceRequest, BindWorkspaceResponse, RecordHostKeyRequest, RecordHostKeyResponse, RefreshAccessRequest, RefreshAccessResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -36,6 +36,15 @@ _GZIP_COMPRESSION = GzipCompression()
 
 class WorkspaceBindingService(Protocol):
     async def bind_workspace(self, request: BindWorkspaceRequest, ctx: RequestContext[BindWorkspaceRequest, BindWorkspaceResponse]) -> BindWorkspaceResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def refresh_access(self, request: RefreshAccessRequest, ctx: RequestContext[RefreshAccessRequest, RefreshAccessResponse]) -> RefreshAccessResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def record_host_key(self, request: RecordHostKeyRequest, ctx: RequestContext[RecordHostKeyRequest, RecordHostKeyResponse]) -> RecordHostKeyResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def allocate_peer_relay(self, request: AllocatePeerRelayRequest, ctx: RequestContext[AllocatePeerRelayRequest, AllocatePeerRelayResponse]) -> AllocatePeerRelayResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -61,6 +70,36 @@ class WorkspaceBindingServiceASGIApplication(ConnectASGIApplication[WorkspaceBin
                         idempotency_level=IdempotencyLevel.IDEMPOTENT,
                     ),
                     function=svc.bind_workspace,
+                ),
+                "/codewire.internal.v1.WorkspaceBindingService/RefreshAccess": Endpoint.unary(
+                    method=MethodInfo(
+                        name="RefreshAccess",
+                        service_name="codewire.internal.v1.WorkspaceBindingService",
+                        input=RefreshAccessRequest,
+                        output=RefreshAccessResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.refresh_access,
+                ),
+                "/codewire.internal.v1.WorkspaceBindingService/RecordHostKey": Endpoint.unary(
+                    method=MethodInfo(
+                        name="RecordHostKey",
+                        service_name="codewire.internal.v1.WorkspaceBindingService",
+                        input=RecordHostKeyRequest,
+                        output=RecordHostKeyResponse,
+                        idempotency_level=IdempotencyLevel.IDEMPOTENT,
+                    ),
+                    function=svc.record_host_key,
+                ),
+                "/codewire.internal.v1.WorkspaceBindingService/AllocatePeerRelay": Endpoint.unary(
+                    method=MethodInfo(
+                        name="AllocatePeerRelay",
+                        service_name="codewire.internal.v1.WorkspaceBindingService",
+                        input=AllocatePeerRelayRequest,
+                        output=AllocatePeerRelayResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.allocate_peer_relay,
                 ),
             },
             interceptors=interceptors,
@@ -120,8 +159,79 @@ class WorkspaceBindingServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def refresh_access(
+        self,
+        request: RefreshAccessRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> RefreshAccessResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="RefreshAccess",
+                service_name="codewire.internal.v1.WorkspaceBindingService",
+                input=RefreshAccessRequest,
+                output=RefreshAccessResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
+    async def record_host_key(
+        self,
+        request: RecordHostKeyRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> RecordHostKeyResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="RecordHostKey",
+                service_name="codewire.internal.v1.WorkspaceBindingService",
+                input=RecordHostKeyRequest,
+                output=RecordHostKeyResponse,
+                idempotency_level=IdempotencyLevel.IDEMPOTENT,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def allocate_peer_relay(
+        self,
+        request: AllocatePeerRelayRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AllocatePeerRelayResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="AllocatePeerRelay",
+                service_name="codewire.internal.v1.WorkspaceBindingService",
+                input=AllocatePeerRelayRequest,
+                output=AllocatePeerRelayResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class WorkspaceBindingServiceSync(Protocol):
     def bind_workspace(self, request: BindWorkspaceRequest, ctx: RequestContext[BindWorkspaceRequest, BindWorkspaceResponse]) -> BindWorkspaceResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def refresh_access(self, request: RefreshAccessRequest, ctx: RequestContext[RefreshAccessRequest, RefreshAccessResponse]) -> RefreshAccessResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def record_host_key(self, request: RecordHostKeyRequest, ctx: RequestContext[RecordHostKeyRequest, RecordHostKeyResponse]) -> RecordHostKeyResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def allocate_peer_relay(self, request: AllocatePeerRelayRequest, ctx: RequestContext[AllocatePeerRelayRequest, AllocatePeerRelayResponse]) -> AllocatePeerRelayResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -145,6 +255,36 @@ class WorkspaceBindingServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.IDEMPOTENT,
                     ),
                     function=service.bind_workspace,
+                ),
+                "/codewire.internal.v1.WorkspaceBindingService/RefreshAccess": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="RefreshAccess",
+                        service_name="codewire.internal.v1.WorkspaceBindingService",
+                        input=RefreshAccessRequest,
+                        output=RefreshAccessResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.refresh_access,
+                ),
+                "/codewire.internal.v1.WorkspaceBindingService/RecordHostKey": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="RecordHostKey",
+                        service_name="codewire.internal.v1.WorkspaceBindingService",
+                        input=RecordHostKeyRequest,
+                        output=RecordHostKeyResponse,
+                        idempotency_level=IdempotencyLevel.IDEMPOTENT,
+                    ),
+                    function=service.record_host_key,
+                ),
+                "/codewire.internal.v1.WorkspaceBindingService/AllocatePeerRelay": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="AllocatePeerRelay",
+                        service_name="codewire.internal.v1.WorkspaceBindingService",
+                        input=AllocatePeerRelayRequest,
+                        output=AllocatePeerRelayResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.allocate_peer_relay,
                 ),
             },
             interceptors=interceptors,
@@ -199,6 +339,65 @@ class WorkspaceBindingServiceClientSync(ConnectClientSync):
                 input=BindWorkspaceRequest,
                 output=BindWorkspaceResponse,
                 idempotency_level=IdempotencyLevel.IDEMPOTENT,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def refresh_access(
+        self,
+        request: RefreshAccessRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> RefreshAccessResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="RefreshAccess",
+                service_name="codewire.internal.v1.WorkspaceBindingService",
+                input=RefreshAccessRequest,
+                output=RefreshAccessResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def record_host_key(
+        self,
+        request: RecordHostKeyRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> RecordHostKeyResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="RecordHostKey",
+                service_name="codewire.internal.v1.WorkspaceBindingService",
+                input=RecordHostKeyRequest,
+                output=RecordHostKeyResponse,
+                idempotency_level=IdempotencyLevel.IDEMPOTENT,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def allocate_peer_relay(
+        self,
+        request: AllocatePeerRelayRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AllocatePeerRelayResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="AllocatePeerRelay",
+                service_name="codewire.internal.v1.WorkspaceBindingService",
+                input=AllocatePeerRelayRequest,
+                output=AllocatePeerRelayResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,
             timeout_ms=timeout_ms,

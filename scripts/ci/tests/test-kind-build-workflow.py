@@ -443,7 +443,7 @@ class WorkflowContractTests(unittest.TestCase):
             "create_cluster",
             "load_images_into_kind",
             "deploy_overlay",
-            "host_key_authorization_smoke",
+            "orchestration_authorization_smoke",
             "edge_routing_probes",
             "connect_edge_probes",
             "coordinator_runtime_smokes",
@@ -526,9 +526,6 @@ kubectl() {
     *' get pod '*) printf '10.244.0.9' ;;
     *' get sandboxclaim '*) printf 'claim-uid' ;;
     *' get sandbox '*) printf 'sandbox-uid' ;;
-    *' exec cw-binding-gateway-'*)
-      printf '%s\n' '{"environmentId":"00000000-0000-4000-8000-000000000501","workspacePodIp":"10.244.0.9","appPorts":[3000],"sidecarToken":"synthetic"}'
-      ;;
     *' get configmap codewire-orchestration-internal-roots '*)
       printf '%s\n' '-----BEGIN CERTIFICATE-----' 'synthetic' '-----END CERTIFICATE-----'
       ;;
@@ -547,20 +544,22 @@ kubectl() {
     *) printf 'unexpected synthetic kubectl: %s\n' "$args" >&2; return 63 ;;
   esac
 }
+auth_token_for_environment_scope() {
+  [ "$1" = 00000000-0000-4000-8000-000000000501 ] && [ "$2" = coordinate ] || return 65
+  printf synthetic-coordinate
+}
 curl_settled() {
   PROBE_BODY='{"code":"unauthenticated"}'
   if [[ "$*" == *:23456:127.0.0.1* && "$*" == *https://codewire-orchestration.*:23456/* ]]; then
+    [ -f "$FIXTURE/backend" ] && [ "$(<"$FIXTURE/state")" = running ] || return 64
+    record internal
     PROBE_CODE=401
+    [ "$FAILURE" != internal ] || PROBE_CODE=200
     printf 'x-codewire-service: codewire-orchestration-internal\n' >"$PROBE_HEADERS"
   else
     PROBE_CODE=404
     printf 'x-codewire-service: codewire-orchestration\n' >"$PROBE_HEADERS"
   fi
-}
-timeout() {
-  [ -f "$FIXTURE/backend" ] && [ "$(<"$FIXTURE/state")" = running ] || return 64
-  [ "$FAILURE" != internal ] || return 31
-  record internal
 }
 mesh_product_connect_ownership_smoke() {
   record mesh
@@ -598,7 +597,7 @@ coordinator_ingress_smoke() {
         result, events, sql, _ = self.run_owner()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(events, [
-            "runtime-created", "admit", "internal", "mesh", "coordinator",
+            "runtime-created", "admit", "internal", "internal", "mesh", "coordinator",
             "retire", "runtime-deleted", "downstream",
         ])
         for transaction in sql.values():

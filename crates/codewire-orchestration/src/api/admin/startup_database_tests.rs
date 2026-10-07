@@ -114,7 +114,7 @@ async fn db_startup_summary_binds_backlog_states_and_counts_the_current_incarnat
         log(
             pool,
             "running-created",
-            "gateway_ready",
+            "access_ready",
             "completed",
             Some(20_000),
             100,
@@ -127,7 +127,7 @@ async fn db_startup_summary_binds_backlog_states_and_counts_the_current_incarnat
         log(
             pool,
             "running-restarted",
-            "gateway_ready",
+            "access_ready",
             "completed",
             Some(20_000),
             2_980,
@@ -141,7 +141,7 @@ async fn db_startup_summary_binds_backlog_states_and_counts_the_current_incarnat
         log(
             pool,
             "running-restart-failed",
-            "gateway_ready",
+            "access_ready",
             "failed",
             Some(90_000),
             10,
@@ -153,7 +153,7 @@ async fn db_startup_summary_binds_backlog_states_and_counts_the_current_incarnat
         log(
             pool,
             "running-legacy",
-            "gateway_ready",
+            "access_ready",
             "completed",
             Some(15_000),
             30_000,
@@ -173,9 +173,9 @@ async fn db_startup_summary_binds_backlog_states_and_counts_the_current_incarnat
         ensure!(summary.starting_backlog_over_5m_count == 2);
         ensure!(summary.starting_backlog_over_10m_count == 1);
         ensure!(
-            summary.running_without_gateway_ready_count == 3,
+            summary.running_without_access_ready_count == 3,
             "running without gateway ready: {}",
-            summary.running_without_gateway_ready_count
+            summary.running_without_access_ready_count
         );
         Ok(())
     }
@@ -198,7 +198,7 @@ async fn db_startup_phase_summary_and_timings_include_pod_stages_only() -> Resul
         log(
             pool,
             "timed",
-            "gateway_ready",
+            "access_ready",
             "completed",
             Some(20_000),
             180,
@@ -275,7 +275,7 @@ async fn db_startup_phase_summary_and_timings_include_pod_stages_only() -> Resul
                     ("create_claim", 1, Some(1_000), Some(1_000)),
                     ("wait_for_ready", 0, None, None),
                     ("workspace_bind", 1, Some(150), Some(150)),
-                    ("gateway_ready", 1, Some(20_000), Some(20_000)),
+                    ("access_ready", 1, Some(20_000), Some(20_000)),
                     ("pod_scheduled", 2, Some(4_000), Some(4_900)),
                     ("pod_initialized", 1, Some(33_000), Some(33_000)),
                     ("pod_running", 1, Some(2_000), Some(2_000)),
@@ -298,7 +298,7 @@ async fn db_startup_phase_summary_and_timings_include_pod_stages_only() -> Resul
                 == [
                     ("create_claim", Some(1_000)),
                     ("workspace_bind", Some(150)),
-                    ("gateway_ready", Some(20_000)),
+                    ("access_ready", Some(20_000)),
                     ("pod_scheduled", Some(3_000)),
                     ("pod_initialized", Some(33_000)),
                     ("pod_running", Some(2_000)),

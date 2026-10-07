@@ -107,6 +107,14 @@ def proto_debug_redacted_field_names(message_body: str) -> set[str]:
     }
 
 
+# The one exact raw-token exception (daemon-hosted access S4): an environment
+# peer re-proves its coordinator session in-band, before its last proven token
+# lapses, with a fresh short-lived peer token bound to its environment's
+# current generation. Headers are sent once per stream, so it cannot travel
+# there. The field must stay debug-redacted and alone in its message.
+IN_BAND_PEER_PROOF_FIELDS = {("CoordinateProof", "peer_token")}
+
+
 def proto_package_boundary_failures(
     proto_sources: dict[str, str],
     ts_manifest: dict[str, Any],
@@ -252,8 +260,15 @@ def proto_package_boundary_failures(
                 }
                 or ("credential" in field and field != "credential_kind")
             )
-            if raw_secret:
+            if raw_secret and (message, field) not in IN_BAND_PEER_PROOF_FIELDS:
                 failures.append(f"{message}.{field}: forbidden raw auth/credential field")
+    for message, field in sorted(IN_BAND_PEER_PROOF_FIELDS):
+        if message in messages and (
+            messages[message] != {field} or (message, field) not in debug_redacted_fields
+        ):
+            failures.append(
+                f"{message} must carry only {field}, with debug_redact = true"
+            )
 
     ts_exports = ts_manifest.get("exports")
     if ts_manifest.get("private") is not True:
@@ -369,6 +384,39 @@ def proto_package_boundary_self_test(
         ),
         "MeshNode.node_token",
     )
+
+    coordinate = "proto/codewire/internal/v1/coordinate.proto"
+    for label, before, after, expected in [
+        (
+            "an unredacted in-band peer proof",
+            "  string peer_token = 1 [debug_redact = true];\n",
+            "  string peer_token = 1;\n",
+            "CoordinateProof must carry only peer_token, with debug_redact = true",
+        ),
+        (
+            "a second token in the in-band peer proof",
+            "  string peer_token = 1 [debug_redact = true];\n",
+            "  string peer_token = 1 [debug_redact = true];\n  string session_token = 2 [debug_redact = true];\n",
+            "CoordinateProof.session_token: forbidden raw auth/credential field",
+        ),
+        (
+            "a peer token outside the in-band proof",
+            "  string environment_id = 2;\n",
+            "  string environment_id = 2;\n  string peer_token = 3 [debug_redact = true];\n",
+            "CoordinateHello.peer_token: forbidden raw auth/credential field",
+        ),
+    ]:
+        mutated = dict(proto_sources)
+        if before not in mutated[coordinate]:
+            raise RuntimeError(f"{label}: self-test fixture did not contain expected source")
+        mutated[coordinate] = mutated[coordinate].replace(before, after, 1)
+        require_failure(
+            label,
+            proto_package_boundary_failures(
+                mutated, ts_manifest, ts_index, python_manifest, sdk_sources
+            ),
+            expected,
+        )
 
     unredacted_capability = dict(proto_sources)
     unredacted_capability["proto/codewire/v1/mesh_invite.proto"] = (

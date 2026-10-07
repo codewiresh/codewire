@@ -75,5 +75,6 @@ codewire-protected-store = { workspace = true, features = ["platform-test-suppor
 flate2 = { workspace = true }
 rcgen = "0.13"
 reqwest = { workspace = true }
+rustix = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

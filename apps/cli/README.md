@@ -206,6 +206,18 @@ cw vscode my-app
 
 `cw shell --stdio` is the permanent OpenSSH/VS Code proxy path.
 
+`cw config-ssh` writes its managed `Host cw-*` block first in `~/.ssh/config`,
+because OpenSSH keeps the first value it finds. The block runs the `cw` that
+wrote it by absolute path, because OpenSSH runs `KnownHostsCommand` only from
+one; re-run `cw config-ssh` if you move `cw`. Host keys are trusted only
+through `KnownHostsCommand <cw> ssh known-hosts %H`, which prints the key the
+platform recorded for the environment's current workspace Pod; any failure
+refuses the connection rather than trusting on first use. The SSH server runs
+inside the environment's sandbox, so the block also turns off agent and X11
+forwarding, GSSAPI delegation and password, keyboard-interactive and public-key
+authentication. `--ssh-option` cannot override these. `cw doctor` warns when
+the block is outdated or not first.
+
 ## Mesh
 
 Environment daemons own node participation. User-facing network commands

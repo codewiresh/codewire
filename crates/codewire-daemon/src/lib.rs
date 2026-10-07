@@ -1,3 +1,5 @@
+pub mod access;
+pub mod app_ports;
 #[cfg(target_os = "linux")]
 pub mod claude_home;
 pub mod client;
@@ -16,6 +18,7 @@ mod host_process;
 #[cfg(unix)]
 pub mod hosted_state;
 mod lifecycle;
+pub mod local_transport;
 #[cfg(target_os = "linux")]
 pub mod platform_managed;
 #[cfg(unix)]
@@ -36,4 +39,4 @@ pub use server::serve_grpc_with_incoming;
 #[cfg(target_os = "linux")]
 pub use server::serve_host_control_grpc_with_incoming;
 #[cfg(target_os = "linux")]
-pub use server::serve_hosted_grpc_with_incoming;
+pub use server::{serve_bound_hosted_grpc_with_incoming, serve_hosted_grpc_with_incoming};

@@ -53,6 +53,11 @@ pub struct Options {
     /// Whether direct peer UDP candidates may be discovered and selected.
     /// UDP peer-relay negotiation remains enabled when this is false.
     pub peer_direct_udp_enabled: bool,
+    /// Accept only globally routable addresses from peers: their direct
+    /// endpoints, CallMeMaybe candidates, relay addresses and verified
+    /// sources. A client sets this so an environment peer cannot steer its
+    /// UDP at loopback or private networks.
+    pub public_peer_endpoints_only: bool,
     /// Our WireGuard node key.
     pub local_node_key: NodePublic,
     /// Our disco private key. Its public half must match our published node.
@@ -74,6 +79,7 @@ impl Options {
             stun_timeout: STUN_DISCOVERY_TIMEOUT,
             stun_refresh_interval: STUN_REFRESH_INTERVAL,
             peer_direct_udp_enabled: true,
+            public_peer_endpoints_only: false,
             local_node_key,
             local_disco,
         }
@@ -100,6 +106,12 @@ impl Options {
     /// Enable or disable direct peer UDP while retaining UDP peer relay.
     pub fn with_peer_direct_udp_enabled(mut self, enabled: bool) -> Self {
         self.peer_direct_udp_enabled = enabled;
+        self
+    }
+
+    /// Accept only globally routable addresses from peers.
+    pub fn with_public_peer_endpoints_only(mut self, public_only: bool) -> Self {
+        self.public_peer_endpoints_only = public_only;
         self
     }
 }

@@ -69,9 +69,9 @@ COMMANDS = {
         "production source ownership: OK",
         True,
     ),
-    "orchestration-host-key-authz": (
-        orchestration_security.check_orchestration_host_key_authz,
-        "orchestration host-key authorization: OK",
+    "orchestration-authz": (
+        orchestration_security.check_orchestration_authz,
+        "orchestration authorization: OK",
         True,
     ),
     "idp-signing-kek-isolation": (

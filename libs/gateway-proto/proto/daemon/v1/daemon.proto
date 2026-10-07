@@ -15,6 +15,11 @@ service DaemonService {
   // source selector, or application projection crosses this boundary.
   rpc PoweroffGuest(PoweroffGuestRequest) returns (PoweroffGuestResponse);
 
+  // Replace the environment's exposed application ports, which a bound
+  // daemon serves on its tailnet address. Orchestration pushes each change;
+  // every access grant the daemon renews also restates the full set.
+  rpc SetAppPorts(SetAppPortsRequest) returns (SetAppPortsResponse);
+
   // Private host-initiated channel for material-free guest credential
   // requests and typed recipient-encrypted application projections. The host
   // authenticates with the generation daemon capability; provider values and
@@ -309,6 +314,13 @@ message GetHealthRequest {}
 message PoweroffGuestRequest {}
 
 message PoweroffGuestResponse {}
+
+message SetAppPortsRequest {
+  // The complete set, 1-65535 without duplicates. It replaces the previous one.
+  repeated int32 ports = 1;
+}
+
+message SetAppPortsResponse {}
 
 message HealthDiagnostic {
   string name = 1;

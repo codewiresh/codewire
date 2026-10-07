@@ -741,7 +741,7 @@ VALUES
     ),
     (
         'log_admin_contract_gateway', 'env_admin_contract_read',
-        'gateway_ready', 'completed', NULL, '{"duration_ms": 75}'::jsonb,
+        'access_ready', 'completed', NULL, '{"duration_ms": 75}'::jsonb,
         NOW() - INTERVAL '2 minutes'
     ),
     (

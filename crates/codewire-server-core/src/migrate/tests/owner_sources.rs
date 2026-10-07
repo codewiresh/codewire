@@ -76,7 +76,7 @@ async fn definition(pool: &PgPool) -> anyhow::Result<String> {
 async fn old_functions(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     // Compare every pre-27 helper byte-for-byte. Migration28's two new
     // session helpers, migration34's workspace-binding trigger function and
-    // migration37's cw-runtime trigger function have their own inventory/
+    // migration38's cw-runtime trigger function have their own inventory/
     // authority proof; none was present in the staged26 baseline and none
     // replaces a prior helper.
     Ok(sqlx::query_scalar(

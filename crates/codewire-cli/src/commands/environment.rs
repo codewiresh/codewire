@@ -3138,14 +3138,6 @@ pub(crate) fn format_env_report_text(report: &EnvironmentTrustReport) -> String 
         display_opt(report.images.workspace_image_id.as_deref())
     ));
     output.push_str(&format!(
-        "    Gateway: {}\n",
-        display_opt(report.images.gateway_image.as_deref())
-    ));
-    output.push_str(&format!(
-        "    Gateway image ID: {}\n",
-        display_opt(report.images.gateway_image_id.as_deref())
-    ));
-    output.push_str(&format!(
         "    DinD: {}\n",
         display_opt(report.images.dind_image.as_deref())
     ));

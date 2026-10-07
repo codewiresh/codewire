@@ -36,7 +36,7 @@ fn decision() -> Decision {
         uid: Uuid::new_v4(),
     };
     let session = PlatformRuntimeSession::new(
-        pod("gateway"),
+        pod("relay"),
         pod("workspace"),
         GrantContext {
             environment_id: EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap(),

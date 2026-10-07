@@ -1,4 +1,4 @@
-//! The SSH proxy opens its gateway port-forward under the environment runtime
+//! The SSH proxy opens its workspace SSH stream under the environment runtime
 //! lease. A client that leaves during that port-forward must not strand the
 //! lease `active`, which would block every external cleanup in the
 //! organization.
@@ -80,7 +80,7 @@ async fn db_failed_port_forward_after_the_client_left_requires_resolution() {
 
     // A client that stays sees the failure; the outcome is still unknown.
     let failure = open_fenced_ssh_stream(&fixture.pool, &fixture.id, &fixture.id, async {
-        Err::<(), _>(anyhow::anyhow!("synthetic gateway port-forward failure"))
+        Err::<(), _>(anyhow::anyhow!("synthetic workspace SSH connect failure"))
     })
     .await
     .unwrap();
@@ -103,7 +103,7 @@ async fn db_failed_port_forward_after_the_client_left_requires_resolution() {
         open_fenced_ssh_stream(&fixture.pool, &fixture.id, &fixture.id, async move {
             let _ = entered_tx.send(());
             let _ = finish_rx.await;
-            Err::<(), _>(anyhow::anyhow!("synthetic gateway port-forward failure"))
+            Err::<(), _>(anyhow::anyhow!("synthetic workspace SSH connect failure"))
         }),
         entered_rx,
     )

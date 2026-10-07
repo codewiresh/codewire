@@ -46,6 +46,7 @@ fn member_setup_error(phase: MemberSetupPhase, error: crate::coordinator::Error)
         Error::SetupTimeout(_) => ("setup_timeout", "none"),
         Error::InvalidSetupResponse => ("invalid_setup_response", "none"),
         Error::DerpMapTooLarge => ("derp_map_too_large", "none"),
+        Error::Trust => ("trust", "none"),
     };
     // Ordinary CLI failures may render their entire anyhow source chain. Do
     // not retain the original error: its URL, credential, RPC message/details,
@@ -388,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn member_setup_diagnostic_classifies_all_seven_errors_without_dynamic_sources() {
+    fn member_setup_diagnostic_classifies_all_errors_without_dynamic_sources() {
         use crate::coordinator::Error;
         for (phase, name) in [
             (MemberSetupPhase::Peer, "peer"),
@@ -426,6 +427,7 @@ mod tests {
                     "none",
                 ),
                 (Error::DerpMapTooLarge, "derp_map_too_large", "none"),
+                (Error::Trust, "trust", "none"),
             ];
             for (error, class, rpc) in errors {
                 assert_closed_setup_error(

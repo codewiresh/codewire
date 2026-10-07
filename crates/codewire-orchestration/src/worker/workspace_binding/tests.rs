@@ -58,7 +58,7 @@ fn legacy_pod(workspace_env: Vec<EnvVar>) -> Pod {
             ..Default::default()
         },
         spec: Some(PodSpec {
-            service_account_name: Some(GATEWAY_BINDING_SERVICE_ACCOUNT.into()),
+            service_account_name: Some(SANDBOX_SERVICE_ACCOUNT.into()),
             containers: vec![
                 container("workspace", WORKSPACE_IMAGE, workspace_env),
                 container("dind", DIND_IMAGE, Vec::new()),
@@ -182,7 +182,7 @@ fn the_credential_scope_follows_what_the_pod_was_rendered_with() {
         .as_mut()
         .unwrap()
         .push(binding_volume(
-            codewire_gateway_proto::GATEWAY_BINDING_TOKEN_AUDIENCE,
+            codewire_gateway_proto::CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
         ));
     assert_eq!(credential_scope(&wrong_audience), None);
 }

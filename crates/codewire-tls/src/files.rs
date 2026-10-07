@@ -99,7 +99,34 @@ impl ServerTlsFiles {
             .map_err(|_| TlsError::Handshake)
     }
 
+    /// Completes one server handshake on `stream` with the current mounted
+    /// identity, offering only HTTP/1.1: for a bounded HTTP/1.1 listener,
+    /// which must never negotiate HTTP/2. A client offering only `h2` is
+    /// refused.
+    pub async fn accept_http1_only(
+        &self,
+        stream: tokio::net::TcpStream,
+    ) -> Result<crate::ServerTlsStream, TlsError> {
+        tokio::time::timeout(TLS_TIMEOUT, async {
+            let config = self.load_with_alpn(vec![b"http/1.1".to_vec()]).await?;
+            tokio_rustls::TlsAcceptor::from(config)
+                .accept(stream)
+                .await
+                .map_err(|_| TlsError::Handshake)
+        })
+        .await
+        .map_err(|_| TlsError::Timeout)?
+    }
+
     pub(crate) async fn load(&self, http1: bool) -> Result<Arc<ServerConfig>, TlsError> {
+        let mut alpn = vec![b"h2".to_vec()];
+        if http1 {
+            alpn.push(b"http/1.1".to_vec());
+        }
+        self.load_with_alpn(alpn).await
+    }
+
+    async fn load_with_alpn(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<ServerConfig>, TlsError> {
         let chain = read_regular(&self.cert_chain, MAX_CERTIFICATE_BYTES).await?;
         let certificates = certificates(&chain)?;
         let pem = read_regular(&self.key, MAX_KEY_BYTES).await?;
@@ -116,10 +143,7 @@ impl ServerTlsFiles {
                 .map_err(|_| TlsError::Configuration)?
                 .with_no_client_auth()
                 .with_cert_resolver(Arc::new(SingleCertAndKey::from(identity)));
-        config.alpn_protocols = vec![b"h2".to_vec()];
-        if http1 {
-            config.alpn_protocols.push(b"http/1.1".to_vec());
-        }
+        config.alpn_protocols = alpn;
         Ok(Arc::new(config))
     }
 }
@@ -215,6 +239,29 @@ fn read_regular_blocking(path: &Path, limit: usize, canceled: impl Fn() -> bool)
     }
     check_live()?;
     Ok(bytes)
+}
+
+/// An optional mounted trust bundle: `None` when nothing exists at `path`,
+/// its certificates when it holds a valid PEM bundle, and an error when it is
+/// present but unreadable, empty or malformed, so a broken mount never
+/// silently changes trust.
+pub async fn read_optional_roots(
+    path: &Path,
+) -> Result<Option<Vec<CertificateDer<'static>>>, TlsError> {
+    validate_path(path)?;
+    if !tokio::fs::try_exists(path)
+        .await
+        .map_err(|_| TlsError::Files)?
+    {
+        return Ok(None);
+    }
+    let bytes = tokio::time::timeout(
+        crate::TLS_TIMEOUT,
+        read_regular(path, MAX_CERTIFICATE_BYTES),
+    )
+    .await
+    .map_err(|_| TlsError::Timeout)??;
+    certificates(&bytes).map(Some)
 }
 
 pub(crate) fn certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, TlsError> {

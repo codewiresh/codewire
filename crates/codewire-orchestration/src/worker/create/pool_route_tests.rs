@@ -30,7 +30,6 @@ fn dev_cfg(shapes: &str) -> SandboxWorkerCfg {
         api_base_url: "https://codewire-dev.sh".into(),
         coordinator_url: "http://codewire-coordinator.dev.svc.cluster.local:8090".into(),
         pod_namespace: "dev".into(),
-        workspace_identity_mode: WorkspaceIdentityMode::Binding,
         warm_pool_shapes: shapes.into(),
         ..Default::default()
     }
@@ -60,16 +59,7 @@ fn environment(cpu: i32, memory: i32, disk: i32) -> EnvironmentRow {
 }
 
 fn opts(cfg: &SandboxWorkerCfg, env: &EnvironmentRow, image: &str) -> TemplateOpts {
-    environment_template_opts(
-        cfg,
-        image,
-        "workspace",
-        env,
-        7,
-        "synthetic-coordinate",
-        "synthetic-daemon",
-    )
-    .unwrap()
+    environment_template_opts(cfg, image, "workspace", env, 7, "synthetic-daemon").unwrap()
 }
 
 fn candidate(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> Result<WarmPoolObjects, ColdReason> {
@@ -128,9 +118,12 @@ fn only_an_exact_canonical_standard_binding_shape_is_a_pool_candidate() {
             Err(ColdReason::Image)
         );
     }
-    let mut rollback = cfg.clone();
-    rollback.workspace_identity_mode = WorkspaceIdentityMode::EnvironmentToken;
-    assert_eq!(candidate(&rollback, &small), Err(ColdReason::Identity));
+    // A rendering that is not identity-free (a configuration without the
+    // binding listener, which a sandbox worker refuses at startup) is never
+    // pooled.
+    let mut unbindable = cfg.clone();
+    unbindable.pod_namespace.clear();
+    assert_eq!(candidate(&unbindable, &small), Err(ColdReason::Identity));
     // An own rendering that differs from the pool's (here another storage
     // class for this environment's rendering) is never pooled.
     let mut other_class = opts(&cfg, &small, CANONICAL_WORKSPACE_RUNTIME_IMAGE);

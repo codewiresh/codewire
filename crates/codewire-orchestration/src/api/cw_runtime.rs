@@ -30,7 +30,7 @@ use super::ApiState;
 use super::proxy::{SandboxTarget, huma_error, resolve_running_sandbox_target};
 use crate::confidential_storage::require_interactive_access;
 use crate::sandbox::client::{ProbeResult, SandboxClient};
-use crate::worker::gatewayauth::{WorkspaceCredentialScope, daemon_credential_for};
+use crate::worker::environment_auth::{WorkspaceCredentialScope, daemon_credential_for};
 use crate::worker::workspace_binding::{CwRuntimeLiveBinding, live_cw_runtime_binding};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(5);

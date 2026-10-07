@@ -323,6 +323,9 @@ fn tailnet_direct_udp_options(
     )
     .with_stun_servers(stun_servers)
     .with_peer_direct_udp_enabled(!suppress_peer_direct_udp)
+    // The environment peer runs inside the sandbox: never let it steer this
+    // client's UDP at loopback or private networks.
+    .with_public_peer_endpoints_only(true)
 }
 
 fn spawn_coordinator_task(
@@ -1039,13 +1042,15 @@ async fn fetch_initial_derp_map(
     Ok(Some(map))
 }
 
+/// A STUN server named by a coordinator DERP map.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct StunServer {
-    host: String,
-    port: u16,
+pub struct StunServer {
+    pub host: String,
+    pub port: u16,
 }
 
-pub(crate) fn derp_target_from_map(map: Option<&Value>) -> Option<DerpTarget> {
+/// The first DERP relay node of a coordinator DERP map, in region order.
+pub fn derp_target_from_map(map: Option<&Value>) -> Option<DerpTarget> {
     let regions = map?.get("Regions")?.as_object()?;
     let mut region_keys = regions.keys().collect::<Vec<_>>();
     region_keys.sort();
@@ -1085,7 +1090,8 @@ pub(crate) fn derp_target_from_map(map: Option<&Value>) -> Option<DerpTarget> {
     None
 }
 
-pub(crate) fn stun_servers_from_map(map: Option<&Value>) -> Vec<StunServer> {
+/// The STUN-only nodes of a coordinator DERP map, without duplicates.
+pub fn stun_servers_from_map(map: Option<&Value>) -> Vec<StunServer> {
     let Some(regions) = map
         .and_then(|map| map.get("Regions"))
         .and_then(Value::as_object)
@@ -1132,9 +1138,8 @@ pub(crate) fn stun_servers_from_map(map: Option<&Value>) -> Vec<StunServer> {
     servers
 }
 
-pub(crate) async fn resolve_stun_servers(
-    servers: Vec<StunServer>,
-) -> anyhow::Result<Vec<SocketAddr>> {
+/// Resolve STUN servers to their socket addresses, without duplicates.
+pub async fn resolve_stun_servers(servers: Vec<StunServer>) -> anyhow::Result<Vec<SocketAddr>> {
     let mut resolved = Vec::new();
     for server in servers {
         let addrs = lookup_host((server.host.as_str(), server.port))
@@ -1455,6 +1460,7 @@ mod tests {
             false,
         );
         assert!(enabled.peer_direct_udp_enabled);
+        assert!(enabled.public_peer_endpoints_only);
 
         unsafe {
             std::env::set_var("CW_TAILNET_SUPPRESS_PEER_DIRECT_UDP", "1");

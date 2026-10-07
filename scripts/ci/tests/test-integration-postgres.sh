@@ -193,7 +193,7 @@ import sys
 
 root, temporary = map(Path, sys.argv[1:])
 suites = [
-    {'args': ['test', '-p', 'codewire-server-core', '--lib', 'migrate::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'server-core migration matrix', 'count': 84},
+    {'args': ['test', '-p', 'codewire-server-core', '--lib', 'migrate::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'server-core migration matrix', 'count': 88},
     {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'storage', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform credential storage matrix', 'count': 23},
     {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'profiles', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform access profile matrix', 'count': 15},
     {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'owner_sources', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform owner-source authority matrix', 'count': 5},
@@ -226,14 +226,15 @@ suites = [
     {'args': ['test', '-p', 'codewire-mesh', '--lib', 'store::migration_tests::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'Mesh migration ledger', 'count': 15},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--test', 'environment_sources', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment source admission matrix', 'count': 6},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::admin::startup_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'admin startup summary matrix', 'count': 2},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::workspace_binding::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'workspace binding recorder matrix', 'count': 21},
+    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::workspace_binding::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'workspace binding recorder matrix', 'count': 20},
+    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'workspace_binding::store::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'workspace binding access store matrix', 'count': 4},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::cw_runtime::owner::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform cw runtime journal matrix', 'count': 35},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::platform_agents::journal::database_tests::db_', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform managed agent journal matrix', 'count': 34},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environment_resize::tests::db_', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'environment resize admission matrix', 'count': 2},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::ssh_proxy::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'SSH proxy runtime lease matrix', 'count': 2},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environment_daemon::repair_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment daemon repair lease matrix', 'count': 2},
-    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::internal::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'gateway RPC ownership matrix', 'count': 2},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::billing_sessions::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'billing session bind matrix', 'count': 4},
+    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::credential_relay::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'credential relay target matrix', 'count': 1},
 ]
 batches = [
     ['test', '-p', 'codewire-server-core', '--lib', '--test', 'session_auth',
@@ -314,7 +315,7 @@ assert all(command['target'] == environment['CARGO_TARGET_DIR'] and
            command['test_database'] == environment['DATABASE_URL_RUST'] for command in actual_batches)
 executions = [command for command in commands if command['args'][0] == 'test'
               and '--no-run' not in command['args']]
-assert len(executions) == len(suites) == 41
+assert len(executions) == len(suites) == 42
 for expected, actual in zip(suites, executions):
     assert actual['args'] == expected['args'], expected['label']
     assert actual['target'] == environment['CODEWIRE_CARGO_CI_TARGET_DIR' if expected['ci']

@@ -44,7 +44,7 @@ async fn fingerprint(pool: &PgPool) -> anyhow::Result<String> {
 }
 
 /// Every helper except migration34's workspace-binding trigger function and
-/// migration37's cw-runtime trigger function, which have their own proof and
+/// migration38's cw-runtime trigger function, which have their own proof and
 /// replace no prior helper.
 async fn helpers(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     Ok(sqlx::query_scalar(

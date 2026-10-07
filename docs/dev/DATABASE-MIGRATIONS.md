@@ -1002,9 +1002,91 @@ disposable application `public` schema. Its fixture proves the ledger and
 migration 35 checksum are restored, records are discarded, and a separate
 schema survives. These tests and instructions authorize no live reset.
 
+### Daemon SSH host keys
+
+Migration `0037_sandbox_ssh_host_keys.sql` is additive. It adds one table,
+`sandbox_ssh_host_keys`, and changes no existing row, helper or earlier
+migration. It implements S3 of the
+[daemon-hosted access design](../plans/2026-10-06-daemon-hosted-access.md)
+for Program #2238.
+
+A workspace daemon generates an Ed25519 host key when it binds and records the
+public half with `RecordHostKey` on the Pod-bound workspace-binding listener.
+Orchestration takes the environment, its current operation generation and the
+Pod UID from the reviewed binding, never from the request. Each row holds the
+environment, the operation generation, the recording Pod's UID, the key and
+`recorded_at`:
+
+- the primary key `pod_uid` allows one key per bound Pod, and orchestration,
+  the only writer, inserts with `ON CONFLICT DO NOTHING`, so a recorded key is
+  never replaced. A different key for the same Pod is refused
+  (`failed_precondition`); the same key again is idempotent. A Pod that
+  replaces another, even within one operation generation, records its own key;
+- CHECK constraints require a positive generation, a lowercase Kubernetes Pod
+  UID, and exactly one OpenSSH Ed25519 key line: `ssh-ed25519`, one space and
+  the 68-character base64 encoding of its 51-byte blob, with no comment;
+- rows cascade with their environment. When the environment's next Pod records
+  its key, the writer deletes the keys of its released bindings in the same
+  transaction. The environment and generation are recorded facts.
+
+Clients trust only the key of the Pod the environment is currently bound to,
+read through the authenticated API, so replacing the Pod (a start, a stop, a
+resize with restart or a repair) rotates trust with it, and a key recorded
+late by a replaced Pod is never trusted.
+
+**Compatibility.** Version-36 binaries never read or write the table. As with
+every migration, a version-36 binary cannot restart against a version-37
+ledger, so a code rollback is a forward revert that keeps this migration, or
+the in-place rollback below.
+
+**Fixtures.** The 36→37 fixtures pin migration 36's SHA-384 and the history
+1–36 from accepted canonical main `6f2693256155b615af44f10ba47c9e53a9419b1b`.
+The version-36 fingerprint stays pinned as
+`ACCEPTED_PRE_SSH_HOST_KEY_SCHEMA_FINGERPRINT`, still equal to the version-34
+value. No earlier fixture needed a change: the migration adds no helper and
+touches no compared row. The fixtures prove:
+
+- fresh apply, with every constraint and its SQLSTATE: 23505 for a second key
+  for one Pod, 23514 for the generation, Pod UID and key-format checks
+  (a comment, a trailing newline, a truncated key, another algorithm, an empty
+  key), 23503 for an unknown environment, and the cascade that removes one
+  environment's keys and no other's;
+- upgrade from version 36 with rows and helpers unchanged, no key invented,
+  and a second startup that is a no-op.
+
+A separate orchestration matrix (`workspace_binding::store::database_tests`,
+3 tests) proves the writer: write-once per Pod, trust only in the currently
+bound Pod's key, pruning of released bindings' keys when the next Pod records,
+and the generation the live binding carries.
+
+The SSH upgrade fixture first proves the exact version-37 boundary, then
+preserves its ledger, rows and keys through the later journals and a second
+current startup.
+
+**Rollback.** Because 0037 only adds one table, it has an in-place rollback
+that keeps every other row. This procedure starts from a version-37 ledger.
+If the later journals have been applied, first reverse managed39 to CW38 and
+CW38 to SSH37 under their own empty-journal guards. Retained request or
+conversation evidence forbids that reversal:
+
+1. Stop the version-37 binaries.
+2. In one transaction, `DROP TABLE public.sandbox_ssh_host_keys;` and
+   `DELETE FROM public._sqlx_migrations WHERE version = 37;`.
+3. Start the version-36 binaries.
+
+Recorded keys are lost; daemons record them again at their next bind after a
+later roll-forward, and clients fail closed until then. The fixture
+`ssh_host_keys_down_restores36_in_place_and_keeps_every_other_row` runs that
+exact statement. It proves the version-36 fingerprint, unchanged rows, helpers
+and ledger, and a clean roll-forward. The full recovery also remains
+available: replay the selected version-36 source into only an empty,
+disposable application `public` schema. Its fixture proves the ledger and
+migration 36 checksum are restored, records are discarded, and a separate
+schema survives. These tests and instructions authorize no live reset.
+
 ### Ordinary cw runtime requests
 
-Migration `0037_environment_cw_runtime_requests.sql` adds the ordinary cw
+Migration `0038_environment_cw_runtime_requests.sql` adds the ordinary cw
 bootstrap, update, rollback and cleanup request journal. Its request UUID,
 authenticated actor, original environment/Pod binding, store generation and
 mutation lease remain attributable after the environment disappears. The
@@ -1017,25 +1099,28 @@ owner blocks a replacement owner; terminal and uncertain evidence cannot be
 deleted or rewritten to replay the request. These rules are separate from
 ordinary session storage and workspace lifecycle.
 
-The owning migration fixtures bind canonical migrations 1–36 from
-`0cb47fbdc8e504162986ec9a7a0740444d913d14`, including the unchanged authority
-stamp removal. They apply an explicit version-37 boundary so later managed
-session tables cannot silently enter that proof. The measured version-37
-schema fingerprint is
-`eb216d37412b9af558ccdc5ab618783713ba289cf0409c97abf68fd83d084637`.
+The owning migration fixtures bind canonical migrations 1–37 from
+`ec60908a65fba269d5858b98c687ad7bf0a2a430`, including unchanged daemon SSH
+host keys. They apply an explicit version-38 boundary so later managed
+session tables cannot silently enter that proof. The version-38 schema
+fingerprint measured by
+`canonical37_cw38_managed39_preserve_prior_ledger_and_measure_boundaries` is
+`8ba1bff35a4a9ba8d1ad41aebab3c2bbbecea13a7efed58b3b3e220e9a950252`.
+The accepted canonical version-37 fingerprint remains
+`88dff060b2dbf35cf0b6464bce13c682c6e13b48ba6d3f80970fb2dfe997c7eb`.
 Upgrade preserves prior rows, checksums and helper objects; failed migration
 transactions leave the prior schema intact.
 
 There is no automatic production rollback for this migration. The owning
 empty-journal reversal fixture proves removal of only its new objects and
-version-37 ledger row restores version 36. Any retained request makes that
+version-38 ledger row restores version 37. Any retained request makes that
 reversal fail. Used journals require a separately reviewed recovery that
 preserves request evidence; a binary downgrade must account for the newer
 migration ledger.
 
 ### Managed platform agent requests
 
-Migration `0038_platform_managed_requests.up.sql` adds
+Migration `0039_platform_managed_requests.up.sql` adds
 `environment_platform_agent_requests` and
 `environment_platform_agent_conversations`. The former binds each mutation
 UUID to its actor, original Pod, binding, digest and one issued owner. The
@@ -1044,16 +1129,17 @@ generation. Matching retries observe the saved outcome; they do not issue a
 second mutation. Explicit cleanup retains the original uncertain result and
 uses a separate linked request.
 
-The migration is additive. It preserves the accepted version-37 ledger and
+The migration is additive. It preserves the accepted version-38 ledger and
 schema, adds bounded metadata and immutable-evidence triggers, and stores no
-prompt or provider material. The independently measured version-38 fingerprint
-is `a7be80c974514b42721d43a6d08efc00349dc0711abbe6356e109189cc215879`.
-Fixtures bind the canonical prior history and unchanged version-37 SQL, then
+prompt or provider material. The version-39 fingerprint measured by the same
+disposable PostgreSQL boundary test is
+`9c5febb69fa7d930c3b4528cda06cf84521162cc51ed7c912959159a28be78fc`.
+Fixtures bind canonical history 1–37 and unchanged CW version-38 SQL, then
 exercise fresh installation, upgrade, rollback and retained-evidence refusal.
 Applied-row counts include up migrations only; the down file is not an
 applied ledger row.
 
-`0038_platform_managed_requests.down.sql` is permitted only while both new
+`0039_platform_managed_requests.down.sql` is permitted only while both new
 tables are empty. Any request or conversation prevents in-place rollback.
 Stop the owning workload before a reviewed reversal; never discard issued,
 uncertain or terminal evidence to make it succeed. A used deployment requires

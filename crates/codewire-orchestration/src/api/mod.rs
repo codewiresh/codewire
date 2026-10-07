@@ -15,7 +15,7 @@ pub mod environment_daemon;
 pub mod environment_resize;
 pub mod environment_sources;
 pub mod environments;
-pub mod internal;
+pub mod host_key;
 pub mod log_notifications;
 pub mod logs;
 pub mod organizations;
@@ -72,12 +72,10 @@ pub struct ApiState {
     /// Cluster-local daemon resolution plus a loopback-only external wire-test
     /// override that cannot be enabled without CONNECT_TESTING_SURFACE=1.
     pub environment_daemon_endpoints: environment_daemon::EnvironmentDaemonEndpointOverrides,
-    /// Shared session secret (Go: cfg.SessionSecret). Used by the
-    /// internal gateway-binding endpoint to issue coordinate-scoped
-    /// sidecar tokens (Go: gatewayservice.NewInProcessService).
+    /// Shared session secret for daemon tokens and preview authorization.
     pub session_secret: String,
-    /// Sandbox/runtime config slice used by internal gateway binding
-    /// to publish dynamic transport endpoints for this environment.
+    /// Sandbox/runtime config slice: the daemon support image and the
+    /// workspace-binding listener's namespace and relay endpoints.
     pub sandbox_cfg: SandboxWorkerCfg,
     /// Disabled-by-default confidential storage product gates.
     pub confidential_storage_flags: FeatureFlags,

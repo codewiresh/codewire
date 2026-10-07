@@ -13,8 +13,9 @@ use super::runtime_policy::{
     workspace_storage_class,
 };
 use codewire_gateway_proto::{
-    WORKSPACE_BINDING_TOKEN_AUDIENCE, WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS,
-    WORKSPACE_BINDING_TOKEN_MOUNT_PATH, WORKSPACE_BINDING_URL_ENV, WORKSPACE_POD_UID_ENV,
+    WORKSPACE_BINDING_TLS_ROOTS_MOUNT_PATH, WORKSPACE_BINDING_TOKEN_AUDIENCE,
+    WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS, WORKSPACE_BINDING_TOKEN_MOUNT_PATH,
+    WORKSPACE_BINDING_URL_ENV, WORKSPACE_POD_UID_ENV,
 };
 // The binding recorder recognizes a Pod-scope Pod by this exact volume.
 use crate::worker::workspace_binding::WORKSPACE_BINDING_VOLUME;
@@ -388,6 +389,30 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
                 "mountPath": WORKSPACE_BINDING_TOKEN_MOUNT_PATH,
                 "readOnly": true,
             }));
+        // The public roots that verify the binding listener's TLS identity.
+        volumes.push(workspace_binding_roots_volume());
+        ws["volumeMounts"]
+            .as_array_mut()
+            .expect("workspace mounts")
+            .push(json!({
+                "name": WORKSPACE_BINDING_ROOTS_VOLUME,
+                "mountPath": WORKSPACE_BINDING_TLS_ROOTS_MOUNT_PATH,
+                "readOnly": true,
+            }));
+        // A local cluster's coordinator is not WebPKI-signed: only there does
+        // orchestration mount the public bundle the daemon trusts beside the
+        // WebPKI roots for its coordinator. Dev and Production never do.
+        if opts.coordinator_extra_roots {
+            volumes.push(coordinator_extra_roots_volume());
+            ws["volumeMounts"]
+                .as_array_mut()
+                .expect("workspace mounts")
+                .push(json!({
+                    "name": COORDINATOR_EXTRA_ROOTS_VOLUME,
+                    "mountPath": codewire_gateway_proto::COORDINATOR_EXTRA_ROOTS_MOUNT_PATH,
+                    "readOnly": true,
+                }));
+        }
     }
 
     let mut spec = Map::new();
@@ -567,6 +592,38 @@ fn workspace_binding_token_volume() -> Value {
                     "path": "token",
                 },
             }],
+        },
+    })
+}
+
+/// The volume of the binding listener's public roots.
+pub(crate) const WORKSPACE_BINDING_ROOTS_VOLUME: &str = "orchestration-internal-roots";
+
+/// Only the `ca.crt` key of orchestration's published internal roots: public
+/// trust material, never a credential (daemon-hosted access §6).
+fn workspace_binding_roots_volume() -> Value {
+    json!({
+        "name": WORKSPACE_BINDING_ROOTS_VOLUME,
+        "configMap": {
+            "name": ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP,
+            "items": [{ "key": "ca.crt", "path": "ca.crt" }],
+            "defaultMode": 0o444,
+        },
+    })
+}
+
+/// The volume of the coordinator's extra public roots (local clusters only).
+pub(crate) const COORDINATOR_EXTRA_ROOTS_VOLUME: &str = "coordinator-extra-roots";
+
+/// Only the `ca.crt` key of the coordinator's extra public roots: public trust
+/// material, never a credential.
+fn coordinator_extra_roots_volume() -> Value {
+    json!({
+        "name": COORDINATOR_EXTRA_ROOTS_VOLUME,
+        "configMap": {
+            "name": codewire_gateway_proto::COORDINATOR_EXTRA_ROOTS_CONFIGMAP,
+            "items": [{ "key": "ca.crt", "path": "ca.crt" }],
+            "defaultMode": 0o444,
         },
     })
 }
@@ -781,4 +838,15 @@ pub fn render_workspace_daemon_service(namespace: &str, opts: &TemplateOpts) -> 
             ],
         },
     })
+}
+
+/// The sandbox-namespace ConfigMap with the public roots of orchestration's
+/// internal TLS listeners. The infrastructure owner provisions it; workspaces
+/// mount it and orchestration checks its own leaf against it at startup.
+pub const ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP: &str = "codewire-orchestration-internal-roots";
+
+/// The DNS name of orchestration's internal TLS listener in `server_namespace`:
+/// the name Mesh calls and its leaf Certificate names.
+pub fn orchestration_internal_tls_host(server_namespace: &str) -> String {
+    format!("codewire-orchestration.{server_namespace}.svc.cluster.local")
 }

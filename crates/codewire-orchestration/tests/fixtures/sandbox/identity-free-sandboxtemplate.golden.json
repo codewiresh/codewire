@@ -102,6 +102,28 @@
               }
             }
           ]
+        },
+        {
+          "ports": [
+            {
+              "port": 3478,
+              "protocol": "UDP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "derp"
+                }
+              }
+            }
+          ]
         }
       ]
     },
@@ -139,7 +161,7 @@
               },
               {
                 "name": "CODEWIRE_WORKSPACE_BINDING_URL",
-                "value": "http://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
+                "value": "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
               },
               {
                 "name": "CODEWIRE_POD_UID",
@@ -238,6 +260,11 @@
               {
                 "mountPath": "/var/run/secrets/codewire/workspace-binding",
                 "name": "workspace-binding-identity",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/run/codewire-orchestration-internal-roots",
+                "name": "orchestration-internal-roots",
                 "readOnly": true
               },
               {
@@ -354,6 +381,19 @@
                 }
               ]
             }
+          },
+          {
+            "configMap": {
+              "defaultMode": 292,
+              "items": [
+                {
+                  "key": "ca.crt",
+                  "path": "ca.crt"
+                }
+              ],
+              "name": "codewire-orchestration-internal-roots"
+            },
+            "name": "orchestration-internal-roots"
           },
           {
             "emptyDir": {
