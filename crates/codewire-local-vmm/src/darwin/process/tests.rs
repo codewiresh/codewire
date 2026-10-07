@@ -391,3 +391,135 @@ fn observation_child() {
         phase => panic!("unexpected fixture phase: {phase}"),
     }
 }
+
+const PARENT_EXIT_CHILD: &str = "darwin::process::tests::parent_exit_child";
+const PARENT_EXIT_MODE: &str = "CW_PARENT_EXIT_CHILD";
+
+#[test]
+fn captured_identity_is_the_current_birth_and_is_never_adopted() {
+    let identity = ProcessIdentity::capture(std::process::id()).unwrap();
+    let birth = observe_current().unwrap();
+    assert_eq!(identity.pid, std::process::id());
+    assert_eq!(identity.boot_id, birth.boot_session().to_hyphenated());
+    assert_eq!(identity.start_time_ticks, birth.start_abstime());
+    assert_eq!(
+        identity.executable,
+        std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
+    );
+    assert_eq!(identity.executable_sha256.len(), 64);
+    assert!(matches!(
+        LiveProcess::recover(&identity),
+        Err(RecoveryError::Unowned)
+    ));
+    let mut other = identity;
+    other.start_time_ticks += 1;
+    assert!(matches!(
+        LiveProcess::recover(&other),
+        Err(RecoveryError::IdentityMismatch)
+    ));
+}
+
+fn readable(fd: RawFd) -> bool {
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one initialized entry; zero timeout.
+    unsafe { libc::poll(&mut pollfd, 1, 0) == 1 }
+}
+
+#[tokio::test]
+async fn owned_child_exit_is_observed_and_a_reaped_child_is_never_signaled() {
+    let sleep = std::path::Path::new("/bin/sleep");
+    let mut child = Command::new(sleep).arg("30").spawn().unwrap();
+    assert!(matches!(
+        LiveProcess::capture_child(child.id(), std::path::Path::new("/bin/cat")),
+        Err(RecoveryError::UnexpectedSpawnedExecutable)
+    ));
+    let process = LiveProcess::capture_child(child.id(), sleep).unwrap();
+    let liveness = process.duplicate_wait_descriptor().unwrap();
+    assert!(!process.is_exited().unwrap());
+    assert!(!readable(liveness.as_raw_fd()));
+    process.signal(Signal::KILL).unwrap();
+    assert!(process.wait_exited(Duration::from_secs(5)).await.unwrap());
+    assert!(readable(liveness.as_raw_fd()));
+    // Exited but unreaped: signaling has no effect, as with a Linux pidfd.
+    process.signal(Signal::KILL).unwrap();
+    child.wait().unwrap();
+    assert!(process.is_exited().unwrap());
+    assert!(matches!(
+        process.signal(Signal::KILL),
+        Err(RecoveryError::ProcessExited)
+    ));
+    assert!(matches!(
+        LiveProcess::recover(process.identity()),
+        Err(RecoveryError::ProcessExited | RecoveryError::IdentityMismatch)
+    ));
+}
+
+#[test]
+fn spawned_child_exits_when_its_parent_exits() {
+    // sh starts the fixed child in the background, reports its PID, then
+    // becomes `sleep`, which stays the child's parent until killed here.
+    let mut parent = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "\"$0\" \"$@\" & echo \"$!\"; exec /bin/sleep 30",
+            std::env::current_exe().unwrap().to_str().unwrap(),
+            "--exact",
+            PARENT_EXIT_CHILD,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env_clear()
+        .env(PARENT_EXIT_MODE, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut output = parent.stdout.take().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = Vec::new();
+    while !String::from_utf8_lossy(&seen).contains("CW_PARENT_EXIT ready\n") {
+        assert!(Instant::now() < deadline, "child never became ready");
+        let mut buffer = [0_u8; 256];
+        let read = output.read(&mut buffer).unwrap();
+        assert_ne!(read, 0, "child exited before becoming ready");
+        seen.extend_from_slice(&buffer[..read]);
+    }
+    // The unreaped direct child is owned here, so std's kill is exact.
+    parent.kill().unwrap();
+    parent.wait().unwrap();
+    // Only the background child still holds the pipe: EOF means it exited.
+    let descriptor = output.as_raw_fd();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let mut pollfd = libc::pollfd {
+            fd: descriptor,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one initialized entry for a bounded wait.
+        let ready = unsafe { libc::poll(&mut pollfd, 1, remaining.as_millis() as libc::c_int) };
+        assert_eq!(ready, 1, "child outlived its parent");
+        let mut buffer = [0_u8; 256];
+        if output.read(&mut buffer).unwrap() == 0 {
+            break;
+        }
+    }
+}
+
+#[test]
+#[ignore = "fixed child invoked only by spawned_child_exits_when_its_parent_exits"]
+fn parent_exit_child() {
+    if std::env::var_os(PARENT_EXIT_MODE).is_none() {
+        return;
+    }
+    exit_with_parent().unwrap();
+    flush_report("CW_PARENT_EXIT ready\n");
+    std::thread::sleep(Duration::from_secs(20));
+    panic!("parent exit was not observed");
+}

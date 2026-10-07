@@ -14,20 +14,11 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use super::acl;
+pub use crate::supervisor_metadata::legacy::{FileIdentity, SocketIdentity};
 
 const O_RESOLVE_BENEATH: libc::c_int = 0x1000;
 const O_UNIQUE: libc::c_int = 0x2000;
 const PRIVATE_FLAGS: libc::c_int = libc::O_CLOEXEC | libc::O_NOFOLLOW_ANY | O_RESOLVE_BENEATH;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileIdentity {
-    pub device: u64,
-    pub inode: u64,
-    pub size: u64,
-    pub uid: u32,
-    pub mode: u32,
-    pub links: u64,
-}
 
 impl FileIdentity {
     pub fn from_metadata(metadata: &Metadata) -> Self {
@@ -693,14 +684,6 @@ impl PrivateRoot {
             source: Box::new(source),
         })
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SocketIdentity {
-    pub device: u64,
-    pub inode: u64,
-    pub uid: u32,
-    pub mode: u32,
 }
 
 impl SocketIdentity {
