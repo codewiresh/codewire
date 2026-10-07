@@ -20,8 +20,9 @@
 
   function showDeadline(node, detail) {
     if (detail.deletionState !== "scheduled") {
-      node.textContent = { unscheduled: "Not currently scheduled", protected: "Protected from automatic deletion",
-        unavailable: "Deletion deadline unavailable" }[detail.deletionState];
+      // Read after the status bar's "Auto-delete" label.
+      node.textContent = { unscheduled: "off", protected: "off (protected)",
+        unavailable: "unavailable" }[detail.deletionState];
       return;
     }
     const date = new Date(detail.shutdownAt);
@@ -72,7 +73,9 @@
     // Ask for setupRunning explicitly: the server omits it for pages that
     // predate it, whose closed-shape check would otherwise reject the response.
     const url = `/${encodeURIComponent(slug)}/${environmentId}/_fragments/terminal-readiness?fields=setup`;
-    const button = root.querySelector("[data-terminal-readiness-refresh]");
+    // The workspace keeps Refresh sandbox status in its More actions menu.
+    const button = root.querySelector("[data-terminal-readiness-refresh]")
+      || document.querySelector("[data-terminal-readiness-refresh]");
     const heading = document.querySelector("[data-sandbox-observation]");
     const observesDetail = heading?.dataset.sandboxEnvironmentId === environmentId;
     let submissionPending = false;

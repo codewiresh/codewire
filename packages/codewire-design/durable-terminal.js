@@ -16,6 +16,10 @@
     exited: exitCode === undefined ? "Exited" : `Exited with code ${exitCode}`,
   })[state] ?? state;
   const ended = (state) => !["starting", "running", "stopping"].includes(state);
+  // The status bar's dot: green while a live session is attached, amber while
+  // it is on its way back, red when it cannot continue without help.
+  const stateTone = (state) => live(state) ? "success" : state === "stopping" ? "warning"
+    : ["failed", "interrupted"].includes(state) ? "danger" : "neutral";
   // Automatic re-attachment waits 1, 2, 4 and 8 s, then 15 s, while the tab is
   // wanted and the page is visible. Only a connection that stays open resets it.
   const retryBaseMs = 1000;
@@ -36,6 +40,9 @@
     const tabs = new Map();
     const tabList = root.querySelector("[data-terminal-tabs]");
     const panels = root.querySelector("[data-terminal-panels]");
+    // Each tab also owns its status-bar group and its terminal-menu actions.
+    const statuses = root.querySelector("[data-terminal-statuses]");
+    const tabActions = root.querySelector("[data-terminal-tab-actions]");
     const template = root.querySelector("[data-terminal-tab-template]");
     const newButton = root.querySelector("[data-terminal-new]");
     const limitNote = root.querySelector("[data-terminal-limit]");
@@ -65,8 +72,12 @@
     let number = 0;
     let inventory = [];
     let closeTarget = null;
+    // Where focus returns when the Close dialog closes: the tab's close
+    // button, or the tab itself when Delete opened it from the keyboard.
+    let closeReturn = null;
     let renameTarget = null;
     let renameOpener = null;
+    let renameReturn = null;
     let requestController = null;
     let foregroundCheck = false;
     // Readiness returned while another request was pending: re-list before
@@ -85,8 +96,15 @@
       : !runtimeAvailable ? "Sandbox status is unavailable. Terminal controls are paused."
       : !runtimeRunning ? "Start this Sandbox to use its terminals."
         : "Sandbox setup is not complete. Terminal controls will be available when setup completes.";
+    const readinessTone = () => runtimeAvailable && !runtimeRunning ? "neutral" : "warning";
 
     function announce(text) { message.textContent = text; }
+    // Output, status-bar groups and tab actions are shown or withheld together.
+    function showSessions(visible) {
+      panels.hidden = !visible;
+      statuses.hidden = !visible;
+      tabActions.hidden = !visible;
+    }
     function storageKey() { return `${storagePrefix}${account}:${org}:${environment}`; }
     function store() {
       if (!authorized || !account) return;
@@ -160,8 +178,20 @@
     }
     function label(tab, text) {
       tab.label = text;
-      tab.button.textContent = text;
+      tab.labelNode.textContent = text;
       tab.panel.querySelector("h2").textContent = text;
+      tab.close.setAttribute("aria-label", `Close ${text}`);
+      tab.remove.setAttribute("aria-label", `Remove ${text} tab`);
+    }
+    // Keep the selected tab in view inside the tab strip, which scrolls on its
+    // own; never scroll the page for it.
+    function reveal(tab) {
+      const strip = tabList.closest("nav");
+      if (!strip) return;
+      const box = tab.item.getBoundingClientRect();
+      const view = strip.getBoundingClientRect();
+      if (box.left < view.left) strip.scrollLeft -= view.left - box.left;
+      else if (box.right > view.right) strip.scrollLeft += box.right - view.right;
     }
     function choose(id, focus = false) {
       if (!tabs.has(id)) return;
@@ -171,21 +201,27 @@
         tab.button.setAttribute("aria-selected", String(selected));
         tab.button.tabIndex = selected ? 0 : -1;
         tab.panel.hidden = !selected;
+        tab.status.hidden = !selected;
+        tab.actions.hidden = !selected;
         if (selected) {
           tab.presentation.fitAndResize();
+          reveal(tab);
           if (focus) tab.button.focus();
         }
       }
       updateControls();
       store();
     }
-    function connectionText(tab, text) { tab.connection.textContent = text; }
-    function finalAfterRender(tab, text) {
+    function connectionText(tab, text, tone = "neutral") {
+      tab.connectionLabel.textContent = text;
+      tab.connection.dataset.tone = tone;
+    }
+    function finalAfterRender(tab, text, tone) {
       const renderEpoch = tab.renderEpoch;
       const attempt = tab.attempt;
       void tab.writes.then(() => {
         if (!tab.disposed && !tab.renderFailed && renderEpoch === tab.renderEpoch && attempt === tab.attempt) {
-          connectionText(tab, text);
+          connectionText(tab, text, tone);
           tab.root.dataset.terminalSettled = "true";
         }
       });
@@ -195,7 +231,7 @@
       tab.inputTimer = null;
       tab.stagedInput = null;
     }
-    function detach(tab, text = "Disconnected", keepWanted = false) {
+    function detach(tab, text = "Disconnected", keepWanted = false, tone = "neutral") {
       if (!keepWanted) {
         tab.wanted = false;
         tab.failures = 0;
@@ -216,7 +252,7 @@
       tab.toggle.textContent = "Reconnect";
       tab.root.dataset.terminalSettled = String(tab.pendingFrames === 0);
       tab.presentation.terminal.options.disableStdin = true;
-      connectionText(tab, text);
+      connectionText(tab, text, tone);
     }
     // Transport loss is not a decision to stop. Re-attach the same wanted
     // session automatically; explicit Disconnect, final status, unverifiable
@@ -238,14 +274,15 @@
     }
     function lose(tab, text) {
       const automatically = automatic(tab);
-      detach(tab, `${text} ${automatically ? "Reconnecting…" : "Reconnect to resume this terminal."}`, automatically);
+      detach(tab, `${text} ${automatically ? "Reconnecting…" : "Reconnect to resume this terminal."}`, automatically,
+        automatically ? "warning" : "neutral");
       if (automatically) scheduleReconnect(tab);
     }
     function retry(tab) {
       // Foreground and readiness recovery own hidden, suspended and not-ready
       // waits; each reconnects wanted tabs when it completes.
       if (!automatic(tab) || tab.socket || suspended || document.hidden) return;
-      if (!runtimeReady()) detach(tab, readinessMessage(), true);
+      if (!runtimeReady()) detach(tab, readinessMessage(), true, readinessTone());
       else if (pending) scheduleReconnect(tab);
       else if (!authorized || relist) void refresh();
       else if (tab.failures % revalidateEvery === 0) void revalidate(tab);
@@ -254,7 +291,8 @@
     // Identity checks pause every transport. Wanted tabs reconnect when the
     // check completes; the others keep their last state.
     function pauseForIdentity(tab) {
-      detach(tab, tab.wanted ? "Checking account…" : tab.connection.textContent, true);
+      detach(tab, tab.wanted ? "Checking account…" : tab.connection.textContent, true,
+        tab.wanted ? "warning" : tab.connection.dataset.tone);
     }
     function sendDeadline(tab) {
       return Math.min(tab.stagedInput?.deadline ?? Infinity, ...tab.sendQueue.map((frame) => frame.deadline));
@@ -294,7 +332,7 @@
       if (suspended || !authorized || tab.socket !== socket || socket.readyState !== WebSocket.OPEN) return false;
       let encoded;
       try { encoded = P.encodeClient(frame); } catch {
-        connectionText(tab, "Input is too large to send. Paste a smaller amount.");
+        connectionText(tab, "Input is too large to send. Paste a smaller amount.", "warning");
         return false;
       }
       if (!reconcileSendQueue(tab, socket)) return false;
@@ -330,7 +368,7 @@
       if (tab.socket !== socket || socket.readyState !== WebSocket.OPEN || suspended || !authorized || !runtimeReady() || !live(tab.state)) return;
       let encoded;
       try { encoded = P.encodeClient({ type: "input", data }); } catch {
-        connectionText(tab, "Input is too large to send. Paste a smaller amount.");
+        connectionText(tab, "Input is too large to send. Paste a smaller amount.", "warning");
         return;
       }
       if (!reconcileSendQueue(tab, socket)) return;
@@ -384,7 +422,7 @@
           });
         } catch {
           tab.renderFailed = true;
-          detach(tab, "Output could not be rendered. Choose Replay recent output to recover.");
+          detach(tab, "Output could not be rendered. Choose Replay recent output to recover.", false, "danger");
           tab.renderAbort.abort();
           updateControls();
           finish();
@@ -404,8 +442,8 @@
     }
     async function connect(tab) {
       if (tab.renderFailed) return;
-      if (!runtimeReady()) { detach(tab, readinessMessage(), true); return; }
-      detach(tab, "Connecting…", true);
+      if (!runtimeReady()) { detach(tab, readinessMessage(), true, readinessTone()); return; }
+      detach(tab, "Connecting…", true, "warning");
       tab.wanted = true;
       const attempt = tab.attempt;
       const identityEpoch = epoch;
@@ -415,21 +453,22 @@
       const drained = await Promise.race([tab.writes.then(() => true), new Promise((resolve) => { timer = setTimeout(() => resolve(false), 5000); })]);
       clearTimeout(timer);
       if (tab.disposed || tab.renderFailed || suspended || document.hidden || !authorized || !runtimeReady() || epoch !== identityEpoch || attempt !== tab.attempt) return;
-      if (!drained) { detach(tab, "Output is still rendering. Replay output before reconnecting."); return; }
+      if (!drained) { detach(tab, "Output is still rendering. Replay output before reconnecting.", false, "danger"); return; }
       tab.received = tab.rendered;
       let socket;
       try { socket = new WebSocket(websocketUrl(tab), [P.protocol]); } catch {
-        detach(tab, "The terminal connection is unavailable."); return;
+        detach(tab, "The terminal connection is unavailable.", false, "danger"); return;
       }
       tab.socket = socket;
       let finalStatus = false;
       let finalText;
+      let finalTone;
       tab.root.dataset.terminalSettled = "false";
       socket.addEventListener("open", () => {
         if (tab.socket !== socket || suspended || !authorized) { socket.close(); return; }
-        if (socket.protocol !== P.protocol) { detach(tab, "The terminal protocol is unavailable."); return; }
+        if (socket.protocol !== P.protocol) { detach(tab, "The terminal protocol is unavailable.", false, "danger"); return; }
         tab.toggle.textContent = "Disconnect";
-        connectionText(tab, live(tab.state) ? "Connected" : stateLabel(tab.state));
+        connectionText(tab, live(tab.state) ? "Connected" : stateLabel(tab.state), stateTone(tab.state));
         // A server that accepts and then closes must not reset the backoff.
         tab.stableTimer = setTimeout(() => {
           tab.stableTimer = null;
@@ -451,8 +490,9 @@
             const text = live(frame.state) ? "Connected" : stateLabel(frame.state, frame.exitCode);
             if (finalStatus) {
               finalText = text;
-              finalAfterRender(tab, text);
-            } else connectionText(tab, text);
+              finalTone = stateTone(frame.state);
+              finalAfterRender(tab, text, finalTone);
+            } else connectionText(tab, text, stateTone(frame.state));
             updateControls();
             return;
           }
@@ -475,7 +515,7 @@
           tab.pendingFrames += 1;
           tab.pendingBytes += bytes;
           render(tab, socket, data, next, bytes, frame.type === "historyGap");
-        } catch { detach(tab, "Connection closed because terminal output could not be verified."); }
+        } catch { detach(tab, "Connection closed because terminal output could not be verified.", false, "danger"); }
       });
       socket.addEventListener("error", () => {
         if (tab.socket === socket) lose(tab, "Connection closed.");
@@ -483,10 +523,10 @@
       socket.addEventListener("close", (event) => {
         if (tab.socket !== socket) return;
         if (finalStatus && event.code === 1000) {
-          detach(tab, "Rendering terminal output…");
-          finalAfterRender(tab, finalText);
+          detach(tab, "Rendering terminal output…", false, "warning");
+          finalAfterRender(tab, finalText, finalTone);
         } else if (finalStatus) {
-          detach(tab, "Connection closed before terminal output could be confirmed.");
+          detach(tab, "Connection closed before terminal output could be confirmed.", false, "danger");
         } else lose(tab, "Disconnected.");
       });
     }
@@ -501,18 +541,18 @@
       let data;
       try { data = await request("list"); } catch (error) {
         if (stale()) return;
-        // Identity doubts pause every transport and hide output, as on focus.
-        if (error.authorization) foreground();
+        // Identity doubts pause every transport and hide output.
+        if (error.authorization) doubtAccount();
         else scheduleReconnect(tab);
         return;
       }
       if (stale()) return;
-      if (data.accountId !== account) { foreground(); return; }
+      if (data.accountId !== account) { doubtAccount(); return; }
       const session = data.sessions.find((item) => item.sessionId === tab.id);
       if (!session) {
         tab.available = false;
         inventory = inventory.filter((item) => item.sessionId !== tab.id);
-        detach(tab, "This terminal is no longer available.");
+        detach(tab, "This terminal is no longer available.", false, "danger");
         announce("A saved terminal is no longer available. Choose an existing terminal or start a new one.");
         showInventory();
         return;
@@ -524,6 +564,7 @@
       tab.root.replaceChildren();
       tab.presentation = globalThis.CodewireTerminalPresentation.open(tab.root, styleNonce, {
         onResize: ({ cols, rows }) => { if (tab.socket && live(tab.state)) send(tab, tab.socket, { type: "resize", columns: cols, rows }); },
+        copyButton: tab.copy, copyStatus: tab.copyStatus,
       });
       tab.input = tab.presentation.terminal.onData((data) => {
         if (tab.socket && live(tab.state)) queueInput(tab, tab.socket, data);
@@ -540,6 +581,8 @@
       tab.presentation.dispose();
       tab.panel.remove();
       tab.item.remove();
+      tab.status.remove();
+      tab.actions.remove();
       tabs.delete(tab.id);
     }
     function clearPresentations() {
@@ -548,43 +591,53 @@
       active = null;
       dialog.close();
       closeTarget = null;
+      closeReturn = null;
     }
     function add(session) {
       if (tabs.has(session.sessionId) || tabs.size >= maxTabs) return tabs.get(session.sessionId);
       number += 1;
-      const panel = template.content.firstElementChild.cloneNode(true);
+      // The template holds one tab's four parts: its tab, its output panel,
+      // its status-bar group and its terminal-menu actions.
+      const parts = template.content.cloneNode(true);
+      const part = (name) => parts.querySelector(`[${name}]`);
+      const item = part("data-terminal-tab-item");
+      const button = part("data-terminal-tab");
+      const panel = part("data-terminal-tab-panel");
+      const status = part("data-terminal-session-status");
+      const actions = part("data-terminal-tab-action-group");
       panel.id = `terminal-panel-${number}`;
       panel.dataset.terminalSessionId = session.sessionId;
+      status.dataset.terminalSessionId = session.sessionId;
       let displayNumber = number;
       while ([...tabs.values()].some((tab) => tab.label === `Terminal ${displayNumber}`)) displayNumber += 1;
       const defaultLabel = `Terminal ${displayNumber}`;
-      panel.querySelector("h2").textContent = defaultLabel;
-      const item = document.createElement("li");
-      item.setAttribute("role", "presentation");
-      const button = document.createElement("button");
-      button.type = "button";
       button.id = `terminal-tab-${number}`;
-      button.setAttribute("role", "tab");
       button.setAttribute("aria-controls", panel.id);
-      button.textContent = defaultLabel;
       panel.setAttribute("aria-labelledby", button.id);
-      item.append(button);
       tabList.append(item);
       panels.append(panel);
-      const tab = { id: session.sessionId, state: session.state, item, button, panel,
-        label: button.textContent,
-        root: panel.querySelector("[data-terminal-root]"), connection: panel.querySelector("[data-terminal-connection]"),
+      statuses.append(status);
+      tabActions.append(actions);
+      const tab = { id: session.sessionId, state: session.state, item, button, panel, status, actions,
+        label: defaultLabel, labelNode: button.querySelector("[data-terminal-tab-label]"),
+        root: panel.querySelector("[data-terminal-root]"), connection: status.querySelector("[data-terminal-connection]"),
+        connectionLabel: status.querySelector("[data-terminal-connection-label]"),
         historyGap: panel.querySelector("[data-terminal-history-gap]"),
-        toggle: panel.querySelector("[data-terminal-toggle]"), reset: panel.querySelector("[data-terminal-replay]"),
-        close: panel.querySelector("[data-terminal-close-session]"), remove: panel.querySelector("[data-terminal-remove-tab]"),
+        toggle: status.querySelector("[data-terminal-toggle]"), reset: actions.querySelector("[data-terminal-replay]"),
+        copy: actions.querySelector("[data-terminal-copy]"), copyStatus: status.querySelector("[data-terminal-copy-status]"),
+        close: item.querySelector("[data-terminal-close-session]"), remove: item.querySelector("[data-terminal-remove-tab]"),
         socket: null, attempt: 0, renderEpoch: 0, renderAbort: new AbortController(), renderFailed: false,
         rendered: 0n, received: 0n, pendingBytes: 0, pendingFrames: 0, writes: Promise.resolve(),
         sendQueue: [], queuedBytes: 0, sendTimer: null, stagedInput: null, inputTimer: null,
         retryTimer: null, stableTimer: null, failures: 0,
         wanted: true, available: true, disposed: false };
+      label(tab, defaultLabel);
+      status.hidden = true;
+      actions.hidden = true;
       presentation(tab);
       tabs.set(tab.id, tab);
       button.addEventListener("click", () => choose(tab.id));
+      button.addEventListener("dblclick", () => { if (tab.id === active) startRename(button); });
       tab.toggle.addEventListener("click", () => {
         // Disconnect is sticky until Reconnect. Reconnect acts immediately,
         // including while an automatic attempt is waiting or connecting.
@@ -611,6 +664,7 @@
       });
       tab.close.addEventListener("click", () => {
         closeTarget = tab.id;
+        closeReturn = closeReturn ?? tab.close;
         dialog.showModal();
         dialog.querySelector("[data-terminal-cancel-close]").focus();
       });
@@ -679,7 +733,7 @@
       pending = true;
       authorized = false;
       invalidateRename();
-      panels.hidden = true;
+      showSessions(false);
       for (const tab of tabs.values()) pauseForIdentity(tab);
       updateControls();
       announce("Refreshing terminal sessions…");
@@ -715,10 +769,10 @@
           const session = available.get(tab.id);
           tab.available = !!session;
           if (session) tab.state = session.state;
-          else { missing = true; detach(tab, "This terminal is no longer available."); }
+          else { missing = true; detach(tab, "This terminal is no longer available.", false, "danger"); }
           if (tab.id === reconnectId && tab.available) tab.wanted = true;
         }
-        panels.hidden = false;
+        showSessions(true);
         choose(tabs.has(active) ? active : tabs.keys().next().value);
         store();
         announce(missing ? "A saved terminal is no longer available. Choose an existing terminal or start a new one." : "");
@@ -756,9 +810,10 @@
         } else {
           if (session.sessionId !== id || !["stopped", "exited"].includes(session.state)) throw new Error("Uncertain stop");
           const tab = tabs.get(id);
+          const focused = !!tab?.item.contains(document.activeElement);
           if (tab) dispose(tab);
           inventory = inventory.filter((item) => item.sessionId !== id);
-          choose(tabs.keys().next().value);
+          choose(tabs.keys().next().value, focused);
           if (!tabs.size) active = null;
         }
         announce("");
@@ -790,17 +845,21 @@
       }
     }
     newButton.addEventListener("click", () => { void mutate("launch"); });
-    renameButton.addEventListener("click", () => {
+    // Rename starts from the terminal menu, F2 or a double-click on the
+    // selected tab; focus returns to whichever started it.
+    function startRename(returnTo) {
       const tab = tabs.get(active);
-      if (!authorized || pending || uncertain || needsReload || suspended || !tab) return;
+      if (renameButton.disabled || !authorized || pending || uncertain || needsReload || suspended || !tab) return;
       renameTarget = { tab, account, epoch };
       renameOpener = tab;
+      renameReturn = returnTo;
       renameInput.value = tab.label;
       renameInput.setCustomValidity("");
       renameDialog.showModal();
       renameInput.focus();
       renameInput.select();
-    });
+    }
+    renameButton.addEventListener("click", () => startRename(renameButton));
     refreshButton.addEventListener("click", () => { void refresh(); });
     existing.addEventListener("change", updateControls);
     existingForm.addEventListener("submit", (event) => {
@@ -820,12 +879,18 @@
       const tab = tabs.get(id);
       if (!tab) return;
       if (!tab.available || ended(tab.state)) {
-        announce("This terminal is no longer live. Use Remove tab to clear it from this browser.");
+        announce("This terminal is no longer live. Remove its tab to clear it from this browser.");
         return;
       }
       void mutate("stop", id);
     });
-    dialog.addEventListener("close", () => { const tab = tabs.get(closeTarget); closeTarget = null; tab?.close.focus(); });
+    dialog.addEventListener("close", () => {
+      const tab = tabs.get(closeTarget);
+      const target = closeReturn;
+      closeTarget = null;
+      closeReturn = null;
+      if (tab && target?.isConnected) target.focus();
+    });
     renameInput.addEventListener("input", () => renameInput.setCustomValidity(""));
     renameForm.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -850,11 +915,30 @@
     renameDialog.addEventListener("close", () => {
       if (renameDialog.open) return; // A queued older close must not clear a new editor.
       const opener = renameOpener;
+      const target = renameReturn;
       clearRename();
       renameOpener = null;
-      if (!renameButton.disabled && opener && tabs.get(opener.id) === opener) renameButton.focus();
+      renameReturn = null;
+      if (!renameButton.disabled && opener && tabs.get(opener.id) === opener && target?.isConnected) target.focus();
     });
     tabList.addEventListener("keydown", (event) => {
+      const tab = tabs.get(active);
+      const focused = event.target instanceof Element && event.target.closest("[role='tab']") === tab?.button;
+      if (event.key === "F2" && focused && !event.altKey && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault();
+        startRename(tab.button);
+        return;
+      }
+      // Delete closes the focused tab the way its close button does: a live
+      // terminal asks first, an ended one is removed from this browser.
+      if (event.key === "Delete" && focused && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+        event.preventDefault();
+        if (!tab.close.hidden && !tab.close.disabled) {
+          closeReturn = tab.button;
+          tab.close.click();
+        } else if (!tab.remove.hidden && !tab.remove.disabled) tab.remove.click();
+        return;
+      }
       if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
       const ids = [...tabs.keys()];
       if (!ids.length) return;
@@ -863,6 +947,11 @@
       const next = event.key === "Home" ? 0 : event.key === "End" ? ids.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + ids.length) % ids.length;
       choose(ids[next], true);
     });
+    // A narrower window or a rotated phone keeps the selected tab in view.
+    const strip = tabList.closest("nav");
+    if (strip && typeof ResizeObserver === "function") {
+      new ResizeObserver(() => { if (tabs.has(active)) reveal(tabs.get(active)); }).observe(strip);
+    }
     window.addEventListener("pagehide", () => {
       suspended = true;
       epoch += 1;
@@ -870,7 +959,7 @@
       pending = false;
       authorized = false;
       invalidateRename();
-      panels.hidden = true;
+      showSessions(false);
       tabList.hidden = true;
       for (const tab of tabs.values()) detach(tab, "Disconnected", true);
       dialog.close();
@@ -880,15 +969,58 @@
       suspended = false;
       void refresh();
     });
-    function foreground() {
+    // An identity doubt pauses every terminal and hides output until a full
+    // refresh re-reads the account, clearing this page's terminals if it
+    // changed or access ended.
+    function doubtAccount() {
       if (suspended) return;
       authorized = false;
       invalidateRename();
-      panels.hidden = true;
+      showSessions(false);
       foregroundCheck = true;
       for (const tab of tabs.values()) pauseForIdentity(tab);
       updateControls();
       if (!document.hidden && !pending) void refresh();
+    }
+    // Returning to the page re-reads the account in the background, as a
+    // desktop terminal keeps its windows: the terminals stay connected and on
+    // screen, and only a changed account or ended access tears them down.
+    async function checkAccount() {
+      const current = epoch;
+      let data;
+      try { data = await request("list"); } catch (error) {
+        if (current === epoch && !suspended && error.authorization) doubtAccount();
+        return;
+      }
+      if (current !== epoch || suspended || pending || document.hidden) return;
+      let previous;
+      try { previous = sessionStorage.getItem(`${storagePrefix}account`); } catch { /* Optional storage. */ }
+      if ((account && account !== data.accountId) || (previous && previous !== data.accountId)) {
+        doubtAccount();
+        return;
+      }
+      inventory = data.sessions;
+      const available = new Map(inventory.map((session) => [session.sessionId, session]));
+      for (const tab of tabs.values()) {
+        const session = available.get(tab.id);
+        if (!session) {
+          if (tab.available) {
+            detach(tab, "This terminal is no longer available.", false, "danger");
+            announce("A saved terminal is no longer available. Choose an existing terminal or start a new one.");
+          }
+          tab.available = false;
+          continue;
+        }
+        tab.state = session.state;
+        // A reconnect paused while the page was hidden resumes now.
+        if (automatic(tab) && !tab.socket && !tab.retryTimer) void connect(tab);
+      }
+      showInventory();
+    }
+    function foreground() {
+      if (suspended || document.hidden) return;
+      if (pending) { foregroundCheck = true; return; }
+      void checkAccount();
     }
     document.addEventListener("visibilitychange", foreground);
     window.addEventListener("focus", foreground);
@@ -906,9 +1038,10 @@
       root.dataset.terminalRunning = String(runtimeRunning);
       for (const tab of tabs.values()) {
         // Readiness loss pauses the transport without withdrawing intent.
-        if (!ready) detach(tab, readinessMessage(), true);
+        if (!ready) detach(tab, readinessMessage(), true, readinessTone());
         else if (!wasReady && !tab.socket) {
-          connectionText(tab, automatic(tab) ? "Reconnecting…" : "Disconnected. Reconnect to resume this terminal.");
+          if (automatic(tab)) connectionText(tab, "Reconnecting…", "warning");
+          else connectionText(tab, "Disconnected. Reconnect to resume this terminal.");
         }
       }
       root.querySelector("[data-terminal-empty]").textContent = !ready ? readinessMessage()

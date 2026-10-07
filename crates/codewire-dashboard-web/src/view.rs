@@ -697,6 +697,8 @@ pub(crate) struct DashboardView {
     pub(crate) provisioned_cpu_millicores: i64,
     pub(crate) provisioned_memory_mb: i64,
     pub(crate) provisioned_disk_gb: i64,
+    /// This browser collapsed the desktop sidebar to its rail.
+    pub(crate) sidebar_collapsed: bool,
 }
 
 impl DashboardView {
@@ -905,6 +907,16 @@ impl EnvironmentRow {
             "destroying" => "deleting…",
             "destroyed" => "deleted",
             state => state,
+        }
+    }
+
+    /// The workspace status bar's short automatic-deletion value, read after
+    /// "Auto-delete". A scheduled deadline renders its `<time>` instead.
+    pub(crate) fn auto_delete_label(&self) -> &'static str {
+        match self.deletion_state {
+            "protected" => "off (protected)",
+            "unavailable" => "unavailable",
+            _ => "off",
         }
     }
 

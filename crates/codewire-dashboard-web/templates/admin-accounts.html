@@ -10,7 +10,7 @@
     <script src="/assets/codewire/dashboard-v1.js" defer></script>
   </head>
   <body class="cw-body" data-route="admin">
-    <div class="cw-app" data-dashboard-app data-mobile-open="false">
+    <div class="cw-app" data-dashboard-app data-mobile-open="false" data-sidebar-collapsed="{{ view.sidebar_collapsed }}">
       <aside class="cw-sidebar-slot">{% include "sidebar.html" %}</aside>
       <header class="cw-mobile-bar"><button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-menu"/></svg></button><a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span class="cw-sr-only">Codewire</span></a></header>
       <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>

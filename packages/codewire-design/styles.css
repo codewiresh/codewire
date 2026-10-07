@@ -130,7 +130,13 @@
   --icon-size-sm: 0.75rem;
 
   --console-header: 3.25rem;
+  /* The Sandbox workspace: its terminal tab bar, the active tab's indicator
+     and the status bar under the terminal. */
+  --tab-bar-height: 2.5rem;
+  --tab-indicator: 0.125rem;
+  --status-bar-height: 1.75rem;
   --sidebar-width: 16.25rem;
+  --sidebar-rail-width: 3.25rem;
   --mobile-drawer-width: 18rem;
   --context-nav-width: 14rem;
   --mobile-bar: 3.25rem;

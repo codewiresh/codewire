@@ -12,7 +12,7 @@ use crate::{
     error::WebError,
     response::{error_page, login_redirect, redirect, render_page, two_factor_redirect},
     routes::{DASHBOARD_PATH, NEW_ORGANIZATION_PATH},
-    security::canonical_cookie,
+    security::{canonical_cookie, cookie_value},
     state::AppState,
     templates::DashboardTemplate,
     view::{DashboardView, OrganizationRow, PageCsrfToken},
@@ -90,6 +90,7 @@ pub(super) async fn dashboard_view(
         provisioned_cpu_millicores: 0,
         provisioned_memory_mb: 0,
         provisioned_disk_gb: 0,
+        sidebar_collapsed: sidebar_collapsed(headers),
     })
 }
 
@@ -155,8 +156,17 @@ fn shell_from_organizations(
         provisioned_cpu_millicores: 0,
         provisioned_memory_mb: 0,
         provisioned_disk_gb: 0,
+        sidebar_collapsed: sidebar_collapsed(headers),
     }
 }
+
+/// Whether this browser collapsed the desktop sidebar. The cookie holds only
+/// that choice, so the page renders it at once rather than after its script.
+pub(crate) fn sidebar_collapsed(headers: &HeaderMap) -> bool {
+    cookie_value(headers, SIDEBAR_COOKIE_NAME) == Some("collapsed")
+}
+
+pub(crate) const SIDEBAR_COOKIE_NAME: &str = "codewire.sidebar";
 
 /// Personal settings have their own authority. An organization is optional
 /// navigation context, never a prerequisite for current-user resources.
@@ -268,4 +278,27 @@ pub(super) async fn select_shell_organization(
     let rail_available = rail.is_ok();
     view.select_organization(&organization, rail.unwrap_or_default(), rail_available);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue, header};
+
+    use super::sidebar_collapsed;
+
+    #[test]
+    fn only_the_sidebar_cookie_collapses_the_sidebar() {
+        let mut headers = HeaderMap::new();
+        assert!(!sidebar_collapsed(&headers));
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("codewire.session_token=token; codewire.sidebar=collapsed"),
+        );
+        assert!(sidebar_collapsed(&headers));
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("codewire.sidebar=open"),
+        );
+        assert!(!sidebar_collapsed(&headers));
+    }
 }

@@ -26,7 +26,7 @@ pub(crate) const ORGANIZATIONS_STYLE_PATH: &str = "/assets/codewire/routes/organ
 pub(crate) const SECRET_MANAGEMENT_STYLE_PATH: &str =
     "/assets/codewire/routes/secret-management-v1.css";
 pub(crate) const ENVIRONMENTS_STYLE_PATH: &str = "/assets/codewire/routes/environments-v2.css";
-pub(crate) const TERMINAL_STYLE_PATH: &str = "/assets/codewire/routes/terminal-v1.css";
+pub(crate) const TERMINAL_STYLE_PATH: &str = "/assets/codewire/routes/terminal-v2.css";
 pub(crate) const BILLING_ADMIN_STYLE_PATH: &str = "/assets/codewire/routes/billing-admin-v1.css";
 pub(crate) const XTERM_STYLE_PATH: &str = "/assets/codewire/xterm-6.0.0.css";
 pub(crate) const SCRIPT_PATH: &str = "/assets/codewire/dashboard-v1.js";
@@ -34,14 +34,14 @@ pub(crate) const PUBLIC_SCRIPT_PATH: &str = "/assets/codewire/public-v1.js";
 pub(crate) const ORGANIZATIONS_SCRIPT_PATH: &str = "/assets/codewire/organizations-v1.js";
 pub(crate) const ENVIRONMENTS_SCRIPT_PATH: &str = "/assets/codewire/environments-v2.js";
 pub(crate) const TERMINAL_SCRIPT_PATH: &str = "/assets/codewire/terminal-v1.js";
-pub(crate) const DURABLE_TERMINAL_SCRIPT_PATH: &str = "/assets/codewire/durable-terminal-v1.js";
+pub(crate) const DURABLE_TERMINAL_SCRIPT_PATH: &str = "/assets/codewire/durable-terminal-v2.js";
 pub(crate) const TERMINAL_PROTOCOL_SCRIPT_PATH: &str = "/assets/codewire/terminal-protocol-v1.js";
-pub(crate) const TERMINAL_READINESS_SCRIPT_PATH: &str = "/assets/codewire/terminal-readiness-v2.js";
+pub(crate) const TERMINAL_READINESS_SCRIPT_PATH: &str = "/assets/codewire/terminal-readiness-v3.js";
 pub(crate) const SETUP_PROGRESS_SCRIPT_PATH: &str = "/assets/codewire/setup-progress-v1.js";
 pub(crate) const SANDBOX_RESIZE_SCRIPT_PATH: &str = "/assets/codewire/sandbox-resize-v3.js";
 pub(crate) const TERMINAL_RENDERER_SCRIPT_PATH: &str = "/assets/codewire/terminal-renderer-v1.js";
 pub(crate) const TERMINAL_PRESENTATION_SCRIPT_PATH: &str =
-    "/assets/codewire/terminal-presentation-v1.js";
+    "/assets/codewire/terminal-presentation-v2.js";
 pub(crate) const XTERM_SCRIPT_PATH: &str = "/assets/codewire/xterm-6.0.0.js";
 pub(crate) const XTERM_FIT_SCRIPT_PATH: &str = "/assets/codewire/addon-fit-0.11.0.js";
 pub(crate) const XTERM_WEB_LINKS_SCRIPT_PATH: &str = "/assets/codewire/addon-web-links-0.12.0.js";
@@ -588,15 +588,42 @@ mod tests {
                 html.contains("Leaving this page disconnects the browser; the shell keeps running")
             );
         }
-        let panel = |html: &'static str| {
+        // One tab's tab, output panel, status-bar group and menu actions. The
+        // fixture reads the same icon sprite from its source path.
+        let tab_parts = |html: &'static str| {
             html.split("<template data-terminal-tab-template>")
                 .nth(1)
                 .unwrap()
                 .split("</template>")
                 .next()
                 .unwrap()
+                .replace("../../assets/icons.svg", ICONS_PATH)
         };
-        assert_eq!(panel(production), panel(fixture));
+        assert_eq!(tab_parts(production), tab_parts(fixture));
+        for marker in [
+            "data-terminal-tab-item",
+            "role=\"tab\"",
+            "data-terminal-close-session",
+            "data-terminal-remove-tab",
+            "data-terminal-session-status",
+            "data-terminal-connection role=\"status\"",
+            "data-terminal-tab-action-group",
+        ] {
+            assert!(tab_parts(production).contains(marker), "missing {marker}");
+        }
+        for html in [production, fixture] {
+            for marker in [
+                "data-terminal-statuses",
+                "data-terminal-tab-actions",
+                "data-terminal-menu",
+                "data-sandbox-menu",
+                "data-terminal-readiness-refresh",
+                "data-sandbox-last-event",
+                "data-sandbox-lifetime",
+            ] {
+                assert!(html.contains(marker), "missing {marker}");
+            }
+        }
         for path in [
             TERMINAL_PROTOCOL_SCRIPT_PATH,
             DURABLE_TERMINAL_SCRIPT_PATH,

@@ -276,8 +276,9 @@ async fn sandbox_row_and_page_name_the_capability_that_needs_reconnect() {
     assert!(list.contains(&format!("<dt>Needs attention</dt><dd>{NOTICE}</dd>")));
     // The viewer's own profile reads by name, not its storage reference.
     assert!(list.contains("<dt>Credential profile</dt><dd>work · revision"));
+    // The workspace names it in a notice under its header.
     assert!(page.contains(&format!(
-        "<div class=\"cw-sandbox-attention\"><dt>Needs attention</dt><dd>{NOTICE}</dd></div>"
+        "<h2 id=\"sandbox-attention-title\">Needs attention</h2>{NOTICE}</section>"
     )));
     // One credential read per render: the list reads current profiles; the
     // page reads its exact bound revision.
