@@ -47,12 +47,12 @@ fn workspace_tailnet_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
     };
     let mut egress = vec![json!({
         "to": server_pods("derp"),
-        "ports": [ { "protocol": "UDP", "port": i64::from(codewire_gateway_proto::DERP_STUN_PORT) } ],
+        "ports": [ { "protocol": "UDP", "port": i64::from(codewire_daemon_proto::DERP_STUN_PORT) } ],
     })];
     if opts.udp_relay_allocator_egress_enabled || !opts.udp_relay_allocator_url.trim().is_empty() {
         egress.push(json!({
             "to": server_pods("udp-relay"),
-            "ports": [ { "protocol": "UDP", "port": i64::from(codewire_gateway_proto::UDP_RELAY_DATA_PORT) } ],
+            "ports": [ { "protocol": "UDP", "port": i64::from(codewire_daemon_proto::UDP_RELAY_DATA_PORT) } ],
         }));
     }
     egress
@@ -140,7 +140,7 @@ pub(super) fn identity_free_workspace_egress_rules(opts: &TemplateOpts) -> Vec<V
                 },
             ],
             "ports": [
-                { "protocol": "TCP", "port": i64::from(codewire_gateway_proto::WORKSPACE_BINDING_PORT) },
+                { "protocol": "TCP", "port": i64::from(codewire_daemon_proto::WORKSPACE_BINDING_PORT) },
             ],
         }),
     ];
@@ -195,7 +195,7 @@ fn workspace_daemon_ingress_rules(opts: &TemplateOpts) -> Vec<Value> {
             ],
             "ports": [
                 { "protocol": "TCP", "port": WORKSPACE_DAEMON_PORT },
-                { "protocol": "TCP", "port": i64::from(codewire_gateway_proto::WORKSPACE_SSH_PORT) },
+                { "protocol": "TCP", "port": i64::from(codewire_daemon_proto::WORKSPACE_SSH_PORT) },
                 {
                     "protocol": "TCP",
                     "port": APP_PREVIEW_MIN_PORT,
@@ -207,7 +207,7 @@ fn workspace_daemon_ingress_rules(opts: &TemplateOpts) -> Vec<Value> {
     if tailnet_udp_listener_enabled(opts) {
         ingress.push(json!({
             "from": world_peers(),
-            "ports": [ { "protocol": "UDP", "port": i64::from(codewire_gateway_proto::WORKSPACE_TAILNET_UDP_PORT) } ],
+            "ports": [ { "protocol": "UDP", "port": i64::from(codewire_daemon_proto::WORKSPACE_TAILNET_UDP_PORT) } ],
         }));
     }
     ingress
@@ -311,7 +311,7 @@ pub fn render_direct_udp_service(namespace: &str, opts: &TemplateOpts) -> Option
                 "name": "tailnet-udp",
                 "protocol": "UDP",
                 "port": opts.direct_udp_lb_port,
-                "targetPort": i64::from(codewire_gateway_proto::WORKSPACE_TAILNET_UDP_PORT),
+                "targetPort": i64::from(codewire_daemon_proto::WORKSPACE_TAILNET_UDP_PORT),
             },
         ],
     });

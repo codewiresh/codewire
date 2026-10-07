@@ -23,7 +23,7 @@ use crate::confidential_storage::require_interactive_access;
 
 /// The one port reserved in the workspace Pod: the daemon's SSH server.
 fn is_reserved_port(port: i32) -> bool {
-    port == i32::from(codewire_gateway_proto::WORKSPACE_SSH_PORT)
+    port == i32::from(codewire_daemon_proto::WORKSPACE_SSH_PORT)
 }
 
 pub(crate) fn validate_preview_port(port: i32, label: &str, access: &str) -> AppResult<()> {

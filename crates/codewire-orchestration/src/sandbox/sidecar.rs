@@ -20,7 +20,7 @@ use super::client::SandboxClient;
 use super::host_keys::HostKeyStore;
 
 /// The workspace daemon's SSH port, which only orchestration may reach.
-pub const WORKSPACE_SSH_PORT: u16 = codewire_gateway_proto::WORKSPACE_SSH_PORT;
+pub const WORKSPACE_SSH_PORT: u16 = codewire_daemon_proto::WORKSPACE_SSH_PORT;
 const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Between access readiness attempts.
 const ACCESS_READY_POLL: Duration = Duration::from_millis(250);
@@ -648,7 +648,7 @@ mod tests {
         // The workspace SSH port is the daemon's, from the shared contract.
         assert_eq!(
             WORKSPACE_SSH_PORT,
-            codewire_gateway_proto::WORKSPACE_SSH_PORT
+            codewire_daemon_proto::WORKSPACE_SSH_PORT
         );
     }
 

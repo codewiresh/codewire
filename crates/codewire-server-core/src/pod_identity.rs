@@ -15,7 +15,7 @@ use axum::http::HeaderMap;
 use axum::http::header::AUTHORIZATION;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use codewire_gateway_proto::{
+use codewire_daemon_proto::{
     CREDENTIAL_RELAY_SERVICE_ACCOUNT, CREDENTIAL_RELAY_TOKEN_AUDIENCE,
     CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE, SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE,
 };

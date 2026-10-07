@@ -73,7 +73,7 @@ impl Fixture {
             panic!("expected typed SSH request");
         };
         assert_eq!(request.operation.as_ref(), Some(operation));
-        assert!(codewire_gateway_proto::ssh::valid_request_id(
+        assert!(codewire_daemon_proto::ssh::valid_request_id(
             &request.request_id
         ));
         assert!(remaining_deadline(request.deadline_unix_ms).unwrap() <= MAX_DEADLINE);
@@ -375,7 +375,7 @@ async fn backpressured_terminal_uses_original_deadline_and_owner_stop() {
             .reply(
                 &request,
                 v1::credential_ssh_response::Result::Signature(v1::CredentialSshSignature {
-                    signature_blob: vec![7; codewire_gateway_proto::ssh::MAX_SIGNATURE_BYTES],
+                    signature_blob: vec![7; codewire_daemon_proto::ssh::MAX_SIGNATURE_BYTES],
                 }),
             )
             .await;
@@ -388,7 +388,7 @@ async fn backpressured_terminal_uses_original_deadline_and_owner_stop() {
             .unwrap();
         assert_eq!(
             u32::from_be_bytes(prefix) as usize,
-            5 + codewire_gateway_proto::ssh::MAX_SIGNATURE_BYTES
+            5 + codewire_daemon_proto::ssh::MAX_SIGNATURE_BYTES
         );
         if stop {
             fixture.shutdown.take().unwrap().send(()).unwrap();
@@ -552,7 +552,7 @@ async fn alternate_response_id_type_bounds_and_closed_failure_are_validated_befo
                         signature_blob: if invalid == 2 {
                             Vec::new()
                         } else {
-                            vec![7; codewire_gateway_proto::ssh::MAX_SIGNATURE_BYTES + 1]
+                            vec![7; codewire_daemon_proto::ssh::MAX_SIGNATURE_BYTES + 1]
                         },
                     },
                 ))

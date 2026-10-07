@@ -78,11 +78,11 @@ verify_services_dockerfile_contract() {
     grep -qF -- "--mount=type=cache,${mount}" "$SERVICES_DOCKERFILE" ||
       fail "services image is missing cache mount ${mount}"
   done
-  grep -qF 'COPY libs/gateway-proto ./libs/gateway-proto' "$SERVICES_DOCKERFILE" ||
+  grep -qF 'COPY libs/daemon-proto ./libs/daemon-proto' "$SERVICES_DOCKERFILE" ||
     fail 'services image does not receive the environment daemon protocol schema'
-  grep -qF '!libs/gateway-proto/**' "$SERVICES_DOCKERIGNORE" ||
+  grep -qF '!libs/daemon-proto/**' "$SERVICES_DOCKERIGNORE" ||
     fail 'services build context excludes the environment daemon protocol schema'
-  grep -qF 'find Cargo.toml Cargo.lock crates proto libs/gateway-proto -type f -exec touch {} +' \
+  grep -qF 'find Cargo.toml Cargo.lock crates proto libs/daemon-proto -type f -exec touch {} +' \
     "$SERVICES_DOCKERFILE" ||
     fail 'services image does not revalidate copied workspace inputs'
   # shellcheck disable=SC2016

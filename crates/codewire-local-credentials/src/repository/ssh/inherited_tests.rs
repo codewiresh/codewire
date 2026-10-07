@@ -7,7 +7,7 @@ use codewire_access::{
     AccessProfileName, BrokerOperationId, BrokerRouteId, CapabilityPolicy, CapabilitySlot,
     CredentialAuthKind, GrantPermission, ProviderCatalog, ProviderDefinition, ProviderId,
 };
-use codewire_gateway_proto::codewire::bridge::v1 as daemon_v1;
+use codewire_daemon_proto::codewire::bridge::v1 as daemon_v1;
 use codewire_protected_store::ProtectedStorePersistence;
 use codewire_protected_store::ssh_material::{SshAgentMaterial, generate_ed25519};
 use tokio::net::UnixStream;

@@ -229,8 +229,8 @@ impl LocalBrokerProcessSpawner for TestBrokerSpawner {
         let environment_generation = config.environment_generation;
         let leased_material = self.leased_material.clone();
         let task = tokio::spawn(async move {
-            let ready = codewire_gateway_proto::codewire::bridge::v1::CredentialBridgeReady {
-                protocol_version: codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+            let ready = codewire_daemon_proto::codewire::bridge::v1::CredentialBridgeReady {
+                protocol_version: codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
                 environment_id: environment_id.to_string(),
                 environment_generation,
             };

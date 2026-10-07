@@ -8,7 +8,7 @@ use crate::{
     PlatformCredentialOutput, RepositoryPlatformAccess,
 };
 use codewire_access::{AccessProfileId, EnvironmentId};
-use codewire_gateway_proto::codewire::bridge::v1 as bridge;
+use codewire_daemon_proto::codewire::bridge::v1 as bridge;
 use futures::{StreamExt as _, future::BoxFuture};
 use tokio::time::Instant;
 
@@ -39,7 +39,7 @@ impl PlatformCredentialConnector for Connector {
         assert_eq!(ready.environment_generation, 1);
         assert_eq!(
             ready.protocol_version,
-            codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION
+            codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION
         );
         assert!(Instant::now() < deadline);
         let seen = Arc::clone(&self.seen);

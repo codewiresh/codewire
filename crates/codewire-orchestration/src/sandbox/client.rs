@@ -1039,7 +1039,7 @@ fn workspace_object_identity_free(object: &DynamicObject) -> anyhow::Result<bool
             .any(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
     };
     match (
-        named(codewire_gateway_proto::WORKSPACE_BINDING_URL_ENV),
+        named(codewire_daemon_proto::WORKSPACE_BINDING_URL_ENV),
         named(super::template::DAEMON_AUTH_TOKEN_ENV),
     ) {
         (true, false) => Ok(true),
@@ -4392,9 +4392,7 @@ fn direct_udp_service_port(service: &DynamicObject) -> Option<u16> {
         .find(|port| {
             port["protocol"].as_str() == Some("UDP")
                 && port["targetPort"].as_i64()
-                    == Some(i64::from(
-                        codewire_gateway_proto::WORKSPACE_TAILNET_UDP_PORT,
-                    ))
+                    == Some(i64::from(codewire_daemon_proto::WORKSPACE_TAILNET_UDP_PORT))
         })
         .and_then(|port| port["port"].as_i64())
         .and_then(|port| u16::try_from(port).ok())

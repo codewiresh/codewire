@@ -2271,7 +2271,7 @@ pub async fn run_credential_forwarder() -> Result<()> {
 
     let listener = TcpListener::bind((
         std::net::Ipv4Addr::LOCALHOST,
-        codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+        codewire_daemon_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
     ))
     .await
     .context("bind credential forwarder IPv4 loopback")?;
@@ -2280,7 +2280,7 @@ pub async fn run_credential_forwarder() -> Result<()> {
         .context("inspect credential forwarder listener")?;
     ensure!(
         address.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-            && address.port() == codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+            && address.port() == codewire_daemon_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
         "credential forwarder listener identity is invalid"
     );
     publish_credential_forwarder_readiness()?;
@@ -5869,7 +5869,7 @@ mod tests {
         let clients =
             codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap();
         let expected = codewire_access::CodexProviderProjection::for_loopback_port(
-            codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+            codewire_daemon_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
         )
         .unwrap()
         .into_config_toml();

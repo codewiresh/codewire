@@ -3,7 +3,7 @@
 
 use codewire_access::EnvironmentId;
 use codewire_credential_bridge::CredentialBridge;
-use codewire_gateway_proto::codewire::bridge::v1 as bridge;
+use codewire_daemon_proto::codewire::bridge::v1 as bridge;
 use std::{path::Path, sync::Arc};
 use tokio::{sync::watch, task::JoinHandle, time::Instant};
 use tokio_stream::StreamExt as _;

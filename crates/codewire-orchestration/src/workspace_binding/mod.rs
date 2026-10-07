@@ -41,7 +41,7 @@ pub use store::{
 };
 
 /// Environment variable selecting the listener port; the default is
-/// [`codewire_gateway_proto::WORKSPACE_BINDING_PORT`].
+/// [`codewire_daemon_proto::WORKSPACE_BINDING_PORT`].
 pub const ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV: &str = "ORCHESTRATION_WORKSPACE_BINDING_PORT";
 
 /// Longest server-side wait for an unbound Pod. Well inside the 60s Connect

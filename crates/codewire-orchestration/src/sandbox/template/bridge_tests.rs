@@ -248,7 +248,7 @@ fn warm_member_bridge_admits_orchestration_and_the_world_only() {
                 // The tailnet UDP port, from the world only (N1).
                 assert_eq!(
                     rule["ports"],
-                    json!([{"protocol": "UDP", "port": codewire_gateway_proto::WORKSPACE_TAILNET_UDP_PORT}])
+                    json!([{"protocol": "UDP", "port": codewire_daemon_proto::WORKSPACE_TAILNET_UDP_PORT}])
                 );
                 assert!(
                     block["except"]

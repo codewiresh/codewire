@@ -24,8 +24,8 @@ use axum::http::Method;
 use axum::http::header::{CONNECTION, CONTENT_LENGTH, TRANSFER_ENCODING, UPGRADE};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use bytes::Bytes as WireBytes;
-use codewire_gateway_proto::codewire::bridge::v1;
-use codewire_gateway_proto::{
+use codewire_daemon_proto::codewire::bridge::v1;
+use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES, CREDENTIAL_BRIDGE_MAX_HEADER_BYTES,
     CREDENTIAL_BRIDGE_MAX_HEADER_NAME_BYTES, CREDENTIAL_BRIDGE_MAX_HEADER_VALUE_BYTES,
     CREDENTIAL_BRIDGE_MAX_HEADERS, CREDENTIAL_BRIDGE_MAX_IN_FLIGHT,
@@ -670,15 +670,15 @@ impl PreparedBridgeConnection {
     where
         S: Stream<Item = Result<v1::CredentialBridgeHostMessage, Status>> + Send + 'static,
     {
-        if capabilities.len() > codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
+        if capabilities.len() > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
             || !capabilities.iter().all(|capability| {
-                codewire_gateway_proto::valid_credential_bridge_capability(capability)
+                codewire_daemon_proto::valid_credential_bridge_capability(capability)
             })
         {
             return Err(invalid_host_frame());
         }
         let codex_login = capabilities.iter().any(|capability| {
-            capability == codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN
+            capability == codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN
         });
         let (cancel, cancelled) = oneshot::channel();
         let mut draining = None;

@@ -1,9 +1,7 @@
 use std::future::pending;
 use std::os::unix::fs::MetadataExt as _;
 
-use codewire_gateway_proto::{
-    CREDENTIAL_BRIDGE_MAX_IN_FLIGHT, CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES,
-};
+use codewire_daemon_proto::{CREDENTIAL_BRIDGE_MAX_IN_FLIGHT, CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;

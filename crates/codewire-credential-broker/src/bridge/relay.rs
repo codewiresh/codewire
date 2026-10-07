@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_daemon_proto::codewire::bridge::v1;
 use futures::{Stream, StreamExt as _, stream};
 use prost::Message as _;
 
@@ -52,7 +52,7 @@ where
     let mut output = connect(ready, Box::pin(input)).await?;
     while let Some(frame) = output.next().await {
         let frame = frame?;
-        if frame.encoded_len() > codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES {
+        if frame.encoded_len() > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES {
             return Err(BrokerBridgeError::InvalidProtocol);
         }
         let payload = match frame.payload {
@@ -67,7 +67,7 @@ where
 }
 
 fn valid_guest_frame(frame: &v1::CredentialBridgeGuestMessage) -> bool {
-    frame.encoded_len() <= codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES
+    frame.encoded_len() <= codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES
         && matches!(
             frame.payload,
             Some(v1::credential_bridge_guest_message::Payload::Request(_))

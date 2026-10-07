@@ -5,7 +5,7 @@
 //! both identity modes (`codewire_daemon::codex_home`).
 
 use codewire_access::{CODEX_PLATFORM_TOKEN_FILE, ManagedCredentialClientPlacement};
-use codewire_gateway_proto::CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE;
+use codewire_daemon_proto::CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE;
 use serde_json::{Value, json};
 
 use super::TemplateOpts;

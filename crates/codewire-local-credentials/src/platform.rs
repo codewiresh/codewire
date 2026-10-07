@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::pin::Pin;
 
-use codewire_gateway_proto::codewire::bridge::v1 as bridge;
+use codewire_daemon_proto::codewire::bridge::v1 as bridge;
 use codewire_project::PlatformProjectionSelection;
 use futures::{Stream, future::BoxFuture};
 use tokio::time::Instant;

@@ -86,7 +86,7 @@
         "codewire-local-credentials": ["crates/codewire-local-credentials/proto/**"],
         "codewire-local-vmm": ["crates/codewire-local-vmm/proto/**"],
         "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"],
-        "codewire-gateway-proto": ["libs/gateway-proto/proto/**"]
+        "codewire-daemon-proto": ["libs/daemon-proto/proto/**"]
       },
       "explicit_inputs": [
         "rust-toolchain.toml",
@@ -126,7 +126,7 @@
         "codewire-local-credentials": ["crates/codewire-local-credentials/proto/**"],
         "codewire-local-vmm": ["crates/codewire-local-vmm/proto/**"],
         "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"],
-        "codewire-gateway-proto": ["libs/gateway-proto/proto/**"]
+        "codewire-daemon-proto": ["libs/daemon-proto/proto/**"]
       },
       "explicit_inputs": ["rust-toolchain.toml"]
     },
@@ -144,7 +144,7 @@
         "crates/**",
         "deployments/docker/rust-base.Dockerfile",
         "docker-bake.hcl",
-        "libs/gateway-proto/**",
+        "libs/daemon-proto/**",
         "packages/codewire-design/**",
         "proto/**"
       ]
@@ -159,7 +159,7 @@
         "deployments/docker/daemon.Dockerfile.dockerignore",
         "deployments/docker/rust-base.Dockerfile",
         "docker-bake.hcl",
-        "libs/gateway-proto/**",
+        "libs/daemon-proto/**",
         "proto/**"
       ]
     },
@@ -189,7 +189,7 @@
         "deployments/docker/services.Dockerfile.dockerignore",
         "deployments/docker/rust-base.Dockerfile",
         "docker-bake.hcl",
-        "libs/gateway-proto/**",
+        "libs/daemon-proto/**",
         "proto/**"
       ]
     },

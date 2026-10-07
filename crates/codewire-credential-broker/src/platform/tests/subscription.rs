@@ -3,7 +3,7 @@
 //! only its owner replaces it, and a replacement fences an in-flight lease.
 
 use bytes::Bytes;
-use codewire_gateway_proto::codewire::bridge::v1::{CredentialBridgeRequest, CredentialHttpHeader};
+use codewire_daemon_proto::codewire::bridge::v1::{CredentialBridgeRequest, CredentialHttpHeader};
 use codewire_platform_credentials::CredentialRegistration;
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 

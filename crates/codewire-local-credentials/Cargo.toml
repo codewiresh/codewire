@@ -13,7 +13,7 @@ axum = { workspace = true }
 base64 = { workspace = true }
 codewire-access = { workspace = true }
 codewire-credential-bridge = { workspace = true }
-codewire-gateway-proto = { workspace = true }
+codewire-daemon-proto = { workspace = true }
 codewire-protected-store = { workspace = true, features = ["ssh-material"] }
 codewire-project = { workspace = true }
 codewire-workload-secrets = { workspace = true }

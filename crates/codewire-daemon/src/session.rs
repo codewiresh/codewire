@@ -2,7 +2,7 @@ use std::future::Future;
 use std::io::{self, Read, Write};
 use std::sync::mpsc as std_mpsc;
 
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 use portable_pty::{PtySize, native_pty_system};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};

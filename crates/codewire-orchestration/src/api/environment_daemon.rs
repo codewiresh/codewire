@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codewire_daemon_bridge::client::DaemonClient;
-use codewire_gateway_proto::daemon::v1;
-use codewire_gateway_proto::{
+use codewire_daemon_proto::daemon::v1;
+use codewire_daemon_proto::{
     DAEMON_AUTH_TOKEN_HEADER, DAEMON_CAPABILITY_ATTACH, DAEMON_CAPABILITY_FILES,
     DAEMON_CAPABILITY_HEALTH, DAEMON_CAPABILITY_SESSIONS, DAEMON_PROTOCOL_VERSION,
 };
@@ -1342,7 +1342,7 @@ async fn resolve_pod_name(
 mod tests {
     use codewire_daemon::service::DaemonRuntimeState;
     use codewire_daemon::{Config, DaemonAuthToken, server};
-    use codewire_gateway_proto::DAEMON_CAPABILITY_HEALTH;
+    use codewire_daemon_proto::DAEMON_CAPABILITY_HEALTH;
     use tempfile::TempDir;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;

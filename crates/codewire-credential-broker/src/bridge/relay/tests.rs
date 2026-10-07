@@ -45,7 +45,7 @@ fn ready(environment_id: Uuid, generation: u64) -> v1::CredentialBridgeGuestMess
     v1::CredentialBridgeGuestMessage {
         payload: Some(v1::credential_bridge_guest_message::Payload::Ready(
             v1::CredentialBridgeReady {
-                protocol_version: codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                protocol_version: codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
                 environment_id: environment_id.to_string(),
                 environment_generation: generation,
             },

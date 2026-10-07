@@ -14,7 +14,7 @@ use codewire_client::{
     StaticTokenProvider, TokenProvider as _, credential_bridge as public_bridge,
     delegate_credentials_request, delegate_credentials_response,
 };
-use codewire_gateway_proto::{
+use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES, CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
     codewire::bridge::v1 as bridge,
 };

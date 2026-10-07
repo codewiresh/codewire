@@ -29,7 +29,7 @@ use codewire_client::{
 };
 use codewire_daemon::access::WorkspaceAccessGrant;
 use codewire_daemon::app_ports::AppPorts;
-use codewire_gateway_proto::COORDINATOR_EXTRA_ROOTS_FILE;
+use codewire_daemon_proto::COORDINATOR_EXTRA_ROOTS_FILE;
 use codewire_tailnet::conn::{Conn, Options};
 use codewire_tailnet::derp_transport::{DerpTarget, DerpTransport, connect_derp_transport};
 use codewire_tailnet::direct_udp;

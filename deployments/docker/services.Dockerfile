@@ -110,9 +110,9 @@ COPY crates ./crates
 # protoc — the contract sources must be in the build context.
 COPY proto ./proto
 # WI-R4 makes orchestration's authenticated environment proxy consume the
-# private daemon protocol through codewire-gateway-proto. Its build script
+# private daemon protocol through codewire-daemon-proto. Its build script
 # compiles this separate internal schema at build time.
-COPY libs/gateway-proto ./libs/gateway-proto
+COPY libs/daemon-proto ./libs/daemon-proto
 ARG CODEWIRE_SCCACHE_MODE=disabled
 ARG SCCACHE_BUCKET
 ARG SCCACHE_ENDPOINT
@@ -129,7 +129,7 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
     --mount=type=cache,id=codewire-services-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=codewire-sccache-v2,target=/var/cache/sccache,sharing=shared \
     --mount=type=secret,id=aws_shared_credentials \
-    find Cargo.toml Cargo.lock crates proto libs/gateway-proto -type f -exec touch {} + && \
+    find Cargo.toml Cargo.lock crates proto libs/daemon-proto -type f -exec touch {} + && \
     feature_args='codewire-credential-service/enrollment' && \
     case "$CODEWIRE_ORCHESTRATION_FEATURES" in \
       '') ;; \

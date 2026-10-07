@@ -14,7 +14,7 @@ use crate::api::environment_resize::{
 };
 use crate::resize_metrics;
 use crate::sandbox::client::{SandboxClient, WorkspaceStorageResizeOutcome};
-use codewire_gateway_proto::daemon::v1::SessionLifecycleState;
+use codewire_daemon_proto::daemon::v1::SessionLifecycleState;
 
 const RESIZE_MUTATION_STATES: &[&str] = &["resizing"];
 const RESTART_TIMEOUT: Duration = Duration::from_secs(600);

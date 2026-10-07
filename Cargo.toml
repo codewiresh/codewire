@@ -15,7 +15,7 @@ members = [
     "crates/codewire-egress-broker",
     "crates/codewire-egress-policy",
     "crates/codewire-email",
-    "crates/codewire-gateway-proto",
+    "crates/codewire-daemon-proto",
     "crates/codewire-idp",
     "crates/codewire-cli",
     "crates/codewire-cli-bin",
@@ -61,7 +61,7 @@ codewire-client = { path = "crates/codewire-client" }
 codewire-types = { path = "crates/codewire-types" }
 codewire-server-core = { path = "crates/codewire-server-core" }
 codewire-oidc = { path = "crates/codewire-oidc" }
-codewire-gateway-proto = { path = "crates/codewire-gateway-proto" }
+codewire-daemon-proto = { path = "crates/codewire-daemon-proto" }
 # default-features = false so server crates can consume the generated
 # message/service types without the Connect HTTP client stack; test/client
 # consumers opt back in with `features = ["client"]`.

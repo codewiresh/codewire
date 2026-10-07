@@ -5,7 +5,7 @@ modules:
   # bridge frames. Invoke this config from the repository root so both module
   # paths remain inside Buf's context and resolve the one canonical source.
   - path: proto
-  - path: libs/gateway-proto/proto
+  - path: libs/daemon-proto/proto
 
 lint:
   use:

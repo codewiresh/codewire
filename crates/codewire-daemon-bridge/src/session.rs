@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use buffa_types::Timestamp;
-use codewire_gateway_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1;
 use codewire_proto::codewire::v1 as proto;
 use connectrpc::{InboundStream, RequestContext, ServiceRequest, ServiceResult, ServiceStream};
 use futures::StreamExt as _;

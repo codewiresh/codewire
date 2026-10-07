@@ -6,10 +6,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 retired_paths=(
   apps/api
   autoagent
-  libs/gateway-proto/buf.gen.yaml
-  libs/gateway-proto/gen
-  libs/gateway-proto/go.mod
-  libs/gateway-proto/go.sum
+  libs/daemon-proto/buf.gen.yaml
+  libs/daemon-proto/gen
+  libs/daemon-proto/go.mod
+  libs/daemon-proto/go.sum
   libs/gatewayauth
   tests/contract/billing
   tests/contract/connectcore
@@ -78,8 +78,8 @@ if rg -n 'prepare_go_workspace|github\.com/noeljackson/agent-sandbox|AGENT_SANDB
   exit 1
 fi
 
-grep -qF '../../libs/gateway-proto/proto' \
-  "$ROOT/crates/codewire-gateway-proto/build.rs"
+grep -qF '../../libs/daemon-proto/proto' \
+  "$ROOT/crates/codewire-daemon-proto/build.rs"
 python3 "$ROOT/scripts/checks/repo_checks.py" go-source-classification
 
 echo 'Go source ownership: OK'

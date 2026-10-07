@@ -10,7 +10,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY proto ./proto
-COPY libs/gateway-proto ./libs/gateway-proto
+COPY libs/daemon-proto ./libs/daemon-proto
 # The dashboard embeds its design assets and the CLI installer.
 COPY packages/codewire-design ./packages/codewire-design
 COPY apps/cli/install.sh ./apps/cli/install.sh
@@ -40,7 +40,7 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
     bin="${KIND_DEV_BIN:-$KIND_DEV_CRATE}" && \
     built="$CARGO_TARGET_DIR/kind-dev-sources.sha256" && \
     mkdir -p "$CARGO_TARGET_DIR" && \
-    find Cargo.toml Cargo.lock crates proto libs/gateway-proto packages/codewire-design apps/cli/install.sh \
+    find Cargo.toml Cargo.lock crates proto libs/daemon-proto packages/codewire-design apps/cli/install.sh \
       -type f -print0 | sort -z | xargs -0 sha256sum >/tmp/kind-dev-sources.sha256 && \
     { [ -f "$built" ] || : >"$built"; } && \
     grep -vxFf "$built" /tmp/kind-dev-sources.sha256 | cut -c67- | tr '\n' '\0' | xargs -0r touch -c && \

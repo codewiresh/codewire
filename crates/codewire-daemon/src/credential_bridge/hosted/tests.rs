@@ -1,7 +1,7 @@
 use super::*;
 use crate::credential_bridge::{CredentialBridge, CredentialBridgeConnection};
 use crate::{CredentialBridgeConfig, CredentialBridgeTransport};
-use codewire_gateway_proto::{CREDENTIAL_BRIDGE_PROTOCOL_VERSION, codewire::bridge::v1};
+use codewire_daemon_proto::{CREDENTIAL_BRIDGE_PROTOCOL_VERSION, codewire::bridge::v1};
 use tokio::sync::mpsc;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 
@@ -291,7 +291,7 @@ async fn the_hosts_listed_capabilities_reach_the_epoch_and_malformed_lists_refus
         vec!["Codex-Login".to_owned()],
         vec![
             "codex-login".to_owned();
-            codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES + 1
+            codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES + 1
         ],
     ] {
         let (_temp, bridge, path) = fixture();

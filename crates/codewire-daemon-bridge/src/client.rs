@@ -6,8 +6,8 @@
 
 use std::time::Duration;
 
-pub use codewire_gateway_proto::daemon::v1;
-use codewire_gateway_proto::{
+pub use codewire_daemon_proto::daemon::v1;
+use codewire_daemon_proto::{
     DAEMON_AUTH_TOKEN_HEADER, DAEMON_CAPABILITY_EXEC, DAEMON_CAPABILITY_PTY,
     DAEMON_PROTOCOL_VERSION,
 };
@@ -481,7 +481,7 @@ mod split_tests;
 mod tests {
     use std::time::Duration;
 
-    use codewire_gateway_proto::{DAEMON_CAPABILITY_EXEC, DAEMON_CAPABILITY_FILES};
+    use codewire_daemon_proto::{DAEMON_CAPABILITY_EXEC, DAEMON_CAPABILITY_FILES};
 
     use super::*;
     use crate::test_support::DaemonHarness;

@@ -901,9 +901,9 @@ fn proto_environment_daemon_diagnostic(
 }
 
 fn proto_environment_daemon_state(
-    state: codewire_gateway_proto::daemon::v1::DaemonState,
+    state: codewire_daemon_proto::daemon::v1::DaemonState,
 ) -> proto::EnvironmentDaemonState {
-    use codewire_gateway_proto::daemon::v1::DaemonState as Internal;
+    use codewire_daemon_proto::daemon::v1::DaemonState as Internal;
     match state {
         Internal::Unspecified => proto::EnvironmentDaemonState::Unspecified,
         Internal::Unsupported => proto::EnvironmentDaemonState::Unsupported,
@@ -1665,7 +1665,7 @@ mod tests {
 
     #[test]
     fn daemon_state_mapping_preserves_every_contract_state() {
-        use codewire_gateway_proto::daemon::v1::DaemonState as Internal;
+        use codewire_daemon_proto::daemon::v1::DaemonState as Internal;
 
         for (internal, public) in [
             (

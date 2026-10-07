@@ -263,7 +263,7 @@ pub struct KubernetesPlatformRuntimeAuthority {
 impl PlatformRuntimeAuthority for KubernetesPlatformRuntimeAuthority {
     async fn project_environment(
         &self,
-        request: codewire_gateway_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
+        request: codewire_daemon_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
     ) -> Result<Vec<u8>, Error> {
         self.project(request).await
     }

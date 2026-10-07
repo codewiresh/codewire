@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use codewire_credential_broker::platform::{
     PlatformRuntimeAuthority, PlatformRuntimeError as Error,
 };
-use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_project::PlatformProjectionSelection;
 use codewire_protected_store::secret_envelope::{
     DekContext, EncryptedTenantSecret, KekProvider, KekProviderKind, SecretCoordinates, WrappedDek,

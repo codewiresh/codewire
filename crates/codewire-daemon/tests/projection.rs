@@ -17,10 +17,10 @@ use codewire_daemon::{
     Config, CredentialBridgeConfig, CredentialBridgeTransport, DaemonAuthToken,
     LaunchProjectionConfig, NativeLaunchProjectionConfig, serve_grpc_with_incoming,
 };
-use codewire_gateway_proto::DAEMON_AUTH_TOKEN_HEADER;
-use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
-use codewire_gateway_proto::daemon::v1;
-use codewire_gateway_proto::daemon::v1::daemon_service_client::DaemonServiceClient;
+use codewire_daemon_proto::DAEMON_AUTH_TOKEN_HEADER;
+use codewire_daemon_proto::codewire::bridge::v1 as bridge_v1;
+use codewire_daemon_proto::daemon::v1;
+use codewire_daemon_proto::daemon::v1::daemon_service_client::DaemonServiceClient;
 use codewire_workload_secrets::launcher::{now_unix_ms, run_environment_launcher};
 use codewire_workload_secrets::{
     EnvironmentProjection, ProjectionContext, seal_environment_projection,

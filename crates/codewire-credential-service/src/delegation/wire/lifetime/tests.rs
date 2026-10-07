@@ -20,7 +20,7 @@ use codewire_credential_broker::platform::{
 use codewire_credential_broker::{
     BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport,
 };
-use codewire_gateway_proto::codewire::bridge::v1 as bridge;
+use codewire_daemon_proto::codewire::bridge::v1 as bridge;
 use codewire_platform_credentials::{PlatformAccessProfileStore, PlatformCredentialStore};
 use codewire_protected_store::secret_envelope::TestKekProvider;
 use codewire_proto::codewire::v1::{self as proto, CredentialDelegationService};
@@ -162,8 +162,7 @@ impl Probe {
             ready: bridge::CredentialBridgeGuestMessage {
                 payload: Some(bridge::credential_bridge_guest_message::Payload::Ready(
                     bridge::CredentialBridgeReady {
-                        protocol_version:
-                            codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                        protocol_version: codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
                         environment_id: environment_id.to_string(),
                         environment_generation: 7,
                     },

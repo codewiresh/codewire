@@ -297,7 +297,7 @@ fn rendered_pool_templates_pass_the_admission_volume_rule() {
         kind,
         [
             "codewire-orchestration-internal-roots",
-            codewire_gateway_proto::COORDINATOR_EXTRA_ROOTS_CONFIGMAP
+            codewire_daemon_proto::COORDINATOR_EXTRA_ROOTS_CONFIGMAP
         ]
     );
     for (cfg, allowed, mounted) in [

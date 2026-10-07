@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn credential_mounts_and_identities_are_separate_for_workspace_and_init() {
         use codewire_access::{CODEX_PLATFORM_HOME, CODEX_PLATFORM_TOKEN_FILE};
-        use codewire_gateway_proto::CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE;
+        use codewire_daemon_proto::CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE;
         let opts = credential_opts();
         let template = render_sandbox_template("dev-sandboxes", &opts);
         let workspace = &template["spec"]["podTemplate"]["spec"];
@@ -2242,7 +2242,7 @@ mod tests {
         assert_eq!(service["spec"]["ports"][0]["port"].as_i64(), Some(33123));
         assert_eq!(
             service["spec"]["ports"][0]["targetPort"].as_i64(),
-            Some(i64::from(codewire_gateway_proto::WORKSPACE_TAILNET_UDP_PORT))
+            Some(i64::from(codewire_daemon_proto::WORKSPACE_TAILNET_UDP_PORT))
         );
         assert_eq!(
             service["spec"]["selector"]["codewire.sh/type"].as_str(),
@@ -2305,7 +2305,7 @@ mod tests {
             ingress[0]["ports"],
             json!([
                 {"protocol": "TCP", "port": WORKSPACE_DAEMON_PORT},
-                {"protocol": "TCP", "port": codewire_gateway_proto::WORKSPACE_SSH_PORT},
+                {"protocol": "TCP", "port": codewire_daemon_proto::WORKSPACE_SSH_PORT},
                 {"protocol": "TCP", "port": APP_PREVIEW_MIN_PORT, "endPort": APP_PREVIEW_MAX_PORT},
             ])
         );
@@ -2314,7 +2314,7 @@ mod tests {
         let world = &ingress[1];
         assert_eq!(
             world["ports"],
-            json!([{"protocol": "UDP", "port": codewire_gateway_proto::WORKSPACE_TAILNET_UDP_PORT}])
+            json!([{"protocol": "UDP", "port": codewire_daemon_proto::WORKSPACE_TAILNET_UDP_PORT}])
         );
         let peers = world["from"].as_array().unwrap();
         assert_eq!(peers.len(), 2);

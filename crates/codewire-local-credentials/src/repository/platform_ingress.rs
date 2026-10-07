@@ -339,7 +339,7 @@ fn valid_route(request: &Request<Incoming>, state: &IngressState) -> bool {
                 .ok()
                 .and_then(|length| length.parse::<usize>().ok())
                 .is_none_or(|length| {
-                    length > codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES
+                    length > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES
                 })
         })
     {

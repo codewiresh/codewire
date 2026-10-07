@@ -274,7 +274,7 @@ class FixtureRepository:
                         "apps/dashboard/runtime-inventory.json",
                         "apps/docs/zola/**",
                         "crates/**",
-                        "libs/gateway-proto/**",
+                        "libs/daemon-proto/**",
                         "packages/codewire-design/**",
                         "proto/**",
                     ],
@@ -287,7 +287,7 @@ class FixtureRepository:
                         "crates/**",
                         "deployments/docker/daemon.Dockerfile",
                         "deployments/docker/daemon.Dockerfile.dockerignore",
-                        "libs/gateway-proto/**",
+                        "libs/daemon-proto/**",
                         "proto/**",
                     ],
                 },
@@ -313,7 +313,7 @@ class FixtureRepository:
                         "crates/**",
                         "deployments/docker/services.Dockerfile",
                         "deployments/docker/services.Dockerfile.dockerignore",
-                        "libs/gateway-proto/**",
+                        "libs/daemon-proto/**",
                         "proto/**",
                     ],
                 },
@@ -598,7 +598,7 @@ dependencies = ["core"]
         self.write("crates/codewire-proto/src/lib.rs", "pub fn proto() {}\n")
         self.write("crates/codewire-tailnet/src/lib.rs", "pub fn tailnet() {}\n")
         self.write("crates/unrelated/src/lib.rs", "pub fn runtime_unrelated() {}\n")
-        self.write("libs/gateway-proto/proto/gateway.proto", "syntax = \"proto3\";\n")
+        self.write("libs/daemon-proto/proto/gateway.proto", "syntax = \"proto3\";\n")
         self.write("libs/sdk-go/environment.go", "package codewire\n")
         self.write("packages/codewire-design/styles.css", ":root {}\n")
         self.write("proto/codewire/v1/api.proto", "syntax = \"proto3\";\n")
@@ -1017,9 +1017,9 @@ class PlannerFixtureTests(unittest.TestCase):
         )
         self.assertEqual(self.runtime_states(self.repo.plan()), ("affected",) * 5)
 
-    def test_gateway_proto_input_affects_exact_consumers(self) -> None:
+    def test_daemon_proto_input_affects_exact_consumers(self) -> None:
         self.repo.change(
-            "libs/gateway-proto/proto/gateway.proto",
+            "libs/daemon-proto/proto/gateway.proto",
             'syntax = "proto3";\n// changed\n',
         )
         self.assertEqual(

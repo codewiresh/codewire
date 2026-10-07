@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use buffa_types::Timestamp;
-use codewire_gateway_proto::DAEMON_CAPABILITY_FILES;
+use codewire_daemon_proto::DAEMON_CAPABILITY_FILES;
 use codewire_proto::codewire::v1 as proto;
 use connectrpc::{InboundStream, RequestContext, ServiceRequest, ServiceResult, ServiceStream};
 use futures::StreamExt as _;

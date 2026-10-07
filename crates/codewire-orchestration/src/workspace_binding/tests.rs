@@ -14,7 +14,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, header::AUTHORIZATION};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use codewire_gateway_proto::{SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
+use codewire_daemon_proto::{SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
 use codewire_server_core::bounded_http1::PeerAddr;
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewStatus, UserInfo};
 use k8s_openapi::api::core::v1::{Pod, PodSpec, PodStatus};
@@ -681,8 +681,8 @@ async fn a_peer_flood_is_refused_before_any_review() {
 #[tokio::test]
 async fn only_the_exact_workspace_binding_audience_authenticates() {
     for audience in [
-        codewire_gateway_proto::CREDENTIAL_RELAY_TOKEN_AUDIENCE,
-        codewire_gateway_proto::CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
+        codewire_daemon_proto::CREDENTIAL_RELAY_TOKEN_AUDIENCE,
+        codewire_daemon_proto::CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
         "https://kubernetes.default.svc",
     ] {
         let fixture = fixture(

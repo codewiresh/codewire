@@ -30,7 +30,7 @@ proto/
 ```
 
 (`daemon.v1` is the Rust-consumed private gateway-to-daemon protocol under
-`libs/gateway-proto/proto/`; see `proto/README.md`.)
+`libs/daemon-proto/proto/`; see `proto/README.md`.)
 
 `codewire.testing.v1` (an 03-D8 amendment to this layout) is the
 Connect serving infrastructure's conformance fixture (`PingService`):

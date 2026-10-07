@@ -182,7 +182,7 @@ fn the_credential_scope_follows_what_the_pod_was_rendered_with() {
         .as_mut()
         .unwrap()
         .push(binding_volume(
-            codewire_gateway_proto::CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
+            codewire_daemon_proto::CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
         ));
     assert_eq!(credential_scope(&wrong_audience), None);
 }

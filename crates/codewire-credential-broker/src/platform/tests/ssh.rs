@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt;
 
 use codewire_access::{CapabilityPolicy, ProviderCatalog, ProviderDefinition, ProviderId};
-use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_protected_store::ssh_material::{SshPublicKey, generate_ed25519};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 

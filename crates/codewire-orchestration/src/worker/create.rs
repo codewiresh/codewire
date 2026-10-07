@@ -223,7 +223,7 @@ pub fn workspace_binding_url(server_namespace: &str) -> String {
     format!(
         "https://{}:{}",
         workspace_binding_tls_host(server_namespace),
-        codewire_gateway_proto::WORKSPACE_BINDING_PORT
+        codewire_daemon_proto::WORKSPACE_BINDING_PORT
     )
 }
 

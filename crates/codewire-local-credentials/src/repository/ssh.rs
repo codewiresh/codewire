@@ -5,8 +5,8 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use codewire_access::{AccessProfileId, CredentialAuthKind};
-use codewire_gateway_proto::codewire::bridge::v1 as daemon_v1;
-use codewire_gateway_proto::ssh::{
+use codewire_daemon_proto::codewire::bridge::v1 as daemon_v1;
+use codewire_daemon_proto::ssh::{
     SshOperation, remaining_deadline, validate_request, validate_response,
 };
 use codewire_protected_store::ssh_material::{SshKeyAlgorithm, SshPublicKey, parse_public_key};
@@ -730,8 +730,8 @@ mod tests {
                 deadline_unix_ms: u64::MAX,
                 operation: Some(daemon_v1::credential_ssh_request::Operation::Sign(
                     daemon_v1::CredentialSshSignRequest {
-                        public_key_blob: vec![0; codewire_gateway_proto::ssh::MAX_PUBLIC_KEY_BYTES],
-                        data: vec![0; codewire_gateway_proto::ssh::MAX_SIGNING_DATA_BYTES],
+                        public_key_blob: vec![0; codewire_daemon_proto::ssh::MAX_PUBLIC_KEY_BYTES],
+                        data: vec![0; codewire_daemon_proto::ssh::MAX_SIGNING_DATA_BYTES],
                         flags: 4,
                     },
                 )),

@@ -1,5 +1,5 @@
 use super::*;
-use codewire_gateway_proto::CREDENTIAL_RELAY_SERVICE_ACCOUNT;
+use codewire_daemon_proto::CREDENTIAL_RELAY_SERVICE_ACCOUNT;
 use serde::Deserialize;
 
 fn target(environment: u128, pod_uid: &str, generation: u64) -> Target {
@@ -159,7 +159,7 @@ async fn a_pass_tells_each_relay_whether_the_broker_can_admit_it() {
 /// trust this module reads.
 #[test]
 fn the_deployment_mounts_the_relay_identity_and_broker_trust() {
-    use codewire_gateway_proto::{
+    use codewire_daemon_proto::{
         CREDENTIAL_RELAY_TOKEN_AUDIENCE, CREDENTIAL_RELAY_TOKEN_EXPIRATION_SECONDS,
         CREDENTIAL_RELAY_TOKEN_MOUNT_PATH,
     };

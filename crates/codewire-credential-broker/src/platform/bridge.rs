@@ -16,11 +16,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
-use codewire_gateway_proto::broker::v1::credential_broker_service_server::{
+use codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
+use codewire_daemon_proto::broker::v1::credential_broker_service_server::{
     CredentialBrokerService, CredentialBrokerServiceServer,
 };
-use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_platform_credentials::{
     EpochMaterialCache, PlatformAccessProfileStore, PlatformCredentialStore,
 };
@@ -69,7 +69,7 @@ pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES: usize = 64;
 /// daemon sends an optional operation only when listed, so an older broker or
 /// relay is never sent a frame that would end its epoch.
 pub const PLATFORM_CREDENTIAL_BRIDGE_CAPABILITIES: &[&str] =
-    &[codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN];
+    &[codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN];
 const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_BUFFER: usize = 32;
 
@@ -497,14 +497,14 @@ where
             let mut response = Response::new(stream);
             for capability in PLATFORM_CREDENTIAL_BRIDGE_CAPABILITIES {
                 response.metadata_mut().append(
-                    codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
+                    codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
                     tonic::metadata::MetadataValue::from_static(capability),
                 );
             }
             // The verified expiry at which this epoch ends, so the relay can
             // admit the next one first. Not a credential; digits only.
             response.metadata_mut().insert(
-                codewire_gateway_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,
                 tonic::metadata::MetadataValue::from(expires_at_unix),
             );
             response

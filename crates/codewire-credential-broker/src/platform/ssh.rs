@@ -9,7 +9,7 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use codewire_gateway_proto::{
+use codewire_daemon_proto::{
     codewire::bridge::v1,
     ssh::{SshOperation, remaining_deadline, validate_request},
 };

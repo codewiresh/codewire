@@ -10,9 +10,9 @@ use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use codewire_daemon::client::{CredentialBridgeResponseSender, SessionClient, SessionClientError};
-use codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
-use codewire_gateway_proto::broker::v1::credential_broker_service_client::CredentialBrokerServiceClient;
-use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
+use codewire_daemon_proto::broker::v1::credential_broker_service_client::CredentialBrokerServiceClient;
+use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_tls::ClientTlsEndpoint;
 use prost::Message as _;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -932,7 +932,7 @@ impl ExpiryRejected {
 /// no authority; the broker still ends the epoch itself.
 fn broker_expiry(metadata: &tonic::metadata::MetadataMap) -> Result<BrokerExpiry, ExpiryRejected> {
     let mut values = metadata
-        .get_all(codewire_gateway_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER)
+        .get_all(codewire_daemon_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER)
         .iter();
     let value = values.next().ok_or(ExpiryRejected::Absent)?;
     if values.next().is_some() {
@@ -995,11 +995,11 @@ async fn forward_guest(
         // boundaries; the relay adds no request or credential selector.
         let deadline = match &frame.payload {
             Some(v1::credential_bridge_guest_message::Payload::Ssh(request)) => {
-                if codewire_gateway_proto::ssh::validate_request(request).is_err() {
+                if codewire_daemon_proto::ssh::validate_request(request).is_err() {
                     return Ok(());
                 }
                 let Ok(remaining) =
-                    codewire_gateway_proto::ssh::remaining_deadline(request.deadline_unix_ms)
+                    codewire_daemon_proto::ssh::remaining_deadline(request.deadline_unix_ms)
                 else {
                     return Ok(());
                 };
@@ -1072,11 +1072,11 @@ async fn forward_host(
 /// forwards only names this build knows.
 fn broker_capabilities(metadata: &tonic::metadata::MetadataMap) -> Vec<String> {
     metadata
-        .get_all(codewire_gateway_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER)
+        .get_all(codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER)
         .iter()
         .filter_map(|value| value.to_str().ok())
-        .filter(|value| codewire_gateway_proto::valid_credential_bridge_capability(value))
-        .take(codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES)
+        .filter(|value| codewire_daemon_proto::valid_credential_bridge_capability(value))
+        .take(codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES)
         .map(str::to_owned)
         .collect()
 }
