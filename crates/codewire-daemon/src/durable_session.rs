@@ -2187,6 +2187,8 @@ impl SessionEngine {
             result = prepared.project_spawned(child.process_id()) => result,
         };
         if projection.is_err() {
+            #[cfg(target_os = "macos")]
+            drop(pair.master);
             let confirmed = terminate_session_pty_launch(
                 &mut child,
                 #[cfg(unix)]
@@ -2206,6 +2208,8 @@ impl SessionEngine {
         if host_group.is_some()
             && let Err(error) = set_host_pty_nonblocking(&*pair.master)
         {
+            #[cfg(target_os = "macos")]
+            drop(pair.master);
             let confirmed = terminate_session_pty_launch(&mut child, host_group.as_mut()).await;
             return self
                 .record_launch_cleanup(handle, confirmed, format!("prepare host PTY: {error}"))
@@ -2215,6 +2219,8 @@ impl SessionEngine {
         let reader = match pair.master.try_clone_reader() {
             Ok(reader) => reader,
             Err(error) => {
+                #[cfg(target_os = "macos")]
+                drop(pair.master);
                 let confirmed = terminate_session_pty_launch(
                     &mut child,
                     #[cfg(unix)]
@@ -2233,6 +2239,8 @@ impl SessionEngine {
         let writer = match pair.master.take_writer() {
             Ok(writer) => writer,
             Err(error) => {
+                #[cfg(target_os = "macos")]
+                drop((reader, pair.master));
                 let confirmed = terminate_session_pty_launch(
                     &mut child,
                     #[cfg(unix)]
@@ -2251,6 +2259,8 @@ impl SessionEngine {
 
         let running = self.record_starting_running(&handle).await;
         if running.is_err() || launch_is_cancelled(&handle, cancel) {
+            #[cfg(target_os = "macos")]
+            drop((reader, writer, pair.master));
             let confirmed = terminate_session_pty_launch(
                 &mut child,
                 #[cfg(unix)]
@@ -2859,6 +2869,8 @@ async fn terminate_session_launch(
     terminate_native_launch(child).await
 }
 
+/// On macOS a session leader's exit waits for its terminal output to drain,
+/// so launch cleanup closes every PTY master handle before waiting to reap.
 async fn terminate_session_pty_launch(
     child: &mut crate::execution::PtyLaunchGuard,
     #[cfg(unix)] group: Option<&mut crate::host_process::OwnedProcessGroup>,
@@ -5161,7 +5173,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 #[path = "durable_session/host_tests.rs"]
 mod host_tests;
 

@@ -731,7 +731,12 @@ fn alive(pid: u32) -> bool {
     {
         return false; // Dead orphans may await the test host's init reaper.
     }
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    #[cfg(target_os = "macos")]
+    return crate::host_process::live(pid as i32); // Zombies may await their reaper.
+    #[cfg(not(target_os = "macos"))]
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -984,7 +989,12 @@ async fn host_stop_owns_shell_descendants_for_pipe_and_pty_preserving_unrelated_
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(stopped.state, v1::SessionLifecycleState::Stopped as i32);
+        assert_eq!(
+            stopped.state,
+            v1::SessionLifecycleState::Stopped as i32,
+            "{}",
+            stopped.status_message
+        );
         assert!(!stopped.cleanup_unknown);
         assert!(
             !alive(descendant_pid),
@@ -997,6 +1007,52 @@ async fn host_stop_owns_shell_descendants_for_pipe_and_pty_preserving_unrelated_
         engine.shutdown().await.unwrap();
         unrelated.kill().await.unwrap();
     }
+    #[cfg(target_os = "linux")]
+    assert_no_fixture_children();
+}
+
+/// PTY job control moves a background job into its own process group, which
+/// a signal to the leader's group misses. Stop must still reach it through the
+/// owned session.
+#[tokio::test]
+async fn host_stop_reaches_job_control_groups_in_the_owned_session() {
+    #[cfg(target_os = "linux")]
+    if isolated_descendant_fixture("host_stop_reaches_job_control_groups_in_the_owned_session")
+        .await
+    {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let engine = host_engine(temp.path());
+    let descendant = temp.path().join("descendant.pid");
+    let script = format!(
+        "set -m; trap '' TERM; sleep 60 & echo $! > '{}'; wait",
+        descendant.display()
+    );
+    let record = engine.launch(request(&script, true)).await.unwrap();
+    let pid: u32 = wait_file(&descendant).await.trim().parse().unwrap();
+    #[cfg(target_os = "linux")]
+    let fixture = FixtureDescendant::capture(pid);
+    assert_eq!(
+        unsafe { libc::getpgid(pid as i32) },
+        pid as i32,
+        "job control did not give the background job its own group"
+    );
+    let stopped = tokio::time::timeout(Duration::from_secs(4), engine.stop(&record.session_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stopped.state,
+        v1::SessionLifecycleState::Stopped as i32,
+        "{}",
+        stopped.status_message
+    );
+    assert!(!stopped.cleanup_unknown);
+    assert!(!alive(pid), "job-control group survived host Stop");
+    #[cfg(target_os = "linux")]
+    fixture.reap();
+    engine.shutdown().await.unwrap();
     #[cfg(target_os = "linux")]
     assert_no_fixture_children();
 }
@@ -1034,7 +1090,12 @@ async fn host_exit_cleans_remaining_descendants_before_reaping_group_leader() {
         })
         .await
         .unwrap();
-        assert_eq!(ended.state, v1::SessionLifecycleState::Exited as i32);
+        assert_eq!(
+            ended.state,
+            v1::SessionLifecycleState::Exited as i32,
+            "{}",
+            ended.status_message
+        );
         assert_eq!(ended.exit_code, Some(7));
         assert!(!ended.cleanup_unknown);
         assert!(!alive(pid));
@@ -1110,6 +1171,7 @@ async fn recovered_host_live_records_are_fenced_without_signaling_persisted_pid(
             session_id: session_id.clone(),
             #[cfg(target_os = "linux")]
             control_origin: None,
+            #[cfg(target_os = "linux")]
             platform_managed_origin: None,
             launch_generation: 1,
             name: String::new(),
@@ -1415,7 +1477,12 @@ async fn host_pty_cleanup_includes_ordinary_terminal_job_control_groups() {
         libc::getsid(pid as i32)
     });
     let stopped = engine.stop(&record.session_id).await.unwrap();
-    assert_eq!(stopped.state, v1::SessionLifecycleState::Stopped as i32);
+    assert_eq!(
+        stopped.state,
+        v1::SessionLifecycleState::Stopped as i32,
+        "{}",
+        stopped.status_message
+    );
     assert!(!stopped.cleanup_unknown);
     assert!(!alive(pid));
     descendant.reap();
@@ -1476,7 +1543,12 @@ async fn host_launch_cancellation_cleans_spawned_descendants_before_failed_ackno
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(record.state, v1::SessionLifecycleState::Failed as i32);
+        assert_eq!(
+            record.state,
+            v1::SessionLifecycleState::Failed as i32,
+            "pty={pty}: {}",
+            record.status_message
+        );
         assert!(!record.cleanup_unknown);
         assert!(!alive(pid));
         #[cfg(target_os = "linux")]
@@ -1541,7 +1613,12 @@ async fn acknowledged_host_input_accepts_maximum_and_times_out_without_replay_or
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stopped.state, v1::SessionLifecycleState::Stopped as i32);
+    assert_eq!(
+        stopped.state,
+        v1::SessionLifecycleState::Stopped as i32,
+        "{}",
+        stopped.status_message
+    );
     #[cfg(target_os = "linux")]
     for descendant in blocked_descendants {
         assert!(!alive(descendant.pid));

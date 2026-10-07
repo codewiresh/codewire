@@ -352,6 +352,17 @@ class HelperTests(unittest.TestCase):
         with helper.cache_lock(self.root):
             pass
 
+    def test_confirmed_cleanup_removes_read_only_test_leftovers(self):
+        with helper.cache_lock(self.root):
+            with helper.isolated_runtime(self.root, self.root / "fixture-run") as runtime:
+                # A managed release store leaves read-only version directories.
+                version = runtime / "tmp/store/versions/synthetic"
+                version.mkdir(parents=True)
+                (version / "identity.json").write_bytes(b"{}")
+                version.chmod(0o555)
+        self.assertFalse(runtime.exists())
+        self.assertFalse((self.root / "inflight.json").exists())
+
     def test_cancel_kills_fixture_grandchild(self):
         cancel = threading.Event()
         marker = self.root / "escaped"

@@ -320,12 +320,12 @@ fn host_creation_is_explicit_and_rejects_vm_or_provider_projection_options() {
         panic!("create expected");
     };
     assert_eq!(create.environment_type, EnvironmentTypeArg::Host);
-    if !cfg!(target_os = "linux") {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
         assert!(
             validate_host_create(&create, placement)
                 .unwrap_err()
                 .to_string()
-                .contains("qualified on Linux")
+                .contains("supported on Linux and macOS")
         );
         return;
     }

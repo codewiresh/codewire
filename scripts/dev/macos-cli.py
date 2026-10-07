@@ -268,7 +268,8 @@ def cache_lock(root):
 
 @contextlib.contextmanager
 def isolated_runtime(root, run):
-    runtime = Path(tempfile.mkdtemp(prefix="cw-", dir="/tmp"))
+    # Resolved: Darwin's /tmp is a symlink, which private-root checks refuse.
+    runtime = Path(tempfile.mkdtemp(prefix="cw-", dir="/tmp")).resolve()
     marker = root / "inflight.json"
     # This fail-closed marker exists before any child can start. An abrupt
     # worker death or failed cleanup cannot silently unlock cache reuse.
@@ -285,8 +286,15 @@ def isolated_runtime(root, run):
         raise
     finally:
         if not retain:
-            shutil.rmtree(runtime)
+            shutil.rmtree(runtime, onerror=writable_retry)
             marker.unlink()
+
+
+def writable_retry(function, path, _):
+    # Tests may leave read-only directories (for example a managed release
+    # store) inside this helper-owned tree; make the parent writable once.
+    os.chmod(os.path.dirname(path), 0o700)
+    function(path)
 
 
 def group_absent(process):
