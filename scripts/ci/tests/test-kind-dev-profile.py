@@ -425,6 +425,15 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assertIsNotNone(launch["lock_fd"])
         self.assertFalse(self.calls("docker"))
 
+    def test_cw_managed_agents_selects_only_explicit_retained_route(self) -> None:
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="cw-managed-agents")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launch, = self.calls("suite")
+        self.assertEqual(launch["args"], ["suite", "cw-managed-agents"])
+        self.assertEqual(launch["profile"], "dev-a")
+        self.assertIsNotNone(launch["lock_fd"])
+        self.assertFalse(self.calls("docker"))
+
     def test_cw_runtime_failure_stops_selected_tail(self) -> None:
         result = self.run_script("test-selected.sh", KIND_TEST_SUITES="cw-runtime warm-pools", FAKE_SUITE_STATUS="28")
         self.assertNotEqual(result.returncode, 0)
