@@ -215,6 +215,9 @@ pub(crate) async fn handle_shell_stdio(
     globals: &Globals,
     environment: Option<&str>,
 ) -> anyhow::Result<()> {
+    if std::env::var_os("CW_DEBUG_TAILNET").is_some() {
+        init_tailnet_debug_log();
+    }
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env);
     let platform = resolve_platform(globals, &paths, &env)?;
@@ -231,6 +234,20 @@ pub(crate) async fn handle_shell_stdio(
             .await?;
     let mode = tailnet_ssh::SshTransportMode::from_env()?;
     tailnet_ssh::pipe_shell_stdio(&client, &org_id, &environment_id, mode).await
+}
+
+/// `CW_DEBUG_TAILNET` timeline on stderr: tailnet and client debug events,
+/// timestamped from process start. `RUST_LOG` narrows or widens it.
+fn init_tailnet_debug_log() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("codewire_tailnet=debug,codewire_client=debug"));
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_timer(tracing_subscriber::fmt::time::uptime())
+        .with_env_filter(filter)
+        .try_init();
 }
 
 pub(crate) fn vscode_environment_ref(value: &str) -> Option<&str> {

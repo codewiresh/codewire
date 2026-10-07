@@ -125,8 +125,11 @@ async fn connect_tailnet_ssh(
         duration_from_env("CW_TAILNET_DIRECT_WAIT", DEFAULT_DIRECT_WAIT, true),
     );
 
+    let started = Instant::now();
     let session =
         connect_tailnet_session(client, org_id, environment_id, peer_timeout, force_derp).await?;
+    debug_phase("session", started);
+    let path_started = Instant::now();
     wait_for_preferred_path(
         &session.conn,
         &session.peer,
@@ -134,6 +137,7 @@ async fn connect_tailnet_ssh(
         expected_transport,
     )
     .await?;
+    debug_phase("path", path_started);
 
     let agent_addr = prefix_from_uuid(&session.environment_uuid);
     let dst = SocketAddr::new(agent_addr.addr(), 22);
@@ -246,9 +250,12 @@ async fn connect_tailnet_session(
         .with_context(|| format!("parse environment ID {environment_id:?}"))?;
     let identity = PrimaryCoordinateIdentity::client(org_id, environment_uuid);
 
+    let phase = Instant::now();
     let derp_map = fetch_initial_derp_map(client, identity.clone(), peer_timeout)
         .await
         .context("fetch coordinator DERP map")?;
+    debug_phase("derp_map", phase);
+    let phase = Instant::now();
     let derp_target = derp_target_from_map(derp_map.as_ref())
         .unwrap_or_else(|| derp_target_from_platform_url(client.server_url()));
     let stun_servers = if force_derp {
@@ -259,15 +266,19 @@ async fn connect_tailnet_session(
             .context("resolve DERP map STUN servers")?
     };
     let suppress_peer_direct_udp = suppress_peer_direct_udp_from_env(force_derp);
+    debug_phase("stun_resolve", phase);
 
     let client_id = Uuid::new_v4();
     let client_addr = prefix_from_uuid(&client_id);
     let secret = StaticSecret::random_from_rng(OsRng);
     let local_node_key = NodePublic::from_raw(PublicKey::from(&secret).to_bytes());
     let disco_private = DiscoPrivate::generate(&mut OsRng);
+    let phase = Instant::now();
     let fallback_transport = connect_derp_transport(&derp_target, &secret)
         .await
         .context("connect DERP relay")?;
+    debug_phase("derp_connect", phase);
+    let phase = Instant::now();
 
     let (transport, endpoints, direct_udp) = if force_derp {
         (fallback_transport, Vec::new(), None)
@@ -292,8 +303,10 @@ async fn connect_tailnet_session(
     conn_options.endpoints = endpoints;
     conn_options.private_key = Some(secret);
     conn_options.disco_private = Some(disco_private);
+    debug_phase("direct_udp_bind", phase);
     let conn = Arc::new(Conn::new(conn_options, transport).context("create tailnet conn")?);
     conn.set_preferred_derp(1);
+    let phase = Instant::now();
 
     let target_peer = Arc::new(Mutex::new(None::<Node>));
     let target_notify = Arc::new(Notify::new());
@@ -301,6 +314,8 @@ async fn connect_tailnet_session(
         .connect_primary_coordinator_with_setup_timeout(identity, peer_timeout)
         .await
         .context("set up typed coordinator session")?;
+    debug_phase("coordinator", phase);
+    let phase = Instant::now();
     let coordinator_task = spawn_coordinator_task(
         conn.clone(),
         coordinator,
@@ -313,6 +328,7 @@ async fn connect_tailnet_session(
     let peer = wait_for_target_peer(target_peer, target_notify, peer_timeout)
         .await
         .with_context(|| format!("wait for environment peer {environment_id}"))?;
+    debug_phase("peer", phase);
 
     Ok(TailnetSession {
         environment_uuid,
@@ -812,6 +828,15 @@ fn stage_fail(
 fn expected_transport_from_env() -> anyhow::Result<ExpectedTransport> {
     ExpectedTransport::parse(&std::env::var("CW_TAILNET_EXPECTED_TRANSPORT").unwrap_or_default())
         .map_err(|err| anyhow!("invalid CW_TAILNET_EXPECTED_TRANSPORT: {err}"))
+}
+
+fn debug_phase(phase: &str, started: Instant) {
+    if std::env::var_os("CW_DEBUG_TAILNET").is_some() {
+        eprintln!(
+            "cw tailnet: phase={phase} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+    }
 }
 
 fn debug_path_probe(transport: PeerTransport) {
