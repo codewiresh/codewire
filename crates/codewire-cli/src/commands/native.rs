@@ -1399,35 +1399,10 @@ async fn native_client() -> anyhow::Result<NativeSupervisorClient> {
         || async {
             NativeSupervisorClient::connect_or_start(&config)
                 .await
-                .map_err(|error| native_supervisor_connect_error(&config, error))
+                .context("connect to native local supervisor")
         },
     )
     .await
-}
-
-/// cw never replaces an existing supervisor endpoint. When nothing accepts on
-/// it, say so and name the one file whose removal lets cw start a new one.
-fn native_supervisor_connect_error(
-    config: &NativeRuntimeConfig,
-    error: codewire_local_vmm::supervisor::SupervisorError,
-) -> anyhow::Error {
-    let refused = std::iter::successors(
-        Some(&error as &(dyn std::error::Error + 'static)),
-        |error| error.source(),
-    )
-    .any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
-    });
-    let error = anyhow::Error::new(error).context("connect to native local supervisor");
-    if refused {
-        return error.context(format!(
-            "no native local supervisor is accepting connections at {}; if none is running, remove that stale socket and retry",
-            config.supervisor_socket().display()
-        ));
-    }
-    error
 }
 
 async fn connect_native_after_authority_admission<T, A, AF, C, CF>(

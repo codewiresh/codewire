@@ -114,6 +114,9 @@ use crate::workspace_plan::{
 
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a client keeps connecting after its replacement supervisor exited
+/// without taking the lock, in case a concurrently started one is binding.
+const STALE_ENDPOINT_GRACE: Duration = Duration::from_secs(2);
 /// How long a new supervisor waits for a previous supervisor's runner, which
 /// exits as soon as it sees its parent exit.
 #[cfg(target_os = "macos")]
@@ -289,13 +292,23 @@ impl NativeSupervisorClient {
         Self::connect_for_config(&config.supervisor_socket(), config).await
     }
 
+    /// Connect to the supervisor, starting one when no endpoint exists or when
+    /// the existing endpoint refuses connections.
+    ///
+    /// A refused endpoint is only replaced by a new supervisor that holds
+    /// `supervisor.lock`. Every supervisor holds that lock for its whole life
+    /// and binds its socket only after taking it, so a supervisor that is alive
+    /// (even one not accepting) keeps its socket: the new one fails to take the
+    /// lock and exits without touching the endpoint. The client never unlinks
+    /// anything itself.
     pub async fn connect_or_start(config: &NativeRuntimeConfig) -> Result<Self, SupervisorError> {
         config.validate()?;
         let socket = config.supervisor_socket();
         match fs::symlink_metadata(&socket) {
-            // Existing endpoints are connect-only. Missing/dead/unsupported
-            // peer admission never authorizes a replacement or stale unlink.
-            Ok(_) => return Self::connect_for_config(&socket, config).await,
+            Ok(_) => match Self::connect_for_config(&socket, config).await {
+                Err(error) if error.refused_connection() => {}
+                result => return result,
+            },
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(source) => {
                 return Err(SupervisorError::Io {
@@ -307,6 +320,7 @@ impl NativeSupervisorClient {
         prepare_runtime_root(&config.root)?;
         let mut child = spawn_supervisor(config)?;
         let deadline = tokio::time::Instant::now() + RUNNER_START_TIMEOUT;
+        let mut exited_at = None;
         loop {
             if fs::symlink_metadata(&socket).is_ok() {
                 match Self::connect_for_config(&socket, config).await {
@@ -324,13 +338,21 @@ impl NativeSupervisorClient {
                     }
                 }
             }
-            if child
-                .try_wait()
-                .map_err(|_| SupervisorError::SpawnSupervisor)?
-                .is_some()
-                && fs::symlink_metadata(&socket).is_err()
+            if exited_at.is_none()
+                && child
+                    .try_wait()
+                    .map_err(|_| SupervisorError::SpawnSupervisor)?
+                    .is_some()
             {
-                return Err(SupervisorError::SpawnSupervisor);
+                if fs::symlink_metadata(&socket).is_err() {
+                    return Err(SupervisorError::SpawnSupervisor);
+                }
+                exited_at = Some(tokio::time::Instant::now());
+            }
+            // A supervisor that exits while the old endpoint still refuses did
+            // not get the lock. Allow a concurrent winner a moment to bind.
+            if exited_at.is_some_and(|exited| exited.elapsed() >= STALE_ENDPOINT_GRACE) {
+                return Err(SupervisorError::EndpointNotReplaced(socket));
             }
             if tokio::time::Instant::now() >= deadline {
                 terminate_unadmitted_child(&mut child);
@@ -7152,6 +7174,10 @@ pub enum SupervisorError {
     SpawnSupervisor,
     #[error("native supervisor startup timed out")]
     SupervisorStartTimeout,
+    #[error(
+        "nothing accepts connections at {0}, and no new native local supervisor could take it over because another one still holds its lock"
+    )]
+    EndpointNotReplaced(PathBuf),
     #[error("the running native supervisor does not implement the required compatibility protocol")]
     SupervisorProtocolUnavailable,
     #[error(
@@ -7310,6 +7336,21 @@ fn create_failure_code(error: &SupervisorError) -> &'static str {
 }
 
 impl SupervisorError {
+    /// Nothing listens on the supervisor endpoint.
+    fn refused_connection(&self) -> bool {
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(self);
+        while let Some(error) = cause {
+            if error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|error| error.kind() == io::ErrorKind::ConnectionRefused)
+            {
+                return true;
+            }
+            cause = error.source();
+        }
+        false
+    }
+
     fn incompatible_supervisor(&self) -> bool {
         matches!(
             self,
@@ -7859,6 +7900,83 @@ mod tests {
             _lock: lock,
         };
         (parent, core)
+    }
+
+    /// Leave a dead owner-only endpoint at `socket`: bound, then closed.
+    fn stale_supervisor_endpoint(socket: &Path) -> SocketIdentity {
+        drop(std::os::unix::net::UnixListener::bind(socket).unwrap());
+        fs::set_permissions(socket, fs::Permissions::from_mode(0o600)).unwrap();
+        SocketIdentity::capture(socket).unwrap()
+    }
+
+    #[tokio::test]
+    async fn refused_endpoint_is_replaced_only_by_the_lock_holder() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let mut config = core.config.clone();
+        config.executable = std::env::current_exe().unwrap();
+        drop(core);
+        fs::set_permissions(_parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = config.supervisor_socket();
+        let stale = stale_supervisor_endpoint(&socket);
+        let error = NativeSupervisorClient::connect_for_config(&socket, &config)
+            .await
+            .err()
+            .expect("a closed endpoint refuses connections");
+        assert!(error.refused_connection(), "{error:?}");
+
+        // A live owner keeps the lock for its whole life. A second supervisor
+        // then fails before it binds, and the endpoint stays exactly as it is.
+        let held = SupervisorLock::acquire(&PrivateRoot::open(&config.root).unwrap()).unwrap();
+        let error = serve_supervisor(config.clone()).await.unwrap_err();
+        assert!(
+            matches!(error, SupervisorError::AlreadyRunning),
+            "{error:?}"
+        );
+        assert_eq!(SocketIdentity::capture(&socket).unwrap(), stale);
+
+        // Once no owner holds the lock, the new supervisor replaces it.
+        drop(held);
+        let mut supervisor = tokio::spawn(serve_supervisor(config.clone()));
+        let replaced = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(identity) = SocketIdentity::capture(&socket)
+                    && identity != stale
+                    && NativeSupervisorClient::connect(&socket).await.is_ok()
+                {
+                    break identity;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the lock holder replaced the refused endpoint");
+        assert_ne!(replaced, stale);
+        assert!(!supervisor.is_finished());
+        supervisor.abort();
+        assert!((&mut supervisor).await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn client_leaves_a_refused_endpoint_whose_lock_is_held() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let mut config = core.config.clone();
+        // The started process exits at once, as a supervisor that cannot take
+        // the lock does; the client itself never unlinks the endpoint.
+        config.executable = PathBuf::from("/usr/bin/false");
+        drop(core);
+        fs::set_permissions(_parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = config.supervisor_socket();
+        let stale = stale_supervisor_endpoint(&socket);
+        let _held = SupervisorLock::acquire(&PrivateRoot::open(&config.root).unwrap()).unwrap();
+        let error = NativeSupervisorClient::connect_or_start(&config)
+            .await
+            .err()
+            .expect("no supervisor can take over a held lock");
+        assert!(
+            matches!(&error, SupervisorError::EndpointNotReplaced(path) if *path == socket),
+            "{error:?}"
+        );
+        assert_eq!(SocketIdentity::capture(&socket).unwrap(), stale);
     }
 
     pub(super) fn test_supervisor_service(core: SupervisorCore) -> SupervisorRpc {
