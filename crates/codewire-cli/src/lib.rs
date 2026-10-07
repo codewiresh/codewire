@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use chrono::{DateTime, SecondsFormat, Utc};
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use codewire_client::{
     ApiKey, AuthUser as PlatformUser, CreateApiKeyRequest, OAuthClient, OAuthCredentials,
@@ -114,6 +114,97 @@ struct Cli {
     member: Option<String>,
     #[command(subcommand)]
     command: Command,
+}
+
+/// Top-level help sections in display order. Each visible command belongs to
+/// exactly one section; a command missing here still appears under "Other".
+const HELP_SECTIONS: &[(&str, &[&str])] = &[
+    ("Get started", &["setup", "login", "logout", "whoami"]),
+    (
+        "Environments",
+        &[
+            "env",
+            "use",
+            "current",
+            "init",
+            "shell",
+            "vscode",
+            "config-ssh",
+            "preset",
+        ],
+    ),
+    (
+        "Sessions",
+        &[
+            "run", "list", "attach", "logs", "send", "wait", "stop", "restart",
+        ],
+    ),
+    ("Agents", &["msg", "steer", "interrupt", "inbox"]),
+    ("Secrets and credentials", &["secrets", "credentials"]),
+    ("Networking", &["network", "mesh", "control", "member"]),
+    ("Organizations and billing", &["org", "api-keys", "cost"]),
+    (
+        "cw itself",
+        &[
+            "install",
+            "update",
+            "doctor",
+            "config",
+            "completion",
+            "help",
+        ],
+    ),
+];
+
+/// The top-level command with its commands grouped into [`HELP_SECTIONS`].
+/// Descriptions come from the commands themselves, so the help cannot drift.
+fn cli_command() -> clap::Command {
+    let command = Cli::command();
+    let mut visible: Vec<(String, String)> = command
+        .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
+        .map(|subcommand| {
+            let about = subcommand
+                .get_about()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            (subcommand.get_name().to_owned(), about)
+        })
+        .collect();
+    visible.push((
+        "help".to_owned(),
+        "Show help for cw or one of its commands".to_owned(),
+    ));
+    let width = visible
+        .iter()
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0);
+    let mut sections = String::new();
+    let mut listed = std::collections::HashSet::new();
+    let mut section = |heading: &str, names: &mut dyn Iterator<Item = &(String, String)>| {
+        let mut body = String::new();
+        for (name, about) in names {
+            body.push_str(&format!("  {name:<width$}  {about}\n"));
+        }
+        if !body.is_empty() {
+            sections.push_str(&format!("{heading}:\n{body}\n"));
+        }
+    };
+    for (heading, names) in HELP_SECTIONS {
+        let mut members = names
+            .iter()
+            .filter_map(|name| visible.iter().find(|(candidate, _)| candidate == name));
+        section(heading, &mut members);
+        listed.extend(names.iter().copied());
+    }
+    let mut other = visible
+        .iter()
+        .filter(|(name, _)| !listed.contains(name.as_str()));
+    section("Other", &mut other);
+    command.help_template(format!(
+        "{{before-help}}{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{sections}Options:\n{{options}}{{after-help}}"
+    ))
 }
 
 #[derive(Clone, Debug)]
@@ -472,7 +563,10 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let cli = Cli::parse_from(args);
+    let mut command = cli_command();
+    let matches = command.clone().get_matches_from(args);
+    let cli =
+        Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.format(&mut command).exit());
     validate_member_mutation_flags(&cli)?;
     if cli.member.is_some() {
         #[cfg(target_os = "linux")]

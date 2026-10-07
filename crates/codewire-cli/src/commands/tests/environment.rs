@@ -66,7 +66,7 @@ fn private_environment_launcher_preserves_argument_boundary_and_requires_a_comma
         .is_err()
     );
     assert!(Cli::try_parse_from(["cw", "__environment-launch", "--", "/bin/true"]).is_err());
-    let help = Cli::command().render_help().to_string();
+    let help = crate::cli_command().render_help().to_string();
     assert!(!help.contains("__environment-launch"));
 }
 

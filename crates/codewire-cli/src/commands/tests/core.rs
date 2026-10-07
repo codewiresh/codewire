@@ -1196,3 +1196,38 @@ fn format_current_target_text_reports_local_and_mesh_network() {
         )
     );
 }
+
+#[test]
+fn top_level_help_groups_every_visible_command_once() {
+    use clap::CommandFactory as _;
+    let help = crate::cli_command().render_help().to_string();
+    let visible: Vec<String> = crate::Cli::command()
+        .get_subcommands()
+        .filter(|command| !command.is_hide_set())
+        .map(|command| command.get_name().to_owned())
+        .collect();
+    for name in visible.iter().map(String::as_str).chain(["help"]) {
+        let sections = crate::HELP_SECTIONS
+            .iter()
+            .filter(|(_, names)| names.contains(&name))
+            .count();
+        assert_eq!(sections, 1, "{name} belongs to exactly one help section");
+        let rows = help
+            .lines()
+            .filter(|line| line.trim_start().starts_with(&format!("{name} ")))
+            .count();
+        assert_eq!(rows, 1, "{name} is listed once");
+    }
+    assert!(!help.contains("\nOther:\n"));
+    assert!(!help.contains("__"));
+    let headings: Vec<&str> = help
+        .lines()
+        .filter(|line| line.ends_with(':') && !line.starts_with(' '))
+        .collect();
+    let expected: Vec<String> = crate::HELP_SECTIONS
+        .iter()
+        .map(|(heading, _)| format!("{heading}:"))
+        .chain(["Options:".to_owned()])
+        .collect();
+    assert_eq!(headings, expected);
+}
