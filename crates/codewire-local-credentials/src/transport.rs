@@ -14,6 +14,8 @@ use std::os::unix::fs::{
     DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, PermissionsExt as _,
 };
 
+use codewire_protected_store::ProtectedStoreError;
+
 use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 
 // Bump this whenever a detached authority must be replaced, including
@@ -224,6 +226,61 @@ pub(crate) fn remove_bound_socket(
     fs::remove_file(socket).map_err(|_| AuthorityRuntimeError::InvalidPrivateSocket)
 }
 
+/// A starting authority that cannot use its protected store exits with one
+/// of these bases plus the store error's index: 80 when it refused to move
+/// values to a newly configured store, 90 when its own store failed while
+/// opening (for example a locked keychain). The detached authority has no
+/// diagnostic stream, so its starter decodes the reason.
+const STORE_SWITCH_EXIT_BASE: i32 = 80;
+const STORE_OPEN_EXIT_BASE: i32 = 90;
+const STORE_ERRORS: [ProtectedStoreError; 9] = [
+    ProtectedStoreError::InvalidEntryId,
+    ProtectedStoreError::EmptyValue,
+    ProtectedStoreError::ValueTooLarge,
+    ProtectedStoreError::AccessDenied,
+    ProtectedStoreError::Unavailable,
+    ProtectedStoreError::TimedOut,
+    ProtectedStoreError::AmbiguousEntry,
+    ProtectedStoreError::CorruptEntry,
+    ProtectedStoreError::UnsupportedPlatform,
+];
+
+/// The process exit status for an authority that failed to start.
+pub fn authority_exit_code(error: &AuthorityRuntimeError) -> Option<i32> {
+    let (base, error) = match error {
+        AuthorityRuntimeError::Credential(LocalCredentialError::ProtectedStoreSwitch(error)) => {
+            (STORE_SWITCH_EXIT_BASE, error)
+        }
+        AuthorityRuntimeError::Credential(LocalCredentialError::ProtectedStore(error)) => {
+            (STORE_OPEN_EXIT_BASE, error)
+        }
+        _ => return None,
+    };
+    STORE_ERRORS
+        .iter()
+        .position(|candidate| candidate == error)
+        .map(|index| base + index as i32)
+}
+
+/// The start failure an authority reported through its exit status. Both
+/// kinds happen only after it holds the singleton lock, so they are final.
+pub(crate) fn store_error_from_exit_status(
+    status: std::process::ExitStatus,
+) -> Option<LocalCredentialError> {
+    let code = status.code()?;
+    let (base, wrap): (i32, fn(ProtectedStoreError) -> LocalCredentialError) =
+        if code >= STORE_OPEN_EXIT_BASE {
+            (STORE_OPEN_EXIT_BASE, LocalCredentialError::ProtectedStore)
+        } else {
+            (
+                STORE_SWITCH_EXIT_BASE,
+                LocalCredentialError::ProtectedStoreSwitch,
+            )
+        };
+    let index = usize::try_from(code.checked_sub(base)?).ok()?;
+    STORE_ERRORS.get(index).copied().map(wrap)
+}
+
 pub(crate) fn current_uid() -> u32 {
     rustix::process::geteuid().as_raw()
 }
@@ -252,4 +309,41 @@ pub enum AuthorityRuntimeError {
     Serve,
     #[error(transparent)]
     Credential(#[from] LocalCredentialError),
+}
+
+#[cfg(test)]
+mod exit_status_tests {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    use super::*;
+
+    #[test]
+    fn store_start_failures_round_trip_through_the_exit_status() {
+        for error in STORE_ERRORS {
+            for (failure, codes) in [
+                (LocalCredentialError::ProtectedStoreSwitch(error), 80..=88),
+                (LocalCredentialError::ProtectedStore(error), 90..=98),
+            ] {
+                let code = authority_exit_code(&AuthorityRuntimeError::Credential(failure.clone()))
+                    .unwrap();
+                assert!(codes.contains(&code));
+                let status = std::process::ExitStatus::from_raw(code << 8);
+                assert_eq!(store_error_from_exit_status(status), Some(failure));
+            }
+        }
+        assert_eq!(authority_exit_code(&AuthorityRuntimeError::Serve), None);
+        assert_eq!(
+            authority_exit_code(&AuthorityRuntimeError::Credential(
+                LocalCredentialError::AlreadyRunning
+            )),
+            None
+        );
+        for code in [0, 1, 79, 89, 99] {
+            let status = std::process::ExitStatus::from_raw(code << 8);
+            assert_eq!(store_error_from_exit_status(status), None);
+        }
+        // Killed by a signal: no exit code.
+        let signaled = std::process::ExitStatus::from_raw(9);
+        assert_eq!(store_error_from_exit_status(signaled), None);
+    }
 }

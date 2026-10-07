@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
-use std::process::Child;
+use std::process::{Child, ExitStatus};
 use std::time::Duration;
 
 use codewire_access::{
@@ -25,12 +25,13 @@ use crate::repository::{MAX_GIT_BUNDLE_BYTES, valid_git_selector};
 use crate::service::auth_kind_to_proto;
 use crate::transport::{
     AUTHORITY_PROTOCOL_VERSION, AuthorityRuntimeConfig, AuthorityRuntimeError, connect_owner_only,
+    store_error_from_exit_status,
 };
 use crate::{
-    AccessProfileRecord, AccessProfileRevisionRecord, BrokerLeaseAuditDecision,
-    BrokerLeaseAuditEvent, CredentialRecord, EnvironmentAccessBindingRecord,
-    EnvironmentBrokerRuntime, LOCAL_OWNER_ID, LocalSecretProject, NewCredential,
-    ResolvedWorkloadSecretMetadata, WorkloadSecretMetadata, WorkloadSecretSelection,
+    AccessProfileRecord, AccessProfileRevisionRecord, AuthorityProtectedStore,
+    BrokerLeaseAuditDecision, BrokerLeaseAuditEvent, CredentialRecord,
+    EnvironmentAccessBindingRecord, EnvironmentBrokerRuntime, LOCAL_OWNER_ID, LocalSecretProject,
+    NewCredential, ResolvedWorkloadSecretMetadata, WorkloadSecretMetadata, WorkloadSecretSelection,
     WorkloadSecretSource, ensure_private_root,
 };
 
@@ -44,10 +45,34 @@ fn valid_object_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorityInfo {
     pub protocol_version: u32,
     pub protected_store_persistence: ProtectedStorePersistence,
+    /// `None` from an authority that predates the recorded store; it used
+    /// the platform default backend.
+    pub protected_store: Option<AuthorityProtectedStore>,
+}
+
+/// An authority process the starting client still owns until admission.
+pub trait SpawnedAuthority {
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>>;
+    fn kill(&mut self) -> std::io::Result<()>;
+    fn wait(&mut self) -> std::io::Result<ExitStatus>;
+}
+
+impl SpawnedAuthority for Child {
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        Child::try_wait(self)
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        Child::kill(self)
+    }
+
+    fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        Child::wait(self)
+    }
 }
 
 #[derive(Clone)]
@@ -175,12 +200,13 @@ impl LocalCredentialClient {
     /// Reuse a compatible authority, or start an owned child only when the
     /// endpoint is absent. A present endpoint's admission error never grants
     /// permission to shut it down, unlink it or launch a replacement.
-    pub async fn connect_or_start_with<F>(
+    pub async fn connect_or_start_with<F, C>(
         config: &AuthorityRuntimeConfig,
         spawn: F,
     ) -> Result<Self, AuthorityRuntimeError>
     where
-        F: FnOnce(&AuthorityRuntimeConfig) -> Result<Child, AuthorityRuntimeError>,
+        F: FnOnce(&AuthorityRuntimeConfig) -> Result<C, AuthorityRuntimeError>,
+        C: SpawnedAuthority,
     {
         config.prepare_root()?;
         if socket_exists(config)? {
@@ -201,11 +227,15 @@ impl LocalCredentialClient {
                     }
                 }
             }
-            if !child_exited {
-                child_exited = child
-                    .try_wait()
-                    .map_err(|_| AuthorityRuntimeError::Spawn)?
-                    .is_some();
+            if !child_exited
+                && let Some(status) = child.try_wait().map_err(|_| AuthorityRuntimeError::Spawn)?
+            {
+                child_exited = true;
+                // A store failure is final for this start: the child held
+                // the singleton lock, so no other live authority is coming.
+                if let Some(error) = store_error_from_exit_status(status) {
+                    return Err(AuthorityRuntimeError::Credential(error));
+                }
             }
             if tokio::time::Instant::now() >= deadline {
                 if child_exited {
@@ -269,12 +299,13 @@ impl LocalCredentialClient {
                 response.protected_store_persistence,
             )
             .map_err(|_| AuthorityRuntimeError::ProtocolMismatch)?,
+            protected_store: store_from_proto(&response.protected_store_backend)?,
         };
         Ok(Self { inner, info })
     }
 
     pub fn info(&self) -> AuthorityInfo {
-        self.info
+        self.info.clone()
     }
 
     pub async fn shutdown(mut self) -> Result<(), Status> {
@@ -810,7 +841,7 @@ impl LocalCredentialControlClient {
     }
 
     pub fn info(&self) -> AuthorityInfo {
-        self.info
+        self.info.clone()
     }
 
     /// Read material-free client-slot metadata from an exact immutable profile
@@ -1286,7 +1317,16 @@ fn broker_lease_audit_event_from_proto(
     })
 }
 
-fn terminate_unadmitted_child(child: &mut Child) {
+fn store_from_proto(value: &str) -> Result<Option<AuthorityProtectedStore>, AuthorityRuntimeError> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    AuthorityProtectedStore::from_record(value)
+        .map(Some)
+        .ok_or(AuthorityRuntimeError::ProtocolMismatch)
+}
+
+fn terminate_unadmitted_child(child: &mut impl SpawnedAuthority) {
     if child.try_wait().ok().flatten().is_none() {
         let _ = child.kill();
         let _ = child.wait();

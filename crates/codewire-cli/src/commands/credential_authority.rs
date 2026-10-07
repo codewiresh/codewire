@@ -1,36 +1,60 @@
 use std::env;
+#[cfg(target_os = "linux")]
 use std::ffi::{OsStr, OsString};
+#[cfg(target_os = "linux")]
 use std::io;
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd as _;
+#[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::process::{Child, Command, Stdio};
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+use std::time::Duration;
 
-use crate::config::OsEnv;
+use crate::config::{Env, OsEnv, ResolvePaths};
 use anyhow::Context as _;
+#[cfg(target_os = "linux")]
 use codewire_local_credentials::{
-    AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, AuthorityRuntimeConfig, AuthorityRuntimeError,
-    LocalBrokerProcessConfig, LocalBrokerProcessSpawner, LocalBrokerSpawnError,
-    LocalCredentialClient, LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner,
+    AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, LocalBrokerProcessConfig, LocalBrokerProcessSpawner,
+    LocalBrokerSpawnError, LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner,
     LocalRepositorySpawnError, serve_os_local_credential_authority_with_process_spawners,
 };
+use codewire_local_credentials::{
+    AuthorityProtectedStore, AuthorityRuntimeConfig, AuthorityRuntimeError, LocalCredentialClient,
+    LocalCredentialError,
+};
+use codewire_protected_store::{ProtectedStoreBackend, ProtectedStoreError};
 
 use super::{
     LocalCredentialAuthorityArgs, LocalCredentialAuthorityProbeArgs, local_credential_root,
 };
 
+#[cfg(target_os = "macos")]
+mod darwin;
+#[cfg(target_os = "linux")]
 mod platform;
+#[cfg(target_os = "linux")]
 mod ssh;
 
+/// Test and synthetic-acceptance hook: keep Keychain items in this explicit
+/// keychain file instead of the login keychain. Fixed when an authority starts.
+#[cfg(target_os = "macos")]
+const LOCAL_CREDENTIAL_KEYCHAIN_ENV: &str = "CODEWIRE_LOCAL_CREDENTIAL_KEYCHAIN";
+const AUTHORITY_STOP_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(target_os = "linux")]
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 struct LinuxCapabilityHeader {
     version: u32,
     pid: i32,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct LinuxCapabilityData {
@@ -39,9 +63,11 @@ struct LinuxCapabilityData {
     inheritable: u32,
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) async fn run_local_credential_authority(
     args: LocalCredentialAuthorityArgs,
 ) -> anyhow::Result<()> {
+    let store = authority_store_from_args(&args)?;
     let config = authority_config(args.root)?;
     let spawner = Arc::new(CwLocalCredentialProcessSpawner {
         executable: config.executable.clone(),
@@ -50,6 +76,7 @@ pub(crate) async fn run_local_credential_authority(
     let signer = Arc::new(ssh::LocalSshAgentAdapter::new(config.root.clone()));
     let result = serve_os_local_credential_authority_with_process_spawners(
         config,
+        store,
         spawner.clone(),
         spawner,
         signer.clone(),
@@ -62,13 +89,40 @@ pub(crate) async fn run_local_credential_authority(
     result.context("run local credential authority")
 }
 
+/// The macOS authority stores values only. Brokers, repository executors,
+/// SSH signing and platform delegation are refused until local VMs consume
+/// them; the launcher already supplied a new session, an empty environment
+/// and standard descriptors only.
+#[cfg(target_os = "macos")]
+pub(crate) async fn run_local_credential_authority(
+    args: LocalCredentialAuthorityArgs,
+) -> anyhow::Result<()> {
+    // posix_spawn has no umask attribute; set it before any file exists.
+    rustix::process::umask(rustix::fs::Mode::RWXG | rustix::fs::Mode::RWXO);
+    let store = authority_store_from_args(&args)?;
+    let config = authority_config(args.root)?;
+    codewire_local_credentials::serve_os_local_credential_authority(config, store)
+        .await
+        .context("run local credential authority")
+}
+
+fn authority_store_from_args(
+    args: &LocalCredentialAuthorityArgs,
+) -> anyhow::Result<AuthorityProtectedStore> {
+    let backend = resolve_local_credential_store(args.protected_store.as_deref())?;
+    #[cfg(target_os = "macos")]
+    let keychain = args.keychain.clone();
+    #[cfg(not(target_os = "macos"))]
+    let keychain = None;
+    validate_authority_store(AuthorityProtectedStore { backend, keychain })
+}
+
 pub(crate) async fn run_local_credential_authority_probe(
     args: LocalCredentialAuthorityProbeArgs,
 ) -> anyhow::Result<()> {
+    let store = configured_authority_store(&OsEnv)?;
     let config = authority_config(args.root)?;
-    let client = LocalCredentialClient::connect_or_start_with(&config, spawn_authority)
-        .await
-        .context("connect to local credential authority")?;
+    let client = connect_configured_authority(&config, &store).await?;
     if args.shutdown {
         client
             .shutdown()
@@ -80,23 +134,139 @@ pub(crate) async fn run_local_credential_authority_probe(
 
 pub(crate) async fn connect_local_credential_authority() -> anyhow::Result<LocalCredentialClient> {
     let env = OsEnv;
+    let store = configured_authority_store(&env)?;
     let root = local_credential_root(&env)?;
     let config = authority_config(root)?;
-    LocalCredentialClient::connect_or_start_with(&config, spawn_authority)
-        .await
-        .context("connect to local credential authority")
+    connect_configured_authority(&config, &store).await
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) async fn admit_existing_local_credential_authority() -> anyhow::Result<()> {
     let env = OsEnv;
     let root = local_credential_root(&env)?;
     let config = authority_config(root)?;
+    let store = AuthorityProtectedStore::platform_default()
+        .context("local protected storage is unavailable on this platform")?;
     drop(
-        LocalCredentialClient::admit_existing_or_replace_with(&config, spawn_authority)
-            .await
-            .context("admit existing local credential authority")?,
+        LocalCredentialClient::admit_existing_or_replace_with(&config, |config| {
+            spawn_authority(config, &store)
+        })
+        .await
+        .context("admit existing local credential authority")?,
     );
     Ok(())
+}
+
+/// Reuse or start the authority for `store`. An authority still running on
+/// another backend was started under an earlier `local_credential_store`;
+/// it is stopped so the next start moves the stored values.
+async fn connect_configured_authority(
+    config: &AuthorityRuntimeConfig,
+    store: &AuthorityProtectedStore,
+) -> anyhow::Result<LocalCredentialClient> {
+    let client = start_authority(config, store).await?;
+    if running_store(&client).as_ref() == Some(store) {
+        return Ok(client);
+    }
+    eprintln!("Restarting the local credential authority to switch its store to {store}.");
+    client
+        .shutdown()
+        .await
+        .context("stop local credential authority")?;
+    let deadline = tokio::time::Instant::now() + AUTHORITY_STOP_TIMEOUT;
+    while config.socket().exists() {
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "local credential authority did not stop"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let client = start_authority(config, store).await?;
+    anyhow::ensure!(
+        running_store(&client).as_ref() == Some(store),
+        "local credential authority did not switch its store to {store}"
+    );
+    Ok(client)
+}
+
+async fn start_authority(
+    config: &AuthorityRuntimeConfig,
+    store: &AuthorityProtectedStore,
+) -> anyhow::Result<LocalCredentialClient> {
+    match LocalCredentialClient::connect_or_start_with(config, |config| {
+        spawn_authority(config, store)
+    })
+    .await
+    {
+        Ok(client) => Ok(client),
+        Err(AuthorityRuntimeError::Credential(LocalCredentialError::ProtectedStoreSwitch(
+            error,
+        ))) => anyhow::bail!(
+            "local credentials could not move to the configured store ({store}): {error}. Stored \
+             values were left unchanged where they were; fix the cause and retry, or set \
+             local_credential_store back in {}",
+            local_config_path_hint()
+        ),
+        Err(AuthorityRuntimeError::Credential(LocalCredentialError::ProtectedStore(
+            ProtectedStoreError::AccessDenied,
+        ))) => anyhow::bail!(
+            "local protected storage ({store}) is locked or inaccessible; unlock it and retry"
+        ),
+        Err(AuthorityRuntimeError::Credential(LocalCredentialError::ProtectedStore(error))) => {
+            anyhow::bail!("local credential authority could not open its store ({store}): {error}")
+        }
+        Err(error) => Err(error).context("connect to local credential authority"),
+    }
+}
+
+fn running_store(client: &LocalCredentialClient) -> Option<AuthorityProtectedStore> {
+    client
+        .info()
+        .protected_store
+        .or_else(AuthorityProtectedStore::platform_default)
+}
+
+fn local_config_path_hint() -> String {
+    ResolvePaths::from_env(&OsEnv)
+        .map(|paths| {
+            paths
+                .mesh_data_dir
+                .join("config.toml")
+                .display()
+                .to_string()
+        })
+        .unwrap_or_else(|_| "~/.codewire/config.toml".to_owned())
+}
+
+/// The backend selected by `local_credential_store`, plus the test-only
+/// explicit keychain on macOS, which applies only to the keychain backend.
+/// A previous store is always reached through the authority's own record.
+pub(crate) fn configured_authority_store(
+    env: &impl Env,
+) -> anyhow::Result<AuthorityProtectedStore> {
+    let paths = ResolvePaths::from_env(env)?;
+    let backend = super::configured_local_credential_store(&paths.mesh_data_dir)?;
+    #[cfg(target_os = "macos")]
+    let keychain = (backend == ProtectedStoreBackend::Keychain)
+        .then(|| env.var(LOCAL_CREDENTIAL_KEYCHAIN_ENV).map(PathBuf::from))
+        .flatten();
+    #[cfg(not(target_os = "macos"))]
+    let keychain = None;
+    validate_authority_store(AuthorityProtectedStore { backend, keychain })
+}
+
+fn validate_authority_store(
+    store: AuthorityProtectedStore,
+) -> anyhow::Result<AuthorityProtectedStore> {
+    anyhow::ensure!(
+        store.is_valid(),
+        "an explicit keychain must be an absolute path and applies only to the keychain store"
+    );
+    Ok(store)
+}
+
+fn resolve_local_credential_store(value: Option<&str>) -> anyhow::Result<ProtectedStoreBackend> {
+    super::resolve_local_credential_store(value)
 }
 
 fn authority_config(root: PathBuf) -> anyhow::Result<AuthorityRuntimeConfig> {
@@ -116,13 +286,50 @@ fn canonical_current_executable() -> anyhow::Result<PathBuf> {
     })
 }
 
-fn spawn_authority(config: &AuthorityRuntimeConfig) -> Result<Child, AuthorityRuntimeError> {
+/// The authority argv names only a non-default backend, so the default
+/// Linux argv stays exactly `__local-credential-authority --root ROOT`.
+fn authority_arguments(
+    config: &AuthorityRuntimeConfig,
+    store: &AuthorityProtectedStore,
+) -> Vec<std::ffi::OsString> {
+    let mut arguments = vec![
+        "__local-credential-authority".into(),
+        "--root".into(),
+        config.root.clone().into_os_string(),
+    ];
+    if Some(store.backend) != ProtectedStoreBackend::platform_default() {
+        arguments.push("--protected-store".into());
+        arguments.push(store.backend.as_str().into());
+    }
+    if let Some(keychain) = &store.keychain {
+        arguments.push("--keychain".into());
+        arguments.push(keychain.clone().into_os_string());
+    }
+    arguments
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_authority(
+    config: &AuthorityRuntimeConfig,
+    store: &AuthorityProtectedStore,
+) -> Result<darwin::SpawnedProcess, AuthorityRuntimeError> {
+    darwin::spawn_detached(
+        &config.executable,
+        &authority_arguments(config, store),
+        &config.root,
+    )
+    .map_err(|_| AuthorityRuntimeError::Spawn)
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_authority(
+    config: &AuthorityRuntimeConfig,
+    store: &AuthorityProtectedStore,
+) -> Result<Child, AuthorityRuntimeError> {
     let allowed_environment = authority_environment(|name| env::var_os(name));
     let mut command = Command::new(&config.executable);
     command
-        .arg("__local-credential-authority")
-        .arg("--root")
-        .arg(&config.root)
+        .args(authority_arguments(config, store))
         .env_clear()
         .envs(allowed_environment)
         .current_dir(&config.root)
@@ -153,11 +360,13 @@ fn spawn_authority(config: &AuthorityRuntimeConfig) -> Result<Child, AuthorityRu
     command.spawn().map_err(|_| AuthorityRuntimeError::Spawn)
 }
 
+#[cfg(target_os = "linux")]
 struct CwLocalCredentialProcessSpawner {
     executable: PathBuf,
     authority_root: PathBuf,
 }
 
+#[cfg(target_os = "linux")]
 impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
     fn spawn(
         &self,
@@ -236,6 +445,7 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
     fn spawn(
         &self,
@@ -343,6 +553,7 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn authority_environment(read: impl Fn(&str) -> Option<OsString>) -> Vec<(OsString, OsString)> {
     let runtime_dir = read("XDG_RUNTIME_DIR").filter(|value| valid_runtime_dir(value));
     let bus_address = runtime_dir.as_ref().and_then(|runtime_dir| {
@@ -362,6 +573,7 @@ fn authority_environment(read: impl Fn(&str) -> Option<OsString>) -> Vec<(OsStri
     environment
 }
 
+#[cfg(target_os = "linux")]
 fn valid_runtime_dir(value: &OsStr) -> bool {
     let path = std::path::Path::new(value);
     path.is_absolute()
@@ -373,6 +585,7 @@ fn valid_runtime_dir(value: &OsStr) -> bool {
         })
 }
 
+#[cfg(target_os = "linux")]
 pub(super) fn confine_spawned_process() -> io::Result<()> {
     let header = LinuxCapabilityHeader {
         version: LINUX_CAPABILITY_VERSION_3,
@@ -409,6 +622,7 @@ pub(super) fn confine_spawned_process() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
     use std::collections::BTreeMap;
 
     use crate::config::MapEnv;
@@ -416,6 +630,138 @@ mod tests {
     use super::super::LOCAL_CREDENTIAL_ROOT_ENV;
     use super::*;
 
+    fn runtime_config() -> AuthorityRuntimeConfig {
+        AuthorityRuntimeConfig {
+            root: "/synthetic/home/.codewire/credentials-v1".into(),
+            executable: "/synthetic/bin/cw".into(),
+        }
+    }
+
+    #[test]
+    fn the_default_store_keeps_the_exact_authority_argv() {
+        let store = AuthorityProtectedStore::platform_default().unwrap();
+        assert_eq!(
+            authority_arguments(&runtime_config(), &store),
+            [
+                "__local-credential-authority",
+                "--root",
+                "/synthetic/home/.codewire/credentials-v1"
+            ]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_selected_store_and_test_keychain_are_explicit_authority_arguments() {
+        use clap::Parser as _;
+
+        let store = AuthorityProtectedStore {
+            backend: ProtectedStoreBackend::File,
+            keychain: None,
+        };
+        assert_eq!(
+            authority_arguments(&runtime_config(), &store),
+            [
+                "__local-credential-authority",
+                "--root",
+                "/synthetic/home/.codewire/credentials-v1",
+                "--protected-store",
+                "file"
+            ]
+        );
+        let store = AuthorityProtectedStore {
+            backend: ProtectedStoreBackend::Keychain,
+            keychain: Some("/private/tmp/synthetic.keychain-db".into()),
+        };
+        assert_eq!(
+            authority_arguments(&runtime_config(), &store),
+            [
+                "__local-credential-authority",
+                "--root",
+                "/synthetic/home/.codewire/credentials-v1",
+                "--keychain",
+                "/private/tmp/synthetic.keychain-db"
+            ]
+        );
+        let parsed = crate::Cli::try_parse_from(
+            std::iter::once(std::ffi::OsString::from("cw"))
+                .chain(authority_arguments(&runtime_config(), &store)),
+        )
+        .unwrap();
+        let crate::Command::LocalCredentialAuthority(args) = parsed.command else {
+            panic!("authority argv must parse as the authority entrypoint");
+        };
+        assert_eq!(authority_store_from_args(&args).unwrap(), store);
+    }
+
+    #[test]
+    fn configured_stores_reject_a_keychain_for_other_backends_and_relative_paths() {
+        for (backend, keychain) in [
+            (ProtectedStoreBackend::File, "/private/tmp/k.keychain-db"),
+            (ProtectedStoreBackend::Keychain, "relative.keychain-db"),
+        ] {
+            assert!(
+                validate_authority_store(AuthorityProtectedStore {
+                    backend,
+                    keychain: Some(keychain.into()),
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn the_store_setting_comes_from_local_config_and_defaults_per_platform() {
+        let home = tempfile::tempdir().unwrap();
+        let env = MapEnv::new([("HOME", home.path().to_str().unwrap())]);
+        assert_eq!(
+            configured_authority_store(&env).unwrap(),
+            AuthorityProtectedStore::platform_default().unwrap()
+        );
+        let data = home.path().join(".codewire");
+        std::fs::create_dir(&data).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let write = |value: &str| {
+            let path = data.join("config.toml");
+            std::fs::write(&path, format!("local_credential_store = {value:?}\n")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        };
+        write("keyring");
+        assert!(configured_authority_store(&env).is_err());
+        #[cfg(target_os = "macos")]
+        {
+            write("file");
+            assert_eq!(
+                configured_authority_store(&env).unwrap().backend,
+                ProtectedStoreBackend::File
+            );
+            write("secret-service");
+            assert!(configured_authority_store(&env).is_err());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            write("secret-service");
+            assert_eq!(
+                configured_authority_store(&env).unwrap().backend,
+                ProtectedStoreBackend::SecretService
+            );
+            for value in ["file", "keychain"] {
+                write(value);
+                let error = configured_authority_store(&env).unwrap_err();
+                assert!(error.to_string().contains("secret-service"), "{error}");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn authority_process_inherits_only_session_bus_discovery() {
         let [authority_dbus_env, authority_xdg_runtime_env] =
@@ -444,6 +790,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn authority_rejects_remote_or_noncanonical_session_bus_discovery() {
         for (runtime, bus) in [

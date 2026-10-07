@@ -36,9 +36,9 @@ pub(crate) use member_control::*;
 mod native;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use native::*;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credential_authority;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use credential_authority::*;
 #[cfg(target_os = "linux")]
 mod credential_broker;
@@ -53,7 +53,7 @@ mod credential_repository;
 #[cfg(target_os = "linux")]
 pub(crate) use credential_repository::*;
 mod credential_input;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credentials;
 mod platform_credentials;
 mod platform_profiles;
@@ -296,14 +296,21 @@ pub(crate) struct NativeMeshEnrollmentBrokerArgs {
     pub(crate) platform_config_dir: PathBuf,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct LocalCredentialAuthorityArgs {
     #[arg(long)]
     pub(crate) root: PathBuf,
+    /// Present only for a backend other than the platform default.
+    #[arg(long)]
+    pub(crate) protected_store: Option<String>,
+    /// Test-only explicit keychain file for the keychain backend.
+    #[cfg(target_os = "macos")]
+    #[arg(long)]
+    pub(crate) keychain: Option<PathBuf>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct LocalCredentialAuthorityProbeArgs {
     #[arg(long)]

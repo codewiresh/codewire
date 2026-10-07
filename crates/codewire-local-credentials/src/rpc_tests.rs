@@ -894,6 +894,7 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
         AuthorityInfo {
             protocol_version: AUTHORITY_PROTOCOL_VERSION,
             protected_store_persistence: ProtectedStorePersistence::ProcessLifetime,
+            protected_store: None,
         }
     );
 
@@ -1376,9 +1377,12 @@ async fn connect_or_start_reuses_the_admitted_authority_without_spawning() {
     assert_eq!(admitted.info().protocol_version, AUTHORITY_PROTOCOL_VERSION);
     drop(admitted);
 
-    let client = LocalCredentialClient::connect_or_start_with(&config, |_| {
-        panic!("an admitted authority must not spawn a replacement")
-    })
+    let client = LocalCredentialClient::connect_or_start_with(
+        &config,
+        |_| -> Result<Child, AuthorityRuntimeError> {
+            panic!("an admitted authority must not spawn a replacement")
+        },
+    )
     .await
     .unwrap();
     assert_eq!(client.info().protocol_version, AUTHORITY_PROTOCOL_VERSION);
@@ -1418,9 +1422,12 @@ async fn existing_authority_admission_fails_closed_for_a_dead_socket_without_spa
     .await
     .unwrap_err();
     assert!(matches!(error, AuthorityRuntimeError::Connect));
-    let error = LocalCredentialClient::connect_or_start_with(&config, |_| {
-        panic!("a present dead socket must not grant replacement permission")
-    })
+    let error = LocalCredentialClient::connect_or_start_with(
+        &config,
+        |_| -> Result<Child, AuthorityRuntimeError> {
+            panic!("a present dead socket must not grant replacement permission")
+        },
+    )
     .await
     .unwrap_err();
     assert!(matches!(error, AuthorityRuntimeError::Connect));
@@ -1445,9 +1452,12 @@ async fn existing_authority_admission_rejects_an_invalid_socket_without_spawning
     .await
     .unwrap_err();
     assert!(matches!(error, AuthorityRuntimeError::InvalidPrivateSocket));
-    let error = LocalCredentialClient::connect_or_start_with(&config, |_| {
-        panic!("a present invalid endpoint must not grant replacement permission")
-    })
+    let error = LocalCredentialClient::connect_or_start_with(
+        &config,
+        |_| -> Result<Child, AuthorityRuntimeError> {
+            panic!("a present invalid endpoint must not grant replacement permission")
+        },
+    )
     .await
     .unwrap_err();
     assert!(matches!(error, AuthorityRuntimeError::InvalidPrivateSocket));
@@ -1489,6 +1499,7 @@ impl tonic::server::UnaryService<v1::GetAuthorityInfoRequest> for CompatibilityA
                     protocol_version: AUTHORITY_PROTOCOL_VERSION - 1,
                     protected_store_persistence: v1::ProtectedStorePersistence::ProcessLifetime
                         as i32,
+                    protected_store_backend: String::new(),
                 }))
             }
         })
@@ -1669,7 +1680,7 @@ async fn assert_present_authority_refusal_retains_process(mode: &str) {
     let before = fs::symlink_metadata(config.socket()).unwrap();
     let spawns = AtomicUsize::new(0);
     for (request_count, admission_only) in [(1, true), (2, false)] {
-        let spawn = |_: &AuthorityRuntimeConfig| {
+        let spawn = |_: &AuthorityRuntimeConfig| -> Result<Child, AuthorityRuntimeError> {
             spawns.fetch_add(1, Ordering::SeqCst);
             Err(AuthorityRuntimeError::Spawn)
         };

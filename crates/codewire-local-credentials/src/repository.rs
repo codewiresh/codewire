@@ -797,12 +797,21 @@ fn map_server_error(error: LocalCredentialError) -> Status {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use std::fs::{self, DirBuilder, OpenOptions};
-    use std::io::{Read as _, Write as _};
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    #[cfg(target_os = "linux")]
+    use std::fs::OpenOptions;
+    use std::fs::{self, DirBuilder};
+    #[cfg(target_os = "linux")]
+    use std::io::Read as _;
+    use std::io::Write as _;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+    #[cfg(target_os = "linux")]
     use std::process::Stdio;
+    #[cfg(target_os = "linux")]
     use tokio::process::Command;
 
+    #[cfg(target_os = "linux")]
     use super::executor::*;
 
     use codewire_access::{AccessProfileName, ProviderId};
@@ -897,18 +906,21 @@ mod tests {
         assert!(lifetime.acquire().is_err());
     }
 
+    #[cfg(target_os = "linux")]
     #[derive(Default)]
     struct SyntheticGitSpawner {
         tokens: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
         invocations: std::sync::Mutex<Vec<String>>,
     }
 
+    #[cfg(target_os = "linux")]
     impl SyntheticGitSpawner {
         fn take_tokens(&self) -> io::Result<Vec<Vec<u8>>> {
             Ok(self.tokens.lock().unwrap().drain(..).collect())
         }
     }
 
+    #[cfg(target_os = "linux")]
     impl LocalRepositoryGitProcessSpawner for SyntheticGitSpawner {
         fn spawn(&self, command: &mut Command) -> io::Result<tokio::process::Child> {
             let command = command.as_std();
@@ -1180,6 +1192,8 @@ mod tests {
             .unwrap();
     }
 
+    // The repository executor is the Linux consumption path; macOS stores only.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn executor_keeps_github_token_out_of_git_argv_environment_and_disk() {
         let staging = TempDir::new().unwrap();

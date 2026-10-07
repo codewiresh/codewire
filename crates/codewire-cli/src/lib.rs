@@ -372,10 +372,10 @@ enum Command {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-mesh-enrollment-broker", hide = true)]
     NativeMeshEnrollmentBroker(NativeMeshEnrollmentBrokerArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__local-credential-authority", hide = true)]
     LocalCredentialAuthority(LocalCredentialAuthorityArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__local-credential-authority-probe", hide = true)]
     LocalCredentialAuthorityProbe(LocalCredentialAuthorityProbeArgs),
     #[cfg(target_os = "linux")]
@@ -494,6 +494,15 @@ pub async fn run_platform_agent_peer_from(
 #[cfg(target_os = "linux")]
 pub async fn run_host_agent_control_from(arguments: Vec<std::ffi::OsString>) -> anyhow::Result<()> {
     commands::run_host_agent_control(arguments).await
+}
+
+/// A local credential authority that refused to take over its recorded
+/// protected store exits with a status its starting client decodes.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn local_credential_authority_exit_code(error: &anyhow::Error) -> Option<i32> {
+    error
+        .downcast_ref::<codewire_local_credentials::AuthorityRuntimeError>()
+        .and_then(codewire_local_credentials::authority_exit_code)
 }
 
 /// Preserve the fixed private worker failure taxonomy across the thin binary
@@ -688,9 +697,9 @@ where
         Command::NativeMeshTransport(args) => run_native_mesh_transport(args).await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeMeshEnrollmentBroker(args) => run_native_mesh_enrollment_broker(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::LocalCredentialAuthority(args) => run_local_credential_authority(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::LocalCredentialAuthorityProbe(args) => {
             run_local_credential_authority_probe(args).await
         }

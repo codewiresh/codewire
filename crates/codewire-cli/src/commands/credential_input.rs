@@ -1,7 +1,7 @@
 //! Portable credential command grammar, selection, and protected input.
 //!
-//! Platform operations use this module on every supported CLI host. Linux-only
-//! local authority processes and handlers remain in `credentials`.
+//! Platform operations use this module on every supported CLI host. Local
+//! authority processes and handlers (Linux and macOS) remain in `credentials`.
 
 use std::io::{BufRead, IsTerminal as _, Read, Write as _};
 use std::path::Path;
@@ -11,7 +11,7 @@ use codewire_access::{
     AccessProfileId, AccessProfileName, AccessProfileReference, CapabilitySlot, CredentialAuthKind,
     CredentialId, ProviderId, builtin_provider_catalog,
 };
-use codewire_protected_store::{MAX_PROTECTED_VALUE_BYTES, ProtectedValue};
+use codewire_protected_store::{MAX_PROTECTED_VALUE_BYTES, ProtectedStoreBackend, ProtectedValue};
 use zeroize::Zeroizing;
 
 use super::storage_placement::{
@@ -51,23 +51,59 @@ pub(crate) async fn handle_credentials_command(
     )?;
     // Decide host support before profile resolution and, more importantly,
     // before any authority configuration or protected input is touched.
-    let dispatch = credential_dispatch(placement, cfg!(target_os = "linux"))?;
+    let dispatch = credential_dispatch(
+        placement,
+        cfg!(any(target_os = "linux", target_os = "macos")),
+    )?;
     let operation = resolve_credential_operation(args.profile, args.command, placement)?;
     match dispatch {
         CredentialDispatch::Platform => {
             super::platform_profiles::handle_platform_credentials(globals, operation).await
         }
         CredentialDispatch::Local => {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 super::credentials::handle_local_credentials_command(operation).await
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
                 unreachable!("local credential dispatch was rejected on this host")
             }
         }
     }
+}
+
+/// The `local_credential_store` setting in the local Codewire config
+/// (`~/.codewire/config.toml`), or the platform default when absent.
+pub(crate) fn configured_local_credential_store(
+    mesh_data_dir: &Path,
+) -> anyhow::Result<ProtectedStoreBackend> {
+    let setting = crate::config::load_mesh_config(mesh_data_dir)?.local_credential_store;
+    resolve_local_credential_store(setting.as_deref())
+}
+
+pub(crate) fn resolve_local_credential_store(
+    setting: Option<&str>,
+) -> anyhow::Result<ProtectedStoreBackend> {
+    let Some(value) = setting else {
+        return ProtectedStoreBackend::platform_default()
+            .context("local protected storage is unavailable on this operating system");
+    };
+    ProtectedStoreBackend::parse(value)
+        .filter(|backend| backend.supported())
+        .with_context(|| {
+            let supported = [
+                ProtectedStoreBackend::SecretService,
+                ProtectedStoreBackend::Keychain,
+                ProtectedStoreBackend::File,
+            ]
+            .into_iter()
+            .filter(|backend| backend.supported())
+            .map(|backend| format!("{:?}", backend.as_str()))
+            .collect::<Vec<_>>()
+            .join(" or ");
+            format!("local_credential_store = {value:?} is not supported here; use {supported}")
+        })
 }
 
 fn credential_dispatch(
@@ -78,7 +114,7 @@ fn credential_dispatch(
         StoragePlacement::Platform => Ok(CredentialDispatch::Platform),
         StoragePlacement::Local if local_supported => Ok(CredentialDispatch::Local),
         StoragePlacement::Local => anyhow::bail!(
-            "local protected credential storage is available only on Linux; use --platform explicitly for platform storage"
+            "local protected credential storage is available only on Linux and macOS; use --platform explicitly for platform storage"
         ),
     }
 }
@@ -518,20 +554,54 @@ mod tests {
     use clap::Parser as _;
 
     #[test]
-    fn macos_dispatch_accepts_platform_and_rejects_local_without_fallback() {
+    fn unsupported_hosts_accept_platform_and_reject_local_without_fallback() {
         assert_eq!(
             credential_dispatch(StoragePlacement::Platform, false).unwrap(),
             CredentialDispatch::Platform
         );
         let error = credential_dispatch(StoragePlacement::Local, false).unwrap_err();
-        assert!(error.to_string().contains("only on Linux"));
+        assert!(error.to_string().contains("only on Linux and macOS"));
         assert_eq!(
             credential_dispatch(StoragePlacement::Local, true).unwrap(),
             CredentialDispatch::Local
         );
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn the_store_setting_names_only_backends_this_platform_supports() {
+        assert_eq!(
+            resolve_local_credential_store(None).unwrap(),
+            ProtectedStoreBackend::platform_default().unwrap()
+        );
+        for value in ["", "keyring", "Keychain", "os"] {
+            assert!(
+                resolve_local_credential_store(Some(value)).is_err(),
+                "{value}"
+            );
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                resolve_local_credential_store(Some("file")).unwrap(),
+                ProtectedStoreBackend::File
+            );
+            let error = resolve_local_credential_store(Some("secret-service")).unwrap_err();
+            assert!(
+                error.to_string().contains("\"keychain\" or \"file\""),
+                "{error}"
+            );
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let error = resolve_local_credential_store(Some("file")).unwrap_err();
+            assert!(
+                error.to_string().contains("use \"secret-service\""),
+                "{error}"
+            );
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn local_rejection_precedes_key_input_and_platform_configuration() {
         // A debug build of the whole CLI future needs more than a test thread's
@@ -557,7 +627,11 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
-        assert!(error.to_string().contains("available only on Linux"));
+        assert!(
+            error
+                .to_string()
+                .contains("available only on Linux and macOS")
+        );
     }
 
     #[test]
@@ -582,12 +656,26 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_has_the_storage_authority_but_no_broker_or_launch_entrypoints() {
+        for command in [
+            "__local-credential-authority",
+            "__local-credential-authority-probe",
+        ] {
+            let error = crate::Cli::try_parse_from(["cw", command]).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "{command}"
+            );
+        }
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn linux_only_credential_and_launch_entrypoints_are_absent() {
         for command in [
-            "__local-credential-authority",
-            "__local-credential-authority-probe",
             "__local-credential-broker",
             "__local-credential-broker-confinement-probe",
             "__local-credential-broker-synthetic-smoke-check",

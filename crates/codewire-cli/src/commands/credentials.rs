@@ -1,7 +1,11 @@
 use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
 use std::io::IsTerminal as _;
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::Stdio;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -11,9 +15,11 @@ use codewire_access::{
     AccessProfileName, CapabilitySlot, CredentialAuthKind, CredentialStatus, Owner, ProviderId,
     builtin_provider_catalog,
 };
+#[cfg(target_os = "linux")]
 use codewire_credential_broker::codex_enrollment::{
     CodexEnrollmentConfig, CodexEnrollmentOwner, CodexPublicationOutcome, CompletedCodexEnrollment,
 };
+#[cfg(target_os = "linux")]
 use codewire_credential_broker::provider_enrollment::{
     PrivateProviderHome, resolve_provider_executable,
 };
@@ -23,18 +29,24 @@ use codewire_local_credentials::{
 };
 #[cfg(test)]
 use codewire_protected_store::MAX_PROTECTED_VALUE_BYTES;
-use codewire_protected_store::{ProtectedStorePersistence, ProtectedValue};
+use codewire_protected_store::ProtectedStorePersistence;
+#[cfg(target_os = "linux")]
+use codewire_protected_store::ProtectedValue;
 use serde::Serialize;
+#[cfg(target_os = "linux")]
 use tokio::io::AsyncReadExt as _;
+#[cfg(target_os = "linux")]
 use zeroize::Zeroizing;
 
 #[cfg(test)]
 use super::CredentialsArgs;
+#[cfg(any(test, target_os = "linux"))]
+use super::credential_input::CODEX_DEVICE_AUTHORIZATION_GUIDANCE;
 use super::credential_input::{
-    CODEX_DEVICE_AUTHORIZATION_GUIDANCE, CredentialOperation, GITHUB_ALWAYS_INCLUDED,
-    ParsedCredentialSelector, ParsedProfileSelector, parse_credential_selector,
-    parse_profile_selector, profile_set_credential, prompt_credential_material, read_ssh_import,
-    supported_profile_slot, validate_ssh_generation, validate_ssh_import,
+    CredentialOperation, GITHUB_ALWAYS_INCLUDED, ParsedCredentialSelector, ParsedProfileSelector,
+    parse_credential_selector, parse_profile_selector, profile_set_credential,
+    prompt_credential_material, read_ssh_import, supported_profile_slot, validate_ssh_generation,
+    validate_ssh_import,
 };
 #[cfg(test)]
 use super::credential_input::{
@@ -52,9 +64,13 @@ use super::{
     connect_local_credential_authority, prompt_confirm_default_no, trimmed_required,
 };
 
+#[cfg(target_os = "linux")]
 const GITHUB_HOST: &str = "github.com";
+#[cfg(target_os = "linux")]
 const GITHUB_CHILD_PATH: &str = "/usr/bin:/bin";
+#[cfg(target_os = "linux")]
 const GITHUB_TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(target_os = "linux")]
 const MAX_GITHUB_TOKEN_BYTES: usize = 4 * 1024;
 
 pub(crate) async fn handle_local_credentials_command(
@@ -102,6 +118,7 @@ pub(crate) async fn handle_local_credentials_command(
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn connect_credential(
     client: &mut LocalCredentialClient,
     args: CredentialConnectArgs,
@@ -112,6 +129,23 @@ async fn connect_credential(
     }
 }
 
+/// Isolated Codex and GitHub enrollment runs the official CLIs under the
+/// Linux confinement; macOS stores API keys, tokens and SSH keys only.
+#[cfg(target_os = "macos")]
+async fn connect_credential(
+    _client: &mut LocalCredentialClient,
+    args: CredentialConnectArgs,
+) -> anyhow::Result<()> {
+    let provider = match args.provider {
+        CredentialConnectProviderArg::Codex => "Codex",
+        CredentialConnectProviderArg::Github => "GitHub",
+    };
+    anyhow::bail!(
+        "connecting {provider} to local storage is not available on macOS yet; use `cw credentials --platform connect`"
+    )
+}
+
+#[cfg(target_os = "linux")]
 async fn connect_codex(
     client: &mut LocalCredentialClient,
     args: CredentialConnectArgs,
@@ -148,6 +182,7 @@ async fn connect_codex(
     result
 }
 
+#[cfg(target_os = "linux")]
 async fn connect_codex_with_owner(
     client: &mut LocalCredentialClient,
     target: OAuthConnectionTarget,
@@ -211,6 +246,7 @@ async fn connect_codex_with_owner(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 async fn connect_github(
     client: &mut LocalCredentialClient,
     args: CredentialConnectArgs,
@@ -247,12 +283,14 @@ async fn connect_github(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 struct OAuthConnectionTarget {
     provider: ProviderId,
     display_name: String,
     existing: Option<CredentialRecord>,
 }
 
+#[cfg(target_os = "linux")]
 async fn prepare_oauth_connection(
     client: &mut LocalCredentialClient,
     args: &CredentialConnectArgs,
@@ -277,6 +315,7 @@ async fn prepare_oauth_connection(
     Ok(Some(target))
 }
 
+#[cfg(target_os = "linux")]
 fn select_oauth_connection_target(
     records: Vec<CredentialRecord>,
     display_name: &str,
@@ -329,6 +368,7 @@ fn select_oauth_connection_target(
     })
 }
 
+#[cfg(target_os = "linux")]
 fn confirm_oauth_connection_with(
     target: &OAuthConnectionTarget,
     yes: bool,
@@ -356,6 +396,7 @@ fn confirm_oauth_connection_with(
     prompt(&message)
 }
 
+#[cfg(target_os = "linux")]
 async fn publish_oauth_connection(
     client: &mut LocalCredentialClient,
     target: OAuthConnectionTarget,
@@ -390,11 +431,13 @@ async fn publish_oauth_connection(
     }
 }
 
+#[cfg(target_os = "linux")]
 struct CompletedGitHubLogin {
     material: ProtectedValue,
     login_home: PrivateProviderHome,
 }
 
+#[cfg(target_os = "linux")]
 async fn run_isolated_github_login() -> anyhow::Result<CompletedGitHubLogin> {
     let login_home = PrivateProviderHome::create_in(&provider_login_runtime()?)
         .context("create private GitHub login staging")?;
@@ -408,6 +451,7 @@ async fn run_isolated_github_login() -> anyhow::Result<CompletedGitHubLogin> {
     .await
 }
 
+#[cfg(target_os = "linux")]
 async fn run_isolated_github_login_with(
     login_home: PrivateProviderHome,
     executable: PathBuf,
@@ -474,6 +518,7 @@ async fn run_isolated_github_login_with(
     })
 }
 
+#[cfg(target_os = "linux")]
 fn isolated_github_command(
     executable: &Path,
     path: &std::ffi::OsStr,
@@ -493,6 +538,7 @@ fn isolated_github_command(
     command
 }
 
+#[cfg(target_os = "linux")]
 async fn read_isolated_github_token(
     executable: &Path,
     path: &std::ffi::OsStr,
@@ -537,6 +583,7 @@ async fn read_isolated_github_token(
     parse_github_token_output(output)
 }
 
+#[cfg(target_os = "linux")]
 fn parse_github_token_output(mut output: Zeroizing<Vec<u8>>) -> anyhow::Result<ProtectedValue> {
     if output.last() == Some(&b'\n') {
         output.pop();
@@ -553,16 +600,19 @@ fn parse_github_token_output(mut output: Zeroizing<Vec<u8>>) -> anyhow::Result<P
     ProtectedValue::new(std::mem::take(&mut *output)).context("prepare protected GitHub credential")
 }
 
+#[cfg(target_os = "linux")]
 fn resolve_github_executable() -> anyhow::Result<PathBuf> {
     let path = provider_search_path("GitHub CLI")?;
     resolve_provider_executable("gh", &path).context("resolve the official GitHub CLI executable")
 }
 
+#[cfg(target_os = "linux")]
 fn provider_search_path(label: &str) -> anyhow::Result<std::ffi::OsString> {
     std::env::var_os("PATH")
         .ok_or_else(|| anyhow::anyhow!("PATH is unavailable; install the official {label}"))
 }
 
+#[cfg(target_os = "linux")]
 fn provider_login_runtime() -> anyhow::Result<PathBuf> {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -571,6 +621,7 @@ fn provider_login_runtime() -> anyhow::Result<PathBuf> {
         })
 }
 
+#[cfg(target_os = "linux")]
 async fn run_isolated_codex_login(
     owner: &CodexEnrollmentOwner,
     interactive: bool,
@@ -1250,8 +1301,11 @@ mod tests {
         assert!(super::read_protected_value(input.as_slice(), false).is_err());
     }
     use std::io::Cursor;
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
 
+    #[cfg(target_os = "linux")]
     use base64::Engine as _;
     use clap::Parser as _;
     use codewire_access::{
@@ -1317,6 +1371,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn synthetic_jwt(payload: serde_json::Value) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1324,6 +1379,7 @@ mod tests {
         format!("{header}.{payload}.synthetic-signature")
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn oauth_connection_name_selects_only_one_exact_matching_identity() {
         let mut record = credential();
@@ -1353,6 +1409,7 @@ mod tests {
         assert!(error.to_string().contains("ambiguous"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn new_oauth_name_needs_no_replacement_confirmation() {
         let target =
@@ -1366,6 +1423,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn oauth_reconnect_requires_yes_or_a_positive_terminal_confirmation() {
         let mut record = credential();
@@ -1435,6 +1493,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn oauth_publication_reconnect_keeps_profile_and_fails_stale_without_retry() {
         let temp = tempfile::tempdir().unwrap();
@@ -2174,6 +2233,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn isolated_codex_login_uses_only_its_private_tmpfs_home() {
         let root = tempfile::Builder::new()
@@ -2248,6 +2308,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn isolated_github_login_uses_only_its_private_tmpfs_configuration() {
         let root = tempfile::Builder::new()
@@ -2280,6 +2341,7 @@ mod tests {
         assert!(!login_path.exists());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn github_token_import_is_single_line_ascii_and_bounded() {
         let token = parse_github_token_output(Zeroizing::new(b"synthetic-token\r\n".to_vec()))

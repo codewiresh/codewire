@@ -17,6 +17,7 @@ mod control;
 mod platform;
 mod repository;
 mod service;
+mod store_backend;
 mod transport;
 mod workload_secret;
 
@@ -33,6 +34,7 @@ pub use broker_process::{
 };
 pub use client::{
     AuthorityInfo, LocalCredentialClient, LocalCredentialControlClient, PreparedGitRepository,
+    SpawnedAuthority,
 };
 pub use platform::{
     PlatformCredentialBinding, PlatformCredentialConnector, PlatformCredentialInput,
@@ -50,12 +52,10 @@ pub use repository::{
     run_platform_repository_executor, validate_github_https_source,
     validate_repository_ssh_runtime_path,
 };
-pub use service::{
-    serve_local_credential_authority, serve_os_local_credential_authority,
-    serve_os_local_credential_authority_with_broker_spawner,
-    serve_os_local_credential_authority_with_process_spawners,
-};
-pub use transport::{AuthorityRuntimeConfig, AuthorityRuntimeError};
+#[cfg(target_os = "linux")]
+pub use service::serve_os_local_credential_authority_with_process_spawners;
+pub use service::{serve_local_credential_authority, serve_os_local_credential_authority};
+pub use transport::{AuthorityRuntimeConfig, AuthorityRuntimeError, authority_exit_code};
 pub use workload_secret::{
     LocalLaunchSecretSelection, LocalSecretProject, ResolvedWorkloadSecretMetadata,
     WorkloadSecretMetadata, WorkloadSecretSelection, WorkloadSecretSource,
@@ -64,7 +64,7 @@ pub use workload_secret::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -76,6 +76,9 @@ use codewire_access::{
     EnvironmentId, GrantContext, GrantPermission, GrantPlacement, Owner, OwnerId, Placement,
     ProviderCatalog, ProviderId, SshPublicKeyMetadata, derive_grants, validate_profile_entries,
 };
+use codewire_protected_store::ProtectedStoreBackend;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use codewire_protected_store::SelectedProtectedStore;
 use codewire_protected_store::{
     ProtectedEntryId, ProtectedStore, ProtectedStoreError, ProtectedStorePersistence,
     ProtectedValue,
@@ -93,6 +96,8 @@ use rustix::fs::{FlockOperation, Mode, OFlags, flock, open};
 use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
 
 pub const DATABASE_FILE: &str = "credentials.db";
+/// The file backend's owner-only entry directory inside the authority root.
+pub const FILE_STORE_DIRECTORY: &str = "protected-v1";
 pub const LOCAL_OWNER_ID: &str = "local-user";
 /// The complete environment inherited by the detached Linux authority.
 ///
@@ -401,6 +406,8 @@ impl fmt::Debug for InternalCredentialRecord {
 /// protected-store transitions so callers cannot interleave one credential's
 /// journal with another operation.
 pub struct LocalCredentialAuthority<S: ProtectedStore> {
+    /// The recorded store this authority selected, when opened by selection.
+    protected_store_identity: Option<AuthorityProtectedStore>,
     _authority_lock: AuthorityLock,
     connection: Mutex<Connection>,
     protected_store: S,
@@ -419,11 +426,125 @@ impl<S: ProtectedStore> fmt::Debug for LocalCredentialAuthority<S> {
     }
 }
 
+/// The persistent store a production authority serves from and records:
+/// a backend plus, for the Keychain backend only, an explicit keychain file
+/// (tests and synthetic acceptance; production uses the login keychain).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorityProtectedStore {
+    pub backend: ProtectedStoreBackend,
+    pub keychain: Option<PathBuf>,
+}
+
+impl AuthorityProtectedStore {
+    pub fn platform_default() -> Option<Self> {
+        ProtectedStoreBackend::platform_default().map(|backend| Self {
+            backend,
+            keychain: None,
+        })
+    }
+
+    /// An explicit keychain belongs only to the Keychain backend and must be
+    /// an absolute path.
+    pub fn is_valid(&self) -> bool {
+        match &self.keychain {
+            None => true,
+            Some(path) => {
+                self.backend == ProtectedStoreBackend::Keychain
+                    && path.is_absolute()
+                    && path.to_str().is_some()
+            }
+        }
+    }
+
+    /// `secret-service`, `keychain`, `file` or `keychain:/absolute/path`.
+    pub fn to_record(&self) -> String {
+        match &self.keychain {
+            None => self.backend.as_str().to_owned(),
+            Some(path) => format!("{}:{}", self.backend.as_str(), path.display()),
+        }
+    }
+
+    pub fn from_record(value: &str) -> Option<Self> {
+        let (backend, keychain) = match value.split_once(':') {
+            Some((backend, path)) => (backend, Some(PathBuf::from(path))),
+            None => (value, None),
+        };
+        let store = Self {
+            backend: ProtectedStoreBackend::parse(backend)?,
+            keychain,
+        };
+        store.is_valid().then_some(store)
+    }
+}
+
+impl fmt::Display for AuthorityProtectedStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.keychain {
+            None => write!(formatter, "{}", self.backend),
+            Some(path) => write!(formatter, "{} at {}", self.backend, path.display()),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl LocalCredentialAuthority<SelectedProtectedStore> {
+    /// Open the authority on its configured backend, moving values recorded
+    /// under another backend first. See `store_backend` for the guarantees.
+    pub fn open_selected(
+        root: &Path,
+        selection: &AuthorityProtectedStore,
+        catalog: ProviderCatalog,
+    ) -> Result<Self, LocalCredentialError> {
+        if !selection.is_valid() {
+            return Err(LocalCredentialError::ProtectedStoreSwitch(
+                ProtectedStoreError::Unavailable,
+            ));
+        }
+        let file_directory = root.join(FILE_STORE_DIRECTORY);
+        // Every store, including a previous one being emptied, is opened at
+        // its own recorded location, never at the configured one.
+        let open = |store: &AuthorityProtectedStore| {
+            SelectedProtectedStore::open(store.backend, &file_directory, store.keychain.as_deref())
+                .map(|store| Box::new(store) as Box<dyn ProtectedStore>)
+        };
+        let store = SelectedProtectedStore::open(
+            selection.backend,
+            &file_directory,
+            selection.keychain.as_deref(),
+        )
+        .map_err(LocalCredentialError::ProtectedStoreSwitch)?;
+        Self::open_inner(root, store, catalog, Some((selection, &open)))
+    }
+}
+
 impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     pub fn open(
         root: &Path,
         protected_store: S,
         catalog: ProviderCatalog,
+    ) -> Result<Self, LocalCredentialError> {
+        Self::open_inner(root, protected_store, catalog, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_backend(
+        root: &Path,
+        protected_store: S,
+        catalog: ProviderCatalog,
+        selection: &AuthorityProtectedStore,
+        open: store_backend::OpenProtectedStore<'_>,
+    ) -> Result<Self, LocalCredentialError> {
+        Self::open_inner(root, protected_store, catalog, Some((selection, open)))
+    }
+
+    fn open_inner(
+        root: &Path,
+        protected_store: S,
+        catalog: ProviderCatalog,
+        selection: Option<(
+            &AuthorityProtectedStore,
+            store_backend::OpenProtectedStore<'_>,
+        )>,
     ) -> Result<Self, LocalCredentialError> {
         let owner_id = OwnerId::parse(LOCAL_OWNER_ID)?;
         #[cfg(unix)]
@@ -431,7 +552,11 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         let authority_lock = AuthorityLock::acquire(root)?;
         let connection = open_database(root)?;
         ensure_authority_identity(&connection, &owner_id, protected_store.persistence())?;
+        if let Some((selected, open)) = selection {
+            store_backend::select_protected_store(&connection, selected, &protected_store, open)?;
+        }
         let authority = Self {
+            protected_store_identity: selection.map(|(selected, _)| selected.clone()),
             _authority_lock: authority_lock,
             connection: Mutex::new(connection),
             protected_store,
@@ -450,6 +575,10 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
 
     pub fn protected_store_persistence(&self) -> ProtectedStorePersistence {
         self.protected_store.persistence()
+    }
+
+    pub fn protected_store_identity(&self) -> Option<&AuthorityProtectedStore> {
+        self.protected_store_identity.as_ref()
     }
 
     pub(crate) fn validate_ssh_enrollment_name(
@@ -3684,6 +3813,9 @@ pub enum LocalCredentialError {
     UnsupportedSchema,
     #[error("local credential metadata is corrupt")]
     CorruptMetadata,
+    /// Stored values were left in the recorded backend, unchanged.
+    #[error("local protected storage could not switch backends: {0}")]
+    ProtectedStoreSwitch(ProtectedStoreError),
     #[error("local credential authority owner does not match persisted metadata")]
     OwnerMismatch,
     #[error("local credential protected-store backend does not match persisted metadata")]

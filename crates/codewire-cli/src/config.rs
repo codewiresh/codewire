@@ -394,6 +394,10 @@ pub struct MeshConfig {
     pub node: Option<MeshNodeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_identity: Option<LocalMeshIdentity>,
+    /// Where `--local` secrets and credentials are stored: "keychain"
+    /// (default) or "file" on macOS, "secret-service" on Linux.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_credential_store: Option<String>,
 }
 
 impl std::fmt::Debug for MeshConfig {
@@ -411,6 +415,7 @@ impl std::fmt::Debug for MeshConfig {
             .field("current_target", &self.current_target)
             .field("node", &self.node)
             .field("local_identity", &self.local_identity)
+            .field("local_credential_store", &self.local_credential_store)
             .finish()
     }
 }
@@ -1150,6 +1155,9 @@ pub struct ConfigReport {
     pub mesh_data_dir: String,
     pub platform: Option<PlatformReport>,
     pub mesh: Option<MeshReport>,
+    /// The effective local protected-storage backend, or `None` when the
+    /// configured value is invalid on this platform.
+    pub local_credential_store: Option<String>,
 }
 
 impl ConfigReport {
@@ -1157,12 +1165,14 @@ impl ConfigReport {
         paths: &ResolvePaths,
         platform: Result<ResolvedPlatformConfig, ConfigError>,
         mesh: Result<ResolvedMeshConfig, ConfigError>,
+        local_credential_store: Option<String>,
     ) -> Self {
         Self {
             platform_config_dir: paths.platform_config_dir.display().to_string(),
             mesh_data_dir: paths.mesh_data_dir.display().to_string(),
             platform: platform.ok().map(PlatformReport::from),
             mesh: mesh.ok().map(MeshReport::from),
+            local_credential_store,
         }
     }
 }

@@ -1321,7 +1321,10 @@ pub(crate) fn inspect_config(output: OutputFormat) -> anyhow::Result<()> {
     let platform =
         config::resolve_platform(config::PlatformResolveOptions::default(), &paths, &env);
     let mesh = config::resolve_mesh(config::MeshResolveOptions::default(), &paths, &env);
-    let report = config::ConfigReport::from_results(&paths, platform, mesh);
+    let local_credential_store = super::configured_local_credential_store(&paths.mesh_data_dir)
+        .ok()
+        .map(|backend| backend.as_str().to_owned());
+    let report = config::ConfigReport::from_results(&paths, platform, mesh, local_credential_store);
 
     match output {
         OutputFormat::Json => {
@@ -1354,6 +1357,13 @@ pub(crate) fn inspect_config(output: OutputFormat) -> anyhow::Result<()> {
                 }
                 None => println!("mesh=unconfigured"),
             }
+            println!(
+                "local_credential_store={}",
+                report
+                    .local_credential_store
+                    .as_deref()
+                    .unwrap_or("invalid")
+            );
         }
     }
 

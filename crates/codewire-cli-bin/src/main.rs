@@ -186,7 +186,17 @@ fn main() {
         eprintln!("failed to initialize async runtime: {error}");
         std::process::exit(1);
     });
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let credential_authority = std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "__local-credential-authority");
     if let Err(err) = runtime.block_on(codewire_cli::run()) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if credential_authority
+            && let Some(exit_code) = codewire_cli::local_credential_authority_exit_code(&err)
+        {
+            std::process::exit(exit_code);
+        }
         if isolated_process {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             let exit_code = if network_worker {

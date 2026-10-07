@@ -60,8 +60,11 @@ fn local_vm_roles_are_hidden_and_other_host_effect_entrypoints_stay_unavailable(
     let help = command(home.path()).arg("--help").output().unwrap();
     assert!(help.status.success());
     let help = String::from_utf8_lossy(&help.stdout);
+    // The local VM roles and the storage-only credential authority are hidden
+    // macOS entrypoints; credential-bearing brokers stay unavailable.
     for hidden in [
         "__native-supervisor",
+        "__local-credential-authority",
         "__native-runner",
         "__native-network-worker",
         "__native-egress-broker",
@@ -70,7 +73,7 @@ fn local_vm_roles_are_hidden_and_other_host_effect_entrypoints_stay_unavailable(
     ] {
         assert!(!help.contains(hidden), "{hidden}");
     }
-    for entrypoint in ["__local-credential-authority", "__local-credential-broker"] {
+    for entrypoint in ["__local-credential-broker"] {
         let output = command(home.path())
             .args([entrypoint, "--help"])
             .output()
