@@ -1198,7 +1198,7 @@ assert_kind_credential_claude_token() {
   [[ "$revision" =~ ^[1-9][0-9]*$ ]] || return 1
   kind_credential_cli credentials --platform get "$name" --output json | jq -e \
     --arg name "$name" --arg revision "$revision" '.[0] as $c
-      | (($c.expiresAtUnix // $c.expires_at_unix) | tonumber) - (now | floor) as $left
+      | ((($c.expiresAtUnix // $c.expires_at_unix) | tonumber) - (now | floor)) as $left
       | length == 1 and $c.name == $name and $c.provider == "anthropic"
         and $c.status == "CREDENTIAL_STATUS_ACTIVE"
         and ($c.authenticationKind // $c.authentication_kind) == "CREDENTIAL_AUTHENTICATION_KIND_OAUTH"
