@@ -15,6 +15,11 @@
 //!
 //! Steady state: `Send(dst, pkt)` → server → `RecvPacket(src, pkt)` on the
 //! peer. We also answer `Ping` with `Pong` and surface keepalives.
+//!
+//! Every [`Client`] method is cancellation-safe: transports race `recv`
+//! against outgoing packets in a `select!`, and a frame half-read or
+//! half-written when that future is dropped stays buffered in the client,
+//! so the stream never loses its framing.
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -83,7 +88,17 @@ pub struct Client<S> {
     private: NodePrivate,
     server_key: NodePublic,
     public: NodePublic,
+    /// Bytes read from `conn` that do not yet form a whole frame.
+    read_buf: Vec<u8>,
+    /// Encoded frames not yet fully written to `conn`.
+    write_buf: Vec<u8>,
 }
+
+/// How much `recv` asks the stream for at once.
+const READ_CHUNK: usize = 16 << 10;
+
+/// Largest frame accepted: Go's 1<<20 receive cap plus key overhead.
+const MAX_FRAME_LEN: usize = (1 << 20) + 64;
 
 impl<S> Client<S>
 where
@@ -121,6 +136,8 @@ where
             private,
             server_key,
             public,
+            read_buf: Vec::new(),
+            write_buf: Vec::new(),
         })
     }
 
@@ -144,6 +161,8 @@ where
             private: self.private,
             server_key: self.server_key,
             public: self.public,
+            read_buf: self.read_buf,
+            write_buf: self.write_buf,
         }
     }
 
@@ -155,22 +174,53 @@ where
         let mut payload = Vec::with_capacity(KEY_LEN + pkt.len());
         payload.extend_from_slice(dst.as_bytes());
         payload.extend_from_slice(pkt);
-        write_frame(&mut self.conn, FrameType::SendPacket, &payload).await
+        self.queue_frame(FrameType::SendPacket, &payload);
+        self.flush_writes().await
     }
 
     /// Send a ping; the server (or peer, for mesh) echoes it in a pong.
     pub async fn send_ping(&mut self, data: [u8; 8]) -> Result<(), Error> {
-        write_frame(&mut self.conn, FrameType::Ping, &data).await
+        self.queue_frame(FrameType::Ping, &data);
+        self.flush_writes().await
     }
 
     /// Tell the server whether this is the client's preferred (home) node.
     pub async fn note_preferred(&mut self, preferred: bool) -> Result<(), Error> {
-        write_frame(
-            &mut self.conn,
-            FrameType::NotePreferred,
-            &[u8::from(preferred)],
-        )
-        .await
+        self.queue_frame(FrameType::NotePreferred, &[u8::from(preferred)]);
+        self.flush_writes().await
+    }
+
+    fn queue_frame(&mut self, t: FrameType, payload: &[u8]) {
+        frame::encode_header(t, payload.len() as u32, &mut self.write_buf);
+        self.write_buf.extend_from_slice(payload);
+    }
+
+    /// Write every queued frame byte. Progress is kept in `write_buf`, so a
+    /// dropped call leaves the rest for the next one.
+    async fn flush_writes(&mut self) -> Result<(), Error> {
+        while !self.write_buf.is_empty() {
+            let written = self.conn.write(&self.write_buf).await?;
+            if written == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
+            }
+            self.write_buf.drain(..written);
+        }
+        self.conn.flush().await?;
+        Ok(())
+    }
+
+    /// Read one whole frame. Partial bytes are kept in `read_buf`, so a
+    /// dropped call loses nothing.
+    async fn read_frame(&mut self) -> Result<(FrameType, Vec<u8>), Error> {
+        loop {
+            if let Some(frame) = take_frame(&mut self.read_buf)? {
+                return Ok(frame);
+            }
+            self.read_buf.reserve(READ_CHUNK);
+            if self.conn.read_buf(&mut self.read_buf).await? == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+        }
     }
 
     /// Receive one message from the server. Automatically replies to
@@ -182,7 +232,9 @@ where
         // than swallowing them, so the consumer's recv loop stays in
         // control — mirroring `derp.Client.Recv`, which also returns one
         // message per call.
-        let (t, payload) = read_frame(&mut self.conn).await?;
+        // Finish a pong an earlier, dropped call queued.
+        self.flush_writes().await?;
+        let (t, payload) = self.read_frame().await?;
         match t {
             FrameType::ServerInfo => {
                 // Decrypt to validate the box, but the contents (rate
@@ -224,7 +276,8 @@ where
                 let mut data = [0u8; 8];
                 data.copy_from_slice(&payload[..8]);
                 // Echo the pong, like the Go client.
-                write_frame(&mut self.conn, FrameType::Pong, &data).await?;
+                self.queue_frame(FrameType::Pong, &data);
+                self.flush_writes().await?;
                 Ok(ReceivedMessage::Ping(data))
             }
             FrameType::Pong => {
@@ -284,11 +337,29 @@ where
     let mut hdr = [0u8; FRAME_HEADER_LEN];
     conn.read_exact(&mut hdr).await?;
     let (t, len) = frame::decode_header(&hdr)?;
-    // Generous ceiling matching Go's 1<<20 recv cap plus key overhead.
-    if len as usize > (1 << 20) + 64 {
+    if len as usize > MAX_FRAME_LEN {
         return Err(Error::Protocol("frame too large"));
     }
     let mut payload = vec![0u8; len as usize];
     conn.read_exact(&mut payload).await?;
     Ok((t, payload))
+}
+
+/// Remove and return the first whole frame in `buf`, if there is one.
+fn take_frame(buf: &mut Vec<u8>) -> Result<Option<(FrameType, Vec<u8>)>, Error> {
+    if buf.len() < FRAME_HEADER_LEN {
+        return Ok(None);
+    }
+    let (t, len) = frame::decode_header(&buf[..FRAME_HEADER_LEN])?;
+    let len = len as usize;
+    if len > MAX_FRAME_LEN {
+        return Err(Error::Protocol("frame too large"));
+    }
+    let end = FRAME_HEADER_LEN + len;
+    if buf.len() < end {
+        return Ok(None);
+    }
+    let payload = buf[FRAME_HEADER_LEN..end].to_vec();
+    buf.drain(..end);
+    Ok(Some((t, payload)))
 }
