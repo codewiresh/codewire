@@ -171,7 +171,7 @@ impl DaemonService for DaemonServiceImpl {
         if let Some(value) = connection.workspace_authorization {
             // This existing private capability-authenticated daemon transport
             // is plaintext inside the cluster. Sensitive metadata is redaction,
-            // not encryption; the gateway-to-broker leg separately uses TLS.
+            // not encryption; the relay-to-broker leg separately uses TLS.
             response.metadata_mut().insert_bin(
                 crate::credential_bridge::WORKSPACE_AUTHORIZATION,
                 value.into_metadata(),

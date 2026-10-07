@@ -430,7 +430,7 @@ where
             output,
             epoch: epoch.clone(),
         };
-        let transport = GatewayTransport {
+        let transport = RelayTransport {
             input,
             sink: sink.clone(),
         };
@@ -468,7 +468,7 @@ where
 
 struct Admission<A, U> {
     broker: OpenAiBroker<PlatformBrokerLeaseProvider<A>, U>,
-    admitted: AdmittedCredentialBridge<GatewayTransport>,
+    admitted: AdmittedCredentialBridge<RelayTransport>,
     sink: ResponseSink,
     receiver: mpsc::Receiver<Result<v1::CredentialBridgeHostMessage, Status>>,
 }
@@ -534,7 +534,7 @@ impl Epoch {
     }
 }
 
-struct GatewayTransport {
+struct RelayTransport {
     input: BoxStream<'static, Result<v1::CredentialBridgeGuestMessage, Status>>,
     sink: ResponseSink,
 }
@@ -546,7 +546,7 @@ struct ResponseSink {
 }
 
 #[async_trait]
-impl CredentialBridgeTransport for GatewayTransport {
+impl CredentialBridgeTransport for RelayTransport {
     type ResponseSink = ResponseSink;
 
     fn response_sink(&self) -> Self::ResponseSink {

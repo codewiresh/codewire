@@ -75,7 +75,8 @@ pub struct CredentialBridgeConfig {
 pub enum CredentialBridgeTransport {
     Local,
     /// Existing capability-authenticated, plaintext intra-cluster daemon leg.
-    /// Its gateway separately authenticates both Pod tokens to the TLS broker.
+    /// The credential relay separately authenticates both Pod tokens to the
+    /// TLS broker.
     Hosted,
 }
 

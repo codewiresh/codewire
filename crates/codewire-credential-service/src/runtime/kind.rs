@@ -1,7 +1,7 @@
 //! Non-promotable Kind libtest entrypoint, never a production runtime switch.
 //!
 //! The checked-in Kind harness supplies the real Deployment, restricted login,
-//! Kubernetes authority, TLS and workspace/gateway topology. Only device login,
+//! Kubernetes authority, TLS and workspace/relay topology. Only device login,
 //! provider HTTP and the KEK are synthetic. This does not prove live OpenBao or
 //! Dev acceptance, and provider counters do not prove native auth-cache rereads
 //! or Kubernetes projected-token rotation.
