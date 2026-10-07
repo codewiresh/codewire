@@ -51,9 +51,6 @@ SMOKE_FILES = {
     "example-coordinator-ingress-smoke": "examples/coordinator-ingress-smoke",
 }
 TEST_FILES = {
-    "test-codewire-orchestration": (
-        "credential-bootstrap-build.jsonl", "codewire_orchestration", ["lib"],
-    ),
     "test-billing-wire-contract": (
         "billing-contract-build.jsonl", "wire_contract", ["test"],
     ),

@@ -26,9 +26,8 @@ cat >"$fixture_root/scripts/ci/verify/run-host-rust-build.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$PWD" >>"$FAKE_WRAPPER_CWD"
-[[ "$1" == bash && "$2" == -ceu && "$4" == -- \
-  && "$5" == "$EXPECTED_CREDENTIAL_ARTIFACT" \
-  && "$6" == "$EXPECTED_BILLING_ARTIFACT" ]] || {
+[[ "$#" -eq 5 && "$1" == bash && "$2" == -ceu && "$4" == -- \
+  && "$5" == "$EXPECTED_BILLING_ARTIFACT" ]] || {
   printf 'unexpected host Rust wrapper invocation\n' >&2
   exit 98
 }
@@ -53,8 +52,6 @@ if [[ "$count" -eq "${FAIL_CARGO_CALL:-0}" ]]; then
 fi
 if [[ "${1:-}" == test && "$*" == *'codewire-billing'* ]]; then
   printf '{"reason":"compiler-artifact","target":{"name":"wire_contract"}}\n'
-elif [[ "${1:-}" == test ]]; then
-  printf '{"reason":"compiler-artifact","target":{"name":"codewire_orchestration"}}\n'
 fi
 EOF
 chmod +x "$work/bin/cargo"
@@ -65,12 +62,10 @@ run_builder() {
     FAKE_CARGO_CALLS="$work/cargo.calls" \
     FAKE_CARGO_COUNT="$work/cargo.count" \
     FAKE_WRAPPER_CWD="$work/wrapper.cwd" \
-    EXPECTED_CREDENTIAL_ARTIFACT="$work/output/credential bootstrap.jsonl" \
     EXPECTED_BILLING_ARTIFACT="$work/output/billing contract.jsonl" \
     FAIL_CARGO_CALL="${1:-0}" \
     FAIL_CARGO_STATUS="${2:-1}" \
     "$fixture_root/scripts/ci/images/build-kind-smokes.sh" \
-      "$work/output/credential bootstrap.jsonl" \
       "$work/output/billing contract.jsonl"
 }
 
@@ -79,7 +74,6 @@ cargo <build> <--profile> <ci> <-p> <codewire-orchestration> <--bin> <crd-smoke>
 cargo <build> <--profile> <ci> <-p> <codewire-client> <--example> <platform-run-smoke> <--example> <environment-session-smoke>
 cargo <build> <--profile> <ci> <-p> <codewire-client> <--example> <coordinator-ingress-smoke> <--features> <kind-e2e>
 cargo <build> <--locked> <--profile> <ci> <-p> <codewire-cli-bin> <--bin> <cw>
-cargo <test> <--locked> <--profile> <ci> <-p> <codewire-orchestration> <--lib> <--no-run> <--message-format=json>
 cargo <test> <--locked> <--profile> <ci> <-p> <codewire-billing> <--test> <wire_contract> <--no-run> <--message-format=json> <configured_billing_wire_contract>
 EOF
 
@@ -93,9 +87,6 @@ cmp -s "$work/expected.calls" "$work/cargo.calls" || {
 }
 printf '%s\n' "$fixture_root" | cmp -s - "$work/wrapper.cwd" ||
   fail 'host Rust wrapper did not run from the repository root'
-grep -Fxq '{"reason":"compiler-artifact","target":{"name":"codewire_orchestration"}}' \
-  "$work/output/credential bootstrap.jsonl" ||
-  fail 'credential Cargo JSON artifact did not reach its explicit output path'
 grep -Fxq '{"reason":"compiler-artifact","target":{"name":"wire_contract"}}' \
   "$work/output/billing contract.jsonl" ||
   fail 'billing Cargo JSON artifact did not reach its explicit output path'
@@ -104,8 +95,7 @@ grep -Fxq '{"reason":"compiler-artifact","target":{"name":"wire_contract"}}' \
 
 : >"$work/cargo.calls"
 : >"$work/wrapper.cwd"
-rm -f "$work/cargo.count" "$work/output/credential bootstrap.jsonl" \
-  "$work/output/billing contract.jsonl"
+rm -f "$work/cargo.count" "$work/output/billing contract.jsonl"
 set +e
 failure_output="$(run_builder 3 37 2>&1)"
 failure_status=$?
@@ -117,8 +107,6 @@ set -e
 if [[ "$failure_output" == *'CODEWIRE_CI_PHASE name=kind-smoke-binary-build'* ]]; then
   fail 'failed build emitted a successful phase timing'
 fi
-[[ ! -e "$work/output/credential bootstrap.jsonl" ]] ||
-  fail 'failed pre-test build reached the Cargo JSON artifact command'
 [[ ! -e "$work/output/billing contract.jsonl" ]] ||
   fail 'failed pre-test build reached the billing Cargo JSON artifact command'
 
@@ -127,8 +115,17 @@ set +e
 usage_status=$?
 set -e
 [[ "$usage_status" -eq 2 ]] || fail 'missing artifact path did not fail with usage status'
-grep -Fq 'CREDENTIAL_TEST_ARTIFACT_JSONL BILLING_TEST_ARTIFACT_JSONL' \
-  "$work/usage.out" || fail 'missing artifact paths did not explain both required inputs'
+grep -Fq 'usage: ' "$work/usage.out" && grep -Fq ' BILLING_TEST_ARTIFACT_JSONL' "$work/usage.out" ||
+  fail 'missing artifact path did not explain the required input'
+
+# The retired orchestration libtest artifact is no longer an input.
+set +e
+"$fixture_root/scripts/ci/images/build-kind-smokes.sh" \
+  "$work/output/credential bootstrap.jsonl" "$work/output/billing contract.jsonl" \
+  >"$work/usage-two.out" 2>&1
+usage_two_status=$?
+set -e
+[[ "$usage_two_status" -eq 2 ]] || fail 'a retired second artifact path was accepted'
 
 bash -n "$BUILDER" "$0"
 printf '[test-build-kind-smokes] command sequence, artifact path, timing, and failure propagation passed\n'

@@ -827,8 +827,7 @@ build_images_and_smokes() {
   if [ "${KIND_BUILD_SMOKES:-1}" = 1 ] \
       && [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-ci ]; then
     log "building Rust kind smoke binaries"
-    "$ROOT/scripts/ci/images/build-kind-smokes.sh" \
-      "$RUN_DIR/credential-bootstrap-build.jsonl" "$RUN_DIR/billing-contract-build.jsonl"
+    "$ROOT/scripts/ci/images/build-kind-smokes.sh" "$RUN_DIR/billing-contract-build.jsonl"
   fi
 }
 
@@ -852,19 +851,16 @@ build_retained_kind_smokes() {
         missing=1
       fi
     done
-    for consumed in credential-bootstrap-build.jsonl billing-contract-build.jsonl; do
-      if [ ! -f "$RUN_DIR/$consumed" ]; then
-        echo "::error::consumed Kind smoke build receipt is missing: ${RUN_DIR}/${consumed}; rerun kind-e2e.sh up"
-        missing=1
-      fi
-    done
+    if [ ! -f "$RUN_DIR/billing-contract-build.jsonl" ]; then
+      echo "::error::consumed Kind smoke build receipt is missing: ${RUN_DIR}/billing-contract-build.jsonl; rerun kind-e2e.sh up"
+      missing=1
+    fi
     [ "$missing" -eq 0 ] || return 1
     log "consumed Kind smoke binaries verified for the retained suite"
     return 0
   fi
   log "building Rust kind smoke binaries for the retained suite"
-  "$ROOT/scripts/ci/images/build-kind-smokes.sh" \
-    "$RUN_DIR/credential-bootstrap-build.jsonl" "$RUN_DIR/billing-contract-build.jsonl"
+  "$ROOT/scripts/ci/images/build-kind-smokes.sh" "$RUN_DIR/billing-contract-build.jsonl"
 }
 
 assert_prebuilt_release_product_images() {

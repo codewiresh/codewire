@@ -1757,8 +1757,7 @@ jobs:
       - name: Build all host smoke and contract binaries
         run: |
           mkdir -p "$RUN_DIR"
-          scripts/ci/images/build-kind-smokes.sh \
-            "$RUN_DIR/credential-bootstrap-build.jsonl" "$RUN_DIR/billing-contract-build.jsonl"
+          scripts/ci/images/build-kind-smokes.sh "$RUN_DIR/billing-contract-build.jsonl"
 
       - name: Clean compiler cache credentials
         if: ${{ always() }}

@@ -1155,7 +1155,6 @@ for consumed_binary in \
   printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/consumed-ci/$consumed_binary"
   chmod +x "$FIXTURE/consumed-ci/$consumed_binary"
 done
-: >"$FIXTURE/consumed-run/credential-bootstrap-build.jsonl"
 : >"$FIXTURE/consumed-run/billing-contract-build.jsonl"
 (
   CARGO_CI_DIR="$FIXTURE/consumed-ci"
@@ -1195,6 +1194,7 @@ suite_block = common.split("build_retained_kind_smokes() {", 1)[1].split("\n}", 
 verified = set()
 for span in re.findall(r"for consumed in(.*?); do", suite_block, re.S):
     verified |= set(re.findall(r"[a-z][a-z0-9.-]+(?:/[a-z0-9.-]+)*", span))
+verified |= set(re.findall(r'\[ ! -f "\$RUN_DIR/([a-z0-9.-]+)" \]', suite_block))
 smoke_block = artifacts.split("SMOKE_FILES = {", 1)[1].split("}", 1)[0]
 transport = set(re.findall(r'^\s{4}"[a-z0-9-]+": "((?:examples/)?[a-z0-9-]+)",$',
                            smoke_block, re.M))
