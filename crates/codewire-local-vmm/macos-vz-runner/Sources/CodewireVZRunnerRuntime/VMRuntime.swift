@@ -8,8 +8,9 @@ import Foundation
 
   /// The product VM process: the macOS counterpart of the Cloud Hypervisor
   /// process the Linux runner owns. It boots one guest, serves the guest's
-  /// vsock ports on one hybrid-vsock Unix socket, stops the VM on SIGTERM or
-  /// SIGINT, and exits once the VM has stopped.
+  /// vsock ports on one hybrid-vsock Unix socket, serves each admitted host
+  /// directory through virtio-fs (Linux's virtiofsd), stops the VM on SIGTERM
+  /// or SIGINT, and exits once the VM has stopped.
   @available(macOS 15.0, *)
   public enum VMRuntime {
     public enum Exit: Int32 {
@@ -32,7 +33,13 @@ import Foundation
       }
       defer { removeSocket(configuration.vsockSocket, bound: identity) }
 
-      let machine = VMMachine(configuration: vmConfiguration)
+      // Virtualization.framework shares a directory by path, so require the
+      // admitted directory again once the VM has started; a replacement in
+      // between stops the VM.
+      let shares = configuration.shares
+      let machine = VMMachine(
+        configuration: vmConfiguration,
+        startedCheck: { (try? verifySharedDirectories(shares)) != nil })
       for signalNumber in [SIGTERM, SIGINT] {
         signal(signalNumber, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: machine.queue)
@@ -83,10 +90,30 @@ import Foundation
         device.blockDeviceIdentifier = disk.serial
         return device
       }
+      try verifySharedDirectories(request.shares)
+      result.directorySharingDevices = try request.shares.map { share in
+        do { try VZVirtioFileSystemDeviceConfiguration.validateTag(share.tag) } catch {
+          throw ConfigurationError.invalidShare
+        }
+        let device = VZVirtioFileSystemDeviceConfiguration(tag: share.tag)
+        device.share = VZSingleDirectoryShare(
+          directory: VZSharedDirectory(
+            url: URL(fileURLWithPath: share.path, isDirectory: true), readOnly: share.readOnly))
+        return device
+      }
       result.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
       result.socketDevices = [VZVirtioSocketDeviceConfiguration()]
       do { try result.validate() } catch { throw RuntimeError.virtualMachineConfigurationInvalid }
       return result
+    }
+
+    /// Each share must still be the admitted directory: same device and inode,
+    /// owned by this user, reached without a symlink and named by its path.
+    static func verifySharedDirectories(_ shares: [VMConfiguration.Share]) throws {
+      for share in shares
+      where cw_vz_verify_shared_directory(share.path, share.device, share.inode) != 0 {
+        throw RuntimeError.sharedDirectoryChanged
+      }
     }
 
     private static func acceptConnections(listener: Int32, machine: VMMachine) {
@@ -139,9 +166,13 @@ import Foundation
     private let lock = NSLock()
     private var exit: VMRuntime.Exit?
     private var retained: [AnyObject] = []
+    private let startedCheck: @Sendable () -> Bool
 
-    init(configuration: VZVirtualMachineConfiguration) {
+    init(
+      configuration: VZVirtualMachineConfiguration, startedCheck: @escaping @Sendable () -> Bool
+    ) {
       machine = VZVirtualMachine(configuration: configuration, queue: queue)
+      self.startedCheck = startedCheck
       super.init()
       queue.sync { machine.delegate = self }
     }
@@ -150,12 +181,18 @@ import Foundation
 
     /// Read and written only on `queue`.
     private var stopRequested = false
+    /// Read and written only on `queue`: the started VM failed its check and
+    /// is stopping, so its stop reports failure.
+    private var startCheckFailed = false
 
     func start() {
       queue.async {
         self.machine.start { result in
           if case .failure = result {
             self.finish(.failed)
+          } else if !self.startedCheck() {
+            self.startCheckFailed = true
+            self.stop()
           } else if self.stopRequested {
             self.stop()
           }
@@ -168,10 +205,11 @@ import Foundation
     /// on Linux. A stop requested while the VM is starting applies once it has.
     func stop() {
       stopRequested = true
+      let stopped: VMRuntime.Exit = startCheckFailed ? .failed : .stopped
       if machine.state == .stopped {
-        finish(.stopped)
+        finish(stopped)
       } else if machine.canStop {
-        machine.stop { error in self.finish(error == nil ? .stopped : .failed) }
+        machine.stop { error in self.finish(error == nil ? stopped : .failed) }
       }
     }
 

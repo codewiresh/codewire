@@ -21,6 +21,14 @@ extension CodewireVZRunnerTests {
           .init(path: "/state/state.raw", serial: "CWSTATE1", readOnly: false),
           .init(path: "/state/seed.raw", serial: "CWSEED1", readOnly: true),
         ],
+        shares: [
+          .init(
+            tag: "cw-direct-00", path: "/Users/someone/source", readOnly: true, device: 16_777_234,
+            inode: 42),
+          .init(
+            tag: "cw-direct-01", path: "/Users/someone/output", readOnly: false,
+            device: 16_777_234, inode: 43),
+        ],
         vsockSocket: "/state/vsock.sock")
     }
 
@@ -56,6 +64,22 @@ extension CodewireVZRunnerTests {
       disks[0]["cache"] = "none"
       root["disks"] = disks
       Self.expect(.unknownFields, try JSONSerialization.data(withJSONObject: root))
+      // Schema 2 requires the shares list, and each share has exactly its fields.
+      root = try Self.object(Self.configuration())
+      root.removeValue(forKey: "shares")
+      Self.expect(.unknownFields, try JSONSerialization.data(withJSONObject: root))
+      for field in ["tag", "path", "readOnly", "device", "inode"] {
+        root = try Self.object(Self.configuration())
+        var shares = try #require(root["shares"] as? [[String: Any]])
+        shares[0].removeValue(forKey: field)
+        root["shares"] = shares
+        Self.expect(.unknownFields, try JSONSerialization.data(withJSONObject: root))
+      }
+      root = try Self.object(Self.configuration())
+      var shares = try #require(root["shares"] as? [[String: Any]])
+      shares[1]["writable"] = true
+      root["shares"] = shares
+      Self.expect(.unknownFields, try JSONSerialization.data(withJSONObject: root))
       Self.expect(.malformed, Data("[]".utf8))
       Self.expect(
         .malformed, Data(repeating: 0x20, count: VMConfiguration.maxConfigurationBytes + 1))
@@ -64,7 +88,8 @@ extension CodewireVZRunnerTests {
     @Test
     func testBoundsAndPathsFailClosed() throws {
       let cases: [(ConfigurationError, (inout VMConfiguration) -> Void)] = [
-        (.unsupportedSchema, { $0.schemaVersion = 2 }),
+        (.unsupportedSchema, { $0.schemaVersion = 1 }),
+        (.unsupportedSchema, { $0.schemaVersion = 3 }),
         (.invalidArtifact, { $0.kernel = "kernel" }),
         (.invalidArtifact, { $0.initialRamdisk = "/state/../etc/initramfs" }),
         (.invalidArtifact, { $0.commandLine = "" }),
@@ -86,6 +111,25 @@ extension CodewireVZRunnerTests {
             }
           }
         ),
+        (.invalidShare, { $0.shares[0].tag = "cw-direct-01" }),
+        (.invalidShare, { $0.shares[1].tag = "cw-direct-1" }),
+        (.invalidShare, { $0.shares[0].tag = "workspace" }),
+        (.invalidShare, { $0.shares[1].path = "/Users/someone/source" }),
+        (.invalidShare, { $0.shares[0].path = "Users/someone/source" }),
+        (.invalidShare, { $0.shares[0].path = "/Users/someone/../source" }),
+        (.invalidShare, { $0.shares[0].path = "/" }),
+        (.invalidShare, { $0.shares[0].path = "/" + String(repeating: "p", count: 1023) }),
+        (.invalidShare, { $0.shares[0].inode = 0 }),
+        (
+          .invalidShare,
+          {
+            $0.shares = (0...VMConfiguration.maxShares).map {
+              .init(
+                tag: VMConfiguration.shareTag($0), path: "/Users/someone/\($0)", readOnly: true,
+                device: 1, inode: UInt64($0) + 1)
+            }
+          }
+        ),
         (.invalidVsockPort, { $0.vsockSocket = "vsock.sock" }),
         (.invalidVsockPort, { $0.vsockSocket = "/" + String(repeating: "v", count: 103) }),
       ]
@@ -94,6 +138,21 @@ extension CodewireVZRunnerTests {
         mutate(&configuration)
         Self.expect(expected, try Self.encoded(configuration))
       }
+    }
+
+    @Test
+    func testShareTagsFollowGuestPlanOrder() throws {
+      #expect(VMConfiguration.shareTag(0) == "cw-direct-00")
+      #expect(VMConfiguration.shareTag(15) == "cw-direct-15")
+      var configuration = Self.configuration()
+      configuration.shares = (0..<VMConfiguration.maxShares).map {
+        .init(
+          tag: VMConfiguration.shareTag($0), path: "/Users/someone/\($0)", readOnly: $0 % 2 == 0,
+          device: 1, inode: UInt64($0) + 1)
+      }
+      #expect(try VMConfiguration.decode(Self.encoded(configuration)) == configuration)
+      configuration.shares = []
+      #expect(try VMConfiguration.decode(Self.encoded(configuration)) == configuration)
     }
 
     @Test

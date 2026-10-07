@@ -4,11 +4,26 @@
 
 `codewire-vz-runner vm --config FILE` is the macOS counterpart of the Cloud
 Hypervisor process that the Linux runner owns. The JSON configuration
-(`VMConfiguration`, schema 1) names the kernel, initial ramdisk, kernel
+(`VMConfiguration`, schema 2) names the kernel, initial ramdisk, kernel
 command line, CPU count, memory and virtio-blk disks by absolute path, with
-each disk's serial and read-only flag. The Rust runner admits every path under
-its private state root before writing the file. Unknown or missing fields fail
-closed.
+each disk's serial and read-only flag, and the admitted direct shares. The
+Rust runner admits every disk under its private state root before writing the
+file. Unknown or missing fields fail closed; schema 1, which had no `shares`,
+is refused.
+
+Each share is `{tag, path, readOnly, device, inode}`: the guest's virtio-fs tag
+`cw-direct-NN` in plan order (at most 16), the canonical directory the Rust
+runner admitted (owned by the user, on APFS, outside broad system roots,
+credential stores and Codewire's own state, not a mount root and without a
+nested mount), and that directory's raw `st_dev` and `st_ino`. The helper
+serves each one with Virtualization.framework's own virtio-fs device
+(`VZVirtioFileSystemDeviceConfiguration` with one `VZSharedDirectory`),
+read-only when `readOnly` is set; the guest also mounts it read-only. Because
+that API shares a directory by path, the helper opens the path with
+`O_NOFOLLOW_ANY` and requires the same device, inode, owner and `F_GETPATH`
+name before it configures the VM, and again once the VM has started. A
+mismatch before start fails the helper; a mismatch after start stops the VM
+and exits 1. A guest symlink resolves inside the guest, never on the host.
 
 The helper binds the configured hybrid-vsock Unix socket owner-only and never
 replaces an existing path. A client writes `CONNECT <port>\n`. The helper dials
@@ -21,9 +36,9 @@ SIGTERM or SIGINT stops the VM, and so does the exit of the process that
 spawned the helper (macOS has no parent-death signal). The process exits 0 after the guest powers off
 or a requested stop completes, and 1 when the VM fails to start or stops with
 an error. It removes the socket only if that path is still the one it bound.
-The VM has no network, directory-sharing, console or graphics device. The
-helper needs the `com.apple.security.virtualization` entitlement; developer
-builds are signed ad hoc with `developer-entitlements.plist`.
+The VM has no network, console or graphics device. The helper needs the
+`com.apple.security.virtualization` entitlement; developer builds are signed
+ad hoc with `developer-entitlements.plist`.
 
 The sections below describe the earlier fixed-topology developer fixtures.
 

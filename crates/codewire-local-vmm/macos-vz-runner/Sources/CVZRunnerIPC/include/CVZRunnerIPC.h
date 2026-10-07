@@ -92,4 +92,9 @@ int cw_vz_write_all(int fd, const uint8_t *bytes, size_t size);
 // write shutdown. Returns 0 after both EOFs and -1 on error. Does not close.
 int cw_vz_splice(int a, int b);
 
+// Product VM shared directory. Open `path` without following a symlink in any
+// component and require this user's directory `device`/`inode` (raw st_dev and
+// st_ino), still named exactly `path`. Returns 0 on a match and -1 otherwise.
+int cw_vz_verify_shared_directory(const char *path, uint32_t device, uint64_t inode);
+
 #endif

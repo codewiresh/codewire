@@ -33,9 +33,7 @@ use crate::cloud_hypervisor::{
 };
 #[cfg(target_os = "linux")]
 use crate::cw_runtime::{AdmittedCwRuntimeDisk, CwRuntimeError, CwRuntimeStore};
-#[cfg(target_os = "linux")]
-use crate::direct_share::AdmittedDirectShare;
-use crate::direct_share::DirectShareRequest;
+use crate::direct_share::{AdmittedDirectShare, DirectShareRequest};
 use crate::egress_broker::{
     EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE,
     EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT, EGRESS_BROKER_PREPARED_MESSAGE,
@@ -156,11 +154,13 @@ struct SetupDiskIdentity {
     file: FileIdentity,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug)]
 struct PreparedDirectShare {
     request: DirectShareRequest,
     admitted: AdmittedDirectShare,
+    /// Linux serves each share through its own virtiofsd socket; Darwin's
+    /// helper serves every share inside the VM process.
+    #[cfg(target_os = "linux")]
     socket: PathBuf,
 }
 
@@ -252,7 +252,6 @@ impl CloudHypervisorRunner {
         let setup_disk = admit_setup_disk(&paths, &request)?;
         paths.clear_stale_runtime_endpoints()?;
 
-        #[cfg(target_os = "linux")]
         let direct_shares = self.prepare_direct_shares(&request, &paths)?;
         let direct_share_plan = direct_share_plan(&request.direct_shares)?;
         let direct_shares_sha256 = direct_share_plan
@@ -346,7 +345,6 @@ impl CloudHypervisorRunner {
             setup_disk,
             #[cfg(target_os = "linux")]
             cw_runtime_disk,
-            #[cfg(target_os = "linux")]
             direct_shares,
             token,
             #[cfg(target_os = "linux")]
@@ -395,6 +393,36 @@ impl CloudHypervisorRunner {
             .collect()
     }
 
+    /// Reopen every admitted share. The helper and its boot artifacts, like
+    /// the private state root, can never be shared.
+    #[cfg(target_os = "macos")]
+    fn prepare_direct_shares(
+        &self,
+        request: &CreateVmRequest,
+        _paths: &VmPaths,
+    ) -> Result<Vec<PreparedDirectShare>, RunnerError> {
+        let forbidden_roots = [
+            self.state_root.path().to_owned(),
+            self.artifacts.vz_runner.path().to_owned(),
+            self.artifacts.kernel.path().to_owned(),
+            self.artifacts.initramfs.path().to_owned(),
+        ];
+        request
+            .direct_shares
+            .iter()
+            .cloned()
+            .map(|share| {
+                let admitted = share
+                    .reopen(&forbidden_roots)
+                    .map_err(|_| RunnerError::DirectShareChanged)?;
+                Ok(PreparedDirectShare {
+                    request: share,
+                    admitted,
+                })
+            })
+            .collect()
+    }
+
     pub async fn start(&self, prepared: PreparedVm) -> Result<RunningVm, RunnerError> {
         #[cfg(target_os = "linux")]
         preflight()?;
@@ -427,6 +455,30 @@ impl CloudHypervisorRunner {
     #[cfg(target_os = "macos")]
     async fn launch(&self, prepared: PreparedVm) -> Result<RunningVm, RunnerError> {
         let root_disk = root_disk_path(&prepared.paths, &prepared.request.root_generation)?;
+        // As Linux does before starting virtiofsd, require each share to be
+        // the admitted directory once more; the helper checks it again
+        // before and after VM start.
+        let shares = prepared
+            .direct_shares
+            .iter()
+            .map(|share| {
+                let current = share
+                    .request
+                    .reopen(&[])
+                    .map_err(|_| RunnerError::DirectShareChanged)?;
+                if current.identity() != share.admitted.identity()
+                    || current.path() != share.admitted.path()
+                {
+                    return Err(RunnerError::DirectShareChanged);
+                }
+                Ok(crate::vz::VzShare::new(
+                    share.request.mount.tag(),
+                    share.admitted.path(),
+                    share.request.mount.read_only(),
+                    share.admitted.identity(),
+                ))
+            })
+            .collect::<Result<Vec<_>, RunnerError>>()?;
         let configuration = crate::vz::VzConfiguration::new(
             self.artifacts.kernel.path(),
             self.artifacts.initramfs.path(),
@@ -445,6 +497,7 @@ impl CloudHypervisorRunner {
                     .as_ref()
                     .map(|setup| setup.path.as_path()),
             },
+            shares,
             &prepared.paths.vsock_socket,
         )
         .encode()?;
@@ -1081,7 +1134,6 @@ pub struct PreparedVm {
     setup_disk: Option<SetupDiskIdentity>,
     #[cfg(target_os = "linux")]
     cw_runtime_disk: Option<AdmittedCwRuntimeDisk>,
-    #[cfg(target_os = "linux")]
     direct_shares: Vec<PreparedDirectShare>,
     token: Zeroizing<String>,
     #[cfg(target_os = "linux")]
@@ -1101,9 +1153,8 @@ impl fmt::Debug for PreparedVm {
             .field("root_disk", &self.root_disk)
             .field("setup_disk", &self.setup_disk);
         #[cfg(target_os = "linux")]
-        debug
-            .field("cw_runtime_disk", &self.cw_runtime_disk)
-            .field("direct_share_count", &self.direct_shares.len());
+        debug.field("cw_runtime_disk", &self.cw_runtime_disk);
+        debug.field("direct_share_count", &self.direct_shares.len());
         debug.field("token", &"[REDACTED]");
         #[cfg(target_os = "linux")]
         debug.field("command", &self.command);
@@ -4067,10 +4118,9 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
     {
         return Err(RunnerError::InvalidRequest);
     }
-    // Direct shares, host ports, Mesh and cw runtime catalogs are Linux-only.
+    // Host ports, Mesh and cw runtime catalogs are Linux-only.
     #[cfg(target_os = "macos")]
-    if !request.direct_shares.is_empty()
-        || !request.host_ports.is_empty()
+    if !request.host_ports.is_empty()
         || request.mesh.is_some()
         || request.cw_runtime_catalog_generation.is_some()
     {

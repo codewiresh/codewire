@@ -5,6 +5,8 @@
 //! by serial, and serves the guest's vsock ports on one hybrid-vsock Unix
 //! socket with the CONNECT/OK protocol the runner already speaks. It stops
 //! its VM when SIGTERM arrives or when this runner (its parent) exits.
+//! Direct shares use Virtualization.framework's built-in virtio-fs device
+//! with the same tag the guest mounts on Linux.
 
 use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
@@ -15,6 +17,7 @@ use codewire_vmm_guest_probe::{
 };
 use serde::Serialize;
 
+use crate::direct_share::DirectShareIdentity;
 use crate::runner::RunnerError;
 use crate::state::VmLock;
 
@@ -25,10 +28,10 @@ pub(crate) const CONFIG_NAME: &str = "vz.json";
 /// time, because Virtualization.framework stops the guest's clocks while the VM
 /// does not run, such as during host sleep.
 const GUEST_KERNEL_CMDLINE: &str = "console=ttyS0 rdinit=/init panic=-1 codewire.clock=rtc";
-/// `VMConfiguration.schemaVersion` in the helper.
-const SCHEMA_VERSION: u32 = 1;
+/// `VMConfiguration.schemaVersion` in the helper. Schema 2 added `shares`.
+const SCHEMA_VERSION: u32 = 2;
 
-/// The helper's schema-1 `VMConfiguration`. It refuses unknown or missing
+/// The helper's schema-2 `VMConfiguration`. It refuses unknown or missing
 /// fields, so these names must match it exactly.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +44,7 @@ pub(crate) struct VzConfiguration {
     #[serde(rename = "memoryMiB")]
     memory_mib: u32,
     disks: Vec<VzDisk>,
+    shares: Vec<VzShare>,
     vsock_socket: PathBuf,
 }
 
@@ -50,6 +54,37 @@ struct VzDisk {
     path: PathBuf,
     serial: &'static str,
     read_only: bool,
+}
+
+/// One admitted host directory, served by the helper's virtio-fs device under
+/// the guest-visible tag. The helper opens the path without following any
+/// symlink and requires this exact directory before and after VM start.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VzShare {
+    tag: String,
+    path: PathBuf,
+    read_only: bool,
+    /// The raw `st_dev` of the admitted directory.
+    device: u32,
+    inode: u64,
+}
+
+impl VzShare {
+    pub(crate) fn new(
+        tag: &str,
+        path: &Path,
+        read_only: bool,
+        identity: &DirectShareIdentity,
+    ) -> Self {
+        Self {
+            tag: tag.to_owned(),
+            path: path.to_owned(),
+            read_only,
+            device: (identity.device_major() << 24) | identity.device_minor(),
+            inode: identity.inode(),
+        }
+    }
 }
 
 /// The VM's disks, in the order Cloud Hypervisor attaches them on Linux.
@@ -68,6 +103,7 @@ impl VzConfiguration {
         vcpus: u8,
         memory_mib: u32,
         disks: VzDisks<'_>,
+        shares: Vec<VzShare>,
         vsock_socket: &Path,
     ) -> Self {
         let disk = |path: &Path, serial, read_only| VzDisk {
@@ -92,6 +128,7 @@ impl VzConfiguration {
             cpu_count: vcpus,
             memory_mib,
             disks: attached,
+            shares,
             vsock_socket: vsock_socket.to_owned(),
         }
     }
@@ -142,7 +179,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn configuration_names_and_disk_order_match_the_helper_schema() {
+    fn configuration_names_disk_order_and_shares_match_the_helper_schema() {
         let configuration = VzConfiguration::new(
             Path::new("/a/kernel"),
             Path::new("/a/initramfs"),
@@ -155,6 +192,13 @@ mod tests {
                 seed: Path::new("/vm/seed/seed.raw"),
                 setup: Some(Path::new("/vm/setup.raw")),
             },
+            vec![VzShare {
+                tag: "cw-direct-00".to_owned(),
+                path: PathBuf::from("/Users/someone/project"),
+                read_only: true,
+                device: 0x0100_0012,
+                inode: 42,
+            }],
             Path::new("/vm/vsock/v"),
         );
         let value: serde_json::Value =
@@ -171,6 +215,7 @@ mod tests {
                 "kernel",
                 "memoryMiB",
                 "schemaVersion",
+                "shares",
                 "vsockSocket"
             ]
         );
@@ -194,7 +239,17 @@ mod tests {
                 (SETUP_DISK_SERIAL.to_owned(), true),
             ]
         );
-        assert_eq!(value["schemaVersion"], 1);
+        assert_eq!(value["schemaVersion"], 2);
+        assert_eq!(
+            value["shares"],
+            serde_json::json!([{
+                "tag": "cw-direct-00",
+                "path": "/Users/someone/project",
+                "readOnly": true,
+                "device": 0x0100_0012,
+                "inode": 42,
+            }])
+        );
         assert_eq!(value["commandLine"], GUEST_KERNEL_CMDLINE);
     }
 }

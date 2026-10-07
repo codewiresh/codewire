@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/param.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -146,4 +147,29 @@ int cw_vz_splice(int a, int b) {
         }
     }
     return 0;
+}
+
+int cw_vz_verify_shared_directory(const char *path, uint32_t device, uint64_t inode) {
+#if defined(__APPLE__)
+    if (path == NULL || path[0] != '/') { return -1; }
+    // O_NOFOLLOW_ANY refuses a symlink in any component, so neither the
+    // directory nor a replaced parent can redirect the admitted path.
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC);
+    if (fd < 0) { return -1; }
+    struct stat status;
+    char current[MAXPATHLEN];
+    int result = -1;
+    if (fstat(fd, &status) == 0 && S_ISDIR(status.st_mode) && (uint32_t)status.st_dev == device &&
+        (uint64_t)status.st_ino == inode && status.st_uid == geteuid() &&
+        fcntl(fd, F_GETPATH, current) == 0 && strcmp(current, path) == 0) {
+        result = 0;
+    }
+    close(fd);
+    return result;
+#else
+    (void)path;
+    (void)device;
+    (void)inode;
+    return -1;
+#endif
 }
