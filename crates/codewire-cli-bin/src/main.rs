@@ -201,7 +201,16 @@ fn main() {
                 None
             }
             .unwrap_or(1);
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "macos")]
+            let exit_code = if network_worker {
+                codewire_cli::native_network_worker_exit_code(&err)
+            } else if egress_broker {
+                codewire_cli::native_egress_broker_exit_code(&err)
+            } else {
+                None
+            }
+            .unwrap_or(1);
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let exit_code = 1;
             std::process::exit(exit_code);
         }

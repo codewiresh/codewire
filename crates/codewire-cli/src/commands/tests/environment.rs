@@ -370,7 +370,7 @@ fn native_resize_requires_whole_cores_and_never_shrinks_disk() {
     assert_eq!(plan.desired.vcpus, 3);
     assert_eq!(plan.desired.memory_mib, 12 * 1024);
     assert_eq!(plan.desired.disk_bytes, 21 * 1024 * 1024 * 1024);
-    assert!(format_native_resize_plan("workspace", &plan).contains("Cloud Hypervisor"));
+    assert!(format_native_resize_plan("workspace", &plan).contains(NATIVE_VMM_NAME));
 
     let mut fractional = args;
     fractional.cpu = Some("1500m".to_string());

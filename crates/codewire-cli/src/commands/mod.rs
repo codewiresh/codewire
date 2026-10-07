@@ -32,14 +32,10 @@ mod member_control;
 #[cfg(target_os = "linux")]
 pub(crate) use member_control::*;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use native::*;
-#[cfg(target_os = "macos")]
-mod native_supervisor;
-#[cfg(target_os = "macos")]
-pub(crate) use native_supervisor::run_native_supervisor;
 #[cfg(target_os = "linux")]
 mod credential_authority;
 #[cfg(target_os = "linux")]
@@ -99,14 +95,14 @@ pub(crate) struct DoctorArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum DoctorCommand {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(about = "Inspect native local VM orphans without mutating them")]
     Local(DoctorLocalArgs),
     #[command(about = "Probe environment tailnet transport paths")]
     Tailnet(DoctorTailnetArgs),
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct DoctorLocalArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
@@ -243,7 +239,7 @@ pub(crate) struct NativeSupervisorArgs {
     pub(crate) credential_authority_root: PathBuf,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct NativeRunnerArgs {
     #[arg(long)]
@@ -260,7 +256,7 @@ pub(crate) struct NativeRunnerArgs {
     pub(crate) platform_config_dir: PathBuf,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct NativeNetworkWorkerArgs {
     #[arg(long)]
@@ -269,7 +265,7 @@ pub(crate) struct NativeNetworkWorkerArgs {
     pub(crate) generation: u64,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct NativeEgressBrokerArgs {
     #[arg(long)]

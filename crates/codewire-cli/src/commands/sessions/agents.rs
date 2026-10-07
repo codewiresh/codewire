@@ -1096,6 +1096,10 @@ pub(super) async fn handle_agent_run_command(
     if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
         return native_host::run(target, args).await;
     }
+    #[cfg(target_os = "macos")]
+    if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) {
+        anyhow::bail!("managed agents are not available in macOS local environments yet");
+    }
     let environment = host_placement(&target)?.clone();
     let agent = match args.agent.as_deref() {
         Some("codex") => AgentKind::Codex,

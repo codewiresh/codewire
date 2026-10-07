@@ -224,7 +224,7 @@ async fn handle_unified_environment_cp(
         .expect("validated copy direction has one remote environment");
     let target = resolve_unified_environment_target(globals, placement, target_ref, "cp").await?;
     match target {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         UnifiedEnvironmentTarget::NativeLocal(name) => match (src_remote, dst_remote) {
             (None, Some((_environment, remote_path))) => {
                 let data = fs::read(&args.src).context("open local file")?;
@@ -280,14 +280,14 @@ async fn handle_unified_environment_access(
 ) -> anyhow::Result<()> {
     match placement {
         Some(EnvironmentPlacement::Local) => {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 handle_native_environment_access(args).await
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
                 let _ = args;
-                anyhow::bail!("native local environment access currently requires Linux")
+                anyhow::bail!("native local environment access currently requires Linux or macOS")
             }
         }
         Some(EnvironmentPlacement::Platform) | None => {
@@ -696,12 +696,12 @@ impl UnifiedEnvironmentLifecycle {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum UnifiedEnvironmentTarget {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     NativeLocal(String),
     Platform(String),
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NativeResizeResources {
     pub(crate) vcpus: u32,
@@ -709,7 +709,7 @@ pub(crate) struct NativeResizeResources {
     pub(crate) disk_bytes: u64,
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NativeResizePlan {
     pub(crate) current: NativeResizeResources,
@@ -843,7 +843,7 @@ fn format_resize_disk(disk_gb: i32) -> String {
     format!("{disk_gb} Gi")
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub(crate) fn resolve_native_resize_plan(
     args: &EnvResizeArgs,
     current: NativeResizeResources,
@@ -906,7 +906,7 @@ pub(crate) fn resolve_native_resize_plan(
     })
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn format_native_disk(bytes: u64) -> String {
     const GIB: u64 = 1024 * 1024 * 1024;
     if bytes.is_multiple_of(GIB) {
@@ -916,10 +916,16 @@ fn format_native_disk(bytes: u64) -> String {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+/// The local VMM a native environment runs on.
+#[cfg(not(target_os = "macos"))]
+pub(crate) const NATIVE_VMM_NAME: &str = "Cloud Hypervisor";
+#[cfg(target_os = "macos")]
+pub(crate) const NATIVE_VMM_NAME: &str = "Virtualization.framework";
+
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub(crate) fn format_native_resize_plan(name: &str, plan: &NativeResizePlan) -> String {
     let mut output = format!(
-        "Environment: {name} (local · Cloud Hypervisor)\n\n              Current   Desired\nCPU       {:<9} {}\nMemory    {:<9} {}\nDisk      {:<9} {}\n\n",
+        "Environment: {name} (local · {NATIVE_VMM_NAME})\n\n              Current   Desired\nCPU       {:<9} {}\nMemory    {:<9} {}\nDisk      {:<9} {}\n\n",
         plan.current.vcpus,
         plan.desired.vcpus,
         format_resize_memory(plan.current.memory_mib as i32),
@@ -1125,7 +1131,7 @@ async fn handle_unified_environment_create(
     match placement {
         Some(EnvironmentPlacement::Local) => {
             let output = args.output;
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 native_create_selected(&args)?;
                 let environment = create_native_environment(globals, *args).await?;
@@ -1134,10 +1140,10 @@ async fn handle_unified_environment_create(
                 }
                 print_native_environment(&environment, output)
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
                 let _ = (globals, output, args);
-                anyhow::bail!("native local environments currently require Linux")
+                anyhow::bail!("native local environments currently require Linux or macOS")
             }
         }
         Some(EnvironmentPlacement::Platform) | None => {
@@ -1156,7 +1162,7 @@ async fn handle_unified_environment_update(
     let target =
         resolve_unified_environment_target(globals, placement, &args.environment, "update").await?;
     match target {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         UnifiedEnvironmentTarget::NativeLocal(name) => {
             args.environment = name;
             handle_native_environment_update(globals, args).await
@@ -1175,7 +1181,7 @@ async fn handle_unified_environment_list(
 ) -> anyhow::Result<()> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let native = if placement != Some(EnvironmentPlacement::Platform)
         && args.environment_type.as_deref() != Some("host")
     {
@@ -1221,7 +1227,7 @@ async fn handle_unified_environment_list(
     let current = config::current_target(&paths.mesh_data_dir)
         .ok()
         .filter(|target| !(target.kind == "local" && target.target_ref == "local"));
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let current = current.filter(|target| {
         target.kind != "local"
             || native.iter().any(|environment| {
@@ -1230,7 +1236,7 @@ async fn handle_unified_environment_list(
     });
     let current = current.as_ref();
     let mut entries = unified_environment_list_entries(&platform, current);
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     entries.extend(
         native
             .iter()
@@ -1279,7 +1285,7 @@ async fn handle_unified_environment_list(
     print_unified_environment_list(&entries, args.output)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn native_environment_is_selected(
     environment: &codewire_local_vmm::control::v1::Environment,
     current: Option<&config::CurrentTargetConfig>,
@@ -1298,7 +1304,7 @@ async fn handle_unified_environment_info(
     let target =
         resolve_unified_environment_target(globals, placement, &args.environment, "info").await?;
     match target {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         UnifiedEnvironmentTarget::NativeLocal(name) => {
             let environment = get_native_environment(&name).await?;
             print_native_environment(&environment, args.output)
@@ -1316,7 +1322,7 @@ async fn handle_unified_environment_info(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn active_native_resize_sessions(
     environment: &codewire_local_vmm::control::v1::Environment,
 ) -> anyhow::Result<Vec<String>> {
@@ -1344,7 +1350,7 @@ async fn active_native_resize_sessions(
         .collect())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn handle_native_environment_resize(
     name: String,
     mut args: EnvResizeArgs,
@@ -1394,7 +1400,7 @@ async fn handle_unified_environment_resize(
     let target =
         resolve_unified_environment_target(globals, placement, &args.environment, "resize").await?;
     match target {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         UnifiedEnvironmentTarget::NativeLocal(name) => {
             handle_native_environment_resize(name, args).await
         }
@@ -1528,7 +1534,7 @@ async fn handle_unified_environment_daemon_command(
 ) -> anyhow::Result<()> {
     let target = resolve_unified_environment_daemon_target(globals, placement, &command).await?;
     match target {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         UnifiedEnvironmentTarget::NativeLocal(name) => {
             handle_native_environment_daemon_command(&name, command).await
         }
@@ -1544,7 +1550,7 @@ async fn handle_unified_environment_daemon_command(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn handle_native_environment_daemon_command(
     name: &str,
     command: EnvDaemonCommand,
@@ -1615,9 +1621,9 @@ async fn resolve_unified_environment_daemon_target(
             command.command_name()
         )
     })?;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let default_local = current.kind == "local" && current.target_ref == "local";
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if (placement == Some(EnvironmentPlacement::Local) || (placement.is_none() && default_local))
         && let Some(environment) = native_selected_environment().await?
     {
@@ -1630,7 +1636,7 @@ async fn resolve_unified_environment_daemon_target(
         (Some(EnvironmentPlacement::Platform), "local") => {
             anyhow::bail!("the selected environment is local; pass a platform ENV")
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         (_, "local") if !current.target_ref.trim().is_empty() && !default_local => {
             let environment = native_environment(&current.target_ref)
                 .await?
@@ -1660,17 +1666,17 @@ async fn handle_unified_environment_lifecycle(
     )
     .await?;
     match (target, command) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         (UnifiedEnvironmentTarget::NativeLocal(name), UnifiedEnvironmentLifecycle::Start(args)) => {
             let environment = start_native_environment(&name).await?;
             print_native_environment(&environment, args.output)
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         (UnifiedEnvironmentTarget::NativeLocal(name), UnifiedEnvironmentLifecycle::Stop(args)) => {
             let environment = stop_native_environment(&name).await?;
             print_native_environment(&environment, args.output)
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         (
             UnifiedEnvironmentTarget::NativeLocal(name),
             UnifiedEnvironmentLifecycle::Restart(args),
@@ -1678,7 +1684,7 @@ async fn handle_unified_environment_lifecycle(
             let environment = restart_native_environment(&name).await?;
             print_native_environment(&environment, args.output)
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         (
             UnifiedEnvironmentTarget::NativeLocal(name),
             UnifiedEnvironmentLifecycle::Remove(args),
@@ -1742,7 +1748,7 @@ async fn handle_unified_environment_lifecycle(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn reconcile_native_current_after_delete(deleted_name: &str) {
     let env = OsEnv;
     let paths = match ResolvePaths::from_env(&env) {
@@ -1772,7 +1778,7 @@ async fn reconcile_native_current_after_delete(deleted_name: &str) {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn native_current_target_after_delete(
     selected: Option<String>,
 ) -> config::CurrentTargetConfig {
@@ -1795,7 +1801,7 @@ async fn handle_unified_environment_refresh_skills(
         resolve_unified_environment_target(globals, placement, &args.environment, "refresh-skills")
             .await?;
     match target {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         UnifiedEnvironmentTarget::NativeLocal(name) => {
             let environment = refresh_native_environment_skills(&name).await?;
             print_native_environment(&environment, args.output)
@@ -1822,24 +1828,24 @@ async fn resolve_unified_environment_target(
     {
         anyhow::bail!("{command} is not supported by trusted host environments");
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let native = if placement != Some(EnvironmentPlacement::Platform) {
         native_environment(target_ref).await?
     } else {
         None
     };
     if placement == Some(EnvironmentPlacement::Local) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(environment) = native.as_ref() {
             return Ok(UnifiedEnvironmentTarget::NativeLocal(
                 environment.name.clone(),
             ));
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            anyhow::bail!("native local environments currently require Linux");
+            anyhow::bail!("native local environments currently require Linux or macOS");
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             anyhow::bail!("local environment {target_ref:?} not found");
         }
@@ -1848,7 +1854,7 @@ async fn resolve_unified_environment_target(
     let platform = match resolve_platform(globals, &paths, &env) {
         Ok(platform) => platform,
         Err(error) if placement.is_none() && command != "update" => {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             if let Some(environment) = native {
                 return Ok(UnifiedEnvironmentTarget::NativeLocal(environment.name));
             }
@@ -1873,7 +1879,7 @@ async fn resolve_unified_environment_target(
         return Ok(UnifiedEnvironmentTarget::Platform(id));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     match (native, platform_match) {
         (_, Some((id, EnvironmentMatchKind::ExactId))) => {
             Ok(UnifiedEnvironmentTarget::Platform(id))
@@ -1887,14 +1893,14 @@ async fn resolve_unified_environment_target(
         (None, Some((id, _))) => Ok(UnifiedEnvironmentTarget::Platform(id)),
         (None, None) => anyhow::bail!("environment {target_ref:?} not found"),
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     match platform_match {
         Some((id, _)) => Ok(UnifiedEnvironmentTarget::Platform(id)),
         None => anyhow::bail!("environment {target_ref:?} not found"),
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub(crate) fn ambiguous_environment_placement_error(
     command: &str,
     target_ref: &str,

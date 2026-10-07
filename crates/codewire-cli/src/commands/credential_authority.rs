@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 
-use crate::config::{Env, OsEnv, ResolvePaths};
+use crate::config::OsEnv;
 use anyhow::Context as _;
 use codewire_local_credentials::{
     AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, AuthorityRuntimeConfig, AuthorityRuntimeError,
@@ -16,12 +16,13 @@ use codewire_local_credentials::{
     LocalRepositorySpawnError, serve_os_local_credential_authority_with_process_spawners,
 };
 
-use super::{LocalCredentialAuthorityArgs, LocalCredentialAuthorityProbeArgs};
+use super::{
+    LocalCredentialAuthorityArgs, LocalCredentialAuthorityProbeArgs, local_credential_root,
+};
 
 mod platform;
 mod ssh;
 
-const LOCAL_CREDENTIAL_ROOT_ENV: &str = "CODEWIRE_LOCAL_CREDENTIAL_ROOT";
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
 #[repr(C)]
@@ -96,19 +97,6 @@ pub(crate) async fn admit_existing_local_credential_authority() -> anyhow::Resul
             .context("admit existing local credential authority")?,
     );
     Ok(())
-}
-
-pub(crate) fn local_credential_root(env: &impl Env) -> anyhow::Result<PathBuf> {
-    if let Some(value) = env.var(LOCAL_CREDENTIAL_ROOT_ENV) {
-        let root = PathBuf::from(value);
-        if !root.is_absolute() {
-            anyhow::bail!("{LOCAL_CREDENTIAL_ROOT_ENV} must be an absolute path");
-        }
-        return Ok(root);
-    }
-    Ok(ResolvePaths::from_env(env)?
-        .mesh_data_dir
-        .join("credentials-v1"))
 }
 
 fn authority_config(root: PathBuf) -> anyhow::Result<AuthorityRuntimeConfig> {
@@ -425,6 +413,7 @@ mod tests {
 
     use crate::config::MapEnv;
 
+    use super::super::LOCAL_CREDENTIAL_ROOT_ENV;
     use super::*;
 
     #[test]

@@ -48,7 +48,7 @@ use organization_client::{
     CreateInvitationRequest, CreateOrgRequest, CreatePresetRequest, OrgWithRole,
     OrganizationClient, OrganizationDeletionOutcome, OrganizationDeletionStart, Preset,
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use presentation::EnvironmentDaemonRepair;
 use presentation::{
     CreateEnvironmentRequest, Environment, EnvironmentAccessGrant, EnvironmentDaemonStatus,
@@ -351,13 +351,13 @@ enum Command {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-supervisor", hide = true)]
     NativeSupervisor(NativeSupervisorArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-runner", hide = true)]
     NativeRunner(NativeRunnerArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-network-worker", hide = true)]
     NativeNetworkWorker(NativeNetworkWorkerArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-egress-broker", hide = true)]
     NativeEgressBroker(NativeEgressBrokerArgs),
     #[cfg(target_os = "linux")]
@@ -492,7 +492,7 @@ pub async fn run_host_agent_control_from(arguments: Vec<std::ffi::OsString>) -> 
 
 /// Preserve the fixed private worker failure taxonomy across the thin binary
 /// wrapper. Ordinary CLI failures continue to use the generic exit status.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn native_network_worker_exit_code(error: &anyhow::Error) -> Option<i32> {
     error
         .downcast_ref::<codewire_local_vmm::network_worker::NetworkWorkerError>()
@@ -501,7 +501,7 @@ pub fn native_network_worker_exit_code(error: &anyhow::Error) -> Option<i32> {
 
 /// Preserve the fixed private broker failure taxonomy across the thin binary
 /// wrapper without printing process-internal detail to ambient stderr.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn native_egress_broker_exit_code(error: &anyhow::Error) -> Option<i32> {
     error
         .downcast_ref::<codewire_local_vmm::egress_broker::EgressBrokerProcessError>()
@@ -654,11 +654,11 @@ where
         Command::HostedDaemon => run_hosted_daemon().await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeSupervisor(args) => run_native_supervisor(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeRunner(args) => run_native_runner(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeNetworkWorker(args) => run_native_network_worker(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeEgressBroker(args) => run_native_egress_broker(args).await,
         #[cfg(target_os = "linux")]
         Command::NativeMeshTransport(args) => run_native_mesh_transport(args).await,

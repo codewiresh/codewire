@@ -335,38 +335,6 @@ impl PrivateRoot {
         })
     }
 
-    /// Revalidate a retained regular file without opening or closing that inode.
-    /// SQLite uses process-owned POSIX locks: even closing an unrelated descriptor
-    /// for its database or SHM would release locks outside SQLite's bookkeeping.
-    pub(crate) fn revalidate_regular(
-        &self,
-        relative: &Path,
-        retained: &ConfinedFile,
-    ) -> Result<(), PathError> {
-        single_name(relative)?;
-        self.revalidate_named()?;
-        let path = self.path.join(relative);
-        self.require_mount(retained.file(), &path)?;
-        let identity = regular_identity(
-            retained.file(),
-            &path,
-            None,
-            false,
-            Some(retained.identity().mode & 0o777),
-        )?;
-        let expected = retained.identity();
-        if identity.device != expected.device
-            || identity.inode != expected.inode
-            || identity.uid != expected.uid
-            || identity.mode != expected.mode
-            || identity.links != expected.links
-        {
-            return Err(PathError::ObjectIdentityChanged(path));
-        }
-        self.require_named_file(relative, retained.file())?;
-        self.revalidate_named()
-    }
-
     pub fn atomic_replace(
         &self,
         relative: &Path,

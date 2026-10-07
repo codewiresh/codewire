@@ -1,12 +1,15 @@
 use std::future::Future;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Component, Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::pin::Pin;
 
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
 use anyhow::Context as _;
 use codewire_access::{AccessProfileReference, EnvironmentId};
+#[cfg(target_os = "linux")]
 use codewire_client::TokenProvider as _;
 use codewire_local_credentials::LocalCredentialClient;
 use codewire_local_vmm::control::v1;
@@ -35,6 +38,42 @@ const DEFAULT_NATIVE_DISK_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const DEFAULT_NATIVE_DOCKER_DISK_BYTES: u64 =
     codewire_local_vmm::state::DEFAULT_DOCKER_DISK_BYTES;
 const NATIVE_CREDENTIAL_AUTHORITY_UNAVAILABLE: &str = "local credential authority is unavailable";
+pub(crate) const LOCAL_CREDENTIAL_ROOT_ENV: &str = "CODEWIRE_LOCAL_CREDENTIAL_ROOT";
+/// The VMM a native environment reports as its backend.
+#[cfg(target_os = "linux")]
+const NATIVE_BACKEND: &str = "cloud-hypervisor";
+#[cfg(target_os = "macos")]
+const NATIVE_BACKEND: &str = "virtualization-framework";
+/// The local credential authority is Linux-only for now (Program #2064 M4).
+#[cfg(target_os = "macos")]
+const MACOS_CREDENTIAL_AUTHORITY_UNSUPPORTED: &str =
+    "credential profiles and secrets are not available for macOS local environments yet";
+
+/// The private root of the local credential authority's state.
+pub(crate) fn local_credential_root(env: &impl config::Env) -> anyhow::Result<PathBuf> {
+    if let Some(value) = env.var(LOCAL_CREDENTIAL_ROOT_ENV) {
+        let root = PathBuf::from(value);
+        if !root.is_absolute() {
+            anyhow::bail!("{LOCAL_CREDENTIAL_ROOT_ENV} must be an absolute path");
+        }
+        return Ok(root);
+    }
+    Ok(ResolvePaths::from_env(env)?
+        .mesh_data_dir
+        .join("credentials-v1"))
+}
+
+#[cfg(target_os = "macos")]
+async fn connect_local_credential_authority() -> anyhow::Result<LocalCredentialClient> {
+    anyhow::bail!(MACOS_CREDENTIAL_AUTHORITY_UNSUPPORTED)
+}
+
+/// macOS has no local credential authority to admit, so credential-free
+/// native operations continue exactly as when no Linux authority exists.
+#[cfg(target_os = "macos")]
+async fn admit_existing_local_credential_authority() -> anyhow::Result<()> {
+    Ok(())
+}
 
 pub(crate) async fn run_native_supervisor(args: NativeSupervisorArgs) -> anyhow::Result<()> {
     let executable = canonical_current_executable()?;
@@ -82,6 +121,7 @@ pub(crate) async fn run_native_egress_broker(args: NativeEgressBrokerArgs) -> an
         .context("run native environment egress broker")
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) async fn run_native_mesh_transport(args: NativeMeshTransportArgs) -> anyhow::Result<()> {
     let environment_id = Uuid::parse_str(&args.environment_id)
         .context("native Mesh transport environment ID is invalid")?;
@@ -90,10 +130,12 @@ pub(crate) async fn run_native_mesh_transport(args: NativeMeshTransportArgs) -> 
         .context("run native environment Mesh transport")
 }
 
+#[cfg(target_os = "linux")]
 struct NativeMeshEnrollmentCredentials {
     paths: ResolvePaths,
 }
 
+#[cfg(target_os = "linux")]
 impl codewire_local_vmm::mesh_enrollment::MeshEnrollmentCredentialResolver
     for NativeMeshEnrollmentCredentials
 {
@@ -159,6 +201,7 @@ impl codewire_local_vmm::mesh_enrollment::MeshEnrollmentCredentialResolver
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) async fn run_native_mesh_enrollment_broker(
     args: NativeMeshEnrollmentBrokerArgs,
 ) -> anyhow::Result<()> {
@@ -178,6 +221,7 @@ pub(crate) async fn run_native_mesh_enrollment_broker(
     .context("run native Mesh enrollment issuer")
 }
 
+#[cfg(target_os = "linux")]
 fn absolute_auth_root_argument(path: PathBuf) -> anyhow::Result<PathBuf> {
     if !path.is_absolute() {
         anyhow::bail!("native Mesh enrollment auth root must be absolute");
@@ -185,6 +229,7 @@ fn absolute_auth_root_argument(path: PathBuf) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(target_os = "linux")]
 fn canonical_private_auth_root(path: PathBuf) -> Result<PathBuf, ()> {
     if !path.is_absolute() {
         return Err(());
@@ -201,6 +246,7 @@ fn canonical_private_auth_root(path: PathBuf) -> Result<PathBuf, ()> {
     Ok(canonical)
 }
 
+#[cfg(target_os = "linux")]
 fn validate_private_auth_file(path: &Path) -> Result<(), ()> {
     let metadata = std::fs::symlink_metadata(path).map_err(|_| ())?;
     if !metadata.is_file()
@@ -282,6 +328,14 @@ fn resolve_native_mesh_attachment(
             "no Mesh owner is configured; run 'cw login --org <org>' for hosted Mesh or run 'cw mesh up' for standalone Mesh before attaching network {network_id:?}"
         )
     })?;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (owner, name, project);
+        anyhow::bail!(
+            "Mesh networks are not available for macOS local environments yet; create it with --no-network instead of attaching network {network_id:?}"
+        );
+    }
+    #[cfg(target_os = "linux")]
     let (auth_source, proto_auth_source) = match owner.auth_source {
         LocalMeshOwnerAuthSource::StandaloneLocal => {
             let runtime = load_local_mesh_runtime(&paths.mesh_data_dir)?.ok_or_else(|| {
@@ -315,6 +369,7 @@ fn resolve_native_mesh_attachment(
         ),
     };
 
+    #[cfg(target_os = "linux")]
     let attachment = codewire_local_vmm::mesh_ingress::MeshAttachment::new_with_auth_source(
         auth_source,
         &owner.mesh_url,
@@ -324,14 +379,15 @@ fn resolve_native_mesh_attachment(
         project.spec.application_ports.iter().map(|port| port.port),
     )
     .context("validate native local Mesh attachment")?;
-    Ok(Some(v1::MeshAttachment {
+    #[cfg(target_os = "linux")]
+    return Ok(Some(v1::MeshAttachment {
         mesh_url: attachment.mesh_url,
         organization_id: attachment.organization_id,
         network_id: attachment.network_id,
         node_name: attachment.node_name,
         guest_ports: attachment.guest_ports.into_iter().map(u32::from).collect(),
         auth_source: proto_auth_source as i32,
-    }))
+    }));
 }
 
 pub(crate) async fn create_native_environment(
@@ -806,6 +862,7 @@ fn native_environment_name_for_id<'a>(
 }
 
 /// Managed guests use a selected typed proxy, never the host agent's login.
+#[cfg(target_os = "linux")]
 pub(crate) async fn require_native_agent_profile(
     environment_id: &str,
     provider: &str,
@@ -1063,6 +1120,7 @@ pub(crate) async fn native_environment_data_client(
     .map_err(anyhow::Error::from)
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) async fn native_environment_managed_runtime(
     environment_id: &str,
 ) -> anyhow::Result<codewire_local_vmm::artifact::CwRuntimeProvenance> {
@@ -1073,6 +1131,7 @@ pub(crate) async fn native_environment_managed_runtime(
         .map_err(anyhow::Error::msg)
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) async fn native_environment_managed_runtime_catalog(
     environment_id: &str,
 ) -> anyhow::Result<codewire_local_vmm::artifact::CwRuntimeCatalog> {
@@ -1127,6 +1186,7 @@ pub(crate) async fn native_environment_managed_runtime_catalog(
     Ok(selection.catalog)
 }
 
+#[cfg(target_os = "linux")]
 fn native_runtime_digest_valid(value: &str) -> bool {
     value.len() == 64
         && value
@@ -1204,7 +1264,7 @@ impl TryFrom<&v1::Environment> for NativeEnvironmentView {
         Ok(Self {
             id: environment.id.clone(),
             name: environment.name.clone(),
-            backend: "cloud-hypervisor".to_owned(),
+            backend: NATIVE_BACKEND.to_owned(),
             state: native_state_label(environment.state).to_owned(),
             selected: environment.selected,
             cpu: environment.vcpus,
@@ -1318,6 +1378,7 @@ fn format_binary_bytes(bytes: u64) -> String {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) async fn native_runtime_control_client() -> anyhow::Result<NativeSupervisorClient> {
     NativeSupervisorClient::connect_runtime(&native_runtime_config()?)
         .await
@@ -1338,10 +1399,35 @@ async fn native_client() -> anyhow::Result<NativeSupervisorClient> {
         || async {
             NativeSupervisorClient::connect_or_start(&config)
                 .await
-                .context("connect to native local supervisor")
+                .map_err(|error| native_supervisor_connect_error(&config, error))
         },
     )
     .await
+}
+
+/// cw never replaces an existing supervisor endpoint. When nothing accepts on
+/// it, say so and name the one file whose removal lets cw start a new one.
+fn native_supervisor_connect_error(
+    config: &NativeRuntimeConfig,
+    error: codewire_local_vmm::supervisor::SupervisorError,
+) -> anyhow::Error {
+    let refused = std::iter::successors(
+        Some(&error as &(dyn std::error::Error + 'static)),
+        |error| error.source(),
+    )
+    .any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
+    });
+    let error = anyhow::Error::new(error).context("connect to native local supervisor");
+    if refused {
+        return error.context(format!(
+            "no native local supervisor is accepting connections at {}; if none is running, remove that stale socket and retry",
+            config.supervisor_socket().display()
+        ));
+    }
+    error
 }
 
 async fn connect_native_after_authority_admission<T, A, AF, C, CF>(
@@ -2001,6 +2087,55 @@ mod tests {
         assert_eq!(parse_native_disk("40GiB").unwrap(), 40 * 1024 * 1024 * 1024);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_refuses_a_mesh_attachment_and_names_the_way_out() {
+        let root = tempfile::tempdir().unwrap();
+        let mesh_data_dir = root.path().join("mesh");
+        let paths = ResolvePaths {
+            mesh_data_dir: mesh_data_dir.clone(),
+            platform_config_dir: root.path().join("unused-platform"),
+        };
+        save_local_mesh_owner_context(
+            &mesh_data_dir,
+            &LocalMeshOwnerContext {
+                schema_version: 1,
+                auth_source: LocalMeshOwnerAuthSource::HostedCurrent,
+                mesh_url: "https://mesh.example.test".to_owned(),
+                organization_id: "org-alpha".to_owned(),
+                selected_network: None,
+                auto_connect: false,
+            },
+        )
+        .unwrap();
+        let project = NativeProjectPlan::default();
+        let error = resolve_native_mesh_attachment(
+            &paths,
+            &config::MapEnv::default(),
+            "native-dev",
+            &project,
+            Some("explicit-network"),
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("--no-network"), "{error}");
+        assert!(
+            resolve_native_mesh_attachment(
+                &paths,
+                &config::MapEnv::default(),
+                "native-dev",
+                &project,
+                None,
+                true,
+                false,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn native_mesh_attachment_uses_only_the_public_owner_projection() {
         let root = tempfile::tempdir().unwrap();
@@ -2116,6 +2251,7 @@ mod tests {
         assert_eq!(automatic.network_id, "selected-network");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn native_mesh_attachment_honors_disable_and_requires_a_live_local_owner() {
         let root = tempfile::tempdir().unwrap();
@@ -2164,6 +2300,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn native_hosted_mesh_attachment_uses_only_the_credential_free_projection() {
         let root = tempfile::tempdir().unwrap();
@@ -2205,6 +2342,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn hosted_mesh_enrollment_uses_only_matching_fresh_saved_oauth() {
         use codewire_client::{CredentialStore as _, OAuthCredentials};
