@@ -41,6 +41,15 @@ import Foundation
         machine.retain(source)
       }
       signal(SIGPIPE, SIG_IGN)
+      // macOS has no PDEATHSIG: stop with the runner that spawned this helper,
+      // so a crashed runner never leaves a VM holding its disks.
+      let parent = getppid()
+      let parentExit = DispatchSource.makeProcessSource(
+        identifier: parent, eventMask: .exit, queue: machine.queue)
+      parentExit.setEventHandler { machine.stop() }
+      parentExit.resume()
+      machine.retain(parentExit)
+      if getppid() != parent { machine.queue.async { machine.stop() } }
       machine.start()
       let acceptor = Thread { acceptConnections(listener: listener, machine: machine) }
       acceptor.start()
@@ -139,22 +148,31 @@ import Foundation
 
     func retain(_ object: AnyObject) { retained.append(object) }
 
+    /// Read and written only on `queue`.
+    private var stopRequested = false
+
     func start() {
       queue.async {
         self.machine.start { result in
-          if case .failure = result { self.finish(.failed) }
+          if case .failure = result {
+            self.finish(.failed)
+          } else if self.stopRequested {
+            self.stop()
+          }
         }
       }
     }
 
-    /// A forced stop of this helper's own VM. The Rust runner first asks the
-    /// guest to power off through its daemon, as it does on Linux.
+    /// A forced stop of this helper's own VM, called on `queue`. The Rust
+    /// runner first asks the guest to power off through its daemon, as it does
+    /// on Linux. A stop requested while the VM is starting applies once it has.
     func stop() {
-      guard machine.canStop else {
-        if machine.state == .stopped { finish(.stopped) }
-        return
+      stopRequested = true
+      if machine.state == .stopped {
+        finish(.stopped)
+      } else if machine.canStop {
+        machine.stop { error in self.finish(error == nil ? .stopped : .failed) }
       }
-      machine.stop { error in self.finish(error == nil ? .stopped : .failed) }
     }
 
     func connect(toPort port: UInt32) -> VZVirtioSocketConnection? {

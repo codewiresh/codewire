@@ -17,7 +17,8 @@ forwarding each EOF as a write shutdown. An unreachable port closes the
 connection without an acknowledgement. This is the protocol the Rust
 hybrid-vsock client already speaks to Cloud Hypervisor.
 
-SIGTERM or SIGINT stops the VM. The process exits 0 after the guest powers off
+SIGTERM or SIGINT stops the VM, and so does the exit of the process that
+spawned the helper (macOS has no parent-death signal). The process exits 0 after the guest powers off
 or a requested stop completes, and 1 when the VM fails to start or stops with
 an error. It removes the socket only if that path is still the one it bound.
 The VM has no network, directory-sharing, console or graphics device. The
