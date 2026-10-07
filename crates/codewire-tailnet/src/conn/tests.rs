@@ -821,3 +821,277 @@ async fn first_handshake_survives_a_peer_that_learns_of_us_late() {
     );
     serve.await.expect("serve task");
 }
+
+/// A DERP stand-in for one daemon and several clients: the daemon's
+/// datagrams go to the client its routing key names, each client's to the
+/// daemon. Counts what reaches each client.
+struct DaemonRelay {
+    daemon: Transport,
+    clients: Vec<(Transport, Arc<AtomicUsize>)>,
+}
+
+fn daemon_relay(daemon_key: DerpPublic, client_keys: &[DerpPublic]) -> DaemonRelay {
+    let (daemon_out_tx, mut daemon_out_rx) = mpsc::unbounded_channel::<WgDatagram>();
+    let (daemon_in_tx, daemon_in_rx) = mpsc::unbounded_channel::<WgDatagram>();
+    let mut routes = Vec::new();
+    let mut clients = Vec::new();
+    for key in client_keys {
+        let (client_out_tx, mut client_out_rx) = mpsc::unbounded_channel::<WgDatagram>();
+        let (client_in_tx, client_in_rx) = mpsc::unbounded_channel::<WgDatagram>();
+        let received = Arc::new(AtomicUsize::new(0));
+        routes.push((key.clone(), client_in_tx, received.clone()));
+        let to_daemon = daemon_in_tx.clone();
+        let source = key.clone();
+        tokio::spawn(async move {
+            while let Some(dg) = client_out_rx.recv().await {
+                let _ = to_daemon.send(WgDatagram {
+                    peer: source.clone(),
+                    data: dg.data,
+                });
+            }
+        });
+        clients.push((
+            Transport {
+                to_transport: client_out_tx,
+                from_transport: client_in_rx,
+                peer_updates: None,
+                path_probe: None,
+                local_endpoint_updates: None,
+            },
+            received,
+        ));
+    }
+    tokio::spawn(async move {
+        while let Some(dg) = daemon_out_rx.recv().await {
+            if let Some((_, to_client, received)) = routes
+                .iter()
+                .find(|(key, _, _)| key.as_bytes() == dg.peer.as_bytes())
+            {
+                received.fetch_add(1, Ordering::SeqCst);
+                let _ = to_client.send(WgDatagram {
+                    peer: daemon_key.clone(),
+                    data: dg.data,
+                });
+            }
+        }
+    });
+    DaemonRelay {
+        daemon: Transport {
+            to_transport: daemon_out_tx,
+            from_transport: daemon_in_rx,
+            peer_updates: None,
+            path_probe: None,
+            local_endpoint_updates: None,
+        },
+        clients,
+    }
+}
+
+/// A daemon must never send one peer's traffic to another. After the first
+/// client departs, the daemon's leftover segments for it (here, writes on its
+/// still-open stream) have no route; they must be dropped, not sent to the
+/// next client, who may be a different user.
+#[tokio::test]
+async fn leftover_segments_for_a_departed_peer_never_reach_the_next_peer() {
+    const C_IP: Ipv6Addr = Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0x000c);
+    let daemon_secret = StaticSecret::random_from_rng(OsRng);
+    let first_secret = StaticSecret::random_from_rng(OsRng);
+    let second_secret = StaticSecret::random_from_rng(OsRng);
+    let daemon_pub = PublicKey::from(&daemon_secret);
+    let first_pub = PublicKey::from(&first_secret);
+    let second_pub = PublicKey::from(&second_secret);
+    let mut relay = daemon_relay(
+        DerpPublic::from_raw(daemon_pub.to_bytes()),
+        &[
+            DerpPublic::from_raw(first_pub.to_bytes()),
+            DerpPublic::from_raw(second_pub.to_bytes()),
+        ],
+    );
+    let (second_transport, second_received) = relay.clients.pop().unwrap();
+    let (first_transport, _) = relay.clients.pop().unwrap();
+    let daemon = Conn::new(conn_opts(&daemon_secret, A_IP), relay.daemon).expect("daemon");
+    let first = Conn::new(conn_opts(&first_secret, B_IP), first_transport).expect("first");
+    let second = Conn::new(conn_opts(&second_secret, C_IP), second_transport).expect("second");
+
+    // The first client connects and talks.
+    daemon
+        .update_peers(&[peer_node(&first_pub, B_IP)])
+        .expect("daemon peers");
+    first
+        .update_peers(&[peer_node(&daemon_pub, A_IP)])
+        .expect("first peers");
+    let mut listener = daemon.listen("tcp", ":22").await.expect("daemon listen");
+    let mut first_stream = first
+        .dial_context_tcp(SocketAddr::new(IpAddr::V6(A_IP), 22))
+        .await
+        .expect("first dials");
+    let mut daemon_stream = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("daemon accepts")
+        .expect("accept");
+    first_stream
+        .write_all(b"hello")
+        .await
+        .expect("first writes");
+    let mut got = [0u8; 5];
+    tokio::time::timeout(Duration::from_secs(5), daemon_stream.read_exact(&mut got))
+        .await
+        .expect("daemon reads")
+        .expect("read");
+
+    // The first client departs; the second, the daemon's only peer now, has
+    // not sent anything yet.
+    drop(first_stream);
+    drop(first);
+    daemon
+        .update_peers(&[peer_node(&second_pub, C_IP)])
+        .expect("daemon peers");
+    second
+        .update_peers(&[peer_node(&daemon_pub, A_IP)])
+        .expect("second peers");
+
+    // The daemon keeps writing to the departed client's stream. Nothing
+    // acknowledges it any more, so bound each write.
+    for _ in 0..5 {
+        let _ = tokio::time::timeout(Duration::from_millis(100), async {
+            daemon_stream.write_all(b"for the first user only").await?;
+            daemon_stream.flush().await
+        })
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        second_received.load(Ordering::SeqCst),
+        0,
+        "the daemon sent the departed client's traffic to the next client"
+    );
+    assert!(daemon.unrouted_packets_dropped() > 0);
+
+    // The second client's own traffic still flows.
+    let accept = tokio::spawn(async move { listener.accept().await.expect("accept") });
+    let mut second_stream = second
+        .dial_context_tcp(SocketAddr::new(IpAddr::V6(A_IP), 22))
+        .await
+        .expect("second dials");
+    let mut second_side = tokio::time::timeout(Duration::from_secs(5), accept)
+        .await
+        .expect("daemon accepts the second client")
+        .expect("accept task");
+    second_side
+        .write_all(b"yours")
+        .await
+        .expect("daemon writes");
+    second_side.flush().await.expect("daemon flushes");
+    let mut got = [0u8; 5];
+    tokio::time::timeout(Duration::from_secs(5), second_stream.read_exact(&mut got))
+        .await
+        .expect("second reads")
+        .expect("read");
+    assert_eq!(&got, b"yours");
+}
+
+fn node_with_addresses(pubkey: &PublicKey, addresses: Vec<Prefix>) -> Node {
+    Node {
+        addresses,
+        ..peer_node(pubkey, A_IP)
+    }
+}
+
+/// Nodes publish their own addresses through the coordinator. A peer owns
+/// only its host addresses that no other peer claims and that are not ours:
+/// a broader prefix would make it the route for traffic that is not its own.
+#[test]
+fn peers_own_only_their_uncontested_host_addresses() {
+    let host = |last: u16| {
+        Prefix::new(
+            IpAddr::V6(Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, last)),
+            128,
+        )
+    };
+    let own = [host(0xa)];
+    let key = |seed: u8| PublicKey::from(&StaticSecret::from([seed; 32]));
+    let broad = node_with_addresses(
+        &key(1),
+        vec![
+            host(0x1),
+            Prefix::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+            Prefix::new(
+                IpAddr::V6(Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0)),
+                48,
+            ),
+            Prefix::new(IpAddr::from([10, 0, 0, 0]), 8),
+            Prefix::new(IpAddr::from([10, 0, 0, 1]), 32),
+        ],
+    );
+    let victim = node_with_addresses(&key(2), vec![host(0x2)]);
+    let squatter = node_with_addresses(&key(3), vec![host(0x2), host(0x3), host(0xa)]);
+
+    let allowed = super::allowed_ips(&[broad, victim, squatter], &own);
+    assert_eq!(
+        allowed,
+        vec![
+            vec![host(0x1), Prefix::new(IpAddr::from([10, 0, 0, 1]), 32)],
+            // An address two peers claim belongs to neither.
+            Vec::new(),
+            vec![host(0x3)],
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_broad_prefix_does_not_make_a_peer_the_default_route() {
+    let daemon_secret = StaticSecret::random_from_rng(OsRng);
+    let peer_secret = StaticSecret::random_from_rng(OsRng);
+    let peer_pub = PublicKey::from(&peer_secret);
+    let (to_transport, mut sent) = mpsc::unbounded_channel::<WgDatagram>();
+    let (_inbound, from_transport) = mpsc::unbounded_channel::<WgDatagram>();
+    let daemon = Conn::new(
+        conn_opts(&daemon_secret, A_IP),
+        Transport {
+            to_transport,
+            from_transport,
+            peer_updates: None,
+            path_probe: None,
+            local_endpoint_updates: None,
+        },
+    )
+    .expect("daemon");
+    daemon
+        .update_peers(&[node_with_addresses(
+            &peer_pub,
+            vec![
+                Prefix::new(IpAddr::V6(B_IP), 128),
+                Prefix::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+            ],
+        )])
+        .expect("daemon peers");
+
+    // Traffic for an address no peer owns goes nowhere.
+    let elsewhere = Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0x00ee);
+    let _unrouted = tokio::time::timeout(
+        Duration::from_secs(2),
+        daemon.dial_context_tcp(SocketAddr::new(IpAddr::V6(elsewhere), 22)),
+    )
+    .await
+    .expect("dial returns");
+    let unrouted = tokio::time::timeout(Duration::from_millis(300), sent.recv()).await;
+    assert!(
+        unrouted.is_err(),
+        "sent {unrouted:?} for an unowned address"
+    );
+    assert!(daemon.unrouted_packets_dropped() > 0);
+
+    // Traffic for the peer's own address still reaches it.
+    let _routed = tokio::time::timeout(
+        Duration::from_secs(2),
+        daemon.dial_context_tcp(SocketAddr::new(IpAddr::V6(B_IP), 22)),
+    )
+    .await
+    .expect("dial returns");
+    let initiation = tokio::time::timeout(Duration::from_secs(2), sent.recv())
+        .await
+        .expect("handshake for the peer's own address")
+        .expect("transport open");
+    assert_eq!(initiation.peer.as_bytes(), &peer_pub.to_bytes());
+    assert_eq!(initiation.data.len(), 148);
+}

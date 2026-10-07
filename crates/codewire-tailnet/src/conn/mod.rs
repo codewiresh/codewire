@@ -256,8 +256,9 @@ struct Peer {
     /// Conn this is the peer's WG public key — both are the same Curve25519
     /// identity in Codewire's model (`Node.key`).
     derp_key: DerpPublic,
-    /// The ULA addresses this peer owns (its `AllowedIPs`); used to route an
-    /// outbound IP packet by destination to the right peer.
+    /// The host addresses this peer owns (its `AllowedIPs`), as filtered by
+    /// [`allowed_ips`]; an outbound packet goes to the peer that owns its
+    /// destination, and an inbound packet must come from one of them.
     addresses: Vec<Prefix>,
     /// Pending resends of an initiation sent while the peer had no session.
     first_handshake: Option<FirstHandshake>,
@@ -382,6 +383,8 @@ pub struct Conn {
     /// per peer session).
     next_index: Arc<Mutex<u32>>,
     closed: Arc<std::sync::atomic::AtomicBool>,
+    /// Outbound packets dropped because no peer owns their destination.
+    unrouted_dropped: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Conn {
@@ -445,12 +448,14 @@ impl Conn {
             local_endpoint_updates,
         } = transport;
 
+        let unrouted_dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let pump = tokio::spawn(pump_loop(PumpCtx {
             peers: peers.clone(),
             ns_out_rx,
             ns_in_tx,
             to_transport,
             from_transport,
+            unrouted_dropped: unrouted_dropped.clone(),
         }));
         let transport_peer_updates = peer_updates;
         let transport_path_probe = path_probe;
@@ -473,6 +478,7 @@ impl Conn {
             endpoint_updates_task,
             next_index,
             closed,
+            unrouted_dropped,
         })
     }
 
@@ -487,10 +493,12 @@ impl Conn {
         if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(Error::Closed);
         }
+        let own = self.node_state.lock().unwrap().addrs.clone();
+        let allowed = allowed_ips(nodes, &own);
         let mut peers = self.peers.lock().unwrap();
         let mut keep: HashMap<[u8; 32], Peer> = HashMap::new();
 
-        for node in nodes {
+        for (node, addresses) in nodes.iter().zip(allowed) {
             let wg_pub = *node.key.as_bytes();
             if let Some(existing) = peers.remove(&wg_pub) {
                 // Keep the live session; refresh routing info.
@@ -499,7 +507,7 @@ impl Conn {
                     Peer {
                         tunn: existing.tunn,
                         derp_key: DerpPublic::from_raw(wg_pub),
-                        addresses: node.addresses.clone(),
+                        addresses,
                         first_handshake: existing.first_handshake,
                     },
                 );
@@ -524,7 +532,7 @@ impl Conn {
                 Peer {
                     tunn,
                     derp_key: DerpPublic::from_raw(wg_pub),
-                    addresses: node.addresses.clone(),
+                    addresses,
                     first_handshake: None,
                 },
             );
@@ -611,6 +619,13 @@ impl Conn {
     /// Current node info for coordination, mirroring Go `Node()`.
     pub fn node(&self) -> Node {
         self.node_state.lock().unwrap().snapshot()
+    }
+
+    /// Outbound packets dropped because no peer owns their destination, such
+    /// as a departed peer's leftover TCP segments.
+    pub fn unrouted_packets_dropped(&self) -> u64 {
+        self.unrouted_dropped
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Return the current non-secret transport path for `peer`, comparable to
@@ -708,6 +723,7 @@ struct PumpCtx {
     ns_in_tx: mpsc::Sender<Vec<u8>>,
     to_transport: mpsc::UnboundedSender<WgDatagram>,
     from_transport: mpsc::UnboundedReceiver<WgDatagram>,
+    unrouted_dropped: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// The data-plane pump: a single task that owns the WG sessions and bridges the
@@ -725,6 +741,7 @@ async fn pump_loop(ctx: PumpCtx) {
         ns_in_tx,
         to_transport,
         mut from_transport,
+        unrouted_dropped,
     } = ctx;
 
     let mut timer = tokio::time::interval(TIMER_TICK);
@@ -743,7 +760,7 @@ async fn pump_loop(ctx: PumpCtx) {
             // Outbound: a bare IP packet the netstack wants to send.
             maybe_pkt = ns_out_rx.recv() => {
                 let Some(pkt) = maybe_pkt else { return; };
-                if let Some(at) = send_outbound(&peers, &to_transport, pkt) {
+                if let Some(at) = send_outbound(&peers, &to_transport, &unrouted_dropped, pkt) {
                     resend_at = Some(resend_at.map_or(at, |current| current.min(at)));
                 }
             }
@@ -777,6 +794,7 @@ async fn pump_loop(ctx: PumpCtx) {
 fn send_outbound(
     peers: &Arc<Mutex<HashMap<[u8; 32], Peer>>>,
     to_transport: &mpsc::UnboundedSender<WgDatagram>,
+    unrouted_dropped: &std::sync::atomic::AtomicU64,
     pkt: Vec<u8>,
 ) -> Option<tokio::time::Instant> {
     let mut resend_at = None;
@@ -788,18 +806,17 @@ fn send_outbound(
         );
         return None;
     };
-    // Route by AllowedIPs; single-peer tunnels fall back to the only peer.
-    let key = match route_key(&guard, dst_ip).or_else(|| single_peer_key(&guard)) {
-        Some(k) => k,
-        None => {
-            tracing::debug!(
-                %dst_ip,
-                packet_len = pkt.len(),
-                peer_count = guard.len(),
-                "rust tailnet dropped outbound IP packet with no peer route"
-            );
-            return None;
-        }
+    // Route by AllowedIPs only. A packet no peer owns, such as a departed
+    // peer's leftover TCP segment, is dropped: never sent to whichever peer
+    // remains, which may be another user.
+    let Some(key) = route_key(&guard, dst_ip) else {
+        unrouted_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::debug!(
+            packet_len = pkt.len(),
+            peer_count = guard.len(),
+            "rust tailnet dropped outbound IP packet with no peer route"
+        );
+        return None;
     };
     let peer = guard.get_mut(&key).unwrap();
     let derp_key = peer.derp_key.clone();
@@ -1006,8 +1023,8 @@ fn dst_ip_of(pkt: &[u8]) -> Option<IpAddr> {
     }
 }
 
-/// Find the peer whose `AllowedIPs` contain `dst` (first containing match wins;
-/// longest-prefix is unnecessary for the small-N relay Conn).
+/// Find the peer that owns `dst`. [`allowed_ips`] leaves each address with at
+/// most one peer, so at most one matches.
 fn route_key(peers: &HashMap<[u8; 32], Peer>, dst: IpAddr) -> Option<[u8; 32]> {
     for (key, peer) in peers {
         for prefix in &peer.addresses {
@@ -1019,14 +1036,53 @@ fn route_key(peers: &HashMap<[u8; 32], Peer>, dst: IpAddr) -> Option<[u8; 32]> {
     None
 }
 
-/// When exactly one peer is registered, route to it unconditionally — the
-/// single-peer tunnel does not need a populated address table.
-fn single_peer_key(peers: &HashMap<[u8; 32], Peer>) -> Option<[u8; 32]> {
-    if peers.len() == 1 {
-        peers.keys().next().copied()
-    } else {
-        None
+/// The `AllowedIPs` each node may have: its host addresses (`/128` or `/32`)
+/// that are neither ours nor claimed by another node. Every Codewire node owns
+/// a single host address, while nodes publish their own addresses through the
+/// coordinator; so a broader prefix would make a peer the route for traffic
+/// that is not its own, and an address two nodes claim belongs to neither.
+fn allowed_ips(nodes: &[Node], own: &[Prefix]) -> Vec<Vec<Prefix>> {
+    let is_host = |prefix: &Prefix| match prefix.addr() {
+        IpAddr::V4(_) => prefix.bits() == 32,
+        IpAddr::V6(_) => prefix.bits() == 128,
+    };
+    let mut claims = HashMap::<IpAddr, usize>::new();
+    for node in nodes {
+        let mut addrs = node
+            .addresses
+            .iter()
+            .filter(|prefix| is_host(prefix))
+            .map(Prefix::addr)
+            .collect::<Vec<_>>();
+        addrs.sort_unstable();
+        addrs.dedup();
+        for addr in addrs {
+            *claims.entry(addr).or_default() += 1;
+        }
     }
+    nodes
+        .iter()
+        .map(|node| {
+            let allowed = node
+                .addresses
+                .iter()
+                .filter(|prefix| {
+                    is_host(prefix)
+                        && claims.get(&prefix.addr()) == Some(&1)
+                        && !own.iter().any(|own| own.addr() == prefix.addr())
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            if allowed.len() != node.addresses.len() {
+                tracing::warn!(
+                    advertised = node.addresses.len(),
+                    allowed = allowed.len(),
+                    "rust tailnet refused peer addresses that are not its own host address"
+                );
+            }
+            allowed
+        })
+        .collect()
 }
 
 /// Does `prefix` contain `addr`? Bit-prefix match over the raw address octets.
