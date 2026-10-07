@@ -66,6 +66,22 @@ artifacts under `~/.cache/codewire/local-vmm-v1/artifacts` with the sibling lock
 `~/.cache/codewire/local-vmm-v1/artifacts.lock.json`. The preview never
 downloads or substitutes those artifacts at runtime.
 
+On an Apple Silicon Mac, local VMs run under Virtualization.framework through
+the signed `codewire-vz-runner` helper instead of Cloud Hypervisor, with the
+same artifact paths. Build the arm64 kernel Image and guest root on an x86_64
+Linux host, copy them to the Mac, install e2fsprogs (`brew install e2fsprogs`),
+then build, sign and install the helper with both files and their lock:
+
+```bash
+make macos-local-runtime KERNEL=/abs/Image INITRAMFS=/abs/initramfs.cpio
+```
+
+Until the arm64 default workspace image is published, pass `--image` with a
+multi-architecture image, for example
+`--image docker.io/library/alpine:3.22 --no-docker`. See
+[macOS CLI](docs/dev/MACOS-CLI.md) for the full flow and what macOS local
+environments cannot do yet.
+
 ```bash
 # Build the CLI
 cargo build -p codewire-cli-bin --bin cw
