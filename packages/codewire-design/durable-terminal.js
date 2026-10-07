@@ -87,6 +87,7 @@
     // authenticated status controller before opening a transport or a shell.
     let runtimeAvailable = false;
     let runtimeRunning = false;
+    let runtimeStarting = false;
     let setupComplete = false;
     let initialStatusReceived = false;
     let runtimeChecking = true;
@@ -94,7 +95,8 @@
     const runtimeReady = () => runtimeControlReady() && setupComplete;
     const readinessMessage = () => runtimeChecking ? "Checking Sandbox status before restoring terminals…"
       : !runtimeAvailable ? "Sandbox status is unavailable. Terminal controls are paused."
-      : !runtimeRunning ? "Start this Sandbox to use its terminals."
+      : !runtimeRunning ? runtimeStarting ? "This Sandbox is starting. Terminals open when it is ready."
+        : "Start this Sandbox to use its terminals."
         : "Sandbox setup is not complete. Terminal controls will be available when setup completes.";
     const readinessTone = () => runtimeAvailable && !runtimeRunning ? "neutral" : "warning";
 
@@ -1032,6 +1034,7 @@
       runtimeAvailable = status.available;
       runtimeChecking = !status.available && status.checking === true;
       runtimeRunning = status.running;
+      runtimeStarting = status.starting === true;
       setupComplete = status.setupComplete;
       const ready = runtimeReady();
       root.dataset.terminalAvailable = String(runtimeAvailable);

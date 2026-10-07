@@ -1672,6 +1672,35 @@ test("initial terminal inventory waits until workspace setup finishes", async ({
   expect(state.stops).toBe(0);
 });
 
+test("a Sandbox still being created says its terminals open when ready, then withdraws the creation notice", async ({ page }) => {
+  const state = await transport(page);
+  state.running = false;
+  state.setupComplete = false;
+  state.detail = { state: "creating", desiredState: "started", tone: "warning", lastEvent: "just now",
+    resources: "1 vCPU · 2 GiB · 10 GiB", cpuMillicores: 1000, memoryMib: 2048, diskGib: 10,
+    startEligible: false, stopEligible: false, deleteEligible: true, actionsAllowed: true, pending: true,
+    deletionState: "unscheduled", shutdownAt: null };
+  await openFixture(page);
+  // The page renders this notice after Create; the fixture shows a running Sandbox.
+  await page.locator(".cw-workspace-notices").evaluate((notices) => {
+    const notice = document.createElement("p");
+    notice.className = "cw-alert";
+    notice.setAttribute("role", "status");
+    notice.setAttribute("data-sandbox-creation-notice", "");
+    notice.textContent = "Sandbox creation started.";
+    notices.prepend(notice);
+  });
+  await expect(page.locator("[data-terminal-empty]")).toHaveText("This Sandbox is starting. Terminals open when it is ready.");
+  await expect(page.locator("[data-sandbox-creation-notice]")).toBeVisible();
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  state.running = true;
+  state.setupComplete = true;
+  state.detail = null;
+  await (await sandboxAction(page, "Refresh sandbox status")).click();
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  await expect(page.locator("[data-sandbox-creation-notice]")).toBeHidden();
+});
+
 test("starting a stopped Sandbox enables terminals after its first ready status without reload", async ({ page }) => {
   const state = await transport(page);
   state.running = false;

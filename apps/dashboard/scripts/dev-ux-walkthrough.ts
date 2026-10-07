@@ -455,8 +455,10 @@ export async function runDevUxWalkthrough(page: Page, options: {
     owned.beforeCreate();
     submitted = Date.now();
     await button(page, "Create Sandbox").click();
-    // Create lands on the new Sandbox's page, which has several live statuses.
-    await expect(page.getByRole("status").filter({ hasText: "Sandbox creation started" })).toBeVisible();
+    // Create lands on the new Sandbox's page. Its "Sandbox creation started."
+    // notice is withdrawn once the Sandbox runs, so a fast start may never
+    // show it; the landing URL is the acceptance.
+    await expect(page).toHaveURL(/\/[0-9a-f-]{36}\/\?message=environment-created$/);
     accepted = Date.now();
   });
   const id = await owned.createdId(deadline);

@@ -1066,6 +1066,9 @@ pub(crate) struct TerminalPageView {
     pub(crate) list_context: SandboxListContext,
     pub(crate) list_url: String,
     pub(crate) message: String,
+    /// The message is "Sandbox creation started.", which the page withdraws
+    /// once the Sandbox runs.
+    pub(crate) creation_notice: bool,
     pub(crate) error: String,
 }
 
