@@ -3789,9 +3789,8 @@ fn prepare_isolated_child(
     lock_process_privileges()
 }
 
-/// Darwin has no parent-death signal, close_range or privilege lock: the
-/// child exits with its parent on its own, and std opens every other
-/// descriptor close-on-exec.
+/// Darwin has no parent-death signal or privilege lock: the child exits with
+/// its parent on its own.
 #[cfg(target_os = "macos")]
 fn prepare_isolated_child(
     expected_parent: libc::pid_t,
@@ -3801,6 +3800,7 @@ fn prepare_isolated_child(
     if unsafe { libc::getppid() } != expected_parent {
         return Err(io::Error::from_raw_os_error(libc::ECHILD));
     }
+    crate::darwin::process::mark_inherited_descriptors_close_on_exec();
     if bootstrap_fd != target_fd && unsafe { libc::dup2(bootstrap_fd, target_fd) } == -1 {
         return Err(io::Error::last_os_error());
     }
@@ -5211,7 +5211,9 @@ mod tests {
         let executable = std::fs::canonicalize("/usr/bin/sleep").unwrap();
         #[cfg(target_os = "macos")]
         let executable = std::fs::canonicalize("/bin/sleep").unwrap();
-        let child = tokio::process::Command::new(&executable)
+        let mut command = tokio::process::Command::new(&executable);
+        crate::test_child(command.as_std_mut());
+        let child = command
             .arg(duration)
             .env_clear()
             .kill_on_drop(true)

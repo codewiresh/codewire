@@ -119,9 +119,11 @@ pub(crate) fn spawn(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // SAFETY: scalar fcntl and umask between fork and exec. Clearing
-    // close-on-exec here affects only the child's copy of the lock descriptor.
+    // close-on-exec here affects only the child's copy of the lock descriptor,
+    // the one descriptor beyond stdio the helper inherits.
     unsafe {
         command.pre_exec(move || {
+            crate::darwin::process::mark_inherited_descriptors_close_on_exec();
             if libc::fcntl(lock, libc::F_SETFD, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }

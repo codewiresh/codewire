@@ -607,6 +607,23 @@ fn exit_now() -> ! {
     unsafe { libc::_exit(1) }
 }
 
+/// Mark every descriptor from 3 up close-on-exec, as Linux does with
+/// `close_range(CLOSE_RANGE_CLOEXEC)`. Darwin creates sockets, pipes and
+/// accepted or received descriptors first and marks them close-on-exec in a
+/// second call, so a descriptor another thread is creating can reach a child
+/// spawned in between. Call it between fork and exec, before clearing the flag
+/// on the descriptors the child is meant to inherit. It makes only
+/// getdtablesize and fcntl calls.
+pub(crate) fn mark_inherited_descriptors_close_on_exec() {
+    // SAFETY: scalar libc calls. A number that is not an open descriptor
+    // fails with EBADF and is skipped.
+    unsafe {
+        for descriptor in 3..libc::getdtablesize() {
+            libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RecoveryError {
     #[error("invalid persisted process ID {0}")]

@@ -1,6 +1,6 @@
 use super::*;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -432,7 +432,10 @@ fn readable(fd: RawFd) -> bool {
 #[tokio::test]
 async fn owned_child_exit_is_observed_and_a_reaped_child_is_never_signaled() {
     let sleep = std::path::Path::new("/bin/sleep");
-    let mut child = Command::new(sleep).arg("30").spawn().unwrap();
+    let mut child = crate::test_child(&mut Command::new(sleep))
+        .arg("30")
+        .spawn()
+        .unwrap();
     assert!(matches!(
         LiveProcess::capture_child(child.id(), std::path::Path::new("/bin/cat")),
         Err(RecoveryError::UnexpectedSpawnedExecutable)
@@ -522,4 +525,41 @@ fn parent_exit_child() {
     flush_report("CW_PARENT_EXIT ready\n");
     std::thread::sleep(Duration::from_secs(20));
     panic!("parent exit was not observed");
+}
+
+#[test]
+fn spawned_child_inherits_no_descriptor_beyond_stdio_after_the_sweep() {
+    // An inheritable pipe end stands in for a descriptor another thread has
+    // created but not yet marked close-on-exec when a child is spawned.
+    let mut ends = [0; 2];
+    // SAFETY: a two-element output array.
+    assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+    // SAFETY: both are fresh descriptors that only this test owns.
+    let (read, _write) = unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
+    // SAFETY: a scalar fcntl on an owned descriptor.
+    assert_eq!(
+        unsafe { libc::fcntl(read.as_raw_fd(), libc::F_SETFD, 0) },
+        0
+    );
+    let inherited = |sweep: bool| {
+        let mut command = Command::new("/bin/test");
+        command
+            .arg("-e")
+            .arg(format!("/dev/fd/{}", read.as_raw_fd()));
+        if sweep {
+            // SAFETY: the sweep makes only getdtablesize and fcntl calls.
+            unsafe {
+                command.pre_exec(|| {
+                    mark_inherited_descriptors_close_on_exec();
+                    Ok(())
+                });
+            }
+        }
+        command.status().unwrap().success()
+    };
+    assert!(
+        inherited(false),
+        "control: an inheritable descriptor reaches the child"
+    );
+    assert!(!inherited(true));
 }

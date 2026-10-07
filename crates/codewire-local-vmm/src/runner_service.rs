@@ -2434,11 +2434,9 @@ mod tests {
         let (_parent, _listener, access) = bootstrap_access();
         let environment_id = Uuid::new_v4();
         let cell = GenerationAccessCell::new(environment_id);
-        let mut child = tokio::process::Command::new("/bin/sleep")
-            .arg("60")
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+        let mut command = tokio::process::Command::new("/bin/sleep");
+        crate::test_child(command.as_std_mut());
+        let mut child = command.arg("60").kill_on_drop(true).spawn().unwrap();
         #[cfg(target_os = "linux")]
         let descriptor = {
             let pid = rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap();

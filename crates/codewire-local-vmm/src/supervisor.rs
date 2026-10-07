@@ -2545,15 +2545,15 @@ impl SupervisorCore {
                 Ok(())
             });
         }
-        // SAFETY: as above. Darwin has no parent-death signal or close_range:
-        // the runner watches this process and exits with it, and std opens
-        // every descriptor close-on-exec.
+        // SAFETY: as above. Darwin has no parent-death signal: the runner
+        // watches this process and exits with it.
         #[cfg(target_os = "macos")]
         unsafe {
             command.pre_exec(move || {
                 if libc::getppid() != expected_parent || libc::setsid() < 0 {
                     return Err(io::Error::last_os_error());
                 }
+                crate::darwin::process::mark_inherited_descriptors_close_on_exec();
                 libc::umask(0o077);
                 Ok(())
             });
@@ -6989,14 +6989,14 @@ fn spawn_supervisor(config: &NativeRuntimeConfig) -> Result<Child, SupervisorErr
             Ok(())
         });
     }
-    // SAFETY: scalar-only libc operations before exec. Darwin has no capset or
-    // close_range; std opens every descriptor close-on-exec.
+    // SAFETY: scalar-only libc operations before exec. Darwin has no capset.
     #[cfg(target_os = "macos")]
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() < 0 {
                 return Err(io::Error::last_os_error());
             }
+            crate::darwin::process::mark_inherited_descriptors_close_on_exec();
             libc::umask(0o077);
             Ok(())
         });
@@ -8267,7 +8267,7 @@ mod tests {
         let socket = parent.path().join("shutdown.sock");
         let executable = fs::canonicalize("/bin/sh").unwrap();
         let mut child = ShutdownTestChild(
-            Command::new(&executable)
+            crate::test_child(&mut Command::new(&executable))
                 .args([
                     "-c",
                     "read -r retirement_command; test \"$retirement_command\" = retire",
@@ -8318,7 +8318,12 @@ mod tests {
         let (identity, calls, stop, server) =
             spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(4));
         let executable = fs::canonicalize("/bin/sleep").unwrap();
-        let mut child = ShutdownTestChild(Command::new(&executable).arg("60").spawn().unwrap());
+        let mut child = ShutdownTestChild(
+            crate::test_child(&mut Command::new(&executable))
+                .arg("60")
+                .spawn()
+                .unwrap(),
+        );
         let live = child.capture(&executable);
         let mut client = RunnerClient::connect(&socket).await.unwrap();
         assert!(
@@ -8343,7 +8348,10 @@ mod tests {
         socket_identity: SocketIdentity,
     ) -> (Uuid, ProcessIdentity) {
         let executable = fs::canonicalize("/bin/sleep").unwrap();
-        let child = Command::new(&executable).arg("60").spawn().unwrap();
+        let child = crate::test_child(&mut Command::new(&executable))
+            .arg("60")
+            .spawn()
+            .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while running_executable(child.id()).as_deref() != Some(executable.as_path()) {
             assert!(

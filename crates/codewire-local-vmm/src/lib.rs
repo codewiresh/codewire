@@ -70,6 +70,23 @@ pub mod linux;
 pub(crate) use darwin as host;
 #[cfg(target_os = "linux")]
 pub(crate) use linux as host;
+
+/// Spawn a long-lived test child without descriptors that concurrent tests are
+/// still creating, so it cannot keep another test's socket or pipe open.
+/// Linux creates every descriptor close-on-exec in one call; Darwin needs the
+/// sweep its product spawns make.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn test_child(command: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(target_os = "macos")]
+    // SAFETY: the sweep makes only getdtablesize and fcntl calls.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(command, || {
+            darwin::process::mark_inherited_descriptors_close_on_exec();
+            Ok(())
+        });
+    }
+    command
+}
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod oci;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
