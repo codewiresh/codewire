@@ -1707,6 +1707,16 @@ impl SupervisorCore {
                     Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
                         return Err(SupervisorError::CredentialAuthorityUnavailable);
                     }
+                    Err(SupervisorError::WorkspacePlan(WorkspacePlanError::DirectShareChanged))
+                        if !recovering =>
+                    {
+                        self.fail_replayed_operation(
+                            &operation,
+                            name,
+                            "start_direct_share_changed",
+                        )?;
+                        continue;
+                    }
                     Err(_) => {
                         let error_code = if recovering {
                             "start_interrupted"
@@ -7333,6 +7343,9 @@ fn create_failure_code(error: &SupervisorError) -> &'static str {
             _ => "create_registry_admission",
         },
         SupervisorError::RegistryReference(_) => "create_registry_reference",
+        SupervisorError::WorkspacePlan(WorkspacePlanError::DirectShareChanged) => {
+            "create_direct_share_changed"
+        }
         SupervisorError::SkillSnapshot(_) => "create_skill_snapshot",
         SupervisorError::WorkspaceGenerationProvisionTask => "create_workspace_generation_task",
         SupervisorError::WorkspaceGeneration => "create_workspace_generation_invalid",

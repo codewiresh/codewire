@@ -677,3 +677,19 @@ async fn watch_reconnect_refuses_replacement_and_preserves_original_operation_wi
     server.identity.revalidate(&server.socket).unwrap();
     server.finish().await;
 }
+
+#[test]
+fn direct_share_change_failures_name_the_moved_source() {
+    for code in ["create_direct_share_changed", "start_direct_share_changed"] {
+        let hint = operation_error_hint(code);
+        assert!(
+            hint.contains("direct-mount source directory"),
+            "{code}: {hint}"
+        );
+        assert!(
+            hint.contains("put the original directory back"),
+            "{code}: {hint}"
+        );
+    }
+    assert_eq!(operation_error_hint("start_failed"), "");
+}

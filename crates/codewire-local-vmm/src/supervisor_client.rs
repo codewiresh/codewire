@@ -488,6 +488,9 @@ fn operation_error_hint(error_code: &str) -> &'static str {
         "create_guest_docker_tooling_missing" => {
             " (the image has no Docker tooling; create with --no-docker or choose an image that includes Docker)"
         }
+        "create_direct_share_changed" | "start_direct_share_changed" => {
+            " (a direct-mount source directory was moved, removed or replaced since it was admitted; put the original directory back at its path, or remove and recreate the environment)"
+        }
         #[cfg(target_os = "macos")]
         "create_registry_platform" => {
             " (the image has no linux/arm64 variant; macOS local environments run arm64 Linux, so choose a multi-architecture or arm64 image)"
