@@ -5,9 +5,9 @@
 
 ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
-# The static amd64 asset stage has no certificate store. Take the same public
-# trust bundle the existing native builder obtains from the admitted Rust base.
-FROM codewire-rust-base AS cw-runtime-trust
+# The shared reviewed Rust build base. The static amd64 asset stage has no
+# certificate store, so the image takes its public trust bundle from here.
+FROM codewire-rust-base AS rust-builder
 
 # The checked-in host wrapper binds this reserved context after admitting the
 # complete static CW record and OCI archive. Without that binding it stays an
@@ -45,7 +45,7 @@ FROM cw-builder-${TARGETARCH} AS cw-builder
 FROM ${DEBIAN_IMAGE}
 LABEL org.opencontainers.image.source="https://github.com/codewiresh/codewire" \
       org.opencontainers.image.title="codewire-gateway"
-COPY --from=cw-runtime-trust /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=rust-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=cw-builder --chown=0:0 --chmod=0555 /out/cw /usr/local/bin/cw
 COPY --from=cw-builder --chown=0:0 /out/provenance/ /usr/local/share/codewire/cw-runtime/
 RUN /usr/local/bin/cw --version
