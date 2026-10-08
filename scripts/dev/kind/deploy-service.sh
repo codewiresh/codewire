@@ -42,7 +42,7 @@ case "$SERVICE" in
     features="enrollment,kind-e2e"
     # Built exactly as services.Dockerfile builds the fake-mode fixture.
     fixture=credential-service
-    fixture_features=enrollment
+    fixture_features=enrollment,kind-e2e
     ;;
   dashboard)
     image=codewire-dashboard
