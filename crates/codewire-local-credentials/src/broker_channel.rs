@@ -23,7 +23,7 @@ use hyper_util::rt::TokioIo;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UnixStream;
-use tokio::sync::{Mutex, Notify, Semaphore, oneshot, watch};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore, oneshot, watch};
 use tokio_stream::{StreamExt as _, once, pending};
 use tonic::transport::server::Connected;
 use tonic::transport::{Channel, Endpoint, Server};
@@ -46,6 +46,22 @@ use crate::{
 mod delegation;
 mod projection;
 mod ssh;
+
+/// Projections run one at a time. A concurrent launch waits for the permit
+/// until its own deadline, which its context already bounds, rather than
+/// failing at once while another launch is being sealed.
+async fn projection_permit(
+    operations: &Arc<Semaphore>,
+    deadline_unix_ms: u64,
+) -> Result<OwnedSemaphorePermit, Status> {
+    let busy = || Status::resource_exhausted("environment projection authority is busy");
+    let now = crate::unix_millis().map_err(|_| busy())?;
+    let remaining = std::time::Duration::from_millis(deadline_unix_ms.saturating_sub(now));
+    tokio::time::timeout(remaining, Arc::clone(operations).acquire_owned())
+        .await
+        .map_err(|_| busy())?
+        .map_err(|_| busy())
+}
 pub use delegation::{LocalCredentialDelegationClient, LocalCredentialDelegationOutput};
 pub use projection::LocalEnvironmentProjectionBinding;
 pub(crate) use ssh::LocalSshOperationRuntime;
