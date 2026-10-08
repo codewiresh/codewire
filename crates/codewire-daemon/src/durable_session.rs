@@ -4,7 +4,7 @@ use std::io::{Read, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use codewire_daemon_proto::daemon::v1;
 use portable_pty::{PtySize, native_pty_system};
@@ -40,6 +40,9 @@ const RETAINED_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 const RETAINED_OUTPUT_FRAMES: usize = 2048;
 const MAX_SESSION_RECORDS: usize = 128;
 const RETIRED_SESSION_PREFIX: &str = ".retired-";
+/// Input and resize run inline in a terminal's attach loop, so a slow one
+/// holds up that terminal's later input. Report any that takes this long.
+const SLOW_SESSION_CONTROL: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub struct SessionEngine {
@@ -87,6 +90,51 @@ struct ActiveSession {
     token: Uuid,
     control: mpsc::Sender<SessionControl>,
     task: JoinHandle<()>,
+}
+
+/// Times the phases of one input or resize and, when the whole call is slow,
+/// logs which phase waited: a lock, the session monitor or the PTY.
+struct SlowControl<'a> {
+    operation: &'static str,
+    session_id: &'a str,
+    started: Instant,
+    mark: Instant,
+    phases: Vec<(&'static str, u128)>,
+}
+
+impl<'a> SlowControl<'a> {
+    fn new(operation: &'static str, session_id: &'a str) -> Self {
+        let now = Instant::now();
+        Self {
+            operation,
+            session_id,
+            started: now,
+            mark: now,
+            phases: Vec::new(),
+        }
+    }
+
+    fn phase(&mut self, name: &'static str) {
+        let now = Instant::now();
+        self.phases
+            .push((name, now.duration_since(self.mark).as_millis()));
+        self.mark = now;
+    }
+}
+
+impl Drop for SlowControl<'_> {
+    fn drop(&mut self) {
+        let elapsed = self.started.elapsed();
+        if elapsed >= SLOW_SESSION_CONTROL {
+            tracing::warn!(
+                session_id = self.session_id,
+                operation = self.operation,
+                elapsed_ms = elapsed.as_millis(),
+                phases_ms = ?self.phases,
+                "terminal session control was slow"
+            );
+        }
+    }
 }
 
 enum SessionControl {
@@ -579,6 +627,7 @@ impl SessionEngine {
     }
 
     pub async fn input(&self, session_id: &str, data: Vec<u8>) -> Result<(), SessionError> {
+        let mut timing = SlowControl::new("input", session_id);
         self.ensure_initialized().await?;
         validate_session_id(session_id)?;
         if data.is_empty() {
@@ -604,8 +653,10 @@ impl SessionEngine {
                     "session {session_id} is not accepting input"
                 ))
             })?;
-        reply_rx
-            .await
+        timing.phase("monitor_queue");
+        let reply = reply_rx.await;
+        timing.phase("pty_write");
+        reply
             .map_err(|_| {
                 SessionError::FailedPrecondition(format!(
                     "session {session_id} stopped while accepting input"
@@ -627,13 +678,16 @@ impl SessionEngine {
                 "session resize width and height must be positive".into(),
             ));
         }
+        let mut timing = SlowControl::new("resize", session_id);
         let handle = self.handle(session_id)?;
         let _operation = handle.operation.lock().await;
+        timing.phase("operation_lock");
         if !handle.metadata.lock().await.pty {
             return Err(SessionError::FailedPrecondition(format!(
                 "session {session_id} is not a PTY session"
             )));
         }
+        timing.phase("metadata_lock");
         let control = lock(&self.inner.active)
             .get(session_id)
             .map(|active| active.control.clone())
@@ -663,12 +717,15 @@ impl SessionEngine {
                 ))
             })?
             .map_err(SessionError::FailedPrecondition)?;
+        timing.phase("pty_resize");
 
         let mut metadata = handle.metadata.lock().await;
+        timing.phase("metadata_lock_again");
         metadata.width = width;
         metadata.height = height;
         metadata.status_message = format!("session resized to {width}x{height}");
         persist_metadata(&self.inner.root, &metadata).await?;
+        timing.phase("persist");
         Ok(metadata.to_record())
     }
 
@@ -2349,6 +2406,18 @@ pub fn status_from_session_error(error: SessionError) -> Status {
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn slow_control_records_each_phase_in_order() {
+        let mut timing = SlowControl::new("resize", "session-test");
+        timing.phase("operation_lock");
+        std::thread::sleep(Duration::from_millis(5));
+        timing.phase("persist");
+        let names: Vec<_> = timing.phases.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["operation_lock", "persist"]);
+        assert!(timing.phases[1].1 >= 5);
+        assert!(timing.started.elapsed() < SLOW_SESSION_CONTROL);
+    }
 
     async fn cancellation_engine() -> (tempfile::TempDir, SessionEngine) {
         let temp = tempfile::tempdir().unwrap();

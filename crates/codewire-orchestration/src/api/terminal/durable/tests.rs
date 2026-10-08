@@ -453,6 +453,7 @@ fn harness(block_flush: bool, io_timeout: Duration) -> Harness {
                 output_offset: 0,
             },
             io_timeout,
+            &std::sync::Mutex::new(RelayStats::default()),
         )
         .await
     });
@@ -546,10 +547,57 @@ async fn stalled_browser_write_does_not_duplicate_output_or_starve_control_c() {
             .await
             .unwrap()
             .unwrap(),
-        End::Transport
+        End::BrowserStalled
     );
     assert!(h.rendered.try_recv().is_err());
     assert!(h.daemon_output.is_closed());
+}
+
+// The Dev terminal stalls of 2026-10-07 closed a live socket after the I/O
+// deadline with no trace of which side stopped. A stalled daemon attachment
+// must be named, with the input it still held and the browser's last frame.
+#[tokio::test]
+async fn blocked_daemon_input_reports_the_stalled_side() {
+    let (browser, browser_rx) = mpsc::channel(128);
+    let (_daemon_output, output_rx) =
+        mpsc::channel::<Result<v1::SessionAttachMessage, tonic::Status>>(128);
+    let (input_tx, _daemon_input) = mpsc::channel(1);
+    let (sent, _rendered) = mpsc::unbounded_channel();
+    let stats = std::sync::Arc::new(std::sync::Mutex::new(RelayStats::default()));
+    let relay_stats = stats.clone();
+    let task = tokio::spawn(async move {
+        relay(
+            &mut TestSink {
+                sent,
+                block_flush: false,
+            },
+            &mut ReceiverStream::new(browser_rx),
+            input_tx,
+            ReceiverStream::new(output_rx),
+            Coordinates {
+                account_id: "synthetic-account".into(),
+                session_id: SESSION.into(),
+                output_offset: 7,
+            },
+            Duration::from_millis(30),
+            &relay_stats,
+        )
+        .await
+    });
+    send(&browser, json!({"type":"input","data":"a"})).await;
+    send(&browser, json!({"type":"input","data":"b"})).await;
+    let end = timeout(Duration::from_secs(1), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(end, End::DaemonInputStalled);
+    assert_eq!(end.as_str(), "daemon_input_stalled");
+    let stats = stats.lock().unwrap();
+    assert_eq!((stats.issued, stats.acknowledged), (7, 7));
+    assert_eq!(stats.pending_input, 1);
+    assert!(stats.last_input_delivered.is_some());
+    assert!(stats.last_browser_frame.is_some());
+    assert!(stats.last_output_sent.is_none());
 }
 
 #[tokio::test]
@@ -565,7 +613,7 @@ async fn blocked_daemon_input_has_a_fixed_deadline_and_detaches() {
             .await
             .unwrap()
             .unwrap(),
-        End::Transport
+        End::DaemonInputStalled
     );
     assert!(h.daemon_output.is_closed());
     let first = h.daemon_input.recv().await.unwrap();
@@ -664,7 +712,7 @@ async fn malformed_input_or_upstream_eof_detaches_without_stop() {
     }
     let mut h = harness(false, Duration::from_secs(1));
     drop(h.daemon_output);
-    assert_eq!(h.task.await.unwrap(), End::Transport);
+    assert_eq!(h.task.await.unwrap(), End::DaemonClosed);
     assert_eq!(h.daemon_input.recv().await, None);
 }
 
