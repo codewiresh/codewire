@@ -294,6 +294,7 @@ pub fn run_init() -> Result<()> {
     POWEROFF_REQUESTED.store(false, Ordering::Release);
 
     mount_minimal_filesystems()?;
+    crate::rtc_clock::follow_if_requested()?;
     install_poweroff_handlers()?;
 
     let state_device = wait_for_disk_by_serial(

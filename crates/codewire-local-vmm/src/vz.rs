@@ -20,8 +20,11 @@ use crate::state::VmLock;
 
 /// The configuration file inside the private VM directory.
 pub(crate) const CONFIG_NAME: &str = "vz.json";
-/// The same kernel command line Cloud Hypervisor boots on Linux.
-const GUEST_KERNEL_CMDLINE: &str = "console=ttyS0 rdinit=/init panic=-1";
+/// The kernel command line Cloud Hypervisor boots on Linux, plus
+/// `codewire.clock=rtc`: the guest follows the VM's RTC, which reads the host's
+/// time, because Virtualization.framework stops the guest's clocks while the VM
+/// does not run, such as during host sleep.
+const GUEST_KERNEL_CMDLINE: &str = "console=ttyS0 rdinit=/init panic=-1 codewire.clock=rtc";
 /// `VMConfiguration.schemaVersion` in the helper.
 const SCHEMA_VERSION: u32 = 1;
 
