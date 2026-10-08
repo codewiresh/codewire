@@ -10,16 +10,21 @@ use crate::api::environment_daemon::{
 };
 use crate::api::environment_resize::{
     EnvironmentResizeDisruptionPolicy, EnvironmentResizeExecutionMode, EnvironmentResizeOperation,
-    classify_execution_mode, scan_operation,
+    EnvironmentResources, classify_execution_mode, scan_operation,
 };
 use crate::resize_metrics;
-use crate::sandbox::client::{SandboxClient, WorkspaceStorageResizeOutcome};
+use crate::sandbox::client::{
+    FailedLiveResize, PodResizeInfeasible, SandboxClient, WorkspaceStorageResizeOutcome,
+};
 use codewire_daemon_proto::daemon::v1::SessionLifecycleState;
 
 const RESIZE_MUTATION_STATES: &[&str] = &["resizing"];
 const RESTART_TIMEOUT: Duration = Duration::from_secs(600);
 const IN_PLACE_RESIZE_TIMEOUT: Duration = Duration::from_secs(600);
 const STORAGE_RESIZE_TIMEOUT: Duration = Duration::from_secs(600);
+/// Withdrawing a pending live request needs no new capacity, so a settled
+/// Pod shows it within seconds.
+const LIVE_RESIZE_WITHDRAW_TIMEOUT: Duration = Duration::from_secs(120);
 /// A running environment's runtime is already bound and access-ready, so the
 /// identity reconcile before its resize takes seconds. One that has not
 /// converged by then is not resized: the operation fails with that reason
@@ -44,6 +49,19 @@ pub fn terminal_failure(error: &anyhow::Error) -> Option<&TerminalResizeFailure>
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<TerminalResizeFailure>())
+}
+
+/// A request the kubelet acknowledged as infeasible fails the operation
+/// without the retries that cannot change the answer.
+fn infeasible_is_terminal(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<PodResizeInfeasible>() {
+        Some(infeasible) => TerminalResizeFailure {
+            code: "runtime_apply_failed",
+            message: format!("{infeasible}; request a smaller size"),
+        }
+        .into(),
+        None => error,
+    }
 }
 
 fn active_session(state: i32) -> bool {
@@ -442,7 +460,8 @@ pub async fn handle_environment_resize(
                         IN_PLACE_RESIZE_TIMEOUT,
                     ),
                 )
-                .await?;
+                .await
+                .map_err(infeasible_is_terminal)?;
         }
         return complete_resize(
             authority,
@@ -511,6 +530,110 @@ pub async fn handle_environment_resize(
     .await
 }
 
+/// Run the environment's active resize. A terminal failure, or any failure
+/// on the final attempt, ends the operation through
+/// [`mark_environment_resize_failed`]; any other failure returns for a retry,
+/// which resumes from the durable operation and the observed runtime.
+pub async fn run_environment_resize(
+    ctx: &WorkerContext,
+    environment_id: &str,
+    authority: &ActivityAuthority,
+    final_attempt: bool,
+) -> anyhow::Result<()> {
+    let Err(error) = handle_environment_resize(ctx, environment_id, authority).await else {
+        return Ok(());
+    };
+    if let Some(failure) = terminal_failure(&error) {
+        let message = failure.message.clone();
+        return mark_environment_resize_failed(
+            ctx,
+            environment_id,
+            authority,
+            failure.code,
+            &message,
+        )
+        .await;
+    }
+    if final_attempt {
+        return mark_environment_resize_failed(
+            ctx,
+            environment_id,
+            authority,
+            "runtime_apply_failed",
+            &format!("environment resize did not converge: {error:#}"),
+        )
+        .await;
+    }
+    Err(error)
+}
+
+/// The workspace Pod incarnation that may hold this operation's live CPU or
+/// memory request: recorded before any runtime mutation of a running
+/// environment, and only relevant when compute changes.
+fn live_compute_pod_uid(operation: &EnvironmentResizeOperation) -> Option<&str> {
+    let previous = operation.last_applied_resources;
+    let requested = operation.desired_resources;
+    let compute_changed = previous.cpu_millicores != requested.cpu_millicores
+        || previous.memory_mb != requested.memory_mb;
+    operation
+        .previous_pod_uid
+        .as_deref()
+        .filter(|uid| compute_changed && !uid.trim().is_empty())
+}
+
+/// The resources a failed operation records and accounts for. CPU and memory
+/// follow what its workspace Pod runs or may still apply. Storage never
+/// shrinks: it keeps the last applied size, or the requested size once the
+/// PVC request was raised, because PVC expansion cannot be undone.
+pub(crate) fn failed_resources(
+    operation: &EnvironmentResizeOperation,
+    live: Option<&FailedLiveResize>,
+    storage_requested: bool,
+) -> EnvironmentResources {
+    let previous = operation.last_applied_resources;
+    let requested = operation.desired_resources;
+    let (cpu_millicores, memory_mb) = match live {
+        None | Some(FailedLiveResize::Settled) => (previous.cpu_millicores, previous.memory_mb),
+        Some(FailedLiveResize::Applied) => (requested.cpu_millicores, requested.memory_mb),
+        Some(FailedLiveResize::Unknown(_)) => (
+            previous.cpu_millicores.max(requested.cpu_millicores),
+            previous.memory_mb.max(requested.memory_mb),
+        ),
+    };
+    let disk_gb = if storage_requested {
+        previous.disk_gb.max(requested.disk_gb)
+    } else {
+        previous.disk_gb
+    };
+    EnvironmentResources {
+        cpu_millicores,
+        memory_mb,
+        disk_gb,
+    }
+}
+
+fn failed_live_resize_note(live: Option<&FailedLiveResize>) -> String {
+    match live {
+        Some(FailedLiveResize::Applied) => {
+            "; the workspace Pod already runs the requested CPU and memory, which are kept".into()
+        }
+        Some(FailedLiveResize::Unknown(reason)) => format!(
+            "; the workspace Pod's CPU and memory could not be confirmed ({reason}), so the larger \
+             of the previous and requested values is recorded and kept for the workspace; submit \
+             a new resize to choose another size"
+        ),
+        None | Some(FailedLiveResize::Settled) => String::new(),
+    }
+}
+
+/// End an operation that cannot complete. A live CPU/memory request it may
+/// have left on its workspace Pod is settled first, on that same incarnation
+/// only, so the recorded and accounted resources are what the Pod runs or may
+/// still apply: an applied request is kept, and completes the operation when
+/// storage is also done; a pending one is withdrawn; one that cannot be
+/// confirmed records the larger of the previous and requested values. A raised
+/// PVC request is recorded because it cannot be undone. No workspace is
+/// restarted here, and storage is never shrunk.
 pub async fn mark_environment_resize_failed(
     ctx: &WorkerContext,
     environment_id: &str,
@@ -521,20 +644,73 @@ pub async fn mark_environment_resize_failed(
     let Some(operation) = active_operation(ctx, environment_id).await? else {
         return Ok(());
     };
-    let mut failure_message = message.to_string();
-    if let Ok(backend) = load_backend_row(&ctx.pool, environment_id).await
-        && let Ok(client) = sandbox_client(ctx, &backend.namespace)
+    let backend = load_backend_row(&ctx.pool, environment_id).await.ok();
+    let client = backend
+        .as_ref()
+        .and_then(|backend| sandbox_client(ctx, &backend.namespace).ok());
+    let live = match (live_compute_pod_uid(&operation), &client) {
+        (None, _) => None,
+        (Some(_), None) => Some(FailedLiveResize::Unknown(
+            "the sandbox runtime is unavailable".into(),
+        )),
+        (Some(pod_uid), Some(client)) => Some(
+            authority
+                .run_while_authoritative_for_states(RESIZE_MUTATION_STATES, async {
+                    Ok(client
+                        .settle_failed_live_resize(
+                            environment_id,
+                            pod_uid,
+                            (
+                                operation.last_applied_resources.cpu_millicores,
+                                operation.last_applied_resources.memory_mb,
+                            ),
+                            (
+                                operation.desired_resources.cpu_millicores,
+                                operation.desired_resources.memory_mb,
+                            ),
+                            LIVE_RESIZE_WITHDRAW_TIMEOUT,
+                        )
+                        .await)
+                })
+                .await?,
+        ),
+    };
+    let storage_requested = operation.desired_resources.disk_gb
+        > operation.last_applied_resources.disk_gb
+        && match (&client, &backend) {
+            (Some(client), Some(backend)) => client
+                .workspace_storage(&workspace_pvc_anchor(backend))
+                .await
+                .map_or(true, |storage| {
+                    storage.requested_disk_gb >= operation.desired_resources.disk_gb
+                }),
+            _ => true,
+        };
+    let recorded = failed_resources(&operation, live.as_ref(), storage_requested);
+    if live == Some(FailedLiveResize::Applied)
+        && operation.last_applied_resources.disk_gb == operation.desired_resources.disk_gb
+    {
+        return complete_resize(
+            authority,
+            &operation,
+            None,
+            None,
+            EnvironmentResizeExecutionMode::InPlace,
+            false,
+        )
+        .await;
+    }
+
+    let mut failure_message = format!("{message}{}", failed_live_resize_note(live.as_ref()));
+    if let Some(client) = &client
         && let Err(error) = authority
             .run_external_mutation(
                 RESIZE_MUTATION_STATES,
                 client.apply_resize_desired_state(
                     environment_id,
-                    operation.last_applied_resources.cpu_millicores,
-                    operation.last_applied_resources.memory_mb,
-                    operation
-                        .last_applied_resources
-                        .disk_gb
-                        .max(operation.desired_resources.disk_gb),
+                    recorded.cpu_millicores,
+                    recorded.memory_mb,
+                    recorded.disk_gb.max(operation.desired_resources.disk_gb),
                 ),
             )
             .await
@@ -544,6 +720,19 @@ pub async fn mark_environment_resize_failed(
         ));
     }
 
+    record_failed_resize(authority, &operation, recorded, code, &failure_message).await
+}
+
+/// Durably end `operation` as failed, recording `recorded` as the
+/// environment's resources and the operation's last applied resources, which
+/// quota and billing then account for.
+pub(crate) async fn record_failed_resize(
+    authority: &ActivityAuthority,
+    operation: &EnvironmentResizeOperation,
+    recorded: EnvironmentResources,
+    code: &str,
+    failure_message: &str,
+) -> anyhow::Result<()> {
     let mut tx = authority.pool().begin().await?;
     authority
         .lock_transaction_for_states(&mut tx, RESIZE_MUTATION_STATES)
@@ -555,26 +744,30 @@ pub async fn mark_environment_resize_failed(
                 error_reason = $6
           WHERE id = $7",
     )
-    .bind(operation.last_applied_resources.cpu_millicores)
-    .bind(operation.last_applied_resources.memory_mb)
-    .bind(operation.last_applied_resources.disk_gb)
+    .bind(recorded.cpu_millicores)
+    .bind(recorded.memory_mb)
+    .bind(recorded.disk_gb)
     .bind(&operation.previous_state)
     .bind(&operation.previous_desired_state)
-    .bind(&failure_message)
-    .bind(environment_id)
+    .bind(failure_message)
+    .bind(&operation.environment_id)
     .execute(&mut *tx)
     .await?;
     let terminal: Option<(chrono::NaiveDateTime, chrono::NaiveDateTime)> = sqlx::query_as(
         "UPDATE environment_resize_operations
             SET state = 'failed', failure_code = $1, failure_message = $2,
-                updated_at = NOW(), completed_at = NOW()
+                last_applied_cpu_millicores = $4, last_applied_memory_mb = $5,
+                last_applied_disk_gb = $6, updated_at = NOW(), completed_at = NOW()
           WHERE id = $3
             AND state IN ('pending', 'applying', 'restarting')
           RETURNING created_at, completed_at",
     )
     .bind(code)
-    .bind(&failure_message)
+    .bind(failure_message)
     .bind(&operation.id)
+    .bind(recorded.cpu_millicores)
+    .bind(recorded.memory_mb)
+    .bind(recorded.disk_gb)
     .fetch_optional(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -596,6 +789,149 @@ mod tests {
         assert!(active_session(SessionLifecycleState::Running as i32));
         assert!(!active_session(SessionLifecycleState::Stopped as i32));
         assert!(!active_session(SessionLifecycleState::Exited as i32));
+    }
+
+    fn operation(
+        previous: (i32, i32, i32),
+        desired: (i32, i32, i32),
+        pod_uid: Option<&str>,
+    ) -> EnvironmentResizeOperation {
+        let resources = |(cpu_millicores, memory_mb, disk_gb)| EnvironmentResources {
+            cpu_millicores,
+            memory_mb,
+            disk_gb,
+        };
+        EnvironmentResizeOperation {
+            id: "operation".into(),
+            org_id: "org".into(),
+            environment_id: "env".into(),
+            request_id: "request".into(),
+            previous_resources: resources(previous),
+            desired_resources: resources(desired),
+            last_applied_resources: resources(previous),
+            previous_state: "running".into(),
+            previous_desired_state: "started".into(),
+            state: "applying".into(),
+            force: false,
+            disruption_policy: EnvironmentResizeDisruptionPolicy::LiveOnly,
+            planned_mode: EnvironmentResizeExecutionMode::InPlace,
+            applied_mode: None,
+            pod_replaced: false,
+            reserved_cpu_millicores: 0,
+            reserved_memory_mb: 0,
+            failure: None,
+            previous_pod_uid: pod_uid.map(str::to_owned),
+            created_at: chrono::NaiveDateTime::default(),
+            updated_at: chrono::NaiveDateTime::default(),
+            completed_at: None,
+        }
+    }
+
+    /// #2474: a failed operation records what its Pod runs or may still
+    /// apply, so quota and billing never miss a pending or applied increase.
+    #[test]
+    fn failed_operation_records_what_the_pod_runs_or_may_still_apply() {
+        let increase = operation((1_000, 1_024, 10), (2_000, 4_096, 20), Some("uid"));
+        let recorded = |live: Option<FailedLiveResize>| {
+            let resources = failed_resources(&increase, live.as_ref(), false);
+            (
+                resources.cpu_millicores,
+                resources.memory_mb,
+                resources.disk_gb,
+            )
+        };
+        assert_eq!(recorded(None), (1_000, 1_024, 10));
+        assert_eq!(
+            recorded(Some(FailedLiveResize::Settled)),
+            (1_000, 1_024, 10)
+        );
+        assert_eq!(
+            recorded(Some(FailedLiveResize::Applied)),
+            (2_000, 4_096, 10)
+        );
+        assert_eq!(
+            recorded(Some(FailedLiveResize::Unknown("unreadable".into()))),
+            (2_000, 4_096, 10)
+        );
+
+        // A live CPU decrease that cannot be confirmed keeps the larger value.
+        let decrease = operation((2_000, 4_096, 10), (1_000, 4_096, 10), Some("uid"));
+        let unknown = failed_resources(
+            &decrease,
+            Some(&FailedLiveResize::Unknown("x".into())),
+            false,
+        );
+        assert_eq!((unknown.cpu_millicores, unknown.memory_mb), (2_000, 4_096));
+
+        // Completed PVC expansion stays recorded, and a raised PVC request is
+        // recorded because it cannot be undone; compute recovery never
+        // shrinks storage.
+        let mut expanded = increase.clone();
+        expanded.last_applied_resources.disk_gb = 20;
+        for live in [
+            FailedLiveResize::Settled,
+            FailedLiveResize::Applied,
+            FailedLiveResize::Unknown("x".into()),
+        ] {
+            assert_eq!(failed_resources(&expanded, Some(&live), false).disk_gb, 20);
+            assert_eq!(failed_resources(&increase, Some(&live), true).disk_gb, 20);
+            assert_eq!(failed_resources(&increase, Some(&live), false).disk_gb, 10);
+        }
+    }
+
+    #[test]
+    fn only_a_recorded_pod_with_a_compute_change_is_settled() {
+        let pod = Some("uid");
+        assert_eq!(
+            live_compute_pod_uid(&operation((1, 1, 1), (2, 1, 1), pod)),
+            pod
+        );
+        assert_eq!(
+            live_compute_pod_uid(&operation((1, 1, 1), (1, 2, 1), pod)),
+            pod
+        );
+        // Storage-only, before the Pod was recorded, or a blank record.
+        assert_eq!(
+            live_compute_pod_uid(&operation((1, 1, 1), (1, 1, 2), pod)),
+            None
+        );
+        assert_eq!(
+            live_compute_pod_uid(&operation((1, 1, 1), (2, 1, 1), None)),
+            None
+        );
+        assert_eq!(
+            live_compute_pod_uid(&operation((1, 1, 1), (2, 1, 1), Some(" "))),
+            None
+        );
+    }
+
+    /// #2475: an acknowledged infeasible request fails without retries and
+    /// says what to do; any other error stays retryable.
+    #[test]
+    fn acknowledged_infeasible_request_is_a_terminal_actionable_failure() {
+        let error = infeasible_is_terminal(
+            PodResizeInfeasible("Node didn't have enough capacity".into()).into(),
+        );
+        let failure = terminal_failure(&error).expect("terminal");
+        assert_eq!(failure.code, "runtime_apply_failed");
+        assert!(failure.message.contains("Node didn't have enough capacity"));
+        assert!(failure.message.ends_with("request a smaller size"));
+        let error = infeasible_is_terminal(anyhow::anyhow!("timeout waiting"));
+        assert!(terminal_failure(&error).is_none());
+    }
+
+    #[test]
+    fn failure_note_names_kept_or_unconfirmed_resources() {
+        assert_eq!(failed_live_resize_note(None), "");
+        assert_eq!(
+            failed_live_resize_note(Some(&FailedLiveResize::Settled)),
+            ""
+        );
+        assert!(
+            failed_live_resize_note(Some(&FailedLiveResize::Applied)).contains("which are kept")
+        );
+        let note = failed_live_resize_note(Some(&FailedLiveResize::Unknown("Pod replaced".into())));
+        assert!(note.contains("(Pod replaced)") && note.contains("larger of the previous"));
     }
 
     #[test]

@@ -26,6 +26,9 @@ pub enum Action {
     Start,
     Stop,
     RestartSources,
+    /// Resume an active resize operation, for example one whose worker
+    /// stopped during its final attempt.
+    Resize,
     Destroy,
     Unhandled,
 }
@@ -531,6 +534,7 @@ impl<S: LifecycleStore> Service<S> {
             }
             ("stopped", "stopping") => Ok(Action::Stop),
             ("started", "stopping") => Ok(Action::RestartSources),
+            ("resized", "resizing") => Ok(Action::Resize),
             ("destroyed", _) => Ok(Action::Destroy),
             _ => Ok(Action::Unhandled),
         }
@@ -1321,6 +1325,11 @@ mod tests {
         assert_eq!(
             svc.reconcile(&snap("stopping", "started")).await.unwrap(),
             Action::RestartSources
+        );
+        // An interrupted resize resumes its own operation.
+        assert_eq!(
+            svc.reconcile(&snap("resizing", "resized")).await.unwrap(),
+            Action::Resize
         );
     }
 
