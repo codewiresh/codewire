@@ -337,6 +337,12 @@ def stop_group(process):
     raise CleanupUnknown("command group remains; runtime and cache retained")
 
 
+# The credential authority's crates carry macOS signer and repository paths
+# (and the selected-key SSH signer feature the CLI enables on macOS).
+CREDENTIAL_CRATES = ["-p", "codewire-local-credentials", "-p", "codewire-credential-broker",
+                     "--features", "codewire-credential-broker/ssh-agent"]
+
+
 def run_command(argv, cwd, env, log, cancel, deadline):
     if cancel.is_set() or time.monotonic() >= deadline:
         return 130 if cancel.is_set() else 124
@@ -483,10 +489,13 @@ def worker(root, run):
                     command(["python3", str(source / "crates/codewire-local-vmm/src/darwin/path/test_mount_fixture.py"), "-v"])
                     command(["cargo", "test", *native, "-p", "codewire-cli", "-p", "codewire-cli-bin"])
                     command(["cargo", "test", *native, "-p", "codewire-local-vmm", "--lib"])
+                    command(["cargo", "test", *native, *CREDENTIAL_CRATES, "--lib"])
                 if action in ("clippy", "verify"):
                     command(["cargo", "clippy", *native, "-p", "codewire-cli", "-p", "codewire-cli-bin",
                              "--all-targets", "--", "-D", "warnings"])
                     command(["cargo", "clippy", *native, "-p", "codewire-local-vmm", "--lib",
+                             "--", "-D", "warnings"])
+                    command(["cargo", "clippy", *native, *CREDENTIAL_CRATES, "--all-targets",
                              "--", "-D", "warnings"])
                 if request["intel"]:
                     command(["cargo", "build", *common, "--target", "x86_64-apple-darwin",
