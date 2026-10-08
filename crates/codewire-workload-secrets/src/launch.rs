@@ -22,6 +22,11 @@ use crate::{MAX_WORKLOAD_SECRETS, validate_workload_secret_key, validate_workloa
 pub const MAX_ENVIRONMENT_PROJECTION_BYTES: usize = 256 * 1024;
 /// A response cannot extend the owning operation's deadline.
 pub const MAX_PROJECTION_LIFETIME_MS: u64 = 30_000;
+/// The lifetime a guest requests. The host checks the deadline against its own
+/// clock, and a guest clock may run up to two seconds ahead of it (a macOS
+/// guest follows its RTC only once it is two seconds off), so the guest stays
+/// that far below the maximum.
+pub const PROJECTION_REQUEST_LIFETIME_MS: u64 = MAX_PROJECTION_LIFETIME_MS - 2_000;
 
 mod composition;
 pub use composition::{
