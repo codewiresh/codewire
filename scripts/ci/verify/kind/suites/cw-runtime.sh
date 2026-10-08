@@ -104,7 +104,7 @@ cw_runtime_pod_identity() {
 run_admitted_cw_runtime_journey() {
   local task="$1" KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment
   local managed="${CW_RUNTIME_MANAGED_AGENTS:-0}" anthropic_name=''
-  local workspace_image update generation pair pod before after cli_sha256
+  local workspace_image update generation pod before after cli_sha256
   require_kind_errexit
   require_tool jq
   require_tool kind
@@ -156,7 +156,7 @@ run_admitted_cw_runtime_journey() {
     kind_credential_cli credentials --platform get "$anthropic_name" --output json | jq -e \
       --arg name "$anthropic_name" 'length == 1 and .[0].name == $name
         and .[0].provider == "anthropic" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"
-        and .[0].authentication_kind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
+        and .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
     kind_credential_cli credentials --platform --profile "$profile_name" set openai "$credential_name"
     kind_credential_cli credentials --platform --profile "$profile_name" set anthropic "$anthropic_name"
   else
@@ -168,7 +168,7 @@ run_admitted_cw_runtime_journey() {
       and .[0].provider == "openai" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"' >/dev/null
   if [ "$managed" = 1 ]; then
     kind_credential_cli credentials --platform get "$credential_name" --output json | jq -e \
-      'length == 1 and .[0].authentication_kind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
+      'length == 1 and .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
   fi
   environment="$(kind_credential_cli env --platform create --name "$profile_name" \
     --image "$workspace_image" --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h \
@@ -177,9 +177,8 @@ run_admitted_cw_runtime_journey() {
   [ "$environment" != 00000000-0000-0000-0000-000000000000 ]
   printf '%s\n' "$environment" >"$task/environment-id"
   wait_kind_credential_environment "$environment" running
-  kind_credential_probe "$environment" wrong-root
-  kind_credential_probe "$environment" missing
-  kind_credential_probe "$environment" unbound
+  # Nothing is projected before the profile is bound.
+  kind_credential_probe "$environment" unselected
   # Profile setup may replace the initial sandbox before the baseline exists.
   # It is completed once; no environment lifecycle change occurs afterward.
   update="$(kind_credential_cli env --platform update "$environment" \
@@ -188,10 +187,10 @@ run_admitted_cw_runtime_journey() {
     if type == "number" and . > 0 and . == floor then .
     else error("expected the acknowledged positive setup generation") end' <<<"$update")"
   wait_kind_credential_environment "$environment" running
-  pair="$(wait_kind_credential_sandbox_pair "$environment" "$generation")"
-  pod="$(sed -n '1p' <<<"$pair")"
+  pod="$(wait_kind_credential_restarted_workspace "$environment" "$generation")"
   if [ "$managed" = 0 ]; then
-    kind_credential_probe "$environment" success
+    kind_credential_probe "$environment" selected
+    kind_credential_daemon_probe "$environment" success
   fi
   before="$(cw_runtime_pod_identity "$pod")"
   printf '%s\n' "$before" >"$task/pod-before.json"
@@ -222,7 +221,9 @@ run_admitted_cw_runtime_journey() {
     return 1
   }
   if [ "$managed" = 0 ]; then
-    kind_credential_probe "$environment" success
+    # Brokerage still answers on the same Pod after the CW update.
+    kind_credential_probe "$environment" selected
+    kind_credential_daemon_probe "$environment" success
   else
     kind_credential_fixture_events | jq -e '
       any(.[]; .event == "api_key_attempt" and .family == "openai" and .api_attempt > 0)
@@ -233,10 +234,12 @@ run_admitted_cw_runtime_journey() {
   kind_credential_cli env --platform rm "$environment" --yes --output json
   wait_kind_credential_environment "$environment" destroyed
   kubectl -n "$SANDBOX_NS" wait --for=delete --timeout=120s "pod/$pod"
-  assert_no_kind_codex_config_map "$environment"
   kind_credential_cli credentials --platform --profile "$profile_name" delete --yes
+  # A stored platform credential is revoked before its record is deleted.
+  kind_credential_cli credentials --platform revoke "$credential_name" --output json >/dev/null
   kind_credential_cli credentials --platform delete "$credential_name" --yes
   if [ "$managed" = 1 ]; then
+    kind_credential_cli credentials --platform revoke "$anthropic_name" --output json >/dev/null
     kind_credential_cli credentials --platform delete "$anthropic_name" --yes
   fi
   rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"

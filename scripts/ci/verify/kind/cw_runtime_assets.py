@@ -248,6 +248,24 @@ def admitted_inputs(source_root, selected_sha, selections):
         revalidate()
 
 
+def stage_release(task, name, entry):
+    """The client's release directory: the admitted executable beside its
+    canonical cw-runtime.json, the two files the cw image carries. Producers
+    keep the identity in their receipts, so it is written here once; the
+    original receipts stay the witness's evidence."""
+    identity = entry["identity"]
+    with closing(source.HeldSourceFile(Path(entry["release_dir"]) / "cw", identity["size"])) as held:
+        source.require(held.sha256 == identity["sha256"] and len(held.data) == identity["size"],
+                       "CW journey executable differs from its admitted identity")
+        data = held.data
+    directory = task / name.replace("_", "-")
+    owner.private_directory(directory)
+    with closing(source.asset.Parent(directory)) as parent:
+        source.asset.write_new(parent.fd, "cw", data, 0o500)
+        source.asset.write_new(parent.fd, "cw-runtime.json", release.canonical(identity), 0o400)
+    return directory
+
+
 def child_environment(task, witness, witness_path, witness_sha256, profile):
     # Keep only checked-in topology/tool controls; use an isolated HOME and
     # the coordinator's already-owned Docker configuration if supplied.
@@ -334,6 +352,8 @@ def main(argv=None):
         os.chmod(task, 0o700)
         for name in ("home", "tmp"):
             owner.private_directory(task / name)
+        for name in ("release_a", "release_b", "support_cw"):
+            witness[name]["release_dir"] = str(stage_release(task, name, witness[name]))
         raw = release.canonical(witness)
         source.require(len(raw) <= 64 * 1024, "CW journey witness exceeds its closed bound")
         with closing(source.asset.Parent(task)) as parent:

@@ -49,21 +49,39 @@ HOME_ROOT = "/home/codewire"
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
-# Exact default PID1 command in sandbox/template/workspace.rs. A custom image
-# command has a daemon-respawn loop and must not borrow this source invariant.
-SUPERVISOR_COMMAND = (
+# The exact PID1 commands sandbox/template/workspace.rs renders: the managed
+# supervisor for an image it recognizes as first party, and the keepalive
+# supervisor (the fixed `sleep infinity` workload of an identity-free
+# workspace) for any other image ref, such as the Kind source image. The
+# keepalive form respawns a daemon that exits, so the original daemon is held
+# by its own pidfd and birth: a respawn refuses rather than passing as it.
+SUPERVISOR_PREFIX = (
     "user_shell=/bin/bash; [ -x /bin/bash ] || user_shell=/bin/sh; "
     "grep -q '^[^:]*:[^:]*:1000:' /etc/passwd || echo "
     '"codewire:x:1000:1000:codewire:/home/codewire:${user_shell}" >> /etc/passwd; '
     "grep -q '^[^:]*:[^:]*:1000:' /etc/group || echo 'codewire:x:1000:' >> /etc/group; "
     "while [ ! -x /codewire/bin/cw ]; do sleep 0.1; done; "
     "/codewire/bin/cw __hosted-daemon & daemon_pid=$!; "
+)
+SUPERVISOR_COMMAND = SUPERVISOR_PREFIX + (
     "shutdown() { kill -TERM \"$daemon_pid\" 2>/dev/null || true; "
     "wait \"$daemon_pid\" 2>/dev/null || true; }; "
     "trap 'shutdown; exit 143' TERM; trap 'shutdown; exit 130' INT; "
     'wait "$daemon_pid"; status=$?; trap - TERM INT; exit "$status"'
 )
-SUPERVISOR_ARGV = b"sh\0-c\0" + SUPERVISOR_COMMAND.encode("ascii") + b"\0"
+KEEPALIVE_SUPERVISOR_COMMAND = SUPERVISOR_PREFIX + (
+    "(exec 'sleep' 'infinity') & workload_pid=$!; "
+    "shutdown() { kill \"$workload_pid\" \"$daemon_pid\" 2>/dev/null || true; "
+    "wait \"$workload_pid\" 2>/dev/null || true; wait \"$daemon_pid\" 2>/dev/null || true; }; "
+    "trap 'shutdown; exit 0' TERM INT; "
+    "while kill -0 \"$workload_pid\" 2>/dev/null; do "
+    "if ! kill -0 \"$daemon_pid\" 2>/dev/null; then wait \"$daemon_pid\" 2>/dev/null || true; sleep 1; "
+    "/codewire/bin/cw __hosted-daemon & daemon_pid=$!; fi; sleep 1; done; "
+    'wait "$workload_pid"; status=$?; kill "$daemon_pid" 2>/dev/null || true; '
+    'wait "$daemon_pid" 2>/dev/null || true; exit "$status"'
+)
+SUPERVISOR_ARGVS = tuple(b"sh\0-c\0" + command.encode("ascii") + b"\0"
+                         for command in (SUPERVISOR_COMMAND, KEEPALIVE_SUPERVISOR_COMMAND))
 DAEMON_ARGV = b"/codewire/bin/cw\0__hosted-daemon\0"
 SHELL_ARGV = b"/bin/bash\0--noprofile\0--norc\0"
 
@@ -294,8 +312,17 @@ class Directory:
                 self.anchors.append((path, child, directory_stamp(info)))
                 if path == self.path:
                     require(created, "proof-already-exists")
-                require(info.st_uid in {0, UID} and info.st_gid in {0, GID}
-                        and not info.st_mode & 0o022, "proof-owner")
+                if path == HOME_ROOT:
+                    # The home is the Pod's own volume root. Kubernetes leaves
+                    # it group- or world-writable (fsGroup setgid 2775,
+                    # local-path 0777); it alone is a held anchor owned by
+                    # root or this user. Its ancestors and the proof ancestry
+                    # below it keep the private checks.
+                    require(stat.S_ISDIR(info.st_mode) and info.st_uid in {0, UID}
+                            and info.st_gid in {0, GID}, "proof-owner")
+                else:
+                    require(info.st_uid in {0, UID} and info.st_gid in {0, GID}
+                            and not info.st_mode & 0o022, "proof-owner")
                 if created:
                     # Only this just-created held directory may shed inherited
                     # setgid. Existing ancestors are never rewritten.
@@ -495,8 +522,14 @@ class Probe:
             os.close(proc)
         require(identifier(self.boot), "boot-id")
         daemon_pid = os.getppid()
+        pid1 = os.open("/proc/1", DIRECTORY_FLAGS)
+        try:
+            supervisor_argv = read_at(pid1, "cmdline", 16 * 1024)
+        finally:
+            os.close(pid1)
+        require(supervisor_argv in SUPERVISOR_ARGVS, "process-role", "supervisor")
         supervisor = Process(1, "supervisor", self.deadline, expected_parent=0,
-                             expected_argv=SUPERVISOR_ARGV)
+                             expected_argv=supervisor_argv)
         self.actors["supervisor"] = supervisor
         daemon = Process(daemon_pid, "daemon", self.deadline, expected_parent=1,
                          expected_path="/codewire/bin/cw", expected_digest=self.args.daemon_sha256,

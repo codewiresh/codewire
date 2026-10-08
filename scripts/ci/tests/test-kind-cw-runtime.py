@@ -16,6 +16,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -322,7 +323,56 @@ class Registration(unittest.TestCase):
                              {key: value for key, value in after["inputs"].items() if key != probe})
 
 
+class ReleaseStaging(unittest.TestCase):
+    def test_staged_release_is_the_admitted_executable_and_its_canonical_identity(self):
+        with tempfile.TemporaryDirectory(prefix="kind-cw-stage-", dir=ROOT / ".tmp") as temporary:
+            root = Path(temporary)
+            os.chmod(root, 0o700)
+            original = root / "assets"
+            original.mkdir(mode=0o700)
+            payload = b"synthetic admitted executable"
+            (original / "cw").write_bytes(payload)
+            os.chmod(original / "cw", 0o500)
+            identity = {"sha256": hashlib.sha256(payload).hexdigest(), "size": len(payload),
+                        "target": "x86_64-unknown-linux-musl"}
+            task = root / "task"
+            task.mkdir(mode=0o700)
+            staged = assets.stage_release(task, "release_a", {"release_dir": str(original), "identity": identity})
+            self.assertEqual(staged, task / "release-a")
+            self.assertEqual(sorted(path.name for path in staged.iterdir()), ["cw", "cw-runtime.json"])
+            self.assertEqual((staged / "cw").read_bytes(), payload)
+            self.assertEqual(os.stat(staged / "cw").st_mode & 0o7777, 0o500)
+            self.assertEqual((staged / "cw-runtime.json").read_bytes(), assets.release.canonical(identity))
+            self.assertEqual(os.stat(staged / "cw-runtime.json").st_mode & 0o7777, 0o400)
+            changed = dict(identity, sha256="0" * 64)
+            with self.assertRaisesRegex((ValueError, assets.release.ReleaseError), "admitted identity"):
+                assets.stage_release(task, "release_b", {"release_dir": str(original), "identity": changed})
+            self.assertFalse((task / "release-b").exists())
+
+
 class SuiteRoute(unittest.TestCase):
+    def test_journey_calls_only_probe_modes_the_helpers_accept(self):
+        # A refused mode fails the journey under errexit without a message.
+        suite = (ROOT / "scripts/ci/verify/kind/suites/cw-runtime.sh").read_text()
+        helpers = (ROOT / "scripts/ci/verify/kind/credentials.sh").read_text()
+        for helper in ("kind_credential_probe", "kind_credential_daemon_probe"):
+            body = helpers.split(helper + "() {", 1)[1]
+            accepted = set(re.search(r'\[\[ "\$mode" =~ \^\(([a-z|-]+)\)\$ \]\]', body).group(1).split("|"))
+            used = set(re.findall(helper + r' "\$environment" ([a-z-]+)', suite))
+            self.assertTrue(used, helper)
+            self.assertEqual(used - accepted, set(), helper)
+
+    def test_journey_calls_only_defined_kind_helpers(self):
+        # The explicit suite runs only when named, so a helper removed from
+        # the shared Kind library fails it only at run time (#2255).
+        suite = (ROOT / "scripts/ci/verify/kind/suites/cw-runtime.sh").read_text()
+        library = "".join(path.read_text() for path in sorted((ROOT / "scripts/ci/verify/kind").glob("**/*.sh")))
+        defined = set(re.findall(r"^([a-z][a-z0-9_]*)\(\) [({]", library, re.M))
+        called = set(re.findall(r"(?:^|[;&|(]\s*|\$\()\s*((?:wait|assert|kind|cw|retained|build|validate)_[a-z0-9_]+)\b",
+                                suite, re.M))
+        self.assertTrue(called)
+        self.assertEqual(called - defined, set())
+
     def run_suite(self, directory, managed=False, **overrides):
         captured = directory / "intake-arguments"
         script = '''source "$1"

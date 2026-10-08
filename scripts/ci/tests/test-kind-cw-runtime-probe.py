@@ -194,22 +194,29 @@ class Guards(unittest.TestCase):
             with self.assertRaises(probe.Refused):
                 probe.original_alias_identity(path, admitted)
 
-    def test_fixed_role_matches_current_default_template_not_custom_supervisor(self):
+    def test_fixed_roles_match_both_rendered_template_supervisors(self):
         source = (ROOT / "crates/codewire-orchestration/src/sandbox/template/workspace.rs").read_text()
         def constant(name):
             match = re.search(r"const " + name + r': &str = ("(?:\\.|[^"\\])*");', source)
             self.assertIsNotNone(match)
             return json.loads(match.group(1))
-        body = source.split("pub(super) fn managed_workspace_supervisor_command(", 1)[1]
-        body = body.split("pub(super) fn custom_workspace_supervisor_command(", 1)[0]
-        literal = re.search(r'format!\(\s*("(?:\\.|[^"\\])*")', body, re.DOTALL)
-        self.assertIsNotNone(literal)
-        normalized = re.sub(r"\\\n\s*", "", literal.group(1))
-        command = json.loads(normalized).format(ensure_user=constant("ENSURE_USER_CMD"),
-                                               wait_daemon=constant("WAIT_DAEMON_CMD"),
-                                               daemon_command=constant("HOSTED_DAEMON_CMD"))
-        self.assertEqual(command, probe.SUPERVISOR_COMMAND)
+        def rendered(function, end, **extra):
+            body = source.split("pub(super) fn " + function + "(", 1)[1].split(end, 1)[0]
+            literals = re.findall(r'format!\(\s*("(?:\\.|[^"\\])*")', body, re.DOTALL)
+            self.assertTrue(literals)
+            normalized = re.sub(r"\\\n\s*", "", literals[-1])
+            return json.loads(normalized).format(ensure_user=constant("ENSURE_USER_CMD"),
+                                                 wait_daemon=constant("WAIT_DAEMON_CMD"),
+                                                 daemon_command=constant("HOSTED_DAEMON_CMD"), **extra)
+        managed = rendered("managed_workspace_supervisor_command", "pub(super) fn custom_workspace_supervisor_command(")
+        # An identity-free workspace's keepalive: the one image command the
+        # platform renders for a non-first-party image ref.
+        keepalive = rendered("custom_workspace_supervisor_command", "\n}\n", workload="(exec 'sleep' 'infinity')")
+        self.assertEqual(managed, probe.SUPERVISOR_COMMAND)
         self.assertNotIn("workload_pid", probe.SUPERVISOR_COMMAND)
+        self.assertEqual(keepalive, probe.KEEPALIVE_SUPERVISOR_COMMAND)
+        self.assertEqual(probe.SUPERVISOR_ARGVS, tuple(b"sh\0-c\0" + command.encode() + b"\0"
+                                                        for command in (managed, keepalive)))
 
     def test_embedded_source_bound_and_no_observer_signal_api(self):
         import ast
@@ -439,6 +446,22 @@ if child:
             self.assertEqual(path.read_bytes(), expected)
         finally:
             directory.close()
+
+    def test_shared_home_volume_root_is_an_anchor_but_proof_ancestry_stays_private(self):
+        # A Kubernetes home volume is root-owned 0777 (local-path) or a setgid
+        # 2775 fsGroup root; the proof ancestry below it is still private.
+        for nonce, mode in (("3" * 32, 0o777), ("4" * 32, 0o2775)):
+            self.home.chmod(mode)
+            probe.Directory(nonce).close()
+            self.assertEqual(stat.S_IMODE((self.proof_root / nonce).stat().st_mode), 0o700)
+        local = self.home / ".local"
+        self.assertEqual(stat.S_IMODE(local.stat().st_mode), 0o700)
+        local.chmod(0o777)
+        with self.assertRaises(probe.Refused):
+            probe.Directory("5" * 32)
+        self.assertFalse((self.proof_root / ("5" * 32)).exists())
+        local.chmod(0o700)
+        self.home.chmod(0o700)
 
     def test_existing_nonce_and_writable_parent_are_not_adopted_or_chmodded(self):
         directory = probe.Directory(NONCE)
