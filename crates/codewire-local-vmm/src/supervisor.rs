@@ -438,6 +438,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
     core.admit_synthetic_workspace_image_pin()?;
     core.recover_host_reboot_workspace_transitions()?;
     core.reconcile_exposing_runners_for_startup().await?;
+    core.begin_rollback_of_failed_creates()?;
     let service = SupervisorRpc {
         info: supervisor_info(&config),
         core: Arc::new(Mutex::new(core)),
@@ -1693,7 +1694,8 @@ impl SupervisorCore {
                         } else {
                             create_failure_code(&error)
                         };
-                        self.fail_replayed_operation(&operation, name, error_code)?;
+                        self.roll_back_failed_create(&operation, name, error_code, recovering)
+                            .await?;
                         // If failure happened before RecordEnvironment, the
                         // prepared repository bundles have no durable owner.
                         // If it happened later, the recorded plan retains
@@ -1766,26 +1768,8 @@ impl SupervisorCore {
                 continue;
             }
             if operation.kind == OperationKind::Delete {
-                let (operation, cleanup_pending) = match self.delete(name, &operation).await {
-                    Ok(result) => result,
-                    Err(error) => {
-                        let error_code = if recovering {
-                            "delete_interrupted"
-                        } else {
-                            "delete_failed"
-                        };
-                        if self.retain_failed_delete(&operation, name, error_code)? {
-                            continue;
-                        }
-                        return Err(error);
-                    }
-                };
-                let result = serde_json::json!({
-                    "name": name,
-                    "removed": true,
-                    "cleanup_pending": cleanup_pending,
-                });
-                self.complete_operation(&operation, &result)?;
+                self.run_delete_operation(name, &operation, recovering)
+                    .await?;
                 continue;
             }
             if matches!(
@@ -1978,6 +1962,129 @@ impl SupervisorCore {
             return Err(SupervisorError::InvalidState);
         }
         Ok(())
+    }
+
+    /// Runs one delete to its end. A delete that fails before its tree
+    /// reaches trash keeps the environment and records why; later failures
+    /// stop the worker, because only finishing the same delete is safe.
+    async fn run_delete_operation(
+        &mut self,
+        name: &str,
+        operation: &OperationRecord,
+        recovering: bool,
+    ) -> Result<(), SupervisorError> {
+        let (operation, cleanup_pending) = match self.delete(name, operation).await {
+            Ok(result) => result,
+            Err(error) => {
+                let error_code = if recovering {
+                    "delete_interrupted"
+                } else {
+                    "delete_failed"
+                };
+                if self.retain_failed_delete(operation, name, error_code)? {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        };
+        let result = serde_json::json!({
+            "name": name,
+            "removed": true,
+            "cleanup_pending": cleanup_pending,
+        });
+        self.complete_operation(&operation, &result)?;
+        Ok(())
+    }
+
+    /// Environments that an earlier failed create left in `error` (never run:
+    /// generation 0 and no active workspace generation) get the ordinary
+    /// delete, which the startup worker then runs like any pending delete.
+    fn begin_rollback_of_failed_creates(&mut self) -> Result<(), SupervisorError> {
+        let stranded = self
+            .state
+            .environments
+            .values()
+            .filter(|environment| {
+                environment.state == StoredEnvironmentState::Error
+                    && environment.generation == 0
+                    && environment.active_workspace_generation.is_none()
+            })
+            // Store validation at load already rejects invalid access
+            // metadata; a cleanup scan never stops the supervisor starting.
+            .filter_map(|environment| {
+                let revoke_access = environment_uses_access_profile(environment).ok()?;
+                Some((environment.name.clone(), environment.id, revoke_access))
+            })
+            .collect::<Vec<_>>();
+        for (name, environment_id, revoke_access) in stranded {
+            if self.store.has_pending_lifecycle_operation(environment_id)? {
+                continue;
+            }
+            self.store.begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::Delete,
+                &serde_json::json!({ "name": name, "revoke_access": revoke_access }),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A failed create leaves nothing behind (#2491). Once the environment
+    /// is recorded, the create fails in the same transaction that begins the
+    /// ordinary delete of that environment, which then runs at once. The
+    /// create keeps its own error code; the delete records its own outcome,
+    /// so a delete that cannot finish leaves a visible `error` environment
+    /// and a failed delete, never a silent record or a false "removed".
+    async fn roll_back_failed_create(
+        &mut self,
+        failed: &OperationRecord,
+        name: &str,
+        error_code: &str,
+        recovering: bool,
+    ) -> Result<(), SupervisorError> {
+        let current = self
+            .store
+            .operation_by_request(failed.request_id)?
+            .ok_or(SupervisorError::InvalidState)?;
+        let environment_id = current
+            .environment_id
+            .ok_or(SupervisorError::InvalidState)?;
+        let Some(environment) = self
+            .state
+            .environments
+            .get(name)
+            .filter(|environment| environment.id == environment_id)
+        else {
+            // Nothing was recorded; there is nothing to remove.
+            self.fail_operation(&current, error_code)?;
+            return Ok(());
+        };
+        let payload = serde_json::json!({
+            "name": name,
+            "revoke_access": environment_uses_access_profile(environment)?,
+        });
+        // Marked `error` as any failed create is, which is how the delete
+        // recognizes a never-started environment and removes it without
+        // booting a runner.
+        let mut next_state = self.state.clone();
+        next_state
+            .environments
+            .get_mut(name)
+            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?
+            .state = StoredEnvironmentState::Error;
+        let (_, rollback) = self.store.fail_operation_and_begin(
+            &next_state,
+            current.operation_id,
+            current.checkpoint,
+            error_code,
+            Uuid::new_v4(),
+            environment_id,
+            OperationKind::Delete,
+            &payload,
+        )?;
+        self.state = next_state;
+        self.run_delete_operation(name, &rollback, recovering).await
     }
 
     fn fail_replayed_operation(
@@ -3811,7 +3918,19 @@ impl SupervisorCore {
                         }
                         DeletionTreeLocation::Trash(_) => {}
                         DeletionTreeLocation::Missing => {
-                            if self.state.environments.contains_key(name) {
+                            // A create that failed before provisioning (for
+                            // example at access binding) recorded the
+                            // environment but never made its tree; there is
+                            // nothing to trash. Any other recorded
+                            // environment must still have one.
+                            if self
+                                .state
+                                .environments
+                                .get(name)
+                                .is_some_and(|environment| {
+                                    !environment_never_provisioned(environment)
+                                })
+                            {
                                 return Err(SupervisorError::State(
                                     StateError::MissingTrashSource(
                                         engine_root.join("vms").join(environment_id.to_string()),
@@ -4068,6 +4187,14 @@ impl LocalSupervisorService for SupervisorRpc {
                 operation
             }
             None => {
+                // A new create for a taken name fails here, before anything
+                // is recorded. Replay above has already finished any rollback
+                // of a failed create, so its name is free again.
+                if core.state.environments.contains_key(&request.name) {
+                    return Err(Status::from(SupervisorError::AlreadyExists(
+                        request.name.clone(),
+                    )));
+                }
                 // Allocate the eventual environment identity before repository
                 // preparation. Successful preparation journals this SAME ID;
                 // failure abandons it and keeps offline replay unchanged.
@@ -5679,6 +5806,15 @@ fn access_environment_id(environment_id: Uuid) -> Result<EnvironmentId, Supervis
     EnvironmentId::parse(environment_id.to_string()).map_err(|_| SupervisorError::InvalidState)
 }
 
+/// Recorded by a create that never reached a workspace generation or a
+/// runner, so nothing of it exists on disk except possibly a partial tree.
+fn environment_never_provisioned(environment: &EnvironmentRecord) -> bool {
+    environment.active_workspace_generation.is_none()
+        && environment.staging_workspace_generation.is_none()
+        && environment.runner.is_none()
+        && environment.generation == 0
+}
+
 fn environment_uses_access_profile(
     environment: &EnvironmentRecord,
 ) -> Result<bool, SupervisorError> {
@@ -7286,7 +7422,7 @@ pub enum SupervisorError {
     )]
     GuestDockerToolingMissing,
     #[error(
-        "a host port this environment publishes on 127.0.0.1 is in use by another program; stop that program or change host_port in codewire.yaml"
+        "a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; stop it or change host_port in codewire.yaml"
     )]
     HostPortUnavailable,
     #[error("native VM stop failed")]
@@ -7354,6 +7490,7 @@ pub enum SupervisorError {
 // or owner paths. The existing operation error_code is the diagnostic surface.
 fn create_failure_code(error: &SupervisorError) -> &'static str {
     match error {
+        SupervisorError::AlreadyExists(_) => "create_name_taken",
         SupervisorError::GuestDockerToolingMissing => "create_guest_docker_tooling_missing",
         SupervisorError::HostPortUnavailable => "create_host_port_unavailable",
         #[cfg(target_os = "macos")]
@@ -14592,6 +14729,10 @@ mod tests {
         const CANARY: &str = "synthetic-create-failure-secret-must-not-escape";
         let cases = [
             (
+                SupervisorError::AlreadyExists(CANARY.to_owned()),
+                "create_name_taken",
+            ),
+            (
                 SupervisorError::CredentialAuthorityUnavailable,
                 "create_credential_authority_unavailable",
             ),
@@ -14748,11 +14889,30 @@ mod tests {
             assert_eq!(persisted.checkpoint, 4);
             assert_eq!(persisted.error_code.as_deref(), Some(expected_code));
             assert!(persisted.result.is_none());
-            let environment = core.environment("dev").unwrap();
-            assert_eq!(environment.state, StoredEnvironmentState::Error);
-            assert_eq!(environment.generation, 0);
-            assert!(environment.runner.is_none());
-            assert!(environment.staging_workspace_generation.is_none());
+            // The failed create rolled back through the ordinary delete: no
+            // record remains, and the create keeps its own error code.
+            let history = reader
+                .recent_environment_operations(environment_id)
+                .unwrap();
+            assert!(
+                matches!(core.environment("dev"), Err(SupervisorError::NotFound(_))),
+                "{expected_code}: environment {:?}; operations {:?}",
+                core.environment("dev").map(|environment| environment.state),
+                history
+                    .iter()
+                    .map(|operation| (
+                        operation.kind,
+                        operation.phase,
+                        operation.error_code.clone()
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            let rollback = history
+                .into_iter()
+                .find(|operation| operation.kind == OperationKind::Delete)
+                .expect("the failed create began its rollback delete");
+            assert_eq!(rollback.phase, OperationPhase::Completed);
+            assert!(core.store.pending_operations().unwrap().is_empty());
             assert!(unexpected.is_file(), "unsafe objects remain quarantined");
             let public = operation_proto(&persisted).unwrap();
             assert_eq!(public.error_code, expected_code);
@@ -14760,7 +14920,13 @@ mod tests {
             assert_eq!(public.stage, v1::OperationStage::Failed as i32);
             let failure = operation_outcome(public).unwrap_err();
             assert_eq!(failure.code(), tonic::Code::FailedPrecondition);
-            assert!(failure.message().ends_with(expected_code));
+            assert!(
+                failure
+                    .message()
+                    .contains(&format!("failed: {expected_code}")),
+                "{}",
+                failure.message()
+            );
             assert!(!failure.message().contains(CANARY));
             assert!(
                 !serde_json::to_string(&persisted.payload)
@@ -14768,6 +14934,43 @@ mod tests {
                     .contains(CANARY)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn startup_rolls_back_environments_left_by_failed_creates() {
+        // Left in `error` by a create that failed before rollback existed.
+        let mut stranded = project_environment();
+        stranded.state = StoredEnvironmentState::Error;
+        stranded.generation = 0;
+        let stranded_id = stranded.id;
+        let (_parent, mut core) = test_supervisor_core(stranded);
+        // A once-running environment in `error` is recoverable, not stranded.
+        let mut recoverable = project_environment();
+        recoverable.name = "kept".to_owned();
+        recoverable.state = StoredEnvironmentState::Error;
+        let mut next_state = core.state.clone();
+        next_state
+            .environments
+            .insert("kept".to_owned(), recoverable.clone());
+        core.store.replace_state(&next_state).unwrap();
+        core.state = next_state;
+
+        core.begin_rollback_of_failed_creates().unwrap();
+        // A second start before the worker ran begins nothing new.
+        core.begin_rollback_of_failed_creates().unwrap();
+        let pending = core.store.pending_operations().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].kind, OperationKind::Delete);
+        assert_eq!(pending[0].environment_id, Some(stranded_id));
+
+        core.run_pending_operations(true).await.unwrap();
+
+        assert!(matches!(
+            core.environment("dev"),
+            Err(SupervisorError::NotFound(_))
+        ));
+        assert_eq!(core.environment("kept").unwrap(), &recoverable);
+        assert!(core.store.pending_operations().unwrap().is_empty());
     }
 
     #[test]

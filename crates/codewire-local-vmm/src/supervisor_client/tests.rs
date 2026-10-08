@@ -27,6 +27,9 @@ struct ProtocolPeer {
     info: Result<v1::SupervisorInfo, tonic::Code>,
     calls: Arc<Mutex<Vec<String>>>,
     replies: Arc<Mutex<VecDeque<WatchReply>>>,
+    /// Whether `get` finds the environment; false answers NotFound, as after
+    /// a failed create's rollback.
+    environment_present: bool,
 }
 
 impl ProtocolPeer {
@@ -69,6 +72,9 @@ impl LocalSupervisorService for ProtocolPeer {
         assert!(request.request_id.is_empty());
         assert!(request.environment_id.is_empty());
         self.record("get");
+        if !self.environment_present {
+            return Err(Status::not_found("local environment was not found"));
+        }
         Ok(Response::new(environment()))
     }
 
@@ -100,9 +106,11 @@ impl LocalSupervisorService for ProtocolPeer {
 
     async fn create_environment(
         &self,
-        _: Request<v1::CreateEnvironmentRequest>,
+        request: Request<v1::CreateEnvironmentRequest>,
     ) -> Result<Response<v1::Operation>, Status> {
-        Err(Status::unimplemented("unused synthetic method"))
+        assert_eq!(request.into_inner().name, "dev");
+        self.record("create");
+        Ok(Response::new(operation(v1::OperationPhase::Intent)))
     }
 
     async fn select_environment(
@@ -205,6 +213,14 @@ impl TestServer {
         info: impl FnOnce(&NativeRuntimeConfig) -> Result<v1::SupervisorInfo, tonic::Code>,
         replies: Vec<WatchReply>,
     ) -> Self {
+        Self::start_with_environment(info, replies, true)
+    }
+
+    fn start_with_environment(
+        info: impl FnOnce(&NativeRuntimeConfig) -> Result<v1::SupervisorInfo, tonic::Code>,
+        replies: Vec<WatchReply>,
+        environment_present: bool,
+    ) -> Self {
         // Keep Unix paths short and canonical on both hosts. This creates only
         // an owned fixture; production input is never silently canonicalized.
         let parent = tempfile::Builder::new()
@@ -231,6 +247,7 @@ impl TestServer {
             info: info(&config),
             calls: calls.clone(),
             replies: Arc::new(Mutex::new(replies.into())),
+            environment_present,
         };
         let (shutdown, receiver) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -514,6 +531,52 @@ async fn observe_sees_the_initial_and_each_non_terminal_update() {
 }
 
 #[tokio::test]
+async fn a_failed_create_says_whether_its_rollback_removed_it() {
+    for (present, expected) in [
+        (false, " Nothing was kept."),
+        (
+            true,
+            " The failed environment could not be removed; run `cw env --local rm dev`.",
+        ),
+    ] {
+        let mut failed = operation(v1::OperationPhase::Failed);
+        failed.error_code = "create_registry_platform".to_owned();
+        let server = TestServer::start_with_environment(
+            valid_info,
+            vec![WatchReply::Updates(vec![Ok(failed)])],
+            present,
+        );
+        let mut client = bounded(NativeSupervisorClient::connect(&server.socket))
+            .await
+            .unwrap();
+        let error = bounded(client.create(v1::CreateEnvironmentRequest {
+            name: "dev".to_owned(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            error
+                .message()
+                .contains("failed: create_registry_platform (")
+        );
+        assert!(error.message().ends_with(expected), "{}", error.message());
+        assert_eq!(
+            server.calls(),
+            [
+                "info",
+                "create",
+                "watch:f30e0037-c1b1-46d0-8d8d-cd512049a002",
+                "get"
+            ]
+        );
+        drop(client);
+        server.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn terminal_initial_result_does_not_open_a_watch() {
     let server = TestServer::start(valid_info, vec![]);
     let mut client = bounded(NativeSupervisorClient::connect(&server.socket))
@@ -680,6 +743,7 @@ async fn watch_reconnect_refuses_replacement_and_preserves_original_operation_wi
         info: valid_info(&server.config),
         calls: replacement_calls.clone(),
         replies: Arc::new(Mutex::new(VecDeque::new())),
+        environment_present: true,
     };
     let (shutdown, receiver) = oneshot::channel();
     server.task = tokio::spawn(async move {

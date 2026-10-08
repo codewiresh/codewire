@@ -94,9 +94,43 @@ impl NativeSupervisorClient {
         observe: &mut (dyn FnMut(&v1::Operation) + Send),
     ) -> Result<v1::Environment, Status> {
         let name = request.name.clone();
-        let operation = self.inner.create_environment(request).await?.into_inner();
-        self.follow_environment_operation(operation, &name, observe)
+        let operation = match self.inner.create_environment(request).await {
+            Ok(response) => response.into_inner(),
+            Err(status) if status.code() == tonic::Code::AlreadyExists => {
+                return Err(Status::already_exists(format!(
+                    "{} (remove it with `cw env --local rm {name}` or choose another --name)",
+                    status.message()
+                )));
+            }
+            Err(status) => return Err(status),
+        };
+        match self
+            .follow_environment_operation(operation, &name, observe)
             .await
+        {
+            Err(failure) if failure.code() == tonic::Code::FailedPrecondition => {
+                Err(self.with_create_cleanup_outcome(failure, &name).await)
+            }
+            outcome => outcome,
+        }
+    }
+
+    /// A failed create removes what it recorded (#2491). Reading the
+    /// environment waits for that rollback, so the message says only what
+    /// is known: removed, kept, or unknown.
+    async fn with_create_cleanup_outcome(&mut self, failure: Status, name: &str) -> Status {
+        let outcome = match self.get(name).await {
+            Err(status) if status.code() == tonic::Code::NotFound => {
+                " Nothing was kept.".to_owned()
+            }
+            Ok(_) => format!(
+                " The failed environment could not be removed; run `cw env --local rm {name}`."
+            ),
+            Err(_) => format!(
+                " Whether the failed environment was removed is unknown; check `cw env --local list` and remove {name} if it is listed."
+            ),
+        };
+        Status::new(failure.code(), format!("{}{outcome}", failure.message()))
     }
 
     pub async fn list(&mut self) -> Result<Vec<v1::Environment>, Status> {
@@ -516,11 +550,21 @@ fn operation_error_hint(error_code: &str) -> &'static str {
             " (a direct-mount source directory was moved, removed or replaced since it was admitted; put the original directory back at its path, or remove and recreate the environment)"
         }
         "create_host_port_unavailable" | "start_host_port_unavailable" => {
-            " (a host port this environment publishes on 127.0.0.1 is in use by another program; `cw env info` lists its ports: stop that program or change host_port in codewire.yaml)"
+            " (a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; `cw env info` lists its ports: stop that program or environment, or change host_port in codewire.yaml)"
         }
         #[cfg(target_os = "macos")]
         "create_registry_platform" => {
-            " (the image has no linux/arm64 variant; macOS local environments run arm64 Linux, so choose a multi-architecture or arm64 image)"
+            " (the image has no linux/arm64 variant; macOS local environments run arm64 Linux, so pass --image with a multi-architecture or arm64 image, such as node:22-bookworm or ubuntu:24.04)"
+        }
+        #[cfg(not(target_os = "macos"))]
+        "create_registry_platform" => {
+            " (the image has no variant for this host's architecture; pass --image with one that has)"
+        }
+        "create_name_taken" => {
+            " (an environment with this name already exists; remove it with cw env --local rm NAME or choose another --name)"
+        }
+        "create_interrupted" => {
+            " (the local supervisor stopped during the create; create it again)"
         }
         #[cfg(target_os = "macos")]
         "create_vz_helper_missing" => {

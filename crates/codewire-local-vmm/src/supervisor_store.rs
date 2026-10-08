@@ -276,61 +276,67 @@ impl SupervisorStore {
         kind: OperationKind,
         payload: &serde_json::Value,
     ) -> Result<OperationRecord, SupervisorStoreError> {
-        validate_non_nil(request_id)?;
-        if let Some(environment_id) = environment_id {
-            validate_non_nil(environment_id)?;
-        }
-        let payload_bytes = encode_operation_json(payload)?;
-        let operation_id = Uuid::new_v4();
-        let now = unix_millis()?;
         let transaction =
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
-        // A live selector intent fences lifecycle births and disruption for
-        // this UUID, while read/history/message paths remain available. The
-        // check and admission share the same authoritative write transaction.
-        if let Some(environment_id) = environment_id
-            && kind != OperationKind::Reconcile
-        {
-            let collision: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM operations WHERE environment_id=?1
-                 AND request_id!=?2 AND kind!='reconcile' AND phase NOT IN ('completed','failed','interrupted')
-                 AND (kind IN ('update_cw_runtime','rollback_cw_runtime') OR ?3))",
-                params![
-                    environment_id.to_string(),
-                    request_id.to_string(),
-                    kind.cw_runtime()
-                ],
-                |row| row.get(0),
-            )?;
-            if collision {
-                return Err(SupervisorStoreError::JournalConflict);
-            }
-        }
-        transaction.execute(
-            "INSERT OR IGNORE INTO operations(
-               operation_id, request_id, environment_id, kind, phase, checkpoint,
-               payload_json, result_json, error_code, created_unix_ms, updated_unix_ms
-             ) VALUES (?1, ?2, ?3, ?4, 'intent', 0, ?5, NULL, NULL, ?6, ?6)",
-            params![
-                operation_id.to_string(),
-                request_id.to_string(),
-                environment_id.map(|id| id.to_string()),
-                kind.as_str(),
-                payload_bytes,
-                now,
-            ],
+        let record = begin_operation_in_transaction(
+            &transaction,
+            request_id,
+            environment_id,
+            kind,
+            payload,
         )?;
-        let record = operation_for_request(&transaction, request_id)?
-            .ok_or(SupervisorStoreError::InvalidOperation)?;
-        if record.environment_id != environment_id
-            || record.kind != kind
-            || record.payload != *payload
-        {
-            return Err(SupervisorStoreError::RequestCollision);
-        }
         transaction.commit()?;
         let _ = self.operation_events.send(record.clone());
         Ok(record)
+    }
+
+    /// Fails `failed_operation_id`, writes `state` and, in the same
+    /// transaction, begins `kind` for `environment_id`. A failed create uses
+    /// this to begin its rollback delete, so no replay can see the failure
+    /// without the rollback that removes what the create left.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn fail_operation_and_begin(
+        &self,
+        state: &SupervisorState,
+        failed_operation_id: Uuid,
+        expected_checkpoint: u32,
+        error_code: &str,
+        request_id: Uuid,
+        environment_id: Uuid,
+        kind: OperationKind,
+        payload: &serde_json::Value,
+    ) -> Result<(OperationRecord, OperationRecord), SupervisorStoreError> {
+        state
+            .validate()
+            .map_err(|_| SupervisorStoreError::InvalidState)?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let (failed, advanced) = advance_operation_in_transaction(
+            &transaction,
+            failed_operation_id,
+            expected_checkpoint,
+            OperationPhase::Failed,
+            None,
+            Some(error_code),
+        )?;
+        if failed.environment_id != Some(environment_id) {
+            return Err(SupervisorStoreError::InvalidOperation);
+        }
+        if advanced {
+            write_state(&transaction, state)?;
+        }
+        let begun = begin_operation_in_transaction(
+            &transaction,
+            request_id,
+            Some(environment_id),
+            kind,
+            payload,
+        )?;
+        transaction.commit()?;
+        validate_database_files(&PrivateRoot::open(&self.root)?, true)?;
+        let _ = self.operation_events.send(failed.clone());
+        let _ = self.operation_events.send(begun.clone());
+        Ok((failed, begun))
     }
 
     pub(crate) fn advance_operation(
@@ -1448,6 +1454,64 @@ fn operation_for_id(
         )
         .optional()
         .map_err(Into::into)
+}
+
+fn begin_operation_in_transaction(
+    transaction: &Transaction<'_>,
+    request_id: Uuid,
+    environment_id: Option<Uuid>,
+    kind: OperationKind,
+    payload: &serde_json::Value,
+) -> Result<OperationRecord, SupervisorStoreError> {
+    validate_non_nil(request_id)?;
+    if let Some(environment_id) = environment_id {
+        validate_non_nil(environment_id)?;
+    }
+    let payload_bytes = encode_operation_json(payload)?;
+    let operation_id = Uuid::new_v4();
+    let now = unix_millis()?;
+    // A live selector intent fences lifecycle births and disruption for
+    // this UUID, while read/history/message paths remain available. The
+    // check and admission share the same authoritative write transaction.
+    if let Some(environment_id) = environment_id
+        && kind != OperationKind::Reconcile
+    {
+        let collision: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operations WHERE environment_id=?1
+             AND request_id!=?2 AND kind!='reconcile' AND phase NOT IN ('completed','failed','interrupted')
+             AND (kind IN ('update_cw_runtime','rollback_cw_runtime') OR ?3))",
+            params![
+                environment_id.to_string(),
+                request_id.to_string(),
+                kind.cw_runtime()
+            ],
+            |row| row.get(0),
+        )?;
+        if collision {
+            return Err(SupervisorStoreError::JournalConflict);
+        }
+    }
+    transaction.execute(
+        "INSERT OR IGNORE INTO operations(
+           operation_id, request_id, environment_id, kind, phase, checkpoint,
+           payload_json, result_json, error_code, created_unix_ms, updated_unix_ms
+         ) VALUES (?1, ?2, ?3, ?4, 'intent', 0, ?5, NULL, NULL, ?6, ?6)",
+        params![
+            operation_id.to_string(),
+            request_id.to_string(),
+            environment_id.map(|id| id.to_string()),
+            kind.as_str(),
+            payload_bytes,
+            now,
+        ],
+    )?;
+    let record = operation_for_request(transaction, request_id)?
+        .ok_or(SupervisorStoreError::InvalidOperation)?;
+    if record.environment_id != environment_id || record.kind != kind || record.payload != *payload
+    {
+        return Err(SupervisorStoreError::RequestCollision);
+    }
+    Ok(record)
 }
 
 fn advance_operation_in_transaction(
