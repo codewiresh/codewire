@@ -3,11 +3,13 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::process::{Command, Stdio};
 
 use clap::Parser as _;
+use codewire_local_credentials::FILE_STORE_DIRECTORY;
 use codewire_protected_store::{
     FileProtectedStore, KeychainProtectedStore, ProtectedEntryId, ProtectedStore as _,
     ProtectedValue,
 };
 
+use super::super::LocalCredentialBrokerArgs;
 use super::*;
 
 const CHILD_MARKER: &str = "CODEWIRE_TEST_BROKER_SEATBELT_CHILD";
@@ -23,7 +25,7 @@ struct Harness {
     args: LocalCredentialBrokerArgs,
 }
 
-fn arguments(store: &[&str]) -> anyhow::Result<BrokerStore> {
+fn arguments(store: &[&str]) -> anyhow::Result<ChildStore> {
     let mut argv = vec![
         "broker",
         "--authority-fd",
@@ -38,7 +40,7 @@ fn arguments(store: &[&str]) -> anyhow::Result<BrokerStore> {
         "/r/e.sock",
     ];
     argv.extend_from_slice(store);
-    BrokerStore::from_args(&Harness::try_parse_from(argv).unwrap().args)
+    ChildStore::from_args(&Harness::try_parse_from(argv).unwrap().args.store)
 }
 
 #[test]
@@ -51,13 +53,13 @@ fn store_arguments_name_exactly_one_supported_store() {
             "/private/root/protected-v1"
         ])
         .unwrap(),
-        BrokerStore::File {
+        ChildStore::File {
             directory: PathBuf::from("/private/root/protected-v1")
         }
     );
     assert_eq!(
         arguments(&["--protected-store", "keychain"]).unwrap(),
-        BrokerStore::Keychain { keychain: None }
+        ChildStore::Keychain { keychain: None }
     );
     assert_eq!(
         arguments(&[
@@ -67,7 +69,7 @@ fn store_arguments_name_exactly_one_supported_store() {
             "/private/tmp/test.keychain-db"
         ])
         .unwrap(),
-        BrokerStore::Keychain {
+        ChildStore::Keychain {
             keychain: Some(PathBuf::from("/private/tmp/test.keychain-db"))
         }
     );
@@ -113,7 +115,7 @@ fn store_arguments_name_exactly_one_supported_store() {
 
 #[test]
 fn profiles_allow_only_the_selected_store_and_provider_https() {
-    let file = BrokerStore::File {
+    let file = ChildStore::File {
         directory: PathBuf::from("/private/root/protected-v1"),
     };
     assert_eq!(
@@ -131,7 +133,7 @@ fn profiles_allow_only_the_selected_store_and_provider_https() {
             .unwrap()
             .contains("(allow network-outbound (remote tcp \"*:443\"))\n")
     );
-    let keychain = BrokerStore::Keychain {
+    let keychain = ChildStore::Keychain {
         keychain: Some(PathBuf::from("/private/tmp/test.keychain-db")),
     };
     let rules = profile(&keychain, false, None).unwrap();
@@ -141,7 +143,7 @@ fn profiles_allow_only_the_selected_store_and_provider_https() {
     assert!(!rules.contains("network"));
     assert!(!rules.contains("Library/Keychains"));
     let login = profile(
-        &BrokerStore::Keychain { keychain: None },
+        &ChildStore::Keychain { keychain: None },
         false,
         Some(Path::new("/Users/someone")),
     )
@@ -152,10 +154,10 @@ fn profiles_allow_only_the_selected_store_and_provider_https() {
             .unwrap()
             .contains("(subpath \"/Users/someone/Library/Keychains\")")
     );
-    assert!(profile(&BrokerStore::Keychain { keychain: None }, false, None).is_err());
+    assert!(profile(&ChildStore::Keychain { keychain: None }, false, None).is_err());
     assert!(
         profile(
-            &BrokerStore::Keychain { keychain: None },
+            &ChildStore::Keychain { keychain: None },
             false,
             Some(Path::new("/Users/a\") (allow default) (\""))
         )
@@ -224,7 +226,7 @@ fn assert_common_denials(network: bool) {
 #[test]
 fn file_store_profile_reads_only_the_entry_directory() {
     if let Some((directory, network)) = child_store() {
-        let store = BrokerStore::File {
+        let store = ChildStore::File {
             directory: directory.clone(),
         };
         confine(&store, network).unwrap();
@@ -298,7 +300,7 @@ fn security(arguments: &[&str]) {
 #[test]
 fn keychain_profile_reads_the_selected_keychain_through_security() {
     if let Some((keychain, network)) = child_store() {
-        let store = BrokerStore::Keychain {
+        let store = ChildStore::Keychain {
             keychain: Some(keychain),
         };
         confine(&store, network).unwrap();

@@ -1,18 +1,26 @@
+#[cfg(target_os = "linux")]
 use std::ffi::OsStr;
 use std::io;
 use std::os::fd::{FromRawFd as _, OwnedFd};
 use std::path::Path;
 
 use anyhow::Context as _;
+#[cfg(target_os = "linux")]
+use codewire_local_credentials::AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES;
 use codewire_local_credentials::{
-    AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, LocalRepositoryGitProcessSpawner,
-    LocalRepositoryProcessConfig, LocalRepositoryTransport, run_git_credential_helper_for_endpoint,
-    run_local_repository_executor, run_local_ssh_repository_executor,
-    run_platform_repository_executor,
+    LocalRepositoryGitProcessSpawner, LocalRepositoryProcessConfig, LocalRepositoryTransport,
+    run_git_credential_helper_for_endpoint, run_local_repository_executor,
+    run_local_ssh_repository_executor, run_platform_repository_executor,
 };
+#[cfg(target_os = "linux")]
 use codewire_protected_store::ConnectedOsProtectedStore;
 use uuid::Uuid;
 
+#[cfg(target_os = "macos")]
+use super::credential_darwin::{
+    ChildStore, bind_to_parent_and_deny_attachment, isolated_session_and_environment,
+    unprivileged_without_core_files,
+};
 use super::{LocalGitCredentialHelperArgs, LocalGitRepositoryExecutorArgs};
 
 const GIT: &str = "/usr/bin/git";
@@ -24,6 +32,9 @@ pub(crate) async fn run_local_git_repository_executor(
     args: LocalGitRepositoryExecutorArgs,
 ) -> anyhow::Result<()> {
     verify_repository_executor_confinement()?;
+    // Validate the store selection before any channel or Git effect.
+    #[cfg(target_os = "macos")]
+    let store = ChildStore::from_args(&args.store)?;
     anyhow::ensure!(args.authority_fd == 3, "invalid repository lease channel");
     let request_id = Uuid::parse_str(&args.request_id)
         .ok()
@@ -62,9 +73,20 @@ pub(crate) async fn run_local_git_repository_executor(
     };
     match config.transport {
         LocalRepositoryTransport::GitHubOAuth => {
+            #[cfg(target_os = "linux")]
             let credential_runtime_directory = std::env::var_os("XDG_RUNTIME_DIR")
                 .map(std::path::PathBuf::from)
                 .context("repository executor requires XDG_RUNTIME_DIR")?;
+            // Darwin has no per-user runtime directory. The one-use credential
+            // socket's private directory goes in the authority root beside this
+            // executor's staging; the next authority removes one a killed
+            // executor left behind.
+            #[cfg(target_os = "macos")]
+            let credential_runtime_directory = config
+                .staging_directory
+                .parent()
+                .map(Path::to_path_buf)
+                .context("invalid repository staging directory")?;
             if config.platform_delegated {
                 return run_platform_repository_executor(
                     authority_stream,
@@ -77,8 +99,13 @@ pub(crate) async fn run_local_git_repository_executor(
                 .await
                 .context("prepare platform repository");
             }
+            #[cfg(target_os = "linux")]
             let store = ConnectedOsProtectedStore::connect()
                 .context("connect repository executor protected store")?;
+            #[cfg(target_os = "macos")]
+            let store = store
+                .open()
+                .context("open repository executor protected store")?;
             run_local_repository_executor(
                 authority_stream,
                 store,
@@ -108,6 +135,7 @@ struct ConfinedGitSpawner {
     parent_pid: libc::pid_t,
 }
 
+#[cfg(target_os = "linux")]
 impl LocalRepositoryGitProcessSpawner for ConfinedGitSpawner {
     fn spawn(&self, command: &mut tokio::process::Command) -> io::Result<tokio::process::Child> {
         let parent_pid = self.parent_pid;
@@ -138,6 +166,38 @@ impl LocalRepositoryGitProcessSpawner for ConfinedGitSpawner {
     }
 }
 
+/// Darwin has no parent-death signal: Git and its helpers stay in the
+/// executor's process group, which the authority stops as a whole.
+#[cfg(target_os = "macos")]
+impl LocalRepositoryGitProcessSpawner for ConfinedGitSpawner {
+    fn spawn(&self, command: &mut tokio::process::Command) -> io::Result<tokio::process::Child> {
+        let parent_pid = self.parent_pid;
+        // SAFETY: this post-fork hook makes only getppid, getdtablesize,
+        // fcntl and setrlimit calls. It binds every Git subprocess to the
+        // exact isolated executor, keeps every inherited descriptor above
+        // stderr out of Git (Darwin sets close-on-exec in a second call for
+        // some descriptors) and disables core files before exec. Credential
+        // material is supplied later over the executor-owned one-use socket.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::getppid() != parent_pid {
+                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                codewire_local_vmm::darwin::process::mark_inherited_descriptors_close_on_exec();
+                let core_limit = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::setrlimit(libc::RLIMIT_CORE, std::ptr::addr_of!(core_limit)) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        command.spawn()
+    }
+}
+
 pub(crate) fn run_local_git_credential_helper(
     args: LocalGitCredentialHelperArgs,
 ) -> anyhow::Result<()> {
@@ -154,6 +214,7 @@ pub(crate) fn run_local_git_credential_helper(
     .context("serve Git credential request")
 }
 
+#[cfg(target_os = "linux")]
 fn verify_repository_executor_confinement() -> anyhow::Result<()> {
     verify_common_confinement()?;
     let pid = rustix::process::getpid();
@@ -177,6 +238,7 @@ fn verify_repository_executor_confinement() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn verify_credential_helper_confinement() -> anyhow::Result<()> {
     verify_common_confinement()?;
     let parent = rustix::process::getppid()
@@ -191,6 +253,7 @@ fn verify_credential_helper_confinement() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn verify_common_confinement() -> anyhow::Result<()> {
     anyhow::ensure!(
         rustix::thread::no_new_privs().unwrap_or(false),
@@ -208,6 +271,49 @@ fn verify_common_confinement() -> anyhow::Result<()> {
             && capabilities.permitted.is_empty()
             && capabilities.inheritable.is_empty(),
         "credential-bearing process retained Linux capabilities"
+    );
+    Ok(())
+}
+
+/// The authority launched this executor in a new session with an empty
+/// environment and no core files; it exits with that authority and refuses
+/// debugger attachment.
+#[cfg(target_os = "macos")]
+fn verify_repository_executor_confinement() -> anyhow::Result<()> {
+    verify_common_confinement()?;
+    anyhow::ensure!(
+        isolated_session_and_environment(),
+        "repository executor inherited ambient configuration or session"
+    );
+    bind_to_parent_and_deny_attachment()
+        .map_err(|_| anyhow::anyhow!("repository executor is not parent bound"))
+}
+
+/// Git starts the helper with its own environment; the helper exits with
+/// that exact Git parent and refuses debugger attachment.
+#[cfg(target_os = "macos")]
+fn verify_credential_helper_confinement() -> anyhow::Result<()> {
+    verify_common_confinement()?;
+    let parent = rustix::process::getppid()
+        .filter(|parent| parent.as_raw_pid() > 1)
+        .ok_or_else(|| anyhow::anyhow!("credential helper has no admissible Git parent"))?;
+    bind_to_parent_and_deny_attachment()
+        .map_err(|_| anyhow::anyhow!("credential helper is not parent bound"))?;
+    anyhow::ensure!(
+        rustix::process::getppid() == Some(parent),
+        "credential helper parent changed before confinement"
+    );
+    Ok(())
+}
+
+/// macOS has no no-new-privileges bit, capabilities or dumpable flag: refuse
+/// root, and require the zero core-file limit the executor's launcher set
+/// and every descendant inherits.
+#[cfg(target_os = "macos")]
+fn verify_common_confinement() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        unprivileged_without_core_files(),
+        "credential-bearing process is not confined"
     );
     Ok(())
 }

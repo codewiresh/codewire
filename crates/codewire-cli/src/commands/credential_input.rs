@@ -658,11 +658,13 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_has_the_authority_and_broker_but_no_launch_entrypoints() {
+    fn macos_has_the_credential_children_but_no_launch_entrypoint() {
         for command in [
             "__local-credential-authority",
             "__local-credential-authority-probe",
             "__local-credential-broker",
+            "__local-git-repository-executor",
+            "__local-git-credential-helper",
         ] {
             let error = crate::Cli::try_parse_from(["cw", command]).unwrap_err();
             assert_eq!(
@@ -679,8 +681,6 @@ mod tests {
         for command in [
             "__local-credential-broker-confinement-probe",
             "__local-credential-broker-synthetic-smoke-check",
-            "__local-git-repository-executor",
-            "__local-git-credential-helper",
             "__environment-launch",
         ] {
             let error = crate::Cli::try_parse_from(["cw", command]).unwrap_err();

@@ -44,7 +44,7 @@ pub(crate) async fn run_local_credential_broker(
     verify_broker_process_confinement()?;
     // Validate the store selection before any channel or provider effect.
     #[cfg(target_os = "macos")]
-    let store = darwin::BrokerStore::from_args(&args)?;
+    let store = super::credential_darwin::ChildStore::from_args(&args.store)?;
     anyhow::ensure!(args.authority_fd == 3, "invalid broker authority channel");
     let environment_id = EnvironmentId::parse(args.environment_id.clone())
         .map_err(|_| anyhow::anyhow!("invalid broker environment identity"))?;

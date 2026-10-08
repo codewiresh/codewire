@@ -48,9 +48,11 @@ pub(crate) use credential_broker::*;
 mod credential_broker_confinement;
 #[cfg(target_os = "linux")]
 pub(crate) use credential_broker_confinement::run_local_credential_broker_confinement_probe;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+mod credential_darwin;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credential_repository;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use credential_repository::*;
 mod credential_input;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -336,19 +338,10 @@ pub(crate) struct LocalCredentialBrokerArgs {
     pub(crate) http_providers: Vec<String>,
     #[arg(long)]
     pub(crate) platform_delegated: bool,
-    /// The authority's store: macOS brokers read the selected backend, not a
-    /// platform default.
+    /// The authority's store: macOS brokers read the selected backend.
     #[cfg(target_os = "macos")]
-    #[arg(long)]
-    pub(crate) protected_store: String,
-    /// The file backend's entry directory inside the authority root.
-    #[cfg(target_os = "macos")]
-    #[arg(long)]
-    pub(crate) protected_store_directory: Option<PathBuf>,
-    /// Test-only explicit keychain file for the keychain backend.
-    #[cfg(target_os = "macos")]
-    #[arg(long)]
-    pub(crate) keychain: Option<PathBuf>,
+    #[command(flatten)]
+    pub(crate) store: credential_darwin::ChildStoreArgs,
 }
 
 #[cfg(target_os = "linux")]
@@ -360,7 +353,7 @@ pub(crate) struct EnvironmentLaunchArgs {
     pub(crate) command: Vec<std::ffi::OsString>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct LocalGitRepositoryExecutorArgs {
     #[arg(long)]
@@ -375,9 +368,14 @@ pub(crate) struct LocalGitRepositoryExecutorArgs {
     pub(crate) request_id: String,
     #[arg(long)]
     pub(crate) staging_directory: PathBuf,
+    /// The authority's store: a macOS GitHub executor reads the selected
+    /// backend, as a Linux one reads Secret Service.
+    #[cfg(target_os = "macos")]
+    #[command(flatten)]
+    pub(crate) store: credential_darwin::ChildStoreArgs,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct LocalGitCredentialHelperArgs {
     #[arg(long)]

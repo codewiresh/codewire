@@ -529,72 +529,74 @@ async fn wait_for_executor(
 }
 
 enum RepositoryChild {
-    GitHub(Child),
-    Ssh(SshRepositoryChild),
+    Single(Child),
+    Group(GroupRepositoryChild),
 }
 
 impl RepositoryChild {
     fn new(mut child: Child, transport: LocalRepositoryTransport) -> Self {
-        match transport {
-            LocalRepositoryTransport::GitHubOAuth => Self::GitHub(child),
-            LocalRepositoryTransport::Ssh => {
-                let pid = child
-                    .id()
-                    .and_then(|pid| i32::try_from(pid).ok())
-                    .and_then(Pid::from_raw)
-                    .filter(|pid| pid.as_raw_pid() > 1);
-                let stderr = child
-                    .stderr
-                    .take()
-                    .map(|stderr| tokio::spawn(discard_stderr(stderr)));
-                Self::Ssh(SshRepositoryChild {
-                    child,
-                    pid,
-                    stderr,
-                    cleanup_failed: false,
-                })
-            }
+        // Darwin has no parent-death signal for Git and its helpers, so a
+        // macOS executor of either transport leads its own process group,
+        // pipes stderr, and is stopped and drained like an SSH executor.
+        let group = cfg!(target_os = "macos") || transport == LocalRepositoryTransport::Ssh;
+        if !group {
+            return Self::Single(child);
         }
+        let pid = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .and_then(Pid::from_raw)
+            .filter(|pid| pid.as_raw_pid() > 1);
+        let stderr = child
+            .stderr
+            .take()
+            .map(|stderr| tokio::spawn(discard_stderr(stderr)));
+        Self::Group(GroupRepositoryChild {
+            child,
+            pid,
+            stderr,
+            cleanup_failed: false,
+        })
     }
 
     fn construction_valid(&self) -> bool {
         match self {
-            Self::GitHub(_) => true,
-            Self::Ssh(child) => child.pid.is_some() && child.stderr.is_some(),
+            Self::Single(_) => true,
+            Self::Group(child) => child.pid.is_some() && child.stderr.is_some(),
         }
     }
 
     async fn wait(&mut self) -> Result<bool, Status> {
         match self {
-            Self::GitHub(child) => child
+            Self::Single(child) => child
                 .wait()
                 .await
                 .map(|status| status.success())
                 .map_err(|_| unavailable()),
-            Self::Ssh(child) => child.wait_without_reaping().await,
+            Self::Group(child) => child.wait_without_reaping().await,
         }
     }
 
     async fn stop_and_drain(&mut self, already_waited: bool) -> bool {
         match self {
-            Self::GitHub(_) if already_waited => true,
-            Self::GitHub(child) => {
+            Self::Single(_) if already_waited => true,
+            Self::Single(child) => {
                 let _ = child.start_kill();
                 child.wait().await.is_ok()
             }
-            Self::Ssh(child) => child.stop_and_drain().await.is_ok(),
+            Self::Group(child) => child.stop_and_drain().await.is_ok(),
         }
     }
 }
 
-struct SshRepositoryChild {
+struct GroupRepositoryChild {
     child: Child,
     pid: Option<Pid>,
     stderr: Option<tokio::task::JoinHandle<Result<(), Status>>>,
     cleanup_failed: bool,
 }
 
-impl SshRepositoryChild {
+impl GroupRepositoryChild {
     async fn wait_without_reaping(&self) -> Result<bool, Status> {
         let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())
             .map_err(|_| unavailable())?;
@@ -617,6 +619,11 @@ impl SshRepositoryChild {
         if let Some(pid) = self.pid.take() {
             match rustix::process::kill_process_group(pid, Signal::KILL) {
                 Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+                // Darwin refuses to signal a group whose members have all
+                // exited (the unreaped executor is a zombie). The stderr EOF
+                // and reap below still prove that every member exited.
+                #[cfg(target_os = "macos")]
+                Err(rustix::io::Errno::PERM) => {}
                 Err(_) => self.cleanup_failed = true,
             }
         } else {
@@ -646,7 +653,7 @@ impl SshRepositoryChild {
     }
 }
 
-impl Drop for SshRepositoryChild {
+impl Drop for GroupRepositoryChild {
     fn drop(&mut self) {
         if let Some(pid) = self.pid.take() {
             let _ = rustix::process::kill_process_group(pid, Signal::KILL);

@@ -396,6 +396,9 @@ where
     let authority = Arc::new(authority);
     cleanup_repository_staging(&authority_root)
         .map_err(|_| AuthorityRuntimeError::InvalidPrivatePath)?;
+    #[cfg(target_os = "macos")]
+    crate::repository::cleanup_repository_credential_sockets(&authority_root)
+        .map_err(|_| AuthorityRuntimeError::InvalidPrivatePath)?;
     cleanup_repository_ssh_runtimes(&authority_root)?;
     // The persistence singleton lock is held before a stale endpoint is ever
     // removed, so a losing process cannot unlink the live authority socket.

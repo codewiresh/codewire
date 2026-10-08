@@ -23,102 +23,29 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use codewire_local_credentials::FILE_STORE_DIRECTORY;
-use codewire_protected_store::{ProtectedStoreBackend, SelectedProtectedStore};
 
-use super::LocalCredentialBrokerArgs;
+use super::super::credential_darwin::{
+    ChildStore, bind_to_parent_and_deny_attachment, isolated_session_and_environment, plain_path,
+    unprivileged_without_core_files,
+};
 
 const SECURITY_TOOL: &str = "/usr/bin/security";
-
-/// The authority store this broker reads, validated before any effect.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum BrokerStore {
-    /// One owner-only file per entry in this directory.
-    File { directory: PathBuf },
-    /// The login keychain, or an explicit test keychain file.
-    Keychain { keychain: Option<PathBuf> },
-}
-
-impl BrokerStore {
-    pub(super) fn from_args(args: &LocalCredentialBrokerArgs) -> anyhow::Result<Self> {
-        let backend = ProtectedStoreBackend::parse(&args.protected_store)
-            .filter(|backend| backend.supported())
-            .context("invalid broker protected store")?;
-        match (backend, &args.protected_store_directory, &args.keychain) {
-            (ProtectedStoreBackend::File, Some(directory), None) => {
-                anyhow::ensure!(
-                    directory.is_absolute()
-                        && directory.file_name() == Some(OsStr::new(FILE_STORE_DIRECTORY))
-                        && plain_path(directory).is_some(),
-                    "invalid broker protected store"
-                );
-                Ok(Self::File {
-                    directory: directory.clone(),
-                })
-            }
-            (ProtectedStoreBackend::Keychain, None, keychain) => {
-                if let Some(keychain) = keychain {
-                    anyhow::ensure!(
-                        keychain.is_absolute() && plain_path(keychain).is_some(),
-                        "invalid broker protected store"
-                    );
-                }
-                Ok(Self::Keychain {
-                    keychain: keychain.clone(),
-                })
-            }
-            _ => anyhow::bail!("invalid broker protected store"),
-        }
-    }
-
-    pub(super) fn open(&self) -> anyhow::Result<SelectedProtectedStore> {
-        let store = match self {
-            Self::File { directory } => {
-                SelectedProtectedStore::open(ProtectedStoreBackend::File, directory, None)
-            }
-            Self::Keychain { keychain } => SelectedProtectedStore::open(
-                ProtectedStoreBackend::Keychain,
-                Path::new("/"),
-                keychain.as_deref(),
-            ),
-        };
-        store.map_err(|error| anyhow::anyhow!("{error}"))
-    }
-}
 
 /// Fail unless the authority launched this broker as its confined child, then
 /// bind this process's life to that authority.
 pub(super) fn verify_process() -> anyhow::Result<()> {
-    let mut core = libc::rlimit {
-        rlim_cur: libc::RLIM_INFINITY,
-        rlim_max: libc::RLIM_INFINITY,
-    };
-    // SAFETY: getrlimit writes one rlimit owned by this frame.
-    let core_read = unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut core) } == 0;
-    let confined = !rustix::process::geteuid().is_root()
-        && rustix::process::getsid(None).ok() == Some(rustix::process::getpid())
-        // CoreFoundation, which cw links, sets this one name itself while
-        // the process loads; it is not inherited input.
-        && std::env::vars_os().all(|(name, _)| name == "__CF_USER_TEXT_ENCODING")
-        && core_read
-        && core.rlim_max == 0;
-    anyhow::ensure!(confined, "local credential broker is not confined");
-    // Darwin has no parent-death signal: exit as soon as the authority does.
-    codewire_local_vmm::darwin::process::exit_with_parent()
-        .map_err(|_| anyhow::anyhow!("local credential broker is not confined"))?;
-    // The macOS counterpart of a non-dumpable Linux broker: refuse debugger
-    // attachment by other processes of the same user.
-    // SAFETY: PT_DENY_ATTACH takes no address or data and affects only this
-    // process.
-    let denied = unsafe { libc::ptrace(libc::PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0) };
-    anyhow::ensure!(denied == 0, "local credential broker is not confined");
-    Ok(())
+    anyhow::ensure!(
+        unprivileged_without_core_files() && isolated_session_and_environment(),
+        "local credential broker is not confined"
+    );
+    bind_to_parent_and_deny_attachment()
+        .map_err(|_| anyhow::anyhow!("local credential broker is not confined"))
 }
 
 /// Install the broker's Seatbelt profile. Irreversible for the process.
-pub(super) fn confine(store: &BrokerStore, provider_network: bool) -> anyhow::Result<()> {
+pub(super) fn confine(store: &ChildStore, provider_network: bool) -> anyhow::Result<()> {
     let home = match store {
-        BrokerStore::Keychain { keychain: None } => Some(home_directory()?),
+        ChildStore::Keychain { keychain: None } => Some(home_directory()?),
         _ => None,
     };
     let profile = profile(store, provider_network, home.as_deref())?;
@@ -129,7 +56,7 @@ pub(super) fn confine(store: &BrokerStore, provider_network: bool) -> anyhow::Re
 /// The broker's Seatbelt profile. Every path is checked against a closed
 /// alphabet first, so no value can end a string or add a rule.
 pub(super) fn profile(
-    store: &BrokerStore,
+    store: &ChildStore,
     provider_network: bool,
     home: Option<&Path>,
 ) -> anyhow::Result<CString> {
@@ -139,7 +66,7 @@ pub(super) fn profile(
         rules.push_str("(allow network-outbound (remote tcp \"*:443\"))\n");
     }
     match store {
-        BrokerStore::File { directory } => {
+        ChildStore::File { directory } => {
             let parent = directory
                 .parent()
                 .context("invalid broker protected store")?;
@@ -149,7 +76,7 @@ pub(super) fn profile(
                 quoted(directory)?
             ));
         }
-        BrokerStore::Keychain { keychain } => {
+        ChildStore::Keychain { keychain } => {
             // Each operation runs Apple's security tool, which inherits this
             // profile: its own binary and the system libraries, the keychain,
             // the security server that unlocks and decrypts items, and the
@@ -197,19 +124,6 @@ pub(super) fn profile(
 
 fn quoted(path: &Path) -> anyhow::Result<&str> {
     plain_path(path).context("broker store path cannot be confined")
-}
-
-/// An absolute path made only of characters that need no quoting in a
-/// Seatbelt string, without `.` or `..` components.
-fn plain_path(path: &Path) -> Option<&str> {
-    let text = path.to_str()?;
-    let plain = path.is_absolute()
-        && text.len() <= 512
-        && text.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-' | b'+' | b'@')
-        })
-        && text.split('/').all(|part| !matches!(part, "." | ".."));
-    plain.then_some(text)
 }
 
 /// This user's home directory from the user database: the broker has no

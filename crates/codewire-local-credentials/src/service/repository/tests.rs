@@ -52,14 +52,18 @@ impl LocalRepositoryProcessSpawner for SyntheticSpawner {
         let stream = UnixStream::from_std(authority_peer).map_err(fail)?;
         let (input, exit_gate) = std::os::unix::net::UnixStream::pair().map_err(fail)?;
         let input: std::os::fd::OwnedFd = input.into();
-        let child = tokio::process::Command::new("/bin/cat")
+        let mut command = tokio::process::Command::new("/bin/cat");
+        command
             .env_clear()
             .stdin(Stdio::from(input))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(fail)?;
+            .kill_on_drop(true);
+        // A macOS executor of either transport leads its process group and
+        // pipes stderr, which its authority drains after stopping the group.
+        #[cfg(target_os = "macos")]
+        command.stderr(Stdio::piped()).process_group(0);
+        let child = command.spawn().map_err(fail)?;
         let store = self.store.clone();
         let request_id = config.request_id;
         let platform = config.platform_delegated;

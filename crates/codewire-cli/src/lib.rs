@@ -75,7 +75,7 @@ pub fn prepare_local_credential_broker_process() -> std::io::Result<()> {
 
 /// The repository executor gives Git this private symlink to the current cw
 /// binary, allowing a shell-free SSH trampoline before normal CLI startup.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn is_local_git_ssh_helper(program: &std::ffi::OsStr) -> bool {
     std::path::Path::new(program).file_name()
         == Some(std::ffi::OsStr::new(
@@ -85,7 +85,7 @@ pub fn is_local_git_ssh_helper(program: &std::ffi::OsStr) -> bool {
 
 /// Execute fixed stock SSH under the isolated repository's captured parent,
 /// pinned public host trust and selected agent. No normal configuration loads.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn run_local_git_ssh_helper(arguments: Vec<std::ffi::OsString>) -> std::io::Result<()> {
     commands::run_git_ssh_helper(arguments)
         .map_err(|_| std::io::Error::other("repository SSH failed"))
@@ -387,10 +387,10 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(name = "__local-credential-broker-confinement-probe", hide = true)]
     LocalCredentialBrokerConfinementProbe,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__local-git-repository-executor", hide = true)]
     LocalGitRepositoryExecutor(LocalGitRepositoryExecutorArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__local-git-credential-helper", hide = true)]
     LocalGitCredentialHelper(LocalGitCredentialHelperArgs),
     #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
@@ -715,9 +715,9 @@ where
         Command::LocalCredentialBrokerConfinementProbe => {
             run_local_credential_broker_confinement_probe().await
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::LocalGitRepositoryExecutor(args) => run_local_git_repository_executor(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::LocalGitCredentialHelper(args) => run_local_git_credential_helper(args),
         #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
         Command::LocalCredentialBrokerSyntheticSmokeCheck => {

@@ -100,7 +100,7 @@ fn main() {
         }
         return;
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if std::env::args_os()
         .next()
         .as_deref()
@@ -161,11 +161,18 @@ fn main() {
             )
         )
     });
-    // macOS has one credential-bearing role; it confines itself at entry.
+    // The macOS credential-bearing roles confine themselves at entry.
     #[cfg(target_os = "macos")]
-    let broker = std::env::args_os()
-        .nth(1)
-        .is_some_and(|argument| argument == "__local-credential-broker");
+    let broker = std::env::args_os().nth(1).is_some_and(|argument| {
+        matches!(
+            argument.to_str(),
+            Some(
+                "__local-credential-broker"
+                    | "__local-git-repository-executor"
+                    | "__local-git-credential-helper"
+            )
+        )
+    });
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let broker = false;
 

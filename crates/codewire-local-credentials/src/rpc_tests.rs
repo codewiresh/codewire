@@ -334,6 +334,10 @@ impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
+        // A macOS executor of either transport leads its process group and
+        // pipes stderr, which its authority drains after stopping the group.
+        #[cfg(target_os = "macos")]
+        child.stderr(std::process::Stdio::piped()).process_group(0);
         let child = child
             .spawn()
             .map_err(|_| LocalRepositorySpawnError::Spawn)?;

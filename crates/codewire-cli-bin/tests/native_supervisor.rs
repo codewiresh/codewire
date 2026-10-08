@@ -61,11 +61,13 @@ fn local_vm_roles_are_hidden_and_other_host_effect_entrypoints_stay_unavailable(
     assert!(help.status.success());
     let help = String::from_utf8_lossy(&help.stdout);
     // The local VM, Mesh and credential roles are hidden macOS entrypoints;
-    // the Linux-only launch and Git repository helpers stay unavailable.
+    // the Linux-only launch helper stays unavailable.
     for hidden in [
         "__native-supervisor",
         "__local-credential-authority",
         "__local-credential-broker",
+        "__local-git-repository-executor",
+        "__local-git-credential-helper",
         "__native-runner",
         "__native-network-worker",
         "__native-egress-broker",
@@ -74,17 +76,11 @@ fn local_vm_roles_are_hidden_and_other_host_effect_entrypoints_stay_unavailable(
     ] {
         assert!(!help.contains(hidden), "{hidden}");
     }
-    for entrypoint in [
-        "__environment-launch",
-        "__local-git-repository-executor",
-        "__local-git-credential-helper",
-    ] {
-        let output = command(home.path())
-            .args([entrypoint, "--help"])
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(2), "{entrypoint}");
-    }
+    let output = command(home.path())
+        .args(["__environment-launch", "--help"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
     assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
 }
 

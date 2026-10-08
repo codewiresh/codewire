@@ -40,6 +40,8 @@ mod platform_ingress;
 mod ssh;
 mod ssh_executor;
 
+#[cfg(target_os = "macos")]
+pub(crate) use executor::cleanup_repository_credential_sockets;
 pub use executor::{
     LocalRepositoryGitProcessSpawner, MAX_GIT_BUNDLE_BYTES, RepositoryExecutorError,
     run_git_credential_helper, run_git_credential_helper_for_endpoint,
@@ -73,6 +75,11 @@ const REPOSITORY_LEASE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duratio
 const MAX_REPOSITORY_LEASE_RPC_MESSAGE_BYTES: usize = 128 * 1024;
 pub const REPOSITORY_LEASE_PROTOCOL_VERSION: u32 = 3;
 pub const REPOSITORY_SSH_RUNTIME_PREFIX: &str = "ssh-";
+/// `sockaddr_un.sun_path` capacity, including the terminating NUL.
+#[cfg(not(target_os = "macos"))]
+const SOCKET_PATH_BYTES: usize = 108;
+#[cfg(target_os = "macos")]
+const SOCKET_PATH_BYTES: usize = 104;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LocalRepositoryTransport {
@@ -132,7 +139,7 @@ pub fn validate_repository_ssh_runtime_path(path: &Path) -> Result<(), LocalRepo
         || !bytes
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
-        || socket_bytes.as_os_str().as_bytes().len() >= 108
+        || socket_bytes.as_os_str().as_bytes().len() >= SOCKET_PATH_BYTES
     {
         return Err(LocalRepositorySpawnError::InvalidConfiguration);
     }
@@ -149,9 +156,10 @@ pub enum LocalRepositorySpawnError {
 
 /// Authority-owned one-shot repository executor launcher. The lease stream is
 /// transferred directly into the child and never exposed at a socket path.
-/// An SSH executor must be its own process-group leader and expose piped
-/// stderr; the authority reserves that leader until it has killed the exact
-/// group, reaped the child, and observed stderr EOF from every descendant.
+/// An SSH executor, and on macOS an executor of either transport, must be its
+/// own process-group leader and expose piped stderr; the authority reserves
+/// that leader until it has killed the exact group, reaped the child, and
+/// observed stderr EOF from every descendant.
 pub trait LocalRepositoryProcessSpawner: Send + Sync + 'static {
     fn spawn(
         &self,
@@ -797,21 +805,21 @@ fn map_server_error(error: LocalCredentialError) -> Status {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use std::fs::OpenOptions;
     use std::fs::{self, DirBuilder};
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use std::io::Read as _;
     use std::io::Write as _;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use std::os::unix::fs::OpenOptionsExt as _;
     use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use std::process::Stdio;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use tokio::process::Command;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use super::executor::*;
 
     use codewire_access::{AccessProfileName, ProviderId};
@@ -906,21 +914,21 @@ mod tests {
         assert!(lifetime.acquire().is_err());
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[derive(Default)]
     struct SyntheticGitSpawner {
         tokens: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
         invocations: std::sync::Mutex<Vec<String>>,
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl SyntheticGitSpawner {
         fn take_tokens(&self) -> io::Result<Vec<Vec<u8>>> {
             Ok(self.tokens.lock().unwrap().drain(..).collect())
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl LocalRepositoryGitProcessSpawner for SyntheticGitSpawner {
         fn spawn(&self, command: &mut Command) -> io::Result<tokio::process::Child> {
             let command = command.as_std();
@@ -984,7 +992,7 @@ mod tests {
                 String::new()
             };
             let mut child = if let Some(gate_reader) = credential_gate {
-                let mut child = tokio::process::Command::new("/usr/bin/cat");
+                let mut child = tokio::process::Command::new("/bin/cat");
                 child.stdin(Stdio::from(std::os::fd::OwnedFd::from(gate_reader)));
                 child
             } else {
@@ -1192,11 +1200,18 @@ mod tests {
             .unwrap();
     }
 
-    // The repository executor is the Linux consumption path; macOS stores only.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn executor_keeps_github_token_out_of_git_argv_environment_and_disk() {
+        // The credential socket's directory must be canonical and its socket
+        // path must fit Darwin's 104 bytes, so macOS stages in /private/tmp.
+        #[cfg(target_os = "linux")]
         let staging = TempDir::new().unwrap();
+        #[cfg(target_os = "macos")]
+        let staging = tempfile::Builder::new()
+            .prefix("cw-git-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
         fs::set_permissions(staging.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let spawner = SyntheticGitSpawner::default();
         let token = b"synthetic-github-token-canary";
