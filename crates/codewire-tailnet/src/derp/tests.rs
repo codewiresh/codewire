@@ -411,3 +411,60 @@ async fn live_tls_derp_relay_two_rust_clients() {
 
     assert_eq!(received, payload, "B got exactly what A sent");
 }
+
+/// Transports race `recv` against outgoing packets in a `select!`, which
+/// drops a `recv` that is part-way through a frame. The dropped bytes must
+/// stay with the client: losing them desynchronizes the stream, and the next
+/// header read sees payload bytes as a length ("frame too large"), which on
+/// Dev reset the DERP connection over and over under bulk traffic.
+#[tokio::test]
+async fn recv_dropped_mid_frame_keeps_the_stream_framed() {
+    const PACKETS: usize = 200;
+    let (client_side, mut server_side) = tokio::io::duplex(64 * 1024);
+    let server_priv = NodePrivate::generate(&mut OsRng);
+    let client_priv = NodePrivate::generate(&mut OsRng);
+    let peer = NodePrivate::generate(&mut OsRng).public();
+
+    let server = tokio::spawn(async move {
+        let source = server_handshake(&mut server_side, &server_priv).await;
+        let (mut reader, mut writer) = tokio::io::split(server_side);
+        // Drain the client's SendPacket frames so its writes never block.
+        tokio::spawn(async move {
+            let mut sink = vec![0u8; 4096];
+            while reader.read(&mut sink).await.is_ok_and(|n| n > 0) {}
+        });
+        for i in 0..PACKETS {
+            let mut body = source.as_bytes().to_vec();
+            body.extend(std::iter::repeat_n(i as u8, 1000 + i));
+            let frame = frame::encode_frame(FrameType::RecvPacket, &body);
+            // Deliver each frame in pieces so `recv` waits mid-frame.
+            for piece in frame.chunks(333) {
+                writer.write_all(piece).await.unwrap();
+                writer.flush().await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_micros(300)).await;
+            }
+        }
+    });
+
+    let mut client = Client::handshake(client_side, client_priv, &mut OsRng)
+        .await
+        .expect("client handshake");
+    let mut received = 0;
+    while received < PACKETS {
+        tokio::select! {
+            () = tokio::time::sleep(std::time::Duration::from_micros(100)) => {
+                client.send(&peer, b"ack").await.expect("send");
+            }
+            msg = client.recv() => match msg.expect("recv keeps the stream framed") {
+                ReceivedMessage::Packet { data, .. } => {
+                    assert_eq!(data.len(), 1000 + received, "packet {received} length");
+                    assert!(data.iter().all(|&b| b == received as u8), "packet {received} bytes");
+                    received += 1;
+                }
+                ReceivedMessage::ServerInfo => {}
+                other => panic!("unexpected message: {other:?}"),
+            },
+        }
+    }
+    server.await.unwrap();
+}

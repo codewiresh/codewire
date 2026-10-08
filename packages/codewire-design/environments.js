@@ -5,6 +5,10 @@
   const draftLimit = 512 * 1024;
   const draftStates = new WeakMap();
   const optionStates = new WeakMap();
+  // Create choices and GitHub repositories retry a transient failure (no
+  // response, a timeout, a 5xx or a rate limit) twice before offering Retry;
+  // a definite failure is shown at once.
+  const transientRetryDelays = [1_000, 3_000];
   const canonicalId = (value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value) && value !== "00000000-0000-0000-0000-000000000000";
   // Account and organization IDs are opaque (currently 32 hex bytes), not UUIDs.
   const opaqueId = (value) => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
@@ -313,6 +317,8 @@
     state.sequence += 1;
     state.controller?.abort();
     state.controller = null;
+    window.clearTimeout(state.retryTimer);
+    state.retryTimer = 0;
   };
   const suspendCreateOptions = (form) => {
     const state = optionStates.get(form);
@@ -328,18 +334,21 @@
       if (form.dataset.createOptionsLoading === "true") void loadCreateOptions(form, state);
     }
   };
-  const loadCreateOptions = async (form, state) => {
+  const loadCreateOptions = async (form, state, retrying = false) => {
     if (!state || state.suspended || !form.isConnected || form.dataset.createOptionsLoading !== "true") return;
     cancelCreateOptions(form);
+    if (!retrying) state.attempt = 0;
     const sequence = state.sequence;
     const controller = new AbortController();
     state.controller = controller;
     const slot = form.querySelector("[data-create-optional-options]");
     const status = slot?.querySelector('[role="status"], [role="alert"]');
-    if (status) { status.textContent = "Loading provider, secret, agent, and isolation choices…"; status.setAttribute("role", "status"); }
+    const loadingText = () => state.attempt ? `Choices did not load. Retrying (${state.attempt} of ${transientRetryDelays.length})…` : "Loading provider, secret, agent, and isolation choices…";
+    if (status) { status.textContent = loadingText(); status.setAttribute("role", "status"); }
     const retry = slot?.querySelector("[data-retry-create-options]");
     if (retry) retry.hidden = true;
-    const timer = window.setTimeout(() => controller.abort(), 40_000);
+    let timedOut = false;
+    const timer = window.setTimeout(() => { timedOut = true; controller.abort(); }, 40_000);
     try {
       const endpoint = new URL(form.dataset.createOptionsUrl, window.location.origin);
       if (endpoint.origin !== window.location.origin || !endpoint.pathname.endsWith("/_fragments/create-options") || endpoint.search || endpoint.hash) throw new Error("invalid options endpoint");
@@ -351,8 +360,10 @@
           organization: form.dataset.createDraftOrganization, draft_id: form.dataset.createDraftId,
           draft_return: form.dataset.createDraftReturn || "",
         }),
-      });
-      if (!response.ok || !response.headers.get("content-type")?.startsWith("text/html")) throw new Error("options unavailable");
+      }).catch(() => { throw Object.assign(new Error("options unavailable"), { transient: true }); });
+      if (!response.ok || !response.headers.get("content-type")?.startsWith("text/html")) {
+        throw Object.assign(new Error("options unavailable"), { transient: response.status >= 500 || response.status === 429 });
+      }
       const html = await readDraftHtml(response);
       if (controller.signal.aborted || state.sequence !== sequence || state.suspended || !form.isConnected) return;
       const parsed = new DOMParser().parseFromString(html, "text/html");
@@ -375,12 +386,24 @@
       form.dataset.createOptionsLoading = "false";
       form.querySelector('[type="submit"]')?.removeAttribute("disabled");
       wireGithubBrowsers();
-    } catch {
+    } catch (error) {
       if (state.sequence !== sequence || state.suspended || !form.isConnected) return;
+      // The same transient failures as repositories retry twice on their own.
+      if ((timedOut || error?.transient === true) && state.attempt < transientRetryDelays.length) {
+        state.attempt += 1;
+        if (status) status.textContent = loadingText();
+        state.retryTimer = window.setTimeout(() => {
+          state.retryTimer = 0;
+          if (state.sequence === sequence) void loadCreateOptions(form, state, true);
+        }, transientRetryDelays[state.attempt - 1]);
+        return;
+      }
+      state.attempt = 0;
       if (status) { status.textContent = "Choices could not be loaded. Your entries are still here; retry to finish setting up this Sandbox."; status.setAttribute("role", "alert"); }
       if (retry) retry.hidden = false;
       const browser = form.querySelector("[data-github-browser]");
       if (browser) {
+        setGithubBusy(browser, false);
         setStatus(browser, "Repository access unavailable. Retry loading choices.");
         const connection = browser.querySelector("[data-github-connection-status]");
         if (connection) connection.textContent = "GitHub connections are unavailable until choices load.";
@@ -393,7 +416,7 @@
   const wireCreateOptions = () => {
     document.querySelectorAll('[data-environment-form][data-create-options-loading="true"]').forEach((form) => {
       if (!(form instanceof HTMLFormElement) || optionStates.has(form)) return;
-      const state = { controller: null, sequence: 0, suspended: false };
+      const state = { controller: null, sequence: 0, suspended: false, attempt: 0, retryTimer: 0 };
       optionStates.set(form, state);
       const owner = form.closest("[data-drawer]") || form.parentElement;
       if (owner) {
@@ -509,7 +532,7 @@
       const state = draftStates.get(form);
       if (state) cancelDraftRestore(state, form);
       cancelCreateOptions(form);
-      form.querySelectorAll("[data-github-browser]").forEach((browser) => { const state = browsers.get(browser); if (state) cancelBrowser(state); });
+      form.querySelectorAll("[data-github-browser]").forEach((browser) => { const state = browsers.get(browser); if (state) cancelBrowser(browser, state); });
     });
   });
   window.addEventListener("pageshow", (event) => {
@@ -519,7 +542,12 @@
     if (!event.persisted) return;
     document.querySelectorAll('[data-environment-form][data-create-options-loading="true"]').forEach((form) => {
       const state = optionStates.get(form);
-      if (state && !state.controller && !state.suspended) void loadCreateOptions(form, state);
+      if (state && !state.controller && !state.retryTimer && !state.suspended) void loadCreateOptions(form, state);
+    });
+    // pagehide cancelled any repository load; a cached return starts it again.
+    document.querySelectorAll("[data-github-browser]").forEach((browser) => {
+      const state = browsers.get(browser);
+      if (state) resumeRepositories(browser, state);
     });
   });
   const environmentListError = (event) => {
@@ -643,6 +671,7 @@
   };
 
   const browsers = new WeakMap();
+  const githubSlowMs = 5_000;
   const browserForm = (browser) => browser?.closest("[data-environment-form]");
   const selectedProfile = (browser) => browserForm(browser)?.querySelector('[name="credential_profile"]');
   const setStatus = (browser, message) => {
@@ -671,18 +700,69 @@
       setup.textContent = { connected: "Manage GitHub connection", inactive: "Reconnect GitHub" }[connectionState(browser)] || "Connect GitHub";
     }
   };
+  // While repositories or the account load, the list is busy: a spinner sits
+  // beside the status and skeleton rows hold the place of rows not yet shown.
+  const setGithubBusy = (browser, busy) => {
+    const results = browser.querySelector("[data-github-results]");
+    if (busy) results?.setAttribute("aria-busy", "true");
+    else results?.removeAttribute("aria-busy");
+    const spinner = browser.querySelector("[data-github-spinner]");
+    if (spinner) spinner.hidden = !busy;
+    const placeholder = browser.querySelector("[data-github-placeholder]");
+    if (placeholder) placeholder.hidden = !busy || !!results?.querySelector("[data-select-github-repository]");
+  };
+  // One key for a repository everywhere it is compared: GitHub owner and name
+  // ignore case, and a clone URL may or may not end in .git or a slash.
+  const repositoryKey = (value) => typeof value === "string" ? value.trim().replace(/\/+$/, "").replace(/\.git$/i, "").toLowerCase() : "";
+  const emptyRepositoryRow = (row) => ["repo_url_", "repo_branch_", "repo_mount_"].every((prefix) => !row.querySelector(`[name^="${prefix}"]`)?.value.trim());
+  const repositoryLimitReached = (form) => {
+    const rows = form.querySelector("[data-repository-rows]");
+    const limit = Number(rows?.dataset.repositoryLimit);
+    if (!rows || !Number.isSafeInteger(limit) || limit < 1) return false;
+    return !Array.from(rows.querySelectorAll("[data-repository-row]")).some(emptyRepositoryRow)
+      && nextIndex(rows, "[data-repository-row]") >= limit;
+  };
+  // Each result says what a click does, derived from the form's repository
+  // rows every time they change, so the label never disagrees with the list.
+  const syncRepositoryActions = (form) => {
+    if (!(form instanceof HTMLFormElement)) return;
+    const selected = new Set(Array.from(form.querySelectorAll('[data-repository-row] [name^="repo_url_"]'), (field) => repositoryKey(field.value)));
+    selected.delete("");
+    const full = repositoryLimitReached(form);
+    form.querySelectorAll("[data-github-browser]").forEach((browser) => {
+      browser.querySelectorAll("[data-select-github-repository]").forEach((button) => {
+        const chosen = selected.has(repositoryKey(button.dataset.repositoryUrl));
+        const verb = button.querySelector("[data-github-repository-verb]");
+        if (verb) verb.textContent = chosen ? "Remove" : "Add";
+        const action = button.querySelector("[data-github-repository-action]");
+        if (action) action.textContent = chosen ? "− Remove" : "+ Add";
+        button.dataset.repositorySelected = String(chosen);
+        button.disabled = !chosen && (button.hasAttribute("data-repository-unavailable") || full);
+      });
+      const limit = browser.querySelector("[data-github-repository-limit]");
+      if (limit) limit.hidden = !full;
+    });
+  };
   const browserCurrent = (browser, state, sequence) => browser.isConnected
     && state.sequence === sequence
     && browserForm(browser)?.isConnected && draftIsOpen(browserForm(browser));
-  const cancelBrowser = (state) => {
+  const cancelBrowser = (browser, state) => {
+    const busy = state.loading || !!state.retryTimer;
     state.sequence += 1;
     state.controller?.abort();
     state.controller = null;
     window.clearTimeout(state.queryTimer);
+    window.clearTimeout(state.retryTimer);
+    window.clearTimeout(state.slowTimer);
+    state.queryTimer = 0;
+    state.retryTimer = 0;
+    state.slowTimer = 0;
     state.loading = false;
+    // A cancelled load stays pending; opening Create again starts it over.
+    if (busy) setGithubBusy(browser, false);
   };
   const resetBrowser = (browser, state) => {
-    cancelBrowser(state);
+    cancelBrowser(browser, state);
     state.query = browser.querySelector("[data-github-filter]")?.value.trim().toLowerCase().slice(0, 128) || "";
     state.nextToken = "";
     state.seenTokens = new Set();
@@ -691,6 +771,8 @@
     state.rendered = 0;
     state.pruned = false;
     state.complete = false;
+    state.attempt = 0;
+    state.pending = connectionState(browser) === "connected";
     browser.querySelector("[data-github-results]")?.replaceChildren();
     browser.querySelector("[data-github-filter-empty]")?.setAttribute("hidden", "");
     browser.querySelector("[data-github-retry]")?.setAttribute("hidden", "");
@@ -698,26 +780,42 @@
     updateConnectionStatus(browser);
     const filter = browser.querySelector("[data-github-filter]");
     if (filter) filter.disabled = connectionState(browser) !== "connected";
-    if (browserForm(browser)?.dataset.createOptionsLoading === "true") setStatus(browser, "Loading GitHub account…");
+    const accountLoading = browserForm(browser)?.dataset.createOptionsLoading === "true";
+    setGithubBusy(browser, accountLoading);
+    if (accountLoading) setStatus(browser, "Loading GitHub account…");
     else if (connectionState(browser) !== "connected") setStatus(browser, githubStateMessage(browser, ""));
   };
-  const loadRepositories = async (browser, state) => {
-    if (state.loading || state.complete || connectionState(browser) !== "connected") return;
+  const loadingMessage = (state) => state.attempt
+    ? `Repositories did not load. Retrying (${state.attempt} of ${transientRetryDelays.length})…`
+    : state.query ? `Searching all accessible repositories… ${state.pages} pages checked.` : "Loading GitHub repositories…";
+  const githubFailure = (message, transient) => Object.assign(new Error(message), { transient });
+  const loadRepositories = async (browser, state, retrying = false) => {
+    if (state.loading || state.retryTimer || state.complete || connectionState(browser) !== "connected") return;
     if (state.pages >= 10_000 || state.seenTokens.has(state.nextToken)) {
+      state.pending = false;
       setStatus(browser, "Repository paging did not finish safely. Refine the search or retry from the beginning.");
       browser.querySelector("[data-github-retry]").hidden = false;
       return;
     }
+    state.pending = true;
+    // A closed Create drawer asks GitHub for nothing; opening it starts the load.
+    if (!draftIsOpen(browserForm(browser))) return;
+    if (!retrying) state.attempt = 0;
     const sequence = state.sequence;
     const token = state.nextToken;
     const controller = new AbortController();
     state.controller = controller;
     state.loading = true;
-    browser.querySelector("[data-github-results]")?.setAttribute("aria-busy", "true");
+    setGithubBusy(browser, true);
     browser.querySelector("[data-github-next]").hidden = true;
     browser.querySelector("[data-github-retry]").hidden = true;
-    setStatus(browser, state.query ? `Searching all accessible repositories… ${state.pages} pages checked.` : "Loading GitHub repositories…");
-    const timer = window.setTimeout(() => controller.abort(), 40_000);
+    setStatus(browser, loadingMessage(state));
+    let timedOut = false;
+    const timer = window.setTimeout(() => { timedOut = true; controller.abort(); }, 40_000);
+    window.clearTimeout(state.slowTimer);
+    state.slowTimer = window.setTimeout(() => {
+      if (state.controller === controller) setStatus(browser, state.query ? `Still searching all accessible repositories… ${state.pages} pages checked.` : "Still loading repositories from GitHub…");
+    }, githubSlowMs);
     try {
       const endpoint = new URL(browser.dataset.repositoriesUrl, window.location.origin);
       if (endpoint.origin !== window.location.origin || !endpoint.pathname.endsWith("/_fragments/github-repositories") || endpoint.search || endpoint.hash) throw new Error("invalid endpoint");
@@ -725,14 +823,15 @@
         method: "POST", credentials: "same-origin", redirect: "error", signal: controller.signal,
         headers: { Accept: "text/html" },
         body: new URLSearchParams({ _csrf: browserForm(browser)?.querySelector('[name="_csrf"]')?.value || "", page_token: token }),
-      });
-      if (!response.headers.get("content-type")?.startsWith("text/html")) throw new Error("invalid content type");
+      }).catch(() => { throw githubFailure("", true); });
+      const transient = response.status >= 500 || response.status === 429;
+      if (!response.headers.get("content-type")?.startsWith("text/html")) throw githubFailure("invalid content type", transient);
       const html = await readDraftHtml(response);
       if (!browserCurrent(browser, state, sequence) || controller.signal.aborted) return;
       const parsed = new DOMParser().parseFromString(html, "text/html");
       const pages = parsed.querySelectorAll("[data-github-results-page]");
-      if (pages.length !== 1 || parsed.querySelector("script")) throw new Error("invalid repository response");
-      if (!response.ok) throw new Error(pages[0].querySelector(".cw-field-error")?.textContent?.trim().slice(0, 240) || "Repository access unavailable. Try again.");
+      if (pages.length !== 1 || parsed.querySelector("script")) throw githubFailure("invalid repository response", transient);
+      if (!response.ok) throw githubFailure(pages[0].querySelector(".cw-field-error")?.textContent?.trim().slice(0, 240) || "Repository access unavailable. Try again.", transient);
       const next = pages[0].querySelector("[data-github-next]")?.getAttribute("data-page-token") || "";
       if (next && (next === token || state.seenTokens.has(next))) throw new Error("Repository paging returned a repeated page. Retry from the beginning.");
       const page = document.importNode(pages[0], true);
@@ -752,6 +851,7 @@
       if (retained) {
         results.append(page);
         state.rendered += retained;
+        syncRepositoryActions(browserForm(browser));
       }
       if (!state.query) {
         while (state.rendered > 200 && results.firstElementChild) {
@@ -768,6 +868,9 @@
       state.pages += 1;
       state.nextToken = next;
       state.complete = !next;
+      state.attempt = 0;
+      // A search keeps paging by itself; an unfiltered list waits for scroll or Load more.
+      state.pending = !!state.query && !state.complete;
       browser.querySelector("[data-github-filter-empty]").hidden = !state.complete || state.matches !== 0 || !state.query;
       browser.querySelector("[data-github-next]").hidden = state.complete || !!state.query;
       setStatus(browser, state.query
@@ -775,49 +878,83 @@
         : state.complete && state.matches === 0 ? "No repositories are available through this GitHub connection. Change the repositories the Codewire GitHub App can access, or use Add custom Git URL."
         : state.complete ? `${state.matches} repositories loaded. Choose one to add.${state.pruned ? " Earlier rows can be found with search." : ""}` : `${state.matches} repositories loaded. Scroll or load more.${state.pruned ? " Earlier rows can be found with search." : ""}`);
     } catch (error) {
-      if (browserCurrent(browser, state, sequence)) {
-        setStatus(browser, error?.message && !["invalid endpoint", "invalid content type", "invalid repository response", "draft response limit"].includes(error.message) ? error.message : "Repository access unavailable. Retry loading repositories.");
-        browser.querySelector("[data-github-retry]").hidden = false;
+      if (!browserCurrent(browser, state, sequence)) return;
+      if ((timedOut || error?.transient === true) && state.attempt < transientRetryDelays.length) {
+        state.attempt += 1;
+        setStatus(browser, loadingMessage(state));
+        state.retryTimer = window.setTimeout(() => {
+          state.retryTimer = 0;
+          if (browserCurrent(browser, state, sequence)) void loadRepositories(browser, state, true);
+        }, transientRetryDelays[state.attempt - 1]);
+        return;
       }
+      state.pending = false;
+      state.attempt = 0;
+      const known = error?.message && !["invalid endpoint", "invalid content type", "invalid repository response", "draft response limit"].includes(error.message);
+      setStatus(browser, timedOut ? "GitHub took too long to list repositories. Retry, or use Add custom Git URL."
+        : known ? error.message : "Repository access unavailable. Retry loading repositories.");
+      browser.querySelector("[data-github-retry]").hidden = false;
     } finally {
       window.clearTimeout(timer);
       if (state.controller === controller) {
+        window.clearTimeout(state.slowTimer);
+        state.slowTimer = 0;
         state.controller = null;
         state.loading = false;
-        browser.querySelector("[data-github-results]")?.removeAttribute("aria-busy");
-        if (state.query && !state.complete && browserCurrent(browser, state, sequence) && browser.querySelector("[data-github-retry]").hidden) void loadRepositories(browser, state);
+        if (!state.retryTimer) setGithubBusy(browser, false);
+        if (state.query && !state.complete && !state.retryTimer && browserCurrent(browser, state, sequence) && browser.querySelector("[data-github-retry]").hidden) void loadRepositories(browser, state);
       }
     }
+  };
+  // Start a load that is still wanted: one deferred while Create was closed,
+  // or one cancelled when it closed.
+  const resumeRepositories = (browser, state) => {
+    if (state.pending && !state.loading && !state.retryTimer && !state.queryTimer) void loadRepositories(browser, state);
   };
   const wireGithubBrowsers = () => {
     document.querySelectorAll("[data-github-browser]").forEach((browser) => {
       if (browsers.has(browser)) return;
-      const state = { sequence: 0, controller: null, queryTimer: 0, query: "", nextToken: "", seenTokens: new Set(), pages: 0, matches: 0, rendered: 0, pruned: false, complete: false, loading: false };
+      const state = { sequence: 0, controller: null, queryTimer: 0, retryTimer: 0, slowTimer: 0, attempt: 0, pending: false, query: "", nextToken: "", seenTokens: new Set(), pages: 0, matches: 0, rendered: 0, pruned: false, complete: false, loading: false };
       browsers.set(browser, state);
       if (browser.querySelector("[data-github-results-page]")) {
         state.complete = true; // Static design fixture already contains its example rows.
         updateConnectionStatus(browser);
       } else {
         resetBrowser(browser, state);
-        if (connectionState(browser) === "connected") void loadRepositories(browser, state);
+        void loadRepositories(browser, state);
       }
+      syncRepositoryActions(browserForm(browser));
       const owner = browser.closest("[data-drawer]") || browserForm(browser)?.parentElement;
       if (owner) {
         const observer = new MutationObserver(() => {
-          if (!browser.isConnected) { cancelBrowser(state); observer.disconnect(); }
-          else if (!draftIsOpen(browserForm(browser))) cancelBrowser(state);
+          if (!browser.isConnected) { cancelBrowser(browser, state); observer.disconnect(); }
+          else if (!draftIsOpen(browserForm(browser))) cancelBrowser(browser, state);
+          else resumeRepositories(browser, state);
         });
         observer.observe(owner, { childList: true, attributes: true, attributeFilter: ["hidden", "data-open"] });
       }
     });
   };
   document.addEventListener("input", (event) => {
-    if (!(event.target instanceof HTMLInputElement) || !event.target.matches("[data-github-filter]")) return;
+    if (!(event.target instanceof HTMLInputElement)) return;
+    if (event.target.matches('[data-repository-row] [name^="repo_url_"]')) {
+      syncRepositoryActions(event.target.closest("[data-environment-form]"));
+      return;
+    }
+    if (!event.target.matches("[data-github-filter]")) return;
     const browser = event.target.closest("[data-github-browser]");
     const state = browsers.get(browser);
     if (!state) return;
     resetBrowser(browser, state);
-    if (connectionState(browser) === "connected") state.queryTimer = window.setTimeout(() => void loadRepositories(browser, state), 250);
+    if (connectionState(browser) === "connected") {
+      state.queryTimer = window.setTimeout(() => {
+        state.queryTimer = 0;
+        void loadRepositories(browser, state);
+      }, 250);
+    }
+  });
+  document.addEventListener("codewire:form-structure-edited", (event) => {
+    if (event.target instanceof HTMLFormElement && event.target.matches("[data-environment-form]")) syncRepositoryActions(event.target);
   });
   document.addEventListener("submit", (event) => {
     if (event.submitter?.closest?.("[data-github-browser]")) event.preventDefault();
@@ -847,10 +984,20 @@
     if (!(repository instanceof HTMLButtonElement) || repository.disabled) return;
     const form = browserForm(browser);
     if (!(form instanceof HTMLFormElement) || !draftIsOpen(form)) return;
+    const key = repositoryKey(repository.dataset.repositoryUrl);
+    if (!key) return;
     const existing = Array.from(form.querySelectorAll("[data-repository-row]"));
-    let row = existing.find((item) => item.querySelector('[name^="repo_url_"]')?.value === repository.dataset.repositoryUrl);
-    if (!row) row = existing.find((item) => ["repo_url_", "repo_branch_", "repo_mount_"].every((prefix) => !item.querySelector(`[name^="${prefix}"]`)?.value.trim()));
-    row ||= appendTemplateRow(form, "[data-repository-template]", "[data-repository-rows]", "[data-repository-row]");
+    // The action follows the rows: a repository already in the list is removed.
+    const chosen = existing.filter((item) => repositoryKey(item.querySelector('[name^="repo_url_"]')?.value) === key);
+    if (chosen.length) {
+      chosen.forEach((item) => item.remove());
+      form.dispatchEvent(new Event("codewire:form-structure-edited", { bubbles: true }));
+      editDraft(form);
+      setStatus(browser, `${repository.dataset.repositoryName || "Repository"} removed.`);
+      return;
+    }
+    const row = existing.find(emptyRepositoryRow)
+      || (!repositoryLimitReached(form) && appendTemplateRow(form, "[data-repository-template]", "[data-repository-rows]", "[data-repository-row]"));
     if (!row) return;
     row.querySelector('[name^="repo_url_"]').value = repository.dataset.repositoryUrl || "";
     if (!row.querySelector('[name^="repo_branch_"]').value) row.querySelector('[name^="repo_branch_"]').value = repository.dataset.repositoryBranch || "";

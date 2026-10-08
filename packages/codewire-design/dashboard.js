@@ -530,6 +530,16 @@ document.addEventListener("htmx:afterSwap", (event) => {
 
 if (app) {
   const closeSidebar = () => app.setAttribute("data-mobile-open", "false");
+  // The desktop sidebar collapses to a rail and expands again. The choice is
+  // this browser's own, kept in a cookie so every page renders it at once.
+  const setSidebarCollapsed = (collapsed) => {
+    app.setAttribute("data-sidebar-collapsed", String(collapsed));
+    const secure = window.location.protocol === "https:" ? "; Secure" : "";
+    document.cookie = collapsed
+      ? `codewire.sidebar=collapsed; Path=/; Max-Age=31536000; SameSite=Lax${secure}`
+      : `codewire.sidebar=; Path=/; Max-Age=0; SameSite=Lax${secure}`;
+    app.querySelector(`.cw-sidebar-slot ${collapsed ? "[data-sidebar-expand]" : "[data-sidebar-close]"}`)?.focus();
+  };
   const currentDrawer = () => document.querySelector("[data-drawer]");
   let historyIndex = 0;
   let historyRollback = null;
@@ -646,9 +656,26 @@ if (app) {
       openQuickSearch();
       return;
     }
+    if (target?.closest(".cw-sidebar-slot [data-sidebar-close], .cw-sidebar-slot [data-sidebar-expand]")) {
+      setSidebarCollapsed(!!target.closest("[data-sidebar-close]"));
+      return;
+    }
     if (target?.closest("[data-sidebar-close], .cw-mobile-drawer a")) {
       closeSidebar();
     }
+  });
+
+  // A menu marked data-menu-close-on-action closes once one of its actions has
+  // run, as a desktop menu does, and returns focus to its own button. An
+  // action that opens a dialog (aria-haspopup) leaves it open so the dialog
+  // can return focus to that action.
+  document.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const action = target?.closest("button:not([aria-haspopup])");
+    const menu = action?.closest("details[data-menu-close-on-action][open]");
+    if (!menu || action.closest("summary") || !menu.querySelector(":scope > .cw-menu-panel")?.contains(action)) return;
+    menu.removeAttribute("open");
+    menu.querySelector(":scope > summary")?.focus({ preventScroll: true });
   });
 
   document.addEventListener("keydown", (event) => {

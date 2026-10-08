@@ -10,6 +10,14 @@ const ORIGIN = "https://codewire-dev.sh";
 const TERMINAL_ATTACH_MS = 30_000;
 const button = (owner: Page | Locator, name: string) => owner.getByRole("button", { name, exact: true });
 const dialog = (page: Page, name: string) => page.getByRole("dialog", { name, exact: true });
+// The Sandbox workspace keeps terminal actions and Sandbox actions in two
+// menus; open one, as a person does, before using what it holds.
+async function workspaceMenu(page: Page, menu: "Terminal actions" | "More actions"): Promise<Locator> {
+  const details = page.locator(menu === "Terminal actions" ? "[data-terminal-menu]" : "[data-sandbox-menu]");
+  if (!(await details.evaluate((node) => (node as HTMLDetailsElement).open))) await details.locator(":scope > summary").click();
+  await expect(details).toHaveJSProperty("open", true);
+  return details;
+}
 
 function passed(name: string, started: number): void {
   console.error(`[dev-ux] ${name}:passed duration_ms=${Date.now() - started}`);
@@ -23,6 +31,24 @@ async function stage(name: string, operation: () => Promise<void>, started = Dat
     throw error instanceof DevUxError && error.stage.startsWith(`${name}-`) ? error : new DevUxError(name);
   }
   passed(name, started);
+}
+
+// Why a shell command's marker did not appear, from fixed tokens only: the
+// selected terminal was paused by the Sandbox readiness check or account
+// check, or detached, at that moment; or the command's own echo is on screen
+// with no output, with different values, or not at all. Each read is
+// immediate, so a terminal that reconnects later is not mistaken for one
+// that stayed attached.
+async function shellFailure(page: Page, rows: Locator, echo: string, marker: RegExp): Promise<string> {
+  const status = page.locator("[data-terminal-session-status]:not([hidden])");
+  const read = async (locator: Locator) => (await locator.textContent({ timeout: 1_000 }).catch(() => "")) ?? "";
+  const connection = (await read(status.locator("[data-terminal-connection]"))).trim();
+  const toggle = (await read(status.locator("[data-terminal-toggle]"))).trim();
+  const text = await rows.innerText({ timeout: 1_000 }).catch(() => "");
+  if (/^(Sandbox status is unavailable|Checking )/.test(connection)) return "paused";
+  if (toggle !== "Disconnect") return "detached";
+  if (marker.test(text)) return "mismatch";
+  return text.includes(echo) ? "no-output" : "no-echo";
 }
 
 async function visit(page: Page, path: string): Promise<void> {
@@ -447,8 +473,10 @@ export async function runDevUxWalkthrough(page: Page, options: {
     owned.beforeCreate();
     submitted = Date.now();
     await button(page, "Create Sandbox").click();
-    // Create lands on the new Sandbox's page, which has several live statuses.
-    await expect(page.getByRole("status").filter({ hasText: "Sandbox creation started" })).toBeVisible();
+    // Create lands on the new Sandbox's page. Its "Sandbox creation started."
+    // notice is withdrawn once the Sandbox runs, so a fast start may never
+    // show it; the landing URL is the acceptance.
+    await expect(page).toHaveURL(/\/[0-9a-f-]{36}\/\?message=environment-created$/);
     accepted = Date.now();
   });
   const id = await owned.createdId(deadline);
@@ -488,8 +516,8 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await page.mouse.down();
     await page.mouse.move(bounds.x + bounds.width, bounds.y + bounds.height / 2, { steps: 12 });
     await page.mouse.up();
-    await button(page, "Copy selection").click();
-    await expect(page.locator("[data-terminal-copy-status]")).toHaveText("Selection copied.");
+    await button(await workspaceMenu(page, "Terminal actions"), "Copy selection").click();
+    await expect(page.locator("[data-terminal-session-status]:not([hidden]) [data-terminal-copy-status]")).toHaveText("Selection copied.");
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("__UX_COPY__");
   });
   const rename = dialog(page, "Rename terminal");
@@ -503,7 +531,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     job = /__UX_JOB__(\d+)__/.exec(await rows.innerText())![1];
   });
   await stage("terminal-tabs-rename", async () => {
-    await button(page, "Rename terminal").click();
+    await button(await workspaceMenu(page, "Terminal actions"), "Rename terminal").click();
     await rename.getByLabel("Terminal name", { exact: true }).fill("UX shell");
     await button(rename, "Save name").click();
   });
@@ -526,7 +554,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     expect(/__UX_SECOND__unset__(\d+)__/.exec(await rows.innerText())![1]).not.toBe(pid);
   });
   await stage("terminal-tabs-reload", async () => {
-    await button(page, "Rename terminal").click();
+    await button(await workspaceMenu(page, "Terminal actions"), "Rename terminal").click();
     await rename.getByLabel("Terminal name", { exact: true }).fill("UX logs");
     await button(rename, "Save name").click();
     await page.reload({ waitUntil: "domcontentloaded" });
@@ -534,14 +562,34 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(page.getByRole("tab", { name: "UX logs", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", secondId!);
   });
-  await stage("terminal-tabs-reconnect", async () => {
+  // Each step of the reconnect journey reports itself, so a Dev failure
+  // names the step rather than the whole journey.
+  await stage("terminal-tabs-reconnect-select", async () => {
     await page.getByRole("tab", { name: "UX shell", exact: true }).click();
+  });
+  // A restored tab may still be attaching after the reload.
+  await stage("terminal-tabs-reconnect-attached", async () => {
+    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
+  });
+  await stage("terminal-tabs-reconnect-disconnect", async () => {
     await button(page, "Disconnect").click();
+    await expect(button(page, "Reconnect")).toBeEnabled();
+  });
+  await stage("terminal-tabs-reconnect-retained", async () => {
     await expect(rows).toContainText(`__UX_PID__${pid}__`);
+  });
+  await stage("terminal-tabs-reconnect-attach", async () => {
     await button(page, "Reconnect").click();
     await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
-    await send("test \"$(jobs -pr)\" = \"$CW_UX_JOB\" && kill -0 \"$CW_UX_JOB\" && printf '__UX_RESUMED__%s__%s__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\" \"$PWD\" \"$CW_UX_JOB\"");
-    await expect(rows).toContainText(`__UX_RESUMED__preserved__${pid}__/tmp__${job}__`);
+  });
+  await stage("terminal-tabs-reconnect-shell", async () => {
+    // Always print, so a changed shell reports a mismatch instead of silence.
+    await send("printf '__UX_RESUMED__%s__%s__%s__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\" \"$PWD\" \"$CW_UX_JOB\" \"$(test \"$(jobs -pr)\" = \"$CW_UX_JOB\" && kill -0 \"$CW_UX_JOB\" 2>/dev/null && echo alive || echo gone)\"");
+    try {
+      await expect(rows).toContainText(`__UX_RESUMED__preserved__${pid}__/tmp__${job}__alive__`);
+    } catch {
+      throw new DevUxError(`terminal-tabs-reconnect-shell-${await shellFailure(page, rows, "__UX_RESUMED__%s", /__UX_RESUMED__(?!%s)/)}`);
+    }
   });
   await stage("terminal-tabs-switch", async () => {
     await page.getByRole("tab", { name: "UX shell", exact: true }).press("ArrowRight");
@@ -549,10 +597,11 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", secondId!);
   });
   await stage("terminal-tabs-close", async () => {
-    await button(page, "Close terminal").click();
+    // Each tab carries its own close button, named for the tab.
+    await button(page, "Close UX logs").click();
     await button(close, "Cancel").click();
     await expect(page.getByRole("tab")).toHaveCount(2);
-    await button(page, "Close terminal").click();
+    await button(page, "Close UX logs").click();
     await button(close, "Close terminal").click();
   });
   await stage("terminal-tabs-survivor-tab", async () => {
@@ -574,16 +623,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     try {
       await expect(rows).toContainText(`__UX_SURVIVOR__preserved__${pid}__/tmp__${job}__${job}__alive__`);
     } catch {
-      // Value-blind classification from fixed tokens only: lost input or
-      // redraw, a command that ran without output, different values, or a
-      // terminal that detached.
-      const text = await rows.innerText().catch(() => "");
-      const detached = !(await button(page, "Disconnect").isEnabled().catch(() => false));
-      const kind = detached ? "detached"
-        : /__UX_SURVIVOR__(?!%s)/.test(text) ? "mismatch"
-        : text.includes("jobs -pr") ? "no-output"
-        : "no-echo";
-      throw new DevUxError(`terminal-tabs-survivor-shell-${kind}`);
+      throw new DevUxError(`terminal-tabs-survivor-shell-${await shellFailure(page, rows, "__UX_SURVIVOR__%s", /__UX_SURVIVOR__(?!%s)/)}`);
     }
   });
   await stage("terminal-tabs-mobile-fit", async () => {
@@ -686,7 +726,8 @@ export async function runDevUxWalkthrough(page: Page, options: {
     const deadline = Date.parse((await page.locator("[data-sandbox-lifetime] time").getAttribute("datetime")) ?? "");
     expect(deadline).toBeGreaterThan(Date.now());
     expect(deadline).toBeLessThanOrEqual(Date.now() + 65 * 60_000);
-    await button(page, "Resize").click();
+    const sandboxMenu = await workspaceMenu(page, "More actions");
+    await button(sandboxMenu, "Resize").click();
     const resize = dialog(page, `Resize ${owned.name}`);
     await expect(resize).toBeVisible();
     // Resize offers Create's choices with the current resources selected.
@@ -696,7 +737,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(resize.getByLabel("Disk (GiB)", { exact: true })).toHaveValue("10");
     await page.mouse.click(2, 2);
     await expect(resize).not.toBeVisible();
-    await expect(button(page, "Resize")).toBeFocused();
+    await expect(button(sandboxMenu, "Resize")).toBeFocused();
   });
   await stage("lifecycle-live-state", async () => {
     await button(page, "Stop").click();
@@ -715,12 +756,12 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(page).toHaveURL(`${ORIGIN}${detailPath}?message=environment-started`);
     await expect(page.locator("[data-sandbox-state]")).toHaveText("running", { timeout: 240_000 });
     await expect(button(page, "New terminal")).toBeEnabled({ timeout: 60_000 });
-    await button(page, "Delete").click();
+    await button(await workspaceMenu(page, "More actions"), "Delete").click();
     const deletion = dialog(page, `Delete ${owned.name}?`);
     await expect(button(deletion, "Cancel")).toBeFocused();
     await expect(deletion).toContainText("This permanently deletes the Sandbox and its workspace files.");
     await button(deletion, "Cancel").click();
-    await button(page, "Delete").click();
+    await button(await workspaceMenu(page, "More actions"), "Delete").click();
     await button(deletion, "Delete Sandbox").click();
     await expect(page).toHaveURL(`${ORIGIN}/${slug}/?message=environment-destroying&environment=${id}`);
     // Independent CLI finally cleanup proves terminal destruction, even when

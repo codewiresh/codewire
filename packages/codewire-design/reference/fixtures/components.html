@@ -28,8 +28,8 @@
       </ul>
       <ul class="gallery-row" aria-label="Sizes and shapes">
         <li><button class="cw-button cw-button--small" type="button">Small</button></li>
-        <li><button class="cw-button cw-button--outline cw-button--small" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-filter"/></svg>Filter</button></li>
-        <li><button class="cw-button cw-button--accent cw-button--pill" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg>Create Sandbox</button></li>
+        <li><button class="cw-button cw-button--outline cw-button--small" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-filter"/></svg><span>Filter</span></button></li>
+        <li><button class="cw-button cw-button--accent cw-button--pill" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg><span>Create Sandbox</span></button></li>
         <li><button class="cw-button cw-button--pill cw-button--large" type="button">Sign in</button></li>
         <li><button class="cw-icon-button" type="button" aria-label="Copy"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-copy"/></svg></button></li>
       </ul>
@@ -98,6 +98,16 @@
         <div class="cw-field"><label class="cw-label" for="g-mount">Mount path</label><label class="cw-input-group cw-mono"><span aria-hidden="true">/workspace/</span><input class="cw-input" id="g-mount" value="codewire"></label></div>
         <div class="cw-field"><label class="cw-label" for="g-large">Email, on sign-in pages</label><input class="cw-input cw-input--large" id="g-large" type="email" placeholder="you@example.com"></div>
       </form>
+    </div>
+  </section>
+
+  <section class="cw-card" aria-labelledby="field-row-title">
+    <header class="cw-card-header"><h2 id="field-row-title" class="cw-card-title">Field row</h2><p class="cw-card-description">Fields side by side with a trailing action. Labels share one line and controls the next, so the action is centred on the controls, not on the labels. A route sets the columns when a row holds more than one field.</p></header>
+    <div class="cw-card-content">
+      <ul class="gallery-list cw-stack">
+        <li class="cw-field-row"><div class="cw-field"><label class="cw-label" for="g-row-url">Repository URL</label><input class="cw-input" id="g-row-url" type="url" value="https://github.com/codewiresh/codewire.git"></div><button class="cw-icon-button" type="button" aria-label="Remove repository"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-close"/></svg></button></li>
+        <li class="cw-field-row"><div class="cw-field"><label class="cw-label" for="g-row-port">Internal port</label><input class="cw-input cw-mono" id="g-row-port" type="number" value="0" aria-invalid="true" aria-describedby="g-row-port-error"><p class="cw-field-error" id="g-row-port-error">Use a port from 1 to 65535.</p></div><button class="cw-icon-button" type="button" aria-label="Remove preview port"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-close"/></svg></button></li>
+      </ul>
     </div>
   </section>
 
@@ -174,6 +184,7 @@
             <a href="#menus-title">Open Sandbox</a>
             <a href="#menus-title">Ports</a>
             <form action="#"><button class="cw-menu-item" type="button">Stop Sandbox</button></form>
+            <button class="cw-menu-item" type="button" disabled>Copy selection</button>
             <details class="cw-disclosure cw-menu-danger"><summary>Delete</summary>
               <div class="cw-menu-section"><p>Workspace files and terminal history are removed.</p><button class="cw-button cw-danger-button cw-button--small" type="button">Delete permanently</button></div>
             </details>
@@ -187,7 +198,7 @@
           </form>
         </details>
         <details class="cw-menu cw-user-menu" open>
-          <summary class="cw-button cw-button--outline cw-button--small cw-button--pill">E2E Owner<svg class="cw-icon cw-user-chevrons" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevrons-up-down"/></svg></summary>
+          <summary class="cw-button cw-button--outline cw-button--small cw-button--pill"><span>E2E Owner</span><svg class="cw-icon cw-user-chevrons" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevrons-up-down"/></svg></summary>
           <div class="cw-menu-panel cw-menu-panel--end">
             <div class="cw-user-menu-identity"><strong>E2E Owner</strong><span>Authenticated account</span></div>
             <a href="#menus-title">Settings</a>
@@ -234,12 +245,17 @@
   </section>
 
   <section class="cw-card" aria-labelledby="row-button-title">
-    <header class="cw-card-header"><h2 id="row-button-title" class="cw-card-title">Row button</h2><p class="cw-card-description">One choice in a picker list: the whole row is the target.</p></header>
+    <header class="cw-card-header"><h2 id="row-button-title" class="cw-card-title">Row button</h2><p class="cw-card-description">One choice in a picker list: the whole row is the target. While rows load, a spinner sits beside the status and skeleton rows hold their place.</p></header>
     <div class="cw-card-content">
       <ul class="gallery-list">
         <li><button class="cw-row-button" type="button"><span>codewiresh/codewire<br><small class="cw-muted">Private</small></span><span>Add</span></button></li>
         <li><button class="cw-row-button" type="button" disabled><span>codewiresh/docs<br><small class="cw-muted">Already added</small></span><span>Added</span></button></li>
       </ul>
+      <ul class="gallery-list" aria-hidden="true">
+        <li class="cw-row-skeleton"><span class="cw-skeleton"></span><span class="cw-skeleton"></span></li>
+        <li class="cw-row-skeleton"><span class="cw-skeleton"></span><span class="cw-skeleton"></span></li>
+      </ul>
+      <p class="cw-help"><span class="cw-spinner" aria-hidden="true"></span> Loading GitHub repositories…</p>
     </div>
   </section>
 
@@ -317,7 +333,7 @@
     <div class="cw-card-content">
       <div class="gallery-stage">
         <dialog class="cw-dialog" open aria-labelledby="g-dialog-title">
-          <header class="cw-dialog-header"><button class="cw-button cw-button--ghost cw-dialog-back" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-left"/></svg>Back</button><h2 id="g-dialog-title">Connect Codex</h2></header>
+          <header class="cw-dialog-header"><button class="cw-button cw-button--ghost cw-dialog-back" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-left"/></svg><span>Back</span></button><h2 id="g-dialog-title">Connect Codex</h2></header>
           <div class="cw-dialog-body">
             <p>Name this credential, then approve it in OpenAI with a one-time code.</p>
             <form class="cw-form" id="g-dialog-form" action="#"><div class="cw-field"><label class="cw-label" for="g-dialog-name">Credential name</label><input class="cw-input" id="g-dialog-name"></div></form>

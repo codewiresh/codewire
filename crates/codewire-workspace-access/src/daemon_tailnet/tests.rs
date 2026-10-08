@@ -427,8 +427,8 @@ fn a_relay_allocation_must_answer_its_own_request() {
     );
 
     assert!(relay_endpoint(allocation(4, requested), requested, 3).is_err());
-    assert!(relay_endpoint(allocation(3, [disco(0x33), disco(0x22)]), requested, 3).is_err());
     assert!(relay_endpoint(allocation(3, [disco(0x22), disco(0x44)]), requested, 3).is_err());
+    assert!(relay_endpoint(allocation(3, [disco(0x22), disco(0x22)]), requested, 3).is_err());
     let mut unaddressed = allocation(3, requested);
     unaddressed.addr_ports.clear();
     assert!(relay_endpoint(unaddressed, requested, 3).is_err());
@@ -438,6 +438,17 @@ fn a_relay_allocation_must_answer_its_own_request() {
     let mut bad_server = allocation(3, requested);
     bad_server.server_disco_key = "nodekey:00".into();
     assert!(relay_endpoint(bad_server, requested, 3).is_err());
+}
+
+/// The relay sorts each pair, so half of all daemon/client key pairs come
+/// back in the other order; rejecting them left those clients with no relay.
+#[test]
+fn a_relay_allocation_may_answer_in_the_relays_canonical_order() {
+    let requested = [disco(0x33), disco(0x22)];
+    let canonical = [disco(0x22), disco(0x33)];
+    let endpoint = relay_endpoint(allocation(3, canonical), requested, 3)
+        .expect("the same pair in sorted order");
+    assert_eq!(endpoint.client_disco, canonical);
 }
 
 #[tokio::test(start_paused = true)]

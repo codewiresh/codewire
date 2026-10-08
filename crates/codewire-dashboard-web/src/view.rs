@@ -697,6 +697,8 @@ pub(crate) struct DashboardView {
     pub(crate) provisioned_cpu_millicores: i64,
     pub(crate) provisioned_memory_mb: i64,
     pub(crate) provisioned_disk_gb: i64,
+    /// This browser collapsed the desktop sidebar to its rail.
+    pub(crate) sidebar_collapsed: bool,
 }
 
 impl DashboardView {
@@ -908,6 +910,16 @@ impl EnvironmentRow {
         }
     }
 
+    /// The workspace status bar's short automatic-deletion value, read after
+    /// "Auto-delete". A scheduled deadline renders its `<time>` instead.
+    pub(crate) fn auto_delete_label(&self) -> &'static str {
+        match self.deletion_state {
+            "protected" => "off (protected)",
+            "unavailable" => "unavailable",
+            _ => "off",
+        }
+    }
+
     /// Delete was accepted: the Sandbox is going or gone, so no lifecycle,
     /// resource or connection action applies to it any more.
     pub(crate) fn deletion_started(&self) -> bool {
@@ -1054,6 +1066,9 @@ pub(crate) struct TerminalPageView {
     pub(crate) list_context: SandboxListContext,
     pub(crate) list_url: String,
     pub(crate) message: String,
+    /// The message is "Sandbox creation started.", which the page withdraws
+    /// once the Sandbox runs.
+    pub(crate) creation_notice: bool,
     pub(crate) error: String,
 }
 
@@ -1501,11 +1516,20 @@ pub(crate) struct EnvironmentCreateFormView {
     pub(crate) form_error: String,
 }
 
+/// Repository rows one Create form may submit (indexes `0..MAX`). The browser
+/// stops offering GitHub repositories at this count instead of submitting a
+/// form the server refuses.
+pub(crate) const MAX_CREATE_REPOSITORIES: usize = 108;
+
 impl EnvironmentCreateFormView {
     /// The product's default workspace image, rendered as the image field's
     /// placeholder so the browser reset control needs no copy of it.
     pub(crate) fn default_image(&self) -> &'static str {
         codewire_server_core::runtime_images::DEFAULT_WORKSPACE_IMAGE
+    }
+
+    pub(crate) fn repository_limit(&self) -> usize {
+        MAX_CREATE_REPOSITORIES
     }
 }
 

@@ -217,10 +217,13 @@ run_paths_case local_secret_sync_policy pull_request refs/pull/20012/head false 
   'policy policy_shell' scripts/dev/kind/sync-local-secrets.sh
 run_paths_case kind_runtime_images_fixture pull_request refs/pull/20014/head false \
   'policy policy_shell' scripts/ci/tests/test-kind-runtime-images.sh
+run_paths_case kind_watch_github_app_fixture pull_request refs/pull/20015/head false \
+  'policy policy_shell' scripts/ci/tests/test-kind-watch-github-app.sh
 # The retained-cluster helpers are policy even where Kind would run; any other
 # scripts/dev/kind helper still selects the Kind gate.
 run_paths_case kind_retained_helpers_main push refs/heads/main false \
-  'policy policy_shell' scripts/dev/kind/dev-loop.sh scripts/ci/tests/test-kind-runtime-images.sh
+  'policy policy_shell' scripts/dev/kind/dev-loop.sh scripts/ci/tests/test-kind-runtime-images.sh \
+  scripts/ci/tests/test-kind-watch-github-app.sh
 run_paths_case kind_deploy_helper_main push refs/heads/main false \
   'policy policy_shell' scripts/dev/kind/deploy-service.sh \
   deployments/docker/kind-dev-binary.Dockerfile
@@ -244,9 +247,9 @@ run_paths_case product_image_build_graph_kind pull_request refs/pull/2004/head t
   'deploy edge_kind go_consumer_interop go_support kind policy release runtime_confidential' \
   docker-bake.hcl scripts/ci/images/build-kind-images.sh \
   scripts/ci/images/run-rust-build.sh
-run_paths_case nexus_publication_retry pull_request refs/pull/2006/head false \
+run_paths_case harbor_runtime_pull_contract pull_request refs/pull/2006/head false \
   'go_consumer_interop go_support policy release runtime_confidential' \
-  scripts/ci/images/nexus-publication-retry-contract.sh
+  scripts/ci/tests/test-harbor-runtime-pull-contract.sh
 run_paths_case protected_runtime_signing pull_request refs/pull/2005/head false \
   'deploy go_consumer_interop go_support policy policy_shell release runtime_confidential security' \
   scripts/ci/images/cosign-private-signing-config.json \

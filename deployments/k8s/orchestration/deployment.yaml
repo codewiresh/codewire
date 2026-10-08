@@ -27,7 +27,6 @@ spec:
         app.kubernetes.io/component: orchestration
     spec:
       imagePullSecrets:
-        - name: nexus-registry
         - name: harbor-registry
       serviceAccountName: codewire-orchestration
       # Group-reads the 0440 internal TLS leaf; the image runs as 65532.

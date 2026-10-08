@@ -79,6 +79,7 @@ fn admin_audit_template_escapes_sensitive_upstream_fields() {
         provisioned_cpu_millicores: 0,
         provisioned_memory_mb: 0,
         provisioned_disk_gb: 0,
+        sidebar_collapsed: false,
     };
     let logs = vec![AuditLogRow {
         occurred: "Just now".into(),
@@ -112,6 +113,33 @@ fn admin_audit_template_escapes_sensitive_upstream_fields() {
 }
 
 #[test]
+fn the_shell_renders_the_collapsed_sidebar_and_both_sidebar_buttons() {
+    for collapsed in [false, true] {
+        let view = DashboardView {
+            sidebar_collapsed: collapsed,
+            ..Default::default()
+        };
+        let body = AdminAuditTemplate {
+            view: &view,
+            logs: &Vec::new(),
+            action: "",
+            info_selected: false,
+            warn_selected: false,
+            error_selected: false,
+            has_previous: false,
+            has_next: false,
+            previous_url: "/admin/audit",
+            next_url: "/admin/audit",
+        }
+        .render()
+        .expect("render admin audit page");
+        assert!(body.contains(&format!("data-sidebar-collapsed=\"{collapsed}\">")));
+        assert!(body.contains("data-sidebar-close aria-label=\"Collapse navigation\""));
+        assert!(body.contains("data-sidebar-expand aria-label=\"Expand navigation\""));
+    }
+}
+
+#[test]
 fn admin_accounts_template_escapes_access_request_fields() {
     let view = DashboardView {
         user_name: "Admin".into(),
@@ -137,6 +165,7 @@ fn admin_accounts_template_escapes_access_request_fields() {
         provisioned_cpu_millicores: 0,
         provisioned_memory_mb: 0,
         provisioned_disk_gb: 0,
+        sidebar_collapsed: false,
     };
     let accounts = vec![AccountAccessView {
         id: "user-safe".into(),

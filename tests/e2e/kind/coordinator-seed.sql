@@ -2,12 +2,14 @@
 -- The billing contract fixture loaded immediately before this file provides
 -- org_contract_1, usr_contract_user, its membership, and the bearer session
 -- token. Coordinator authorization additionally requires a UUID environment
--- id, while the older billing fixture deliberately uses env_contract_1.
+-- id, while the older billing fixture deliberately uses env_contract_1. Its
+-- peer token is proven at operation generation 1.
 -- The runtime fixture owner admits this stopped row only after its claim,
 -- workspace and backend exist, then retires it after all coordinator probes.
 INSERT INTO environments (
     id, org_id, created_by, type, state, desired_state, name, preset_id,
-    cpu_millicores, memory_mb, total_running_seconds, project_spec
+    cpu_millicores, memory_mb, total_running_seconds, project_spec,
+    environment_operation_generation
 )
 VALUES (
     '00000000-0000-4000-8000-000000000501',
@@ -21,5 +23,6 @@ VALUES (
     500,
     1024,
     0,
-    '{"schema_version":1,"working_directory":"/workspace"}'::jsonb
+    '{"schema_version":1,"working_directory":"/workspace"}'::jsonb,
+    1
 );

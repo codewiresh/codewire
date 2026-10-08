@@ -427,8 +427,9 @@ fn parse_disco(text: &str) -> Result<DiscoPublic> {
 }
 
 /// The tailnet endpoint for one allocation. It must answer the request it
-/// was made for: the same disco keys in the same order and the same
-/// generation, with at least one numeric relay address.
+/// was made for: the same two disco keys and the same generation, with at
+/// least one numeric relay address. The relay keeps each pair in its
+/// canonical (sorted) order, so the keys may come back either way round.
 fn relay_endpoint(
     allocation: PeerRelayAllocation,
     requested: [DiscoPublic; 2],
@@ -442,9 +443,15 @@ fn relay_endpoint(
         .iter()
         .map(|key| parse_disco(key))
         .collect::<Result<Vec<_>>>()?;
-    if disco.as_slice() != requested.as_slice() {
+    let [first, second] = disco.as_slice() else {
+        return Err(anyhow!("relay allocation answers other disco keys"));
+    };
+    let same_pair = (*first == requested[0] && *second == requested[1])
+        || (*first == requested[1] && *second == requested[0]);
+    if !same_pair {
         return Err(anyhow!("relay allocation answers other disco keys"));
     }
+    let client_disco = [*first, *second];
     let addr_ports = allocation
         .addr_ports
         .iter()
@@ -458,7 +465,7 @@ fn relay_endpoint(
     }
     Ok(UDPRelayEndpoint {
         server_disco: parse_disco(&allocation.server_disco_key)?,
-        client_disco: requested,
+        client_disco,
         lamport_id: allocation.lamport_id,
         vni: allocation.vni,
         bind_lifetime: Duration::from_nanos(allocation.bind_lifetime_ns),
@@ -551,12 +558,20 @@ pub async fn connect_daemon_tailnet(
     let local_node_key = NodePublic::from_raw(PublicKey::from(&secret).to_bytes());
     let disco_private = DiscoPrivate::generate(&mut OsRng);
     let local_disco = disco_private.public();
-    let stun = resolve_stun_servers(stun_servers_from_map(derp_map))
-        .await
-        .context("resolve DERP map STUN servers")?;
     let advertised = resolve_endpoints(grant.direct_udp_endpoints())
         .await
         .context("resolve the environment's direct UDP endpoints")?;
+    // Peers reach a daemon directly at the endpoint the platform publishes
+    // for it. Behind that endpoint a STUN answer could name only the node's
+    // outbound NAT mapping, which admits replies from that STUN server and
+    // nothing else, so STUN runs only for a daemon with no published endpoint.
+    let stun = if advertised.is_empty() {
+        resolve_stun_servers(stun_servers_from_map(derp_map))
+            .await
+            .context("resolve DERP map STUN servers")?
+    } else {
+        Vec::new()
+    };
     let relay_enabled = !grant.peer_relay_endpoints().is_empty();
     let (transport, endpoints, handle) =
         if stun.is_empty() && advertised.is_empty() && !relay_enabled {

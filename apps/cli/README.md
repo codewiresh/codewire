@@ -212,7 +212,9 @@ wrote it by absolute path, because OpenSSH runs `KnownHostsCommand` only from
 one; re-run `cw config-ssh` if you move `cw`. Host keys are trusted only
 through `KnownHostsCommand <cw> ssh known-hosts %H`, which prints the key the
 platform recorded for the environment's current workspace Pod; any failure
-refuses the connection rather than trusting on first use. The SSH server runs
+refuses the connection rather than trusting on first use. The block accepts
+only Ed25519 host keys, the one type the platform records, which also saves
+OpenSSH a second `KnownHostsCommand` run per connection. The SSH server runs
 inside the environment's sandbox, so the block also turns off agent and X11
 forwarding, GSSAPI delegation and password, keyboard-interactive and public-key
 authentication. `--ssh-option` cannot override these. `cw doctor` warns when

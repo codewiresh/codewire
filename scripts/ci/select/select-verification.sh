@@ -426,6 +426,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-preflight-openbao-native-secrets.sh|\
       scripts/ci/tests/test-sync-local-secrets.sh|\
       scripts/ci/tests/test-kind-runtime-images.sh|\
+      scripts/ci/tests/test-kind-watch-github-app.sh|\
       scripts/ci/tests/fixtures/cargo-cache-df.sh|\
       scripts/ci/verify/integration-postgres.sh|scripts/ci/tests/test-integration-postgres.sh|\
       scripts/ci/verify/resolve-cargo-target-dir.sh|\
@@ -1635,7 +1636,6 @@ if [ "$event_selected" = false ]; then
       keys/production-release.asc|\
       .gitea/workflows/observe-*.yaml|\
       scripts/ci/images/build-push-image.sh|scripts/ci/images/build-push-runtime-images.sh|\
-      scripts/ci/images/nexus-publication-retry-contract.sh|\
       scripts/ci/images/compute-image-tags.sh|\
       scripts/ci/images/copy-image-to-ghcr.sh|\
       scripts/ci/images/publish-image-to-harbor.sh|\
@@ -1646,7 +1646,6 @@ if [ "$event_selected" = false ]; then
       scripts/ci/setup/fetch-openbao-ghcr-credentials.sh|\
       scripts/ci/setup/fetch-openbao-harbor-credentials.sh|\
       scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh|\
-      scripts/ci/setup/fetch-openbao-nexus-credentials.sh|\
       scripts/ci/images/publish-image-to-ghcr.sh|\
       scripts/ci/images/resolve-published-support-pair.sh|\
       scripts/ci/images/run-skopeo-container.sh|\
@@ -1680,9 +1679,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-harbor-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh|\
-      scripts/ci/tests/test-fetch-openbao-nexus-credentials.sh|\
       scripts/ci/tests/test-forgejo-action-mirrors.sh|\
-      scripts/ci/tests/test-nexus-runtime-pull-contract.sh|\
+      scripts/ci/tests/test-harbor-runtime-pull-contract.sh|\
       scripts/ci/tests/test-cw-install-signature.sh|scripts/ci/tests/test-image-bundle.py|\
       scripts/ci/tests/test-mirror-git-tags.sh|scripts/ci/tests/test-publish-cw-release.sh|\
       scripts/ci/tests/test-mint-github-app-token.sh|\

@@ -13,7 +13,7 @@
     <p>Manage members and invitations</p>
     {% if organization.can_admin %}
     <details class="cw-menu cw-org-details"{% if page.invite_form.expanded %} open{% endif %}>
-      <summary class="cw-button cw-button--pill"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>Invite Member</summary>
+      <summary class="cw-button cw-button--pill"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg><span>Invite Member</span></summary>
       <section class="cw-drawer" aria-labelledby="invite-title">
         <header class="cw-drawer-header"><h2 id="invite-title" class="cw-card-title">Invite Member</h2><p class="cw-card-description">Send an invitation to join this organization</p></header>
         <div class="cw-drawer-body">

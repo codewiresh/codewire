@@ -228,6 +228,7 @@ run_policy_core() {
   scripts/ci/tests/test-preflight-openbao-native-secrets.sh
   scripts/ci/tests/test-sync-local-secrets.sh
   scripts/ci/tests/test-kind-runtime-images.sh
+  scripts/ci/tests/test-kind-watch-github-app.sh
   scripts/ci/tests/test-source-approval-workflow.sh
   scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh
   scripts/ci/tests/test-select-untrusted-rust-cache.sh
@@ -767,9 +768,8 @@ run_release() {
   scripts/ci/tests/test-fetch-openbao-ghcr-credentials.sh
   scripts/ci/tests/test-fetch-openbao-harbor-credentials.sh
   scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh
-  scripts/ci/tests/test-fetch-openbao-nexus-credentials.sh
   scripts/ci/tests/test-forgejo-action-mirrors.sh
-  scripts/ci/tests/test-nexus-runtime-pull-contract.sh
+  scripts/ci/tests/test-harbor-runtime-pull-contract.sh
   scripts/ci/tests/test-verify-release-tag-ref.sh
   scripts/ci/tests/test-verify-release-tag-receipt.sh
   scripts/ci/tests/test-mirror-git-tags.sh

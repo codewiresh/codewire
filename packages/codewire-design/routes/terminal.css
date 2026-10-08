@@ -1,6 +1,138 @@
-.cw-terminal-page { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 100vh; overflow: hidden; background: var(--bg-base); }
-.cw-terminal-header { display: flex; min-height: 2.75rem; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-4); border-bottom: var(--border-width) solid var(--border); background: var(--bg-secondary); color: var(--fg-primary); }
-.cw-terminal-page-header { border-bottom-color: var(--border); }
+/* The Sandbox workspace fills the console's main column beside the sidebar,
+   like a desktop terminal window: a header with the Sandbox and its actions,
+   a tab bar with one tab per terminal session, the terminal itself, and a
+   status bar. The header, tab bar and status bar keep their own height; the
+   terminal takes the rest and refits as it changes. */
+.cw-terminal-page { overflow: hidden; background: var(--bg-base); }
+.cw-workspace { display: grid; height: 100dvh; min-width: 0; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; background: var(--bg-base); }
+
+/* Header: back, name, state and resources; the actions sit on the same line. */
+.cw-workspace-header { display: flex; min-width: 0; min-height: var(--console-header); align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-4); border-bottom: var(--border-width) solid var(--border-subtle); background: var(--bg-base); }
+.cw-workspace-title { display: flex; min-width: 0; align-items: center; gap: var(--space-3); }
+.cw-workspace-title h1 { min-width: 0; margin: 0; overflow: hidden; color: var(--fg-primary); font-family: var(--font-sans); font-size: var(--text-body); font-weight: var(--weight-semibold); line-height: var(--leading-tight); text-overflow: ellipsis; white-space: nowrap; }
+.cw-workspace-title .cw-status { flex: none; }
+.cw-workspace-resources { flex: none; color: var(--fg-tertiary); font-family: var(--font-mono); font-size: var(--text-small); line-height: var(--leading-tight); white-space: nowrap; }
+.cw-terminal-back { display: inline-grid; width: var(--control-height-sm); height: var(--control-height-sm); flex: none; place-items: center; border-radius: var(--radius-md); color: var(--fg-secondary); font-size: var(--text-title); line-height: var(--leading-tight); text-decoration: none; }
+.cw-terminal-back:hover { background: var(--bg-surface-hover); color: var(--fg-primary); }
+.cw-workspace-actions { display: flex; flex: none; align-items: center; gap: var(--space-2); }
+.cw-workspace-actions form { display: contents; }
+.cw-workspace-more { --button-padding-x: var(--space-2); width: var(--control-height-sm); }
+.cw-workspace-menu-panel { width: min(20rem, calc(100vw - var(--space-8))); }
+/* Sandbox facts in the menu, on the menu items' inset. */
+.cw-workspace-details dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-1) var(--space-3); margin: 0; padding: 0 var(--space-2) var(--space-1-5); }
+.cw-workspace-details dl div { display: contents; }
+.cw-workspace-details dt { color: var(--fg-tertiary); font-size: var(--text-small); line-height: var(--leading-body); }
+.cw-workspace-details dd { min-width: 0; margin: 0; color: var(--fg-secondary); font-family: var(--font-mono); font-size: var(--text-small); line-height: var(--leading-body); overflow-wrap: anywhere; }
+
+/* Everything below the header. Short screens scroll here rather than giving
+   up the terminal's minimum output area. */
+.cw-workspace-main { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow-x: hidden; overflow-y: auto; }
+.cw-workspace-main > * { flex: none; min-width: 0; }
+.cw-workspace-notices { display: grid; gap: var(--space-2); padding: var(--space-2) var(--space-4); border-bottom: var(--border-width) solid var(--border-subtle); }
+.cw-workspace-notices:not(:has(> :not([hidden]))) { display: none; }
+.cw-workspace-notices > .cw-field-help { justify-self: start; }
+.cw-workspace-attention { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-3); }
+.cw-workspace-attention h2 { margin: 0; font-size: inherit; font-weight: var(--weight-semibold); }
+.cw-workspace-attention .cw-credential-attention { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3); }
+
+/* Terminal: tab bar, session messages, the active tab's output, status bar. */
+.cw-durable-terminal { position: relative; display: grid; min-width: 0; min-height: calc(var(--tab-bar-height) + var(--status-bar-height) + 11.25rem); flex: 1 1 auto; grid-template-rows: auto auto auto auto minmax(0, 1fr) auto; background: var(--bg-base); }
+.cw-durable-terminal > * { min-width: 0; }
+.cw-durable-terminal > .cw-terminal-tabs-bar { grid-row: 1; }
+.cw-durable-terminal > .cw-terminal-limit { grid-row: 2; }
+.cw-durable-terminal > .cw-terminal-session-message { grid-row: 3; }
+.cw-durable-terminal > .cw-terminal-reload { grid-row: 4; }
+.cw-durable-terminal > .cw-terminal-empty, .cw-durable-terminal > .cw-terminal-panels { grid-row: 5; grid-column: 1; }
+/* With no tabs open the output container is shown but empty; the message
+   shares its cell and stays above it. */
+.cw-durable-terminal > .cw-terminal-empty { z-index: 1; }
+.cw-durable-terminal > .cw-workspace-statusbar { grid-row: 6; }
+
+/* Tabs scroll inside the bar, never the page. New terminal stays in reach
+   after the last tab, and the terminal menu stays at the end. */
+.cw-terminal-tabs-bar { display: flex; min-height: var(--tab-bar-height); align-items: stretch; border-bottom: var(--border-width) solid var(--border-subtle); background: var(--bg-secondary); }
+.cw-terminal-tabs-bar nav { display: flex; min-width: 0; flex: 0 1 auto; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
+.cw-terminal-tabs-bar ul { display: flex; margin: 0; padding: 0; list-style: none; }
+.cw-terminal-tab-item { position: relative; display: flex; flex: none; align-items: center; border-right: var(--border-width) solid var(--border-subtle); }
+.cw-terminal-tab-item:has(> [aria-selected="true"]) { background: var(--bg-base); }
+.cw-terminal-tab-item:has(> [aria-selected="true"])::before { position: absolute; inset: 0 0 auto; height: var(--tab-indicator); background: var(--fg-primary); content: ""; }
+.cw-terminal-tab { display: flex; min-height: var(--tab-bar-height); align-items: center; gap: var(--space-2); padding: 0 var(--space-1) 0 var(--space-4); border: 0; background: transparent; color: var(--fg-tertiary); font: inherit; font-size: var(--text-secondary); line-height: var(--leading-tight); white-space: nowrap; cursor: pointer; }
+.cw-terminal-tab:hover, .cw-terminal-tab[aria-selected="true"] { color: var(--fg-primary); }
+.cw-terminal-tab:focus-visible { outline-offset: calc(-1 * var(--focus-ring-width)); }
+.cw-terminal-tab-label { max-width: 12rem; overflow: hidden; text-overflow: ellipsis; }
+.cw-terminal-tab-close { display: inline-grid; width: var(--touch-target); height: var(--touch-target); flex: none; place-items: center; margin-right: var(--space-2); padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--fg-tertiary); cursor: pointer; }
+.cw-terminal-tab-close:hover:not(:disabled) { background: var(--bg-surface-hover); color: var(--fg-primary); }
+.cw-terminal-tab-close:disabled { color: var(--fg-disabled); cursor: not-allowed; }
+.cw-terminal-tab-close .cw-icon { width: var(--icon-size-sm); height: var(--icon-size-sm); }
+.cw-terminal-new { align-self: center; margin-inline: var(--space-2); }
+.cw-terminal-menu { align-self: center; margin: 0 var(--space-2) 0 auto; }
+.cw-terminal-menu-panel { width: min(20rem, calc(100vw - var(--space-8))); }
+/* Each tab's own actions; only the selected tab's group is shown. */
+.cw-terminal-tab-actions, .cw-terminal-tab-action-group { display: grid; gap: var(--space-0-5); }
+.cw-terminal-existing { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.cw-terminal-existing label { grid-column: 1 / -1; color: var(--fg-secondary); font-size: var(--text-small); }
+.cw-terminal-existing select { min-width: 0; }
+
+/* Session-wide messages read as thin strips above the output. */
+.cw-terminal-session-message, .cw-terminal-limit { margin: 0; padding: var(--space-1-5) var(--space-4); border-bottom: var(--border-width) solid var(--border-subtle); color: var(--fg-secondary); font-size: var(--text-small); line-height: var(--leading-body); }
+.cw-terminal-session-message:empty { display: none; }
+.cw-terminal-reload { padding: var(--space-1-5) var(--space-4); color: var(--accent-text); font-size: var(--text-small); }
+.cw-terminal-empty { display: grid; place-content: center; margin: 0; padding: var(--space-8) max(var(--space-4), calc((100% - var(--measure)) / 2)); color: var(--fg-tertiary); font-size: var(--text-secondary); line-height: var(--leading-body); text-align: center; }
+
+/* Output fills its cell edge to edge with one small inner gutter. */
+.cw-terminal-panels { min-height: 0; background: var(--bg-base); }
+.cw-terminal-tab-panel { display: grid; height: 100%; min-height: 0; grid-template-rows: auto minmax(0, 1fr); }
+.cw-terminal-tab-panel > .cw-terminal-notice { grid-row: 1; }
+.cw-terminal-tab-panel > .cw-terminal-panel { grid-row: 2; }
+.cw-terminal-notice { margin: 0; padding: var(--space-1-5) var(--space-4); border-bottom: var(--border-width) solid var(--border-subtle); color: var(--fg-secondary); font-size: var(--text-small); line-height: var(--leading-body); }
+.cw-terminal-panel { position: relative; height: 100%; min-height: 12rem; overflow: hidden; background: var(--bg-base); }
+.cw-terminal-panel--fullscreen { min-height: 100%; }
+.cw-durable-terminal .cw-terminal-panel { min-height: 0; contain: size; }
+.cw-terminal-panel .terminal { height: 100%; padding: var(--space-3) var(--space-4); }
+.cw-durable-terminal .cw-terminal-panel .terminal { padding: var(--space-3) var(--space-4) var(--space-2); }
+/* xterm paints its viewport black behind the gutter; match the theme so the
+   output reads edge to edge with no inset box. */
+.cw-terminal-panel .xterm .xterm-viewport { background-color: var(--bg-base); }
+
+/* Status bar: the active terminal's connection, then the Sandbox's facts. */
+.cw-workspace-statusbar { display: flex; min-height: var(--status-bar-height); flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-5); padding: var(--space-1) var(--space-4); border-top: var(--border-width) solid var(--border-subtle); background: var(--bg-secondary); color: var(--fg-tertiary); font-size: var(--text-small); line-height: var(--leading-tight); }
+.cw-terminal-statuses { display: flex; min-width: 0; align-items: center; }
+.cw-terminal-statuses:not(:has(> :not([hidden]))) { display: none; }
+.cw-terminal-session-status { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); }
+.cw-terminal-connection { display: inline-flex; min-width: 0; align-items: center; gap: var(--space-1-5); margin: 0; color: var(--fg-secondary); }
+.cw-terminal-connection::before { width: var(--space-1-5); height: var(--space-1-5); flex: none; border-radius: var(--radius-pill); background: var(--fg-tertiary); content: ""; }
+.cw-terminal-connection[data-tone="success"]::before { background: var(--success); }
+.cw-terminal-connection[data-tone="warning"]::before { background: var(--warning); }
+.cw-terminal-connection[data-tone="danger"]::before { background: var(--destructive); }
+.cw-terminal-connection[data-tone="danger"] { color: var(--destructive); }
+/* The dot centres on the label's capitals, as a button's icon does. */
+@supports (text-box: trim-both cap alphabetic) { .cw-terminal-connection > span { text-box: trim-both cap alphabetic; } }
+.cw-workspace-facts { display: flex; min-width: 0; flex: 1 1 auto; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-5); margin: 0; }
+.cw-workspace-facts > div { display: flex; min-width: 0; gap: var(--space-1-5); }
+.cw-workspace-facts dd { margin: 0; color: var(--fg-secondary); }
+.cw-workspace-fact-id { margin-left: auto; }
+.cw-workspace-fact-id dd { color: var(--fg-tertiary); font-family: var(--font-mono); }
+
+/* Copy feedback and the presentation fixture's toolbar. An empty live region
+   stays in the accessibility tree without taking a place in the row. */
+.cw-terminal-copy-status { margin: 0; color: var(--fg-secondary); font-family: var(--font-mono); font-size: var(--text-small); }
+.cw-terminal-copy-status:empty { position: absolute; width: var(--hairline); height: var(--hairline); padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.cw-terminal-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); padding: var(--space-2) var(--space-3); border-bottom: var(--border-width) solid var(--border); }
+.cw-terminal-toolbar > .cw-terminal-copy-status { flex: 1; }
+.cw-sandbox-terminal:not(.cw-durable-terminal) { display: grid; grid-template-rows: auto minmax(11.25rem, 1fr); }
+.cw-sandbox-terminal:not(.cw-durable-terminal) .cw-terminal-panel--fullscreen { min-height: 0; }
+
+/* The single-session preview, its drawer and the no-JavaScript fallback. */
+.cw-terminal-status { position: absolute; inset: 0; z-index: 2; display: grid; place-items: center; margin: 0; background: var(--backdrop); color: var(--fg-secondary); font-size: var(--text-secondary); }
+.cw-terminal-status[data-tone="danger"] { color: var(--destructive); }
+.cw-terminal-drawer { position: fixed; right: 0; bottom: 0; left: 0; z-index: 50; display: grid; grid-template-rows: auto minmax(0, 1fr); height: 40vh; min-height: 18rem; border-top: var(--border-width) solid var(--border); box-shadow: var(--shadow-popover); background: var(--bg-base); }
+.cw-terminal-drawer .cw-terminal-panel { min-height: 0; }
+.cw-terminal-fallback { position: absolute; inset: 20% auto auto 50%; width: min(90vw, 32rem); transform: translateX(-50%); padding: var(--space-5); border: var(--border-width) solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--fg-primary); }
+.cw-terminal-fallback h2 { margin: 0 0 var(--space-2); font-size: var(--text-title); }
+.cw-terminal-fallback p { margin: 0 0 var(--space-3); color: var(--fg-secondary); }
+.cw-terminal-fallback code { display: block; padding: var(--space-3); border-radius: var(--radius-sm); background: var(--bg-surface); color: var(--fg-primary); overflow-wrap: anywhere; }
+
+/* Lifecycle controls the readiness controller hides; the resize dialog. */
 [data-sandbox-action][hidden], [data-sandbox-resize][hidden], [data-sandbox-observation-status][hidden], [data-sandbox-observation-reload][hidden] { display: none; }
 [data-resize-open][hidden], dialog[data-sandbox-resize] [hidden] { display: none; }
 dialog[data-sandbox-resize][open] { display: flex; flex-direction: column; width: min(32rem, calc(100vw - 2rem)); overflow: hidden; }
@@ -11,57 +143,10 @@ dialog[data-sandbox-resize] legend { margin-bottom: var(--space-3); font-weight:
 dialog[data-sandbox-resize] .cw-field-help { margin: 0; }
 dialog[data-sandbox-resize] [data-resize-consents] > label:not([hidden]) { display: flex; align-items: baseline; gap: var(--space-2); }
 dialog[data-sandbox-resize] > .cw-dialog-body > p:first-child { margin-top: 0; }
-.cw-terminal-heading, .cw-terminal-actions { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
-.cw-terminal-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cw-terminal-back { color: var(--fg-secondary); font-size: var(--text-title); text-decoration: none; }
-.cw-terminal-back:hover { color: var(--fg-primary); }
-.cw-terminal-page-main { min-height: 0; }
-.cw-terminal-panel { position: relative; height: 100%; min-height: 12rem; overflow: hidden; background: var(--bg-base); }
-.cw-terminal-panel--fullscreen { min-height: 100%; }
-.cw-sandbox-terminal { display: grid; grid-template-rows: auto minmax(0, 1fr); }
-.cw-sandbox-terminal .cw-terminal-panel--fullscreen { min-height: 0; }
-.cw-durable-terminal { grid-template-rows: auto auto auto auto auto minmax(0, 1fr); min-height: 0; min-width: 0; }
-.cw-durable-terminal > * { min-width: 0; }
-.cw-durable-terminal > .cw-terminal-tabs-bar { grid-row: 1; }
-.cw-durable-terminal > .cw-terminal-limit { grid-row: 2; }
-.cw-durable-terminal > .cw-terminal-session-tools { grid-row: 3; }
-.cw-durable-terminal > .cw-terminal-session-message { grid-row: 4; }
-.cw-durable-terminal > .cw-terminal-reload { grid-row: 5; }
-.cw-durable-terminal > .cw-terminal-empty, .cw-durable-terminal > .cw-terminal-panels { grid-row: 6; }
-.cw-terminal-tabs-bar { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-3); border-bottom: var(--border-width) solid var(--border); }
-.cw-terminal-tabs-bar nav { min-width: 0; flex: 1; overflow-x: auto; }
-.cw-terminal-tabs-bar ul { display: flex; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
-[data-terminal-tabs][hidden] { display: none; }
-.cw-terminal-tabs-bar li { flex: none; }
-.cw-terminal-tabs-bar [role="tab"] { padding: var(--space-2) var(--space-3); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--fg-secondary); font-family: var(--font-mono); font-size: var(--text-small); cursor: pointer; }
-.cw-terminal-tabs-bar [aria-selected="true"] { background: var(--bg-surface-hover); color: var(--fg-primary); }
-.cw-terminal-tabs-bar > button { flex: none; }
-.cw-terminal-session-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3); }
-.cw-terminal-session-tools form { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
-.cw-terminal-session-tools label { color: var(--fg-secondary); font-size: var(--text-small); }
-.cw-terminal-session-tools select { max-width: 18rem; }
-.cw-terminal-session-message { margin: 0; padding-inline: var(--space-3); color: var(--fg-secondary); font-size: var(--text-small); }
-.cw-terminal-session-message:empty { display: none; }
-.cw-terminal-limit { margin: 0; padding: var(--space-1-5) var(--space-3) 0; color: var(--fg-tertiary); font-size: var(--text-small); }
-.cw-terminal-empty { margin: 0; padding: var(--space-4); color: var(--fg-secondary); font-size: var(--text-secondary); }
-.cw-terminal-panels { min-height: 0; }
-.cw-terminal-tab-panel { display: grid; grid-template-rows: auto auto minmax(0, 1fr); height: 100%; min-height: 0; }
-.cw-terminal-tab-panel > .cw-terminal-toolbar { grid-row: 1; }
-.cw-terminal-tab-panel > [data-terminal-history-gap] { grid-row: 2; }
-.cw-terminal-tab-panel > .cw-terminal-panel { grid-row: 3; }
-/* Detail chrome must not consume the shell's minimum usable output area.
-   Short viewports scroll the main area rather than stretching the footer. */
-.cw-sandbox-detail-main .cw-terminal-panel {
-  contain: size;
-}
 
-.cw-sandbox-detail-main .cw-durable-terminal { grid-template-rows: auto auto auto auto auto minmax(min-content, 1fr); }
-.cw-sandbox-detail-main .cw-terminal-tab-panel { grid-template-rows: auto auto minmax(11.25rem, 1fr); }
-.cw-sandbox-detail-main .cw-sandbox-terminal:not(.cw-durable-terminal) { grid-template-rows: auto minmax(11.25rem, 1fr); }
-/* Setup progress (A5c): the section owns the page gutter; each stage and
+/* Setup progress (A5c): the section owns the workspace gutter; each stage and
    repository row shares one inset through the row rule below. */
-.cw-setup-progress { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-5); border-bottom: var(--border-width) solid var(--border-subtle); }
-.cw-setup-progress[hidden], .cw-setup-progress [hidden] { display: none; }
+.cw-setup-progress { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-bottom: var(--border-width) solid var(--border-subtle); }
 .cw-setup-progress h2 { margin: 0; font-size: var(--text-secondary); font-weight: var(--weight-semibold); }
 .cw-setup-progress-status { margin: 0; color: var(--fg-secondary); font-size: var(--text-small); }
 .cw-setup-progress .cw-alert { margin: 0; }
@@ -75,36 +160,21 @@ dialog[data-sandbox-resize] > .cw-dialog-body > p:first-child { margin-top: 0; }
 .cw-setup-stage[data-state="failed"] > .cw-setup-row .cw-setup-stage-label,
 .cw-setup-stage[data-state="failed"] > .cw-setup-row .cw-setup-stage-detail { color: var(--destructive); }
 .cw-setup-row progress { inline-size: var(--control-width-sm); accent-color: var(--accent); }
-.cw-terminal-tab-panel[hidden], .cw-terminal-panels[hidden], .cw-terminal-empty[hidden], .cw-terminal-reload[hidden] { display: none; }
-.cw-terminal-tab-panel .cw-terminal-toolbar { flex-wrap: wrap; }
-.cw-terminal-toolbar button[hidden] { display: none; }
-.cw-terminal-connection { margin: 0; color: var(--fg-secondary); font-family: var(--font-mono); font-size: var(--text-small); }
-.cw-terminal-reload { padding: var(--space-2) var(--space-3); color: var(--accent); }
-.cw-terminal-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); padding: var(--space-2) var(--space-3); border-bottom: var(--border-width) solid var(--border); }
-.cw-terminal-copy-status { flex: 1; margin: 0; color: var(--fg-secondary); font-family: var(--font-mono); font-size: var(--text-small); }
-.cw-terminal-panel .terminal { height: 100%; padding: var(--space-2); }
-.cw-terminal-status { position: absolute; inset: 0; z-index: 2; display: grid; place-items: center; margin: 0; background: var(--backdrop); color: var(--fg-secondary); font-size: var(--text-secondary); }
-.cw-terminal-status[hidden] { display: none; }
-.cw-terminal-status[data-tone="danger"] { color: var(--destructive); }
-.cw-terminal-footer { display: flex; min-width: 0; flex-wrap: wrap; gap: var(--space-2) var(--space-5); padding: var(--space-1-5) var(--space-4); border-top: var(--border-width) solid var(--border); background: var(--bg-secondary); color: var(--fg-tertiary); font-family: var(--font-mono); font-size: var(--text-micro); }
-.cw-terminal-drawer { position: fixed; right: 0; bottom: 0; left: 0; z-index: 50; display: grid; grid-template-rows: auto minmax(0, 1fr); height: 40vh; min-height: 18rem; border-top: var(--border-width) solid var(--border); box-shadow: var(--shadow-popover); background: var(--bg-base); }
-.cw-terminal-drawer[hidden] { display: none; }
-.cw-terminal-drawer .cw-terminal-panel { min-height: 0; }
-.cw-terminal-fallback { position: absolute; inset: 20% auto auto 50%; width: min(90vw, 32rem); transform: translateX(-50%); padding: var(--space-5); border: var(--border-width) solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--fg-primary); }
-.cw-terminal-fallback h1 { margin: 0 0 var(--space-2); font-size: var(--text-title); }
-.cw-terminal-fallback p { margin: 0 0 var(--space-3); color: var(--fg-secondary); }
-.cw-terminal-fallback code { display: block; padding: var(--space-3); border-radius: var(--radius-sm); background: var(--bg-surface); color: var(--fg-primary); overflow-wrap: anywhere; }
 
 @media (max-width: 48rem) {
-  .cw-terminal-header { padding-inline: var(--space-3); }
+  /* Phones: the name and state on one line and the actions on the next; the
+     resources and the Sandbox ID move to the More actions menu. */
+  .cw-workspace-header { flex-wrap: wrap; row-gap: var(--space-2); padding-inline: var(--space-3); }
+  .cw-workspace-title { flex: 1 1 100%; gap: var(--space-2); }
+  .cw-workspace-resources, .cw-workspace-facts > .cw-workspace-fact-id { display: none; }
+  /* The actions row, not the More actions button, anchors its menu, so the
+     panel's end meets the row's end and stays on screen. */
+  .cw-workspace-actions { position: relative; flex: 1 1 100%; flex-wrap: wrap; }
+  .cw-workspace-actions > .cw-menu { position: static; }
+  .cw-workspace-notices, .cw-terminal-session-message, .cw-terminal-limit, .cw-terminal-notice, .cw-workspace-statusbar { padding-inline: var(--space-3); }
+  .cw-setup-progress { padding-inline: var(--space-3); }
+  .cw-durable-terminal .cw-terminal-panel .terminal { padding-inline: var(--space-3); }
+  .cw-terminal-tab { padding-left: var(--space-3); }
+  .cw-workspace-statusbar { gap: var(--space-1) var(--space-4); }
   .cw-terminal-drawer { height: 55vh; }
-  .cw-terminal-heading .cw-status { display: none; }
-  /* Resources and the Sandbox ID wrap to two tight lines on phones. */
-  .cw-terminal-footer { gap: var(--space-1) var(--space-3); }
-  .cw-terminal-session-tools select { width: 100%; max-width: 100%; }
-  .cw-terminal-session-tools form { display: grid; grid-template-columns: minmax(0, 1fr) auto; width: 100%; }
-  .cw-terminal-session-tools form > label { grid-column: 1 / -1; }
-  .cw-terminal-session-tools select { min-width: 0; }
-  .cw-terminal-tab-panel .cw-terminal-copy-status { flex-basis: 100%; }
-  .cw-terminal-copy-status:empty { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 }

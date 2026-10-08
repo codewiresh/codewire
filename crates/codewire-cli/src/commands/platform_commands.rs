@@ -1966,8 +1966,11 @@ const SSH_CW_PLACEHOLDER: &str = "{cw}";
 /// Kerberos credentials or a password prompt to it, and host keys are trusted
 /// only through `KnownHostsCommand`: the environment's recorded key, fetched
 /// through the authenticated API (`cw ssh known-hosts`), failing closed with
-/// no first-use trust and no known_hosts file. OpenSSH keeps the first value
-/// it obtains, so the block is written before the user's own entries.
+/// no first-use trust and no known_hosts file. The recorded key is always
+/// Ed25519, and naming that one algorithm also stops OpenSSH from running
+/// `KnownHostsCommand` a second time, before key exchange, only to order the
+/// host key algorithms. OpenSSH keeps the first value it obtains, so the block
+/// is written before the user's own entries.
 pub(crate) const MANAGED_SSH_DIRECTIVES: &[(&str, &str)] = &[
     ("ProxyCommand", "{cw} shell --stdio %n"),
     ("User", "codewire"),
@@ -1975,6 +1978,7 @@ pub(crate) const MANAGED_SSH_DIRECTIVES: &[(&str, &str)] = &[
     ("UserKnownHostsFile", "/dev/null"),
     ("GlobalKnownHostsFile", "/dev/null"),
     ("KnownHostsCommand", "{cw} ssh known-hosts %H"),
+    ("HostKeyAlgorithms", "ssh-ed25519"),
     ("UpdateHostKeys", "no"),
     ("ForwardAgent", "no"),
     ("ForwardX11", "no"),

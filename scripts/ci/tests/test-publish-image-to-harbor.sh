@@ -37,7 +37,6 @@ cat >"$work/bin/copy-helper" <<'SH'
 set -euo pipefail
 [[ "${HARBOR_PUBLISH_USERNAME:?}" == 'robot$codewire+publisher' ]]
 [[ "$(<"${HARBOR_PUBLISH_PASSWORD_FILE:?}")" == synthetic-harbor-publisher-password ]]
-[[ -z "${NEXUS_REGISTRY_PASSWORD_FILE:-}" ]]
 printf '%s\n' "$*" >>"${FAKE_COPY_LOG:?}"
 [[ "${FAKE_COPY_FAILURE:-0}" != 1 ]]
 SH
@@ -130,9 +129,6 @@ grep -qxF removed "$FAKE_DOCKER_LOG" || fail 'the pull auth volume was not remov
 if grep -rqF synthetic- "$FAKE_COPY_LOG" "$FAKE_SKOPEO_LOG" "$work/runtime.out"; then
   fail 'a registry credential reached command arguments or output'
 fi
-if grep -rqiF nexus "$FAKE_COPY_LOG" "$FAKE_SKOPEO_LOG" "$FAKE_FETCH_LOG"; then
-  fail 'Harbor publication referenced Nexus'
-fi
 
 reset_logs
 "$PUBLISH" --support-pair "$harbor/base@$digest" "$harbor/workspace@$digest" "$source_sha" \
@@ -152,7 +148,7 @@ grep -qxF "$harbor/workspace@$digest $harbor/workspace keep-${digest/:/-}" "$FAK
 # Compiled-in defaults already in Harbor are only kept; the public mirror is
 # never contacted.
 mapfile -t pinned < <(
-  grep -ohE 'registry\.example\.invalid/codewire/(workspace|daemon|gateway)@sha256:[0-9a-f]{64}' \
+  grep -ohE 'registry\.example\.invalid/codewire/(workspace|daemon)@sha256:[0-9a-f]{64}' \
     "$ROOT/crates/codewire-server-core/src/runtime_images.rs" | sort -u
 )
 [[ "${#pinned[@]}" -ge 2 ]] || fail 'source does not pin Harbor workspace and daemon defaults'
@@ -197,9 +193,9 @@ fi
 if "$PUBLISH" --keep "ghcr.io/codewiresh/workspace@$digest" >"$work/bad-keep.out" 2>&1; then
   fail 'a non-Harbor keep source was accepted'
 fi
-if "$PUBLISH" "nexus-system-cluster.example.invalid/oci-promoted/codewire/daemon@$digest" \
-    "$harbor/daemon" "$source_sha" >"$work/nexus-source.out" 2>&1; then
-  fail 'a Nexus source reference was accepted'
+if "$PUBLISH" "ghcr.io/codewiresh/daemon@$digest" \
+    "$harbor/daemon" "$source_sha" >"$work/foreign-source.out" 2>&1; then
+  fail 'a non-Harbor source reference was accepted'
 fi
 
 reset_logs

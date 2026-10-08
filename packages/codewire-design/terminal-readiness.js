@@ -20,8 +20,9 @@
 
   function showDeadline(node, detail) {
     if (detail.deletionState !== "scheduled") {
-      node.textContent = { unscheduled: "Not currently scheduled", protected: "Protected from automatic deletion",
-        unavailable: "Deletion deadline unavailable" }[detail.deletionState];
+      // Read after the status bar's "Auto-delete" label.
+      node.textContent = { unscheduled: "off", protected: "off (protected)",
+        unavailable: "unavailable" }[detail.deletionState];
       return;
     }
     const date = new Date(detail.shutdownAt);
@@ -72,7 +73,9 @@
     // Ask for setupRunning explicitly: the server omits it for pages that
     // predate it, whose closed-shape check would otherwise reject the response.
     const url = `/${encodeURIComponent(slug)}/${environmentId}/_fragments/terminal-readiness?fields=setup`;
-    const button = root.querySelector("[data-terminal-readiness-refresh]");
+    // The workspace keeps Refresh sandbox status in its More actions menu.
+    const button = root.querySelector("[data-terminal-readiness-refresh]")
+      || document.querySelector("[data-terminal-readiness-refresh]");
     const heading = document.querySelector("[data-sandbox-observation]");
     const observesDetail = heading?.dataset.sandboxEnvironmentId === environmentId;
     let submissionPending = false;
@@ -91,6 +94,10 @@
       const status = heading.querySelector("[data-sandbox-observation-status]");
       const reload = heading.querySelector("[data-sandbox-observation-reload]");
       heading.dataset.observationAvailable = String(available);
+      // "Sandbox creation started." is news only until the Sandbox runs.
+      if (value?.running === true) {
+        for (const notice of document.querySelectorAll("[data-sandbox-creation-notice]")) notice.hidden = true;
+      }
       if (available) {
         const state = heading.querySelector("[data-sandbox-state]");
         state.textContent = stateLabels[detail.state] || detail.state;
@@ -185,6 +192,9 @@
       document.dispatchEvent(new CustomEvent("codewire:sandbox-status", {
         detail: { environmentId, available, running: value?.running === true,
           setupComplete: value?.setupComplete === true, setupRunning: value?.setupRunning === true,
+          // Asked to run and on its way up, not stopped and not failed.
+          starting: value?.running !== true && value?.detail?.desiredState === "started"
+            && !["error", "build failed"].includes(value?.detail?.state),
           actionsAllowed: value?.detail?.actionsAllowed === true,
           pending: value?.detail?.pending !== false, checking: !settled },
       }));

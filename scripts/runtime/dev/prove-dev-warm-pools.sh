@@ -24,6 +24,9 @@ PROOF_TTL="${PROOF_TTL:-1h}"
 PROOF_HITS="${PROOF_HITS:-20}"
 PROOF_MIN_HITS="${PROOF_MIN_HITS:-}"
 PROOF_TIMEOUT_SECONDS="${PROOF_TIMEOUT_SECONDS:-600}"
+# The path the timed first SSH must take (cw's CW_TAILNET_EXPECTED_TRANSPORT).
+FIRST_SSH_TRANSPORT="${FIRST_SSH_TRANSPORT:-direct_udp}"
+FIRST_SSH_TIMEOUT_SECONDS="${FIRST_SSH_TIMEOUT_SECONDS:-120}"
 POOL_WAIT_SECONDS="${POOL_WAIT_SECONDS:-300}"
 PROOF_TMP_PARENT="${PROOF_TMP_PARENT:-$ROOT/.tmp}"
 CW_BIN="${CW_BIN:-}"
@@ -36,6 +39,10 @@ JOURNEYS_GIVEN=0
 # Done-when targets on Dev: pool hit to an enabled terminal (no repository).
 TARGET_HIT_P50_MS=5000
 TARGET_HIT_P95_MS=10000
+# Owner target (2026-10-07): a warm create is usable over SSH, carried by
+# direct UDP, in under 5 s.
+TARGET_FIRST_SSH_P50_MS=5000
+TARGET_FIRST_SSH_P95_MS=10000
 
 POOL_PREFIX="cw-pool-"
 SHADOW_PREFIX="shadow-pool-"
@@ -55,6 +62,8 @@ CREATED_ENVS=()
 WARM_IDS=()
 COLD_IDS=()
 HIT_TIMES=()
+FIRST_SSH_WARM=()
+FIRST_SSH_PID=""
 FAILURES=0
 RESULTS=()
 POOL_NAME=""
@@ -78,6 +87,8 @@ Journeys (default: preflight hits miss off-shape invariants, then stats when
               carry the pool revision and reach its daemon, own no gateway
               object, serve SSH presenting the host key the platform
               recorded (OpenSSH through cw, the managed block's settings),
+              and is timed from the create to its first OpenSSH command
+              over --first-ssh-transport (no WebSocket fallback),
               and its warm-member bridge must select exactly the bound Pod
               (skipped, with a message, while the fork's sandbox-uid label
               is absent); with --sql-cmd, a completed access_ready stage and
@@ -85,7 +96,8 @@ Journeys (default: preflight hits miss off-shape invariants, then stats when
               side
   miss        with the pool full, members + 1 creates at once: at least one
               finds the pool empty, gets a fresh Sandbox and still starts
-  off-shape   a shape no pool holds goes cold through its own shadow pool
+  off-shape   a shape no pool holds goes cold through its own shadow pool;
+              its first SSH is timed like a hit's
   invariants  unbound members: no environment label or token, no API token,
               only workspace audiences, a current pool revision, no ingress,
               younger than 24 h, not on a cordoned node; with --sql-cmd, no
@@ -93,7 +105,8 @@ Journeys (default: preflight hits miss off-shape invariants, then stats when
               environment with a live binding
   stats       with --sql-cmd: warm and cold `complete` p50/p95 and stage
               p50s over this run's environments, against the Done-when
-              targets (hit <= 5 s p50, <= 10 s p95)
+              targets (hit <= 5 s p50, <= 10 s p95); hits also report warm
+              create-to-first-SSH p50/p95 against <= 5 s p50, <= 10 s p95
 
 Acceptance needs at least 20 warm hits (the default).
 
@@ -105,6 +118,8 @@ Options:
                           coordinator's roq.sh wrapper; adds binding,
                           billing-at-bind and stage-duration checks
   --enforce-targets       Fail when the warm p50/p95 targets are missed
+  --first-ssh-transport T Path the timed first SSH must take: direct_udp
+                          (default), udp_relay or derp
   --cw-bin PATH           Prebuilt cw binary (default: build one)
   --keep                  Keep created environments
   -h, --help              Show this help
@@ -187,6 +202,7 @@ while (($# > 0)); do
     --min-hits) [[ $# -ge 2 ]] || die "--min-hits requires a value"; PROOF_MIN_HITS="$2"; shift 2 ;;
     --sql-cmd) [[ $# -ge 2 ]] || die "--sql-cmd requires a value"; SQL_CMD="$2"; shift 2 ;;
     --enforce-targets) ENFORCE_TARGETS=1; shift ;;
+    --first-ssh-transport) [[ $# -ge 2 ]] || die "--first-ssh-transport requires a value"; FIRST_SSH_TRANSPORT="$2"; shift 2 ;;
     --cw-bin) [[ $# -ge 2 ]] || die "--cw-bin requires a value"; CW_BIN="$2"; shift 2 ;;
     --keep) KEEP=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -205,6 +221,11 @@ for dimension in PROOF_CPU PROOF_MEMORY PROOF_DISK OFF_SHAPE_CPU; do
   [[ "${!dimension}" =~ ^[1-9][0-9]*$ ]] || die "$dimension must be a positive integer"
 done
 [[ "$OFF_SHAPE_CPU" != "$PROOF_CPU" ]] || die "OFF_SHAPE_CPU must differ from PROOF_CPU"
+case "$FIRST_SSH_TRANSPORT" in
+  direct_udp|udp_relay|derp) ;;
+  *) die "--first-ssh-transport must be direct_udp, udp_relay or derp" ;;
+esac
+[[ "$FIRST_SSH_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "FIRST_SSH_TIMEOUT_SECONDS must be a positive integer"
 [[ -n "${CODEWIRE_DEV_SMOKE_API_KEY:-}" ]] ||
   die "CODEWIRE_DEV_SMOKE_API_KEY is required; run through scripts/runtime/dev/with-dev-smoke-auth.sh"
 if [[ "$JOURNEYS_GIVEN" == 0 && -n "$SQL_CMD" ]]; then
@@ -236,7 +257,7 @@ for journey in "${JOURNEYS[@]}"; do
   case "$journey" in hits|miss|off-shape) NEEDS_CW=1 ;; esac
 done
 for journey in "${JOURNEYS[@]}"; do
-  [[ "$journey" != hits ]] || require_cmd ssh
+  case "$journey" in hits|off-shape) require_cmd ssh ;; esac
 done
 if [[ "$NEEDS_CW" == 1 && -z "$CW_BIN" ]]; then
   require_cmd cargo
@@ -321,15 +342,79 @@ daemon_reachable() { in_workspace "$1" 'true' >/dev/null 2>&1; }
 # server presents exactly the recorded key. The block's commands carry no
 # server; they find it through CODEWIRE_SERVER_URL.
 ssh_presents_recorded_key() {
-  local id="$1" config="$TMPDIR_PROOF/ssh_config"
-  if [[ ! -s "$config" ]]; then
-    "$CW_BIN" --server "$CODEWIRE_SERVER_URL" config-ssh --ssh-config-file "$config" >/dev/null ||
-      { log "cw config-ssh could not write the managed SSH block"; return 1; }
-  fi
+  local id="$1" config
+  config="$(managed_ssh_config)" || return 1
   env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL" timeout 120 ssh -F "$config" -T \
     -o BatchMode=yes -o ConnectTimeout=60 \
     "cw-$id" true </dev/null >/dev/null 2>"$TMPDIR_PROOF/ssh-$id.err" ||
     { log "ssh: cw-$id: $(sed 's/[[:cntrl:]]//g' "$TMPDIR_PROOF/ssh-$id.err" | tail -n 2 | tr '\n' ' ')"; return 1; }
+}
+
+# The block `cw config-ssh` writes, once per run.
+managed_ssh_config() {
+  local config="$TMPDIR_PROOF/ssh_config"
+  if [[ ! -s "$config" ]]; then
+    "$CW_BIN" --server "$CODEWIRE_SERVER_URL" config-ssh --ssh-config-file "$config" >/dev/null ||
+      { log "cw config-ssh could not write the managed SSH block"; return 1; }
+  fi
+  printf '%s\n' "$config"
+}
+
+# Create to the first OpenSSH command through the managed block, carried by
+# FIRST_SSH_TRANSPORT. cw then refuses any other path, WebSocket included, so
+# an attempt over the wrong path fails and the loop tries again until the
+# deadline.
+first_ssh_ms() { # ID STARTED_MS CONFIG -> elapsed ms
+  local id="$1" started="$2" config="$3" deadline
+  deadline=$(( $(date +%s) + FIRST_SSH_TIMEOUT_SECONDS ))
+  while (( $(date +%s) < deadline )); do
+    if env CODEWIRE_SERVER_URL="$CODEWIRE_SERVER_URL" CW_TAILNET_EXPECTED_TRANSPORT="$FIRST_SSH_TRANSPORT" \
+      timeout 30 ssh -F "$config" -T -o BatchMode=yes -o ConnectTimeout=20 "cw-$id" true \
+      </dev/null >/dev/null 2>&1; then
+      printf '%s\n' "$(( $(now_ms) - started ))"
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+# Time the first SSH in the background while the create proceeds.
+start_first_ssh() { # ID STARTED_MS
+  local config
+  config="$(managed_ssh_config)" || return 1
+  first_ssh_ms "$1" "$2" "$config" >"$TMPDIR_PROOF/first-ssh-$1" &
+  FIRST_SSH_PID=$!
+}
+
+# The timed first SSH in ms; empty when none succeeded in time.
+finish_first_ssh() { # ID
+  [[ -n "$FIRST_SSH_PID" ]] || return 0
+  wait "$FIRST_SSH_PID" 2>/dev/null || true
+  FIRST_SSH_PID=""
+  cat "$TMPDIR_PROOF/first-ssh-$1" 2>/dev/null || true
+}
+
+abandon_first_ssh() {
+  [[ -n "$FIRST_SSH_PID" ]] || return 0
+  kill "$FIRST_SSH_PID" 2>/dev/null || true
+  wait "$FIRST_SSH_PID" 2>/dev/null || true
+  FIRST_SSH_PID=""
+}
+
+# Log one timed first SSH; with a non-empty LIST name, append it there.
+record_first_ssh() { # LABEL ID [LIST]
+  local label="$1" id="$2" list="${3:-}" first
+  first="$(finish_first_ssh "$id")"
+  if [[ -z "$first" ]]; then
+    fail "$label: no SSH over $FIRST_SSH_TRANSPORT within ${FIRST_SSH_TIMEOUT_SECONDS} s of the create"
+    return
+  fi
+  log "$label: first SSH over $FIRST_SSH_TRANSPORT ${first} ms after the create (client side)"
+  if [[ -n "$list" ]]; then
+    local -n samples="$list"
+    samples+=("$first")
+  fi
 }
 
 # ------------------------------------------------------------- Kubernetes
@@ -588,9 +673,20 @@ journey_hits() {
     if ! wait_pool_members 1; then fail "hit $n: pool $POOL_NAME has no ready member after ${POOL_WAIT_SECONDS}s"; continue; fi
     id="$(create_env "$PROOF_CPU")" || { fail "hit $n: cw env create"; continue; }
     started="$(<"$TMPDIR_PROOF/create-started")"
-    if ! wait_ready "$id"; then fail "hit $n: $id did not become ready"; remove_env "$id" || true; continue; fi
+    start_first_ssh "$id" "$started" || fail "hit $n: could not start the first-SSH timer"
+    if ! wait_ready "$id"; then
+      abandon_first_ssh
+      fail "hit $n: $id did not become ready"
+      remove_env "$id" || true
+      continue
+    fi
     elapsed=$(( $(now_ms) - started ))
     path="$(classify "$id")"
+    if [[ "$path" == warm ]]; then
+      record_first_ssh "hit $n" "$id" FIRST_SSH_WARM
+    else
+      record_first_ssh "hit $n" "$id"
+    fi
     if [[ "$path" == warm ]]; then
       warm=$((warm + 1))
       WARM_IDS+=("$id")
@@ -625,6 +721,16 @@ journey_hits() {
   if ((${#HIT_TIMES[@]})); then
     log "client-side warm create ms (sorted): $(printf '%s\n' "${HIT_TIMES[@]}" | sort -n | tr '\n' ' ')"
     log "client-side warm p50 ms: $(printf '%s\n' "${HIT_TIMES[@]}" | percentile 50) p95 ms: $(printf '%s\n' "${HIT_TIMES[@]}" | percentile 95)"
+  fi
+  if ((${#FIRST_SSH_WARM[@]})); then
+    local first_p50 first_p95
+    first_p50="$(printf '%s\n' "${FIRST_SSH_WARM[@]}" | percentile 50)"
+    first_p95="$(printf '%s\n' "${FIRST_SSH_WARM[@]}" | percentile 95)"
+    log "warm create to first SSH over $FIRST_SSH_TRANSPORT ms (sorted): $(printf '%s\n' "${FIRST_SSH_WARM[@]}" | sort -n | tr '\n' ' ')"
+    target_check "hits: warm create to first SSH over $FIRST_SSH_TRANSPORT p50 ${first_p50} ms <= ${TARGET_FIRST_SSH_P50_MS} ms" \
+      test "$first_p50" -le "$TARGET_FIRST_SSH_P50_MS"
+    target_check "hits: warm create to first SSH over $FIRST_SSH_TRANSPORT p95 ${first_p95} ms <= ${TARGET_FIRST_SSH_P95_MS} ms" \
+      test "$first_p95" -le "$TARGET_FIRST_SSH_P95_MS"
   fi
   check "hits: at least $PROOF_MIN_HITS warm hits" test "$warm" -ge "$PROOF_MIN_HITS"
 }
@@ -671,8 +777,15 @@ journey_off_shape() {
   local id started elapsed ref launch
   id="$(create_env "$OFF_SHAPE_CPU")" || { fail "off-shape: create"; return; }
   started="$(<"$TMPDIR_PROOF/create-started")"
-  if ! wait_ready "$id"; then fail "off-shape: $id did not become ready"; remove_env "$id" || true; return; fi
+  start_first_ssh "$id" "$started" || fail "off-shape: could not start the first-SSH timer"
+  if ! wait_ready "$id"; then
+    abandon_first_ssh
+    fail "off-shape: $id did not become ready"
+    remove_env "$id" || true
+    return
+  fi
   elapsed=$(( $(now_ms) - started ))
+  record_first_ssh "off-shape" "$id"
   COLD_IDS+=("$id")
   ref="$(claim_pool_ref "$id")"
   launch="$(sandbox_launch_type "$id" || echo unknown)"

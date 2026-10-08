@@ -926,7 +926,7 @@ curl_settled() {
 auth_token_for_environment_scope() {
   local environment_id="$1" scope="$2" secret payload encoded_payload signature
   case "$scope" in
-    coordinate | daemon) ;;
+    daemon) ;;
     *)
       echo "::error::unsupported environment auth token scope: $scope" >&2
       return 1
@@ -950,6 +950,52 @@ auth_token_for_environment_scope() {
 
 daemon_auth_token_for_environment() {
   auth_token_for_environment_scope "$1" daemon
+}
+
+# Mirrors codewire_server_core::peer_token::issue, whose pinned wire vector
+# scripts/ci/tests/test-kind-build-workflow.py also checks against this
+# function: claims in a fixed order, signed with a key derived from the
+# session secret for peer tokens only.
+peer_token() {
+  local secret="$1" environment_id="$2" generation="$3" expires_at="$4"
+  local encoded_payload derived_key signature
+  case "$generation" in
+    '' | *[!0-9]* | 0)
+      echo "::error::peer token needs a positive operation generation, got '$generation'" >&2
+      return 1
+      ;;
+  esac
+  encoded_payload="$(
+    printf '{"environment_id":"%s","exp":%s,"generation":%s,"scope":"peer"}' \
+      "$environment_id" "$expires_at" "$generation" \
+      | openssl base64 -A | tr '+/' '-_' | tr -d '='
+  )"
+  derived_key="$(
+    printf '%s' 'codewire/environment-peer-token/v1' \
+      | openssl dgst -sha256 -hmac "$secret" -hex | sed 's/^.*= //'
+  )"
+  signature="$(
+    printf '%s' "$encoded_payload" \
+      | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${derived_key}" -binary \
+      | openssl base64 -A | tr '+/' '-_' | tr -d '='
+  )"
+  printf '%s.%s' "$encoded_payload" "$signature"
+}
+
+# A peer token for an environment at its current operation generation,
+# valid for nine of the coordinator's ten-minute lifetime.
+peer_token_for_environment() {
+  local environment_id="$1" secret generation
+  secret="$(
+    kubectl -n "$NS" get secret codewire-secrets \
+      -o jsonpath='{.data.SESSION_SECRET}' | base64 --decode
+  )"
+  generation="$(
+    kubectl -n "$NS" exec deploy/postgres -- \
+      psql -U codewire -d codewire -Atq -v ON_ERROR_STOP=1 \
+      -c "SELECT environment_operation_generation FROM environments WHERE id = '$environment_id'"
+  )"
+  peer_token "$secret" "$environment_id" "$generation" "$(($(date +%s) + 540))"
 }
 
 kubectl_apply() {
@@ -2595,7 +2641,7 @@ coordinator_runtime_smokes() {
     local bound_pod="$bound_sandbox"
     local bound_claim_uid bound_sandbox_uid bound_pod_ip bound_claim_status
     local bound_port_id=port_internal_connect_kind
-    local port_forward_log port_forward_pid local_port i sidecar_token
+    local port_forward_log port_forward_pid local_port i peer_token
     local internal_roots
     port_forward_log="$(mktemp)"
     # Public roots of the TLS internal listener, for host-side probes.
@@ -2749,8 +2795,8 @@ SET state = 'running', desired_state = 'started', error_reason = NULL
 WHERE id = '$bound_environment_id';
 COMMIT;
 SQL
-    # The coordinator's own coordinate-scoped capability for this environment.
-    sidecar_token="$(auth_token_for_environment_scope "$bound_environment_id" coordinate)"
+    # The environment's own peer capability at its operation generation.
+    peer_token="$(peer_token_for_environment "$bound_environment_id")"
     local internal_host="codewire-orchestration.${NS}.svc.cluster.local"
 
     kubectl -n "$NS" get configmap codewire-orchestration-internal-roots \
@@ -2791,15 +2837,15 @@ SQL
       exit 1
     fi
 
-    # A coordinate-scoped Codewire HMAC bearer is not the Mesh service's
-    # method-scoped HMAC: no other capability crosses into the listener.
+    # An environment peer token is not the Mesh service's method-scoped
+    # HMAC: no other capability crosses into the listener.
     curl_settled --cacert "$internal_roots" \
       --resolve "${internal_host}:${local_port}:127.0.0.1" \
       -X POST -H 'content-type: application/json' \
-      -H "authorization: Bearer ${sidecar_token}" -d '{}' \
+      -H "authorization: Bearer ${peer_token}" -d '{}' \
       "https://${internal_host}:${local_port}/codewire.internal.v1.MeshAuthorizationService/ResolveMeshAuthorization"
     if [ "$PROBE_CODE" != "401" ] || ! echo "$PROBE_BODY" | grep -q '"code":"unauthenticated"'; then
-      echo "::error::coordinate capability crossed into the internal listener: code=$PROBE_CODE body=$PROBE_BODY"
+      echo "::error::peer capability crossed into the internal listener: code=$PROBE_CODE body=$PROBE_BODY"
       exit 1
     fi
 
@@ -2808,7 +2854,7 @@ SQL
     # The direct Coordinate stream proves the same token is accepted by the
     # coordinator for this live environment.
     KIND_COORDINATOR_ENVIRONMENT="$bound_environment_id" \
-      KIND_COORDINATOR_SIDECAR_TOKEN="$sidecar_token" \
+      KIND_COORDINATOR_SIDECAR_TOKEN="$peer_token" \
       coordinator_ingress_smoke
   )
 }

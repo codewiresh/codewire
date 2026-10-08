@@ -231,8 +231,15 @@ cmd_watch() {
   if [ "$(credential_mode)" = real ] && [ "$(credential_origin)" != "$KIND_PUBLIC_ORIGIN" ]; then
     die "credential-service origin $(credential_origin) differs from KIND_PUBLIC_ORIGIN ${KIND_PUBLIC_ORIGIN}"
   fi
+  # The dashboard reads the GitHub App's public values once, at start; a real
+  # credential-service without them would leave Connect GitHub unconfigured.
+  GITHUB_APP_CLIENT_ID="$(app_public_value client-id)"
+  GITHUB_APP_SLUG="$(app_public_value slug)"
+  if [ "$(credential_mode)" = real ] && { [ -z "$GITHUB_APP_CLIENT_ID" ] || [ -z "$GITHUB_APP_SLUG" ]; }; then
+    die "credential-service is real but the GitHub App public values are missing from codewire-github-app-authorization; rerun make kind-credentials-real"
+  fi
   if [ "$(credential_mode)" = fake ]; then
-    log "WARNING: the credential-service is the gate's synthetic fixture; connecting GitHub, Codex or any provider will fail. Run make kind-credentials-real (needs an OpenBao login) before reviewing credentials."
+    log "WARNING: the credential-service is the gate's synthetic fixture; connecting GitHub, Codex or any provider will fail. Run make kind-credentials-real (needs an OpenBao login), then restart make kind-watch, before reviewing credentials."
   fi
   ensure_review_origin
   cmd_runtime_images
@@ -252,8 +259,6 @@ cmd_watch() {
     kind_profile_private_dir "$CARGO_TARGET_DIR" || exit $?
     export CARGO_TARGET_DIR
   fi
-  GITHUB_APP_CLIENT_ID="$(app_public_value client-id)"
-  GITHUB_APP_SLUG="$(app_public_value slug)"
   export GITHUB_APP_CLIENT_ID GITHUB_APP_SLUG
   kind_profile_unlock
   # exec so HUP/INT/TERM reach the watcher, which owns and stops its dashboard.

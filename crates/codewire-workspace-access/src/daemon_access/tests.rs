@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use codewire_daemon::execution::ProcessExecution;
 use codewire_daemon::local_transport::{local_transport, with_local_connections};
 use codewire_daemon::{Config, DaemonAuthToken, serve_grpc_with_incoming};
-use russh::{ChannelMsg, client, kex};
+use russh::{ChannelMsg, client};
 use tokio::time::timeout;
 
 use super::*;
@@ -223,10 +222,7 @@ impl client::Handler for AcceptAllKeys {
 }
 
 async fn connect(addr: SocketAddr) -> client::Handle<AcceptAllKeys> {
-    let mut config = client::Config::default();
-    config.preferred.kex =
-        Cow::Borrowed(&[kex::CURVE25519, kex::ECDH_SHA2_NISTP256, kex::DH_G14_SHA256]);
-    let mut handle = client::connect(Arc::new(config), addr, AcceptAllKeys)
+    let mut handle = client::connect(Arc::new(client::Config::default()), addr, AcceptAllKeys)
         .await
         .unwrap();
     // The transport authenticated the user before the connection arrived.

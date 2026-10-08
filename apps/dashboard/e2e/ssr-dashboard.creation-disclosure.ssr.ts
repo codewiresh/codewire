@@ -252,15 +252,19 @@ test("optional-choice failure offers retry without clearing the Create form", as
     hydratedHtml = await original.text();
     await route.fulfill({ response: original, body: loadingCreateFixture(hydratedHtml) });
   });
+  // A transient failure is retried twice by itself before Retry is offered.
   await page.route("**/fixture/_fragments/create-options", async (route) => {
     attempts += 1;
-    if (attempts === 1) await route.fulfill({ status: 503, contentType: "text/plain", body: "unavailable" });
+    if (attempts <= 3) await route.fulfill({ status: 503, contentType: "text/plain", body: "unavailable" });
     else await route.fulfill({ status: 200, contentType: "text/html", body: hydratedCreateCard(hydratedHtml) });
   });
   await page.goto(url);
   const form = page.locator("[data-environment-form]");
-  await expect(page.getByRole("button", { name: "Retry loading choices" })).toBeVisible();
+  await expect(page.locator("[data-create-optional-options] [role=status]")).toHaveText("Choices did not load. Retrying (1 of 2)…");
+  await expect(page.getByRole("button", { name: "Retry loading choices" })).toBeVisible({ timeout: 10_000 });
+  expect(attempts).toBe(3);
   await expect(page.locator("[data-github-status]")).toContainText("Repository access unavailable");
+  await expect(page.locator("[data-github-spinner]")).toBeHidden();
   const originalForm = await form.elementHandle();
   await page.getByLabel("Name", { exact: true }).fill("retry-keeps-my-name");
   await page.getByRole("button", { name: "Retry loading choices" }).click();
@@ -268,6 +272,26 @@ test("optional-choice failure offers retry without clearing the Create form", as
   await expect(page.locator("[data-github-status]")).toContainText("Repositories available through this connection");
   expect(await originalForm?.evaluate((node) => node.isConnected)).toBe(true);
   await expect(page.getByLabel("Name", { exact: true })).toHaveValue("retry-keeps-my-name");
+  expect(attempts).toBe(4);
+});
+
+test("a transient optional-choice failure recovers by itself", async ({ page }) => {
+  const url = fixtureUrl();
+  let hydratedHtml = "";
+  let attempts = 0;
+  await page.route(url, async (route) => {
+    const original = await route.fetch();
+    hydratedHtml = await original.text();
+    await route.fulfill({ response: original, body: loadingCreateFixture(hydratedHtml) });
+  });
+  await page.route("**/fixture/_fragments/create-options", async (route) => {
+    attempts += 1;
+    if (attempts === 1) await route.abort("connectionreset");
+    else await route.fulfill({ status: 200, contentType: "text/html", body: hydratedCreateCard(hydratedHtml) });
+  });
+  await page.goto(url);
+  await expect(page.locator("[data-environment-form]")).toHaveAttribute("data-create-options-loading", "false");
+  await expect(page.getByRole("button", { name: "Retry loading choices" })).toHaveCount(0);
   expect(attempts).toBe(2);
 });
 
@@ -785,6 +809,29 @@ test("Create recovery restores authored values only after current selections are
   await page.locator("[data-create-runtime] summary").click();
   await expect(page.getByLabel("Install Command")).toHaveValue("bun install");
   await expect(page.getByLabel("Startup Script")).toHaveValue("bun run dev");
+});
+
+test("restored repositories set each GitHub row's Add or Remove", async ({ page }) => {
+  const draft = {
+    ...selectionsDraft(),
+    authored: {
+      name: "restored-repositories", image: "", install_command: "", startup_script: "",
+      repositories: [{ url: "https://github.com/codewiresh/docs.git", branch: "main", mount: "docs" }],
+      port_rows: [], ttl: "",
+    },
+  };
+  await page.addInitScript(({ key, bytes }) => sessionStorage.setItem(key, bytes), { key: keyForDraft(draft), bytes: JSON.stringify(draft) });
+  await page.goto(fixtureUrl());
+  const html = await restoredCard(page, draft);
+  await page.route("**/fixture/_fragments/create-draft", (route) => route.fulfill({ status: 200, contentType: "text/html", body: html }));
+  const browser = page.locator("[data-github-browser]");
+  // Before the restore, the fixture's own row selects codewiresh/codewire.
+  await expect(browser.locator('[data-repository-name="codewiresh/codewire"]')).toHaveAccessibleName("Remove codewiresh/codewire Private");
+  await page.getByRole("button", { name: "Restore saved draft" }).click();
+  await expect(page.locator("[data-environment-form]")).toHaveAttribute("data-create-draft-restored", "true");
+  await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("https://github.com/codewiresh/docs.git");
+  await expect(browser.locator('[data-repository-name="codewiresh/docs"]')).toHaveAccessibleName("Remove codewiresh/docs Public");
+  await expect(browser.locator('[data-repository-name="codewiresh/codewire"]')).toHaveAccessibleName("Add codewiresh/codewire Private");
 });
 
 test("Create recovery keeps the restored preset lifetime when the draft left it to the default", async ({ page }) => {

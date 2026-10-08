@@ -29,7 +29,6 @@ spec:
         codewire.sh/ses-credential-generation: "1"
     spec:
       imagePullSecrets:
-        - name: nexus-registry
         - name: harbor-registry
       containers:
         - name: billing

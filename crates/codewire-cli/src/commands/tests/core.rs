@@ -80,6 +80,7 @@ Host cw-*
     UserKnownHostsFile /dev/null
     GlobalKnownHostsFile /dev/null
     KnownHostsCommand /opt/codewire/bin/cw ssh known-hosts %H
+    HostKeyAlgorithms ssh-ed25519
     UpdateHostKeys no
     ForwardAgent no
     ForwardX11 no

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copy one exact Harbor manifest, unchanged, to another tag in its Harbor
 # repository (the registry every deployment pulls from) or to the public GHCR
-# mirror. Images are built and pushed to Harbor; nothing reads Nexus here.
+# mirror. Images are built and pushed to Harbor.
 set -euo pipefail
 
 if [ "$#" -lt 3 ]; then
@@ -14,10 +14,7 @@ target_repository="$2"
 shift 2
 tags=("$@")
 
-# `gateway` is the daemon image's repository before its rename to `daemon`:
-# the compiled-in default daemon image still names a digest there, which
-# --pinned-defaults keeps until that default moves to a `daemon` digest.
-readonly source_pattern='^registry\.example\.invalid/codewire/(dashboard|derp|daemon|gateway|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})$'
+readonly source_pattern='^registry\.example\.invalid/codewire/(dashboard|derp|daemon|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})$'
 if [[ ! "$source_ref" =~ $source_pattern ]]; then
   echo "Source must be an exact supported Harbor digest reference" >&2
   exit 1

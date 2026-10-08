@@ -301,6 +301,41 @@ mod tests {
     }
 
     #[test]
+    fn rows_name_their_action_and_show_visibility_pills() {
+        let mut public = repo();
+        public.full_name = "owner/archived".into();
+        public.clone_url = "https://github.com/owner/archived.git".into();
+        public.is_private = false;
+        public.archived = true;
+        public.disabled = true;
+        let repositories = [repo(), public];
+        let html = RepositoriesTemplate {
+            repositories: &repositories,
+            next_page_token: "",
+            error: "",
+        }
+        .render()
+        .unwrap();
+        // One button per row, named "Add owner/repo ..." with the visible
+        // "+ Add" hidden from the name; the browser keeps both in step.
+        assert!(html.contains(
+            "<span class=\"cw-sr-only\" data-github-repository-verb>Add</span> <strong>owner/repo</strong> <span class=\"cw-github-repository-badges\"><span class=\"cw-badge\" data-tone=\"purple\">Private</span></span>"
+        ));
+        assert!(html.contains(
+            "<span class=\"cw-github-repository-action\" aria-hidden=\"true\" data-github-repository-action>+ Add</span>"
+        ));
+        assert!(html.contains(
+            "<strong>owner/archived</strong> <span class=\"cw-github-repository-badges\"><span class=\"cw-badge\">Public</span> <span class=\"cw-badge\" data-tone=\"warning\">Archived</span> <span class=\"cw-badge\">Unavailable</span></span>"
+        ));
+        assert_eq!(
+            html.matches(" data-repository-unavailable disabled>")
+                .count(),
+            1
+        );
+        assert!(!html.contains("<small>"));
+    }
+
+    #[test]
     fn repository_fields_are_escaped_and_invalid_metadata_fails_closed() {
         let mut repository = repo();
         repository.default_branch = "main\"><script>alert(1)</script>".into();

@@ -80,6 +80,7 @@ pub(super) async fn page(
                 return error_page(WebError::BrowserConfigurationUnavailable);
             }
         };
+    let (message, creation_notice) = detail_message(&query.message, environment.state);
     let view = TerminalPageView {
         account_id: identity.id,
         organization_id: organization.id.clone(),
@@ -87,7 +88,8 @@ pub(super) async fn page(
         websocket_origin,
         list_url: list_context.list_url(&slug),
         list_context,
-        message: super::environments::page_message(&query.message).into(),
+        message,
+        creation_notice,
         error: super::environments::page_error(&query.error).into(),
     };
     let token = page_csrf_token(&headers);
@@ -127,6 +129,20 @@ pub(crate) fn browser_websocket_origin(public_origin: &str, api_origin: &str) ->
     Some(api.as_str().trim_end_matches('/').to_owned())
 }
 
+/// The detail page's feedback, and whether it is the creation notice.
+/// "Sandbox creation started." is news only until the Sandbox runs, so a
+/// reload after that shows nothing; the page withdraws it live as well.
+fn detail_message(message: &str, environment_state: &str) -> (String, bool) {
+    let creation_notice = message == "environment-created";
+    if creation_notice && environment_state == "running" {
+        return (String::new(), false);
+    }
+    (
+        super::environments::page_message(message).into(),
+        creation_notice,
+    )
+}
+
 pub(super) fn terminal_path(slug: &str, environment_id: &str) -> String {
     let mut url = Url::parse("https://codewire.invalid").expect("static base URL");
     url.path_segments_mut()
@@ -154,6 +170,25 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.list_context.normalized().list_state, "all");
         assert_eq!(legacy.list_context.list_search, "");
+    }
+
+    #[test]
+    fn the_creation_notice_is_marked_and_withdrawn_once_the_sandbox_runs() {
+        assert_eq!(
+            detail_message("environment-created", "creating"),
+            ("Sandbox creation started.".to_owned(), true)
+        );
+        assert_eq!(
+            detail_message("environment-created", "running"),
+            (String::new(), false)
+        );
+        let (started, notice) = detail_message("environment-started", "running");
+        assert!(!started.is_empty());
+        assert!(!notice);
+        let template = include_str!("../../templates/terminal.html");
+        assert!(template.contains(
+            "{% if page.creation_notice %} data-sandbox-creation-notice{% endif %}>{{ page.message }}</p>"
+        ));
     }
 
     #[test]

@@ -261,7 +261,12 @@ impl PeerRelayAllocator {
                         let state = allocator.finish_allocation_success(key);
                         allocator.log_allocation_diagnostic("queued", state);
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %format!("{error:#}"),
+                            "{} UDP peer relay allocation failed",
+                            allocator.component
+                        );
                         let state = allocator.finish_allocation_failure(key);
                         allocator.log_allocation_diagnostic("retry_scheduled", state);
                     }

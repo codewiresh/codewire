@@ -16,8 +16,6 @@ fixture="$work/fixture"
 mkdir -p "$fixture/scripts/ci/images" "$fixture/bin" "$fixture/tmp"
 cp "$ROOT/scripts/ci/images/build-push-runtime-images.sh" \
   "$fixture/scripts/ci/images/build-push-runtime-images.sh"
-cp "$ROOT/scripts/ci/images/nexus-publication-retry-contract.sh" \
-  "$fixture/scripts/ci/images/nexus-publication-retry-contract.sh"
 mkdir -p "$fixture/scripts/ci/setup"
 cat >"$fixture/scripts/ci/setup/fetch-openbao-harbor-credentials.sh" <<'SH'
 #!/usr/bin/env bash
@@ -74,34 +72,14 @@ fi
 SH
 chmod 0755 "$fixture/bin/docker"
 
-cat >"$fixture/bin/sleep" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >>"$SLEEP_LOG"
-SH
-chmod 0755 "$fixture/bin/sleep"
-
 cat >"$fixture/scripts/ci/images/build-push-image.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 name="$1"
-if [ "${FAKE_TRANSIENT_REGISTRY_IMAGE:-}" = "$name" ]; then
-  state="${FAKE_TRANSIENT_REGISTRY_STATE:?}"
-  failures="${FAKE_TRANSIENT_REGISTRY_FAILURES:-1}"
-  count="$(cat "$state")"
-  if [ "$count" -lt "$failures" ]; then
-    printf '%s\n' "$((count + 1))" >"$state"
-    if [ "$count" -eq 0 ]; then
-      printf 'unexpected status from HEAD request to https://registry.example.invalid/v2/codewire/%s/blobs/sha256:test: 503 Service Temporarily Unavailable\n' \
-        "$name" >&2
-    else
-      printf 'login attempt to https://registry.example.invalid/v2/ failed with status: 503 Service Unavailable\n' >&2
-    fi
-    exit 1
-  fi
-fi
 if [ "${FAKE_FATAL_IMAGE:-}" = "$name" ]; then
-  printf 'non-retryable protected build failure\n' >&2
+  printf '%s\n' "$name" >>"${FAKE_FATAL_ATTEMPTS:?}"
+  printf 'unexpected status from HEAD request to https://registry.example.invalid/v2/codewire/%s/blobs/sha256:test: 503 Service Unavailable\n' \
+    "$name" >&2
   exit 1
 fi
 printf '%s|%s|%s|%s|%s|%s\n' \
@@ -116,15 +94,12 @@ chmod 0755 "$fixture/scripts/ci/images/build-push-image.sh"
 output="$work/output"
 docker_log="$work/docker.log"
 build_log="$work/build.log"
-sleep_log="$work/sleep.log"
-: >"$sleep_log"
 (
   cd "$fixture"
   PATH="$fixture/bin:$PATH" \
     RUNNER_TEMP="$fixture/tmp" \
     DOCKER_LOG="$docker_log" \
     BUILD_LOG="$build_log" \
-    SLEEP_LOG="$sleep_log" \
     GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
     GITHUB_RUN_ID=42 \
     GITHUB_RUN_ATTEMPT=3 \
@@ -144,49 +119,18 @@ for family in dashboard derp daemon mesh services; do
     fail "wrapper omitted the head built-from source for built $family"
 done
 
-transient_output="$work/transient-output"
-transient_docker_log="$work/transient-docker.log"
-transient_build_log="$work/transient-build.log"
-transient_sleep_log="$work/transient-sleep.log"
-transient_state="$work/transient-state"
-printf '0\n' >"$transient_state"
-: >"$transient_sleep_log"
-(
-  cd "$fixture"
-  PATH="$fixture/bin:$PATH" \
-    RUNNER_TEMP="$fixture/tmp" \
-    DOCKER_LOG="$transient_docker_log" \
-    BUILD_LOG="$transient_build_log" \
-    SLEEP_LOG="$transient_sleep_log" \
-    FAKE_TRANSIENT_REGISTRY_IMAGE=mesh \
-    FAKE_TRANSIENT_REGISTRY_FAILURES=2 \
-    FAKE_TRANSIENT_REGISTRY_STATE="$transient_state" \
-    GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
-    GITHUB_RUN_ID=43 \
-    GITHUB_RUN_ATTEMPT=1 \
-    GITHUB_OUTPUT="$transient_output" \
-    CODEWIRE_SCCACHE_MODE=local \
-    scripts/ci/images/build-push-runtime-images.sh
-)
-[[ "$(wc -l <"$transient_output" | tr -d ' ')" -eq 10 ]] ||
-  fail "transient registry recovery did not emit the exact five-image set with built-from sources"
-[[ "$(wc -l <"$transient_build_log" | tr -d ' ')" -eq 5 ]] ||
-  fail "transient registry recovery rebuilt a successful image"
-[[ "$(cat "$transient_state")" -eq 2 ]] ||
-  fail "transient registry recovery did not observe both injected failures"
-[[ "$(grep -c '^60$' "$transient_sleep_log")" -eq 2 ]] ||
-  fail "transient registry recovery did not use the fixed retry delay"
-
-fatal_state="$work/fatal-state"
-printf '0\n' >"$fatal_state"
+# A failed protected build, including a registry 503, stops the wrapper at
+# that image: no retry, and no later image is built.
+fatal_attempts="$work/fatal-attempts"
+: >"$fatal_attempts"
 if (
   cd "$fixture"
   PATH="$fixture/bin:$PATH" \
     RUNNER_TEMP="$fixture/tmp" \
     DOCKER_LOG="$work/fatal-docker.log" \
     BUILD_LOG="$work/fatal-build.log" \
-    SLEEP_LOG="$work/fatal-sleep.log" \
     FAKE_FATAL_IMAGE=mesh \
+    FAKE_FATAL_ATTEMPTS="$fatal_attempts" \
     GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
     GITHUB_RUN_ID=44 \
     GITHUB_RUN_ATTEMPT=1 \
@@ -194,69 +138,14 @@ if (
     CODEWIRE_SCCACHE_MODE=local \
     scripts/ci/images/build-push-runtime-images.sh
 ) >"$work/fatal.stdout" 2>"$work/fatal.stderr"; then
-  fail "non-retryable protected build failure was accepted"
+  fail "failed protected build was accepted"
 fi
-[[ ! -s "$work/fatal-sleep.log" ]] ||
-  fail "non-retryable protected build failure entered the registry retry loop"
-grep -Fq 'non-retryable protected build failure' "$work/fatal.stdout" ||
-  fail "non-retryable protected build failure was not observable"
-
-maintenance_output="$work/maintenance-output"
-maintenance_state="$work/maintenance-state"
-maintenance_sleep_log="$work/maintenance-sleep.log"
-printf '0\n' >"$maintenance_state"
-: >"$maintenance_sleep_log"
-(
-  cd "$fixture"
-  PATH="$fixture/bin:$PATH" \
-    RUNNER_TEMP="$fixture/tmp" \
-    DOCKER_LOG="$work/maintenance-docker.log" \
-    BUILD_LOG="$work/maintenance-build.log" \
-    SLEEP_LOG="$maintenance_sleep_log" \
-    FAKE_TRANSIENT_REGISTRY_IMAGE=mesh \
-    FAKE_TRANSIENT_REGISTRY_FAILURES=60 \
-    FAKE_TRANSIENT_REGISTRY_STATE="$maintenance_state" \
-    GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
-    GITHUB_RUN_ID=46 \
-    GITHUB_RUN_ATTEMPT=1 \
-    GITHUB_OUTPUT="$maintenance_output" \
-    CODEWIRE_SCCACHE_MODE=local \
-    scripts/ci/images/build-push-runtime-images.sh
-)
-[[ "$(cat "$maintenance_state")" -eq 60 ]] ||
-  fail "registry maintenance recovery did not reach its final admitted retry"
-[[ "$(grep -c '^60$' "$maintenance_sleep_log")" -eq 60 ]] ||
-  fail "registry maintenance recovery did not use sixty bounded waits"
-[[ "$(wc -l <"$maintenance_output" | tr -d ' ')" -eq 10 ]] ||
-  fail "registry maintenance recovery did not emit the exact five-image set with built-from sources"
-
-exhausted_state="$work/exhausted-state"
-exhausted_sleep_log="$work/exhausted-sleep.log"
-printf '0\n' >"$exhausted_state"
-: >"$exhausted_sleep_log"
-if (
-  cd "$fixture"
-  PATH="$fixture/bin:$PATH" \
-    RUNNER_TEMP="$fixture/tmp" \
-    DOCKER_LOG="$work/exhausted-docker.log" \
-    BUILD_LOG="$work/exhausted-build.log" \
-    SLEEP_LOG="$exhausted_sleep_log" \
-    FAKE_TRANSIENT_REGISTRY_IMAGE=mesh \
-    FAKE_TRANSIENT_REGISTRY_FAILURES=61 \
-    FAKE_TRANSIENT_REGISTRY_STATE="$exhausted_state" \
-    GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
-    GITHUB_RUN_ID=45 \
-    GITHUB_RUN_ATTEMPT=1 \
-    GITHUB_OUTPUT="$work/exhausted-output" \
-    CODEWIRE_SCCACHE_MODE=local \
-    scripts/ci/images/build-push-runtime-images.sh
-) >"$work/exhausted.stdout" 2>"$work/exhausted.stderr"; then
-  fail "exhausted registry outage was accepted"
-fi
-[[ "$(cat "$exhausted_state")" -eq 61 ]] ||
-  fail "registry retry boundary did not stop after 61 failed attempts"
-[[ "$(grep -c '^60$' "$exhausted_sleep_log")" -eq 60 ]] ||
-  fail "registry retry boundary did not use exactly 60 bounded waits"
+[[ "$(wc -l <"$fatal_attempts" | tr -d ' ')" -eq 1 ]] ||
+  fail "failed protected build was retried"
+[[ "$(cut -d'|' -f1 "$work/fatal-build.log")" = services ]] ||
+  fail "wrapper built another image after a failed protected build"
+grep -Fq '503 Service Unavailable' "$work/fatal.stderr" ||
+  fail "failed protected build was not observable"
 
 builder="$(cut -d'|' -f2 "$build_log" | sort -u)"
 [[ "$builder" =~ ^codewire-runtime-42-3-[0-9]+$ ]] ||
@@ -293,7 +182,6 @@ if (
     RUNNER_TEMP="$fixture/tmp" \
     DOCKER_LOG="$docker_log" \
     BUILD_LOG="$build_log" \
-    SLEEP_LOG="$sleep_log" \
     GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
     GITHUB_OUTPUT="$work/rejected-output" \
     CODEWIRE_SCCACHE_MODE=r2 \
@@ -310,7 +198,6 @@ if (
     RUNNER_TEMP="$fixture/tmp" \
     DOCKER_LOG="$docker_log" \
     BUILD_LOG="$build_log" \
-    SLEEP_LOG="$sleep_log" \
     GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
     GITHUB_OUTPUT="$work/untrusted-output" \
     CODEWIRE_SCCACHE_MODE=r2 \
@@ -330,7 +217,6 @@ if (
     RUNNER_TEMP="$fixture/tmp" \
     DOCKER_LOG="$docker_log" \
     BUILD_LOG="$build_log" \
-    SLEEP_LOG="$sleep_log" \
     GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
     GITHUB_OUTPUT="$work/untrusted-bucket-output" \
     CODEWIRE_SCCACHE_MODE=r2 \
@@ -354,7 +240,6 @@ protected_r2_build_log="$work/protected-r2-build.log"
     RUNNER_TEMP="$fixture/tmp" \
     DOCKER_LOG="$work/protected-r2-docker.log" \
     BUILD_LOG="$protected_r2_build_log" \
-    SLEEP_LOG="$work/protected-r2-sleep.log" \
     GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
     GITHUB_RUN_ID=46 \
     GITHUB_RUN_ATTEMPT=1 \
@@ -380,15 +265,14 @@ carried_digest() {
 head_sha=0123456789abcdef0123456789abcdef01234567
 
 run_wrapper() {
-  local output="$1" docker_log="$2" build_log="$3" sleep_log="$4" run_id="$5"
-  shift 5
+  local output="$1" docker_log="$2" build_log="$3" run_id="$4"
+  shift 4
   (
     cd "$fixture"
     PATH="$fixture/bin:$PATH" \
       RUNNER_TEMP="$fixture/tmp" \
       DOCKER_LOG="$docker_log" \
       BUILD_LOG="$build_log" \
-      SLEEP_LOG="$sleep_log" \
       GITHUB_SHA="$head_sha" \
       GITHUB_RUN_ID="$run_id" \
       GITHUB_RUN_ATTEMPT=1 \
@@ -404,7 +288,7 @@ ui_docker_log="$work/ui-docker.log"
 ui_build_log="$work/ui-build.log"
 ui_carried="$work/ui-carried"
 printf '%s\n' services mesh daemon derp >"$ui_carried"
-run_wrapper "$ui_output" "$ui_docker_log" "$ui_build_log" "$work/ui-sleep.log" 47 \
+run_wrapper "$ui_output" "$ui_docker_log" "$ui_build_log" 47 \
   FAKE_BASELINE_SHA="$baseline_sha" \
   CARRIED_FAMILIES_FILE="$ui_carried" \
   CODEWIRE_RUNTIME_CARRY_FORWARD=1 \
@@ -446,8 +330,7 @@ services_docker_log="$work/services-docker.log"
 services_build_log="$work/services-build.log"
 services_carried="$work/services-carried"
 printf '%s\n' dashboard derp daemon mesh >"$services_carried"
-run_wrapper "$services_output" "$services_docker_log" "$services_build_log" \
-  "$work/services-sleep.log" 48 \
+run_wrapper "$services_output" "$services_docker_log" "$services_build_log" 48 \
   FAKE_BASELINE_SHA="$baseline_sha" \
   CARRIED_FAMILIES_FILE="$services_carried" \
   CODEWIRE_RUNTIME_CARRY_FORWARD=1 \
@@ -474,8 +357,7 @@ grep -qx "services_built_from=${head_sha}" "$services_output" ||
 gate_off_output="$work/gate-off-output"
 gate_off_docker_log="$work/gate-off-docker.log"
 gate_off_build_log="$work/gate-off-build.log"
-run_wrapper "$gate_off_output" "$gate_off_docker_log" "$gate_off_build_log" \
-  "$work/gate-off-sleep.log" 49 \
+run_wrapper "$gate_off_output" "$gate_off_docker_log" "$gate_off_build_log" 49 \
   FAKE_BASELINE_SHA="$baseline_sha" \
   CODEWIRE_RUNTIME_CARRY_FORWARD=0 \
   CODEWIRE_DEPLOY_BASELINE_SHA="$baseline_sha" \
@@ -495,7 +377,7 @@ for family in dashboard derp daemon mesh services; do
 done
 
 if run_wrapper "$work/no-baseline-output" "$work/no-baseline-docker.log" \
-    "$work/no-baseline-build.log" "$work/no-baseline-sleep.log" 50 \
+    "$work/no-baseline-build.log" 50 \
     CODEWIRE_RUNTIME_CARRY_FORWARD=1 \
     CODEWIRE_IMAGE_STATE_DASHBOARD=unaffected \
     >"$work/no-baseline.stdout" 2>"$work/no-baseline.stderr"; then
@@ -509,8 +391,7 @@ missing_docker_log="$work/missing-docker.log"
 missing_build_log="$work/missing-build.log"
 missing_carried="$work/missing-carried"
 printf '%s\n' services daemon derp >"$missing_carried"
-run_wrapper "$missing_output" "$missing_docker_log" "$missing_build_log" \
-  "$work/missing-sleep.log" 51 \
+run_wrapper "$missing_output" "$missing_docker_log" "$missing_build_log" 51 \
   FAKE_BASELINE_SHA="$baseline_sha" \
   FAKE_MISSING_BASELINE_IMAGE=mesh \
   CARRIED_FAMILIES_FILE="$missing_carried" \
@@ -538,8 +419,7 @@ stateless_docker_log="$work/stateless-docker.log"
 stateless_build_log="$work/stateless-build.log"
 stateless_carried="$work/stateless-carried"
 printf '%s\n' dashboard derp daemon services >"$stateless_carried"
-run_wrapper "$stateless_output" "$stateless_docker_log" "$stateless_build_log" \
-  "$work/stateless-sleep.log" 52 \
+run_wrapper "$stateless_output" "$stateless_docker_log" "$stateless_build_log" 52 \
   FAKE_BASELINE_SHA="$baseline_sha" \
   CARRIED_FAMILIES_FILE="$stateless_carried" \
   CODEWIRE_RUNTIME_CARRY_FORWARD=1 \

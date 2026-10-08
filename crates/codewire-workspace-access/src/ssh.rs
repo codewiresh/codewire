@@ -1,11 +1,10 @@
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use russh::{Channel, ChannelId, MethodKind, MethodSet, Preferred, Pty, kex, server};
+use russh::{Channel, ChannelId, MethodKind, MethodSet, Pty, server};
 use thiserror::Error;
 
 use crate::daemon::{
@@ -18,14 +17,6 @@ use crate::sftp::DaemonSftpRunner;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "ssh/stock_credentials.rs"]
 mod stock_credentials;
-
-const WORKSPACE_SSH_KEX_ORDER: &[kex::Name] = &[
-    kex::CURVE25519,
-    kex::ECDH_SHA2_NISTP256,
-    kex::ECDH_SHA2_NISTP384,
-    kex::ECDH_SHA2_NISTP521,
-    kex::DH_G14_SHA256,
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshSessionRequest {
@@ -618,25 +609,10 @@ pub fn workspace_ssh_server_config() -> server::Config {
 
 pub fn apply_workspace_ssh_policy(config: &mut server::Config) {
     config.methods = workspace_ssh_auth_methods();
-    config.preferred = workspace_ssh_preferred_algorithms();
 }
 
 pub fn workspace_ssh_auth_methods() -> MethodSet {
     MethodSet::from(&[MethodKind::None][..])
-}
-
-pub fn workspace_ssh_preferred_algorithms() -> Preferred {
-    Preferred {
-        kex: Cow::Borrowed(WORKSPACE_SSH_KEX_ORDER),
-        ..Preferred::DEFAULT
-    }
-}
-
-pub fn workspace_ssh_kex_names() -> Vec<String> {
-    WORKSPACE_SSH_KEX_ORDER
-        .iter()
-        .map(|name| name.as_ref().to_string())
-        .collect()
 }
 
 pub fn build_daemon_session_start(request: SshSessionRequest) -> DaemonSessionStart {
@@ -1252,10 +1228,7 @@ mod tests {
     }
 
     fn test_client_config() -> Arc<client::Config> {
-        let mut config = client::Config::default();
-        config.preferred.kex =
-            Cow::Borrowed(&[kex::CURVE25519, kex::ECDH_SHA2_NISTP256, kex::DH_G14_SHA256]);
-        Arc::new(config)
+        Arc::new(client::Config::default())
     }
 
     async fn authenticated_client(addr: SocketAddr) -> client::Handle<AcceptAllKeys> {
@@ -1523,21 +1496,12 @@ mod tests {
         assert_eq!(&*config.methods, &[MethodKind::None]);
     }
 
+    /// OpenSSH 10 warns on every connection that does not negotiate a
+    /// post-quantum key exchange, so the server offers ML-KEM first.
     #[test]
-    fn workspace_ssh_server_config_excludes_mlkem_until_tailnet_supports_it() {
+    fn workspace_ssh_server_config_prefers_post_quantum_kex() {
         let config = workspace_ssh_server_config();
-        assert!(config.preferred.kex.contains(&kex::CURVE25519));
-        assert!(!config.preferred.kex.contains(&kex::MLKEM768X25519_SHA256));
-        assert_eq!(
-            workspace_ssh_kex_names(),
-            [
-                "curve25519-sha256",
-                "ecdh-sha2-nistp256",
-                "ecdh-sha2-nistp384",
-                "ecdh-sha2-nistp521",
-                "diffie-hellman-group14-sha256",
-            ]
-        );
+        assert_eq!(config.preferred.kex[0], kex::MLKEM768X25519_SHA256);
     }
 
     #[test]

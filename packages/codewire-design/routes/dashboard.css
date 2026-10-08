@@ -9,6 +9,16 @@
 /* Sidebar rows and controls share one gutter and one inner inset. */
 .cw-console-sidebar { --cw-sidebar-gutter: var(--space-2); --cw-sidebar-row-padding: var(--space-3); --button-padding-x: var(--cw-sidebar-row-padding); }
 .cw-console-brand-row { display: flex; height: var(--console-header); align-items: center; justify-content: space-between; padding: 0 var(--space-4); border-bottom: 1px solid var(--border-subtle); }
+/* A collapsed sidebar keeps a rail holding only the button that expands it;
+   the page takes the rest. Phones use the drawer instead. */
+.cw-console-brand-row > .cw-sidebar-expand { display: none; }
+@media (min-width: 64rem) {
+  .cw-app[data-sidebar-collapsed="true"] { --sidebar-width: var(--sidebar-rail-width); }
+  .cw-app[data-sidebar-collapsed="true"] .cw-sidebar-slot .cw-sidebar > :not(.cw-console-brand-row),
+  .cw-app[data-sidebar-collapsed="true"] .cw-sidebar-slot .cw-console-brand-row > :not(.cw-sidebar-expand) { display: none; }
+  .cw-app[data-sidebar-collapsed="true"] .cw-sidebar-slot .cw-console-brand-row { justify-content: center; padding: 0; }
+  .cw-app[data-sidebar-collapsed="true"] .cw-sidebar-slot .cw-sidebar-expand { display: inline-grid; }
+}
 .cw-console-brand img { width: 6.5rem; height: 1.5rem; object-fit: contain; object-position: left center; }
 .cw-console-brand > span:not(.cw-sr-only) { display: none; }
 .cw-mobile-bar .cw-brand img { width: 6.5rem; }

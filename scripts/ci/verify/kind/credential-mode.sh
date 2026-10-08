@@ -90,6 +90,19 @@ set_kind_frontend_url() {
   kubectl -n "$NS" rollout status deployment/codewire-billing --timeout=180s
 }
 
+# A `make kind-watch` dashboard (scripts/dev/kind/dev-loop.sh) reads the
+# GitHub App's public values once, at start, so one started before a switch
+# keeps the old ones. Find it as that script's release_watch_port does: the
+# codewire-dashboard-web listener (comm truncated to 15 characters) on
+# KIND_WATCH_ADDR's port. Without one, as in CI, print nothing; never fail.
+kind_watch_restart_hint() {
+  local addr="${KIND_WATCH_ADDR:-127.0.0.1:5182}" pid
+  pid="$(ss -Hltnp "sport = :${addr##*:}" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2 || true)"
+  [ -n "$pid" ] || return 0
+  [ "$(cat "/proc/${pid}/comm" 2>/dev/null)" = codewire-dashbo ] || return 0
+  log "A make kind-watch dashboard is running from before this switch; restart it (stop it, then make kind-watch) so it reads the GitHub App settings."
+}
+
 switch_kind_credentials_real() {
   local roots
   [ -n "$KIND_PUBLIC_ORIGIN" ] || {
@@ -113,6 +126,7 @@ switch_kind_credentials_real() {
   kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s
   set_kind_frontend_url "$KIND_PUBLIC_ORIGIN"
   log "credential-service is real; use the dashboard at ${KIND_PUBLIC_ORIGIN}"
+  kind_watch_restart_hint
 }
 
 switch_kind_credentials_fake() {
@@ -126,6 +140,7 @@ switch_kind_credentials_fake() {
     --patch-file "$fixture_patch" || return $?
   kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s
   set_kind_frontend_url "$KIND_INGRESS_URL"
+  kind_watch_restart_hint
 }
 
 run_retained_credential_mode() {

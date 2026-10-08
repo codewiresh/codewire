@@ -443,7 +443,7 @@ SH
         esac
         cat
       }
-      "$target" env-fixture coordinate
+      "$target" env-fixture daemon
       ;;
     exec_service_connect_smoke)
       # A failed stream binary must stop before any subsequent REST probes.
@@ -816,7 +816,7 @@ for hardcoded_loopback in '127.0.0.1:7233' '127.0.0.1:8084' '127.0.0.1:18092' '1
 done
 grep -Fq 'anonymous internal command was not rejected' "$COMMON" ||
   fail 'Kind internal listener probe does not assert anonymous rejection'
-grep -Fq 'coordinate capability crossed into the internal listener' "$COMMON" ||
+grep -Fq 'peer capability crossed into the internal listener' "$COMMON" ||
   fail 'Kind internal listener probe does not assert cross-scope rejection'
 if grep -Fq -e 'GatewayBindingService' -e 'codewire.internal.gateway-binding.v1' "$COMMON"; then
   fail 'Kind harness still exercises the deleted gateway binding service'
@@ -2432,10 +2432,6 @@ grep -Fq "KIND_WORKSPACE_IMAGE: $SEALED_WORKSPACE_IMAGE" \
   "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the Forgejo-proven workspace image'
 grep -Fq "KIND_DIND_IMAGE: $SEALED_DIND_IMAGE" \
   "$ROOT/.gitea/workflows/ci.yaml" || fail 'Forgejo CI does not select the approved Docker DinD image'
-if grep -Fq 'nexus-system-cluster.example.invalid/oci-approved/' \
-    "$ROOT/.gitea/workflows/ci.yaml"; then
-  fail 'Forgejo CI still uses the Nexus recovery alias for an approved Kind input'
-fi
 
 # The CI gate shards the retained suites across four matrix legs, each with its
 # own cluster and a 45-minute ceiling; Required verification aggregates the one
