@@ -9,12 +9,12 @@
 //! launcher provides them), exits with its parent and refuses debugger
 //! attachment.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use clap::Args;
-use codewire_local_credentials::FILE_STORE_DIRECTORY;
+use codewire_local_credentials::{AuthorityProtectedStore, FILE_STORE_DIRECTORY};
 use codewire_protected_store::{ProtectedStoreBackend, SelectedProtectedStore};
 
 /// The authority store as a child receives it on its command line.
@@ -30,6 +30,31 @@ pub(crate) struct ChildStoreArgs {
     /// Test-only explicit keychain file for the keychain backend.
     #[arg(long)]
     pub(crate) keychain: Option<PathBuf>,
+}
+
+/// The authority's store arguments for a child it launches.
+pub(crate) fn child_store_arguments(
+    store: &AuthorityProtectedStore,
+    authority_root: &Path,
+) -> Option<Vec<OsString>> {
+    let mut arguments = vec![
+        OsString::from("--protected-store"),
+        store.backend.as_str().into(),
+    ];
+    match (store.backend, &store.keychain) {
+        (ProtectedStoreBackend::Keychain, keychain) => {
+            if let Some(keychain) = keychain {
+                arguments.push("--keychain".into());
+                arguments.push(keychain.clone().into_os_string());
+            }
+        }
+        (ProtectedStoreBackend::File, None) => {
+            arguments.push("--protected-store-directory".into());
+            arguments.push(authority_root.join(FILE_STORE_DIRECTORY).into_os_string());
+        }
+        _ => return None,
+    }
+    Some(arguments)
 }
 
 /// The authority store a child reads, validated before any effect.

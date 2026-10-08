@@ -52,11 +52,9 @@ pub use repository::{
     run_platform_repository_executor, validate_github_https_source,
     validate_repository_ssh_runtime_path,
 };
-#[cfg(target_os = "macos")]
-pub use service::serve_os_local_credential_authority_with_broker_spawner;
-#[cfg(target_os = "linux")]
+pub use service::serve_local_credential_authority;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use service::serve_os_local_credential_authority_with_process_spawners;
-pub use service::{serve_local_credential_authority, serve_os_local_credential_authority};
 pub use transport::{AuthorityRuntimeConfig, AuthorityRuntimeError, authority_exit_code};
 pub use workload_secret::{
     LocalLaunchSecretSelection, LocalSecretProject, ResolvedWorkloadSecretMetadata,

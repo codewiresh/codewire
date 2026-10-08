@@ -20,11 +20,11 @@ use anyhow::Context as _;
 use codewire_local_credentials::{
     AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, LocalBrokerProcessConfig, LocalBrokerProcessSpawner,
     LocalBrokerSpawnError, LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner,
-    LocalRepositorySpawnError, serve_os_local_credential_authority_with_process_spawners,
+    LocalRepositorySpawnError,
 };
 use codewire_local_credentials::{
     AuthorityProtectedStore, AuthorityRuntimeConfig, AuthorityRuntimeError, LocalCredentialClient,
-    LocalCredentialError,
+    LocalCredentialError, serve_os_local_credential_authority_with_process_spawners,
 };
 use codewire_protected_store::{ProtectedStoreBackend, ProtectedStoreError};
 
@@ -34,9 +34,7 @@ use super::{
 
 #[cfg(target_os = "macos")]
 mod darwin;
-#[cfg(target_os = "linux")]
 mod platform;
-#[cfg(target_os = "linux")]
 mod ssh;
 
 /// Test and synthetic-acceptance hook: keep Keychain items in this explicit
@@ -63,15 +61,29 @@ struct LinuxCapabilityData {
     inheritable: u32,
 }
 
-#[cfg(target_os = "linux")]
+/// The authority launches the confined broker per local VM generation and the
+/// repository executor per credentialed checkout, signs SSH with one isolated
+/// agent per signature and delegates platform selections to their platform.
+/// On macOS the launcher already supplied a new session, an empty environment
+/// and standard descriptors only.
 pub(crate) async fn run_local_credential_authority(
     args: LocalCredentialAuthorityArgs,
 ) -> anyhow::Result<()> {
+    // posix_spawn has no umask attribute; set it before any file exists.
+    #[cfg(target_os = "macos")]
+    rustix::process::umask(rustix::fs::Mode::RWXG | rustix::fs::Mode::RWXO);
     let store = authority_store_from_args(&args)?;
     let config = authority_config(args.root)?;
+    #[cfg(target_os = "linux")]
     let spawner = Arc::new(CwLocalCredentialProcessSpawner {
         executable: config.executable.clone(),
         authority_root: config.root.clone(),
+    });
+    #[cfg(target_os = "macos")]
+    let spawner = Arc::new(darwin::CwLocalCredentialProcessSpawner {
+        executable: config.executable.clone(),
+        authority_root: config.root.clone(),
+        store: store.clone(),
     });
     let signer = Arc::new(ssh::LocalSshAgentAdapter::new(config.root.clone()));
     let result = serve_os_local_credential_authority_with_process_spawners(
@@ -87,31 +99,6 @@ pub(crate) async fn run_local_credential_authority(
     // An ordinary non-SSH authority never initializes tools or staging.
     signer.shutdown().await.context("drain local SSH signer")?;
     result.context("run local credential authority")
-}
-
-/// The macOS authority stores values and launches one confined broker per
-/// local VM generation, which reads the authority's own store. Repository
-/// executors, SSH signing and platform delegation stay refused. The launcher
-/// already supplied a new session, an empty environment and standard
-/// descriptors only.
-#[cfg(target_os = "macos")]
-pub(crate) async fn run_local_credential_authority(
-    args: LocalCredentialAuthorityArgs,
-) -> anyhow::Result<()> {
-    // posix_spawn has no umask attribute; set it before any file exists.
-    rustix::process::umask(rustix::fs::Mode::RWXG | rustix::fs::Mode::RWXO);
-    let store = authority_store_from_args(&args)?;
-    let config = authority_config(args.root)?;
-    let spawner = Arc::new(darwin::CwLocalCredentialBrokerSpawner {
-        executable: config.executable.clone(),
-        authority_root: config.root.clone(),
-        store: store.clone(),
-    });
-    codewire_local_credentials::serve_os_local_credential_authority_with_broker_spawner(
-        config, store, spawner,
-    )
-    .await
-    .context("run local credential authority")
 }
 
 fn authority_store_from_args(

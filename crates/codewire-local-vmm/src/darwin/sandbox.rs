@@ -46,7 +46,7 @@ const MESH_TRANSPORT_PROFILE: &CStr = c"(version 1)(deny default)\
 (allow network-inbound (local udp \"*:*\"))";
 
 /// Irreversibly confine this process to the descriptors it already holds.
-pub(crate) fn deny_all() -> io::Result<()> {
+pub fn deny_all() -> io::Result<()> {
     apply_profile(DENY_ALL_PROFILE)
 }
 

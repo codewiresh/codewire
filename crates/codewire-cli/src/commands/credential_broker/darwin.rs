@@ -12,6 +12,9 @@
 //! - reading exactly the authority's store: the file backend's entry
 //!   directory, or running Apple's `/usr/bin/security` against the keychain.
 //!
+//! A platform relay broker reads no store and dials no provider: its profile
+//! denies everything, where Linux installs Landlock and then seccomp.
+//!
 //! Every other file, network, process and Mach service is denied. Descriptors
 //! held before confinement (the authority channel and the guest bridge) keep
 //! working. Keychain exposure equals Linux Secret Service: any process of the
@@ -40,6 +43,14 @@ pub(super) fn verify_process() -> anyhow::Result<()> {
     );
     bind_to_parent_and_deny_attachment()
         .map_err(|_| anyhow::anyhow!("local credential broker is not confined"))
+}
+
+/// Install the platform relay's deny-all profile, which keeps only the guest
+/// bridge and authority channel it already holds: it reads no store and dials
+/// no provider. Irreversible.
+pub(super) fn confine_relay() -> anyhow::Result<()> {
+    codewire_local_vmm::darwin::sandbox::deny_all()
+        .map_err(|_| anyhow::anyhow!("the relay Seatbelt profile was not applied"))
 }
 
 /// Install the broker's Seatbelt profile. Irreversible for the process.

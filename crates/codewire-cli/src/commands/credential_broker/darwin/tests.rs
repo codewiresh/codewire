@@ -320,3 +320,41 @@ fn keychain_profile_reads_the_selected_keychain_through_security() {
         false,
     );
 }
+
+const RELAY_CHILD_MARKER: &str = "CODEWIRE_TEST_BROKER_RELAY_SEATBELT_CHILD";
+
+/// The platform relay keeps the bridge and authority channel it holds and is
+/// refused files, programs, the store and every network destination.
+#[test]
+fn relay_profile_keeps_only_the_descriptors_it_holds() {
+    use std::io::{Read as _, Write as _};
+
+    if std::env::var_os(RELAY_CHILD_MARKER).is_some() {
+        let (mut held, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        confine_relay().unwrap();
+        held.write_all(b"bridge frame").unwrap();
+        let mut frame = [0; 12];
+        peer.read_exact(&mut frame).unwrap();
+        assert_eq!(&frame, b"bridge frame");
+        assert_denied(std::fs::File::open("/etc/hosts"), "unrelated file");
+        assert_denied(
+            Command::new("/usr/bin/security").status(),
+            "the keychain tool",
+        );
+        for port in [443, 80, 22] {
+            assert_denied(
+                std::net::TcpStream::connect(("127.0.0.1", port)),
+                "any network destination",
+            );
+        }
+        return;
+    }
+    let status = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("commands::credential_broker::darwin::tests::relay_profile_keeps_only_the_descriptors_it_holds")
+        .arg("--nocapture")
+        .env(RELAY_CHILD_MARKER, "1")
+        .status()
+        .unwrap();
+    assert!(status.success(), "confined relay child failed");
+}

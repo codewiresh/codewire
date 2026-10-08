@@ -9,23 +9,19 @@ use codewire_access::{EnvironmentId, HttpProvider};
 use codewire_credential_broker::ProviderHttpsTransport;
 #[cfg(feature = "local-broker-synthetic-smoke")]
 use codewire_credential_broker::SyntheticOpenAiSmokeTransport;
-#[cfg(target_os = "linux")]
 use codewire_credential_broker::{
-    BrokerBridgeError, CredentialBridgeRelayOutput, run_admitted_credential_bridge_relay,
+    BrokerBridgeError, CredentialBridgeRelayOutput, OpenAiBroker, admit_credential_bridge,
+    run_admitted_credential_bridge, run_admitted_credential_bridge_relay,
 };
-use codewire_credential_broker::{
-    OpenAiBroker, admit_credential_bridge, run_admitted_credential_bridge,
-};
-use codewire_local_credentials::LocalCredentialBrokerLeaseClient;
 #[cfg(target_os = "linux")]
+use codewire_local_credentials::AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES;
 use codewire_local_credentials::{
-    AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, LocalCredentialDelegationClient,
+    LocalCredentialBrokerLeaseClient, LocalCredentialDelegationClient,
 };
 use codewire_local_vmm::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
 use codewire_local_vmm::runner_service::RunnerClient;
 #[cfg(target_os = "linux")]
 use codewire_protected_store::ConnectedOsProtectedStore;
-#[cfg(target_os = "linux")]
 use futures::StreamExt as _;
 use uuid::Uuid;
 
@@ -130,17 +126,16 @@ pub(crate) async fn run_local_credential_broker(
     // runtime domain.
     drop(daemon);
     drop(runner);
-    #[cfg(target_os = "macos")]
-    anyhow::ensure!(
-        !args.platform_delegated,
-        "platform credential relay is not available on macOS"
-    );
-    #[cfg(target_os = "linux")]
     if args.platform_delegated {
         // The original guest Ready is retained in `bridge`. This branch has
         // no provider DNS, protected-store connection, or raw lease provider.
         // The only authority endpoint is the parent's inherited FD3 channel.
+        #[cfg(target_os = "linux")]
         apply_broker_landlock_confinement().context("confine platform credential relay")?;
+        // One deny-all Seatbelt profile replaces Landlock and seccomp: the
+        // relay keeps only the bridge and authority descriptors it holds.
+        #[cfg(target_os = "macos")]
+        darwin::confine_relay().context("confine platform credential relay")?;
         let mut delegation = LocalCredentialDelegationClient::connect(
             authority_stream,
             environment_id,
@@ -148,6 +143,7 @@ pub(crate) async fn run_local_credential_broker(
         )
         .await
         .context("connect platform credential relay authority")?;
+        #[cfg(target_os = "linux")]
         apply_broker_seccomp_confinement().context("seal platform credential relay")?;
         return run_admitted_credential_bridge_relay(bridge, move |ready, input| async move {
             let output = delegation
