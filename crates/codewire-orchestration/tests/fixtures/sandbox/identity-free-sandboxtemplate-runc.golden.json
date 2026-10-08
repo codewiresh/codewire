@@ -270,7 +270,7 @@
             "command": [
               "sh",
               "-c",
-              "umask 077; mkdir -p /codewire/run/processes && chmod 0700 /codewire/run/processes && cp /usr/local/bin/cw /codewire/bin/.cw.tmp && chmod 0755 /codewire/bin/.cw.tmp && mv /codewire/bin/.cw.tmp /codewire/bin/cw"
+              "umask 022; chown 0:0 /codewire/bin && chmod 0755 /codewire/bin && chmod g-s /codewire/bin && cp /usr/local/bin/cw /codewire/bin/.cw.tmp && chmod 0555 /codewire/bin/.cw.tmp && mv /codewire/bin/.cw.tmp /codewire/bin/cw && mkdir -p /codewire/run/processes && chown 1000:1000 /codewire/run/processes && chmod 0700 /codewire/run/processes"
             ],
             "image": "git.example.invalid/codewire/daemon:golden",
             "name": "codewire-daemon-init",
@@ -293,7 +293,11 @@
                 "mountPath": "/codewire/run",
                 "name": "codewire-run"
               }
-            ]
+            ],
+            "securityContext": {
+              "runAsUser": 0,
+              "runAsGroup": 0
+            }
           }
         ],
         "restartPolicy": "Never",

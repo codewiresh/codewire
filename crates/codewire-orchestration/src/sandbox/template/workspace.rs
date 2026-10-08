@@ -498,7 +498,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     if !daemon_image_volume {
         spec.insert(
             "initContainers".into(),
-            json!([daemon_init_container(support_image)]),
+            json!([daemon_init_container(support_image, &runtime_spec.profile)]),
         );
     }
     spec.insert("containers".into(), Value::Array(containers));
@@ -650,18 +650,39 @@ fn bootstrap_resources() -> Value {
     })
 }
 
-fn daemon_init_container(support_image: &str) -> Value {
+fn daemon_init_container(support_image: &str, profile: &str) -> Value {
+    let mounts = json!([
+        { "name": DAEMON_VOLUME, "mountPath": "/codewire/bin" },
+        { "name": "codewire-run", "mountPath": "/codewire/run" },
+    ]);
+    if profile == RUNTIME_PROFILE_CONFIDENTIAL {
+        // A confidential guest keeps the workspace-user copy its policy
+        // admits; managed agents, which pin a root-owned daemon, are not
+        // offered there.
+        return json!({
+            "name": DAEMON_INIT_CONTAINER,
+            "image": support_image,
+            "command": [
+                "sh", "-c",
+                "umask 077; mkdir -p /codewire/run/processes && chmod 0700 /codewire/run/processes && cp /usr/local/bin/cw /codewire/bin/.cw.tmp && chmod 0755 /codewire/bin/.cw.tmp && mv /codewire/bin/.cw.tmp /codewire/bin/cw",
+            ],
+            "volumeMounts": mounts,
+            "resources": bootstrap_resources(),
+        });
+    }
+    // Root installs the daemon as an image volume presents it: a root-owned
+    // 0755 directory holding a root-owned 0555 executable, which the
+    // daemon's own image pin requires. Only the process directory belongs to
+    // the workspace user.
     json!({
         "name": DAEMON_INIT_CONTAINER,
         "image": support_image,
+        "securityContext": { "runAsUser": 0, "runAsGroup": 0 },
         "command": [
             "sh", "-c",
-            "umask 077; mkdir -p /codewire/run/processes && chmod 0700 /codewire/run/processes && cp /usr/local/bin/cw /codewire/bin/.cw.tmp && chmod 0755 /codewire/bin/.cw.tmp && mv /codewire/bin/.cw.tmp /codewire/bin/cw",
+            "umask 022; chown 0:0 /codewire/bin && chmod 0755 /codewire/bin && chmod g-s /codewire/bin && cp /usr/local/bin/cw /codewire/bin/.cw.tmp && chmod 0555 /codewire/bin/.cw.tmp && mv /codewire/bin/.cw.tmp /codewire/bin/cw && mkdir -p /codewire/run/processes && chown 1000:1000 /codewire/run/processes && chmod 0700 /codewire/run/processes",
         ],
-        "volumeMounts": [
-            { "name": DAEMON_VOLUME, "mountPath": "/codewire/bin" },
-            { "name": "codewire-run", "mountPath": "/codewire/run" },
-        ],
+        "volumeMounts": mounts,
         "resources": bootstrap_resources(),
     })
 }
@@ -680,7 +701,7 @@ pub(crate) fn render_workspace_client_bootstrap(opts: &TemplateOpts) -> Value {
         "environment": credentials::workspace_environment(opts),
         "volumes": [],
         "volumeMounts": [],
-        "init": daemon_init_container(""),
+        "init": daemon_init_container("", &opts.runtime_profile_spec().profile),
         "clientInit": null,
     })
 }
