@@ -309,7 +309,37 @@ fn import_codex_auth_json_at(
         return Err(CodexOAuthMaterialError::Invalid);
     }
     let tokens = parsed.tokens.ok_or(CodexOAuthMaterialError::Invalid)?;
-    if !valid_token(&tokens.access_token)
+    import_tokens_at(tokens, imported_at_unix)
+}
+
+/// Normalize the tokens of one completed Codex device login. The account is
+/// the ID token's `chatgpt_account_id` claim.
+pub(crate) fn import_codex_tokens(
+    id_token: Zeroizing<String>,
+    access_token: Zeroizing<String>,
+    refresh_token: Zeroizing<String>,
+) -> Result<CodexOAuthImport, CodexOAuthMaterialError> {
+    let imported_at_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| CodexOAuthMaterialError::Invalid)?
+        .as_secs();
+    import_tokens_at(
+        CodexAuthTokens {
+            id_token,
+            access_token,
+            refresh_token,
+            account_id: None,
+        },
+        imported_at_unix,
+    )
+}
+
+fn import_tokens_at(
+    tokens: CodexAuthTokens,
+    imported_at_unix: u64,
+) -> Result<CodexOAuthImport, CodexOAuthMaterialError> {
+    if imported_at_unix == 0
+        || !valid_token(&tokens.access_token)
         || !valid_token(&tokens.refresh_token)
         || !valid_token(&tokens.id_token)
     {

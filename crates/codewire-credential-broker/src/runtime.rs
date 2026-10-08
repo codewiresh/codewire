@@ -38,6 +38,7 @@ use crate::github_app::{
     GitHubAppUserOAuthBundle, GitHubOAuthCredential,
 };
 use crate::openai::OpenAiChatGptOAuthAdapter;
+use crate::provider_oauth::{CODEX_OAUTH_CLIENT_ID, OPENAI_TOKEN_URL};
 use crate::refresh_failure::{ProviderRejection, RefreshFailure};
 use crate::timing::{self, Phase};
 use crate::{
@@ -47,8 +48,6 @@ use crate::{
 
 const OPENAI_OPERATION: &str = "responses";
 const OPENAI_ROUTE: &str = "openai-api";
-const OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const OPENAI_OAUTH_REFRESH_URL: &str = "https://auth.openai.com/oauth/token";
 const MAX_OAUTH_REFRESH_RESPONSE_BYTES: usize = 1024 * 1024;
 const OAUTH_REFRESH_WAIT_ATTEMPTS: usize = 64;
 const OAUTH_REFRESH_WAIT_INTERVAL: Duration = Duration::from_millis(500);
@@ -2149,13 +2148,13 @@ where
     let local = OAuthRefreshError::Permanent(RefreshFailure::RequestBuild);
     let mut body = Zeroizing::new(
         serde_json::to_vec(&OAuthRefreshRequest {
-            client_id: OPENAI_OAUTH_CLIENT_ID,
+            client_id: CODEX_OAUTH_CLIENT_ID,
             grant_type: "refresh_token",
             refresh_token,
         })
         .map_err(|_| local)?,
     );
-    let target = Url::parse(OPENAI_OAUTH_REFRESH_URL).map_err(|_| local)?;
+    let target = Url::parse(OPENAI_TOKEN_URL).map_err(|_| local)?;
     let mut headers = HeaderMap::new();
     headers.insert(
         http::header::ACCEPT,
@@ -3048,7 +3047,7 @@ mod tests {
             let (method, target, headers, body) = request.into_parts();
             assert_eq!(method, Method::POST);
             match target.as_str() {
-                OPENAI_OAUTH_REFRESH_URL => {
+                OPENAI_TOKEN_URL => {
                     assert!(
                         self.start_count.load(Ordering::Acquire) > 0,
                         "provider exchange preceded Start"
@@ -3061,7 +3060,7 @@ mod tests {
                     );
                     let value: serde_json::Value =
                         serde_json::from_slice(&body).expect("refresh JSON");
-                    assert_eq!(value["client_id"], OPENAI_OAUTH_CLIENT_ID);
+                    assert_eq!(value["client_id"], CODEX_OAUTH_CLIENT_ID);
                     assert_eq!(value["grant_type"], "refresh_token");
                     assert_eq!(value["refresh_token"], "synthetic-old-refresh-token");
                     if let Some(control) = &self.refresh_control {

@@ -35,6 +35,7 @@ pub mod platform;
 mod process_test_support;
 #[cfg(any(feature = "codex-enrollment", feature = "ssh-agent"))]
 pub mod provider_enrollment;
+pub mod provider_oauth;
 mod reconnect;
 mod refresh_failure;
 mod runtime;
