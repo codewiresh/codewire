@@ -292,6 +292,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
         }
         let (ready_tx, mut ready_rx) = oneshot::channel();
         let (lease_shutdown, shutdown_rx) = watch::channel(false);
+        let last_admission = Arc::new(std::sync::Mutex::new(None));
         let mut lease_task = tokio::spawn(serve_repository_lease_channel_with_ready(
             Arc::clone(&self.authority),
             authority_stream,
@@ -300,6 +301,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
             platform_checkout,
             ready_tx,
             shutdown_rx,
+            Arc::clone(&last_admission),
         ));
         let mut lease_result = None;
         // The process and lease handles live OUTSIDE the caught operation.
@@ -346,12 +348,20 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
         }
         cancellation.ensure_live()?;
         if let Some(admitted) = admitted {
+            // The executor may have refreshed the login through this channel;
+            // compare with the last admission it was issued, so any other
+            // change while Git ran still fails the checkout.
+            let expected = last_admission
+                .lock()
+                .map_err(|_| unavailable())?
+                .take()
+                .unwrap_or(admitted);
             let authority = Arc::clone(&self.authority);
             let current = run_blocking(move || {
                 authority.admit_repository_credential_operation(&authorization)
             })
             .await?;
-            if current != admitted {
+            if current != expected {
                 return Err(Status::permission_denied(
                     "repository authorization changed",
                 ));

@@ -26,16 +26,91 @@ use super::{LocalGitCredentialHelperArgs, LocalGitRepositoryExecutorArgs};
 const GIT: &str = "/usr/bin/git";
 
 /// A connected GitHub login is stored as the Codewire App's login bundle (or,
-/// from older connections, a raw token); Git needs only its access token.
-fn github_access_token(
-    material: &[u8],
-) -> Result<zeroize::Zeroizing<String>, codewire_local_credentials::RepositoryExecutorError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| codewire_local_credentials::RepositoryExecutorError::InvalidCredential)?
-        .as_secs();
-    codewire_credential_broker::github_access_token(material, now)
-        .map_err(|_| codewire_local_credentials::RepositoryExecutorError::InvalidCredential)
+/// from older connections, a raw token). Git needs only its access token; a
+/// bundle due for renewal is refreshed with the App's public client ID, as the
+/// environment broker does.
+struct CodewireGitHubLogin;
+
+impl codewire_local_credentials::GitHubLoginRenewer for CodewireGitHubLogin {
+    fn classify(
+        &self,
+        material: &[u8],
+    ) -> Result<
+        codewire_local_credentials::GitHubLoginState,
+        codewire_local_credentials::RepositoryExecutorError,
+    > {
+        use codewire_credential_broker::GitHubAppAuthorizationError;
+        use codewire_local_credentials::{GitHubLoginState, RepositoryExecutorError};
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| RepositoryExecutorError::InvalidCredential)?
+            .as_secs();
+        match codewire_credential_broker::github_access_token(material, now) {
+            Ok(token) => Ok(GitHubLoginState::Ready(token)),
+            Err(GitHubAppAuthorizationError::Unavailable) => Ok(GitHubLoginState::Due),
+            // An expired refresh token or malformed material needs a reconnect.
+            Err(_) => Err(RepositoryExecutorError::InvalidCredential),
+        }
+    }
+
+    fn renew<'a>(
+        &'a self,
+        material: &'a [u8],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        codewire_protected_store::ProtectedValue,
+                        codewire_local_credentials::RepositoryExecutorError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        use codewire_local_credentials::RepositoryExecutorError;
+        Box::pin(async move {
+            let bundle = codewire_credential_broker::GitHubAppUserOAuthBundle::parse(material)
+                .map_err(|_| RepositoryExecutorError::InvalidCredential)?;
+            let owner = codewire_credential_broker::GitHubAppAuthorizationOwner::public_client(
+                codewire_credential_broker::provider_oauth::github::codewire_github_app(),
+                github_app_transport().await?,
+            );
+            let rotated =
+                tokio::time::timeout(std::time::Duration::from_secs(30), owner.refresh(bundle))
+                    .await
+                    .map_err(|_| RepositoryExecutorError::InvalidCredential)?
+                    .map_err(|_| RepositoryExecutorError::InvalidCredential)?;
+            codewire_protected_store::ProtectedValue::new(rotated.into_bytes().to_vec())
+                .map_err(|_| RepositoryExecutorError::InvalidCredential)
+        })
+    }
+}
+
+#[cfg(not(feature = "local-broker-synthetic-smoke"))]
+async fn github_app_transport() -> Result<
+    std::sync::Arc<dyn codewire_credential_broker::BrokerUpstreamTransport>,
+    codewire_local_credentials::RepositoryExecutorError,
+> {
+    Ok(std::sync::Arc::new(
+        codewire_credential_broker::ProviderHttpsTransport::resolve(
+            &std::collections::BTreeSet::from([
+                codewire_access::HttpProvider::GitHubAppAuthorization,
+            ]),
+        )
+        .await
+        .map_err(|_| codewire_local_credentials::RepositoryExecutorError::InvalidCredential)?,
+    ))
+}
+
+/// The non-shipping product smoke answers the App refresh in process.
+#[cfg(feature = "local-broker-synthetic-smoke")]
+async fn github_app_transport() -> Result<
+    std::sync::Arc<dyn codewire_credential_broker::BrokerUpstreamTransport>,
+    codewire_local_credentials::RepositoryExecutorError,
+> {
+    Ok(std::sync::Arc::new(
+        codewire_credential_broker::SyntheticOpenAiSmokeTransport,
+    ))
 }
 
 mod ssh;
@@ -127,7 +202,7 @@ pub(crate) async fn run_local_git_repository_executor(
                 Path::new(GIT),
                 &executable,
                 &git_spawner,
-                &github_access_token,
+                &CodewireGitHubLogin,
             )
             .await
         }

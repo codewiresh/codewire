@@ -284,6 +284,9 @@ struct TestRepositorySpawner {
     store: TestProtectedStore,
     leased_material: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    /// When set, the stand-in executor treats its login as due and refreshes
+    /// it to this material through the lease channel before Git would run.
+    refresh_to: Option<&'static [u8]>,
 }
 
 impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
@@ -302,6 +305,7 @@ impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
         let store = self.store.clone();
         let request_id = config.request_id;
         let leased_material = self.leased_material.clone();
+        let refresh_to = self.refresh_to;
         let marker = config.staging_directory.join("lease-complete");
         let task = tokio::spawn(async move {
             let Ok(mut client) =
@@ -312,10 +316,39 @@ impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
             if client.report_ready().await.is_err() {
                 return;
             }
-            let Ok(lease) = client.lease_github(store).await else {
+            let Ok(lease) = client.lease_github(store.clone()).await else {
                 return;
             };
             let _ = leased_material.send(lease.material().to_vec());
+            if let Some(rotated) = refresh_to {
+                // No second lease before a refresh outcome.
+                let early = client.lease_github(store.clone()).await;
+                let _ = leased_material.send(if early.is_err() {
+                    b"second-lease-denied".to_vec()
+                } else {
+                    b"second-lease-allowed".to_vec()
+                });
+                let Ok(crate::repository::RepositoryRefreshBegin::Reserved(reservation)) =
+                    client.begin_github_refresh(&lease).await
+                else {
+                    return;
+                };
+                let Ok(started) = client.start_github_refresh(reservation).await else {
+                    return;
+                };
+                let rotated = ProtectedValue::from_slice(rotated).unwrap();
+                if client
+                    .commit_github_refresh(started, rotated, store.clone())
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let Ok(lease) = client.lease_github(store).await else {
+                    return;
+                };
+                let _ = leased_material.send(lease.material().to_vec());
+            }
             let _ = fs::write(marker, b"ready");
         });
         self.tasks
@@ -1056,6 +1089,7 @@ async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
         store: store.clone(),
         leased_material: material_tx,
         tasks: Arc::new(Mutex::new(Vec::new())),
+        refresh_to: None,
     });
     let (shutdown, task) =
         start_server_with_repository_spawner(config.clone(), store, spawner).await;
@@ -1106,6 +1140,86 @@ async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
     assert_eq!(u64::try_from(bundle.len()).unwrap(), prepared.bundle_size);
     assert!(!bundle.windows(token.len()).any(|window| window == token));
     assert_eq!(material_rx.recv().await.unwrap(), token);
+
+    shutdown.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+/// A checkout whose GitHub login is due refreshes it through the lease channel
+/// and the shared journal, then leases the rotated generation.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_checkout_refreshes_a_due_github_login_through_the_authority_journal() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let (material_tx, mut material_rx) = tokio::sync::mpsc::unbounded_channel();
+    let spawner = Arc::new(TestRepositorySpawner {
+        store: store.clone(),
+        leased_material: material_tx,
+        tasks: Arc::new(Mutex::new(Vec::new())),
+        refresh_to: Some(b"rotated-github-app-bundle"),
+    });
+    let (shutdown, task) =
+        start_server_with_repository_spawner(config.clone(), store, spawner).await;
+    let mut client = connect_when_ready(&config).await;
+    let token = b"synthetic-private-github-token";
+    let _connection = client
+        .add_credential(
+            NewCredential {
+                provider: provider("github"),
+                authentication_kind: CredentialAuthKind::OAuth,
+                display_name: "github-work".to_owned(),
+                account_hint: None,
+                expires_at_unix: None,
+            },
+            ProtectedValue::from_slice(token).unwrap(),
+        )
+        .await
+        .unwrap();
+    let profile = client
+        .create_profile(
+            &AccessProfileName::parse("github-work").unwrap(),
+            &BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut control = LocalCredentialControlClient::connect(&config)
+        .await
+        .unwrap();
+    let mut prepared = control
+        .prepare_git_repository(
+            Uuid::new_v4(),
+            &profile.profile.id,
+            profile.profile.revision,
+            "https://github.com/codewire/codewire.git".to_owned(),
+            "main".to_owned(),
+            String::new(),
+            Vec::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(prepared.branch, "main");
+    assert_eq!(prepared.commit.len(), 40);
+    let mut bundle = Vec::new();
+    while let Some(chunk) = prepared.next_bundle_chunk().await.unwrap() {
+        bundle.extend_from_slice(&chunk);
+    }
+    assert_eq!(u64::try_from(bundle.len()).unwrap(), prepared.bundle_size);
+    assert!(!bundle.windows(token.len()).any(|window| window == token));
+    assert_eq!(material_rx.recv().await.unwrap(), token);
+    assert_eq!(material_rx.recv().await.unwrap(), b"second-lease-denied");
+    // Git would send only the refreshed login, admitted again by the authority,
+    // and the post-checkout check accepted this channel's own refresh.
+    assert_eq!(
+        material_rx.recv().await.unwrap(),
+        b"rotated-github-app-bundle"
+    );
+    let refreshed = client
+        .get_credential(&_connection.metadata.id)
+        .await
+        .unwrap();
+    assert_eq!(refreshed.metadata.revocation_generation, 2);
 
     shutdown.send(()).unwrap();
     task.await.unwrap().unwrap();

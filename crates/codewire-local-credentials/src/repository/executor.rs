@@ -62,10 +62,40 @@ pub enum RepositoryExecutorError {
     Filesystem,
 }
 
-/// Turns stored GitHub material (a raw token or a GitHub App login bundle)
-/// into the access token Git sends. The caller owns the bundle format.
-pub type GitHubTokenResolver<'a> =
-    &'a (dyn Fn(&[u8]) -> Result<zeroize::Zeroizing<String>, RepositoryExecutorError> + Sync);
+/// A stored GitHub login as host Git sees it.
+pub enum GitHubLoginState {
+    /// Its access token, valid for this checkout.
+    Ready(Zeroizing<String>),
+    /// Due for renewal: refresh it before use.
+    Due,
+}
+
+/// The GitHub login format, which the caller owns: whether a stored login is
+/// ready or due, and the provider exchange of a due login for its rotated
+/// material. A login that needs reconnecting is an error from `classify`.
+pub trait GitHubLoginRenewer: Sync {
+    fn classify(&self, material: &[u8]) -> Result<GitHubLoginState, RepositoryExecutorError>;
+
+    fn renew<'a>(
+        &'a self,
+        material: &'a [u8],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        codewire_protected_store::ProtectedValue,
+                        RepositoryExecutorError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    >;
+}
+
+/// Leases, refresh attempts and waits for a broker's refresh, within the
+/// authority's own bound for one channel.
+const MAX_GITHUB_LOGIN_ATTEMPTS: u32 = 32;
+const BROKER_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_local_repository_executor<S>(
@@ -76,7 +106,7 @@ pub async fn run_local_repository_executor<S>(
     git_executable: &Path,
     credential_helper_executable: &Path,
     git_spawner: &dyn LocalRepositoryGitProcessSpawner,
-    github_token: GitHubTokenResolver<'_>,
+    github_login: &dyn GitHubLoginRenewer,
 ) -> Result<(), RepositoryExecutorError>
 where
     S: ProtectedStore + Clone + 'static,
@@ -101,11 +131,56 @@ where
         .report_ready()
         .await
         .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?;
-    let lease = leases
-        .lease_github(protected_store)
+    let mut lease = leases
+        .lease_github(protected_store.clone())
         .await
         .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?;
-    let token = github_token(lease.material())?;
+    // A login due for renewal is refreshed through the authority's journal,
+    // which a running environment's broker shares, then leased again: Git only
+    // ever sends a token the authority has just admitted.
+    let mut attempts = 0;
+    let token = loop {
+        if let GitHubLoginState::Ready(token) = github_login.classify(lease.material())? {
+            break token;
+        }
+        attempts += 1;
+        if attempts > MAX_GITHUB_LOGIN_ATTEMPTS {
+            return Err(RepositoryExecutorError::LeaseUnavailable);
+        }
+        match leases
+            .begin_github_refresh(&lease)
+            .await
+            .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?
+        {
+            super::RepositoryRefreshBegin::LeaseAgain { wait } => {
+                if wait {
+                    tokio::time::sleep(BROKER_REFRESH_WAIT).await;
+                }
+            }
+            super::RepositoryRefreshBegin::Reserved(reservation) => {
+                let started = leases
+                    .start_github_refresh(reservation)
+                    .await
+                    .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?;
+                match github_login.renew(lease.material()).await {
+                    Ok(material) => leases
+                        .commit_github_refresh(started, material, protected_store.clone())
+                        .await
+                        .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?,
+                    Err(error) => {
+                        // Refused or ambiguous: the old refresh token may be
+                        // spent, so the login is never retried with it.
+                        let _ = leases.fail_github_refresh(started).await;
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        lease = leases
+            .lease_github(protected_store.clone())
+            .await
+            .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?;
+    };
     let token = token.as_bytes();
     if token.is_empty()
         || token.len() > MAX_GITHUB_TOKEN_BYTES

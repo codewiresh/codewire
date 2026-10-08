@@ -538,22 +538,12 @@ where
             let _operation_permit = operation_permit;
             // Capacity waits cannot extend the bounded execution window. Once
             // the blocking write begins, shutdown drains it before recovery.
-            if crate::unix_millis()
-                .ok()
-                .is_none_or(|now| now >= started.execution_deadline_unix_ms)
-            {
-                return Err(codewire_protected_store::ProtectedStoreError::Unavailable);
-            }
-            if store.get(&entry_id)?.is_some() {
-                return Err(codewire_protected_store::ProtectedStoreError::AmbiguousEntry);
-            }
-            if crate::unix_millis()
-                .ok()
-                .is_none_or(|now| now >= started.execution_deadline_unix_ms)
-            {
-                return Err(codewire_protected_store::ProtectedStoreError::Unavailable);
-            }
-            store.put(&entry_id, &material)
+            crate::stage_refreshed_material(
+                &store,
+                &entry_id,
+                &material,
+                started.execution_deadline_unix_ms,
+            )
         })
         .await
         .map_err(|_| BrokerLeaseChannelError::Unavailable)?;
@@ -1349,11 +1339,11 @@ where
         let outcome = match admission {
             CredentialRefreshAdmission::Reserved(permit) => {
                 Outcome::Reserved(v1::BrokerCredentialRefreshReservation {
-                    refresh_id: permit.refresh_id.to_string(),
-                    request_id: permit.request_id.to_string(),
-                    credential_id: permit.grant.credential_id.to_string(),
-                    current_material_generation: permit.current_material_generation,
-                    next_material_generation: permit.next_material_generation,
+                    refresh_id: permit.refresh_id().to_string(),
+                    request_id: permit.request_id().to_string(),
+                    credential_id: permit.credential_id().to_string(),
+                    current_material_generation: permit.current_material_generation(),
+                    next_material_generation: permit.next_material_generation(),
                 })
             }
             CredentialRefreshAdmission::Recovered => {
