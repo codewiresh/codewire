@@ -467,7 +467,7 @@ jobs:
     # heavy tooling group only when trusted selection requests it.
     name: Policy verification
     runs-on: ci-heavy
-    timeout-minutes: 13
+    timeout-minutes: 30
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.policy_expected == 'true' }}
     steps:

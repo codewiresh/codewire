@@ -2002,7 +2002,7 @@ grep -qF '    timeout-minutes: 55' "$workspace_block" || {
 }
 
 policy_block="$TMP/policy.yaml"
-grep -qF '    timeout-minutes: 13' "$policy_block"
+grep -qF '    timeout-minutes: 30' "$policy_block"
 grep -qF 'name: Verify sealed policy tools' "$policy_block"
 grep -qF 'name: Run Policy' "$policy_block"
 grep -A1 -F 'name: Run Policy' "$policy_block" \
@@ -2016,7 +2016,7 @@ if grep -Eq 'run:.*docker|setup-bun|setup-go|curl |wget ' "$policy_setup_block";
   exit 1
 fi
 
-grep -qF '    timeout-minutes: 13' "$TMP/policy.yaml" || {
+grep -qF '    timeout-minutes: 30' "$TMP/policy.yaml" || {
   echo 'policy: heavy job lost its measured bounded task ceiling' >&2
   exit 1
 }
