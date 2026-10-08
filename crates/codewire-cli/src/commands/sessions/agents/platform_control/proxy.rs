@@ -181,6 +181,6 @@ pub(super) fn arguments(kind: AgentKind) -> Vec<String> {
         AgentKind::Codex=>["-c","model_provider=\"codewire_platform_api\"","-c","forced_login_method=\"api\"","-c","cli_auth_credentials_store=\"file\"","-c",
             "model_providers.codewire_platform_api={name=\"Codewire Platform API\",base_url=\"http://127.0.0.1:38081/_codewire/openai/v1\",env_key=\"OPENAI_API_KEY\",wire_api=\"responses\",requires_openai_auth=false,supports_websockets=false}",
             "-c","features.enable_request_compression=false"].into_iter().map(str::to_owned).collect(),
-        AgentKind::Claude=>["--settings-sources","","--strict-mcp-config","--mcp-config","{\"mcpServers\":{}}","--disable-slash-commands"].into_iter().map(str::to_owned).collect(),
+        AgentKind::Claude=>["--setting-sources","","--strict-mcp-config","--mcp-config","{\"mcpServers\":{}}","--disable-slash-commands"].into_iter().map(str::to_owned).collect(),
     }
 }

@@ -270,6 +270,23 @@ fn platform_control_private_proxy_homes_never_copy_inherited_auth_or_routes() {
 }
 
 #[test]
+fn platform_control_claude_prefix_uses_the_pinned_cli_option_names() {
+    // Claude 2.1.238 exits during startup on an unknown option such as
+    // `--settings-sources`; these are the names it accepts.
+    assert_eq!(
+        proxy::arguments(AgentKind::Claude),
+        [
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--mcp-config",
+            "{\"mcpServers\":{}}",
+            "--disable-slash-commands",
+        ]
+    );
+}
+
+#[test]
 fn platform_control_codex_private_config_allows_only_its_exact_project_suffix() {
     let f = Fixture::new();
     let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
