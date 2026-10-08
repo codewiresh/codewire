@@ -466,7 +466,7 @@ for hardcoded_loopback in '127.0.0.1:7233' '127.0.0.1:8084' '127.0.0.1:18092' '1
 done
 grep -Fq 'anonymous internal command was not rejected' "$COMMON" ||
   fail 'Kind internal listener probe does not assert anonymous rejection'
-grep -Fq 'coordinate capability crossed into the internal listener' "$COMMON" ||
+grep -Fq 'peer capability crossed into the internal listener' "$COMMON" ||
   fail 'Kind internal listener probe does not assert cross-scope rejection'
 if grep -Fq -e 'GatewayBindingService' -e 'codewire.internal.gateway-binding.v1' "$COMMON"; then
   fail 'Kind harness still exercises the deleted gateway binding service'
