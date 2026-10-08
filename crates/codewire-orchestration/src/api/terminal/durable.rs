@@ -287,6 +287,10 @@ pub(super) async fn websocket(
         .on_upgrade(move |socket| async move {
             let (mut browser_output, mut browser_input) = socket.split();
             let (input, output) = attachment.into_stream_parts();
+            let session_id = coordinates.session_id.clone();
+            let start_offset = coordinates.output_offset;
+            let started = Instant::now();
+            let stats = std::sync::Mutex::new(RelayStats::default());
             let end = relay(
                 &mut browser_output,
                 &mut browser_input,
@@ -294,8 +298,28 @@ pub(super) async fn websocket(
                 output,
                 coordinates,
                 IO_TIMEOUT,
+                &stats,
             )
             .await;
+            if !matches!(end, End::PeerClosed | End::Complete) {
+                let stats = stats.into_inner().unwrap_or_default();
+                tracing::warn!(
+                    environment_id = %env_id,
+                    session_id = %session_id,
+                    reason = end.as_str(),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    start_offset,
+                    issued = stats.issued,
+                    acknowledged = stats.acknowledged,
+                    unacknowledged_frames = stats.unacknowledged_frames,
+                    unacknowledged_bytes = stats.unacknowledged_bytes,
+                    pending_input = stats.pending_input,
+                    since_output_sent_ms = ?elapsed_ms(stats.last_output_sent),
+                    since_input_delivered_ms = ?elapsed_ms(stats.last_input_delivered),
+                    since_browser_frame_ms = ?elapsed_ms(stats.last_browser_frame),
+                    "browser terminal relay ended abnormally"
+                );
+            }
             let code = if matches!(end, End::PeerClosed | End::Complete) {
                 1000
             } else {
@@ -439,7 +463,46 @@ enum End {
     Complete,
     PeerClosed,
     Invalid,
-    Transport,
+    /// The browser did not take an output frame within the I/O deadline.
+    BrowserStalled,
+    /// The browser connection failed while reading or writing.
+    BrowserClosed,
+    /// The daemon attachment did not take queued input within the deadline.
+    DaemonInputStalled,
+    /// The daemon attachment ended or failed before a final session status.
+    DaemonClosed,
+}
+
+impl End {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::PeerClosed => "peer_closed",
+            Self::Invalid => "invalid",
+            Self::BrowserStalled => "browser_stalled",
+            Self::BrowserClosed => "browser_closed",
+            Self::DaemonInputStalled => "daemon_input_stalled",
+            Self::DaemonClosed => "daemon_closed",
+        }
+    }
+}
+
+/// What the relay had in flight when it ended, so an abnormal end names the
+/// side that stopped moving rather than reading as a silent stall.
+#[derive(Debug, Default)]
+struct RelayStats {
+    issued: u64,
+    acknowledged: u64,
+    unacknowledged_frames: usize,
+    unacknowledged_bytes: u64,
+    pending_input: usize,
+    last_output_sent: Option<Instant>,
+    last_input_delivered: Option<Instant>,
+    last_browser_frame: Option<Instant>,
+}
+
+fn elapsed_ms(since: Option<Instant>) -> Option<u128> {
+    since.map(|instant| instant.elapsed().as_millis())
 }
 
 struct PendingInput {
@@ -455,6 +518,7 @@ async fn relay<Tx, Rx, Output, E>(
     output: Output,
     coordinates: Coordinates,
     io_timeout: Duration,
+    stats: &std::sync::Mutex<RelayStats>,
 ) -> End
 where
     Tx: Sink<Message> + Unpin,
@@ -470,6 +534,7 @@ where
             &writer,
             coordinates,
             io_timeout,
+            stats,
         )
         .await;
         drop(writer);
@@ -479,11 +544,10 @@ where
     // input/ACKs must not cancel a partially flushed WebSocket send and retry it.
     let writer = async {
         while let Some(frame) = frames.recv().await {
-            if !matches!(
-                timeout(io_timeout, browser_output.send(frame)).await,
-                Ok(Ok(()))
-            ) {
-                return End::Transport;
+            match timeout(io_timeout, browser_output.send(frame)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return End::BrowserClosed,
+                Err(_) => return End::BrowserStalled,
             }
         }
         End::Complete
@@ -504,6 +568,7 @@ async fn relay_input<Rx, Output, E>(
     writer: &mpsc::Sender<Message>,
     coordinates: Coordinates,
     io_timeout: Duration,
+    stats: &std::sync::Mutex<RelayStats>,
 ) -> End
 where
     Rx: Stream<Item = Result<Message, E>> + Unpin,
@@ -515,6 +580,13 @@ where
     let mut input_bytes = 0;
     let mut terminal_seen = false;
     loop {
+        if let Ok(mut stats) = stats.lock() {
+            stats.issued = window.issued;
+            stats.acknowledged = window.acknowledged;
+            stats.unacknowledged_frames = window.ends.len();
+            stats.unacknowledged_bytes = window.pending_bytes;
+            stats.pending_input = pending_input.len();
+        }
         let input_deadline = pending_input
             .front()
             .map_or_else(Instant::now, |entry| entry.deadline);
@@ -527,8 +599,12 @@ where
                     Some(Ok(Message::Text(text))) if text.len() <= FRAME_BYTES => text,
                     Some(Ok(Message::Close(_))) | None => return End::PeerClosed,
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                    Some(Err(_)) => return End::BrowserClosed,
                     _ => return End::Invalid,
                 };
+                if let Ok(mut stats) = stats.lock() {
+                    stats.last_browser_frame = Some(Instant::now());
+                }
                 let frame: ClientFrame = match serde_json::from_str(&message) {
                     Ok(frame) => frame,
                     Err(_) => return End::Invalid,
@@ -563,14 +639,28 @@ where
                 });
             }
             permit = timeout_at(input_deadline, input.reserve()), if !pending_input.is_empty() => {
-                let Ok(Ok(permit)) = permit else { return End::Transport };
+                let permit = match permit {
+                    Ok(Ok(permit)) => permit,
+                    Ok(Err(_)) => return End::DaemonClosed,
+                    Err(_) => return End::DaemonInputStalled,
+                };
                 let entry = pending_input.pop_front().expect("pending input");
                 input_bytes -= entry.bytes;
                 permit.send(entry.message);
+                if let Ok(mut stats) = stats.lock() {
+                    stats.last_input_delivered = Some(Instant::now());
+                }
             }
             permit = timeout_at(frame_deadline, writer.reserve()), if pending_frame.is_some() => {
-                let Ok(Ok(permit)) = permit else { return End::Transport };
+                let permit = match permit {
+                    Ok(Ok(permit)) => permit,
+                    Ok(Err(_)) => return End::BrowserClosed,
+                    Err(_) => return End::BrowserStalled,
+                };
                 permit.send(pending_frame.take().expect("pending output").0);
+                if let Ok(mut stats) = stats.lock() {
+                    stats.last_output_sent = Some(Instant::now());
+                }
             }
             message = output.next(), if pending_frame.is_none() && window.has_capacity() => {
                 let frame = match message {
@@ -605,7 +695,7 @@ where
                         ServerFrame::Status { state, exit_code: status.exit_code }
                     }
                     None if terminal_seen => return End::Complete,
-                    _ => return End::Transport,
+                    _ => return End::DaemonClosed,
                 };
                 let Ok(encoded) = serde_json::to_string(&frame) else { return End::Invalid };
                 if encoded.len() > FRAME_BYTES {
