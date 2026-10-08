@@ -193,6 +193,36 @@ isolate_kind_fixture_environment() {
   unset CLUSTER KEEP_KIND_CLUSTER KUBECONFIG KUBE_CONTEXT RUN_DIR CARGO_CI_DIR
 }
 
+# Image-source and producer fixtures admit only temp roots that no other UID
+# can rename into: owner-private ancestry or a root-owned sticky 1777 root.
+# A hosted runner's emptyDir /tmp is world-writable without sticky, so run
+# them under /dev/shm there; a workstation keeps its own TMPDIR.
+with_owner_safe_tmpdir() {
+  local candidate
+  for candidate in "${TMPDIR:-/tmp}" /dev/shm; do
+    if python3 -I -B - "$candidate" <<'PY'
+import os
+import stat
+import sys
+
+current = "/"
+for part in ["", *os.path.realpath(sys.argv[1]).split("/")[1:]]:
+    current = os.path.join(current, part)
+    info = os.lstat(current)
+    sticky_root = info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o1777
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid())
+            or (info.st_mode & 0o022 and not sticky_root)):
+        sys.exit(1)
+PY
+    then
+      TMPDIR="$candidate" "$@"
+      return
+    fi
+  done
+  echo "::error::no owner-safe temp root for $*" >&2
+  return 1
+}
+
 run_policy_core() {
   (
   isolate_kind_fixture_environment
@@ -219,9 +249,9 @@ run_policy_core() {
   scripts/ci/tests/test-workspace-agent-contract.sh
   python3 -I -B scripts/ci/tests/test-cw-image-context.py
   python3 -I -B scripts/ci/tests/test-cw-runtime-source.py
-  python3 -I -B scripts/ci/tests/test-cw-image-source.py
+  with_owner_safe_tmpdir python3 -I -B scripts/ci/tests/test-cw-image-source.py
   python3 -I -B scripts/ci/tests/test-cw-image-consumer.py
-  scripts/ci/tests/test-workspace-image-verify-workflow.sh
+  with_owner_safe_tmpdir scripts/ci/tests/test-workspace-image-verify-workflow.sh
   scripts/ci/tests/test-build-kind-smokes.sh
   python3 -B scripts/ci/tests/test-kind-build-artifacts.py
   scripts/ci/tests/test-openbao-only-secret-authority.sh
@@ -783,7 +813,7 @@ run_release() {
   scripts/ci/tests/test-resolve-published-support-pair.sh
   scripts/ci/tests/test-run-skopeo-container.sh
   scripts/ci/tests/test-support-images-workflow.sh
-  scripts/ci/tests/test-workspace-image-verify-workflow.sh
+  with_owner_safe_tmpdir scripts/ci/tests/test-workspace-image-verify-workflow.sh
   python3 scripts/ci/tests/test-image-bundle.py
   scripts/ci/tests/test-deploy-prod-workflow.sh
   python3 scripts/checks/repo_checks.py production-source-ownership --self-test

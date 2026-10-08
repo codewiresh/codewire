@@ -199,6 +199,9 @@ class ReleaseStoreCleanupTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="cw-update-cleanup-")
         self.root = Path(self.temporary.name)
+        # A setgid temp root (a CI emptyDir under fsGroup) passes setgid to
+        # this directory; the journey root is exactly 0700, as on a workstation.
+        self.root.chmod(0o700)
         self.addCleanup(self.dispose_fixture)
         self.module = load_candidate()
         self.module.host.arm_owned_family()
@@ -296,10 +299,11 @@ class ReleaseStoreCleanupTests(unittest.TestCase):
         target = Path(foreign.name) / "readonly"
         target.mkdir(mode=0o555)
         self.addCleanup(target.chmod, 0o700)
+        original = stat.S_IMODE(target.stat().st_mode)
         member.symlink_to(target, target_is_directory=True)
         with self.assertRaises(OSError):
             self.journey.cleanup()
-        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o555)
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), original)
         self.assertEqual(stat.S_IMODE((self.versions / ("a" * 64)).stat().st_mode), 0o555)
         self.assertTrue((self.journey.workspace / "child.pid").exists())
 

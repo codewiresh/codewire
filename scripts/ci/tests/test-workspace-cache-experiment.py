@@ -682,7 +682,7 @@ class ProducerReportTests(unittest.TestCase):
         def capture(command, **kwargs):
             if command[0] != "fixture-docker":
                 if command[0] != "git":
-                    self.assertEqual(command[:3], [sys.executable, str(ROOT / "scripts/dev/cw-runtime-image.py"), "unpack"])
+                    self.assertEqual(command[:4], [sys.executable, "-B", str(ROOT / "scripts/dev/cw-runtime-image.py"), "unpack"])
                 return run(command, **kwargs)
             self.assertEqual(command[:-1], ["fixture-docker", "buildx", "history", "logs", "--builder", builder,
                                           "--progress", "rawjson"])
