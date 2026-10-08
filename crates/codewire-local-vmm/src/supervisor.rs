@@ -8265,6 +8265,11 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let socket = parent.path().join("shutdown.sock");
+        // Darwin's /bin/sh re-executes the selected shell, so its image would
+        // change under the capture; start that real shell directly.
+        #[cfg(target_os = "macos")]
+        let executable = fs::canonicalize("/bin/bash").unwrap();
+        #[cfg(target_os = "linux")]
         let executable = fs::canonicalize("/bin/sh").unwrap();
         let mut child = ShutdownTestChild(
             crate::test_child(&mut Command::new(&executable))

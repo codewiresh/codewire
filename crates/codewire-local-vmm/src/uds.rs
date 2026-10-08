@@ -321,6 +321,39 @@ mod client_tests {
         current_uid().checked_add(1).unwrap()
     }
 
+    /// A private socket file whose socket is bound but never listens, so it
+    /// refuses every connection. A dropped listener cannot prove that: on
+    /// Darwin, a child another test spawns can inherit it before std marks
+    /// it close-on-exec and keep it accepting.
+    fn refusing_socket(path: &Path) -> std::os::fd::OwnedFd {
+        use std::os::fd::FromRawFd as _;
+        use std::os::unix::ffi::OsStrExt as _;
+        // SAFETY: an all-zero sockaddr_un is a valid empty address.
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let bytes = path.as_os_str().as_bytes();
+        assert!(bytes.len() < address.sun_path.len());
+        for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+            *slot = *byte as libc::c_char;
+        }
+        // SAFETY: scalar arguments; the result is owned below.
+        let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(raw >= 0);
+        // SAFETY: raw is a fresh descriptor that nothing else owns.
+        let socket = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+        // SAFETY: a fully initialized sockaddr_un and its exact size.
+        let bound = unsafe {
+            libc::bind(
+                raw,
+                (&raw const address).cast(),
+                std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(bound, 0);
+        host_path::set_socket_private(path).unwrap();
+        socket
+    }
+
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn native_parent_mode_acl_and_noncanonical_alias_are_rejected() {
@@ -442,7 +475,9 @@ mod client_tests {
                 .is_symlink()
         );
         assert!(owner_only_connector(&parent.path().join("missing.sock")).is_err());
-        let connector = owner_only_connector(&socket).unwrap();
+        let refusing = parent.path().join("refusing.sock");
+        let _refusing = refusing_socket(&refusing);
+        let connector = owner_only_connector(&refusing).unwrap();
         drop(listener);
         assert!(
             tokio::time::timeout(
