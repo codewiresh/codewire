@@ -40,10 +40,6 @@ pub(crate) const LOCAL_CREDENTIAL_ROOT_ENV: &str = "CODEWIRE_LOCAL_CREDENTIAL_RO
 const NATIVE_BACKEND: &str = "cloud-hypervisor";
 #[cfg(target_os = "macos")]
 const NATIVE_BACKEND: &str = "virtualization-framework";
-/// The local credential authority is Linux-only for now (Program #2064 M4).
-#[cfg(target_os = "macos")]
-const MACOS_CREDENTIAL_AUTHORITY_UNSUPPORTED: &str =
-    "credential profiles and secrets are not available for macOS local environments yet";
 
 /// The private root of the local credential authority's state.
 pub(crate) fn local_credential_root(env: &impl config::Env) -> anyhow::Result<PathBuf> {
@@ -57,18 +53,6 @@ pub(crate) fn local_credential_root(env: &impl config::Env) -> anyhow::Result<Pa
     Ok(ResolvePaths::from_env(env)?
         .mesh_data_dir
         .join("credentials-v1"))
-}
-
-#[cfg(target_os = "macos")]
-async fn connect_local_credential_authority() -> anyhow::Result<LocalCredentialClient> {
-    anyhow::bail!(MACOS_CREDENTIAL_AUTHORITY_UNSUPPORTED)
-}
-
-/// macOS has no local credential authority to admit, so credential-free
-/// native operations continue exactly as when no Linux authority exists.
-#[cfg(target_os = "macos")]
-async fn admit_existing_local_credential_authority() -> anyhow::Result<()> {
-    Ok(())
 }
 
 pub(crate) async fn run_native_supervisor(args: NativeSupervisorArgs) -> anyhow::Result<()> {

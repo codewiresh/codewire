@@ -10,7 +10,7 @@ use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::process::{Child, Command, Stdio};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -89,10 +89,11 @@ pub(crate) async fn run_local_credential_authority(
     result.context("run local credential authority")
 }
 
-/// The macOS authority stores values only. Brokers, repository executors,
-/// SSH signing and platform delegation are refused until local VMs consume
-/// them; the launcher already supplied a new session, an empty environment
-/// and standard descriptors only.
+/// The macOS authority stores values and launches one confined broker per
+/// local VM generation, which reads the authority's own store. Repository
+/// executors, SSH signing and platform delegation stay refused. The launcher
+/// already supplied a new session, an empty environment and standard
+/// descriptors only.
 #[cfg(target_os = "macos")]
 pub(crate) async fn run_local_credential_authority(
     args: LocalCredentialAuthorityArgs,
@@ -101,9 +102,16 @@ pub(crate) async fn run_local_credential_authority(
     rustix::process::umask(rustix::fs::Mode::RWXG | rustix::fs::Mode::RWXO);
     let store = authority_store_from_args(&args)?;
     let config = authority_config(args.root)?;
-    codewire_local_credentials::serve_os_local_credential_authority(config, store)
-        .await
-        .context("run local credential authority")
+    let spawner = Arc::new(darwin::CwLocalCredentialBrokerSpawner {
+        executable: config.executable.clone(),
+        authority_root: config.root.clone(),
+        store: store.clone(),
+    });
+    codewire_local_credentials::serve_os_local_credential_authority_with_broker_spawner(
+        config, store, spawner,
+    )
+    .await
+    .context("run local credential authority")
 }
 
 fn authority_store_from_args(
@@ -150,6 +158,23 @@ pub(crate) async fn admit_existing_local_credential_authority() -> anyhow::Resul
     drop(
         LocalCredentialClient::admit_existing_or_replace_with(&config, |config| {
             spawn_authority(config, &store)
+        })
+        .await
+        .context("admit existing local credential authority")?,
+    );
+    Ok(())
+}
+
+/// Admit an authority already listening at the credential root, as on
+/// Linux. An absent endpoint starts nothing, so credential-free native
+/// operations continue without an authority.
+#[cfg(target_os = "macos")]
+pub(crate) async fn admit_existing_local_credential_authority() -> anyhow::Result<()> {
+    let root = local_credential_root(&OsEnv)?;
+    let config = authority_config(root)?;
+    drop(
+        LocalCredentialClient::admit_existing_or_replace_with(&config, |_| {
+            Err::<std::process::Child, _>(AuthorityRuntimeError::Spawn)
         })
         .await
         .context("admit existing local credential authority")?,

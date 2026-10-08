@@ -378,7 +378,7 @@ enum Command {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__local-credential-authority-probe", hide = true)]
     LocalCredentialAuthorityProbe(LocalCredentialAuthorityProbeArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__local-credential-broker", hide = true)]
     LocalCredentialBroker(LocalCredentialBrokerArgs),
     #[cfg(target_os = "linux")]
@@ -703,7 +703,7 @@ where
         Command::LocalCredentialAuthorityProbe(args) => {
             run_local_credential_authority_probe(args).await
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::LocalCredentialBroker(args) => run_local_credential_broker(args).await,
         #[cfg(target_os = "linux")]
         Command::EnvironmentLaunch(args) => codewire_daemon::execution::run_environment_launcher(

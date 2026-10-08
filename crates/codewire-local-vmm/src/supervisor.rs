@@ -437,7 +437,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         operation_progress: operation_progress.clone(),
         _lock: lock,
     };
-    #[cfg(feature = "synthetic-oci-input-smoke")]
+    #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
     core.admit_synthetic_workspace_image_pin()?;
     core.recover_host_reboot_workspace_transitions()?;
     core.reconcile_exposing_runners_for_startup().await?;
@@ -546,7 +546,7 @@ fn orphan_inventory_response(
         })
         .collect();
     let retained_content = referenced_content_blobs(state)?;
-    #[cfg(feature = "synthetic-oci-input-smoke")]
+    #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
     let retained_content = {
         let mut retained_content = retained_content;
         let engine = root.open_private_directory(Path::new("engine"), 0o700)?;
@@ -636,7 +636,7 @@ impl SupervisorCore {
         Ok(())
     }
 
-    #[cfg(feature = "synthetic-oci-input-smoke")]
+    #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
     fn synthetic_workspace_image_pin(&self) -> Result<Option<ResolvedImage>, SupervisorError> {
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         let content = ContentStore::create(&engine)?;
@@ -644,7 +644,7 @@ impl SupervisorCore {
             .map_err(|_| SupervisorError::InvalidState)
     }
 
-    #[cfg(feature = "synthetic-oci-input-smoke")]
+    #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
     fn admit_synthetic_workspace_image_pin(&mut self) -> Result<(), SupervisorError> {
         let _ = self.synthetic_workspace_image_pin()?;
         Ok(())
@@ -654,13 +654,13 @@ impl SupervisorCore {
         &self,
         reference: &RegistryReference,
     ) -> Result<Option<ResolvedImage>, SupervisorError> {
-        #[cfg(feature = "synthetic-oci-input-smoke")]
+        #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
         {
             Ok(self
                 .synthetic_workspace_image_pin()?
                 .filter(|image| image.source_reference == reference.original()))
         }
-        #[cfg(not(feature = "synthetic-oci-input-smoke"))]
+        #[cfg(not(all(target_os = "linux", feature = "synthetic-oci-input-smoke")))]
         {
             let _ = reference;
             Ok(None)
@@ -1287,7 +1287,7 @@ impl SupervisorCore {
 
     fn collect_unreferenced_content(&mut self) -> Result<(), SupervisorError> {
         let mut retained = referenced_content_blobs(&self.state)?;
-        #[cfg(feature = "synthetic-oci-input-smoke")]
+        #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
         if let Some(image) = self.synthetic_workspace_image_pin()? {
             retain_image_content(&mut retained, &image)?;
         }
@@ -14419,7 +14419,7 @@ mod tests {
         assert!(!artifact_blobs.join(format!("r-{stale_kernel}")).exists());
     }
 
-    #[cfg(feature = "synthetic-oci-input-smoke")]
+    #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
     #[tokio::test]
     async fn synthetic_image_pin_reopens_matches_exactly_and_survives_precreate_collection() {
         let (_parent, mut core) = test_supervisor_core(project_environment());

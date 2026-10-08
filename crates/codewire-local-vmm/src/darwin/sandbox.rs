@@ -47,17 +47,17 @@ const MESH_TRANSPORT_PROFILE: &CStr = c"(version 1)(deny default)\
 
 /// Irreversibly confine this process to the descriptors it already holds.
 pub(crate) fn deny_all() -> io::Result<()> {
-    apply(DENY_ALL_PROFILE)
+    apply_profile(DENY_ALL_PROFILE)
 }
 
 /// Irreversibly confine the egress broker to outbound TCP and its own DNS.
 pub(crate) fn confine_egress_broker() -> io::Result<()> {
-    apply(EGRESS_BROKER_PROFILE)
+    apply_profile(EGRESS_BROKER_PROFILE)
 }
 
 /// Irreversibly confine the Mesh transport to TCP dials and direct UDP.
 pub(crate) fn confine_mesh_transport() -> io::Result<()> {
-    apply(MESH_TRANSPORT_PROFILE)
+    apply_profile(MESH_TRANSPORT_PROFILE)
 }
 
 /// Irreversibly confine the one-shot Mesh enrollment issuer to TCP dials to
@@ -72,13 +72,16 @@ pub(crate) fn confine_mesh_enrollment(origin_port: u16) -> io::Result<()> {
         "(version 1)(deny default)(allow network-outbound (remote tcp \"*:{origin_port}\"))"
     ))
     .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    apply(&profile)
+    apply_profile(&profile)
 }
 
-fn apply(profile: &CStr) -> io::Result<()> {
+/// Irreversibly confine this whole process with one inline Seatbelt profile.
+/// The caller owns the profile text; build it only from validated values.
+pub fn apply_profile(profile: &CStr) -> io::Result<()> {
     let mut error = std::ptr::null_mut();
-    // SAFETY: the profile is NUL-terminated and static; flags 0 selects an
-    // inline profile. Any error buffer the call allocates is freed below.
+    // SAFETY: the profile is NUL-terminated and outlives the call; flags 0
+    // selects an inline profile. Any error buffer the call allocates is
+    // freed below.
     let result = unsafe { sandbox_init(profile.as_ptr(), 0, &raw mut error) };
     if !error.is_null() {
         // SAFETY: the buffer came from sandbox_init and is freed once.

@@ -3,7 +3,7 @@
 mod acl;
 pub mod path;
 pub mod process;
-pub(crate) mod sandbox;
+pub mod sandbox;
 pub(crate) mod supervisor_peer;
 
 #[cfg(test)]

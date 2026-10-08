@@ -1,20 +1,31 @@
-//! Detached macOS launch of the local credential authority.
+//! macOS launch of the local credential authority and of its brokers.
 //!
-//! `posix_spawn` gives the child a new session (`POSIX_SPAWN_SETSID`), closes
-//! every inherited descriptor except stdin, stdout and stderr, which point at
-//! `/dev/null` (`POSIX_SPAWN_CLOEXEC_DEFAULT`), resets signal dispositions and
-//! the signal mask, passes an empty environment and starts in the authority
-//! root. The authority sets its umask itself before creating any file.
+//! The authority is detached: `posix_spawn` gives the child a new session
+//! (`POSIX_SPAWN_SETSID`), closes every inherited descriptor except stdin,
+//! stdout and stderr, which point at `/dev/null`
+//! (`POSIX_SPAWN_CLOEXEC_DEFAULT`), resets signal dispositions and the signal
+//! mask, passes an empty environment and starts in the authority root. The
+//! authority sets its umask itself before creating any file.
+//!
+//! A broker is an owned child of the authority: it keeps only its authority
+//! channel as descriptor 3, gets an empty environment, a new session, no core
+//! files and umask 077, and exits with the authority (Darwin has no
+//! parent-death signal; the broker watches its parent itself).
 
 use std::ffi::{CString, OsStr, OsString};
 use std::io;
 use std::mem::MaybeUninit;
+use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::process::ExitStatusExt as _;
-use std::path::Path;
-use std::process::ExitStatus;
+use std::path::{Path, PathBuf};
+use std::process::{ExitStatus, Stdio};
 
-use codewire_local_credentials::SpawnedAuthority;
+use codewire_local_credentials::{
+    AuthorityProtectedStore, FILE_STORE_DIRECTORY, LocalBrokerProcessConfig,
+    LocalBrokerProcessSpawner, LocalBrokerSpawnError, SpawnedAuthority,
+};
+use codewire_protected_store::ProtectedStoreBackend;
 
 /// `<sys/spawn.h>`; the libc crate does not define it.
 const POSIX_SPAWN_SETSID: libc::c_int = 0x0400;
@@ -194,6 +205,118 @@ impl SpawnedAuthority for SpawnedProcess {
     }
 }
 
+/// Launches `cw __local-credential-broker` for one environment generation.
+/// The broker reads values from exactly the authority's store.
+pub(super) struct CwLocalCredentialBrokerSpawner {
+    pub(super) executable: PathBuf,
+    pub(super) authority_root: PathBuf,
+    pub(super) store: AuthorityProtectedStore,
+}
+
+impl CwLocalCredentialBrokerSpawner {
+    fn store_arguments(&self) -> Result<Vec<OsString>, LocalBrokerSpawnError> {
+        let mut arguments = vec![
+            OsString::from("--protected-store"),
+            self.store.backend.as_str().into(),
+        ];
+        match (self.store.backend, &self.store.keychain) {
+            (ProtectedStoreBackend::Keychain, keychain) => {
+                if let Some(keychain) = keychain {
+                    arguments.push("--keychain".into());
+                    arguments.push(keychain.clone().into_os_string());
+                }
+            }
+            (ProtectedStoreBackend::File, None) => {
+                arguments.push("--protected-store-directory".into());
+                arguments.push(
+                    self.authority_root
+                        .join(FILE_STORE_DIRECTORY)
+                        .into_os_string(),
+                );
+            }
+            _ => return Err(LocalBrokerSpawnError::InvalidConfiguration),
+        }
+        Ok(arguments)
+    }
+}
+
+impl LocalBrokerProcessSpawner for CwLocalCredentialBrokerSpawner {
+    fn spawn(
+        &self,
+        config: &LocalBrokerProcessConfig,
+        authority_peer: std::os::unix::net::UnixStream,
+    ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
+        let authority_fd = authority_peer.as_raw_fd();
+        if authority_fd < 3 {
+            return Err(LocalBrokerSpawnError::InvalidConfiguration);
+        }
+        // No platform relay exists on macOS; the authority has no connector.
+        if config.platform_delegated {
+            return Err(LocalBrokerSpawnError::InvalidConfiguration);
+        }
+        let store_arguments = self.store_arguments()?;
+        // SAFETY: getpid has no preconditions.
+        let parent_pid = unsafe { libc::getpid() };
+        let mut command = tokio::process::Command::new(&self.executable);
+        command
+            .arg("__local-credential-broker")
+            .arg("--authority-fd")
+            .arg("3")
+            .arg("--environment-id")
+            .arg(config.environment_id.to_string())
+            .arg("--environment-generation")
+            .arg(config.environment_generation.to_string())
+            .arg("--environment-name")
+            .arg(&config.environment_name)
+            .arg("--runner-socket")
+            .arg(&config.runner_socket)
+            .args(store_arguments)
+            .env_clear()
+            .current_dir(&self.authority_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        for provider in &config.http_providers {
+            command.arg("--http-provider").arg(provider.as_str());
+        }
+        // SAFETY: this post-fork hook uses async-signal-safe system calls
+        // only. It binds the child to this exact authority, starts a new
+        // session, marks every descriptor from 3 up close-on-exec (Darwin
+        // sets that flag in a second call, so a descriptor another thread is
+        // creating could otherwise reach the child), then moves the
+        // authority channel to fixed descriptor 3, and disables core files.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::getppid() != parent_pid {
+                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                if libc::setsid() < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                codewire_local_vmm::darwin::process::mark_inherited_descriptors_close_on_exec();
+                if authority_fd == 3 {
+                    if libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                } else if libc::dup2(authority_fd, 3) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let no_core = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::setrlimit(libc::RLIMIT_CORE, &no_core) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                libc::umask(0o077);
+                Ok(())
+            });
+        }
+        command.spawn().map_err(|_| LocalBrokerSpawnError::Spawn)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::fd::AsRawFd as _;
@@ -256,6 +379,88 @@ mod tests {
         };
         assert!(exists(2), "stderr is reopened on /dev/null");
         assert!(!exists(leaked.as_raw_fd()));
+    }
+
+    #[tokio::test]
+    async fn a_broker_keeps_only_its_authority_channel_in_a_new_empty_session() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let leaked = std::fs::File::open("/dev/null").unwrap();
+        // SAFETY: clears FD_CLOEXEC on a descriptor this test owns.
+        assert_eq!(
+            unsafe { libc::fcntl(leaked.as_raw_fd(), libc::F_SETFD, 0) },
+            0
+        );
+        let broker = root.join("broker");
+        std::fs::write(
+            &broker,
+            format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    "{{ ps -o pgid= -p $$; echo $$; ",
+                    "env | cut -d= -f1 | grep -v -x -e PWD -e SHLVL -e _ | wc -l; ",
+                    "ulimit -c; umask; ",
+                    "test -e /dev/fd/3 && echo channel; ",
+                    "test -e /dev/fd/{leaked} && echo leaked; ",
+                    "pwd; echo \"$@\"; }} > observed\n",
+                ),
+                leaked = leaked.as_raw_fd()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&broker, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let spawner = CwLocalCredentialBrokerSpawner {
+            executable: broker,
+            authority_root: root.clone(),
+            store: AuthorityProtectedStore {
+                backend: ProtectedStoreBackend::File,
+                keychain: None,
+            },
+        };
+        let environment = uuid::Uuid::new_v4().to_string();
+        let config = LocalBrokerProcessConfig {
+            environment_id: codewire_access::EnvironmentId::parse(environment.clone()).unwrap(),
+            environment_generation: 1,
+            environment_name: "env".to_owned(),
+            runner_socket: root.join("runners").join(format!("{environment}.sock")),
+            http_providers: [codewire_access::HttpProvider::OpenAiApiKey].into(),
+            platform_delegated: false,
+        };
+        let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut child = spawner.spawn(&config, peer).unwrap();
+        assert!(child.wait().await.unwrap().success());
+        let observed = std::fs::read_to_string(root.join("observed")).unwrap();
+        let lines = observed.lines().map(str::trim).collect::<Vec<_>>();
+        assert_eq!(lines[0], lines[1], "setsid makes the broker a group leader");
+        assert_eq!(lines[2], "0", "only the shell's own variables are set");
+        assert_eq!(lines[3], "0", "core files are disabled");
+        assert_eq!(lines[4], "0077");
+        assert_eq!(lines[5], "channel", "the authority channel is descriptor 3");
+        assert_eq!(
+            lines[6],
+            root.to_str().unwrap(),
+            "no other descriptor survives"
+        );
+        assert!(lines[7].starts_with(&format!(
+            "__local-credential-broker --authority-fd 3 --environment-id {environment} "
+        )));
+        assert!(lines[7].ends_with(&format!(
+            "--protected-store file --protected-store-directory {}/protected-v1 --http-provider openai-api-key",
+            root.display()
+        )));
+
+        let platform = LocalBrokerProcessConfig {
+            http_providers: Default::default(),
+            platform_delegated: true,
+            ..config
+        };
+        let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert!(matches!(
+            spawner.spawn(&platform, peer),
+            Err(LocalBrokerSpawnError::InvalidConfiguration)
+        ));
     }
 
     #[test]

@@ -40,9 +40,9 @@ pub(crate) use native::*;
 mod credential_authority;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use credential_authority::*;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credential_broker;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use credential_broker::*;
 #[cfg(target_os = "linux")]
 mod credential_broker_confinement;
@@ -319,7 +319,7 @@ pub(crate) struct LocalCredentialAuthorityProbeArgs {
     pub(crate) shutdown: bool,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct LocalCredentialBrokerArgs {
     #[arg(long)]
@@ -336,6 +336,19 @@ pub(crate) struct LocalCredentialBrokerArgs {
     pub(crate) http_providers: Vec<String>,
     #[arg(long)]
     pub(crate) platform_delegated: bool,
+    /// The authority's store: macOS brokers read the selected backend, not a
+    /// platform default.
+    #[cfg(target_os = "macos")]
+    #[arg(long)]
+    pub(crate) protected_store: String,
+    /// The file backend's entry directory inside the authority root.
+    #[cfg(target_os = "macos")]
+    #[arg(long)]
+    pub(crate) protected_store_directory: Option<PathBuf>,
+    /// Test-only explicit keychain file for the keychain backend.
+    #[cfg(target_os = "macos")]
+    #[arg(long)]
+    pub(crate) keychain: Option<PathBuf>,
 }
 
 #[cfg(target_os = "linux")]

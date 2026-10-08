@@ -71,6 +71,7 @@ rustix = { workspace = true }
 tempfile = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+codewire-credential-broker = { workspace = true }
 codewire-local-credentials = { workspace = true }
 codewire-local-vmm = { path = "../codewire-local-vmm" }
 rustix = { workspace = true }

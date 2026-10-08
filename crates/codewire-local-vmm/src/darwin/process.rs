@@ -554,7 +554,7 @@ pub(crate) fn signal_unreaped_child(pid: u32, signal: Signal) -> Result<(), Reco
 /// Exit this process when its parent exits. Darwin has no parent-death
 /// signal, so a spawned child calls this at entry. The parent PID is checked
 /// again after registering, so a parent that exited first is also caught.
-pub(crate) fn exit_with_parent() -> io::Result<()> {
+pub fn exit_with_parent() -> io::Result<()> {
     // SAFETY: getppid has no preconditions.
     let parent = unsafe { libc::getppid() };
     if parent <= 1 {
@@ -614,7 +614,7 @@ fn exit_now() -> ! {
 /// spawned in between. Call it between fork and exec, before clearing the flag
 /// on the descriptors the child is meant to inherit. It makes only
 /// getdtablesize and fcntl calls.
-pub(crate) fn mark_inherited_descriptors_close_on_exec() {
+pub fn mark_inherited_descriptors_close_on_exec() {
     // SAFETY: scalar libc calls. A number that is not an open descriptor
     // fails with EBADF and is skipped.
     unsafe {

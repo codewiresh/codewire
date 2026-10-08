@@ -658,10 +658,11 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_has_the_storage_authority_but_no_broker_or_launch_entrypoints() {
+    fn macos_has_the_authority_and_broker_but_no_launch_entrypoints() {
         for command in [
             "__local-credential-authority",
             "__local-credential-authority-probe",
+            "__local-credential-broker",
         ] {
             let error = crate::Cli::try_parse_from(["cw", command]).unwrap_err();
             assert_eq!(
@@ -676,7 +677,6 @@ mod tests {
     #[test]
     fn linux_only_credential_and_launch_entrypoints_are_absent() {
         for command in [
-            "__local-credential-broker",
             "__local-credential-broker-confinement-probe",
             "__local-credential-broker-synthetic-smoke-check",
             "__local-git-repository-executor",

@@ -184,7 +184,7 @@ pub async fn serve_local_credential_authority<S: ProtectedStore + 'static>(
 /// Run the production storage authority on its configured persistent backend
 /// with the exact capability catalog compiled into this binary. It has no
 /// broker, repository, SSH-signing or platform launcher: those requests are
-/// refused as unavailable. macOS uses this until local VMs consume values.
+/// refused as unavailable.
 pub async fn serve_os_local_credential_authority(
     config: AuthorityRuntimeConfig,
     store: AuthorityProtectedStore,
@@ -213,6 +213,27 @@ pub async fn serve_os_local_credential_authority_with_process_spawners(
             repository_spawner: Some(repository_spawner),
             ssh_signer: Some(ssh_signer),
             platform_connector: Some(platform_connector),
+        },
+    )
+    .await
+}
+
+/// Run the macOS production authority with its local VM broker launcher.
+/// Repository executors, SSH signing and platform delegation have no macOS
+/// launcher yet, so those requests stay refused as unavailable.
+#[cfg(target_os = "macos")]
+pub async fn serve_os_local_credential_authority_with_broker_spawner(
+    config: AuthorityRuntimeConfig,
+    store: AuthorityProtectedStore,
+    broker_spawner: Arc<dyn LocalBrokerProcessSpawner>,
+) -> Result<(), AuthorityRuntimeError> {
+    verify_production_process_confinement()?;
+    serve_selected(
+        config,
+        store,
+        AuthorityRuntimeAdapters {
+            broker_spawner: Some(broker_spawner),
+            ..Default::default()
         },
     )
     .await
