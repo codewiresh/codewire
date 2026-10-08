@@ -33,7 +33,6 @@ pub struct NativeRuntimeConfig {
 impl NativeRuntimeConfig {
     /// Bind a retained supervisor without changing any other configuration input.
     /// The caller admits this executable from the live kernel peer first.
-    #[cfg(target_os = "linux")]
     pub(crate) fn with_supervisor_executable(
         &self,
         executable: PathBuf,

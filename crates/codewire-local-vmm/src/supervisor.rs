@@ -13201,18 +13201,12 @@ mod tests {
             error.to_string(),
             "the running native supervisor uses a different runtime configuration"
         );
-        // The production entry additionally refuses this non-role process,
-        // before any startup fallback or metadata effects.
-        #[cfg(target_os = "linux")]
+        // The production entry additionally refuses this process, whose
+        // executable is neither this cw nor a retained managed version, before
+        // any startup fallback or metadata effects.
         assert!(matches!(
             NativeSupervisorClient::connect_or_start(&wrong_config).await,
             Err(SupervisorError::Uds(UdsError::SupervisorPeerAdmission(_)))
-        ));
-        // Darwin admits the owner-only socket, then refuses the digest.
-        #[cfg(target_os = "macos")]
-        assert!(matches!(
-            NativeSupervisorClient::connect_or_start(&wrong_config).await,
-            Err(SupervisorError::SupervisorConfigurationMismatch)
         ));
         // The incompatible live process remains available; only this reuse
         // attempt failed, and no replacement was started over its socket.
