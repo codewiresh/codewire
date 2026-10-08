@@ -341,8 +341,7 @@ print(f'Rust/transport composition trace: {cases} cases passed')
 # Only terminal checks are synthetic; selection, preflight and receipt logic
 # are copied byte-for-byte. This isolated repository has no external remote or secrets.
 policy_body = production.split('run_policy_core() {', 1)[1].split('\n}\n', 1)[0]
-policy_helpers = re.findall(r'^  (?:with_owner_safe_tmpdir )?(?:python3 (?:(?:-I|-B) )*)?((?:scripts|crates)/[\w/.-]+)',
-                            policy_body, re.M)
+policy_helpers = re.findall(r'^  (?:python3 (?:(?:-I|-B) )*)?((?:scripts|crates)/[\w/.-]+)', policy_body, re.M)
 image_guards = ('test-cw-image-context.py', 'test-cw-runtime-source.py',
                 'test-cw-image-source.py', 'test-cw-image-consumer.py')
 assert set(image_guards) <= {Path(helper).name for helper in policy_helpers}

@@ -1882,7 +1882,7 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
 done <<'EOF'
 cw-release-assets|CW release-assets verification|ci-heavy|cw_release_assets
 workspace-image|Container contract verification|ci-heavy|workspace_image
-policy|Policy verification|ci-lite|policy
+policy|Policy verification|ci-heavy|policy
 standard|Standard verification|ci-heavy|standard
 tooling|Tooling / delivery contract verification|ci-heavy|tooling
 rust-compile|Compile every Rust target|ci-heavy|rust_transport
@@ -1898,7 +1898,7 @@ EOF
 policy_block="$TMP/policy.yaml"
 tooling_block="$TMP/tooling.yaml"
 grep -Fq 'run-product-verification.sh policy-core' "$policy_block" || {
-  echo 'ci-lite policy job does not own only the fast policy core' >&2
+  echo 'policy job does not own only the fast policy core' >&2
   exit 1
 }
 grep -Fq 'run-product-verification.sh policy-shell' "$tooling_block" || {
@@ -2272,12 +2272,12 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 17 ]] || {
-  echo 'Codewire CI requires twelve ordinary heavy groups, three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe' >&2
+[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 18 ]] || {
+  echo 'Codewire CI requires thirteen ordinary heavy groups (policy included), three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe' >&2
   exit 1
 }
-[[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 3 ]] || {
-  echo 'Codewire CI has not assigned selection, policy, and aggregation to ci-lite' >&2
+[[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 2 ]] || {
+  echo 'Codewire CI has not assigned selection and aggregation to ci-lite' >&2
   exit 1
 }
 [[ "$(grep -Fc '    runs-on: ci-light' "$WORKFLOW")" -eq 0 ]] || {

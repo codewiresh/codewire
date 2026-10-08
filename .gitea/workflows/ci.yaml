@@ -461,11 +461,12 @@ jobs:
   policy:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     # Baseline repository contracts are non-Docker checks over sealed tools.
-    # Keep their fast core on elastic non-privileged capacity; the measured
-    # full ShellCheck phase joins the existing heavy tooling group only when
-    # trusted selection requests it.
+    # They admit owner-private checkouts and temp roots, which only the heavy
+    # pool's job-private /data and /tmp provide; ci-lite's emptyDir roots are
+    # world-writable. The measured full ShellCheck phase joins the existing
+    # heavy tooling group only when trusted selection requests it.
     name: Policy verification
-    runs-on: ci-lite
+    runs-on: ci-heavy
     timeout-minutes: 13
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.policy_expected == 'true' }}
