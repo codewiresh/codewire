@@ -1844,7 +1844,11 @@ mod tests {
                 let _ = self.0.wait();
             }
         }
-        let sentinel = Sentinel(Command::new(SLEEP).arg("60").spawn().unwrap());
+        let sentinel = Sentinel(
+            crate::test_child(Command::new(SLEEP).arg("60"))
+                .spawn()
+                .unwrap(),
+        );
         // spawn may return before exec; admit the sleeping sentinel only after
         // its actual image is visible, while the unreaped Child owns its birth.
         let deadline = std::time::Instant::now() + Duration::from_secs(3);

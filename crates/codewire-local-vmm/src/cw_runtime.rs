@@ -1122,12 +1122,16 @@ fn inherit_publication_custody(
     // Acquiring the publication lock therefore proves the prior writer exited.
     // Darwin has no parent-death signal: a leaf whose producer died runs its
     // bounded format or inspection to completion, still holding the lock.
+    // Darwin also marks new descriptors close-on-exec in a second call, so
+    // sweep every inherited descriptor before passing only the lock.
     unsafe {
         command.pre_exec(move || {
             #[cfg(target_os = "linux")]
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
                 return Err(io::Error::last_os_error());
             }
+            #[cfg(target_os = "macos")]
+            crate::host::process::mark_inherited_descriptors_close_on_exec();
             if libc::getppid() != parent {
                 return Err(io::Error::from(io::ErrorKind::Interrupted));
             }
