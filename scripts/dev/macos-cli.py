@@ -382,7 +382,11 @@ def import_git_seeds(seeded, cargo, command):
             stream.seek(-20, os.SEEK_END)
             pack_name = "pack-" + stream.read().hex()
         for suffix in (".pack", ".idx"):
-            shutil.copy2(pack.with_suffix(suffix), database / "objects/pack" / (pack_name + suffix))
+            # The name is the pack's content hash, so an earlier seed's file
+            # (read-only once indexed) already holds these bytes.
+            destination = database / "objects/pack" / (pack_name + suffix)
+            if not destination.exists():
+                shutil.copy2(pack.with_suffix(suffix), destination)
         command(["git", f"--git-dir={database}", "update-ref",
                  "refs/commit/" + item["commit"], item["commit"]])
 
