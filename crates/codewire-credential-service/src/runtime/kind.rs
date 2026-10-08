@@ -8,12 +8,13 @@
 
 mod authentication;
 mod config;
-mod enrollment;
 mod git;
 mod provider;
 
 use super::*;
 use codewire_credential_broker::GitHubAppAuthorizationConfig;
+use codewire_credential_broker::provider_oauth::codex::CodexDeviceLogin;
+use codewire_credential_broker::provider_oauth::github::GitHubDeviceLogin;
 use codewire_platform_credentials::PlatformCredentialStore;
 use codewire_protected_store::secret_envelope::TestKekProvider;
 use zeroize::Zeroizing;
@@ -74,8 +75,14 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
             provider::github_app_callback_url(&config.public_origin),
         )
         .map_err(|_| RuntimeError::Configuration("Kind GitHub App fixture"))?;
-        // Keep the private tmpfs fixture alive through both owner drains.
-        let (fixture, enrollment, github) = enrollment::Fixture::create(&config.runtime_directory)?;
+        // The production device logins, against the synthetic provider.
+        let github_login = GitHubDeviceLogin::new(
+            github_app
+                .device_login_config()
+                .map_err(|_| RuntimeError::Configuration("Kind GitHub App fixture"))?,
+            Arc::new(provider.clone()),
+        );
+        let codex_login = CodexDeviceLogin::new(Arc::new(provider.clone()));
         let store = Arc::new(PlatformCredentialStore::new(
             pool.clone(),
             crate::authority::TimedKekProvider::wrap(Arc::new(TestKekProvider)),
@@ -108,8 +115,8 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
         let mutation = Arc::new(CredentialMutationOwner::new(
             pool.clone(),
             store.clone(),
-            CodexEnrollmentOwner::new(enrollment),
-            GitHubEnrollmentOwner::new(github),
+            codex_login,
+            Some(github_login),
             Some(github_app_authorization.clone()),
         ));
         // The production keep-alive against the synthetic provider. Its
@@ -150,16 +157,7 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
         let git_drain = git.close().await;
         tracing::info!(target: TARGET, event = "github_git_drained", success = git_drain.is_ok(), "github_git_drained");
         provider.log_totals();
-        match result.and(git_drain.map_err(|_| RuntimeError::Cleanup)) {
-            Ok(()) => fixture.close(),
-            Err(error) => {
-                // A listener/signal error can mask a simultaneous owner
-                // cleanup error. Preserve the outer root on every failure,
-                // including any homes the enrollment owner retained.
-                fixture.retain();
-                Err(error)
-            }
-        }
+        result.and(git_drain.map_err(|_| RuntimeError::Cleanup))
     }
     .await;
     pool.close().await;

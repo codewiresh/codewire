@@ -21,7 +21,6 @@ kind-e2e = [
     "codewire-credential-broker/local-broker-synthetic-smoke",
 ]
 enrollment = [
-    "codewire-credential-broker/codex-enrollment",
     "dep:codewire-proto",
     "dep:connectrpc",
     "dep:futures",

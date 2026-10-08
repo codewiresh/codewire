@@ -755,7 +755,7 @@ async fn shutdown_drains_issued_enrollment_commit_and_real_refresh_past_transpor
         ensure!(h.count().await? == 1, "blocked enrollment published before its COMMIT was released");
         blocker.rollback().await?;
         h.drained().await?;
-        ensure!(h.count().await? == 2 && !h.logged_out(), "issued enrollment was lost or logged out during runtime shutdown");
+        ensure!(h.count().await? == 2, "issued enrollment was lost during runtime shutdown");
 
         // Transport grace may end, but the provider-accepted refresh must
         // retain its worker and finish publication, independently of RPC peers.
@@ -802,8 +802,8 @@ fn credential_database_pool_does_not_ping_on_every_acquire() {
 }
 
 /// Only this long-lived service's broker upstream keeps provider connections
-/// alive. Its GitHub App authorization transport and the per-environment local
-/// broker open one connection per request.
+/// alive. Its GitHub App authorization and Codex device-login transports and
+/// the per-environment local broker open one connection per request.
 #[test]
 fn only_the_long_lived_broker_upstream_pools_provider_connections() {
     let service = include_str!("../runtime.rs");
@@ -817,7 +817,7 @@ fn only_the_long_lived_broker_upstream_pools_provider_connections() {
     assert!(service.contains("let upstream = ProviderHttpsTransport::resolve_pooled("));
     assert_eq!(
         service.matches("ProviderHttpsTransport::resolve(").count(),
-        1
+        2
     );
     assert!(local.contains("ProviderHttpsTransport::resolve(&http_providers)"));
     assert!(!local.contains("resolve_pooled"));

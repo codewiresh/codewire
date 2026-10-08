@@ -1,13 +1,12 @@
 //! GitHub App user-to-server authorization inside the isolated credential
 //! authority.
 //!
-//! This is intentionally separate from `github_enrollment`: that module owns
-//! the GitHub CLI device flow used by `cw`.  A browser callback carries an
-//! OAuth authorization code from a GitHub App installation, which this owner
-//! exchanges only from the credential authority that holds the App client
-//! secret.  The resulting user token never reaches the dashboard or a
-//! Sandbox.  The App's own device login (`provider_oauth::github`) needs no
-//! secret and ends in the same identity checks and import.
+//! A browser callback carries an OAuth authorization code from a GitHub App
+//! installation, which this owner exchanges only from the credential authority
+//! that holds the App client secret.  The resulting user token never reaches
+//! the dashboard or a Sandbox.  The App's own device login
+//! (`provider_oauth::github`) needs no secret and ends in the same identity
+//! checks and import.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -66,6 +65,18 @@ impl GitHubAppAuthorizationConfig {
             app_slug,
             callback_url,
         })
+    }
+
+    /// The same App's public identity for its device login, which needs no
+    /// client secret.
+    pub fn device_login_config(
+        &self,
+    ) -> Result<crate::provider_oauth::github::GitHubDeviceLoginConfig, GitHubAppAuthorizationError>
+    {
+        crate::provider_oauth::github::GitHubDeviceLoginConfig::new(
+            self.client_id.clone(),
+            self.app_slug.clone(),
+        )
     }
 }
 

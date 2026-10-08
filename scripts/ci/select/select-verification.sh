@@ -1139,14 +1139,18 @@ if [ "$event_selected" = false ]; then
         # matrix in addition to the material-free Kubernetes unit fixtures.
         select_token database
         ;;
-      crates/codewire-credential-broker/src/provider_enrollment.rs|\
-      crates/codewire-credential-broker/src/codex_enrollment/*)
-        # Shared by CLI and the isolated platform mutation service;
-        # package-default tests alone do not cover this opt-in feature.
+      crates/codewire-credential-broker/src/provider_enrollment.rs)
+        # Shared by CLI and the isolated platform mutation service (its SSH
+        # runtime); package-default tests alone do not cover these features.
         select_token rust
         select_token rust_pkg_codewire_cli
         select_token rust_pkg_codewire_credential_service
         select_token database
+        ;;
+      crates/codewire-credential-broker/src/codex_enrollment/*)
+        # Only the CLI's local connect enables this opt-in feature.
+        select_token rust
+        select_token rust_pkg_codewire_cli
         ;;
       crates/codewire-credential-broker/src/platform.rs|\
       crates/codewire-credential-broker/src/platform/*|\

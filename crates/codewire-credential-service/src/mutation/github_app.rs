@@ -1,5 +1,5 @@
-//! GitHub App browser callback completion, deliberately separate from the
-//! GitHub CLI device enrollment in `github.rs`.
+//! GitHub App browser callback completion. The App's device login in
+//! `github.rs` shares its identity checks and publication.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,12 +89,12 @@ async fn run(
         return Err(Error::EnrollmentFailed);
     }
     let mut completed = Completed::GithubApp(import);
-    let publication = publication::enroll(&shared, scope, &mut completed, target).await;
-    completed.finish(publication.outcome).await?;
-    publication.result
+    publication::enroll(&shared, scope, &mut completed, target)
+        .await
+        .result
 }
 
-fn reconnect_account_matches(expected: Option<&str>, actual: &str) -> bool {
+pub(super) fn reconnect_account_matches(expected: Option<&str>, actual: &str) -> bool {
     expected.is_none_or(|expected| expected == actual)
 }
 

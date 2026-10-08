@@ -117,9 +117,12 @@ assert_contract_field() {
 }
 
 policy=policy
-for enrollment_input in src/provider_enrollment.rs src/codex_enrollment/mod.rs src/codex_enrollment/parser.rs; do
-  run_paths_case shared_codex_enrollment pull_request refs/pull/1/head false \
-    'database policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_broker rust_pkg_codewire_credential_service' \
+run_paths_case shared_provider_enrollment pull_request refs/pull/1/head false \
+  'database policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_broker rust_pkg_codewire_credential_service' \
+  crates/codewire-credential-broker/src/provider_enrollment.rs
+for enrollment_input in src/codex_enrollment/mod.rs src/codex_enrollment/parser.rs; do
+  run_paths_case local_codex_enrollment pull_request refs/pull/1/head false \
+    'policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_broker' \
     "crates/codewire-credential-broker/$enrollment_input"
 done
 run_paths_case platform_credential_store pull_request refs/pull/1/head false \

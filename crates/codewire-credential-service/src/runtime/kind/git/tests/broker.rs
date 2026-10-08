@@ -72,7 +72,7 @@ impl BrokerCredentialLease for Lease {
         1
     }
     fn with_material<T>(self, operation: impl FnOnce(&[u8]) -> T) -> T {
-        operation(b"gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        operation(GITHUB_APP_USER_TOKEN.as_bytes())
     }
 }
 
