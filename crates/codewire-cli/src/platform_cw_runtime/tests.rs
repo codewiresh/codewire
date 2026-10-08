@@ -555,6 +555,78 @@ fn readonly_status_never_recreates_either_missing_lock() {
 }
 
 #[test]
+fn shared_home_volume_root_is_an_anchor_but_runtime_directories_stay_private() {
+    // A Kubernetes home volume is root-owned 0777 (local-path) or a setgid
+    // 2775 fsGroup root; the workspace user cannot change either.
+    let f = Fixture::new();
+    let home = f.root.path().join("home");
+    let created = [
+        ".local",
+        ".local/bin",
+        ".local/share",
+        ".local/share/codewire",
+        ".local/share/codewire/cw-runtime-staging",
+    ];
+    for mode in [0o777, 0o2775] {
+        chmod(&home, mode);
+        drop(Tree::open(&f.paths, true).unwrap());
+        for name in created {
+            let path = home.join(name);
+            if path.exists() {
+                assert_eq!(
+                    stdfs::metadata(&path).unwrap().mode() & 0o7777,
+                    0o700,
+                    "{name}"
+                );
+            }
+        }
+        assert!(Tree::open(&f.paths, false).is_ok());
+        stdfs::remove_dir_all(home.join(".local")).unwrap();
+    }
+    // The same sharing on a runtime directory below the home still refuses.
+    drop(Tree::open(&f.paths, true).unwrap());
+    chmod(&home.join(".local"), 0o770);
+    assert!(matches!(
+        Tree::open(&f.paths, false),
+        Err(Code::UnsafeState)
+    ));
+    chmod(&home.join(".local"), 0o700);
+    chmod(&home, 0o700);
+}
+
+#[test]
+fn root_owned_shared_home_is_writable_through_effective_access() {
+    // A root-owned world-writable /tmp stands in for a local-path volume root.
+    let tmp = Path::new("/tmp");
+    let shared = stdfs::symlink_metadata(tmp).unwrap();
+    assert!(shared.is_dir() && shared.uid() == 0 && shared.mode() & 0o003 == 0o003);
+    assert!(Paths::fixture(tmp).check_home_for_test(true).is_ok());
+    if rustix::process::geteuid().as_raw() != 0 {
+        // A root-owned home this user cannot write is admitted read-only.
+        let usr = Paths::fixture(Path::new("/usr"));
+        assert!(usr.check_home_for_test(false).is_ok());
+        assert!(matches!(usr.check_home_for_test(true), Err(Code::ReadOnly)));
+    }
+}
+
+#[test]
+fn symlinked_or_non_directory_home_refuses() {
+    let f = Fixture::new();
+    let real = f.root.path().join("real-home");
+    stdfs::create_dir(&real).unwrap();
+    let linked = f.root.path().join("linked-home");
+    symlink(&real, &linked).unwrap();
+    let file = f.root.path().join("file-home");
+    write(&file, b"", 0o600);
+    for home in [&linked, &file] {
+        assert!(matches!(
+            Tree::open(&Paths::fixture(home), false),
+            Err(Code::UnsafeState)
+        ));
+    }
+}
+
+#[test]
 fn existing_unmanaged_entry_and_readonly_parent_refuse_before_publication() {
     let f = Fixture::new();
     let tree = Tree::open(&f.paths, true).unwrap();
@@ -614,19 +686,19 @@ fn unsafe_parent_symlink_and_foreign_writable_ancestor_are_not_repaired() {
     assert_eq!(stdfs::read(outside.join("sentinel")).unwrap(), b"preserve");
     assert!(stdfs::symlink_metadata(&local).unwrap().is_symlink());
     stdfs::remove_file(&local).unwrap();
-    chmod(f.paths.home_for_test(), 0o722);
+    // The home itself is a shared volume anchor; a runtime directory below it
+    // must stay private and is never repaired.
+    stdfs::create_dir(&local).unwrap();
+    chmod(&local, 0o722);
     assert_eq!(
         f.execute(Action::Status, &[]),
         (Err(Code::UnsafeState), false)
     );
     assert_eq!(
-        stdfs::symlink_metadata(f.paths.home_for_test())
-            .unwrap()
-            .mode()
-            & 0o777,
+        stdfs::symlink_metadata(&local).unwrap().mode() & 0o777,
         0o722
     );
-    chmod(f.paths.home_for_test(), 0o700);
+    chmod(&local, 0o700);
 }
 
 #[test]
@@ -1639,14 +1711,14 @@ fn platform_image_dispatch_pending_and_corrupt_current_are_preserved() {
 
 #[test]
 fn platform_image_dispatch_unsafe_ancestry_and_linked_or_fifo_member_refuse() {
-    for kind in ["home", "symlink", "hardlink", "fifo"] {
+    for kind in ["ancestor", "symlink", "hardlink", "fifo"] {
         let f = Fixture::new();
         f.bootstrap();
         let selected = f.store().version_executable(&f.a.identity.sha256);
         let sentinel = f.root.path().join("sentinel");
         write(&sentinel, &f.a.bytes, 0o555);
         match kind {
-            "home" => chmod(f.paths.home_for_test(), 0o720),
+            "ancestor" => chmod(&f.paths.home_for_test().join(".local"), 0o720),
             "symlink" | "hardlink" | "fifo" => {
                 chmod(selected.parent().unwrap(), 0o755);
                 stdfs::remove_file(&selected).unwrap();

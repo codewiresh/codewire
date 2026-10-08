@@ -131,6 +131,8 @@ struct Anchor {
     uid: u32,
     gid: u32,
     mode: u32,
+    /// The shared workspace home volume root (see `Anchor::home`).
+    shared: bool,
 }
 
 impl Anchor {
@@ -150,6 +152,31 @@ impl Anchor {
             mode: m.mode(),
             file,
             path,
+            shared: false,
+        };
+        anchor.check()?;
+        Ok(anchor)
+    }
+
+    /// The workspace home is the Pod's own volume root. Kubernetes leaves it
+    /// root owned and group- or world-writable (fsGroup setgid 2775,
+    /// local-path 0777), and the workspace user cannot change that. It is a
+    /// held anchor: a real directory owned by root or this user. Every runtime
+    /// directory below it stays private and owner-checked, so another account
+    /// can at most make a path refuse, and a later rename fails `check`.
+    fn home(file: File, path: PathBuf) -> Result<Self> {
+        let m = file.metadata().map_err(|_| Code::Io)?;
+        if !m.is_dir() || (m.uid() != user().0 && m.uid() != 0) || m.mode() & 0o500 != 0o500 {
+            return Err(Code::UnsafeState);
+        }
+        let anchor = Self {
+            id: FileId::metadata(&m),
+            uid: m.uid(),
+            gid: m.gid(),
+            mode: m.mode(),
+            file,
+            path,
+            shared: true,
         };
         anchor.check()?;
         Ok(anchor)
@@ -180,6 +207,7 @@ impl Anchor {
             uid: self.uid,
             gid: self.gid,
             mode: self.mode,
+            shared: self.shared,
         })
     }
 }
@@ -209,14 +237,35 @@ impl Dir {
                 return Err(Code::UnsafeState);
             };
             let name = name.to_str().ok_or(Code::UnsafeState)?;
-            dir = dir
-                .child_inner(name, false, parts.peek().is_none())?
-                .ok_or(Code::UnsafeState)?;
-        }
-        if dir.own.uid != user().0 {
-            return Err(Code::UnsafeState);
+            dir = if parts.peek().is_none() {
+                dir.home_child(name)?
+            } else {
+                dir.child_inner(name, false, false)?
+                    .ok_or(Code::UnsafeState)?
+            };
         }
         Ok(dir)
+    }
+
+    fn home_child(&self, name: &str) -> Result<Self> {
+        basename(name)?;
+        self.check(false)?;
+        let file = File::from(
+            rfs::openat(&self.own.file, name, dir_flags(), Mode::empty())
+                .map_err(|_| Code::UnsafeState)?,
+        );
+        let mut ancestors = self
+            .ancestors
+            .iter()
+            .map(Anchor::copy)
+            .collect::<Result<Vec<_>>>()?;
+        ancestors.push(self.own.copy()?);
+        let child = Self {
+            ancestors,
+            own: Anchor::home(file, self.path().join(name))?,
+        };
+        child.check(false)?;
+        Ok(child)
     }
 
     pub(super) fn path(&self) -> &Path {
@@ -232,7 +281,20 @@ impl Dir {
             parent.check()?
         }
         self.own.check()?;
-        if writable && (self.own.uid != user().0 || self.own.mode & 0o200 == 0) {
+        let writable_here = if self.own.shared {
+            // A root-owned volume root is writable through its group or other
+            // bits; ask the kernel for this process's effective access.
+            rfs::accessat(
+                &self.own.file,
+                ".",
+                rfs::Access::WRITE_OK | rfs::Access::EXEC_OK,
+                AtFlags::EACCESS,
+            )
+            .is_ok()
+        } else {
+            self.own.uid == user().0 && self.own.mode & 0o200 != 0
+        };
+        if writable && !writable_here {
             return Err(Code::ReadOnly);
         }
         Ok(())
@@ -253,18 +315,27 @@ impl Dir {
     fn child_inner(&self, name: &str, create: bool, owner_only: bool) -> Result<Option<Self>> {
         basename(name)?;
         self.check(create)?;
-        if create {
+        let created = if create {
             match rfs::mkdirat(&self.own.file, name, Mode::from_raw_mode(0o700)) {
-                Ok(()) => self.own.file.sync_all().map_err(|_| Code::Io)?,
-                Err(rustix::io::Errno::EXIST) => {}
+                Ok(()) => Some(self.private_created(name)?),
+                Err(rustix::io::Errno::EXIST) => None,
                 Err(_) => return Err(Code::Io),
             }
-        }
-        let file = match rfs::openat(&self.own.file, name, dir_flags(), Mode::empty()) {
-            Ok(fd) => File::from(fd),
-            Err(rustix::io::Errno::NOENT) if !create => return Ok(None),
-            Err(_) => return Err(Code::UnsafeState),
+        } else {
+            None
         };
+        let file = match created {
+            Some(file) => file,
+            None => match rfs::openat(&self.own.file, name, dir_flags(), Mode::empty()) {
+                Ok(fd) => File::from(fd),
+                Err(rustix::io::Errno::NOENT) if !create => return Ok(None),
+                Err(_) => return Err(Code::UnsafeState),
+            },
+        };
+        self.admit_child(name, file, owner_only).map(Some)
+    }
+
+    fn admit_child(&self, name: &str, file: File, owner_only: bool) -> Result<Self> {
         let mut ancestors = self
             .ancestors
             .iter()
@@ -274,7 +345,7 @@ impl Dir {
         let own = Anchor::new(file, self.path().join(name), owner_only)?;
         let child = Self { ancestors, own };
         child.check(false)?;
-        Ok(Some(child))
+        Ok(child)
     }
 
     fn new_child(&self, name: &str) -> Result<Self> {
@@ -288,8 +359,26 @@ impl Dir {
                 Code::Io
             }
         })?;
+        let file = self.private_created(name)?;
+        self.admit_child(name, file, true)
+    }
+
+    /// The directory this tree just made: below a setgid volume root it
+    /// inherits setgid, so it is set exactly private, and the same descriptor
+    /// is admitted. A directory another account swapped in under the name, or
+    /// one with other permissions, refuses.
+    fn private_created(&self, name: &str) -> Result<File> {
+        let created = File::from(
+            rfs::openat(&self.own.file, name, dir_flags(), Mode::empty())
+                .map_err(|_| Code::UnsafeState)?,
+        );
+        let m = created.metadata().map_err(|_| Code::Io)?;
+        if !m.is_dir() || m.uid() != user().0 || m.mode() & 0o5777 != 0o700 {
+            return Err(Code::UnsafeState);
+        }
+        rfs::fchmod(&created, Mode::from_raw_mode(0o700)).map_err(|_| Code::Io)?;
         self.own.file.sync_all().map_err(|_| Code::Io)?;
-        self.child(name, false)?.ok_or(Code::UnsafeState)
+        Ok(created)
     }
 
     pub(super) fn create_file(&self, name: &str, mode: u32) -> Result<File> {
@@ -518,6 +607,10 @@ impl Paths {
     #[cfg(test)]
     pub(super) fn home_for_test(&self) -> &Path {
         &self.home
+    }
+    #[cfg(test)]
+    pub(super) fn check_home_for_test(&self, writable: bool) -> Result<()> {
+        Dir::home(&self.home)?.check(writable)
     }
 }
 

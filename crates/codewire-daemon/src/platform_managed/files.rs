@@ -1,5 +1,6 @@
 //! Held owner-private state IO for this service only. Existing unsafe paths
-//! refuse; no chmod, adoption, foreign unlink or crash recovery is performed.
+//! refuse; no chmod of an existing entry, adoption, foreign unlink or crash
+//! recovery is performed.
 use super::Error;
 use rustix::fs::{Mode, OFlags, RenameFlags};
 use std::fs::{File, Metadata};
@@ -9,6 +10,8 @@ use std::path::{Component, Path, PathBuf};
 
 pub(crate) struct Tree {
     pins: Vec<(PathBuf, File)>,
+    /// The pin that is the workspace home, when the tree is below it.
+    home: Option<usize>,
 }
 fn stamp(m: &Metadata) -> (u64, u64, u32, u32, u32, u64, u64, i64, i64, i64, i64) {
     (
@@ -25,6 +28,15 @@ fn stamp(m: &Metadata) -> (u64, u64, u32, u32, u32, u64, u64, i64, i64, i64, i64
         m.ctime_nsec(),
     )
 }
+/// The workspace home is the Pod's own volume root. Kubernetes leaves it root
+/// owned and group- or world-writable (fsGroup setgid 2775, local-path 0777),
+/// and the workspace user cannot change that. The home alone is a held anchor:
+/// a real directory owned by root or this user. Its ancestors and everything
+/// below it stay owner-checked, so another account can at most make a
+/// component refuse, and a later rename fails the held-descriptor check.
+fn anchor(m: &Metadata) -> bool {
+    m.is_dir() && [0, unsafe { libc::geteuid() }].contains(&m.uid())
+}
 fn dir(m: &Metadata, leaf: bool) -> bool {
     m.is_dir()
         && [0, unsafe { libc::geteuid() }].contains(&m.uid())
@@ -40,6 +52,9 @@ fn leaf(m: &Metadata, bound: usize) -> bool {
 }
 impl Tree {
     pub(crate) fn open(path: &Path, create: bool) -> Result<Self, Error> {
+        Self::open_below(Path::new(super::HOME), path, create)
+    }
+    fn open_below(home: &Path, path: &Path, create: bool) -> Result<Self, Error> {
         if !path.is_absolute()
             || path.components().count() > 64
             || path
@@ -55,6 +70,7 @@ impl Tree {
         )
         .map_err(|_| Error::Refused)?;
         let mut pins = vec![(PathBuf::from("/"), File::from(root))];
+        let mut home_pin = None;
         let mut named = PathBuf::from("/");
         for part in path.components().filter_map(|p| match p {
             Component::Normal(p) => Some(p),
@@ -72,24 +88,49 @@ impl Tree {
                     rustix::fs::mkdirat(parent, part, Mode::from_raw_mode(0o700))
                         .map_err(|_| Error::Unknown)?;
                     rustix::fs::fsync(parent).map_err(|_| Error::Unknown)?;
-                    rustix::fs::openat(
+                    let created = rustix::fs::openat(
                         parent,
                         part,
                         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                         Mode::empty(),
                     )
-                    .map_err(|_| Error::Unknown)?
+                    .map_err(|_| Error::Unknown)?;
+                    // A directory made below a setgid volume root inherits
+                    // setgid; this one is set exactly private. A directory
+                    // another account swapped in under the name refuses.
+                    let made = rustix::fs::fstat(&created).map_err(|_| Error::Unknown)?;
+                    if made.st_mode & libc::S_IFMT != libc::S_IFDIR
+                        || made.st_uid != unsafe { libc::geteuid() }
+                        || made.st_mode & 0o5777 != 0o700
+                    {
+                        return Err(Error::Refused);
+                    }
+                    rustix::fs::fchmod(&created, Mode::from_raw_mode(0o700))
+                        .map_err(|_| Error::Unknown)?;
+                    created
                 }
                 _ => return Err(Error::Refused),
             };
             named.push(part);
             let fd = File::from(descriptor);
-            if !dir(&fd.metadata().map_err(|_| Error::Refused)?, named == path) {
+            let metadata = fd.metadata().map_err(|_| Error::Refused)?;
+            let is_home = named == home && named != path;
+            if !(if is_home {
+                anchor(&metadata)
+            } else {
+                dir(&metadata, named == path)
+            }) {
                 return Err(Error::Refused);
+            }
+            if is_home {
+                home_pin = Some(pins.len());
             }
             pins.push((named.clone(), fd));
         }
-        let tree = Self { pins };
+        let tree = Self {
+            pins,
+            home: home_pin,
+        };
         tree.check()?;
         Ok(tree)
     }
@@ -97,7 +138,12 @@ impl Tree {
         for (i, (path, fd)) in self.pins.iter().enumerate() {
             let a = fd.metadata().map_err(|_| Error::Unknown)?;
             let b = std::fs::symlink_metadata(path).map_err(|_| Error::Unknown)?;
-            if !dir(&b, i + 1 == self.pins.len())
+            let admitted = if self.home == Some(i) {
+                anchor(&b)
+            } else {
+                dir(&b, i + 1 == self.pins.len())
+            };
+            if !admitted
                 || (a.dev(), a.ino(), a.uid(), a.gid(), a.mode())
                     != (b.dev(), b.ino(), b.uid(), b.gid(), b.mode())
             {
@@ -225,12 +271,14 @@ impl Tree {
     }
     pub(super) fn count(&self) -> Result<usize, Error> {
         self.check()?;
-        let path = &self.pins.last().ok_or(Error::Refused)?.0;
+        let held = &self.pins.last().ok_or(Error::Refused)?.1;
         let mut count = 0;
-        for item in std::fs::read_dir(path).map_err(|_| Error::Refused)? {
+        for item in rustix::fs::Dir::read_from(held).map_err(|_| Error::Refused)? {
             let entry = item.map_err(|_| Error::Refused)?;
-            let name = entry.file_name();
-            let name = name.to_str().ok_or(Error::Refused)?;
+            let name = entry.file_name().to_str().map_err(|_| Error::Refused)?;
+            if name == "." || name == ".." {
+                continue;
+            }
             if name == "requests.lock" {
                 self.read(name, 0)?.ok_or(Error::Refused)?;
                 continue;
@@ -331,6 +379,54 @@ mod tests {
                 .nlink(),
             2
         );
+    }
+
+    #[test]
+    fn platform_files_admit_a_shared_home_volume_root_but_keep_the_store_private() {
+        // The workspace home is root-owned 0777 on local-path volumes and a
+        // setgid 2775 fsGroup volume elsewhere; only the store below it is ours.
+        let base = private_root();
+        let home = base.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        for mode in [0o777, 0o2775] {
+            std::fs::set_permissions(&home, std::fs::Permissions::from_mode(mode)).unwrap();
+            let store = home.join(format!(".codewire-{mode:o}/daemon/sessions"));
+            let tree = Tree::open_below(&home, &store, true).unwrap();
+            tree.write("probe.bin", b"probe", false).unwrap();
+            for created in [
+                store.parent().unwrap().parent().unwrap(),
+                store.parent().unwrap(),
+                &store,
+            ] {
+                assert_eq!(std::fs::metadata(created).unwrap().mode() & 0o7777, 0o700);
+            }
+            assert!(Tree::open_below(&home, &store, false).is_ok());
+            // The same mode on a component below the home still refuses.
+            let shared = home.join(format!("shared-{mode:o}"));
+            std::fs::create_dir(&shared).unwrap();
+            std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(matches!(
+                Tree::open_below(&home, &shared.join("store"), true),
+                Err(Error::Refused)
+            ));
+            assert!(!shared.join("store").exists());
+        }
+        // Without the home anchor, the shared root itself refuses.
+        assert!(matches!(
+            Tree::open(&home.join(".codewire-777/daemon/sessions"), false),
+            Err(Error::Refused)
+        ));
+        // A symlinked or non-directory home is never an anchor.
+        let linked = base.path().join("linked");
+        std::os::unix::fs::symlink(&home, &linked).unwrap();
+        let file = base.path().join("file");
+        record(&file, b"");
+        for home in [&linked, &file] {
+            assert!(matches!(
+                Tree::open_below(home, &home.join("store"), true),
+                Err(Error::Refused)
+            ));
+        }
     }
 
     #[test]
