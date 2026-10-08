@@ -12,7 +12,8 @@ accessible environments and reports unavailable targets as errors.
 | Trusted Linux host | `--local --type host` | Owner daemon and private Unix socket | Codex and Claude |
 | Native Linux sandbox | `--local --type sandbox` | Native supervisor and guest daemon | Codex/Claude implementation; VM qualification pending |
 | Platform sandbox | `--platform --type sandbox` | Authenticated platform API | Qualification pending |
-| macOS host or sandbox | Separate hardware qualification | See Program #2064 | Qualification pending |
+| macOS trusted host | `--local --type host` | Owner daemon and private Unix socket | Codex and Claude |
+| macOS local sandbox | `--local --type sandbox` on Apple Silicon | Shared supervisor, VZ helper and arm64 guest daemon | Same host route as a native Linux sandbox; needs a local credential profile, see [MACOS-CLI.md](MACOS-CLI.md) |
 
 ```sh
 cw env create --local --type host --name host-team --path .
@@ -24,8 +25,8 @@ A trusted host runs as the local user with their ordinary HOME and installed
 tools. Its daemon uses a dedicated state directory, outside the workspace by
 default; `CW_HOST_DATA_DIR` selects another registry location. It provides
 owned process cleanup, not filesystem or network containment. Stop and remove
-retire its owned runtime; they preserve the workspace. Linux is the admitted host
-implementation. Other hosts fail before creation effects.
+retire its owned runtime; they preserve the workspace. Linux and macOS are the
+admitted host implementations. Other hosts fail before creation effects.
 
 Native sandboxes retain their protected credential and workspace contracts.
 Creating a host does not copy authentication files into a sandbox.
@@ -221,7 +222,11 @@ python3 scripts/dev/cw-runtime-image.py build \
   --output /absolute/fresh/owned/cw-image
 ```
 
-The image contains only static Linux/amd64 `cw` and public build provenance.
+The image contains only static Linux `cw` and public build provenance. A local
+VM runs its host's architecture: an x86_64 Linux host uses the default
+x86_64 target, and an Apple Silicon Mac uses `--target
+aarch64-unknown-linux-musl`, which produces a `linux/arm64` image (see
+[MACOS-CLI.md](MACOS-CLI.md)).
 It is an OCI image with one uncompressed layer; this local producer neither
 executes the image nor publishes it. Its external `image.json` receipt pins
 the index, manifest and payload. Produce the separate native runtime bundle:
@@ -297,8 +302,8 @@ retains its intent and fences lifecycle changes on that live VM birth until
 observed or durably cancelled. A later boot verifies the retained selector against host
 receipts before startup succeeds; an interrupted operation is not assumed to
 have had no effect. Older guests without the trusted publisher refuse live
-updates and need an explicit later compatible boot. Platform and Mac runtime
-updates are outside this Linux route.
+updates and need an explicit later compatible boot. macOS local VMs use this
+same route with an aarch64 runtime; platform runtime updates are outside it.
 
 Runtime commands resolve saved identity and observe the exact retained runner
 and VMM. A pending lifecycle intent or changed process, socket, boot, or protocol
