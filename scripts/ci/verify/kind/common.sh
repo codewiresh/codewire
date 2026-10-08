@@ -3602,6 +3602,7 @@ environment_resize_smoke() (
   local claim_name="sandbox-${environment_id}"
   local daemon_service="cw-daemon-${environment_id}"
   local sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid claim_uid
+  local resize_scoped_quota=false
   local operation_id operation_state response runtime_state marker image resources
   local current_pvc_uid resize_label sandbox_cpu claim_cpu storage_rbac pvc_rbac
   local status
@@ -3639,6 +3640,11 @@ DELETE FROM environment_presets WHERE id = '$preset_id' AND org_id = 'org_contra
 COMMIT;
 SQL
     [ "$?" -eq 0 ] || status=1
+    if [ "${resize_scoped_quota:-false}" = true ]; then
+      kubectl -n "$NS" exec deploy/postgres -- psql -U codewire -d codewire -v ON_ERROR_STOP=1 -Atc \
+        "DELETE FROM environment_quotas WHERE org_id = 'org_contract_1'" >/dev/null ||
+        status=1
+    fi
     # Runtime identity reconciliation creates the environment's access
     # objects. Never delete the shared fixture Issuers or public root
     # ConfigMaps.
@@ -3816,6 +3822,128 @@ SQL
     return 1
   fi
 
+  # The live resize waited for the kubelet to acknowledge its Pod generation
+  # (#2475); record that this node reports both generation fields.
+  local generation observed_generation
+  generation="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.generation}')"
+  observed_generation="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.observedGeneration}')"
+  if [ -z "$generation" ] || [ "$observed_generation" != "$generation" ]; then
+    echo "::error::live-resized Pod does not report an acknowledged generation: generation=${generation:-missing} observed=${observed_generation:-missing}"
+    return 1
+  fi
+  log "live resize: Pod generation=$generation observedGeneration=$observed_generation on $(kubectl version -o json | jq -r .serverVersion.gitVersion)"
+
+  # Submit one public resize and poll it until it is terminal, in $response.
+  resize_until_terminal() {
+    local id="$1" cpu="$2" memory="$3" operation
+    curl_settled -X POST \
+      -H 'cookie: codewire.session_token=contract-admin-session-token' \
+      -H 'content-type: application/json' \
+      -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"cpuMillicores\":${cpu},\"memoryMb\":${memory},\"diskGb\":1,\"requestId\":\"${id}\"}" \
+      "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/ResizeEnvironment"
+    operation="$(jq -r '.operation.id // empty' <<<"$PROBE_BODY")"
+    if [ "$PROBE_CODE" != "200" ] || [ -z "$operation" ]; then
+      echo "::error::resize request $id failed: code=$PROBE_CODE body=$PROBE_BODY"
+      return 1
+    fi
+    for _ in $(seq 1 240); do
+      curl_settled -X POST \
+        -H 'cookie: codewire.session_token=contract-admin-session-token' \
+        -H 'content-type: application/json' \
+        -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"operationId\":\"${operation}\"}" \
+        "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/GetEnvironmentResizeOperation"
+      response="$PROBE_BODY"
+      case "$(jq -r '.operation.state // empty' <<<"$response")" in
+        ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED | ENVIRONMENT_RESIZE_OPERATION_STATE_FAILED) return 0 ;;
+      esac
+      sleep 1
+    done
+    echo "::error::resize $id did not reach a terminal state: $response"
+    return 1
+  }
+
+  # Live workspace resources and pending resize reason, as cpu:cpu:reason.
+  live_resources() {
+    kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.spec.containers[?(@.name=="workspace")].resources.requests.cpu}:{.status.containerStatuses[?(@.name=="workspace")].resources.requests.cpu}:{.status.conditions[?(@.type=="PodResizePending")].reason}'
+  }
+
+  # A request above the node's allocatable CPU is infeasible. It fails
+  # actionably, and its accepted request is withdrawn from the same Pod before
+  # the reservation is released, leaving nothing to apply later (#2474).
+  local node_name infeasible_cpu
+  node_name="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.spec.nodeName}')"
+  infeasible_cpu="$(kubectl get node "$node_name" -o jsonpath='{.status.allocatable.cpu}' |
+    python3 -c 'import sys; v = sys.stdin.read().strip(); print((int(v[:-1]) if v.endswith("m") else int(float(v) * 1000)) + 1000)')"
+  # The contract org's default quota (32 CPUs) may be smaller than a large
+  # node. Unless the org has its own quota row, scope an unlimited CPU quota
+  # to this one request.
+  if [ -n "$(kubectl -n "$NS" exec deploy/postgres -- psql -U codewire -d codewire -v ON_ERROR_STOP=1 -Atc \
+      "INSERT INTO environment_quotas (org_id, max_concurrent_environments, max_concurrent_sandbox, max_cpu_millicores, max_memory_mb)
+       VALUES ('org_contract_1', 10, 50, -1, 65536) ON CONFLICT (org_id) DO NOTHING RETURNING org_id")" ]; then
+    resize_scoped_quota=true
+  fi
+  resize_until_terminal "${request_id}-infeasible" "$infeasible_cpu" 512 || return 1
+  if [ "$resize_scoped_quota" = true ]; then
+    kubectl -n "$NS" exec deploy/postgres -- psql -U codewire -d codewire -v ON_ERROR_STOP=1 -Atc \
+      "DELETE FROM environment_quotas WHERE org_id = 'org_contract_1'" >/dev/null
+    resize_scoped_quota=false
+  fi
+  if ! jq -e '
+      .operation.state == "ENVIRONMENT_RESIZE_OPERATION_STATE_FAILED"
+      and .operation.failure.code == "runtime_apply_failed"
+      and (.operation.failure.message | contains("request a smaller size"))
+      and .operation.lastAppliedResources == {"cpuMillicores":500,"memoryMb":512,"diskGb":1}
+      and .environment.cpuMillicores == 500
+      and .environment.memoryMb == 512
+    ' <<<"$response" >/dev/null; then
+    echo "::error::infeasible live resize did not fail actionably with the running resources recorded: $response"
+    return 1
+  fi
+  if [ "$(live_resources)" != "500m:500m:" ]; then
+    echo "::error::infeasible live resize request was not withdrawn from the workspace Pod: $(live_resources)"
+    return 1
+  fi
+  if [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')" != "$old_pod_uid" ] \
+      || [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.containerStatuses[?(@.name=="workspace")].restartCount}')" != "$old_restart_count" ]; then
+    echo "::error::infeasible live resize changed the workspace Pod identity or restart count"
+    return 1
+  fi
+  if [ "$(kubectl -n "$SANDBOX_NS" get sandbox "$sandbox_name" -o jsonpath='{.spec.podTemplate.spec.containers[?(@.name=="workspace")].resources.requests.cpu}')" != "500m" ] \
+      || [ "$(kubectl -n "$NS" exec deploy/postgres -- psql -U codewire -d codewire -Atc \
+        "SELECT state || ':' || cpu_millicores || ':' || memory_mb FROM environments WHERE id = '$environment_id'")" != "running:500:512" ]; then
+    echo "::error::infeasible live resize left desired or durable resources changed"
+    return 1
+  fi
+  log "infeasible live resize failed actionably and its request was withdrawn from Pod $old_pod_uid"
+
+  # An Infeasible condition from an earlier Pod generation does not fail a
+  # new feasible request (#2475). Leave one out of band, then recover live.
+  kubectl -n "$SANDBOX_NS" patch pod "$pod_name" --subresource=resize --type=strategic \
+    -p "{\"spec\":{\"containers\":[{\"name\":\"workspace\",\"resources\":{\"requests\":{\"cpu\":\"${infeasible_cpu}m\"},\"limits\":{\"cpu\":\"${infeasible_cpu}m\"}}}]}}" >/dev/null
+  if ! kubectl -n "$SANDBOX_NS" wait "pod/${pod_name}" --timeout=60s \
+      --for=jsonpath='{.status.conditions[?(@.type=="PodResizePending")].reason}'=Infeasible >/dev/null; then
+    echo "::error::the out-of-band infeasible request was not reported Infeasible: $(live_resources)"
+    return 1
+  fi
+  log "stale Infeasible condition at generation $(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.conditions[?(@.type=="PodResizePending")].observedGeneration}')"
+  resize_until_terminal "${request_id}-recover" 750 512 || return 1
+  if ! jq -e '
+      .operation.state == "ENVIRONMENT_RESIZE_OPERATION_STATE_COMPLETED"
+      and .operation.appliedMode == "ENVIRONMENT_RESIZE_EXECUTION_MODE_IN_PLACE"
+      and .operation.lastAppliedResources == {"cpuMillicores":750,"memoryMb":512,"diskGb":1}
+      and .environment.cpuMillicores == 750
+    ' <<<"$response" >/dev/null; then
+    echo "::error::live resize did not recover from a stale Infeasible condition: $response"
+    return 1
+  fi
+  if [ "$(live_resources)" != "750m:750m:" ] \
+      || [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')" != "$old_pod_uid" ] \
+      || [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.containerStatuses[?(@.name=="workspace")].restartCount}')" != "$old_restart_count" ]; then
+    echo "::error::live resize recovery changed the workspace Pod or left a request pending: $(live_resources)"
+    return 1
+  fi
+  log "live resize recovered from a stale Infeasible condition on Pod $old_pod_uid"
+
   # A restart-class plan queries the daemon to enforce the active-session
   # policy. The in-place Pod /resize acknowledgement precedes Service endpoint
   # reconciliation, so prove the existing daemon is ready before exercising
@@ -3840,7 +3968,7 @@ SQL
   curl_settled -X POST \
     -H 'cookie: codewire.session_token=contract-admin-session-token' \
     -H 'content-type: application/json' \
-    -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"cpuMillicores\":500,\"memoryMb\":384,\"diskGb\":1,\"requestId\":\"${request_id}\",\"disruptionPolicy\":\"ENVIRONMENT_RESIZE_DISRUPTION_POLICY_ALLOW_RESTART\"}" \
+    -d "{\"orgId\":\"org_contract_1\",\"environmentId\":\"${environment_id}\",\"cpuMillicores\":750,\"memoryMb\":384,\"diskGb\":1,\"requestId\":\"${request_id}\",\"disruptionPolicy\":\"ENVIRONMENT_RESIZE_DISRUPTION_POLICY_ALLOW_RESTART\"}" \
     "${KIND_INGRESS_URL}/codewire.v1.EnvironmentService/ResizeEnvironment" || return $?
   if [ "$PROBE_CODE" != "200" ]; then
     echo "::error::explicit restart resize request failed: code=$PROBE_CODE body=$PROBE_BODY"
@@ -3884,6 +4012,59 @@ SQL
     echo "::error::explicit restart failed to preserve PVC identity or workspace data"
     return 1
   fi
+
+  # The API server enforces the UID and resourceVersion that Codewire binds a
+  # live resize to on pods/resize (#2473). Replace the Pod under the same name;
+  # Codewire's request shape, bound to the old incarnation, is refused and the
+  # replacement keeps its resources.
+  local stale_uid stale_version replacement_uid="" replacement_cpu patch_output
+  stale_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}')"
+  stale_version="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.resourceVersion}')"
+  if ! kubectl -n "$SANDBOX_NS" delete pod "$pod_name" --wait=true --timeout=120s >/dev/null; then
+    echo "::error::could not delete the workspace Pod to exercise its replacement"
+    return 1
+  fi
+  for _ in $(seq 1 120); do
+    replacement_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+    if [ -n "$replacement_uid" ] && [ "$replacement_uid" != "$stale_uid" ]; then
+      break
+    fi
+    sleep 1
+  done
+  if [ -z "$replacement_uid" ] || [ "$replacement_uid" = "$stale_uid" ]; then
+    echo "::error::the Sandbox did not replace the deleted workspace Pod"
+    return 1
+  fi
+  if ! kubectl -n "$SANDBOX_NS" wait "pod/${pod_name}" --for=condition=Ready --timeout=180s >/dev/null; then
+    echo "::error::the replacement workspace Pod did not become Ready"
+    return 1
+  fi
+  replacement_cpu="$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.spec.containers[?(@.name=="workspace")].resources.requests.cpu}')"
+  bound_resize() {
+    printf '{"metadata":{"uid":"%s","resourceVersion":"%s"},"spec":{"containers":[{"name":"workspace","resources":{"requests":{"cpu":"1000m","memory":"384Mi"},"limits":{"cpu":"1000m","memory":"384Mi"}}}]}}' "$1" "$2"
+  }
+  if patch_output="$(kubectl -n "$SANDBOX_NS" patch pod "$pod_name" --subresource=resize \
+      --type=strategic -p "$(bound_resize "$stale_uid" "$stale_version")" 2>&1)" \
+      || ! grep -q 'Conflict' <<<"$patch_output"; then
+    echo "::error::a resize bound to the replaced Pod was not refused as a conflict: $patch_output"
+    return 1
+  fi
+  # The UID is enforced on its own: the replacement's current resourceVersion
+  # with the old UID is invalid. Retry only a concurrent status update.
+  for _ in $(seq 1 5); do
+    if patch_output="$(kubectl -n "$SANDBOX_NS" patch pod "$pod_name" --subresource=resize --type=strategic \
+        -p "$(bound_resize "$stale_uid" "$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.metadata.resourceVersion}')")" 2>&1)"; then
+      echo "::error::a resize bound to the replaced Pod UID mutated the replacement"
+      return 1
+    fi
+    grep -q 'Conflict' <<<"$patch_output" || break
+  done
+  if ! grep -q 'metadata.uid' <<<"$patch_output" \
+      || [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.spec.containers[?(@.name=="workspace")].resources.requests.cpu}')" != "$replacement_cpu" ]; then
+    echo "::error::the replacement Pod was not protected by the UID precondition: $patch_output"
+    return 1
+  fi
+  log "pods/resize refused requests bound to replaced Pod $stale_uid; replacement $replacement_uid unchanged"
 
 
   local as_user="system:serviceaccount:${NS}:codewire-orchestration"

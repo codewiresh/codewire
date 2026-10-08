@@ -408,38 +408,15 @@ impl EnvironmentActivities {
         let Some(authority) = required_authority(&self.wctx, &cmd, "resized").await? else {
             return Ok(());
         };
-        run_environment_activity(ctx, async {
-            match resize::handle_environment_resize(&self.wctx, &cmd.environment_id, &authority)
-                .await
-            {
-                Ok(()) => Ok(()),
-                Err(error) => {
-                    let terminal = resize::terminal_failure(&error)
-                        .map(|failure| (failure.code, failure.message.clone()));
-                    if let Some((code, message)) = terminal {
-                        resize::mark_environment_resize_failed(
-                            &self.wctx,
-                            &cmd.environment_id,
-                            &authority,
-                            code,
-                            &message,
-                        )
-                        .await
-                    } else if attempt >= 3 {
-                        resize::mark_environment_resize_failed(
-                            &self.wctx,
-                            &cmd.environment_id,
-                            &authority,
-                            "runtime_apply_failed",
-                            &format!("environment resize did not converge: {error:#}"),
-                        )
-                        .await
-                    } else {
-                        Err(error)
-                    }
-                }
-            }
-        })
+        run_environment_activity(
+            ctx,
+            resize::run_environment_resize(
+                &self.wctx,
+                &cmd.environment_id,
+                &authority,
+                attempt >= 3,
+            ),
+        )
         .await
     }
 

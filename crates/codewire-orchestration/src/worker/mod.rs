@@ -159,6 +159,10 @@ mod tests {
                 "destroy",
                 future_size(&|| lifecycle::handle_environment_destroy(never(), never(), never())),
             ),
+            (
+                "resize",
+                future_size(&|| resize::run_environment_resize(never(), never(), never(), never())),
+            ),
         ];
         for (activity, size) in sizes {
             eprintln!("{activity} activity future: {size} bytes");

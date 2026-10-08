@@ -93,6 +93,11 @@
     let runtimeChecking = true;
     const runtimeControlReady = () => runtimeAvailable && runtimeRunning;
     const runtimeReady = () => runtimeControlReady() && setupComplete;
+    // Known not ready: the status says the Sandbox is stopped or still setting
+    // up. An unknown status, such as one failed poll, is not evidence of that,
+    // so an open terminal keeps its socket and its input; the socket itself
+    // reports a Sandbox that went away.
+    const runtimeBlocked = () => runtimeAvailable && !runtimeReady();
     const readinessMessage = () => runtimeChecking ? "Checking Sandbox status before restoring terminals…"
       : !runtimeAvailable ? "Sandbox status is unavailable. Terminal controls are paused."
       : !runtimeRunning ? runtimeStarting ? "This Sandbox is starting. Terminals open when it is ready."
@@ -138,8 +143,12 @@
       } catch { return null; }
     }
     function updateControls() {
-      const controlBlocked = !authorized || pending || uncertain || needsReload || suspended || !runtimeControlReady();
+      const stateBlocked = !authorized || pending || uncertain || needsReload || suspended;
+      const controlBlocked = stateBlocked || !runtimeControlReady();
       const blocked = controlBlocked || !setupComplete;
+      // An open terminal keeps typing and can disconnect through an unknown
+      // status; only a Sandbox known not to be ready stops it.
+      const openBlocked = stateBlocked || runtimeBlocked();
       tabList.hidden = !authorized || suspended;
       renameSave.disabled = !authorized || pending || uncertain || needsReload || suspended;
       renameButton.disabled = renameSave.disabled || !tabs.has(active);
@@ -157,7 +166,8 @@
       existingForm.querySelector("button").disabled = existing.disabled || !existing.value;
       for (const tab of tabs.values()) {
         // An ended session has nothing to reconnect to; Replay still shows its output.
-        tab.toggle.disabled = blocked || !tab.available || tab.renderFailed
+        const open = tab.socket?.readyState === WebSocket.OPEN;
+        tab.toggle.disabled = (open ? openBlocked : blocked) || !tab.available || tab.renderFailed
           || (ended(tab.state) && tab.socket?.readyState !== WebSocket.OPEN);
         tab.reset.disabled = blocked || !tab.available;
         const removable = !tab.available || ended(tab.state);
@@ -165,7 +175,7 @@
         tab.close.disabled = controlBlocked || removable;
         tab.remove.hidden = !removable;
         tab.remove.disabled = !authorized || pending || suspended;
-        tab.presentation.terminal.options.disableStdin = blocked || tab.socket?.readyState !== WebSocket.OPEN || !live(tab.state);
+        tab.presentation.terminal.options.disableStdin = openBlocked || !open || !live(tab.state);
       }
     }
     function clearRename() {
@@ -353,7 +363,7 @@
     }
     function flushInput(tab, socket) {
       if (tab.socket !== socket) return false;
-      if (socket.readyState !== WebSocket.OPEN || suspended || !authorized || !runtimeReady() || !live(tab.state)) {
+      if (socket.readyState !== WebSocket.OPEN || suspended || !authorized || runtimeBlocked() || !live(tab.state)) {
         discardInput(tab);
         watchSendQueue(tab, socket);
         return false;
@@ -367,7 +377,7 @@
       return send(tab, socket, { type: "input", data: staged.data }, staged.deadline);
     }
     function queueInput(tab, socket, data) {
-      if (tab.socket !== socket || socket.readyState !== WebSocket.OPEN || suspended || !authorized || !runtimeReady() || !live(tab.state)) return;
+      if (tab.socket !== socket || socket.readyState !== WebSocket.OPEN || suspended || !authorized || runtimeBlocked() || !live(tab.state)) return;
       let encoded;
       try { encoded = P.encodeClient({ type: "input", data }); } catch {
         connectionText(tab, "Input is too large to send. Paste a smaller amount.", "warning");
@@ -1040,9 +1050,12 @@
       root.dataset.terminalAvailable = String(runtimeAvailable);
       root.dataset.terminalRunning = String(runtimeRunning);
       for (const tab of tabs.values()) {
-        // Readiness loss pauses the transport without withdrawing intent.
-        if (!ready) detach(tab, readinessMessage(), true, readinessTone());
-        else if (!wasReady && !tab.socket) {
+        // Readiness loss pauses the transport without withdrawing intent. An
+        // unknown status leaves an open terminal attached; a tab without a
+        // socket says why it waits.
+        if (!ready) {
+          if (runtimeBlocked() || !tab.socket) detach(tab, readinessMessage(), true, readinessTone());
+        } else if (!wasReady && !tab.socket) {
           if (automatic(tab)) connectionText(tab, "Reconnecting…", "warning");
           else connectionText(tab, "Disconnected. Reconnect to resume this terminal.");
         }

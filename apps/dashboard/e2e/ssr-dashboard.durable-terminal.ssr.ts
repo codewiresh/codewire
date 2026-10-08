@@ -339,10 +339,11 @@ test("the status bar follows the selected terminal's connection", async ({ page 
   await expect(shown).toHaveAttribute("data-tone", "warning");
   state.statusAvailable = true;
   await advance(page, 5000);
-  await expect.poll(() => attached(state, sessionId(2)).length).toBe(2);
+  // The open Terminal 2 stayed attached through the outage.
+  expect(attached(state, sessionId(2))).toHaveLength(1);
   await page.getByRole("tab", { name: "Terminal 2", exact: true }).click();
   await expect(shown).toHaveText("Connected");
-  output(attached(state, sessionId(2))[1], "out-of-order", 7n);
+  output(attached(state, sessionId(2))[0], "out-of-order", 7n);
   await expect(shown).toHaveText("Connection closed because terminal output could not be verified.");
   await expect(shown).toHaveAttribute("data-tone", "danger");
   expect(await dot()).toBe("rgb(232, 112, 95)");
@@ -1926,7 +1927,7 @@ test("an automatic reconnect whose old output cannot finish rendering stays manu
   expect(state.stops).toBe(0);
 });
 
-test("a failed readiness poll pauses terminals and re-attaches wanted sessions without launching when ready again", async ({ page }) => {
+test("a failed readiness poll keeps open terminals attached and typing; a stopped Sandbox still pauses them", async ({ page }) => {
   await page.clock.install();
   const state = await transport(page);
   state.sessions = [{ sessionId: sessionId(1), state: "running" }, { sessionId: sessionId(2), state: "running" }];
@@ -1934,34 +1935,44 @@ test("a failed readiness poll pauses terminals and re-attaches wanted sessions w
   await expect(page.getByRole("tab")).toHaveCount(2);
   await expect.poll(() => state.connections.length).toBe(2);
   const [first] = attached(state, sessionId(1));
-  const cursor = output(first, "survives-readiness-flap\r\n");
-  await expect.poll(() => first.frames.some((frame) => frame.type === "ack" && frame.offset === String(cursor))).toBe(true);
+  output(first, "survives-readiness-flap\r\n");
   await page.getByRole("tab", { name: "Terminal 2", exact: true }).click();
   await page.getByRole("button", { name: "Disconnect", exact: true }).click();
   await expect(connectionStatus(page, sessionId(2))).toHaveText("Disconnected");
   await page.clock.pauseAt(new Date(Date.now() + 1000));
   await settleReadiness(page);
-  // One failed poll reports the Sandbox unavailable.
+  const lists = state.lists;
+  // One failed poll leaves the Sandbox's state unknown, not stopped: the open
+  // terminal keeps its socket and its input, nothing new starts, and the
+  // disconnected tab says why it waits.
   state.statusAvailable = false;
   await advance(page, 5000);
-  await expect(connectionStatus(page, sessionId(1))).toHaveText("Sandbox status is unavailable. Terminal controls are paused.");
-  await expect.poll(() => first.closed).toBe(true);
+  await expect(connectionStatus(page, sessionId(2))).toHaveText("Sandbox status is unavailable. Terminal controls are paused.");
   await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeDisabled();
-  const lists = state.lists;
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
+  await expect(connectionStatus(page, sessionId(1))).toHaveText("Connected");
+  expect(first.closed).toBeFalsy();
+  await page.getByRole("textbox", { name: "Terminal input" }).focus();
+  await page.keyboard.insertText("typed-while-unknown");
+  await page.clock.runFor(100);
+  await expect.poll(() => first.frames.filter((frame) => frame.type === "input").map((frame) => frame.data).join(""))
+    .toContain("typed-while-unknown");
+  // The status returns: the open terminal never dropped, so nothing re-lists
+  // or re-attaches, and the disconnected tab offers Reconnect again.
   state.statusAvailable = true;
   await advance(page, 5000);
-  await expect.poll(() => state.connections.length).toBe(3);
-  const replacement = state.connections[2];
-  expect(replacement.url.searchParams.get("session_id")).toBe(sessionId(1));
-  expect(replacement.url.searchParams.get("output_offset")).toBe(String(cursor));
-  expect(state.lists).toBe(lists + 1);
   await expect(connectionStatus(page, sessionId(1))).toHaveText("Connected");
-  // Explicit Disconnect survives the readiness flap and its refresh.
+  await page.getByRole("tab", { name: "Terminal 2", exact: true }).click();
   await expect(connectionStatus(page, sessionId(2))).toHaveText("Disconnected. Reconnect to resume this terminal.");
   await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeEnabled();
-  await advance(page, 60_000);
-  expect(state.connections).toHaveLength(3);
-  expect(replacement.frames.some((frame) => frame.type === "input")).toBe(false);
+  expect(state.connections).toHaveLength(2);
+  expect(state.lists).toBe(lists);
+  // A status that says the Sandbox stopped still pauses the open terminal.
+  state.running = false;
+  await advance(page, 5000);
+  await expect.poll(() => first.closed).toBe(true);
+  await expect(connectionStatus(page, sessionId(1))).toHaveText("Start this Sandbox to use its terminals.");
   expect(state.launches).toBe(0);
   expect(state.stops).toBe(0);
 });
@@ -2109,10 +2120,11 @@ test("readiness returning during a pending launch re-lists sessions before re-at
   state.launchGate = new Promise<void>((resolve) => { releaseLaunch = resolve; });
   await page.getByRole("button", { name: "New terminal", exact: true }).click();
   await expect.poll(() => state.launches).toBe(1);
-  state.statusAvailable = false;
+  // The Sandbox reports stopped, then running again: it may have restarted.
+  state.running = false;
   await advance(page, 5000);
-  await expect(connectionStatus(page, sessionId(11))).toHaveText("Sandbox status is unavailable. Terminal controls are paused.");
-  state.statusAvailable = true;
+  await expect(connectionStatus(page, sessionId(11))).toHaveText("Start this Sandbox to use its terminals.");
+  state.running = true;
   await advance(page, 5000);
   await expect(connectionStatus(page, sessionId(11))).toHaveText("Reconnecting…");
   expect(state.lists).toBe(1);

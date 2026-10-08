@@ -444,7 +444,7 @@ run_database() {
     cargo test --locked -p codewire-orchestration --lib \
       'api::environment_resize::tests::db_' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "environment resize admission matrix" "$logfile" 2
+  assert_passed_count "environment resize admission matrix" "$logfile" 3
 
   logfile="$RUN_DIR/ssh-proxy-runtime-lease.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

@@ -1553,6 +1553,185 @@ mod tests {
             .unwrap();
     }
 
+    /// #2474: a failed live resize whose Pod may still apply its increase,
+    /// and whose PVC request was already raised, releases the reservation
+    /// only into recorded resources that keep both increases in quota and
+    /// billing accounting.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL"]
+    async fn db_failed_live_resize_keeps_an_unconfirmed_increase_accounted() {
+        use crate::sandbox::client::FailedLiveResize;
+        use crate::worker::activity_authority::ActivityAuthority;
+        use crate::worker::resize::{failed_resources, record_failed_resize};
+
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL is required for resize DB flow");
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await
+            .expect("connect environment resize test database");
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let user_id = format!("usr_resize_failed_{suffix}");
+        let org_id = format!("org_resize_failed_{suffix}");
+        let preset_id = format!("preset_resize_failed_{suffix}");
+        let env_id = format!("env_resize_failed_{suffix}");
+        let other_env_id = format!("env_resize_failed_other_{suffix}");
+        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+            .bind(&user_id)
+            .bind(format!("resize-failed-{suffix}@example.test"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO organizations (id, name, slug, created_by)
+             VALUES ($1, 'Resize failure test', $2, $3)",
+        )
+        .bind(&org_id)
+        .bind(format!("resize-failed-{suffix}"))
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"INSERT INTO environment_presets (id, org_id, name, slug, project_spec)
+               VALUES ($1, $2, 'Resize failure test', $3,
+                       '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
+        )
+        .bind(&preset_id)
+        .bind(&org_id)
+        .bind(format!("resize-failed-preset-{suffix}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        for id in [&env_id, &other_env_id] {
+            sqlx::query(
+                r#"INSERT INTO environments
+                    (id, org_id, created_by, preset_id, type, state, desired_state,
+                     cpu_millicores, memory_mb, disk_gb, project_spec,
+                     environment_operation_generation)
+                 VALUES ($1, $2, $3, $4, 'sandbox', 'running', 'started', 1000, 1024, 10,
+                         '{"schema_version":1,"working_directory":"/workspace"}'::jsonb, 1)"#,
+            )
+            .bind(id)
+            .bind(&org_id)
+            .bind(&user_id)
+            .bind(&preset_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let params = |environment_id: &str, cpu_millicores, disk_gb, request_id: &str| {
+            ResizeEnvironmentParams {
+                org_id: org_id.clone(),
+                environment_id: environment_id.into(),
+                desired_resources: EnvironmentResources {
+                    cpu_millicores,
+                    memory_mb: 1_024,
+                    disk_gb,
+                },
+                request_id: request_id.into(),
+                force: false,
+                disruption_policy: EnvironmentResizeDisruptionPolicy::LiveOnly,
+            }
+        };
+        let plan = |params: &ResizeEnvironmentParams| EnvironmentResizePlan {
+            previous_resources: EnvironmentResources {
+                cpu_millicores: 1_000,
+                memory_mb: 1_024,
+                disk_gb: 10,
+            },
+            desired_resources: params.desired_resources,
+            execution_mode: EnvironmentResizeExecutionMode::InPlace,
+            active_session_count: 0,
+            active_sessions_will_be_terminated: false,
+            reason: "test".into(),
+            warnings: Vec::new(),
+        };
+
+        let increase = params(&env_id, 2_000, 20, "unconfirmed-increase");
+        let (mut operation, _) =
+            begin_resize_operation(&pool, &increase, &plan(&increase), 3_500, -1)
+                .await
+                .unwrap();
+        assert_eq!(operation.reserved_cpu_millicores, 1_000);
+        operation.previous_pod_uid = Some("pod-uid".into());
+
+        // The Pod accepted the increase but its outcome was never confirmed,
+        // and the PVC request was raised before the operation failed.
+        let authority = ActivityAuthority::capture(&pool, &env_id, 1).await.unwrap();
+        let recorded = failed_resources(
+            &operation,
+            Some(&FailedLiveResize::Unknown("observation failed".into())),
+            true,
+        );
+        record_failed_resize(
+            &authority,
+            &operation,
+            recorded,
+            "runtime_apply_failed",
+            "environment resize did not converge",
+        )
+        .await
+        .unwrap();
+
+        let environment: (String, String, i32, i32, i32) = sqlx::query_as(
+            "SELECT state, desired_state, cpu_millicores, memory_mb, disk_gb
+               FROM environments WHERE id = $1",
+        )
+        .bind(&env_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            environment,
+            ("running".into(), "started".into(), 2_000, 1_024, 20)
+        );
+        let failed: (String, i32, i32, i32) = sqlx::query_as(
+            "SELECT state, last_applied_cpu_millicores, last_applied_memory_mb,
+                    last_applied_disk_gb
+               FROM environment_resize_operations WHERE id = $1",
+        )
+        .bind(&operation.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(failed, ("failed".into(), 2_000, 1_024, 20));
+
+        // The reservation is gone but the increase is still counted:
+        // 2000 + 1000 in use, so another +1000 exceeds 3500.
+        let other = params(&other_env_id, 2_000, 10, "after-failure");
+        let error = begin_resize_operation(&pool, &other, &plan(&other), 3_500, -1)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("CPU limit would be exceeded (3000+1000")
+        );
+
+        sqlx::query("DELETE FROM environments WHERE org_id = $1")
+            .bind(&org_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM environment_presets WHERE id = $1")
+            .bind(&preset_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(&org_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
     #[test]
     fn setup_owns_a_running_runtime_until_it_completes_or_records_failure() {
         let progress = |setup_complete, setup_failed, owner_present| SetupProgress {

@@ -1335,6 +1335,20 @@ pub async fn handle_environment_reconcile(
             .await?;
             Ok(ReconcileOutcome::Continue)
         }
+        Action::Resize => {
+            let final_attempt = activity_ctx.info().attempt >= 3;
+            await_reconcile_or_cancel(
+                &activity_ctx,
+                Box::pin(super::resize::run_environment_resize(
+                    ctx,
+                    env_id,
+                    authority,
+                    final_attempt,
+                )),
+            )
+            .await?;
+            Ok(ReconcileOutcome::Continue)
+        }
         Action::Destroy => {
             await_reconcile_or_cancel(
                 &activity_ctx,
