@@ -39,6 +39,8 @@ pub(crate) use native::*;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credential_authority;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod native_progress;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use credential_authority::*;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credential_broker;
@@ -1063,7 +1065,7 @@ pub(crate) struct EnvCreateArgs {
         long = "path-mode",
         value_enum,
         value_name = "MODE",
-        help = "Prepare the implicit --path source as auto, clone, or copy; requires --local"
+        help = "How --path becomes the workspace: mount (default, live), snapshot, clone, copy, or empty; requires --local"
     )]
     path_mode: Option<PathModeArg>,
     #[arg(
@@ -1167,11 +1169,20 @@ pub(crate) struct EnvCreateArgs {
     save_preset: Option<String>,
 }
 
+/// How `cw env create --local` turns the `--path` directory into the
+/// workspace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum PathModeArg {
-    Auto,
+    /// Mount the directory live, read-write, at /workspace/<name> (default).
+    Mount,
+    /// Copy it once: clone a Git repository's committed state, otherwise copy.
+    Snapshot,
+    /// Clone the Git repository's committed state once.
     Clone,
+    /// Copy the directory once.
     Copy,
+    /// Start with an empty /workspace.
+    Empty,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

@@ -10,6 +10,8 @@ use codewire_access::{AccessProfileReference, EnvironmentId};
 use codewire_client::TokenProvider as _;
 use codewire_local_credentials::LocalCredentialClient;
 use codewire_local_vmm::control::v1;
+
+use super::native_progress::NativeProgress;
 use codewire_local_vmm::oci::RegistryReference;
 use codewire_local_vmm::runner_service::{RunnerEntrypointConfig, serve_runner};
 use codewire_local_vmm::supervisor::{
@@ -353,16 +355,27 @@ fn resolve_native_mesh_attachment(
     }))
 }
 
+/// `Ok(None)` when the person declined the reviewed settings.
 pub(crate) async fn create_native_environment(
     globals: &Globals,
-    args: EnvCreateArgs,
-) -> anyhow::Result<v1::Environment> {
+    mut args: EnvCreateArgs,
+) -> anyhow::Result<Option<v1::Environment>> {
     reject_unsupported_native_create_options(&args)?;
+    if args.name.as_deref().and_then(trimmed_str).is_none() {
+        args.name = Some(default_native_name(
+            args.path.as_deref(),
+            &native_names().await,
+        ));
+    }
+    let reviewed = native_create_is_interactive(&args);
+    if reviewed && !review_native_create(&mut args).await? {
+        return Ok(None);
+    }
     let name = args
         .name
         .as_deref()
         .and_then(trimmed_str)
-        .ok_or_else(|| anyhow::anyhow!("native local creation requires --name"))?
+        .unwrap_or_default()
         .to_owned();
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
@@ -379,12 +392,25 @@ pub(crate) async fn create_native_environment(
         project.spec.image = image.to_owned();
     }
     sources::apply_create_source_flags(&mut project.spec, &args)?;
-    let (request_source_path, implicit_path_mode) = native_workspace_request(
+    let declared_direct_mounts = native_direct_mount_warning(&project.local_mounts);
+    let workspace = resolve_native_workspace(
         &source_path,
-        &project.spec,
-        &project.local_mounts,
+        &mut project,
         args.path_mode,
+        Some(&paths.mesh_data_dir.join("native-empty-workspace")),
+        native_runtime_supports_mounts(),
     )?;
+    if !reviewed && matches!(args.output, OutputFormat::Text) {
+        if let Some(notice) = &workspace.notice {
+            eprintln!("{notice}");
+        }
+        eprintln!("Workspace: {}", workspace.description);
+    }
+    let NativeWorkspace {
+        source_path: request_source_path,
+        path_mode: implicit_path_mode,
+        ..
+    } = workspace;
     let vcpus = match args.cpu.as_deref() {
         Some(value) => parse_native_cpu(value)?,
         None => project.vcpus.unwrap_or(DEFAULT_NATIVE_VCPUS),
@@ -448,23 +474,8 @@ pub(crate) async fn create_native_environment(
             "Warning: copy mounts expose every selected file to the guest, including credentials deliberately stored beneath a selected source."
         );
     }
-    let direct_mounts = project
-        .local_mounts
-        .iter()
-        .filter(|mount| mount.mode == v1::LocalMountMode::Direct as i32)
-        .collect::<Vec<_>>();
-    if !direct_mounts.is_empty() {
-        let write_warning = if direct_mounts
-            .iter()
-            .any(|mount| mount.read_only == Some(false))
-        {
-            " Read-write grants let guest root modify or delete that host content."
-        } else {
-            ""
-        };
-        eprintln!(
-            "Warning: direct mounts let guest root inspect every file beneath each selected host directory.{write_warning} The explicit mode: direct and read_only choice acknowledges this grant."
-        );
+    if let Some(warning) = declared_direct_mounts {
+        eprintln!("{warning}");
     }
     let NativeProjectPlan {
         spec, local_mounts, ..
@@ -503,12 +514,321 @@ pub(crate) async fn create_native_environment(
         platform_source_authority: selected.platform,
         local_mounts,
     };
-    let environment = client
-        .create(request.clone())
-        .await
-        .map_err(native_status)?;
+    let progress = native_progress();
+    let created = match &progress {
+        Some(progress) => {
+            progress.begin_sources();
+            let mut observe = |operation: &v1::Operation| progress.observe(operation);
+            progress
+                .tick_while(client.create_observed(request.clone(), &mut observe))
+                .await
+        }
+        None => client.create(request.clone()).await,
+    };
+    finish_native_progress(progress.as_ref(), created.is_ok());
+    let environment = created.map_err(native_status)?;
     sources::validate_created_environment(&environment, &request)?;
-    Ok(environment)
+    Ok(Some(environment))
+}
+
+/// The acknowledgement codewire.yaml direct mounts carry. The default project
+/// mount is announced by the workspace line instead.
+fn native_direct_mount_warning(mounts: &[v1::LocalMountInput]) -> Option<String> {
+    let direct = mounts
+        .iter()
+        .filter(|mount| mount.mode == v1::LocalMountMode::Direct as i32)
+        .collect::<Vec<_>>();
+    if direct.is_empty() {
+        return None;
+    }
+    let write_warning = if direct.iter().any(|mount| mount.read_only == Some(false)) {
+        " Read-write grants let guest root modify or delete that host content."
+    } else {
+        ""
+    };
+    Some(format!(
+        "Warning: direct mounts let guest root inspect every file beneath each selected host directory.{write_warning} The explicit mode: direct and read_only choice acknowledges this grant."
+    ))
+}
+
+/// A create in a terminal shows the settings it will use and lets the person
+/// change them first. Flags still apply; `--yes`, JSON output and scripts
+/// never see a prompt.
+fn native_create_is_interactive(args: &EnvCreateArgs) -> bool {
+    use std::io::IsTerminal as _;
+    !args.yes
+        && matches!(args.output, OutputFormat::Text)
+        && std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal()
+}
+
+/// Shows the settings and asks Yes, edit or no. Returns `false` on no.
+async fn review_native_create(args: &mut EnvCreateArgs) -> anyhow::Result<bool> {
+    loop {
+        eprintln!("{}", native_create_summary(args)?);
+        let answer = prompt_text("Create with these settings? [Y]es / [e]dit / [n]o: ")?;
+        match answer.to_ascii_lowercase().as_str() {
+            "" | "y" | "yes" => return Ok(true),
+            "n" | "no" => {
+                eprintln!("Canceled; nothing was created.");
+                return Ok(false);
+            }
+            "e" | "edit" => edit_native_create(args)?,
+            _ => eprintln!("Answer y, e or n."),
+        }
+    }
+}
+
+/// Existing local environment names; empty before the first environment, when
+/// no supervisor runs yet. Create itself reports a name that is taken.
+async fn native_names() -> Vec<String> {
+    if !native_state_exists().unwrap_or(false) {
+        return Vec::new();
+    }
+    native_environments()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|environment| environment.name)
+        .collect()
+}
+
+/// The directory's name as an environment name, made unique among `taken`.
+fn default_native_name(path: Option<&Path>, taken: &[String]) -> String {
+    let directory = std::fs::canonicalize(path.unwrap_or_else(|| Path::new(".")))
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default();
+    let mut base = directory
+        .to_ascii_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .chars()
+        .take(56)
+        .collect::<String>();
+    if base.is_empty() || !base.starts_with(|character: char| character.is_ascii_alphanumeric()) {
+        base = "sandbox".to_owned();
+    }
+    let mut name = base.clone();
+    let mut suffix = 2;
+    while taken.iter().any(|existing| existing == &name) {
+        name = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    name
+}
+
+fn native_create_summary(args: &EnvCreateArgs) -> anyhow::Result<String> {
+    let requested = args.path.as_deref().unwrap_or_else(|| Path::new("."));
+    let source = std::fs::canonicalize(requested)
+        .with_context(|| format!("resolve {}", requested.display()))?;
+    let mut project = native_codewire_yaml(&source, args.file.as_deref())?;
+    let workspace = resolve_native_workspace(
+        &source,
+        &mut project,
+        args.path_mode,
+        None,
+        native_runtime_supports_mounts(),
+    )?;
+    let image = args
+        .image
+        .as_deref()
+        .and_then(trimmed_str)
+        .map(str::to_owned)
+        .or_else(|| (!project.spec.image.is_empty()).then(|| project.spec.image.clone()))
+        .unwrap_or_else(|| "Codewire workspace (default)".to_owned());
+    let cpus = match args.cpu.as_deref() {
+        Some(value) => parse_native_cpu(value)?,
+        None => project.vcpus.unwrap_or(DEFAULT_NATIVE_VCPUS),
+    };
+    let memory_mib = match args.memory.as_deref() {
+        Some(value) => parse_native_memory(value)?,
+        None => project.memory_mib.unwrap_or(DEFAULT_NATIVE_MEMORY_MIB),
+    };
+    let disk_bytes = match args.disk.as_deref() {
+        Some(value) => parse_native_disk(value)?,
+        None => project.disk_bytes.unwrap_or(DEFAULT_NATIVE_DISK_BYTES),
+    };
+    let docker = if args.no_docker {
+        "off".to_owned()
+    } else {
+        let disk = match args.docker_disk.as_deref() {
+            Some(value) => parse_native_disk(value)?,
+            None => DEFAULT_NATIVE_DOCKER_DISK_BYTES,
+        };
+        format!("on ({} data disk)", gib_label(disk))
+    };
+    let profile = args
+        .profile
+        .clone()
+        .or_else(|| {
+            project
+                .spec
+                .credentials
+                .as_ref()
+                .map(|binding| binding.profile.clone())
+        })
+        .unwrap_or_else(|| "none".to_owned());
+    let ports = if project.host_ports.is_empty() {
+        "none".to_owned()
+    } else {
+        project
+            .host_ports
+            .iter()
+            .map(|binding| format!("127.0.0.1:{} → {}", binding.host_port, binding.guest_port))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut lines = vec![
+        "Create a local sandbox".to_owned(),
+        format!(
+            "  Name         {}",
+            args.name.as_deref().unwrap_or_default()
+        ),
+        format!("  Workspace    {}", workspace.description),
+        format!("  Image        {image}"),
+        format!(
+            "  Resources    {cpus} vCPU · {} memory · {} disk",
+            gib_label(u64::from(memory_mib) * 1024 * 1024),
+            gib_label(disk_bytes)
+        ),
+        format!("  Docker       {docker}"),
+        format!("  Credentials  {profile}"),
+        format!("  Ports        {ports}"),
+    ];
+    if let Some(notice) = workspace.notice {
+        lines.push(format!("  {notice}"));
+    } else if workspace.description.starts_with("mount ") {
+        lines.push(
+            "  Guest root can read, change and delete files in the mounted directory.".to_owned(),
+        );
+    }
+    Ok(lines.join("\n"))
+}
+
+/// Asks each setting in turn, with the current value as the default. An
+/// answer that does not parse is asked again.
+fn edit_native_create(args: &mut EnvCreateArgs) -> anyhow::Result<()> {
+    loop {
+        let name = prompt_default("Name", args.name.as_deref().unwrap_or_default())?;
+        if codewire_local_vmm::valid_environment_name(&name) {
+            args.name = Some(name);
+            break;
+        }
+        eprintln!("Use 1 to 63 letters, digits, '-', '_' or '.', starting with a letter or digit.");
+    }
+    let current_path = args
+        .path
+        .as_deref()
+        .unwrap_or_else(|| Path::new("."))
+        .display()
+        .to_string();
+    loop {
+        let path = PathBuf::from(prompt_default("Project directory", &current_path)?);
+        if std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+            args.path = Some(path);
+            break;
+        }
+        eprintln!("{} is not a directory.", path.display());
+    }
+    let current_mode = match args.path_mode.unwrap_or(PathModeArg::Mount) {
+        PathModeArg::Mount => "mount",
+        PathModeArg::Snapshot => "snapshot",
+        PathModeArg::Clone => "clone",
+        PathModeArg::Copy => "copy",
+        PathModeArg::Empty => "empty",
+    };
+    loop {
+        let mode = prompt_default("Workspace (mount, snapshot, empty)", current_mode)?;
+        match <PathModeArg as clap::ValueEnum>::from_str(&mode, true) {
+            Ok(mode) => {
+                args.path_mode = Some(mode);
+                break;
+            }
+            Err(_) => eprintln!("Choose mount, snapshot, clone, copy or empty."),
+        }
+    }
+    let image = prompt_default(
+        "Image (default = Codewire workspace)",
+        args.image.as_deref().unwrap_or("default"),
+    )?;
+    args.image = (image != "default").then_some(image);
+    edit_quantity("vCPUs", &mut args.cpu, "2", |value| {
+        parse_native_cpu(value).map(|_| ())
+    })?;
+    edit_quantity("Memory", &mut args.memory, "4GB", |value| {
+        parse_native_memory(value).map(|_| ())
+    })?;
+    edit_quantity("Disk", &mut args.disk, "20GB", |value| {
+        parse_native_disk(value).map(|_| ())
+    })?;
+    let docker = prompt_default(
+        "Docker (on, off)",
+        if args.no_docker { "off" } else { "on" },
+    )?;
+    args.no_docker = docker.eq_ignore_ascii_case("off") || docker.eq_ignore_ascii_case("no");
+    if args.no_docker {
+        args.docker_disk = None;
+    }
+    let profile = prompt_default(
+        "Credential profile (local:NAME, platform:NAME or none)",
+        args.profile.as_deref().unwrap_or("none"),
+    )?;
+    args.profile = (!profile.eq_ignore_ascii_case("none")).then_some(profile);
+    Ok(())
+}
+
+fn edit_quantity(
+    label: &str,
+    value: &mut Option<String>,
+    default: &str,
+    parse: impl Fn(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    loop {
+        let answer = prompt_default(label, value.as_deref().unwrap_or(default))?;
+        match parse(&answer) {
+            Ok(()) => {
+                *value = Some(answer);
+                return Ok(());
+            }
+            Err(error) => eprintln!("{error}"),
+        }
+    }
+}
+
+fn gib_label(bytes: u64) -> String {
+    let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    if (gib - gib.round()).abs() < 0.05 {
+        format!("{} GB", gib.round() as u64)
+    } else {
+        format!("{gib:.1} GB")
+    }
+}
+
+/// Live stage progress for a local lifecycle call, on a terminal only, so
+/// scripts and captured output see nothing new.
+fn native_progress() -> Option<NativeProgress> {
+    super::environment::progress::live_progress_enabled()
+        .then(|| NativeProgress::new(std::time::Instant::now()))
+}
+
+fn finish_native_progress(progress: Option<&NativeProgress>, succeeded: bool) {
+    match progress {
+        Some(progress) if succeeded => progress.complete(),
+        Some(progress) => progress.abandon(),
+        None => {}
+    }
 }
 
 pub(crate) async fn native_environments() -> anyhow::Result<Vec<v1::Environment>> {
@@ -706,7 +1026,18 @@ pub(crate) async fn select_native_environment(name: &str) -> anyhow::Result<v1::
 pub(crate) async fn start_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
     let mut client = native_client().await?;
     get_native_environment_with_required_authority(&mut client, name).await?;
-    client.start(name).await.map_err(native_status)
+    let progress = native_progress();
+    let started = match &progress {
+        Some(progress) => {
+            let mut observe = |operation: &v1::Operation| progress.observe(operation);
+            progress
+                .tick_while(client.start_observed(name, &mut observe))
+                .await
+        }
+        None => client.start(name).await,
+    };
+    finish_native_progress(progress.as_ref(), started.is_ok());
+    started.map_err(native_status)
 }
 
 pub(crate) async fn stop_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
@@ -1444,6 +1775,7 @@ struct NativeProjectPlan {
     vcpus: Option<u32>,
     memory_mib: Option<u32>,
     disk_bytes: Option<u64>,
+    working_directory_explicit: bool,
 }
 
 fn native_codewire_yaml(
@@ -1495,6 +1827,7 @@ fn native_codewire_yaml(
         .map(native_memory_from_mib)
         .transpose()?;
     let disk_bytes = resources.disk_gib.map(native_disk_from_gib).transpose()?;
+    let working_directory_explicit = document.working_directory_is_explicit();
     Ok(NativeProjectPlan {
         spec: document.spec,
         host_ports: document.local.host_ports,
@@ -1502,6 +1835,7 @@ fn native_codewire_yaml(
         vcpus,
         memory_mib,
         disk_bytes,
+        working_directory_explicit,
     })
 }
 
@@ -1633,9 +1967,12 @@ fn canonical_native_workspace_image(image: &str) -> anyhow::Result<String> {
 
 fn workspace_selection_from_arg(value: PathModeArg) -> WorkspaceSelection {
     match value {
-        PathModeArg::Auto => WorkspaceSelection::Auto,
+        PathModeArg::Snapshot => WorkspaceSelection::Auto,
         PathModeArg::Clone => WorkspaceSelection::Clone,
         PathModeArg::Copy => WorkspaceSelection::Copy,
+        PathModeArg::Mount | PathModeArg::Empty => {
+            unreachable!("mount and empty workspaces are not snapshots")
+        }
     }
 }
 
@@ -1646,29 +1983,202 @@ fn workspace_source_mode_name(value: WorkspaceSourceMode) -> &'static str {
     }
 }
 
-fn native_workspace_request(
+/// How the implicit `--path` directory became the workspace, for the create
+/// summary and the request.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct NativeWorkspace {
+    /// The implicit snapshot source and its mode; empty for mounts and for
+    /// workspaces that codewire.yaml declares.
+    source_path: String,
+    path_mode: String,
+    /// One line for the create summary.
+    description: String,
+    /// Why the default mount was not used, when it was not.
+    notice: Option<String>,
+}
+
+/// Mount the project directory live by default. A snapshot (clone or copy) or
+/// an empty workspace is an explicit choice. No mode ever mounts or copies a
+/// directory the host share policy refuses, such as the home directory itself
+/// or a credential store; the default then falls back to an empty workspace.
+fn resolve_native_workspace(
     source_path: &Path,
-    spec: &codewire_project::ProjectSpec,
-    local_mounts: &[v1::LocalMountInput],
+    project: &mut NativeProjectPlan,
     requested_mode: Option<PathModeArg>,
-) -> anyhow::Result<(String, String)> {
-    if !spec.repositories.is_empty() || !local_mounts.is_empty() {
+    empty_workspace: Option<&Path>,
+    mounts_supported: bool,
+) -> anyhow::Result<NativeWorkspace> {
+    if !project.spec.repositories.is_empty() || !project.local_mounts.is_empty() {
         if requested_mode.is_some() {
             anyhow::bail!(
                 "--path-mode applies only when codewire.yaml has no repositories or mounts"
             );
         }
-        return Ok((String::new(), String::new()));
+        return Ok(NativeWorkspace {
+            description: "as declared in codewire.yaml".to_owned(),
+            ..NativeWorkspace::default()
+        });
     }
-    let requested_workspace = requested_mode
-        .map(workspace_selection_from_arg)
-        .unwrap_or(WorkspaceSelection::Auto);
-    let mode = resolve_workspace_mode(source_path, requested_workspace)
-        .context("resolve native workspace preparation mode")?;
-    Ok((
-        source_path.to_string_lossy().into_owned(),
-        workspace_source_mode_name(mode).to_owned(),
-    ))
+    let shown = display_host_path(source_path);
+    let refusal = codewire_local_vmm::workspace_source_refusal(source_path);
+    match requested_mode.unwrap_or(PathModeArg::Mount) {
+        PathModeArg::Empty => empty_native_workspace(empty_workspace, None),
+        PathModeArg::Mount => {
+            if let Some(reason) = refusal {
+                if requested_mode.is_some() {
+                    anyhow::bail!("refusing to mount {shown}: {reason}");
+                }
+                return empty_native_workspace(
+                    empty_workspace,
+                    Some(format!(
+                        "Not mounting {shown}: {reason}. /workspace starts empty; run from a project directory or pass --path to mount one."
+                    )),
+                );
+            }
+            if !mounts_supported {
+                if requested_mode.is_some() {
+                    anyhow::bail!(
+                        "this local runtime has no virtiofsd, so it cannot mount {shown}; reinstall the runtime or use --path-mode snapshot"
+                    );
+                }
+                let mut workspace = resolve_native_workspace(
+                    source_path,
+                    project,
+                    Some(PathModeArg::Snapshot),
+                    empty_workspace,
+                    mounts_supported,
+                )?;
+                workspace.notice = Some(format!(
+                    "This local runtime has no virtiofsd, so {shown} is copied once instead of mounted; reinstall the runtime to mount it live."
+                ));
+                return Ok(workspace);
+            }
+            let destination = format!("/workspace/{}", workspace_directory_name(source_path));
+            project.local_mounts.push(v1::LocalMountInput {
+                source_path: source_path.as_os_str().as_bytes().to_vec(),
+                destination: destination.clone(),
+                mode: v1::LocalMountMode::Direct as i32,
+                read_only: Some(false),
+            });
+            if !project.working_directory_explicit {
+                project.spec.working_directory = destination.clone();
+            }
+            Ok(NativeWorkspace {
+                description: format!("mount {shown} at {destination} (live, read-write)"),
+                ..NativeWorkspace::default()
+            })
+        }
+        mode @ (PathModeArg::Snapshot | PathModeArg::Clone | PathModeArg::Copy) => {
+            if let Some(reason) = refusal {
+                anyhow::bail!("refusing to copy {shown} into the workspace: {reason}");
+            }
+            let mode = resolve_workspace_mode(source_path, workspace_selection_from_arg(mode))
+                .context("resolve native workspace preparation mode")?;
+            let path_mode = workspace_source_mode_name(mode).to_owned();
+            Ok(NativeWorkspace {
+                source_path: source_path.to_string_lossy().into_owned(),
+                description: format!("snapshot of {shown} ({path_mode})"),
+                path_mode,
+                notice: None,
+            })
+        }
+    }
+}
+
+/// Direct mounts need virtio-fs: Virtualization.framework's own device on
+/// macOS, and the runtime's virtiofsd on Linux. An unreadable lock is left to
+/// the supervisor's own admission error.
+fn native_runtime_supports_mounts() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(config) = native_runtime_config() else {
+            return true;
+        };
+        !codewire_local_vmm::artifact::ArtifactLock::read(&config.artifact_lock)
+            .is_ok_and(|lock| lock.virtiofsd.is_none())
+    }
+    #[cfg(not(target_os = "linux"))]
+    true
+}
+
+/// An empty workspace is a snapshot of one empty directory that cw keeps.
+/// Without a directory this only describes the choice, for the create review.
+fn empty_native_workspace(
+    directory: Option<&Path>,
+    notice: Option<String>,
+) -> anyhow::Result<NativeWorkspace> {
+    let Some(directory) = directory else {
+        return Ok(NativeWorkspace {
+            description: "empty".to_owned(),
+            notice,
+            ..NativeWorkspace::default()
+        });
+    };
+    match std::fs::create_dir(directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("create {}", directory.display()));
+        }
+    }
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("restrict {}", directory.display()))?;
+    let directory = std::fs::canonicalize(directory)
+        .with_context(|| format!("resolve {}", directory.display()))?;
+    anyhow::ensure!(
+        std::fs::read_dir(&directory)
+            .with_context(|| format!("read {}", directory.display()))?
+            .next()
+            .is_none(),
+        "{} must stay empty; remove its contents",
+        directory.display()
+    );
+    Ok(NativeWorkspace {
+        source_path: directory.to_string_lossy().into_owned(),
+        path_mode: workspace_source_mode_name(WorkspaceSourceMode::Copy).to_owned(),
+        description: "empty".to_owned(),
+        notice,
+    })
+}
+
+/// The mount directory beneath /workspace: the project directory's name,
+/// reduced to characters every guest path accepts.
+fn workspace_directory_name(source_path: &Path) -> String {
+    let name = source_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let name = name
+        .trim_matches(|character| matches!(character, '.' | '-'))
+        .to_owned();
+    if name.is_empty() {
+        "project".to_owned()
+    } else {
+        name.chars().take(64).collect()
+    }
+}
+
+/// A host path with the home directory shortened to `~`.
+fn display_host_path(path: &Path) -> String {
+    let home = env::var_os("HOME").map(PathBuf::from);
+    match home
+        .as_deref()
+        .and_then(|home| path.strip_prefix(home).ok())
+    {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
 }
 
 fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> anyhow::Result<()> {
@@ -2463,7 +2973,7 @@ mod tests {
             "mounts: [{source: ../fixtures, destination: /workspace/fixtures, mode: copy}]\n",
         )
         .unwrap();
-        let project =
+        let mut project =
             native_codewire_yaml(temp.path(), Some(Path::new("config/dev.yaml"))).unwrap();
         assert_eq!(project.spec.working_directory, "/workspace/fixtures");
         assert_eq!(project.local_mounts.len(), 1);
@@ -2477,9 +2987,11 @@ mod tests {
         );
         assert_eq!(project.local_mounts[0].read_only, None);
         assert_eq!(
-            native_workspace_request(temp.path(), &project.spec, &project.local_mounts, None,)
-                .unwrap(),
-            (String::new(), String::new())
+            resolve_native_workspace(temp.path(), &mut project, None, None, true).unwrap(),
+            NativeWorkspace {
+                description: "as declared in codewire.yaml".to_owned(),
+                ..NativeWorkspace::default()
+            }
         );
     }
 
@@ -2492,7 +3004,7 @@ mod tests {
             "mounts: [{source: ./fixtures, destination: /workspace/fixtures, mode: direct, read_only: true}]\n",
         )
         .unwrap();
-        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        let mut project = native_codewire_yaml(temp.path(), None).unwrap();
         assert_eq!(project.local_mounts.len(), 1);
         assert_eq!(
             project.local_mounts[0].mode,
@@ -2500,9 +3012,11 @@ mod tests {
         );
         assert_eq!(project.local_mounts[0].read_only, Some(true));
         assert_eq!(
-            native_workspace_request(temp.path(), &project.spec, &project.local_mounts, None,)
-                .unwrap(),
-            (String::new(), String::new())
+            resolve_native_workspace(temp.path(), &mut project, None, None, true).unwrap(),
+            NativeWorkspace {
+                description: "as declared in codewire.yaml".to_owned(),
+                ..NativeWorkspace::default()
+            }
         );
     }
 
@@ -2524,19 +3038,22 @@ working_directory: /workspace/github
         )
         .unwrap();
 
-        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        let mut project = native_codewire_yaml(temp.path(), None).unwrap();
         assert_eq!(project.spec.repositories.len(), 2);
         assert_eq!(project.spec.working_directory, "/workspace/github");
         assert_eq!(
-            native_workspace_request(temp.path(), &project.spec, &project.local_mounts, None)
-                .unwrap(),
-            (String::new(), String::new())
+            resolve_native_workspace(temp.path(), &mut project, None, None, true).unwrap(),
+            NativeWorkspace {
+                description: "as declared in codewire.yaml".to_owned(),
+                ..NativeWorkspace::default()
+            }
         );
-        let error = native_workspace_request(
+        let error = resolve_native_workspace(
             temp.path(),
-            &project.spec,
-            &project.local_mounts,
+            &mut project,
             Some(PathModeArg::Copy),
+            None,
+            true,
         )
         .unwrap_err();
         assert!(
@@ -2597,7 +3114,7 @@ working_directory: /workspace/github
     #[test]
     fn path_mode_arguments_map_only_the_implicit_local_source() {
         assert_eq!(
-            workspace_selection_from_arg(PathModeArg::Auto),
+            workspace_selection_from_arg(PathModeArg::Snapshot),
             WorkspaceSelection::Auto
         );
         assert_eq!(
@@ -2608,6 +3125,158 @@ working_directory: /workspace/github
             workspace_selection_from_arg(PathModeArg::Copy),
             WorkspaceSelection::Copy
         );
+    }
+
+    #[test]
+    fn the_project_directory_is_mounted_live_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_dir = temp.path().join("My App");
+        std::fs::create_dir(&project_dir).unwrap();
+        let source = std::fs::canonicalize(&project_dir).unwrap();
+        let mut project = native_codewire_yaml(&source, None).unwrap();
+        let workspace = resolve_native_workspace(&source, &mut project, None, None, true).unwrap();
+        assert_eq!(workspace.source_path, "");
+        assert_eq!(workspace.path_mode, "");
+        assert_eq!(workspace.notice, None);
+        assert!(
+            workspace
+                .description
+                .ends_with("at /workspace/My-App (live, read-write)"),
+            "{}",
+            workspace.description
+        );
+        assert_eq!(
+            project.local_mounts,
+            vec![v1::LocalMountInput {
+                source_path: source.as_os_str().as_bytes().to_vec(),
+                destination: "/workspace/My-App".to_owned(),
+                mode: v1::LocalMountMode::Direct as i32,
+                read_only: Some(false),
+            }]
+        );
+        assert_eq!(project.spec.working_directory, "/workspace/My-App");
+        assert_eq!(native_direct_mount_warning(&[]), None);
+    }
+
+    #[test]
+    fn an_explicit_working_directory_survives_the_default_mount() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("codewire.yaml"),
+            "working_directory: /workspace\n",
+        )
+        .unwrap();
+        let source = std::fs::canonicalize(temp.path()).unwrap();
+        let mut project = native_codewire_yaml(&source, None).unwrap();
+        resolve_native_workspace(&source, &mut project, None, None, true).unwrap();
+        assert_eq!(project.local_mounts.len(), 1);
+        assert_eq!(project.spec.working_directory, "/workspace");
+    }
+
+    #[test]
+    fn without_virtiofs_the_default_falls_back_to_a_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("file"), "content").unwrap();
+        let source = std::fs::canonicalize(temp.path()).unwrap();
+        let mut project = native_codewire_yaml(&source, None).unwrap();
+        let workspace = resolve_native_workspace(&source, &mut project, None, None, false).unwrap();
+        assert!(project.local_mounts.is_empty());
+        assert_eq!(workspace.source_path, source.to_string_lossy());
+        assert_eq!(workspace.path_mode, "copy");
+        assert!(workspace.notice.unwrap().contains("no virtiofsd"));
+        let error =
+            resolve_native_workspace(&source, &mut project, Some(PathModeArg::Mount), None, false)
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("--path-mode snapshot"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_refused_directory_is_never_mounted_or_copied() {
+        let root = Path::new("/");
+        let mut project = NativeProjectPlan::default();
+        let workspace = resolve_native_workspace(root, &mut project, None, None, true).unwrap();
+        assert!(project.local_mounts.is_empty());
+        assert_eq!(workspace.description, "empty");
+        assert!(
+            workspace
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.starts_with("Not mounting /: it is a system")),
+            "{workspace:?}"
+        );
+        for mode in [
+            PathModeArg::Mount,
+            PathModeArg::Snapshot,
+            PathModeArg::Clone,
+            PathModeArg::Copy,
+        ] {
+            let error =
+                resolve_native_workspace(root, &mut project, Some(mode), None, true).unwrap_err();
+            assert!(error.to_string().starts_with("refusing to"), "{error}");
+        }
+        assert!(project.local_mounts.is_empty());
+    }
+
+    #[test]
+    fn an_empty_workspace_is_one_kept_empty_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let empty = temp.path().join("native-empty-workspace");
+        let mut project = NativeProjectPlan::default();
+        let workspace = resolve_native_workspace(
+            temp.path(),
+            &mut project,
+            Some(PathModeArg::Empty),
+            Some(&empty),
+            true,
+        )
+        .unwrap();
+        assert_eq!(workspace.description, "empty");
+        assert_eq!(workspace.path_mode, "copy");
+        assert_eq!(
+            workspace.source_path,
+            std::fs::canonicalize(&empty).unwrap().to_string_lossy()
+        );
+        assert_eq!(
+            std::fs::metadata(&empty).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        std::fs::write(empty.join("stray"), "").unwrap();
+        let error = resolve_native_workspace(
+            temp.path(),
+            &mut project,
+            Some(PathModeArg::Empty),
+            Some(&empty),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("must stay empty"), "{error}");
+    }
+
+    #[test]
+    fn default_names_follow_the_directory_and_stay_unique() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_dir = temp.path().join("My App!");
+        std::fs::create_dir(&project_dir).unwrap();
+        assert_eq!(default_native_name(Some(&project_dir), &[]), "my-app");
+        assert_eq!(
+            default_native_name(
+                Some(&project_dir),
+                &["my-app".to_owned(), "my-app-2".to_owned()]
+            ),
+            "my-app-3"
+        );
+        let odd = temp.path().join("___");
+        std::fs::create_dir(&odd).unwrap();
+        assert_eq!(default_native_name(Some(&odd), &[]), "sandbox");
+    }
+
+    #[test]
+    fn gib_labels_round_whole_sizes() {
+        assert_eq!(gib_label(20 * 1024 * 1024 * 1024), "20 GB");
+        assert_eq!(gib_label(1536 * 1024 * 1024), "1.5 GB");
     }
 
     #[test]

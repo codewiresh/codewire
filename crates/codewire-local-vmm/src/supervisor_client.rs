@@ -83,9 +83,20 @@ impl NativeSupervisorClient {
         &mut self,
         request: v1::CreateEnvironmentRequest,
     ) -> Result<v1::Environment, Status> {
+        self.create_observed(request, &mut |_| {}).await
+    }
+
+    /// Create, reporting the lifecycle operation and each of its non-terminal
+    /// updates to `observe` as the supervisor publishes them.
+    pub async fn create_observed(
+        &mut self,
+        request: v1::CreateEnvironmentRequest,
+        observe: &mut (dyn FnMut(&v1::Operation) + Send),
+    ) -> Result<v1::Environment, Status> {
         let name = request.name.clone();
         let operation = self.inner.create_environment(request).await?.into_inner();
-        self.follow_environment_operation(operation, &name).await
+        self.follow_environment_operation(operation, &name, observe)
+            .await
     }
 
     pub async fn list(&mut self) -> Result<Vec<v1::Environment>, Status> {
@@ -130,12 +141,22 @@ impl NativeSupervisorClient {
     }
 
     pub async fn start(&mut self, name: &str) -> Result<v1::Environment, Status> {
+        self.start_observed(name, &mut |_| {}).await
+    }
+
+    /// Start, reporting the lifecycle operation's progress to `observe`.
+    pub async fn start_observed(
+        &mut self,
+        name: &str,
+        observe: &mut (dyn FnMut(&v1::Operation) + Send),
+    ) -> Result<v1::Environment, Status> {
         let operation = self
             .inner
             .start_environment(mutation_selector(name))
             .await?
             .into_inner();
-        self.follow_environment_operation(operation, name).await
+        self.follow_environment_operation(operation, name, observe)
+            .await
     }
 
     pub async fn stop(&mut self, name: &str) -> Result<v1::Environment, Status> {
@@ -144,7 +165,8 @@ impl NativeSupervisorClient {
             .stop_environment(mutation_selector(name))
             .await?
             .into_inner();
-        self.follow_environment_operation(operation, name).await
+        self.follow_environment_operation(operation, name, &mut |_| {})
+            .await
     }
 
     pub async fn restart(
@@ -161,7 +183,8 @@ impl NativeSupervisorClient {
             })
             .await?
             .into_inner();
-        self.follow_environment_operation(operation, name).await
+        self.follow_environment_operation(operation, name, &mut |_| {})
+            .await
     }
 
     pub async fn refresh_skills(&mut self, name: &str) -> Result<v1::Environment, Status> {
@@ -170,7 +193,8 @@ impl NativeSupervisorClient {
             .refresh_environment_skills(mutation_selector(name))
             .await?
             .into_inner();
-        self.follow_environment_operation(operation, name).await
+        self.follow_environment_operation(operation, name, &mut |_| {})
+            .await
     }
 
     pub async fn resize(
@@ -194,7 +218,8 @@ impl NativeSupervisorClient {
             })
             .await?
             .into_inner();
-        self.follow_environment_operation(operation, name).await
+        self.follow_environment_operation(operation, name, &mut |_| {})
+            .await
     }
 
     /// Update only the source selections, waiting on the existing durable operation stream.
@@ -207,7 +232,7 @@ impl NativeSupervisorClient {
             .update_environment_sources(request)
             .await?
             .into_inner();
-        self.follow_operation(operation).await
+        self.follow_operation(operation, &mut |_| {}).await
     }
 
     pub async fn delete(&mut self, name: &str) -> Result<v1::DeleteEnvironmentResponse, Status> {
@@ -216,7 +241,7 @@ impl NativeSupervisorClient {
             .delete_environment(mutation_selector(name))
             .await?
             .into_inner();
-        let operation = self.follow_operation(operation).await?;
+        let operation = self.follow_operation(operation, &mut |_| {}).await?;
         match operation.result.and_then(|result| result.value) {
             Some(v1::operation_result::Value::Deletion(deletion)) => Ok(deletion),
             _ => Err(Status::internal(
@@ -369,14 +394,16 @@ impl NativeSupervisorClient {
         &mut self,
         operation: v1::Operation,
         name: &str,
+        observe: &mut (dyn FnMut(&v1::Operation) + Send),
     ) -> Result<v1::Environment, Status> {
-        self.follow_operation(operation).await?;
+        self.follow_operation(operation, observe).await?;
         self.get(name).await
     }
 
     async fn follow_operation(
         &mut self,
         operation: v1::Operation,
+        observe: &mut (dyn FnMut(&v1::Operation) + Send),
     ) -> Result<v1::Operation, Status> {
         let operation_id = operation.operation_id.clone();
         if operation_terminal(&operation)
@@ -384,6 +411,7 @@ impl NativeSupervisorClient {
         {
             return operation_outcome(operation);
         }
+        observe(&operation);
         let mut reconnects = 0_u8;
         loop {
             let stream = self
@@ -404,7 +432,7 @@ impl NativeSupervisorClient {
                             {
                                 return operation_outcome(operation);
                             }
-                            Ok(Some(_)) => {}
+                            Ok(Some(operation)) => observe(&operation),
                             Ok(None) => {
                                 break Status::unavailable(
                                     "local lifecycle operation stream ended before a terminal result",

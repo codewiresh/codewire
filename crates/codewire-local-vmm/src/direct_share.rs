@@ -370,6 +370,36 @@ const PLATFORM_HOME_CREDENTIAL_STORES: &[&str] = &[];
 #[cfg(target_os = "macos")]
 const PLATFORM_HOME_CREDENTIAL_STORES: &[&str] = &["Library/Keychains"];
 
+/// Why a host directory may never become a workspace source (mounted, copied
+/// or cloned), or `None` when the share policy admits it. This is the same
+/// policy that admits explicit direct shares, phrased for the person creating
+/// the environment. `path` must already be canonical.
+pub fn workspace_source_refusal(path: &Path) -> Option<&'static str> {
+    if path == Path::new("/") || BROAD_ROOTS.iter().any(|root| path == Path::new(root)) {
+        return Some("it is a system or shared top-level directory");
+    }
+    if FORBIDDEN_TREES.iter().any(|root| path.starts_with(root)) {
+        return Some("it is inside a protected system directory");
+    }
+    let Ok(home) = current_home_directory() else {
+        return Some("your home directory could not be determined");
+    };
+    if path == home {
+        return Some("it is your home directory");
+    }
+    if home.starts_with(path) {
+        return Some("it contains your home directory");
+    }
+    if HOME_CREDENTIAL_STORES
+        .iter()
+        .chain(PLATFORM_HOME_CREDENTIAL_STORES)
+        .any(|relative| paths_overlap(path, &home.join(relative)))
+    {
+        return Some("it is or contains a credential store (such as ~/.ssh)");
+    }
+    None
+}
+
 fn validate_source_policy(
     path: &Path,
     forbidden_roots: &[PathBuf],

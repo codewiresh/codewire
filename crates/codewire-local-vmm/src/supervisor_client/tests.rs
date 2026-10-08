@@ -472,7 +472,7 @@ async fn connect_only_stream_failure_has_no_restart_authority() {
             .await
             .unwrap();
         let initial = operation(v1::OperationPhase::Intent);
-        let error = bounded(client.follow_operation(initial.clone()))
+        let error = bounded(client.follow_operation(initial.clone(), &mut |_| {}))
             .await
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::Unavailable);
@@ -489,6 +489,31 @@ async fn connect_only_stream_failure_has_no_restart_authority() {
 }
 
 #[tokio::test]
+async fn observe_sees_the_initial_and_each_non_terminal_update() {
+    let mut started = operation(v1::OperationPhase::EffectApplied);
+    started.stage = v1::OperationStage::StartVm as i32;
+    let server = TestServer::start(
+        valid_info,
+        vec![WatchReply::Updates(vec![
+            Ok(started.clone()),
+            Ok(operation(v1::OperationPhase::Completed)),
+        ])],
+    );
+    let mut client = bounded(NativeSupervisorClient::connect(&server.socket))
+        .await
+        .unwrap();
+    let initial = operation(v1::OperationPhase::Intent);
+    let mut seen = Vec::new();
+    let mut observe = |update: &v1::Operation| seen.push(update.clone());
+    bounded(client.follow_operation(initial.clone(), &mut observe))
+        .await
+        .unwrap();
+    assert_eq!(seen, [initial, started]);
+    drop(client);
+    server.finish().await;
+}
+
+#[tokio::test]
 async fn terminal_initial_result_does_not_open_a_watch() {
     let server = TestServer::start(valid_info, vec![]);
     let mut client = bounded(NativeSupervisorClient::connect(&server.socket))
@@ -496,7 +521,7 @@ async fn terminal_initial_result_does_not_open_a_watch() {
         .unwrap();
     let terminal = operation(v1::OperationPhase::Completed);
     assert_eq!(
-        bounded(client.follow_operation(terminal.clone()))
+        bounded(client.follow_operation(terminal.clone(), &mut |_| {}))
             .await
             .unwrap(),
         terminal
@@ -527,7 +552,7 @@ async fn stream_failures_and_invalid_phases_do_not_become_success() {
             .await
             .unwrap();
         let initial = operation(v1::OperationPhase::Intent);
-        let error = bounded(client.follow_operation(initial.clone()))
+        let error = bounded(client.follow_operation(initial.clone(), &mut |_| {}))
             .await
             .unwrap_err();
         assert_eq!(error.code(), expected_code);
@@ -596,9 +621,10 @@ async fn linux_watch_reconnect_is_bounded_to_three_attempts() {
     .unwrap();
     client.reconnect_enabled = true;
     let started = tokio::time::Instant::now();
-    let error = bounded(client.follow_operation(operation(v1::OperationPhase::Intent)))
-        .await
-        .unwrap_err();
+    let error =
+        bounded(client.follow_operation(operation(v1::OperationPhase::Intent), &mut |_| {}))
+            .await
+            .unwrap_err();
     assert_eq!(error.code(), tonic::Code::Unavailable);
     assert!(started.elapsed() >= Duration::from_millis(300));
     let calls = server.calls();
@@ -635,7 +661,7 @@ async fn watch_reconnect_refuses_replacement_and_preserves_original_operation_wi
     let original_calls = server.calls.clone();
     let initial = operation(v1::OperationPhase::Intent);
     let expected_id = initial.operation_id.clone();
-    let follower = tokio::spawn(async move { client.follow_operation(initial).await });
+    let follower = tokio::spawn(async move { client.follow_operation(initial, &mut |_| {}).await });
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     while original_calls.lock().unwrap().len() < 2 {
         assert!(tokio::time::Instant::now() < deadline);

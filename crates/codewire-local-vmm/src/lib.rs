@@ -113,7 +113,7 @@ mod vz;
 mod workspace_generation;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub use direct_share::DirectShareRequest;
+pub use direct_share::{DirectShareRequest, workspace_source_refusal};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use host::process::{LiveProcess, ProcessIdentity, RecoveryError};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -123,6 +123,8 @@ pub use runner::{
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use state::{StateDiskIdentity, VmPaths};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use supervisor_metadata::valid_environment_name;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod unsupported;

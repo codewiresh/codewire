@@ -3,7 +3,7 @@ use std::path::Path;
 
 use super::*;
 
-mod progress;
+pub(super) mod progress;
 mod runtime;
 mod sources;
 
@@ -1134,7 +1134,9 @@ async fn handle_unified_environment_create(
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 native_create_selected(&args)?;
-                let environment = create_native_environment(globals, *args).await?;
+                let Some(environment) = create_native_environment(globals, *args).await? else {
+                    return Ok(());
+                };
                 if matches!(output, OutputFormat::Text) {
                     eprintln!("Local environment created: {}.", environment.name);
                 }

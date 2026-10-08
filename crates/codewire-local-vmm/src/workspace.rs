@@ -863,6 +863,11 @@ fn open_source_directory(requested_source: &Path) -> Result<SourceDirectory, Wor
         path: requested_source.to_owned(),
         source,
     })?;
+    // Snapshots follow the same source policy as direct shares: never the
+    // home directory itself, a broad root or a credential store.
+    if let Some(reason) = crate::direct_share::workspace_source_refusal(&path) {
+        return Err(WorkspaceError::RefusedSource(path, reason));
+    }
     let directory = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -2148,6 +2153,8 @@ pub enum WorkspaceError {
     },
     #[error("workspace copy crossed a mount boundary at {0}")]
     SourceMountBoundary(PathBuf),
+    #[error("workspace source {0} is refused: {1}")]
+    RefusedSource(PathBuf, &'static str),
     #[error("workspace source entry changed while it was copied: {0}")]
     SourceEntryChanged(PathBuf),
     #[error("workspace copy contains an invalid relative path: {0}")]

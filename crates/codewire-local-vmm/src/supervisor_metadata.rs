@@ -503,7 +503,8 @@ impl PlatformSourceAuthority {
     }
 }
 
-pub(crate) fn valid_environment_name(name: &str) -> bool {
+/// The rule every local environment name follows.
+pub fn valid_environment_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     !bytes.is_empty()
         && bytes.len() <= 63
