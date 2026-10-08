@@ -227,6 +227,22 @@ fn nonnil_id(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The platform workspace home is the Pod's own volume root. Kubernetes
+/// leaves it root owned and group- or world-writable (fsGroup setgid 2775,
+/// local-path 0777), and the workspace user cannot change that.
+pub(super) const PLATFORM_HOME: &str = "/home/codewire";
+
+/// An ancestor of managed state: a real directory owned by root or this user
+/// that another UID cannot write, root's sticky shared directory, or the exact
+/// platform home, held as an anchor. Everything below the home stays private.
+pub(super) fn admitted_ancestor(path: &Path, meta: &fs::Metadata, home: &Path) -> bool {
+    meta.is_dir()
+        && (meta.uid() == 0 || meta.uid() == euid())
+        && (meta.mode() & 0o022 == 0
+            || (meta.uid() == 0 && meta.mode() & 0o1000 != 0)
+            || path == home)
+}
+
 // Hold each nofollow directory in the authority chain through synchronous
 // helper work. Another UID cannot replace a writable ancestor; same-UID/root
 // adversaries are outside this trusted-host boundary.
@@ -253,9 +269,7 @@ impl DirectoryPin {
                 .open(&current)?;
             let meta = file.metadata()?;
             ensure!(
-                meta.is_dir()
-                    && (meta.uid() == 0 || meta.uid() == euid())
-                    && (meta.mode() & 0o022 == 0 || (meta.uid() == 0 && meta.mode() & 0o1000 != 0)),
+                admitted_ancestor(&current, &meta, Path::new(PLATFORM_HOME)),
                 "managed state ancestor is unsafe"
             );
             held.push((current.clone(), file));

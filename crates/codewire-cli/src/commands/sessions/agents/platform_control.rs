@@ -324,9 +324,7 @@ fn make_directory(path: &Path) -> anyhow::Result<DirectoryPin> {
         }
         let m = fs::symlink_metadata(&current)?;
         ensure!(
-            m.is_dir()
-                && [0, euid()].contains(&m.uid())
-                && (m.mode() & 0o022 == 0 || (m.uid() == 0 && m.mode() & 0o7777 == 0o1777)),
+            host_control::admitted_ancestor(&current, &m, Path::new(host_control::PLATFORM_HOME)),
             "unsafe platform ancestor"
         );
     }

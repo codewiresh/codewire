@@ -782,3 +782,32 @@ fn member_helper_generation_addition_keeps_ordinary_record_bytes_and_refuses_zer
     member.member_launch_generation = Some(0);
     assert!(member.validate(&f.dir(&driver), &member.id).is_err());
 }
+
+#[test]
+fn platform_home_alone_admits_a_shared_volume_root() {
+    use std::os::unix::fs::PermissionsExt as _;
+    // A Kubernetes home volume is root-owned 0777 (local-path) or a setgid
+    // 2775 fsGroup root; only the exact home is admitted that way.
+    let temp = tempfile::tempdir().unwrap();
+    let home = fs::canonicalize(temp.path()).unwrap().join("home");
+    let below = home.join(".local");
+    fs::create_dir(&home).unwrap();
+    fs::create_dir(&below).unwrap();
+    for mode in [0o777, 0o2775] {
+        fs::set_permissions(&home, fs::Permissions::from_mode(mode)).unwrap();
+        fs::set_permissions(&below, fs::Permissions::from_mode(mode)).unwrap();
+        let meta = |path: &Path| fs::symlink_metadata(path).unwrap();
+        assert!(admitted_ancestor(&home, &meta(&home), &home));
+        assert!(!admitted_ancestor(&below, &meta(&below), &home));
+        assert!(!admitted_ancestor(&home, &meta(&home), &below));
+    }
+    let file = home.join("file");
+    fs::write(&file, b"").unwrap();
+    assert!(!admitted_ancestor(
+        &file,
+        &fs::symlink_metadata(&file).unwrap(),
+        &file
+    ));
+    fs::set_permissions(&below, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+}
