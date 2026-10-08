@@ -103,6 +103,27 @@ impl PrivateProviderHome {
         Ok(Self { path: Some(path) })
     }
 
+    /// Create the selected-key SSH signer's staging on macOS, which has no
+    /// per-user tmpfs. Only the signer stages here, and it writes no key or
+    /// passphrase byte to a file: ssh-add reads the key on stdin and the
+    /// passphrase through a FIFO, so the directory holds the agent socket and
+    /// that FIFO only. The short name keeps the agent socket under Darwin's
+    /// 104-byte socket path bound. Provider login staging keeps requiring
+    /// [`validate_private_tmpfs_runtime`], which no macOS filesystem passes.
+    #[cfg(all(feature = "ssh-agent", target_os = "macos"))]
+    pub(crate) fn create_signer_staging_in(
+        runtime: &Path,
+    ) -> Result<Self, ProviderEnrollmentError> {
+        validate_private_directory(runtime)?;
+        let path = runtime.join(format!(".cw-{}", uuid::Uuid::new_v4().simple()));
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .map_err(|_| ProviderEnrollmentError)?;
+        validate_private_directory(&path)?;
+        Ok(Self { path: Some(path) })
+    }
+
     /// Private process-local staging path; never expose this through public RPC.
     pub fn path(&self) -> &Path {
         self.path.as_deref().expect("private home remains owned")

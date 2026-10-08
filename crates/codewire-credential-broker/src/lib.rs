@@ -38,7 +38,7 @@ pub mod provider_enrollment;
 mod reconnect;
 mod refresh_failure;
 mod runtime;
-#[cfg(all(feature = "ssh-agent", target_os = "linux"))]
+#[cfg(all(feature = "ssh-agent", any(target_os = "linux", target_os = "macos")))]
 pub mod ssh_agent;
 pub mod timing;
 
