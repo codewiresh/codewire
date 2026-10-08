@@ -297,7 +297,10 @@ async fn released_unbound_or_absent_binding_never_resolves_a_client() {
     backend.replace_rows([None]);
     assert!(matches!(
         capture(&backend, &incarnation(&original), SYNTHETIC_SECRET).await,
-        Err(AppError::Conflict(_))
+        Err(AppError::Coded {
+            code: "invalid_state",
+            ..
+        })
     ));
     assert_eq!(backend.0.lock().unwrap().events, ["authorize", "binding"]);
 }
@@ -329,7 +332,10 @@ async fn each_expected_immutable_identity_member_must_match_the_joined_row() {
         assert!(
             matches!(
                 capture(&backend, &incarnation(&original), SYNTHETIC_SECRET).await,
-                Err(AppError::Conflict(_))
+                Err(AppError::Coded {
+                    code: "invalid_state",
+                    ..
+                })
             ),
             "identity case {index}"
         );
@@ -359,7 +365,10 @@ async fn backend_pointer_claim_pvc_and_ip_incoherence_refuse_before_probe() {
         assert!(
             matches!(
                 capture(&backend, &incarnation(&original), SYNTHETIC_SECRET).await,
-                Err(AppError::Conflict(_))
+                Err(AppError::Coded {
+                    code: "invalid_state",
+                    ..
+                })
             ),
             "pointer case {index}"
         );
@@ -383,7 +392,10 @@ async fn authorized_name_is_not_authority_for_another_namespace_or_environment()
         }
         assert!(matches!(
             capture(&backend, &incarnation(&original), SYNTHETIC_SECRET).await,
-            Err(AppError::Conflict(_))
+            Err(AppError::Coded {
+                code: "invalid_state",
+                ..
+            })
         ));
         assert_eq!(backend.connections(), 0);
     }
@@ -472,7 +484,10 @@ async fn probe_requires_exact_running_original_pod_even_if_name_or_ip_is_reused(
         assert!(
             matches!(
                 capture(&backend, &incarnation(&original), SYNTHETIC_SECRET).await,
-                Err(AppError::Conflict(_))
+                Err(AppError::Coded {
+                    code: "invalid_state",
+                    ..
+                })
             ),
             "probe case {index}"
         );
@@ -498,7 +513,10 @@ async fn binding_release_between_probe_and_reread_refuses_before_connect() {
     backend.replace_rows([Some(original.clone()), None]);
     assert!(matches!(
         capture(&backend, &incarnation(&original), SYNTHETIC_SECRET).await,
-        Err(AppError::Conflict(_))
+        Err(AppError::Coded {
+            code: "invalid_state",
+            ..
+        })
     ));
     assert_eq!(backend.connections(), 0);
     assert!(backend.0.lock().unwrap().events.contains(&"probe"));
@@ -527,7 +545,10 @@ async fn complete_row_reread_refuses_mutable_gate_and_pointer_changes() {
         assert!(
             matches!(
                 capture(&backend, &incarnation(&original), SYNTHETIC_SECRET).await,
-                Err(AppError::Conflict(_))
+                Err(AppError::Coded {
+                    code: "invalid_state",
+                    ..
+                })
             ),
             "reread case {index}"
         );
@@ -585,7 +606,10 @@ async fn recheck_keeps_original_client_and_does_not_follow_replacement_binding()
     backend.replace_rows([Some(replacement)]);
     assert!(matches!(
         recheck_capture(&backend, &expected, &captured.row).await,
-        Err(AppError::Conflict(_))
+        Err(AppError::Coded {
+            code: "invalid_state",
+            ..
+        })
     ));
     assert_eq!(captured.client.credential, credential);
     assert_eq!(backend.connections(), 1);
@@ -605,7 +629,10 @@ async fn recheck_compares_full_capture_even_when_public_incarnation_is_unchanged
     backend.replace_rows([Some(changed.clone()), Some(changed)]);
     assert!(matches!(
         recheck_capture(&backend, &expected, &captured.row).await,
-        Err(AppError::Conflict(_))
+        Err(AppError::Coded {
+            code: "invalid_state",
+            ..
+        })
     ));
     assert_eq!(backend.connections(), 1);
 }

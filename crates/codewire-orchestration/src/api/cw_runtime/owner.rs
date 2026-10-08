@@ -24,7 +24,7 @@ use super::CapturedPlatformCwRuntime;
 use super::model::{
     CapturedBindingFacts, CheckpointAcknowledgement, EffectReceipt, MAX_CHECKPOINTS,
     MAX_JSON_BYTES, RuntimeAction, RuntimeEffect, RuntimeMutation, RuntimePhase, bounded_json,
-    conflict, fingerprint, invalid_request, unavailable,
+    conflict, fingerprint, invalid_request, not_found, unavailable,
 };
 use crate::api::environments::lock_cw_runtime_operator_in;
 use crate::confidential_storage::FeatureFlags;
@@ -346,12 +346,12 @@ impl RuntimeJournal {
         owned(async move {
             let mut tx = journal.pool.begin().await.map_err(|_| unavailable())?;
             lock_cw_runtime_operator_in(&mut tx, &user, &org, &env, journal.flags).await?;
+            // A request this environment never recorded is absent; one saved
+            // under another scope is not disclosed.
             let saved = load_in(&mut tx, request_id, false)
                 .await?
-                .ok_or_else(conflict)?;
-            if saved.organization_id != org || saved.environment_id != env {
-                return Err(conflict());
-            }
+                .filter(|saved| saved.organization_id == org && saved.environment_id == env)
+                .ok_or_else(not_found)?;
             let request = saved.decode()?;
             tx.commit().await.map_err(|_| unavailable())?;
             Ok(request)

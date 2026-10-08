@@ -19,6 +19,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::http::StatusCode;
 use codewire_daemon_bridge::client::DaemonClient;
 use codewire_daemon_proto::{DAEMON_CAPABILITY_EXEC, DAEMON_CAPABILITY_FILES};
 use codewire_server_core::auth::AuthUser;
@@ -411,8 +412,14 @@ async fn bounded<T>(
         .map_err(|_| binding_unavailable())?
 }
 
+/// The caller's expected incarnation is no longer the live one: a state
+/// precondition (Connect `failed_precondition`), not an existing resource.
 fn incarnation_changed() -> AppError {
-    AppError::Conflict("environment runtime incarnation changed".into())
+    AppError::Coded {
+        status: StatusCode::CONFLICT,
+        code: "invalid_state",
+        detail: "environment runtime incarnation changed".into(),
+    }
 }
 
 fn binding_unavailable() -> AppError {

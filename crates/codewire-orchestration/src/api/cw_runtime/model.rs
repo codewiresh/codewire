@@ -302,6 +302,10 @@ pub(super) fn conflict() -> AppError {
     AppError::Conflict("cw runtime request requires observation or resolution".into())
 }
 
+pub(super) fn not_found() -> AppError {
+    AppError::NotFound("cw runtime request not found".into())
+}
+
 pub(super) mod decimal_u64 {
     use serde::{Deserialize, Deserializer, Serializer};
 
