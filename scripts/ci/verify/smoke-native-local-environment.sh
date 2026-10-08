@@ -1565,113 +1565,6 @@ remove_isolated_keyring_runtime() {
   KEYRING_DBUS_ADDRESS=''
 }
 
-install_synthetic_codex() {
-  cat >"$SMOKE_ROOT/bin/codex" <<'EOF'
-#!/bin/sh
-set -eu
-
-case "${1-}" in
-  login)
-    [ "$#" -eq 4 ]
-    [ "$2" = '--device-auth' ]
-    [ "$3" = '-c' ]
-    [ "$4" = 'cli_auth_credentials_store="file"' ]
-    [ "$HOME" = "$CODEX_HOME" ]
-    [ "$XDG_CONFIG_HOME" = "$CODEX_HOME" ]
-    [ "$XDG_CACHE_HOME" = "$CODEX_HOME" ]
-    [ "$TMPDIR" = "$CODEX_HOME" ]
-    [ "$(pwd -P)" = "$CODEX_HOME" ]
-    [ -z "${XDG_RUNTIME_DIR+x}" ]
-    [ -z "${DBUS_SESSION_BUS_ADDRESS+x}" ]
-    [ -z "${OPENAI_API_KEY+x}" ]
-    login_parent=${CODEX_HOME%/*}
-    [ -f "$login_parent/.codewire-synthetic-login-root" ]
-    [ "$(findmnt -nro FSTYPE -T "$CODEX_HOME")" = tmpfs ]
-    printf '\nWelcome to Codex [v\033[90m0.157.0\033[0m]\n\033[90mOpenAI\047s command-line coding agent\033[0m\n\n'
-    printf 'Follow these steps to sign in with ChatGPT using device code authorization:\n\n'
-    printf '1. Open this link in your browser and sign in to your account\n   \033[94mhttps://auth.openai.com/codex/device\033[0m\n\n'
-    printf '2. Enter this one-time code \033[90m(expires in 15 minutes)\033[0m\n   \033[94mSYNTH-ETIC\033[0m\n\n'
-    printf '\033[90mContinue only if you started this login in Codex. If a website or another person gave you this code, cancel.\033[0m\n\n'
-    boot_id=$(tr -d '-' </proc/sys/kernel/random/boot_id)
-    [ "${#boot_id}" -eq 32 ]
-    access_token="cwlocalbroker$boot_id"
-    refresh_token="cwlocalrefresh$boot_id"
-    jwt_header=$(printf '%s' '{"alg":"none"}' | /usr/bin/base64 -w 0 | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '=')
-    jwt_payload=$(printf '%s' '{"email":"native-smoke@example.test","https://api.openai.com/auth":{"chatgpt_account_id":"account-native-broker","chatgpt_account_is_fedramp":false}}' | /usr/bin/base64 -w 0 | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '=')
-    id_token="$jwt_header.$jwt_payload.synthetic-signature"
-    umask 077
-    printf '%s' "{\"auth_mode\":\"chatgpt\",\"OPENAI_API_KEY\":null,\"tokens\":{\"id_token\":\"$id_token\",\"access_token\":\"$access_token\",\"refresh_token\":\"$refresh_token\",\"account_id\":\"account-native-broker\"}}" >"$CODEX_HOME/auth.json"
-    chmod 0600 "$CODEX_HOME/auth.json"
-    ;;
-  logout)
-    [ "$#" -eq 3 ]
-    [ "$2" = '-c' ]
-    [ "$3" = 'cli_auth_credentials_store="file"' ]
-    rm -f -- "$CODEX_HOME/auth.json"
-    ;;
-  *)
-    exit 64
-    ;;
-esac
-EOF
-  chmod 0700 "$SMOKE_ROOT/bin/codex"
-  touch "$KEYRING_RUNTIME/.codewire-synthetic-login-root"
-  chmod 0600 "$KEYRING_RUNTIME/.codewire-synthetic-login-root"
-}
-
-install_synthetic_github() {
-  cat >"$SMOKE_ROOT/bin/gh" <<'EOF'
-#!/bin/sh
-set -eu
-
-case "${1-}:${2-}" in
-  auth:login)
-    [ "$#" -eq 9 ]
-    [ "$3" = '--hostname' ]
-    [ "$4" = 'github.com' ]
-    [ "$5" = '--git-protocol' ]
-    [ "$6" = 'https' ]
-    [ "$7" = '--web' ]
-    [ "$8" = '--insecure-storage' ]
-    [ "$9" = '--skip-ssh-key' ]
-    [ "$HOME" = "$GH_CONFIG_DIR" ]
-    [ "$XDG_CONFIG_HOME" = "$GH_CONFIG_DIR" ]
-    [ "$XDG_CACHE_HOME" = "$GH_CONFIG_DIR" ]
-    [ "$TMPDIR" = "$GH_CONFIG_DIR" ]
-    [ "$(pwd -P)" = "$GH_CONFIG_DIR" ]
-    [ "$PATH" = '/usr/bin:/bin' ]
-    [ -z "${XDG_RUNTIME_DIR+x}" ]
-    [ -z "${DBUS_SESSION_BUS_ADDRESS+x}" ]
-    [ -z "${GH_TOKEN+x}" ]
-    [ -z "${GITHUB_TOKEN+x}" ]
-    login_parent=${GH_CONFIG_DIR%/*}
-    [ -f "$login_parent/.codewire-synthetic-login-root" ]
-    [ "$(findmnt -nro FSTYPE -T "$GH_CONFIG_DIR")" = tmpfs ]
-    boot_id=$(tr -d '-' </proc/sys/kernel/random/boot_id)
-    [ "${#boot_id}" -eq 32 ]
-    oauth_token="cwlocalgithub$boot_id"
-    umask 077
-    printf 'github.com:\n  user: synthetic-smoke\n  oauth_token: %s\n  git_protocol: https\n' \
-      "$oauth_token" >"$GH_CONFIG_DIR/hosts.yml"
-    chmod 0600 "$GH_CONFIG_DIR/hosts.yml"
-    ;;
-  auth:token)
-    [ "$#" -eq 4 ]
-    [ "$3" = '--hostname' ]
-    [ "$4" = 'github.com' ]
-    [ -f "$GH_CONFIG_DIR/hosts.yml" ]
-    boot_id=$(tr -d '-' </proc/sys/kernel/random/boot_id)
-    [ "${#boot_id}" -eq 32 ]
-    printf '%s\n' "cwlocalgithub$boot_id"
-    ;;
-  *)
-    exit 64
-    ;;
-esac
-EOF
-  chmod 0700 "$SMOKE_ROOT/bin/gh"
-}
-
 secret_tool_isolated() {
   env -i PATH='/usr/bin:/bin' LC_ALL=C \
     XDG_RUNTIME_DIR="$KEYRING_RUNTIME" \
@@ -2218,7 +2111,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   start_isolated_keyring
   CREDENTIAL_CANARY="cwlocalbroker$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   CREDENTIAL_REFRESH_CANARY="cwlocalrefresh$(tr -d '-' </proc/sys/kernel/random/boot_id)"
-  GITHUB_CREDENTIAL_CANARY="cwlocalgithub$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  GITHUB_CREDENTIAL_CANARY="ghu_cwlocalgithub$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   OPENAI_CREDENTIAL_CANARY="cwlocalopenai$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   ANTHROPIC_CREDENTIAL_CANARY="cwlocalanthropic$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   WORKLOAD_SECRET_CANARY="cwworkload$(tr -d '-' </proc/sys/kernel/random/boot_id)"
@@ -2240,16 +2133,6 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   [[ ${#WORKLOAD_SECRET_CANARY} -ge 16 && ${#WORKLOAD_SECRET_CANARY} -le 256 &&
      "$WORKLOAD_SECRET_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
     die 'generated workload-secret canary is invalid'
-  install_synthetic_codex
-  install_synthetic_github
-  for canary in "$CREDENTIAL_CANARY" "$CREDENTIAL_REFRESH_CANARY" \
-    "$GITHUB_CREDENTIAL_CANARY" "$OPENAI_CREDENTIAL_CANARY" \
-    "$ANTHROPIC_CREDENTIAL_CANARY"; do
-    if rg -qF "$canary" "$SMOKE_ROOT/bin/codex" "$SMOKE_ROOT/bin/gh"; then
-      die 'synthetic provider executable contains a generated credential canary'
-    fi
-  done
-
   log 'enrolling synthetic protected Codex/GitHub OAuth, OpenAI/Anthropic API-key, and generated SSH credentials through public commands'
   run_cw_connect_synthetic_codex
   run_cw_connect_synthetic_github
@@ -2271,12 +2154,6 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   run_cw secrets --local --user list --output json
   jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
     die 'local personal-secret store was not empty before its selected fixture'
-  [[ -z "$(find "$KEYRING_RUNTIME" -mindepth 1 -maxdepth 1 -type d \
-    -name '.codewire-codex-login-*' -print -quit)" ]] ||
-    die 'transient Codex login directory remained after enrollment'
-  [[ -z "$(find "$KEYRING_RUNTIME" -mindepth 1 -maxdepth 1 -type d \
-    -name '.codewire-github-login-*' -print -quit)" ]] ||
-    die 'transient GitHub login directory remained after enrollment'
   run_cw credentials --local list --output json
   jq -e '
     length == 5 and

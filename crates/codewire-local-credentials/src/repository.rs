@@ -43,8 +43,8 @@ mod ssh_executor;
 #[cfg(target_os = "macos")]
 pub(crate) use executor::cleanup_repository_credential_sockets;
 pub use executor::{
-    LocalRepositoryGitProcessSpawner, MAX_GIT_BUNDLE_BYTES, RepositoryExecutorError,
-    run_git_credential_helper, run_git_credential_helper_for_endpoint,
+    GitHubTokenResolver, LocalRepositoryGitProcessSpawner, MAX_GIT_BUNDLE_BYTES,
+    RepositoryExecutorError, run_git_credential_helper, run_git_credential_helper_for_endpoint,
     run_local_repository_executor,
 };
 pub(crate) use executor::{

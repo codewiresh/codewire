@@ -1147,11 +1147,6 @@ if [ "$event_selected" = false ]; then
         select_token rust_pkg_codewire_credential_service
         select_token database
         ;;
-      crates/codewire-credential-broker/src/codex_enrollment/*)
-        # Only the CLI's local connect enables this opt-in feature.
-        select_token rust
-        select_token rust_pkg_codewire_cli
-        ;;
       crates/codewire-credential-broker/src/platform.rs|\
       crates/codewire-credential-broker/src/platform/*|\
       crates/codewire-credential-broker/src/runtime.rs|\

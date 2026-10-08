@@ -28,6 +28,27 @@ const USER_AGENT: &str = "Codewire";
 const MAX_CODE_LIFETIME: Duration = Duration::from_secs(30 * 60);
 const MIN_CODE_LIFETIME: Duration = Duration::from_secs(60);
 
+/// The Codewire GitHub App (Codewire.sh, App ID 2837346, owned by the
+/// codewiresh organization): its public identity, shared by every placement
+/// and by the Dev and Production platforms. A client ID and an App slug are
+/// not secrets: GitHub shows both on its authorization and installation pages.
+pub(crate) const CODEWIRE_GITHUB_APP_CLIENT_ID: &str = "Iv23lif1VpZftJWtcQCL";
+pub(crate) const CODEWIRE_GITHUB_APP_SLUG: &str = "codewire-sh";
+
+/// GitHub's page for installing the Codewire App on a personal account or an
+/// organization and choosing its repositories.
+pub fn codewire_github_app_install_url() -> String {
+    format!("https://github.com/apps/{CODEWIRE_GITHUB_APP_SLUG}/installations/new")
+}
+
+/// The Codewire GitHub App, for a client that holds no App secret.
+pub fn codewire_github_app() -> GitHubDeviceLoginConfig {
+    GitHubDeviceLoginConfig {
+        client_id: CODEWIRE_GITHUB_APP_CLIENT_ID.to_owned(),
+        app_slug: CODEWIRE_GITHUB_APP_SLUG.to_owned(),
+    }
+}
+
 /// The public identity of one Codewire GitHub App. It deliberately has no
 /// client secret: device login never needs one.
 pub struct GitHubDeviceLoginConfig {
@@ -44,6 +65,14 @@ impl GitHubDeviceLoginConfig {
             client_id,
             app_slug,
         })
+    }
+
+    pub(crate) fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
+    pub(crate) fn app_slug(&self) -> &str {
+        &self.app_slug
     }
 }
 

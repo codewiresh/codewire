@@ -177,6 +177,26 @@ pub(crate) async fn run_local_credential_broker(
     };
     #[cfg(feature = "local-broker-synthetic-smoke")]
     let upstream = (!http_providers.is_empty()).then_some(SyntheticOpenAiSmokeTransport);
+    // A selected GitHub connection may be an expiring App login. Its refresh
+    // uses the App's own family with the public client ID only; resolve it
+    // with the other provider addresses, before confinement.
+    #[cfg(not(feature = "local-broker-synthetic-smoke"))]
+    let github_app = if http_providers.contains(&HttpProvider::GitHubOAuth) {
+        Some(std::sync::Arc::new(
+            codewire_credential_broker::GitHubAppAuthorizationOwner::public_client(
+                codewire_credential_broker::provider_oauth::github::codewire_github_app(),
+                std::sync::Arc::new(
+                    ProviderHttpsTransport::resolve(&BTreeSet::from([
+                        HttpProvider::GitHubAppAuthorization,
+                    ]))
+                    .await
+                    .context("resolve the GitHub App refresh endpoint")?,
+                ),
+            ),
+        ))
+    } else {
+        None
+    };
     #[cfg(target_os = "linux")]
     let protected_store = {
         apply_broker_landlock_confinement().context("confine credential broker filesystem")?;
@@ -205,6 +225,11 @@ pub(crate) async fn run_local_credential_broker(
         .context("complete broker launch handshake")?;
     let broker = OpenAiBroker::new(leases, upstream)
         .map_err(|_| anyhow::anyhow!("initialize broker provider policy"))?;
+    #[cfg(not(feature = "local-broker-synthetic-smoke"))]
+    let broker = match github_app {
+        Some(owner) => broker.with_github_app_authorization_owner(owner),
+        None => broker,
+    };
     run_admitted_credential_bridge(broker, bridge)
         .await
         .context("run guest credential bridge")

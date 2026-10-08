@@ -568,8 +568,8 @@ run_rust() {
     # Exercise the isolated platform build explicitly; the default local
     # feature cannot qualify platform admission or its production graph.
     scripts/ci/tests/test-openbao-only-secret-authority.sh --production-broker-features
-    cargo clippy --locked -p codewire-credential-broker --no-default-features --features platform,codex-enrollment --all-targets -- -D warnings
-    cargo test --locked -p codewire-credential-broker --no-default-features --features platform,codex-enrollment --all-targets
+    cargo clippy --locked -p codewire-credential-broker --no-default-features --features platform --all-targets -- -D warnings
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform --all-targets
   fi
   if selected rust_workspace || selected rust_pkg_codewire_server_core \
       || selected rust_pkg_codewire_orchestration; then

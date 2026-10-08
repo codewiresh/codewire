@@ -59,6 +59,8 @@ mod credential_input;
 mod credentials;
 mod platform_credentials;
 mod platform_profiles;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod provider_login;
 pub(crate) use credential_input::*;
 
 #[derive(Debug, Args)]

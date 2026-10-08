@@ -120,11 +120,6 @@ policy=policy
 run_paths_case shared_provider_enrollment pull_request refs/pull/1/head false \
   'database policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_broker rust_pkg_codewire_credential_service' \
   crates/codewire-credential-broker/src/provider_enrollment.rs
-for enrollment_input in src/codex_enrollment/mod.rs src/codex_enrollment/parser.rs; do
-  run_paths_case local_codex_enrollment pull_request refs/pull/1/head false \
-    'policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_broker' \
-    "crates/codewire-credential-broker/$enrollment_input"
-done
 run_paths_case platform_credential_store pull_request refs/pull/1/head false \
   'database policy rust rust_pkg_codewire_credential_broker rust_pkg_codewire_platform_credentials' \
   crates/codewire-platform-credentials/src/store.rs
@@ -3292,8 +3287,8 @@ run_platform_broker_rust_case() {
     [[ "$status" == 0 ]] || { cat "$primitive_probe/broker-$name.out" >&2; exit 1; }
   fi
   graph_count="$(grep -c '^tree --locked -p codewire-credential-broker --no-default-features --features platform --edges normal,build ' "$log" || true)"
-  clippy_count="$(grep -cxF 'clippy --locked -p codewire-credential-broker --no-default-features --features platform,codex-enrollment --all-targets -- -D warnings' "$log" || true)"
-  test_count="$(grep -cxF 'test --locked -p codewire-credential-broker --no-default-features --features platform,codex-enrollment --all-targets' "$log" || true)"
+  clippy_count="$(grep -cxF 'clippy --locked -p codewire-credential-broker --no-default-features --features platform --all-targets -- -D warnings' "$log" || true)"
+  test_count="$(grep -cxF 'test --locked -p codewire-credential-broker --no-default-features --features platform --all-targets' "$log" || true)"
   [[ "$graph_count" == "$expected" ]] || { echo "$name: missing or duplicate broker graph check" >&2; exit 1; }
   if [[ "$fail" == tree || "$features" != platform ]]; then
     [[ "$clippy_count" == 0 && "$test_count" == 0 ]] || { echo "$name: broker checks followed invalid graph" >&2; exit 1; }

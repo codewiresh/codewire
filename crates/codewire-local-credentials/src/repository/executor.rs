@@ -62,6 +62,12 @@ pub enum RepositoryExecutorError {
     Filesystem,
 }
 
+/// Turns stored GitHub material (a raw token or a GitHub App login bundle)
+/// into the access token Git sends. The caller owns the bundle format.
+pub type GitHubTokenResolver<'a> =
+    &'a (dyn Fn(&[u8]) -> Result<zeroize::Zeroizing<String>, RepositoryExecutorError> + Sync);
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run_local_repository_executor<S>(
     authority_stream: UnixStream,
     protected_store: S,
@@ -70,6 +76,7 @@ pub async fn run_local_repository_executor<S>(
     git_executable: &Path,
     credential_helper_executable: &Path,
     git_spawner: &dyn LocalRepositoryGitProcessSpawner,
+    github_token: GitHubTokenResolver<'_>,
 ) -> Result<(), RepositoryExecutorError>
 where
     S: ProtectedStore + Clone + 'static,
@@ -98,7 +105,8 @@ where
         .lease_github(protected_store)
         .await
         .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?;
-    let token = lease.material();
+    let token = github_token(lease.material())?;
+    let token = token.as_bytes();
     if token.is_empty()
         || token.len() > MAX_GITHUB_TOKEN_BYTES
         || !token.iter().all(u8::is_ascii_graphic)

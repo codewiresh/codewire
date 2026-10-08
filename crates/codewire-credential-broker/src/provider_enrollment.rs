@@ -1,46 +1,18 @@
-//! Shared private staging and executable validation for explicit provider login.
+//! Private tmpfs staging and executable validation for the SSH agent helper.
 //!
 //! Callers supply trusted configuration. This module never reads ambient PATH,
 //! HOME, provider credentials or the user's ordinary provider configuration.
 
-use std::ffi::OsStr;
 use std::fs::{DirBuilder, File};
-#[cfg(feature = "codex-enrollment")]
-use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "codex-enrollment")]
-use rustix::fs::{Mode, OFlags};
 use thiserror::Error;
-#[cfg(feature = "codex-enrollment")]
-use zeroize::Zeroizing;
 
 /// Value-blind failures for private provider login staging.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 #[error("provider enrollment configuration or private staging is unavailable")]
 pub struct ProviderEnrollmentError;
-
-/// Resolve an executable using an explicitly supplied, trusted search path.
-/// Neither the search path nor the executable is supplied by an API caller.
-pub fn resolve_provider_executable(
-    name: &str,
-    search_path: &OsStr,
-) -> Result<PathBuf, ProviderEnrollmentError> {
-    if name.is_empty() || name.contains('/') {
-        return Err(ProviderEnrollmentError);
-    }
-    for directory in std::env::split_paths(search_path) {
-        if !directory.is_absolute() {
-            continue;
-        }
-        let candidate = directory.join(name);
-        if let Ok(path) = validate_executable(&candidate) {
-            return Ok(path);
-        }
-    }
-    Err(ProviderEnrollmentError)
-}
 
 pub(crate) fn validate_executable(path: &Path) -> Result<PathBuf, ProviderEnrollmentError> {
     if !path.is_absolute() {
@@ -153,45 +125,4 @@ impl Drop for PrivateProviderHome {
             let _ = std::fs::remove_dir_all(path);
         }
     }
-}
-
-#[cfg(feature = "codex-enrollment")]
-pub(crate) fn read_private_file(
-    home: &PrivateProviderHome,
-    name: &str,
-    limit: usize,
-) -> Result<Zeroizing<Vec<u8>>, ProviderEnrollmentError> {
-    validate_private_directory(home.path())?;
-    let directory = rustix::fs::open(
-        home.path(),
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| ProviderEnrollmentError)?;
-    let descriptor = rustix::fs::openat(
-        directory,
-        name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-        Mode::empty(),
-    )
-    .map_err(|_| ProviderEnrollmentError)?;
-    let file = File::from(descriptor);
-    let metadata = file.metadata().map_err(|_| ProviderEnrollmentError)?;
-    if !metadata.is_file()
-        || metadata.uid() != rustix::process::geteuid().as_raw()
-        || metadata.permissions().mode() & 0o7777 != 0o600
-        || metadata.len() == 0
-        || metadata.len() > limit as u64
-        || metadata.nlink() != 1
-    {
-        return Err(ProviderEnrollmentError);
-    }
-    let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
-    file.take((limit + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| ProviderEnrollmentError)?;
-    if bytes.len() != metadata.len() as usize || bytes.len() > limit {
-        return Err(ProviderEnrollmentError);
-    }
-    Ok(bytes)
 }

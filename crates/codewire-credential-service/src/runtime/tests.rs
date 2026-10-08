@@ -24,7 +24,7 @@ use codewire_credential_broker::platform::{
     PlatformPodIdentity, PlatformRuntimeAuthority, PlatformRuntimeError, PlatformRuntimeSession,
 };
 use codewire_credential_broker::{
-    BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, import_codex_auth_json,
+    BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, import_codex_tokens,
 };
 use codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION;
 use codewire_daemon_proto::broker::v1::credential_broker_service_client::CredentialBrokerServiceClient;
@@ -577,11 +577,11 @@ async fn refresh_fixture(
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&json!({
             "https://api.openai.com/auth":{"chatgpt_account_id":"synthetic-account"}
         }))?);
-    let imported = import_codex_auth_json(&serde_json::to_vec(&json!({
-        "auth_mode":"chatgpt","tokens":{"access_token":token(1)?,
-        "refresh_token":"synthetic-runtime-refresh-old","id_token":format!("e30.{id_payload}.synthetic-signature"),
-        "account_id":"synthetic-account"}
-    }))?)?;
+    let imported = import_codex_tokens(
+        zeroize::Zeroizing::new(format!("e30.{id_payload}.synthetic-signature")),
+        zeroize::Zeroizing::new(token(1)?),
+        zeroize::Zeroizing::new("synthetic-runtime-refresh-old".to_owned()),
+    )?;
     let record = h
         .store
         .create(

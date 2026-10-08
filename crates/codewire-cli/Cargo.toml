@@ -64,7 +64,7 @@ async-trait = { workspace = true }
 codewire-workspace-access = { workspace = true }
 futures = { workspace = true }
 prost = { workspace = true }
-codewire-credential-broker = { workspace = true, features = ["codex-enrollment", "ssh-agent"] }
+codewire-credential-broker = { workspace = true, features = ["ssh-agent"] }
 codewire-local-credentials = { workspace = true }
 codewire-local-vmm = { path = "../codewire-local-vmm" }
 rustix = { workspace = true }
@@ -80,6 +80,7 @@ rustix = { workspace = true }
 tempfile = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 axum = { workspace = true }
 codewire-tls = { workspace = true, features = ["test-support"] }
 buffa = { workspace = true }

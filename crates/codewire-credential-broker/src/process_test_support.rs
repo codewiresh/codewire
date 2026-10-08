@@ -2,8 +2,6 @@
 
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
-#[cfg(feature = "codex-enrollment")]
-use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -105,33 +103,11 @@ fn reap_fixture_children(test: &str) {
     }
 }
 
-#[cfg(feature = "codex-enrollment")]
-pub(crate) fn ready_pid(path: &Path) -> Option<i32> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => panic!("cannot read synthetic process PID: {error}"),
-    };
-    let digits = contents.strip_suffix('\n')?;
-    let pid: i32 = digits.parse().expect("complete synthetic process PID");
-    assert!(pid > 1);
-    assert_eq!(digits, pid.to_string());
-    Some(pid)
-}
-
 pub(crate) fn observe_process(pid: i32) -> AsyncFd<OwnedFd> {
     let pid = Pid::from_raw(pid).expect("exact synthetic process PID");
     let descriptor = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
         .expect("pin exact synthetic process before completion or cancellation");
     AsyncFd::new(descriptor).expect("register synthetic process exit observation")
-}
-
-#[cfg(feature = "codex-enrollment")]
-pub(crate) fn observe_group(root: &Path) -> [(&'static str, AsyncFd<OwnedFd>); 2] {
-    ["wrapper.pid", "native.pid"].map(|name| {
-        let pid = ready_pid(&root.join(name)).expect("synthetic process PID is ready");
-        (name, observe_process(pid))
-    })
 }
 
 pub(crate) async fn wait_for_exit(
@@ -142,20 +118,6 @@ pub(crate) async fn wait_for_exit(
         .await?
         .expect("observe exact synthetic process exit");
     Ok(())
-}
-
-#[cfg(feature = "codex-enrollment")]
-pub(crate) async fn assert_group_exited(processes: [(&'static str, AsyncFd<OwnedFd>); 2]) {
-    // Linux closes inherited pipes during exit_files before exit_notify marks
-    // a grandchild terminal. EOF and the direct parent's wait can therefore
-    // precede the grandchild's observable exit. Pin identities while both are
-    // still blocked, then observe actual exit without racing PID reuse or init.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    for (name, process) in processes {
-        wait_for_exit(&process, deadline)
-            .await
-            .unwrap_or_else(|_| panic!("synthetic group member {name} did not exit"));
-    }
 }
 
 #[tokio::test]

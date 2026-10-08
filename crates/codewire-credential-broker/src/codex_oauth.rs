@@ -1,9 +1,7 @@
 //! Canonical protected material for a Codex ChatGPT OAuth identity.
 //!
-//! The import boundary accepts only the documented Codex `auth.json` shape
-//! produced by an explicit, isolated login. It immediately normalizes that
-//! provider-owned file into a small Codewire-owned envelope so later Codex
-//! file-format changes do not silently alter the broker contract.
+//! The import boundary accepts only the tokens of a completed Codex device
+//! login and immediately normalizes them into a small Codewire-owned envelope.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -74,20 +72,10 @@ impl CodexOAuthImport {
     }
 }
 
-#[derive(Deserialize)]
-struct CodexAuthFile {
-    auth_mode: Option<String>,
-    #[serde(rename = "OPENAI_API_KEY")]
-    openai_api_key: Option<Zeroizing<String>>,
-    tokens: Option<CodexAuthTokens>,
-}
-
-#[derive(Deserialize)]
-struct CodexAuthTokens {
+struct IssuedTokens {
     id_token: Zeroizing<String>,
     access_token: Zeroizing<String>,
     refresh_token: Zeroizing<String>,
-    account_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -277,44 +265,9 @@ struct ImportedClaims {
     fedramp: bool,
 }
 
-/// Normalize the output of one isolated official Codex ChatGPT login.
-///
-/// Callers must not pass ambient `~/.codex/auth.json` here. The CLI owner of
-/// this operation creates a private, empty login home and supplies only the
-/// resulting bounded bytes.
-pub fn import_codex_auth_json(source: &[u8]) -> Result<CodexOAuthImport, CodexOAuthMaterialError> {
-    let imported_at_unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| CodexOAuthMaterialError::Invalid)?
-        .as_secs();
-    import_codex_auth_json_at(source, imported_at_unix)
-}
-
-fn import_codex_auth_json_at(
-    source: &[u8],
-    imported_at_unix: u64,
-) -> Result<CodexOAuthImport, CodexOAuthMaterialError> {
-    if source.is_empty() || source.len() > MAX_BUNDLE_BYTES || imported_at_unix == 0 {
-        return Err(if source.len() > MAX_BUNDLE_BYTES {
-            CodexOAuthMaterialError::TooLarge
-        } else {
-            CodexOAuthMaterialError::Invalid
-        });
-    }
-    let mut source = Zeroizing::new(source.to_vec());
-    let parsed = serde_json::from_slice::<CodexAuthFile>(&source)
-        .map_err(|_| CodexOAuthMaterialError::Invalid)?;
-    source.zeroize();
-    if parsed.auth_mode.as_deref() != Some("chatgpt") || parsed.openai_api_key.is_some() {
-        return Err(CodexOAuthMaterialError::Invalid);
-    }
-    let tokens = parsed.tokens.ok_or(CodexOAuthMaterialError::Invalid)?;
-    import_tokens_at(tokens, imported_at_unix)
-}
-
 /// Normalize the tokens of one completed Codex device login. The account is
 /// the ID token's `chatgpt_account_id` claim.
-pub(crate) fn import_codex_tokens(
+pub fn import_codex_tokens(
     id_token: Zeroizing<String>,
     access_token: Zeroizing<String>,
     refresh_token: Zeroizing<String>,
@@ -324,18 +277,17 @@ pub(crate) fn import_codex_tokens(
         .map_err(|_| CodexOAuthMaterialError::Invalid)?
         .as_secs();
     import_tokens_at(
-        CodexAuthTokens {
+        IssuedTokens {
             id_token,
             access_token,
             refresh_token,
-            account_id: None,
         },
         imported_at_unix,
     )
 }
 
 fn import_tokens_at(
-    tokens: CodexAuthTokens,
+    tokens: IssuedTokens,
     imported_at_unix: u64,
 ) -> Result<CodexOAuthImport, CodexOAuthMaterialError> {
     if imported_at_unix == 0
@@ -346,9 +298,8 @@ fn import_tokens_at(
         return Err(CodexOAuthMaterialError::Invalid);
     }
     let claims = id_token_claims(&tokens.id_token)?;
-    let account_id = tokens
+    let account_id = claims
         .account_id
-        .or(claims.account_id)
         .filter(|value| valid_account_id(value))
         .ok_or(CodexOAuthMaterialError::Invalid)?;
     let account_hint = claims
@@ -458,99 +409,48 @@ mod tests {
         format!("{header}.{payload}.synthetic-signature")
     }
 
-    fn auth_json() -> Zeroizing<Vec<u8>> {
-        Zeroizing::new(
-            serde_json::to_vec(&json!({
-                "auth_mode": "chatgpt",
-                "OPENAI_API_KEY": null,
-                "tokens": {
-                    "id_token": jwt(json!({
-                        "email": "developer@example.test",
-                        "https://api.openai.com/auth": {
-                            "chatgpt_account_id": "account-work",
-                            "chatgpt_account_is_fedramp": false
-                        }
-                    })),
-                    "access_token": "header.access.signature",
-                    "refresh_token": "synthetic-refresh-token",
-                    "account_id": "account-work"
-                },
-                "last_refresh": "2026-09-02T12:00:00Z"
-            }))
-            .unwrap(),
-        )
+    fn issued(id_claims: serde_json::Value, access_token: &str) -> IssuedTokens {
+        IssuedTokens {
+            id_token: Zeroizing::new(jwt(id_claims)),
+            access_token: Zeroizing::new(access_token.to_owned()),
+            refresh_token: Zeroizing::new("synthetic-refresh-token".to_owned()),
+        }
+    }
+
+    fn work_claims() -> serde_json::Value {
+        json!({
+            "email": "developer@example.test",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "account-work",
+                "chatgpt_account_is_fedramp": false
+            }
+        })
+    }
+
+    fn import_at(access_token: &str, imported_at: u64) -> CodexOAuthImport {
+        import_tokens_at(issued(work_claims(), access_token), imported_at).unwrap()
     }
 
     #[test]
-    fn normalizes_supported_chatgpt_auth_without_exposing_material_metadata() {
-        let source = auth_json();
-        let imported = import_codex_auth_json(&source).unwrap();
+    fn normalizes_a_device_login_without_exposing_material_metadata() {
+        let imported = import_at("header.access.signature", 1_800_000_000);
         assert_eq!(imported.account_hint(), Some("developer@example.test"));
         let (bundle, hint) = imported.into_parts();
         assert_eq!(hint.as_deref(), Some("developer@example.test"));
         let parsed = CodexOAuthCredential::parse(bundle.as_bytes()).unwrap();
         assert_eq!(parsed.access_token(), "header.access.signature");
-        assert!(
-            !bundle
-                .as_bytes()
-                .windows(13)
-                .any(|part| part == b"OPENAI_API_KEY")
-        );
+        assert_eq!(parsed.account_id(), "account-work");
     }
 
     #[test]
-    fn rejects_api_keys_non_chatgpt_modes_and_mismatched_accounts() {
-        for source in [
-            json!({
-                "auth_mode": "api_key",
-                "OPENAI_API_KEY": "synthetic-key",
-                "tokens": null
-            }),
-            json!({
-                "auth_mode": "chatgpt",
-                "OPENAI_API_KEY": null,
-                "tokens": {
-                    "id_token": jwt(json!({
-                        "https://api.openai.com/auth": {
-                            "chatgpt_account_id": "account-one"
-                        }
-                    })),
-                    "access_token": "header.access.signature",
-                    "refresh_token": "synthetic-refresh-token",
-                    "account_id": "account-two"
-                }
-            }),
+    fn rejects_logins_without_a_forwardable_chatgpt_account() {
+        for claims in [
+            json!({"email": "developer@example.test"}),
+            json!({"https://api.openai.com/auth": {"chatgpt_account_id": "account work"}}),
+            json!({"https://api.openai.com/auth": {"chatgpt_account_id": "account-é"}}),
         ] {
-            let bytes = Zeroizing::new(serde_json::to_vec(&source).unwrap());
             assert!(matches!(
-                import_codex_auth_json(&bytes),
-                Err(CodexOAuthMaterialError::Invalid)
-            ));
-        }
-    }
-
-    #[test]
-    fn rejects_account_ids_that_cannot_be_forwarded_as_one_http_header() {
-        for account_id in ["account work", "account-é"] {
-            let source = Zeroizing::new(
-                serde_json::to_vec(&json!({
-                    "auth_mode": "chatgpt",
-                    "OPENAI_API_KEY": null,
-                    "tokens": {
-                        "id_token": jwt(json!({
-                            "https://api.openai.com/auth": {
-                                "chatgpt_account_id": account_id
-                            }
-                        })),
-                        "access_token": "header.access.signature",
-                        "refresh_token": "synthetic-refresh-token",
-                        "account_id": account_id
-                    }
-                }))
-                .unwrap(),
-            );
-            assert!(matches!(
-                import_codex_auth_json(&source),
+                import_tokens_at(issued(claims, "header.access.signature"), 1_800_000_000),
                 Err(CodexOAuthMaterialError::Invalid)
             ));
         }
@@ -558,9 +458,7 @@ mod tests {
 
     #[test]
     fn canonical_parser_rejects_unknown_or_mutated_policy_fields() {
-        let source = auth_json();
-        let imported = import_codex_auth_json(&source).unwrap();
-        let (bundle, _) = imported.into_parts();
+        let (bundle, _) = import_at("header.access.signature", 1_800_000_000).into_parts();
         let mut value = serde_json::from_slice::<serde_json::Value>(bundle.as_bytes()).unwrap();
         value["destination"] = json!("https://evil.example");
         let bytes = Zeroizing::new(serde_json::to_vec(&value).unwrap());
@@ -586,31 +484,12 @@ mod tests {
     fn refresh_window_prefers_access_token_expiry_and_has_a_bounded_fallback() {
         let imported_at = 1_800_000_000;
         let access_token = jwt(json!({ "exp": imported_at + 600 }));
-        let source = Zeroizing::new(
-            serde_json::to_vec(&json!({
-                "auth_mode": "chatgpt",
-                "OPENAI_API_KEY": null,
-                "tokens": {
-                    "id_token": jwt(json!({
-                        "https://api.openai.com/auth": {
-                            "chatgpt_account_id": "account-work"
-                        }
-                    })),
-                    "access_token": access_token,
-                    "refresh_token": "synthetic-refresh-token",
-                    "account_id": "account-work"
-                }
-            }))
-            .unwrap(),
-        );
-        let imported = import_codex_auth_json_at(&source, imported_at).unwrap();
-        let (bundle, _) = imported.into_parts();
+        let (bundle, _) = import_at(&access_token, imported_at).into_parts();
         let credential = CodexOAuthCredential::parse(bundle.as_bytes()).unwrap();
         assert!(!credential.should_refresh(imported_at + 299));
         assert!(credential.should_refresh(imported_at + 300));
 
-        let imported = import_codex_auth_json_at(&auth_json(), imported_at).unwrap();
-        let (bundle, _) = imported.into_parts();
+        let (bundle, _) = import_at("header.access.signature", imported_at).into_parts();
         let credential = CodexOAuthCredential::parse(bundle.as_bytes()).unwrap();
         assert!(!credential.should_refresh(imported_at + FALLBACK_REFRESH_INTERVAL_SECONDS - 1));
         assert!(credential.should_refresh(imported_at + FALLBACK_REFRESH_INTERVAL_SECONDS));
@@ -619,26 +498,7 @@ mod tests {
     #[test]
     fn login_validity_minimum_is_capped_at_half_the_token_lifetime() {
         let credential = |access: serde_json::Value, refreshed_at: u64| {
-            let source = Zeroizing::new(
-                serde_json::to_vec(&json!({
-                    "auth_mode": "chatgpt",
-                    "OPENAI_API_KEY": null,
-                    "tokens": {
-                        "id_token": jwt(json!({
-                            "https://api.openai.com/auth": {
-                                "chatgpt_account_id": "account-work"
-                            }
-                        })),
-                        "access_token": jwt(access),
-                        "refresh_token": "synthetic-refresh-token",
-                        "account_id": "account-work"
-                    }
-                }))
-                .unwrap(),
-            );
-            let (bundle, _) = import_codex_auth_json_at(&source, refreshed_at)
-                .unwrap()
-                .into_parts();
+            let (bundle, _) = import_at(&jwt(access), refreshed_at).into_parts();
             CodexOAuthCredential::parse(bundle.as_bytes()).unwrap()
         };
         let issued = 1_800_000_000;
@@ -678,8 +538,7 @@ mod tests {
 
     #[test]
     fn refreshed_bundle_preserves_missing_fields_and_rejects_account_changes() {
-        let imported = import_codex_auth_json_at(&auth_json(), 1_800_000_000).unwrap();
-        let (bundle, _) = imported.into_parts();
+        let (bundle, _) = import_at("header.access.signature", 1_800_000_000).into_parts();
         let credential = CodexOAuthCredential::parse(bundle.as_bytes()).unwrap();
         let refreshed = credential
             .refreshed(

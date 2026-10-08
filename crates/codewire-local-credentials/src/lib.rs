@@ -41,7 +41,7 @@ pub use platform::{
     PlatformCredentialOutput,
 };
 pub use repository::{
-    LocalCredentialRepositoryLeaseClient, LocalRepositoryGitProcessSpawner,
+    GitHubTokenResolver, LocalCredentialRepositoryLeaseClient, LocalRepositoryGitProcessSpawner,
     LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner, LocalRepositorySpawnError,
     LocalRepositoryTransport, MAX_GIT_BUNDLE_BYTES, REPOSITORY_SSH_RUNTIME_PREFIX,
     RepositoryCredentialLease, RepositoryExecutorError, RepositoryLeaseChannelError,

@@ -279,7 +279,17 @@ async fn github_device_login_honors_slow_down_and_runs_the_dashboard_identity_ch
             StatusCode::OK,
             json!({"access_token": GITHUB_USER_TOKEN, "token_type": "bearer", "scope": ""}),
         );
-    github_identity(&provider, json!([{"id": 41, "app_slug": "codewire"}]));
+    github_identity(
+        &provider,
+        json!([
+            {"id": 41, "app_slug": "codewire", "account": {"login": "octo-user"},
+             "repository_selection": "all"},
+            {"id": 43, "app_slug": "codewire", "account": {"login": "octo-org"},
+             "repository_selection": "selected"},
+            {"id": 44, "app_slug": "another-app", "account": {"login": "elsewhere"},
+             "repository_selection": "all"},
+        ]),
+    );
     let login = github(&provider);
     let pending = login.start().await.unwrap();
     assert_eq!(
@@ -289,6 +299,20 @@ async fn github_device_login_honors_slow_down_and_runs_the_dashboard_identity_ch
     assert_eq!(pending.challenge().user_code(), "WDJB-MJHT");
     let mut import = login.complete(pending).await.unwrap();
     assert_eq!(import.account_hint(), "octo-user");
+    // Only this App's installations, sorted by account.
+    assert_eq!(
+        import.reach(),
+        [
+            crate::GitHubAppInstallationReach {
+                account: "octo-org".into(),
+                all_repositories: false,
+            },
+            crate::GitHubAppInstallationReach {
+                account: "octo-user".into(),
+                all_repositories: true,
+            },
+        ]
+    );
     let (material, account) = import.take_import().unwrap();
     assert_eq!(material.as_slice(), GITHUB_USER_TOKEN.as_bytes());
     assert_eq!(account.as_deref(), Some("octo-user"));
@@ -438,4 +462,16 @@ async fn github_device_login_maps_provider_outcomes_and_bounds_the_flow_by_expir
             DeviceLoginError::InvalidResponse
         );
     }
+}
+
+#[test]
+fn the_built_in_codewire_github_app_identity_is_valid() {
+    use super::github::{CODEWIRE_GITHUB_APP_CLIENT_ID, CODEWIRE_GITHUB_APP_SLUG};
+    assert!(
+        GitHubDeviceLoginConfig::new(
+            CODEWIRE_GITHUB_APP_CLIENT_ID.to_owned(),
+            CODEWIRE_GITHUB_APP_SLUG.to_owned()
+        )
+        .is_ok()
+    );
 }

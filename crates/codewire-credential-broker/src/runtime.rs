@@ -408,17 +408,17 @@ where
         permit: Self::StartedRefresh,
         material: CanonicalCodexOAuthBundle,
     ) -> Result<(), BrokerRefreshError> {
-        let mut bytes = material.into_bytes();
-        let value = codewire_protected_store::ProtectedValue::new(std::mem::take(&mut *bytes))
-            .map_err(|_| BrokerRefreshError::InvalidRequest)?;
-        let mut client = self.clone();
-        codewire_local_credentials::LocalCredentialBrokerLeaseClient::commit_credential_refresh(
-            &mut client,
-            permit,
-            value,
-        )
-        .await
-        .map_err(map_local_refresh_error)
+        commit_local_refresh(self, permit, material.into_bytes()).await
+    }
+
+    /// A rotated App bundle publishes through the same local journal as Codex:
+    /// the next material generation, then the authority's promotion.
+    async fn commit_github_app_refresh(
+        &self,
+        permit: Self::StartedRefresh,
+        material: GitHubAppUserOAuthBundle,
+    ) -> Result<(), BrokerRefreshError> {
+        commit_local_refresh(self, permit, material.into_bytes()).await
     }
 
     async fn abort_credential_refresh(
@@ -454,6 +454,27 @@ where
         .await
         .map_err(map_local_refresh_error)
     }
+}
+
+#[cfg(feature = "local")]
+async fn commit_local_refresh<S>(
+    client: &codewire_local_credentials::LocalCredentialBrokerLeaseClient<S>,
+    permit: codewire_local_credentials::StartedBrokerCredentialRefresh,
+    mut bytes: Zeroizing<Vec<u8>>,
+) -> Result<(), BrokerRefreshError>
+where
+    S: codewire_protected_store::ProtectedStore + Clone + 'static,
+{
+    let value = codewire_protected_store::ProtectedValue::new(std::mem::take(&mut *bytes))
+        .map_err(|_| BrokerRefreshError::InvalidRequest)?;
+    let mut client = client.clone();
+    codewire_local_credentials::LocalCredentialBrokerLeaseClient::commit_credential_refresh(
+        &mut client,
+        permit,
+        value,
+    )
+    .await
+    .map_err(map_local_refresh_error)
 }
 
 #[cfg(feature = "local")]
@@ -584,6 +605,9 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
         request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
         let (method, target, headers, body) = request.into_parts();
+        if let Some(answer) = Self::device_login(&method, &target, &body)? {
+            return Ok(answer);
+        }
         if target.host_str() == Some("api.anthropic.com") {
             return Self::anthropic(method, target, headers, body);
         }
@@ -825,6 +849,87 @@ impl SyntheticOpenAiSmokeTransport {
         )
         .map_err(|_| denied)?;
         Ok(())
+    }
+
+    /// The product smoke's Codex and GitHub device logins, approved at the
+    /// first poll. Their tokens carry this boot's canaries, which the smoke
+    /// scans for outside the protected store.
+    fn device_login(
+        method: &Method,
+        target: &url::Url,
+        body: &[u8],
+    ) -> Result<Option<BrokerUpstreamResponse>, BrokerUpstreamError> {
+        // Linux smokes scan for this boot's id. Synthetic macOS journeys have
+        // no such file, so their canary suffix is fixed.
+        let boot = || {
+            if cfg!(target_os = "linux") {
+                std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                    .ok()
+                    .map(|id| id.trim().replace('-', ""))
+                    .filter(|id| id.len() == 32)
+                    .ok_or(BrokerUpstreamError::Protocol)
+            } else {
+                Ok("0123456789abcdef0123456789abcdef".to_owned())
+            }
+        };
+        let grant = |name: &str| {
+            url::form_urlencoded::parse(body)
+                .any(|(key, value)| key == "grant_type" && value == name)
+        };
+        let value = match (method.as_str(), target.as_str()) {
+            ("POST", "https://auth.openai.com/api/accounts/deviceauth/usercode") => {
+                serde_json::json!({"device_auth_id": "synthetic-smoke",
+                    "user_code": "SYNTH-ETIC", "interval": "1"})
+            }
+            ("POST", "https://auth.openai.com/api/accounts/deviceauth/token") => {
+                serde_json::json!({"authorization_code": "synthetic-smoke",
+                    "code_challenge": "synthetic-smoke", "code_verifier": "synthetic-smoke"})
+            }
+            ("POST", "https://auth.openai.com/oauth/token") if grant("authorization_code") => {
+                use base64::Engine as _;
+                let encode = |value: serde_json::Value| {
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .encode(value.to_string().as_bytes())
+                };
+                let boot = boot()?;
+                serde_json::json!({
+                    "id_token": format!("{}.{}.synthetic-signature",
+                        encode(serde_json::json!({"alg": "none"})),
+                        encode(serde_json::json!({"email": "native-smoke@example.test",
+                            "https://api.openai.com/auth": {
+                                "chatgpt_account_id": SYNTHETIC_CODEX_ACCOUNT_ID,
+                                "chatgpt_account_is_fedramp": false}}))),
+                    "access_token": format!("cwlocalbroker{boot}"),
+                    "refresh_token": format!("cwlocalrefresh{boot}"),
+                })
+            }
+            ("POST", "https://github.com/login/device/code") => {
+                serde_json::json!({"device_code": "synthetic-smoke", "user_code": "SYNTH-ETIC",
+                    "expires_in": 900, "interval": 1})
+            }
+            ("POST", "https://github.com/login/oauth/access_token")
+                if grant("urn:ietf:params:oauth:grant-type:device_code") =>
+            {
+                serde_json::json!({"access_token": format!("ghu_cwlocalgithub{}", boot()?),
+                    "token_type": "bearer"})
+            }
+            ("GET", "https://api.github.com/user") => {
+                serde_json::json!({"id": 1, "login": "synthetic-smoke"})
+            }
+            ("GET", "https://api.github.com/user/installations?per_page=100&page=1") => {
+                serde_json::json!({"installations": [{"id": 1,
+                    "app_slug": crate::provider_oauth::github::CODEWIRE_GITHUB_APP_SLUG}]})
+            }
+            _ => return Ok(None),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+        let body = Bytes::from(value.to_string());
+        Ok(Some(BrokerUpstreamResponse::new(
+            StatusCode::OK,
+            headers,
+            Box::pin(stream::iter([Ok(body)])),
+        )))
     }
 
     fn canary(value: &str, prefix: &str) -> bool {
@@ -1185,11 +1290,11 @@ where
         })
     }
 
-    /// Install the App owner only through private credential-service process
-    /// composition. The broker exposes no request field or guest route that
-    /// can choose this authority or observe its client secret.
-    #[cfg(any(test, feature = "platform"))]
-    pub(crate) fn with_github_app_authorization_owner(
+    /// Install the App owner only through private process composition: the
+    /// credential service, or a local broker's public-client owner. The broker
+    /// exposes no request field or guest route that can choose this authority
+    /// or observe a client secret.
+    pub fn with_github_app_authorization_owner(
         mut self,
         owner: Arc<GitHubAppAuthorizationOwner>,
     ) -> Self {
@@ -3265,27 +3370,20 @@ mod tests {
     }
 
     fn oauth_material(access_token: &str) -> CanonicalCodexOAuthBundle {
-        let source = serde_json::to_vec(&json!({
-            "auth_mode": "chatgpt",
-            "OPENAI_API_KEY": null,
-            "tokens": {
-                "id_token": jwt(json!({
-                    "email": "developer@example.test",
-                    "https://api.openai.com/auth": {
-                        "chatgpt_account_id": "account-work",
-                        "chatgpt_account_is_fedramp": false
-                    }
-                })),
-                "access_token": access_token,
-                "refresh_token": "synthetic-old-refresh-token",
-                "account_id": "account-work"
-            }
-        }))
-        .expect("Codex auth JSON");
-        crate::import_codex_auth_json(&source)
-            .expect("Codex OAuth import")
-            .into_parts()
-            .0
+        crate::import_codex_tokens(
+            Zeroizing::new(jwt(json!({
+                "email": "developer@example.test",
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "account-work",
+                    "chatgpt_account_is_fedramp": false
+                }
+            }))),
+            Zeroizing::new(access_token.to_owned()),
+            Zeroizing::new("synthetic-old-refresh-token".to_owned()),
+        )
+        .expect("Codex OAuth import")
+        .into_parts()
+        .0
     }
 
     fn oauth_broker(

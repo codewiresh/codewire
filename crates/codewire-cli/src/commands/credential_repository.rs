@@ -25,6 +25,19 @@ use super::{LocalGitCredentialHelperArgs, LocalGitRepositoryExecutorArgs};
 
 const GIT: &str = "/usr/bin/git";
 
+/// A connected GitHub login is stored as the Codewire App's login bundle (or,
+/// from older connections, a raw token); Git needs only its access token.
+fn github_access_token(
+    material: &[u8],
+) -> Result<zeroize::Zeroizing<String>, codewire_local_credentials::RepositoryExecutorError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| codewire_local_credentials::RepositoryExecutorError::InvalidCredential)?
+        .as_secs();
+    codewire_credential_broker::github_access_token(material, now)
+        .map_err(|_| codewire_local_credentials::RepositoryExecutorError::InvalidCredential)
+}
+
 mod ssh;
 pub(crate) use ssh::run_git_ssh_helper;
 
@@ -114,6 +127,7 @@ pub(crate) async fn run_local_git_repository_executor(
                 Path::new(GIT),
                 &executable,
                 &git_spawner,
+                &github_access_token,
             )
             .await
         }
