@@ -173,9 +173,11 @@ impl std::fmt::Debug for LocalCredentialClient {
 
 impl LocalCredentialClient {
     /// Admit a currently running authority without starting one when its
-    /// endpoint is absent. An incompatible or unconnectable existing endpoint
-    /// fails closed without shutdown, replacement or request replay.
-    /// The legacy method signature is retained; its spawner is never invoked.
+    /// endpoint is absent. A socket nothing listens on, left by an authority
+    /// that died, counts as absent and is left in place. Any other
+    /// unconnectable or incompatible endpoint fails closed without shutdown,
+    /// replacement or request replay. The legacy method signature is
+    /// retained; its spawner is never invoked.
     pub async fn admit_existing_or_replace_with<F>(
         config: &AuthorityRuntimeConfig,
         _spawn: F,
@@ -194,12 +196,19 @@ impl LocalCredentialClient {
         if !socket_exists(config)? {
             return Ok(None);
         }
-        Self::connect(config).await.map(Some)
+        match Self::connect(config).await {
+            Err(AuthorityRuntimeError::Connect) if endpoint_refuses(config) => Ok(None),
+            result => result.map(Some),
+        }
     }
 
-    /// Reuse a compatible authority, or start an owned child only when the
-    /// endpoint is absent. A present endpoint's admission error never grants
-    /// permission to shut it down, unlink it or launch a replacement.
+    /// Reuse a compatible authority, or start an owned child when the endpoint
+    /// is absent or nothing listens on it. A dead authority's socket is then
+    /// replaced only by the new authority after it takes the singleton lock,
+    /// which every live authority holds for its whole life, so a live one
+    /// keeps its socket. The client itself never unlinks anything, and any
+    /// other admission error never grants permission to shut an endpoint
+    /// down, unlink it or launch a replacement.
     pub async fn connect_or_start_with<F, C>(
         config: &AuthorityRuntimeConfig,
         spawn: F,
@@ -210,7 +219,10 @@ impl LocalCredentialClient {
     {
         config.prepare_root()?;
         if socket_exists(config)? {
-            return Self::connect(config).await;
+            match Self::connect(config).await {
+                Err(AuthorityRuntimeError::Connect) if endpoint_refuses(config) => {}
+                result => return result,
+            }
         }
 
         let mut child = spawn(config)?;
@@ -1331,6 +1343,15 @@ fn terminate_unadmitted_child(child: &mut impl SpawnedAuthority) {
         let _ = child.kill();
         let _ = child.wait();
     }
+}
+
+/// Nothing listens on the existing endpoint: the socket of an authority that
+/// is no longer running.
+fn endpoint_refuses(config: &AuthorityRuntimeConfig) -> bool {
+    matches!(
+        std::os::unix::net::UnixStream::connect(config.socket()),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused
+    )
 }
 
 fn socket_exists(config: &AuthorityRuntimeConfig) -> Result<bool, AuthorityRuntimeError> {

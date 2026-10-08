@@ -1407,8 +1407,26 @@ async fn existing_authority_admission_skips_an_absent_socket_without_spawning() 
     assert!(!config.root.exists());
 }
 
+/// An authority running as a task in this test process.
+/// Like a dropped `Child`, dropping it leaves the authority running.
+struct InProcessAuthority;
+
+impl SpawnedAuthority for InProcessAuthority {
+    fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        Ok(None)
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+        Ok(std::os::unix::process::ExitStatusExt::from_raw(0))
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn existing_authority_admission_fails_closed_for_a_dead_socket_without_spawning() {
+async fn a_dead_authority_socket_is_absent_for_admission_and_replaced_on_start() {
     let temp = tempfile::tempdir().unwrap();
     let config = runtime_config(&temp);
     config.prepare_root().unwrap();
@@ -1416,26 +1434,46 @@ async fn existing_authority_admission_fails_closed_for_a_dead_socket_without_spa
     fs::set_permissions(config.socket(), fs::Permissions::from_mode(0o600)).unwrap();
     drop(listener);
     let before = fs::symlink_metadata(config.socket()).unwrap();
-    let error = LocalCredentialClient::admit_existing_or_replace_with(&config, |_| {
-        panic!("an unadmitted authority socket must not spawn")
+
+    // Admission alone treats a socket nothing listens on as absent and leaves it.
+    assert!(
+        LocalCredentialClient::admit_existing_or_replace_with(&config, |_| {
+            panic!("admission must not spawn")
+        })
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let after = fs::symlink_metadata(config.socket()).unwrap();
+    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+
+    // A start launches a new authority, which takes the lock and only then
+    // replaces the dead socket.
+    let (shutdown, shutdown_rx) = oneshot::channel::<()>();
+    let mut server = None;
+    let client = LocalCredentialClient::connect_or_start_with(&config, |config| {
+        let config = config.clone();
+        server = Some(tokio::spawn(async move {
+            serve_until(
+                config,
+                TestProtectedStore::default(),
+                catalog(),
+                async move {
+                    let _ = shutdown_rx.await;
+                },
+            )
+            .await
+        }));
+        Ok(InProcessAuthority)
     })
     .await
-    .unwrap_err();
-    assert!(matches!(error, AuthorityRuntimeError::Connect));
-    let error = LocalCredentialClient::connect_or_start_with(
-        &config,
-        |_| -> Result<Child, AuthorityRuntimeError> {
-            panic!("a present dead socket must not grant replacement permission")
-        },
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(error, AuthorityRuntimeError::Connect));
-    let after = fs::symlink_metadata(config.socket()).unwrap();
-    assert_eq!(
-        (before.dev(), before.ino(), before.mode()),
-        (after.dev(), after.ino(), after.mode())
-    );
+    .unwrap();
+    // The new authority answers where nothing listened before. (A freed
+    // inode number can be reused, so the socket's inode proves nothing.)
+    assert_eq!(client.info().protocol_version, AUTHORITY_PROTOCOL_VERSION);
+    client.shutdown().await.unwrap();
+    server.unwrap().await.unwrap().unwrap();
+    drop(shutdown);
 }
 
 #[tokio::test(flavor = "multi_thread")]
