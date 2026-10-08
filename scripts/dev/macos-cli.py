@@ -720,7 +720,11 @@ def main():
             response = ssh(args.host, ["python3", "-c", BOOTSTRAP, key, run_id],
                            stdin=stream, stdout=subprocess.PIPE, check=True)
         remote = response.stdout.decode().strip()
-        command = ["python3", remote + "/worker.py", "--worker", str(Path(remote).parents[1]), remote]
+        # A Mac set to idle-sleep otherwise sleeps through most of a long build,
+        # waking only briefly for network traffic; -i alone does not stop its
+        # maintenance sleep, -s does on AC power. Both assertions end with the run.
+        command = ["/usr/bin/caffeinate", "-i", "-s", "python3", remote + "/worker.py", "--worker",
+                   str(Path(remote).parents[1]), remote]
         process = subprocess.Popen(["ssh", *SSH_OPTIONS, "--", args.host, shlex.join(command)],
                                    stdin=subprocess.PIPE)
         try:
