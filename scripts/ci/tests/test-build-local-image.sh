@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly HELPER="$ROOT/scripts/ci/images/build-local-image.sh"
 readonly CW_FIXTURE="$ROOT/scripts/ci/tests/cw_image_fixtures.py"
+# Hosted CI writes Python bytecode; prove the capsule stays exact without
+# relying on a caller that disables it.
+unset PYTHONDONTWRITEBYTECODE
 
 mkdir -p "$ROOT/.tmp"
 work="$(mktemp -d "$ROOT/.tmp/build-local-image-test.XXXXXX")"

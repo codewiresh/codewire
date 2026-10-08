@@ -517,10 +517,12 @@ def runtime_transports(executable, identity, work, tool=RUNTIME_IMAGE_TOOL):
     artifact = work / "artifact.json"
     write_new(artifact, json.dumps(descriptor).encode(), 0o600)
     image_dir, pack_dir = work / "oci", work / "pack"
+    # The tool imports this module from its own tree; -B keeps bytecode out of
+    # a strict source capsule.
     receipt = json.loads(subprocess.check_output(
-        [sys.executable, str(tool), "build", "--artifact", str(artifact), "--output", str(image_dir)], text=True))
+        [sys.executable, "-B", str(tool), "build", "--artifact", str(artifact), "--output", str(image_dir)], text=True))
     lock = json.loads(subprocess.check_output(
-        [sys.executable, str(tool), "pack", "--image", str(image_dir / "cw.oci.tar"),
+        [sys.executable, "-B", str(tool), "pack", "--image", str(image_dir / "cw.oci.tar"),
          "--index-sha256", receipt["index_sha256"], "--output", str(pack_dir)], text=True))
     return image_dir, pack_dir, receipt, lock
 
@@ -544,7 +546,7 @@ def check_transports(executable_bytes, identity, oci_archive, image_receipt, pac
         image = Path(scratch) / "cw.oci.tar"
         write_new(image, oci_archive, 0o600)
         out = Path(scratch) / "out"
-        subprocess.run([sys.executable, str(tool), "unpack", "--image", str(image),
+        subprocess.run([sys.executable, "-B", str(tool), "unpack", "--image", str(image),
                         "--index-sha256", image_receipt["index_sha256"], "--output", str(out)],
                        check=True, stdout=subprocess.DEVNULL)
         require((out / "cw").read_bytes() == executable_bytes, "OCI layer bytes differ from the raw executable")
