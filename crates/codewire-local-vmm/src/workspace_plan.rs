@@ -448,6 +448,11 @@ async fn prepare_authenticated_repository(
 }
 
 fn credential_repository_rejection(status: tonic::Status) -> WorkspacePlanError {
+    // A repository that outlasts the preparation deadline is a timeout, not
+    // a rejection; say so instead of naming a status code.
+    if status.code() == tonic::Code::DeadlineExceeded {
+        return WorkspacePlanError::GitTimeout;
+    }
     WorkspacePlanError::CredentialRepositoryRejected(status.code())
 }
 
@@ -751,7 +756,6 @@ mod tests {
             Code::Cancelled,
             Code::Unknown,
             Code::InvalidArgument,
-            Code::DeadlineExceeded,
             Code::NotFound,
             Code::AlreadyExists,
             Code::PermissionDenied,
@@ -787,6 +791,13 @@ mod tests {
             }
             assert!(std::error::Error::source(&error).is_none());
         }
+        let timeout = credential_repository_rejection(Status::with_details_and_metadata(
+            Code::DeadlineExceeded,
+            MESSAGE,
+            bytes::Bytes::from_static(DETAILS.as_bytes()),
+            MetadataMap::new(),
+        ));
+        assert_eq!(timeout.to_string(), "remote Git preparation timed out");
     }
 
     #[test]

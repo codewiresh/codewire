@@ -35,6 +35,16 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 const EXECUTION_TIMEOUT: Duration = Duration::from_secs(310);
 const CHANNEL_CLOSE_GRACE: Duration = Duration::from_secs(1);
 const PROCESS_GROUP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a caller waits for a prepared repository: the authority's own
+/// bounds on starting, running and cleaning up the executor, plus slack for
+/// the reply.
+pub(crate) const REPOSITORY_PREPARATION_TIMEOUT: Duration = Duration::from_secs(
+    START_TIMEOUT.as_secs()
+        + EXECUTION_TIMEOUT.as_secs()
+        + CHANNEL_CLOSE_GRACE.as_secs()
+        + PROCESS_GROUP_CLEANUP_TIMEOUT.as_secs()
+        + 10,
+);
 
 pub(super) struct RepositoryProcessManager<S: ProtectedStore> {
     authority: Arc<LocalCredentialAuthority<S>>,

@@ -287,6 +287,9 @@ struct TestRepositorySpawner {
     /// When set, the stand-in executor treats its login as due and refreshes
     /// it to this material through the lease channel before Git would run.
     refresh_to: Option<&'static [u8]>,
+    /// How long the stand-in executor works after its lease, holding the
+    /// lease channel open as a real fetch does.
+    work_seconds: u32,
 }
 
 impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
@@ -307,6 +310,7 @@ impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
         let leased_material = self.leased_material.clone();
         let refresh_to = self.refresh_to;
         let marker = config.staging_directory.join("lease-complete");
+        let work = std::time::Duration::from_secs(u64::from(self.work_seconds));
         let task = tokio::spawn(async move {
             let Ok(mut client) =
                 LocalCredentialRepositoryLeaseClient::connect(stream, request_id).await
@@ -349,6 +353,7 @@ impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
                 };
                 let _ = leased_material.send(lease.material().to_vec());
             }
+            tokio::time::sleep(work).await;
             let _ = fs::write(marker, b"ready");
         });
         self.tasks
@@ -1081,6 +1086,17 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
 
 #[tokio::test(flavor = "multi_thread")]
 async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
+    prepare_github_repository_taking(0).await;
+}
+
+/// A fetch that outlasts the 30 s control deadline still completes: the
+/// preparation call has its own, longer deadline (#2499).
+#[tokio::test(flavor = "multi_thread")]
+async fn repository_preparation_outlasts_the_control_request_deadline() {
+    prepare_github_repository_taking(32).await;
+}
+
+async fn prepare_github_repository_taking(work_seconds: u32) {
     let temp = tempfile::tempdir().unwrap();
     let config = runtime_config(&temp);
     let store = TestProtectedStore::default();
@@ -1090,6 +1106,7 @@ async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
         leased_material: material_tx,
         tasks: Arc::new(Mutex::new(Vec::new())),
         refresh_to: None,
+        work_seconds,
     });
     let (shutdown, task) =
         start_server_with_repository_spawner(config.clone(), store, spawner).await;
@@ -1158,6 +1175,7 @@ async fn a_checkout_refreshes_a_due_github_login_through_the_authority_journal()
         leased_material: material_tx,
         tasks: Arc::new(Mutex::new(Vec::new())),
         refresh_to: Some(b"rotated-github-app-bundle"),
+        work_seconds: 0,
     });
     let (shutdown, task) =
         start_server_with_repository_spawner(config.clone(), store, spawner).await;

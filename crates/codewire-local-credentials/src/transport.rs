@@ -170,11 +170,20 @@ pub(crate) fn bind_owner_only_for_uid(
 pub(crate) async fn connect_owner_only(
     config: &AuthorityRuntimeConfig,
 ) -> Result<Channel, AuthorityRuntimeError> {
+    connect_owner_only_with_timeout(config, REQUEST_TIMEOUT).await
+}
+
+/// A channel whose calls may each run for `timeout`. Control calls use the
+/// 30 s default; repository preparation runs git first and needs longer.
+pub(crate) async fn connect_owner_only_with_timeout(
+    config: &AuthorityRuntimeConfig,
+    timeout: Duration,
+) -> Result<Channel, AuthorityRuntimeError> {
     config.validate()?;
     let connector = owner_only_connector(config)?;
     Endpoint::from_static("http://codewire-local-credential-authority")
         .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
+        .timeout(timeout)
         .connect_with_connector(connector)
         .await
         .map_err(|_| AuthorityRuntimeError::Connect)

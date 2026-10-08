@@ -22,10 +22,11 @@ use crate::broker_channel::MAX_BROKER_LEASE_AUDIT_LIST_LIMIT;
 use crate::control::v1::local_credential_authority_service_client::LocalCredentialAuthorityServiceClient;
 use crate::control::v1::{self, CredentialAuthenticationKind};
 use crate::repository::{MAX_GIT_BUNDLE_BYTES, valid_git_selector};
+use crate::service::REPOSITORY_PREPARATION_TIMEOUT;
 use crate::service::auth_kind_to_proto;
 use crate::transport::{
     AUTHORITY_PROTOCOL_VERSION, AuthorityRuntimeConfig, AuthorityRuntimeError, connect_owner_only,
-    store_error_from_exit_status,
+    connect_owner_only_with_timeout, store_error_from_exit_status,
 };
 use crate::{
     AccessProfileRecord, AccessProfileRevisionRecord, AuthorityProtectedStore,
@@ -91,6 +92,8 @@ pub struct LocalCredentialClient {
 pub struct LocalCredentialControlClient {
     inner: LocalCredentialAuthorityServiceClient<tonic::transport::Channel>,
     info: AuthorityInfo,
+    /// Repository preparation reconnects with its own, longer deadline.
+    config: AuthorityRuntimeConfig,
 }
 
 /// Credential-free output stream from one authority-owned repository
@@ -849,6 +852,7 @@ impl LocalCredentialControlClient {
         Ok(Self {
             inner: client.inner,
             info: client.info,
+            config: config.clone(),
         })
     }
 
@@ -952,8 +956,28 @@ impl LocalCredentialControlClient {
         if let Some(platform) = &platform {
             platform.validate(&authorization)?;
         }
-        let mut stream = self
-            .inner
+        // The authority answers only after git has fetched and bundled the
+        // repository, which can take minutes; the 30 s control deadline
+        // would cut it off. Use one connection with the preparation
+        // deadline, checked against the same authority protocol.
+        let channel = connect_owner_only_with_timeout(&self.config, REPOSITORY_PREPARATION_TIMEOUT)
+            .await
+            .map_err(|_| Status::unavailable("local credential authority is unavailable"))?;
+        let mut repositories = LocalCredentialAuthorityServiceClient::new(channel)
+            .max_decoding_message_size(MAX_RPC_MESSAGE_BYTES)
+            .max_encoding_message_size(MAX_RPC_MESSAGE_BYTES);
+        let protocol_version = repositories
+            .get_authority_info(v1::GetAuthorityInfoRequest {})
+            .await?
+            .into_inner()
+            .protocol_version;
+        if protocol_version != self.info.protocol_version {
+            return Err(Status::failed_precondition(
+                "local credential authority changed during repository preparation",
+            ));
+        }
+        let started = std::time::Instant::now();
+        let mut stream = match repositories
             .prepare_git_repository(v1::PrepareGitRepositoryRequest {
                 request_id: request_id.to_string(),
                 profile_id: profile_id.to_string(),
@@ -964,8 +988,18 @@ impl LocalCredentialControlClient {
                 known_hosts,
                 platform: platform.map(crate::RepositoryPlatformAccess::into_proto),
             })
-            .await?
-            .into_inner();
+            .await
+        {
+            Ok(response) => response.into_inner(),
+            // The channel deadline ends the call without a status of its own.
+            Err(_) if started.elapsed() >= REPOSITORY_PREPARATION_TIMEOUT => {
+                return Err(Status::deadline_exceeded(format!(
+                    "repository preparation timed out after {} s",
+                    REPOSITORY_PREPARATION_TIMEOUT.as_secs()
+                )));
+            }
+            Err(status) => return Err(status),
+        };
         let first = stream
             .message()
             .await?

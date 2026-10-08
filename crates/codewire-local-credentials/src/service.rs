@@ -65,6 +65,7 @@ const MAX_SSH_ENROLLMENT_WORKERS: u32 = 8;
 const SSH_ENROLLMENT_DEADLINE: Duration = Duration::from_secs(30);
 
 mod repository;
+pub(crate) use repository::REPOSITORY_PREPARATION_TIMEOUT;
 use repository::{PreparedRepository, RepositoryProcessManager, cleanup_repository_ssh_runtimes};
 
 struct AuthorityRpc<S: ProtectedStore> {
