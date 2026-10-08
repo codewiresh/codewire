@@ -513,7 +513,8 @@ pub(super) async fn message(
         anyhow::ensure!(args.turn_id.is_none(), "--turn-id applies only to cw steer");
     }
     let id = request_id(args.request_id.as_deref())?;
-    save_location(&conversation.location(&id, conversation.session.launch_generation))?;
+    let location = conversation.location(&id, conversation.session.launch_generation);
+    save_location(&location)?;
     conversation
         .endpoint
         .mutate(
@@ -522,6 +523,19 @@ pub(super) async fn message(
             Some(args.output),
         )
         .await?;
+    if steer {
+        // The pipe settles the request; only the provider decides the steer.
+        let record = await_location(
+            &location,
+            &conversation.endpoint.client,
+            ACCEPT_TIMEOUT,
+            MessageRecord::decided,
+        )
+        .await?;
+        if let Some(error) = message_failure(&record) {
+            return Err(error);
+        }
+    }
     Ok(())
 }
 
@@ -659,6 +673,20 @@ async fn wait_location(
     timeout: Duration,
     output: OutputFormat,
 ) -> anyhow::Result<()> {
+    let record = await_location(&location, client, timeout, |r| r.state.is_terminal()).await?;
+    print_message_result(&record, output)?;
+    if let Some(error) = message_failure(&record) {
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn await_location(
+    location: &MessageLocation,
+    client: &codewire_client::CodewireClient,
+    timeout: Duration,
+    until: impl Fn(&MessageRecord) -> bool,
+) -> anyhow::Result<MessageRecord> {
     anyhow::ensure!(
         location.version == 1
             && location.launch_generation > 0
@@ -695,12 +723,8 @@ async fn wait_location(
                 && record.target_session_id == location.session_id,
             "managed message record changed its original identity"
         );
-        if record.state.is_terminal() {
-            print_message_result(&record, output)?;
-            if let Some(error) = message_failure(&record) {
-                return Err(error);
-            }
-            return Ok(());
+        if until(&record) {
+            return Ok(record);
         }
         anyhow::ensure!(
             Instant::now() < deadline,

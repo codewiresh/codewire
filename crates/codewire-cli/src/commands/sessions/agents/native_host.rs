@@ -673,7 +673,7 @@ async fn deliver(
         anyhow::bail!("guest queue returned a different message binding");
     }
     if record.state.rank() >= MessageState::Accepted.rank() {
-        return Ok(record);
+        return await_acceptance(guest, driver_id, id).await;
     }
     let result = guest
         .target
@@ -703,11 +703,14 @@ async fn await_acceptance(
     let deadline = Instant::now() + ACCEPT_TIMEOUT;
     loop {
         let record = guest.get_message(driver_id, id).await?;
-        if record.state.rank() >= MessageState::Accepted.rank() {
+        if record.decided() {
             return Ok(record);
         }
         if Instant::now() >= deadline {
-            anyhow::bail!("message {id} has not been accepted; no automatic replay");
+            anyhow::bail!(
+                "message {id} is {} and undecided; no automatic replay",
+                record.state.name()
+            );
         }
         tokio::time::sleep(QUERY_INTERVAL).await;
     }

@@ -219,10 +219,13 @@ async fn await_acceptance(
                 record["member_launch_generation"].as_u64() == Some(session.launch_generation),
                 "member native acceptance belongs to another incarnation"
             );
-            if matches!(
-                record["state"].as_str(),
-                Some("accepted" | "running" | "completed" | "error" | "interrupted" | "unknown")
-            ) {
+            // Only the provider decides a steer or interrupt.
+            let decided = if matches!(record["action"].as_str(), Some("steer" | "interrupt")) {
+                record["native_acknowledged"].as_bool() == Some(true)
+            } else {
+                matches!(record["state"].as_str(), Some("accepted" | "running"))
+            };
+            if decided || message_terminal(&record) {
                 return Ok::<_, anyhow::Error>(record);
             }
             tokio::time::sleep(Duration::from_millis(200)).await;

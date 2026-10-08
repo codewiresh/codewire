@@ -456,6 +456,16 @@ impl MessageRecord {
         self.transition(state)
     }
 
+    /// The driver decides a queued message when it admits it. Only the
+    /// provider decides a steer or interrupt, so those wait for its answer.
+    fn decided(&self) -> bool {
+        self.state.is_terminal()
+            || match self.action {
+                MessageAction::Steer | MessageAction::Interrupt => self.native_acknowledged,
+                _ => self.state.rank() >= MessageState::Accepted.rank(),
+            }
+    }
+
     fn validate(&self, dir: &Path, id: &str) -> anyhow::Result<()> {
         if self.version != 1
             || self.id != id
@@ -1579,7 +1589,7 @@ async fn deliver_cli_message(
                 record.error.as_deref().unwrap_or("delivery failed")
             );
         }
-        return Ok(record);
+        return await_acceptance(&managed.dir, &id).await;
     }
     update_message(&managed.dir, &id, |r| {
         r.transition(MessageState::PipeWritten);
@@ -1591,12 +1601,12 @@ async fn await_acceptance(dir: &Path, id: &str) -> anyhow::Result<MessageRecord>
     let deadline = Instant::now() + ACCEPT_TIMEOUT;
     loop {
         let record = load_message(dir, id)?;
-        if record.state.rank() >= MessageState::Accepted.rank() {
+        if record.decided() {
             return Ok(record);
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "message {id} is {} but the driver did not accept it within {}s; it is not replayed automatically. Inspect it with `cw inbox` or `cw wait --message {id}`",
+                "message {id} is {} and was not decided within {}s; it is not replayed automatically. Inspect it with `cw inbox` or `cw wait --message {id}`",
                 record.state.name(),
                 ACCEPT_TIMEOUT.as_secs()
             );
@@ -3185,6 +3195,17 @@ impl Driver {
                             "the targeted member turn ended; nothing was steered",
                         );
                     }
+                    // Refuse locally what the provider would refuse later.
+                    Some((_, Some(turn)))
+                        if r.expected_turn_id
+                            .as_ref()
+                            .is_some_and(|expected| expected != turn) =>
+                    {
+                        r.fail(
+                            MessageState::Error,
+                            "the targeted turn ended; nothing was steered",
+                        );
+                    }
                     Some((_, Some(turn))) => {
                         let expected = r.expected_turn_id.clone().unwrap_or_else(|| turn.clone());
                         r.transition(MessageState::Accepted);
@@ -4154,6 +4175,26 @@ mod tests {
         apply_delivery_failure(&mut unaccepted, false, "lost ACK");
         assert_eq!(unaccepted.state, MessageState::Unknown);
         assert!(!unaccepted.transition(MessageState::Accepted));
+    }
+
+    #[test]
+    fn provider_decides_steer_and_interrupt_but_the_driver_decides_a_message() {
+        let mut message =
+            MessageRecord::new("driver", "session", MessageAction::Message, "task".into());
+        assert!(!message.decided());
+        message.transition(MessageState::Accepted);
+        assert!(message.decided());
+        for action in [MessageAction::Steer, MessageAction::Interrupt] {
+            let mut control = MessageRecord::new("driver", "session", action, String::new());
+            control.transition(MessageState::Accepted);
+            control.transition(MessageState::Running);
+            assert!(!control.decided(), "driver admission alone decides nothing");
+            let mut rejected = control.clone();
+            rejected.fail(MessageState::Error, "Codex rejected the steer");
+            assert!(rejected.decided() && message_failure(&rejected).is_some());
+            control.native_acknowledged = true;
+            assert!(control.decided() && message_failure(&control).is_none());
+        }
     }
 
     #[test]
