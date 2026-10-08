@@ -442,7 +442,7 @@ async fn supervisor_selects_platform_broker_and_clients_without_local_profile_or
             fs::canonicalize(&core.config.platform_config_dir).unwrap()
         );
         assert_eq!(
-            core.managed_credential_clients_for_boot(&environment)
+            core.managed_credential_clients_for_boot(&environment, 1)
                 .await
                 .unwrap(),
             managed_clients(&environment).unwrap().unwrap()

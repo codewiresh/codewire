@@ -856,6 +856,28 @@ impl LocalCredentialControlClient {
         self.info.clone()
     }
 
+    /// The capability slots the authority grants this environment generation
+    /// now. Grants are material-free; GitHub appears only while the profile
+    /// includes it and the store holds an active connection.
+    pub async fn environment_grant_slots(
+        &mut self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+    ) -> Result<std::collections::BTreeSet<String>, Status> {
+        Ok(self
+            .inner
+            .evaluate_environment_grants(v1::EvaluateEnvironmentGrantsRequest {
+                environment_id: environment_id.to_string(),
+                environment_generation,
+            })
+            .await?
+            .into_inner()
+            .grants
+            .into_iter()
+            .map(|grant| grant.capability_slot)
+            .collect())
+    }
+
     /// Read material-free client-slot metadata from an exact immutable profile
     /// revision. This reuses the authority's existing metadata RPC and exposes
     /// no credential material or profile mutation to lifecycle callers.

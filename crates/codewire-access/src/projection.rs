@@ -71,9 +71,12 @@ impl ManagedCredentialClient {
                 "CLAUDE_CODE_OAUTH_TOKEN",
             ],
             Self::Ssh => &["SSH_AUTH_SOCK"],
-            // Checkout owns an exact command-scoped URL rewrite, never a
-            // provider token or an ambient/global Git configuration.
-            Self::GitHub => &[],
+            // Git's environment configuration routes github.com through the
+            // managed GitHub route; never a provider token or a written file.
+            // This replaces the former checkout-only rewrite, so git in the
+            // workspace keeps working after checkout. A declared variable of
+            // these names is refused, never merged or overwritten.
+            Self::GitHub => &["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"],
         }
     }
 }
@@ -298,7 +301,7 @@ impl ManagedCredentialClients {
             environment.insert("OPENAI_API_KEY".into(), "codewire-managed".into());
         }
         if self.contains(ManagedCredentialClient::Anthropic) {
-            environment.insert("ANTHROPIC_BASE_URL".into(), origin);
+            environment.insert("ANTHROPIC_BASE_URL".into(), origin.clone());
             if self.anthropic_subscription_token() {
                 // Claude Code's subscription mode: the placeholder makes it
                 // send its own OAuth form (bearer plus the OAuth beta) to
@@ -317,6 +320,19 @@ impl ManagedCredentialClients {
                 environment.insert("ANTHROPIC_API_KEY".into(), String::new());
                 environment.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new());
             }
+        }
+        if self.contains(ManagedCredentialClient::GitHub) {
+            // Git 2.31+ reads configuration from the environment: every
+            // https://github.com/ remote goes to the managed GitHub route,
+            // where the broker adds the owner's GitHub login outside the
+            // workspace, so fetch, pull and push work with no login step.
+            // Only this endpoint is projected: no token, helper or file.
+            environment.insert("GIT_CONFIG_COUNT".into(), "1".into());
+            environment.insert(
+                "GIT_CONFIG_KEY_0".into(),
+                format!("url.{origin}{MANAGED_GITHUB_GIT_PREFIX}.insteadOf"),
+            );
+            environment.insert("GIT_CONFIG_VALUE_0".into(), "https://github.com/".into());
         }
         if self.contains(ManagedCredentialClient::Ssh) {
             let socket = match placement {

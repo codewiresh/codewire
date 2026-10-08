@@ -759,6 +759,7 @@ impl SupervisorCore {
     async fn managed_credential_clients_for_boot(
         &mut self,
         environment: &EnvironmentRecord,
+        generation: u64,
     ) -> Result<codewire_access::ManagedCredentialClients, SupervisorError> {
         let project: codewire_project::ProjectSpec = serde_json::from_slice(
             environment
@@ -799,12 +800,26 @@ impl SupervisorCore {
         {
             return Err(SupervisorError::EnvironmentAccessUnavailable);
         }
+        // The store's one GitHub connection is never a profile entry: the
+        // authority grants it to profiles that include GitHub while it is
+        // active. Configure git for it exactly then, so a missing connection
+        // never routes GitHub remotes to a route that cannot serve them.
+        let github = authority
+            .environment_grant_slots(&expected.environment_id, generation)
+            .await
+            .map_err(credential_control_error)?
+            .contains("github");
         // Local profiles never hold a Claude subscription token: the local
         // authority refuses Anthropic OAuth, so slot names fix every form here.
         // TODO(native-claude-subscription-form): revisit with the platform
         // source path in sources::platform::managed_clients.
         let clients = codewire_access::ManagedCredentialClients::from_profile_slots(
-            revision.profile.entries.keys().map(|slot| slot.as_str()),
+            revision
+                .profile
+                .entries
+                .keys()
+                .map(|slot| slot.as_str())
+                .chain(github.then_some("github")),
         )
         .map_err(|_| SupervisorError::EnvironmentAccessUnavailable)?;
         clients
@@ -2867,7 +2882,7 @@ impl SupervisorCore {
         .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)??;
         let projection_environment = sources::projection_environment_for_boot(&environment)?;
         let managed_credential_clients = self
-            .managed_credential_clients_for_boot(&projection_environment)
+            .managed_credential_clients_for_boot(&projection_environment, generation)
             .await?;
         let broker_request =
             self.credential_broker_request_for_environment(&projection_environment, generation)?;
@@ -12028,7 +12043,7 @@ mod tests {
         let (_parent, mut core) = test_supervisor_core(project_environment());
         let empty = core.environment("dev").unwrap().clone();
         assert_eq!(
-            core.managed_credential_clients_for_boot(&empty)
+            core.managed_credential_clients_for_boot(&empty, 1)
                 .await
                 .unwrap(),
             Default::default()
@@ -12037,15 +12052,37 @@ mod tests {
         let binding = bind_test_environment_access(&mut core, &mut authority).await;
         let environment = core.environment("dev").unwrap().clone();
         assert_eq!(
-            core.managed_credential_clients_for_boot(&environment)
+            core.managed_credential_clients_for_boot(&environment, 1)
                 .await
                 .unwrap(),
             Default::default()
         );
+        // The store's GitHub connection is granted to the profile, never an
+        // entry of it; once it exists, boot configures git for it.
+        authority
+            .add_credential(
+                codewire_local_credentials::NewCredential {
+                    provider: codewire_access::ProviderId::parse("github").unwrap(),
+                    authentication_kind: codewire_access::CredentialAuthKind::OAuth,
+                    display_name: "github".to_owned(),
+                    account_hint: None,
+                    expires_at_unix: None,
+                },
+                codewire_protected_store::ProtectedValue::from_slice(b"synthetic-github-login")
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            core.managed_credential_clients_for_boot(&environment, 1)
+                .await
+                .unwrap(),
+            codewire_access::ManagedCredentialClients::from_profile_slots(["github"]).unwrap()
+        );
         let mut wrong = environment.clone();
         wrong.access_binding.as_mut().unwrap().profile_revision = binding.profile_revision + 1;
         assert!(matches!(
-            core.managed_credential_clients_for_boot(&wrong).await,
+            core.managed_credential_clients_for_boot(&wrong, 1).await,
             Err(SupervisorError::EnvironmentAccessUnavailable)
         ));
         let mut platform = environment.clone();
@@ -12054,7 +12091,7 @@ mod tests {
         spec.credentials.as_mut().unwrap().profile = format!("platform:id:{}", binding.profile_id);
         set_test_current_project(&mut platform, &spec);
         assert!(matches!(
-            core.managed_credential_clients_for_boot(&platform).await,
+            core.managed_credential_clients_for_boot(&platform, 1).await,
             Err(SupervisorError::EnvironmentAccessUnavailable)
         ));
         drop(authority);
