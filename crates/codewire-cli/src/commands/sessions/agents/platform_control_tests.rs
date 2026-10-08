@@ -270,6 +270,22 @@ fn platform_control_private_proxy_homes_never_copy_inherited_auth_or_routes() {
 }
 
 #[test]
+fn platform_control_directories_below_a_setgid_home_are_exactly_private() {
+    // A Pod fsGroup home is setgid; directories made below it inherit setgid.
+    let temp = tempfile::tempdir().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o2700)).unwrap();
+    let leaf = temp.path().join("state").join("agents");
+    make_directory(&leaf).unwrap();
+    for made in [temp.path().join("state"), leaf] {
+        assert_eq!(
+            fs::metadata(&made).unwrap().mode() & 0o7777,
+            0o700,
+            "{made:?}"
+        );
+    }
+}
+
+#[test]
 fn platform_control_claude_prefix_uses_the_pinned_cli_option_names() {
     // Claude 2.1.238 exits during startup on an unknown option such as
     // `--settings-sources`; these are the names it accepts.

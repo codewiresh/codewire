@@ -491,11 +491,7 @@ impl Store {
             }
         }
         let state = &pins.last().ok_or(Error::Storage)?.file;
-        match rustix::fs::mkdirat(state, DIRECTORY, Mode::from_raw_mode(0o700)) {
-            Ok(()) => rustix::fs::fsync(state).map_err(|_| Error::Storage)?,
-            Err(rustix::io::Errno::EXIST) => {}
-            Err(_) => return Err(Error::Storage),
-        }
+        make_private_directory(state, DIRECTORY)?;
         let fd = rustix::fs::openat(
             state,
             DIRECTORY,
@@ -853,11 +849,7 @@ impl Store {
         }
         let state_root = &self.pins[self.pins.len() - 2].file;
         let sessions = open_private_directory(state_root, "sessions")?;
-        match rustix::fs::mkdirat(self.directory(), LAUNCH_STAGES, Mode::from_raw_mode(0o700)) {
-            Ok(()) => rustix::fs::fsync(self.directory()).map_err(|_| Error::Storage)?,
-            Err(rustix::io::Errno::EXIST) => {}
-            Err(_) => return Err(Error::Storage),
-        }
+        make_private_directory(self.directory(), LAUNCH_STAGES)?;
         let stages = open_private_directory(self.directory(), LAUNCH_STAGES)?;
         let path = self
             .pins
@@ -866,8 +858,9 @@ impl Store {
             .path
             .join(LAUNCH_STAGES);
         check_stages(&stages, &path)?;
-        rustix::fs::mkdirat(&stages, &receipt.session_id, Mode::from_raw_mode(0o700))
-            .map_err(|_| Error::Storage)?;
+        if !make_private_directory(&stages, &receipt.session_id)? {
+            return Err(Error::Storage);
+        }
         let stage = open_private_directory(&stages, &receipt.session_id)?;
         let identity = directory_identity(&stage)?;
         #[cfg(test)]
@@ -1198,6 +1191,28 @@ fn directory_identity(file: &File) -> Result<(u64, u64), Error> {
         return Err(Error::Storage);
     }
     Ok((metadata.dev(), metadata.ino()))
+}
+
+/// Makes `name` below `parent`, exactly 0700. A directory made below a setgid
+/// volume root (a Pod fsGroup home) inherits setgid, which owner-private
+/// admission refuses. Returns whether this call made it.
+fn make_private_directory(parent: &File, name: &str) -> Result<bool, Error> {
+    match rustix::fs::mkdirat(parent, name, Mode::from_raw_mode(0o700)) {
+        Ok(()) => {}
+        Err(rustix::io::Errno::EXIST) => return Ok(false),
+        Err(_) => return Err(Error::Storage),
+    }
+    let made = rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| Error::Storage)?;
+    rustix::fs::fchmod(&made, Mode::from_raw_mode(0o700)).map_err(|_| Error::Storage)?;
+    directory_identity(&made.into())?;
+    rustix::fs::fsync(parent).map_err(|_| Error::Storage)?;
+    Ok(true)
 }
 
 fn open_private_directory(parent: &File, name: &str) -> Result<File, Error> {

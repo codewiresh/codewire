@@ -301,6 +301,23 @@ pub(super) fn parent_generation(
     );
     Ok(Some(expected))
 }
+/// A directory made below a setgid volume root (the Pod's fsGroup home)
+/// inherits setgid, which owner-private admission refuses. Set the directory
+/// this call just made exactly 0700 through its own nofollow descriptor.
+fn set_created_private(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let made = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let m = made.metadata()?;
+    ensure!(
+        m.is_dir() && m.uid() == euid() && m.mode() & 0o5777 == 0o700,
+        "created platform directory changed"
+    );
+    made.set_permissions(fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
 fn make_directory(path: &Path) -> anyhow::Result<DirectoryPin> {
     use std::os::unix::fs::DirBuilderExt;
     ensure!(
@@ -317,6 +334,7 @@ fn make_directory(path: &Path) -> anyhow::Result<DirectoryPin> {
         match fs::symlink_metadata(&current) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 fs::DirBuilder::new().mode(0o700).create(&current)?;
+                set_created_private(&current)?;
                 fs::File::open(current.parent().context("platform parent")?)?.sync_all()?;
             }
             Err(e) => return Err(e.into()),
@@ -407,6 +425,7 @@ fn prepare(environment: &DriverEnvironment, request: Envelope) -> anyhow::Result
     );
     let stage = agents.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
     fs::DirBuilder::new().mode(0o700).create(&stage)?;
+    set_created_private(&stage)?;
     make_directory(&stage.join("messages"))?;
     write_private_json(&stage.join("config.json"), &config)?;
     write_private_json(&stage.join(ORIGIN), &request.origin)?;
