@@ -203,8 +203,10 @@ class PackTests(unittest.TestCase):
         self.assert_release(self.snapshot())
         self.assertEqual(stat.S_IMODE(self.release.stat().st_mode), 0o700)
         package = str(runtime.PACKAGE)
-        self.assertEqual(self.tools.calls[0], ["swift", "build", "-c", "release", "--package-path", package])
-        self.assertEqual(self.tools.calls[1][-1], "--show-bin-path")
+        # The revision is resolved before anything is built.
+        self.assertEqual(self.tools.calls[0], ["git", "-C", str(REPOSITORY), "rev-parse", "HEAD"])
+        self.assertEqual(self.tools.calls[1], ["swift", "build", "-c", "release", "--package-path", package])
+        self.assertEqual(self.tools.calls[2][-1], "--show-bin-path")
         sign = [call for call in self.tools.calls if call[:2] == ["/usr/bin/codesign", "--force"]][0]
         self.assertEqual(sign[:7], ["/usr/bin/codesign", "--force", "--sign", "-",
                                     "--identifier", "codewire-vz-runner", "--entitlements"])
@@ -218,6 +220,17 @@ class PackTests(unittest.TestCase):
 
     def live_guest_root(self):
         self.initramfs.write_bytes(guest_root(init=elf() + b"init" + runtime.LIVE_RUNTIME_CAPABILITY_MARKER))
+
+    def test_a_tree_without_git_names_its_revision(self):
+        status, _stdout, stderr = self.pack("--source-revision", "d" * 40)
+        self.assertEqual(status, 0, stderr)
+        document = json.loads((self.release / runtime.LOCAL_RUNTIME_DOCUMENT).read_text())
+        self.assertEqual(document["source_revision"], "d" * 40)
+        self.assertFalse(any(call[:1] == ["git"] for call in self.tools.calls))
+        status, _stdout, stderr = self.main("--pack", str(self.scratch / "other"), "--source-revision", "main")
+        self.assertEqual(status, 1)
+        self.assertIn("must be a 40-character commit", stderr)
+        self.assertFalse((self.scratch / "other").exists())
 
     def test_installs_through_cw_setup_local(self):
         status, _stdout, stderr = self.main("--replace", "--cw", "/opt/dev/cw")

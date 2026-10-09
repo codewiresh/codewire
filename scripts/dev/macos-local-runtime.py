@@ -363,15 +363,20 @@ def put_blob(release: Path, source: Path) -> dict:
     return {"sha256": sha256, "size": size}
 
 
-def source_revision() -> str:
-    """The checkout's commit: cw installs only a runtime from its own source."""
-    revision = run(["git", "-C", str(REPOSITORY), "rev-parse", "HEAD"], capture=True).decode().strip()
+def source_revision(given: str = "") -> str:
+    """The checkout's commit: cw installs only a runtime from its own source.
+
+    A tree without Git metadata (a synced copy) names its commit explicitly;
+    cw still refuses a runtime whose commit differs from its own.
+    """
+    revision = given or run(["git", "-C", str(REPOSITORY), "rev-parse", "HEAD"],
+                            capture=True).decode().strip()
     if len(revision) != 40 or not all(c in "0123456789abcdef" for c in revision):
-        raise InstallError("git rev-parse HEAD returned %r" % revision)
+        raise InstallError("the source revision must be a 40-character commit, not %r" % revision)
     return revision
 
 
-def pack(kernel: Path, initramfs: Path, release: Path, cw_runtime=None) -> Path:
+def pack(kernel: Path, initramfs: Path, release: Path, cw_runtime=None, revision: str = "") -> Path:
     """Write the release directory for this Mac's runtime into `release`."""
     require_host()
     require_e2fsprogs()
@@ -382,8 +387,8 @@ def pack(kernel: Path, initramfs: Path, release: Path, cw_runtime=None) -> Path:
         check_live_publisher(initramfs)
     if release.exists():
         raise InstallError("%s already exists; pack into a new directory" % release)
+    revision = source_revision(revision)
     helper = build_helper()
-    revision = source_revision()
     private_directory(release)
     signed = release / ("." + PRODUCT)
     stage_copy(helper, signed)
@@ -412,9 +417,10 @@ def pack(kernel: Path, initramfs: Path, release: Path, cw_runtime=None) -> Path:
     return release
 
 
-def install(kernel: Path, initramfs: Path, replace: bool, cw: str, cw_runtime=None) -> int:
+def install(kernel: Path, initramfs: Path, replace: bool, cw: str, cw_runtime=None,
+            revision: str = "") -> int:
     with tempfile.TemporaryDirectory(prefix="cw-local-runtime-") as scratch:
-        release = pack(kernel, initramfs, Path(scratch) / "release", cw_runtime)
+        release = pack(kernel, initramfs, Path(scratch) / "release", cw_runtime, revision)
         run([cw, "setup", "--local", "--from", str(release)] + (["--replace"] if replace else []))
     return 0
 
@@ -428,6 +434,8 @@ def main(argv=None) -> int:
                         help="absolute directory holding a sealed aarch64 cw-runtime.lock.json and runtime.pack")
     parser.add_argument("--pack", default="", help="only write the release directory to this new path")
     parser.add_argument("--cw", default="cw", help="the cw that installs the runtime (default: cw on PATH)")
+    parser.add_argument("--source-revision", default="",
+                        help="the source commit, for a tree without Git metadata (default: git rev-parse HEAD)")
     args = parser.parse_args(argv)
     try:
         kernel = input_file(args.kernel, "KERNEL")
@@ -441,9 +449,9 @@ def main(argv=None) -> int:
             release = Path(args.pack)
             if not release.is_absolute():
                 raise InstallError("--pack must be an absolute path: %s" % args.pack)
-            pack(kernel, initramfs, release, cw_runtime)
+            pack(kernel, initramfs, release, cw_runtime, args.source_revision)
             return 0
-        return install(kernel, initramfs, args.replace, args.cw, cw_runtime)
+        return install(kernel, initramfs, args.replace, args.cw, cw_runtime, args.source_revision)
     except (InstallError, OSError) as error:
         print("macos-local-runtime: ERROR: %s" % error, file=sys.stderr)
         return 1
