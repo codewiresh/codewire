@@ -152,6 +152,12 @@ source = "content/cli/overview.md"
 output = "cli/overview/index.html"
 
 [[routes]]
+canonical = "/docs/cli/orchestration"
+redirect_from = "/docs/cli/orchestration/"
+source = "content/cli/orchestration.md"
+output = "cli/orchestration/index.html"
+
+[[routes]]
 canonical = "/docs/cli/platform"
 redirect_from = "/docs/cli/platform/"
 source = "content/cli/platform.md"
