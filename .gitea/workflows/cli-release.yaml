@@ -102,11 +102,71 @@ jobs:
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
           printf 'tag_object_sha=%s\n' "$remote_object_sha" >> "$GITHUB_OUTPUT"
 
+  build-darwin:
+    # The macOS cw links Apple frameworks (Security, SystemConfiguration), so
+    # it is built natively on the protected mac-runner runner: one ephemeral
+    # registration per job, as the unprivileged ci account (infra
+    # docs/runbooks/macos-arm64-runner.md). Compilation only: no OIDC,
+    # signing, mirror or R2 capability exists in this job.
+    name: Build the macOS cw natively
+    needs: [release-selection]
+    runs-on: macos-arm64
+    outputs:
+      darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
+          path: .release-source
+          fetch-depth: 0
+
+      - name: Confirm selected release checkout
+        env:
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [ "$(git -C .release-source rev-parse HEAD)" = "$SOURCE_SHA" ]
+
+      - name: Install protoc (pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$HOME/protoc.zip" "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-osx-aarch_64.zip"
+          echo "193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2  $HOME/protoc.zip" | shasum -a 256 -c -
+          mkdir -p "$HOME/.proto-tools/protoc"
+          unzip -o -q "$HOME/protoc.zip" -d "$HOME/.proto-tools/protoc"
+          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/.proto-tools/protoc/bin/protoc" --version
+
+      - name: Build the macOS pair
+        id: build
+        working-directory: .release-source
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          CW_RELEASE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+        run: |
+          set -euo pipefail
+          CW_RELEASE_TARGETS='aarch64-apple-darwin x86_64-apple-darwin' \
+            ../scripts/ci/release/package-cw-release.sh "$RELEASE_TAG"
+          (cd dist/cw-release && shasum -a 256 -c SHA256SUMS)
+          printf 'darwin_sums_sha256=%s\n' \
+            "$(shasum -a 256 dist/cw-release/SHA256SUMS | cut -c1-64)" >> "$GITHUB_OUTPUT"
+
+      - name: Hand the macOS pair to packaging
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: cw-release-darwin-${{ github.run_id }}
+          path: .release-source/dist/cw-release/
+          if-no-files-found: error
+          retention-days: 1
+
   build-release:
     # Compilation and packaging only: no OIDC, signing, mirror or R2
     # capability exists in this job.
     name: Build four-target cw release delivery
-    needs: [release-selection]
+    needs: [release-selection, build-darwin]
     runs-on: ci-protected
     outputs:
       delivery_sha256: ${{ steps.prepare.outputs.delivery_sha256 }}
@@ -152,6 +212,22 @@ jobs:
 
           cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
 
+      - name: Receive the macOS pair
+        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        with:
+          name: cw-release-darwin-${{ github.run_id }}
+          path: .release-source/dist-darwin
+
+      - name: Verify the received macOS pair is the built pair
+        working-directory: .release-source
+        env:
+          DARWIN_SUMS_SHA256: ${{ needs.build-darwin.outputs.darwin_sums_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$DARWIN_SUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$DARWIN_SUMS_SHA256" ]
+          (cd dist-darwin && sha256sum --check SHA256SUMS)
+
       - name: Package unsigned release delivery
         id: prepare
         working-directory: .release-source
@@ -161,9 +237,11 @@ jobs:
           CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
         run: |
           set -euo pipefail
-          ../scripts/ci/release/check-cw-darwin-sdkless.sh
+          # The macOS pair comes from build-darwin; preparation admits each
+          # by its build record exactly as a local build.
           CW_RELEASE_BUILD_CMD='cargo zigbuild' \
-            CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin' \
+            CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu' \
+            CW_RELEASE_IMPORT_DIR=dist-darwin \
             ../scripts/ci/release/package-cw-release.sh "$RELEASE_TAG"
           python3 ../scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned
           (cd dist/cw-release && sha256sum --check --ignore-missing SHA256SUMS)

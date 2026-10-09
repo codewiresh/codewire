@@ -272,26 +272,25 @@ jobs:
           echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
           cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
 
-      - name: Reject Darwin SDK framework dependencies
+      # The macOS cw links Apple frameworks, so only the protected mac-runner
+      # runner links it (cli-release.yaml and cw-release-dry-run.yaml, which
+      # also verify the four-target delivery on every main change). Pull
+      # requests compile it for both Mac targets without the SDK.
+      - name: Compile the macOS cw for both Mac targets
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
-        run: scripts/ci/release/check-cw-darwin-sdkless.sh
+        run: scripts/ci/verify/check-darwin-cross.sh --cli
 
-      - name: Package four-target dry-run assets
+      - name: Package Linux dry-run assets
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}
         run: |
           set -euo pipefail
           CW_RELEASE_PROFILE=ci \
             CW_RELEASE_BUILD_CMD='cargo zigbuild' \
-            CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin' \
+            CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu' \
             scripts/ci/release/package-cw-release.sh v0.0.0-ci
           "dist/cw-release/cw-v0.0.0-ci-x86_64-unknown-linux-musl" --version | grep -F 'v0.0.0-ci'
-          [ "$(wc -l < dist/cw-release/SHA256SUMS)" -eq 4 ]
+          [ "$(wc -l < dist/cw-release/SHA256SUMS)" -eq 2 ]
           (cd dist/cw-release && sha256sum --check --ignore-missing SHA256SUMS)
-          # One identity per final executable; the OCI image and runtime pack
-          # carry exactly the raw Linux x86-64 musl bytes.
-          [ "$(find dist/cw-release/delivery/identities -name '*.json' | wc -l)" -eq 4 ]
-          python3 scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned |
-            grep -Fx 'cw-release: verified targets=4 version=v0.0.0-ci runtime_equal=true signed=false'
 
       - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.cw_package_selected == 'true' }}

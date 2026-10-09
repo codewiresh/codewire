@@ -16,6 +16,9 @@ source = Path(sys.argv[1])
 check = source / 'scripts/ci/verify/check-darwin-cross.sh'
 expected_check = ['check', '--locked', '-p', 'codewire-local-vmm',
                   '-p', 'codewire-vmm-guest-probe', '--target', 'aarch64-apple-darwin']
+# The macOS cw links Apple frameworks, so Linux only compile-checks it.
+expected_cli = ['check', '--locked', '-p', 'codewire-cli-bin', '--bin', 'cw',
+                '--target', 'aarch64-apple-darwin', '--target', 'x86_64-apple-darwin']
 with tempfile.TemporaryDirectory(prefix='codewire-darwin-cross-') as temporary:
     root = Path(temporary)
     binary = root / 'bin'
@@ -88,7 +91,18 @@ else:
                            dict(tool='cargo', args=expected_check)], records
     records, _ = run(dict(DARWIN_FIXTURE_CHECK_STATUS='46'), status=46)
     assert records[-1] == dict(tool='cargo', args=expected_check)
+    records, result = run(arguments=['--cli'])
+    assert records == [dict(tool='uname', args=['-s']),
+                       dict(tool='zig', args=['version']),
+                       dict(tool='cargo-zigbuild', args=['--version']),
+                       dict(tool='cargo-zigbuild', args=expected_cli),
+                       dict(tool='cargo', args=expected_cli)], records
+    assert 'macOS cw for aarch64 and x86_64' in result.stdout, result.stdout
+    records, _ = run(dict(DARWIN_FIXTURE_CHECK_STATUS='46'), status=46, arguments=['--cli'])
+    assert records[-1] == dict(tool='cargo', args=expected_cli)
     run(arguments=['--features', 'synthetic'], status=1)
+    run(arguments=['--cli', '--features', 'synthetic'], status=1)
+    run(dict(DARWIN_FIXTURE_HOST='Darwin'), status=1, arguments=['--cli'])
     run(dict(DARWIN_FIXTURE_HOST='Darwin'), status=1)
     for override in ('ZIG_VERSION', 'CARGO_ZIGBUILD_VERSION', 'DARWIN_FIXTURE_ZIG',
                      'DARWIN_FIXTURE_ZIGBUILD'):
@@ -100,15 +114,18 @@ else:
     # Both cc-rs spellings and empty overrides must fail before Cargo starts.
     overrides = ['CC', 'CXX', 'AR', 'RANLIB', 'LD', 'TARGET_CC', 'TARGET_CXX',
                  'TARGET_AR', 'TARGET_RANLIB', 'TARGET_LD',
-                 'CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER', 'SDKROOT', 'ZIG_COMMAND',
+                 'CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER',
+                 'CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER', 'SDKROOT', 'ZIG_COMMAND',
                  'CARGO_ZIGBUILD_ZIG_PATH', 'CARGO_ZIGBUILD_PYTHON_PATH',
                  'CARGO_ZIGBUILD_ZIG_VERSION', 'CARGO_ZIGBUILD_RUSTC_VERSION', 'CARGO']
     overrides += ['CARGO_BIN_EXE_cargo-zigbuild', 'LIBSQLITE3_SYS_USE_PKG_CONFIG',
                   'LIBSQLITE3_FLAGS', 'CFLAGS', 'CXXFLAGS', 'TARGET_CFLAGS', 'TARGET_CXXFLAGS']
     overrides += [f'{tool}_{target}' for tool in ('CFLAGS', 'CXXFLAGS')
-                  for target in ('aarch64-apple-darwin', 'aarch64_apple_darwin')]
+                  for target in ('aarch64-apple-darwin', 'aarch64_apple_darwin',
+                                 'x86_64-apple-darwin', 'x86_64_apple_darwin')]
     overrides += [f'{tool}_{target}' for tool in ('CC', 'CXX', 'AR', 'RANLIB', 'LD')
-                  for target in ('aarch64-apple-darwin', 'aarch64_apple_darwin')]
+                  for target in ('aarch64-apple-darwin', 'aarch64_apple_darwin',
+                                 'x86_64-apple-darwin', 'x86_64_apple_darwin')]
     for override in overrides:
         for value in ('', '/synthetic/override'):
             _, result = run({override: value}, status=1)
@@ -131,7 +148,8 @@ else:
     environment['PATH'] = saved_path
 
     # These fixture pins must move atomically with the existing workflow pins.
-    for workflow in ('.gitea/workflows/ci.yaml', '.gitea/workflows/cli-release.yaml'):
+    for workflow in ('.gitea/workflows/ci.yaml', '.gitea/workflows/cli-release.yaml',
+                     '.gitea/workflows/cw-release-dry-run.yaml'):
         content = (source / workflow).read_text()
         assert content.count('  ZIG_VERSION: 0.15.2\n') == 1, workflow
         assert content.count('  CARGO_ZIGBUILD_VERSION: 0.23.0\n') == 1, workflow

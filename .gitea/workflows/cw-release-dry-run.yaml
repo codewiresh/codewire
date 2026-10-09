@@ -1,0 +1,133 @@
+name: cw four-target dry run
+
+# The macOS cw links Apple frameworks, so pull requests only compile it
+# (ci.yaml) and only the protected mac-runner runner links it. Every change to
+# the cw on main is therefore built and assembled here exactly as a release
+# is (cli-release.yaml): the macOS pair natively on the Mac, the Linux pair
+# beside the unsigned four-target delivery, which is verified. Nothing is
+# signed or published, and no job holds a credential.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+      - 'crates/**'
+      - 'libs/**'
+      - 'proto/**'
+      - 'images/cw-runtime/**'
+      - 'scripts/ci/release/**'
+      - 'scripts/dev/cw-runtime-image.py'
+      - '.gitea/workflows/cw-release-dry-run.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: 0.15.2
+  ZIG_X86_64_LINUX_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+  CARGO_ZIGBUILD_VERSION: 0.23.0
+  DRY_RUN_VERSION: v0.0.0
+
+jobs:
+  build-darwin:
+    name: Build the macOS cw natively
+    runs-on: macos-arm64
+    outputs:
+      darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Install protoc (pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$HOME/protoc.zip" "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-osx-aarch_64.zip"
+          echo "193289af0470c6a1aada357d4fba0bbf8d78bfaac8b5e42ca30af2ef75583de2  $HOME/protoc.zip" | shasum -a 256 -c -
+          mkdir -p "$HOME/.proto-tools/protoc"
+          unzip -o -q "$HOME/protoc.zip" -d "$HOME/.proto-tools/protoc"
+          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/.proto-tools/protoc/bin/protoc" --version
+
+      - name: Build the macOS pair
+        id: build
+        run: |
+          set -euo pipefail
+          CW_RELEASE_TARGETS='aarch64-apple-darwin x86_64-apple-darwin' \
+            scripts/ci/release/package-cw-release.sh "$DRY_RUN_VERSION"
+          (cd dist/cw-release && shasum -a 256 -c SHA256SUMS)
+          printf 'darwin_sums_sha256=%s\n' \
+            "$(shasum -a 256 dist/cw-release/SHA256SUMS | cut -c1-64)" >> "$GITHUB_OUTPUT"
+
+      - name: Hand the macOS pair to the assembly
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: cw-dry-run-darwin-${{ github.run_id }}
+          path: dist/cw-release/
+          if-no-files-found: error
+          retention-days: 1
+
+  assemble:
+    name: Assemble and verify the unsigned four-target delivery
+    needs: [build-darwin]
+    runs-on: ci-protected
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Verify sealed Rust toolchain and release targets
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Install protoc (pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip"
+          echo "6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip" | sha256sum -c -
+          mkdir -p "$HOME/.proto-tools/protoc"
+          unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
+          echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/.proto-tools/protoc/bin/protoc" --version
+
+      - name: Set up cross-build tools
+        run: |
+          set -euo pipefail
+          zig_url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSLo zig.tar.xz "$zig_url"
+          echo "${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+          cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
+
+      - name: Receive the macOS pair
+        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        with:
+          name: cw-dry-run-darwin-${{ github.run_id }}
+          path: dist-darwin
+
+      - name: Verify the received macOS pair is the built pair
+        env:
+          DARWIN_SUMS_SHA256: ${{ needs.build-darwin.outputs.darwin_sums_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$DARWIN_SUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$DARWIN_SUMS_SHA256" ]
+          (cd dist-darwin && sha256sum --check SHA256SUMS)
+
+      - name: Package and verify the unsigned delivery
+        run: |
+          set -euo pipefail
+          CW_RELEASE_BUILD_CMD='cargo zigbuild' \
+            CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu' \
+            CW_RELEASE_IMPORT_DIR=dist-darwin \
+            scripts/ci/release/package-cw-release.sh "$DRY_RUN_VERSION"
+          [ "$(wc -l < dist/cw-release/SHA256SUMS)" -eq 4 ]
+          (cd dist/cw-release && sha256sum --check SHA256SUMS)
+          [ "$(find dist/cw-release/delivery/identities -name '*.json' | wc -l)" -eq 4 ]
+          python3 scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned |
+            grep -Fx "cw-release: verified targets=4 version=$DRY_RUN_VERSION runtime_equal=true signed=false"

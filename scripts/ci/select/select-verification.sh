@@ -1631,6 +1631,7 @@ if [ "$event_selected" = false ]; then
     case "$path" in
       images/*|\
       .gitea/workflows/cli-release.yaml|\
+      .gitea/workflows/cw-release-dry-run.yaml|\
       .gitea/workflows/mirror-github.yaml|\
       .gitea/workflows/support-images.yaml|\
       keys/production-release.asc|\
@@ -1652,7 +1653,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/image-bundle.py|scripts/ci/release/mirror-canonical-release-tag.sh|\
       scripts/ci/release/mirror-git-tags.sh|\
       scripts/ci/*promot*.sh|scripts/ci/*promot*.py|\
-      scripts/ci/release/check-cw-darwin-sdkless.sh|\
+      scripts/ci/verify/check-darwin-cross.sh|\
       scripts/ci/release/mint-github-app-token.sh|\
       scripts/ci/release/mirror-github.sh|\
       scripts/ci/release/package-cw-release.sh|scripts/ci/release/publish-cw-release.sh|\
