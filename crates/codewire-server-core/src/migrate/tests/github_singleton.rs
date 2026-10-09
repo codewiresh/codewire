@@ -154,7 +154,7 @@ async fn github_singleton_staged_upgrade_drops_pinned_entries_and_enforces_one_c
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let after = applied_migrations(&pool).await?;
         anyhow::ensure!(
-            after.len() == MIGRATOR.iter().count()
+            after.len() == MIGRATOR.iter().filter(|m| m.migration_type.is_up_migration()).count()
                 && after[..28] == before
                 && after[28].0 == VERSION
         );
@@ -271,7 +271,13 @@ async fn github_singleton_fails_closed_on_ambiguous_connections_then_retries() -
             .connect(&db.url)
             .await?;
         anyhow::ensure!(singleton_index_present(&pool).await?);
-        anyhow::ensure!(applied_migrations(&pool).await?.len() == MIGRATOR.iter().count());
+        anyhow::ensure!(
+            applied_migrations(&pool).await?.len()
+                == MIGRATOR
+                    .iter()
+                    .filter(|m| m.migration_type.is_up_migration())
+                    .count()
+        );
         pool.close().await;
         Ok(())
     }

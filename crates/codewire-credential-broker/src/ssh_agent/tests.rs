@@ -8,6 +8,7 @@ use base64::engine::general_purpose::STANDARD;
 
 use super::protocol::{MAX_DATA_BYTES, SIGN_REQUEST, put_string};
 use super::*;
+use crate::process_test_support::isolated_process_fixture;
 
 mod one_shot;
 
@@ -440,128 +441,146 @@ impl Synthetic {
 
 #[tokio::test]
 async fn openssh_selected_ed25519_and_rsa_sign_without_ambient_agent_or_key_reads() {
-    let synthetic = Synthetic::new();
-    let owner = synthetic.owner();
-    for (kind, passphrase) in [("ed25519", ""), ("rsa", "SYNTHETIC_RSA_PASSPHRASE")] {
-        let agent = owner
-            .start(
-                synthetic.key(kind, passphrase).await,
-                Some(Zeroizing::new(passphrase.as_bytes().to_vec())),
-                Instant::now() + Duration::from_secs(30),
-            )
-            .unwrap()
-            .ready()
-            .await
-            .unwrap();
-        let identity = agent.public_identity();
-        let response = agent.request(&[11]).await.unwrap();
-        assert_eq!(
-            SshPublicIdentity::from_agent_response(&response).unwrap(),
-            *identity
-        );
-        assert!(!String::from_utf8_lossy(&response).contains("PRIVATE_COMMENT_CANARY"));
-        let flags: &[u32] = if kind == "rsa" { &[2, 4] } else { &[0] };
-        for flags in flags {
-            let request = sign_request(identity, *flags, b"synthetic selected-key signing data");
-            let response = agent.request(&request).await.unwrap();
-            identity
-                .validate_signature(
-                    &response,
-                    identity.admit_request(&request).unwrap().unwrap(),
-                )
-                .unwrap();
-        }
-        for operation in [17, 18, 19, 20, 21, 22, 23, 25, 26, 27] {
-            assert_eq!(
-                agent.request(&[operation]).await,
-                Err(SshAgentError::Denied)
-            );
-        }
-        assert!(agent.request(&[11]).await.is_ok());
-    }
-    owner.shutdown().await.unwrap();
-    owner.shutdown().await.unwrap();
-    synthetic.assert_clean();
+    isolated_process_fixture(
+        "ssh_agent::tests::openssh_selected_ed25519_and_rsa_sign_without_ambient_agent_or_key_reads",
+        async {
+            let synthetic = Synthetic::new();
+            let owner = synthetic.owner();
+            for (kind, passphrase) in [("ed25519", ""), ("rsa", "SYNTHETIC_RSA_PASSPHRASE")] {
+                let agent = owner
+                    .start(
+                        synthetic.key(kind, passphrase).await,
+                        Some(Zeroizing::new(passphrase.as_bytes().to_vec())),
+                        Instant::now() + Duration::from_secs(30),
+                    )
+                    .unwrap()
+                    .ready()
+                    .await
+                    .unwrap();
+                let identity = agent.public_identity();
+                let response = agent.request(&[11]).await.unwrap();
+                assert_eq!(
+                    SshPublicIdentity::from_agent_response(&response).unwrap(),
+                    *identity
+                );
+                assert!(!String::from_utf8_lossy(&response).contains("PRIVATE_COMMENT_CANARY"));
+                let flags: &[u32] = if kind == "rsa" { &[2, 4] } else { &[0] };
+                for flags in flags {
+                    let request = sign_request(identity, *flags, b"synthetic selected-key signing data");
+                    let response = agent.request(&request).await.unwrap();
+                    identity
+                        .validate_signature(
+                            &response,
+                            identity.admit_request(&request).unwrap().unwrap(),
+                        )
+                        .unwrap();
+                }
+                for operation in [17, 18, 19, 20, 21, 22, 23, 25, 26, 27] {
+                    assert_eq!(
+                        agent.request(&[operation]).await,
+                        Err(SshAgentError::Denied)
+                    );
+                }
+                assert!(agent.request(&[11]).await.is_ok());
+            }
+            owner.shutdown().await.unwrap();
+            owner.shutdown().await.unwrap();
+            synthetic.assert_clean();
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn openssh_encrypted_ed25519_uses_single_private_fifo_and_value_blind_errors() {
-    let synthetic = Synthetic::new();
-    let owner = synthetic.owner();
-    let key = synthetic.key("ed25519", "SYNTHETIC_PASSPHRASE").await;
-    let agent = owner
-        .start(
-            key.clone(),
-            Some(Zeroizing::new(b"SYNTHETIC_PASSPHRASE".to_vec())),
-            Instant::now() + Duration::from_secs(30),
-        )
-        .unwrap()
-        .ready()
-        .await
-        .unwrap();
-    assert!(
-        agent
-            .request(&sign_request(agent.public_identity(), 0, b"data"))
-            .await
-            .is_ok()
-    );
-    let bad = owner
-        .start(
-            key,
-            Some(Zeroizing::new(b"WRONG_PASSPHRASE_CANARY".to_vec())),
-            Instant::now() + Duration::from_secs(2),
-        )
-        .unwrap()
-        .ready()
-        .await;
-    let error = match bad {
-        Err(error) => error,
-        Ok(_) => panic!("wrong passphrase admitted"),
-    };
-    assert!(!format!("{error:?} {error}").contains("CANARY"));
-    drop(agent);
-    owner.shutdown().await.unwrap();
-    synthetic.assert_clean();
+    isolated_process_fixture(
+        "ssh_agent::tests::openssh_encrypted_ed25519_uses_single_private_fifo_and_value_blind_errors",
+        async {
+            let synthetic = Synthetic::new();
+            let owner = synthetic.owner();
+            let key = synthetic.key("ed25519", "SYNTHETIC_PASSPHRASE").await;
+            let agent = owner
+                .start(
+                    key.clone(),
+                    Some(Zeroizing::new(b"SYNTHETIC_PASSPHRASE".to_vec())),
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .unwrap()
+                .ready()
+                .await
+                .unwrap();
+            assert!(
+                agent
+                    .request(&sign_request(agent.public_identity(), 0, b"data"))
+                    .await
+                    .is_ok()
+            );
+            let bad = owner
+                .start(
+                    key,
+                    Some(Zeroizing::new(b"WRONG_PASSPHRASE_CANARY".to_vec())),
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .unwrap()
+                .ready()
+                .await;
+            let error = match bad {
+                Err(error) => error,
+                Ok(_) => panic!("wrong passphrase admitted"),
+            };
+            assert!(!format!("{error:?} {error}").contains("CANARY"));
+            drop(agent);
+            owner.shutdown().await.unwrap();
+            synthetic.assert_clean();
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn dropped_pending_start_and_ready_handles_are_owned_until_shutdown() {
-    let synthetic = Synthetic::new();
-    let key = synthetic.key("ed25519", "SYNTHETIC_PASSPHRASE").await;
-    for phase in [Phase::ImportSpawned, Phase::FifoConnected, Phase::Ready] {
-        let (owner, probe, reached) = synthetic.owner_at(phase, false);
-        let pending = owner
-            .start(
-                key.clone(),
-                Some(Zeroizing::new(b"SYNTHETIC_PASSPHRASE".to_vec())),
-                Instant::now() + Duration::from_secs(30),
-            )
-            .unwrap();
-        let drain = pending.drain_handle();
-        let waiter = tokio::spawn(pending.ready());
-        let evidence = phase_reached(reached).await;
-        assert!(evidence.home.is_dir());
-        match phase {
-            Phase::Ready => {
-                probe.resume.notify_one();
-                let agent = waiter.await.unwrap().unwrap();
-                drop(agent);
-            }
-            _ => {
-                waiter.abort();
-                match waiter.await {
-                    Err(error) => assert!(error.is_cancelled()),
-                    Ok(_) => panic!("aborted startup waiter completed"),
+    isolated_process_fixture(
+        "ssh_agent::tests::dropped_pending_start_and_ready_handles_are_owned_until_shutdown",
+        async {
+            let synthetic = Synthetic::new();
+            let key = synthetic.key("ed25519", "SYNTHETIC_PASSPHRASE").await;
+            for phase in [Phase::ImportSpawned, Phase::FifoConnected, Phase::Ready] {
+                let (owner, probe, reached) = synthetic.owner_at(phase, false);
+                let pending = owner
+                    .start(
+                        key.clone(),
+                        Some(Zeroizing::new(b"SYNTHETIC_PASSPHRASE".to_vec())),
+                        Instant::now() + Duration::from_secs(30),
+                    )
+                    .unwrap();
+                let drain = pending.drain_handle();
+                let waiter = tokio::spawn(pending.ready());
+                let evidence = phase_reached(reached).await;
+                assert!(evidence.home.is_dir());
+                match phase {
+                    Phase::Ready => {
+                        probe.resume.notify_one();
+                        let agent = waiter.await.unwrap().unwrap();
+                        drop(agent);
+                    }
+                    _ => {
+                        waiter.abort();
+                        match waiter.await {
+                            Err(error) => assert!(error.is_cancelled()),
+                            Ok(_) => panic!("aborted startup waiter completed"),
+                        }
+                    }
                 }
+                drain.cancel_and_drain().await.unwrap();
+                drain.cancel_and_drain().await.unwrap();
+                owner.shutdown().await.unwrap();
+                evidence.assert_dead(true).await;
+                assert!(!evidence.home.exists());
+                synthetic.assert_clean();
             }
-        }
-        drain.cancel_and_drain().await.unwrap();
-        drain.cancel_and_drain().await.unwrap();
-        owner.shutdown().await.unwrap();
-        evidence.assert_dead(true).await;
-        assert!(!evidence.home.exists());
-        synthetic.assert_clean();
-    }
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -660,33 +679,39 @@ async fn shutdown_during_dispatched_signing_drains_the_exact_agent() {
 
 #[tokio::test]
 async fn worker_panic_is_latched_and_owned_children_are_drained_before_cleanup() {
-    let synthetic = Synthetic::new();
-    let (owner, probe, reached) = synthetic.owner_at(Phase::FifoConnected, true);
-    let pending = owner
-        .start(
-            synthetic.key("ed25519", "SYNTHETIC_PASSPHRASE").await,
-            Some(Zeroizing::new(b"SYNTHETIC_PASSPHRASE".to_vec())),
-            Instant::now() + Duration::from_secs(30),
-        )
-        .unwrap();
-    let drain = pending.drain_handle();
-    let waiter = tokio::spawn(pending.ready());
-    let evidence = phase_reached(reached).await;
-    assert_eq!(
-        evidence.processes.len(),
-        3,
-        "agent, add and askpass must be owned"
-    );
-    assert!(evidence.home.is_dir());
-    probe.resume.notify_one();
-    assert!(waiter.await.unwrap().is_err());
-    assert_eq!(drain.cancel_and_drain().await, Err(SshAgentError::Cleanup));
-    assert_eq!(drain.cancel_and_drain().await, Err(SshAgentError::Cleanup));
-    assert_eq!(owner.shutdown().await, Err(SshAgentError::Cleanup));
-    assert_eq!(owner.shutdown().await, Err(SshAgentError::Cleanup));
-    evidence.assert_dead(true).await;
-    assert!(!evidence.home.exists());
-    synthetic.assert_clean();
+    isolated_process_fixture(
+        "ssh_agent::tests::worker_panic_is_latched_and_owned_children_are_drained_before_cleanup",
+        async {
+            let synthetic = Synthetic::new();
+            let (owner, probe, reached) = synthetic.owner_at(Phase::FifoConnected, true);
+            let pending = owner
+                .start(
+                    synthetic.key("ed25519", "SYNTHETIC_PASSPHRASE").await,
+                    Some(Zeroizing::new(b"SYNTHETIC_PASSPHRASE".to_vec())),
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .unwrap();
+            let drain = pending.drain_handle();
+            let waiter = tokio::spawn(pending.ready());
+            let evidence = phase_reached(reached).await;
+            assert_eq!(
+                evidence.processes.len(),
+                3,
+                "agent, add and askpass must be owned"
+            );
+            assert!(evidence.home.is_dir());
+            probe.resume.notify_one();
+            assert!(waiter.await.unwrap().is_err());
+            assert_eq!(drain.cancel_and_drain().await, Err(SshAgentError::Cleanup));
+            assert_eq!(drain.cancel_and_drain().await, Err(SshAgentError::Cleanup));
+            assert_eq!(owner.shutdown().await, Err(SshAgentError::Cleanup));
+            assert_eq!(owner.shutdown().await, Err(SshAgentError::Cleanup));
+            evidence.assert_dead(true).await;
+            assert!(!evidence.home.exists());
+            synthetic.assert_clean();
+        },
+    )
+    .await;
 }
 
 #[tokio::test]

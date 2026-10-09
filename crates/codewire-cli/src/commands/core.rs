@@ -4,7 +4,7 @@ use super::*;
 
 pub(crate) async fn handle_logout_command(globals: &Globals) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     if let Ok(platform) = resolve_platform(globals, &paths, &env) {
         if let Some(path) = &platform.oauth_credentials_path {
             let store = codewire_client::FileCredentialStore::at(path);
@@ -30,7 +30,7 @@ pub(crate) async fn handle_whoami_command(
     args: WhoamiArgs,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let token = platform.token_provider()?.token().await?;
     let response = codewire_client::OAuthClient::for_server_url(&platform.server_url)?
@@ -53,7 +53,7 @@ pub(crate) async fn handle_use_command(
     args: UseTargetArgs,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let placement = if args.local {
         Some(EnvironmentPlacement::Local)
     } else if args.platform {
@@ -61,6 +61,19 @@ pub(crate) async fn handle_use_command(
     } else {
         None
     };
+    #[cfg(unix)]
+    let host = if placement != Some(EnvironmentPlacement::Platform) {
+        resolve_host_reference(globals, &args.target, placement).await?
+    } else {
+        None
+    };
+    #[cfg(unix)]
+    let target = if let Some(host) = host {
+        host.current_target()
+    } else {
+        resolve_named_execution_target(globals, &paths, &env, &args.target, placement).await?
+    };
+    #[cfg(not(unix))]
     let target =
         resolve_named_execution_target(globals, &paths, &env, &args.target, placement).await?;
     #[cfg(target_os = "linux")]
@@ -93,7 +106,7 @@ pub(crate) async fn handle_current_command(
     args: CurrentTargetArgs,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let target = config::current_target(&paths.mesh_data_dir)?;
     let network = config::selected_mesh_network(&paths, &env);
     let environment = lookup_environment_for_target(globals, &paths, &env, &target).await;
@@ -165,7 +178,7 @@ pub(crate) async fn resolve_platform_context(
     globals: &Globals,
 ) -> anyhow::Result<(String, OrganizationClient, EnvironmentClient)> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let organization_client = organization_client(&platform)?;
     let orgs = organization_client.list_orgs().await.context("list orgs")?;
@@ -182,7 +195,7 @@ pub(crate) async fn handle_vscode_command(
     args: VscodeArgs,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let environment_client = EnvironmentClient::new(&platform)?;
     let orgs = organization_client(&platform)?
@@ -219,7 +232,7 @@ pub(crate) async fn handle_shell_stdio(
         init_tailnet_debug_log();
     }
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let client = codewire_client(&platform)?;
     let environment_client = EnvironmentClient::new(&platform)?;
@@ -354,6 +367,7 @@ pub(crate) fn env_create_request_from_init_args(
         anyhow::bail!("--branch requires a repo URL");
     }
     let env_args = EnvCreateArgs {
+        environment_type: EnvironmentTypeArg::Sandbox,
         repo_urls: args.repo_urls.clone(),
         preset_slug: args.preset_slug.clone(),
         preset_id: args.preset_id.clone(),

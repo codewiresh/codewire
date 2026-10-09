@@ -60,6 +60,7 @@ buffa-types = { workspace = true }
 bytes = { workspace = true }
 codewire-access = { workspace = true }
 codewire-client = { workspace = true }
+codewire-cw-release = { workspace = true }
 codewire-local-credentials = { workspace = true }
 codewire-proto = { workspace = true }
 codewire-project = { workspace = true }

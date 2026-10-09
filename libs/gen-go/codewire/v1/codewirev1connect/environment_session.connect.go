@@ -49,6 +49,9 @@ const (
 	// EnvironmentSessionServiceRestartSessionProcedure is the fully-qualified name of the
 	// EnvironmentSessionService's RestartSession RPC.
 	EnvironmentSessionServiceRestartSessionProcedure = "/codewire.v1.EnvironmentSessionService/RestartSession"
+	// EnvironmentSessionServiceSendSessionInputProcedure is the fully-qualified name of the
+	// EnvironmentSessionService's SendSessionInput RPC.
+	EnvironmentSessionServiceSendSessionInputProcedure = "/codewire.v1.EnvironmentSessionService/SendSessionInput"
 	// EnvironmentSessionServiceReadSessionOutputProcedure is the fully-qualified name of the
 	// EnvironmentSessionService's ReadSessionOutput RPC.
 	EnvironmentSessionServiceReadSessionOutputProcedure = "/codewire.v1.EnvironmentSessionService/ReadSessionOutput"
@@ -65,6 +68,9 @@ type EnvironmentSessionServiceClient interface {
 	GetSession(context.Context, *connect.Request[v1.GetSessionRequest]) (*connect.Response[v1.GetSessionResponse], error)
 	StopSession(context.Context, *connect.Request[v1.StopSessionRequest]) (*connect.Response[v1.StopSessionResponse], error)
 	RestartSession(context.Context, *connect.Request[v1.RestartSessionRequest]) (*connect.Response[v1.RestartSessionResponse], error)
+	// Acknowledges an owned stdin write/flush or PTY write, not queue admission.
+	// Timeout is ambiguous: callers must not automatically retry input.
+	SendSessionInput(context.Context, *connect.Request[v1.SendSessionInputRequest]) (*connect.Response[v1.SendSessionInputResponse], error)
 	ReadSessionOutput(context.Context, *connect.Request[v1.ReadSessionOutputRequest]) (*connect.Response[v1.ReadSessionOutputResponse], error)
 	AttachSession(context.Context) *connect.BidiStreamForClient[v1.AttachSessionRequest, v1.AttachSessionResponse]
 }
@@ -112,6 +118,12 @@ func NewEnvironmentSessionServiceClient(httpClient connect.HTTPClient, baseURL s
 			connect.WithSchema(environmentSessionServiceMethods.ByName("RestartSession")),
 			connect.WithClientOptions(opts...),
 		),
+		sendSessionInput: connect.NewClient[v1.SendSessionInputRequest, v1.SendSessionInputResponse](
+			httpClient,
+			baseURL+EnvironmentSessionServiceSendSessionInputProcedure,
+			connect.WithSchema(environmentSessionServiceMethods.ByName("SendSessionInput")),
+			connect.WithClientOptions(opts...),
+		),
 		readSessionOutput: connect.NewClient[v1.ReadSessionOutputRequest, v1.ReadSessionOutputResponse](
 			httpClient,
 			baseURL+EnvironmentSessionServiceReadSessionOutputProcedure,
@@ -135,6 +147,7 @@ type environmentSessionServiceClient struct {
 	getSession        *connect.Client[v1.GetSessionRequest, v1.GetSessionResponse]
 	stopSession       *connect.Client[v1.StopSessionRequest, v1.StopSessionResponse]
 	restartSession    *connect.Client[v1.RestartSessionRequest, v1.RestartSessionResponse]
+	sendSessionInput  *connect.Client[v1.SendSessionInputRequest, v1.SendSessionInputResponse]
 	readSessionOutput *connect.Client[v1.ReadSessionOutputRequest, v1.ReadSessionOutputResponse]
 	attachSession     *connect.Client[v1.AttachSessionRequest, v1.AttachSessionResponse]
 }
@@ -164,6 +177,11 @@ func (c *environmentSessionServiceClient) RestartSession(ctx context.Context, re
 	return c.restartSession.CallUnary(ctx, req)
 }
 
+// SendSessionInput calls codewire.v1.EnvironmentSessionService.SendSessionInput.
+func (c *environmentSessionServiceClient) SendSessionInput(ctx context.Context, req *connect.Request[v1.SendSessionInputRequest]) (*connect.Response[v1.SendSessionInputResponse], error) {
+	return c.sendSessionInput.CallUnary(ctx, req)
+}
+
 // ReadSessionOutput calls codewire.v1.EnvironmentSessionService.ReadSessionOutput.
 func (c *environmentSessionServiceClient) ReadSessionOutput(ctx context.Context, req *connect.Request[v1.ReadSessionOutputRequest]) (*connect.Response[v1.ReadSessionOutputResponse], error) {
 	return c.readSessionOutput.CallUnary(ctx, req)
@@ -182,6 +200,9 @@ type EnvironmentSessionServiceHandler interface {
 	GetSession(context.Context, *connect.Request[v1.GetSessionRequest]) (*connect.Response[v1.GetSessionResponse], error)
 	StopSession(context.Context, *connect.Request[v1.StopSessionRequest]) (*connect.Response[v1.StopSessionResponse], error)
 	RestartSession(context.Context, *connect.Request[v1.RestartSessionRequest]) (*connect.Response[v1.RestartSessionResponse], error)
+	// Acknowledges an owned stdin write/flush or PTY write, not queue admission.
+	// Timeout is ambiguous: callers must not automatically retry input.
+	SendSessionInput(context.Context, *connect.Request[v1.SendSessionInputRequest]) (*connect.Response[v1.SendSessionInputResponse], error)
 	ReadSessionOutput(context.Context, *connect.Request[v1.ReadSessionOutputRequest]) (*connect.Response[v1.ReadSessionOutputResponse], error)
 	AttachSession(context.Context, *connect.BidiStream[v1.AttachSessionRequest, v1.AttachSessionResponse]) error
 }
@@ -225,6 +246,12 @@ func NewEnvironmentSessionServiceHandler(svc EnvironmentSessionServiceHandler, o
 		connect.WithSchema(environmentSessionServiceMethods.ByName("RestartSession")),
 		connect.WithHandlerOptions(opts...),
 	)
+	environmentSessionServiceSendSessionInputHandler := connect.NewUnaryHandler(
+		EnvironmentSessionServiceSendSessionInputProcedure,
+		svc.SendSessionInput,
+		connect.WithSchema(environmentSessionServiceMethods.ByName("SendSessionInput")),
+		connect.WithHandlerOptions(opts...),
+	)
 	environmentSessionServiceReadSessionOutputHandler := connect.NewUnaryHandler(
 		EnvironmentSessionServiceReadSessionOutputProcedure,
 		svc.ReadSessionOutput,
@@ -250,6 +277,8 @@ func NewEnvironmentSessionServiceHandler(svc EnvironmentSessionServiceHandler, o
 			environmentSessionServiceStopSessionHandler.ServeHTTP(w, r)
 		case EnvironmentSessionServiceRestartSessionProcedure:
 			environmentSessionServiceRestartSessionHandler.ServeHTTP(w, r)
+		case EnvironmentSessionServiceSendSessionInputProcedure:
+			environmentSessionServiceSendSessionInputHandler.ServeHTTP(w, r)
 		case EnvironmentSessionServiceReadSessionOutputProcedure:
 			environmentSessionServiceReadSessionOutputHandler.ServeHTTP(w, r)
 		case EnvironmentSessionServiceAttachSessionProcedure:
@@ -281,6 +310,10 @@ func (UnimplementedEnvironmentSessionServiceHandler) StopSession(context.Context
 
 func (UnimplementedEnvironmentSessionServiceHandler) RestartSession(context.Context, *connect.Request[v1.RestartSessionRequest]) (*connect.Response[v1.RestartSessionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentSessionService.RestartSession is not implemented"))
+}
+
+func (UnimplementedEnvironmentSessionServiceHandler) SendSessionInput(context.Context, *connect.Request[v1.SendSessionInputRequest]) (*connect.Response[v1.SendSessionInputResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentSessionService.SendSessionInput is not implemented"))
 }
 
 func (UnimplementedEnvironmentSessionServiceHandler) ReadSessionOutput(context.Context, *connect.Request[v1.ReadSessionOutputRequest]) (*connect.Response[v1.ReadSessionOutputResponse], error) {

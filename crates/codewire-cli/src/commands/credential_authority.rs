@@ -106,7 +106,7 @@ pub(crate) fn local_credential_root(env: &impl Env) -> anyhow::Result<PathBuf> {
         }
         return Ok(root);
     }
-    Ok(ResolvePaths::from_env(env)
+    Ok(ResolvePaths::from_env(env)?
         .mesh_data_dir
         .join("credentials-v1"))
 }

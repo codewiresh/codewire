@@ -184,6 +184,13 @@ impl LocalSupervisorService for ProtocolPeer {
     ) -> Result<Response<v1::DaemonAccess>, Status> {
         Err(Status::unimplemented("unused synthetic method"))
     }
+
+    async fn get_managed_runtime(
+        &self,
+        _: Request<v1::EnvironmentSelector>,
+    ) -> Result<Response<v1::ManagedRuntime>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
 }
 
 struct TestServer {
@@ -547,9 +554,17 @@ async fn linux_reconnect_readmits_and_replaces_client_without_reissuing_mutation
             WatchReply::Updates(vec![Ok(operation(v1::OperationPhase::Completed))]),
         ],
     );
-    let mut client = bounded(NativeSupervisorClient::connect_or_start(&server.config))
-        .await
-        .unwrap();
+    // This in-process protocol fixture uses the generic pinned API and opts
+    // into watch reconnect. Production only enables this after fixed-role
+    // configuration admission, exercised in linux::supervisor_peer tests.
+    let mut client = bounded(NativeSupervisorClient::connect_admitted(
+        &server.socket,
+        Some(server.config.configuration_digest()),
+    ))
+    .await
+    .unwrap();
+    client.reconnect_enabled = true;
+    let original_pin = client.peer_pin.clone();
     let started = tokio::time::Instant::now();
     assert_eq!(bounded(client.stop("dev")).await.unwrap(), environment());
     assert!(started.elapsed() >= Duration::from_millis(100));
@@ -564,7 +579,7 @@ async fn linux_reconnect_readmits_and_replaces_client_without_reissuing_mutation
             "get"
         ]
     );
-    assert!(client.restart_config.is_some());
+    assert!(Arc::ptr_eq(&original_pin, &client.peer_pin));
     drop(client);
     server.finish().await;
 }
@@ -576,9 +591,13 @@ async fn linux_watch_reconnect_is_bounded_to_three_attempts() {
         valid_info,
         vec![WatchReply::Failure(tonic::Code::Unavailable); 4],
     );
-    let mut client = bounded(NativeSupervisorClient::connect_or_start(&server.config))
-        .await
-        .unwrap();
+    let mut client = bounded(NativeSupervisorClient::connect_admitted(
+        &server.socket,
+        Some(server.config.configuration_digest()),
+    ))
+    .await
+    .unwrap();
+    client.reconnect_enabled = true;
     let started = tokio::time::Instant::now();
     let error = bounded(client.follow_operation(operation(v1::OperationPhase::Intent)))
         .await
@@ -599,5 +618,65 @@ async fn linux_watch_reconnect_is_bounded_to_three_attempts() {
     );
     assert_eq!(calls.len(), 8);
     drop(client);
+    server.finish().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn watch_reconnect_refuses_replacement_and_preserves_original_operation_without_replay() {
+    let mut server = TestServer::start(
+        valid_info,
+        vec![WatchReply::Failure(tonic::Code::Unavailable)],
+    );
+    let mut client = bounded(NativeSupervisorClient::connect_admitted(
+        &server.socket,
+        Some(server.config.configuration_digest()),
+    ))
+    .await
+    .unwrap();
+    client.reconnect_enabled = true;
+    let original_calls = server.calls.clone();
+    let initial = operation(v1::OperationPhase::Intent);
+    let expected_id = initial.operation_id.clone();
+    let follower = tokio::spawn(async move { client.follow_operation(initial).await });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while original_calls.lock().unwrap().len() < 2 {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    server.shutdown.take().unwrap().send(()).unwrap();
+    bounded(&mut server.task).await.unwrap();
+    host_path::PrivateRoot::open(&server.config.root)
+        .unwrap()
+        .remove_private_socket(Path::new("supervisor.sock"))
+        .unwrap();
+    let listener = UnixListener::bind(&server.socket).unwrap();
+    server.identity = host_path::set_socket_private(&server.socket).unwrap();
+    let replacement_calls = Arc::new(Mutex::new(Vec::new()));
+    let peer = ProtocolPeer {
+        info: valid_info(&server.config),
+        calls: replacement_calls.clone(),
+        replies: Arc::new(Mutex::new(VecDeque::new())),
+    };
+    let (shutdown, receiver) = oneshot::channel();
+    server.task = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(LocalSupervisorServiceServer::new(peer))
+            .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async {
+                let _ = receiver.await;
+            })
+            .await
+            .unwrap();
+    });
+    server.shutdown = Some(shutdown);
+    let error = bounded(follower).await.unwrap().unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unavailable);
+    assert!(error.message().contains(&expected_id));
+    assert_eq!(
+        *original_calls.lock().unwrap(),
+        ["info", &format!("watch:{expected_id}")]
+    );
+    assert!(replacement_calls.lock().unwrap().is_empty());
+    server.identity.revalidate(&server.socket).unwrap();
     server.finish().await;
 }

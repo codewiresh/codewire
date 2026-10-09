@@ -10,8 +10,10 @@ TMP_ROOT="$ROOT/.tmp"
 mkdir -p "$TMP_ROOT"
 TMP="$(mktemp -d "$TMP_ROOT/selector.XXXXXX")"
 NEGATIVE_CACHE_PATH="$ROOT/scripts/ci/cache/unlisted-cache-helper.sh"
+HOST_CLASSIFICATION_NEIGHBORS=()
 cleanup() {
   rm -f "$NEGATIVE_CACHE_PATH"
+  rm -f "${HOST_CLASSIFICATION_NEIGHBORS[@]}"
   rmdir "$ROOT/scripts/ci/cache" 2>/dev/null || true
   rm -rf "$TMP"
 }
@@ -364,6 +366,21 @@ run_paths_case workspace_cache_consumers pull_request refs/pull/2047/head false 
   scripts/ci/tests/test-workspace-cache-probes.py \
   scripts/ci/verify/workspace-cache-probes.py \
   scripts/ci/tests/canary-workspace-r2-cache.sh
+run_paths_case cw_image_source_consumers pull_request refs/pull/2255/head false \
+  'policy security' \
+  scripts/ci/images/prepare-cw-source-context.py \
+  scripts/ci/images/build-cw-runtime-source.py \
+  scripts/ci/images/finalize-cw-runtime-source.py \
+  scripts/ci/images/prepare-cw-image-context.py \
+  scripts/ci/images/cw-image-consumer.py \
+  scripts/ci/images/cw-image-consumer.sh \
+  scripts/ci/images/cw-image-source.py \
+  scripts/ci/images/build-product-images.sh \
+  scripts/ci/tests/test-cw-image-context.py \
+  scripts/ci/tests/test-cw-runtime-source.py \
+  scripts/ci/tests/test-cw-image-consumer.py \
+  scripts/ci/tests/test-cw-image-source.py \
+  scripts/ci/tests/cw_image_fixtures.py
 run_present_paths_case workspace_cache_experiment_consumers pull_request refs/pull/2047/head false \
   'policy policy_shell security' \
   scripts/ci/setup/select-workspace-cache-experiment.py \
@@ -485,6 +502,15 @@ run_paths_case local_vmm_initramfs_builder pull_request refs/pull/5013/head fals
 run_paths_case local_vmm_kvm_smoke pull_request refs/pull/5014/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/smoke-local-vmm-cloud-hypervisor.sh
+for kernel_input in scripts/ci/verify/build-linux-vmm-kernel.py \
+    scripts/ci/verify/linux-vmm-kernel/x86_64.config \
+    scripts/ci/verify/linux-vmm-kernel/dax.patch \
+    scripts/ci/verify/linux-vmm-kernel/provenance.json \
+    scripts/ci/tests/test-linux-vmm-kernel.py; do
+  run_paths_case "local_vmm_kernel_${kernel_input##*/}" pull_request refs/pull/2255/head false \
+    'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+    "$kernel_input"
+done
 run_paths_case native_local_environment_smoke pull_request refs/pull/5015/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/smoke-native-local-environment.sh
@@ -562,6 +588,12 @@ run_paths_case material_free_credential_bridge pull_request refs/pull/6011/head 
 run_paths_case concrete_platform_credential_service pull_request refs/pull/6011/head false \
   'database policy rust rust_pkg_codewire_credential_service' \
   crates/codewire-credential-service/src/authority.rs
+run_paths_case credential_service_kind_entrypoint_without_opt_in pull_request refs/pull/6011/head false \
+  'database policy rust rust_pkg_codewire_credential_service' \
+  crates/codewire-credential-service/src/runtime/kind.rs
+run_paths_case credential_service_kind_entrypoint_with_opt_in pull_request refs/pull/6011/head true \
+  'database edge_kind kind policy rust rust_pkg_codewire_credential_service' \
+  crates/codewire-credential-service/src/runtime/kind.rs
 run_paths_case credential_service_kind_runtime_without_opt_in pull_request refs/pull/6011/head false \
   'database policy rust rust_pkg_codewire_credential_service' \
   crates/codewire-credential-service/src/runtime/kind/provider.rs
@@ -691,6 +723,19 @@ run_paths_case kind_fixture_only pull_request refs/pull/847/head false \
   'policy' \
   scripts/ci/tests/test-kind-e2e-suites.sh \
   scripts/ci/tests/test-kind-forwards.sh
+for kind_runtime_fixture in test-kind-cw-runtime.py test-kind-cw-runtime-probe.py; do
+  run_paths_case "${kind_runtime_fixture%.py}_pr" pull_request refs/pull/8471/head false \
+    'policy' "scripts/ci/tests/$kind_runtime_fixture"
+  run_paths_case "${kind_runtime_fixture%.py}_opt_in" pull_request refs/pull/8472/head true \
+    'edge_kind policy' "scripts/ci/tests/$kind_runtime_fixture"
+  run_paths_case "${kind_runtime_fixture%.py}_main" push refs/heads/main false \
+    'edge_kind policy' "scripts/ci/tests/$kind_runtime_fixture"
+done
+run_paths_case kind_runtime_fixture_mixed_opt_in pull_request refs/pull/8473/head true \
+  'edge_kind kind policy' \
+  scripts/ci/tests/test-kind-cw-runtime.py \
+  scripts/ci/tests/test-kind-cw-runtime-probe.py \
+  scripts/ci/verify/kind/suites/integrated.sh
 run_paths_case temporal_shared_fixture pull_request refs/pull/841/head false \
   'policy service_billing service_integration service_orchestration service_temporal' \
   tests/e2e/flip-state.env
@@ -967,6 +1012,84 @@ grep -qF "[ \"\$GITHUB_REF\" = 'refs/heads/main' ]" "$CLI_RELEASE_WORKFLOW"
 run_paths_case cli_makefile pull_request refs/pull/1521/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
   apps/cli/Makefile
+run_paths_case cli_host_journey pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/dev/test-cli-host.py
+run_paths_case source_approval_policy pull_request refs/pull/2255/head false \
+  'policy' .supplychain/source-policy.json
+for host_input in scripts/dev/test-cli-host-managed.py scripts/ci/tests/test-cli-host-managed.py scripts/dev/fixtures/host-member-managed-assets.py; do
+  run_paths_case "host_managed_${host_input//\//_}" pull_request refs/pull/2255/head false \
+    'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' "$host_input"
+done
+run_paths_case host_managed_and_source_policy pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  .supplychain/source-policy.json scripts/dev/test-cli-host-managed.py \
+  scripts/ci/tests/test-cli-host-managed.py
+# Nearby unrecognized files retain conservative fallback; do not broaden
+# either the protected source-policy name or the exact harness path cases.
+for neighbor in .supplychain/source-policy-unlisted.json \
+    scripts/dev/test-cli-host-managed-unlisted.py scripts/ci/tests/test-cli-host-managed-unlisted.py \
+    scripts/dev/fixtures/host-member-managed-assets-unlisted.py; do
+  if ! (set -C; printf '%s\n' '# classifier fixture, never executed' > "$ROOT/$neighbor"); then
+    echo "classification neighbor already exists: $neighbor" >&2; exit 1
+  fi
+  HOST_CLASSIFICATION_NEIGHBORS+=("$ROOT/$neighbor")
+  printf '%s\n' "$neighbor" > "$TMP/host-neighbor.paths"
+  neighbor_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+    GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/2255/head \
+    KIND_E2E_OPT_IN=false "$SELECTOR" "$TMP/host-neighbor.paths" 2>/dev/null)"
+  [[ "$neighbor_output" == *'classification=unclassified'* \
+      && "$neighbor_output" == *'required_local_mode=full'* ]] || {
+    echo "classification neighbor lost conservative fallback: $neighbor" >&2; exit 1
+  }
+done
+run_paths_case cli_host_update_journey pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/dev/test-cli-update.py
+run_paths_case cli_host_update_port_regression pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/ci/tests/test-cli-update-mesh-endpoints.py
+run_paths_case cli_agent_peer_fixture pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/dev/fixtures/agent-peer.py
+run_paths_case cli_native_managed_startup pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/dev/test-native-managed-startup.py
+run_paths_case cli_native_managed_journey pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/test-cli-native-managed.py
+run_paths_case cli_native_update_journey pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/test-cli-native-update.py
+run_paths_case cli_native_update_entrypoint_regression pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  scripts/ci/tests/test-native-managed-update-entrypoint.py
+run_paths_case cli_native_managed_artifact pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/build-native-managed-agent.py
+# Release delivery sources and their proofs were unclassified (all product
+# verification) or missed the release suite; each now selects it.
+run_paths_case cw_release_delivery_core pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential' \
+  scripts/ci/release/cw_release.py scripts/ci/release/cw_release_r2.py
+run_paths_case cw_release_delivery_shell pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential' \
+  scripts/ci/release/sign-cw-release.sh \
+  scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh \
+  scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh
+run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential' \
+  scripts/ci/tests/cw_release_fixtures.py scripts/ci/tests/test-cli-release-workflow.py \
+  scripts/ci/tests/test-cw-release-delivery.py scripts/ci/tests/test-cw-release-r2.py
+run_paths_case cw_runtime_image_tool pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential transport transport_pkg_codewire_local_vmm' \
+  scripts/dev/cw-runtime-image.py scripts/dev/test-cw-runtime-image.py
+run_paths_case cw_host_build_tool pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  scripts/dev/build-cw.py
+run_paths_case cw_build_record_producer pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli' \
+  crates/codewire-cli/build.rs crates/codewire-cli/src/build_record.rs
 run_paths_case edge_harness pull_request refs/pull/153/head false \
   'policy' scripts/ci/verify/kind-e2e.sh
 run_paths_case edge_host_runtime pull_request refs/pull/1529/head true \
@@ -1180,6 +1303,8 @@ run_paths_case rust_cache_unlisted pull_request refs/pull/201/head false "$all_p
   scripts/ci/cache/unlisted-cache-helper.sh
 rm -f "$NEGATIVE_CACHE_PATH"
 rmdir "$ROOT/scripts/ci/cache" 2>/dev/null || true
+run_present_paths_case kind_runtime_fixture_unknown pull_request refs/pull/1801/head false \
+  "$all_product_pr" scripts/ci/tests/test-kind-cw-runtime-future.py
 run_paths_case unknown pull_request refs/pull/18/head false "$all_product_pr" \
   unexplained/new-surface.txt
 run_paths_case mesh_policy_unknown pull_request refs/pull/181/head false "$all_product_pr" \
@@ -1218,6 +1343,21 @@ contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1913/head \
   KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
 assert_contract_field kind_fixture_mixed "$contract_output" required_local_mode kind
+printf '%s\n' scripts/ci/tests/test-kind-cw-runtime.py \
+  scripts/ci/tests/test-kind-cw-runtime-probe.py > "$contract_paths"
+contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/19131/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
+assert_contract_field kind_runtime_fixtures "$contract_output" classification changed
+assert_contract_field kind_runtime_fixtures "$contract_output" required_local_mode default
+printf '%s\n' scripts/ci/tests/test-kind-cw-runtime.py \
+  scripts/ci/tests/test-kind-cw-runtime-probe.py \
+  scripts/ci/verify/kind/suites/integrated.sh > "$contract_paths"
+contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/19132/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
+assert_contract_field kind_runtime_fixtures_mixed "$contract_output" classification changed
+assert_contract_field kind_runtime_fixtures_mixed "$contract_output" required_local_mode kind
 printf '%s\n' scripts/ci/tests/test-dashboard-browser-gate.sh \
   scripts/ci/verify/kind/suites/dashboard-browser.sh > "$contract_paths"
 contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
@@ -1456,7 +1596,7 @@ grep -qF 'cargo test --locked -p codewire-credential-service --features enrollme
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' "$integration_runner"
 grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
-grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 87' "$integration_runner"
+grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 88' "$integration_runner"
 grep -qF 'assert_passed_count "idp db_flow" "$logfile" 13' "$integration_runner"
 grep -qF 'assert_passed_count "idp two-factor replacement" "$logfile" 11' "$integration_runner"
 grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 23' "$integration_runner"
@@ -1645,6 +1785,8 @@ assert_tokens github_output \
 # Exercise changed-range discovery, including fail-closed missing PR state.
 repo="$TMP/ranges"
 git init -q -b main "$repo"
+git -C "$repo" config maintenance.auto false
+git -C "$repo" config gc.auto 0
 git -C "$repo" config user.name 'Selector Test'
 git -C "$repo" config user.email selector@example.invalid
 mkdir -p "$repo/docs"
@@ -1740,7 +1882,7 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
 done <<'EOF'
 cw-release-assets|CW release-assets verification|ci-heavy|cw_release_assets
 workspace-image|Container contract verification|ci-heavy|workspace_image
-policy|Policy verification|ci-lite|policy
+policy|Policy verification|ci-heavy|policy
 standard|Standard verification|ci-heavy|standard
 tooling|Tooling / delivery contract verification|ci-heavy|tooling
 rust-compile|Compile every Rust target|ci-heavy|rust_transport
@@ -1756,7 +1898,7 @@ EOF
 policy_block="$TMP/policy.yaml"
 tooling_block="$TMP/tooling.yaml"
 grep -Fq 'run-product-verification.sh policy-core' "$policy_block" || {
-  echo 'ci-lite policy job does not own only the fast policy core' >&2
+  echo 'policy job does not own only the fast policy core' >&2
   exit 1
 }
 grep -Fq 'run-product-verification.sh policy-shell' "$tooling_block" || {
@@ -1860,7 +2002,7 @@ grep -qF '    timeout-minutes: 55' "$workspace_block" || {
 }
 
 policy_block="$TMP/policy.yaml"
-grep -qF '    timeout-minutes: 13' "$policy_block"
+grep -qF '    timeout-minutes: 30' "$policy_block"
 grep -qF 'name: Verify sealed policy tools' "$policy_block"
 grep -qF 'name: Run Policy' "$policy_block"
 grep -A1 -F 'name: Run Policy' "$policy_block" \
@@ -1874,7 +2016,7 @@ if grep -Eq 'run:.*docker|setup-bun|setup-go|curl |wget ' "$policy_setup_block";
   exit 1
 fi
 
-grep -qF '    timeout-minutes: 13' "$TMP/policy.yaml" || {
+grep -qF '    timeout-minutes: 30' "$TMP/policy.yaml" || {
   echo 'policy: heavy job lost its measured bounded task ceiling' >&2
   exit 1
 }
@@ -2130,12 +2272,12 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 17 ]] || {
-  echo 'Codewire CI requires twelve ordinary heavy groups, three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe' >&2
+[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 18 ]] || {
+  echo 'Codewire CI requires thirteen ordinary heavy groups (policy included), three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe' >&2
   exit 1
 }
-[[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 3 ]] || {
-  echo 'Codewire CI has not assigned selection, policy, and aggregation to ci-lite' >&2
+[[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 2 ]] || {
+  echo 'Codewire CI has not assigned selection and aggregation to ci-lite' >&2
   exit 1
 }
 [[ "$(grep -Fc '    runs-on: ci-light' "$WORKFLOW")" -eq 0 ]] || {
@@ -2644,6 +2786,20 @@ fi
 edge_kind_block="$TMP/edge-kind.yaml"
 grep -qF 'run: scripts/ci/verify/run-product-verification.sh edge' "$edge_kind_block"
 grep -qF 'scripts/ci/verify/kind-e2e.sh shard "${suites[@]}"' "$edge_kind_block"
+edge_fixture_runner="$TMP/edge-fixture-runner.sh"
+awk '
+  /^run_edge\(\) \{/ { capture = 1 }
+  capture { print }
+  capture && $0 == "}" { exit }
+' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$edge_fixture_runner"
+for edge_fixture_command in \
+    '  scripts/ci/tests/test-kind-e2e-suites.sh' \
+    '  python3 -B scripts/ci/tests/test-kind-cw-runtime-probe.py'; do
+  [ "$(grep -cFx "$edge_fixture_command" "$edge_fixture_runner")" -eq 1 ] || {
+    echo "shared edge route must invoke the owning fixture once: $edge_fixture_command" >&2
+    exit 1
+  }
+done
 
 if grep -qF '    name: Manual diagnostics' "$WORKFLOW" \
   || grep -qF '  diagnostics:' "$WORKFLOW" \
@@ -2832,7 +2988,11 @@ primitive_cargo_command="$(PATH="$primitive_probe/bin:$PATH" bash -c 'command -v
 primitive_guard="$ROOT/scripts/ci/tests/test-openbao-only-secret-authority.sh"
 : > "$primitive_probe/default.log"
 PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$primitive_probe/default.log" \
-  PRIMITIVE_CARGO_FAIL=all "$primitive_guard" > "$primitive_probe/default.out" 2>&1
+  PRIMITIVE_CARGO_FAIL=all "$primitive_guard" > "$primitive_probe/default.out" 2>&1 || {
+  status=$?
+  cat "$primitive_probe/default.out" >&2
+  exit "$status"
+}
 [[ ! -s "$primitive_probe/default.log" ]] || {
   echo 'default authority policy must not invoke Cargo' >&2
   exit 1
@@ -2932,9 +3092,64 @@ set -euo pipefail
 selected() { [[ "$SELECTION" == *"|$1|"* ]]; }
 has_root_rust_selection() { return 0; }
 run_rust_packages() { printf '%s\n' "$*" > "$PRIMITIVE_PACKAGE_LOG"; }
+python3() {
+  if [[ "$*" == '-B scripts/ci/tests/test-cli-host-managed.py' ]]; then
+    if [[ -n "${PRIMITIVE_HOST_ROUTING_LOG:-}" ]]; then
+      printf '%s\n' host-fixture >> "$PRIMITIVE_HOST_ROUTING_LOG"
+    fi
+    return "${PRIMITIVE_HOST_FIXTURE_EXIT:-0}"
+  fi
+  if [[ -n "${PRIMITIVE_HOST_ROUTING_LOG:-}" ]] \
+      && [[ "$*" == '-B scripts/ci/tests/test-cli-update-mesh-endpoints.py' ]]; then
+    printf '%s\n' mesh-fixture >> "$PRIMITIVE_HOST_ROUTING_LOG"
+    return 0
+  fi
+  command python3 "$@"
+}
 source "$PRIMITIVE_RUST_BODY"
+if [[ "${PRIMITIVE_HOST_EXPLICIT_STATUS:-false}" == true ]]; then
+  status=0
+  run_rust || status=$?
+  if [[ "$status" == 0 ]]; then
+    printf '%s\n' success-receipt >> "$PRIMITIVE_HOST_ROUTING_LOG"
+  fi
+  exit "$status"
+fi
 run_rust
 SH
+# The actual feature dispatcher must run this fixture once, preserve its
+# failure even under explicit status capture, and omit it on unrelated shards.
+run_host_fixture_routing_case() {
+  local name="$1" tokens="$2" shard="$3" expected_calls="$4" fixture_exit="$5" expected_exit="$6"
+  local log="$primitive_probe/host-$name.log" output="$primitive_probe/host-$name.out" status=0
+  : > "$log"
+  PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_STUB="$primitive_cargo_stub" \
+    PRIMITIVE_CARGO_LOG="$primitive_probe/host-$name.cargo" \
+    PRIMITIVE_PACKAGE_LOG="$primitive_probe/host-$name.packages" \
+    PRIMITIVE_RUST_BODY="$primitive_rust_body" PRIMITIVE_HOST_ROUTING_LOG="$log" \
+    PRIMITIVE_HOST_FIXTURE_EXIT="$fixture_exit" PRIMITIVE_HOST_EXPLICIT_STATUS=true \
+    RUST_TRANSPORT_SHARD="$shard" SELECTION="|valid:v3|$tokens|complete|" \
+    bash "$primitive_probe/dispatch.sh" > "$output" 2>&1 || status=$?
+  [[ "$status" == "$expected_exit" ]] || { cat "$output" >&2; exit 1; }
+  [[ "$(grep -cxF host-fixture "$log" || true)" == "$expected_calls" ]] || {
+    echo "$name: host fixture routing count changed" >&2; exit 1;
+  }
+  if [[ "$expected_exit" != 0 ]]; then
+    [[ "$(wc -l < "$log")" == 1 ]] || {
+      echo "$name: verification continued or emitted success after host fixture failure" >&2; exit 1;
+    }
+  else
+    [[ "$(grep -cxF success-receipt "$log" || true)" == 1 ]] || exit 1
+  fi
+}
+run_host_fixture_routing_case workspace rust_workspace features 1 0 0
+run_host_fixture_routing_case cli rust_pkg_codewire_cli features 1 0 0
+run_host_fixture_routing_case cli_bin rust_pkg_codewire_cli_bin features 1 0 0
+run_host_fixture_routing_case combined 'rust_pkg_codewire_cli|rust_pkg_codewire_cli_bin' features 1 0 0
+run_host_fixture_routing_case unrelated rust_pkg_codewire_client features 0 0 0
+run_host_fixture_routing_case packages rust_pkg_codewire_cli packages 0 0 0
+run_host_fixture_routing_case local_vmm rust_pkg_codewire_cli local-vmm 0 0 0
+run_host_fixture_routing_case refused rust_pkg_codewire_cli features 1 79 79
 run_primitive_rust_case() {
   local name="$1" token="$2" graph="$3" platform="$4" fail="${5:-}" features="${6:-platform}"
   local log="$primitive_probe/$name.log" status=0 graph_count cli_count clippy_count test_count
@@ -3165,12 +3380,12 @@ if [ "$(grep -c '^run_selected_family edge_kind edge ' \
   echo 'local preflight must invoke edge static verification exactly once' >&2
   exit 1
 fi
-if grep -qF "find scripts/runtime -type f -name '*.sh' -print0" \
+if grep -qF "find scripts/runtime -type f -name '*.sh'" \
     "$ROOT/scripts/dev/preflight.sh"; then
   echo 'local preflight duplicates the shared runtime syntax owner' >&2
   exit 1
 fi
-grep -qF "find scripts/runtime -type f -name '*.sh' -print0" \
+grep -qF "find scripts/runtime -type f -name '*.sh' -exec bash -c '" \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 shared_shell_policy="$TMP/shared-shell-policy.sh"
 awk '

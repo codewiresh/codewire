@@ -1,4 +1,105 @@
+#[cfg(target_os = "linux")]
+mod local_mesh_helper;
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    if let Some(role) = std::env::args_os()
+        .nth(1)
+        .and_then(|a| a.into_string().ok())
+        && matches!(
+            role.as_str(),
+            "__platform-agent-driver" | "__platform-agent-peer"
+        )
+    {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+        else {
+            eprintln!("platform agent role failed");
+            std::process::exit(1);
+        };
+        let arguments = std::env::args_os().skip(2).collect();
+        let result = if role == "__platform-agent-driver" {
+            runtime.block_on(codewire_cli::run_platform_agent_driver_from(arguments))
+        } else {
+            runtime.block_on(codewire_cli::run_platform_agent_peer_from(arguments))
+        };
+        if result.is_err() {
+            eprintln!("platform agent role failed");
+            std::process::exit(1);
+        }
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "__platform-cw-runtime")
+    {
+        std::process::exit(codewire_cli::run_platform_cw_runtime_from(
+            std::env::args_os(),
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "__platform-agent-control")
+    {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+        else {
+            eprintln!("platform agent control failed");
+            std::process::exit(1);
+        };
+        if runtime
+            .block_on(codewire_cli::run_platform_agent_control_from(
+                std::env::args_os().skip(2).collect(),
+            ))
+            .is_err()
+        {
+            eprintln!("platform agent control failed");
+            std::process::exit(1);
+        }
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "__host-agent-control")
+    {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+        else {
+            eprintln!("host agent control failed");
+            std::process::exit(1);
+        };
+        if runtime
+            .block_on(codewire_cli::run_host_agent_control_from(
+                std::env::args_os().skip(2).collect(),
+            ))
+            .is_err()
+        {
+            eprintln!("host agent control failed");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // Helper roles must not resolve ordinary CLI settings, credentials or the
+    // mutable managed entry. The parent already selected this exact executable.
+    #[cfg(target_os = "linux")]
+    if let Some(role) = std::env::args_os().nth(1)
+        && local_mesh_helper::is_role(&role)
+    {
+        if let Err(error) = local_mesh_helper::run(&role) {
+            eprintln!("local Mesh helper failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     #[cfg(target_os = "linux")]
     if std::env::args_os()
         .next()
@@ -27,6 +128,14 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+    // This only redirects ordinary invocations through admitted fixed image
+    // aliases. Private roles (including the later hosted-daemon dispatch) and
+    // explicit immutable version paths never consult the writable Store.
+    #[cfg(target_os = "linux")]
+    if codewire_cli::redirect_platform_cw_default_from(std::env::args_os()).is_err() {
+        eprintln!("platform CW default selection refused");
+        std::process::exit(1);
     }
     let network_worker = std::env::args_os()
         .nth(1)

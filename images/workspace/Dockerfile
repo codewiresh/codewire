@@ -12,7 +12,7 @@ ADD --checksum=sha256:821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae8419
   https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-aarch64-unknown-linux-musl.tar.gz /sccache.tar.gz
 FROM sccache-${TARGETARCH} AS sccache-archive
 
-FROM rust:1.91.1-slim-bookworm@sha256:8514999d4786ef12efe89239e86b3d0a021b94b9d35108c8efe6c79ca7dc1a65 AS cw-toolchain
+FROM rust:1.93.0-slim-bookworm@sha256:776861219cd851131c1cec3bbd7cbeb16b99a794048097eb69ad9682a8ed0d57 AS cw-toolchain
 ADD --checksum=sha256:6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 \
   https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip \
   /tmp/protoc.zip
@@ -29,7 +29,7 @@ RUN rm -f /etc/apt/sources.list && \
     rm /tmp/protoc.zip && \
     test "$(/opt/protoc/bin/protoc --version)" = 'libprotoc 35.1'
 ENV PROTOC=/opt/protoc/bin/protoc
-RUN rustup component add --toolchain 1.91.1 rustfmt clippy
+RUN rustup component add --toolchain 1.93.0 rustfmt clippy
 COPY --from=sccache-archive /sccache.tar.gz /tmp/sccache.tar.gz
 RUN mkdir /tmp/sccache && \
     tar -xzf /tmp/sccache.tar.gz --strip-components=1 -C /tmp/sccache && \
@@ -38,7 +38,16 @@ RUN mkdir /tmp/sccache && \
     test "$(sccache --version)" = 'sccache 0.17.0'
 COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-rust-build
 
-FROM cw-toolchain AS cw-builder
+FROM scratch AS codewire-verified-cw
+
+FROM scratch AS cw-builder-amd64
+COPY --from=codewire-verified-cw --chown=0:0 --chmod=0555 /cw /out/cw
+COPY --from=codewire-verified-cw --chown=0:0 --chmod=0444 /provenance.json /out/provenance/provenance.json
+
+# Keep the native ARM compiler path and the developer toolchain. Only amd64
+# receives the separately admitted static startup asset and its provenance.
+FROM cw-toolchain AS cw-builder-arm64
+ARG CODEWIRE_RUST_PROFILE=release
 ARG CODEWIRE_SCCACHE_MODE=disabled
 ARG SCCACHE_BUCKET
 ARG SCCACHE_ENDPOINT
@@ -52,10 +61,13 @@ RUN --mount=type=bind,target=/src,readonly \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,id=codewire-workspace-sccache-v1,target=/var/cache/sccache,sharing=shared \
     --mount=type=secret,id=aws_shared_credentials \
-    SCCACHE_BASEDIRS=/src codewire-rust-build cargo build --manifest-path /src/Cargo.toml --locked --release \
+    SCCACHE_BASEDIRS=/src codewire-rust-build cargo build --manifest-path /src/Cargo.toml --locked --profile "$CODEWIRE_RUST_PROFILE" \
       -p codewire-cli-bin --bin cw --target-dir /tmp/cargo-target && \
-    install -D -m 0755 /tmp/cargo-target/release/cw /out/cw && \
+    mkdir -p /out/provenance && \
+    install -D -m 0755 "/tmp/cargo-target/$CODEWIRE_RUST_PROFILE/cw" /out/cw && \
     rm -rf /tmp/cargo-target
+
+FROM cw-builder-${TARGETARCH} AS cw-builder
 
 # Prepare the loopback SSH acceptance target once, at image-build time. Extract
 # signed, version-pinned packages without executing maintainer scripts: this
@@ -108,11 +120,11 @@ RUN set -euo pipefail; \
       "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" \
       -o /tmp/node.tgz; \
     echo "${node_sha}  /tmp/node.tgz" | sha256sum -c -; \
-    tar -xzf /tmp/node.tgz -C /usr/local --strip-components=1; \
+    tar --no-same-owner -xzf /tmp/node.tgz -C /usr/local --strip-components=1; \
     curl --proto '=https' --tlsv1.2 -fsSL \
       "https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz" -o /tmp/go.tgz; \
     echo "${go_sha}  /tmp/go.tgz" | sha256sum -c -; \
-    tar -xzf /tmp/go.tgz -C /usr/local; \
+    tar --no-same-owner -xzf /tmp/go.tgz -C /usr/local; \
     rm -f /tmp/node.tgz /tmp/go.tgz; \
     node --version; npm --version; /usr/local/go/bin/go version
 
@@ -196,7 +208,8 @@ RUN chown -R -h root:root /opt/codewire/agents && chmod -R go-w /opt/codewire/ag
 # Keep the source-built CLI after the moving developer tools. The final image proves
 # and exposes the exact binary built from this source tree.
 COPY --from=stock-ssh-fixture /out/ /opt/codewire/fixtures/openssh/
-COPY --from=cw-builder /out/cw /usr/local/bin/cw
+COPY --from=cw-builder --chown=0:0 --chmod=0555 /out/cw /usr/local/bin/cw
+COPY --from=cw-builder --chown=0:0 /out/provenance/ /usr/local/share/codewire/cw-runtime/
 RUN /usr/local/bin/cw --version
 
 USER codewire

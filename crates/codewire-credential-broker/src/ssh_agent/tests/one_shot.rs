@@ -4,6 +4,7 @@ use codewire_protected_store::ssh_material::{
 };
 
 use super::*;
+use crate::process_test_support::isolated_process_fixture;
 
 fn material() -> SshAgentMaterial {
     let (_, protected) = generate_ed25519().unwrap().into_parts();
@@ -20,33 +21,39 @@ fn request(material: &SshAgentMaterial, flags: u32) -> v1::CredentialSshSignRequ
 
 #[tokio::test]
 async fn one_shot_signatures_return_after_cleanup_for_generated_and_encrypted_keys() {
-    let synthetic = Synthetic::new();
-    let owner = synthetic.owner();
-    for (kind, passphrase, flags) in [
-        ("ed25519", "", 0),
-        ("rsa", "SYNTHETIC_ONE_SHOT_PASSPHRASE", 2),
-        ("rsa", "SYNTHETIC_ONE_SHOT_PASSPHRASE", 4),
-    ] {
-        let raw = synthetic.key(kind, passphrase).await;
-        let passphrase =
-            (!passphrase.is_empty()).then(|| Zeroizing::new(passphrase.as_bytes().to_vec()));
-        let (_, protected) = import_openssh(raw, passphrase).unwrap().into_parts();
-        let material = decode_protected_material(protected).unwrap();
-        let request = request(&material, flags);
-        let blob = sign_once(
-            &owner,
-            material,
-            request,
-            Instant::now() + Duration::from_secs(30),
-            std::future::pending(),
-        )
-        .await
-        .unwrap();
-        assert!(!blob.is_empty());
-        synthetic.assert_clean();
-        assert_eq!(owner.capacity.available_permits(), MAX_AGENTS);
-    }
-    owner.shutdown().await.unwrap();
+    isolated_process_fixture(
+        "ssh_agent::tests::one_shot::one_shot_signatures_return_after_cleanup_for_generated_and_encrypted_keys",
+        async {
+            let synthetic = Synthetic::new();
+            let owner = synthetic.owner();
+            for (kind, passphrase, flags) in [
+                ("ed25519", "", 0),
+                ("rsa", "SYNTHETIC_ONE_SHOT_PASSPHRASE", 2),
+                ("rsa", "SYNTHETIC_ONE_SHOT_PASSPHRASE", 4),
+            ] {
+                let raw = synthetic.key(kind, passphrase).await;
+                let passphrase =
+                    (!passphrase.is_empty()).then(|| Zeroizing::new(passphrase.as_bytes().to_vec()));
+                let (_, protected) = import_openssh(raw, passphrase).unwrap().into_parts();
+                let material = decode_protected_material(protected).unwrap();
+                let request = request(&material, flags);
+                let blob = sign_once(
+                    &owner,
+                    material,
+                    request,
+                    Instant::now() + Duration::from_secs(30),
+                    std::future::pending(),
+                )
+                .await
+                .unwrap();
+                assert!(!blob.is_empty());
+                synthetic.assert_clean();
+                assert_eq!(owner.capacity.available_permits(), MAX_AGENTS);
+            }
+            owner.shutdown().await.unwrap();
+        },
+    )
+    .await;
 }
 
 #[tokio::test]

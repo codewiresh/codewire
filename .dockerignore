@@ -1,7 +1,8 @@
 .git
+**/.claude
 .gitea
 target
-node_modules
+**/node_modules
 *.md
 !package.json
 docs
@@ -28,3 +29,8 @@ go-server/.tmp
 **/__pycache__
 **/*.pyc
 **/*.pyo
+**/.venv
+**/.venv-*
+**/playwright-report
+**/test-results
+**/.npmrc

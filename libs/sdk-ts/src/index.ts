@@ -43,6 +43,18 @@ export { Codewire as default };
 export { CodewireError } from "./types.js";
 export { Environment } from "./environment.js";
 export { Files } from "./files.js";
+export { CwRuntime, CwRuntimeOutcomeUnknownError } from "./cw-runtime.js";
+export { PlatformAgents, PlatformAgentOutcomeUnknownError } from "./platform-agents.js";
+export type {
+  EnvironmentAgentScope, EnvironmentAgentSupport, EnvironmentAgentOperation,
+  EnvironmentAgentLaunch, EnvironmentAgentControl, MutateEnvironmentAgentRequest,
+  ListEnvironmentAgentsRequest, ReadEnvironmentAgentRequest,
+} from "./platform-agents.js";
+export type {
+  EnvironmentCwRuntimeIdentity, EnvironmentCwRuntimeIncarnation, EnvironmentCwRuntimeExpectation,
+  EnvironmentCwRuntimeOperation, EnvironmentCwRuntimeSelection,
+  UpdateEnvironmentCwRuntimeHeader, RollbackEnvironmentCwRuntimeRequest,
+} from "./cw-runtime.js";
 export { AccessProfiles } from "./access-profiles.js";
 export { Credentials, EnrollmentOutcomeUnknownError } from "./credentials.js";
 export type {

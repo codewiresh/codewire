@@ -28,7 +28,11 @@ assert_reason() {
 repo="$TMP/repo"
 remote="$TMP/remote.git"
 git init -q -b main "$repo"
+git -C "$repo" config gc.auto 0
+git -C "$repo" config maintenance.auto false
 git init -q --bare "$remote"
+git -C "$remote" config gc.auto 0
+git -C "$remote" config maintenance.auto false
 git -C "$repo" config user.name 'Receipt Fixture'
 git -C "$repo" config user.email receipt-fixture@codewire.invalid
 mkdir -p "$repo/scripts/ci/receipts" "$repo/scripts/ci/select" "$repo/docs"

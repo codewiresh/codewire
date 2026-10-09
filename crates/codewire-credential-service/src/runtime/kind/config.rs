@@ -211,6 +211,40 @@ async fn assert_restricted_role(pool: &PgPool, expected_role: &str) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kind_public_origin_accepts_saved_ports_and_rejects_unmanaged_origins() {
+        for port in [1024, 8090, 32767, 65535] {
+            let origin = format!("http://127.0.0.1:{port}");
+            assert_eq!(super::kind_public_origin(&origin).unwrap(), origin);
+        }
+        for origin in [
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:1023",
+            "http://127.0.0.1:65536",
+            "http://127.0.0.1:08090",
+            "http://127.0.0.1:+8090",
+            "http://127.0.0.1:8090/",
+            "http://127.0.0.1:8090/path",
+            "http://127.0.0.1:8090?x=1",
+            "http://127.0.0.1:8090#fragment",
+            "http://user@127.0.0.1:8090",
+            "http://localhost:8090",
+            "http://127.1:8090",
+            "http://[::1]:8090",
+            "http://0.0.0.0:8090",
+            "https://127.0.0.1:8090",
+            "http://127.0.0.1",
+            " http://127.0.0.1:8090",
+            "http://127.0.0.1:8090\n",
+        ] {
+            assert!(
+                super::kind_public_origin(origin).is_err(),
+                "accepted {origin:?}"
+            );
+        }
+    }
+
     use anyhow::{Context, Result, ensure};
 
     use super::*;

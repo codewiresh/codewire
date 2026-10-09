@@ -3758,6 +3758,8 @@ pub enum LocalCredentialError {
     ProtectedStore(#[from] ProtectedStoreError),
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod process_test_support;
 #[cfg(test)]
 mod rpc_tests;
 #[cfg(test)]

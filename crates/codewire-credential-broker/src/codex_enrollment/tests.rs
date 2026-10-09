@@ -1,5 +1,5 @@
 use super::*;
-use crate::process_test_support::{assert_group_exited, observe_group};
+use crate::process_test_support::{assert_group_exited, isolated_process_fixture, observe_group};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
 
@@ -9,7 +9,7 @@ const PROMPT: &str = "\nWelcome to Codex [v\x1b[90m0.149.0\x1b[0m]\n\x1b[90mOpen
 
 #[test]
 fn pinned_prompt_accepts_every_chunk_boundary_and_only_typed_challenge() {
-    for version in ["0.149.0", "0.153.4"] {
+    for version in ["0.149.0", "0.153.4", "0.157.0"] {
         assert_pinned_prompt(&PROMPT.replace("0.149.0", version));
     }
 }
@@ -55,20 +55,27 @@ fn prompt_rejects_wrong_url_codes_controls_duplicates_and_truncation() {
         PROMPT.replace("ABCD-EFGH", &"A".repeat(65)),
         PROMPT.replace("\x1b[94m", "\x1b[31m"),
         PROMPT.replace("ABCD-EFGH", "ABCD\x00EFGH"),
+        PROMPT.replace(
+            "If a website or another person gave you this code, cancel.",
+            "Continue anyway.",
+        ),
         format!("{PROMPT}{PROMPT}"),
         format!("{PROMPT}raw provider output\n"),
         "x".repeat(64 * 1024 + 1),
         "x".repeat(4097),
         PROMPT[..PROMPT.len() - 3].to_owned(),
     ];
-    for input in cases {
-        let mut parser = ChallengeParser::new(1234);
-        assert!(
-            parser
-                .push(input.as_bytes())
-                .and_then(|_| parser.finish())
-                .is_err()
-        );
+    for version in ["0.149.0", "0.153.4", "0.157.0"] {
+        for input in &cases {
+            let input = input.replace("0.149.0", version);
+            let mut parser = ChallengeParser::new(1234);
+            assert!(
+                parser
+                    .push(input.as_bytes())
+                    .and_then(|_| parser.finish())
+                    .is_err()
+            );
+        }
     }
     // The upstream fixture's 4+4 example is not a provider format guarantee.
     let mut parser = ChallengeParser::new(1234);
@@ -85,13 +92,15 @@ fn prompt_rejects_wrong_url_codes_controls_duplicates_and_truncation() {
 
 #[test]
 fn unsupported_version_and_all_errors_are_closed_and_value_blind() {
-    let mut parser = ChallengeParser::new(1234);
-    assert_eq!(
-        parser
-            .push(PROMPT.replace("0.149.0", "0.150.0").as_bytes())
-            .err(),
-        Some(CodexEnrollmentError::UnsupportedVersion)
-    );
+    for version in ["0.150.0", "0.157.1", "0.158.0"] {
+        let mut parser = ChallengeParser::new(1234);
+        assert_eq!(
+            parser
+                .push(PROMPT.replace("0.149.0", version).as_bytes())
+                .err(),
+            Some(CodexEnrollmentError::UnsupportedVersion)
+        );
+    }
     for error in [
         CodexEnrollmentError::Configuration,
         CodexEnrollmentError::Unavailable,
@@ -289,16 +298,38 @@ fn private_result_rejects_file_modes_links_fifo_size_and_removes_all_staging() {
 
 #[tokio::test]
 async fn completed_publication_cleans_private_home_without_logout() {
-    for newer in [false, true] {
-        assert_completed_publication(newer).await;
-    }
+    isolated_process_fixture(
+        "codex_enrollment::tests::completed_publication_cleans_private_home_without_logout",
+        async {
+            for version in ["0.149.0", "0.153.4"] {
+                assert_completed_publication(version).await;
+            }
+        },
+    )
+    .await;
 }
 
-async fn assert_completed_publication(newer: bool) {
+#[tokio::test]
+async fn codex_0_157_0_completes_isolated_enrollment_and_cleans_private_home() {
+    isolated_process_fixture(
+        "codex_enrollment::tests::codex_0_157_0_completes_isolated_enrollment_and_cleans_private_home",
+        async {
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                assert_completed_publication("0.157.0"),
+            )
+            .await
+            .expect("synthetic enrollment and cleanup must finish within the bound");
+        },
+    )
+    .await;
+}
+
+async fn assert_completed_publication(version: &str) {
     let fixture = Fixture::new();
-    if newer {
+    if version != "0.149.0" {
         std::fs::write(
-            fixture.root.path().join("codex-0.153.4"),
+            fixture.root.path().join(format!("codex-{version}")),
             b"synthetic version",
         )
         .unwrap();
@@ -322,241 +353,302 @@ async fn assert_completed_publication(newer: bool) {
 
 #[tokio::test]
 async fn definite_rejection_alone_attempts_logout_before_cleanup() {
-    let fixture = Fixture::new();
-    fixture
-        .completed()
-        .await
-        .finish(CodexPublicationOutcome::NotPublished)
-        .await
-        .unwrap();
-    fixture.assert_clean().await;
-    assert_eq!(
-        std::fs::read_to_string(fixture.root.path().join("logout.called")).unwrap(),
-        "logout\n"
-    );
+    isolated_process_fixture(
+        "codex_enrollment::tests::definite_rejection_alone_attempts_logout_before_cleanup",
+        async {
+            let fixture = Fixture::new();
+            fixture
+                .completed()
+                .await
+                .finish(CodexPublicationOutcome::NotPublished)
+                .await
+                .unwrap();
+            fixture.assert_clean().await;
+            assert_eq!(
+                std::fs::read_to_string(fixture.root.path().join("logout.called")).unwrap(),
+                "logout\n"
+            );
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn ambiguous_ack_and_dropped_completion_never_revoke_stored_material() {
-    for explicit in [true, false] {
-        let fixture = Fixture::new();
-        let mut completed = fixture.completed().await;
-        let imported = completed.take_import().unwrap();
-        let (bundle, _) = imported.into_parts();
-        assert!(!bundle.as_bytes().is_empty());
-        if explicit {
-            completed
-                .finish(CodexPublicationOutcome::Unknown)
-                .await
-                .unwrap();
-        } else {
-            drop(completed);
-        }
-        fixture.assert_clean().await;
-        assert!(!fixture.root.path().join("logout.called").exists());
-        // Unknown ACK cannot destroy the caller's already-transferred bundle.
-        assert!(!bundle.as_bytes().is_empty());
-    }
+    isolated_process_fixture(
+        "codex_enrollment::tests::ambiguous_ack_and_dropped_completion_never_revoke_stored_material",
+        async {
+            for explicit in [true, false] {
+                let fixture = Fixture::new();
+                let mut completed = fixture.completed().await;
+                let imported = completed.take_import().unwrap();
+                let (bundle, _) = imported.into_parts();
+                assert!(!bundle.as_bytes().is_empty());
+                if explicit {
+                    completed
+                        .finish(CodexPublicationOutcome::Unknown)
+                        .await
+                        .unwrap();
+                } else {
+                    drop(completed);
+                }
+                fixture.assert_clean().await;
+                assert!(!fixture.root.path().join("logout.called").exists());
+                // Unknown ACK cannot destroy the caller's already-transferred bundle.
+                assert!(!bundle.as_bytes().is_empty());
+            }
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn publication_wait_keeps_original_deadline_and_preserves_a_late_commit() {
-    let fixture = Fixture::new();
-    let mut completed = fixture.completed().await;
-    let imported = completed.take_import().unwrap();
-    let (bundle, _) = imported.into_parts();
-    let stored = std::sync::Mutex::new(None);
-    let (acknowledge, acknowledgement) = oneshot::channel::<()>();
+    isolated_process_fixture(
+        "codex_enrollment::tests::publication_wait_keeps_original_deadline_and_preserves_a_late_commit",
+        async {
+            let fixture = Fixture::new();
+            let mut completed = fixture.completed().await;
+            let imported = completed.take_import().unwrap();
+            let (bundle, _) = imported.into_parts();
+            let stored = std::sync::Mutex::new(None);
+            let (acknowledge, acknowledgement) = oneshot::channel::<()>();
 
-    // Almost the entire original login lifetime has already elapsed. Starting
-    // publication must not grant it another lifetime or wait forever for an ACK.
-    tokio::time::pause();
-    tokio::time::advance(ENROLLMENT_LIFETIME - Duration::from_secs(1)).await;
-    {
-        let publication = completed.wait_for_publication(async {
-            *stored.lock().unwrap() = Some(bundle);
-            acknowledgement.await
-        });
-        tokio::pin!(publication);
-        tokio::select! {
-            biased;
-            result = &mut publication => panic!("publication returned early: {result:?}"),
-            _ = tokio::task::yield_now() => {},
-        }
-        assert!(stored.lock().unwrap().is_some());
-        tokio::time::advance(Duration::from_secs(1)).await;
-        assert_eq!(publication.await.err(), Some(CodexEnrollmentError::Expired));
-    }
-    tokio::time::resume();
-    completed
-        .finish(CodexPublicationOutcome::Unknown)
-        .await
-        .unwrap();
-    fixture.assert_clean().await;
-    assert!(
-        acknowledge.send(()).is_err(),
-        "the timed-out caller cannot accept a late ACK"
-    );
-    assert!(
-        !stored
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .as_bytes()
-            .is_empty()
-    );
-    assert!(!fixture.root.path().join("logout.called").exists());
+            // Almost the entire original login lifetime has already elapsed. Starting
+            // publication must not grant it another lifetime or wait forever for an ACK.
+            tokio::time::pause();
+            tokio::time::advance(ENROLLMENT_LIFETIME - Duration::from_secs(1)).await;
+            {
+                let publication = completed.wait_for_publication(async {
+                    *stored.lock().unwrap() = Some(bundle);
+                    acknowledgement.await
+                });
+                tokio::pin!(publication);
+                tokio::select! {
+                    biased;
+                    result = &mut publication => panic!("publication returned early: {result:?}"),
+                    _ = tokio::task::yield_now() => {},
+                }
+                assert!(stored.lock().unwrap().is_some());
+                tokio::time::advance(Duration::from_secs(1)).await;
+                assert_eq!(publication.await.err(), Some(CodexEnrollmentError::Expired));
+            }
+            tokio::time::resume();
+            completed
+                .finish(CodexPublicationOutcome::Unknown)
+                .await
+                .unwrap();
+            fixture.assert_clean().await;
+            assert!(
+                acknowledge.send(()).is_err(),
+                "the timed-out caller cannot accept a late ACK"
+            );
+            assert!(
+                !stored
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .as_bytes()
+                    .is_empty()
+            );
+            assert!(!fixture.root.path().join("logout.called").exists());
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn cancellation_drains_wrapper_and_native_child_before_home_cleanup() {
-    let fixture = Fixture::new();
-    let pending = fixture.ready().await;
-    let processes = observe_group(fixture.root.path());
-    tokio::time::timeout(Duration::from_secs(5), pending.cancel())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(fixture.homes().is_empty());
-    assert_group_exited(processes).await;
-    fixture.release();
-    assert!(!fixture.root.path().join("native.finished").exists());
-    fixture.assert_clean().await;
+    isolated_process_fixture(
+        "codex_enrollment::tests::cancellation_drains_wrapper_and_native_child_before_home_cleanup",
+        async {
+            let fixture = Fixture::new();
+            let pending = fixture.ready().await;
+            let processes = observe_group(fixture.root.path());
+            tokio::time::timeout(Duration::from_secs(5), pending.cancel())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(fixture.homes().is_empty());
+            assert_group_exited(processes).await;
+            fixture.release();
+            assert!(!fixture.root.path().join("native.finished").exists());
+            fixture.assert_clean().await;
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn owner_shutdown_drains_dropped_pending_and_rejects_new_admission() {
-    let fixture = Fixture::new();
-    let pending = fixture.ready().await;
-    let processes = observe_group(fixture.root.path());
-    drop(pending);
-    tokio::time::timeout(Duration::from_secs(5), fixture.owner.shutdown())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_group_exited(processes).await;
-    assert!(fixture.homes().is_empty());
-    assert!(fixture.owner.start().is_err());
+    isolated_process_fixture(
+        "codex_enrollment::tests::owner_shutdown_drains_dropped_pending_and_rejects_new_admission",
+        async {
+            let fixture = Fixture::new();
+            let pending = fixture.ready().await;
+            let processes = observe_group(fixture.root.path());
+            drop(pending);
+            tokio::time::timeout(Duration::from_secs(5), fixture.owner.shutdown())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_group_exited(processes).await;
+            assert!(fixture.homes().is_empty());
+            assert!(fixture.owner.start().is_err());
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn original_deadline_expires_pending_exchange_and_drains_the_group() {
-    let fixture = Fixture::new();
-    let mut pending = fixture.owner.start().unwrap();
-    // The process remains blocked after printing a valid challenge; receiving it
-    // does not restart the original lifetime.
-    pending.challenge().await.unwrap();
-    let processes = observe_group(fixture.root.path());
-    tokio::time::pause();
-    tokio::time::advance(ENROLLMENT_LIFETIME).await;
-    tokio::time::resume();
-    let result = tokio::time::timeout(Duration::from_secs(5), pending.complete())
-        .await
-        .unwrap();
-    assert_eq!(result.err(), Some(CodexEnrollmentError::Expired));
-    assert_group_exited(processes).await;
-    fixture.assert_clean().await;
+    isolated_process_fixture(
+        "codex_enrollment::tests::original_deadline_expires_pending_exchange_and_drains_the_group",
+        async {
+            let fixture = Fixture::new();
+            let mut pending = fixture.owner.start().unwrap();
+            // The process remains blocked after printing a valid challenge; receiving it
+            // does not restart the original lifetime.
+            pending.challenge().await.unwrap();
+            let processes = observe_group(fixture.root.path());
+            tokio::time::pause();
+            tokio::time::advance(ENROLLMENT_LIFETIME).await;
+            tokio::time::resume();
+            let result = tokio::time::timeout(Duration::from_secs(5), pending.complete())
+                .await
+                .unwrap();
+            assert_eq!(result.err(), Some(CodexEnrollmentError::Expired));
+            assert_group_exited(processes).await;
+            fixture.assert_clean().await;
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn completed_deadline_and_shutdown_deny_late_import_without_logout() {
-    let fixture = Fixture::new();
-    let mut completed = fixture.completed().await;
-    fixture.owner.shutdown().await.unwrap();
-    assert_eq!(
-        completed.take_import().err(),
-        Some(CodexEnrollmentError::Cancelled)
-    );
-    completed
-        .finish(CodexPublicationOutcome::NotPublished)
-        .await
-        .unwrap();
-    assert!(!fixture.root.path().join("logout.called").exists());
+    isolated_process_fixture(
+        "codex_enrollment::tests::completed_deadline_and_shutdown_deny_late_import_without_logout",
+        async {
+            let fixture = Fixture::new();
+            let mut completed = fixture.completed().await;
+            fixture.owner.shutdown().await.unwrap();
+            assert_eq!(
+                completed.take_import().err(),
+                Some(CodexEnrollmentError::Cancelled)
+            );
+            completed
+                .finish(CodexPublicationOutcome::NotPublished)
+                .await
+                .unwrap();
+            assert!(!fixture.root.path().join("logout.called").exists());
 
-    let fixture = Fixture::new();
-    let mut completed = fixture.completed().await;
-    // Advance the actual fixed deadline; the handle has no deadline setter.
-    tokio::time::pause();
-    tokio::time::advance(ENROLLMENT_LIFETIME).await;
-    tokio::time::resume();
-    assert_eq!(
-        completed.take_import().err(),
-        Some(CodexEnrollmentError::Expired)
-    );
-    completed
-        .finish(CodexPublicationOutcome::Unknown)
-        .await
-        .unwrap();
-    fixture.assert_clean().await;
+            let fixture = Fixture::new();
+            let mut completed = fixture.completed().await;
+            // Advance the actual fixed deadline; the handle has no deadline setter.
+            tokio::time::pause();
+            tokio::time::advance(ENROLLMENT_LIFETIME).await;
+            tokio::time::resume();
+            assert_eq!(
+                completed.take_import().err(),
+                Some(CodexEnrollmentError::Expired)
+            );
+            completed
+                .finish(CodexPublicationOutcome::Unknown)
+                .await
+                .unwrap();
+            fixture.assert_clean().await;
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn enrollment_capacity_is_finite_and_shutdown_serializes_spawn() {
-    let fixture = Fixture::new();
-    let mut pending = Vec::new();
-    for _ in 0..MAX_ENROLLMENTS {
-        pending.push(fixture.owner.start().unwrap());
-    }
-    assert_eq!(
-        fixture.owner.start().err(),
-        Some(CodexEnrollmentError::Unavailable)
-    );
-    drop(pending);
-    fixture.assert_clean().await;
+    isolated_process_fixture(
+        "codex_enrollment::tests::enrollment_capacity_is_finite_and_shutdown_serializes_spawn",
+        async {
+            let fixture = Fixture::new();
+            let mut pending = Vec::new();
+            for _ in 0..MAX_ENROLLMENTS {
+                pending.push(fixture.owner.start().unwrap());
+            }
+            assert_eq!(
+                fixture.owner.start().err(),
+                Some(CodexEnrollmentError::Unavailable)
+            );
+            drop(pending);
+            fixture.assert_clean().await;
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn invalid_output_or_result_cannot_publish_and_cleans_staging() {
-    for invalid_output in [true, false] {
-        let fixture = Fixture::new();
-        if invalid_output {
-            std::fs::write(fixture.root.path().join("invalid-output"), b"synthetic").unwrap();
-        } else {
-            std::fs::write(
-                fixture.root.path().join("synthetic-auth.fixture.json"),
-                b"not provider material",
-            )
-            .unwrap();
-        }
-        fixture.release();
-        let pending = fixture.owner.start().unwrap();
-        let error = tokio::time::timeout(Duration::from_secs(5), pending.complete())
-            .await
-            .unwrap()
-            .err()
-            .unwrap();
-        assert_eq!(
-            error,
-            if invalid_output {
-                CodexEnrollmentError::InvalidOutput
-            } else {
-                CodexEnrollmentError::InvalidResult
+    isolated_process_fixture(
+        "codex_enrollment::tests::invalid_output_or_result_cannot_publish_and_cleans_staging",
+        async {
+            for invalid_output in [true, false] {
+                let fixture = Fixture::new();
+                if invalid_output {
+                    std::fs::write(fixture.root.path().join("invalid-output"), b"synthetic")
+                        .unwrap();
+                } else {
+                    std::fs::write(
+                        fixture.root.path().join("synthetic-auth.fixture.json"),
+                        b"not provider material",
+                    )
+                    .unwrap();
+                }
+                fixture.release();
+                let pending = fixture.owner.start().unwrap();
+                let error = tokio::time::timeout(Duration::from_secs(5), pending.complete())
+                    .await
+                    .unwrap()
+                    .err()
+                    .unwrap();
+                assert_eq!(
+                    error,
+                    if invalid_output {
+                        CodexEnrollmentError::InvalidOutput
+                    } else {
+                        CodexEnrollmentError::InvalidResult
+                    }
+                );
+                assert!(!format!("{error} {error:?}").contains("synthetic"));
+                fixture.assert_clean().await;
             }
-        );
-        assert!(!format!("{error} {error:?}").contains("synthetic"));
-        fixture.assert_clean().await;
-    }
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn failed_child_with_private_result_is_definitely_unpublished_and_logs_out() {
-    let fixture = Fixture::new();
-    std::fs::write(fixture.root.path().join("fail-after-result"), b"synthetic").unwrap();
-    fixture.release();
-    let pending = fixture.owner.start().unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), pending.complete())
-            .await
-            .unwrap()
-            .err(),
-        Some(CodexEnrollmentError::Failed)
-    );
-    fixture.assert_clean().await;
-    assert_eq!(
-        std::fs::read_to_string(fixture.root.path().join("logout.called")).unwrap(),
-        "logout\n"
-    );
+    isolated_process_fixture(
+        "codex_enrollment::tests::failed_child_with_private_result_is_definitely_unpublished_and_logs_out",
+        async {
+            let fixture = Fixture::new();
+            std::fs::write(fixture.root.path().join("fail-after-result"), b"synthetic").unwrap();
+            fixture.release();
+            let pending = fixture.owner.start().unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), pending.complete())
+                    .await
+                    .unwrap()
+                    .err(),
+                Some(CodexEnrollmentError::Failed)
+            );
+            fixture.assert_clean().await;
+            assert_eq!(
+                std::fs::read_to_string(fixture.root.path().join("logout.called")).unwrap(),
+                "logout\n"
+            );
+        },
+    )
+    .await;
 }
 
 #[tokio::test]

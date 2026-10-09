@@ -14,6 +14,8 @@ pub mod ch_api;
 #[cfg(target_os = "linux")]
 pub mod cloud_hypervisor;
 pub mod control;
+#[cfg(target_os = "linux")]
+pub mod cw_runtime;
 #[cfg(target_os = "macos")]
 pub mod darwin;
 #[cfg(target_os = "linux")]

@@ -186,6 +186,20 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertTrue(admitted(receipt=True, producer_results=("skipped",) * 3))
         self.assertFalse(admitted(selection_ok=False, kind=False, producer_results=("skipped",) * 3))
 
+    def test_kind_consumer_selects_a_private_saved_profile(self) -> None:
+        edge = self.jobs["edge-kind"]
+        kind = named_step(edge, "Run the shard Kind gate")
+        self.assertEqual(kind["if"], KIND_STEP_IF)
+        self.assertEqual(kind.get("env"), {
+            "KIND_CLUSTER_NAME": "codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}",
+            "CLUSTER": "codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}",
+            "CODEWIRE_KIND_PROFILE_ROOT": "${{ runner.temp }}/kind-profiles",
+            "KIND_SHARD_SUITES": "${{ matrix.shard.suites }}",
+            "CODEWIRE_KIND_DASHBOARD_WORKERS": "${{ matrix.shard.playwright_workers }}",
+        })
+        self.assertNotIn("CLUSTER", edge["env"],
+                         "static fixtures must not inherit an uncreated profile")
+
     def test_consumer_downloads_bound_manifests_outside_checkout(self) -> None:
         edge = self.jobs["edge-kind"]
         self.assertEqual(edge["env"]["CODEWIRE_KIND_PRODUCT_IMAGE_MODE"], "prebuilt-ci")
@@ -283,6 +297,9 @@ class WorkflowContractTests(unittest.TestCase):
             with self.subTest(step=step_name):
                 step = named_step(edge, step_name)
                 self.assertEqual(step["env"]["KIND_CLUSTER_NAME"], cluster_name)
+                self.assertEqual(step["env"]["CLUSTER"], cluster_name)
+                self.assertEqual(step["env"]["CODEWIRE_KIND_PROFILE_ROOT"],
+                                 "${{ runner.temp }}/kind-profiles")
         shard = named_step(edge, "Run the shard Kind gate")
         self.assertIn('scripts/ci/verify/kind-e2e.sh shard "${suites[@]}"', shard["run"])
         self.assertEqual(
@@ -293,7 +310,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(indices, sorted(indices))
         self.assertEqual(
             named_step(edge, "Delete the shard Kind cluster")["run"],
-            'kind delete cluster --name "$KIND_CLUSTER_NAME" || true',
+            'scripts/ci/verify/kind-e2e.sh down || true',
         )
         cancel = named_step(edge, "Cancel the run after this failure")
         self.assertIs(edge["steps"][-1], cancel)
@@ -364,6 +381,17 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("edge-kind", self.jobs["required-verification"]["needs"])
 
+    def test_shard_teardown_requires_the_saved_cluster_identity(self) -> None:
+        edge = self.jobs["edge-kind"]
+        shard = named_step(edge, "Run the shard Kind gate")
+        teardown = named_step(edge, "Delete the shard Kind cluster")
+        self.assertEqual(shard["env"]["CLUSTER"], teardown["env"]["CLUSTER"])
+        self.assertEqual(shard["env"]["CODEWIRE_KIND_PROFILE_ROOT"],
+                         teardown["env"]["CODEWIRE_KIND_PROFILE_ROOT"])
+        self.assertEqual(teardown["run"], "scripts/ci/verify/kind-e2e.sh down || true")
+        for step in edge["steps"]:
+            self.assertNotIn("kind delete cluster", step.get("run", ""))
+
     def test_download_guard_exports_only_a_fresh_external_directory(self) -> None:
         guard = named_step(
             self.jobs["edge-kind"],
@@ -408,7 +436,7 @@ class WorkflowContractTests(unittest.TestCase):
     def test_integrated_runtime_order_remains_atomic(self) -> None:
         source = INTEGRATED.read_text(encoding="utf-8")
         body = source.split("  trap cleanup EXIT", 1)[1].split('  log "green"', 1)[0]
-        calls = re.findall(r"^  ([a-z][a-z0-9_]*)$", body, flags=re.MULTILINE)
+        calls = [call for call in re.findall(r"^  ([a-z][a-z0-9_]*)(?: \|\| return \$\?)?$", body, flags=re.MULTILINE) if call != "fi"]
         self.assertEqual(calls, [
             "ingress_path_drift_check",
             "build_images_and_smokes",
@@ -825,6 +853,10 @@ class CommonConsumerContractTests(unittest.TestCase):
                 export KIND_POSTGRES_HOST_PORT=25432
                 mkdir -p "$RUN_DIR" "$FIXTURE_ROOT/artifacts"
                 source "$ROOT/scripts/ci/verify/kind/common.sh"
+                # Publication locking has its own real-lock/profile fixture.
+                # This fixture owns only the closed producer/consumer calls.
+                acquire_kind_build_publication_lock() { :; }
+                release_kind_build_publication_lock() { :; }
 
                 record() { printf '%s\n' "$*" >>"$CALLS"; }
                 fail() { printf 'fixture failure: %s\n' "$*" >&2; exit 1; }
@@ -1007,6 +1039,9 @@ class CommonConsumerContractTests(unittest.TestCase):
             harness.chmod(0o755)
             calls = fixture / "calls"
             environment = os.environ.copy()
+            # This consumer fixture selects the legacy cluster above; a caller's
+            # saved-profile selector belongs to its separate profile fixtures.
+            environment.pop("CLUSTER", None)
             environment.update({"FIXTURE_ROOT": str(fixture), "CALLS": str(calls)})
             result = subprocess.run(
                 ["bash", str(harness)],

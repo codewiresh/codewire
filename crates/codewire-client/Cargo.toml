@@ -61,4 +61,6 @@ keyring = { workspace = true, optional = true, features = ["windows-native"] }
 keyring = { workspace = true, optional = true, features = ["linux-native-sync-persistent"] }
 
 [dev-dependencies]
+codewire-cw-release = { workspace = true }
+rustix = { workspace = true }
 tempfile = { workspace = true }

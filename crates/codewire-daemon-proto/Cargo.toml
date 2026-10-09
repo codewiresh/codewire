@@ -8,6 +8,7 @@ license = "AGPL-3.0-only"
 description = "Generated protobuf message types for the Codewire daemon and broker boundary."
 
 [dependencies]
+sha2 = { workspace = true }
 codewire-workload-secrets = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }

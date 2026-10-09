@@ -196,7 +196,20 @@ fn build_process_env_from(
 }
 
 pub fn load_persisted_environment(config: &Config) -> Vec<String> {
-    let path: PathBuf = config.home_root.join(".codewire/environment.json");
+    let path: PathBuf = match &config.host {
+        Some(host) => {
+            // Never consult HOME/.codewire in host placement, even as fallback.
+            if config.validate_host().is_err() {
+                return Vec::new();
+            }
+            let path = host.state_root.join("environment.json");
+            if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+                return Vec::new();
+            }
+            path
+        }
+        None => config.home_root.join(".codewire/environment.json"),
+    };
     let Ok(data) = fs::read(&path) else {
         return Vec::new();
     };
@@ -272,6 +285,7 @@ mod tests {
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,
             managed_credential_clients: Default::default(),
+            host: None,
             launch_projection: None,
         }
     }
@@ -298,6 +312,42 @@ mod tests {
             native: None,
         });
         config
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn host_saved_environment_uses_only_state_root_and_preserves_home_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        fs::create_dir_all(home.join(".codewire")).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        let home_path = home.join(".codewire/environment.json");
+        fs::write(&home_path, br#"{"ORIGIN":"home-must-not-be-read"}"#).unwrap();
+        let mut config = test_config(home);
+        config.host = Some(crate::HostConfig {
+            state_root: state.clone(),
+        });
+        assert!(load_persisted_environment(&config).is_empty());
+        fs::write(
+            state.join("environment.json"),
+            br#"{"ORIGIN":"explicit-host-state"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_persisted_environment(&config),
+            vec!["ORIGIN=explicit-host-state"]
+        );
+        assert_eq!(
+            fs::read(&home_path).unwrap(),
+            br#"{"ORIGIN":"home-must-not-be-read"}"#
+        );
+        #[cfg(unix)]
+        {
+            fs::remove_file(state.join("environment.json")).unwrap();
+            std::os::unix::fs::symlink(&home_path, state.join("environment.json")).unwrap();
+            assert!(load_persisted_environment(&config).is_empty());
+        }
     }
 
     #[test]

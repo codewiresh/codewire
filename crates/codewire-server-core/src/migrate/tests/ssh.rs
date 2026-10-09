@@ -78,7 +78,7 @@ async fn ssh_staged_upgrade_preserves_history_envelopes_locks_and_second_startup
         ensure_schema(&db.url).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let after = applied_migrations(&pool).await?;
-        anyhow::ensure!(after.len() == MIGRATOR.iter().count() && after[..25] == before && after[25].0 == VERSION);
+        anyhow::ensure!(after.len() == MIGRATOR.iter().filter(|m| m.migration_type.is_up_migration()).count() && after[..25] == before && after[25].0 == VERSION);
         public_columns(&pool).await?;
         anyhow::ensure!(sqlx::query_as::<_,(String,String)>(rows_sql).fetch_one(&pool).await? == rows);
         let absent: bool = sqlx::query_scalar("SELECT ssh_public_key IS NULL AND ssh_fingerprint IS NULL FROM platform_credentials WHERE id='ssh-retained'").fetch_one(&pool).await?;

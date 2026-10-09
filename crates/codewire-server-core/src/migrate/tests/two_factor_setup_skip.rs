@@ -86,7 +86,11 @@ async fn two_factor_setup_skip_upgrade_keeps_sessions_and_adds_an_unset_choice()
             .await?;
         let after = applied_migrations(&pool).await?;
         anyhow::ensure!(
-            after.len() == MIGRATOR.iter().count()
+            after.len()
+                == MIGRATOR
+                    .iter()
+                    .filter(|m| m.migration_type.is_up_migration())
+                    .count()
                 && after[..29] == before
                 && after[29].0 == VERSION
         );

@@ -87,6 +87,7 @@ daemon_service! {
     get_session(daemon_v1::GetSessionRequest) -> daemon_v1::GetSessionResponse,
     stop_session(daemon_v1::StopSessionRequest) -> daemon_v1::StopSessionResponse,
     restart_session(daemon_v1::RestartSessionRequest) -> daemon_v1::RestartSessionResponse,
+    send_session_input(daemon_v1::SendSessionInputRequest) -> daemon_v1::SendSessionInputResponse,
     read_session_output(daemon_v1::ReadSessionOutputRequest) -> daemon_v1::ReadSessionOutputResponse,
     attach_session(Streaming<daemon_v1::SessionAttachMessage>) -> Self::AttachSessionStream,
     exec_session(Streaming<daemon_v1::ExecMessage>) -> Self::ExecSessionStream,

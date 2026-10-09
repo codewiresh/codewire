@@ -49,6 +49,20 @@ pub struct NodePublic {
 }
 
 impl NodePrivate {
+    /// Admit a control-channel peer before treating a box as possession proof.
+    ///
+    /// DERP's existing byte-address parsing remains unchanged. A separate
+    /// application protocol must reject noncontributory Curve25519 inputs;
+    /// otherwise an all-zero shared secret can impersonate a key holder.
+    pub fn require_contributory(&self, peer: &NodePublic) -> Result<(), Error> {
+        let secret = crate::wg::StaticSecret::from(self.secret.to_bytes());
+        let public = crate::wg::PublicKey::from(*peer.as_bytes());
+        if !secret.diffie_hellman(&public).was_contributory() {
+            return Err(Error::Crypto("noncontributory control public key"));
+        }
+        Ok(())
+    }
+
     /// Generate a fresh node private key.
     pub fn generate<R: RngCore + CryptoRng>(rng: &mut R) -> Self {
         Self {
@@ -134,5 +148,31 @@ impl std::fmt::Debug for NodePublic {
             write!(f, "{b:02x}")?;
         }
         write!(f, "…)")
+    }
+}
+
+#[cfg(test)]
+mod member_control_tests {
+    use super::*;
+
+    #[test]
+    fn member_control_refuses_nonzero_low_order_keys_and_accepts_generated_keys() {
+        let secret = NodePrivate::from_raw([0x42; KEY_LEN]);
+        for first in [0, 1] {
+            let mut bytes = [0; KEY_LEN];
+            bytes[0] = first;
+            assert!(secret
+                .require_contributory(&NodePublic::from_raw(bytes))
+                .is_err());
+        }
+        let other = NodePrivate::from_raw([0x73; KEY_LEN]);
+        secret.require_contributory(&other.public()).unwrap();
+        let box_bytes = secret
+            .seal_to(&other.public(), b"control", &mut rand::rngs::OsRng)
+            .unwrap();
+        assert_eq!(
+            other.open_from(&secret.public(), &box_bytes).unwrap(),
+            b"control"
+        );
     }
 }

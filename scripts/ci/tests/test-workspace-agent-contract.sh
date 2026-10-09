@@ -38,6 +38,30 @@ cat >"$work/bin/getent" <<'EOF'
 [ "$*" = 'passwd codewire' ] || exit 99
 printf 'codewire:x:1000:%s:Codewire:/home/codewire:/bin/bash\n' "${FAKE_CODEWIRE_PASSWD_GID:-1000}"
 EOF
+cat >"$work/bin/stat" <<'EOF'
+#!/bin/sh
+# Model image ownership for only the four checked ancestry paths. The host's
+# /usr/local need not be root-owned. Directory/link checks and real modes stay
+# unchanged; every other stat delegates without translation.
+if [ "$#" -eq 3 ] && [ "$1" = --format=%u:%g:%a ] && [ "$2" = -- ]; then
+  case "$3" in
+    /|/usr|/usr/local|"$FAKE_BIN_ROOT")
+      uid=0; gid=0
+      if [ "$3" = "$FAKE_BIN_ROOT" ]; then
+        [ "${FAIL_BIN_STAT:-false}" = false ] || exit 42
+        if [ "${MALFORMED_BIN_STAT:-false}" = true ]; then
+          printf '0:0:0755:unexpected\n'
+          exit 0
+        fi
+        uid="${FAKE_BIN_UID:-0}"; gid="${FAKE_BIN_GID:-0}"
+      fi
+      mode="$(/usr/bin/stat --format=%a -- "$3")" || exit "$?"
+      printf '%s:%s:%s\n' "$uid" "$gid" "$mode"
+      exit 0 ;;
+  esac
+fi
+exec /usr/bin/stat "$@"
+EOF
 cat >"$work/bin/agent" <<'EOF'
 #!/bin/sh
 if [ "${FAIL_AGENT:-}" = "$(basename "$0")" ]; then
@@ -76,7 +100,7 @@ cat >"$work/interactive-bash" <<'EOF'
 [ "$#" -eq 2 ] && [ "$1" = -ic ] && [ "$2" = 'printf %s "$-"' ] || exit 99
 printf '%s' "$FAKE_INTERACTIVE_FLAGS"
 EOF
-chmod +x "$work/bin/id" "$work/bin/getent" "$work/bin/agent" "$work/bin/npm" "$work/bin/mkdir" \
+chmod +x "$work/bin/id" "$work/bin/getent" "$work/bin/stat" "$work/bin/agent" "$work/bin/npm" "$work/bin/mkdir" \
   "$work/interactive-bash"
 cat >"$work/ssh/usr/sbin/sshd" <<'EOF'
 #!/bin/sh
@@ -133,6 +157,11 @@ run_contract() {
     CODEWIRE_EXPECTED_PIDS_MAX=2048 \
     FAKE_CODEWIRE_GID="${FAKE_CODEWIRE_GID:-1000}" \
     FAKE_CODEWIRE_PASSWD_GID="${FAKE_CODEWIRE_PASSWD_GID:-1000}" \
+    FAKE_BIN_ROOT="$work/bin" \
+    FAKE_BIN_UID="${FAKE_BIN_UID:-0}" \
+    FAKE_BIN_GID="${FAKE_BIN_GID:-0}" \
+    FAIL_BIN_STAT="${FAIL_BIN_STAT:-false}" \
+    MALFORMED_BIN_STAT="${MALFORMED_BIN_STAT:-false}" \
     FAIL_AGENT="${FAIL_AGENT:-}" \
     FAKE_CODEX_VERSION="${FAKE_CODEX_VERSION:-0.157.0}" \
     FAKE_PREFIX_STATE="$work/prefix-state" \
@@ -153,6 +182,33 @@ grep -Fxq 'codex-cli 0.157.0' "$work/success.out" || fail 'agent checks did not 
 grep -Fxq 'npm dry-run OK' "$work/success.out" || fail 'Codex install-plan check did not run'
 grep -Fxq 'workspace image verification: inert SSH fixture contract passed' "$work/success.out" ||
   fail 'prepared SSH fixture was not checked'
+
+for bin_failure in wrong-uid wrong-gid group-write other-write symlink stat-error malformed; do
+  rm -f "$work/prefix-state"
+  (
+    case "$bin_failure" in
+      wrong-uid) FAKE_BIN_UID=1001 ;;
+      wrong-gid) FAKE_BIN_GID=1001 ;;
+      group-write) chmod g+w "$work/bin" ;;
+      other-write) chmod o+w "$work/bin" ;;
+      symlink) mv "$work/bin" "$work/bin.real"; ln -s bin.real "$work/bin" ;;
+      stat-error) FAIL_BIN_STAT=true ;;
+      malformed) MALFORMED_BIN_STAT=true ;;
+    esac
+    if run_contract >"$work/bin-failure.out" 2>"$work/bin-failure.err"; then
+      fail "invalid fixed launcher ancestry was accepted: $bin_failure"
+    fi
+    [[ ! -s "$work/bin-failure.out" ]] || fail "ancestry $bin_failure reached agent checks"
+    [[ ! -e "$work/prefix-state" ]] || fail "ancestry $bin_failure prepared the npm prefix"
+    grep -Eq '^workspace image verification: (invalid|untrusted) fixed launcher ancestry: ' "$work/bin-failure.err" ||
+      fail "ancestry $bin_failure was not reported"
+  )
+  if [[ -L "$work/bin" ]]; then
+    rm "$work/bin"
+    mv "$work/bin.real" "$work/bin"
+  fi
+  chmod go-w "$work/bin"
+done
 
 if FAKE_CODEWIRE_GID=1001 run_contract >"$work/process-gid.out" 2>"$work/process-gid.err"; then
   fail 'process GID drift was accepted'

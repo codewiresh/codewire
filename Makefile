@@ -1,5 +1,13 @@
-.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-deploy kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-runtime-images kind-watch kind-status design-system design-check e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-daemon build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
+.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-list kind-down kind-deploy kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-runtime-images kind-watch kind-status design-system design-check e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-daemon build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
 .PHONY: dogfood cli-build cli-smoke cli-install cli-install-user cli-install-system scan-supply-chain verify-dashboard-image sync-local-secrets accept-secrets-credentials
+
+# The older codewire/default-namespace topology has its own fixed endpoints.
+# Reject named selection before its build prerequisites or runtime mutations.
+ifneq ($(strip $(CLUSTER)),)
+ifneq ($(filter up up-billing down deploy-local deploy-local-static local-runtime rollout-local-runtime prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime kind-billing-listen test-ui-kind test-ui-kind-billing test-billing-smoke-kind sync-local-secrets,$(MAKECMDGOALS)),)
+$(error CLUSTER selects saved product-gate profiles; use kind-up/kind-down/kind-deploy/kind-watch/kind-test/kind-status for this topology)
+endif
+endif
 
 # Default target
 help:
@@ -28,6 +36,9 @@ help:
 	@echo "  make test-ui-kind-billing - Run Playwright billing tests against local kind"
 	@echo "  make test-billing-smoke-kind - Run Rust billing runtime smoke + Playwright billing against local kind"
 	@echo "  make e2e-kind     - Run the isolated Rust-owned Kind product gate"
+	@echo "  make kind-up CLUSTER=<name> - Create or validate a saved isolated cluster"
+	@echo "  make kind-list   - List saved clusters and endpoints on this Docker daemon"
+	@echo "  make kind-down CLUSTER=<name> - Remove only the recorded cluster node"
 	@echo "  make accept-secrets-credentials - Run the checked-in #1922 acceptance matrix"
 	@echo "  make scan-supply-chain - Run local policy plus the strict external-scanner equivalent"
 	@echo "  make verify-dashboard-image - Build and inspect the production Rust/Zola image"
@@ -80,7 +91,7 @@ export
 export DATABASE_URL ?= postgres://codewire:codewire@localhost:54320/codewire?sslmode=disable
 export RUST_LOG ?= codewire_server=debug,tower_http=debug
 export DRY_RUN ?= true
-export KUBE_CONTEXT ?= kind-codewire
+export KUBE_CONTEXT ?= $(if $(strip $(CLUSTER)),kind-$(CLUSTER),kind-codewire)
 DASHBOARD_PORT ?= 5173
 KUBECTL ?= kubectl --context $(KUBE_CONTEXT)
 AGENT_SANDBOX_REPO ?= https://github.com/noeljackson/agent-sandbox.git
@@ -191,13 +202,25 @@ dashboard-watch-kind:
 # (same KIND_CLUSTER_NAME). KIND_PUBLIC_ORIGIN is the browser origin registered
 # as the GitHub App callback origin; the default is the owner workstation's
 # Tailnet URL, served by `tailscale serve` from the watcher on 127.0.0.1:5182.
+ifeq ($(strip $(CLUSTER)),)
 KIND_PUBLIC_ORIGIN ?= http://nj.example.invalid:4174
 # The cluster ingress on the same host, for browser terminals and streams.
 KIND_BROWSER_API_ORIGIN ?= http://nj.example.invalid:8090
+KIND_ORIGIN_ENV = KIND_PUBLIC_ORIGIN="$(KIND_PUBLIC_ORIGIN)" KIND_BROWSER_API_ORIGIN="$(KIND_BROWSER_API_ORIGIN)"
+else
+export CLUSTER
+KIND_ORIGIN_ENV =
+endif
 
 # Create and deploy a new retained cluster without running the test suites.
 kind-up:
 	./scripts/ci/verify/kind-e2e.sh up
+
+kind-list:
+	python3 scripts/dev/kind/cluster-profile.py list
+
+kind-down:
+	./scripts/ci/verify/kind-e2e.sh down
 
 # Rebuild one service from current source into the retained cluster, e.g.
 # `make kind-deploy SERVICE=credential-service`.
@@ -211,7 +234,7 @@ kind-test:
 	KIND_TEST_SUITES="$(SUITES)" ./scripts/dev/kind/test-selected.sh
 
 kind-credentials-real:
-	KIND_PUBLIC_ORIGIN="$(KIND_PUBLIC_ORIGIN)" ./scripts/ci/verify/kind-e2e.sh credentials real
+	$(KIND_ORIGIN_ENV) ./scripts/ci/verify/kind-e2e.sh credentials real
 
 kind-credentials-fake:
 	./scripts/ci/verify/kind-e2e.sh credentials fake
@@ -223,10 +246,10 @@ kind-runtime-images:
 	./scripts/dev/kind/dev-loop.sh runtime-images
 
 kind-watch:
-	KIND_PUBLIC_ORIGIN="$(KIND_PUBLIC_ORIGIN)" KIND_BROWSER_API_ORIGIN="$(KIND_BROWSER_API_ORIGIN)" ./scripts/dev/kind/dev-loop.sh watch
+	$(KIND_ORIGIN_ENV) ./scripts/dev/kind/dev-loop.sh watch
 
 kind-status:
-	KIND_PUBLIC_ORIGIN="$(KIND_PUBLIC_ORIGIN)" ./scripts/dev/kind/dev-loop.sh status
+	$(KIND_ORIGIN_ENV) ./scripts/dev/kind/dev-loop.sh status
 
 design-system:
 	python3 scripts/dev/design-system-server.py
@@ -367,7 +390,7 @@ cli-install-system:
 # Build the workspace daemon support image for kind/local runtime smoke.
 build-daemon:
 	@echo "Building daemon image via deployments/docker/daemon.Dockerfile..."
-	docker buildx bake --file docker-bake.hcl --pull --load --set 'daemon.tags=$(REGISTRY)/codewire/daemon:local' daemon
+	scripts/ci/images/build-product-images.sh --pull --load --set 'daemon.tags=$(REGISTRY)/codewire/daemon:local' daemon
 
 # Deploy the local Rust runtime into kind.
 deploy-local: local-runtime build-dashboard-local
@@ -546,7 +569,7 @@ test-sdk-go:
 	cd libs/sdk-go && GOWORK=off go build ./... && GOWORK=off go vet ./... && GOWORK=off go test ./... -count=1 -timeout 60s
 
 test-sdk-ts:
-	cd libs/sdk-ts && npm ci --silent --ignore-scripts && npm run typecheck && npm test
+	cd libs/sdk-ts && npm ci --silent --install-links --ignore-scripts && npm run typecheck && npm test
 
 test-sdk-python:
 	cd libs/sdk-python && \
@@ -554,7 +577,7 @@ test-sdk-python:
 	  .venv/bin/pip install --require-hashes -r requirements.lock -q && \
 	  .venv/bin/pip install --no-deps . -q && \
 	  env -u CODEWIRE_API_KEY -u CODEWIRE_ORG_ID -u CODEWIRE_BASE_URL \
-	    PYTHONPATH="$(CURDIR)/libs/gen-python$${PYTHONPATH:+:$$PYTHONPATH}" .venv/bin/python -m unittest test_sdk test_transport -v && \
+	    PYTHONPATH="$(CURDIR)/libs/gen-python$${PYTHONPATH:+:$$PYTHONPATH}" .venv/bin/python -m unittest test_sdk test_transport test_cw_runtime test_platform_agents -v && \
 	  (cd /tmp && $(CURDIR)/libs/sdk-python/.venv/bin/python -c 'from codewire._transport import ConnectTransport; from codewire.errors import CodewireError; from codewire.v1.api_key_connect import ApiKeyServiceClientSync; from google.rpc.error_details_pb2 import BadRequest; assert CodewireError and BadRequest and isinstance(ConnectTransport("https://codewire.example", "").client(ApiKeyServiceClientSync), ApiKeyServiceClientSync)')
 	scripts/runtime/tests/test-run-sdk-python-e2e.sh
 
@@ -569,4 +592,4 @@ sdk-e2e-python: test-sdk-python
 	  .venv/bin/python -m unittest e2e_test -v
 
 sdk-e2e-ts:
-	cd libs/sdk-ts && npm ci --silent --ignore-scripts && ./node_modules/.bin/tsx src/e2e.ts
+	cd libs/sdk-ts && npm ci --silent --install-links --ignore-scripts && ./node_modules/.bin/tsx src/e2e.ts

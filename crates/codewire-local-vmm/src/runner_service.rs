@@ -51,7 +51,7 @@ const MAXIMUM_GUEST_PROGRESS_FRAMES: usize = 64;
 const RUNNER_WATCH_BUFFER: usize = 8;
 // Bump for every detached-runner behavior change, even if the protobuf
 // message layout itself remains wire-compatible.
-const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 3;
+const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 4;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =
@@ -415,7 +415,9 @@ fn runner_protocol_info_rpc_error(status: Status) -> RunnerServiceError {
     }
 }
 
-fn admit_runner_protocol_info(info: &v1::RunnerProtocolInfo) -> Result<(), RunnerServiceError> {
+pub(crate) fn admit_runner_protocol_info(
+    info: &v1::RunnerProtocolInfo,
+) -> Result<(), RunnerServiceError> {
     if info.protocol_version != NATIVE_RUNNER_PROTOCOL_VERSION {
         return Err(RunnerServiceError::RunnerProtocolMismatch {
             expected: NATIVE_RUNNER_PROTOCOL_VERSION,
@@ -440,6 +442,7 @@ impl RunnerEvents {
             generation,
             artifact_generation: artifact_generation.clone(),
             error_code: String::new(),
+            cw_runtime_catalog_generation: String::new(),
         };
         let initial = v1::RunnerEvent {
             sequence: 1,
@@ -464,7 +467,13 @@ impl RunnerEvents {
         stage: v1::RunnerStage,
         guest: Option<GuestProgressUpdate>,
         error_code: Option<&str>,
+        cw_runtime_catalog_generation: Option<&str>,
     ) -> Result<v1::RunnerEvent, Status> {
+        if cw_runtime_catalog_generation
+            .is_some_and(|generation| !crate::linux::state::valid_root_generation(generation))
+        {
+            return Err(Status::internal("runner runtime attachment is invalid"));
+        }
         if error_code.is_some_and(|code| {
             code.is_empty()
                 || code.len() > 64
@@ -489,6 +498,9 @@ impl RunnerEvents {
                 generation,
                 artifact_generation: self.artifact_generation.clone(),
                 error_code: error_code.unwrap_or_default().to_owned(),
+                cw_runtime_catalog_generation: cw_runtime_catalog_generation
+                    .unwrap_or_default()
+                    .to_owned(),
             }),
             stage: stage as i32,
             guest_sequence: guest.map_or(0, |update| update.sequence),
@@ -661,7 +673,17 @@ impl RunnerState {
             generation: self.generation,
             artifact_generation: self.artifact_generation.clone(),
             error_code: self.error_code.unwrap_or_default().to_owned(),
+            cw_runtime_catalog_generation: self
+                .cw_runtime_catalog_generation()
+                .unwrap_or_default()
+                .to_owned(),
         }
+    }
+
+    fn cw_runtime_catalog_generation(&self) -> Option<&str> {
+        self.running
+            .as_ref()
+            .and_then(RunningVm::cw_runtime_catalog_generation)
     }
 
     async fn observe_exit(&mut self) -> Result<(), RunnerError> {
@@ -821,6 +843,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             v1::RunnerStage::Ready,
             None,
             None,
+            state.cw_runtime_catalog_generation(),
         )?;
         Ok(Response::new(info))
     }
@@ -847,6 +870,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 stage,
                 None,
                 (stage == v1::RunnerStage::Error).then_some(exit_reason.unwrap_or("runtime_exit")),
+                state.cw_runtime_catalog_generation(),
             )?;
         }
         Ok(Response::new(state.info()))
@@ -905,6 +929,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let direct_shares = parse_direct_shares(&request)?;
         let skill_snapshot_sha256 = parse_skill_snapshot(&request)?;
         let environment_projection_sha256 = parse_environment_projection(&request)?;
+        let cw_runtime_catalog_generation = parse_cw_runtime_catalog_generation(&request)?;
         let managed_credential_clients =
             codewire_access::ManagedCredentialClients::decode(&request.managed_credential_clients)
                 .map_err(|_| {
@@ -934,6 +959,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             v1::RunnerStage::PreparingVm,
             None,
             None,
+            state.cw_runtime_catalog_generation(),
         )?;
         let prepared = match state
             .runner
@@ -956,6 +982,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 skill_snapshot_sha256,
                 environment_projection_sha256,
                 managed_credential_clients,
+                cw_runtime_catalog_generation,
             })
             .await
         {
@@ -969,6 +996,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                     v1::RunnerStage::Error,
                     None,
                     Some("prepare_failed"),
+                    state.cw_runtime_catalog_generation(),
                 )?;
                 return Err(map_start_error(error));
             }
@@ -984,6 +1012,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             v1::RunnerStage::StartingVmm,
             None,
             None,
+            state.cw_runtime_catalog_generation(),
         )?;
         let mut running = match state.runner.start(prepared).await {
             Ok(running) => running,
@@ -996,6 +1025,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                     v1::RunnerStage::Error,
                     None,
                     Some("vmm_start_failed"),
+                    state.cw_runtime_catalog_generation(),
                 )?;
                 return Err(map_start_error(error));
             }
@@ -1014,6 +1044,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                     v1::RunnerStage::Error,
                     None,
                     Some("daemon_access_failed"),
+                    state.cw_runtime_catalog_generation(),
                 )?;
                 return Err(error);
             }
@@ -1035,6 +1066,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                     v1::RunnerStage::Error,
                     None,
                     Some("network_worker_failed"),
+                    state.cw_runtime_catalog_generation(),
                 )?;
                 return Err(Status::internal("resolve network worker executable failed"));
             }
@@ -1059,6 +1091,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 v1::RunnerStage::Error,
                 None,
                 Some(error_code),
+                state.cw_runtime_catalog_generation(),
             )?;
             return Err(map_start_error(error));
         }
@@ -1068,6 +1101,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             v1::RunnerStage::WaitingGuest,
             None,
             None,
+            running.cw_runtime_catalog_generation(),
         )?;
         if let Err(error) =
             wait_for_guest_daemon(&mut running, daemon_ready_timeout, &self.events).await
@@ -1082,6 +1116,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 v1::RunnerStage::Error,
                 None,
                 Some("guest_start_failed"),
+                state.cw_runtime_catalog_generation(),
             )?;
             return Err(error);
         }
@@ -1096,6 +1131,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 v1::RunnerStage::Error,
                 None,
                 Some("input_cleanup_failed"),
+                state.cw_runtime_catalog_generation(),
             )?;
             return Err(Status::internal("one-boot guest input cleanup failed"));
         }
@@ -1110,6 +1146,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             v1::RunnerStage::DaemonReady,
             None,
             None,
+            state.cw_runtime_catalog_generation(),
         ) {
             state.generation_access = None;
             state.state = v1::EnvironmentState::Error;
@@ -1136,6 +1173,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             v1::RunnerStage::StoppingVm,
             None,
             None,
+            state.cw_runtime_catalog_generation(),
         )?;
         if let Some(running) = state.running.as_mut() {
             match running
@@ -1165,6 +1203,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             v1::RunnerStage::Stopped,
             None,
             None,
+            state.cw_runtime_catalog_generation(),
         )?;
         Ok(Response::new(state.info()))
     }
@@ -1194,6 +1233,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             v1::RunnerStage::Retiring,
             None,
             None,
+            state.cw_runtime_catalog_generation(),
         )?;
         if let Some(running) = state.running.as_mut() {
             let exit = running
@@ -1219,6 +1259,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             v1::RunnerStage::Stopped,
             None,
             None,
+            state.cw_runtime_catalog_generation(),
         )?;
         state.retirement = RetirementState::Prepared;
         Ok(Response::new(v1::PrepareRetireRunnerResponse {}))
@@ -1281,6 +1322,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             v1::RunnerStage::GrowingDisk,
             None,
             None,
+            state.cw_runtime_catalog_generation(),
         )?;
         let disk_bytes = state
             .runner
@@ -1293,6 +1335,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             v1::RunnerStage::Ready,
             None,
             None,
+            state.cw_runtime_catalog_generation(),
         )?;
         Ok(Response::new(v1::GrowStateDiskResponse { disk_bytes }))
     }
@@ -1343,6 +1386,21 @@ fn parse_environment_id(value: &str) -> Result<Uuid, Status> {
         return Err(Status::invalid_argument("invalid environment ID"));
     }
     Ok(id)
+}
+
+fn parse_cw_runtime_catalog_generation(
+    request: &v1::StartVmRequest,
+) -> Result<Option<String>, Status> {
+    let generation = &request.cw_runtime_catalog_generation;
+    if generation.is_empty() {
+        return Ok(None);
+    }
+    if !crate::linux::state::valid_root_generation(generation) {
+        return Err(Status::invalid_argument(
+            "invalid cw runtime catalog generation",
+        ));
+    }
+    Ok(Some(generation.clone()))
 }
 
 fn parse_setup_binding(request: &v1::StartVmRequest) -> Result<Option<SetupBinding>, Status> {
@@ -1710,6 +1768,7 @@ async fn wait_for_guest_daemon(
                             v1::RunnerStage::GuestInit,
                             Some(progress),
                             None,
+                        running.cw_runtime_catalog_generation(),
                         )?;
                         if progress.stage.is_failure() {
                             return Err(Status::failed_precondition(
@@ -1985,6 +2044,31 @@ mod tests {
                 .encode()
                 .to_owned(),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cw_runtime_generation_is_empty_or_one_lowercase_sha256() {
+        let mut request = stopped_start_request(Uuid::new_v4());
+        assert_eq!(parse_cw_runtime_catalog_generation(&request).unwrap(), None);
+        request.cw_runtime_catalog_generation = "a".repeat(64);
+        assert_eq!(
+            parse_cw_runtime_catalog_generation(&request).unwrap(),
+            Some("a".repeat(64))
+        );
+        for invalid in [
+            "A".repeat(64),
+            "a".repeat(63),
+            "../catalog".to_owned(),
+            format!("{}\n", "a".repeat(64)),
+        ] {
+            request.cw_runtime_catalog_generation = invalid;
+            assert_eq!(
+                parse_cw_runtime_catalog_generation(&request)
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::InvalidArgument
+            );
         }
     }
 
@@ -2968,6 +3052,7 @@ mod tests {
                     stage: GuestBootStage::WorkspaceRunning,
                 }),
                 None,
+                None,
             )
             .unwrap();
         receiver.changed().await.unwrap();
@@ -2984,6 +3069,7 @@ mod tests {
                 v1::RunnerStage::Error,
                 None,
                 Some("mesh_ingress_receiver_exit"),
+                None,
             )
             .unwrap();
         assert_eq!(

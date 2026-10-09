@@ -1059,8 +1059,15 @@ A separate orchestration matrix (`workspace_binding::store::database_tests`,
 bound Pod's key, pruning of released bindings' keys when the next Pod records,
 and the generation the live binding carries.
 
+The SSH upgrade fixture first proves the exact version-37 boundary, then
+preserves its ledger, rows and keys through the later journals and a second
+current startup.
+
 **Rollback.** Because 0037 only adds one table, it has an in-place rollback
-that keeps every other row:
+that keeps every other row. This procedure starts from a version-37 ledger.
+If the later journals have been applied, first reverse managed39 to CW38 and
+CW38 to SSH37 under their own empty-journal guards. Retained request or
+conversation evidence forbids that reversal:
 
 1. Stop the version-37 binaries.
 2. In one transaction, `DROP TABLE public.sandbox_ssh_host_keys;` and
@@ -1076,6 +1083,68 @@ available: replay the selected version-36 source into only an empty,
 disposable application `public` schema. Its fixture proves the ledger and
 migration 36 checksum are restored, records are discarded, and a separate
 schema survives. These tests and instructions authorize no live reset.
+
+### Ordinary cw runtime requests
+
+Migration `0038_environment_cw_runtime_requests.sql` adds the ordinary cw
+bootstrap, update, rollback and cleanup request journal. Its request UUID,
+authenticated actor, original environment/Pod binding, store generation and
+mutation lease remain attributable after the environment disappears. The
+journal stores operation metadata and bounded acknowledgements; provider
+material and resolved application-secret values are excluded.
+
+The migration adds one table, its indexes and an immutable-evidence trigger.
+Existing application rows and helper objects are preserved. One unresolved
+owner blocks a replacement owner; terminal and uncertain evidence cannot be
+deleted or rewritten to replay the request. These rules are separate from
+ordinary session storage and workspace lifecycle.
+
+The owning migration fixtures bind canonical migrations 1–37 from
+`ec60908a65fba269d5858b98c687ad7bf0a2a430`, including unchanged daemon SSH
+host keys. They apply an explicit version-38 boundary so later managed
+session tables cannot silently enter that proof. The version-38 schema
+fingerprint measured by
+`canonical37_cw38_managed39_preserve_prior_ledger_and_measure_boundaries` is
+`8ba1bff35a4a9ba8d1ad41aebab3c2bbbecea13a7efed58b3b3e220e9a950252`.
+The accepted canonical version-37 fingerprint remains
+`88dff060b2dbf35cf0b6464bce13c682c6e13b48ba6d3f80970fb2dfe997c7eb`.
+Upgrade preserves prior rows, checksums and helper objects; failed migration
+transactions leave the prior schema intact.
+
+There is no automatic production rollback for this migration. The owning
+empty-journal reversal fixture proves removal of only its new objects and
+version-38 ledger row restores version 37. Any retained request makes that
+reversal fail. Used journals require a separately reviewed recovery that
+preserves request evidence; a binary downgrade must account for the newer
+migration ledger.
+
+### Managed platform agent requests
+
+Migration `0039_platform_managed_requests.up.sql` adds
+`environment_platform_agent_requests` and
+`environment_platform_agent_conversations`. The former binds each mutation
+UUID to its actor, original Pod, binding, digest and one issued owner. The
+latter binds the original session and driver to its support image and launch
+generation. Matching retries observe the saved outcome; they do not issue a
+second mutation. Explicit cleanup retains the original uncertain result and
+uses a separate linked request.
+
+The migration is additive. It preserves the accepted version-38 ledger and
+schema, adds bounded metadata and immutable-evidence triggers, and stores no
+prompt or provider material. The version-39 fingerprint measured by the same
+disposable PostgreSQL boundary test is
+`9c5febb69fa7d930c3b4528cda06cf84521162cc51ed7c912959159a28be78fc`.
+Fixtures bind canonical history 1–37 and unchanged CW version-38 SQL, then
+exercise fresh installation, upgrade, rollback and retained-evidence refusal.
+Applied-row counts include up migrations only; the down file is not an
+applied ledger row.
+
+`0039_platform_managed_requests.down.sql` is permitted only while both new
+tables are empty. Any request or conversation prevents in-place rollback.
+Stop the owning workload before a reviewed reversal; never discard issued,
+uncertain or terminal evidence to make it succeed. A used deployment requires
+a separately reviewed recovery. These fixtures and instructions authorize no
+live schema change or reset.
 
 ## Mesh Database
 

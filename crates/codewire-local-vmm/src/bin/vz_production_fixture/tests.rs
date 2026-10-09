@@ -254,6 +254,7 @@ async fn daemon_proof_requires_authenticated_ready_rpc_on_injected_unix_stream()
             process_execution: codewire_daemon::execution::ProcessExecution::Native,
             credential_bridge: None,
             managed_credential_clients: Default::default(),
+            host: None,
             launch_projection: None,
         };
         let state = if is_ready {
@@ -366,6 +367,7 @@ async fn verifier_rejects_k_or_network_eof_after_readiness_but_before_workload()
             process_execution: codewire_daemon::execution::ProcessExecution::Native,
             credential_bridge: None,
             managed_credential_clients: Default::default(),
+            host: None,
             launch_projection: None,
         };
         let server = tokio::spawn(
@@ -453,6 +455,7 @@ async fn failed_workload_emits_no_workload_marker() {
         process_execution: codewire_daemon::execution::ProcessExecution::Native,
         credential_bridge: None,
         managed_credential_clients: Default::default(),
+        host: None,
         launch_projection: None,
     };
     let server = tokio::spawn(
@@ -532,6 +535,7 @@ async fn verifier_readiness_and_workload_precede_arming_and_only_armed_eof_compl
             process_execution: codewire_daemon::execution::ProcessExecution::Native,
             credential_bridge: None,
             managed_credential_clients: Default::default(),
+            host: None,
             launch_projection: None,
         };
         let server = tokio::spawn(
@@ -731,6 +735,10 @@ fn durable_output_rejects_malformed_oversize_and_trailing_frames() {
 
 fn running_record(output_end_offset: u64) -> v1::SessionRecord {
     v1::SessionRecord {
+        name: String::new(),
+        parent_session_id: None,
+        cleanup_unknown: false,
+        launch_generation: 1,
         session_id: "session-00000000-0000-4000-8000-000000000001".to_owned(),
         state: v1::SessionLifecycleState::Running as i32,
         command: vec![

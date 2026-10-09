@@ -25,10 +25,11 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::artifact::{AdmittedArtifacts, ArtifactError, ArtifactLock};
-use crate::ch_api::{ChApiClient, ChApiError};
+use crate::ch_api::{ChApiClient, ChApiError, VmInfo};
 use crate::cloud_hypervisor::{
     CloudHypervisorConfig, CloudHypervisorConfigError, CommandSpec, VirtioFsConfig,
 };
+use crate::cw_runtime::{AdmittedCwRuntimeDisk, CwRuntimeError, CwRuntimeStore};
 use crate::direct_share::{AdmittedDirectShare, DirectShareRequest};
 use crate::egress_broker::{
     EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE,
@@ -130,6 +131,7 @@ pub struct CreateVmRequest {
     pub skill_snapshot_sha256: Option<Sha256Value>,
     pub environment_projection_sha256: Option<Sha256Value>,
     pub managed_credential_clients: codewire_access::ManagedCredentialClients,
+    pub cw_runtime_catalog_generation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,10 +206,22 @@ impl CloudHypervisorRunner {
     pub async fn prepare(&self, request: CreateVmRequest) -> Result<PreparedVm, RunnerError> {
         preflight()?;
         validate_request(&request)?;
+        self.artifacts.require_current_guest_seed_abi()?;
+        let cw_runtime_disk = request
+            .cw_runtime_catalog_generation
+            .as_deref()
+            .map(|generation| CwRuntimeStore::create(&self.state_root)?.open_catalog(generation))
+            .transpose()?;
         let host_port_listeners = reserve_host_ports(&request.host_ports)?;
         let paths = VmPaths::create(&self.state_root, request.vm_id)?;
         let lock = paths.lock()?;
         let persisted = read_stopped_persisted_state(&paths, request.vm_id)?;
+        if let Some(disk) = persisted
+            .as_ref()
+            .and_then(|state| state.cw_runtime_disk.as_ref())
+        {
+            CwRuntimeStore::create(&self.state_root)?.revalidate_attachment(disk)?;
+        }
         let state_disk = admit_state_disk(&paths, &request, persisted.as_ref())?;
         let docker_disk = admit_docker_disk(&paths, &request, persisted.as_ref())?;
         let (root_disk_path, root_disk) = admit_root_disk(&paths, &request, persisted.as_ref())?;
@@ -242,6 +256,13 @@ impl CloudHypervisorRunner {
             None => seed,
         };
         let seed = seed.with_managed_credential_clients(request.managed_credential_clients);
+        let seed = match &cw_runtime_disk {
+            Some(disk) => seed.with_cw_runtime_catalog_sha256(
+                Sha256Value::parse_hex(&disk.generation)
+                    .map_err(|_| RunnerError::InvalidRequest)?,
+            ),
+            None => seed,
+        };
         publish_seed(&paths.seed_disk, &seed.encode())?;
         paths.prepare_diagnostics()?;
 
@@ -277,6 +298,7 @@ impl CloudHypervisorRunner {
             )?,
         }
         .with_docker_disk(docker_disk.as_ref().map(|_| paths.docker_disk.clone()))?
+        .with_cw_runtime_disk(cw_runtime_disk.as_ref().map(|disk| disk.path.clone()))?
         .with_virtiofs(
             direct_shares
                 .iter()
@@ -294,6 +316,7 @@ impl CloudHypervisorRunner {
             docker_disk,
             root_disk,
             setup_disk,
+            cw_runtime_disk,
             direct_shares,
             token,
             command,
@@ -354,7 +377,13 @@ impl CloudHypervisorRunner {
         if let Some(setup) = &prepared.setup_disk {
             revalidate_setup_disk(setup, prepared.request.setup)?;
         }
-        validate_seed_file(&prepared.paths.seed_disk)?;
+        if let Some(disk) = &prepared.cw_runtime_disk {
+            CwRuntimeStore::create(&self.state_root)?.revalidate_attachment(disk)?;
+        }
+        validate_seed_file(
+            &prepared.paths.seed_disk,
+            prepared.request.cw_runtime_catalog_generation.as_deref(),
+        )?;
         let mut direct_share_startup = DirectShareStartup::start(
             self.artifacts
                 .virtiofsd
@@ -401,6 +430,7 @@ impl CloudHypervisorRunner {
             docker_disk: prepared.docker_disk.clone(),
             root_generation: Some(prepared.request.root_generation.clone()),
             root_disk: Some(prepared.root_disk.clone()),
+            cw_runtime_disk: prepared.cw_runtime_disk.clone(),
             api_socket: None,
             vsock_socket: None,
         };
@@ -418,6 +448,9 @@ impl CloudHypervisorRunner {
             )
             .await?;
             api.ping().await?;
+            if let Some(disk) = &prepared.cw_runtime_disk {
+                validate_live_cw_runtime_disk(&api.info().await?, disk)?;
+            }
             prepared.paths.validate_diagnostics()?;
             let persisted = PersistedVmState {
                 schema_version: PERSISTED_STATE_SCHEMA_VERSION,
@@ -431,6 +464,7 @@ impl CloudHypervisorRunner {
                 docker_disk: prepared.docker_disk.clone(),
                 root_generation: Some(prepared.request.root_generation.clone()),
                 root_disk: Some(prepared.root_disk.clone()),
+                cw_runtime_disk: prepared.cw_runtime_disk.clone(),
                 api_socket: Some(set_socket_private(&prepared.paths.api_socket)?),
                 vsock_socket: Some(set_socket_private(&prepared.paths.vsock_socket)?),
             };
@@ -455,6 +489,7 @@ impl CloudHypervisorRunner {
             docker_disk: prepared.docker_disk,
             root_disk: prepared.root_disk,
             setup_disk: prepared.setup_disk,
+            cw_runtime_disk: prepared.cw_runtime_disk,
             direct_shares: direct_share_startup.disarm(),
             token: prepared.token,
             child,
@@ -474,6 +509,11 @@ impl CloudHypervisorRunner {
         if state.vm_id != vm_id {
             return Err(RunnerError::PersistedIdentityMismatch);
         }
+        let cw_runtime_disk = state
+            .cw_runtime_disk
+            .as_ref()
+            .map(|disk| CwRuntimeStore::create(&self.state_root)?.revalidate_attachment(disk))
+            .transpose()?;
         state.state_disk.revalidate(&paths.state_disk)?;
         if let Some(docker_disk) = &state.docker_disk {
             docker_disk.revalidate(&paths.docker_disk)?;
@@ -498,6 +538,7 @@ impl CloudHypervisorRunner {
             state,
             process,
             api,
+            cw_runtime_disk,
             _lock: lock,
         })
     }
@@ -855,6 +896,7 @@ pub struct PreparedVm {
     docker_disk: Option<StateDiskIdentity>,
     root_disk: StateDiskIdentity,
     setup_disk: Option<SetupDiskIdentity>,
+    cw_runtime_disk: Option<AdmittedCwRuntimeDisk>,
     direct_shares: Vec<PreparedDirectShare>,
     token: Zeroizing<String>,
     command: CommandSpec,
@@ -872,6 +914,7 @@ impl fmt::Debug for PreparedVm {
             .field("docker_disk", &self.docker_disk)
             .field("root_disk", &self.root_disk)
             .field("setup_disk", &self.setup_disk)
+            .field("cw_runtime_disk", &self.cw_runtime_disk)
             .field("direct_share_count", &self.direct_shares.len())
             .field("token", &"[REDACTED]")
             .field("command", &self.command)
@@ -904,6 +947,16 @@ impl PreparedVm {
         &self.root_disk
     }
 
+    pub fn cw_runtime_disk(&self) -> Option<&AdmittedCwRuntimeDisk> {
+        self.cw_runtime_disk.as_ref()
+    }
+
+    pub fn cw_runtime_catalog_generation(&self) -> Option<&str> {
+        self.cw_runtime_disk
+            .as_ref()
+            .map(|disk| disk.generation.as_str())
+    }
+
     pub fn auth_token_fingerprint(&self) -> String {
         token_fingerprint(&self.token)
     }
@@ -916,6 +969,7 @@ pub struct RunningVm {
     docker_disk: Option<StateDiskIdentity>,
     root_disk: StateDiskIdentity,
     setup_disk: Option<SetupDiskIdentity>,
+    cw_runtime_disk: Option<AdmittedCwRuntimeDisk>,
     direct_shares: Vec<DirectShareProcess>,
     token: Zeroizing<String>,
     child: tokio::process::Child,
@@ -937,6 +991,7 @@ impl fmt::Debug for RunningVm {
             .field("docker_disk", &self.docker_disk)
             .field("root_disk", &self.root_disk)
             .field("setup_disk", &self.setup_disk)
+            .field("cw_runtime_disk", &self.cw_runtime_disk)
             .field("direct_share_count", &self.direct_shares.len())
             .field("process", &self.process)
             .field("token", &"[REDACTED]")
@@ -971,6 +1026,16 @@ impl RunningVm {
 
     pub fn root_disk_identity(&self) -> &StateDiskIdentity {
         &self.root_disk
+    }
+
+    pub fn cw_runtime_disk(&self) -> Option<&AdmittedCwRuntimeDisk> {
+        self.cw_runtime_disk.as_ref()
+    }
+
+    pub fn cw_runtime_catalog_generation(&self) -> Option<&str> {
+        self.cw_runtime_disk
+            .as_ref()
+            .map(|disk| disk.generation.as_str())
     }
 
     pub fn api(&self) -> &ChApiClient {
@@ -3600,6 +3665,7 @@ pub struct RecoveredVm {
     state: PersistedVmState,
     process: LiveProcess,
     api: Option<ChApiClient>,
+    cw_runtime_disk: Option<AdmittedCwRuntimeDisk>,
     _lock: VmLock,
 }
 
@@ -3626,6 +3692,13 @@ impl RecoveredVm {
     /// A supervisor restart cannot recover the per-boot daemon token. An
     /// orphan is therefore terminated and booted with a fresh generation.
     pub async fn terminate_orphan(&self) -> Result<(), RunnerError> {
+        if let Some(disk) = &self.cw_runtime_disk {
+            // Recovery never adopts an orphan's daemon authority. If a live
+            // API is present, also fence the saved attachment against vm.info.
+            if let Some(api) = &self.api {
+                validate_live_cw_runtime_disk(&api.info().await?, disk)?;
+            }
+        }
         terminate_exact_process(&self.process, self.api.as_ref()).await
     }
 }
@@ -3682,6 +3755,10 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
                 || !bytes.is_multiple_of(1024 * 1024)
         })
         || !valid_root_generation(&request.root_generation)
+        || request
+            .cw_runtime_catalog_generation
+            .as_deref()
+            .is_some_and(|generation| !valid_root_generation(generation))
         || request.root_disk_bytes < MINIMUM_ROOT_DISK_BYTES
         || !request.root_disk_bytes.is_multiple_of(1024 * 1024)
         || request.vcpus == 0
@@ -3947,13 +4024,85 @@ fn token_fingerprint(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 
-fn validate_seed_file(path: &Path) -> Result<(), RunnerError> {
+fn validate_seed_file(path: &Path, catalog_generation: Option<&str>) -> Result<(), RunnerError> {
     let parent = PrivateRoot::open(path.parent().ok_or(RunnerError::InvalidRequest)?)?;
     let name = path
         .file_name()
         .map(Path::new)
         .ok_or(RunnerError::InvalidRequest)?;
-    parent.open_regular(name, false, Some(4096), false, Some(0o400))?;
+    let opened = parent.open_regular(name, false, Some(4096), false, Some(0o400))?;
+    let mut bytes = Vec::with_capacity(4096);
+    opened
+        .into_file()
+        .take(4097)
+        .read_to_end(&mut bytes)
+        .map_err(|source| RunnerError::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+    let seed = Seed::decode(&bytes)?;
+    let expected = catalog_generation
+        .map(Sha256Value::parse_hex)
+        .transpose()
+        .map_err(|_| RunnerError::InvalidRequest)?;
+    if seed.cw_runtime_catalog_sha256() != expected {
+        return Err(RunnerError::CwRuntimeDiskChanged);
+    }
+    Ok(())
+}
+
+fn validate_live_cw_runtime_disk(
+    info: &VmInfo,
+    expected: &AdmittedCwRuntimeDisk,
+) -> Result<(), RunnerError> {
+    use codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_DISK_SERIAL;
+    let disks = info
+        .additional
+        .get("config")
+        .and_then(|config| config.get("disks"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or(RunnerError::CwRuntimeDiskChanged)?;
+    let path = expected
+        .path
+        .to_str()
+        .ok_or(RunnerError::CwRuntimeDiskChanged)?;
+    let mut matches = 0;
+    for disk in disks {
+        let candidate = disk.get("id").and_then(serde_json::Value::as_str) == Some("cw-runtime")
+            || disk.get("serial").and_then(serde_json::Value::as_str)
+                == Some(CW_RUNTIME_DISK_SERIAL)
+            || disk.get("path").and_then(serde_json::Value::as_str) == Some(path);
+        if !candidate {
+            continue;
+        }
+        matches += 1;
+        if disk.get("id").and_then(serde_json::Value::as_str) != Some("cw-runtime")
+            || disk.get("serial").and_then(serde_json::Value::as_str)
+                != Some(CW_RUNTIME_DISK_SERIAL)
+            || disk.get("path").and_then(serde_json::Value::as_str) != Some(path)
+            || disk.get("readonly").and_then(serde_json::Value::as_bool) != Some(true)
+            || disk.get("direct").and_then(serde_json::Value::as_bool) != Some(false)
+            || disk
+                .get("backing_files")
+                .and_then(serde_json::Value::as_bool)
+                != Some(false)
+            || disk.get("vhost_user").and_then(serde_json::Value::as_bool) != Some(false)
+            || disk.get("sparse").and_then(serde_json::Value::as_bool) != Some(false)
+            || !disk
+                .get("image_type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| value.eq_ignore_ascii_case("raw"))
+            || !disk
+                .get("lock_granularity")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| value.eq_ignore_ascii_case("full"))
+        {
+            return Err(RunnerError::CwRuntimeDiskChanged);
+        }
+    }
+    if matches != 1 {
+        return Err(RunnerError::CwRuntimeDiskChanged);
+    }
     Ok(())
 }
 
@@ -4346,6 +4495,10 @@ async fn wait_for_endpoints_with_timeout(
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
+    #[error("cw runtime catalog attachment changed or its live disk is invalid")]
+    CwRuntimeDiskChanged,
+    #[error(transparent)]
+    CwRuntime(#[from] CwRuntimeError),
     #[error("invalid VM create request")]
     InvalidRequest,
     #[error(
@@ -4565,6 +4718,7 @@ mod tests {
             docker_disk: None,
             root_generation: None,
             root_disk: None,
+            cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
         }
@@ -4589,6 +4743,7 @@ mod tests {
 
     fn request(vcpus: u8, memory_mib: u32) -> CreateVmRequest {
         CreateVmRequest {
+            cw_runtime_catalog_generation: None,
             vm_id: Uuid::new_v4(),
             generation: 1,
             vsock_cid: 7,
@@ -4620,6 +4775,43 @@ mod tests {
         })
         .await
         .expect("child did not reach its expected executable");
+    }
+
+    #[test]
+    fn cw_runtime_request_and_seed_bind_the_same_catalog() {
+        let mut valid = request(1, 512);
+        assert!(validate_request(&valid).is_ok());
+        valid.cw_runtime_catalog_generation = Some("b".repeat(64));
+        assert!(validate_request(&valid).is_ok());
+        for invalid in [
+            String::new(),
+            "B".repeat(64),
+            "b".repeat(63),
+            "../runtime".to_owned(),
+        ] {
+            valid.cw_runtime_catalog_generation = Some(invalid);
+            assert!(matches!(
+                validate_request(&valid),
+                Err(RunnerError::InvalidRequest)
+            ));
+        }
+        let task = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(task.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = task.path().join("seed.raw");
+        let hash = Sha256Value::parse_hex(&"b".repeat(64)).unwrap();
+        let seed = Seed::new(Uuid::new_v4(), 1, 7777, "s".repeat(64))
+            .unwrap()
+            .with_cw_runtime_catalog_sha256(hash);
+        publish_seed(&path, &seed.encode()).unwrap();
+        validate_seed_file(&path, Some(&"b".repeat(64))).unwrap();
+        assert!(matches!(
+            validate_seed_file(&path, None),
+            Err(RunnerError::CwRuntimeDiskChanged)
+        ));
+        assert!(matches!(
+            validate_seed_file(&path, Some(&"c".repeat(64))),
+            Err(RunnerError::CwRuntimeDiskChanged)
+        ));
     }
 
     async fn spawn_admitted_sleep(duration: &str) -> (tokio::process::Child, LiveProcess) {
@@ -5277,6 +5469,7 @@ mod tests {
             docker_disk: None,
             root_generation: None,
             root_disk: None,
+            cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
         };
@@ -5365,6 +5558,7 @@ mod tests {
             docker_disk: Some(admitted),
             root_generation: None,
             root_disk: None,
+            cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
         };
@@ -5406,6 +5600,7 @@ mod tests {
             docker_disk: None,
             root_generation: Some(generation.clone()),
             root_disk: Some(admitted.clone()),
+            cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
         };
@@ -5539,6 +5734,7 @@ mod tests {
             docker_disk: None,
             root_generation: Some(previous_generation),
             root_disk: Some(previous_identity),
+            cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
         };

@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT="$ROOT/scripts/ci/verify/kind-e2e.sh"
-COMMON="$ROOT/scripts/ci/verify/kind/common.sh"
+COMMON="${CODEWIRE_TEST_KIND_COMMON:-$ROOT/scripts/ci/verify/kind/common.sh}"
 INTEGRATED="$ROOT/scripts/ci/verify/kind/suites/integrated.sh"
 FIXTURE="$(mktemp -d)"
 CLUSTERS="$FIXTURE/clusters"
@@ -16,6 +16,7 @@ KIND_DELETE_FAILURE=''
 DOCKER_PS_FAILURE=0
 # The fixture owns this transaction name even when hosted CI exports its own.
 export KIND_CLUSTER_NAME=codewire-e2e-ci
+unset CLUSTER KIND_PROFILE
 # The fixture requests the default host topology even when the caller exports
 # a shifted harness port set; the occupied-port cases below occupy ports this
 # run requested, and the shifted case sets its own assignment explicitly.
@@ -93,10 +94,10 @@ expect_failure() {
 bash -n "$SCRIPT" "$COMMON" "$INTEGRATED" \
   "$ROOT/scripts/ci/verify/kind/suites/final-fencing.sh" "$0"
 
-# Sourcing the production script defines the startup function without running
-# the heavyweight e2e main or installing its EXIT cleanup trap.
-# shellcheck source=scripts/ci/verify/kind-e2e.sh
-source "$SCRIPT"
+# Source the shared startup core without running a heavyweight suite. The
+# explicit alternate source exists to demonstrate old failing behavior.
+# shellcheck source=scripts/ci/verify/kind/common.sh
+source "$COMMON"
 
 cat > "$KIND_CONFIG" <<'EOF'
 kind: Cluster
@@ -109,9 +110,8 @@ nodes:
         hostPort: 10443
 EOF
 
-# Prior cancelled runs and the current transaction name are stale on this
-# runner. Unrelated and misleading prefix names remain untouched. Repeating
-# startup is deterministic.
+# Existing names, including the selected name and the same CI prefix, are
+# retained until their owner removes them explicitly.
 reset_fixture
 cat > "$CLUSTERS" <<'EOF'
 codewire-e2e-ci-8683
@@ -120,27 +120,21 @@ codewire-e2e-ci
 codewire-e2e-ciary-1
 codewire-e2e-ci-8770
 EOF
-reclaim_cancelled_ci_clusters "$KIND_CONFIG"
-cat > "$FIXTURE/want-clusters" <<'EOF'
-personal-kind
-codewire-e2e-ciary-1
-EOF
+cp "$CLUSTERS" "$FIXTURE/want-clusters"
+expect_failure existing-cluster
+[ ! -s "$DELETIONS" ] || fail 'startup deleted an existing cluster'
 cmp -s "$FIXTURE/want-clusters" "$CLUSTERS" || fail 'unrelated Kind cluster was changed'
-cat > "$FIXTURE/want-deletions" <<'EOF'
-codewire-e2e-ci-8683
-codewire-e2e-ci
-codewire-e2e-ci-8770
-EOF
-cmp -s "$FIXTURE/want-deletions" "$DELETIONS" || fail 'CI-owned clusters were not reclaimed exactly'
-reclaim_cancelled_ci_clusters "$KIND_CONFIG"
-cmp -s "$FIXTURE/want-deletions" "$DELETIONS" || fail 'clean startup was not deterministic'
+[ ! -s "$DOCKER_CALLS" ] || fail 'startup continued after an existing-cluster refusal'
 
-# A failed Kind deletion is fatal and port inspection never starts.
+# Prefix neighbors never authorize reclamation. Repeated absent startup is
+# deterministic and inspects ports without any runtime deletion.
 reset_fixture
-printf '%s\n' codewire-e2e-ci-8683 > "$CLUSTERS"
-KIND_DELETE_FAILURE=codewire-e2e-ci-8683
-expect_failure delete-failure
-[ ! -s "$DOCKER_CALLS" ] || fail 'startup continued after failed Kind cleanup'
+printf '%s\n' codewire-e2e-ci-8683 personal-kind > "$CLUSTERS"
+cp "$CLUSTERS" "$FIXTURE/want-clusters"
+reclaim_cancelled_ci_clusters "$KIND_CONFIG"
+reclaim_cancelled_ci_clusters "$KIND_CONFIG"
+cmp -s "$FIXTURE/want-clusters" "$CLUSTERS" || fail 'same-prefix cluster changed'
+[ ! -s "$DELETIONS" ] || fail 'name prefix authorized deletion'
 
 # Enumeration failures are fatal and cannot trigger broad deletion attempts.
 reset_fixture
@@ -184,6 +178,48 @@ grep -Fq 'fixed Kind host port 18090 remains occupied' "$FIXTURE/shifted-occupie
   fail 'shifted occupied-port error does not name the requested port'
 [ ! -s "$DELETIONS" ] || fail 'requested-port holder triggered a Kind deletion outside the CI prefix'
 
+# A saved profile's config is already rendered to its requested ports. They
+# are admitted as requested, a holder of one still blocks startup, and a port
+# that is not one of the profile's requested ports is refused.
+cat > "$FIXTURE/profile-kind-config.yaml" <<'EOF'
+kind: Cluster
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 39985
+      - containerPort: 443
+        hostPort: 52383
+EOF
+reset_fixture
+printf '%s\n' personal-kind > "$CLUSTERS"
+(
+  KIND_PROFILE=1 KIND_INGRESS_HOST_PORT=39985 KIND_INGRESS_TLS_HOST_PORT=52383
+  reclaim_cancelled_ci_clusters "$FIXTURE/profile-kind-config.yaml"
+) || fail 'profile startup refused its own rendered host ports'
+reset_fixture
+printf '%s\n' personal-kind > "$CLUSTERS"
+printf 'abc123\tunrelated-postgres\t127.0.0.1:39985->5432/tcp\n' > "$DOCKER_PS"
+if (
+  KIND_PROFILE=1 KIND_INGRESS_HOST_PORT=39985 KIND_INGRESS_TLS_HOST_PORT=52383
+  reclaim_cancelled_ci_clusters "$FIXTURE/profile-kind-config.yaml"
+) >"$FIXTURE/profile-occupied.out" 2>&1; then
+  fail 'profile requested-port holder did not block startup'
+fi
+grep -Fq 'fixed Kind host port 39985 remains occupied' "$FIXTURE/profile-occupied.out" ||
+  fail 'profile occupied-port error does not name the requested port'
+reset_fixture
+printf '%s\n' personal-kind > "$CLUSTERS"
+if (
+  KIND_PROFILE=1 KIND_INGRESS_HOST_PORT=39985 KIND_INGRESS_TLS_HOST_PORT=40000
+  reclaim_cancelled_ci_clusters "$FIXTURE/profile-kind-config.yaml"
+) >"$FIXTURE/profile-unknown.out" 2>&1; then
+  fail 'profile startup admitted a host port it never requested'
+fi
+grep -Fq 'host port 52383 is not one of its KIND_*_HOST_PORT values' "$FIXTURE/profile-unknown.out" ||
+  fail 'profile unknown-port error does not name the port'
+[ ! -s "$DELETIONS" ] || fail 'profile startup deleted a cluster'
+
 # Failure to prove fixed-port release is itself fatal.
 reset_fixture
 DOCKER_PS_FAILURE=1
@@ -198,7 +234,7 @@ main_cleanup_line="$(
 main_create_line="$(
   awk '
     /^run_integrated_kind_suite\(\)/ { in_main=1 }
-    in_main && /^[[:space:]]+create_cluster$/ { print NR; exit }
+    in_main && /^[[:space:]]+create_cluster([[:space:]]|$)/ { print NR; exit }
   ' "$INTEGRATED"
 )"
 [ -n "$main_cleanup_line" ] || fail 'integrated suite does not invoke startup cleanup'

@@ -121,6 +121,9 @@ trap cleanup EXIT
 
 # A dedicated range keeps the review preview on 4174 free and lets concurrent
 # checks from other worktrees each take the next free port.
+# Create the log before the server starts: the background child opens its
+# redirection asynchronously, and a missing file would fail the first read.
+: >"$work/server.log"
 python3 "$ROOT/scripts/dev/design-system-server.py" --port 4180-4199 >"$work/server.log" 2>&1 &
 server_pid=$!
 origin=""

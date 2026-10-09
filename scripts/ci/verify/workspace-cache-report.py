@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Bounded, value-blind workspace cache measurements; no provider API client."""
 from datetime import datetime
+from contextlib import closing, ExitStack
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -11,6 +13,108 @@ import signal
 import subprocess
 import sys
 import time
+
+ROOT = Path(__file__).resolve().parents[3]
+LIBRARY_ROOT = ROOT
+MAX_HISTORY = 64 * 1024 * 1024
+PRODUCER_FIELDS = {"status", "receipt", "producer_receipt", "image", "index_sha256", "payload",
+                   "source", "profile", "version", "build_ref", "cache_qualified", "image_qualified"}
+_consumer = None
+
+
+def consumer_library():
+    """Reuse the full held producer admission; importing it runs no solve."""
+    global _consumer
+    if _consumer is None:
+        spec = importlib.util.spec_from_file_location(
+            "workspace_cache_cw_consumer", LIBRARY_ROOT / "scripts/ci/images/cw-image-consumer.py")
+        value = importlib.util.module_from_spec(spec)
+        bytecode = sys.dont_write_bytecode
+        try:
+            sys.dont_write_bytecode = True
+            spec.loader.exec_module(value)
+        finally:
+            sys.dont_write_bytecode = bytecode
+        _consumer = value
+    return _consumer
+
+
+def owned_reference(reference, builder):
+    if not isinstance(builder, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{1,160}", builder) \
+            or not isinstance(reference, str) \
+            or not re.fullmatch(re.escape(f"{builder}/{builder}-node/") + r"[a-z0-9]{20,32}", reference):
+        raise ValueError("history does not belong to the owned builder and node")
+    return reference
+
+
+class ProducerEvidence:
+    """Retain original compiled provenance and current source across reporting.
+
+    reopen() is an observation, never compiler execution. Only this case's
+    exact original solve history can qualify the measured compiler/cache path.
+    """
+
+    def __init__(self, directory, header, compiler_mode=None):
+        self.pointer, self.retained = None, None
+        self.consumer = consumer_library()
+        producer = self.consumer.producer
+        asset, release = producer.source.asset, producer.release
+        try:
+            mode = MODES[header["case"]][0] if compiler_mode is None else compiler_mode
+            asset.require(mode in ("disabled", "r2"), "measurement compiler mode refused")
+            self.pointer = asset.HeldFile(Path(directory) / "cw-image-work/cw-producer-result.json", 64 * 1024)
+            asset.require(self.pointer.metadata["uid"] == os.geteuid()
+                          and self.pointer.metadata["mode"] & 0o7777 == 0o400,
+                          "producer result is not a private immutable owner file")
+            pointer = release.parse_canonical(self.pointer.data, 64 * 1024)
+            asset.require(type(pointer) is dict and set(pointer) == PRODUCER_FIELDS
+                          and type(pointer["receipt"]) is dict
+                          and release.is_hex(pointer["receipt"].get("sha256"), 64),
+                          "producer result fields or receipt pin refused")
+            version = self.consumer.effective_version(ROOT, None)
+            self.retained = producer.reopen(pointer["receipt"]["path"], pointer["receipt"]["sha256"],
+                                            ROOT, header["source_sha"], "release", version)
+            summary = self.retained.summary
+            asset.require(release.canonical(pointer) == release.canonical(
+                {key: summary[key] for key in PRODUCER_FIELDS}), "producer pointer differs from its original build")
+            asset.require(summary["current_source"]["revision"] == header["source_sha"]
+                          and summary["current_source"]["git_tree"] == header["source_tree"],
+                          "producer current source differs from the selected case")
+            reference = owned_reference(summary["build_ref"], header["builder_name"])
+            model = self.retained.model
+            fixed = producer.fixed_arguments(self.retained.path / "source-context", self.retained.capsule.model,
+                                              model["source_request_sha256"], self.retained.path,
+                                              mode)
+            producer.admit_solve_command(model["build"]["command"], fixed, header["builder_name"])
+            self.identity = {"build_ref": reference, "pointer_sha256": self.pointer.sha256,
+                             "build_receipt_sha256": summary["receipt"]["sha256"],
+                             "producer_receipt_sha256": summary["producer_receipt"]["sha256"],
+                             "build_log_sha256": self.retained.files["build_log"].sha256}
+            self.revalidate()
+        except (producer.release.ReleaseError, producer.finalizer.release.ReleaseError):
+            self.close()
+            raise ValueError("retained producer record or source admission failed") from None
+        except BaseException:
+            self.close()
+            raise
+
+    def revalidate(self):
+        self.pointer.revalidate(content=True)
+        self.retained.revalidate()
+        self.pointer.revalidate(content=True)
+
+    def close(self):
+        if self.retained is not None:
+            self.retained.close()
+        if self.pointer is not None:
+            self.pointer.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
 
 MODES = {"seed": ("r2", "r2"), "cold": ("disabled", "disabled"),
          "compiler": ("r2", "disabled"), "warm-1": ("r2", "r2"), "warm-2": ("r2", "r2")}
@@ -96,43 +200,82 @@ def sample(docker, container, directory, once=False):
 def history_identity(directory, builder):
     metadata = json.loads((Path(directory) / "workspace-metadata.json").read_text())
     reference = metadata.get("buildx.build.ref", "")
-    if not isinstance(builder, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{1,160}", builder) \
-            or not isinstance(reference, str) \
-            or not re.fullmatch(re.escape(f"{builder}/{builder}-node/") + r"[a-z0-9]{20,32}", reference):
-        raise ValueError("workspace history does not belong to the owned builder and node")
+    owned_reference(reference, builder)
     image = metadata.get("containerimage.config.digest", "")
     if not isinstance(image, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
         raise ValueError("workspace history metadata lacks its output image identity")
     return {"build_ref": reference, "workspace_image_id": image}
 
 
-def capture_history(docker, builder, directory):
+def capture_one_history(docker, builder, directory, prefix, identity):
     directory = Path(directory)
-    marker = directory / "workspace-history.json"
+    owned_reference(identity["build_ref"], builder)
+    marker = directory / f"{prefix}-history.json"
     marker.unlink(missing_ok=True)
-    identity = history_identity(directory, builder)
-    path = directory / "workspace-progress.jsonl"
+    path = directory / f"{prefix}-progress.jsonl"
     # Buildx's history lookup takes the solve ID, not its builder/node prefix.
     # Its rawjson printer writes to stderr. Never substitute latest/^0.
     with path.open("wb") as output:
         subprocess.run([docker, "buildx", "history", "logs", "--builder", builder,
                         "--progress", "rawjson", identity["build_ref"].rsplit("/", 1)[1]],
                        stdout=subprocess.DEVNULL, stderr=output, check=True)
-    raw = path.read_bytes()
-    if not raw or len(raw) > 64 * 1024 * 1024:
-        raise ValueError("workspace history capture is empty or exceeds its bound")
-    marker.write_text(compact(dict(identity, sha256=hashlib.sha256(raw).hexdigest())) + "\n")
+    with closing(consumer_library().asset.HeldFile(path, MAX_HISTORY)) as held:
+        held.revalidate(content=True)
+        return dict(identity, sha256=held.sha256)
 
 
-def compiler_history(directory, header, receipt):
+def capture_producer_history(docker, builder, directory, evidence):
+    """Capture only the already-admitted producer's original owned solve."""
+    marker = Path(directory) / "cw-producer-history.json"
+    marker.unlink(missing_ok=True)
+    evidence.revalidate()
+    capture = capture_one_history(docker, builder, directory, "cw-producer", evidence.identity)
+    evidence.revalidate()
+    marker.write_text(compact(capture) + "\n")
+
+
+def capture_history(docker, builder, directory):
     directory = Path(directory)
+    marker = directory / "workspace-history.json"
+    marker.unlink(missing_ok=True)
+    header = json.loads((directory / "identity.json").read_text())
+    if header["builder_name"] != builder or header["architecture"] not in ("amd64", "arm64"):
+        raise ValueError("history capture differs from the selected owned case")
+    if header["architecture"] == "amd64":
+        (directory / "cw-producer-history.json").unlink(missing_ok=True)
+    identity = history_identity(directory, builder)
+    with ExitStack() as custody:
+        evidence = custody.enter_context(ProducerEvidence(directory, header)) if header["architecture"] == "amd64" else None
+        if evidence is not None and evidence.identity["build_ref"] == identity["build_ref"]:
+            raise ValueError("workspace and standalone producer histories must be distinct solves")
+        capture = capture_one_history(docker, builder, directory, "workspace", identity)
+        if evidence is not None:
+            capture_producer_history(docker, builder, directory, evidence)
+            evidence.revalidate()
+        marker.write_text(compact(capture) + "\n")
+
+
+def captured_vertices(directory, prefix, identity, custody):
+    asset = consumer_library().asset
+    marker = custody.enter_context(closing(asset.HeldFile(Path(directory) / f"{prefix}-history.json", 64 * 1024)))
+    progress = custody.enter_context(closing(asset.HeldFile(Path(directory) / f"{prefix}-progress.jsonl", MAX_HISTORY)))
+    if json.loads(marker.data) != dict(identity, sha256=progress.sha256):
+        raise ValueError("history capture is incomplete or belongs to another output")
+    vertices = history_vertices(progress.data)
+    marker.revalidate(content=True)
+    progress.revalidate(content=True)
+    return vertices, (marker, progress)
+
+
+def workspace_history(directory, header, receipt, custody):
     identity = history_identity(directory, header["builder_name"])
-    marker = json.loads((directory / "workspace-history.json").read_text())
-    raw = (directory / "workspace-progress.jsonl").read_bytes()
-    if not raw or len(raw) > 64 * 1024 * 1024 \
-            or marker != dict(identity, sha256=hashlib.sha256(raw).hexdigest()) \
-            or identity["workspace_image_id"] != receipt["workspace_image_id"]:
-        raise ValueError("workspace history capture is incomplete or belongs to another output")
+    if identity["workspace_image_id"] != receipt["workspace_image_id"]:
+        raise ValueError("workspace history belongs to another image")
+    vertices, files = captured_vertices(directory, "workspace", identity, custody)
+    return identity, vertices, files
+
+
+def history_vertices(raw):
     vertices = {}
     for line in raw.splitlines():
         status = json.loads(line)
@@ -157,6 +300,12 @@ def compiler_history(directory, header, receipt):
                         raise ValueError("malformed workspace history timestamp")
                     datetime.fromisoformat(stamp.replace("Z", "+00:00"))
             vertices.setdefault(digest, []).append(vertex)
+    return vertices
+
+
+def compiler_vertex(vertices, cached=None):
+    if cached is not None and type(cached) is not bool:
+        raise ValueError("compiler cache expectation must be boolean")
     compiler = [(digest, events) for digest, events in vertices.items()
                 if any(re.match(r"\[cw-builder [^]]+\] RUN\b", v.get("name", "")) for v in events)]
     if len(compiler) != 1:
@@ -172,16 +321,52 @@ def compiler_history(directory, header, receipt):
     started = [v for v in events if v.get("started")]
     if not started or not started[-1].get("completed"):
         raise ValueError("workspace compiler history is incomplete")
-    cached = any(v.get("cached") is True and v.get("started") and v.get("completed") for v in events)
+    layer_cached = any(v.get("cached") is True and v.get("started") and v.get("completed") for v in events)
     executed = any(v.get("started") and v.get("inputs") and not v.get("cached", False) for v in events)
-    if header["case"].startswith("warm-") and (not cached or executed):
+    if cached is True and (not layer_cached or executed):
         raise ValueError("warm workspace did not prove reuse of its compiler layer")
-    return dict(identity, compiler_vertex_digest=digest, compiler_layer_cached=bool(cached),
-                compiler_executed=bool(executed))
+    if cached is False and (layer_cached or not executed):
+        raise ValueError("measurement did not prove execution of its compiler layer")
+    return {"compiler_vertex_digest": digest, "compiler_layer_cached": bool(layer_cached),
+            "compiler_executed": bool(executed)}
 
 
-def logs(path, layers, workspace=False):
-    text = Path(path).read_text()
+def compiler_history(directory, header, receipt, custody):
+    identity, vertices, files = workspace_history(directory, header, receipt, custody)
+    cached = True if header["case"].startswith("warm-") else False if header["case"] in ("cold", "compiler") else None
+    return dict(identity, **compiler_vertex(vertices, cached)), files
+
+
+def producer_history(directory, evidence, cached=None):
+    """Verify a measured producer solve, retaining lazy cache extraction semantics."""
+    with ExitStack() as custody:
+        result, files = held_producer_history(directory, evidence, cached, custody)
+        for held in files:
+            held.revalidate(content=True)
+        evidence.revalidate()
+        return result
+
+
+def held_producer_history(directory, evidence, cached, custody):
+    evidence.revalidate()
+    vertices, files = captured_vertices(directory, "cw-producer", evidence.identity, custody)
+    result = dict(evidence.identity, **compiler_vertex(vertices, cached))
+    evidence.revalidate()
+    return result, files
+
+
+def logs(path, layers, workspace=False, compiler=None):
+    return log_text(Path(path).read_text(), layers, workspace, compiler)
+
+
+def producer_logs(evidence, layers):
+    evidence.revalidate()
+    result = log_text(evidence.retained.files["build_log"].data.decode("utf-8"), layers, compiler=True)
+    evidence.revalidate()
+    return result
+
+
+def log_text(text, layers, workspace=False, compiler=None):
     if re.search(r"(?im)^#\d+ ERROR:|ignoring error|sccache: error|failed to configure s3 cache|"
                  r"error (?:reading|writing).*?(?:cache|blob|manifest)|failed to (?:export|import).*?cache", text):
         raise ValueError("cache IO/export failure in build log")
@@ -200,13 +385,14 @@ def logs(path, layers, workspace=False):
         raise ValueError("disabled layers performed external cache IO")
     floating = [lines for lines in vertices.values()
                 if any(re.match(r"\[workspace-floating-tools [^]]+\] RUN\b", line) for line in lines)]
-    compiler = [lines for lines in vertices.values()
-                if any(re.match(r"\[cw-builder [^]]+\] RUN\b", line) for line in lines)]
+    compiler_vertices = [lines for lines in vertices.values()
+                         if any(re.match(r"\[cw-builder [^]]+\] RUN\b", line) for line in lines)]
     if workspace:
         if len(floating) != 2 or any("CACHED" in lines or not any(line.startswith("DONE") for line in lines) for lines in floating):
             raise ValueError("both floating tool RUNs must execute")
-        if len(compiler) != 1:
-            raise ValueError("workspace log lacks one compiler vertex")
+    expected = 1 if compiler is True or compiler is None and workspace else 0 if compiler is False else None
+    if expected is not None and len(compiler_vertices) != expected:
+        raise ValueError("build log compiler vertices differ from the selected producer path")
     statistics = {key: int(value) for key, value in re.findall(
         r"(?im)(Cache hits(?: \(Rust\))?|Cache misses|Cache read errors|Cache write errors|Cache errors)\s+(\d+)", text)}
     def duration(lines):
@@ -215,8 +401,8 @@ def logs(path, layers, workspace=False):
 
     image_exports = [lines for lines in vertices.values() if any(line in ("exporting to docker image format", "importing to docker") for line in lines)]
     return {"s3_export_completed": bool(exports), "cached_vertices": sum("CACHED" in lines for lines in vertices.values()),
-            "floating_runs_executed": len(floating), "compiler_layer_cached": bool(compiler and "CACHED" in compiler[0]),
-            "compiler_vertex_seconds": duration(compiler[0]) if compiler else None,
+            "floating_runs_executed": len(floating), "compiler_layer_cached": bool(compiler_vertices and "CACHED" in compiler_vertices[0]),
+            "compiler_vertex_seconds": duration(compiler_vertices[0]) if compiler_vertices else None,
             "floating_vertex_seconds": [duration(lines) for lines in floating],
             "image_export_load_vertex_seconds": [duration(lines) for lines in image_exports],
             "compiler_cache_statistics": statistics}
@@ -236,6 +422,11 @@ def seed_report(raw, source, tree):
 
 
 def finalize(directory, receipt_path):
+    with ExitStack() as custody:
+        finalize_held(directory, receipt_path, custody)
+
+
+def finalize_held(directory, receipt_path, custody):
     directory = Path(directory)
     (directory / "result.json").unlink(missing_ok=True)
     credential = Path(os.environ["RUNNER_TEMP"]) / "codewire-sccache-r2.aws"
@@ -276,11 +467,33 @@ def finalize(directory, receipt_path):
     version_values = json.loads((directory / "versions.json").read_text())
     if set(version_values) != set(VERSION_COMMANDS) or any(not isinstance(v, str) or not v for v in version_values.values()):
         raise ValueError("floating tool inventory is incomplete")
-    phases = {target: logs(directory / f"{target}-build.log", expected_modes["layers"],
-                           workspace=target == "workspace") for target in ("base", "workspace")}
-    phases["workspace"].update(compiler_history(directory, header, receipt))
-    statistics = phases["workspace"]["compiler_cache_statistics"]
-    if case == "compiler" and statistics.get("Cache hits (Rust)", statistics.get("Cache hits", 0)) <= 0:
+    if header["architecture"] not in ("amd64", "arm64"):
+        raise ValueError("measurement architecture is unsupported")
+    amd64 = header["architecture"] == "amd64"
+    phases = {"base": logs(directory / "base-build.log", expected_modes["layers"]),
+              "workspace": logs(directory / "workspace-build.log", expected_modes["layers"],
+                                workspace=True, compiler=not amd64)}
+    evidence = None
+    if amd64:
+        evidence = custody.enter_context(ProducerEvidence(directory, header))
+        workspace, _, workspace_files = workspace_history(directory, header, receipt, custody)
+        if workspace["build_ref"] == evidence.identity["build_ref"]:
+            raise ValueError("workspace and standalone producer histories must be distinct solves")
+        phases["workspace"].update(workspace)
+        phases["cw_producer"] = producer_logs(evidence, expected_modes["layers"])
+        cached = True if case.startswith("warm-") else False if case in ("cold", "compiler") else None
+        history, producer_files = held_producer_history(directory, evidence, cached, custody)
+        phases["cw_producer"].update(history)
+        summary = evidence.retained.summary
+        phases["cw_producer"].update({key: summary[key] for key in
+                                     ("source", "current_source", "payload", "profile", "version")})
+        history_files = (*workspace_files, *producer_files)
+        statistics = phases["cw_producer"]["compiler_cache_statistics"]
+    else:
+        history, history_files = compiler_history(directory, header, receipt, custody)
+        phases["workspace"].update(history)
+        statistics = phases["workspace"]["compiler_cache_statistics"]
+    if case == "compiler" and statistics.get("Cache hits (Rust)", 0) <= 0:
         raise ValueError("compiler-only measurement did not prove reuse from its remote compiler cache")
     elapsed = float((directory / "elapsed-seconds").read_text())
     if not math.isfinite(elapsed) or elapsed < 0:
@@ -314,7 +527,15 @@ def finalize(directory, receipt_path):
 
     handlers = {number: signal.signal(number, interrupted) for number in (signal.SIGTERM, signal.SIGINT)}
     try:
+        if evidence is not None:
+            evidence.revalidate()
+        for held in history_files:
+            held.revalidate(content=True)
         result_path.write_text(compact(result) + "\n")
+        if evidence is not None:
+            evidence.revalidate()
+        for held in history_files:
+            held.revalidate(content=True)
         if case == "seed":
             with open(os.environ["GITHUB_OUTPUT"], "a") as output:
                 output.write("workspace_cache_seed=" + compact(result) + "\n")
@@ -375,6 +596,6 @@ if __name__ == "__main__":
             compare(args)
         else:
             raise ValueError("invalid workspace cache report command")
-    except (KeyError, ValueError, OSError, subprocess.SubprocessError) as error:
+    except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError) as error:
         print(f"workspace cache measurement: {error}", file=sys.stderr)
         sys.exit(1)

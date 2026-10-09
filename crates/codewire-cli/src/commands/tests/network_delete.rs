@@ -66,7 +66,7 @@ fn deleted_network_clears_only_its_matching_local_selection() {
             false,
         ),
     ] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_mesh_data_fixture();
         config::save_selected_mesh_network_preference(dir.path(), saved_name, true).unwrap();
         let context = LocalMeshOwnerContext {
             schema_version: 1,
@@ -103,7 +103,7 @@ fn deleted_network_clears_only_its_matching_local_selection() {
 
 #[test]
 fn deleted_network_preserves_owner_on_another_mesh_origin() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_mesh_data_fixture();
     let context = LocalMeshOwnerContext {
         schema_version: 1,
         auth_source: LocalMeshOwnerAuthSource::StandaloneLocal,
@@ -129,7 +129,7 @@ fn deleted_network_preserves_owner_on_another_mesh_origin() {
 
 #[test]
 fn deleted_network_environment_override_does_not_clear_saved_other_origin() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_mesh_data_fixture();
     config::save_mesh_connection(dir.path(), "https://saved.example.test", "synthetic-owner")
         .unwrap();
     config::save_selected_mesh_network_preference(dir.path(), "network-alpha", true).unwrap();

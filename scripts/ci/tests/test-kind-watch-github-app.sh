@@ -5,6 +5,7 @@
 # restart a dashboard that was already running. Fake kind, kubectl, ss, curl,
 # docker and python3 stand in for the cluster and the watcher.
 set -euo pipefail
+unset CLUSTER KIND_PROFILE
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 mkdir -p "$ROOT/.tmp"
@@ -37,6 +38,7 @@ mkdir -p "$BIN" "$(dirname "$SCRIPT")" "$TREE/scripts/dev" \
   "$TREE/crates/codewire-server-core/src" \
   "$TREE/crates/codewire-orchestration/src/sandbox/template"
 cp "$ROOT/scripts/dev/kind/dev-loop.sh" "$SCRIPT"
+cp "$ROOT/scripts/dev/kind/profile.sh" "$TREE/scripts/dev/kind/profile.sh"
 : >"$TREE/scripts/dev/dashboard-watch.py"
 printf 'pub const DEFAULT_WORKSPACE_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:%064d";\n' 0 \
   >"$TREE/crates/codewire-server-core/src/runtime_images.rs"
@@ -82,15 +84,19 @@ esac
 EOF
 
 # FAKE_SS_PID listens on the watcher's port; FAKE_SS_FAIL models a host where
-# ss is missing or refuses, as a CI runner may.
+# ss is missing or refuses, as a CI runner may. The restart hint reads the
+# listener's process (-p); the watcher only asks whether the port is listening.
 cat >"$BIN/ss" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [ "${FAKE_SS_FAIL:-0}" != 1 ] || exit 1
-[ "$*" = "-Hltnp sport = :${KIND_WATCH_ADDR##*:}" ] || exit 64
+case "$*" in
+  "-Hltnp sport = :${KIND_WATCH_ADDR##*:}") users=' users:(("listener",pid='"${FAKE_SS_PID:-}"',fd=9))' ;;
+  "-Hltn sport = :${KIND_WATCH_ADDR##*:}") users='' ;;
+  *) exit 64 ;;
+esac
 [ -z "${FAKE_SS_PID:-}" ] \
-  || printf 'LISTEN 0 128 %s 0.0.0.0:* users:(("listener",pid=%s,fd=9))\n' \
-    "$KIND_WATCH_ADDR" "$FAKE_SS_PID"
+  || printf 'LISTEN 0 128 %s 0.0.0.0:*%s\n' "$KIND_WATCH_ADDR" "$users"
 EOF
 
 cat >"$BIN/curl" <<'EOF'

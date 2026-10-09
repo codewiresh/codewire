@@ -1,6 +1,6 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -286,7 +286,6 @@ async fn bind_answer_loss_relay(
     let dropped_sources = Arc::new(Mutex::new(HashSet::new()));
     let task_dropped_sources = dropped_sources.clone();
     let task_relay = relay.clone();
-    let mut control_counts = HashMap::<SocketAddr, usize>::new();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(async move {
         let mut buf = vec![0u8; UDP_PACKET_LIMIT];
@@ -295,19 +294,18 @@ async fn bind_answer_loss_relay(
                 _ = &mut shutdown_rx => return,
                 received = socket.recv_from(&mut buf) => {
                     let Ok((n, source)) = received else { return; };
+                    // Lose the first bind answer from each peer. A loaded peer
+                    // can retransmit its bind before the challenge arrives, so
+                    // match the message rather than its position.
                     if let Ok(RelayPacket::Control { payload, .. }) =
                         udp_relay::decode_packet(&buf[..n])
                     {
-                        let count = control_counts.entry(source).or_default();
-                        *count += 1;
-                        if *count == 2 {
-                            let opened = relay_disco.open(payload).unwrap();
-                            assert!(matches!(
-                                opened.message,
-                                Message::BindUDPRelayEndpointAnswer(_)
-                            ));
-                            task_dropped_sources.lock().unwrap().insert(source);
-                            continue;
+                        if let Ok(opened) = relay_disco.open(payload) {
+                            if matches!(opened.message, Message::BindUDPRelayEndpointAnswer(_))
+                                && task_dropped_sources.lock().unwrap().insert(source)
+                            {
+                                continue;
+                            }
                         }
                     }
                     let output = task_relay

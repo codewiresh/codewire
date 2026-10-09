@@ -496,7 +496,7 @@ fn supported_content_type(headers: &HeaderMap, allow_sse: bool) -> bool {
     }
 }
 
-fn route() -> ProxyRouteConfig {
+pub(crate) fn route() -> ProxyRouteConfig {
     ProxyRouteConfig {
         profile: "codewire-anthropic-api-key".into(),
         base_url: "https://api.anthropic.com/v1".into(),

@@ -70,9 +70,11 @@ case "$PREFLIGHT_MODE" in
     ;;
 esac
 
+preflight_git_local_env_names="$(git rev-parse --local-env-vars)"
 while IFS= read -r git_env_name; do
   unset "$git_env_name"
-done < <(git rev-parse --local-env-vars)
+done <<<"$preflight_git_local_env_names"
+unset preflight_git_local_env_names
 
 PREFLIGHT_TMP="$(mktemp -d)"
 PREFLIGHT_CHANGED_PATHS="$PREFLIGHT_TMP/changed-files"

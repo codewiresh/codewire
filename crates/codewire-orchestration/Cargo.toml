@@ -54,6 +54,7 @@ required-features = ["kind-e2e"]
 [dependencies]
 codewire-access = { workspace = true }
 codewire-admin-proto = { workspace = true }
+codewire-cw-release = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-daemon-bridge = { workspace = true }
 codewire-daemon-proto = { workspace = true }
@@ -94,6 +95,7 @@ prometheus = { workspace = true }
 # same path the Go worker's CheckSidecarReady takes.
 russh = { workspace = true }
 russh-sftp = { workspace = true }
+rustix = { workspace = true }
 uuid = { workspace = true }
 # Temporal worker (#36 Stage D1): EnvironmentWorkflow + activities.
 temporalio-sdk = { workspace = true }

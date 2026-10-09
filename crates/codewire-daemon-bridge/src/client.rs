@@ -55,6 +55,7 @@ pub enum DaemonClientError {
 pub struct DaemonClient {
     inner: v1::daemon_service_client::DaemonServiceClient<Channel>,
     auth_token: MetadataValue<tonic::metadata::Ascii>,
+    platform: v1::platform_managed_service_client::PlatformManagedServiceClient<Channel>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,7 +123,12 @@ impl DaemonClient {
     ) -> Result<Self, DaemonClientError> {
         let auth_token = Self::parse_auth_token(daemon_token)?;
         Ok(Self {
-            inner: v1::daemon_service_client::DaemonServiceClient::new(channel),
+            inner: v1::daemon_service_client::DaemonServiceClient::new(channel.clone()),
+            platform: v1::platform_managed_service_client::PlatformManagedServiceClient::new(
+                channel,
+            )
+            .max_decoding_message_size(codewire_daemon_proto::platform_managed::FRAME_BYTES)
+            .max_encoding_message_size(codewire_daemon_proto::platform_managed::REQUEST_BYTES),
             auth_token,
         })
     }
@@ -266,6 +272,31 @@ impl DaemonClient {
                 },
             })
         }
+    }
+
+    /// Acknowledged input; deliberately no retry after an ambiguous deadline.
+    pub async fn send_session_input(
+        &self,
+        request: v1::SendSessionInputRequest,
+    ) -> Result<(), DaemonClientError> {
+        use codewire_daemon_proto::{
+            DAEMON_CAPABILITY_SESSION_INPUT, SESSION_INPUT_MAX_BYTES, SESSION_INPUT_TIMEOUT,
+        };
+        if request.data.is_empty() || request.data.len() > SESSION_INPUT_MAX_BYTES {
+            return Err(tonic::Status::invalid_argument(
+                "session input must contain 1..65536 bytes",
+            )
+            .into());
+        }
+        tokio::time::timeout(SESSION_INPUT_TIMEOUT, async {
+            self.require_ready(&[DAEMON_CAPABILITY_SESSION_INPUT]).await?;
+            let mut client = self.inner.clone();
+            let mut request = self.authorized(request);
+            request.set_timeout(SESSION_INPUT_TIMEOUT);
+            client.send_session_input(request).await?;
+            Ok(())
+        }).await.map_err(|_| DaemonClientError::Status(tonic::Status::deadline_exceeded(
+            "session input acknowledgement timed out; input may have been written; do not retry automatically")))?
     }
 
     pub async fn list_files(
@@ -721,3 +752,7 @@ mod tests {
         harness.shutdown().await;
     }
 }
+
+#[path = "platform_managed.rs"]
+mod platform_managed;
+pub use platform_managed::{PlatformManagedRecordStream, platform_managed_request_fingerprint};

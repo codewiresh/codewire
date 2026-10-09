@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "process_test_support.rs"]
+mod process_test_support;
 use std::os::unix::fs::PermissionsExt as _;
 use std::process::Command as StdCommand;
 
@@ -313,107 +316,119 @@ async fn cancellation_closes_an_unfinished_transport_without_waiting_for_peer() 
 
 #[tokio::test]
 async fn process_cleanup_kills_a_term_resistant_child_and_descendant() {
-    let root = tempfile::tempdir().unwrap();
-    let mut command = Command::new("/bin/sh");
-    command
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .current_dir(root.path())
-        .args([
-            "-c",
-            "trap '' TERM; /bin/sleep 300 & printf '%s\\n' \"$!\"; wait",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .process_group(0);
-    let mut owned = OwnedChild::spawn(&mut command).unwrap();
-    let mut stdout = owned.child.stdout.take().unwrap();
-    let mut line = Vec::new();
-    loop {
-        let byte = tokio::time::timeout(TEST_TIMEOUT, stdout.read_u8())
-            .await
-            .unwrap()
-            .unwrap();
-        if byte == b'\n' {
-            break;
-        }
-        line.push(byte);
-    }
-    let descendant: u32 = String::from_utf8(line).unwrap().parse().unwrap();
-    let process = format!("/proc/{descendant}/stat");
-    let prior = fs::read_to_string(&process).unwrap();
-    let started = prior
-        .rsplit_once(") ")
-        .unwrap()
-        .1
-        .split_whitespace()
-        .nth(19)
-        .unwrap();
-    assert!(!owned.finish().await.unwrap().success());
-    tokio::time::timeout(TEST_TIMEOUT, bounded_bytes(stdout))
-        .await
-        .unwrap()
-        .unwrap();
-    // An init-owned zombie is already dead; neither it nor PID reuse authorizes
-    // another signal. The owned pipe EOF also proves no live inheritor remains.
-    tokio::time::timeout(TEST_TIMEOUT, async {
-        loop {
-            let Ok(stat) = fs::read_to_string(&process) else {
-                break;
-            };
-            let fields: Vec<_> = stat
+    process_test_support::isolated_process_fixture(
+        "linux::tests::process_cleanup_kills_a_term_resistant_child_and_descendant",
+        async {
+            let root = tempfile::tempdir().unwrap();
+            let mut command = Command::new("/bin/sh");
+            command
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .current_dir(root.path())
+                .args([
+                    "-c",
+                    "trap '' TERM; /bin/sleep 300 & printf '%s\\n' \"$!\"; wait",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .process_group(0);
+            let mut owned = OwnedChild::spawn(&mut command).unwrap();
+            let mut stdout = owned.child.stdout.take().unwrap();
+            let mut line = Vec::new();
+            loop {
+                let byte = tokio::time::timeout(TEST_TIMEOUT, stdout.read_u8())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if byte == b'\n' {
+                    break;
+                }
+                line.push(byte);
+            }
+            let descendant: u32 = String::from_utf8(line).unwrap().parse().unwrap();
+            let process = format!("/proc/{descendant}/stat");
+            let prior = fs::read_to_string(&process).unwrap();
+            let started = prior
                 .rsplit_once(") ")
                 .unwrap()
                 .1
                 .split_whitespace()
-                .collect();
-            if fields[0] == "Z" || fields[19] != started {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("killed exact descendant must reach terminal state");
+                .nth(19)
+                .unwrap();
+            assert!(!owned.finish().await.unwrap().success());
+            tokio::time::timeout(TEST_TIMEOUT, bounded_bytes(stdout))
+                .await
+                .unwrap()
+                .unwrap();
+            // An init-owned zombie is already dead; neither it nor PID reuse authorizes
+            // another signal. The owned pipe EOF also proves no live inheritor remains.
+            tokio::time::timeout(TEST_TIMEOUT, async {
+                loop {
+                    let Ok(stat) = fs::read_to_string(&process) else {
+                        break;
+                    };
+                    let fields: Vec<_> = stat
+                        .rsplit_once(") ")
+                        .unwrap()
+                        .1
+                        .split_whitespace()
+                        .collect();
+                    if fields[0] == "Z" || fields[19] != started {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("killed exact descendant must reach terminal state");
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn repository_preparation_cancellation_drains_its_running_git_child() {
-    let root = tempfile::tempdir().unwrap();
-    let directory = root.path().to_owned();
-    let stop = CancellationToken::new();
-    let child_stop = stop.clone();
-    let preparation = tokio::spawn(async move {
-        // Test-only fixed Git alias stalls after proving process admission. The
-        // executable accepts no aliases or caller-selected Git commands.
-        run_git(
-            &directory,
-            &[
-                "-c",
-                "alias.stall=!printf ready >stalled; trap '' TERM; /bin/sleep 300",
-                "stall",
-            ],
-            &child_stop,
-        )
-        .await
-    });
-    tokio::time::timeout(TEST_TIMEOUT, async {
-        while !root.path().join("stalled").exists() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-    stop.cancel();
-    assert_eq!(
-        tokio::time::timeout(TEST_TIMEOUT, preparation)
+    process_test_support::isolated_process_fixture(
+        "linux::tests::repository_preparation_cancellation_drains_its_running_git_child",
+        async {
+            let root = tempfile::tempdir().unwrap();
+            let directory = root.path().to_owned();
+            let stop = CancellationToken::new();
+            let child_stop = stop.clone();
+            let preparation = tokio::spawn(async move {
+                // Test-only fixed Git alias stalls after proving process admission. The
+                // executable accepts no aliases or caller-selected Git commands.
+                run_git(
+                    &directory,
+                    &[
+                        "-c",
+                        "alias.stall=!printf ready >stalled; trap '' TERM; /bin/sleep 300",
+                        "stall",
+                    ],
+                    &child_stop,
+                )
+                .await
+            });
+            tokio::time::timeout(TEST_TIMEOUT, async {
+                while !root.path().join("stalled").exists() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
             .await
-            .unwrap()
-            .unwrap(),
-        Err("repository preparation cancelled")
-    );
+            .unwrap();
+            stop.cancel();
+            assert_eq!(
+                tokio::time::timeout(TEST_TIMEOUT, preparation)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                Err("repository preparation cancelled")
+            );
+        },
+    )
+    .await;
 }
 
 #[test]

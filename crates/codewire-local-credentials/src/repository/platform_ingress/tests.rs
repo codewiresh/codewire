@@ -135,15 +135,31 @@ impl Fixture {
     }
 
     async fn finish(mut self) -> Result<(), RepositoryExecutorError> {
+        // Reserve a distinct client source while the ingress still owns its port.
+        // A fresh auto-bound loopback client can otherwise connect to itself.
+        let probe = tokio::net::TcpSocket::new_v4().unwrap();
+        probe
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .unwrap();
+        let probe_address = probe.local_addr().unwrap();
+        assert_ne!(probe_address, self.address);
         let result = tokio::time::timeout(BOUND, self.ingress.close())
             .await
             .expect("owned ingress drain is bounded");
+        let probe_result = tokio::time::timeout(BOUND, probe.connect(self.address)).await;
         self.shutdown.send(()).unwrap();
         tokio::time::timeout(BOUND, self.driver)
             .await
             .unwrap()
             .unwrap();
-        assert!(TcpStream::connect(self.address).await.is_err());
+        let probe_result = probe_result.expect("owned post-close ingress probe is bounded");
+        assert!(
+            probe_result.is_err(),
+            "post-close connection succeeded: bound source {probe_address}, observed {:?}",
+            probe_result
+                .as_ref()
+                .map(|stream| (stream.local_addr(), stream.peer_addr()))
+        );
         result
     }
 }

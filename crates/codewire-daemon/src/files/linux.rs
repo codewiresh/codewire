@@ -465,6 +465,7 @@ mod tests {
             process_execution: ProcessExecution::Native,
             credential_bridge: None,
             managed_credential_clients: Default::default(),
+            host: None,
             launch_projection: None,
         };
         (temp, config, workspace)

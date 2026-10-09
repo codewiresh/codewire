@@ -3,6 +3,8 @@
 // Regenerate with
 // `make proto-generate`; see docs/plans/connect-rpc/02-proto-authoring-guide.md.
 export * from "./gen/codewire/v1/common_pb.js";
+export * from "./gen/codewire/v1/environment_cw_runtime_pb.js";
+export * from "./gen/codewire/v1/environment_agent_pb.js";
 export * from "./gen/codewire/v1/mesh_group_pb.js";
 export * from "./gen/codewire/v1/mesh_invite_pb.js";
 export * from "./gen/codewire/v1/mesh_kv_pb.js";

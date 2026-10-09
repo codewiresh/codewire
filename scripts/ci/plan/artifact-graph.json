@@ -82,16 +82,47 @@
         "aarch64-apple-darwin"
       ],
       "package_inputs": {
+        "codewire-cli": ["apps/cli/GPG_PUBLIC_KEY.asc"],
         "codewire-egress-policy": ["crates/codewire-egress-policy/policies/**"],
         "codewire-local-credentials": ["crates/codewire-local-credentials/proto/**"],
         "codewire-local-vmm": ["crates/codewire-local-vmm/proto/**"],
         "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"],
-        "codewire-daemon-proto": ["libs/daemon-proto/proto/**"]
+        "codewire-daemon-proto": ["libs/daemon-proto/proto/**"],
+        "codewire-mesh": ["crates/codewire-mesh/migrations/**"],
+        "codewire-server-core": ["crates/codewire-server-core/migrations/**"]
       },
       "explicit_inputs": [
         "rust-toolchain.toml",
+        "scripts/ci/release/cw_release.py",
+        "scripts/dev/cw-runtime-image.py",
+        "scripts/dev/build-cw.py",
         "scripts/ci/release/package-cw-release.sh",
-        "scripts/ci/release/check-cw-darwin-sdkless.sh"
+        "scripts/ci/release/check-cw-darwin-sdkless.sh",
+        "images/cw-runtime/Dockerfile",
+        "scripts/ci/images/prepare-cw-source-context.py",
+        "scripts/ci/images/build-cw-runtime-source.py",
+        "scripts/ci/images/finalize-cw-runtime-source.py",
+        "scripts/ci/images/prepare-cw-image-context.py",
+        "scripts/ci/images/run-rust-build.sh",
+        "scripts/ci/verify/kind/cw_runtime_probe.py",
+        "scripts/ci/verify/build-linux-vmm-kernel.py",
+        "*.rs",
+        "*.toml",
+        "*.lock",
+        "*.proto",
+        "apps/cli/GPG_PUBLIC_KEY.asc",
+        "crates/codewire-credential-broker/src/ssh_agent/askpass.sh",
+        "crates/codewire-egress-policy/policies/**",
+        "crates/codewire-mesh/migrations/**",
+        "crates/codewire-proto/codewire_descriptor.bin",
+        "crates/codewire-server-core/migrations/**",
+        "scripts/dev/build-native-managed-agent.py",
+        ".gitignore",
+        "Cargo.toml",
+        "Cargo.lock",
+        "images/workspace/debian.sources",
+        "images/base/apt-transport.conf",
+        "images/base/apt-get-with-retry"
       ]
     },
     "desktop_package": {
@@ -105,7 +136,9 @@
         "codewire-egress-policy": ["crates/codewire-egress-policy/policies/**"],
         "codewire-local-credentials": ["crates/codewire-local-credentials/proto/**"],
         "codewire-local-vmm": ["crates/codewire-local-vmm/proto/**"],
-        "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"]
+        "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"],
+        "codewire-mesh": ["crates/codewire-mesh/migrations/**"],
+        "codewire-server-core": ["crates/codewire-server-core/migrations/**"]
       },
       "explicit_inputs": [
         "rust-toolchain.toml",
@@ -119,16 +152,51 @@
       "manifest": "Cargo.toml",
       "package": "codewire-cli-bin",
       "lockfile": "Cargo.lock",
-      "profiles": ["release"],
-      "release_targets": ["host"],
+      "profiles": ["release", "ci"],
+      "release_targets": ["host", "x86_64-unknown-linux-musl"],
       "package_inputs": {
+        "codewire-cli": ["apps/cli/GPG_PUBLIC_KEY.asc"],
         "codewire-egress-policy": ["crates/codewire-egress-policy/policies/**"],
         "codewire-local-credentials": ["crates/codewire-local-credentials/proto/**"],
         "codewire-local-vmm": ["crates/codewire-local-vmm/proto/**"],
         "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"],
-        "codewire-daemon-proto": ["libs/daemon-proto/proto/**"]
+        "codewire-daemon-proto": ["libs/daemon-proto/proto/**"],
+        "codewire-mesh": ["crates/codewire-mesh/migrations/**"],
+        "codewire-server-core": ["crates/codewire-server-core/migrations/**"]
       },
       "explicit_inputs": ["rust-toolchain.toml"]
+    },
+    "cw_runtime_image_asset": {
+      "kind": "composite",
+      "dependencies": ["workspace_cw_binary"],
+      "inputs": [
+        "*.rs", "*.toml", "*.lock", "*.proto",
+        "apps/cli/GPG_PUBLIC_KEY.asc",
+        "crates/codewire-credential-broker/src/ssh_agent/askpass.sh",
+        "crates/codewire-egress-policy/policies/**",
+        "crates/codewire-mesh/migrations/**",
+        "crates/codewire-proto/codewire_descriptor.bin",
+        "crates/codewire-server-core/migrations/**",
+        "scripts/ci/release/cw_release.py",
+        "scripts/dev/build-cw.py",
+        "scripts/dev/build-native-managed-agent.py",
+        "scripts/dev/cw-runtime-image.py",
+        "images/cw-runtime/Dockerfile",
+        "scripts/ci/images/prepare-cw-source-context.py",
+        "scripts/ci/images/build-cw-runtime-source.py",
+        "scripts/ci/images/finalize-cw-runtime-source.py",
+        "scripts/ci/images/prepare-cw-image-context.py",
+        "scripts/ci/images/run-rust-build.sh",
+        "scripts/ci/verify/kind/cw_runtime_probe.py",
+        "scripts/ci/verify/build-linux-vmm-kernel.py",
+        ".gitignore",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "images/workspace/debian.sources",
+        "images/base/apt-transport.conf",
+        "images/base/apt-get-with-retry"
+      ]
     },
     "dashboard_image": {
       "kind": "file-set",
@@ -150,8 +218,10 @@
       ]
     },
     "daemon_image": {
-      "kind": "file-set",
+      "kind": "composite",
+      "dependencies": ["cw_runtime_image_asset"],
       "inputs": [
+        ".dockerignore",
         "Cargo.toml",
         "Cargo.lock",
         "crates/**",
@@ -160,7 +230,15 @@
         "deployments/docker/rust-base.Dockerfile",
         "docker-bake.hcl",
         "libs/daemon-proto/**",
-        "proto/**"
+        "proto/**",
+        "scripts/ci/images/cw-image-consumer.py",
+        "scripts/ci/images/cw-image-consumer.sh",
+        "scripts/ci/images/cw-image-source.py",
+        "scripts/ci/images/build-product-images.sh",
+        "scripts/ci/images/build-kind-images.sh",
+        "scripts/ci/images/build-local-image.sh",
+        "scripts/ci/images/build-push-image.sh",
+        "scripts/ci/images/build-push-runtime-images.sh"
       ]
     },
     "derp_image": {
@@ -228,12 +306,19 @@
     },
     "workspace_image_verification": {
       "kind": "composite",
-      "dependencies": ["base_image", "workspace_cw_binary"],
+      "dependencies": ["base_image", "cw_runtime_image_asset"],
       "inputs": [
         ".dockerignore",
         "Cargo.toml",
         "images/workspace/**",
         "scripts/ci/images/build-local-image.sh",
+        "scripts/ci/images/cw-image-consumer.py",
+        "scripts/ci/images/cw-image-consumer.sh",
+        "scripts/ci/images/cw-image-source.py",
+        "scripts/ci/images/build-product-images.sh",
+        "scripts/ci/tests/test-cw-image-consumer.py",
+        "scripts/ci/tests/test-cw-image-source.py",
+        "scripts/ci/tests/test-cw-runtime-source.py",
         "scripts/ci/images/run-rust-build.sh",
         "scripts/ci/images/workspace-cache.sh",
         "scripts/ci/setup/prepare-workspace-cache-measurement.sh",
@@ -261,7 +346,7 @@
       "kind": "composite",
       "dependencies": [
         "base_image",
-        "workspace_cw_binary",
+        "cw_runtime_image_asset",
         "confidential_workspace_acceptance_contract",
         "dev_release_tree",
         "dev_acceptance_harness",
@@ -271,7 +356,16 @@
         "services_image",
         "mesh_image"
       ],
-      "inputs": ["images/workspace/**"]
+      "inputs": [
+        "images/workspace/**",
+        "scripts/ci/images/cw-image-consumer.py",
+        "scripts/ci/images/cw-image-consumer.sh",
+        "scripts/ci/images/cw-image-source.py",
+        "scripts/ci/images/build-product-images.sh",
+        "scripts/ci/images/build-local-image.sh",
+        "scripts/ci/images/build-push-image.sh",
+        "scripts/ci/images/build-push-runtime-images.sh"
+      ]
     }
   }
 }

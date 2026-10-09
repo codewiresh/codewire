@@ -21,7 +21,7 @@ pub(crate) fn display_client_error(error: ClientError) -> anyhow::Error {
 
 pub(crate) async fn handle_cost_command(globals: &Globals, args: CostArgs) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let client = ConsoleClient::new(&platform)?;
     let orgs = organization_client(&platform)?
@@ -40,6 +40,10 @@ pub(crate) async fn resolve_named_execution_target(
     placement: Option<EnvironmentPlacement>,
 ) -> anyhow::Result<config::CurrentTargetConfig> {
     let target_ref = trimmed_required(target_ref, "target")?;
+    #[cfg(unix)]
+    if let Some(host) = resolve_host_reference(globals, target_ref, placement).await? {
+        return Ok(host.current_target());
+    }
     #[cfg(target_os = "linux")]
     let local = if placement != Some(EnvironmentPlacement::Platform) {
         native_environment(target_ref).await?
@@ -404,7 +408,7 @@ pub(crate) fn short_env_id(id: &str) -> &str {
 
 pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let server_url = resolve_login_server_url(globals, &paths, &env)?;
     let configured_org = saved_login_default_org(&paths, &server_url);
     let client = OAuthClient::discover(&server_url)
@@ -459,7 +463,7 @@ pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> 
 
 pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let server_url = resolve_setup_server_url(globals, &paths, &env);
     let login_client = OAuthClient::discover(&server_url)
         .await
@@ -771,7 +775,7 @@ pub(crate) async fn handle_org_command(
     command: Option<OrgCommand>,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let client = organization_client(&platform)?;
 
@@ -898,7 +902,7 @@ pub(crate) async fn handle_api_keys_command(
     command: ApiKeyCommand,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let orgs = organization_client(&platform)?
         .list_orgs()
@@ -957,7 +961,7 @@ pub(crate) async fn handle_preset_command(
     command: PresetCommand,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let client = organization_client(&platform)?;
     let orgs = client.list_orgs().await.context("list orgs")?;
@@ -1039,7 +1043,7 @@ pub(crate) async fn handle_platform_secrets_command(
     command: SecretOperation,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let client = SecretClient::new(&platform)?;
     let organizations = organization_client(&platform)?;
@@ -1313,7 +1317,7 @@ fn resolve_platform_secret_project<'a>(
 
 pub(crate) fn inspect_config(output: OutputFormat) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform =
         config::resolve_platform(config::PlatformResolveOptions::default(), &paths, &env);
     let mesh = config::resolve_mesh(config::MeshResolveOptions::default(), &paths, &env);
@@ -1414,7 +1418,7 @@ pub(crate) async fn handle_doctor_command(
     }
 
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let report = collect_doctor_report(globals, &paths, &env).await;
     print_doctor_report(&report, args.output)
 }
@@ -1462,7 +1466,7 @@ pub(crate) async fn handle_doctor_tailnet_command(
     };
 
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let client = codewire_client(&platform)?;
     let environment_client = EnvironmentClient::new(&platform)?;

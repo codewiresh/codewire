@@ -19,6 +19,9 @@ service EnvironmentSessionService {
   }
   rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
   rpc RestartSession(RestartSessionRequest) returns (RestartSessionResponse);
+  // Acknowledges an owned stdin write/flush or PTY write, not queue admission.
+  // Timeout is ambiguous: callers must not automatically retry input.
+  rpc SendSessionInput(SendSessionInputRequest) returns (SendSessionInputResponse);
   rpc ReadSessionOutput(ReadSessionOutputRequest)
       returns (ReadSessionOutputResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -61,6 +64,13 @@ message EnvironmentSession {
   string status_message = 11;
   // Absolute byte cursor of the oldest retained output. Earlier output is unavailable.
   uint64 output_start_offset = 12;
+  // Optional label, unique among retained records in this environment.
+  string name = 13;
+  optional string parent_session_id = 14;
+  // Cleanup cannot be established after a trusted-host daemon crash.
+  bool cleanup_unknown = 15;
+  // Durable per-session launch admission generation; zero means unavailable.
+  uint64 launch_generation = 16;
 }
 
 // Output offsets are absolute byte positions over the ordered output sequence.
@@ -82,6 +92,11 @@ message LaunchSessionRequest {
   string term = 7;
   uint32 columns = 8;
   uint32 rows = 9;
+  // Empty means unnamed; otherwise 1..64 ASCII bytes, alphanumeric first,
+  // followed by alphanumeric, dot, underscore or hyphen.
+  string name = 10;
+  // Canonical session UUID identity in this same environment, never a name.
+  optional string parent_session_id = 11;
 }
 
 message LaunchSessionResponse {
@@ -121,11 +136,23 @@ message RestartSessionRequest {
   string org_id = 1;
   string environment_id = 2;
   string session_id = 3;
+  // Compare before cancellation/Stop; requires a known terminal generation.
+  optional uint64 expected_launch_generation = 4;
 }
 
 message RestartSessionResponse {
   EnvironmentSession session = 1;
 }
+
+message SendSessionInputRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string session_id = 3;
+  // Nonempty, at most 64KiB. The acknowledgement is bounded to five seconds.
+  bytes data = 4;
+}
+
+message SendSessionInputResponse {}
 
 message ReadSessionOutputRequest {
   string org_id = 1;

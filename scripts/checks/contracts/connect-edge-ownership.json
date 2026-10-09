@@ -16,6 +16,8 @@
     "codewire.v1.CredentialService": "orchestration",
     "codewire.v1.GithubRepositoryService": "credential-service",
     "codewire.v1.EnvironmentService": "orchestration",
+    "codewire.v1.EnvironmentCwRuntimeService": "orchestration",
+    "codewire.v1.EnvironmentAgentService": "orchestration",
     "codewire.v1.EnvironmentSessionService": "orchestration",
     "codewire.v1.ExecService": "orchestration",
     "codewire.v1.FileService": "orchestration",

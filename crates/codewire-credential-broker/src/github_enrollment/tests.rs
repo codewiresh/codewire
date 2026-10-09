@@ -1,6 +1,7 @@
 use super::*;
 use crate::process_test_support::{
-    assert_group_exited, observe_group, observe_process, ready_pid, wait_for_exit,
+    assert_group_exited, isolated_process_fixture, observe_group, observe_process, ready_pid,
+    wait_for_exit,
 };
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
@@ -296,173 +297,215 @@ impl Fixture {
 
 #[tokio::test]
 async fn completed_import_is_single_use_and_every_disposition_cleans_without_logout() {
-    for outcome in [
-        GitHubPublicationOutcome::Published,
-        GitHubPublicationOutcome::NotPublished,
-        GitHubPublicationOutcome::Unknown,
-    ] {
-        let f = Fixture::new();
-        let pending = f.ready().await;
-        let processes = observe_group(f.root.path());
-        f.flag("release");
-        let mut completed = tokio::time::timeout(Duration::from_secs(5), pending.complete())
-            .await
-            .unwrap()
-            .unwrap();
-        let (token, login) = completed.take_import().unwrap().into_parts();
-        assert_eq!(&*token, TOKEN.as_bytes());
-        assert_eq!(login.as_deref(), Some("synthetic-user"));
-        assert!(completed.take_import().is_err());
-        assert!(f.homes()[0].join("login.log").exists());
-        assert_group_exited(processes).await;
-        completed.finish(outcome).await.unwrap();
-        f.clean().await;
-        assert_eq!(&*token, TOKEN.as_bytes());
-    }
+    isolated_process_fixture(
+        "github_enrollment::tests::completed_import_is_single_use_and_every_disposition_cleans_without_logout",
+        async {
+            for outcome in [
+                GitHubPublicationOutcome::Published,
+                GitHubPublicationOutcome::NotPublished,
+                GitHubPublicationOutcome::Unknown,
+            ] {
+                let f = Fixture::new();
+                let pending = f.ready().await;
+                let processes = observe_group(f.root.path());
+                f.flag("release");
+                let mut completed = tokio::time::timeout(Duration::from_secs(5), pending.complete())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let (token, login) = completed.take_import().unwrap().into_parts();
+                assert_eq!(&*token, TOKEN.as_bytes());
+                assert_eq!(login.as_deref(), Some("synthetic-user"));
+                assert!(completed.take_import().is_err());
+                assert!(f.homes()[0].join("login.log").exists());
+                assert_group_exited(processes).await;
+                completed.finish(outcome).await.unwrap();
+                f.clean().await;
+                assert_eq!(&*token, TOKEN.as_bytes());
+            }
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn cancellation_and_dropped_waiter_retain_group_drain_before_cleanup() {
-    for explicit in [true, false] {
-        let f = Fixture::new();
-        let pending = f.ready().await;
-        let processes = observe_group(f.root.path());
-        if explicit {
-            pending.cancel().await.unwrap();
-        } else {
-            drop(pending);
-        }
-        f.clean().await;
-        assert_group_exited(processes).await;
-        assert!(!f.root.path().join("native.finished").exists());
-    }
+    isolated_process_fixture(
+        "github_enrollment::tests::cancellation_and_dropped_waiter_retain_group_drain_before_cleanup",
+        async {
+            for explicit in [true, false] {
+                let f = Fixture::new();
+                let pending = f.ready().await;
+                let processes = observe_group(f.root.path());
+                if explicit {
+                    pending.cancel().await.unwrap();
+                } else {
+                    drop(pending);
+                }
+                f.clean().await;
+                assert_group_exited(processes).await;
+                assert!(!f.root.path().join("native.finished").exists());
+            }
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn cancellation_before_challenge_drains_version_child() {
-    let f = Fixture::new();
-    f.flag("block-version");
-    // Opening the shell redirection can precede writing its PID. Force that
-    // state so file existence alone cannot be mistaken for child readiness.
-    std::fs::write(f.root.path().join("version.pid"), b"").unwrap();
-    let pending = f.owner.start().unwrap();
-    let pid = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(pid) = ready_pid(&f.root.path().join("version.pid")) {
-                break pid;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    let process = observe_process(pid);
-    pending.cancel().await.unwrap();
-    f.clean().await;
-    wait_for_exit(&process, Instant::now() + Duration::from_secs(5))
-        .await
-        .unwrap();
-    assert!(!f.root.path().join("wrapper.pid").exists());
+    isolated_process_fixture(
+        "github_enrollment::tests::cancellation_before_challenge_drains_version_child",
+        async {
+            let f = Fixture::new();
+            f.flag("block-version");
+            // Opening the shell redirection can precede writing its PID. Force that
+            // state so file existence alone cannot be mistaken for child readiness.
+            std::fs::write(f.root.path().join("version.pid"), b"").unwrap();
+            let pending = f.owner.start().unwrap();
+            let pid = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(pid) = ready_pid(&f.root.path().join("version.pid")) {
+                        break pid;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let process = observe_process(pid);
+            pending.cancel().await.unwrap();
+            f.clean().await;
+            wait_for_exit(&process, Instant::now() + Duration::from_secs(5))
+                .await
+                .unwrap();
+            assert!(!f.root.path().join("wrapper.pid").exists());
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn unsupported_version_fails_before_login_and_malformed_result_never_completes() {
-    for (flag, expected) in [
-        ("wrong-version", GitHubEnrollmentError::UnsupportedVersion),
-        ("unexpected-stdout", GitHubEnrollmentError::InvalidOutput),
-        ("world-readable", GitHubEnrollmentError::InvalidResult),
-        ("result-link", GitHubEnrollmentError::InvalidResult),
-        ("fail-after-result", GitHubEnrollmentError::Failed),
-    ] {
-        let f = Fixture::new();
-        f.flag(flag);
-        f.flag("release");
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), f.owner.start().unwrap().complete())
-                .await
-                .unwrap()
-                .err(),
-            Some(expected)
-        );
-        if flag == "wrong-version" {
-            assert!(!f.root.path().join("wrapper.pid").exists());
-        }
-        f.clean().await;
-    }
+    isolated_process_fixture(
+        "github_enrollment::tests::unsupported_version_fails_before_login_and_malformed_result_never_completes",
+        async {
+            for (flag, expected) in [
+                ("wrong-version", GitHubEnrollmentError::UnsupportedVersion),
+                ("unexpected-stdout", GitHubEnrollmentError::InvalidOutput),
+                ("world-readable", GitHubEnrollmentError::InvalidResult),
+                ("result-link", GitHubEnrollmentError::InvalidResult),
+                ("fail-after-result", GitHubEnrollmentError::Failed),
+            ] {
+                let f = Fixture::new();
+                f.flag(flag);
+                f.flag("release");
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(5), f.owner.start().unwrap().complete())
+                        .await
+                        .unwrap()
+                        .err(),
+                    Some(expected)
+                );
+                if flag == "wrong-version" {
+                    assert!(!f.root.path().join("wrapper.pid").exists());
+                }
+                f.clean().await;
+            }
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn capacity_is_fail_fast_and_shutdown_drains_pending_and_completed_workers() {
-    let f = Fixture::new();
-    let pending: Vec<_> = (0..MAX_ENROLLMENTS)
-        .map(|_| f.owner.start().unwrap())
-        .collect();
-    assert!(f.owner.start().is_err());
-    f.owner.shutdown().await.unwrap();
-    assert!(f.homes().is_empty());
-    drop(pending);
-    let f = Fixture::new();
-    let completed = f.completed().await;
-    f.owner.shutdown().await.unwrap();
-    assert!(completed.check_active().is_err());
-    completed
-        .finish(GitHubPublicationOutcome::Unknown)
-        .await
-        .unwrap();
-    f.clean().await;
+    isolated_process_fixture(
+        "github_enrollment::tests::capacity_is_fail_fast_and_shutdown_drains_pending_and_completed_workers",
+        async {
+            let f = Fixture::new();
+            let pending: Vec<_> = (0..MAX_ENROLLMENTS)
+                .map(|_| f.owner.start().unwrap())
+                .collect();
+            assert!(f.owner.start().is_err());
+            f.owner.shutdown().await.unwrap();
+            assert!(f.homes().is_empty());
+            drop(pending);
+            let f = Fixture::new();
+            let completed = f.completed().await;
+            f.owner.shutdown().await.unwrap();
+            assert!(completed.check_active().is_err());
+            completed
+                .finish(GitHubPublicationOutcome::Unknown)
+                .await
+                .unwrap();
+            f.clean().await;
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn dropped_completion_and_publication_timeout_do_not_revoke_transferred_token() {
-    let f = Fixture::new();
-    let mut completed = f.completed().await;
-    let (token, _) = completed.take_import().unwrap().into_parts();
-    drop(completed);
-    f.clean().await;
-    assert_eq!(&*token, TOKEN.as_bytes());
+    isolated_process_fixture(
+        "github_enrollment::tests::dropped_completion_and_publication_timeout_do_not_revoke_transferred_token",
+        async {
+            let f = Fixture::new();
+            let mut completed = f.completed().await;
+            let (token, _) = completed.take_import().unwrap().into_parts();
+            drop(completed);
+            f.clean().await;
+            assert_eq!(&*token, TOKEN.as_bytes());
 
-    let f = Fixture::new();
-    let mut completed = f.completed().await;
-    let (token, _) = completed.take_import().unwrap().into_parts();
-    let stored = Mutex::new(None);
-    tokio::time::pause();
-    tokio::time::advance(ENROLLMENT_LIFETIME - Duration::from_secs(1)).await;
-    let result = completed
-        .wait_for_publication(async {
-            *stored.lock().unwrap() = Some(token);
-            std::future::pending::<()>().await
-        })
-        .await;
-    assert_eq!(result, Err(GitHubEnrollmentError::Expired));
-    tokio::time::resume();
-    completed
-        .finish(GitHubPublicationOutcome::Unknown)
-        .await
-        .unwrap();
-    f.clean().await;
-    assert_eq!(
-        &**stored.lock().unwrap().as_ref().unwrap(),
-        TOKEN.as_bytes()
-    );
+            let f = Fixture::new();
+            let mut completed = f.completed().await;
+            let (token, _) = completed.take_import().unwrap().into_parts();
+            let stored = Mutex::new(None);
+            tokio::time::pause();
+            tokio::time::advance(ENROLLMENT_LIFETIME - Duration::from_secs(1)).await;
+            let result = completed
+                .wait_for_publication(async {
+                    *stored.lock().unwrap() = Some(token);
+                    std::future::pending::<()>().await
+                })
+                .await;
+            assert_eq!(result, Err(GitHubEnrollmentError::Expired));
+            tokio::time::resume();
+            completed
+                .finish(GitHubPublicationOutcome::Unknown)
+                .await
+                .unwrap();
+            f.clean().await;
+            assert_eq!(
+                &**stored.lock().unwrap().as_ref().unwrap(),
+                TOKEN.as_bytes()
+            );
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn original_deadline_and_post_join_recheck_deny_late_success() {
-    let f = Fixture::new();
-    f.flag("block-version");
-    let pending = f
-        .owner
-        .start_with_lifetime(Duration::from_millis(20))
-        .unwrap();
-    assert_eq!(
-        pending.complete().await.err(),
-        Some(GitHubEnrollmentError::Expired)
-    );
-    f.clean().await;
-    assert_eq!(
-        check_active(&CancellationToken::new(), Instant::now()),
-        Err(GitHubEnrollmentError::Expired)
-    );
+    isolated_process_fixture(
+        "github_enrollment::tests::original_deadline_and_post_join_recheck_deny_late_success",
+        async {
+            let f = Fixture::new();
+            f.flag("block-version");
+            let pending = f
+                .owner
+                .start_with_lifetime(Duration::from_millis(20))
+                .unwrap();
+            assert_eq!(
+                pending.complete().await.err(),
+                Some(GitHubEnrollmentError::Expired)
+            );
+            f.clean().await;
+            assert_eq!(
+                check_active(&CancellationToken::new(), Instant::now()),
+                Err(GitHubEnrollmentError::Expired)
+            );
+        },
+    )
+    .await;
 }
 
 #[test]

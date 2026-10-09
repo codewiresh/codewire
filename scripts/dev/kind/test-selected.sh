@@ -10,10 +10,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=scripts/dev/kind/profile.sh
+source "$ROOT/scripts/dev/kind/profile.sh"
+kind_profile_load "$ROOT" || exit $?
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
-# warm-pools runs only when named (KIND_TEST_SUITES): it needs the C0
-# agent-sandbox controller and the canonical image (make kind-runtime-images).
-ORDER=(edge-contract credentials workspace-services dashboard-browser final-fencing runtime-acceptance warm-pools)
+# cw-runtime, cw-managed-agents and warm-pools run only when named
+# (KIND_TEST_SUITES). The CW journeys need admitted release A/B and support
+# producers; warm-pools needs the C0 agent-sandbox controller and the
+# canonical image (make kind-runtime-images).
+ORDER=(edge-contract credentials workspace-services dashboard-browser final-fencing runtime-acceptance cw-runtime cw-managed-agents warm-pools)
 
 log() { printf '[kind-test] %s\n' "$*" >&2; }
 die() { printf '[kind-test] error: %s\n' "$*" >&2; exit 1; }
@@ -96,6 +101,15 @@ for suite in "${!wanted[@]}"; do
   printf '%s\n' "${ORDER[@]}" | grep -Fxq "$suite" || die "unknown suite: ${suite}"
 done
 log "suites: ${selected[*]}"
+if [ "$KIND_PROFILE" = 1 ]; then
+  kind_profile_lock "$ROOT" || exit $?
+  kind_profile_verify_node "$ROOT" || exit $?
+  kind_profile_verify_artifacts "$ROOT" || exit $?
+  if [ -n "${CARGO_CI_DIR:-}" ] && [ "$CARGO_CI_DIR" != "$KIND_PROFILE_SMOKE_DIR" ]; then
+    die 'CARGO_CI_DIR conflicts with the saved immutable smoke artifact'
+  fi
+  export CARGO_CI_DIR="$KIND_PROFILE_SMOKE_DIR"
+fi
 for suite in "${selected[@]}"; do
   # Test the current source against the cluster as deployed, not only an
   # unchanged tree that matches the image receipt.

@@ -54,6 +54,7 @@ A `(bin)` marker means the crate produces a service/app binary.
 | ------------------ | ----------------------------- | ------- |
 | `codewire-cli`     | `cw` CLI implementation.       | AGPL-3.0-only |
 | `codewire-cli-bin` | `cw` CLI binary wrapper (bin). | AGPL-3.0-only |
+| `codewire-cw-release` | Release identity and the immutable `cw` version store. | AGPL-3.0-only |
 
 ### Desktop app (excluded from the root workspace)
 
@@ -62,9 +63,9 @@ A `(bin)` marker means the crate produces a service/app binary.
 | `codewire-ui`              | Reusable GPUI components.                                  | MIT     |
 | `codewire-desktop`         | GPUI desktop app entrypoint (bin).                        | MIT     |
 
-The root workspace default is **AGPL-3.0-only**. `codewire-cli` and
-`codewire-cli-bin` intentionally inherit that default. Every permissive crate
-declares an explicit override, and every crate directory carries the
+The root workspace default is **AGPL-3.0-only**. `codewire-cli`,
+`codewire-cli-bin` and `codewire-cw-release` intentionally inherit that default.
+Every permissive crate declares an explicit override, and every crate directory carries the
 applicable license text.
 
 `codewire-tailnet` and `codewire-derp` remain BSD-3-Clause as standalone

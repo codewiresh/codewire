@@ -12,7 +12,9 @@ import (
 // to the owning client.
 type Environment struct {
 	EnvironmentData
-	Files *Files
+	Files   *Files
+	Runtime *CwRuntime
+	Agents  *PlatformAgents
 
 	client       *Client
 	orgID        string

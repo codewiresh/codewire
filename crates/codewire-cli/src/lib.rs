@@ -1,3 +1,4 @@
+mod build_record;
 pub mod config;
 mod console_client;
 mod environment_client;
@@ -8,13 +9,20 @@ mod hosted_binding;
 mod hosted_exec;
 mod mesh;
 mod organization_client;
+#[cfg(target_os = "linux")]
+mod platform_cw_runtime;
 mod presentation;
+mod public_fetch;
 mod secret_client;
 mod tailnet_ssh;
 mod terminal_attach;
 mod update;
 
 pub use hosted_exec::run_hosted_exec_from;
+#[cfg(target_os = "linux")]
+pub use platform_cw_runtime::redirect_from as redirect_platform_cw_default_from;
+#[cfg(target_os = "linux")]
+pub use platform_cw_runtime::run_from as run_platform_cw_runtime_from;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -26,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use chrono::{DateTime, SecondsFormat, Utc};
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use codewire_client::{
     ApiKey, AuthUser as PlatformUser, CreateApiKeyRequest, OAuthClient, OAuthCredentials,
@@ -49,10 +57,9 @@ use presentation::{
 };
 use secret_client::{CreateSecretProjectRequest, SecretClient, SecretMetadata, SecretProject};
 
-const CLI_VERSION: &str = match option_env!("CODEWIRE_VERSION") {
-    Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
-};
+// The effective compiled version: `CODEWIRE_VERSION` when the build set it,
+// otherwise the workspace version, read from this cw's embedded build record.
+use build_record::CLI_VERSION;
 
 /// Reassert a credential-bearing child's non-dumpable state immediately after
 /// `execve`, which resets this flag for an ordinary executable. The selected
@@ -98,13 +105,112 @@ const LOCAL_DERP_LOG_FILE: &str = "codewire-derp.log";
 struct Cli {
     #[arg(short, long, global = true, help = "Platform server URL override")]
     server: Option<String>,
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "server",
+        help = "Pinned trusted host member"
+    )]
+    member: Option<String>,
     #[command(subcommand)]
     command: Command,
+}
+
+/// Top-level help sections in display order. Each visible command belongs to
+/// exactly one section; a command missing here still appears under "Other".
+const HELP_SECTIONS: &[(&str, &[&str])] = &[
+    ("Get started", &["setup", "login", "logout", "whoami"]),
+    (
+        "Environments",
+        &[
+            "env",
+            "use",
+            "current",
+            "init",
+            "shell",
+            "vscode",
+            "config-ssh",
+            "preset",
+        ],
+    ),
+    (
+        "Sessions",
+        &[
+            "run", "list", "attach", "logs", "send", "wait", "stop", "restart",
+        ],
+    ),
+    ("Agents", &["msg", "steer", "interrupt", "inbox"]),
+    ("Secrets and credentials", &["secrets", "credentials"]),
+    ("Networking", &["network", "mesh", "control", "member"]),
+    ("Organizations and billing", &["org", "api-keys", "cost"]),
+    (
+        "cw itself",
+        &[
+            "install",
+            "update",
+            "doctor",
+            "config",
+            "completion",
+            "help",
+        ],
+    ),
+];
+
+/// The top-level command with its commands grouped into [`HELP_SECTIONS`].
+/// Descriptions come from the commands themselves, so the help cannot drift.
+fn cli_command() -> clap::Command {
+    let command = Cli::command();
+    let mut visible: Vec<(String, String)> = command
+        .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
+        .map(|subcommand| {
+            let about = subcommand
+                .get_about()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            (subcommand.get_name().to_owned(), about)
+        })
+        .collect();
+    visible.push((
+        "help".to_owned(),
+        "Show help for cw or one of its commands".to_owned(),
+    ));
+    let width = visible
+        .iter()
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0);
+    let mut sections = String::new();
+    let mut listed = std::collections::HashSet::new();
+    let mut section = |heading: &str, names: &mut dyn Iterator<Item = &(String, String)>| {
+        let mut body = String::new();
+        for (name, about) in names {
+            body.push_str(&format!("  {name:<width$}  {about}\n"));
+        }
+        if !body.is_empty() {
+            sections.push_str(&format!("{heading}:\n{body}\n"));
+        }
+    };
+    for (heading, names) in HELP_SECTIONS {
+        let mut members = names
+            .iter()
+            .filter_map(|name| visible.iter().find(|(candidate, _)| candidate == name));
+        section(heading, &mut members);
+        listed.extend(names.iter().copied());
+    }
+    let mut other = visible
+        .iter()
+        .filter(|(name, _)| !listed.contains(name.as_str()));
+    section("Other", &mut other);
+    command.help_template(format!(
+        "{{before-help}}{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{sections}Options:\n{{options}}{{after-help}}"
+    ))
 }
 
 #[derive(Clone, Debug)]
 struct Globals {
     server: Option<String>,
+    member: Option<String>,
 }
 
 mod commands;
@@ -128,8 +234,10 @@ enum Command {
     ConfigSsh(ConfigSshArgs),
     #[command(about = "Check Codewire CLI and environment setup")]
     Doctor(DoctorArgs),
-    #[command(about = "Show how to update cw during the private preview")]
-    Update,
+    #[command(about = "Update, inspect or roll back the managed cw installation")]
+    Update(update::UpdateArgs),
+    #[command(about = "Install this cw as a managed, versioned installation")]
+    Install(update::InstallArgs),
     #[command(about = "Sign in to Codewire")]
     Login(LoginArgs),
     #[command(
@@ -164,6 +272,38 @@ enum Command {
     },
     #[command(about = "Run a durable session in the selected or named environment")]
     Run(EnvironmentRunArgs),
+    #[cfg(unix)]
+    #[command(name = "_host-daemon", hide = true)]
+    HostDaemon(HostDaemonArgs),
+    #[command(about = "Write acknowledged input to a terminal or command session")]
+    Send(SendArgs),
+    #[command(about = "Wait for a session or managed message to finish")]
+    Wait(WaitArgs),
+    #[command(about = "Stop an owned session")]
+    Stop(SessionTargetArgs),
+    #[command(about = "Restart a retained session with its canonical identity")]
+    Restart(SessionTargetArgs),
+    #[cfg(unix)]
+    #[command(about = "Send a task or follow-up to a managed agent conversation")]
+    Msg(AgentMessageArgs),
+    #[cfg(unix)]
+    #[command(about = "Steer the current turn of a managed agent")]
+    Steer(AgentMessageArgs),
+    #[cfg(unix)]
+    #[command(about = "Interrupt the current managed agent turn")]
+    Interrupt(SessionTargetArgs),
+    #[cfg(unix)]
+    #[command(about = "Show managed messages and their results")]
+    Inbox(SessionTargetArgs),
+    #[cfg(unix)]
+    #[command(name = "_agent-driver", hide = true)]
+    AgentDriver(AgentDriverArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "_agent-control", hide = true)]
+    AgentControl(AgentControlArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "_agent-peer", hide = true)]
+    AgentPeer(AgentPeerArgs),
     #[command(about = "Manage environments")]
     Env(EnvArgs),
     #[command(about = "Show usage and billing overview")]
@@ -200,6 +340,12 @@ enum Command {
         #[command(subcommand)]
         command: MeshCommand,
     },
+    #[cfg(target_os = "linux")]
+    #[command(about = "Manage trusted Mesh access to a local host")]
+    Control(HostControlArgs),
+    #[cfg(target_os = "linux")]
+    #[command(about = "Manage pinned trusted host members")]
+    Member(MemberArgs),
     #[command(name = "__hosted-daemon", hide = true)]
     HostedDaemon,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -279,11 +425,69 @@ where
     let Command::EnvironmentLaunch(args) = cli.command else {
         return Err(invalid());
     };
-    if cli.server.is_some() {
+    if cli.server.is_some() || cli.member.is_some() {
         return Err(invalid());
     }
     codewire_daemon::execution::run_environment_launcher(&args.projection_socket, &args.command)
         .map_err(|_| invalid())
+}
+
+#[cfg(target_os = "linux")]
+pub async fn run_host_member_helper_from(arguments: Vec<std::ffi::OsString>) -> anyhow::Result<()> {
+    commands::run_host_member_helper(arguments).await
+}
+
+/// Fixed platform record helper. The binary dispatches it before ordinary
+/// configuration, credential resolution, Mesh paths or mutable CW selection.
+#[cfg(target_os = "linux")]
+pub async fn run_platform_agent_control_from(
+    arguments: Vec<std::ffi::OsString>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        unsafe { libc::geteuid() } == 1000 && unsafe { libc::getegid() } == 1000,
+        "platform agent helper requires its ordinary owner"
+    );
+    anyhow::ensure!(
+        arguments.len() == 2 && arguments[0] == "--environment",
+        "invalid fixed platform agent arguments"
+    );
+    let environment = arguments[1]
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid platform environment"))?;
+    let id = uuid::Uuid::parse_str(environment)?;
+    anyhow::ensure!(
+        !id.is_nil() && id.to_string() == environment,
+        "invalid platform environment"
+    );
+    // No registry, caller-selected root, command, URL, environment or token.
+    commands::run_platform_agent_control(id.to_string()).await
+}
+#[cfg(target_os = "linux")]
+pub async fn run_platform_agent_driver_from(
+    arguments: Vec<std::ffi::OsString>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        arguments.len() == 4 && arguments[0] == "--environment" && arguments[2] == "--driver-id",
+        "invalid fixed platform driver arguments"
+    );
+    let environment = arguments[1]
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid platform environment"))?;
+    let driver = arguments[3]
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid platform driver"))?;
+    commands::run_platform_agent_driver(environment.into(), driver.into()).await
+}
+#[cfg(target_os = "linux")]
+pub async fn run_platform_agent_peer_from(
+    arguments: Vec<std::ffi::OsString>,
+) -> anyhow::Result<()> {
+    commands::run_platform_agent_peer(arguments).await
+}
+
+#[cfg(target_os = "linux")]
+pub async fn run_host_agent_control_from(arguments: Vec<std::ffi::OsString>) -> anyhow::Result<()> {
+    commands::run_host_agent_control(arguments).await
 }
 
 /// Preserve the fixed private worker failure taxonomy across the thin binary
@@ -334,14 +538,65 @@ fn require_local_broker_smoke_executable() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_member_mutation_flags(cli: &Cli) -> anyhow::Result<()> {
+    if cli.member.is_none() {
+        match &cli.command {
+            Command::Stop(args)
+            | Command::Restart(args)
+            | Command::Interrupt(args)
+            | Command::Inbox(args) => anyhow::ensure!(
+                args.request_id.is_none() && args.expected_launch_generation.is_none(),
+                "member mutation flags require --member"
+            ),
+            Command::Msg(args) | Command::Steer(args) => anyhow::ensure!(
+                args.request_id.is_none() && args.expected_launch_generation.is_none(),
+                "member mutation flags require --member"
+            ),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub async fn run_from<I, T>(args: I) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let cli = Cli::parse_from(args);
+    let mut command = cli_command();
+    let matches = command.clone().get_matches_from(args);
+    let cli =
+        Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.format(&mut command).exit());
+    validate_member_mutation_flags(&cli)?;
+    if cli.member.is_some() {
+        #[cfg(target_os = "linux")]
+        anyhow::ensure!(
+            matches!(
+                &cli.command,
+                Command::Run(_)
+                    | Command::List(_)
+                    | Command::Send(_)
+                    | Command::Logs(_)
+                    | Command::Wait(_)
+                    | Command::Stop(_)
+                    | Command::Restart(_)
+                    | Command::Msg(_)
+                    | Command::Steer(_)
+                    | Command::Interrupt(_)
+                    | Command::Inbox(_)
+                    | Command::Member(_)
+            ),
+            "--member supports run, list, send, logs, wait, stop, restart, msg, steer, interrupt, inbox and member commands"
+        );
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!("trusted host member commands require Linux");
+    }
+    // Validate an explicitly selected Mesh state root before any ordinary
+    // command effects, including routes that otherwise need only platform state.
+    ResolvePaths::from_env(&OsEnv)?;
     let globals = Globals {
         server: cli.server.clone(),
+        member: cli.member.clone(),
     };
     match cli.command {
         Command::Config {
@@ -350,7 +605,8 @@ where
         Command::Completion(args) => handle_completion_command(args),
         Command::ConfigSsh(args) => handle_config_ssh_command(args),
         Command::Doctor(args) => handle_doctor_command(&globals, args).await,
-        Command::Update => update::run_current().await,
+        Command::Update(args) => update::run(args).await,
+        Command::Install(args) => update::install(args),
         Command::Login(args) => handle_login_command(&globals, args).await,
         Command::Setup(args) => handle_setup_command(&globals, args).await,
         Command::Logout => handle_logout_command(&globals).await,
@@ -362,6 +618,26 @@ where
         Command::Shell(args) => handle_environment_shell_command(&globals, args).await,
         Command::Ssh { command } => handle_ssh_command(&globals, command).await,
         Command::Run(args) => handle_environment_run_command(&globals, args).await,
+        #[cfg(unix)]
+        Command::HostDaemon(args) => run_host_daemon(args).await,
+        Command::Send(args) => handle_send_command(&globals, args).await,
+        Command::Wait(args) => handle_wait_command(&globals, args).await,
+        Command::Stop(args) => handle_stop_command(&globals, args).await,
+        Command::Restart(args) => handle_restart_command(&globals, args).await,
+        #[cfg(unix)]
+        Command::Msg(args) => handle_agent_message_command(&globals, args, false).await,
+        #[cfg(unix)]
+        Command::Steer(args) => handle_agent_message_command(&globals, args, true).await,
+        #[cfg(unix)]
+        Command::Interrupt(args) => handle_agent_interrupt_command(&globals, args).await,
+        #[cfg(unix)]
+        Command::Inbox(args) => handle_agent_inbox_command(&globals, args).await,
+        #[cfg(unix)]
+        Command::AgentDriver(args) => run_agent_driver(args).await,
+        #[cfg(target_os = "linux")]
+        Command::AgentControl(args) => run_agent_control(args).await,
+        #[cfg(target_os = "linux")]
+        Command::AgentPeer(args) => run_agent_peer(args).await,
         Command::Env(args) => handle_env_command(&globals, args).await,
         Command::Cost(args) => handle_cost_command(&globals, args).await,
         Command::Org { command } => handle_org_command(&globals, command).await,
@@ -371,6 +647,10 @@ where
         Command::Credentials(args) => handle_credentials_command(&globals, args).await,
         Command::Network { command } => handle_network_command(&globals, command).await,
         Command::Mesh { command } => handle_mesh_command(&globals, command).await,
+        #[cfg(target_os = "linux")]
+        Command::Control(args) => handle_host_control_command(&globals, args).await,
+        #[cfg(target_os = "linux")]
+        Command::Member(args) => handle_member_command(&globals, args).await,
         Command::HostedDaemon => run_hosted_daemon().await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeSupervisor(args) => run_native_supervisor(args).await,

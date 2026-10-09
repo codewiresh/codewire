@@ -1,12 +1,30 @@
 #!/usr/bin/env bash
+# ShellCheck follows the whole Kind suite tree from here. Its data-flow pass
+# needs over 10 GiB, more than a CI worker has, and reports nothing at the
+# policy's warning severity, so this file uses the ordinary analysis.
+# shellcheck extended-analysis=false
 # Stable dispatcher for the Rust product Kind gate and retained-cluster suites.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-if [ "${KIND_CLUSTER_NAME+x}" = x ]; then
+if [ "${KIND_CLUSTER_NAME+x}" = x ] || [ -n "${CLUSTER:-}" ]; then
   KIND_CLUSTER_NAME_EXPLICIT=1
 else
   KIND_CLUSTER_NAME_EXPLICIT=0
+fi
+
+# Only create entrypoints allocate a saved profile. Read/test/remove commands
+# require an existing profile and cannot claim a cluster merely by its name.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]] && [ -n "${CLUSTER:-}" ] \
+    && { [ "$#" -eq 0 ] || [ "${1:-}" = up ] || [ "${1:-}" = shard ]; }; then
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
+    echo '::error::named Kind profiles currently require the synthetic CI product image contract' >&2
+    exit 2
+  fi
+  profile_args=(--cluster "$CLUSTER")
+  [ -z "${KIND_PUBLIC_ORIGIN:-}" ] || profile_args+=(--public-origin "$KIND_PUBLIC_ORIGIN")
+  [ -z "${KIND_BROWSER_API_ORIGIN:-}" ] || profile_args+=(--browser-api-origin "$KIND_BROWSER_API_ORIGIN")
+  python3 "$ROOT/scripts/dev/kind/cluster-profile.py" ensure "${profile_args[@]}" >/dev/null
 fi
 
 # shellcheck source=scripts/ci/verify/kind/common.sh
@@ -19,6 +37,8 @@ source "$ROOT/scripts/ci/verify/kind/suites/dashboard-browser.sh"
 source "$ROOT/scripts/ci/verify/kind/suites/final-fencing.sh"
 # shellcheck source=scripts/ci/verify/kind/suites/environment-session.sh
 source "$ROOT/scripts/ci/verify/kind/suites/environment-session.sh"
+# shellcheck source=scripts/ci/verify/kind/suites/cw-runtime.sh
+source "$ROOT/scripts/ci/verify/kind/suites/cw-runtime.sh"
 # shellcheck source=scripts/ci/verify/kind/suites/sandbox-supply-chain.sh
 source "$ROOT/scripts/ci/verify/kind/suites/sandbox-supply-chain.sh"
 # shellcheck source=scripts/ci/verify/kind/suites/runtime-acceptance.sh
@@ -40,6 +60,9 @@ kind_e2e_usage() {
   cat >&2 <<'EOF'
 usage:
   scripts/ci/verify/kind-e2e.sh
+  CLUSTER=<new-profile> scripts/ci/verify/kind-e2e.sh up
+  CLUSTER=<new-profile> scripts/ci/verify/kind-e2e.sh shard <suite> [<suite>...]
+  CLUSTER=<profile> scripts/ci/verify/kind-e2e.sh down
   KIND_CLUSTER_NAME=<new-cluster> scripts/ci/verify/kind-e2e.sh up
   KIND_CLUSTER_NAME=<new-cluster> scripts/ci/verify/kind-e2e.sh shard <suite> [<suite>...]
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite edge-contract
@@ -49,6 +72,8 @@ usage:
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite dashboard-browser
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite final-fencing
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite environment-session
+  CLUSTER=<profile> scripts/ci/verify/kind-e2e.sh suite cw-runtime
+  CLUSTER=<profile> scripts/ci/verify/kind-e2e.sh suite cw-managed-agents
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite sandbox-supply-chain
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite runtime-acceptance
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite warm-pools
@@ -79,14 +104,32 @@ dispatch_kind_e2e() {
       kind_e2e_usage
       return 2
     fi
+    KIND_SHARD_TRANSACTION=1
     run_kind_up
     log "cluster ${KIND_CLUSTER_NAME} is up; running shard suites: ${*:2}"
     shift
-    local suite
+    local suite original_kubeconfig="${KUBECONFIG-}" kubeconfig_was_set="${KUBECONFIG+x}"
     for suite in "$@"; do
       dispatch_kind_e2e suite "$suite"
+      # A suite replaces the EXIT trap and pins a temporary kubeconfig. Keep
+      # the creating process's network state and dispose only that suite's
+      # context before the next one. Failure uses the chained owner cleanup.
+      if [ -n "$RETAINED_KUBECONFIG" ]; then
+        rm -f "$RETAINED_KUBECONFIG" || return $?
+        RETAINED_KUBECONFIG=""
+      fi
+      if [ "$kubeconfig_was_set" = x ]; then
+        export KUBECONFIG="$original_kubeconfig"
+      else
+        unset KUBECONFIG
+      fi
+      trap cleanup EXIT
     done
     log "Kind shard suites green: $*"
+    return
+  fi
+  if [ "${1:-}" = down ] && [ "$#" -eq 1 ]; then
+    run_kind_down
     return
   fi
   if [ "${1:-}" = "credentials" ]; then
@@ -129,6 +172,12 @@ dispatch_kind_e2e() {
       ;;
     environment-session)
       run_retained_environment_session_suite
+      ;;
+    cw-runtime)
+      run_retained_cw_runtime_suite
+      ;;
+    cw-managed-agents)
+      run_retained_cw_managed_agents_suite
       ;;
     final-fencing)
       run_retained_final_fencing_suite

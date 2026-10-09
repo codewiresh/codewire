@@ -191,7 +191,11 @@ ln -s tool-stub "$TMP/bin/bun"
 repo="$TMP/checkout"
 remote="$TMP/remote.git"
 git init -q -b main "$repo"
+git -C "$repo" config gc.auto 0
+git -C "$repo" config maintenance.auto false
 git init -q --bare "$remote"
+git -C "$remote" config gc.auto 0
+git -C "$remote" config maintenance.auto false
 git -C "$repo" config user.name 'Preflight Fixture'
 git -C "$repo" config user.email preflight-fixture@codewire.invalid
 # Tags created below are synthetic pre-push inputs. Do not inherit a
@@ -606,6 +610,8 @@ assert_not_contains empty_tools "$(cat "$empty_log")" 'kind'
 # does not claim that a synthetic path was successfully classified.
 unknown_repo="$TMP/unknown-checkout"
 git init -q -b feature "$unknown_repo"
+git -C "$unknown_repo" config gc.auto 0
+git -C "$unknown_repo" config maintenance.auto false
 git -C "$unknown_repo" config user.name 'Preflight Fixture'
 git -C "$unknown_repo" config user.email preflight-fixture@codewire.invalid
 write_stub_tree "$unknown_repo"

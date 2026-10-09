@@ -42,7 +42,7 @@ python3 --version
 readonly helm_version='v3.16.4'
 [[ "$(helm version --template '{{.Version}}')" == "$helm_version" ]]
 
-readonly rust_version='1.91.1'
+readonly rust_version='1.93.0'
 readonly rust_host='x86_64-unknown-linux-gnu'
 readonly -a rust_targets=(
   "$rust_host"
@@ -52,10 +52,10 @@ readonly -a rust_targets=(
   aarch64-apple-darwin
 )
 
-[[ "$(rustc --version)" == "rustc $rust_version (ed61e7d7e 2025-11-07)" ]]
-[[ "$(cargo --version)" == "cargo $rust_version (ea2d97820 2025-10-10)" ]]
-[[ "$(rustfmt --version)" == 'rustfmt 1.8.0-stable (ed61e7d7e2 2025-11-07)' ]]
-[[ "$(clippy-driver --version)" == 'clippy 0.1.91 (ed61e7d7e2 2025-11-07)' ]]
+[[ "$(rustc --version)" == "rustc $rust_version (254b59607 2026-01-19)" ]]
+[[ "$(cargo --version)" == "cargo $rust_version (083ac5135 2025-12-15)" ]]
+[[ "$(rustfmt --version)" == 'rustfmt 1.8.0-stable (254b59607d 2026-01-19)' ]]
+[[ "$(clippy-driver --version)" == 'clippy 0.1.93 (254b59607d 2026-01-19)' ]]
 [[ "$(rustup show active-toolchain | awk '{print $1}')" == "$rust_version-$rust_host" ]]
 
 installed_targets="$(rustup target list --installed | LC_ALL=C sort)"

@@ -150,6 +150,7 @@ export FAKE_CARGO_LOG
 : > "$FAKE_CARGO_LOG"
 if invalid_network_output="$(
   CARGO_TARGET_DIR="$TMP/target" \
+    CODEWIRE_CARGO_CI_TARGET_DIR="$TMP/target" \
     RUN_DIR="$TMP/invalid-network" \
     INTEGRATION_DOCKER_NETWORK='invalid/network' \
     DATABASE_URL='postgres://synthetic:synthetic@127.0.0.1:60003/synthetic' \
@@ -165,6 +166,7 @@ grep -Fq 'invalid integration Docker network or NATS alias' \
 
 if missing_scope_output="$(
   CARGO_TARGET_DIR="$TMP/target" \
+    CODEWIRE_CARGO_CI_TARGET_DIR="$TMP/target" \
     RUN_DIR="$TMP/missing-service-scope" \
     DATABASE_URL='postgres://synthetic:synthetic@127.0.0.1:60003/synthetic' \
     DATABASE_URL_RUST='postgres://synthetic:synthetic@127.0.0.1:60003/synthetic' \
@@ -191,7 +193,7 @@ import sys
 
 root, temporary = map(Path, sys.argv[1:])
 suites = [
-    {'args': ['test', '-p', 'codewire-server-core', '--lib', 'migrate::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'server-core migration matrix', 'count': 87},
+    {'args': ['test', '-p', 'codewire-server-core', '--lib', 'migrate::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'server-core migration matrix', 'count': 88},
     {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'storage', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform credential storage matrix', 'count': 23},
     {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'profiles', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform access profile matrix', 'count': 15},
     {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'owner_sources', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform owner-source authority matrix', 'count': 5},
@@ -226,6 +228,8 @@ suites = [
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::admin::startup_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'admin startup summary matrix', 'count': 2},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::workspace_binding::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'workspace binding recorder matrix', 'count': 20},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'workspace_binding::store::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'workspace binding access store matrix', 'count': 4},
+    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::cw_runtime::owner::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform cw runtime journal matrix', 'count': 35},
+    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::platform_agents::journal::database_tests::db_', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform managed agent journal matrix', 'count': 34},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environment_resize::tests::db_', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'environment resize admission matrix', 'count': 3},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::ssh_proxy::database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'SSH proxy runtime lease matrix', 'count': 2},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'api::environment_daemon::repair_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment daemon repair lease matrix', 'count': 2},
@@ -311,7 +315,7 @@ assert all(command['target'] == environment['CARGO_TARGET_DIR'] and
            command['test_database'] == environment['DATABASE_URL_RUST'] for command in actual_batches)
 executions = [command for command in commands if command['args'][0] == 'test'
               and '--no-run' not in command['args']]
-assert len(executions) == len(suites) == 40
+assert len(executions) == len(suites) == 42
 for expected, actual in zip(suites, executions):
     assert actual['args'] == expected['args'], expected['label']
     assert actual['target'] == environment['CODEWIRE_CARGO_CI_TARGET_DIR' if expected['ci']
@@ -327,13 +331,18 @@ for batch in actual_batches:
 for index in range(len(suites)):
     failed, _, _ = run_case('count:' + str(index))
     assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout, index
+journal_index = next(i for i, item in enumerate(suites)
+                     if item['label'] == 'platform cw runtime journal matrix')
+failed, trace, _ = run_case('test:' + str(journal_index))
+assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout
+assert trace[-1]['args'] == suites[journal_index]['args']
 for failure in ['compile:codewire-server-core', 'compile:codewire-platform-credentials',
                 'compile:codewire-orchestration', 'test:0', 'test:22', 'skip:20', 'skip:21', 'skip:24']:
     failed, trace, _ = run_case(failure)
     assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout, failure
     if failure.startswith('compile:'):
         assert '--no-run' in trace[-1]['args'], failure
-print(f'Database batching: {len(suites) + 8} trace/failure cases; '
+print(f'Database batching: {len(suites) + 10} trace/failure cases; '
       f'all {len(suites)} suite contracts and {sum(suite["count"] for suite in suites)} required tests preserved')
 PYTHON
 
