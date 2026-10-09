@@ -13,8 +13,14 @@ use tonic::transport::{Channel, Endpoint};
 use crate::darwin::path as host_path;
 #[cfg(target_os = "linux")]
 use crate::linux::path as host_path;
+#[cfg(target_os = "linux")]
+use crate::linux::supervisor_peer::SupervisorPeerPin;
+#[cfg(target_os = "linux")]
+use crate::supervisor_config::NativeRuntimeConfig;
 use host_path::{PrivateRoot, set_socket_private};
 use host_path::{SocketIdentity, current_uid};
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 // OCI setup is a bounded lifecycle operation and can legitimately include
@@ -145,6 +151,74 @@ pub(crate) async fn connect_owner_only(socket: &Path) -> Result<Channel, UdsErro
         .map_err(|_| UdsError::Connect)
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) async fn capture_supervisor_peer(
+    socket: &Path,
+    config: Option<&NativeRuntimeConfig>,
+) -> Result<Arc<SupervisorPeerPin>, UdsError> {
+    let identity = SocketIdentity::capture(socket)?;
+    let stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(socket))
+        .await
+        .map_err(|_| UdsError::Connect)?
+        .map_err(|source| UdsError::Io {
+            path: socket.to_owned(),
+            source,
+        })?;
+    identity.revalidate(socket)?;
+    SupervisorPeerPin::capture(&stream, socket, identity, config).map_err(supervisor_peer_error)
+}
+
+#[cfg(target_os = "linux")]
+fn supervisor_peer_error(error: crate::linux::supervisor_peer::PeerError) -> UdsError {
+    use crate::linux::supervisor_peer::PeerError;
+    UdsError::SupervisorPeerAdmission(match error {
+        PeerError::Kernel => "kernel socket-derived process identity is unavailable",
+        PeerError::Identity => "process, socket or executable identity changed",
+        PeerError::Role => "role or configuration arguments do not match",
+        PeerError::Provenance => "retained executable provenance is unavailable or changed",
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn connect_supervisor_peer(
+    pin: Arc<SupervisorPeerPin>,
+) -> Result<Channel, UdsError> {
+    Endpoint::from_static("http://codewire-local-control")
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .connect_with_connector(supervisor_peer_connector(pin))
+        .await
+        .map_err(|_| UdsError::Connect)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn supervisor_peer_connector(
+    pin: Arc<SupervisorPeerPin>,
+) -> impl tower::Service<
+    http::Uri,
+    Response = TokioIo<UnixStream>,
+    Error = io::Error,
+    Future: Send + 'static,
+> + Clone
++ Send
++ 'static {
+    tower::service_fn(move |_| {
+        let pin = pin.clone();
+        async move {
+            let stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(pin.socket()))
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Unix connect timeout"))??;
+            pin.revalidate_stream(&stream).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "native supervisor peer changed",
+                )
+            })?;
+            Ok::<_, io::Error>(TokioIo::new(stream))
+        }
+    })
+}
+
 pub(crate) fn owner_only_connector(
     socket: &Path,
 ) -> Result<
@@ -219,6 +293,9 @@ pub(crate) fn remove_bound_socket(
 
 #[derive(Debug, thiserror::Error)]
 pub enum UdsError {
+    #[cfg(target_os = "linux")]
+    #[error("native supervisor admission refused: {0}")]
+    SupervisorPeerAdmission(&'static str),
     #[error("invalid private Unix socket path: {0}")]
     InvalidPath(PathBuf),
     #[error("connect to private Unix socket failed")]

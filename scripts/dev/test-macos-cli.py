@@ -45,7 +45,9 @@ class HelperTests(unittest.TestCase):
         (repo / "tracked").write_text("old")
         (repo / ".gitignore").write_text(".env\n")
         subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        # The inherited-signer fixture must also join automatic maintenance.
         subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+                        "-c", "maintenance.autoDetach=false", "-c", "gc.autoDetach=false",
                         "commit", "-qm", "fixture"], cwd=repo, check=True)
         return repo
 
@@ -175,9 +177,11 @@ class HelperTests(unittest.TestCase):
         (repo / "tracked").write_text("synthetic private replacement")
         subprocess.run(["git", "add", "tracked"], cwd=repo, check=True)
         subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+                        "-c", "maintenance.autoDetach=false", "-c", "gc.autoDetach=false",
                         "commit", "-qm", "replacement"], cwd=repo, check=True)
         replacement = helper.output(["git", "rev-parse", "HEAD"], cwd=repo)
-        subprocess.run(["git", f"--git-dir={database}", "fetch", "-q", str(repo), replacement], check=True)
+        subprocess.run(["git", f"--git-dir={database}", "-c", "maintenance.autoDetach=false",
+                        "-c", "gc.autoDetach=false", "fetch", "-q", str(repo), replacement], check=True)
         subprocess.run(["git", f"--git-dir={database}", "replace", commit, replacement], check=True)
         lock = ('[[package]]\nname="fixture"\nversion="1.0.0"\n'
                 f'source="git+https://github.com/connectrpc/connect-rust.git?rev={commit}#{commit}"\n').encode()

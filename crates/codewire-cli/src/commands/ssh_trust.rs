@@ -45,7 +45,7 @@ pub(crate) async fn handle_ssh_command(
 async fn handle_ssh_known_hosts(globals: &Globals, host: &str) -> anyhow::Result<()> {
     let target = KnownHostsTarget::parse(host)?;
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let environment_client = EnvironmentClient::new(&platform)?;
     let orgs = organization_client(&platform)?

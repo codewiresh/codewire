@@ -326,6 +326,13 @@ impl LocalSupervisorService for SupervisorRpc {
         Err(unsupported())
     }
 
+    async fn get_managed_runtime(
+        &self,
+        _: Request<v1::EnvironmentSelector>,
+    ) -> Result<Response<v1::ManagedRuntime>, Status> {
+        Err(unsupported())
+    }
+
     type WatchOperationStream =
         Pin<Box<dyn Stream<Item = Result<v1::Operation, Status>> + Send + 'static>>;
 

@@ -2,6 +2,9 @@
 # Build one image through an isolated Docker-container Buildx builder and load
 # the result into the caller's Docker image store for immediate verification.
 set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+readonly ROOT
+source "$ROOT/scripts/ci/images/cw-image-consumer.sh"
 
 usage() {
   echo "usage: $0 TAG DOCKERFILE CONTEXT [BUILDX_ARG ...]" >&2
@@ -20,6 +23,7 @@ shift 3
 readonly -a build_args=("$@")
 
 builder=""
+cw_local_work=""
 
 cleanup() {
   local status=$? cleanup_status=0
@@ -32,6 +36,13 @@ cleanup() {
   if [[ "$status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
     echo "local image build: failed to remove ephemeral builder $builder" >&2
     status="$cleanup_status"
+  fi
+  if [[ -n "$cw_local_work" ]]; then
+    if [[ "$status" -eq 0 ]]; then
+      rm -rf -- "$cw_local_work"
+    else
+      echo "local image build: retained failed CW build evidence at $cw_local_work" >&2
+    fi
   fi
   exit "$status"
 }
@@ -47,11 +58,20 @@ if [[ ! "$builder" =~ ^[[:alnum:]][[:alnum:]_.-]*$ ]]; then
   exit 1
 fi
 
-"$docker_bin" buildx build \
+command=("$docker_bin" buildx build
   --builder "$builder" \
   --pull \
   --load \
   --tag "$tag" \
   --file "$dockerfile" \
   "${build_args[@]}" \
-  "$context"
+  "$context")
+case "$(realpath -m -- "$dockerfile")" in
+  "$(realpath -m -- "$context")/deployments/docker/daemon.Dockerfile"|"$(realpath -m -- "$context")/images/workspace/Dockerfile")
+    umask 077
+    mkdir -p "$ROOT/.tmp"
+    cw_local_work="$(mktemp -d "$ROOT/.tmp/cw-local-image.XXXXXX")"
+    cw_image_run "${CODEWIRE_RUST_PROFILE:-release}" "$(realpath -m -- "$context")" "$cw_local_work" "${command[@]}"
+    ;;
+  *) "${command[@]}" ;;
+esac

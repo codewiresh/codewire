@@ -708,6 +708,12 @@ mod tests {
 
     fn git(repository: &Path, arguments: &[&str]) {
         let status = std::process::Command::new("/usr/bin/git")
+            .args([
+                "-c",
+                "maintenance.autoDetach=false",
+                "-c",
+                "gc.autoDetach=false",
+            ])
             .arg("-C")
             .arg(repository)
             .args(arguments)

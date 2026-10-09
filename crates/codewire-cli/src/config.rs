@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 pub const CW_CONFIG_DIR_ENV: &str = "CW_CONFIG_DIR";
+pub const CW_MESH_DATA_DIR_ENV: &str = "CW_MESH_DATA_DIR";
 pub const CODEWIRE_SERVER_URL_ENV: &str = "CODEWIRE_SERVER_URL";
 pub const CODEWIRE_API_KEY_ENV: &str = "CODEWIRE_API_KEY";
 pub const CODEWIRE_MESH_URL_ENV: &str = "CODEWIRE_MESH_URL";
@@ -24,6 +25,10 @@ pub const CODEWIRE_NODE_NAME_ENV: &str = "CODEWIRE_NODE_NAME";
 
 pub trait Env {
     fn var(&self, key: &str) -> Option<String>;
+
+    fn checked_var(&self, key: &str) -> Result<Option<String>, std::env::VarError> {
+        Ok(self.var(key))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -32,6 +37,14 @@ pub struct OsEnv;
 impl Env for OsEnv {
     fn var(&self, key: &str) -> Option<String> {
         std::env::var(key).ok()
+    }
+
+    fn checked_var(&self, key: &str) -> Result<Option<String>, std::env::VarError> {
+        match std::env::var(key) {
+            Ok(value) => Ok(Some(value)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -64,20 +77,41 @@ pub struct ResolvePaths {
 }
 
 impl ResolvePaths {
-    pub fn from_env(env: &impl Env) -> Self {
+    pub fn from_env(env: &impl Env) -> Result<Self, ConfigError> {
         Self::from_home_and_env(home_dir(env), env)
     }
 
-    pub fn from_home_and_env(home: PathBuf, env: &impl Env) -> Self {
+    pub fn from_home_and_env(home: PathBuf, env: &impl Env) -> Result<Self, ConfigError> {
+        let mesh_data_dir = match env
+            .checked_var(CW_MESH_DATA_DIR_ENV)
+            .map_err(|_| ConfigError::InvalidMeshDataDirectory)?
+        {
+            None => home.join(".codewire"),
+            Some(value) => {
+                let path = PathBuf::from(&value);
+                // Check raw components before Path normalizes away '.'. Resolving
+                // paths has no filesystem effects and never repairs ownership.
+                if value.is_empty()
+                    || value.len() > 4096
+                    || value.chars().any(char::is_control)
+                    || value.split('/').any(|part| matches!(part, "." | ".."))
+                    || !path.is_absolute()
+                    || path.parent().is_none()
+                {
+                    return Err(ConfigError::InvalidMeshDataDirectory);
+                }
+                path
+            }
+        };
         let platform_config_dir = env
             .var(CW_CONFIG_DIR_ENV)
             .and_then(non_empty)
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".config").join("cw"));
-        Self {
+        Ok(Self {
             platform_config_dir,
-            mesh_data_dir: home.join(".codewire"),
-        }
+            mesh_data_dir,
+        })
     }
 }
 
@@ -405,7 +439,7 @@ impl LocalMeshIdentity {
         sha256_hex(&self.api_key)
     }
 
-    fn is_complete(&self) -> bool {
+    pub(crate) fn is_complete(&self) -> bool {
         [self.organization_id.as_str(), self.api_key.as_str()]
             .iter()
             .all(|value| !value.trim().is_empty())
@@ -479,6 +513,19 @@ pub struct ResolvedMeshConfig {
 }
 
 impl ResolvedMeshConfig {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn static_token(mesh_url: String, token: &str) -> Result<Self, ConfigError> {
+        let token_provider = StaticTokenProvider::new(token).map_err(|_| {
+            ConfigError::InvalidMeshAuth("invalid standalone credential".to_owned())
+        })?;
+        Ok(Self {
+            mesh_url,
+            selected_network: None,
+            auth_source: MeshAuthSource::Explicit,
+            token_provider: Arc::new(token_provider),
+        })
+    }
+
     pub fn auth_configured(&self) -> bool {
         true
     }
@@ -660,6 +707,26 @@ fn saved_mesh_value_for_selected_url(
 
 pub fn load_mesh_config(data_dir: &Path) -> Result<MeshConfig, ConfigError> {
     let path = data_dir.join("config.toml");
+    #[cfg(target_os = "linux")]
+    let data = {
+        let read_error = |error: anyhow::Error| ConfigError::ReadConfig {
+            path: path.clone(),
+            source: std::io::Error::other(error),
+        };
+        let Some(directory) =
+            crate::commands::MeshStateDir::open(data_dir, false).map_err(read_error)?
+        else {
+            return Ok(MeshConfig::default());
+        };
+        let Some(bytes) = directory.read("config.toml").map_err(read_error)? else {
+            return Ok(MeshConfig::default());
+        };
+        String::from_utf8(bytes).map_err(|error| ConfigError::ReadConfig {
+            path: path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+        })?
+    };
+    #[cfg(not(target_os = "linux"))]
     let data = match fs::read_to_string(&path) {
         Ok(data) => data,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(MeshConfig::default()),
@@ -694,7 +761,7 @@ pub fn ensure_local_mesh_identity(data_dir: &Path) -> Result<LocalMeshIdentity, 
     Ok(identity)
 }
 
-fn new_local_mesh_identity() -> LocalMeshIdentity {
+pub(crate) fn new_local_mesh_identity() -> LocalMeshIdentity {
     let mut api_key_bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut api_key_bytes);
     LocalMeshIdentity {
@@ -876,29 +943,48 @@ fn update_mesh_config(
 }
 
 fn write_mesh_config(data_dir: &Path, config: &MeshConfig) -> Result<(), ConfigError> {
-    fs::create_dir_all(data_dir).map_err(|source| ConfigError::CreateConfigDir {
-        path: data_dir.to_path_buf(),
-        source,
-    })?;
-    harden_dir(data_dir)?;
-
     let path = data_dir.join("config.toml");
     let data = toml::to_string_pretty(config).map_err(|source| ConfigError::SerializeMesh {
         path: path.clone(),
         source,
     })?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&path)
-        .map_err(|source| ConfigError::WriteConfig {
+    #[cfg(target_os = "linux")]
+    {
+        let write_error = |error: anyhow::Error| ConfigError::WriteConfig {
             path: path.clone(),
+            source: std::io::Error::other(error),
+        };
+        let directory = crate::commands::MeshStateDir::open(data_dir, true)
+            .map_err(write_error)?
+            .ok_or_else(|| ConfigError::WriteConfig {
+                path: path.clone(),
+                source: std::io::Error::other("local Mesh directory is absent"),
+            })?;
+        directory
+            .write("config.toml", data.as_bytes())
+            .map_err(write_error)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        fs::create_dir_all(data_dir).map_err(|source| ConfigError::CreateConfigDir {
+            path: data_dir.to_path_buf(),
             source,
         })?;
-    harden_file(&path)?;
-    file.write_all(data.as_bytes())
-        .map_err(|source| ConfigError::WriteConfig { path, source })
+        harden_dir(data_dir)?;
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&path)
+            .map_err(|source| ConfigError::WriteConfig {
+                path: path.clone(),
+                source,
+            })?;
+        harden_file(&path)?;
+        file.write_all(data.as_bytes())
+            .map_err(|source| ConfigError::WriteConfig { path, source })
+    }
 }
 
 #[cfg(unix)]
@@ -1120,6 +1206,10 @@ impl From<ResolvedMeshConfig> for MeshReport {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error(
+        "CW_MESH_DATA_DIR must be a bounded absolute non-root Unicode path without control or dot components"
+    )]
+    InvalidMeshDataDirectory,
     #[error("read config {path}: {source}")]
     ReadConfig {
         path: PathBuf,
@@ -1207,7 +1297,92 @@ mod tests {
     use super::*;
 
     fn paths(home: &Path, env: &impl Env) -> ResolvePaths {
-        ResolvePaths::from_home_and_env(home.to_path_buf(), env)
+        ResolvePaths::from_home_and_env(home.to_path_buf(), env).unwrap()
+    }
+
+    #[test]
+    fn mesh_data_directory_default_preserves_home_and_platform_resolution() {
+        let home = tempfile::tempdir().unwrap();
+        let env = MapEnv::new([("HOME", home.path().to_str().unwrap())]);
+        let paths = ResolvePaths::from_env(&env).unwrap();
+        assert_eq!(paths.mesh_data_dir, home.path().join(".codewire"));
+        assert_eq!(paths.platform_config_dir, home.path().join(".config/cw"));
+        assert_eq!(env.var("HOME").unwrap(), home.path().to_str().unwrap());
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn mesh_data_directory_override_is_independent_and_has_no_filesystem_effects() {
+        let home = tempfile::tempdir().unwrap();
+        let mesh = home.path().join("isolated-mesh");
+        let platform = home.path().join("isolated-platform");
+        let env = MapEnv::new([
+            ("HOME", home.path().to_str().unwrap()),
+            (CW_CONFIG_DIR_ENV, platform.to_str().unwrap()),
+            (CW_MESH_DATA_DIR_ENV, mesh.to_str().unwrap()),
+        ]);
+        let paths = ResolvePaths::from_env(&env).unwrap();
+        assert_eq!(paths.mesh_data_dir, mesh);
+        assert_eq!(paths.platform_config_dir, platform);
+        assert_eq!(env.var("HOME").unwrap(), home.path().to_str().unwrap());
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn invalid_present_mesh_data_directory_never_falls_back_or_changes_state() {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("sentinel"), b"preserve").unwrap();
+        for value in [
+            "".to_owned(),
+            "relative".to_owned(),
+            "/".to_owned(),
+            "///".to_owned(),
+            "/safe/./child".to_owned(),
+            "/safe/../child".to_owned(),
+            "/safe/child/.".to_owned(),
+            "/safe/\0child".to_owned(),
+            "/safe/\nchild".to_owned(),
+            "/safe/\u{7f}child".to_owned(),
+            format!("/{}", "a".repeat(4096)),
+        ] {
+            let env = MapEnv::new([
+                ("HOME", home.path().to_str().unwrap()),
+                (CW_MESH_DATA_DIR_ENV, value.as_str()),
+            ]);
+            assert!(matches!(
+                ResolvePaths::from_env(&env),
+                Err(ConfigError::InvalidMeshDataDirectory)
+            ));
+            assert_eq!(fs::read(home.path().join("sentinel")).unwrap(), b"preserve");
+            assert_eq!(fs::read_dir(home.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mesh_data_directory_os_lookup_refuses_present_invalid_unicode() {
+        use std::os::unix::ffi::OsStringExt;
+        const SENTINEL: &str = "CODEWIRE_TEST_INVALID_MESH_DIRECTORY";
+        if std::env::var_os(SENTINEL).is_none() {
+            let name = std::thread::current().name().unwrap().to_owned();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name])
+                .env(SENTINEL, "1")
+                .env(
+                    CW_MESH_DATA_DIR_ENV,
+                    std::ffi::OsString::from_vec(vec![b'/', 0xff]),
+                )
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let home = std::env::var_os("HOME");
+        assert!(matches!(
+            ResolvePaths::from_env(&OsEnv),
+            Err(ConfigError::InvalidMeshDataDirectory)
+        ));
+        assert_eq!(home, std::env::var_os("HOME"));
     }
 
     fn write_platform_config(dir: &Path, server_url: &str) {
@@ -1226,6 +1401,13 @@ mod tests {
     fn write_mesh_config(dir: &Path, body: &str) {
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join("config.toml"), body).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(dir.join("config.toml"), fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
     }
 
     #[test]

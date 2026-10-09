@@ -45,10 +45,13 @@ async fn fingerprint(pool: &PgPool) -> anyhow::Result<String> {
     .await?)
 }
 
+/// Every helper except migration38's cw-runtime trigger function, which has
+/// its own proof and replaces no prior helper.
 async fn helpers(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n \
         ON n.oid=p.pronamespace WHERE n.nspname='public' AND starts_with(p.proname,'codewire_') \
+        AND p.proname <> 'codewire_cw_runtime_request_immutable' \
         ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)",
     )
     .fetch_all(pool)
@@ -614,7 +617,11 @@ async fn workspace_binding_upgrade_preserves33_rows_helpers_and_second_startup()
             .await?;
         let after = applied_migrations(&pool).await?;
         anyhow::ensure!(
-            after.len() == MIGRATOR.iter().count()
+            after.len()
+                == MIGRATOR
+                    .iter()
+                    .filter(|m| m.migration_type.is_up_migration())
+                    .count()
                 && after[..33] == before
                 && after[33].0 == VERSION
         );
@@ -694,7 +701,7 @@ async fn workspace_binding_failed_forward_rolls_back_table_columns_and_ledger_th
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         anyhow::ensure!(
             !absent(&pool).await?
-                && applied_migrations(&pool).await?.len() == MIGRATOR.iter().count()
+                && applied_migrations(&pool).await?.len() == MIGRATOR.iter().filter(|m| m.migration_type.is_up_migration()).count()
                 && rows(&pool).await? == original
                 && pointers_absent(&pool).await?
         );
@@ -754,7 +761,13 @@ async fn workspace_binding_down_restores33_in_place_and_keeps_every_other_row() 
             .max_connections(1)
             .connect(&db.url)
             .await?;
-        anyhow::ensure!(applied_migrations(&pool).await?.len() == MIGRATOR.iter().count());
+        anyhow::ensure!(
+            applied_migrations(&pool).await?.len()
+                == MIGRATOR
+                    .iter()
+                    .filter(|m| m.migration_type.is_up_migration())
+                    .count()
+        );
         anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
         anyhow::ensure!(rows(&pool).await? == original);
         anyhow::ensure!(binding_count(&pool).await? == 0 && pointers_absent(&pool).await?);

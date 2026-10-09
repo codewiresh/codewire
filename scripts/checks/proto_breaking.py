@@ -187,7 +187,21 @@ def run_breaking(base_sha: str) -> None:
     ]
     for path in checked_paths:
         command.extend(["--path", path])
-    subprocess.run(command, cwd=ROOT / "proto", check=True)
+    # Buf fetches the comparison tree with Git. Join its automatic maintenance
+    # before returning so verification owns the complete process family.
+    environment = os.environ.copy()
+    try:
+        config_count = int(environment.get("GIT_CONFIG_COUNT") or "0")
+    except ValueError:
+        raise PolicyError("invalid inherited Git configuration count") from None
+    if config_count < 0:
+        raise PolicyError("invalid inherited Git configuration count")
+    for key in ("maintenance.autoDetach", "gc.autoDetach"):
+        environment[f"GIT_CONFIG_KEY_{config_count}"] = key
+        environment[f"GIT_CONFIG_VALUE_{config_count}"] = "false"
+        config_count += 1
+    environment["GIT_CONFIG_COUNT"] = str(config_count)
+    subprocess.run(command, cwd=ROOT / "proto", check=True, env=environment)
     print(
         "proto breaking policy: OK "
         f"({sum(mode == 'delete' for mode, _, _ in active)} reviewed deletion(s), "

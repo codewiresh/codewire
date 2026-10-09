@@ -14,6 +14,10 @@ mod direct_share;
 /// Provider credentials are never stored here. The directory contains only
 /// guest-visible configuration and Codex's own workspace-local state.
 pub const CODEX_GUEST_HOME_PATH: &str = codewire_access::CODEX_NATIVE_HOME;
+pub mod cw_runtime;
+pub mod cw_runtime_live;
+#[cfg(target_os = "linux")]
+pub mod cw_runtime_publisher;
 mod newc;
 mod progress;
 mod seed;
@@ -46,17 +50,19 @@ pub use network::{
     NetworkHostHello, NetworkHostReady, NetworkKey, NetworkRole, NetworkSession,
     encoded_network_frame_len,
 };
+#[cfg(target_os = "linux")]
+pub use newc::write_canonical_guest_root_initramfs_with_cw;
 pub use newc::{
-    NewcError, canonical_guest_root_newc, canonical_newc, write_canonical_guest_root_initramfs,
-    write_canonical_initramfs,
+    NewcError, canonical_guest_root_newc, canonical_guest_root_newc_with_cw, canonical_newc,
+    write_canonical_guest_root_initramfs, write_canonical_initramfs,
 };
 pub use progress::{
     GUEST_PROGRESS_VSOCK_PORT, GuestBootStage, PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN,
     PROGRESS_REQUEST_LEN, ProgressError, ProgressFrame, ProgressRequest,
 };
 pub use seed::{
-    DOCKER_DISK_SERIAL, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN, STATE_DISK_SERIAL, Seed,
-    SeedError, SetupBinding,
+    DOCKER_DISK_SERIAL, GUEST_RUNTIME_ABI_MARKER, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN,
+    STATE_DISK_SERIAL, Seed, SeedError, SetupBinding,
 };
 pub use setup::{
     GUEST_ABI_VERSION, LayerEncoding, MAX_SETUP_CONFIG_BYTES, MAX_SETUP_LAYER_BYTES,

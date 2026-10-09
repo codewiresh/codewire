@@ -179,6 +179,10 @@ fn git_command(directory: &Path) -> Command {
             "core.hooksPath=/dev/null",
             "-c",
             "core.fsmonitor=false",
+            "-c",
+            "maintenance.autoDetach=false",
+            "-c",
+            "gc.autoDetach=false",
         ])
         .current_dir(directory)
         .stdin(Stdio::piped())

@@ -26,9 +26,65 @@ service LocalSupervisorService {
   // environment generation. The response and request are material-free.
   rpc EnsureCredentialBroker(EnvironmentSelector) returns (CredentialBrokerRuntime);
   rpc GetDaemonAccess(EnvironmentSelector) returns (DaemonAccess);
+  // Public runtime identity from this immutable UUID's retained native binding.
+  // Never consults the current global artifact source or a guest manifest.
+  rpc GetManagedRuntime(EnvironmentSelector) returns (ManagedRuntime);
+}
+
+message ManagedRuntime {
+  string environment_id = 1;
+  string artifact_generation = 2;
+  bytes provenance_json = 3;
+  // Canonical bounded catalog admitted independently of the boot bundle.
+  bytes catalog_json = 4;
+  string cw_runtime_catalog_generation = 5;
 }
 
 message GetSupervisorInfoRequest {}
+
+// Linux protocol9 only. Runtime selection never authorizes a lifecycle effect.
+service LinuxCwRuntimeService {
+  // Read saved identity only; never replay/reconcile lifecycle operations.
+  rpc Resolve(LinuxCwRuntimeSelector) returns (LinuxCwRuntimeIdentity);
+  rpc Info(LinuxCwRuntimeQuery) returns (LinuxCwRuntimeStatus);
+  rpc Update(LinuxCwRuntimeMutation) returns (LinuxCwRuntimeStatus);
+  rpc Rollback(LinuxCwRuntimeMutation) returns (LinuxCwRuntimeStatus);
+  rpc Observe(LinuxCwRuntimeQuery) returns (LinuxCwRuntimeStatus);
+  rpc Cancel(LinuxCwRuntimeQuery) returns (LinuxCwRuntimeStatus);
+}
+message LinuxCwRuntimeSelector {
+  string selector = 1;
+}
+message LinuxCwRuntimeIdentity {
+  string environment_id = 1;
+}
+message LinuxCwRuntimeQuery {
+  string environment_id = 1;
+  // Resolve the SAME durable operation after a lost reply.
+  string request_id = 2;
+}
+message LinuxCwRuntimeMutation {
+  string environment_id = 1;
+  uint64 generation = 2;
+  string bootstrap_catalog_sha256 = 3;
+  string request_id = 4;
+  uint64 expected_revision = 5;
+  string target_sha256 = 6;
+  // Update requires a pinned local source. Never journal the source path.
+  string image_index_sha256 = 7;
+  string source_lock = 8;
+}
+message LinuxCwRuntimeStatus {
+  string environment_id = 1;
+  uint64 generation = 2;
+  bytes selection_json = 3;
+  string operation_id = 4;
+  string request_id = 5;
+  string phase = 6;
+  string error_code = 7;
+  // Retained old-birth uncertainty is not reported as an unchanged update.
+  repeated string interrupted_request_ids = 8;
+}
 
 message SupervisorInfo {
   uint32 protocol_version = 1;
@@ -88,6 +144,8 @@ enum OperationKind {
   reserved 10;
   reserved "OPERATION_KIND_APPLY_ENVIRONMENT_ACCESS";
   OPERATION_KIND_UPDATE_ENVIRONMENT_SOURCES = 11;
+  OPERATION_KIND_UPDATE_CW_RUNTIME = 12;
+  OPERATION_KIND_ROLLBACK_CW_RUNTIME = 13;
 }
 
 enum OperationPhase {
@@ -164,6 +222,7 @@ message OperationResult {
   oneof value {
     EnvironmentOperationResult environment = 1;
     DeleteEnvironmentResponse deletion = 2;
+    LinuxCwRuntimeStatus cw_runtime = 3;
   }
 }
 
@@ -423,6 +482,8 @@ message RunnerInfo {
   // Bounded machine-readable cause for an error state. Empty for every
   // non-error state.
   string error_code = 5;
+  // Actual owned VMM attachment. Empty when no catalog disk is running.
+  string cw_runtime_catalog_generation = 6;
 }
 
 enum RunnerStage {
@@ -521,6 +582,9 @@ message StartVmRequest {
   // Closed material-free client selection from the exact pinned profile.
   // Explicit v1:none is required when no managed credential client is selected.
   string managed_credential_clients = 22;
+  // Lowercase SHA-256 of the independently admitted private runtime catalog.
+  // The runner derives its fixed disk path; empty is allowed for raw fixtures.
+  string cw_runtime_catalog_generation = 23;
 }
 
 message DirectShareAttachment {

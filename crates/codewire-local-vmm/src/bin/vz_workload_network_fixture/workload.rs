@@ -9,6 +9,8 @@ pub(super) const SESSION_STDOUT: &[u8] = b"workload-network-ready\n";
 
 pub(super) fn request(working_dir: &str) -> v1::LaunchSessionRequest {
     v1::LaunchSessionRequest {
+        name: String::new(),
+        parent_session_id: None,
         command: vec!["/bin/sh".into(), "-c".into(),
             "/run/codewire-runtime/init macos-workload-network-client && printf 'workload-network-ready\\n' && exec /bin/sleep 300".into()],
         working_dir: working_dir.into(),

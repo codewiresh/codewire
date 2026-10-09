@@ -8,6 +8,7 @@ license = "AGPL-3.0-only"
 description = "Host-side public Codewire adapters for the private workspace daemon protocol"
 
 [dependencies]
+sha2 = { workspace = true }
 async-trait = { workspace = true }
 buffa = { workspace = true }
 buffa-types = { workspace = true }

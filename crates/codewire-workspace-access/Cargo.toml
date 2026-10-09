@@ -45,6 +45,7 @@ serde = { workspace = true }
 url = { workspace = true }
 boringtun = "0.7"
 chrono = { workspace = true }
+rustix = { workspace = true }
 codewire-proto = { workspace = true }
 axum = { workspace = true }
 codewire-tls = { workspace = true, features = ["test-support"] }

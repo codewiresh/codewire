@@ -22,7 +22,7 @@ use codewire_server_core::{AppError, AppResult};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use super::ApiState;
 use crate::confidential_storage::require_interactive_access;
@@ -338,6 +338,82 @@ pub(crate) async fn require_environment_access(
         }
         Some(_) => Ok(()),
     }
+}
+
+/// Current operator fence for the additive cw-runtime journal. Existing pool
+/// callers retain their behavior. The journal retains these row locks through
+/// its admission/Issued commit; bearer authentication remains the transport
+/// middleware's responsibility, not a claim made by this principal-only seam.
+/// Lock order: enabled user, active organization, environment, membership,
+/// grant. Membership is required even for the creator or a global admin.
+pub(crate) async fn lock_cw_runtime_operator_in(
+    tx: &mut Transaction<'_, Postgres>,
+    user: &AuthUser,
+    org_id: &str,
+    env_id: &str,
+    flags: crate::confidential_storage::FeatureFlags,
+) -> AppResult<()> {
+    codewire_server_core::org_deletion::bound_environment_runtime_transaction(tx).await?;
+    let denied = || coded(StatusCode::FORBIDDEN, "access_denied", "access denied");
+    let current: Option<(bool, bool)> =
+        sqlx::query_as("SELECT enabled,COALESCE(is_admin,false) FROM users WHERE id=$1 FOR SHARE")
+            .bind(&user.user_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    let Some((true, is_admin)) = current else {
+        return Err(denied());
+    };
+    if !user.permits_organization(org_id) {
+        return Err(denied());
+    }
+    let active: Option<bool> = sqlx::query_scalar(
+        "SELECT deletion_state='active' FROM organizations WHERE id=$1 FOR UPDATE",
+    )
+    .bind(org_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if active != Some(true) {
+        return Err(denied());
+    }
+    let environment: Option<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT org_id,created_by,isolation_tier FROM environments WHERE id=$1 FOR UPDATE",
+    )
+    .bind(env_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((actual_org, creator, tier)) = environment else {
+        return Err(denied());
+    };
+    if actual_org != org_id {
+        return Err(denied());
+    }
+    let role: Option<String> =
+        sqlx::query_scalar("SELECT role FROM org_members WHERE org_id=$1 AND user_id=$2 FOR SHARE")
+            .bind(org_id)
+            .bind(&user.user_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    let Some(role) = role else {
+        return Err(denied());
+    };
+    let grant: Option<String> = sqlx::query_scalar(
+        "SELECT permission FROM environment_access WHERE environment_id=$1 AND user_id=$2 FOR SHARE",
+    )
+    .bind(env_id)
+    .bind(&user.user_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if creator.as_deref() != Some(user.user_id.as_str())
+        && !matches!(role.as_str(), "owner" | "admin")
+        && !matches!(grant.as_deref(), Some("operator" | "owner"))
+    {
+        return Err(denied());
+    }
+    let fresh = AuthUser {
+        is_admin,
+        ..user.clone()
+    };
+    require_interactive_access(flags, &fresh, &tier)
 }
 
 /// Mirrors `auth.LogAuditEvent` (warn-only, severity "warning").

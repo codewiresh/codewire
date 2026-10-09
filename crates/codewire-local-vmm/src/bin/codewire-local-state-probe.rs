@@ -27,6 +27,7 @@ mod linux {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
+    use codewire_local_vmm::cw_runtime::CwRuntimeJournalEvidence;
     use codewire_local_vmm::{LiveProcess, ProcessIdentity};
     use rusqlite::config::DbConfig;
     use rusqlite::{Connection, OpenFlags, OptionalExtension as _};
@@ -36,7 +37,7 @@ mod linux {
     use uuid::Uuid;
 
     const DATABASE_APPLICATION_ID: i64 = 0x4357_564d;
-    const DATABASE_SCHEMA_VERSION: i64 = 11;
+    const DATABASE_SCHEMA_VERSION: i64 = 12;
     const DATABASE_FILE: &str = "supervisor.db";
     const MAXIMUM_OPERATIONS: usize = 128;
     const MAXIMUM_WORKSPACE_METADATA_BYTES: usize = 512 * 1024;
@@ -85,6 +86,8 @@ mod linux {
         socket: SocketIdentity,
         artifact_generation: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        cw_runtime_catalog_generation: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         error_code: Option<String>,
     }
 
@@ -102,6 +105,7 @@ mod linux {
         kind: String,
         phase: String,
         checkpoint: u32,
+        runtime_completed: Option<bool>,
     }
 
     #[derive(Deserialize)]
@@ -329,7 +333,9 @@ mod linux {
                     let complete = !rows.is_empty()
                         && rows.iter().all(|row| {
                             row.phase == "completed"
-                                && terminal_checkpoint(&row.kind) == Some(row.checkpoint)
+                                && row.runtime_completed.unwrap_or_else(|| {
+                                    terminal_checkpoint(&row.kind) == Some(row.checkpoint)
+                                })
                         });
                     Ok(if complete { "yes" } else { "no" }.to_owned())
                 }
@@ -388,6 +394,12 @@ mod linux {
             require(encoded.len() <= 64 * 1024)?;
             let runner: RunnerRecord = serde_json::from_slice(&encoded)?;
             require(valid_sha256(&runner.artifact_generation) && runner.process.pid > 0)?;
+            require(
+                runner
+                    .cw_runtime_catalog_generation
+                    .as_deref()
+                    .is_none_or(valid_sha256),
+            )?;
             require(runner.error_code.as_deref().is_none_or(|error_code| {
                 !error_code.is_empty()
                     && error_code.len() <= 64
@@ -401,11 +413,42 @@ mod linux {
         fn operations(&self) -> ProbeResult<Vec<OperationRow>> {
             let limit = i64::try_from(MAXIMUM_OPERATIONS + 1)?;
             let mut statement = self.connection.prepare(
-                "SELECT kind, phase, checkpoint FROM operations \
-                 ORDER BY created_unix_ms, operation_id LIMIT ?1",
+                "SELECT kind, phase, checkpoint,
+                   CASE WHEN kind IN ('update_cw_runtime', 'rollback_cw_runtime')
+                     AND typeof(operation_id) = 'text' AND length(operation_id) = 36
+                     THEN operation_id END,
+                   CASE WHEN kind IN ('update_cw_runtime', 'rollback_cw_runtime')
+                     AND typeof(environment_id) = 'text' AND length(environment_id) = 36
+                     THEN environment_id END,
+                   CASE WHEN kind IN ('update_cw_runtime', 'rollback_cw_runtime')
+                     THEN typeof(payload_json) END,
+                   CASE WHEN kind IN ('update_cw_runtime', 'rollback_cw_runtime')
+                     THEN length(payload_json) END,
+                   CASE WHEN kind IN ('update_cw_runtime', 'rollback_cw_runtime')
+                     AND typeof(payload_json) = 'blob' AND length(payload_json) BETWEEN 1 AND ?2
+                     THEN payload_json END,
+                   CASE WHEN kind IN ('update_cw_runtime', 'rollback_cw_runtime')
+                     THEN typeof(result_json) END,
+                   CASE WHEN kind IN ('update_cw_runtime', 'rollback_cw_runtime')
+                     THEN length(result_json) END,
+                   CASE WHEN kind IN ('update_cw_runtime', 'rollback_cw_runtime')
+                     AND typeof(result_json) = 'blob' AND length(result_json) BETWEEN 1 AND ?2
+                     THEN result_json END,
+                   CASE WHEN kind IN ('update_cw_runtime', 'rollback_cw_runtime')
+                     THEN typeof(error_code) END,
+                   CASE WHEN kind IN ('update_cw_runtime', 'rollback_cw_runtime')
+                     THEN length(CAST(error_code AS BLOB)) END,
+                   CASE WHEN kind IN ('update_cw_runtime', 'rollback_cw_runtime')
+                     AND typeof(error_code) = 'text'
+                     AND length(CAST(error_code AS BLOB)) BETWEEN 1 AND 64
+                     THEN error_code END
+                 FROM operations ORDER BY created_unix_ms, operation_id LIMIT ?1",
             )?;
             let rows = statement
-                .query_map([limit], decode_operation)?
+                .query_map(
+                    rusqlite::params![limit, CwRuntimeJournalEvidence::MAXIMUM_JSON_BYTES],
+                    decode_journal_operation,
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
             require(rows.len() <= MAXIMUM_OPERATIONS)?;
             Ok(rows)
@@ -414,7 +457,7 @@ mod linux {
 
     impl OperationRow {
         fn validate(&self) -> ProbeResult<()> {
-            require(terminal_checkpoint(&self.kind).is_some())?;
+            require(self.runtime_completed.is_some() || terminal_checkpoint(&self.kind).is_some())?;
             require(matches!(
                 self.phase.as_str(),
                 "intent" | "effect_applied" | "completed" | "failed" | "interrupted"
@@ -440,7 +483,86 @@ mod linux {
             kind: row.get(0)?,
             phase: row.get(1)?,
             checkpoint,
+            runtime_completed: None,
         })
+    }
+
+    fn decode_journal_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRow> {
+        let mut operation = decode_operation(row)?;
+        if !matches!(
+            operation.kind.as_str(),
+            "update_cw_runtime" | "rollback_cw_runtime"
+        ) {
+            return Ok(operation);
+        }
+        let validate = || -> ProbeResult<bool> {
+            let operation_id = canonical_uuid(row.get::<_, Option<String>>(3)?)?;
+            let environment_id = canonical_uuid(row.get::<_, Option<String>>(4)?)?;
+            let payload = journal_blob(row, 5, true)?.ok_or_else(failed)?;
+            let result = journal_blob(row, 8, false)?;
+            let error_type: String = row.get(11)?;
+            let error_size: Option<i64> = row.get(12)?;
+            let error_code: Option<String> = row.get(13)?;
+            match error_type.as_str() {
+                "null" => require(error_size.is_none() && error_code.is_none())?,
+                "text" => require(
+                    error_size.is_some_and(|size| (1..=64).contains(&size))
+                        && error_code
+                            .as_ref()
+                            .is_some_and(|code| i64::try_from(code.len()).ok() == error_size),
+                )?,
+                _ => return Err(failed()),
+            }
+            require(operation.checkpoint <= 16)?;
+            require(
+                CwRuntimeJournalEvidence {
+                    kind: &operation.kind,
+                    operation_id,
+                    environment_id,
+                    phase: &operation.phase,
+                    payload: &payload,
+                    result: result.as_deref(),
+                    error_code: error_code.as_deref(),
+                }
+                .validate(),
+            )?;
+            Ok(operation.phase == "completed")
+        };
+        // Validate and release each bounded JSON row before reading another;
+        // the returned vector retains only fixed summary/completion fields.
+        operation.runtime_completed = Some(validate().map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, failed())
+        })?);
+        Ok(operation)
+    }
+
+    fn canonical_uuid(value: Option<String>) -> ProbeResult<Uuid> {
+        let value = value.ok_or_else(failed)?;
+        let parsed = Uuid::parse_str(&value)?;
+        require(!parsed.is_nil() && parsed.to_string() == value)?;
+        Ok(parsed)
+    }
+
+    fn journal_blob(
+        row: &rusqlite::Row<'_>,
+        type_column: usize,
+        required: bool,
+    ) -> ProbeResult<Option<Vec<u8>>> {
+        let storage_type: String = row.get(type_column)?;
+        let size: Option<i64> = row.get(type_column + 1)?;
+        let bytes: Option<Vec<u8>> = row.get(type_column + 2)?;
+        match storage_type.as_str() {
+            "null" if !required => require(size.is_none() && bytes.is_none())?,
+            "blob" => require(
+                size.is_some_and(|size| {
+                    (1..=CwRuntimeJournalEvidence::MAXIMUM_JSON_BYTES as i64).contains(&size)
+                }) && bytes
+                    .as_ref()
+                    .is_some_and(|bytes| i64::try_from(bytes.len()).ok() == size),
+            )?,
+            _ => return Err(failed()),
+        }
+        Ok(bytes)
     }
 
     fn terminal_checkpoint(kind: &str) -> Option<u32> {
@@ -483,6 +605,29 @@ mod linux {
                 .is_some();
             require(present)?;
         }
+        let platform: (i64, Option<String>) = connection.query_row(
+            "SELECT COUNT(*), MIN(value) FROM supervisor_metadata WHERE key = 'platform'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        require(platform == (1, Some("linux-v1".to_owned())))?;
+        let runtime_binding = connection
+            .query_row(
+                "SELECT type, \"notnull\", dflt_value, pk, hidden
+                 FROM pragma_table_xinfo('environments') WHERE name = 'cw_runtime_binding_json'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        require(runtime_binding == Some(("BLOB".to_owned(), 0, None, 0, 0)))?;
         Ok(())
     }
 
@@ -544,6 +689,12 @@ mod linux {
         use std::os::unix::process::ExitStatusExt as _;
         use std::process::{Child, Command, Stdio};
 
+        use codewire_vmm_guest_probe::cw_runtime::{
+            CwImageDescriptor, CwImagePayload, CwRuntimeCatalog, CwRuntimeProvenance,
+        };
+        use codewire_vmm_guest_probe::cw_runtime_live::{
+            RuntimeBinding, RuntimeReply, RuntimeSelection, SelectionOutcome, SelectionReceipt,
+        };
         use rusqlite::params;
 
         use super::*;
@@ -582,7 +733,8 @@ mod linux {
                          CREATE TABLE environments(
                            id TEXT, name TEXT, runner_json BLOB,
                            active_artifact_generation TEXT,
-                           active_workspace_generation_json BLOB
+                           active_workspace_generation_json BLOB,
+                           cw_runtime_binding_json BLOB NULL
                          );
                          CREATE TABLE supervisor_settings(
                            singleton INTEGER, current_environment_id TEXT
@@ -591,11 +743,13 @@ mod linux {
                          CREATE TABLE operations(
                            operation_id TEXT, kind TEXT, phase TEXT,
                            checkpoint INTEGER, created_unix_ms INTEGER,
-                           environment_id TEXT
+                           environment_id TEXT, payload_json BLOB,
+                           result_json BLOB, error_code TEXT
                          );
+                         INSERT INTO supervisor_metadata VALUES ('platform', 'linux-v1');
                          INSERT INTO supervisor_settings VALUES (1, NULL);
                          PRAGMA application_id = 1129797197;
-                         PRAGMA user_version = 11;",
+                         PRAGMA user_version = 12;",
                     )
                     .unwrap();
                 fs::set_permissions(&database, fs::Permissions::from_mode(0o600)).unwrap();
@@ -603,7 +757,10 @@ mod linux {
                 let runner = runner_record(process);
                 writer
                     .execute(
-                        "INSERT INTO environments VALUES (?1, 'native-smoke', ?2, ?3, ?4)",
+                        "INSERT INTO environments
+                         (id, name, runner_json, active_artifact_generation,
+                          active_workspace_generation_json)
+                         VALUES (?1, 'native-smoke', ?2, ?3, ?4)",
                         params![
                             environment_id,
                             serde_json::to_vec(&runner).unwrap(),
@@ -621,7 +778,9 @@ mod linux {
                     .unwrap();
                 writer
                     .execute(
-                        "INSERT INTO operations VALUES ('op-a', 'create', 'completed', 9, 1, ?1)",
+                        "INSERT INTO operations
+                         (operation_id, kind, phase, checkpoint, created_unix_ms, environment_id)
+                         VALUES ('op-a', 'create', 'completed', 9, 1, ?1)",
                         [&environment_id],
                     )
                     .unwrap();
@@ -648,8 +807,598 @@ mod linux {
                     mode: 0o140600,
                 },
                 artifact_generation: "b".repeat(64),
+                cw_runtime_catalog_generation: None,
                 error_code: None,
             }
+        }
+
+        struct RuntimeJournal {
+            operation_id: Uuid,
+            kind: &'static str,
+            payload: serde_json::Value,
+            result: serde_json::Value,
+        }
+
+        impl RuntimeJournal {
+            fn new(fixture: &Fixture, rollback: bool, cancelled: bool) -> Self {
+                let environment_id = Uuid::parse_str(&fixture.environment_id).unwrap();
+                let binding = RuntimeBinding {
+                    environment_id,
+                    generation: 7,
+                    bootstrap_catalog_sha256: "c".repeat(64),
+                };
+                let a = runtime_member('a');
+                let b = runtime_member('b');
+                let target = if cancelled {
+                    runtime_member('d')
+                } else if rollback {
+                    a.clone()
+                } else {
+                    b.clone()
+                };
+                let mut runner =
+                    runner_record(ProcessIdentity::capture(std::process::id()).unwrap());
+                runner.cw_runtime_catalog_generation = Some("c".repeat(64));
+                let payload = serde_json::json!({
+                    "binding": binding,
+                    "runner": runner,
+                    "vmm": runner.process,
+                    "vsock": runner.socket,
+                    "expected_revision": 3,
+                    "target": target,
+                    "rollback": rollback,
+                });
+                let operation_id = Uuid::new_v4();
+                let receipt = SelectionReceipt {
+                    operation_id,
+                    generation: 7,
+                    expected_revision: 3,
+                    target_sha256: target.payload.sha256.clone(),
+                    outcome: if cancelled {
+                        SelectionOutcome::Cancelled
+                    } else {
+                        SelectionOutcome::Committed
+                    },
+                    selection_revision: if cancelled { 3 } else { 4 },
+                };
+                let result = serde_json::to_value(RuntimeReply {
+                    protocol_version: 1,
+                    binding,
+                    selection: RuntimeSelection {
+                        schema_version: 1,
+                        environment_id,
+                        bootstrap_catalog_sha256: "c".repeat(64),
+                        revision: receipt.selection_revision,
+                        previous_sha256: if cancelled || rollback {
+                            Some(b.payload.sha256.clone())
+                        } else {
+                            Some(a.payload.sha256.clone())
+                        },
+                        catalog: CwRuntimeCatalog {
+                            schema_version: 1,
+                            active_sha256: if cancelled {
+                                a.payload.sha256.clone()
+                            } else {
+                                target.payload.sha256.clone()
+                            },
+                            runtimes: vec![a, b],
+                        },
+                        operations: vec![receipt.clone()],
+                    },
+                    observed: Some(receipt),
+                })
+                .unwrap();
+                Self {
+                    operation_id,
+                    kind: if rollback {
+                        "rollback_cw_runtime"
+                    } else {
+                        "update_cw_runtime"
+                    },
+                    payload,
+                    result,
+                }
+            }
+
+            fn insert(&self, fixture: &Fixture, checkpoint: u32) {
+                fixture
+                    .writer
+                    .execute(
+                        "INSERT INTO operations
+                     (operation_id, kind, phase, checkpoint, created_unix_ms, environment_id,
+                      payload_json, result_json, error_code)
+                     VALUES (?1, ?2, 'completed', ?3, 2, ?4, ?5, ?6, NULL)",
+                        params![
+                            self.operation_id.to_string(),
+                            self.kind,
+                            checkpoint,
+                            fixture.environment_id,
+                            serde_json::to_vec(&self.payload).unwrap(),
+                            serde_json::to_vec(&self.result).unwrap(),
+                        ],
+                    )
+                    .unwrap();
+            }
+
+            fn update(&self, fixture: &Fixture) {
+                fixture
+                    .writer
+                    .execute(
+                        "UPDATE operations SET kind = ?2, phase = 'completed', checkpoint = 1,
+                     environment_id = ?3, payload_json = ?4, result_json = ?5, error_code = NULL
+                     WHERE operation_id = ?1",
+                        params![
+                            self.operation_id.to_string(),
+                            self.kind,
+                            fixture.environment_id,
+                            serde_json::to_vec(&self.payload).unwrap(),
+                            serde_json::to_vec(&self.result).unwrap(),
+                        ],
+                    )
+                    .unwrap();
+            }
+        }
+
+        fn runtime_member(byte: char) -> CwRuntimeProvenance {
+            let descriptor = CwImageDescriptor {
+                sha256: "a".repeat(64),
+                size: 10240,
+            };
+            CwRuntimeProvenance {
+                schema_version: 1,
+                image_index_sha256: "b".repeat(64),
+                image_manifest: descriptor.clone(),
+                image_config: descriptor.clone(),
+                image_layer: descriptor,
+                layer_diff_id: "a".repeat(64),
+                payload: CwImagePayload {
+                    schema_version: 2,
+                    protocol_version: 1,
+                    record_version: 1,
+                    package_version: "0.1.0".into(),
+                    target: "x86_64-unknown-linux-musl".into(),
+                    source_revision: "c".repeat(40),
+                    source_tree_sha256: "d".repeat(64),
+                    rustc: "rustc 1.93.0 (synthetic journal fixture)".into(),
+                    sha256: byte.to_string().repeat(64),
+                    size: 136,
+                },
+            }
+        }
+
+        fn assert_runtime_row_refused(fixture: &Fixture) {
+            let database = fixture.database();
+            for field in [Field::JournalComplete, Field::JournalSummary] {
+                assert!(database.value(field, "native-smoke").is_err(), "{field:?}");
+            }
+        }
+
+        #[test]
+        fn runtime_journal_completed_receipts_preserve_lifecycle_completion() {
+            let fixture = Fixture::new(ProcessIdentity::capture(std::process::id()).unwrap());
+            for (rollback, cancelled, checkpoint) in [
+                (false, false, 1),
+                (true, false, 1),
+                (false, false, 0),
+                (false, true, 0),
+                (false, false, 16),
+            ] {
+                let row = RuntimeJournal::new(&fixture, rollback, cancelled);
+                row.insert(&fixture, checkpoint);
+                let database = fixture.database();
+                assert_eq!(
+                    database
+                        .value(Field::JournalComplete, "native-smoke")
+                        .unwrap(),
+                    "yes"
+                );
+                assert_eq!(
+                    database
+                        .value(Field::JournalSummary, "native-smoke")
+                        .unwrap(),
+                    format!("create:completed:9,{}:completed:{checkpoint}", row.kind)
+                );
+                let stored: Vec<u8> = fixture
+                    .writer
+                    .query_row(
+                        "SELECT result_json FROM operations WHERE operation_id = ?1",
+                        [row.operation_id.to_string()],
+                        |value| value.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(stored, serde_json::to_vec(&row.result).unwrap());
+                fixture
+                    .writer
+                    .execute(
+                        "DELETE FROM operations WHERE operation_id = ?1",
+                        [row.operation_id.to_string()],
+                    )
+                    .unwrap();
+            }
+        }
+
+        #[test]
+        fn runtime_journal_requires_exact_typed_intent_and_receipt() {
+            let fixture = Fixture::new(ProcessIdentity::capture(std::process::id()).unwrap());
+            let row = RuntimeJournal::new(&fixture, false, false);
+            row.insert(&fixture, 1);
+            for mutation in 0..13 {
+                let mut result = row.result.clone();
+                match mutation {
+                    0 => result["observed"] = serde_json::Value::Null,
+                    1 => result["binding"]["environment_id"] = serde_json::json!(Uuid::new_v4()),
+                    2 => result["binding"]["generation"] = serde_json::json!(8),
+                    3 => {
+                        result["binding"]["bootstrap_catalog_sha256"] =
+                            serde_json::json!("f".repeat(64))
+                    }
+                    4 => result["observed"]["operation_id"] = serde_json::json!(Uuid::new_v4()),
+                    5 => {
+                        result["observed"]["generation"] = serde_json::json!(8);
+                        result["selection"]["operations"][0]["generation"] = serde_json::json!(8);
+                    }
+                    6 => {
+                        result["observed"]["expected_revision"] = serde_json::json!(2);
+                        result["selection"]["operations"][0]["expected_revision"] =
+                            serde_json::json!(2);
+                    }
+                    7 => {
+                        result["observed"]["target_sha256"] = serde_json::json!("a".repeat(64));
+                        result["selection"]["operations"][0]["target_sha256"] =
+                            serde_json::json!("a".repeat(64));
+                    }
+                    8 => result["observed"]["outcome"] = serde_json::json!("unknown"),
+                    9 => result["extra"] = serde_json::json!(true),
+                    10 => {
+                        result["selection"]["catalog"]["runtimes"][1]["payload"]["source_revision"] =
+                            serde_json::json!("e".repeat(40))
+                    }
+                    11 => {
+                        result["selection"]["catalog"]["runtimes"][1]["payload"]["rustc"] =
+                            serde_json::json!("rustc 1.91.1 (unadmitted)")
+                    }
+                    _ => result["selection"]["environment_id"] = serde_json::json!(Uuid::new_v4()),
+                }
+                fixture
+                    .writer
+                    .execute(
+                        "UPDATE operations SET result_json = ?1 WHERE operation_id = ?2",
+                        params![
+                            serde_json::to_vec(&result).unwrap(),
+                            row.operation_id.to_string()
+                        ],
+                    )
+                    .unwrap();
+                assert_runtime_row_refused(&fixture);
+            }
+            for mutation in 0..7 {
+                row.update(&fixture);
+                let mut payload = row.payload.clone();
+                match mutation {
+                    0 => payload["extra"] = serde_json::json!(true),
+                    1 => payload["binding"]["environment_id"] = serde_json::json!(Uuid::new_v4()),
+                    2 => payload["expected_revision"] = serde_json::json!(0),
+                    3 => payload["rollback"] = serde_json::json!(true),
+                    4 => payload["target"]["payload"]["sha256"] = serde_json::json!("x".repeat(64)),
+                    5 => {
+                        payload["runner"]["cw_runtime_catalog_generation"] =
+                            serde_json::json!("f".repeat(64))
+                    }
+                    _ => {
+                        payload["target"]["capability"] =
+                            serde_json::json!("synthetic-refused-field")
+                    }
+                }
+                fixture
+                    .writer
+                    .execute(
+                        "UPDATE operations SET payload_json = ?1 WHERE operation_id = ?2",
+                        params![
+                            serde_json::to_vec(&payload).unwrap(),
+                            row.operation_id.to_string()
+                        ],
+                    )
+                    .unwrap();
+                assert_runtime_row_refused(&fixture);
+            }
+            for (column, bad) in [
+                ("operation_id", Uuid::nil().to_string()),
+                ("operation_id", "not-an-operation-uuid".to_owned()),
+                ("environment_id", Uuid::nil().to_string()),
+                ("environment_id", Uuid::new_v4().to_string()),
+            ] {
+                row.update(&fixture);
+                let sql =
+                    format!("UPDATE operations SET {column} = ?1 WHERE kind = 'update_cw_runtime'");
+                fixture.writer.execute(&sql, [bad]).unwrap();
+                assert_runtime_row_refused(&fixture);
+                fixture
+                    .writer
+                    .execute(
+                        "UPDATE operations SET operation_id = ?1 WHERE kind = 'update_cw_runtime'",
+                        [row.operation_id.to_string()],
+                    )
+                    .unwrap();
+            }
+            row.update(&fixture);
+            fixture
+                .writer
+                .execute(
+                    "UPDATE operations SET checkpoint = 17 WHERE kind = 'update_cw_runtime'",
+                    [],
+                )
+                .unwrap();
+            assert_runtime_row_refused(&fixture);
+        }
+
+        #[test]
+        fn runtime_journal_sql_bounds_preserve_type_null_and_error_evidence() {
+            use rusqlite::types::Value;
+            let fixture = Fixture::new(ProcessIdentity::capture(std::process::id()).unwrap());
+            let row = RuntimeJournal::new(&fixture, false, false);
+            row.insert(&fixture, 1);
+            let mut full_payload = serde_json::to_vec(&row.payload).unwrap();
+            let mut full_result = serde_json::to_vec(&row.result).unwrap();
+            full_payload.resize(2 * 1024 * 1024, b' ');
+            full_result.resize(2 * 1024 * 1024, b' ');
+            fixture.writer.execute(
+                "UPDATE operations SET payload_json = ?1, result_json = ?2 WHERE operation_id = ?3",
+                params![full_payload, full_result, row.operation_id.to_string()],
+            ).unwrap();
+            assert_eq!(
+                fixture
+                    .database()
+                    .value(Field::JournalComplete, "native-smoke")
+                    .unwrap(),
+                "yes"
+            );
+            let bad_json = [
+                Value::Null,
+                Value::Integer(1),
+                Value::Real(1.0),
+                Value::Text(serde_json::to_string(&row.result).unwrap()),
+                Value::Blob(Vec::new()),
+                Value::Blob(b"{\"truncated\":".to_vec()),
+                Value::Blob(vec![b' '; 2 * 1024 * 1024 + 1]),
+            ];
+            for column in ["payload_json", "result_json"] {
+                for bad in &bad_json {
+                    row.update(&fixture);
+                    let sql =
+                        format!("UPDATE operations SET {column} = ?1 WHERE operation_id = ?2");
+                    fixture
+                        .writer
+                        .execute(&sql, params![bad, row.operation_id.to_string()])
+                        .unwrap();
+                    assert_runtime_row_refused(&fixture);
+                }
+            }
+            for phase in ["intent", "effect_applied", "failed", "interrupted"] {
+                row.update(&fixture);
+                let error = matches!(phase, "failed" | "interrupted").then_some("runtime_unknown");
+                fixture.writer.execute("UPDATE operations SET phase = ?1, result_json = NULL, error_code = ?2 WHERE operation_id = ?3",
+                    params![phase, error, row.operation_id.to_string()]).unwrap();
+                let database = fixture.database();
+                assert_eq!(
+                    database
+                        .value(Field::JournalComplete, "native-smoke")
+                        .unwrap(),
+                    "no"
+                );
+                assert_eq!(
+                    database
+                        .value(Field::JournalSummary, "native-smoke")
+                        .unwrap(),
+                    format!("create:completed:9,update_cw_runtime:{phase}:1")
+                );
+                for bad in [
+                    Value::Integer(1),
+                    Value::Real(1.0),
+                    Value::Text(serde_json::to_string(&row.result).unwrap()),
+                    Value::Blob(Vec::new()),
+                    Value::Blob(vec![b' '; 2 * 1024 * 1024 + 1]),
+                ] {
+                    fixture
+                        .writer
+                        .execute(
+                            "UPDATE operations SET result_json = ?1 WHERE operation_id = ?2",
+                            params![bad, row.operation_id.to_string()],
+                        )
+                        .unwrap();
+                    assert_runtime_row_refused(&fixture);
+                }
+                let mut bad_intent = row.payload.clone();
+                bad_intent["extra"] = serde_json::json!(true);
+                fixture.writer.execute(
+                    "UPDATE operations SET result_json = NULL, payload_json = ?1 WHERE operation_id = ?2",
+                    params![serde_json::to_vec(&bad_intent).unwrap(), row.operation_id.to_string()],
+                ).unwrap();
+                assert_runtime_row_refused(&fixture);
+            }
+            for phase in ["completed", "intent", "failed", "interrupted"] {
+                for bad in [
+                    Value::Integer(1),
+                    Value::Real(1.0),
+                    Value::Blob(b"runtime_unknown".to_vec()),
+                    Value::Text(String::new()),
+                    Value::Text("X".to_owned()),
+                    Value::Text("x".repeat(65)),
+                    Value::Text("é".repeat(64)),
+                ] {
+                    row.update(&fixture);
+                    fixture.writer.execute("UPDATE operations SET phase = ?1, error_code = ?2 WHERE operation_id = ?3",
+                        params![phase, bad, row.operation_id.to_string()]).unwrap();
+                    if phase != "completed" {
+                        fixture
+                            .writer
+                            .execute(
+                                "UPDATE operations SET result_json = NULL WHERE operation_id = ?1",
+                                [row.operation_id.to_string()],
+                            )
+                            .unwrap();
+                    }
+                    assert_runtime_row_refused(&fixture);
+                }
+            }
+            row.update(&fixture);
+            fixture.writer.execute("UPDATE operations SET phase = 'failed', result_json = NULL WHERE operation_id = ?1", [row.operation_id.to_string()]).unwrap();
+            assert_runtime_row_refused(&fixture);
+            row.update(&fixture);
+            fixture.writer.execute("UPDATE operations SET phase = 'intent', result_json = NULL, error_code = 'runtime_unknown' WHERE operation_id = ?1", [row.operation_id.to_string()]).unwrap();
+            assert_runtime_row_refused(&fixture);
+        }
+
+        #[test]
+        fn runtime_journal_never_filters_or_changes_lifecycle_predicates() {
+            let fixture = Fixture::new(ProcessIdentity::capture(std::process::id()).unwrap());
+            let row = RuntimeJournal::new(&fixture, false, false);
+            row.insert(&fixture, 0);
+            fixture
+                .writer
+                .execute(
+                    "UPDATE operations SET checkpoint = 8 WHERE kind = 'create'",
+                    [],
+                )
+                .unwrap();
+            assert_eq!(
+                fixture
+                    .database()
+                    .value(Field::JournalComplete, "native-smoke")
+                    .unwrap(),
+                "no"
+            );
+            assert_eq!(
+                fixture
+                    .database()
+                    .value(Field::JournalSummary, "native-smoke")
+                    .unwrap(),
+                "create:completed:8,update_cw_runtime:completed:0"
+            );
+            for (kind, phase) in [
+                ("unadmitted_lifecycle", "completed"),
+                ("create", "unknown_phase"),
+            ] {
+                fixture
+                    .writer
+                    .execute(
+                        "UPDATE operations SET kind = ?1, phase = ?2 WHERE operation_id = 'op-a'",
+                        params![kind, phase],
+                    )
+                    .unwrap();
+                assert_eq!(
+                    fixture
+                        .database()
+                        .value(Field::JournalComplete, "native-smoke")
+                        .unwrap(),
+                    "no"
+                );
+                assert!(
+                    fixture
+                        .database()
+                        .value(Field::JournalSummary, "native-smoke")
+                        .is_err()
+                );
+            }
+            fixture.writer.execute("UPDATE operations SET kind = 'create', phase = 'completed', checkpoint = 9 WHERE operation_id = 'op-a'", []).unwrap();
+            assert_eq!(
+                fixture
+                    .database()
+                    .value(Field::JournalComplete, "native-smoke")
+                    .unwrap(),
+                "yes"
+            );
+        }
+
+        #[test]
+        fn runtime_catalog_runner_records_preserve_old_and_new_closed_decoding() {
+            let process = ProcessIdentity::capture(std::process::id()).unwrap();
+            let fixture = Fixture::new(process.clone());
+            let old = serde_json::to_value(runner_record(process.clone())).unwrap();
+            assert!(old.get("cw_runtime_catalog_generation").is_none());
+            let write = |record: &serde_json::Value| {
+                fixture
+                    .writer
+                    .execute(
+                        "UPDATE environments SET runner_json = ?1 WHERE name = 'native-smoke'",
+                        [serde_json::to_vec(record).unwrap()],
+                    )
+                    .unwrap();
+            };
+            let assert_values = || {
+                let database = fixture.database();
+                assert_eq!(
+                    database.value(Field::RunnerPid, "native-smoke").unwrap(),
+                    process.pid.to_string()
+                );
+                assert_eq!(
+                    database
+                        .value(Field::RunnerArtifactGeneration, "native-smoke")
+                        .unwrap(),
+                    "b".repeat(64)
+                );
+            };
+            assert_values();
+            let mut current = old.clone();
+            current["cw_runtime_catalog_generation"] = serde_json::json!("c".repeat(64));
+            write(&current);
+            assert_values();
+            assert_eq!(
+                fixture
+                    .database()
+                    .runner("native-smoke")
+                    .unwrap()
+                    .cw_runtime_catalog_generation
+                    .as_deref(),
+                Some("c".repeat(64).as_str())
+            );
+            let mut absent = old.clone();
+            absent["cw_runtime_catalog_generation"] = serde_json::Value::Null;
+            write(&absent);
+            assert_values();
+            for invalid in [
+                serde_json::json!(""),
+                serde_json::json!("C".repeat(64)),
+                serde_json::json!(format!("sha256:{}", "c".repeat(64))),
+                serde_json::json!(true),
+            ] {
+                let mut corrupt = current.clone();
+                corrupt["cw_runtime_catalog_generation"] = invalid;
+                write(&corrupt);
+                assert!(
+                    fixture
+                        .database()
+                        .value(Field::RunnerPid, "native-smoke")
+                        .is_err()
+                );
+            }
+            let mut unknown = current.clone();
+            unknown["unadmitted_field"] = serde_json::json!("synthetic-unknown-field");
+            write(&unknown);
+            assert!(
+                fixture
+                    .database()
+                    .value(Field::RunnerPid, "native-smoke")
+                    .is_err()
+            );
+            let still_saved: Vec<u8> = fixture
+                .writer
+                .query_row(
+                    "SELECT runner_json FROM environments WHERE name = 'native-smoke'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(still_saved, serde_json::to_vec(&unknown).unwrap());
+            write(&old);
+            assert_values();
+            assert!(
+                fixture
+                    .database()
+                    .runner("native-smoke")
+                    .unwrap()
+                    .cw_runtime_catalog_generation
+                    .is_none()
+            );
         }
 
         #[test]
@@ -811,19 +1560,103 @@ mod linux {
                     .database()
                     .value(Field::Contract, "native-smoke")
                     .unwrap(),
-                "1129797197:11:wal:ok"
+                "1129797197:12:wal:ok"
             );
+            for version in [0, 10, 11, 13] {
+                fixture
+                    .writer
+                    .pragma_update(None, "user_version", version)
+                    .unwrap();
+                assert!(ProbeDatabase::open(&fixture.root).is_err());
+                assert_eq!(
+                    fixture
+                        .writer
+                        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                        .unwrap(),
+                    version
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_a_mislabeled_runtime_schema_without_repairing_it() {
+            for column in [
+                "unrelated BLOB NULL",
+                "cw_runtime_binding_json TEXT NULL",
+                "cw_runtime_binding_json BLOB NOT NULL",
+                "cw_runtime_binding_json BLOB NULL DEFAULT NULL",
+                "cw_runtime_binding_json BLOB PRIMARY KEY",
+                "other BLOB, cw_runtime_binding_json BLOB GENERATED ALWAYS AS (other) VIRTUAL",
+            ] {
+                let fixture = Fixture::new(ProcessIdentity::capture(std::process::id()).unwrap());
+                let schema = format!("CREATE TABLE environments ({column})");
+                fixture
+                    .writer
+                    .execute_batch(&format!("DROP TABLE environments; {schema};"))
+                    .unwrap();
+                assert!(ProbeDatabase::open(&fixture.root).is_err(), "{column}");
+                assert_eq!(
+                    fixture
+                        .writer
+                        .query_row(
+                            "SELECT sql FROM sqlite_schema WHERE name = 'environments'",
+                            [],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .unwrap(),
+                    schema
+                );
+                assert_eq!(
+                    fixture
+                        .writer
+                        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                        .unwrap(),
+                    12
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_foreign_or_ambiguous_platform_without_changing_it() {
+            for platform in ["darwin-v1", "linux-v2", ""] {
+                let fixture = Fixture::new(ProcessIdentity::capture(std::process::id()).unwrap());
+                fixture
+                    .writer
+                    .execute("UPDATE supervisor_metadata SET value = ?1", [platform])
+                    .unwrap();
+                assert!(ProbeDatabase::open(&fixture.root).is_err());
+                assert_eq!(
+                    fixture
+                        .writer
+                        .query_row("SELECT value FROM supervisor_metadata", [], |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .unwrap(),
+                    platform
+                );
+            }
+            let fixture = Fixture::new(ProcessIdentity::capture(std::process::id()).unwrap());
             fixture
                 .writer
-                .pragma_update(None, "user_version", 10)
+                .execute("DELETE FROM supervisor_metadata", [])
+                .unwrap();
+            assert!(ProbeDatabase::open(&fixture.root).is_err());
+            fixture
+                .writer
+                .execute_batch(
+                    "INSERT INTO supervisor_metadata VALUES ('platform', 'linux-v1');
+                     INSERT INTO supervisor_metadata VALUES ('platform', 'linux-v1');",
+                )
                 .unwrap();
             assert!(ProbeDatabase::open(&fixture.root).is_err());
             assert_eq!(
                 fixture
                     .writer
-                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .query_row("SELECT COUNT(*) FROM supervisor_metadata", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
                     .unwrap(),
-                10
+                2
             );
         }
 
@@ -901,11 +1734,13 @@ mod linux {
                     .is_err()
             );
             fixture.writer.execute(
-                "INSERT INTO operations VALUES ('source-a', 'update_environment_sources', 'completed', 9, 2, ?1)",
+                "INSERT INTO operations (operation_id, kind, phase, checkpoint, created_unix_ms, environment_id)
+                 VALUES ('source-a', 'update_environment_sources', 'completed', 9, 2, ?1)",
                 [&fixture.environment_id],
             ).unwrap();
             fixture.writer.execute(
-                "INSERT INTO operations VALUES ('source-other', 'update_environment_sources', 'completed', 10, 3, ?1)",
+                "INSERT INTO operations (operation_id, kind, phase, checkpoint, created_unix_ms, environment_id)
+                 VALUES ('source-other', 'update_environment_sources', 'completed', 10, 3, ?1)",
                 [Uuid::new_v4().to_string()],
             ).unwrap();
             assert_eq!(

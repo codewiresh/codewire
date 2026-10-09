@@ -120,7 +120,7 @@ async fn platform_projection_upgrade_retains_accepted_history_envelopes_and_noop
         ensure_schema(&db.url).await?;
         let pool=PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let after=applied_migrations(&pool).await?;
-        anyhow::ensure!(after.len()==MIGRATOR.iter().count() && after[..24]==before && after[24].0==VERSION);
+        anyhow::ensure!(after.len()==MIGRATOR.iter().filter(|m| m.migration_type.is_up_migration()).count() && after[..24]==before && after[24].0==VERSION);
         let fingerprint:String=sqlx::query_scalar(include_str!("../../../tests/data/application_schema_fingerprint.sql")).fetch_one(&pool).await?;
         anyhow::ensure!(fingerprint==ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT,"current application schema changed: {fingerprint}");
         anyhow::ensure!(sqlx::query_as::<_,(String,String,String,String)>(rows_sql).fetch_one(&pool).await?==rows_before);

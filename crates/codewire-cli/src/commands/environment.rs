@@ -4,6 +4,7 @@ use std::path::Path;
 use super::*;
 
 mod progress;
+mod runtime;
 mod sources;
 
 use progress::{FollowPolicy, StartProgress, format_env_ready_text, format_environment_logs_plain};
@@ -121,7 +122,29 @@ pub(crate) fn env_create_mesh_prompt(mesh_url: &str, network_id: &str) -> String
 
 pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyhow::Result<()> {
     let placement = args.placement();
+    #[cfg(unix)]
+    if placement != Some(EnvironmentPlacement::Platform)
+        && handle_host_environment_command(globals, placement, &args.command).await?
+    {
+        return Ok(());
+    }
     match args.command {
+        EnvCommand::Agent(args) => {
+            anyhow::ensure!(
+                placement != Some(EnvironmentPlacement::Local),
+                "cw env agent requires a platform environment"
+            );
+            #[cfg(unix)]
+            {
+                super::sessions::agents::platform_host::handle_metadata(globals, args.command).await
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = args;
+                anyhow::bail!("platform managed agent commands require a Unix client")
+            }
+        }
+        EnvCommand::Runtime(args) => runtime::handle(globals, placement, args.command).await,
         EnvCommand::Create(create) => {
             handle_unified_environment_create(globals, placement, create).await
         }
@@ -240,7 +263,7 @@ async fn handle_unified_environment_cp(
         },
         UnifiedEnvironmentTarget::Platform(_) => {
             let env = OsEnv;
-            let paths = ResolvePaths::from_env(&env);
+            let paths = ResolvePaths::from_env(&env)?;
             let platform = resolve_platform(globals, &paths, &env)?;
             let orgs = organization_client(&platform)?.list_orgs().await?;
             let org_id = current_org_id(&platform, &orgs)?;
@@ -292,7 +315,7 @@ async fn handle_unified_environment_share(
 /// This only observes the current placements; it never changes `cw use`.
 pub(crate) async fn show_workspace_list(globals: &Globals) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let placement = resolve_platform(globals, &paths, &env)
         .is_err()
         .then_some(EnvironmentPlacement::Local);
@@ -314,7 +337,7 @@ pub(crate) async fn handle_platform_env_command(
     command: EnvCommand,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let environment_client = EnvironmentClient::new(&platform)?;
     let organization_client = organization_client(&platform)?;
@@ -322,6 +345,19 @@ pub(crate) async fn handle_platform_env_command(
     let org_id = current_org_id(&platform, &orgs)?;
 
     match command {
+        EnvCommand::Agent(args) => {
+            #[cfg(unix)]
+            {
+                super::sessions::agents::platform_host::handle_metadata(globals, args.command)
+                    .await?
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = args;
+                anyhow::bail!("platform managed agent commands require a Unix client")
+            }
+        }
+        EnvCommand::Runtime(_) => anyhow::bail!("cw env runtime supports only native Linux VMs"),
         EnvCommand::Create(args) => {
             let began = Instant::now();
             let mut request = prepare_platform_env_create_request(&args)?;
@@ -1035,7 +1071,7 @@ fn prompt_resize_quantity(label: &str, current: &str) -> anyhow::Result<Option<S
 }
 
 impl EnvDaemonCommand {
-    fn environment(&self) -> Option<&str> {
+    pub(super) fn environment(&self) -> Option<&str> {
         match self {
             Self::Status(args) | Self::Repair(args) => args.environment.as_deref(),
             Self::Logs(args) => args.environment.as_deref(),
@@ -1061,6 +1097,8 @@ impl EnvDaemonCommand {
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub(crate) struct UnifiedEnvironmentListEntry {
+    #[serde(rename = "type")]
+    pub(crate) environment_type: String,
     pub(crate) name: String,
     pub(crate) placement: String,
     pub(crate) selected: bool,
@@ -1075,6 +1113,15 @@ async fn handle_unified_environment_create(
     placement: Option<EnvironmentPlacement>,
     args: Box<EnvCreateArgs>,
 ) -> anyhow::Result<()> {
+    if args.environment_type == EnvironmentTypeArg::Host {
+        #[cfg(unix)]
+        {
+            validate_host_create(&args, placement)?;
+            return create_host_environment(&args).await;
+        }
+        #[cfg(not(unix))]
+        anyhow::bail!("trusted host environments are currently qualified only on Linux");
+    }
     match placement {
         Some(EnvironmentPlacement::Local) => {
             let output = args.output;
@@ -1127,21 +1174,21 @@ async fn handle_unified_environment_list(
     args: EnvListArgs,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
-    if placement == Some(EnvironmentPlacement::Local)
-        && (args.environment_type.is_some() || args.state.is_some() || args.all)
-    {
-        anyhow::bail!("--type, --state, and --all are only supported for platform environments");
-    }
-
+    let paths = ResolvePaths::from_env(&env)?;
     #[cfg(target_os = "linux")]
-    let native = if placement != Some(EnvironmentPlacement::Platform) {
+    let native = if placement != Some(EnvironmentPlacement::Platform)
+        && args.environment_type.as_deref() != Some("host")
+    {
         native_environments().await?
     } else {
         Vec::new()
     };
 
-    let platform = if placement != Some(EnvironmentPlacement::Local) {
+    let platform = if placement != Some(EnvironmentPlacement::Local)
+        && args.environment_type.as_deref() != Some("host")
+        && (placement == Some(EnvironmentPlacement::Platform)
+            || resolve_platform(globals, &paths, &env).is_ok())
+    {
         let platform = resolve_platform(globals, &paths, &env)?;
         let environment_client = EnvironmentClient::new(&platform)?;
         let organization_client = organization_client(&platform)?;
@@ -1188,6 +1235,7 @@ async fn handle_unified_environment_list(
         native
             .iter()
             .map(|environment| UnifiedEnvironmentListEntry {
+                environment_type: "sandbox".into(),
                 name: environment.name.clone(),
                 placement: "local".to_string(),
                 selected: native_environment_is_selected(environment, current),
@@ -1202,6 +1250,27 @@ async fn handle_unified_environment_list(
                 id: environment.id.clone(),
             }),
     );
+    #[cfg(unix)]
+    if placement != Some(EnvironmentPlacement::Platform)
+        && args.environment_type.as_deref() != Some("sandbox")
+    {
+        for environment in host_environments()? {
+            let daemon_health = host_daemon_health(&environment).await;
+            entries.push(UnifiedEnvironmentListEntry {
+                environment_type: "host".into(),
+                name: environment.name.clone(),
+                placement: "local".into(),
+                selected: current
+                    .is_some_and(|t| t.kind == "host" && t.target_ref == environment.id),
+                state: environment.state,
+                id: environment.id,
+                daemon_health,
+            });
+        }
+    }
+    if let Some(state) = args.state.as_deref() {
+        entries.retain(|entry| entry.state.eq_ignore_ascii_case(state));
+    }
     entries.sort_by(|left, right| {
         left.name
             .cmp(&right.name)
@@ -1539,7 +1608,7 @@ async fn resolve_unified_environment_daemon_target(
     }
 
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let current = config::current_target(&paths.mesh_data_dir).map_err(|_| {
         anyhow::anyhow!(
             "no environment selected; use `cw use ENV` or pass ENV to `cw env {}`",
@@ -1676,7 +1745,13 @@ async fn handle_unified_environment_lifecycle(
 #[cfg(target_os = "linux")]
 async fn reconcile_native_current_after_delete(deleted_name: &str) {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = match ResolvePaths::from_env(&env) {
+        Ok(paths) => paths,
+        Err(error) => {
+            eprintln!("Warning: could not reconcile the current local target: {error}");
+            return;
+        }
+    };
     let Ok(current) = config::current_target(&paths.mesh_data_dir) else {
         return;
     };
@@ -1738,8 +1813,15 @@ async fn resolve_unified_environment_target(
     command: &str,
 ) -> anyhow::Result<UnifiedEnvironmentTarget> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let target_ref = trimmed_required(target_ref, "environment")?;
+    #[cfg(unix)]
+    if resolve_host_reference(globals, target_ref, placement)
+        .await?
+        .is_some()
+    {
+        anyhow::bail!("{command} is not supported by trusted host environments");
+    }
     #[cfg(target_os = "linux")]
     let native = if placement != Some(EnvironmentPlacement::Platform) {
         native_environment(target_ref).await?
@@ -1844,6 +1926,7 @@ pub(crate) fn unified_environment_list_entries(
     let mut entries = platform
         .iter()
         .map(|(environment, daemon_health)| UnifiedEnvironmentListEntry {
+            environment_type: "sandbox".into(),
             name: environment_display_name(environment).to_string(),
             placement: "platform".to_string(),
             selected: current
@@ -1873,13 +1956,14 @@ fn print_unified_environment_list(
                 return Ok(());
             }
             println!(
-                "{:<24} {:<10} {:<9} {:<14} DAEMON",
-                "NAME", "PLACEMENT", "SELECTED", "STATE"
+                "{:<24} {:<10} {:<10} {:<9} {:<14} DAEMON",
+                "NAME", "TYPE", "PLACEMENT", "SELECTED", "STATE"
             );
             for entry in entries {
                 println!(
-                    "{:<24} {:<10} {:<9} {:<14} {}",
+                    "{:<24} {:<10} {:<10} {:<9} {:<14} {}",
                     entry.name,
+                    entry.environment_type,
                     entry.placement,
                     if entry.selected { "yes" } else { "" },
                     display_str(&entry.state),

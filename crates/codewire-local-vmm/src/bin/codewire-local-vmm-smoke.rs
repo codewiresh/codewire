@@ -91,6 +91,7 @@ mod linux {
     use codewire_daemon_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT;
     use codewire_daemon_proto::codewire::bridge::v1 as bridge_v1;
     use codewire_local_vmm::ch_api::VmInfo;
+    use codewire_local_vmm::cw_runtime::AdmittedCwRuntimeDisk;
     use codewire_local_vmm::generation::{RootGenerationDisk, ensure_empty_root_generation};
     use codewire_local_vmm::host_port::HostPortBinding;
     use codewire_local_vmm::linux::runner::ExitClass;
@@ -667,6 +668,7 @@ mod linux {
             first.paths(),
             cid_for(arguments.vm_id),
             resources,
+            first.cw_runtime_disk(),
         )?;
         if let Some(actual_bytes) = info_before.memory_actual_size {
             observation("vmm.memory_actual_bytes", actual_bytes);
@@ -686,6 +688,7 @@ mod linux {
             first.paths(),
             cid_for(arguments.vm_id),
             resources,
+            first.cw_runtime_disk(),
         )?;
         require_unchanged_live_boundary(&boundary_before, &boundary_after)?;
         observation("vmm.landlock_disk_probe_http_status", denied.get());
@@ -1147,6 +1150,8 @@ mod linux {
 
     fn runner_error_class(error: &RunnerError) -> &'static str {
         match error {
+            RunnerError::CwRuntimeDiskChanged => "cw-runtime-disk-changed",
+            RunnerError::CwRuntime(_) => "cw-runtime",
             RunnerError::InvalidRequest => "invalid-request",
             RunnerError::InvalidArtifactStagingLayout => "invalid-artifact-layout",
             RunnerError::Artifact(_) => "artifact",
@@ -1296,6 +1301,7 @@ mod linux {
 
     fn request(generation: u64, arguments: &Args, resources: RunResources) -> CreateVmRequest {
         CreateVmRequest {
+            cw_runtime_catalog_generation: None,
             vm_id: arguments.vm_id,
             generation,
             vsock_cid: cid_for(arguments.vm_id),
@@ -2354,6 +2360,8 @@ mod linux {
         ];
         let admitted = client
             .launch(v1::LaunchSessionRequest {
+                name: String::new(),
+                parent_session_id: None,
                 command: command.clone(),
                 working_dir: "/workspace".to_owned(),
                 env: Vec::new(),
@@ -2432,6 +2440,8 @@ mod linux {
 
     fn launch_request(command: Vec<String>) -> v1::LaunchSessionRequest {
         v1::LaunchSessionRequest {
+            name: String::new(),
+            parent_session_id: None,
             command,
             working_dir: "/".to_owned(),
             env: Vec::new(),
@@ -2450,6 +2460,8 @@ mod linux {
         let command = vec![CONTAINER_INIT_PATH.to_owned(), "identity".to_owned()];
         let admitted = client
             .launch(v1::LaunchSessionRequest {
+                name: String::new(),
+                parent_session_id: None,
                 command: command.clone(),
                 working_dir: "/".to_owned(),
                 env: Vec::new(),
@@ -2491,6 +2503,8 @@ mod linux {
         ];
         let admitted = client
             .launch(v1::LaunchSessionRequest {
+                name: String::new(),
+                parent_session_id: None,
                 command: command.clone(),
                 working_dir: "/workspace".to_owned(),
                 env: Vec::new(),
@@ -2537,6 +2551,8 @@ mod linux {
         );
         let record = client
             .launch(v1::LaunchSessionRequest {
+                name: String::new(),
+                parent_session_id: None,
                 command: vec!["/bin/sh".to_owned(), "-c".to_owned(), query],
                 working_dir: "/workspace".to_owned(),
                 env: Vec::new(),
@@ -2684,6 +2700,8 @@ mod linux {
         let received_path = host_port_received_path(host_port);
         let admitted = client
             .launch(v1::LaunchSessionRequest {
+                name: String::new(),
+                parent_session_id: None,
                 command: command.clone(),
                 working_dir: "/workspace".to_owned(),
                 env: Vec::new(),
@@ -2768,6 +2786,8 @@ mod linux {
         let received_path = mesh_received_path(generation);
         let admitted = client
             .launch(v1::LaunchSessionRequest {
+                name: String::new(),
+                parent_session_id: None,
                 command: command.clone(),
                 working_dir: "/workspace".to_owned(),
                 env: Vec::new(),
@@ -3158,6 +3178,7 @@ mod linux {
         paths: &VmPaths,
         expected_vsock_cid: u32,
         resources: RunResources,
+        cw_runtime_disk: Option<&AdmittedCwRuntimeDisk>,
     ) -> SmokeResult<LiveBoundary> {
         if !info
             .state
@@ -3225,7 +3246,10 @@ mod linux {
             .get("disks")
             .and_then(Value::as_array)
             .ok_or_else(|| failure("Cloud Hypervisor vm.info omitted its disks"))?;
-        if disks.len() != 3 {
+        if let Some(runtime) = cw_runtime_disk {
+            runtime.validate_metadata()?;
+        }
+        if disks.len() != 3 + usize::from(cw_runtime_disk.is_some()) {
             return Err(failure(
                 "Cloud Hypervisor live configuration has unexpected disks",
             ));
@@ -3241,6 +3265,7 @@ mod linux {
         let mut saw_state = false;
         let mut saw_root = false;
         let mut saw_seed = false;
+        let mut saw_runtime = false;
         for disk in disks {
             let disk = disk
                 .as_object()
@@ -3274,6 +3299,13 @@ mod linux {
                 {
                     saw_seed = true;
                 }
+                (Some(path), Some("cw-runtime"), Some("CWRUNTIME1"), Some(true), Some(false))
+                    if cw_runtime_disk
+                        .is_some_and(|runtime| runtime.path.to_str() == Some(path))
+                        && !saw_runtime =>
+                {
+                    saw_runtime = true;
+                }
                 _ => return Err(failure("Cloud Hypervisor live disk identity drifted")),
             }
             if !disk
@@ -3293,7 +3325,7 @@ mod linux {
                 ));
             }
         }
-        if !saw_state || !saw_root || !saw_seed {
+        if !saw_state || !saw_root || !saw_seed || saw_runtime != cw_runtime_disk.is_some() {
             return Err(failure(
                 "Cloud Hypervisor live disks lack required serial identities",
             ));
@@ -4081,12 +4113,12 @@ mod linux {
             let paths = test_paths();
             let resources = test_resources();
             let valid = exact_vm_info(&paths, resources);
-            require_live_configuration(&valid, &paths, 7, resources).unwrap();
+            require_live_configuration(&valid, &paths, 7, resources, None).unwrap();
 
             let mut invalid = exact_vm_info(&paths, resources);
             invalid.additional.get_mut("config").unwrap()["net"] =
                 serde_json::json!([{"id": "forbidden-net"}]);
-            assert!(require_live_configuration(&invalid, &paths, 7, resources).is_err());
+            assert!(require_live_configuration(&invalid, &paths, 7, resources, None).is_err());
         }
 
         #[test]
@@ -4097,35 +4129,40 @@ mod linux {
             let mut wrong_cpus = exact_vm_info(&paths, resources);
             wrong_cpus.additional.get_mut("config").unwrap()["cpus"]["max_vcpus"] =
                 serde_json::json!(resources.vcpus + 1);
-            assert!(require_live_configuration(&wrong_cpus, &paths, 7, resources).is_err());
+            assert!(require_live_configuration(&wrong_cpus, &paths, 7, resources, None).is_err());
 
             let mut wrong_memory = exact_vm_info(&paths, resources);
             wrong_memory.additional.get_mut("config").unwrap()["memory"]["size"] =
                 serde_json::json!(u64::from(resources.memory_mib + 1) * 1024 * 1024);
-            assert!(require_live_configuration(&wrong_memory, &paths, 7, resources).is_err());
+            assert!(require_live_configuration(&wrong_memory, &paths, 7, resources, None).is_err());
         }
 
         #[test]
         fn live_boundary_requires_and_compares_the_bounded_device_tree() {
             let paths = test_paths();
             let resources = test_resources();
-            let before =
-                require_live_configuration(&exact_vm_info(&paths, resources), &paths, 7, resources)
-                    .unwrap();
+            let before = require_live_configuration(
+                &exact_vm_info(&paths, resources),
+                &paths,
+                7,
+                resources,
+                None,
+            )
+            .unwrap();
 
             let mut absent = exact_vm_info(&paths, resources);
             absent.additional.remove("device_tree");
-            assert!(require_live_configuration(&absent, &paths, 7, resources).is_err());
+            assert!(require_live_configuration(&absent, &paths, 7, resources, None).is_err());
 
             let mut null = exact_vm_info(&paths, resources);
             null.additional
                 .insert("device_tree".to_owned(), Value::Null);
-            assert!(require_live_configuration(&null, &paths, 7, resources).is_err());
+            assert!(require_live_configuration(&null, &paths, 7, resources, None).is_err());
 
             let mut drifted = exact_vm_info(&paths, resources);
             drifted.additional.get_mut("device_tree").unwrap()["unexpected"] =
                 serde_json::json!({"id": "partial-hotplug"});
-            let after = require_live_configuration(&drifted, &paths, 7, resources).unwrap();
+            let after = require_live_configuration(&drifted, &paths, 7, resources, None).unwrap();
             assert!(require_unchanged_live_boundary(&before, &after).is_err());
         }
 

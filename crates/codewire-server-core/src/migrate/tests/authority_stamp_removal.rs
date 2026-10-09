@@ -76,6 +76,10 @@ fn authority_stamp_removal_restores_the_accepted34_fingerprint() {
     // themselves from drifting apart. Version 36's schema is the one
     // migration 37 starts from.
     assert_eq!(
+        ACCEPTED_AUTHORITY_STAMP_REMOVAL_SCHEMA_FINGERPRINT,
+        ACCEPTED_PRE_SSH_HOST_KEY_SCHEMA_FINGERPRINT
+    );
+    assert_eq!(
         ACCEPTED_PRE_SSH_HOST_KEY_SCHEMA_FINGERPRINT,
         ACCEPTED_PRE_AUTHORITY_STAMP_SCHEMA_FINGERPRINT
     );
@@ -374,7 +378,14 @@ async fn authority_stamp_removal_upgrade_drops_every_stamp_object_and_keeps35_ro
         ensure_schema(&db.url).await?;
         let pool = connect(&db.url).await?;
         let restarted = applied_migrations(&pool).await?;
-        anyhow::ensure!(restarted.len() == MIGRATOR.iter().count() && restarted[..36] == after);
+        anyhow::ensure!(
+            restarted.len()
+                == MIGRATOR
+                    .iter()
+                    .filter(|m| m.migration_type.is_up_migration())
+                    .count()
+                && restarted[..36] == after
+        );
         anyhow::ensure!(absent(&pool).await? && rows(&pool).await? == written);
         anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
         pool.close().await;

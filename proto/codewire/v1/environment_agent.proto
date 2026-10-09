@@ -1,0 +1,206 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "codewire/v1/environment_cw_runtime.proto";
+import "codewire/v1/environment_session.proto";
+
+// Managed conversations on one captured, running platform Pod. These methods
+// never deliver provider credentials or accept executable paths or environment
+// overrides. A lost mutation response is observed with its original request
+// UUID; clients must never automatically retry it or switch to a newer Pod.
+service EnvironmentAgentService {
+  rpc GetEnvironmentAgentInfo(GetEnvironmentAgentInfoRequest)
+      returns (GetEnvironmentAgentInfoResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc MutateEnvironmentAgent(MutateEnvironmentAgentRequest)
+      returns (MutateEnvironmentAgentResponse);
+  rpc ObserveEnvironmentAgent(ObserveEnvironmentAgentRequest)
+      returns (ObserveEnvironmentAgentResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc ListEnvironmentAgents(ListEnvironmentAgentsRequest)
+      returns (ListEnvironmentAgentsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc ReadEnvironmentAgent(ReadEnvironmentAgentRequest)
+      returns (ReadEnvironmentAgentResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+enum EnvironmentAgentKind {
+  ENVIRONMENT_AGENT_KIND_UNSPECIFIED = 0;
+  ENVIRONMENT_AGENT_KIND_CODEX = 1;
+  ENVIRONMENT_AGENT_KIND_CLAUDE = 2;
+}
+
+enum EnvironmentAgentAction {
+  ENVIRONMENT_AGENT_ACTION_UNSPECIFIED = 0;
+  ENVIRONMENT_AGENT_ACTION_MESSAGE = 1;
+  ENVIRONMENT_AGENT_ACTION_STEER = 2;
+  ENVIRONMENT_AGENT_ACTION_INTERRUPT = 3;
+  ENVIRONMENT_AGENT_ACTION_STOP = 4;
+  ENVIRONMENT_AGENT_ACTION_RESTART = 5;
+}
+
+enum EnvironmentAgentPhase {
+  ENVIRONMENT_AGENT_PHASE_UNSPECIFIED = 0;
+  ENVIRONMENT_AGENT_PHASE_ADMITTED = 1;
+  ENVIRONMENT_AGENT_PHASE_ISSUED = 2;
+  ENVIRONMENT_AGENT_PHASE_COMPLETED = 3;
+  ENVIRONMENT_AGENT_PHASE_REJECTED = 4;
+  ENVIRONMENT_AGENT_PHASE_UNKNOWN = 5;
+}
+
+// Support identity is the held original image binary, independently of the
+// updateable ordinary cw selection. Every mutation binds this entire scope.
+message EnvironmentAgentScope {
+  EnvironmentCwRuntimeIncarnation incarnation = 1;
+  bytes support_image_sha256 = 2;
+  uint64 support_image_size = 3;
+}
+
+message EnvironmentAgentSupport {
+  EnvironmentAgentKind agent = 1;
+  bytes provider_sha256 = 2;
+  uint64 provider_size = 3;
+  string provider_version = 4;
+  bool proxy_only_qualified = 5;
+  bool steer = 6;
+  bool interrupt = 7;
+}
+
+message GetEnvironmentAgentInfoRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message GetEnvironmentAgentInfoResponse {
+  EnvironmentAgentScope scope = 1;
+  string support_image_version = 2;
+  repeated EnvironmentAgentSupport agents = 3;
+}
+
+message EnvironmentAgentLaunch {
+  EnvironmentAgentKind agent = 1;
+  string model = 2;
+  optional string effort = 3;
+  string working_dir = 4;
+  string name = 5;
+  optional string prompt = 6;
+  string parent_session_id = 7;
+  uint64 expected_parent_launch_generation = 8;
+  bytes expected_provider_sha256 = 9;
+  uint64 expected_provider_size = 10;
+  string expected_provider_version = 11;
+}
+
+message EnvironmentAgentControl {
+  EnvironmentAgentAction action = 1;
+  string session_id = 2;
+  string driver_id = 3;
+  uint64 expected_launch_generation = 4;
+  string text = 5;
+  optional string reply_to = 6;
+  optional string expected_turn_id = 7;
+  optional string expected_active_message_id = 8;
+  // Stop only: explicitly names the original Unknown operation being cleaned
+  // up. A Restart cleanup may select its original or exactly next generation;
+  // the target must prove that Restart's original clean peer lineage.
+  optional string cleanup_of_request_id = 9;
+}
+
+message MutateEnvironmentAgentRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string request_id = 3;
+  EnvironmentAgentScope expected_scope = 4;
+  oneof operation {
+    EnvironmentAgentLaunch launch = 5;
+    EnvironmentAgentControl control = 6;
+  }
+}
+
+// Metadata only: no prompt, message text, provider material or environment
+// values. Completed means the target's bounded action settled, not that a
+// provider turn finished. A pipe acknowledgement and a native acknowledgement
+// are separate facts. Unknown/Issued is never a replay permit.
+message EnvironmentAgentOperation {
+  string request_id = 1;
+  EnvironmentAgentScope scope = 2;
+  bytes fingerprint_sha256 = 3;
+  EnvironmentAgentPhase phase = 4;
+  string session_id = 5;
+  string driver_id = 6;
+  string message_id = 7;
+  uint64 launch_generation = 8;
+  EnvironmentSessionState lifecycle = 9;
+  optional int32 exit_code = 10;
+  bool cleanup_unknown = 11;
+  bool pipe_acknowledged = 12;
+  bool native_acknowledged = 13;
+  string reason_code = 14;
+  string cleanup_of_request_id = 15;
+}
+
+message MutateEnvironmentAgentResponse {
+  EnvironmentAgentOperation operation = 1;
+}
+
+message ObserveEnvironmentAgentRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string request_id = 3;
+}
+
+message ObserveEnvironmentAgentResponse {
+  EnvironmentAgentOperation operation = 1;
+}
+
+message ListEnvironmentAgentsRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  EnvironmentAgentScope expected_scope = 3;
+  string after_session_id = 4;
+}
+
+message ListEnvironmentAgentsResponse {
+  EnvironmentAgentScope scope = 1;
+  repeated EnvironmentSession sessions = 2;
+  string next_after_session_id = 3;
+}
+
+enum EnvironmentAgentRecordKind {
+  ENVIRONMENT_AGENT_RECORD_KIND_UNSPECIFIED = 0;
+  ENVIRONMENT_AGENT_RECORD_KIND_CURRENT = 1;
+  ENVIRONMENT_AGENT_RECORD_KIND_MESSAGE = 2;
+}
+
+message ReadEnvironmentAgentRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  EnvironmentAgentScope expected_scope = 3;
+  string session_id = 4;
+  string driver_id = 5;
+  uint64 expected_launch_generation = 6;
+  EnvironmentAgentRecordKind kind = 7;
+  string message_id = 8;
+  reserved 9;
+  uint32 limit = 10;
+}
+
+// Complete canonical managed record JSON, verified against the original
+// private stream's exact scope, generation, byte count, digest and EOF.
+// At most5MiB. No partial or malformed stream is returned as a record.
+message ReadEnvironmentAgentResponse {
+  EnvironmentAgentScope scope = 1;
+  string session_id = 2;
+  string driver_id = 3;
+  uint64 launch_generation = 4;
+  EnvironmentAgentRecordKind kind = 5;
+  string message_id = 6;
+  bytes record_json = 7;
+  bytes record_sha256 = 8;
+}

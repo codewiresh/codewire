@@ -14,10 +14,17 @@ use uuid::Uuid;
 use crate::control::v1;
 use crate::control::v1::local_supervisor_service_client::LocalSupervisorServiceClient;
 #[cfg(target_os = "linux")]
+use crate::linux::supervisor_peer::SupervisorPeerPin;
+#[cfg(target_os = "linux")]
 use crate::supervisor_config::NativeRuntimeConfig;
 use crate::supervisor_config::{SupervisorConfigError, admit_supervisor_info};
 pub use crate::uds::UdsError;
+#[cfg(target_os = "macos")]
 use crate::uds::connect_owner_only;
+#[cfg(target_os = "linux")]
+use crate::uds::{capture_supervisor_peer, connect_supervisor_peer};
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 
 const SUPERVISOR_INFO_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -25,7 +32,11 @@ const SUPERVISOR_INFO_TIMEOUT: Duration = Duration::from_secs(3);
 pub struct NativeSupervisorClient {
     inner: LocalSupervisorServiceClient<tonic::transport::Channel>,
     #[cfg(target_os = "linux")]
-    pub(crate) restart_config: Option<NativeRuntimeConfig>,
+    pub(crate) peer_pin: Arc<SupervisorPeerPin>,
+    #[cfg(target_os = "linux")]
+    pub(crate) expected_configuration_digest: [u8; 32],
+    #[cfg(target_os = "linux")]
+    pub(crate) reconnect_enabled: bool,
 }
 
 impl NativeSupervisorClient {
@@ -42,26 +53,54 @@ impl NativeSupervisorClient {
         socket: &Path,
         expected_configuration_digest: Option<[u8; 32]>,
     ) -> Result<Self, SupervisorClientError> {
-        let channel = connect_owner_only(socket).await?;
-        let mut client = Self {
-            inner: LocalSupervisorServiceClient::new(channel),
-            #[cfg(target_os = "linux")]
-            restart_config: None,
-        };
-        let info = tokio::time::timeout(
-            SUPERVISOR_INFO_TIMEOUT,
-            client
-                .inner
-                .get_supervisor_info(v1::GetSupervisorInfoRequest {}),
-        )
-        .await
-        .map_err(|_| SupervisorClientError::SupervisorInfoUnavailable)?
-        .map_err(supervisor_info_rpc_error)?
-        .into_inner();
-        admit_supervisor_info(&info, expected_configuration_digest.as_ref())?;
-        Ok(client)
+        #[cfg(target_os = "linux")]
+        {
+            let pin = capture_supervisor_peer(socket, None).await?;
+            Self::connect_pinned(pin, expected_configuration_digest, false).await
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let channel = connect_owner_only(socket).await?;
+            let mut inner = LocalSupervisorServiceClient::new(channel);
+            query_supervisor_info(&mut inner, expected_configuration_digest).await?;
+            Ok(Self { inner })
+        }
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn connect_configured(
+        config: &NativeRuntimeConfig,
+    ) -> Result<Self, SupervisorClientError> {
+        config.validate()?;
+        let pin = capture_supervisor_peer(&config.supervisor_socket(), Some(config)).await?;
+        let expected = pin
+            .configuration_digest()
+            .ok_or(SupervisorConfigError::InvalidConfiguration)?;
+        Self::connect_pinned(pin, Some(expected), true).await
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn connect_pinned(
+        peer_pin: Arc<SupervisorPeerPin>,
+        expected_configuration_digest: Option<[u8; 32]>,
+        reconnect_enabled: bool,
+    ) -> Result<Self, SupervisorClientError> {
+        let channel = connect_supervisor_peer(peer_pin.clone()).await?;
+        let mut inner = LocalSupervisorServiceClient::new(channel);
+        let expected_configuration_digest =
+            query_supervisor_info(&mut inner, expected_configuration_digest).await?;
+        Ok(Self {
+            inner,
+            peer_pin,
+            expected_configuration_digest,
+            reconnect_enabled,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn supervisor_peer_pin(&self) -> Arc<SupervisorPeerPin> {
+        self.peer_pin.clone()
+    }
     pub async fn create(
         &mut self,
         request: v1::CreateEnvironmentRequest,
@@ -216,6 +255,22 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
+    pub async fn managed_runtime(
+        &mut self,
+        name: &str,
+        environment_id: &str,
+    ) -> Result<v1::ManagedRuntime, Status> {
+        Ok(self
+            .inner
+            .get_managed_runtime(v1::EnvironmentSelector {
+                name: name.to_owned(),
+                environment_id: environment_id.to_owned(),
+                request_id: String::new(),
+            })
+            .await?
+            .into_inner())
+    }
+
     pub async fn ensure_credential_broker(
         &mut self,
         name: &str,
@@ -225,6 +280,118 @@ impl NativeSupervisorClient {
             .ensure_credential_broker(read_selector(name))
             .await?
             .into_inner())
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn runtime_client(
+        &self,
+    ) -> Result<
+        v1::linux_cw_runtime_service_client::LinuxCwRuntimeServiceClient<tonic::transport::Channel>,
+        Status,
+    > {
+        // Every connection keeps the original socket-derived pidfd/image pin.
+        // Refusal cannot fall back to spawn, adoption or mutation replay.
+        let channel = connect_supervisor_peer(self.peer_pin.clone())
+            .await
+            .map_err(|_| Status::failed_precondition("retained native supervisor changed"))?;
+        let mut supervisor = LocalSupervisorServiceClient::new(channel.clone());
+        query_supervisor_info(&mut supervisor, Some(self.expected_configuration_digest))
+            .await
+            .map_err(|_| {
+                Status::failed_precondition(
+                    "native runtime update requires exact Linux supervisor protocol9",
+                )
+            })?;
+        Ok(v1::linux_cw_runtime_service_client::LinuxCwRuntimeServiceClient::new(channel))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn runtime_resolve(&self, selector: &str) -> Result<String, Status> {
+        let resolved = self
+            .runtime_client()
+            .await?
+            .resolve(v1::LinuxCwRuntimeSelector {
+                selector: selector.to_owned(),
+            })
+            .await?
+            .into_inner();
+        let id = Uuid::parse_str(&resolved.environment_id)
+            .ok()
+            .filter(|id| !id.is_nil() && id.to_string() == resolved.environment_id)
+            .ok_or_else(|| Status::failed_precondition("invalid resolved runtime environment"))?;
+        if Uuid::parse_str(selector).is_ok_and(|selected| selected != id) {
+            return Err(Status::failed_precondition(
+                "runtime environment UUID changed",
+            ));
+        }
+        Ok(resolved.environment_id)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn runtime_info(
+        &self,
+        environment_id: &str,
+    ) -> Result<v1::LinuxCwRuntimeStatus, Status> {
+        self.runtime_client()
+            .await?
+            .info(v1::LinuxCwRuntimeQuery {
+                environment_id: environment_id.to_owned(),
+                request_id: String::new(),
+            })
+            .await
+            .map(|response| response.into_inner())
+    }
+    #[cfg(target_os = "linux")]
+    pub async fn runtime_update(
+        &self,
+        request: v1::LinuxCwRuntimeMutation,
+    ) -> Result<v1::LinuxCwRuntimeStatus, Status> {
+        self.runtime_client()
+            .await?
+            .update(request)
+            .await
+            .map(|response| response.into_inner())
+    }
+    #[cfg(target_os = "linux")]
+    pub async fn runtime_rollback(
+        &self,
+        request: v1::LinuxCwRuntimeMutation,
+    ) -> Result<v1::LinuxCwRuntimeStatus, Status> {
+        self.runtime_client()
+            .await?
+            .rollback(request)
+            .await
+            .map(|response| response.into_inner())
+    }
+    #[cfg(target_os = "linux")]
+    pub async fn runtime_observe(
+        &self,
+        environment_id: &str,
+        request_id: &str,
+    ) -> Result<v1::LinuxCwRuntimeStatus, Status> {
+        self.runtime_client()
+            .await?
+            .observe(v1::LinuxCwRuntimeQuery {
+                environment_id: environment_id.to_owned(),
+                request_id: request_id.to_owned(),
+            })
+            .await
+            .map(|response| response.into_inner())
+    }
+    #[cfg(target_os = "linux")]
+    pub async fn runtime_cancel(
+        &self,
+        environment_id: &str,
+        request_id: &str,
+    ) -> Result<v1::LinuxCwRuntimeStatus, Status> {
+        self.runtime_client()
+            .await?
+            .cancel(v1::LinuxCwRuntimeQuery {
+                environment_id: environment_id.to_owned(),
+                request_id: request_id.to_owned(),
+            })
+            .await
+            .map(|response| response.into_inner())
     }
 
     async fn follow_environment_operation(
@@ -364,6 +531,25 @@ impl NativeSupervisorClient {
             Status::unavailable("local supervisor reconnect is unavailable"),
         ))
     }
+}
+
+async fn query_supervisor_info(
+    inner: &mut LocalSupervisorServiceClient<tonic::transport::Channel>,
+    expected_configuration_digest: Option<[u8; 32]>,
+) -> Result<[u8; 32], SupervisorClientError> {
+    let info = tokio::time::timeout(
+        SUPERVISOR_INFO_TIMEOUT,
+        inner.get_supervisor_info(v1::GetSupervisorInfoRequest {}),
+    )
+    .await
+    .map_err(|_| SupervisorClientError::SupervisorInfoUnavailable)?
+    .map_err(supervisor_info_rpc_error)?
+    .into_inner();
+    admit_supervisor_info(&info, expected_configuration_digest.as_ref())?;
+    info.configuration_sha256
+        .as_slice()
+        .try_into()
+        .map_err(|_| SupervisorConfigError::InvalidSupervisorInfo.into())
 }
 
 fn supervisor_info_rpc_error(status: Status) -> SupervisorClientError {

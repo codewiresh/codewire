@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import stat
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -28,6 +30,9 @@ selector = module("experiment_selector", "scripts/ci/setup/select-workspace-cach
 report = module("experiment_report", "scripts/ci/verify/workspace-cache-report.py")
 SOURCE, TREE = "1" * 40, "2" * 40
 SEED = "run-2047/tree-" + TREE + "/seed-" + "3" * 64
+# A private old/new controller may supply only the historical report function.
+# Fixture setup always uses the current actual source/producer admission.
+LEGACY_REPORT_FINALIZER = None
 
 
 class EventTests(unittest.TestCase):
@@ -139,6 +144,8 @@ class VersionTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    # Retain every original native-compiler report/refusal on the ARM route.
+    # The separate AMD class uses actual shared producer admission below.
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="workspace-experiment-report-")
         self.addCleanup(temporary.cleanup)
@@ -160,12 +167,12 @@ class ReportTests(unittest.TestCase):
         directory = self.root / case
         directory.mkdir()
         compiler, layers = report.MODES[case]
-        header = {"case": case, "source_sha": SOURCE, "source_tree": TREE, "architecture": "amd64",
+        header = {"case": case, "source_sha": SOURCE, "source_tree": TREE, "architecture": "arm64",
                   "docker_daemon_id": "daemon-" + identity, "builder_container_id": identity * 64,
                   "builder_name": "codewire-workspace-fixture-" + identity,
                   "pins": {"buildkit_image": "pinned", "job_image_id": "pinned"}, "seed_cache_id": SEED}
         (directory / "identity.json").write_text(json.dumps(header))
-        receipt = {"source_sha": SOURCE, "source_tree": TREE, "architecture": "amd64",
+        receipt = {"source_sha": SOURCE, "source_tree": TREE, "architecture": "arm64",
                    "cache_modes": {"compiler": compiler, "layers": layers}, "layer_cache_fallback": False,
                    "workspace_image_id": "sha256:" + "4" * 64}
         (directory / "receipt.json").write_text(json.dumps(receipt))
@@ -184,7 +191,7 @@ class ReportTests(unittest.TestCase):
             "#1 [workspace-floating-tools 1/2] RUN npm install\n#1 DONE 1.0s\n"
             "#2 [workspace-floating-tools 2/2] RUN go install\n#2 DONE 2.0s\n"
             "#3 [cw-builder 1/1] RUN codewire-rust-build cargo build\n#3 " + compile_result + "\n"
-            "#3 1.0 Cache hits 4\n#3 1.0 Cache misses 2\n#3 1.0 Cache write errors 0\n" + export)
+            "#3 1.0 Cache hits 4\n#3 1.0 Cache hits (Rust) 4\n#3 1.0 Cache misses 2\n#3 1.0 Cache write errors 0\n" + export)
         builder = header["builder_name"]
         (directory / "workspace-metadata.json").write_text(json.dumps({
             "buildx.build.ref": f"{builder}/{builder}-node/" + "a" * 25,
@@ -340,6 +347,8 @@ class ReportTests(unittest.TestCase):
         import sys
         import time
 
+        custody = module("workspace_history_fixture_custody", "scripts/ci/verify/build-linux-vmm-kernel.py")
+        custody.arm_custody()
         directory = self.fixture("warm-1", "5")
         builder = "codewire-workspace-fixture-5"
         temporary_parent = ROOT / ".tmp"
@@ -424,6 +433,19 @@ else:
                             os.kill(pid, signal.SIGKILL)
                         except ProcessLookupError:
                             pass
+                # The intentional timeout can orphan the plugin after its
+                # parent is killed. This fixture owns that adopted child;
+                # snapshot death alone does not prove complete family cleanup.
+                deadline = time.monotonic() + 3
+                while True:
+                    try:
+                        reaped, _ = os.waitpid(-1, os.WNOHANG | custody.WALL)
+                    except ChildProcessError:
+                        break
+                    if time.monotonic() >= deadline:
+                        self.fail("owned history timeout fixture did not reach __WALL ECHILD")
+                    if not reaped:
+                        time.sleep(0.01)
 
     def test_floating_cache_hit_and_sccache_errors_fail(self):
         directory = self.fixture("warm-1", "5")
@@ -463,8 +485,8 @@ else:
         directory = self.fixture("compiler", "5")
         path = directory / "workspace-build.log"
         original = path.read_text()
-        for hit_lines in ("Cache hits 0", "Cache hits 4\n#3 1.0 Cache hits (Rust) 0"):
-            path.write_text(original.replace("Cache hits 4", hit_lines))
+        for hit_lines in ("Cache hits 0", "Cache hits 4", "Cache hits 4\n#3 1.0 Cache hits (Rust) 0"):
+            path.write_text(original.replace("Cache hits 4\n#3 1.0 Cache hits (Rust) 4", hit_lines))
             with self.assertRaises(ValueError):
                 self.finish(directory)
 
@@ -504,6 +526,320 @@ else:
                                                env=dict(good, **change), text=True, capture_output=True, timeout=5)
                     self.assertEqual(completed.returncode == 0, accepted, completed.stderr)
                     self.assertEqual(output_path.exists(), accepted)
+
+
+class ProducerReportTests(unittest.TestCase):
+    """Actual held/source/ELF admission of synthetic bytes and solve events.
+
+    No compiler, Docker, cache server or incoming executable runs. The shared
+    producer fixture creates isolated synthetic Git objects, not a delivery
+    checkout mutation. Only history transport is mocked in capture tests.
+    """
+
+    def setUp(self):
+        self.consumer = report.consumer_library()
+        self.components = module("workspace_cache_source_fixture", "scripts/ci/tests/test-cw-runtime-source.py")
+        self.source_fixture = self.components.Source()
+        self.source_fixture.setUp()
+        self.addCleanup(self.source_fixture.doCleanups)
+        self.addCleanup(self.source_fixture.tearDown)
+        self.repo = self.source_fixture.repo
+        self.components.write(self.repo / "Cargo.toml",
+            ('[workspace]\nmembers = ["crates/demo"]\n[workspace.package]\nversion = "'
+             + self.components.fixture.VERSION + '"\n').encode())
+        self.source_fixture.git("add", "Cargo.toml")
+        self.source_fixture.git("-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid",
+                                "commit", "-q", "-m", "workspace version fixture")
+        self.source_fixture.revision = self.revision = self.source_fixture.git("rev-parse", "HEAD").strip().decode()
+        self.tree = self.source_fixture.git("rev-parse", "HEAD^{tree}").strip().decode()
+        self.root = self.source_fixture.base / "reports"
+        self.root.mkdir(mode=0o700)
+        environment = {"RUNNER_TEMP": str(self.root), "GITHUB_OUTPUT": str(self.root / "output"),
+                       "CODEWIRE_EXPECTED_SOURCE_SHA": self.revision, "CODEWIRE_EXPECTED_SOURCE_TREE": self.tree,
+                       "CODEWIRE_SCCACHE_MODE": "r2", "CODEWIRE_BUILDKIT_CACHE_MODE": "r2"}
+        patch = mock.patch.dict(os.environ, environment)
+        patch.start()
+        self.addCleanup(patch.stop)
+        patch = mock.patch.object(report, "ROOT", self.repo)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.seed_directory = self.fixture("seed", "3")
+        self.seed = self.finish(self.seed_directory)
+        os.environ["CODEWIRE_WORKSPACE_CACHE_SEED_REPORT"] = json.dumps(self.seed)
+
+    def fixture(self, case, identity, name=None, build_text=None, plain_done=False):
+        directory = ReportTests.fixture(self, case, identity)
+        if name is not None:
+            renamed = self.root / name
+            directory.rename(renamed)
+            directory = renamed
+        header = json.loads((directory / "identity.json").read_text())
+        header.update(source_sha=self.revision, source_tree=self.tree, architecture="amd64",
+                      seed_cache_id="run-2047/tree-" + self.tree + "/seed-" + "3" * 64)
+        (directory / "identity.json").write_text(json.dumps(header))
+        receipt = json.loads((directory / "receipt.json").read_text())
+        receipt.update(source_sha=self.revision, source_tree=self.tree, architecture="amd64")
+        (directory / "receipt.json").write_text(json.dumps(receipt))
+        mode, layers = report.MODES[case]
+        export = "#9 exporting cache to Amazon S3\n#9 DONE 1.0s\n" if layers == "r2" else ""
+        (directory / "workspace-build.log").write_text(
+            "#1 [workspace-floating-tools 1/2] RUN npm install\n#1 DONE 1.0s\n"
+            "#2 [workspace-floating-tools 2/2] RUN go install\n#2 DONE 2.0s\n"
+            "#3 [cw-builder 1/1] COPY --from=codewire-verified-cw /cw /cw\n#3 DONE 0.1s\n" + export)
+        ReportTests.history(self, directory, [{"digest": "sha256:" + "8" * 64,
+            "name": "[cw-builder 1/1] COPY --from=codewire-verified-cw /cw /cw",
+            "inputs": ["sha256:" + "9" * 64], "cached": False,
+            "started": "2026-09-10T10:00:04Z", "completed": "2026-09-10T10:00:05Z"}])
+        work = directory / "cw-image-work"
+        work.mkdir(mode=0o700)
+        (work / "cw-producer-owned").mkdir(mode=0o700)
+        producer = self.consumer.producer
+        with producer.prepare_plan(self.repo, self.revision, "release", self.components.fixture.VERSION,
+                                   work / "cw-producer-owned" / "build") as prepared:
+            capsule = prepared.capsule
+            binary, depinfo, target, cargo, result = self.source_fixture.build_bytes(capsule)
+            with producer.source.admit(capsule.path / "source", capsule.path / "git", capsule.path / "request.json",
+                                       capsule.outputs["request.json"].sha256) as admitted:
+                producer.finalizer.finalize(admitted, binary, depinfo, self.components.fixture.RUSTC, result,
+                                            prepared.path / "assets", target, cargo)
+            cached = case.startswith("warm-")
+            done = "CACHED" if cached and not plain_done else "DONE 3.0s"
+            text = build_text if build_text is not None else (
+                "#4 [cw-builder 1/1] RUN codewire-rust-build cargo build --release\n#4 " + done + "\n"
+                "#4 1.0 Cache hits 4\n#4 1.0 Cache hits (Rust) 4\n#4 1.0 Cache misses 2\n"
+                "#4 1.0 Cache write errors 0\n" + export)
+            log = prepared.path / "build.log"
+            self.components.write(log, text.encode(), 0o400)
+            arguments = producer.producer_arguments(capsule, prepared.path, mode)
+            command = ["/usr/bin/docker", "buildx", "build", "--builder", header["builder_name"], *arguments]
+            self.components.write(prepared.path / "metadata.json", producer.release.canonical({
+                "buildx.build.ref": f'{header["builder_name"]}/{header["builder_name"]}-node/' + "b" * 25}), 0o400)
+            completed = producer.finish(prepared, result | {"command": command, "log": str(log),
+                                        "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest()}, header["builder_name"])
+        self.components.write(work / "cw-producer-result.json", producer.release.canonical(completed), 0o400)
+        self.producer_events(directory, [{"digest": "sha256:" + "6" * 64, "inputs": ["sha256:" + "7" * 64],
+            "name": "[cw-builder 1/1] RUN codewire-rust-build cargo build --release", "cached": cached,
+            "started": "2026-09-10T10:00:00Z", "completed": "2026-09-10T10:00:03Z"}])
+        return directory
+
+    def history(self, directory, events):
+        ReportTests.history(self, directory, events)
+
+    def evidence(self, directory):
+        return report.ProducerEvidence(directory, json.loads((directory / "identity.json").read_text()))
+
+    def producer_events(self, directory, events):
+        raw = b"".join((json.dumps({"vertexes": [event]}) + "\n").encode() for event in events)
+        (directory / "cw-producer-progress.jsonl").write_bytes(raw)
+        with self.evidence(directory) as evidence:
+            (directory / "cw-producer-history.json").write_text(json.dumps(
+                dict(evidence.identity, sha256=hashlib.sha256(raw).hexdigest())))
+
+    def finish(self, directory, finalizer=None):
+        case = json.loads((directory / "identity.json").read_text())["case"]
+        os.environ["CODEWIRE_SCCACHE_MODE"], os.environ["CODEWIRE_BUILDKIT_CACHE_MODE"] = report.MODES[case]
+        with contextlib.redirect_stdout(io.StringIO()):
+            (finalizer or report.finalize)(directory, directory / "receipt.json")
+        return json.loads((directory / "result.json").read_text())
+
+    def refused(self, directory):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(
+                (ValueError, OSError, KeyError, TypeError, self.consumer.release.ReleaseError)):
+            self.finish(directory)
+        self.assertFalse((directory / "result.json").exists())
+        self.assertEqual(output.getvalue(), "")
+
+    def test_workspace_copy_joins_actual_admission_and_separate_solve(self):
+        directory = self.fixture("warm-1", "5")
+        result = self.finish(directory, LEGACY_REPORT_FINALIZER)
+        workspace, compiled = result["phases"]["workspace"], result["phases"]["cw_producer"]
+        self.assertEqual(workspace["floating_runs_executed"], 2)
+        self.assertNotEqual(workspace["build_ref"], compiled["build_ref"])
+        self.assertTrue(compiled["compiler_layer_cached"])
+        self.assertFalse(compiled["compiler_executed"])
+        self.assertEqual(compiled["profile"], "release")
+        self.assertEqual(compiled["source"]["revision"], self.revision)
+        self.assertEqual(compiled["payload"]["source_revision"], self.revision)
+        self.assertEqual(compiled["current_source"]["git_tree"], self.tree)
+        self.assertEqual(compiled["compiler_cache_statistics"]["Cache hits (Rust)"], 4)
+
+    def test_all_cases_separate_compiler_and_workspace_metrics(self):
+        for index, case in enumerate(("cold", "compiler", "warm-1", "warm-2"), 5):
+            result = self.finish(self.fixture(case, str(index)))
+            compiled = result["phases"]["cw_producer"]
+            self.assertEqual(compiled["compiler_executed"], not case.startswith("warm-"))
+            self.assertEqual(compiled["compiler_layer_cached"], case.startswith("warm-"))
+            self.assertEqual(result["workspace_image_id"], "sha256:" + "4" * 64)
+            self.assertNotIn("compiler_executed", result["phases"]["workspace"])
+
+    def test_capture_queries_two_exact_refs_and_never_latest(self):
+        directory = self.fixture("warm-1", "5")
+        builder = json.loads((directory / "identity.json").read_text())["builder_name"]
+        raw = {"a" * 25: (directory / "workspace-progress.jsonl").read_bytes(),
+               "b" * 25: (directory / "cw-producer-progress.jsonl").read_bytes()}
+        calls, run = [], subprocess.run
+        def capture(command, **kwargs):
+            if command[0] != "fixture-docker":
+                if command[0] != "git":
+                    self.assertEqual(command[:4], [sys.executable, "-B", str(ROOT / "scripts/dev/cw-runtime-image.py"), "unpack"])
+                return run(command, **kwargs)
+            self.assertEqual(command[:-1], ["fixture-docker", "buildx", "history", "logs", "--builder", builder,
+                                          "--progress", "rawjson"])
+            self.assertIn(command[-1], raw)
+            self.assertNotIn("timeout", kwargs)
+            calls.append(command[-1])
+            kwargs["stderr"].write(raw[command[-1]])
+        with mock.patch.object(report.subprocess, "run", side_effect=capture):
+            report.capture_history("fixture-docker", builder, directory)
+        self.assertEqual(calls, ["a" * 25, "b" * 25])
+        self.finish(directory)
+        calls.clear()
+        def fail_second(command, **kwargs):
+            if command[0] == "fixture-docker" and command[-1] == "b" * 25:
+                raise subprocess.CalledProcessError(23, command)
+            return capture(command, **kwargs)
+        with mock.patch.object(report.subprocess, "run", side_effect=fail_second), self.assertRaises(subprocess.CalledProcessError):
+            report.capture_history("fixture-docker", builder, directory)
+        self.assertFalse((directory / "workspace-history.json").exists())
+        self.assertFalse((directory / "cw-producer-history.json").exists())
+        self.refused(directory)
+
+    def test_pointer_is_closed_canonical_and_exactly_matches_original(self):
+        directory = self.fixture("warm-1", "5")
+        path = directory / "cw-image-work/cw-producer-result.json"
+        original = path.read_bytes()
+        pointer = json.loads(original)
+        invalid = [b"", b" " + original, b"[]\n", original[:-1],
+                   original.replace(b'"status":', b'"status":"x","status":', 1)]
+        for changes in ({"extra": True}, {"reused": True}, {"cache_qualified": 0},
+                        {"image_qualified": True}, {"profile": "ci"}, {"version": "v9.9.9"},
+                        {"receipt": pointer["receipt"] | {"sha256": "0" * 64}},
+                        {"payload": pointer["payload"] | {"sha256": "0" * 64}},
+                        {"source": pointer["source"] | {"revision": "0" * 40}}):
+            invalid.append(self.consumer.release.canonical(pointer | changes))
+        for raw in invalid:
+            with self.subTest(raw=raw[:40]):
+                self.components.write(path, raw, 0o400)
+                self.refused(directory)
+        self.components.write(path, original, 0o400)
+        self.finish(directory)
+
+    def test_pointer_modes_links_and_foreign_builders_refuse(self):
+        directory = self.fixture("warm-1", "5")
+        path = directory / "cw-image-work/cw-producer-result.json"
+        raw = path.read_bytes()
+        path.chmod(0o600)
+        self.refused(directory)
+        path.chmod(0o400)
+        external = self.root / "pointer-copy"
+        self.components.write(external, raw, 0o400)
+        path.unlink()
+        path.symlink_to(external)
+        self.refused(directory)
+        path.unlink()
+        os.link(external, path)
+        self.refused(directory)
+        path.unlink()
+        self.components.write(path, raw, 0o400)
+        header_path = directory / "identity.json"
+        header = json.loads(header_path.read_text())
+        header_path.write_text(json.dumps(header | {"builder_name": "codewire-workspace-another"}))
+        self.refused(directory)
+        header_path.write_text(json.dumps(header | {"source_tree": "0" * 40}))
+        self.refused(directory)
+
+    def test_retained_asset_log_metadata_and_depinfo_replacement_refuse(self):
+        for index, name in enumerate(("assets/cw", "assets/cw.d", "assets/cw.oci.tar", "assets/producer.json",
+                                      "metadata.json", "build.log")):
+            directory = self.fixture("warm-1", "5", name="replacement-" + str(index))
+            path = directory / "cw-image-work/cw-producer-owned/build" / name
+            mode = stat.S_IMODE(path.stat().st_mode)
+            self.components.write(path, path.read_bytes() + b"changed", mode)
+            self.refused(directory)
+
+    def test_current_source_and_cache_mode_must_match_but_docs_keep_original(self):
+        directory = self.fixture("warm-1", "5")
+        header = json.loads((directory / "identity.json").read_text())
+        with self.assertRaises(ValueError):
+            report.ProducerEvidence(directory, header, compiler_mode="disabled")
+        path = self.repo / "crates/demo/src/lib.rs"
+        original = path.read_bytes()
+        self.components.write(path, original + b"pub fn edited() {}\n")
+        self.refused(directory)
+        self.components.write(path, original)
+        self.components.write(self.repo / "README.md", b"docs-only consumer commit\n")
+        self.source_fixture.git("add", "README.md")
+        self.source_fixture.git("-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid",
+                                "commit", "-q", "-m", "docs only")
+        current = self.source_fixture.git("rev-parse", "HEAD").strip().decode()
+        tree = self.source_fixture.git("rev-parse", "HEAD^{tree}").strip().decode()
+        with report.ProducerEvidence(directory, header | {"source_sha": current, "source_tree": tree}) as evidence:
+            summary = evidence.retained.summary
+            self.assertEqual(summary["source"]["revision"], self.revision)
+            self.assertEqual(summary["current_source"]["revision"], current)
+            self.assertNotEqual(summary["source"]["git_tree"], summary["current_source"]["git_tree"])
+            self.assertEqual(summary["build_ref"], evidence.identity["build_ref"])
+            # Observation through reopen never claims that another solve ran.
+            self.assertIs(summary["reused"], True)
+
+    def test_cached_history_retains_lazy_extraction_and_completed_dwell(self):
+        directory = self.fixture("warm-1", "5", plain_done=True)
+        cached = json.loads((directory / "cw-producer-progress.jsonl").read_text())["vertexes"][0]
+        extraction = {key: value for key, value in cached.items() if key not in ("cached", "inputs")}
+        initial = {key: value for key, value in cached.items() if key not in ("cached", "started", "completed")}
+        self.producer_events(directory, [initial, cached, extraction, initial])
+        result = self.finish(directory)["phases"]["cw_producer"]
+        self.assertTrue(result["compiler_layer_cached"])
+        self.assertFalse(result["compiler_executed"])
+
+    def test_wrong_producer_history_identity_hash_and_incomplete_vertices_refuse(self):
+        directory = self.fixture("warm-1", "5")
+        marker = directory / "cw-producer-history.json"
+        original = json.loads(marker.read_text())
+        for key in ("build_ref", "pointer_sha256", "build_receipt_sha256", "build_log_sha256", "sha256"):
+            marker.write_text(json.dumps(original | {key: "0" * 64}))
+            self.refused(directory)
+        event = json.loads((directory / "cw-producer-progress.jsonl").read_text())["vertexes"][0]
+        for events in ([], [dict(event, cached=False)], [dict(event, cached=1)], [dict(event, completed=None)],
+                       [dict(event, inputs="invalid")], [dict(event, error="failed")],
+                       [event, dict(event, digest="sha256:" + "8" * 64)],
+                       [dict(event, name="[cw-builder 1/1] COPY /cw /cw")]):
+            self.producer_events(directory, events)
+            self.refused(directory)
+
+    def test_cold_and_compiler_require_executed_producer_and_rust_hits(self):
+        for case in ("cold", "compiler"):
+            directory = self.fixture(case, "5", name="cached-" + case)
+            event = json.loads((directory / "cw-producer-progress.jsonl").read_text())["vertexes"][0]
+            for changed in (dict(event, cached=True), {key: value for key, value in event.items() if key != "inputs"}):
+                self.producer_events(directory, [changed])
+                self.refused(directory)
+        text = "#4 [cw-builder 1/1] RUN codewire-rust-build cargo build --release\n#4 DONE 1.0s\n#4 1.0 Cache hits 100\n"
+        for index, suffix in enumerate(("", "#4 1.0 Cache hits (Rust) 0\n")):
+            directory = self.fixture("compiler", "5", name="generic-hits-" + str(index), build_text=text + suffix)
+            self.refused(directory)
+
+    def test_copy_or_old_workspace_compile_cannot_supply_producer_evidence(self):
+        directory = self.fixture("warm-1", "5")
+        (directory / "cw-image-work/cw-producer-result.json").unlink()
+        self.refused(directory)
+        # A valid old compiler observation cannot replace a missing producer.
+        log = directory / "workspace-build.log"
+        log.write_text(log.read_text() + "#10 [cw-builder 1/1] RUN cargo build\n#10 CACHED\n")
+        self.refused(directory)
+
+    def test_late_retained_pointer_mutation_removes_success_and_output(self):
+        directory = self.fixture("warm-1", "5")
+        pointer = directory / "cw-image-work/cw-producer-result.json"
+        raw, original = pointer.read_bytes(), Path.write_text
+        def replace_after_emit(path, data, *args, **kwargs):
+            result = original(path, data, *args, **kwargs)
+            if path == directory / "result.json":
+                self.components.write(pointer, raw, 0o400)
+            return result
+        with mock.patch.object(Path, "write_text", replace_after_emit):
+            self.refused(directory)
 
 
 def workflow_job(name):

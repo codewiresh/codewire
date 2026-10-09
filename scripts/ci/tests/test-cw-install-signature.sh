@@ -5,7 +5,26 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 INSTALLER="$ROOT/apps/cli/install.sh"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+installer_tmp="$TMP/installer-tmp"
+cleanup() {
+  local status=$? cleanup_status=0 home
+  trap - EXIT
+  for home in "$TMP/key-a-home" "$TMP/key-b-home" "$TMP/ambient-home" \
+    "$installer_tmp"/*/gnupg; do
+    if [[ -d "$home" ]]; then
+      gpgconf --homedir "$home" --kill all >/dev/null 2>&1 || cleanup_status=$?
+    fi
+  done
+  if [[ "$cleanup_status" -eq 0 ]]; then
+    rm -rf "$TMP" || cleanup_status=$?
+  fi
+  if [[ "$status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
+    status="$cleanup_status"
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+mkdir -m 700 "$installer_tmp"
 
 make_key() {
   local home="$1"
@@ -91,6 +110,7 @@ run_installer() {
   FIXTURE_CURL="$fake_bin/curl" \
     FIXTURE_PUBLIC_KEY="$public_key" \
     FIXTURE_ASSETS="$assets" \
+    TMPDIR="$installer_tmp" \
     bash "$fixture_installer" --version v0.0.0-test --prefix "$prefix"
 }
 

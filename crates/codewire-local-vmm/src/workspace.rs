@@ -27,6 +27,13 @@ use crate::workspace_plan::{WorkspaceInput, WorkspacePlan};
 use codewire_vmm_guest_probe::DIRECT_SHARE_PLAN_RELATIVE_PATH;
 
 const GIT: &str = "/usr/bin/git";
+// Git maintenance stays in the owned command's family until it is joined.
+const GIT_FOREGROUND_MAINTENANCE: [&str; 4] = [
+    "-c",
+    "maintenance.autoDetach=false",
+    "-c",
+    "gc.autoDetach=false",
+];
 const MAX_GIT_CONTROL_OUTPUT: usize = 16 * 1024 * 1024;
 const MINIMUM_EXT4_HEADROOM: u64 = 128 * 1024 * 1024;
 const MAXIMUM_COPY_ENTRIES: u64 = 1_000_000;
@@ -771,6 +778,7 @@ fn git_output(
         .ok_or(WorkspaceError::GitOutputTooLarge)? as u64;
     let mut command = Command::new(GIT);
     command
+        .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
             "core.fsmonitor=false",
@@ -1580,6 +1588,7 @@ fn import_git_bundle(
     template: &Path,
 ) -> Result<(), WorkspaceError> {
     let initialized = Command::new(GIT)
+        .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
             "core.fsmonitor=false",
@@ -1610,6 +1619,7 @@ fn import_git_bundle(
     }
 
     let fetched = Command::new(GIT)
+        .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
             "credential.helper=",
@@ -1655,6 +1665,7 @@ fn git_clone_output(
     template: &Path,
 ) -> Result<Output, WorkspaceError> {
     Command::new(GIT)
+        .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
             "core.fsmonitor=false",
@@ -2223,6 +2234,7 @@ mod tests {
 
     fn git(source: &Path, arguments: &[&str]) {
         let status = Command::new(GIT)
+            .args(GIT_FOREGROUND_MAINTENANCE)
             .args(arguments)
             .current_dir(source)
             .env_clear()

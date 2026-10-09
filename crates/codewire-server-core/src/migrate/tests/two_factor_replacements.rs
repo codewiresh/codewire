@@ -45,13 +45,15 @@ async fn fingerprint(pool: &PgPool) -> anyhow::Result<String> {
     .await?)
 }
 
-/// Every helper except migration34's workspace-binding trigger function, which
-/// has its own proof and replaces no prior helper.
+/// Every helper except migration34's workspace-binding trigger function and
+/// migration38's cw-runtime trigger function, which have their own proof and
+/// replace no prior helper.
 async fn helpers(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n \
         ON n.oid=p.pronamespace WHERE n.nspname='public' AND starts_with(p.proname,'codewire_') \
         AND p.proname <> 'codewire_workspace_binding_immutable' \
+        AND p.proname <> 'codewire_cw_runtime_request_immutable' \
         ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)",
     )
     .fetch_all(pool)
@@ -303,7 +305,11 @@ async fn two_factor_replacement_upgrade_preserves31_rows_helpers_and_second_star
             .await?;
         let after = applied_migrations(&pool).await?;
         anyhow::ensure!(
-            after.len() == MIGRATOR.iter().count()
+            after.len()
+                == MIGRATOR
+                    .iter()
+                    .filter(|m| m.migration_type.is_up_migration())
+                    .count()
                 && after[..31] == before
                 && after[31].0 == VERSION
         );
@@ -435,7 +441,7 @@ async fn two_factor_replacement_failed_forward_rolls_back_table_column_and_ledge
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         anyhow::ensure!(
             !absent(&pool).await?
-                && applied_migrations(&pool).await?.len() == MIGRATOR.iter().count()
+                && applied_migrations(&pool).await?.len() == MIGRATOR.iter().filter(|m| m.migration_type.is_up_migration()).count()
                 && rows(&pool).await? == original
         );
         pool.close().await;
@@ -488,7 +494,13 @@ async fn two_factor_replacement_down_restores31_in_place_and_keeps_every_other_r
             .max_connections(1)
             .connect(&db.url)
             .await?;
-        anyhow::ensure!(applied_migrations(&pool).await?.len() == MIGRATOR.iter().count());
+        anyhow::ensure!(
+            applied_migrations(&pool).await?.len()
+                == MIGRATOR
+                    .iter()
+                    .filter(|m| m.migration_type.is_up_migration())
+                    .count()
+        );
         anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
         anyhow::ensure!(rows(&pool).await? == original && pending_count(&pool).await? == 0);
         pool.close().await;

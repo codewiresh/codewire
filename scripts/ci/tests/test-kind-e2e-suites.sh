@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
+# ShellCheck follows the whole Kind suite tree from here. Its data-flow pass
+# needs over 10 GiB, more than a CI worker has, and reports nothing at the
+# policy's warning severity, so this file uses the ordinary analysis.
+# shellcheck extended-analysis=false
 set -euo pipefail
 
 # Synthetic ownership fixtures must not inherit the caller's live CI cluster.
 export KIND_CLUSTER_NAME=codewire-e2e-ci
+unset CLUSTER KIND_PROFILE
 # The fixture requests the default host topology even when the caller exports
 # a shifted harness port set; behavior cases that assert shifted renderings or
 # shifted preflights set their own assignment explicitly in a subshell.
@@ -103,6 +108,85 @@ expect_live_failure() {
   [ "$live_status" -ne 0 ] || fail "$label unexpectedly succeeded"
 }
 
+# The standard SQLx migrator applies simple/up files, never explicit down files.
+# Exercise the exact live row-census/query/refusal fragment with synthetic input;
+# its success marker is written only after the original guard returns normally.
+migration_fixture="$FIXTURE/sqlx-application-ledger"
+mkdir -p "$migration_fixture/simple/crates/codewire-server-core/migrations" \
+  "$migration_fixture/reversible/crates/codewire-server-core/migrations/nested"
+: >"$migration_fixture/simple/crates/codewire-server-core/migrations/0001_simple.sql"
+: >"$migration_fixture/reversible/crates/codewire-server-core/migrations/0001_simple.sql"
+: >"$migration_fixture/reversible/crates/codewire-server-core/migrations/0002_reversible.up.sql"
+: >"$migration_fixture/reversible/crates/codewire-server-core/migrations/0002_reversible.down.sql"
+: >"$migration_fixture/reversible/crates/codewire-server-core/migrations/ignored.txt"
+: >"$migration_fixture/reversible/crates/codewire-server-core/migrations/nested/0009_ignored.sql"
+migration_guard="$(awk '
+  /^  local expected_migration_rows migration_rows$/ { capture = 1 }
+  capture { print }
+  capture && /^  fi$/ { exit }
+' "$COMMON")"
+[ -n "$migration_guard" ] || fail 'the actual SQLx ledger guard fragment is absent'
+{
+  cat <<'LEDGER_HEAD'
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$1"
+NS=sqlx-ledger-fixture
+MIGRATION_ROWS="$2"
+MIGRATION_QUERY_EXIT="$3"
+MIGRATION_RECEIPT="$4"
+kubectl() {
+  [ "$*" = '-n sqlx-ledger-fixture exec deploy/postgres -- psql -U codewire -d codewire -tAc SELECT count(*) FILTER (WHERE success = true), count(*) FROM _sqlx_migrations' ] || return 91
+  printf 'query\n' >>"$MIGRATION_RECEIPT.query"
+  printf '%s\n' "$MIGRATION_ROWS"
+  return "$MIGRATION_QUERY_EXIT"
+}
+check_application_ledger() {
+LEDGER_HEAD
+  printf '%s\n' "$migration_guard"
+  cat <<'LEDGER_TAIL'
+}
+# A plain call preserves production errexit for a failed query; this child is
+# joined by the fixture's synchronous Bash invocation even for refusal cases.
+check_application_ledger
+printf 'SQLx ledger accepted\n' >"$MIGRATION_RECEIPT"
+LEDGER_TAIL
+} >"$migration_fixture/check-ledger.sh"
+
+run_sqlx_migration_ledger_case() {
+  local label="$1" case_root="$2" rows="$3" query_exit="$4" expected="$5"
+  local receipt="$migration_fixture/$label.receipt" status=0
+  if bash "$migration_fixture/check-ledger.sh" "$case_root" "$rows" "$query_exit" "$receipt" \
+      >"$migration_fixture/$label.log" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$(wc -l <"$receipt.query" | tr -d '[:space:]')" = 1 ] ||
+    fail "$label did not use exactly the original SQLx ledger query"
+  if [ "$expected" = accepted ]; then
+    [ "$status" = 0 ] && grep -Fxq 'SQLx ledger accepted' "$receipt" ||
+      fail "$label refused a correct up-only SQLx ledger"
+  else
+    [ "$status" != 0 ] && [ ! -e "$receipt" ] ||
+      fail "$label accepted or emitted success for a refused SQLx ledger"
+    if [ "$query_exit" = 0 ]; then
+      grep -Fq 'successful SQLx migration rows and no other ledger rows' \
+        "$migration_fixture/$label.log" || fail "$label lost the actual ledger refusal"
+    else
+      [ "$status" = "$query_exit" ] || fail "$label lost the original query failure status"
+    fi
+  fi
+}
+run_sqlx_migration_ledger_case simple-correct "$migration_fixture/simple" '1|1' 0 accepted
+run_sqlx_migration_ledger_case reversible-correct "$migration_fixture/reversible" '2|2' 0 accepted
+run_sqlx_migration_ledger_case extra "$migration_fixture/reversible" '3|3' 0 refused
+run_sqlx_migration_ledger_case failed-row "$migration_fixture/reversible" '1|2' 0 refused
+run_sqlx_migration_ledger_case missing "$migration_fixture/reversible" '1|1' 0 refused
+run_sqlx_migration_ledger_case empty "$migration_fixture/reversible" '' 0 refused
+run_sqlx_migration_ledger_case query-failed "$migration_fixture/reversible" '2|2' 47 refused
+printf '[test-kind-e2e-suites] SQLx ledger guard cases=7 passed\n'
+
 # Workspace exec uses the production private adapter and authenticated daemon,
 # not a bare container shell. Reuse the daemon fixture without giving the host
 # exec binary ownership of its Pod lifecycle.
@@ -191,6 +275,268 @@ for binding in \
     fail "prepared workspace readiness binding missing: $binding"
 done
 workspace_fixture="$(sed -n '/^workspace_service_smokes() {/,/^environment_resize_smoke() (/p' "$COMMON")"
+
+# Bash suppresses errexit throughout functions invoked from an if/|| condition.
+# Exercise the actual composites in that context, with synthetic leaf commands,
+# so neither a failed child nor a failed fixture transition can emit green.
+workspace_smoke_definition() {
+  awk -v name="$1" '
+    /^[[:alnum:]_]+\(\) [({]$/ {
+      if (copying) exit
+      if ($1 == name "()") copying = 1
+    }
+    copying { print }
+  ' "$COMMON"
+}
+
+run_workspace_failure_fixture() (
+  local target="$1" failure="$2"
+  local NS=codewire-e2e SANDBOX_NS=dev-sandboxes
+  local KIND_INGRESS_URL=http://fixture.invalid KIND_INGRESS_TLS_URL=https://fixture.invalid
+  # shellcheck disable=SC2034 # Read by the extracted smoke function below.
+  local KIND_ORCHESTRATION_HTTP_URL=http://fixture-direct.invalid
+  local CARGO_CI_DIR="$FIXTURE/workspace-bin"
+  local RUN_DIR="$FIXTURE"
+  local claim_deletes=0 sandbox_deletes=0
+  export WORKSPACE_FIXTURE_CALLS="$CALLS" WORKSPACE_FIXTURE_FAILURE="$failure"
+  mkdir -p "$CARGO_CI_DIR/examples"
+  cat >"$CARGO_CI_DIR/leaf" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+step="${0##*/}"
+if [[ "$step" == crd-smoke ]]; then
+  step="crd-${CRD_SMOKE_ACCESS_PHASE:-${CRD_SMOKE_RESIZE_PHASE:-missing}}"
+fi
+printf '%s\n' "$step" >>"$WORKSPACE_FIXTURE_CALLS"
+[[ "$step" != "$WORKSPACE_FIXTURE_FAILURE" ]] || exit 43
+if [[ "$step" == crd-render ]]; then
+  printf '{"items":[{"kind":"SandboxTemplate","metadata":{"name":"fixture-template"}},{"kind":"SandboxWarmPool","metadata":{"name":"fixture-pool"}},{"kind":"SandboxClaim","metadata":{"name":"sandbox-%s"},"spec":{"warmPoolRef":{"name":"fixture-pool"}}}]}\n' "$CRD_SMOKE_RESIZE_ENVIRONMENT_ID"
+fi
+SH
+  chmod +x "$CARGO_CI_DIR/leaf"
+  for leaf in exec-smoke exec-stream-smoke environment-setup-smoke file-service-smoke crd-smoke; do
+    cp "$CARGO_CI_DIR/leaf" "$CARGO_CI_DIR/$leaf"
+  done
+
+  fixture_step() {
+    record "$1"
+    [[ "$1" != "$failure" ]] || return 41
+  }
+  log() { record "log $*"; }
+  kind_workspace_runtime_image() { printf '%s\n' fixture-workspace; }
+  daemon_auth_token_for_environment() { printf '%s\n' fixture-daemon; }
+  workspace_access_stack_smoke() { fixture_step access; }
+  file_service_smoke() { fixture_step file-composite; }
+  environment_resize_smoke() { fixture_step resize; }
+  workspace_user_ssh_smoke() { fixture_step user-ssh; }
+  environment_daemon_proxy_smoke() { fixture_step proxy; }
+  environment_setup_terminal_smoke() { fixture_step terminal; }
+  exec_service_connect_smoke() { fixture_step exec-service; }
+  platform_run_connect_smoke() { fixture_step platform-run; }
+  environment_session_protocol_smoke() { fixture_step session-protocol; }
+  delete_kind_credential_bootstrap() { fixture_step credential-cleanup; }
+  kubectl_apply() {
+    local manifest
+    manifest="$(cat)"
+    if grep -Fxq 'kind: Sandbox' <<<"$manifest"; then
+      fixture_step sandbox-apply
+    else
+      fixture_step claim-apply
+    fi
+  }
+  jq() {
+    if [[ " $* " == *' --arg pod_uid '* ]]; then
+      fixture_step pod-owner-json || return $?
+    fi
+    command jq "$@"
+  }
+  kubectl() {
+    case " $* " in
+      *' get deploy/agent-sandbox-controller '*) printf '1\n' ;;
+      *' scale deploy/agent-sandbox-controller '*--replicas=0*) fixture_step controller-stop ;;
+      *' scale deploy/agent-sandbox-controller '*) fixture_step controller-restore ;;
+      *' wait pod '*) fixture_step controller-drain ;;
+      *' wait pod/'*) fixture_step daemon-ready ;;
+      *' wait sandboxclaim/'*) fixture_step resize-claim-ready ;;
+      *' rollout status '*) fixture_step controller-ready ;;
+      *' get pod '*status.podIP*) printf '10.0.0.1\n' ;;
+      *' get pod '*metadata.uid*) printf 'fixture-pod-uid\n' ;;
+      *' delete sandbox '*--cascade=orphan*)
+        sandbox_deletes=$((sandbox_deletes + 1))
+        if [[ "$sandbox_deletes" -eq 1 ]]; then
+          fixture_step sandbox-reset
+        else
+          fixture_step sandbox-cleanup
+        fi
+        ;;
+      *' get sandboxclaim '*metadata.uid*)
+        fixture_step claim-uid || return $?
+        printf 'fixture-claim-uid\n'
+        ;;
+      *' get sandbox '*metadata.uid*)
+        fixture_step sandbox-uid || return $?
+        printf 'fixture-sandbox-uid\n'
+        ;;
+      *' patch pod '*--type=merge*) fixture_step pod-owner ;;
+      *' delete sandboxclaim '*)
+        claim_deletes=$((claim_deletes + 1))
+        if [[ "$claim_deletes" -eq 1 ]]; then
+          fixture_step claim-reset
+        else
+          fixture_step claim-cleanup
+        fi
+        ;;
+      *' patch sandboxclaim '*) fixture_step claim-ready ;;
+      *' get sandboxclaim '*)
+        if [[ "$failure" == claim-not-ready ]]; then printf 'False\n'; else printf 'True\n'; fi
+        ;;
+      *' exec -i deploy/postgres '*)
+        local sql
+        sql="$(cat)"
+        if [[ "$sql" == INSERT* ]]; then
+          fixture_step database-setup
+        else
+          fixture_step database-cleanup
+        fi
+        ;;
+      *' delete pod '*) fixture_step pod-cleanup ;;
+      *' delete pod/'*) fixture_step daemon-reset ;;
+      *' --cascade=foreground '*) fixture_step resize-foreground ;;
+      *) fail "unexpected workspace fixture command: $*" ;;
+    esac
+  }
+  case "$target" in
+    workspace_service_smokes|file_service_smoke|environment_resize_smoke|workspace_access_stack_smoke)
+      eval "$(workspace_smoke_definition "$target")" || return $?
+      "$target"
+      ;;
+    environment_setup_terminal_smoke)
+      eval "$(workspace_smoke_definition "$target")" || return $?
+      "$target" env-fixture
+      ;;
+    file-cleanup)
+      local claim_name=fixture-claim sandbox_name=fixture-daemon original_replicas=1 initial_status=0
+      sandbox_deletes=1
+      eval "$(sed -n '/^  cleanup_file_service_binding() {/,/^  }/p' "$COMMON")" || return $?
+      if [[ "$failure" == cleanup-preserve ]]; then
+        initial_status=43
+        failure=controller-restore
+      fi
+      (exit "$initial_status")
+      cleanup_file_service_binding
+      ;;
+    curl_settled)
+      eval "$(workspace_smoke_definition "$target")" || return $?
+      mktemp() { fixture_step probe-temp || return $?; printf '%s\n' "$FIXTURE/probe-headers"; }
+      curl() {
+        printf 'HTTP/1.1 200 OK\n' >"$PROBE_HEADERS"
+        printf '%s\n' fixture-body
+        fixture_step probe-transport
+      }
+      awk() { fixture_step probe-headers || return $?; command awk "$@"; }
+      "$target" http://fixture.invalid
+      ;;
+    auth_token_for_environment_scope)
+      eval "$(workspace_smoke_definition "$target")" || return $?
+      kubectl() { fixture_step token-secret || return $?; printf '%s\n' Zml4dHVyZQ==; }
+      openssl() {
+        case "$1" in
+          base64) fixture_step token-encode || return $? ;;
+          dgst) fixture_step token-sign || return $? ;;
+          *) fail "unexpected fixture openssl command: $*" ;;
+        esac
+        cat
+      }
+      "$target" env-fixture daemon
+      ;;
+    exec_service_connect_smoke)
+      # A failed stream binary must stop before any subsequent REST probes.
+      curl_settled() { fixture_step unexpected-curl; return 1; }
+      eval "$(workspace_smoke_definition "$target")" || return $?
+      "$target" env-fixture
+      ;;
+    *) fail "unexpected workspace fixture target: $target" ;;
+  esac
+)
+
+workspace_failure_cases=0
+expect_workspace_failure() {
+  local target="$1" failure="$2" expected_status="$3" forbidden="$4" status
+  : >"$CALLS"
+  if run_workspace_failure_fixture "$target" "$failure" >"$FIXTURE/workspace-failure.out" 2>&1; then
+    fail "$target ignored failed $failure"
+  else
+    status=$?
+  fi
+  if [[ "$status" -ne "$expected_status" ]]; then
+    cat "$FIXTURE/workspace-failure.out" >&2
+    fail "$target changed failed $failure status: got $status, want $expected_status"
+  fi
+  if grep -Eq "$forbidden" "$CALLS"; then
+    fail "$target continued or emitted green after failed $failure"
+  fi
+  workspace_failure_cases=$((workspace_failure_cases + 1))
+}
+
+expect_workspace_failure workspace_service_smokes access 41 '^(exec-smoke|file-composite|resize|user-ssh)$'
+expect_workspace_failure workspace_service_smokes exec-smoke 43 '^(file-composite|resize|user-ssh)$'
+expect_workspace_failure workspace_service_smokes file-composite 41 '^(resize|user-ssh)$'
+expect_workspace_failure workspace_service_smokes resize 41 '^user-ssh$|green$'
+expect_workspace_failure workspace_service_smokes user-ssh 41 'green$'
+for failure in proxy terminal exec-service platform-run session-protocol; do
+  case "$failure" in
+    proxy) forbidden='^(terminal|exec-service|platform-run|session-protocol|file-service-smoke)$|green$' ;;
+    terminal) forbidden='^(exec-service|platform-run|session-protocol|file-service-smoke)$|green$' ;;
+    exec-service) forbidden='^(platform-run|session-protocol|file-service-smoke)$|green$' ;;
+    platform-run) forbidden='^(session-protocol|file-service-smoke)$|green$' ;;
+    session-protocol) forbidden='^file-service-smoke$|green$' ;;
+  esac
+  expect_workspace_failure file_service_smoke "$failure" 41 "$forbidden"
+done
+expect_workspace_failure file_service_smoke file-service-smoke 43 'green$'
+for failure in controller-stop controller-drain sandbox-reset claim-reset claim-apply \
+    claim-uid sandbox-apply sandbox-uid pod-owner-json pod-owner claim-ready database-setup; do
+  expect_workspace_failure file_service_smoke "$failure" 41 '^(proxy|terminal|exec-service|platform-run|session-protocol|file-service-smoke)$|green$'
+done
+expect_workspace_failure file_service_smoke claim-not-ready 1 '^(proxy|terminal|exec-service|platform-run|session-protocol|file-service-smoke)$|green$'
+for failure in database-cleanup sandbox-cleanup claim-cleanup controller-restore controller-ready pod-cleanup; do
+  expect_workspace_failure file_service_smoke "$failure" 41 'green$'
+done
+expect_workspace_failure file_service_smoke crd-cleanup 43 'green$'
+expect_workspace_failure environment_setup_terminal_smoke environment-setup-smoke 43 'green$'
+expect_workspace_failure exec_service_connect_smoke exec-stream-smoke 43 '^unexpected-curl$|green$'
+expect_workspace_failure workspace_access_stack_smoke crd-setup 43 '^(daemon-reset|claim-apply)$|green$'
+expect_workspace_failure workspace_access_stack_smoke daemon-reset 41 '^(claim-apply|daemon-ready)$|green$'
+expect_workspace_failure workspace_access_stack_smoke claim-apply 41 '^daemon-ready$|green$'
+expect_workspace_failure workspace_access_stack_smoke daemon-ready 41 'green$'
+expect_workspace_failure environment_resize_smoke crd-render 43 '^claim-apply$|green$'
+expect_workspace_failure environment_resize_smoke claim-apply 41 '^resize-claim-ready$|green$'
+for failure in sandbox-cleanup claim-reset controller-restore controller-ready; do
+  expect_workspace_failure file-cleanup "$failure" 41 'green$'
+done
+expect_workspace_failure file-cleanup cleanup-preserve 43 'green$'
+for failure in probe-temp probe-transport probe-headers; do
+  expect_workspace_failure curl_settled "$failure" 41 'green$'
+done
+for failure in token-secret token-encode token-sign; do
+  expect_workspace_failure auth_token_for_environment_scope "$failure" 41 'green$'
+done
+for target in workspace_service_smokes file_service_smoke workspace_access_stack_smoke file-cleanup curl_settled auth_token_for_environment_scope; do
+  : >"$CALLS"
+  if ! run_workspace_failure_fixture "$target" none >"$FIXTURE/workspace-passing.out" 2>&1; then
+    fail "$target rejected passing leaves and fixture transitions"
+  fi
+  case "$target" in
+    workspace_service_smokes) grep -Fxq resize "$CALLS" || fail 'workspace success omitted resize'
+      grep -Fxq user-ssh "$CALLS" || fail 'workspace success omitted the user SSH journey' ;;
+    file_service_smoke) grep -Fq 'FileService streaming and black-box Connect contract green' "$CALLS" ||
+      fail 'file-service success omitted its green result' ;;
+    workspace_access_stack_smoke) grep -Fxq daemon-ready "$CALLS" || fail 'access success omitted daemon readiness' ;;
+  esac
+  workspace_failure_cases=$((workspace_failure_cases + 1))
+done
+printf '[test-kind-e2e-suites] workspace failure propagation: %s cases passed\n' "$workspace_failure_cases"
+
 python3 - "$ROOT" <<'PY'
 import hashlib
 import pathlib
@@ -394,7 +740,7 @@ grep -Fq 'process.env.PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE || workspaceImage' \
 grep -Fq '(${presetId}, ${workspaceRuntimeImage},' \
   "$ROOT/apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts" ||
   fail 'dashboard lifecycle preset ignores its selected runtime workspace image'
-grep -Fq 'KIND_INGRESS_HOST_PORT="${KIND_INGRESS_HOST_PORT:-8090}"' "$COMMON" ||
+grep -Fq 'KIND_INGRESS_HOST_PORT="${KIND_INGRESS_HOST_PORT:-${KIND_INGRESS_HTTP_HOST_PORT:-8090}}"' "$COMMON" ||
   fail 'Kind ingress host port is not configurable with the accepted default'
 grep -Fq 'KIND_INGRESS_TLS_HOST_PORT="${KIND_INGRESS_TLS_HOST_PORT:-10443}"' "$COMMON" ||
   fail 'Kind ingress TLS host port is not configurable with the accepted default'
@@ -402,7 +748,7 @@ grep -Fq 'KIND_TEMPORAL_HOST_PORT="${KIND_TEMPORAL_HOST_PORT:-7233}"' "$COMMON" 
   fail 'Kind Temporal host port is not configurable with the accepted default'
 grep -Fq 'KIND_ORCHESTRATION_HOST_PORT="${KIND_ORCHESTRATION_HOST_PORT:-8084}"' "$COMMON" ||
   fail 'Kind orchestration host port is not configurable with the accepted default'
-grep -Fq 'KIND_COORDINATOR_DIRECT_HOST_PORT="${KIND_COORDINATOR_DIRECT_HOST_PORT:-18092}"' "$COMMON" ||
+grep -Fq 'KIND_COORDINATOR_DIRECT_HOST_PORT="${KIND_COORDINATOR_DIRECT_HOST_PORT:-${KIND_COORDINATOR_HOST_PORT:-18092}}"' "$COMMON" ||
   fail 'Kind coordinator direct host port is not configurable with the accepted default'
 grep -Fq 'KIND_POSTGRES_HOST_PORT="${KIND_POSTGRES_HOST_PORT:-25432}"' "$COMMON" ||
   fail 'Kind Postgres host port is not configurable with the accepted default'
@@ -412,16 +758,16 @@ grep -Fq "KIND_TEMPORAL_IMAGE='docker.io/temporalio/auto-setup:1.29.0@sha256:660
   fail 'Kind Temporal support input is not bound to the reviewed linux/amd64 manifest'
 grep -Fq 'KIND_INGRESS_URL="${KIND_INGRESS_URL:-http://127.0.0.1:${KIND_INGRESS_HOST_PORT}}"' "$COMMON" ||
   fail 'Kind ingress URL does not follow the requested ingress host port'
-grep -Fq 'KIND_TEMPORAL_FRONTEND_URL="${KIND_TEMPORAL_FRONTEND_URL:-http://127.0.0.1:${KIND_TEMPORAL_HOST_PORT}}"' "$COMMON" ||
+grep -Fq 'KIND_TEMPORAL_ADDRESS="${KIND_TEMPORAL_FRONTEND_URL:-${KIND_TEMPORAL_ADDRESS:-http://127.0.0.1:${KIND_TEMPORAL_HOST_PORT}}}"' "$COMMON" ||
   fail 'Kind Temporal client address does not follow the requested host port'
-grep -Fq 'KIND_ORCHESTRATION_HTTP_URL="${KIND_ORCHESTRATION_HTTP_URL:-http://127.0.0.1:${KIND_ORCHESTRATION_HOST_PORT}}"' "$COMMON" ||
+grep -Fq 'KIND_ORCHESTRATION_URL="${KIND_ORCHESTRATION_HTTP_URL:-${KIND_ORCHESTRATION_URL:-http://127.0.0.1:${KIND_ORCHESTRATION_HOST_PORT}}}"' "$COMMON" ||
   fail 'Kind orchestration client address does not follow the requested host port'
 grep -Fq 'KIND_COORDINATOR_DIRECT_URL="${KIND_COORDINATOR_DIRECT_URL:-http://127.0.0.1:${KIND_COORDINATOR_DIRECT_HOST_PORT}}"' "$COMMON" ||
   fail 'Kind coordinator direct address does not follow the requested host port'
 grep -Fq 'render_kind_host_port_mappings "$kind_config" "$rendered_kind_config"' "$COMMON" ||
   fail 'Kind cluster creation does not render the requested host-port mappings'
-grep -Fq 'sed -i "s/hostPort: ${default_port}\$/hostPort: ${requested_port}/" "$output"' "$COMMON" ||
-  fail 'Kind host-port rendering does not rewrite each requested mapping'
+grep -Fq 'module.render_host_ports(data.decode(), replacements)' "$COMMON" ||
+  fail 'Kind host-port rendering does not use the shared single-pass mapping renderer'
 grep -Fq 'require_kind_host_ports_available "$KIND_CLUSTER_NAME"' "$COMMON" ||
   fail 'Kind cluster creation does not preflight requested host-port ownership'
 grep -Fq 'log_kind_bound_endpoints' "$COMMON" ||
@@ -449,6 +795,14 @@ grep -Fq 'configure_remote_dind_kind_network' "$COMMON" ||
 if grep -Fq '127.0.0.1:25432/codewire' "$COMMON"; then
   fail 'Kind smoke callers bypass the configurable Postgres URL'
 fi
+# The overlay renderer recognizes the checked-in template's four default
+# origins; profile-gate fixtures prove all four become the saved origin.
+# Client callers must still use the selected endpoint variables throughout.
+common_client_source="$(cat "$COMMON")"
+overlay_renderer_source="$(workspace_smoke_definition render_kind_overlay_manifest)"
+[ -n "$overlay_renderer_source" ] || fail 'overlay renderer source is missing'
+common_client_source="${common_client_source/"$overlay_renderer_source"/}"
+
 # Smoke binaries default to the default host ports, which belong to another
 # cluster whenever this one runs shifted: every Temporal smoke names this
 # cluster's frontend.
@@ -460,7 +814,7 @@ for temporal_smoke in temporal-smoke temporal-fencing-smoke; do
     fail "${temporal_smoke} can fall back to another cluster's Temporal (${addressed}/${invocations} addressed)"
 done
 for hardcoded_loopback in '127.0.0.1:7233' '127.0.0.1:8084' '127.0.0.1:18092' '127.0.0.1:8090' 'localhost:10443'; do
-  if grep -Fq "$hardcoded_loopback" "$COMMON"; then
+  if grep -Fq "$hardcoded_loopback" <<<"$common_client_source"; then
     fail "Kind harness still hardcodes client address ${hardcoded_loopback}"
   fi
 done
@@ -590,6 +944,7 @@ run_retained_integrated_suite() { record integrated-retained; }
 run_retained_dashboard_browser_suite() { record dashboard-browser-retained; }
 run_retained_final_fencing_suite() { record final-fencing; }
 run_retained_environment_session_suite() { record environment-session; }
+run_retained_cw_runtime_suite() { record cw-runtime; }
 run_retained_sandbox_supply_chain_suite() { record sandbox-supply-chain; }
 run_retained_runtime_acceptance_suite() { record runtime-acceptance; }
 run_retained_warm_pools_suite() { record warm-pools; }
@@ -626,8 +981,8 @@ grep -Fq 'cluster ${KIND_CLUSTER_NAME} is up; no test suites ran' "$SCRIPT" ||
 # shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$ROOT/scripts/ci/verify/kind/suites/up.sh"
 
-# Up refuses an implicit cluster name and an already-existing cluster before
-# touching the host runtime, the lock, or any image.
+# Up refuses an implicit name before setup, and an existing cluster under the
+# transaction lock before building or changing any image or cluster.
 (
   require_tool() { :; }
   KIND_CLUSTER_NAME=up-implicit KIND_CLUSTER_NAME_EXPLICIT=0
@@ -641,7 +996,10 @@ source "$ROOT/scripts/ci/verify/kind/suites/up.sh"
     [ "$*" = 'get clusters' ] || fail "unexpected up-guard kind invocation: $*"
     printf '%s\n' up-existing
   }
-  prepare_kind_temp_runtime() { fail 'existing-cluster up touched the host runtime'; }
+  prepare_kind_temp_runtime() { :; }
+  acquire_kind_host_lock() { :; }
+  build_images_and_smokes() { fail 'existing-cluster up built images'; }
+  create_cluster() { fail 'existing-cluster up recreated its cluster'; }
   KIND_CLUSTER_NAME=up-existing KIND_CLUSTER_NAME_EXPLICIT=1
   expect_live_failure up-existing-cluster run_kind_up
   grep -Fq 'already exists' "$FIXTURE/up-existing-cluster.out" ||
@@ -672,9 +1030,9 @@ source "$ROOT/scripts/ci/verify/kind/suites/up.sh"
   run_kind_up
 )
 cat >"$FIXTURE/want-up-order" <<'EOF'
-port-preflight
 temp-runtime
 acquire-lock
+port-preflight
 ingress-drift
 build
 create-cluster
@@ -708,7 +1066,7 @@ drift_status=$?
 set -e
 [ "$drift_status" -ne 0 ] || fail 'kind up accepted an ingress drift failure'
 [ "$drift_status" -eq 43 ] || fail 'kind up lost the ingress drift failure status'
-printf '%s\n' port-preflight temp-runtime acquire-lock ingress-drift | cmp -s - "$CALLS" ||
+printf '%s\n' temp-runtime acquire-lock port-preflight ingress-drift | cmp -s - "$CALLS" ||
   fail 'kind up continued after an ingress drift failure'
 
 : >"$CALLS"
@@ -729,6 +1087,17 @@ printf '%s\n' final-fencing | cmp -s - "$CALLS" || fail 'final-fencing dispatch 
 dispatch_kind_e2e suite environment-session
 printf '%s\n' environment-session | cmp -s - "$CALLS" ||
   fail 'environment-session dispatch changed'
+
+: >"$CALLS"
+dispatch_kind_e2e suite cw-runtime
+printf '%s\n' cw-runtime | cmp -s - "$CALLS" || fail 'cw-runtime dispatch changed'
+
+: >"$CALLS"
+run_retained_cw_runtime_suite() { record cw-runtime; return 45; }
+expect_live_failure failed-cw-runtime dispatch_kind_e2e suite cw-runtime
+[ "$live_status" -eq 45 ] || fail 'cw-runtime dispatch lost its failure status'
+printf '%s\n' cw-runtime | cmp -s - "$CALLS" || fail 'cw-runtime failure entered another suite'
+run_retained_cw_runtime_suite() { record cw-runtime; }
 
 : >"$CALLS"
 dispatch_kind_e2e suite sandbox-supply-chain
@@ -914,6 +1283,8 @@ source "$FINAL_FENCING"
 # shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$ENVIRONMENT_SESSION"
 # shellcheck source=/dev/null # Read through kind-e2e.sh above.
+source "$ROOT/scripts/ci/verify/kind/suites/cw-runtime.sh"
+# shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$SANDBOX_SUPPLY_CHAIN"
 # shellcheck source=/dev/null # Read through kind-e2e.sh above.
 source "$RUNTIME_ACCEPTANCE"
@@ -966,7 +1337,7 @@ dashboard_browser_e2e() { record dashboard-browser; }
 assert_sandbox_supply_chain() { record sandbox-supply-chain; }
 rust_reconciler_ttl_e2e() { record ttl; }
 log() { record "log:$*"; }
-run_integrated_kind_suite
+KEEP_KIND_CLUSTER=0 run_integrated_kind_suite
 trap - EXIT
 trap cleanup_fixture EXIT
 cat >"$FIXTURE/want-order" <<'EOF'
@@ -1151,6 +1522,7 @@ for consumed_binary in \
     file-service-smoke prepare-stream-smoke log-stream-smoke temporal-smoke \
     temporal-fencing-smoke reconciler-ttl-smoke cw \
     examples/platform-run-smoke examples/environment-session-smoke \
+    examples/environment-cw-runtime-smoke \
     examples/coordinator-ingress-smoke; do
   printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/consumed-ci/$consumed_binary"
   chmod +x "$FIXTURE/consumed-ci/$consumed_binary"
@@ -1168,13 +1540,15 @@ done
   RUN_DIR="$FIXTURE/consumed-run"
   CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-ci
   log() { :; }
-  rm -f "$FIXTURE/consumed-ci/temporal-fencing-smoke"
-  expect_failure missing-consumed-smoke build_retained_kind_smokes
-  grep -Fq 'consumed Kind smoke binary is missing' \
-    "$FIXTURE/missing-consumed-smoke.out" ||
-    fail 'missing consumed smoke binary was not decisive'
-  printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/consumed-ci/temporal-fencing-smoke"
-  chmod +x "$FIXTURE/consumed-ci/temporal-fencing-smoke"
+  for missing_consumed in temporal-fencing-smoke examples/environment-cw-runtime-smoke; do
+    rm -f "$FIXTURE/consumed-ci/$missing_consumed"
+    expect_failure missing-consumed-smoke build_retained_kind_smokes
+    grep -Fq "consumed Kind smoke binary is missing: $CARGO_CI_DIR/$missing_consumed" \
+      "$FIXTURE/missing-consumed-smoke.out" ||
+      fail "missing consumed smoke binary was not decisive: $missing_consumed"
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/consumed-ci/$missing_consumed"
+    chmod +x "$FIXTURE/consumed-ci/$missing_consumed"
+  done
   rm -f "$FIXTURE/consumed-run/billing-contract-build.jsonl"
   expect_failure missing-consumed-receipt build_retained_kind_smokes
   grep -Fq 'consumed Kind smoke build receipt is missing' \
@@ -1281,6 +1655,32 @@ if grep -Eq 'hostPort: (8090|7233|25432)$' "$FIXTURE/kind-config-rendered.yaml";
   fail 'default Kind host ports survived requested-port rendering'
 fi
 
+# Swapped defaults remain distinct: a sequential substitution would rewrite
+# the first requested value again when rendering the second mapping.
+(
+  KIND_INGRESS_HOST_PORT=7233
+  KIND_TEMPORAL_HOST_PORT=8090
+  render_kind_host_port_mappings "$FIXTURE/kind-config-render.yaml" "$FIXTURE/kind-config-swapped.yaml"
+) || fail 'swapped default Kind host ports were not accepted'
+awk '
+  /containerPort: 80$/ { ingress = 1; next }
+  ingress && /hostPort:/ { if ($2 != 7233) exit 1; ingress = 0; checked++ }
+  /containerPort: 30733$/ { temporal = 1; next }
+  temporal && /hostPort:/ { if ($2 != 8090) exit 1; temporal = 0; checked++ }
+  END { if (checked != 2) exit 1 }
+' "$FIXTURE/kind-config-swapped.yaml" || fail 'swapped Kind ports were rendered more than once'
+
+printf preserved >"$FIXTURE/kind-config-rejected.yaml"
+(
+  KIND_INGRESS_HOST_PORT=7233
+  KIND_TEMPORAL_HOST_PORT=7233
+  if render_kind_host_port_mappings "$FIXTURE/kind-config-render.yaml" "$FIXTURE/kind-config-rejected.yaml"; then
+    exit 1
+  fi
+) || fail 'duplicate Kind ports were accepted'
+[ "$(cat "$FIXTURE/kind-config-rejected.yaml")" = preserved ] ||
+  fail 'rejected Kind rendering changed an existing output'
+
 # The overlay and the credential fixture follow the requested ingress origin
 # (#2395): the default port renders byte-identically, a shifted port replaces
 # every pinned occurrence, and drift, foreign origins or bad ports fail.
@@ -1302,6 +1702,29 @@ source_origins="$(cat "$ROOT/tests/e2e/kind/support.yaml" "$ROOT/tests/e2e/kind/
   grep -Fxq '              value: http://127.0.0.1:18090' "$rendered" &&
     ! grep -Fq '127.0.0.1:8090' "$rendered"
 ) || fail 'shifted ingress origin was not rendered into the credential fixture patch'
+# A conditional caller suppresses errexit inside the renderer. Neither a
+# failed directory check nor a failed copy may admit an existing valid patch.
+for failing_step in mkdir cp; do
+  (
+    RUN_DIR="$FIXTURE/ingress-origin-${failing_step}-failure"
+    mkdir -p "$RUN_DIR"
+    cp "$ROOT/tests/e2e/kind/credential-fixture-patch.yaml" "$RUN_DIR/credential-fixture-patch.yaml"
+    if [ "$failing_step" = mkdir ]; then
+      mkdir() { return 41; }
+      expected_status=41
+    else
+      cp() { return 42; }
+      expected_status=42
+    fi
+    if rendered="$(render_kind_credential_fixture_patch)"; then
+      exit 1
+    else
+      status=$?
+    fi
+    [ "$status" -eq "$expected_status" ] && [ -z "$rendered" ] &&
+      cmp -s "$RUN_DIR/credential-fixture-patch.yaml" "$ROOT/tests/e2e/kind/credential-fixture-patch.yaml"
+  ) || fail "credential renderer admitted a stale patch after ${failing_step} failed"
+done
 printf '%s\n' 'FRONTEND_URL: http://127.0.0.1:8090' 'ISSUER: http://127.0.0.1:8090' \
   '- value: http://127.0.0.1:8090' '- value: http://127.0.0.1:8090' 'decoy: http://127.0.0.1:80901' \
   >"$FIXTURE/overlay-origins.yaml"
@@ -1335,7 +1758,8 @@ grep -Fq 'Kind ingress origin occurrence mismatch in overlay-origins-drift.yaml:
   "$FIXTURE/overlay-origins-drift.err" || fail 'ingress origin count drift was not explained'
 
 # A held requested port fails fast and names the owning cluster; shifted
-# assignments pass, and the cluster being recreated ignores its own holders.
+# assignments pass. Ignoring a selected holder here does not authorize replacing
+# an existing cluster; create_cluster independently refuses that operation.
 docker() {
   [ "${1:-}" = ps ] || fail "unexpected Docker invocation during port preflight: $*"
   printf '%s\n' 'codewire-ux-2099-control-plane 0.0.0.0:8090->80/tcp, 0.0.0.0:10443->443/tcp'
@@ -1358,44 +1782,29 @@ docker() {
   printf '%s\n' 'codewire-e2e-ci-control-plane 0.0.0.0:8090->80/tcp'
 }
 require_kind_host_ports_available codewire-e2e-ci ||
-  fail 'ports held by the cluster being recreated block its replacement'
+  fail 'port observation cannot exclude the selected cluster holder'
 if require_kind_host_ports_available >/dev/null 2>&1; then
   fail 'ports held by an existing cluster were accepted for a new cluster'
 fi
 unset -f docker ss
 
-# Cancelled-run cleanup owns the current transaction and run-ID-suffixed CI
-# clusters, but it must preserve every unrelated local Kind cluster.
+# Startup never replaces an existing cluster, even when its selected name or
+# prefix matches a disposable CI convention.
 : >"$CALLS"
 cat >"$FIXTURE/kind-config.yaml" <<'EOF'
 hostPort: 8090
 EOF
 kind() {
   case "${1:-} ${2:-}" in
-    'get clusters')
-      if grep -q '^kind:delete ' "$CALLS"; then
-        printf '%s\n' agent-sandbox codewire e2e-test
-      else
-        printf '%s\n' codewire-e2e-ci codewire-e2e-ci-873 agent-sandbox codewire e2e-test
-      fi
-      ;;
+    'get clusters') printf '%s\n' codewire-e2e-ci codewire-e2e-ci-873 agent-sandbox codewire e2e-test ;;
     'delete cluster') record "kind:delete ${4:-}" ;;
-    *) fail "unexpected Kind cleanup invocation: $*" ;;
+    *) fail "unexpected Kind startup invocation: $*" ;;
   esac
 }
-docker() {
-  [ "${1:-}" = ps ] || fail "unexpected Docker cleanup invocation: $*"
-}
+docker() { record "docker:$*"; }
 log() { :; }
-reclaim_cancelled_ci_clusters "$FIXTURE/kind-config.yaml"
-cat >"$FIXTURE/want-cancelled-cleanup" <<'EOF'
-kind:delete codewire-e2e-ci
-kind:delete codewire-e2e-ci-873
-EOF
-cmp -s "$FIXTURE/want-cancelled-cleanup" "$CALLS" || {
-  diff -u "$FIXTURE/want-cancelled-cleanup" "$CALLS" >&2 || true
-  fail 'cancelled-run cleanup did not preserve the exact current/prefixed CI ownership boundary'
-}
+expect_failure existing-startup reclaim_cancelled_ci_clusters "$FIXTURE/kind-config.yaml"
+[ ! -s "$CALLS" ] || fail 'startup touched an existing selected or same-prefix cluster'
 
 # Support services are pulled before cluster creation by immutable digest and
 # receive disposable local aliases. A missing upstream digest fails before any
@@ -2051,7 +2460,9 @@ for shard_contract in \
     'suites: edge-contract integrated' \
     'KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}' \
     'scripts/ci/verify/kind-e2e.sh shard "${suites[@]}"' \
-    'kind delete cluster --name "$KIND_CLUSTER_NAME" || true'; do
+    'CLUSTER: codewire-e2e-ci-${{ github.run_id }}-${{ matrix.shard.slug }}' \
+    'CODEWIRE_KIND_PROFILE_ROOT: ${{ runner.temp }}/kind-profiles' \
+    'scripts/ci/verify/kind-e2e.sh down || true'; do
   grep -Fq "$shard_contract" <<<"$edge_kind_block" ||
     fail "Kind shard matrix is missing: $shard_contract"
 done
@@ -2699,6 +3110,8 @@ if grep -Fq 'delete cluster' "$CALLS"; then
   fail 'retained suite tried to delete its cluster'
 fi
 
+python3 -B "$ROOT/scripts/ci/tests/test-kind-cw-runtime.py"
+
 # The native gRPC upstream check reads only its own smoke's requests. The
 # controller-log stub answers like the kubelet: the lines logged at or after
 # --since-time, and every line for any other window. An earlier ordinary HTTP
@@ -2767,6 +3180,40 @@ fi
       'date:-u +%Y-%m-%dT%H:%M:%SZ' "smoke:$KIND_INGRESS_TLS_URL" \
       logs:--since-time=2026-10-05T05:02:05Z) "$CALLS" ||
     fail 'the native gRPC smoke did not start its upstream window after the HTTP requests'
+
+  # A failed window prerequisite must stop before native requests and remove
+  # the temporary certificate even when the caller disables Bash errexit.
+  for failed_prerequisite in sleep date; do
+    : >"$CALLS"
+    failed_certificate_dir="$FIXTURE/grpc-${failed_prerequisite}-certificate"
+    mkdir -p "$failed_certificate_dir"
+    mktemp() { printf '%s\n' "$failed_certificate_dir"; }
+    sleep() {
+      record "sleep:$*"
+      [ "$failed_prerequisite" != sleep ] || return 41
+    }
+    date() {
+      record "date:$*"
+      [ "$failed_prerequisite" != date ] || return 42
+      printf '2026-10-05T05:02:05Z\n'
+    }
+    if environment_session_protocol_smoke 00000000-0000-4000-8000-000000000001 \
+        >"$FIXTURE/grpc-${failed_prerequisite}-failure.out" 2>&1; then
+      fail "the native gRPC smoke accepted a failed ${failed_prerequisite} prerequisite"
+    else
+      prerequisite_status=$?
+    fi
+    expected_status=41
+    [ "$failed_prerequisite" != date ] || expected_status=42
+    [ "$prerequisite_status" -eq "$expected_status" ] ||
+      fail "the native gRPC smoke lost the ${failed_prerequisite} failure status"
+    [ ! -e "$failed_certificate_dir" ] ||
+      fail "the native gRPC smoke retained its certificate after failed ${failed_prerequisite}"
+    if grep -Fxq "smoke:$KIND_INGRESS_TLS_URL" "$CALLS" \
+        || grep -q '^logs:' "$CALLS"; then
+      fail "the native gRPC smoke sent native requests after failed ${failed_prerequisite}"
+    fi
+  done
 )
 
 printf '[test-kind-e2e-suites] dispatcher, order, prerequisites, and cleanup passed\n'

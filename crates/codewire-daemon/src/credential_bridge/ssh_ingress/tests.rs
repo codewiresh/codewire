@@ -50,6 +50,7 @@ fn daemon_config(root: &Path) -> Config {
             ["ssh"],
         )
         .unwrap(),
+        host: None,
         launch_projection: Some(crate::LaunchProjectionConfig {
             selection_sha256: [1; 32],
             native: None,
@@ -274,8 +275,11 @@ async fn occupied_ssh_objects_never_unlink_ssh_or_the_existing_http_owner() {
             let before = std::fs::symlink_metadata(&path).unwrap();
             let http_before = std::fs::symlink_metadata(&http).unwrap();
             let bridge = CredentialBridge::new(Some(config(http.clone(), transport)));
+            let result = bridge.prepare_ingress(true);
             assert!(
-                matches!(bridge.prepare_ingress(true), Err(error) if error.kind() == io::ErrorKind::AlreadyExists)
+                matches!(&result, Err(error) if error.kind() == io::ErrorKind::AlreadyExists),
+                "transport={transport:?}, object={object}: unexpected ingress result: {:?}",
+                result.as_ref().err()
             );
             let after = std::fs::symlink_metadata(&path).unwrap();
             let http_after = std::fs::symlink_metadata(&http).unwrap();

@@ -82,6 +82,15 @@ impl DaemonServiceImpl {
         }
     }
 
+    fn require_guest(&self) -> Result<(), Status> {
+        if self.config.host.is_some() {
+            return Err(Status::permission_denied(
+                "trusted host daemon permits durable-session RPCs only",
+            ));
+        }
+        Ok(())
+    }
+
     /// Accept `SetAppPorts`, publishing each set to `app_ports`.
     pub fn with_app_ports(mut self, app_ports: AppPortsSender) -> Self {
         self.app_ports = Some(app_ports);
@@ -100,6 +109,9 @@ impl DaemonServiceImpl {
         if !bool::from(actual.as_bytes().ct_eq(expected.as_bytes())) {
             return Err(Status::unauthenticated("invalid daemon auth token"));
         }
+        self.config
+            .validate_host()
+            .map_err(|error| Status::failed_precondition(error.to_string()))?;
         Ok(())
     }
 
@@ -140,6 +152,7 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::PoweroffGuestRequest>,
     ) -> Result<Response<v1::PoweroffGuestResponse>, Status> {
         self.authorize(&request)?;
+        self.require_guest()?;
         crate::lifecycle::poweroff_guest(&self.config).await?;
         Ok(Response::new(v1::PoweroffGuestResponse {}))
     }
@@ -149,6 +162,7 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::SetAppPortsRequest>,
     ) -> Result<Response<v1::SetAppPortsResponse>, Status> {
         self.authorize(&request)?;
+        self.require_guest()?;
         let Some(app_ports) = &self.app_ports else {
             return Err(Status::failed_precondition(
                 "this daemon serves no application ports",
@@ -166,6 +180,7 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<Streaming<bridge_v1::CredentialBridgeHostMessage>>,
     ) -> Result<Response<Self::CredentialBridgeStream>, Status> {
         self.authorize(&request)?;
+        self.require_guest()?;
         let connection = self.credential_bridge.connect(request.into_inner()).await?;
         let mut response = Response::new(connection.output);
         if let Some(value) = connection.workspace_authorization {
@@ -243,14 +258,32 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::RestartSessionRequest>,
     ) -> Result<Response<v1::RestartSessionResponse>, Status> {
         self.authorize(&request)?;
-        let session = self
-            .session_engine
-            .restart(&request.into_inner().session_id)
-            .await
-            .map_err(status_from_session_error)?;
+        let request = request.into_inner();
+        let session = match request.expected_launch_generation {
+            Some(generation) => {
+                self.session_engine
+                    .restart_with_generation(&request.session_id, Some(generation))
+                    .await
+            }
+            None => self.session_engine.restart(&request.session_id).await,
+        }
+        .map_err(status_from_session_error)?;
         Ok(Response::new(v1::RestartSessionResponse {
             session: Some(session),
         }))
+    }
+
+    async fn send_session_input(
+        &self,
+        request: Request<v1::SendSessionInputRequest>,
+    ) -> Result<Response<v1::SendSessionInputResponse>, Status> {
+        self.authorize(&request)?;
+        let request = request.into_inner();
+        self.session_engine
+            .send_input(&request.session_id, request.data)
+            .await
+            .map_err(status_from_session_error)?;
+        Ok(Response::new(v1::SendSessionInputResponse {}))
     }
 
     async fn read_session_output(
@@ -310,6 +343,7 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<Streaming<v1::ExecMessage>>,
     ) -> Result<Response<Self::ExecSessionStream>, Status> {
         self.authorize(&request)?;
+        self.require_guest()?;
         let mut stream = request.into_inner();
         let start = match stream
             .message()
@@ -334,6 +368,7 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<Streaming<v1::PtyMessage>>,
     ) -> Result<Response<Self::PtySessionStream>, Status> {
         self.authorize(&request)?;
+        self.require_guest()?;
         let mut stream = request.into_inner();
         let start = match stream
             .message()
@@ -358,6 +393,7 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::ListRequest>,
     ) -> Result<Response<v1::ListResponse>, Status> {
         self.authorize(&request)?;
+        self.require_guest()?;
         let entries = files::list(&self.config, &request.into_inner().path)
             .map_err(status_from_file_error)?;
         Ok(Response::new(v1::ListResponse { entries }))
@@ -368,6 +404,7 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::StatRequest>,
     ) -> Result<Response<v1::StatResponse>, Status> {
         self.authorize(&request)?;
+        self.require_guest()?;
         let request = request.into_inner();
         let entry = files::stat(&self.config, &request.path, request.follow)
             .map_err(status_from_file_error)?;
@@ -379,6 +416,7 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::OpenFileRequest>,
     ) -> Result<Response<v1::OperationStatus>, Status> {
         self.authorize(&request)?;
+        self.require_guest()?;
         let request = request.into_inner();
         files::open_file(
             &self.config,
@@ -395,6 +433,7 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::ReadRequest>,
     ) -> Result<Response<v1::ReadResponse>, Status> {
         self.authorize(&request)?;
+        self.require_guest()?;
         let request = request.into_inner();
         let data = files::read(&self.config, &request.path, request.offset, request.length)
             .map_err(status_from_file_error)?;
@@ -406,6 +445,7 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::WriteRequest>,
     ) -> Result<Response<v1::WriteResponse>, Status> {
         self.authorize(&request)?;
+        self.require_guest()?;
         let request = request.into_inner();
         let bytes_written =
             files::write(&self.config, &request.path, request.offset, &request.data)
@@ -418,6 +458,7 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::MkdirRequest>,
     ) -> Result<Response<v1::OperationStatus>, Status> {
         self.authorize(&request)?;
+        self.require_guest()?;
         let request = request.into_inner();
         files::mkdir(&self.config, &request.path, request.perm).map_err(status_from_file_error)?;
         Ok(Response::new(ok_status()))
@@ -428,6 +469,7 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::RemoveRequest>,
     ) -> Result<Response<v1::OperationStatus>, Status> {
         self.authorize(&request)?;
+        self.require_guest()?;
         let request = request.into_inner();
         let _ = request.dir;
         files::remove(&self.config, &request.path).map_err(status_from_file_error)?;
@@ -439,6 +481,7 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::RenameRequest>,
     ) -> Result<Response<v1::OperationStatus>, Status> {
         self.authorize(&request)?;
+        self.require_guest()?;
         let request = request.into_inner();
         files::rename(&self.config, &request.old_path, &request.new_path)
             .map_err(status_from_file_error)?;
@@ -450,6 +493,7 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::SetStatRequest>,
     ) -> Result<Response<v1::OperationStatus>, Status> {
         self.authorize(&request)?;
+        self.require_guest()?;
         let request = request.into_inner();
         validate_timestamp(request.access_time.as_ref())?;
         validate_timestamp(request.mod_time.as_ref())?;
@@ -462,6 +506,7 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::ReadlinkRequest>,
     ) -> Result<Response<v1::ReadlinkResponse>, Status> {
         self.authorize(&request)?;
+        self.require_guest()?;
         let target = files::readlink(&self.config, &request.into_inner().path)
             .map_err(status_from_file_error)?;
         Ok(Response::new(v1::ReadlinkResponse { target }))
@@ -743,7 +788,12 @@ fn is_attached_session_live(state: i32) -> bool {
 
 impl DaemonServiceImpl {
     fn capabilities(&self, request: v1::GetCapabilitiesRequest) -> v1::GetCapabilitiesResponse {
-        let supported = DAEMON_CAPABILITIES
+        let selected = if self.config.host.is_some() {
+            codewire_daemon_proto::HOST_DAEMON_CAPABILITIES
+        } else {
+            DAEMON_CAPABILITIES
+        };
+        let supported = selected
             .iter()
             .copied()
             .chain(
@@ -753,6 +803,14 @@ impl DaemonServiceImpl {
             )
             .map(str::to_owned)
             .collect::<Vec<_>>();
+        #[cfg(target_os = "linux")]
+        let supported = if crate::platform_managed::Service::available(&self.config) {
+            let mut supported = supported;
+            supported.push(codewire_daemon_proto::platform_managed::CAPABILITY.into());
+            supported
+        } else {
+            supported
+        };
 
         let (state, message) = if request.protocol_version > DAEMON_PROTOCOL_VERSION {
             (
@@ -1323,6 +1381,7 @@ mod tests {
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,
             managed_credential_clients: Default::default(),
+            host: None,
             launch_projection: None,
         };
         (
@@ -1352,6 +1411,7 @@ mod tests {
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,
             managed_credential_clients: Default::default(),
+            host: None,
             launch_projection: None,
         };
         // A daemon that serves no tailnet refuses the push.
@@ -1713,8 +1773,200 @@ mod tests {
         owner.await.unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn host_rpc_policy_advertises_only_session_capabilities_and_rejects_guest_effects() {
+        use std::marker::PhantomData;
+        struct Decoder<T>(PhantomData<T>);
+        impl<T> tonic::codec::Decoder for Decoder<T> {
+            type Item = T;
+            type Error = Status;
+            fn decode(
+                &mut self,
+                _buffer: &mut tonic::codec::DecodeBuf<'_>,
+            ) -> Result<Option<T>, Status> {
+                panic!("host guest-only RPC must reject before reading stream frames")
+            }
+        }
+        fn stream<T: Send + 'static>() -> Streaming<T> {
+            Streaming::new_request(Decoder(PhantomData), axum::body::Body::empty(), None, None)
+        }
+        fn authorized<T>(value: T) -> Request<T> {
+            let mut request = Request::new(value);
+            request
+                .metadata_mut()
+                .insert(DAEMON_AUTH_TOKEN_HEADER, TEST_AUTH_TOKEN.parse().unwrap());
+            request
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            listen_addr: "unused:0".into(),
+            workspace_root: temp.path().join("workspace"),
+            home_root: temp.path().join("home"),
+            auth_token: DaemonAuthToken::new(TEST_AUTH_TOKEN).unwrap(),
+            process_execution: crate::execution::ProcessExecution::Native,
+            credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            launch_projection: None,
+            host: Some(crate::HostConfig {
+                state_root: temp.path().join("state"),
+            }),
+        };
+        let (app_ports, current_ports) =
+            tokio::sync::watch::channel(crate::app_ports::AppPorts::from([8080]));
+        let service = DaemonServiceImpl::new(config).with_app_ports(app_ports);
+        let capabilities = service
+            .get_capabilities(authorized(v1::GetCapabilitiesRequest::default()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            capabilities.capabilities,
+            codewire_daemon_proto::HOST_DAEMON_CAPABILITIES
+        );
+        assert_eq!(
+            service
+                .set_app_ports(authorized(v1::SetAppPortsRequest { ports: vec![3000] }))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            *current_ports.borrow(),
+            crate::app_ports::AppPorts::from([8080])
+        );
+        assert_eq!(
+            service
+                .poweroff_guest(authorized(v1::PoweroffGuestRequest {}))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            service
+                .exec_session(authorized(stream::<v1::ExecMessage>()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            service
+                .pty_session(authorized(stream::<v1::PtyMessage>()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert!(
+            matches!(DaemonService::credential_bridge(&service, authorized(stream::<bridge_v1::CredentialBridgeHostMessage>())).await,
+            Err(error) if error.code() == tonic::Code::PermissionDenied)
+        );
+        assert_eq!(
+            service
+                .list(authorized(v1::ListRequest::default()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            service
+                .stat(authorized(v1::StatRequest::default()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            service
+                .open_file(authorized(v1::OpenFileRequest::default()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            service
+                .read(authorized(v1::ReadRequest::default()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            service
+                .write(authorized(v1::WriteRequest::default()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            service
+                .mkdir(authorized(v1::MkdirRequest::default()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            service
+                .remove(authorized(v1::RemoveRequest::default()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            service
+                .rename(authorized(v1::RenameRequest::default()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            service
+                .set_stat(authorized(v1::SetStatRequest::default()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            service
+                .readlink(authorized(v1::ReadlinkRequest::default()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert!(!temp.path().join("home/.codewire").exists());
+        assert!(
+            service
+                .list_sessions(authorized(v1::ListSessionsRequest {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .sessions
+                .is_empty()
+        );
+        assert!(temp.path().join("state/sessions").exists());
+        service.session_engine.shutdown().await.unwrap();
+    }
+
     async fn spawn_daemon_with_auth(
         auth_token: &str,
+    ) -> (tempfile::TempDir, SocketAddr, oneshot::Sender<()>) {
+        spawn_daemon_placement(auth_token, false).await
+    }
+
+    async fn spawn_daemon_placement(
+        auth_token: &str,
+        host: bool,
     ) -> (tempfile::TempDir, SocketAddr, oneshot::Sender<()>) {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
@@ -1731,6 +1983,9 @@ mod tests {
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,
             managed_credential_clients: Default::default(),
+            host: host.then(|| crate::HostConfig {
+                state_root: temp.path().join("state"),
+            }),
             launch_projection: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();

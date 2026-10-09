@@ -3,6 +3,82 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+
+# This isolated fixture owns the helpers started by its original nested tests.
+# The existing kernel owner supplies Linux subreaper admission and initial ECHILD.
+fixture_owner_marker='codewire.release-tag-fixture-owner/v1'
+fixture_body_argument='--codewire-release-tag-fixture-body-v1'
+if [[ ${CW_RELEASE_TAG_FIXTURE_OWNER+x} || ${CW_RELEASE_TAG_FIXTURE_OWNER_PID+x} ||
+      ${CW_RELEASE_TAG_FIXTURE_OWNER_ARGC+x} ]]; then
+  if [[ ${CW_RELEASE_TAG_FIXTURE_OWNER:-} != "$fixture_owner_marker" ||
+        ${CW_RELEASE_TAG_FIXTURE_OWNER_PID:-} != "$PPID" ||
+        ${CW_RELEASE_TAG_FIXTURE_OWNER_ARGC:-} != "$#" ||
+        ${1:-} != "$fixture_body_argument" ||
+        ${BASH_SOURCE[0]} != "$ROOT/scripts/ci/tests/test-verify-release-tag-ref.sh" ]]; then
+    echo 'release tag fixture owner marker/argv is invalid' >&2
+    exit 1
+  fi
+  shift
+  unset CW_RELEASE_TAG_FIXTURE_OWNER CW_RELEASE_TAG_FIXTURE_OWNER_PID CW_RELEASE_TAG_FIXTURE_OWNER_ARGC
+else
+  if [[ ${1:-} == "$fixture_body_argument" ]]; then
+    echo 'release tag fixture body requires its owning process' >&2
+    exit 1
+  fi
+  exec python3 -I -B - "$ROOT" "$ROOT/scripts/ci/tests/test-verify-release-tag-ref.sh" "$@" <<'PY_OWNER'
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+root = Path(sys.argv[1]).resolve(strict=True)
+script = root / "scripts/ci/tests/test-verify-release-tag-ref.sh"
+if Path(sys.argv[2]).resolve(strict=True) != script:
+    raise SystemExit("release tag fixture script identity is wrong")
+spec = importlib.util.spec_from_file_location(
+    "release_tag_fixture_custody", root / "scripts/ci/verify/build-linux-vmm-kernel.py")
+owner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(owner)
+owner.arm_custody()
+
+environment = dict(os.environ)
+environment.update({"CW_RELEASE_TAG_FIXTURE_OWNER": "codewire.release-tag-fixture-owner/v1",
+                    "CW_RELEASE_TAG_FIXTURE_OWNER_PID": str(os.getpid()),
+                    "CW_RELEASE_TAG_FIXTURE_OWNER_ARGC": str(len(sys.argv[3:]) + 1)})
+body = subprocess.Popen(["/bin/bash", str(script), "--codewire-release-tag-fixture-body-v1",
+                         *sys.argv[3:]], env=environment)
+status = body.wait()  # Preserve the original body's direct-child wait and exit.
+
+# Original traps, nested direct waits and Signer.close have all finished.
+# Reap only this isolated owner's adopted helpers; no cleanup signals are sent.
+deadline = time.monotonic() + 5
+try:
+    while True:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("release tag fixture cleanup did not reach ECHILD")
+        try:
+            reaped, _ = os.waitpid(-1, os.WNOHANG | owner.WALL)
+        except ChildProcessError:
+            break
+        except InterruptedError:
+            continue
+        if not reaped:
+            time.sleep(0.01)
+except (OSError, RuntimeError) as error:
+    print(str(error), file=sys.stderr)
+    raise SystemExit(status if status > 0 else 1)
+
+if status < 0:
+    print(f"release tag fixture body terminated by signal {-status}", file=sys.stderr)
+if status == 0:
+    print("release tag dispatch guard tests: OK", flush=True)
+# Preserve normal exits; a signaled child remains an explicit shell-style refusal.
+raise SystemExit(status if status >= 0 else 128 - status)
+PY_OWNER
+fi
+unset fixture_owner_marker fixture_body_argument
 VERIFY="$ROOT/scripts/ci/release/verify-release-tag-ref.sh"
 COMPUTE_TAGS="$ROOT/scripts/ci/images/compute-image-tags.sh"
 
@@ -263,6 +339,7 @@ installer="$ROOT/apps/cli/install.sh"
 cli_readme="$ROOT/apps/cli/README.md"
 release_public_key="$ROOT/apps/cli/GPG_PUBLIC_KEY.asc"
 package_script="$ROOT/scripts/ci/release/package-cw-release.sh"
+sign_script="$ROOT/scripts/ci/release/sign-cw-release.sh"
 
 grep -Fq '  workflow_dispatch:' "$deploy_workflow"
 grep -Fq '  release-selection:' "$deploy_workflow"
@@ -327,12 +404,18 @@ if grep -Fq "    tags: ['v*']" "$cli_workflow"; then
   echo 'CLI publication still grants release behavior to tag-owned workflow code' >&2
   exit 1
 fi
-grep -Fq 'enable-openid-connect: true' "$cli_workflow"
+grep -Fq '    enable-openid-connect: true' "$cli_workflow"
+if grep -q '^enable-openid-connect:' "$cli_workflow"; then
+  echo 'CLI release exposes Forgejo OIDC to the compilation job' >&2
+  exit 1
+fi
 grep -Fq '  OPENBAO_GITHUB_ROLE: codewire-source-cli-github-mirror' "$cli_workflow"
 grep -Fq '  OPENBAO_GITHUB_AUDIENCE: openbao-codewire-source-cli-github-mirror' "$cli_workflow"
 grep -Fq '  release-selection:' "$cli_workflow"
+grep -Fq '  build-release:' "$cli_workflow"
 grep -Fq '  package-release:' "$cli_workflow"
 grep -Fq '    needs: [release-selection]' "$cli_workflow"
+grep -Fq '    needs: [release-selection, build-release]' "$cli_workflow"
 grep -Fq "[ \"\$GITHUB_REF\" = 'refs/heads/main' ]" "$cli_workflow"
 grep -Fq '          path: .release-source' "$cli_workflow"
 grep -Fq '+refs/heads/main:refs/remotes/origin/main' "$cli_workflow"
@@ -341,6 +424,7 @@ grep -Fq '        working-directory: .release-source' "$cli_workflow"
 grep -Fq '../scripts/ci/release/verify-cw-release-signing-key.sh apps/cli/GPG_PUBLIC_KEY.asc' "$cli_workflow"
 grep -Fq '        run: scripts/ci/setup/assert-ci-runner-image.sh' "$cli_workflow"
 grep -Fq '../scripts/ci/release/package-cw-release.sh "$RELEASE_TAG"' "$cli_workflow"
+grep -Fq '../scripts/ci/release/sign-cw-release.sh dist/cw-release' "$cli_workflow"
 grep -Fq '../scripts/ci/release/publish-cw-release.sh "$RELEASE_TAG" dist/cw-release' "$cli_workflow"
 grep -Fq 'CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}' "$cli_workflow"
 if grep -Fq '.release-control' "$cli_workflow"; then
@@ -348,47 +432,47 @@ if grep -Fq '.release-control' "$cli_workflow"; then
   exit 1
 fi
 grep -Fq '          CW_RELEASE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}' "$cli_workflow"
+build_release="$(sed -n '/^  build-release:/,/^  package-release:/p' "$cli_workflow")"
 package_release="$(sed -n '/^  package-release:/,$p' "$cli_workflow")"
 assert_release_publication_boundary() {
   local workflow="$1"
-  local package_step
-  package_step="$(awk '
-    /^      - name: Package signed release assets$/ { in_step = 1 }
-    in_step && /^      - / && $0 !~ /^      - name: Package signed release assets$/ { exit }
+  local publish_step
+  publish_step="$(awk '
+    /^      - name: Publish signed release assets$/ { in_step = 1 }
+    in_step && /^      - / && $0 !~ /^      - name: Publish signed release assets$/ { exit }
     in_step { print }
   ' "$workflow")"
 
-  grep -Fq '          ../scripts/ci/release/package-cw-release.sh "$RELEASE_TAG"' <<<"$package_step" || return 1
-  grep -Fq '          gpg --verify dist/cw-release/SHA256SUMS.asc dist/cw-release/SHA256SUMS' <<<"$package_step" || return 1
-  grep -Fq '          GITEA_TOKEN: ${{ github.token }}' <<<"$package_step" || return 1
-  grep -Fq '../scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh' <<<"$package_step" || return 1
-  grep -Fq '../scripts/ci/release/mint-github-app-token.sh' <<<"$package_step" || return 1
-  grep -Fq '          export GH_MIRROR_TOKEN_FILE="$github_work/token"' <<<"$package_step" || return 1
-  if grep -Eq 'MIRROR_GITHUB_(APP_ID|INSTALLATION_ID|PRIVATE_KEY).*secrets\.' <<<"$package_step"; then
+  grep -Fq '          gpg --verify dist/cw-release/SHA256SUMS.asc dist/cw-release/SHA256SUMS' <<<"$publish_step" || return 1
+  grep -Fq '          GITEA_TOKEN: ${{ github.token }}' <<<"$publish_step" || return 1
+  grep -Fq '../scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh' <<<"$publish_step" || return 1
+  grep -Fq '../scripts/ci/release/mint-github-app-token.sh' <<<"$publish_step" || return 1
+  grep -Fq '          export GH_MIRROR_TOKEN_FILE="$github_work/token"' <<<"$publish_step" || return 1
+  if grep -Eq 'MIRROR_GITHUB_(APP_ID|INSTALLATION_ID|PRIVATE_KEY).*secrets\.' <<<"$publish_step"; then
     echo 'CLI release still reads the retired Forgejo GitHub App secret tuple' >&2
     return 1
   fi
-  grep -Fq "          CW_REQUIRE_GITHUB_MIRROR: '1'" <<<"$package_step" || return 1
-  grep -Fq '          CW_RELEASE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}' <<<"$package_step" || return 1
-  grep -Fq '          CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}' <<<"$package_step" || return 1
-  grep -Fq '          ../scripts/ci/release/publish-cw-release.sh "$RELEASE_TAG" dist/cw-release' <<<"$package_step" || return 1
-  if grep -Eq "node <<'NODE'|api\.github\.com/app/installations/|mirror_token=|token_json=" <<<"$package_step"; then
+  grep -Fq "          CW_REQUIRE_GITHUB_MIRROR: '1'" <<<"$publish_step" || return 1
+  grep -Fq '          CW_RELEASE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}' <<<"$publish_step" || return 1
+  grep -Fq '          CW_RELEASE_TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}' <<<"$publish_step" || return 1
+  grep -Fq '          ../scripts/ci/release/publish-cw-release.sh "$RELEASE_TAG" dist/cw-release' <<<"$publish_step" || return 1
+  if grep -Eq "node <<'NODE'|api\.github\.com/app/installations/|mirror_token=|token_json=" <<<"$publish_step"; then
     echo 'CLI release workflow still implements GitHub publication instead of invoking the publication script' >&2
     return 1
   fi
   if ! awk '
-    /^      - name: Package signed release assets$/ { in_step = 1 }
-    in_step && /^      - / && $0 !~ /^      - name: Package signed release assets$/ { exit }
+    /^      - name: Publish signed release assets$/ { in_step = 1 }
+    in_step && /^      - / && $0 !~ /^      - name: Publish signed release assets$/ { exit }
     in_step && /\.\.\/scripts\/ci\/release\/publish-cw-release\.sh "\$RELEASE_TAG" dist\/cw-release/ { seen = 1; next }
     seen && /^[[:space:]]*$/ { next }
     seen && /^          / { trailing_command = 1; exit }
     END { exit (seen && !trailing_command) ? 0 : 1 }
   ' "$workflow"; then
-    echo 'CLI release workflow performs work after publication inside the package completion boundary' >&2
+    echo 'CLI release workflow performs work after publication inside the publication boundary' >&2
     return 1
   fi
   if grep -Fq '      - name: Publish release assets' "$workflow"; then
-    echo 'CLI release workflow leaves publication outside the package completion boundary' >&2
+    echo 'CLI release workflow leaves publication outside the publication boundary' >&2
     return 1
   fi
   return 0
@@ -409,11 +493,13 @@ if assert_release_publication_boundary "$trailing_publication_workflow" >/dev/nu
   exit 1
 fi
 
+# Signing material reaches only key verification and signing, after a
+# successful credential-free build; compilation never receives it.
 signing_preflight_line="$(grep -n 'name: Verify release signing key' <<<"$package_release" | cut -d: -f1)"
-toolchain_line="$(grep -n 'name: Verify sealed Rust toolchain and release targets' <<<"$package_release" | head -1 | cut -d: -f1)"
-[[ -n "$signing_preflight_line" && -n "$toolchain_line" &&
-  "$signing_preflight_line" -lt "$toolchain_line" ]] || {
-  echo 'CLI signing preflight must run before cross-target toolchain setup' >&2
+signing_line="$(grep -n 'name: Sign release delivery' <<<"$package_release" | cut -d: -f1)"
+[[ -n "$signing_preflight_line" && -n "$signing_line" &&
+  "$signing_preflight_line" -lt "$signing_line" ]] || {
+  echo 'CLI signing preflight must run before release signing' >&2
   exit 1
 }
 for name in \
@@ -421,14 +507,28 @@ for name in \
   CW_RELEASE_GPG_PASSPHRASE \
   CW_RELEASE_GPG_KEY_ID; do
   [ "$(grep -Fc "          ${name}: \${{ secrets.${name} }}" <<<"$package_release")" -eq 2 ] || {
-    printf 'CLI workflow does not pass %s to both preflight and packaging\n' "$name" >&2
+    printf 'CLI workflow does not pass %s to both preflight and signing\n' "$name" >&2
     exit 1
   }
+  if grep -Fq "secrets.${name}" <<<"$build_release"; then
+    printf 'CLI compilation receives %s\n' "$name" >&2
+    exit 1
+  fi
 done
 
 "$signing_key_test"
 "$installer_signature_test"
 "$publish_release_test"
+python3 -B "$ROOT/scripts/ci/tests/test-cli-release-workflow.py"
+python3 -B "$ROOT/scripts/ci/tests/test-cw-release-delivery.py" >/dev/null 2>&1 || {
+  echo 'cw release delivery tests failed' >&2
+  exit 1
+}
+python3 -B "$ROOT/scripts/ci/tests/test-cw-release-r2.py" >/dev/null 2>&1 || {
+  echo 'cw release R2 publisher tests failed' >&2
+  exit 1
+}
+"$ROOT/scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh"
 
 installer_fingerprint="$(
   sed -n 's/^GPG_KEY_ID="\([0-9A-F]*\)"$/\1/p' "$installer"
@@ -449,9 +549,14 @@ grep -Fq 'GNUPGHOME="$release_gnupg_home"' "$installer"
 grep -Fq '[ "$valid_signature_count" -eq 1 ] && [ "$valid_signature_id" = "$GPG_KEY_ID" ]' "$installer"
 grep -Fq 'main/apps/cli/GPG_PUBLIC_KEY.asc' "$installer"
 grep -Fq 'gpg --import apps/cli/GPG_PUBLIC_KEY.asc' "$cli_readme"
-grep -Fq -- '--passphrase-fd 0' "$package_script"
-if grep -Fq -- '--passphrase "$CW_RELEASE_GPG_PASSPHRASE"' "$package_script"; then
-  echo 'release packager still exposes the passphrase through process arguments' >&2
+grep -Fq -- '--passphrase-fd 0' "$sign_script"
+if grep -Fq -- '--passphrase "$CW_RELEASE_GPG_PASSPHRASE"' "$sign_script"; then
+  echo 'release signer exposes the passphrase through process arguments' >&2
+  exit 1
+fi
+if grep -Fq 'CW_RELEASE_GPG' "$package_script" &&
+  ! grep -Fq 'must not reach release compilation' "$package_script"; then
+  echo 'release packager handles signing material' >&2
   exit 1
 fi
 
@@ -472,7 +577,7 @@ if grep -Fq 'date +%s' "$image_builder"; then
 fi
 grep -Fq 'source_dir="${CODEWIRE_SOURCE_DIR:-.}"' "$image_builder"
 grep -Fq '    DOCKER_CONFIG="$docker_config"' "$image_builder"
-grep -Fq '      docker buildx build --builder "$buildx_builder" --push' \
+grep -Fq '    image_command=(docker buildx build --builder "$buildx_builder" --push' \
   "$image_builder"
 grep -Fq -- '--provenance="$provenance"' "$image_builder"
 grep -Fq -- '--metadata-file "$build_metadata"' "$image_builder"
@@ -492,5 +597,3 @@ if [[ -e "$ROOT/keys/production-release.asc" ]]; then
   echo 'release tags are trusted through Forgejo; no pinned production key file may remain' >&2
   exit 1
 fi
-
-printf 'release tag dispatch guard tests: OK\n'

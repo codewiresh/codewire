@@ -6,7 +6,6 @@
 !crates
 !proto
 !proto/**
-!libs
 !libs/daemon-proto
 !libs/daemon-proto/**
 !deployments

@@ -18,6 +18,11 @@ path = "src/main.rs"
 codewire-cli = { path = "../codewire-cli" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+codewire-derp = { workspace = true }
+codewire-mesh = { path = "../codewire-mesh" }
+tracing-subscriber = { workspace = true }
+
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 axum = { workspace = true }
 codewire-client = { workspace = true }
@@ -33,6 +38,7 @@ connectrpc = { workspace = true, features = ["client"] }
 futures = { workspace = true }
 libc = "0.2"
 rand = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true }

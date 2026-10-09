@@ -14,6 +14,7 @@ COPY libs/daemon-proto ./libs/daemon-proto
 # The dashboard embeds its design assets and the CLI installer.
 COPY packages/codewire-design ./packages/codewire-design
 COPY apps/cli/install.sh ./apps/cli/install.sh
+COPY apps/cli/GPG_PUBLIC_KEY.asc ./apps/cli/GPG_PUBLIC_KEY.asc
 ARG KIND_DEV_CRATE
 ARG KIND_DEV_FEATURES=
 ARG KIND_DEV_BIN=

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -358,6 +358,10 @@ pub(crate) fn prepare_test_repository_bundle(staging: &std::path::Path) -> io::R
                 "commit.gpgsign=false",
                 "-c",
                 "core.hooksPath=/dev/null",
+                "-c",
+                "maintenance.autoDetach=false",
+                "-c",
+                "gc.autoDetach=false",
             ]);
         command
     };
@@ -1407,12 +1411,24 @@ async fn existing_authority_admission_fails_closed_for_a_dead_socket_without_spa
     let listener = std::os::unix::net::UnixListener::bind(config.socket()).unwrap();
     fs::set_permissions(config.socket(), fs::Permissions::from_mode(0o600)).unwrap();
     drop(listener);
+    let before = fs::symlink_metadata(config.socket()).unwrap();
     let error = LocalCredentialClient::admit_existing_or_replace_with(&config, |_| {
         panic!("an unadmitted authority socket must not spawn")
     })
     .await
     .unwrap_err();
     assert!(matches!(error, AuthorityRuntimeError::Connect));
+    let error = LocalCredentialClient::connect_or_start_with(&config, |_| {
+        panic!("a present dead socket must not grant replacement permission")
+    })
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AuthorityRuntimeError::Connect));
+    let after = fs::symlink_metadata(config.socket()).unwrap();
+    assert_eq!(
+        (before.dev(), before.ino(), before.mode()),
+        (after.dev(), after.ino(), after.mode())
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1429,6 +1445,284 @@ async fn existing_authority_admission_rejects_an_invalid_socket_without_spawning
     .await
     .unwrap_err();
     assert!(matches!(error, AuthorityRuntimeError::InvalidPrivateSocket));
+    let error = LocalCredentialClient::connect_or_start_with(&config, |_| {
+        panic!("a present invalid endpoint must not grant replacement permission")
+    })
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AuthorityRuntimeError::InvalidPrivateSocket));
+    assert_eq!(fs::read(config.socket()).unwrap(), b"not a socket");
+}
+
+const COMPATIBILITY_FIXTURE_ROOT: &str = "CW_AUTHORITY_COMPATIBILITY_FIXTURE_ROOT";
+const COMPATIBILITY_FIXTURE_MODE: &str = "CW_AUTHORITY_COMPATIBILITY_FIXTURE_MODE";
+const COMPATIBILITY_INFO_ROUTE: &str =
+    "/codewire.local.credentials.v1.LocalCredentialAuthorityService/GetAuthorityInfo";
+const COMPATIBILITY_SHUTDOWN_ROUTE: &str =
+    "/codewire.local.credentials.v1.LocalCredentialAuthorityService/ShutdownAuthority";
+
+/// This service has no protected store or provider operations. It deliberately
+/// speaks an older protocol, or refuses info, while observing all received RPCs.
+#[derive(Clone)]
+struct CompatibilityAuthorityService {
+    unavailable: bool,
+    requests: Arc<Mutex<Vec<String>>>,
+    request_log: std::path::PathBuf,
+    shutdown: tokio::sync::watch::Sender<bool>,
+}
+
+impl tonic::server::NamedService for CompatibilityAuthorityService {
+    const NAME: &'static str = v1::local_credential_authority_service_server::SERVICE_NAME;
+}
+
+impl tonic::server::UnaryService<v1::GetAuthorityInfoRequest> for CompatibilityAuthorityService {
+    type Response = v1::AuthorityInfo;
+    type Future = tonic::codegen::BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
+
+    fn call(&mut self, _: tonic::Request<v1::GetAuthorityInfoRequest>) -> Self::Future {
+        let unavailable = self.unavailable;
+        Box::pin(async move {
+            if unavailable {
+                Err(tonic::Status::unavailable("synthetic info unavailable"))
+            } else {
+                Ok(tonic::Response::new(v1::AuthorityInfo {
+                    protocol_version: AUTHORITY_PROTOCOL_VERSION - 1,
+                    protected_store_persistence: v1::ProtectedStorePersistence::ProcessLifetime
+                        as i32,
+                }))
+            }
+        })
+    }
+}
+
+impl tonic::server::UnaryService<v1::ShutdownAuthorityRequest> for CompatibilityAuthorityService {
+    type Response = v1::ShutdownAuthorityResponse;
+    type Future = tonic::codegen::BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
+
+    fn call(&mut self, _: tonic::Request<v1::ShutdownAuthorityRequest>) -> Self::Future {
+        // A regression requesting shutdown really stops this fixture, making
+        // endpoint/process retention assertions fail in addition to the log.
+        self.shutdown.send_replace(true);
+        Box::pin(async { Ok(tonic::Response::new(v1::ShutdownAuthorityResponse {})) })
+    }
+}
+
+impl tower::Service<http::Request<tonic::body::Body>> for CompatibilityAuthorityService {
+    type Response = http::Response<tonic::body::Body>;
+    type Error = std::convert::Infallible;
+    type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+        let route = request.uri().path().to_owned();
+        let mut requests = self.requests.lock().expect("synthetic request log lock");
+        assert!(requests.len() < 8, "unexpected synthetic RPC replay");
+        requests.push(route.clone());
+        fs::write(&self.request_log, requests.join("\n")).expect("write synthetic request log");
+        drop(requests);
+        let method = self.clone();
+        Box::pin(async move {
+            let response = match route.as_str() {
+                COMPATIBILITY_INFO_ROUTE => {
+                    tonic::server::Grpc::new(tonic_prost::ProstCodec::<
+                        v1::AuthorityInfo,
+                        v1::GetAuthorityInfoRequest,
+                    >::default())
+                    .unary(method, request)
+                    .await
+                }
+                COMPATIBILITY_SHUTDOWN_ROUTE => {
+                    tonic::server::Grpc::new(tonic_prost::ProstCodec::<
+                        v1::ShutdownAuthorityResponse,
+                        v1::ShutdownAuthorityRequest,
+                    >::default())
+                    .unary(method, request)
+                    .await
+                }
+                _ => {
+                    let mut response = http::Response::new(tonic::body::Body::default());
+                    response.headers_mut().insert(
+                        tonic::Status::GRPC_STATUS,
+                        (tonic::Code::Unimplemented as i32).into(),
+                    );
+                    response.headers_mut().insert(
+                        http::header::CONTENT_TYPE,
+                        tonic::metadata::GRPC_CONTENT_TYPE,
+                    );
+                    response
+                }
+            };
+            Ok(response)
+        })
+    }
+}
+
+/// Selected only in an owned child. Ordinary execution does not bind a socket.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatibility_authority_process_fixture() {
+    let Some(root) = std::env::var_os(COMPATIBILITY_FIXTURE_ROOT) else {
+        return;
+    };
+    let mode = std::env::var(COMPATIBILITY_FIXTURE_MODE).expect("synthetic fixture mode");
+    assert!(matches!(
+        mode.as_str(),
+        "protocol-mismatch" | "info-unavailable"
+    ));
+    let config = AuthorityRuntimeConfig {
+        root: root.into(),
+        executable: fs::canonicalize(std::env::current_exe().unwrap()).unwrap(),
+    };
+    let (incoming, identity) = bind_owner_only(&config).unwrap();
+    let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let service = CompatibilityAuthorityService {
+        unavailable: mode == "info-unavailable",
+        requests: Arc::new(Mutex::new(Vec::new())),
+        request_log: config.root.join("synthetic-requests"),
+        shutdown,
+    };
+    fs::write(config.root.join("synthetic-ready"), b"ready").unwrap();
+    tonic::transport::Server::builder()
+        .add_service(service)
+        .serve_with_incoming_shutdown(incoming, async move {
+            while !*shutdown_rx.borrow_and_update() {
+                if shutdown_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+    remove_bound_socket(&config, &identity).unwrap();
+}
+
+struct CompatibilityAuthorityProcess {
+    config: AuthorityRuntimeConfig,
+    child: Child,
+    temp: Option<tempfile::TempDir>,
+}
+
+impl Drop for CompatibilityAuthorityProcess {
+    fn drop(&mut self) {
+        let clean = match self.child.try_wait() {
+            Ok(Some(_)) => true,
+            Ok(None) => self.child.kill().is_ok() && self.child.wait().is_ok(),
+            Err(_) => false,
+        };
+        if !clean && let Some(temp) = self.temp.take() {
+            eprintln!(
+                "retained unknown synthetic authority cleanup: {}",
+                temp.keep().display()
+            );
+        }
+    }
+}
+
+impl CompatibilityAuthorityProcess {
+    async fn start(mode: &str) -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let config = runtime_config(&temp);
+        let child = Command::new(&config.executable)
+            .args([
+                "rpc_tests::compatibility_authority_process_fixture",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_clear()
+            .env(COMPATIBILITY_FIXTURE_ROOT, &config.root)
+            .env(COMPATIBILITY_FIXTURE_MODE, mode)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn metadata-only synthetic authority");
+        let mut fixture = Self {
+            config,
+            child,
+            temp: Some(temp),
+        };
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !fixture.config.root.join("synthetic-ready").exists() {
+                assert!(
+                    fixture.child.try_wait().unwrap().is_none(),
+                    "synthetic authority exited before readiness"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("synthetic authority readiness timeout");
+        fixture
+    }
+}
+
+async fn assert_present_authority_refusal_retains_process(mode: &str) {
+    let mut fixture = CompatibilityAuthorityProcess::start(mode).await;
+    let config = fixture.config.clone();
+    let pid = fixture.child.id();
+    let before = fs::symlink_metadata(config.socket()).unwrap();
+    let spawns = AtomicUsize::new(0);
+    for (request_count, admission_only) in [(1, true), (2, false)] {
+        let spawn = |_: &AuthorityRuntimeConfig| {
+            spawns.fetch_add(1, Ordering::SeqCst);
+            Err(AuthorityRuntimeError::Spawn)
+        };
+        let error = tokio::time::timeout(Duration::from_secs(3), async {
+            if admission_only {
+                LocalCredentialClient::admit_existing_or_replace_with(&config, spawn)
+                    .await
+                    .map(|_| ())
+            } else {
+                LocalCredentialClient::connect_or_start_with(&config, spawn)
+                    .await
+                    .map(|_| ())
+            }
+        })
+        .await
+        .expect("present authority admission timeout")
+        .unwrap_err();
+        if mode == "protocol-mismatch" {
+            assert!(
+                matches!(error, AuthorityRuntimeError::ProtocolMismatch),
+                "{error:?}"
+            );
+        } else {
+            assert!(matches!(error, AuthorityRuntimeError::Connect), "{error:?}");
+        }
+        assert_eq!(spawns.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.child.id(), pid);
+        assert!(
+            fixture.child.try_wait().unwrap().is_none(),
+            "existing authority process was stopped"
+        );
+        let after = fs::symlink_metadata(config.socket()).unwrap();
+        assert_eq!(
+            (before.dev(), before.ino(), before.uid(), before.mode()),
+            (after.dev(), after.ino(), after.uid(), after.mode())
+        );
+        let requests = fs::read_to_string(config.root.join("synthetic-requests")).unwrap();
+        assert_eq!(
+            requests.lines().collect::<Vec<_>>(),
+            vec![COMPATIBILITY_INFO_ROUTE; request_count],
+            "shutdown, replay or unrelated RPC was invoked"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incompatible_authority_is_retained_without_shutdown_or_spawn() {
+    assert_present_authority_refusal_retains_process("protocol-mismatch").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ambiguous_live_authority_is_retained_without_shutdown_or_spawn() {
+    assert_present_authority_refusal_retains_process("info-unavailable").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

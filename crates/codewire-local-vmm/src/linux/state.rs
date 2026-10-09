@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use rustix::fs::{FlockOperation, flock};
 use uuid::Uuid;
 
+use crate::cw_runtime::AdmittedCwRuntimeDisk;
 use codewire_vmm_guest_probe::MAX_DIRECT_SHARES;
 
 use super::path::{FileIdentity, PathError, PrivateRoot, SocketIdentity};
@@ -245,6 +246,8 @@ pub struct PersistedVmState {
     pub root_generation: Option<String>,
     #[serde(default)]
     pub root_disk: Option<StateDiskIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cw_runtime_disk: Option<AdmittedCwRuntimeDisk>,
     pub api_socket: Option<SocketIdentity>,
     pub vsock_socket: Option<SocketIdentity>,
 }
@@ -312,6 +315,10 @@ impl PersistedVmState {
                 .as_ref()
                 .is_some_and(|disk| disk.filesystem_uuid.is_nil())
             || !valid_root
+            || self
+                .cw_runtime_disk
+                .as_ref()
+                .is_some_and(|disk| disk.validate_metadata().is_err())
             || !valid_phase
         {
             return Err(StateError::InvalidPersistedState);
@@ -879,6 +886,7 @@ mod tests {
             docker_disk: None,
             root_generation: None,
             root_disk: None,
+            cw_runtime_disk: None,
             api_socket: None,
             vsock_socket: None,
         }
@@ -988,6 +996,17 @@ mod tests {
         let names = serde_json::to_string(&persisted(VmPhase::Starting)).unwrap();
         assert!(!names.to_ascii_lowercase().contains("token"));
         assert!(!names.to_ascii_lowercase().contains("credential"));
+    }
+
+    #[test]
+    fn legacy_persisted_state_defaults_to_no_cw_runtime_attachment() {
+        let original = persisted(VmPhase::Starting);
+        let json = serde_json::to_value(&original).unwrap();
+        assert!(json.get("cw_runtime_disk").is_none());
+        let restored: PersistedVmState = serde_json::from_value(json).unwrap();
+        restored.validate().unwrap();
+        assert_eq!(restored, original);
+        assert!(restored.cw_runtime_disk.is_none());
     }
 
     #[test]

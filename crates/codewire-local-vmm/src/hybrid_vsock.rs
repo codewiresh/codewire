@@ -48,6 +48,27 @@ pub async fn connect_hybrid_vsock(
     connect_admitted(socket, &identity, guest_port).await
 }
 
+/// Fixed live-runtime port; no caller-selected guest routing or fallback. The
+/// connected peer is birth-pinned before sending even the CONNECT handshake.
+pub(crate) async fn connect_runtime_publisher(
+    socket: &Path,
+    identity: &SocketIdentity,
+    expected_vmm: &crate::linux::ProcessIdentity,
+) -> Result<(UnixStream, std::os::fd::OwnedFd), HybridVsockError> {
+    let port = codewire_vmm_guest_probe::cw_runtime_live::LIVE_RUNTIME_VSOCK_PORT;
+    validate_target(socket, port)?;
+    identity.revalidate(socket)?;
+    let stream = connect_stream(UnixStream::connect(socket), CONNECT_TIMEOUT).await?;
+    let peer = crate::linux::supervisor_peer::admit_known_process_stream(&stream, expected_vmm)
+        .map_err(|_| HybridVsockError::InvalidAcknowledgement)?;
+    identity.revalidate(socket)?;
+    let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, complete_handshake(stream, port))
+        .await
+        .map_err(|_| HybridVsockError::HandshakeTimeout)??;
+    identity.revalidate(socket)?;
+    Ok((stream, peer))
+}
+
 async fn connect_admitted(
     socket: &Path,
     identity: &SocketIdentity,
@@ -308,6 +329,7 @@ mod tests {
                     process_execution: codewire_daemon::execution::ProcessExecution::Native,
                     credential_bridge: None,
                     managed_credential_clients: Default::default(),
+                    host: None,
                     launch_projection: None,
                 },
                 tokio_stream::wrappers::ReceiverStream::new(incoming_rx),
@@ -395,6 +417,7 @@ mod tests {
                     process_execution: codewire_daemon::execution::ProcessExecution::Native,
                     credential_bridge: None,
                     managed_credential_clients: Default::default(),
+                    host: None,
                     launch_projection: None,
                 },
                 tokio_stream::once(Ok::<_, io::Error>(stream)),

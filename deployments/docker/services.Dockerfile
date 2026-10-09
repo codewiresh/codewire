@@ -161,7 +161,7 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
     if [ "$CODEWIRE_ORCHESTRATION_FEATURES" = kind-e2e ]; then \
       test "$CODEWIRE_RUST_PROFILE" = ci && \
       codewire-rust-build cargo test --locked --profile ci \
-        -p codewire-credential-service --features enrollment --lib --no-run \
+        -p codewire-credential-service --features enrollment,kind-e2e --lib --no-run \
         --message-format=json > /tmp/credential-fixture-artifacts.jsonl && \
       credential_fixture="$(sed -n '/"reason":"compiler-artifact"/{/"test":true/{s@.*"executable":"\(/src/target/ci/deps/codewire_credential_service-[0-9a-f][0-9a-f]*\)".*@\1@p;}}' /tmp/credential-fixture-artifacts.jsonl)" && \
       test -n "$credential_fixture" && test -x "$credential_fixture" && \

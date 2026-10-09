@@ -331,6 +331,7 @@ impl DaemonHarness {
             auth_token: DaemonAuthToken::new(TEST_DAEMON_TOKEN).unwrap(),
             process_execution: ProcessExecution::Native,
             credential_bridge: None,
+            host: None,
             launch_projection: None,
             managed_credential_clients: Default::default(),
         };
@@ -376,6 +377,7 @@ impl DaemonHarness {
             auth_token: DaemonAuthToken::new(TEST_DAEMON_TOKEN).unwrap(),
             process_execution: ProcessExecution::Native,
             credential_bridge: None,
+            host: None,
             launch_projection: None,
             managed_credential_clients: Default::default(),
         };

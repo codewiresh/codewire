@@ -15,7 +15,7 @@ const BEFORE_CODE: &[&str] = &[
 ];
 const WARNING: &str = "Continue only if you started this login in Codex. If a website or another person gave you this code, cancel.";
 
-/// Incremental parser for the reviewed official 0.149.0/0.153.4 device stdout.
+/// Incremental parser for the reviewed official 0.149.0/0.153.4/0.157.0 device stdout.
 /// Unknown escapes, control characters, URLs, duplicate prompts and overflow
 /// fail closed. No raw output is retained in a returned error or display value.
 pub(super) struct ChallengeParser {
@@ -85,10 +85,14 @@ impl ChallengeParser {
         let line =
             std::str::from_utf8(&self.line).map_err(|_| CodexEnrollmentError::InvalidOutput)?;
         let challenge = if self.phase < BEFORE_CODE.len() {
-            // The reviewed rust-v0.153.4 login/device_code_auth.rs is identical
-            // to rust-v0.149.0 except for the rendered package version. Keep
-            // exact version admission; unknown future prompts remain denied.
-            let additional_version = self.phase == 0 && line == "Welcome to Codex [v0.153.4]";
+            // The reviewed rust-v0.153.4 and rust-v0.157.0 login/device_code_auth.rs
+            // prompts match rust-v0.149.0 except for the rendered package version.
+            // Keep exact version admission; unknown future prompts remain denied.
+            let additional_version = self.phase == 0
+                && matches!(
+                    line,
+                    "Welcome to Codex [v0.153.4]" | "Welcome to Codex [v0.157.0]"
+                );
             if line != BEFORE_CODE[self.phase] && !additional_version {
                 if self.phase == 0 && line.starts_with("Welcome to Codex [v") {
                     return Err(CodexEnrollmentError::UnsupportedVersion);

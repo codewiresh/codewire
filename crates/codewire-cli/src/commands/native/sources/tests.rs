@@ -641,7 +641,10 @@ async fn resolve_platform_metadata(credentials: Vec<codewire_client::Credential>
         ..Default::default()
     };
     let resolved = resolve_requested_sources(
-        &Globals { server: None },
+        &Globals {
+            server: None,
+            member: None,
+        },
         &paths,
         &env,
         None,
@@ -692,11 +695,19 @@ async fn platform_api_keys_fail_before_identity_or_source_requests_without_ambie
             "cw_synthetic_cannot_impersonate_user".to_owned(),
         ),
     ]);
-    let error = platform_metadata(&Globals { server: None }, &paths, &env, true)
-        .await
-        .err()
-        .unwrap()
-        .to_string();
+    let error = platform_metadata(
+        &Globals {
+            server: None,
+            member: None,
+        },
+        &paths,
+        &env,
+        true,
+    )
+    .await
+    .err()
+    .unwrap()
+    .to_string();
     assert!(error.contains("cw login"));
     assert!(!error.contains("cw_synthetic"));
     assert!(server.received_requests().await.unwrap().is_empty());
@@ -723,7 +734,10 @@ async fn local_only_empty_resolution_never_reads_platform_configuration_or_authe
         ..Default::default()
     };
     let resolved = resolve_requested_sources(
-        &Globals { server: None },
+        &Globals {
+            server: None,
+            member: None,
+        },
         &paths,
         &NoEnvReads,
         None,

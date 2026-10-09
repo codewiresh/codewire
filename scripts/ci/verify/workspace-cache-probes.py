@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Value-blind preparation and assertions for explicitly requested cache probes."""
 import hashlib
+from contextlib import closing, ExitStack
 import importlib.util
 import json
 import os
@@ -13,6 +14,8 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
+from types import SimpleNamespace
 
 PHASES = ("native-cold", "native-warm", "native-malformed", "native-missing-blob",
           "native-denied", "cw-control", "cw-edit", "tools", "cancel")
@@ -32,6 +35,190 @@ def module(name, path):
 
 measurement = module("workspace_probe_measurement", Path(__file__).with_name("workspace-cache-report.py"))
 artifact = module("workspace_probe_artifact", Path(__file__).with_name("workspace-image-artifact.py"))
+
+MAX_CHECKPOINT = 32 * 1024 * 1024
+CHECKPOINT_SCHEMA = "codewire.cw.probe-producer-checkpoint/v1"
+HISTORICAL_CLAIM = "retained original producer probe; no fresh source or installation proof"
+CHECKPOINT_FIELDS = {"schema", "claim", "phase", "identity", "source", "pointer", "producer_root",
+                     "producer_root_metadata", "files", "capsule_files", "history", "version_command"}
+
+
+def producer_checkpoint(root, report, phase, docker):
+    """Retain an observed derivative before its intentional source restoration.
+
+    This is a historical probe boundary. It is never a fresh current-source
+    admission, an installation receipt, or permission to replay a solve.
+    """
+    root, report = Path(root), Path(report)
+    if root != measurement.ROOT or phase not in ("cw-control", "cw-edit", "tools"):
+        raise ValueError("producer checkpoint source or phase refused")
+    directory = report / phase
+    original = read(report / "identity.json")
+    owner = read(directory / "owner.json")
+    header = {**original, "builder_name": owner["builder"]}
+    with measurement.ProducerEvidence(directory, header, compiler_mode="r2") as evidence:
+        measurement.capture_producer_history(docker, owner["builder"], directory, evidence)
+        history = measurement.producer_history(directory, evidence, cached=phase != "cw-edit")
+        measurement.producer_logs(evidence, "r2")
+        retained = evidence.retained
+        if phase != "tools":
+            executable = retained.files["asset/cw"]
+            operation = [str(executable.path), "--version"]
+            controller = evidence.consumer.owner
+            controller.arm_custody()
+            for number in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(number, controller.on_signal)
+            result = controller.run_owned(operation, directory,
+                {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "TZ": "UTC"},
+                directory / "version.txt", time.monotonic() + 30)
+            (directory / "cw.sha256").write_text(executable.sha256 + "\n")
+        else:
+            result = None
+        evidence.revalidate()
+        value = {"schema": CHECKPOINT_SCHEMA, "claim": HISTORICAL_CLAIM,
+                 "phase": phase, "identity": evidence.identity, "source": retained.model["source"],
+                 "pointer": evidence.pointer.evidence(), "producer_root": str(retained.path),
+                 "producer_root_metadata": list(evidence.consumer.asset.stamp(
+                     os.fstat(retained.parent.fd), evidence.consumer.asset.DIR_FIELDS)),
+                 "files": {name: held.evidence() for name, held in retained.files.items()},
+                 "capsule_files": {name: held.evidence() for name, held in retained.capsule.files.items()},
+                 "history": history, "version_command": result}
+        raw = evidence.consumer.release.canonical(value)
+        if len(raw) > MAX_CHECKPOINT:
+            raise ValueError("producer checkpoint exceeds its bound")
+        with closing(evidence.consumer.asset.Parent(directory)) as parent:
+            evidence.consumer.asset.write_new(parent.fd, "cw-producer-checkpoint.json", raw, 0o400)
+        evidence.revalidate()
+
+
+class HistoricalProducer:
+    """Static custody of a previously admitted probe, after source restoration."""
+
+    def __init__(self, report, phase):
+        self.custody = ExitStack()
+        self.files = []
+        try:
+            directory = Path(report) / phase
+            consumer = measurement.consumer_library()
+            producer, asset, release = consumer.producer, consumer.asset, consumer.release
+            checkpoint = self.custody.enter_context(closing(asset.HeldFile(
+                directory / "cw-producer-checkpoint.json", MAX_CHECKPOINT)))
+            value = release.parse_canonical(checkpoint.data, MAX_CHECKPOINT)
+            if set(value) != CHECKPOINT_FIELDS or value.get("schema") != CHECKPOINT_SCHEMA \
+                    or value.get("phase") != phase or value.get("claim") != HISTORICAL_CLAIM:
+                raise ValueError("historical producer checkpoint identity differs")
+            self.files.append(checkpoint)
+            work = asset.path_arg(str(directory / "cw-image-work"))
+            producer_root = asset.path_arg(value["producer_root"])
+            if not producer_root.is_relative_to(work) or producer_root == work:
+                raise ValueError("historical producer escaped its exact phase")
+            self.parent = self.custody.enter_context(closing(asset.Parent(producer_root)))
+            self.parent_stamp = value["producer_root_metadata"]
+            self.asset, self.producer, self.producer_root = asset, producer, producer_root
+
+            def hold(binding, expected=None, maximum=producer.source.MAX_FILE):
+                path = asset.path_arg(binding["path"])
+                if expected is not None and path != expected or expected is None and not path.is_relative_to(producer_root):
+                    raise ValueError("historical producer file escaped its fixed closure")
+                held = self.custody.enter_context(closing(producer.source.HeldSourceFile(path, maximum)))
+                if release.canonical(held.evidence()) != release.canonical(binding):
+                    raise ValueError("historical producer bytes or metadata changed")
+                self.files.append(held)
+                return held
+
+            pointer = hold(value["pointer"], work / "cw-producer-result.json", release.MAX_JSON)
+            pointer_model = release.parse_canonical(pointer.data)
+            paths = {"receipt": producer_root / "build.json", "metadata": producer_root / "metadata.json",
+                     "build_log": producer_root / "build.log"}
+            paths.update({"asset/" + name: producer_root / "assets" / name for name in producer.finalizer.FILES})
+            if set(value["files"]) != set(paths):
+                raise ValueError("historical producer closure differs")
+            retained = {name: hold(binding, paths[name], maximum=(producer.finalizer.export_bound(name[6:])
+                        if name.startswith("asset/") else 256 * 1024 * 1024 if name == "build_log"
+                        else 1024 * 1024 if name == "metadata" else release.MAX_JSON))
+                        for name, binding in value["files"].items()}
+            if set(retained) != {"receipt", "metadata", "build_log"} | {"asset/" + name for name in producer.finalizer.FILES}:
+                raise ValueError("historical producer closure differs")
+            model = release.parse_canonical(retained["receipt"].data)
+            if retained["receipt"].path != producer_root / "build.json" or set(model) != producer.RECEIPT_FIELDS \
+                    or model["schema"] != producer.SCHEMA or model["status"] != "producer-admitted" \
+                    or model["target"] != producer.source.TARGET or model["profile"] != "release" \
+                    or model["claim"] != producer.CLAIM \
+                    or any(model[key] is not False for key in ("cache_qualified", "image_qualified", "builder_ownership_verified")):
+                raise ValueError("historical producer authority differs")
+            capsule = self.custody.enter_context(producer.source.admit(
+                producer_root / "source-context/source", producer_root / "source-context/git",
+                producer_root / "source-context/request.json", model["source_request_sha256"]))
+            if set(capsule.files) != set(value["capsule_files"]):
+                raise ValueError("historical source closure differs")
+            for name, held in capsule.files.items():
+                if release.canonical(held.evidence()) != release.canonical(value["capsule_files"][name]):
+                    raise ValueError("historical source bytes or metadata changed")
+            self.capsule = capsule
+            exported = producer.finalizer.verify_export(producer_root / "assets", capsule.model,
+                                                        model["source_request_sha256"])
+            for key in ("source", "target", "profile", "version", "payload", "source_request_sha256",
+                        "repository_input_count", "depinfo"):
+                if release.canonical(model[key]) != release.canonical(exported[key]):
+                    raise ValueError("historical producer and export differ")
+            summary = {"status": "producer-admitted", "receipt": retained["receipt"].evidence(),
+                       **{key: model[key] for key in measurement.PRODUCER_FIELDS - {"status", "receipt"}}}
+            if release.canonical(pointer_model) != release.canonical(summary):
+                raise ValueError("historical producer pointer changed")
+            original, owner = read(Path(report) / "identity.json"), read(directory / "owner.json")
+            if model["source"] != value["source"] or model["source"]["revision"] != original["source_sha"] \
+                    or model["source"]["git_tree"] != original["source_tree"]:
+                raise ValueError("historical producer is not the selected source")
+            producer.finalizer.completion(model["build"])
+            fixed = producer.fixed_arguments(producer_root / "source-context", capsule.model,
+                                             model["source_request_sha256"], producer_root, "r2")
+            producer.admit_solve_command(model["build"]["command"], fixed, owner["builder"])
+            if producer.metadata_reference(retained["metadata"].data, owner["builder"]) != model["build_ref"] \
+                    or model["build"]["log"] != str(producer_root / "build.log") \
+                    or model["build"]["log_sha256"] != retained["build_log"].sha256 \
+                    or model["metadata"] != retained["metadata"].evidence() \
+                    or model["producer_receipt"] != retained["asset/producer.json"].evidence() \
+                    or model["image"] != retained["asset/cw.oci.tar"].evidence() \
+                    or model["index_sha256"] != exported["image"]["index_sha256"]:
+                raise ValueError("historical solve metadata or log differs")
+            self.identity = {"build_ref": measurement.owned_reference(model["build_ref"], owner["builder"]),
+                             "pointer_sha256": pointer.sha256,
+                             "build_receipt_sha256": retained["receipt"].sha256,
+                             "producer_receipt_sha256": retained["asset/producer.json"].sha256,
+                             "build_log_sha256": retained["build_log"].sha256}
+            if self.identity != value["identity"]:
+                raise ValueError("historical capture identity changed")
+            self.retained = SimpleNamespace(model=model, files=retained)
+            self.record = value
+            if phase != "tools":
+                version = self.custody.enter_context(closing(producer.source.HeldSourceFile(directory / "version.txt", 4096)))
+                self.files.append(version)
+                result = producer.finalizer.completion(value["version_command"])
+                if result["command"] != [str(producer_root / "assets/cw"), "--version"] \
+                        or result["log"] != str(directory / "version.txt") or result["log_sha256"] != version.sha256:
+                    raise ValueError("historical version command differs")
+            self.revalidate()
+        except BaseException:
+            self.close()
+            raise
+
+    def revalidate(self):
+        self.parent.revalidate()
+        if list(self.asset.stamp(os.fstat(self.parent.fd), self.asset.DIR_FIELDS)) != self.parent_stamp:
+            raise ValueError("historical producer namespace changed")
+        self.capsule.revalidate()
+        for held in self.files:
+            held.revalidate(content=True)
+        self.producer.source.validate_inventory(self.producer_root / "assets", self.producer.finalizer.FILES, ())
+
+    def close(self):
+        self.custody.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
 
 
 def compact(value):
@@ -95,7 +282,7 @@ def derive(archive, work, report, credential, nonce):
     main = contexts / "cw-edit" / MAIN
     original_main = main.read_text()
     anchor = "fn main() {\n"
-    if not original_main.startswith(anchor) or original_main.count(anchor) != 1:
+    if original_main.count(anchor) != 1 or anchor not in original_main.splitlines(keepends=True):
         raise ValueError("CW probe insertion anchor changed")
     inserted = ('    if std::env::args_os().nth(1).is_some_and(|argument| argument == "--version") {\n'
                 f'        println!("codewire-cache-probe-{nonce}");\n'
@@ -424,8 +611,23 @@ def check_phase(report, phase):
     elif phase in ("cw-control", "cw-edit"):
         if status != 0:
             raise ValueError("actual CW build failed")
-        measurement.logs(directory / "build.log", "r2")
-        vertex(text, r"^\[cw-builder [^]]+\] RUN\b", phase == "cw-control")
+        if identity["architecture"] == "amd64":
+            with HistoricalProducer(report, phase) as evidence:
+                history = measurement.producer_history(directory, evidence, cached=phase == "cw-control")
+                if history != evidence.record["history"]:
+                    raise ValueError("historical producer history changed")
+                measurement.producer_logs(evidence, "r2")
+                context = read(report / "contexts.json")
+                expected_main = (read(report / "cw-context.json")["after"] if phase == "cw-edit"
+                                 else context["inventories"]["control"][MAIN])
+                if evidence.capsule.files["source/" + MAIN].sha256 != expected_main["sha256"]:
+                    raise ValueError("historical producer omitted the exact intended source derivative")
+                outcome["producer"] = {"claim": evidence.record["claim"], "history": history,
+                                       "source": evidence.record["source"],
+                                       "payload": evidence.retained.model["payload"]}
+        else:
+            measurement.logs(directory / "build.log", "r2")
+            vertex(text, r"^\[cw-builder-arm64 [^]]+\] RUN\b", phase == "cw-control")
         value = (directory / "version.txt").read_text()
         token = "codewire-cache-probe-" + identity["nonce"] + "\n"
         if not value.strip() or (value == token) != (phase == "cw-edit"):
@@ -433,6 +635,8 @@ def check_phase(report, phase):
         binary = (directory / "cw.sha256").read_text().split()[0]
         if not re.fullmatch(r"[0-9a-f]{64}", binary):
             raise ValueError("invalid CW binary hash")
+        if identity["architecture"] == "amd64" and binary != outcome["producer"]["payload"]["sha256"]:
+            raise ValueError("executed CW bytes differ from the admitted producer")
         outcome["binary_sha256"] = binary
         if phase == "cw-edit" and binary == read(report / "cw-control" / "result.json")["binary_sha256"]:
             raise ValueError("CW source derivative retained the control binary")
@@ -441,7 +645,18 @@ def check_phase(report, phase):
                 or (directory / "tool-marker").read_text() != "codewire-cache-probe-" + identity["nonce"] + "\n":
             raise ValueError("tool derivative or its unchanged contracts failed")
         measurement.logs(directory / "base-build.log", "r2")
-        measurement.logs(directory / "build.log", "r2", workspace=True)
+        if identity["architecture"] == "amd64":
+            measurement.logs(directory / "build.log", "r2")
+            with HistoricalProducer(report, phase) as evidence:
+                history = measurement.producer_history(directory, evidence, cached=True)
+                if history != evidence.record["history"]:
+                    raise ValueError("tools producer history changed")
+                measurement.producer_logs(evidence, "r2")
+                outcome["producer"] = {"claim": evidence.record["claim"], "history": history,
+                                       "source": evidence.record["source"],
+                                       "payload": evidence.retained.model["payload"]}
+        else:
+            measurement.logs(directory / "build.log", "r2", workspace=True)
         versions = read(directory / "versions.json")
         if set(versions) != set(measurement.VERSION_COMMANDS) or any(not isinstance(v, str) or not v for v in versions.values()):
             raise ValueError("tool derivative version inventory is incomplete")
@@ -531,6 +746,8 @@ if __name__ == "__main__":
             cleaned(*arguments)
         elif command == "check" and len(arguments) == 2:
             check_phase(*arguments)
+        elif command == "checkpoint" and len(arguments) == 4:
+            producer_checkpoint(*arguments)
         elif command == "replay" and len(arguments) == 5:
             replay(*arguments)
         elif command == "ready" and len(arguments) == 2:

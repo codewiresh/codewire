@@ -148,22 +148,48 @@ for phase in cw-control cw-edit; do
     python3 "$probe_tool" mutate "$ROOT" "$report" "$source_backup"
   fi
   status=0
-  workspace_cache_logged_command "$report/$phase/build.log" \
-    "$docker_bin" buildx build --builder "$builder" --progress plain --pull \
-    --cache-from "$common,name=$architecture/workspace/experiments/$seed_id" \
-    --cache-to "$common,name=$architecture/workspace/experiments/$seed_id/probes/$nonce/$phase-$builder_container,mode=max,touch_refresh=24h,upload_parallelism=4,ignore-error=false" \
-    "${compiler_args[@]}" --build-arg BASE_IMAGE_REF=scratch \
-    --file "$context/images/workspace/Dockerfile" --target cw-builder \
-    --output "type=local,dest=$work/$phase-output" "$context" || status=$?
+  if [[ "$architecture" == amd64 ]]; then
+    producer_work="$report/$phase/cw-image-work"
+    mkdir -m 0700 "$producer_work"
+    workspace_cache_logged_command "$report/$phase/build.log" bash -c '
+      result=$1; shift
+      umask 077
+      "$@" >"$result"
+      status=$?
+      [[ "$status" != 0 ]] || chmod 0400 "$result"
+      exit "$status"
+    ' cw-probe-producer "$producer_work/cw-producer-result.json" \
+      python3 "$ROOT/scripts/ci/images/cw-image-consumer.py" produce \
+      --source-dir "$ROOT" --source-sha "$source_sha" --profile release \
+      --output "$producer_work/build" --docker-bin "$docker_bin" --builder "$builder" --sccache-mode r2 \
+      --cache-from "$common,name=$architecture/cw-runtime/experiments/$seed_id" \
+      --cache-to "$common,name=$architecture/cw-runtime/experiments/$seed_id/probes/$nonce/$phase-$builder_container,mode=max,touch_refresh=24h,upload_parallelism=4,ignore-error=false" || status=$?
+  else
+    # ARM retains its native compiler stage. The AMD scratch copy cannot
+    # substitute for the actual compiler/cache invalidation experiment.
+    workspace_cache_logged_command "$report/$phase/build.log" \
+      "$docker_bin" buildx build --builder "$builder" --progress plain --pull --platform linux/arm64 \
+      --cache-from "$common,name=$architecture/workspace/experiments/$seed_id" \
+      --cache-to "$common,name=$architecture/workspace/experiments/$seed_id/probes/$nonce/$phase-$builder_container,mode=max,touch_refresh=24h,upload_parallelism=4,ignore-error=false" \
+      "${compiler_args[@]}" --build-arg BASE_IMAGE_REF=scratch \
+      --file "$context/images/workspace/Dockerfile" --target cw-builder-arm64 \
+      --output "type=local,dest=$work/$phase-output" "$context" || status=$?
+  fi
   printf '%s\n' "$status" >"$report/$phase/status"
   [[ "$status" == 0 ]]
-  "$work/$phase-output/out/cw" --version >"$report/$phase/version.txt"
-  sha256sum "$work/$phase-output/out/cw" >"$report/$phase/cw.sha256"
-  if [[ "$phase" == cw-edit ]]; then
-    python3 "$probe_tool" restore "$ROOT" "$report" "$source_backup"
+  if [[ "$architecture" == amd64 ]]; then
+    # Admit the live selected source and retain its exact original producer
+    # evidence before restoring the intentional edit or deleting BuildKit.
+    workspace_cache_timed_command 60s python3 "$probe_tool" checkpoint "$ROOT" "$report" "$phase" "$docker_bin"
+  else
+    "$work/$phase-output/out/cw" --version >"$report/$phase/version.txt"
+    sha256sum "$work/$phase-output/out/cw" >"$report/$phase/cw.sha256"
   fi
   remove_builder "$phase"
   python3 "$probe_tool" check "$report" "$phase"
+  if [[ "$phase" == cw-edit ]]; then
+    python3 "$probe_tool" restore "$ROOT" "$report" "$source_backup"
+  fi
 done
 
 new_builder tools "$original_credentials"
@@ -178,8 +204,13 @@ workspace_cache_logged_command "$report/tools/base-build.log" \
 base_digest="$(jq -er '.["containerimage.digest"] | select(test("^sha256:[0-9a-f]{64}$"))' "$report/tools/base-metadata.json")"
 image_tag="codewire-cache-probe:$nonce"
 status=0
+mkdir -m 0700 "$report/tools/cw-image-work"
 workspace_cache_logged_command "$report/tools/build.log" \
-  "$docker_bin" buildx build --builder "$builder" --progress plain --pull \
+  bash "$ROOT/scripts/ci/images/cw-image-consumer.sh" release "$ROOT" "$report/tools/cw-image-work" \
+  --image-source-dir "$work/contexts/tools" \
+  --cache-from "$common,name=$architecture/cw-runtime/experiments/$seed_id" \
+  --cache-to "$common,name=$architecture/cw-runtime/experiments/$seed_id/probes/$nonce/tools-$builder_container,mode=max,touch_refresh=24h,upload_parallelism=4,ignore-error=false" -- \
+  "$docker_bin" buildx build --builder "$builder" --progress plain --pull --platform "linux/$architecture" \
   --cache-from "$common,name=$architecture/workspace/experiments/$seed_id" \
   --cache-to "$common,name=$architecture/workspace/experiments/$seed_id/probes/$nonce/tools-$builder_container,mode=max,touch_refresh=24h,upload_parallelism=4,ignore-error=false" \
   --no-cache-filter workspace-floating-tools \
@@ -189,6 +220,9 @@ workspace_cache_logged_command "$report/tools/build.log" \
   --file "$work/contexts/tools/images/workspace/Dockerfile" "$work/contexts/tools" || status=$?
 printf '%s\n' "$status" >"$report/tools/status"
 [[ "$status" == 0 ]]
+if [[ "$architecture" == amd64 ]]; then
+  workspace_cache_timed_command 60s python3 "$probe_tool" checkpoint "$ROOT" "$report" tools "$docker_bin"
+fi
 # Exactly the ordinary contract topology, after credential/builder removal.
 remove_builder tools
 workspace_cache_command "$docker_bin" image inspect "$image_tag" --format '{{.Id}}' >"$report/tools/image-id"

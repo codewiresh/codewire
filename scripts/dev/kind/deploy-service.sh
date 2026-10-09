@@ -16,6 +16,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=scripts/dev/kind/profile.sh
+source "$ROOT/scripts/dev/kind/profile.sh"
+kind_profile_load "$ROOT" || exit $?
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
 SERVICE="${1:-}"
 BUILDER="codewire-kind-dev"
@@ -39,7 +42,7 @@ case "$SERVICE" in
     features="enrollment,kind-e2e"
     # Built exactly as services.Dockerfile builds the fake-mode fixture.
     fixture=credential-service
-    fixture_features=enrollment
+    fixture_features=enrollment,kind-e2e
     ;;
   dashboard)
     image=codewire-dashboard
@@ -57,22 +60,67 @@ case "$SERVICE" in
 esac
 deployment="codewire-${SERVICE}"
 IMAGE="${image}:e2e"
-BASE_IMAGE="${image}:kind-dev-base"
 STATE="$ROOT/.tmp/kind-dev/${KIND_CLUSTER_NAME}"
 if [ "$image" != codewire-services ]; then
   STATE="$STATE/$image"
 fi
+if [ "$KIND_PROFILE" = 1 ]; then
+  kind_profile_lock "$ROOT" || exit $?
+  kind_profile_verify_node "$ROOT" || exit $?
+  kind_profile_verify_artifacts "$ROOT" || exit $?
+  BUILDER="${KIND_PROFILE_IMAGE_PREFIX}-dev"
+  STATE="$(dirname "$KIND_PROFILE_PATH")/dev/$image"
+fi
 
 kind get clusters 2>/dev/null | grep -Fxq "$KIND_CLUSTER_NAME" \
   || die "cluster ${KIND_CLUSTER_NAME} does not exist; create it with make kind-up"
-docker image inspect "$IMAGE" >/dev/null 2>&1 || die "${IMAGE} is missing; run make kind-up first"
-
-current="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
-base="$(docker image inspect --format "{{ index .Config.Labels \"${BASE_LABEL}\" }}" "$IMAGE")"
-if [ -z "$base" ] || [ "$base" = "<no value>" ]; then
-  base="$current"
+if [ "$KIND_PROFILE" = 1 ]; then
+  base="$(kind_profile_image_base "$image")" || exit $?
+  current="$(docker image inspect --format '{{.Id}}' "$base")" \
+    || die 'the sealed product base is missing from this Docker daemon; import the selected profile artifacts first'
+  [ "$current" = "$base" ] || die 'the Docker product base differs from its saved identity'
+else
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || die "${IMAGE} is missing; run make kind-up first"
+  current="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
+  base="$(docker image inspect --format "{{ index .Config.Labels \"${BASE_LABEL}\" }}" "$IMAGE")"
+  if [ -z "$base" ] || [ "$base" = "<no value>" ]; then
+    base="$current"
+  fi
 fi
+[[ "$base" =~ ^sha256:[0-9a-f]{64}$ ]] || die 'the product base is not one exact Docker image ID'
+umask 077
+kind_profile_private_dir "$STATE/bin" || exit $?
+kind_profile_private_dir "$STATE/fixtures" || exit $?
+[ ! -L "$STATE" ] && [ ! -L "$STATE/bin" ] && [ ! -L "$STATE/fixtures" ] \
+  || die 'dev binary state must not be a symlink'
 mkdir -p "$STATE/bin" "$STATE/fixtures"
+if [ -e "$STATE/base" ] || [ -L "$STATE/base" ]; then
+  [ -f "$STATE/base" ] && [ ! -L "$STATE/base" ] \
+    && [ "$(stat -c '%h' "$STATE/base")" = 1 ] || die 'dev base state must be one regular owned file'
+fi
+for binary in "$STATE/bin/"*; do
+  [ -e "$binary" ] || [ -L "$binary" ] || continue
+  [ -f "$binary" ] && [ ! -L "$binary" ] || die 'dev binary state contains an unowned file'
+  if [ "$KIND_PROFILE" = 1 ]; then
+    [ "$(stat -c '%u:%h' "$binary")" = "$(id -u):1" ] \
+      || die 'dev binary state contains a foreign or multiply linked file'
+  fi
+  case "${binary##*/}" in
+    codewire-idp|codewire-billing|codewire-coordinator|codewire-orchestration|\
+    codewire-credential-service|codewire-dashboard-web|cw) ;;
+    *) die 'dev binary state contains an unknown binary' ;;
+  esac
+done
+for fixture_file in "$STATE/fixtures/"*; do
+  [ -e "$fixture_file" ] || [ -L "$fixture_file" ] || continue
+  [ -f "$fixture_file" ] && [ ! -L "$fixture_file" ] \
+    || die 'dev fixture state contains an unowned file'
+  if [ "$KIND_PROFILE" = 1 ]; then
+    [ "$(stat -c '%u:%h' "$fixture_file")" = "$(id -u):1" ] \
+      || die 'dev fixture state contains a foreign or multiply linked file'
+  fi
+  [ "${fixture_file##*/}" = credential-service ] || die 'dev fixture state contains an unknown fixture'
+done
 if [ "$(cat "$STATE/base" 2>/dev/null || true)" != "$base" ]; then
   log "new base image ${base:7:12}; forgetting earlier dev binaries"
   rm -f "$STATE/bin/"* "$STATE/fixtures/"*
@@ -103,7 +151,26 @@ shopt -s nullglob
 fixtures=("$STATE/fixtures/"*)
 shopt -u nullglob
 log "layering $(cd "$STATE/bin" && echo *)${fixtures[*]:+ and fixtures $(cd "$STATE/fixtures" && echo *)} onto the base image"
-docker tag "$base" "$BASE_IMAGE"
+if [ "$KIND_PROFILE" = 1 ]; then
+  content="$( {
+    printf '%s\n' "$base"
+    sha256sum "$STATE/bin/"*
+    if [ "${#fixtures[@]}" -gt 0 ]; then
+      sha256sum "${fixtures[@]}"
+    fi
+  } | sha256sum)"
+  content="${content%% *}"
+  IMAGE="${KIND_PROFILE_IMAGE_PREFIX}-${image#codewire-}:dev-${content}"
+  BASE_IMAGE="${KIND_PROFILE_IMAGE_PREFIX}-${image#codewire-}:base-${base#sha256:}"
+else
+  BASE_IMAGE="${image}:kind-dev-base-${base#sha256:}"
+fi
+if docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
+  [ "$(docker image inspect --format '{{.Id}}' "$BASE_IMAGE")" = "$base" ] \
+    || die 'source-qualified base alias names a different image'
+else
+  docker tag "$base" "$BASE_IMAGE"
+fi
 {
   printf 'FROM %s\n' "$BASE_IMAGE"
   for binary in "$STATE/bin/"*; do
@@ -118,11 +185,16 @@ docker tag "$base" "$BASE_IMAGE"
 
 log "loading ${IMAGE} into ${KIND_CLUSTER_NAME}"
 kind load docker-image "$IMAGE" --name "$KIND_CLUSTER_NAME" >/dev/null
-if [ "$SERVICE" = daemon ]; then
+if [ "$SERVICE" = daemon ] && [ "$KIND_PROFILE" != 1 ]; then
   log "sandboxes created from now on run the current daemon"
   exit 0
 fi
 kube() { kubectl --context "kind-${KIND_CLUSTER_NAME}" -n "$NAMESPACE" "$@"; }
+if [ "$SERVICE" = daemon ]; then
+  # The renderer reads this Deployment environment for future sandboxes.
+  # Loading a new tag alone would leave it using the original daemon image.
+  deployment=codewire-orchestration
+fi
 # A rollout reports done while the previous pods are still terminating and can
 # still answer requests; wait for them to go so the next request, such as
 # `make kind-test`, reaches the current source.
@@ -132,10 +204,30 @@ selector="$(kube get "deployment/${deployment}" \
 selector="${selector%,}"
 [ -n "$selector" ] || die "deployment/${deployment} has no label selector"
 previous="$(kube get pods -l "$selector" -o name)"
-kube rollout restart "deployment/${deployment}" >/dev/null
+if [ "$KIND_PROFILE" = 1 ]; then
+  if [ "$SERVICE" = daemon ]; then
+    current_image="$(kube get "deployment/${deployment}" \
+      -o 'jsonpath={.spec.template.spec.containers[?(@.name=="orchestration")].env[?(@.name=="SANDBOX_DAEMON_IMAGE")].value}')"
+    kube set env "deployment/${deployment}" --containers=orchestration "SANDBOX_DAEMON_IMAGE=$IMAGE" >/dev/null
+  else
+    current_image="$(kube get "deployment/${deployment}" \
+      -o "jsonpath={.spec.template.spec.containers[?(@.name==\"${SERVICE}\")].image}")"
+    kube set image "deployment/${deployment}" "${SERVICE}=$IMAGE" >/dev/null
+  fi
+  # A changed image/env already starts one rollout. An identical repeated
+  # deployment still needs a restart before waiting for the captured old Pods.
+  if [ "$current_image" = "$IMAGE" ]; then
+    kube rollout restart "deployment/${deployment}" >/dev/null
+  fi
+else
+  kube rollout restart "deployment/${deployment}" >/dev/null
+fi
 kube rollout status "deployment/${deployment}" --timeout=180s
 if [ -n "$previous" ]; then
-  # shellcheck disable=SC2086 # one argument per previous pod
+  # shellcheck disable=SC2086 # one argument for each captured Pod
   kube wait --for=delete $previous --timeout=120s >/dev/null
+fi
+if [ "$SERVICE" = daemon ]; then
+  log 'sandboxes created from now on run the current daemon'
 fi
 log "${SERVICE} is running the current source"

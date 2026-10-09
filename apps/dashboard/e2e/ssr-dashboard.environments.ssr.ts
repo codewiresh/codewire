@@ -1036,7 +1036,9 @@ test.describe.serial("server-rendered environments", () => {
     await page.keyboard.press("Control+C");
     await expect.poll(() => page.evaluate(() => ((window as Window & { __terminalFrames?: TerminalClientFrame[] }).__terminalFrames || []).filter((frame) => frame.type === "input").at(-1))).toEqual({ type: "input", data: "\u0003" });
 
-    await page.keyboard.type("cd /tmp; export CW_DURABLE_BROWSER=preserved-session; printf '__DURABLE_PID__%s__\\n' \"$$\"");
+    // Use a deterministic single-row prompt for the durability checks that
+    // follow viewport changes.
+    await page.keyboard.type("cd /tmp; PS1='$ '; export CW_DURABLE_BROWSER=preserved-session; printf '__DURABLE_PID__%s__\\n' \"$$\"");
     await page.keyboard.press("Enter");
     await expect(terminalRows).toContainText(/__DURABLE_PID__\d+__/);
     const firstPid = /__DURABLE_PID__(\d+)__/.exec(await terminalRows.innerText())![1];

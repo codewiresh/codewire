@@ -62,6 +62,14 @@ fn clean_command(program: &str, home: &Path) -> Command {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .process_group(0);
+    if program == "/usr/bin/git" {
+        command.args([
+            "-c",
+            "maintenance.autoDetach=false",
+            "-c",
+            "gc.autoDetach=false",
+        ]);
+    }
     command
 }
 

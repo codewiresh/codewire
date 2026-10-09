@@ -28,8 +28,9 @@ fn session_mutation_upgrade_retains_accepted_staged27() -> anyhow::Result<()> {
     assert_accepted_staged27()
 }
 
-/// Helpers other than this migration's two and migration34's workspace-binding
-/// trigger function, which has its own proof and replaces no prior helper.
+/// Helpers other than this migration's two, migration34's workspace-binding
+/// trigger function and migration38's cw-runtime trigger function, which have
+/// their own proof and replace no prior helper.
 async fn prior_helper_definitions(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT pg_catalog.pg_get_functiondef(p.oid) FROM pg_catalog.pg_proc p \
@@ -37,6 +38,7 @@ async fn prior_helper_definitions(pool: &PgPool) -> anyhow::Result<Vec<String>> 
          WHERE n.nspname='public' AND starts_with(p.proname,'codewire_') \
          AND p.proname NOT IN ('codewire_authenticate_credential_session', \
          'codewire_lock_credential_session_authority','codewire_workspace_binding_immutable') \
+         AND p.proname <> 'codewire_cw_runtime_request_immutable' \
          ORDER BY p.proname,p.oid",
     )
     .fetch_all(pool)
@@ -252,7 +254,7 @@ async fn session_mutation_staged_upgrade_preserves27_rows_helpers_and_noop() -> 
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let after = applied_migrations(&pool).await?;
         anyhow::ensure!(
-            after.len() == MIGRATOR.iter().count()
+            after.len() == MIGRATOR.iter().filter(|m| m.migration_type.is_up_migration()).count()
                 && after[..27] == before
                 && after[27].0 == VERSION
         );
@@ -318,7 +320,7 @@ async fn session_mutation_failed_forward_rolls_back_both_helpers_and_ledger_then
         ensure_schema(&db.url).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         anyhow::ensure!(helpers_present(&pool).await?);
-        anyhow::ensure!(applied_migrations(&pool).await?.len() == MIGRATOR.iter().count());
+        anyhow::ensure!(applied_migrations(&pool).await?.len() == MIGRATOR.iter().filter(|m| m.migration_type.is_up_migration()).count());
         pool.close().await;
         Ok(())
     }

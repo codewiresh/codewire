@@ -147,6 +147,7 @@ async fn eof_during_actual_pending_projection_reaps_launcher_before_terminal_exi
             ingress_gid: unsafe { libc::getegid() },
         }),
         managed_credential_clients: Default::default(),
+        host: None,
         launch_projection: Some(LaunchProjectionConfig {
             selection_sha256: [1; 32],
             native: Some(NativeLaunchProjectionConfig {

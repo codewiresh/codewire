@@ -68,6 +68,9 @@ mod synthetic_smoke_tests;
 #[cfg(test)]
 #[path = "runtime/anthropic_subscription_tests.rs"]
 mod anthropic_subscription_tests;
+#[cfg(feature = "local-broker-synthetic-smoke")]
+#[path = "runtime/native_managed_smoke.rs"]
+mod native_managed_smoke;
 
 /// Metadata-only description of one exact OAuth generation to refresh.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -623,6 +626,9 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
         } else {
             "CWCODEX149"
         };
+        // Managed-agent fixture markers select their own stream; every other
+        // request keeps the canned one-turn bytes below.
+        let native = native_managed_smoke::codex(&body, protected_value)?;
         let response = format!(
             concat!(
                 "event: response.created\n",
@@ -654,13 +660,174 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
         Ok(BrokerUpstreamResponse::new(
             StatusCode::OK,
             response_headers,
-            Box::pin(stream::iter([Ok(first), Ok(second)])),
+            native.unwrap_or_else(|| Box::pin(stream::iter([Ok(first), Ok(second)]))),
         ))
     }
 }
 
 #[cfg(feature = "local-broker-synthetic-smoke")]
 impl SyntheticOpenAiSmokeTransport {
+    /// Select only the fixed API family before route validation. An invalid
+    /// URL on either API host must stay in this branch and be refused instead
+    /// of falling through to an OAuth fixture.
+    pub fn api_key_family(request: &BrokerUpstreamRequest) -> Option<&'static str> {
+        match request.target.host_str() {
+            Some("api.openai.com") => Some("openai"),
+            Some("api.anthropic.com") => Some("anthropic"),
+            _ => None,
+        }
+    }
+
+    /// Distinguish only the three fixed, public Kind Claude canaries from
+    /// the CW API fixture. This is classification, not admission: the original
+    /// owned request must still pass the Kind provider's complete validator.
+    /// No protected value or request field leaves this borrowed predicate.
+    pub fn is_kind_anthropic_fixture(request: &BrokerUpstreamRequest) -> bool {
+        if request.method != Method::POST
+            || !matches!(
+                request.target.as_str(),
+                "https://api.anthropic.com/v1/messages"
+                    | "https://api.anthropic.com/v1/messages?beta=true"
+                    | "https://api.anthropic.com/v1/messages/count_tokens"
+                    | "https://api.anthropic.com/v1/messages/count_tokens?beta=true"
+            )
+        {
+            return false;
+        }
+        let mut authorization = request.headers.get_all("authorization").iter();
+        let bearer = authorization.next();
+        let mut api_key = request.headers.get_all("x-api-key").iter();
+        let key = api_key.next();
+        if authorization.next().is_some() || api_key.next().is_some() {
+            return false;
+        }
+        match (bearer, key) {
+            (None, Some(key)) => {
+                key.as_bytes() == b"sk-ant-api03-CW_KIND_SYNTHETIC_ANTHROPIC_KEY-0123456789abcdef"
+            }
+            (Some(bearer), None) => matches!(
+                bearer.as_bytes(),
+                b"Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_CLAUDE_TOKEN-0123456789abcdef"
+                    | b"Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_REFUSED_TOKEN-0123456789abcdef"
+            ),
+            _ => false,
+        }
+    }
+
+    /// Validate a Kind fixture's exact selected synthetic credential in place.
+    /// This borrows the broker-owned request; the caller then delegates that
+    /// same owned request to `execute`, including the existing stream/redactor.
+    /// No request fields or protected values leave this method.
+    pub fn validate_exact_api_key_request(
+        request: &BrokerUpstreamRequest,
+        expected: &str,
+    ) -> Result<(), BrokerUpstreamError> {
+        let denied = BrokerUpstreamError::Protocol;
+        let (route, path, query, prefix, authority) = match request.target.as_str() {
+            "https://api.openai.com/v1/responses" => (
+                crate::openai::openai_responses_route(),
+                "/responses",
+                None,
+                "cwlocalopenai",
+                "authorization",
+            ),
+            "https://api.anthropic.com/v1/messages" => (
+                crate::anthropic::route(),
+                "/messages",
+                None,
+                "cwlocalanthropic",
+                "x-api-key",
+            ),
+            "https://api.anthropic.com/v1/messages?beta=true" => (
+                crate::anthropic::route(),
+                "/messages",
+                Some("beta=true"),
+                "cwlocalanthropic",
+                "x-api-key",
+            ),
+            "https://api.anthropic.com/v1/messages/count_tokens" => (
+                crate::anthropic::route(),
+                "/messages/count_tokens",
+                None,
+                "cwlocalanthropic",
+                "x-api-key",
+            ),
+            "https://api.anthropic.com/v1/messages/count_tokens?beta=true" => (
+                crate::anthropic::route(),
+                "/messages/count_tokens",
+                Some("beta=true"),
+                "cwlocalanthropic",
+                "x-api-key",
+            ),
+            _ => return Err(denied),
+        };
+        if !Self::canary(expected, prefix)
+            || request.method != Method::POST
+            || request.body.is_empty()
+            || request.body.len() > route.max_body_bytes
+            || request.headers.len() > 64
+        {
+            return Err(denied);
+        }
+        let mut header_bytes = 0_usize;
+        for (name, value) in &request.headers {
+            if request.headers.get_all(name).iter().count() != 1
+                || value.as_bytes().len() > 8 * 1024
+                || !(name.as_str() == authority
+                    || name == http::header::ACCEPT_ENCODING
+                    || route
+                        .allowed_request_headers
+                        .iter()
+                        .any(|allowed| allowed == name.as_str()))
+            {
+                return Err(denied);
+            }
+            header_bytes = header_bytes
+                .checked_add(name.as_str().len())
+                .and_then(|bytes| bytes.checked_add(value.as_bytes().len()))
+                .filter(|bytes| *bytes <= 64 * 1024)
+                .ok_or(denied)?;
+        }
+        let supplied = request
+            .headers
+            .get(authority)
+            .and_then(|value| value.to_str().ok());
+        let supplied = if authority == "authorization" {
+            supplied.and_then(|value| value.strip_prefix("Bearer "))
+        } else {
+            supplied
+        };
+        if supplied != Some(expected)
+            || request
+                .headers
+                .get(http::header::ACCEPT_ENCODING)
+                .is_some_and(|value| value.as_bytes() != b"identity")
+            || (authority == "x-api-key"
+                && (request
+                    .headers
+                    .get("anthropic-version")
+                    .map(HeaderValue::as_bytes)
+                    != Some(b"2023-06-01")
+                    || request
+                        .headers
+                        .get(http::header::ACCEPT_ENCODING)
+                        .map(HeaderValue::as_bytes)
+                        != Some(b"identity")))
+        {
+            return Err(denied);
+        }
+        av_credential_proxy::validate_proxy_request(
+            &route,
+            path,
+            query,
+            &request.method,
+            &request.headers,
+            request.body.len(),
+        )
+        .map_err(|_| denied)?;
+        Ok(())
+    }
+
     fn canary(value: &str, prefix: &str) -> bool {
         value.strip_prefix(prefix).is_some_and(|suffix| {
             suffix.len() == 32
@@ -764,6 +931,7 @@ impl SyntheticOpenAiSmokeTransport {
                 })),
             ));
         }
+        let native = native_managed_smoke::claude(&payload, protected_value)?;
         // A complete text-only Messages stream consumed by the pinned Claude
         // CLI, including the final usage/stop events. Split inside the reflected
         // key, not at an SSE boundary, to exercise streaming redaction.
@@ -795,7 +963,7 @@ impl SyntheticOpenAiSmokeTransport {
         Ok(BrokerUpstreamResponse::new(
             StatusCode::OK,
             response_headers,
-            Box::pin(stream::iter(chunks.map(Ok))),
+            native.unwrap_or_else(|| Box::pin(stream::iter(chunks.map(Ok)))),
         ))
     }
 }
@@ -2326,6 +2494,96 @@ mod tests {
     use crate::openai::response_admission_test_cases::{accepted_encodings, denied_encodings};
 
     mod codex_login;
+
+    #[cfg(feature = "local-broker-synthetic-smoke")]
+    #[test]
+    fn kind_anthropic_fixture_recognizer_has_closed_origin_and_auth_forms() {
+        let api_key = "sk-ant-api03-CW_KIND_SYNTHETIC_ANTHROPIC_KEY-0123456789abcdef";
+        let token = "Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_CLAUDE_TOKEN-0123456789abcdef";
+        let refused = "Bearer sk-ant-oat01-CW_KIND_SYNTHETIC_REFUSED_TOKEN-0123456789abcdef";
+        let request = |url: &str, name: &str, value: &str| {
+            BrokerUpstreamRequest::new(
+                Method::POST,
+                Url::parse(url).unwrap(),
+                HeaderMap::from_iter([(
+                    HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                    HeaderValue::from_str(value).unwrap(),
+                )]),
+                b"{}".to_vec(),
+            )
+        };
+        let url = "https://api.anthropic.com/v1/messages";
+        for (name, value) in [
+            ("x-api-key", api_key),
+            ("authorization", token),
+            ("authorization", refused),
+        ] {
+            for url in [
+                url,
+                "https://api.anthropic.com/v1/messages?beta=true",
+                "https://api.anthropic.com/v1/messages/count_tokens",
+                "https://api.anthropic.com/v1/messages/count_tokens?beta=true",
+            ] {
+                assert!(SyntheticOpenAiSmokeTransport::is_kind_anthropic_fixture(
+                    &request(url, name, value)
+                ));
+            }
+            let mut duplicate = request(url, name, value);
+            duplicate.headers.append(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+            assert!(!SyntheticOpenAiSmokeTransport::is_kind_anthropic_fixture(
+                &duplicate
+            ));
+        }
+        for url in [
+            "http://api.anthropic.com/v1/messages",
+            "https://api.anthropic.com:444/v1/messages",
+            "https://user@api.anthropic.com/v1/messages",
+            "https://api.anthropic.com/v1/messages#fragment",
+            "https://api.anthropic.com/v1/messages?foreign=true",
+            "https://api.anthropic.com/v1/other",
+            "https://foreign.invalid/v1/messages",
+        ] {
+            assert!(!SyntheticOpenAiSmokeTransport::is_kind_anthropic_fixture(
+                &request(url, "x-api-key", api_key)
+            ));
+        }
+        for (name, value) in [
+            ("x-api-key", token),
+            ("authorization", api_key),
+            ("x-api-key", "codewire-managed"),
+            ("authorization", "Bearer codewire-managed"),
+            (
+                "x-api-key",
+                "cwlocalanthropic0123456789abcdef0123456789abcdef",
+            ),
+            (
+                "x-api-key",
+                "cwlocalanthropic00000000000000000000000000000000",
+            ),
+            ("x-api-key", "cwlocalopenai0123456789abcdef0123456789abcdef"),
+            ("authorization", "Bearer sk-ant-oat01-unknown"),
+        ] {
+            assert!(!SyntheticOpenAiSmokeTransport::is_kind_anthropic_fixture(
+                &request(url, name, value)
+            ));
+        }
+        let mut mixed = request(url, "x-api-key", api_key);
+        mixed.headers.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_str(token).unwrap(),
+        );
+        assert!(!SyntheticOpenAiSmokeTransport::is_kind_anthropic_fixture(
+            &mixed
+        ));
+        let mut wrong_method = request(url, "x-api-key", api_key);
+        wrong_method.method = Method::GET;
+        assert!(!SyntheticOpenAiSmokeTransport::is_kind_anthropic_fixture(
+            &wrong_method
+        ));
+    }
 
     const SYNTHETIC_KEY: &str = "CW_TEST_OPENAI_VALUE_123";
 

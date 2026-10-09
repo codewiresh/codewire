@@ -176,7 +176,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 87
+  assert_passed_count "server-core migration matrix" "$logfile" 88
 
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test storage \
@@ -424,6 +424,20 @@ run_database() {
       'workspace_binding::store::database_tests::' \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "workspace binding access store matrix" "$logfile" 4
+
+  logfile="$RUN_DIR/platform-cw-runtime-journal.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::cw_runtime::owner::database_tests::' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform cw runtime journal matrix" "$logfile" 35
+
+  logfile="$RUN_DIR/platform-managed-agent-journal.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::platform_agents::journal::database_tests::db_' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform managed agent journal matrix" "$logfile" 34
 
   logfile="$RUN_DIR/environment-resize-admission.log"
   DATABASE_URL="$DATABASE_URL_RUST" \

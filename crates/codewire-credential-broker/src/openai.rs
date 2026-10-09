@@ -491,7 +491,7 @@ fn valid_openai_api_key(material: &[u8]) -> bool {
         && material[token_bytes..].iter().all(|byte| *byte == b'=')
 }
 
-fn openai_responses_route() -> ProxyRouteConfig {
+pub(crate) fn openai_responses_route() -> ProxyRouteConfig {
     ProxyRouteConfig {
         profile: "codewire-openai-api-key".to_owned(),
         base_url: OPENAI_API_BASE_URL.to_owned(),

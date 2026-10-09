@@ -1,10 +1,25 @@
 use super::*;
 use crate::terminal_attach::RawModeGuard;
 use tokio::io::AsyncReadExt as _;
+#[cfg(unix)]
+pub(crate) mod agents;
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn run_host_agent_control(
+    arguments: Vec<std::ffi::OsString>,
+) -> anyhow::Result<()> {
+    agents::host_control::run_from(arguments).await
+}
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct EnvironmentSessionView {
     pub(crate) session_id: String,
+    pub(crate) name: String,
+    pub(crate) parent_session_id: String,
+    pub(crate) cleanup_unknown: bool,
+    #[serde(skip)]
+    pub(crate) started_at: String,
+    pub(crate) launch_generation: u64,
     pub(crate) state: String,
     pub(crate) command: Vec<String>,
     pub(crate) working_dir: String,
@@ -20,14 +35,20 @@ struct EnvironmentSessionOutput {
     chunks: Vec<Vec<u8>>,
     next_offset: u64,
     history_gap: bool,
+    eof: bool,
 }
 
 #[derive(Clone)]
 enum EnvironmentSessionTarget {
+    #[cfg(unix)]
+    Host {
+        target: config::CurrentTargetConfig,
+        environment: HostEnvironment,
+    },
     #[cfg(target_os = "linux")]
     NativeLocal {
         target: config::CurrentTargetConfig,
-        name: String,
+        environment_id: String,
         working_dir: String,
     },
     Platform {
@@ -39,8 +60,86 @@ enum EnvironmentSessionTarget {
 }
 
 impl EnvironmentSessionTarget {
+    async fn stop(&self, session_id: &str) -> anyhow::Result<EnvironmentSessionView> {
+        match self {
+            #[cfg(unix)]
+            Self::Host { environment, .. } => Ok(host_environment_session_view(
+                host_session_client(environment)
+                    .await?
+                    .stop(session_id)
+                    .await?,
+            )),
+            #[cfg(target_os = "linux")]
+            Self::NativeLocal { environment_id, .. } => Ok(platform_environment_session_view(
+                native_environment_session_client(environment_id)
+                    .await?
+                    .stop(session_id)
+                    .await?,
+            )),
+            Self::Platform {
+                org_id,
+                environment_id,
+                client,
+                ..
+            } => {
+                let response = client
+                    .stop_session(codewire_client::StopSessionRequest {
+                        org_id: org_id.clone(),
+                        environment_id: environment_id.clone(),
+                        session_id: session_id.into(),
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(display_client_error)?;
+                response
+                    .session
+                    .into_option()
+                    .map(platform_environment_session_view)
+                    .context("StopSession returned no session")
+            }
+        }
+    }
+
+    async fn send_input(&self, session_id: &str, data: Vec<u8>) -> anyhow::Result<()> {
+        match self {
+            #[cfg(unix)]
+            Self::Host { environment, .. } => host_session_client(environment)
+                .await?
+                .send_input(session_id, data)
+                .await
+                .map_err(Into::into),
+            #[cfg(target_os = "linux")]
+            Self::NativeLocal { environment_id, .. } => {
+                native_environment_session_client(environment_id)
+                    .await?
+                    .send_input(session_id, data)
+                    .await
+                    .map_err(Into::into)
+            }
+            Self::Platform {
+                org_id,
+                environment_id,
+                client,
+                ..
+            } => {
+                client
+                    .send_session_input(codewire_client::SendSessionInputRequest {
+                        org_id: org_id.clone(),
+                        environment_id: environment_id.clone(),
+                        session_id: session_id.into(),
+                        data,
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(display_client_error)?;
+                Ok(())
+            }
+        }
+    }
     fn ensure_ready_for_run(&self) -> anyhow::Result<()> {
         match self {
+            #[cfg(unix)]
+            Self::Host { .. } => Ok(()),
             #[cfg(target_os = "linux")]
             Self::NativeLocal { .. } => Ok(()),
             Self::Platform { .. } => Ok(()),
@@ -49,15 +148,25 @@ impl EnvironmentSessionTarget {
 
     async fn list(&self) -> anyhow::Result<Vec<EnvironmentSessionView>> {
         match self {
-            #[cfg(target_os = "linux")]
-            Self::NativeLocal { name, .. } => Ok(native_environment_session_client(name)
+            #[cfg(unix)]
+            Self::Host { environment, .. } => Ok(host_session_client(environment)
                 .await?
                 .list()
-                .await
-                .map_err(anyhow::Error::from)?
+                .await?
                 .into_iter()
-                .map(platform_environment_session_view)
+                .map(host_environment_session_view)
                 .collect()),
+            #[cfg(target_os = "linux")]
+            Self::NativeLocal { environment_id, .. } => {
+                Ok(native_environment_session_client(environment_id)
+                    .await?
+                    .list()
+                    .await
+                    .map_err(anyhow::Error::from)?
+                    .into_iter()
+                    .map(platform_environment_session_view)
+                    .collect())
+            }
             Self::Platform {
                 org_id,
                 environment_id,
@@ -84,9 +193,29 @@ impl EnvironmentSessionTarget {
         offset: u64,
     ) -> anyhow::Result<EnvironmentSessionOutput> {
         match self {
+            #[cfg(unix)]
+            Self::Host { environment, .. } => {
+                let response = host_session_client(environment)
+                    .await?
+                    .read_output(
+                        codewire_daemon_proto::daemon::v1::ReadSessionOutputRequest {
+                            session_id: session_id.into(),
+                            offset,
+                            limit: 0,
+                            allow_history_gap: true,
+                        },
+                    )
+                    .await?;
+                Ok(EnvironmentSessionOutput {
+                    chunks: response.chunks.into_iter().map(|c| c.data).collect(),
+                    next_offset: response.next_offset,
+                    history_gap: response.history_gap,
+                    eof: response.eof,
+                })
+            }
             #[cfg(target_os = "linux")]
-            Self::NativeLocal { name, .. } => {
-                let response = native_environment_session_client(name)
+            Self::NativeLocal { environment_id, .. } => {
+                let response = native_environment_session_client(environment_id)
                     .await?
                     .read_output(session_id, offset, 0)
                     .await?;
@@ -98,6 +227,7 @@ impl EnvironmentSessionTarget {
                         .collect(),
                     next_offset: response.next_offset,
                     history_gap: response.history_gap,
+                    eof: response.eof,
                 })
             }
             Self::Platform {
@@ -126,6 +256,7 @@ impl EnvironmentSessionTarget {
                         .collect(),
                     next_offset: response.next_offset,
                     history_gap: response.history_gap,
+                    eof: response.eof,
                 })
             }
         }
@@ -137,13 +268,34 @@ impl EnvironmentSessionTarget {
         working_dir: String,
         env: BTreeMap<String, String>,
         pty: bool,
+        name: String,
+        parent_session_id: String,
     ) -> anyhow::Result<EnvironmentSessionView> {
         let (columns, rows) = session_terminal_size(pty)?;
         let term = env::var("TERM").unwrap_or_default();
         match self {
+            #[cfg(unix)]
+            Self::Host { environment, .. } => {
+                let session = host_session_client(environment)
+                    .await?
+                    .launch(codewire_daemon_proto::daemon::v1::LaunchSessionRequest {
+                        command,
+                        working_dir,
+                        env: env.into_iter().map(|(k, v)| format!("{k}={v}")).collect(),
+                        pty,
+                        term,
+                        width: i32::from(columns),
+                        height: i32::from(rows),
+                        name,
+                        parent_session_id: (!parent_session_id.is_empty())
+                            .then_some(parent_session_id),
+                    })
+                    .await?;
+                Ok(host_environment_session_view(session))
+            }
             #[cfg(target_os = "linux")]
-            Self::NativeLocal { name, .. } => {
-                let session = native_environment_session_client(name)
+            Self::NativeLocal { environment_id, .. } => {
+                let session = native_environment_session_client(environment_id)
                     .await?
                     .launch(codewire_client::LaunchSessionRequest {
                         command,
@@ -153,6 +305,9 @@ impl EnvironmentSessionTarget {
                         term,
                         columns: u32::from(columns),
                         rows: u32::from(rows),
+                        name,
+                        parent_session_id: (!parent_session_id.is_empty())
+                            .then_some(parent_session_id),
                         ..Default::default()
                     })
                     .await?;
@@ -175,6 +330,9 @@ impl EnvironmentSessionTarget {
                         term,
                         columns: u32::from(columns),
                         rows: u32::from(rows),
+                        name,
+                        parent_session_id: (!parent_session_id.is_empty())
+                            .then_some(parent_session_id),
                         ..Default::default()
                     })
                     .await
@@ -190,9 +348,16 @@ impl EnvironmentSessionTarget {
 
     async fn get(&self, session_id: &str) -> anyhow::Result<EnvironmentSessionView> {
         match self {
+            #[cfg(unix)]
+            Self::Host { environment, .. } => Ok(host_environment_session_view(
+                host_session_client(environment)
+                    .await?
+                    .get(session_id)
+                    .await?,
+            )),
             #[cfg(target_os = "linux")]
-            Self::NativeLocal { name, .. } => Ok(platform_environment_session_view(
-                native_environment_session_client(name)
+            Self::NativeLocal { environment_id, .. } => Ok(platform_environment_session_view(
+                native_environment_session_client(environment_id)
                     .await?
                     .get(session_id)
                     .await?,
@@ -223,9 +388,16 @@ impl EnvironmentSessionTarget {
 
     async fn restart(&self, session_id: &str) -> anyhow::Result<EnvironmentSessionView> {
         match self {
+            #[cfg(unix)]
+            Self::Host { environment, .. } => Ok(host_environment_session_view(
+                host_session_client(environment)
+                    .await?
+                    .restart(session_id)
+                    .await?,
+            )),
             #[cfg(target_os = "linux")]
-            Self::NativeLocal { name, .. } => Ok(platform_environment_session_view(
-                native_environment_session_client(name)
+            Self::NativeLocal { environment_id, .. } => Ok(platform_environment_session_view(
+                native_environment_session_client(environment_id)
                     .await?
                     .restart(session_id)
                     .await?,
@@ -256,6 +428,8 @@ impl EnvironmentSessionTarget {
 
     fn current_target(&self) -> &config::CurrentTargetConfig {
         match self {
+            #[cfg(unix)]
+            Self::Host { target, .. } => target,
             #[cfg(target_os = "linux")]
             Self::NativeLocal { target, .. } => target,
             Self::Platform { target, .. } => target,
@@ -264,6 +438,8 @@ impl EnvironmentSessionTarget {
 
     fn default_working_dir(&self) -> String {
         match self {
+            #[cfg(unix)]
+            Self::Host { environment, .. } => environment.path.to_string_lossy().into_owned(),
             #[cfg(target_os = "linux")]
             Self::NativeLocal { working_dir, .. } => working_dir.clone(),
             Self::Platform { .. } => LOCAL_WORKSPACE_PATH.to_string(),
@@ -276,7 +452,21 @@ async fn resolve_environment_session_target(
     environment: Option<&str>,
 ) -> anyhow::Result<EnvironmentSessionTarget> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
+    #[cfg(unix)]
+    if let Some(requested) = environment.and_then(trimmed_str) {
+        if let Some(environment) = resolve_host_reference(globals, requested, None).await? {
+            return Ok(EnvironmentSessionTarget::Host {
+                target: environment.current_target(),
+                environment,
+            });
+        }
+    } else if let Some(environment) = selected_host_environment()? {
+        return Ok(EnvironmentSessionTarget::Host {
+            target: environment.current_target(),
+            environment,
+        });
+    }
     #[cfg(target_os = "linux")]
     if let Some(requested) = environment.and_then(trimmed_str)
         && let Ok(target) = config::current_target(&paths.mesh_data_dir)
@@ -318,7 +508,11 @@ pub(crate) fn native_session_request_matches(
     environment: &codewire_local_vmm::control::v1::Environment,
     requested: &str,
 ) -> bool {
-    environment.name == requested || environment.id == requested
+    if uuid::Uuid::parse_str(requested).is_ok() {
+        environment.id == requested
+    } else {
+        environment.name == requested || environment.id == requested
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -327,13 +521,14 @@ fn native_session_target(
 ) -> EnvironmentSessionTarget {
     let working_dir = native_environment_session_working_dir(&environment);
     let name = environment.name;
+    let environment_id = environment.id;
     EnvironmentSessionTarget::NativeLocal {
         target: config::CurrentTargetConfig {
             kind: "local".to_string(),
             target_ref: name.clone(),
             name: name.clone(),
         },
-        name,
+        environment_id,
         working_dir,
     }
 }
@@ -354,6 +549,15 @@ async fn environment_session_target_from_current(
     target: config::CurrentTargetConfig,
 ) -> anyhow::Result<EnvironmentSessionTarget> {
     match target.kind.as_str() {
+        #[cfg(unix)]
+        "host" => {
+            let environment = host_environment(&target.target_ref)?
+                .context("selected host environment no longer exists")?;
+            Ok(EnvironmentSessionTarget::Host {
+                target,
+                environment,
+            })
+        }
         "local" => {
             #[cfg(target_os = "linux")]
             let environment = native_environment(&target.target_ref)
@@ -390,6 +594,15 @@ fn platform_environment_session_view(
 ) -> EnvironmentSessionView {
     EnvironmentSessionView {
         session_id: session.session_id,
+        name: session.name,
+        parent_session_id: session.parent_session_id.unwrap_or_default(),
+        cleanup_unknown: session.cleanup_unknown,
+        launch_generation: session.launch_generation,
+        started_at: session
+            .started_at
+            .into_option()
+            .map(|t| format!("{}:{}", t.seconds, t.nanos))
+            .unwrap_or_default(),
         state: platform_environment_session_state_name(session.state.as_known()).to_string(),
         command: session.command,
         working_dir: session.working_dir,
@@ -398,6 +611,363 @@ fn platform_environment_session_view(
         output_end_offset: session.output_end_offset,
         output_start_offset: session.output_start_offset,
         status_message: session.status_message,
+    }
+}
+
+#[cfg(unix)]
+pub(super) fn host_environment_session_view(
+    session: codewire_daemon_proto::daemon::v1::SessionRecord,
+) -> EnvironmentSessionView {
+    use codewire_daemon_proto::daemon::v1::SessionLifecycleState as State;
+    let state = match State::try_from(session.state).ok() {
+        Some(State::Starting) => "Starting",
+        Some(State::Running) => "Running",
+        Some(State::Stopping) => "Stopping",
+        Some(State::Stopped) => "Stopped",
+        Some(State::Exited) => "Exited",
+        Some(State::Failed) => "Failed",
+        Some(State::Interrupted) => "Interrupted",
+        _ => "Unknown",
+    };
+    EnvironmentSessionView {
+        session_id: session.session_id,
+        name: session.name,
+        parent_session_id: session.parent_session_id.unwrap_or_default(),
+        cleanup_unknown: session.cleanup_unknown,
+        launch_generation: session.launch_generation,
+        started_at: session
+            .started_at
+            .map(|t| format!("{}:{}", t.seconds, t.nanos))
+            .unwrap_or_default(),
+        state: state.into(),
+        command: session.command,
+        working_dir: session.working_dir,
+        pty: session.pty,
+        exit_code: session.exit_code,
+        output_end_offset: session.output_end_offset,
+        output_start_offset: session.output_start_offset,
+        status_message: session.status_message,
+    }
+}
+
+async fn resolve_parent_session(
+    target: &EnvironmentSessionTarget,
+    requested: Option<&str>,
+) -> anyhow::Result<String> {
+    let Some(requested) = requested else {
+        return Ok(String::new());
+    };
+    match select_environment_session(target, Some(requested)).await? {
+        SessionSelection::Select(parent) => Ok(parent.session_id),
+        SessionSelection::Create => anyhow::bail!("parent session does not exist"),
+    }
+}
+
+fn split_session_target(values: &[String]) -> anyhow::Result<(Option<&str>, &str)> {
+    match values {
+        [session] => Ok((None, session)),
+        [environment, session] => Ok((Some(environment), session)),
+        _ => anyhow::bail!("expected SESSION, or ENV SESSION"),
+    }
+}
+
+async fn resolve_selected_session(
+    globals: &Globals,
+    values: &[String],
+) -> anyhow::Result<(EnvironmentSessionTarget, EnvironmentSessionView)> {
+    let (environment, requested) = split_session_target(values)?;
+    let target = resolve_environment_session_target(globals, environment).await?;
+    let session = match select_environment_session(&target, Some(requested)).await? {
+        SessionSelection::Select(session) => *session,
+        SessionSelection::Create => anyhow::bail!("session does not exist"),
+    };
+    Ok((target, session))
+}
+
+fn managed_session(session: &EnvironmentSessionView) -> bool {
+    session.command.iter().any(|arg| arg == "_agent-driver")
+}
+
+pub(crate) async fn handle_send_command(globals: &Globals, args: SendArgs) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        return super::member_control::terminal::send(globals, args).await;
+    }
+    anyhow::ensure!(
+        args.request_id.is_none() && args.expected_launch_generation.is_none(),
+        "member mutation flags require --member"
+    );
+    let (values, data) = if let Some(key) = args.key.as_deref() {
+        let data = match key {
+            "ctrl-c" => vec![3],
+            "ctrl-d" => vec![4],
+            "enter" => vec![b'\r'],
+            "escape" => vec![27],
+            "tab" => vec![b'\t'],
+            _ => anyhow::bail!("unsupported terminal key"),
+        };
+        (args.target_and_text, data)
+    } else {
+        let mut values = args.target_and_text;
+        if !(2..=3).contains(&values.len()) {
+            anyhow::bail!("expected SESSION TEXT, or ENV SESSION TEXT");
+        }
+        let mut data = values.pop().expect("validated text argument").into_bytes();
+        if !args.no_newline {
+            data.push(b'\n');
+        }
+        (values, data)
+    };
+    if data.is_empty() || data.len() > 64 * 1024 {
+        anyhow::bail!("session input must contain 1–65536 bytes");
+    }
+    let (target, session) = resolve_selected_session(globals, &values).await?;
+    if managed_session(&session) {
+        anyhow::bail!("managed agents receive tasks through cw msg or cw steer");
+    }
+    if args.key.is_some() && !session.pty {
+        anyhow::bail!("--key requires a PTY session; it is a terminal control byte");
+    }
+    target
+        .send_input(&session.session_id, data)
+        .await
+        .context("input delivery was not confirmed; do not automatically resend")?;
+    println!("Input written to {}", session.session_id);
+    Ok(())
+}
+
+pub(crate) async fn handle_stop_command(
+    globals: &Globals,
+    args: SessionTargetArgs,
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        anyhow::ensure!(
+            args.cleanup_request_id.is_none(),
+            "--cleanup-request-id requires a managed platform Stop"
+        );
+        return super::member_control::managed::stop(globals, args).await;
+    }
+    let (target, session) = resolve_selected_session(globals, &args.target).await?;
+    #[cfg(unix)]
+    if matches!(target, EnvironmentSessionTarget::Platform { .. }) && managed_session(&session) {
+        let stopped = agents::platform_host::control_session(
+            target,
+            &session,
+            args.request_id.as_deref(),
+            args.expected_launch_generation,
+            args.cleanup_request_id,
+            codewire_client::platform_agents::EnvironmentAgentAction::Stop,
+        )
+        .await?;
+        return print_environment_sessions(std::slice::from_ref(&stopped), args.output);
+    }
+    anyhow::ensure!(
+        args.request_id.is_none()
+            && args.expected_launch_generation.is_none()
+            && args.cleanup_request_id.is_none(),
+        "request and generation flags require --member or a managed platform session"
+    );
+    #[cfg(target_os = "linux")]
+    if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) && managed_session(&session) {
+        let stopped = agents::stop_native_managed(&target, &session).await?;
+        return print_environment_sessions(std::slice::from_ref(&stopped), args.output);
+    }
+    let stopped = target.stop(&session.session_id).await?;
+    print_environment_sessions(std::slice::from_ref(&stopped), args.output)?;
+    if !session_is_terminal(&stopped) || stopped.cleanup_unknown {
+        anyhow::bail!("session stop is not confirmed: {}", stopped.status_message);
+    }
+    Ok(())
+}
+
+pub(crate) async fn handle_restart_command(
+    globals: &Globals,
+    args: SessionTargetArgs,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        args.cleanup_request_id.is_none(),
+        "--cleanup-request-id requires Stop"
+    );
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        return super::member_control::managed::action(
+            globals,
+            args,
+            codewire_daemon_proto::daemon::v1::HostManagedAction::Restart,
+        )
+        .await;
+    }
+    let (target, session) = resolve_selected_session(globals, &args.target).await?;
+    #[cfg(unix)]
+    if matches!(target, EnvironmentSessionTarget::Platform { .. }) && managed_session(&session) {
+        let restarted = agents::platform_host::control_session(
+            target,
+            &session,
+            args.request_id.as_deref(),
+            args.expected_launch_generation,
+            None,
+            codewire_client::platform_agents::EnvironmentAgentAction::Restart,
+        )
+        .await?;
+        return print_environment_sessions(std::slice::from_ref(&restarted), args.output);
+    }
+    anyhow::ensure!(
+        globals.member.is_none()
+            && args.request_id.is_none()
+            && args.expected_launch_generation.is_none(),
+        "request and generation flags require --member or a managed platform session"
+    );
+    if session.cleanup_unknown {
+        anyhow::bail!("session cleanup is unknown; restart is fenced");
+    }
+    #[cfg(target_os = "linux")]
+    if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) && managed_session(&session) {
+        let restarted = agents::restart_native_managed(&target, &session).await?;
+        return print_environment_sessions(std::slice::from_ref(&restarted), args.output);
+    }
+    let restarted = target.restart(&session.session_id).await?;
+    print_environment_sessions(std::slice::from_ref(&restarted), args.output)
+}
+
+pub(crate) async fn handle_wait_command(globals: &Globals, args: WaitArgs) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        if args.message.is_some() {
+            return super::member_control::managed::wait(globals, args).await;
+        }
+        return super::member_control::terminal::wait(globals, args).await;
+    }
+    let timeout = tailnet_ssh::parse_duration(&args.timeout)
+        .map_err(|e| anyhow::anyhow!("invalid wait timeout: {e}"))?;
+    if timeout.is_zero() {
+        anyhow::bail!("wait timeout must be greater than zero");
+    }
+    if let Some(message) = args.message {
+        #[cfg(unix)]
+        return agents::wait_agent_message(globals, &message, timeout, args.output).await;
+        #[cfg(not(unix))]
+        anyhow::bail!("managed message waiting currently requires Linux or macOS");
+    }
+    let (target, initial) = resolve_selected_session(globals, &args.target).await?;
+    let future = async {
+        let mut offset = 0;
+        let mut history_gap = false;
+        let mut output = Vec::new();
+        let mut started_at = initial.started_at.clone();
+        loop {
+            let replay = target.read_output(&initial.session_id, offset).await?;
+            if replay.history_gap {
+                history_gap = true;
+                if matches!(args.output, OutputFormat::Text) {
+                    eprintln!("[cw] older output unavailable; showing retained output");
+                }
+            }
+            for chunk in replay.chunks {
+                match args.output {
+                    OutputFormat::Text => {
+                        write_session_output(&mut std::io::stdout(), &chunk, true)?
+                    }
+                    OutputFormat::Json => {
+                        output.extend_from_slice(&chunk);
+                        if output.len() > 4 * 1024 * 1024 {
+                            output.drain(..output.len() - 4 * 1024 * 1024);
+                            history_gap = true;
+                        }
+                    }
+                }
+            }
+            offset = replay.next_offset;
+            let current = target.get(&initial.session_id).await?;
+            if !started_at.is_empty() && current.started_at != started_at {
+                anyhow::bail!(
+                    "session restarted during wait; completion of the selected run is unknown"
+                );
+            }
+            if started_at.is_empty() {
+                started_at = current.started_at.clone();
+            }
+            if session_is_terminal(&current) && replay.eof && offset >= current.output_end_offset {
+                match args.output {
+                    OutputFormat::Json => println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &serde_json::json!({"session":current,"output":String::from_utf8_lossy(&output),"history_gap":history_gap,"eof":true})
+                        )?
+                    ),
+                    OutputFormat::Text => {}
+                }
+                if current.cleanup_unknown {
+                    anyhow::bail!(
+                        "session cleanup remains unknown: {}",
+                        current.status_message
+                    );
+                }
+                ensure_environment_session_succeeded(&current)?;
+                return Ok::<(), anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+    tokio::time::timeout(timeout, future)
+        .await
+        .context("wait timed out; no completion confirmed")?
+}
+
+#[cfg(unix)]
+async fn attach_host_environment_session(
+    environment: &HostEnvironment,
+    session: &EnvironmentSessionView,
+    offset: u64,
+    interactive: bool,
+    raw_output: bool,
+    ansi: &mut LogsAnsiFilter,
+) -> anyhow::Result<AttachExit> {
+    use codewire_daemon_proto::daemon::v1::session_attach_message::Payload;
+    let client = host_session_client(environment).await?;
+    let mut attachment = client.attach(&session.session_id, offset).await?;
+    let input = attachment.input_handle();
+    let interactive =
+        interactive && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    if interactive && managed_session(session) {
+        anyhow::bail!("use cw msg or cw steer for managed agents; cw logs reads their output");
+    }
+    let _raw = interactive.then(RawModeGuard::enable).transpose()?;
+    let mut decoder = AttachNavigationDecoder::default();
+    let mut stdin = tokio::io::stdin();
+    let mut buf = [0u8; 4096];
+    let mut cursor = offset;
+    let mut stdin_open = interactive;
+    loop {
+        tokio::select! {
+            event=attachment.next_event()=>{
+                let Some(event)=event? else{return Ok(AttachExit::StreamEnded{output_offset:cursor});};
+                match event.payload {
+                    Some(Payload::Output(chunk))=>{
+                        if raw_output {
+                            write_session_output(&mut std::io::stdout(), &chunk.data, true)?;
+                        } else {
+                            write_session_output(&mut std::io::stdout(), &ansi.strip(&chunk.data), true)?;
+                        }
+                        cursor=chunk.next_offset;
+                    }
+                    Some(Payload::HistoryGap(gap))=>{
+                        eprintln!("[cw] older output unavailable; showing retained output");
+                        cursor=gap.retained_start_offset;
+                        *ansi=LogsAnsiFilter::default();
+                    }
+                    Some(Payload::Status(status)) if (4..=7).contains(&status.state)=>return Ok(AttachExit::Terminal),
+                    _=>{},
+                }
+            }
+            n=stdin.read(&mut buf),if stdin_open=>{
+                let n=n?;
+                if n==0{stdin_open=false;continue;}
+                let (action,bytes)=decoder.feed(&buf[..n]);
+                if !bytes.is_empty(){client.send_input(&session.session_id,bytes).await?;}
+                if let Some(action)=action{input.detach().await?;return Ok(action);}
+            }
+        }
     }
 }
 
@@ -421,7 +991,7 @@ pub(crate) fn platform_environment_session_state_name(
 
 enum SessionSelection {
     Create,
-    Select(EnvironmentSessionView),
+    Select(Box<EnvironmentSessionView>),
 }
 
 async fn select_environment_session(
@@ -430,16 +1000,31 @@ async fn select_environment_session(
 ) -> anyhow::Result<SessionSelection> {
     let sessions = target.list().await?;
     if let Some(requested) = requested.and_then(trimmed_str) {
-        return sessions
-            .into_iter()
-            .find(|session| session.session_id == requested)
-            .map(SessionSelection::Select)
+        return requested_environment_session(&sessions, requested)
+            .cloned()
+            .map(|session| SessionSelection::Select(Box::new(session)))
             .ok_or_else(|| anyhow::anyhow!("session {requested:?} not found"));
     }
     match sessions.as_slice() {
         [] => Ok(SessionSelection::Create),
-        [session] => Ok(SessionSelection::Select(session.clone())),
-        _ => select_session_from_picker(&sessions).map(SessionSelection::Select),
+        [session] => Ok(SessionSelection::Select(Box::new(session.clone()))),
+        _ => select_session_from_picker(&sessions)
+            .map(|session| SessionSelection::Select(Box::new(session))),
+    }
+}
+
+pub(crate) fn requested_environment_session<'a>(
+    sessions: &'a [EnvironmentSessionView],
+    requested: &str,
+) -> Option<&'a EnvironmentSessionView> {
+    let by_id = sessions
+        .iter()
+        .find(|session| session.session_id == requested);
+    let canonical_id = requested.strip_prefix("session-").unwrap_or(requested);
+    if uuid::Uuid::parse_str(canonical_id).is_ok() {
+        by_id
+    } else {
+        by_id.or_else(|| sessions.iter().find(|session| session.name == requested))
     }
 }
 
@@ -457,7 +1042,7 @@ fn select_session_from_picker(
             "  {}) {} {}",
             index + 1,
             session.session_id,
-            session.command.join(" ")
+            session_command_label(session)
         );
     }
     eprint!("Session number: ");
@@ -515,7 +1100,15 @@ pub(crate) fn environment_run_allocates_tty_for_streams(
     args.tty || (stdin_is_terminal && stdout_is_terminal)
 }
 
-fn print_environment_sessions(
+fn session_command_label(session: &EnvironmentSessionView) -> String {
+    if managed_session(session) {
+        "managed agent".into()
+    } else {
+        session.command.join(" ")
+    }
+}
+
+pub(super) fn print_environment_sessions(
     sessions: &[EnvironmentSessionView],
     output: OutputFormat,
 ) -> anyhow::Result<()> {
@@ -525,10 +1118,11 @@ fn print_environment_sessions(
         OutputFormat::Text => {
             for session in sessions {
                 println!(
-                    "{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}",
                     session.session_id,
+                    session.name,
                     session.state,
-                    session.command.join(" ")
+                    session_command_label(session)
                 );
             }
         }
@@ -540,7 +1134,22 @@ pub(crate) async fn handle_environment_run_command(
     globals: &Globals,
     args: EnvironmentRunArgs,
 ) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        if args.agent.is_some() {
+            return super::member_control::managed::run(globals, args).await;
+        }
+        return super::member_control::terminal::run(globals, args).await;
+    }
+    anyhow::ensure!(args.request_id.is_none(), "--request-id requires --member");
     let target = resolve_environment_session_target(globals, args.environment.as_deref()).await?;
+    if args.agent.is_some() {
+        #[cfg(unix)]
+        return agents::handle_agent_run_command(globals, target, args).await;
+        #[cfg(not(unix))]
+        anyhow::bail!("managed conversations currently require a trusted Linux or macOS host");
+    }
+    let parent_session_id = resolve_parent_session(&target, args.parent.as_deref()).await?;
     let pty = environment_run_allocates_tty(&args);
     let working_dir = args.workdir.unwrap_or_else(|| target.default_working_dir());
     target.ensure_ready_for_run()?;
@@ -550,6 +1159,8 @@ pub(crate) async fn handle_environment_run_command(
             working_dir,
             parse_env_overrides(&args.env)?,
             pty,
+            args.name.unwrap_or_default(),
+            parent_session_id,
         )
         .await?;
     if matches!(args.output, OutputFormat::Json) {
@@ -577,6 +1188,13 @@ pub(crate) async fn handle_environment_shell_command(
     handle_environment_run_command(
         globals,
         EnvironmentRunArgs {
+            request_id: None,
+            name: None,
+            parent: None,
+            agent: None,
+            model: None,
+            effort: None,
+            prompt: None,
             environment: args.environment,
             workdir: None,
             env: Vec::new(),
@@ -689,9 +1307,21 @@ async fn attach_environment_session(
     let mut reconnect_budget = AttachmentReconnectBudget::default();
     loop {
         let exit = match &target {
+            #[cfg(unix)]
+            EnvironmentSessionTarget::Host { environment, .. } => {
+                attach_host_environment_session(
+                    environment,
+                    &session,
+                    output_offset,
+                    session.pty,
+                    true,
+                    &mut LogsAnsiFilter::default(),
+                )
+                .await?
+            }
             #[cfg(target_os = "linux")]
-            EnvironmentSessionTarget::NativeLocal { name, .. } => {
-                let client = native_environment_session_client(name).await?;
+            EnvironmentSessionTarget::NativeLocal { environment_id, .. } => {
+                let client = native_environment_session_client(environment_id).await?;
                 let attachment = client.attach(&session.session_id, output_offset).await?;
                 attach_platform_environment_session(attachment, session.pty, true).await?
             }
@@ -883,7 +1513,12 @@ pub(crate) fn ensure_environment_session_succeeded(
     session: &EnvironmentSessionView,
 ) -> anyhow::Result<()> {
     match session.exit_code {
-        Some(0) => Ok(()),
+        Some(0) if session.state == "Exited" && !session.cleanup_unknown => Ok(()),
+        Some(0) => anyhow::bail!(
+            "session is {} with cleanup_unknown={}; completion is not confirmed",
+            session.state,
+            session.cleanup_unknown
+        ),
         Some(code) => anyhow::bail!("session exited with code {code}"),
         None => {
             let status_suffix = if session.status_message.is_empty() {
@@ -900,7 +1535,7 @@ pub(crate) fn ensure_environment_session_succeeded(
     }
 }
 
-fn write_session_output(
+pub(super) fn write_session_output(
     stdout: &mut std::io::Stdout,
     data: &[u8],
     raw_output: bool,
@@ -938,7 +1573,7 @@ async fn select_or_create_environment_session(
     target: &EnvironmentSessionTarget,
 ) -> anyhow::Result<EnvironmentSessionView> {
     match select_environment_session(target, None).await? {
-        SessionSelection::Select(session) => Ok(session),
+        SessionSelection::Select(session) => Ok(*session),
         SessionSelection::Create if should_create_session()? => {
             target
                 .launch(
@@ -946,6 +1581,8 @@ async fn select_or_create_environment_session(
                     target.default_working_dir(),
                     BTreeMap::new(),
                     true,
+                    String::new(),
+                    String::new(),
                 )
                 .await
         }
@@ -961,7 +1598,7 @@ async fn adjacent_environment_target(
     forward: bool,
 ) -> anyhow::Result<EnvironmentSessionTarget> {
     let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
+    let paths = ResolvePaths::from_env(&env)?;
     let targets = attachment_environment_targets(globals, &paths, &env).await?;
     let current_index = targets
         .iter()
@@ -993,6 +1630,8 @@ async fn attachment_environment_targets(
         .collect::<Vec<_>>();
     #[cfg(not(target_os = "linux"))]
     let mut targets = Vec::new();
+    #[cfg(unix)]
+    targets.extend(host_environments()?.into_iter().map(|e| e.current_target()));
 
     match resolve_platform(globals, paths, env) {
         Ok(platform) => {
@@ -1074,6 +1713,73 @@ fn strip_ansi_escapes(data: &[u8]) -> Vec<u8> {
 }
 
 pub(crate) async fn handle_list_command(globals: &Globals, args: ListArgs) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        return super::member_control::terminal::list(globals, args).await;
+    }
+    if args.all {
+        let paths = ResolvePaths::from_env(&OsEnv)?;
+        let targets = attachment_environment_targets(globals, &paths, &OsEnv).await?;
+        let mut rows = Vec::new();
+        let mut incomplete = false;
+        for current in targets {
+            let result = match environment_session_target_from_current(
+                globals,
+                &paths,
+                &OsEnv,
+                current.clone(),
+            )
+            .await
+            {
+                Ok(target) => target.list().await,
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(sessions)=>rows.push(serde_json::json!({"environment_id":current.target_ref,"environment":current.name,
+                    "placement":if current.kind=="env"{"platform"}else{"local"},
+                    "type":if current.kind=="host"{"host"}else{"sandbox"},"sessions":sessions,"error":null})),
+                Err(error)=>{
+                    incomplete=true;
+                    rows.push(serde_json::json!({"environment_id":current.target_ref,"environment":current.name,
+                        "placement":if current.kind=="env"{"platform"}else{"local"},
+                        "type":if current.kind=="host"{"host"}else{"sandbox"},"sessions":[],"error":error.to_string()}));
+                }
+            }
+        }
+        match args.output {
+            OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&rows)?),
+            OutputFormat::Text => {
+                if rows.is_empty() {
+                    println!("No environments");
+                }
+                for row in rows {
+                    println!(
+                        "{} ({}/{})",
+                        row["environment"].as_str().unwrap_or(""),
+                        row["placement"].as_str().unwrap_or(""),
+                        row["type"].as_str().unwrap_or("")
+                    );
+                    if let Some(error) = row["error"].as_str() {
+                        println!("  unavailable: {error}");
+                    }
+                    for session in row["sessions"].as_array().into_iter().flatten() {
+                        println!(
+                            "  {}\t{}\t{}",
+                            session["session_id"].as_str().unwrap_or(""),
+                            session["name"].as_str().unwrap_or(""),
+                            session["state"].as_str().unwrap_or("")
+                        );
+                    }
+                }
+            }
+        }
+        if incomplete {
+            anyhow::bail!(
+                "session inventory is partial; unavailable environments are listed above"
+            );
+        }
+        return Ok(());
+    }
     let target = resolve_environment_session_target(globals, args.environment.as_deref()).await?;
     let sessions = target.list().await?;
     print_environment_sessions(&sessions, args.output)?;
@@ -1084,10 +1790,14 @@ pub(crate) async fn handle_attach_command(
     globals: &Globals,
     args: AttachArgs,
 ) -> anyhow::Result<()> {
-    let target = resolve_environment_session_target(globals, args.environment.as_deref()).await?;
-    let requested = args.selected_session.or(args.session);
+    let (target, requested) = resolve_attach_or_logs_target(
+        globals,
+        args.environment,
+        args.selected_session.or(args.session),
+    )
+    .await?;
     let session = match select_environment_session(&target, requested.as_deref()).await? {
-        SessionSelection::Select(session) => session,
+        SessionSelection::Select(session) => *session,
         SessionSelection::Create => select_or_create_environment_session(&target).await?,
     };
     let _ = attach_environment_session(globals, target, session).await?;
@@ -1095,39 +1805,169 @@ pub(crate) async fn handle_attach_command(
 }
 
 pub(crate) async fn handle_logs_command(globals: &Globals, args: LogsArgs) -> anyhow::Result<()> {
-    let target = resolve_environment_session_target(globals, args.environment.as_deref()).await?;
-    let session = match select_environment_session(&target, args.session.as_deref()).await? {
-        SessionSelection::Select(session) => session,
+    #[cfg(target_os = "linux")]
+    if globals.member.is_some() {
+        return super::member_control::terminal::logs(globals, args).await;
+    }
+    let (target, requested) =
+        resolve_attach_or_logs_target(globals, args.environment, args.session).await?;
+    let session = match select_environment_session(&target, requested.as_deref()).await? {
+        SessionSelection::Select(session) => *session,
         SessionSelection::Create => anyhow::bail!("no sessions in the selected environment"),
     };
-    let output = target.read_output(&session.session_id, 0).await?;
-    if output.history_gap {
-        eprintln!("[cw] older output unavailable; showing recent history");
-    }
-    let data = output.chunks.concat();
-    let data = tail_session_output(&data, args.tail);
+    // Freeze the initial boundary: a running writer must not keep ordinary logs
+    // chasing a moving EOF. The daemon retains 4 MiB and compacts at 8 MiB;
+    // allow that whole window while bounding faulty or unexpectedly large replay.
+    const MAX_REPLAY_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_REPLAY_PAGES: usize = 128;
+    let end_offset = session.output_end_offset;
+    let mut output_offset = 0;
+    let mut replay_bytes = 0usize;
+    let mut drained = false;
+    let mut tail_buffer = args.tail.map(|_| Vec::new());
+    let mut ansi = LogsAnsiFilter::default();
     let mut stdout = std::io::stdout();
-    write_session_output(&mut stdout, &data, args.raw)?;
+    for _ in 0..MAX_REPLAY_PAGES {
+        let output = target
+            .read_output(&session.session_id, output_offset)
+            .await?;
+        anyhow::ensure!(
+            output.next_offset >= output_offset,
+            "session output replay moved backwards"
+        );
+        if output.history_gap {
+            eprintln!("[cw] older output unavailable; showing recent history");
+            // A gap breaks both the previous line and its escape-code context.
+            if let Some(buffer) = &mut tail_buffer {
+                buffer.clear();
+            }
+            ansi = LogsAnsiFilter::default();
+        }
+        for chunk in output.chunks {
+            replay_bytes = replay_bytes
+                .checked_add(chunk.len())
+                .context("session output replay size overflow")?;
+            anyhow::ensure!(
+                replay_bytes <= MAX_REPLAY_BYTES,
+                "session output replay exceeds the bounded retained-history budget"
+            );
+            if let Some(buffer) = &mut tail_buffer {
+                if args.tail != Some(0) {
+                    buffer.extend_from_slice(&chunk);
+                    let start = session_output_tail_start(buffer, args.tail);
+                    buffer.drain(..start);
+                }
+            } else if args.raw {
+                write_session_output(&mut stdout, &chunk, true)?;
+            } else {
+                write_session_output(&mut stdout, &ansi.strip(&chunk), true)?;
+            }
+        }
+        anyhow::ensure!(
+            output.next_offset > output_offset || output_offset >= end_offset,
+            "session output replay did not advance to the selected end offset {end_offset}"
+        );
+        output_offset = output.next_offset;
+        if output_offset >= end_offset {
+            drained = true;
+            break;
+        }
+        anyhow::ensure!(
+            !output.eof,
+            "session output ended before the selected end offset {end_offset}"
+        );
+    }
+    anyhow::ensure!(drained, "session output replay exceeded its page budget");
+    if let Some(buffer) = tail_buffer {
+        let buffer = tail_session_output(&buffer, args.tail);
+        if args.raw {
+            write_session_output(&mut stdout, &buffer, true)?;
+        } else {
+            write_session_output(&mut stdout, &ansi.strip(&buffer), true)?;
+        }
+    }
     if args.follow && !session_is_terminal(&session) {
-        follow_session_output(&target, &session, output.next_offset, args.raw).await?;
+        follow_session_output(&target, &session, output_offset, args.raw, ansi).await?;
     }
     Ok(())
 }
 
+#[derive(Default)]
+pub(super) struct LogsAnsiFilter {
+    escape: bool,
+    csi: bool,
+}
+
+impl LogsAnsiFilter {
+    pub(super) fn strip(&mut self, data: &[u8]) -> Vec<u8> {
+        let mut output = Vec::with_capacity(data.len());
+        for &byte in data {
+            if self.csi {
+                if (0x40..=0x7e).contains(&byte) {
+                    self.csi = false;
+                }
+            } else if self.escape {
+                self.escape = false;
+                self.csi = byte == b'[';
+            } else if byte == 0x1b {
+                self.escape = true;
+            } else {
+                output.push(byte);
+            }
+        }
+        output
+    }
+}
+
+/// A single positional value may name a session in the selected environment.
+/// The two-value ENV SESSION form and attach --session remain explicit.
+async fn resolve_attach_or_logs_target(
+    globals: &Globals,
+    environment: Option<String>,
+    session: Option<String>,
+) -> anyhow::Result<(EnvironmentSessionTarget, Option<String>)> {
+    if session.is_none()
+        && let Some(requested) = environment.as_deref()
+        && let Ok(current) = resolve_environment_session_target(globals, None).await
+        && let Ok(sessions) = current.list().await
+        && requested_environment_session(&sessions, requested).is_some()
+    {
+        if resolve_environment_session_target(globals, Some(requested))
+            .await
+            .is_ok()
+        {
+            anyhow::bail!(
+                "{requested:?} names both an environment and a session; use ENV SESSION explicitly"
+            );
+        }
+        return Ok((current, environment));
+    }
+    let target = resolve_environment_session_target(globals, environment.as_deref()).await?;
+    Ok((target, session))
+}
+
 pub(crate) fn tail_session_output(data: &[u8], tail: Option<u32>) -> Vec<u8> {
+    data[session_output_tail_start(data, tail)..].to_vec()
+}
+
+pub(super) fn session_output_tail_start(data: &[u8], tail: Option<u32>) -> usize {
     let Some(tail) = tail else {
-        return data.to_vec();
+        return 0;
     };
     if tail == 0 {
-        return Vec::new();
+        return data.len();
     }
-    let lines = data
-        .split_inclusive(|byte| *byte == b'\n')
-        .collect::<Vec<_>>();
-    let start = lines
-        .len()
-        .saturating_sub(usize::try_from(tail).unwrap_or(usize::MAX));
-    lines.into_iter().skip(start).flatten().copied().collect()
+    let end = data.len() - usize::from(data.last() == Some(&b'\n'));
+    let mut remaining = tail;
+    for index in (0..end).rev() {
+        if data[index] == b'\n' {
+            remaining -= 1;
+            if remaining == 0 {
+                return index + 1;
+            }
+        }
+    }
+    0
 }
 
 async fn follow_session_output(
@@ -1135,13 +1975,30 @@ async fn follow_session_output(
     session: &EnvironmentSessionView,
     mut output_offset: u64,
     raw_output: bool,
+    ansi: LogsAnsiFilter,
 ) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    let mut ansi = ansi;
+    #[cfg(not(unix))]
+    let _ = ansi;
     let mut reconnect_budget = AttachmentReconnectBudget::default();
     loop {
         let exit = match target {
+            #[cfg(unix)]
+            EnvironmentSessionTarget::Host { environment, .. } => {
+                attach_host_environment_session(
+                    environment,
+                    session,
+                    output_offset,
+                    false,
+                    raw_output,
+                    &mut ansi,
+                )
+                .await?
+            }
             #[cfg(target_os = "linux")]
-            EnvironmentSessionTarget::NativeLocal { name, .. } => {
-                let client = native_environment_session_client(name).await?;
+            EnvironmentSessionTarget::NativeLocal { environment_id, .. } => {
+                let client = native_environment_session_client(environment_id).await?;
                 attach_platform_environment_session(
                     client.attach(&session.session_id, output_offset).await?,
                     false,

@@ -17,7 +17,8 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/test.ts && tsx src/mesh.test.ts"
+    "test": "npm run test:runner && node scripts/run-tests.mjs",
+    "test:runner": "node --test scripts/run-tests.test.mjs"
   },
   "keywords": [
     "codewire",

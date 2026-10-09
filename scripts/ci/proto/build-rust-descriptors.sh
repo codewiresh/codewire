@@ -30,6 +30,8 @@ cd "$ROOT/proto"
   --path codewire/v1/credential.proto \
   --path codewire/v1/credential_delegation.proto \
   --path codewire/v1/environment.proto \
+  --path codewire/v1/environment_agent.proto \
+  --path codewire/v1/environment_cw_runtime.proto \
   --path codewire/v1/environment_session.proto \
   --path codewire/v1/exec.proto \
   --path codewire/v1/file.proto \

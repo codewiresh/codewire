@@ -1,0 +1,180 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Selects ordinary UID1000 cw invocations inside one already-running platform
+// Pod. Existing image cw, daemons, helpers and sessions are never replaced.
+// A duplicate request UUID is observation only. Unknown/Issued outcomes must
+// be observed with that same UUID; clients must never replay the mutation.
+service EnvironmentCwRuntimeService {
+  rpc GetEnvironmentCwRuntime(GetEnvironmentCwRuntimeRequest)
+      returns (GetEnvironmentCwRuntimeResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Exactly one header, then nonempty chunks of at most 64KiB, then EOF.
+  // Total bytes must equal identity.size (maximum256MiB). Intake is complete
+  // and admitted before journal admission or any Pod effect.
+  rpc UpdateEnvironmentCwRuntime(stream UpdateEnvironmentCwRuntimeRequest)
+      returns (UpdateEnvironmentCwRuntimeResponse);
+  rpc RollbackEnvironmentCwRuntime(RollbackEnvironmentCwRuntimeRequest)
+      returns (RollbackEnvironmentCwRuntimeResponse);
+  // Returns only saved operation metadata, never an executor/recovery permit.
+  rpc ObserveEnvironmentCwRuntime(ObserveEnvironmentCwRuntimeRequest)
+      returns (ObserveEnvironmentCwRuntimeResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// Complete unchanged schema2/protocol1/record1 payload identity. Only static
+// x86_64-unknown-linux-musl is admitted by this platform operation.
+message EnvironmentCwRuntimeIdentity {
+  uint32 schema_version = 1;
+  string package_version = 2;
+  uint32 protocol_version = 3;
+  uint32 record_version = 4;
+  string target = 5;
+  string source_revision = 6;
+  string source_tree_sha256 = 7;
+  string rustc = 8;
+  string sha256 = 9;
+  uint64 size = 10;
+}
+
+// Expected immutable binding and current environment generation are distinct.
+// No caller-controlled endpoint, path, command, environment or token exists.
+message EnvironmentCwRuntimeIncarnation {
+  string org_id = 1;
+  string environment_id = 2;
+  uint64 environment_generation = 3;
+  string namespace = 4;
+  string pod_name = 5;
+  string pod_uid = 6;
+  string claim_uid = 7;
+  string sandbox_uid = 8;
+  optional string workspace_pvc_uid = 9;
+  uint64 binding_generation = 10;
+  optional string projection_selection_sha256 = 11;
+  string managed_credential_clients = 12;
+  google.protobuf.Timestamp binding_bound_at = 13;
+}
+
+message EnvironmentCwRuntimeExpectation {
+  uint64 generation = 1;
+  optional string current_sha256 = 2;
+  optional string previous_sha256 = 3;
+}
+
+message EnvironmentCwRuntimeSelection {
+  uint64 generation = 1;
+  EnvironmentCwRuntimeIdentity current = 2;
+  EnvironmentCwRuntimeIdentity previous = 3;
+  bool pending = 4;
+  bool consistent = 5;
+  uint32 retained_count = 6;
+}
+
+message GetEnvironmentCwRuntimeRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message GetEnvironmentCwRuntimeResponse {
+  EnvironmentCwRuntimeIncarnation incarnation = 1;
+  bool supported_image = 2;
+  EnvironmentCwRuntimeIdentity bootstrap_identity = 3;
+  EnvironmentCwRuntimeSelection selection = 4;
+}
+
+message UpdateEnvironmentCwRuntimeHeader {
+  string org_id = 1;
+  string environment_id = 2;
+  string request_id = 3;
+  EnvironmentCwRuntimeIncarnation expected_incarnation = 4;
+  EnvironmentCwRuntimeExpectation expected_selection = 5;
+  EnvironmentCwRuntimeIdentity identity = 6;
+  // Present only for the absent Store (generation0), and must equal the
+  // verified original image identity observed through its captured channel.
+  EnvironmentCwRuntimeIdentity bootstrap_identity = 7;
+}
+
+message UpdateEnvironmentCwRuntimeRequest {
+  oneof payload {
+    UpdateEnvironmentCwRuntimeHeader header = 1;
+    bytes chunk = 2;
+  }
+}
+
+message UpdateEnvironmentCwRuntimeResponse {
+  EnvironmentCwRuntimeOperation operation = 1;
+}
+
+message RollbackEnvironmentCwRuntimeRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string request_id = 3;
+  EnvironmentCwRuntimeIncarnation expected_incarnation = 4;
+  EnvironmentCwRuntimeExpectation expected_selection = 5;
+  EnvironmentCwRuntimeIdentity identity = 6;
+}
+
+message RollbackEnvironmentCwRuntimeResponse {
+  EnvironmentCwRuntimeOperation operation = 1;
+}
+
+message ObserveEnvironmentCwRuntimeRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  string request_id = 3;
+}
+
+message ObserveEnvironmentCwRuntimeResponse {
+  EnvironmentCwRuntimeOperation operation = 1;
+}
+
+message EnvironmentCwRuntimeStaged {
+  string sha256 = 1;
+  uint64 size = 2;
+}
+
+message EnvironmentCwRuntimeSelected {
+  string sha256 = 1;
+  uint64 generation = 2;
+  optional string previous_sha256 = 3;
+  bool changed = 4;
+}
+
+message EnvironmentCwRuntimeCleaned {}
+
+message EnvironmentCwRuntimeAcknowledgement {
+  uint32 checkpoint = 1;
+  // Closed journal values: bootstrap, staging, update, rollback, cleanup.
+  string effect = 2;
+  oneof receipt {
+    EnvironmentCwRuntimeStaged staged = 3;
+    EnvironmentCwRuntimeSelected selected = 4;
+    EnvironmentCwRuntimeCleaned cleaned = 5;
+  }
+}
+
+// Metadata of the original durable owner. It is not current Store state and
+// a matching digest cannot establish a lost acknowledgement or ownership.
+message EnvironmentCwRuntimeOperation {
+  string request_id = 1;
+  EnvironmentCwRuntimeIncarnation incarnation = 2;
+  // Closed values update/rollback and admitted/issued/acknowledged/succeeded/
+  // failed/unknown. Unknown and Issued are observe-only.
+  string action = 3;
+  string phase = 4;
+  uint32 checkpoint = 5;
+  optional string issued_effect = 6;
+  EnvironmentCwRuntimeExpectation expected_selection = 7;
+  EnvironmentCwRuntimeIdentity identity = 8;
+  EnvironmentCwRuntimeIdentity bootstrap_identity = 9;
+  repeated EnvironmentCwRuntimeAcknowledgement acknowledgements = 10;
+  optional string error_code = 11;
+  google.protobuf.Timestamp admitted_at = 12;
+  google.protobuf.Timestamp issued_at = 13;
+  google.protobuf.Timestamp terminal_at = 14;
+}

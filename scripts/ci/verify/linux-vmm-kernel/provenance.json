@@ -1,0 +1,17 @@
+{
+  "source_commit": "5bbb9c9f8f808710e2123f2b30f0d61d7d698f52",
+  "source_tree": "75e0e86253747fd036815505b8c48c9668aafb3c",
+  "source_tag_object": "2e57d67d62e9b5e54f352e48166b791524762f71",
+  "source_tag": "v6.18.48",
+  "baseline_config_sha256": "f4c7056b7b1622e3939179521280db1bbc5ce21355685dc9e455fd83add9a4f3",
+  "config_sha256": "c02a08863f75099b9a18389cf0518134c94b1fe9f499a2566e4891251699274e",
+  "config_origin": "qualified codewire1 configuration generated from Kata 894e1956bb340752b30f7ad49879972234a0098c",
+  "kata_recipe_sha256": "3aff9dff0303421d548e151dab9aeedad445fe1f68c51f80c233d192fa6952d9",
+  "patch_sha256": "a5d223f15107735d9a8da3551adb7b4fb4ab97a6d8618ca21e1a0dcac023e7e2",
+  "patched_dax_sha256": "54ecbd2961f1f8e1c8d51ff9df43414350f68410389fa0f72d6ae34b1f5faeee",
+  "bc_sha256": "36cb337928452e9379f349f11a3095e36a9b3aed8cefc50e2ae060bf9c6cf70f",
+  "gcc_version": "gcc (GCC) 16.1.1 20260728",
+  "ld_version": "GNU ld (GNU Binutils) 2.47",
+  "build_timestamp": "2026-08-28 06:22:54 +0000",
+  "release": "6.18.48-codewire2"
+}

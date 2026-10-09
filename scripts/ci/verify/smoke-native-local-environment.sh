@@ -68,6 +68,18 @@ MESH_STARTED=0
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
 MANAGED_CREDENTIAL_BROKER=0
+MANAGED_AGENT_SESSIONS=0
+MANAGED_AGENT_CW_IMAGE_RECEIPT=''
+MANAGED_AGENT_CW_IMAGE_RECEIPT_SEEN=0
+MANAGED_AGENT_UPDATE=0
+MANAGED_AGENT_UPDATE_RUNTIME_LOCK=''
+MANAGED_AGENT_UPDATE_IMAGE_RECEIPT=''
+MANAGED_AGENT_UPDATE_SHA256=''
+MANAGED_AGENT_UPDATE_RUNTIME_SEEN=0
+MANAGED_AGENT_UPDATE_IMAGE_SEEN=0
+MANAGED_AGENT_UPDATE_SHA_SEEN=0
+MANAGED_AGENT_UPDATE_A_LOCK=''
+MANAGED_AGENT_UPDATE_A_SHA256=''
 CREDENTIAL_ROOT=''
 CREDENTIAL_PROFILE_NAME='native-broker'
 CREDENTIAL_ID=''
@@ -122,6 +134,10 @@ usage: smoke-native-local-environment.sh \
   --artifact-root ABSOLUTE_PRIVATE_DIRECTORY \
   --artifact-lock ABSOLUTE_LOCK_FILE \
   [--managed-credential-broker] \
+  [--managed-agent-sessions --managed-agent-cw-image-receipt ABSOLUTE_IMAGE_RECEIPT] \
+  [--managed-agent-update-runtime-lock ABSOLUTE_B_LOCK \
+   --managed-agent-update-cw-image-receipt ABSOLUTE_B_IMAGE_RECEIPT \
+   --managed-agent-update-cw-sha256 B_CW_SHA256] \
   [--workspace-image-import-bin ABSOLUTE_PATH] \
   [--scratch-parent ABSOLUTE_DIRECTORY]
 
@@ -139,7 +155,7 @@ permits direct registry and Git egress; every later command receives dead proxy
 endpoints. It proves digest-pinned OCI workspace execution, exact
 credential-free git.example.invalid/GitHub preparation, independent copy preparation,
 create/info, loopback-only host-port publication, bounded daemon diagnostics and
-repair, stock Codex 0.149.0 over the synthetic credential bridge, bare run and
+repair, stock Codex 0.157.0 over the synthetic credential bridge, bare run and
 shell, PTY behavior, saved output and nonzero status,
 cached-runtime restart after the installed artifact lock advances, offline
 disk/CPU/memory resize, supervisor crash recovery, Mesh attachment and typed
@@ -163,6 +179,17 @@ install, startup, managed exec, and PTY sessions; replaces and clears them
 through confirmed source updates; and proves installed-root, workspace, and
 skill preservation.
 Application values are intentionally child-visible, unlike provider credentials.
+
+With --managed-agent-sessions and a source-bound readonly cw runtime image receipt,
+the same protected-broker environment additionally runs actual pinned guest
+Codex and Claude managed conversations before the existing revocation proof.
+It requires native acknowledgement, follow-up/resume, held-turn controls,
+guest tool execution, same-VM parent continuation, history/wait and cleanup.
+This mode retains the exact workspace-image and private credential-store gates.
+The three update inputs additionally select the running-VM A-to-B-to-A journey.
+They require both managed modes. Host and both asset identities are admitted
+before allocating scratch; the same journey repeats admission and preserves
+every existing managed-session assertion before revocation and cleanup.
 USAGE
 }
 
@@ -256,6 +283,35 @@ while [[ $# -gt 0 ]]; do
       MANAGED_CREDENTIAL_BROKER=1
       shift
       ;;
+    --managed-agent-sessions)
+      [[ "$MANAGED_AGENT_SESSIONS" -eq 0 ]] || { usage; exit 2; }
+      MANAGED_AGENT_SESSIONS=1
+      shift
+      ;;
+    --managed-agent-cw-image-receipt)
+      [[ $# -ge 2 && -n "$2" && "$MANAGED_AGENT_CW_IMAGE_RECEIPT_SEEN" -eq 0 ]] || { usage; exit 2; }
+      MANAGED_AGENT_CW_IMAGE_RECEIPT_SEEN=1
+      MANAGED_AGENT_CW_IMAGE_RECEIPT="$2"
+      shift 2
+      ;;
+    --managed-agent-update-runtime-lock)
+      [[ $# -ge 2 && "$MANAGED_AGENT_UPDATE_RUNTIME_SEEN" -eq 0 ]] || { usage; exit 2; }
+      MANAGED_AGENT_UPDATE_RUNTIME_SEEN=1
+      MANAGED_AGENT_UPDATE_RUNTIME_LOCK="$2"
+      shift 2
+      ;;
+    --managed-agent-update-cw-image-receipt)
+      [[ $# -ge 2 && "$MANAGED_AGENT_UPDATE_IMAGE_SEEN" -eq 0 ]] || { usage; exit 2; }
+      MANAGED_AGENT_UPDATE_IMAGE_SEEN=1
+      MANAGED_AGENT_UPDATE_IMAGE_RECEIPT="$2"
+      shift 2
+      ;;
+    --managed-agent-update-cw-sha256)
+      [[ $# -ge 2 && "$MANAGED_AGENT_UPDATE_SHA_SEEN" -eq 0 ]] || { usage; exit 2; }
+      MANAGED_AGENT_UPDATE_SHA_SEEN=1
+      MANAGED_AGENT_UPDATE_SHA256="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -272,6 +328,15 @@ done
   exit 2
 }
 
+if (( MANAGED_AGENT_UPDATE_RUNTIME_SEEN + MANAGED_AGENT_UPDATE_IMAGE_SEEN + MANAGED_AGENT_UPDATE_SHA_SEEN > 0 )); then
+  [[ "$MANAGED_AGENT_UPDATE_RUNTIME_SEEN" -eq 1 && "$MANAGED_AGENT_UPDATE_IMAGE_SEEN" -eq 1 &&
+     "$MANAGED_AGENT_UPDATE_SHA_SEEN" -eq 1 && -n "$MANAGED_AGENT_UPDATE_RUNTIME_LOCK" &&
+     -n "$MANAGED_AGENT_UPDATE_IMAGE_RECEIPT" && "$MANAGED_AGENT_UPDATE_SHA256" =~ ^[0-9a-f]{64}$ &&
+     "$MANAGED_CREDENTIAL_BROKER" -eq 1 && "$MANAGED_AGENT_SESSIONS" -eq 1 &&
+     -n "$MANAGED_AGENT_CW_IMAGE_RECEIPT" ]] || { usage; exit 2; }
+  MANAGED_AGENT_UPDATE=1
+fi
+
 for tool in awk base64 cat chmod cp dirname e2fsck find findmnt git id jq ln mkdir mktemp python3 readlink realpath resize2fs rg script sha256sum sleep stat tail timeout touch tr uname; do
   require_cmd "$tool"
 done
@@ -285,6 +350,14 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   require_absolute_canonical_file 'stock SSH workload fixture' "$STOCK_SSH_WORKLOAD_SOURCE"
 elif [[ -n "$WORKSPACE_IMAGE_IMPORT_BIN" ]]; then
   die 'workspace image importer is only available in managed synthetic mode'
+fi
+if [[ "$MANAGED_AGENT_SESSIONS" -eq 1 ]]; then
+  [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 && -n "$MANAGED_AGENT_CW_IMAGE_RECEIPT" ]] ||
+    die 'managed agent sessions require protected-broker mode and a boot cw image receipt'
+  require_absolute_canonical_file 'managed cw runtime image receipt' "$MANAGED_AGENT_CW_IMAGE_RECEIPT"
+  require_absolute_canonical_file 'managed native journey' "$SOURCE_ROOT/scripts/dev/test-cli-native-managed.py"
+elif [[ -n "$MANAGED_AGENT_CW_IMAGE_RECEIPT" ]]; then
+  die 'cw runtime image receipt requires --managed-agent-sessions'
 fi
 [[ "$(uname -s)" == Linux ]] || die 'the native local-environment smoke requires Linux'
 [[ "$(uname -m)" == x86_64 ]] || die 'the current native artifact set requires x86_64'
@@ -339,6 +412,35 @@ case ",$SCRATCH_MOUNT_OPTIONS," in
 esac
 ORIGINAL_ARTIFACT_ROOT="$ARTIFACT_ROOT"
 ORIGINAL_ARTIFACT_LOCK="$ARTIFACT_LOCK"
+
+admit_native_managed_update_assets() {
+  local admission
+  MANAGED_AGENT_UPDATE_A_LOCK="$(dirname -- "$ORIGINAL_ARTIFACT_LOCK")/cw-runtime.lock.json"
+  require_absolute_canonical_file 'managed A runtime lock' "$MANAGED_AGENT_UPDATE_A_LOCK"
+  require_absolute_canonical_file 'managed B runtime lock' "$MANAGED_AGENT_UPDATE_RUNTIME_LOCK"
+  require_absolute_canonical_file 'managed B cw image receipt' "$MANAGED_AGENT_UPDATE_IMAGE_RECEIPT"
+  require_absolute_canonical_file 'managed native update journey' "$SOURCE_ROOT/scripts/dev/test-cli-native-update.py"
+  if ! admission="$(env -i PATH='/usr/bin:/bin' HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)" \
+    LC_ALL=C PYTHONDONTWRITEBYTECODE=1 \
+    python3 "$SOURCE_ROOT/scripts/dev/test-cli-native-update.py" --admit-only \
+      --cw "$CW_BIN" --runtime-a "$MANAGED_AGENT_UPDATE_A_LOCK" \
+      --image-a "$MANAGED_AGENT_CW_IMAGE_RECEIPT" \
+      --runtime-b "$MANAGED_AGENT_UPDATE_RUNTIME_LOCK" --image-b "$MANAGED_AGENT_UPDATE_IMAGE_RECEIPT" \
+      --sha256-b "$MANAGED_AGENT_UPDATE_SHA256")"; then
+    die 'native managed update asset admission failed before scratch allocation'
+  fi
+  jq -e --arg pin "$MANAGED_AGENT_UPDATE_SHA256" '
+    .status == "admitted" and .proof == "asset-admission-only" and
+    .harness == "scripts/dev/test-cli-native-update.py" and .vm_journey_started == false and
+    (.assets.A.identity.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+    .assets.B.identity.sha256 == $pin
+  ' <<<"$admission" >/dev/null || die 'native managed update admission receipt drifted'
+  MANAGED_AGENT_UPDATE_A_SHA256="$(jq -er '.assets.A.identity.sha256' <<<"$admission")"
+}
+
+if [[ "$MANAGED_AGENT_UPDATE" -eq 1 ]]; then
+  admit_native_managed_update_assets
+fi
 
 SMOKE_ROOT="$(mktemp -d "$SMOKE_PARENT/.cwn.XXXXXX")"
 chmod 0700 "$SMOKE_ROOT"
@@ -693,6 +795,68 @@ run_cw() {
   cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
   LAST_STDOUT="$stdout_file"
   LAST_STDERR="$stderr_file"
+}
+
+run_named_reader_smoke() {
+  local parent_name='native-reader-parent' reader_name='native-reader'
+  local input='native-reader-ack' parent_id reader_id
+
+  log 'checking named non-PTY input ACK, wait, restart identity, and known-clean stop'
+  run_cw run --detach --no-tty --name "$parent_name" --output json -- /bin/true
+  parent_id="$(jq -er '.session_id | select(type == "string" and length > 0)' "$LAST_STDOUT")" ||
+    die 'named reader parent did not return a canonical identity'
+  run_cw wait "$parent_name" --timeout 30s --output json
+  jq -e --arg id "$parent_id" --arg name "$parent_name" '
+    .session.session_id == $id and .session.name == $name and
+    .session.parent_session_id == "" and .session.pty == false and
+    .session.state == "Exited" and .session.exit_code == 0 and
+    .session.cleanup_unknown == false and .output == "" and .eof == true
+  ' "$LAST_STDOUT" >/dev/null || die 'named reader parent completion was not confirmed'
+
+  # Bound the detached guest process as well as each host-side cw command.
+  # shellcheck disable=SC2016 # This variable belongs to the guest process.
+  run_cw run --detach --no-tty --name "$reader_name" --parent "$parent_name" \
+    --output json -- timeout --signal=TERM --kill-after=5s 60s /bin/sh -c \
+    'set -eu; IFS= read -r value; printf "native-reader:%s\n" "$value"'
+  reader_id="$(jq -er '.session_id | select(type == "string" and length > 0)' "$LAST_STDOUT")" ||
+    die 'named non-PTY reader did not return a canonical identity'
+  jq -e --arg id "$reader_id" --arg name "$reader_name" --arg parent "$parent_id" '
+    .session_id == $id and .session_id != $parent and .name == $name and
+    .parent_session_id == $parent and .pty == false and .state == "Running"
+  ' "$LAST_STDOUT" >/dev/null || die 'named reader launch or canonical parent drifted'
+
+  run_cw send "$reader_name" "$input"
+  rg -qxF "Input written to $reader_id" "$LAST_STDOUT" ||
+    die 'named reader input ACK did not resolve to its canonical identity'
+  run_cw wait "$reader_name" --timeout 30s --output json
+  jq -e --arg id "$reader_id" --arg name "$reader_name" --arg parent "$parent_id" \
+    --arg output "native-reader:$input"$'\n' '
+    .session.session_id == $id and .session.name == $name and
+    .session.parent_session_id == $parent and .session.pty == false and
+    .session.state == "Exited" and .session.exit_code == 0 and
+    .session.cleanup_unknown == false and .output == $output and
+    .eof == true and .history_gap == false
+  ' "$LAST_STDOUT" >/dev/null || die 'named reader wait did not confirm input, zero exit, output, and EOF'
+
+  run_cw restart "$reader_name" --output json
+  jq -e --arg id "$reader_id" --arg name "$reader_name" --arg parent "$parent_id" '
+    length == 1 and (.[0] |
+      .session_id == $id and .name == $name and .parent_session_id == $parent and
+      .pty == false and .state == "Running" and .exit_code == null)
+  ' "$LAST_STDOUT" >/dev/null || die 'reader restart changed its identity, name, parent, or run state'
+  run_cw stop "$reader_name" --output json
+  jq -e --arg id "$reader_id" --arg name "$reader_name" --arg parent "$parent_id" '
+    length == 1 and (.[0] |
+      .session_id == $id and .name == $name and .parent_session_id == $parent and
+      .pty == false and .state == "Stopped" and .cleanup_unknown == false)
+  ' "$LAST_STDOUT" >/dev/null || die 'reader stop did not return its terminal known-clean record'
+  run_cw list --output json
+  jq -e --arg id "$reader_id" --arg name "$reader_name" --arg parent "$parent_id" '
+    [.[] | select(.name == $name)] |
+    length == 1 and (.[0] |
+      .session_id == $id and .parent_session_id == $parent and
+      .pty == false and .state == "Stopped" and .cleanup_unknown == false)
+  ' "$LAST_STDOUT" >/dev/null || die 'reader terminal known-clean record was not retained'
 }
 
 assert_current_target_cleared() {
@@ -1118,9 +1282,9 @@ run_application_secret_smoke() {
     jq -e --argjson generation "$generation" --arg id "$ENVIRONMENT_ID" --arg project "$project_id" \
       --arg skills "$INITIAL_SKILL_SNAPSHOT" '
       .id == $id and .generation == $generation and .state == "running" and
-      .access_profile == "user/native-broker" and .access_profile_revision == 5 and
+      .access_profile == "user/native-broker" and .access_profile_revision == 4 and
       .source_selection.credentials.reference == "user/native-broker" and
-      .source_selection.credentials.revision == 5 and
+      .source_selection.credentials.revision == 4 and
       (.source_selection.secrets.project // "") == (if $project == "" then "" else "local:id:" + $project end) and
       (if $project == "" then .source_selection.secrets.user == null
        else .source_selection.secrets.user == "local" end) and
@@ -1198,6 +1362,57 @@ run_managed_credential_broker_smoke() {
   cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
   [[ "$(cat "$stdout_file")" == 'codewire-local-codex-bridge-smoke: PASS (managed broker)' ]] ||
     die 'managed local credential-broker smoke receipt drifted'
+}
+
+run_native_managed_agent_smoke() {
+  local stdout_file stderr_file journey expected_harness
+  local -a journey_args
+  journey="$SOURCE_ROOT/scripts/dev/test-cli-native-managed.py"
+  expected_harness='scripts/dev/test-cli-native-managed.py'
+  journey_args=(--cw "$CW_BIN" --environment "$ENVIRONMENT_ID")
+  if [[ "$MANAGED_AGENT_UPDATE" -eq 1 ]]; then
+    journey="$SOURCE_ROOT/scripts/dev/test-cli-native-update.py"
+    expected_harness='scripts/dev/test-cli-native-update.py'
+    journey_args+=(--runtime-a "$MANAGED_AGENT_UPDATE_A_LOCK" --image-a "$MANAGED_AGENT_CW_IMAGE_RECEIPT"
+      --sha256-a "$MANAGED_AGENT_UPDATE_A_SHA256" --runtime-b "$MANAGED_AGENT_UPDATE_RUNTIME_LOCK"
+      --image-b "$MANAGED_AGENT_UPDATE_IMAGE_RECEIPT" --sha256-b "$MANAGED_AGENT_UPDATE_SHA256"
+      --vm-state "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json"
+      --runner-socket "$STATE_ROOT/runners/$ENVIRONMENT_ID.sock")
+  else
+    journey_args+=(--cw-image-receipt "$MANAGED_AGENT_CW_IMAGE_RECEIPT")
+  fi
+  journey_args+=(--codex-model codewire-synthetic --claude-model claude-sonnet-4-6)
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if ! env -i \
+    PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" USER="$(id -un)" LOGNAME="$(id -un)" \
+    SHELL='/bin/sh' TERM='xterm-256color' LC_ALL=C \
+    CW_CONFIG_DIR="$PLATFORM_CONFIG" \
+    CODEWIRE_NATIVE_STATE_ROOT="$STATE_ROOT" \
+    CODEWIRE_NATIVE_ARTIFACT_ROOT="$ARTIFACT_ROOT" \
+    CODEWIRE_NATIVE_ARTIFACT_LOCK="$ARTIFACT_LOCK" \
+    CODEWIRE_LOCAL_CREDENTIAL_ROOT="$CREDENTIAL_ROOT" \
+    XDG_RUNTIME_DIR="$KEYRING_RUNTIME" DBUS_SESSION_BUS_ADDRESS="$KEYRING_DBUS_ADDRESS" \
+    CODEWIRE_SERVER_URL='http://127.0.0.1:1' \
+    CODEWIRE_API_KEY='synthetic-platform-key-must-not-be-used' \
+    HTTP_PROXY='http://127.0.0.1:1' HTTPS_PROXY='http://127.0.0.1:1' \
+    ALL_PROXY='http://127.0.0.1:1' NO_PROXY='127.0.0.1,localhost' \
+    PYTHONDONTWRITEBYTECODE=1 \
+    /usr/bin/timeout --foreground --signal=TERM --kill-after=10s 1220s \
+    python3 "$journey" "${journey_args[@]}" \
+      >"$stdout_file" 2>"$stderr_file"; then
+    cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+    cat "$stdout_file" >&2
+    tail -n 30 "$stderr_file" >&2
+    die 'native managed agent session journey failed'
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  jq -e --arg harness "$expected_harness" '.status == "passed" and
+    .harness == $harness and .mode == "protected-broker-actual-agents" and
+    (.missing_acceptance | length) == 0 and (.cleanup_errors | length) == 0' \
+    "$stdout_file" >/dev/null || die 'native managed agent journey receipt drifted'
+  log 'native managed agent session journey passed'
 }
 
 wait_for_pid_exit() {
@@ -1372,7 +1587,7 @@ case "${1-}" in
     login_parent=${CODEX_HOME%/*}
     [ -f "$login_parent/.codewire-synthetic-login-root" ]
     [ "$(findmnt -nro FSTYPE -T "$CODEX_HOME")" = tmpfs ]
-    printf '\nWelcome to Codex [v\033[90m0.149.0\033[0m]\n\033[90mOpenAI\047s command-line coding agent\033[0m\n\n'
+    printf '\nWelcome to Codex [v\033[90m0.157.0\033[0m]\n\033[90mOpenAI\047s command-line coding agent\033[0m\n\n'
     printf 'Follow these steps to sign in with ChatGPT using device code authorization:\n\n'
     printf '1. Open this link in your browser and sign in to your account\n   \033[94mhttps://auth.openai.com/codex/device\033[0m\n\n'
     printf '2. Enter this one-time code \033[90m(expires in 15 minutes)\033[0m\n   \033[94mSYNTH-ETIC\033[0m\n\n'
@@ -2065,6 +2280,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   run_cw credentials --local list --output json
   jq -e '
     length == 5 and
+    ([.[] | select(.provider == "github")] | length) == 1 and
     any(.[];
       .placement == "local" and
       .owner == "user/local-user" and
@@ -2148,48 +2364,69 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   chmod 0600 "$MOUNT_SOURCE/native-ssh-public-key.pub"
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set codex "id:$CREDENTIAL_ID"
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
-  jq -e 'length == 1 and .[0].revision == 1 and (.[0].entries | length) == 1' "$LAST_STDOUT" >/dev/null ||
+  jq -e --arg credential "$CREDENTIAL_ID" '
+    length == 1 and .[0].revision == 1 and
+    (.[0].entries | keys) == ["codex"] and .[0].entries.codex == $credential
+  ' "$LAST_STDOUT" >/dev/null ||
     die 'first profile set did not create exactly revision one'
-  run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set github "id:$GITHUB_CREDENTIAL_ID"
+  # GitHub is the one account connection, automatically included in grants;
+  # it cannot be selected or stored as a profile entry.
+  run_cw_expect_failure credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set github "id:$GITHUB_CREDENTIAL_ID"
+  rg -qF 'every profile includes your one GitHub connection' "$LAST_STDERR" ||
+    die 'profile GitHub selection did not refuse with singleton connection guidance'
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
-  jq -e 'length == 1 and .[0].revision == 2 and (.[0].entries | length) == 2' "$LAST_STDOUT" >/dev/null ||
-    die 'second profile set did not create exactly revision two'
+  jq -e --arg credential "$CREDENTIAL_ID" '
+    length == 1 and .[0].revision == 1 and
+    (.[0].entries | keys) == ["codex"] and .[0].entries.codex == $credential
+  ' "$LAST_STDOUT" >/dev/null ||
+    die 'refused GitHub profile selection changed profile revision or entries'
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set openai "id:$OPENAI_CREDENTIAL_ID"
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
-  jq -e 'length == 1 and .[0].revision == 3 and (.[0].entries | length) == 3' "$LAST_STDOUT" >/dev/null ||
-    die 'third profile set did not create exactly revision three'
+  jq -e --arg credential "$CREDENTIAL_ID" --arg openai "$OPENAI_CREDENTIAL_ID" '
+    length == 1 and .[0].revision == 2 and
+    (.[0].entries | keys) == ["codex", "openai"] and
+    .[0].entries.codex == $credential and .[0].entries.openai == $openai
+  ' "$LAST_STDOUT" >/dev/null ||
+    die 'second profile set did not create exactly revision two'
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set anthropic "id:$ANTHROPIC_CREDENTIAL_ID"
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
-  jq -e --arg credential "$CREDENTIAL_ID" --arg github "$GITHUB_CREDENTIAL_ID" \
+  jq -e --arg credential "$CREDENTIAL_ID" \
     --arg openai "$OPENAI_CREDENTIAL_ID" --arg anthropic "$ANTHROPIC_CREDENTIAL_ID" '
     length == 1 and
     .[0].placement == "local" and
     .[0].owner == "user/local-user" and
     .[0].name == "native-broker" and
-    .[0].revision == 4 and
-    (.[0].entries | length) == 4 and
+    .[0].revision == 3 and
+    (.[0].entries | keys) == ["anthropic", "codex", "openai"] and
     .[0].entries.codex == $credential and
-    .[0].entries.github == $github and
     .[0].entries.openai == $openai and
     .[0].entries.anthropic == $anthropic
-  ' "$LAST_STDOUT" >/dev/null || die 'fourth profile set did not create exact revision four'
+  ' "$LAST_STDOUT" >/dev/null || die 'third profile set did not create exact revision three'
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set ssh "id:$SSH_CREDENTIAL_ID"
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
-  jq -e --arg credential "$CREDENTIAL_ID" --arg github "$GITHUB_CREDENTIAL_ID" \
+  jq -e --arg credential "$CREDENTIAL_ID" \
     --arg openai "$OPENAI_CREDENTIAL_ID" --arg anthropic "$ANTHROPIC_CREDENTIAL_ID" \
     --arg ssh "$SSH_CREDENTIAL_ID" '
     length == 1 and
     .[0].placement == "local" and
     .[0].owner == "user/local-user" and
     .[0].name == "native-broker" and
-    .[0].revision == 5 and
-    (.[0].entries | length) == 5 and
+    .[0].revision == 4 and
+    (.[0].entries | keys) == ["anthropic", "codex", "openai", "ssh"] and
     .[0].entries.codex == $credential and
-    .[0].entries.github == $github and
     .[0].entries.openai == $openai and
     .[0].entries.anthropic == $anthropic and
     .[0].entries.ssh == $ssh
   ' "$LAST_STDOUT" >/dev/null || die 'synthetic access profile metadata drifted'
+  run_cw credentials --local list --output json
+  jq -e --arg github "$GITHUB_CREDENTIAL_ID" '
+    [.[] | select(.provider == "github")] |
+    length == 1 and .[0].id == $github and
+    .[0].authentication_kind == "oauth" and .[0].status == "active" and
+    .[0].revocation_generation == 1 and
+    .[0].protected_store_persistence == "operating_system" and
+    .[0].cleanup_pending == false
+  ' "$LAST_STDOUT" >/dev/null || die 'profile selection changed the account GitHub connection'
   prepare_application_secret_fixture
   CREATE_ACCESS_ARGS=(--profile "local:user/$CREDENTIAL_PROFILE_NAME" \
     --secrets "local:$APP_SECRET_PROJECT_A" --user-secrets local --yes)
@@ -2244,7 +2481,7 @@ rg -qF 'Read-write grants let guest root modify or delete that host content' "$L
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   jq -e '
     .access_profile == "user/native-broker" and
-    .access_profile_revision == 5
+    .access_profile_revision == 4
   ' "$LAST_STDOUT" >/dev/null || die 'created native environment access profile drifted'
 fi
 [[ ! -e "$SOURCE_HOOK_MARKER" ]] || die 'source Git hook ran during native clone preparation'
@@ -2281,7 +2518,7 @@ for sqlite_sidecar in "$STATE_ROOT/supervisor.db-wal" "$STATE_ROOT/supervisor.db
   [[ ! -e "$sqlite_sidecar" || "$(stat -c '%a' "$sqlite_sidecar")" == 600 ]] ||
     die "native supervisor database sidecar is not mode 0600: $sqlite_sidecar"
 done
-[[ "$(native_database_value contract)" == '1129797197:11:wal:ok' ]] ||
+[[ "$(native_database_value contract)" == '1129797197:12:wal:ok' ]] ||
   die 'native supervisor database contract drifted'
 wait_for_journal_complete ||
   die "initial create returned before its lifecycle journal became terminal: $(native_database_value journal_summary)"
@@ -2330,6 +2567,10 @@ run_cw run --no-tty -- /bin/sh -lc \
 
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   run_application_secret_smoke
+  if [[ "$MANAGED_AGENT_SESSIONS" -eq 1 ]]; then
+    log 'checking actual pinned guest managed sessions and parent continuation'
+    run_native_managed_agent_smoke
+  fi
   log 'checking protected injection, redaction, denial, broker recovery, revocation, and audit'
   run_managed_credential_broker_smoke
   run_cw credentials --local get "id:$CREDENTIAL_ID" --output json
@@ -2498,6 +2739,8 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   exit 0
 fi
 
+run_named_reader_smoke
+
 log 'checking public Exec/File over the owner-only supervisor UDS'
 run_public_data_smoke
 
@@ -2578,7 +2821,7 @@ done
 [[ "$HOST_PORT_SESSION_EXITED" -eq 1 ]] ||
   die 'host-port guest session did not exit successfully'
 
-log 'checking stock Codex 0.149.0 over the synthetic guest credential bridge'
+log 'checking stock Codex 0.157.0 over the synthetic guest credential bridge'
 run_codex_credential_bridge_smoke
 
 log 'checking bounded public daemon status over the owner-only supervisor UDS'
@@ -2595,6 +2838,8 @@ jq -e '
     "files.v1",
     "health.v1",
     "pty.v1",
+    "session_input.v1",
+    "session_metadata.v1",
     "sessions.v1"
   ] and
   .message == "local environment daemon is ready" and

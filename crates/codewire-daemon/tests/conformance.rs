@@ -37,6 +37,8 @@ async fn generated_session_client_authenticates_and_requires_ready_daemon() {
 
     let launched = client
         .launch(v1::LaunchSessionRequest {
+            name: String::new(),
+            parent_session_id: None,
             command: vec!["sh".into(), "-c".into(), "printf generated-client".into()],
             ..v1::LaunchSessionRequest::default()
         })
@@ -726,6 +728,7 @@ async fn durable_session_lifecycle_persists_output_and_restarts() {
     let restarted = client
         .restart_session(v1::RestartSessionRequest {
             session_id: launched.session_id.clone(),
+            expected_launch_generation: None,
         })
         .await
         .expect("restart durable session")
@@ -1219,6 +1222,7 @@ async fn pty_resize_is_applied_before_status_and_detach_preserves_session() {
     let restarted = client
         .restart_session(v1::RestartSessionRequest {
             session_id: session_id.clone(),
+            expected_launch_generation: None,
         })
         .await
         .expect("restart durable PTY")

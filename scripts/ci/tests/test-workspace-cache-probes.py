@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Synthetic only: actual harness/wrapper, absolute fake Docker, no provider IO."""
+"""Synthetic harness/producer admission; no compiler, Docker or provider IO.
+
+The fake producer emits a known static ELF that only writes a fixed version
+line and exits. The real producer/export/intake paths validate those bytes;
+the probe explicitly executes that closed fixture after admission.
+"""
 import contextlib
 import hashlib
 import importlib.util
@@ -23,7 +28,7 @@ SPEC.loader.exec_module(probes)
 PIN = "docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5"
 
 FAKE_DOCKER = r'''#!/usr/bin/python3
-import hashlib, json, os, re, signal, subprocess, sys
+import hashlib, importlib.util, json, os, re, signal, struct, subprocess, sys, tempfile
 from pathlib import Path
 args = sys.argv[1:]
 root = Path(os.environ["FAKE_STATE"])
@@ -52,6 +57,57 @@ def write_output(name, value):
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(value)
     return output
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    value = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(value)
+    return value
+def producer_export(state, phase):
+    capsule = Path(args[-1]).parent
+    source_root = Path(os.environ["FAKE_SOURCE"])
+    finalizer = load("probe_fixture_finalizer", source_root / "scripts/ci/images/finalize-cw-runtime-source.py")
+    fixture = load("probe_fixture_elf", source_root / "scripts/ci/tests/cw_release_fixtures.py")
+    request = capsule / "request.json"
+    request_hash = hashlib.sha256(request.read_bytes()).hexdigest()
+    scratch = Path(tempfile.mkdtemp(prefix="producer-", dir=root))
+    with finalizer.source.admit(capsule / "source", capsule / "git", request, request_hash) as admitted:
+        model = admitted.model
+        value = "cw 0.1.0" if phase != "cw-edit" or failure == "stale-cw" else "codewire-cache-probe-" + nonce()
+        printed = (value + "\n").encode()
+        raw = bytearray(fixture.executable(finalizer.source.TARGET, version=model["version"],
+                        revision=model["source"]["revision"], tree=model["source"]["source_tree_sha256"]))
+        struct.pack_into("<Q", raw, 24, 256)  # Entry within the sole static PT_LOAD.
+        struct.pack_into("<H", raw, 52, 64)
+        struct.pack_into("<IIQQQQQQ", raw, 64, 1, 5, 0, 0, 0, len(raw), len(raw), 4096)
+        code = (b"\xb8\x01\x00\x00\x00\xbf\x01\x00\x00\x00\x48\x8d\x35" +
+                struct.pack("<i", 512 - (256 + 17)) + b"\xba" + struct.pack("<I", len(printed)) +
+                b"\x0f\x05\xb8\x3c\x00\x00\x00\x31\xff\x0f\x05")
+        raw[256:256 + len(code)] = code
+        raw[512:512 + len(printed)] = printed
+        target, cargo = scratch / "target", scratch / "cargo"
+        target.mkdir(); cargo.mkdir()
+        binary, depinfo, log = target / "cw", target / "cw.d", scratch / "compile.log"
+        binary.write_bytes(raw); binary.chmod(0o500)
+        depinfo.write_text(str(binary) + ": " + str(capsule / "source/crates/codewire-cli-bin/src/main.rs") + "\n")
+        depinfo.chmod(0o400)
+        log.write_text("synthetic fixture only; no compiler ran\n"); log.chmod(0o400)
+        completed = {"command": finalizer.command(model["profile"]), "exit": 0, "elapsed_seconds": 0,
+                     "log": str(log), "log_sha256": hashlib.sha256(log.read_bytes()).hexdigest(),
+                     "timed_out": False, "interrupted": False, "unexpected_family": False, "cleanup_unknown": False}
+        output = Path(re.search(r"(?:^|,)dest=([^,]+)", option("--output"))[1])
+        finalizer.finalize(admitted, binary, depinfo, fixture.RUSTC, completed, output, target, cargo)
+    solve = hashlib.sha256((state["container"] + phase + "cw-producer").encode()).hexdigest()[:32]
+    Path(option("--metadata-file")).write_text(json.dumps({"buildx.build.ref": state["builder"] + "/" + state["builder"] + "-node/" + solve}))
+    cached = phase != "cw-edit" and failure != "control-miss"
+    state.setdefault("history", {})[solve] = {"vertexes": [{"digest": "sha256:" + "a" * 64,
+         "name": "[cw-builder 1/1] RUN cargo zigbuild --locked", "cached": cached,
+         "inputs": [] if cached else ["sha256:" + "b" * 64],
+         "started": "2026-01-01T00:00:00Z", "completed": "2026-01-01T00:00:01Z"}]}
+    save(state)
+    print("#2 [cw-builder 1/1] RUN cargo zigbuild --locked")
+    print("#2 CACHED" if cached else "#2 DONE 0.1s")
+    print("#2 0.1 Compile requests 10\n#2 0.1 Cache hits 8\n#2 0.1 Cache hits (Rust) 8\n#2 0.1 Cache misses 2\n#2 0.1 Non-cacheable calls 0\n#2 0.1 Cache read errors 0\n#2 0.1 Cache write errors 0\n#2 0.1 Cache errors 0")
+    export_log()
 if args[:2] == ["buildx", "create"]:
     builder = option("--name")
     container = hashlib.sha256(builder.encode()).hexdigest()
@@ -100,12 +156,20 @@ elif args[:2] == ["buildx", "ls"]:
     for state in states():
         if not state["removed"]:
             print(state["builder"])
+elif args[:3] == ["buildx", "history", "logs"]:
+    state = selected(option("--builder"))
+    assert option("--progress") == "rawjson"
+    print(json.dumps(state["history"][args[-1]]), file=sys.stderr)
 elif args[:2] == ["buildx", "build"]:
     state = selected(option("--builder"))
     phase = next(p for p in ("native-cold", "native-warm", "native-malformed", "native-missing-blob",
                             "native-denied", "cw-control", "cw-edit", "tools", "cancel")
                  if "workspace-" + p + "." in state["builder"])
-    if phase.startswith("native-"):
+    if "--file" in args and Path(option("--file")).as_posix().endswith("/images/cw-runtime/Dockerfile"):
+        if phase == "cw-edit" and failure == "cw-build":
+            raise SystemExit(53)
+        producer_export(state, phase)
+    elif phase.startswith("native-"):
         cached = phase == "native-warm"
         if "--no-cache" not in args:
             client_key = Path(os.environ["AWS_SHARED_CREDENTIALS_FILE"])
@@ -144,10 +208,10 @@ elif args[:2] == ["buildx", "build"]:
         if "--cache-to" in args:
             print("#8 exporting cache to Amazon S3\n#8 writing layer sha256:" + "f" * 64 + "\n#8 DONE 0.1s")
     elif phase.startswith("cw-"):
-        assert option("--target") == "cw-builder"
+        assert option("--target") == "cw-builder-arm64"
         assert Path(option("--file")).resolve() == (Path(args[-1]) / "images/workspace/Dockerfile").resolve()
         assert option("--build-arg") == "CODEWIRE_SCCACHE_MODE=r2"
-        print("#2 [cw-builder 1/1] RUN cargo build")
+        print("#2 [cw-builder-arm64 1/1] RUN cargo build")
         if phase == "cw-edit" and failure == "cw-build":
             raise SystemExit(53)
         print("#2 CACHED" if phase == "cw-control" and failure != "control-miss" else "#2 DONE 0.1s")
@@ -156,14 +220,16 @@ elif args[:2] == ["buildx", "build"]:
         binary.chmod(0o755)
         export_log()
     elif phase == "tools":
-        if "--metadata-file" in args:
+        if Path(option("--file")).as_posix().endswith("/images/base/Dockerfile"):
             Path(option("--metadata-file")).write_text(json.dumps({"containerimage.digest":"sha256:" + "c" * 64}))
         else:
             assert option("--no-cache-filter") == "workspace-floating-tools"
-            assert option("--build-context").endswith("@sha256:" + "c" * 64)
+            contexts = [args[i + 1] for i, arg in enumerate(args) if arg == "--build-context"]
+            assert any(context.endswith("@sha256:" + "c" * 64) for context in contexts)
+            assert any(context.startswith("codewire-verified-cw=") for context in contexts)
             print("#1 [workspace-floating-tools 1/2] RUN npm install\n#1 DONE 0.1s")
             print("#2 [workspace-floating-tools 2/2] RUN go install\n#2 DONE 0.1s")
-            print("#3 [cw-builder 1/1] RUN cargo build\n#3 DONE 0.1s")
+            print("#3 [cw-builder-amd64 1/1] COPY --from=codewire-verified-cw /cw /out/cw\n#3 DONE 0.1s")
         export_log()
     else:
         print("#1 [1/1] RUN printf '%s\\n' 'CODEWIRE_CACHE_PROBE_READY=" + nonce() + "'; sleep 120")
@@ -225,7 +291,7 @@ class ProbeFixture(unittest.TestCase):
         path.write_text(content)
 
     def test_derivative_inventory_and_every_context_key_boundary(self):
-        self.write(self.root / probes.MAIN, "fn main() {\n    run();\n}\n")
+        self.write(self.root / probes.MAIN, "#[cfg(target_os = \"linux\")]\nmod helper;\n\nfn main() {\n    run();\n}\n")
         self.write(self.root / probes.DOCKERFILE, (ROOT / probes.DOCKERFILE).read_text())
         archive = self.work / "source.tar"
         with tarfile.open(archive, "w") as output:
@@ -338,7 +404,8 @@ class ProbeFixture(unittest.TestCase):
             probes.MAIN, probes.DOCKERFILE, "scripts/ci/images/workspace-cache.sh",
             "scripts/ci/tests/probe-workspace-r2-cache.sh", "scripts/ci/verify/workspace-cache-probes.py",
             "scripts/ci/setup/select-workspace-cache-experiment.py", "scripts/ci/verify/workspace-cache-report.py",
-            "scripts/ci/verify/workspace-image-artifact.py", "scripts/ci/verify/workspace-agent-contract.sh"}
+            "scripts/ci/verify/workspace-image-artifact.py", "scripts/ci/verify/workspace-agent-contract.sh",
+            "scripts/ci/tests/cw_release_fixtures.py", ".gitignore", "Cargo.toml", "Cargo.lock"}
         for path in paths:
             self.write(self.root / path, (ROOT / path).read_text() if (ROOT / path).is_file() else "synthetic\n")
             # Model the archive's canonical checkout mode, independently of
@@ -347,8 +414,11 @@ class ProbeFixture(unittest.TestCase):
         for path in self.root.rglob("*.sh"):
             path.chmod(0o755)
         def git(*args):
-            return subprocess.check_output(["git", "-C", str(self.root), *args], text=True, stderr=subprocess.DEVNULL).strip()
+            return subprocess.check_output(["git", "-c", "maintenance.auto=false", "-c", "gc.auto=0",
+                "-C", str(self.root), *args], text=True, stderr=subprocess.DEVNULL).strip()
         git("init", "-q")
+        git("config", "maintenance.auto", "false")
+        git("config", "gc.auto", "0")
         git("add", ".")
         git("-c", "commit.gpgsign=false", "-c", "user.name=Fixture", "-c", "user.email=fixture@invalid",
             "commit", "-qm", "synthetic fixture")
@@ -377,6 +447,7 @@ class ProbeFixture(unittest.TestCase):
                 "GITHUB_SHA": source, "GITHUB_RUN_ID": "2047", "GITHUB_JOB": "workspace-cache-probes",
                 "HOSTNAME": "fixture-job", "RUNNER_TEMP": str(self.work),
                 "CODEWIRE_DOCKER_BIN": str(fake), "FAKE_STATE": str(state), "FAKE_REPORT": str(self.report),
+                "FAKE_SOURCE": str(self.root),
                 "FAKE_ORIGINAL_CREDENTIAL": str(self.credential),
                 "FAKE_CONTRACT": str(self.root / "scripts/ci/verify/workspace-agent-contract.sh"),
                 "FAKE_PIN": PIN, "CODEWIRE_SCCACHE_MODE": "r2", "CODEWIRE_BUILDKIT_CACHE_MODE": "r2",
@@ -445,6 +516,36 @@ class ProbeFixture(unittest.TestCase):
         completed, environment = self.run_harness()
         self.assertEqual(completed.returncode, 0, completed.stdout)
         self.assertFalse((self.report / "result.json").exists())
+        for phase in ("cw-control", "cw-edit", "tools"):
+            with probes.HistoricalProducer(self.report, phase) as evidence:
+                self.assertEqual(evidence.record["claim"], probes.HISTORICAL_CLAIM)
+                self.assertIs(evidence.retained.model["image_qualified"], False)
+                self.assertIs(evidence.retained.model["cache_qualified"], False)
+            checkpoint = self.report / phase / "cw-producer-checkpoint.json"
+            original = checkpoint.read_bytes()
+            variants = []
+            for field, replacement in (("claim", "fresh current-source installation"),
+                                       ("phase", "cancel"),
+                                       ("source", {"revision": "f" * 40})):
+                value = json.loads(original)
+                value[field] = replacement
+                variants.append(value)
+            value = json.loads(original)
+            value["files"].pop("asset/cw")
+            variants.append(value)
+            value = json.loads(original)
+            value["replay_allowed"] = True
+            variants.append(value)
+            for value in variants:
+                with self.subTest(phase=phase, changed=value.keys()):
+                    checkpoint.chmod(0o600)
+                    checkpoint.write_bytes(probes.measurement.consumer_library().release.canonical(value))
+                    checkpoint.chmod(0o400)
+                    with self.assertRaises(ValueError):
+                        probes.HistoricalProducer(self.report, phase)
+            checkpoint.chmod(0o600)
+            checkpoint.write_bytes(original)
+            checkpoint.chmod(0o400)
         with mock.patch.dict(os.environ, environment, clear=True), self.assertRaisesRegex(ValueError, "finisher"):
             probes.finalize(self.report)
         self.credential.unlink()
@@ -478,7 +579,7 @@ class ProbeFixture(unittest.TestCase):
         completed, _ = self.run_harness("control-miss")
         self.assertNotEqual(completed.returncode, 0)
         self.assertFalse((self.report / "work-complete").exists())
-        self.assertIn("expected executed/cached", completed.stdout)
+        self.assertIn("did not prove reuse of its compiler layer", completed.stdout)
 
     def test_exact_cold_blob_digest_is_accepted_as_native_warm_hit(self):
         completed, environment = self.run_harness("lazy-native-hit")

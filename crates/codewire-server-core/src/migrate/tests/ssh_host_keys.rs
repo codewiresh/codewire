@@ -292,14 +292,11 @@ async fn ssh_host_keys_upgrade_preserves36_rows_helpers_and_second_startup() -> 
         let old_helpers = helpers(&pool).await?;
         pool.close().await;
 
-        ensure_schema(&db.url).await?;
+        // Prove SSH37 itself before the later CW journal adds its helper.
+        apply_migrations_before(&db.url, VERSION + 1).await?;
         let pool = connect(&db.url).await?;
         let after = applied_migrations(&pool).await?;
-        anyhow::ensure!(
-            after.len() == MIGRATOR.iter().count()
-                && after[..36] == before
-                && after[36].0 == VERSION
-        );
+        anyhow::ensure!(after.len() == 37 && after[..36] == before && after[36].0 == VERSION);
         // No backfill and no other change: no key exists until a daemon
         // records one.
         anyhow::ensure!(rows(&pool).await? == original);
@@ -307,17 +304,39 @@ async fn ssh_host_keys_upgrade_preserves36_rows_helpers_and_second_startup() -> 
         anyhow::ensure!(keys(&pool).await?.is_empty());
         let measured = fingerprint(&pool).await?;
         anyhow::ensure!(
-            measured == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT,
+            measured == ACCEPTED_SSH_HOST_KEY_SCHEMA_FINGERPRINT,
             "ssh host keys measured fingerprint: {measured}"
         );
         record(&pool, ENV, 3, POD, KEY).await?;
         let recorded = keys(&pool).await?;
         pool.close().await;
 
-        // A second startup changes nothing.
-        ensure_schema(&db.url).await?;
+        // A second version-37 startup changes nothing.
+        apply_migrations_before(&db.url, VERSION + 1).await?;
         let pool = connect(&db.url).await?;
         anyhow::ensure!(applied_migrations(&pool).await? == after);
+        anyhow::ensure!(rows(&pool).await? == original && keys(&pool).await? == recorded);
+        pool.close().await;
+
+        // Ordinary current startup adds the later journals without changing
+        // the accepted SSH ledger, rows or keys, and then is a no-op too.
+        ensure_schema(&db.url).await?;
+        let pool = connect(&db.url).await?;
+        let current = applied_migrations(&pool).await?;
+        anyhow::ensure!(
+            current.len()
+                == MIGRATOR
+                    .iter()
+                    .filter(|m| m.migration_type.is_up_migration())
+                    .count()
+                && current[..37] == after
+        );
+        anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
+        anyhow::ensure!(rows(&pool).await? == original && keys(&pool).await? == recorded);
+        pool.close().await;
+        ensure_schema(&db.url).await?;
+        let pool = connect(&db.url).await?;
+        anyhow::ensure!(applied_migrations(&pool).await? == current);
         anyhow::ensure!(rows(&pool).await? == original && keys(&pool).await? == recorded);
         pool.close().await;
         Ok(())
@@ -358,7 +377,13 @@ async fn ssh_host_keys_down_restores36_in_place_and_keeps_every_other_row() -> a
         // Rolling forward again applies 37 cleanly with no keys.
         ensure_schema(&db.url).await?;
         let pool = connect(&db.url).await?;
-        anyhow::ensure!(applied_migrations(&pool).await?.len() == MIGRATOR.iter().count());
+        anyhow::ensure!(
+            applied_migrations(&pool).await?.len()
+                == MIGRATOR
+                    .iter()
+                    .filter(|m| m.migration_type.is_up_migration())
+                    .count()
+        );
         anyhow::ensure!(fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
         anyhow::ensure!(rows(&pool).await? == original && keys(&pool).await?.is_empty());
         pool.close().await;

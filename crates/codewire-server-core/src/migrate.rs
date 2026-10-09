@@ -63,23 +63,193 @@ mod tests {
 
     use super::*;
 
-    // Measured in isolated PostgreSQL after composing account access,
-    // environment projection, typed SSH metadata, the GitHub singleton that
-    // every personal profile includes, the per-session two-factor setup skip,
-    // preview browser authorization, pending authenticator replacement, the
-    // runtime-dispatch lease environment scope, claim-time workspace binding
-    // and daemon SSH host keys, through version37.
+    // Bind only after the disposable boundary fixture measures canonical
+    // SSH37, CW journal38 and the metadata-only managed-agent journal39.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
+        "9c5febb69fa7d930c3b4528cda06cf84521162cc51ed7c912959159a28be78fc";
+    // Independently accepted canonical main ec60908a, through SSH host keys37.
+    const ACCEPTED_SSH_HOST_KEY_SCHEMA_FINGERPRINT: &str =
         "88dff060b2dbf35cf0b6464bce13c682c6e13b48ba6d3f80970fb2dfe997c7eb";
     // Accepted table schema through version36, before daemon SSH host keys.
     // Version 36 removes everything version 35 added, so this is also the
     // version-34 value below.
     const ACCEPTED_PRE_SSH_HOST_KEY_SCHEMA_FINGERPRINT: &str =
         "218a3ea293e6023d9023b3b133534bfeba823dd68e17818196d609032ccca1b5";
-    // Accepted table schema through version35, with the authority stamp that
-    // version 36 removes.
+    const ACCEPTED_AUTHORITY_STAMP_REMOVAL_SCHEMA_FINGERPRINT: &str =
+        ACCEPTED_PRE_SSH_HOST_KEY_SCHEMA_FINGERPRINT;
     const ACCEPTED_AUTHORITY_STAMP_SCHEMA_FINGERPRINT: &str =
         "14d3d5ac233de6dbd7f98e9a3f638e2983c84768d238fc3f54d74c29f84f617f";
+    // SHA384(concatenated binary SHA384(SQL1)..SHA384(SQL36)), and SQL36,
+    // read from committed canonical0cb47fbd, never an edited-branch ledger.
+    const ACCEPTED_CANONICAL_HISTORY36: &str = "d93e9473a13019377f7cc71ae0327aa1bb0e7d1951d57dc45deeab0746e5a1d51e859523d963a0dde16059dbd8ce0383";
+    const ACCEPTED_CANONICAL_MIGRATION36: &str = "32b0848765fb6892efe547f652316061c530b60e68607d20bce9dbd23f4ab37cb0008095a5fe3a86f9cfcdd5ecebbb8d";
+    // Independently read from canonical ec60908a, not the reconciled branch.
+    const ACCEPTED_CANONICAL_HISTORY37: &str = "42dd000f6391c6714faa2c98cbfcc6158bf761bfdf27660cbe308e813be8dd41a8d2d0f2052666aedce16872f3f1baf5";
+    const ACCEPTED_CANONICAL_MIGRATION37: &str = "7c4649b59bac9d5836eba3dcfc7f96608e137a433b13ef440cdb4a145848017e405a69dfb2af32c9c2384fd8bba81ac4";
+
+    fn assert_canonical_history36(prior: &[&sqlx::migrate::Migration]) -> anyhow::Result<()> {
+        anyhow::ensure!(prior.len() == 36, "canonical history1..36 length changed");
+        let mut digest = Sha384::new();
+        for (index, migration) in prior.iter().enumerate() {
+            anyhow::ensure!(
+                migration.version == index as i64 + 1 && migration.migration_type.is_up_migration(),
+                "canonical history1..36 ordering/type changed"
+            );
+            digest.update(Sha384::digest(migration.sql.as_bytes()));
+        }
+        anyhow::ensure!(
+            format!("{:x}", digest.finalize()) == ACCEPTED_CANONICAL_HISTORY36,
+            "migration1..36 differs from accepted canonical0cb47fbd"
+        );
+        anyhow::ensure!(
+            format!("{:x}", Sha384::digest(prior[35].sql.as_bytes()))
+                == ACCEPTED_CANONICAL_MIGRATION36,
+            "migration36 differs from accepted canonical0cb47fbd"
+        );
+        Ok(())
+    }
+
+    fn assert_accepted_canonical_history36() -> anyhow::Result<()> {
+        authority_stamp_removal::assert_accepted_prior35()?;
+        let prior: Vec<_> = MIGRATOR.iter().filter(|m| m.version <= 36).collect();
+        assert_canonical_history36(&prior)
+    }
+
+    fn assert_canonical_history37(prior: &[&sqlx::migrate::Migration]) -> anyhow::Result<()> {
+        anyhow::ensure!(prior.len() == 37, "canonical history1..37 length changed");
+        assert_canonical_history36(&prior[..36])?;
+        anyhow::ensure!(
+            prior[36].version == 37 && prior[36].migration_type.is_up_migration(),
+            "canonical migration37 ordering/type changed"
+        );
+        let mut digest = Sha384::new();
+        for migration in prior {
+            digest.update(Sha384::digest(migration.sql.as_bytes()));
+        }
+        anyhow::ensure!(
+            format!("{:x}", digest.finalize()) == ACCEPTED_CANONICAL_HISTORY37,
+            "migration1..37 differs from accepted canonical ec60908a"
+        );
+        anyhow::ensure!(
+            format!("{:x}", Sha384::digest(prior[36].sql.as_bytes()))
+                == ACCEPTED_CANONICAL_MIGRATION37,
+            "migration37 differs from accepted canonical ec60908a"
+        );
+        Ok(())
+    }
+
+    fn assert_accepted_canonical_history37() -> anyhow::Result<()> {
+        ssh_host_keys::assert_accepted_prior36()?;
+        let prior: Vec<_> = MIGRATOR.iter().filter(|m| m.version <= 37).collect();
+        assert_canonical_history37(&prior)
+    }
+
+    #[test]
+    fn canonical_history36_rejects_changed_sql_missing_or_reordered_versions() -> anyhow::Result<()>
+    {
+        assert_accepted_canonical_history36()?;
+        let prior: Vec<_> = MIGRATOR.iter().filter(|m| m.version <= 36).collect();
+        anyhow::ensure!(assert_canonical_history36(&prior[..35]).is_err());
+        let mut reordered = prior.clone();
+        reordered.swap(34, 35);
+        anyhow::ensure!(assert_canonical_history36(&reordered).is_err());
+        let mut changed = (*prior[35]).clone();
+        changed.sql = Cow::Owned(format!("{}\n-- changed canonical bytes\n", changed.sql));
+        let mut altered = prior;
+        altered[35] = &changed;
+        anyhow::ensure!(assert_canonical_history36(&altered).is_err());
+        // The new prior boundary also refuses a missing, reordered or edited
+        // canonical SSH37 while retaining all accepted history36 assertions.
+        assert_accepted_canonical_history37()?;
+        let prior: Vec<_> = MIGRATOR.iter().filter(|m| m.version <= 37).collect();
+        anyhow::ensure!(assert_canonical_history37(&prior[..36]).is_err());
+        let mut reordered = prior.clone();
+        reordered.swap(35, 36);
+        anyhow::ensure!(assert_canonical_history37(&reordered).is_err());
+        let mut changed = (*prior[36]).clone();
+        changed.sql = Cow::Owned(format!("{}\n-- changed canonical bytes\n", changed.sql));
+        let mut altered = prior;
+        altered[36] = &changed;
+        anyhow::ensure!(assert_canonical_history37(&altered).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn platform_managed_journal_pins_accepted_history38() -> anyhow::Result<()> {
+        assert_accepted_canonical_history37()?;
+        let prior: Vec<_> = MIGRATOR.iter().filter(|m| m.version < 39).collect();
+        anyhow::ensure!(prior.len() == 38);
+        let mut digest = Sha384::new();
+        for (index, m) in prior.iter().enumerate() {
+            anyhow::ensure!(m.version == index as i64 + 1 && m.migration_type.is_up_migration());
+            digest.update(Sha384::digest(m.sql.as_bytes()));
+        }
+        anyhow::ensure!(
+            format!("{:x}", digest.finalize())
+                == "68604f8738c2fdf1058494e572f7fb16b690847b820cb19afd2227e1583013ce9c8f6d5bc38f9fda9539131cf0e8a9a2",
+            "canonical history37 plus unchanged CW journal38 changed"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn canonical37_cw38_managed39_preserve_prior_ledger_and_measure_boundaries()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            apply_migrations_before(&test_db.url, 38).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            let fingerprint = |pool: PgPool| async move {
+                sqlx::query_scalar::<_, String>(include_str!(
+                    "../tests/data/application_schema_fingerprint.sql"
+                ))
+                .fetch_one(&pool)
+                .await
+            };
+            let canonical = fingerprint(pool.clone()).await?;
+            anyhow::ensure!(canonical == ACCEPTED_SSH_HOST_KEY_SCHEMA_FINGERPRINT);
+            let history37 = applied_migrations(&pool).await?;
+            anyhow::ensure!(history37.len() == 37 && history37.iter().all(|row| row.2));
+            apply_migrations_before(&test_db.url, 39).await?;
+            let cw = fingerprint(pool.clone()).await?;
+            let history38 = applied_migrations(&pool).await?;
+            anyhow::ensure!(
+                history38.len() == 38
+                    && history38[..37] == history37
+                    && history38[37].0 == 38
+                    && history38[37].2
+            );
+            anyhow::ensure!(cw != canonical && cw.len() == 64);
+            println!("CW_RUNTIME_SCHEMA38_FINGERPRINT={cw}");
+            ensure_schema(&test_db.url).await?;
+            let managed = fingerprint(pool.clone()).await?;
+            let history39 = applied_migrations(&pool).await?;
+            anyhow::ensure!(
+                history39.len() == 39
+                    && history39[..38] == history38
+                    && history39[38].0 == 39
+                    && history39[38].2
+            );
+            anyhow::ensure!(managed != cw && managed.len() == 64);
+            println!("PLATFORM_MANAGED_SCHEMA39_FINGERPRINT={managed}");
+            ensure_schema(&test_db.url).await?;
+            anyhow::ensure!(
+                fingerprint(pool.clone()).await? == managed
+                    && applied_migrations(&pool).await? == history39
+            );
+            pool.close().await;
+            Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
     // Accepted table schema through version34, before the authority stamp.
     const ACCEPTED_PRE_AUTHORITY_STAMP_SCHEMA_FINGERPRINT: &str =
         "218a3ea293e6023d9023b3b133534bfeba823dd68e17818196d609032ccca1b5";
@@ -242,7 +412,7 @@ mod tests {
                 .await?;
             let after = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                after.len() == MIGRATOR.iter().count()
+                after.len() == MIGRATOR.iter().filter(|m| !m.migration_type.is_down_migration()).count()
                     && after[..18] == before
                     && after[18].0 == 19
                     && after[19].0 == 20
@@ -827,7 +997,7 @@ mod tests {
                 .await?;
             let after = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                after.len() == MIGRATOR.iter().count()
+                after.len() == MIGRATOR.iter().filter(|m| !m.migration_type.is_down_migration()).count()
                     && after[..23] == before
                     && after[23].0 == ACCOUNT_ACCESS_VERSION
             );
@@ -1813,7 +1983,7 @@ mod tests {
             ensure_schema(&test_db.url).await?;
             let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
             let after = applied_migrations(&pool).await?;
-            anyhow::ensure!(after.len() == MIGRATOR.iter().count() && after[..21] == before && after[21].0 == 22);
+            anyhow::ensure!(after.len() == MIGRATOR.iter().filter(|m| !m.migration_type.is_down_migration()).count() && after[..21] == before && after[21].0 == 22);
             let definitions = assert_platform_broker_lock_authority(&pool, true).await?;
             let binding: (String, i64, Option<String>) = sqlx::query_as(
                 "SELECT profile_id,profile_revision,personal_owner_confirmed_by \
@@ -1943,6 +2113,7 @@ mod tests {
             let first = applied_migrations(&pool).await?;
             let embedded: Vec<_> = MIGRATOR
                 .iter()
+                .filter(|migration| !migration.migration_type.is_down_migration())
                 .map(|migration| {
                     (
                         migration.version,
@@ -2029,7 +2200,7 @@ mod tests {
             assert_platform_credential_schema(&pool).await?;
             let after = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                after.len() == MIGRATOR.iter().count()
+                after.len() == MIGRATOR.iter().filter(|m| !m.migration_type.is_down_migration()).count()
                     && after[..17] == before
                     && after[17].0 == 18,
                 "migration history did not append to the exact accepted version-17 ledger"
@@ -3202,7 +3373,11 @@ mod tests {
                 .connect(&test_db.url)
                 .await?;
             anyhow::ensure!(
-                applied_migrations(&pool).await?.len() == MIGRATOR.iter().count(),
+                applied_migrations(&pool).await?.len()
+                    == MIGRATOR
+                        .iter()
+                        .filter(|m| !m.migration_type.is_down_migration())
+                        .count(),
                 "deployed migration 12 ledger did not advance to current history"
             );
             pool.close().await;
@@ -4228,7 +4403,13 @@ mod tests {
                 .connect(&test_db.url)
                 .await?;
             let applied = applied_migrations(&pool).await?;
-            anyhow::ensure!(applied.len() == MIGRATOR.iter().count());
+            anyhow::ensure!(
+                applied.len()
+                    == MIGRATOR
+                        .iter()
+                        .filter(|m| !m.migration_type.is_down_migration())
+                        .count()
+            );
             pool.close().await;
             anyhow::Ok(())
         }
@@ -5082,6 +5263,15 @@ mod tests {
         }
         if version > 35 {
             authority_stamp_removal::assert_accepted_prior35()?;
+        }
+        if version > 36 {
+            assert_accepted_canonical_history36()?;
+        }
+        if version > 37 {
+            assert_accepted_canonical_history37()?;
+        }
+        if version > 38 {
+            platform_managed_journal_pins_accepted_history38()?;
         }
         if version > PLATFORM_BINDING_CONSENT_VERSION {
             let consent = MIGRATOR

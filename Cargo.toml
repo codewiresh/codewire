@@ -22,6 +22,7 @@ members = [
     "crates/codewire-credential-broker",
     "crates/codewire-credential-bridge",
     "crates/codewire-credential-service",
+    "crates/codewire-cw-release",
     "crates/codewire-local-credentials",
     "crates/codewire-platform-credentials",
     "crates/codewire-local-vmm",
@@ -50,7 +51,7 @@ exclude = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91.1"
+rust-version = "1.93.0"
 license = "AGPL-3.0-only"
 authors = ["Sonica"]
 
@@ -88,6 +89,7 @@ codewire-protected-store = { path = "crates/codewire-protected-store" }
 codewire-credential-broker = { path = "crates/codewire-credential-broker" }
 codewire-credential-bridge = { path = "crates/codewire-credential-bridge" }
 codewire-credential-service = { path = "crates/codewire-credential-service" }
+codewire-cw-release = { path = "crates/codewire-cw-release" }
 codewire-local-credentials = { path = "crates/codewire-local-credentials" }
 codewire-platform-credentials = { path = "crates/codewire-platform-credentials" }
 codewire-workload-secrets = { path = "crates/codewire-workload-secrets" }
@@ -266,6 +268,16 @@ wry = "0.54"
 lto = true
 codegen-units = 1
 strip = true
+
+# Native tests hash the actual CW image at admission and custody checks. Keep
+# those hashes inside the same deadlines even with an unoptimized debug CW.
+[profile.test.package."sha2@0.10.9"]
+opt-level = 3
+
+# In-process VMM RPC fixtures admit their own test executable. Omit linked
+# debug information so it fits the unchanged 256MiB executable bound.
+[profile.test.package.codewire-local-vmm]
+strip = "debuginfo"
 
 # CI/dev-drill profile: release semantics without LTO or single-unit
 # codegen — host-built test binaries in CI use this (shipped images

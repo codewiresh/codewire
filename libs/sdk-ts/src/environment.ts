@@ -1,4 +1,6 @@
 import { Files } from "./files.js";
+import { CwRuntime } from "./cw-runtime.js";
+import { PlatformAgents } from "./platform-agents.js";
 import { EnvironmentResizeDisruptionPolicy } from "@codewire/proto-ts/gen/codewire/v1/environment_pb";
 import {
   fromProtoEnvironment,
@@ -67,6 +69,8 @@ export class Environment implements EnvironmentData {
   readonly operation_generation: bigint;
   readonly source_selection: EnvironmentSourceSelection | undefined;
   readonly files: Files;
+  readonly runtime: CwRuntime;
+  readonly agents: PlatformAgents;
 
   constructor(
     data: EnvironmentData,
@@ -109,6 +113,8 @@ export class Environment implements EnvironmentData {
     this.preset_name = data.preset_name ?? undefined;
     this.operation_generation = data.operation_generation;
     this.source_selection = data.source_selection;
+    this.runtime = new CwRuntime(clients.cwRuntime, clients.cwRuntimeUpdates, orgId, this.id);
+    this.agents = new PlatformAgents(clients.environmentAgents, orgId, this.id);
     this.files = new Files(
       clients.files,
       clients.fileUploads,

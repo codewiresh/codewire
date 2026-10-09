@@ -5,9 +5,15 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+#[cfg(test)]
 use codewire_vmm_guest_probe::canonical_guest_root_newc;
+use codewire_vmm_guest_probe::canonical_guest_root_newc_with_cw;
 #[cfg(test)]
 use codewire_vmm_guest_probe::canonical_newc;
+use codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_PROVENANCE_ENTRY;
+pub use codewire_vmm_guest_probe::cw_runtime::{
+    CW_RUNTIME_ROOT, CwRuntimeCatalog, CwRuntimeProvenance, validate_static_cw,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
@@ -20,6 +26,7 @@ pub const VIRTIOFSD_RELEASE: &str = "v1.14.0";
 const VERSION_OUTPUT_LIMIT: u64 = 4096;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 const ARTIFACT_LOCK_LIMIT: u64 = 1024 * 1024;
+const INITRAMFS_LIMIT: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -190,10 +197,56 @@ impl AdmittedArtifacts {
     pub(crate) fn read_guest_busybox(&self) -> Result<Vec<u8>, ArtifactError> {
         read_canonical_initramfs_entry(&self.initramfs, b"bin/busybox")
     }
+
+    pub(crate) fn require_current_guest_seed_abi(&self) -> Result<(), ArtifactError> {
+        let init = read_canonical_initramfs_entry(&self.initramfs, b"init")?;
+        let marker = codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER;
+        let prefix = b"\0CWGUESTABI\0";
+        if init
+            .windows(marker.len())
+            .filter(|bytes| *bytes == marker)
+            .count()
+            != 1
+            || init
+                .windows(prefix.len())
+                .filter(|bytes| *bytes == prefix)
+                .count()
+                != 1
+        {
+            return Err(ArtifactError::GuestSeedProtocolUnsupported(
+                self.initramfs.path().to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn require_live_cw_runtime_publisher(&self) -> Result<(), ArtifactError> {
+        let init = read_canonical_initramfs_entry(&self.initramfs, b"init")?;
+        let marker = codewire_vmm_guest_probe::cw_runtime_live::LIVE_RUNTIME_CAPABILITY_MARKER;
+        if init
+            .windows(marker.len())
+            .filter(|bytes| *bytes == marker)
+            .count()
+            != 1
+        {
+            return Err(ArtifactError::GuestLiveRuntimeUnsupported(
+                self.initramfs.path().to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArtifactError {
+    #[error(
+        "retained guest has no trusted live cw publisher; it cannot be retrofitted without an explicit later boot: {0}"
+    )]
+    GuestLiveRuntimeUnsupported(PathBuf),
+    #[error(
+        "retained boot assets do not support the current startup protocol; explicitly upgrade the environment boot assets before starting or updating cw: {0}"
+    )]
+    GuestSeedProtocolUnsupported(PathBuf),
     #[error("read artifact lock {path}: {source}")]
     ReadLock { path: PathBuf, source: io::Error },
     #[error("decode artifact lock {path}: {source}")]
@@ -553,13 +606,25 @@ fn validate_initramfs(
     path: &Path,
     architecture: ArtifactArchitecture,
 ) -> Result<(), ArtifactError> {
+    if file
+        .metadata()
+        .map_err(|source| ArtifactError::Inspect {
+            path: path.to_owned(),
+            source,
+        })?
+        .len()
+        > INITRAMFS_LIMIT
+    {
+        return Err(ArtifactError::InvalidInitramfs(path.to_owned()));
+    }
     file.seek(SeekFrom::Start(0))
         .map_err(|source| ArtifactError::Inspect {
             path: path.to_owned(),
             source,
         })?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    file.take(INITRAMFS_LIMIT + 1)
+        .read_to_end(&mut bytes)
         .map_err(|source| ArtifactError::Inspect {
             path: path.to_owned(),
             source,
@@ -570,11 +635,28 @@ fn validate_initramfs(
     if !valid_elf_header(init, architecture) {
         return Err(ArtifactError::InvalidInitramfs(path.to_owned()));
     }
+    if bytes.len() as u64 > INITRAMFS_LIMIT {
+        return Err(ArtifactError::InvalidInitramfs(path.to_owned()));
+    }
+    let cw = if let Some(provenance) = find_newc_entry(&bytes, CW_RUNTIME_PROVENANCE_ENTRY) {
+        let identity = CwRuntimeProvenance::decode(provenance)
+            .map_err(|_| ArtifactError::InvalidInitramfs(path.to_owned()))?;
+        let payload = find_newc_entry(&bytes, identity.archive_entry().as_bytes())
+            .ok_or_else(|| ArtifactError::InvalidInitramfs(path.to_owned()))?;
+        if architecture != ArtifactArchitecture::X86_64
+            || identity.validate_payload(payload).is_err()
+        {
+            return Err(ArtifactError::InvalidInitramfs(path.to_owned()));
+        }
+        Some((payload, provenance))
+    } else {
+        None
+    };
     let product_canonical = find_newc_entry(&bytes, b"bin/busybox").is_some_and(|busybox| {
         find_newc_entry(&bytes, b"sbin/runc").is_some_and(|runc| {
             valid_static_elf_header(busybox, architecture)
                 && valid_static_elf_header(runc, architecture)
-                && canonical_guest_root_newc(init, busybox, runc)
+                && canonical_guest_root_newc_with_cw(init, busybox, runc, cw)
                     .ok()
                     .is_some_and(|canonical| canonical == bytes)
         })
@@ -589,6 +671,9 @@ fn read_canonical_initramfs_entry(
     artifact: &AdmittedArtifact,
     expected: &[u8],
 ) -> Result<Vec<u8>, ArtifactError> {
+    if artifact.size > INITRAMFS_LIMIT {
+        return Err(ArtifactError::InvalidInitramfs(artifact.path.clone()));
+    }
     let file = artifact.open_exact()?;
     let mut bytes = Vec::new();
     file.take(artifact.size.saturating_add(1))
@@ -1025,6 +1110,109 @@ mod tests {
     }
 
     #[test]
+    fn current_guest_capability_is_read_from_the_exact_pinned_init_and_never_guessed() {
+        let task = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(task.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = PrivateRoot::open(task.path()).unwrap();
+        let marker = codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER;
+        for (index, capability) in [
+            Vec::new(),
+            marker.to_vec(),
+            [marker, marker].concat(),
+            b"\0CWGUESTABI\0seed=8;cw_catalog=0\0".to_vec(),
+            [marker, b"\0CWGUESTABI\0seed=10;cw_catalog=2\0"].concat(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut init = vec![0; 64];
+            init[..4].copy_from_slice(b"\x7fELF");
+            init.extend(capability);
+            let archive = canonical_newc(&init).unwrap();
+            let name = format!("boot-{index}");
+            write_artifact(&root.path().join(&name), &archive, 0o400);
+            let admitted = admit_one(&root, &spec(&name, &archive), false).unwrap();
+            let artifacts = AdmittedArtifacts {
+                cloud_hypervisor: AdmittedArtifact::for_test("/unused/ch"),
+                virtiofsd: None,
+                kernel: AdmittedArtifact::for_test("/unused/kernel"),
+                initramfs: admitted,
+            };
+            assert_eq!(
+                artifacts.require_current_guest_seed_abi().is_ok(),
+                index == 1
+            );
+            if index == 1 {
+                let mut changed = archive;
+                *changed.last_mut().unwrap() ^= 1;
+                std::fs::set_permissions(
+                    root.path().join(&name),
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .unwrap();
+                write_artifact(&root.path().join(&name), &changed, 0o400);
+                assert!(matches!(
+                    artifacts.require_current_guest_seed_abi(),
+                    Err(ArtifactError::IdentityChanged(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn live_runtime_capability_requires_the_exact_pinned_init() {
+        let task = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let root = PrivateRoot::open(task.path()).unwrap();
+        let marker = codewire_vmm_guest_probe::cw_runtime_live::LIVE_RUNTIME_CAPABILITY_MARKER;
+        for (index, capability) in [
+            Vec::new(),
+            marker.to_vec(),
+            [marker, marker].concat(),
+            b"CODEWIRE_NATIVE_CW_LIVE_PUBLISHER_V0\0".to_vec(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut init = vec![0; 64];
+            init[..4].copy_from_slice(b"\x7fELF");
+            init.extend(codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER);
+            init.extend(capability);
+            let archive = canonical_newc(&init).unwrap();
+            let name = format!("publisher-{index}");
+            write_artifact(&root.path().join(&name), &archive, 0o400);
+            let artifacts = AdmittedArtifacts {
+                cloud_hypervisor: AdmittedArtifact::for_test("/unused/ch"),
+                virtiofsd: None,
+                kernel: AdmittedArtifact::for_test("/unused/kernel"),
+                initramfs: admit_one(&root, &spec(&name, &archive), false).unwrap(),
+            };
+            // Seed9/disk support alone must never imply a trusted publisher.
+            artifacts.require_current_guest_seed_abi().unwrap();
+            assert_eq!(
+                artifacts.require_live_cw_runtime_publisher().is_ok(),
+                index == 1
+            );
+            if index == 1 {
+                let mut changed = archive;
+                *changed.last_mut().unwrap() ^= 1;
+                std::fs::set_permissions(
+                    root.path().join(&name),
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .unwrap();
+                write_artifact(&root.path().join(&name), &changed, 0o400);
+                assert!(matches!(
+                    artifacts.require_live_cw_runtime_publisher(),
+                    Err(ArtifactError::IdentityChanged(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn probe_only_archive_is_not_admitted_as_a_product_guest_root() {
         let architecture = ArtifactArchitecture::host().unwrap();
         let mut init = vec![0_u8; 64];
@@ -1085,6 +1273,115 @@ mod tests {
             validate_initramfs(&mut File::open(&path).unwrap(), &path, architecture),
             Err(ArtifactError::InvalidInitramfs(rejected)) if rejected == path
         ));
+    }
+
+    #[test]
+    fn cw_image_boot_bundle_refuses_payload_provenance_and_mode_tampering() {
+        use codewire_vmm_guest_probe::cw_runtime::{CwImageDescriptor, CwImagePayload};
+        let mut cw = vec![0_u8; 136];
+        cw[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        cw[16..18].copy_from_slice(&2_u16.to_le_bytes());
+        cw[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        cw[32..40].copy_from_slice(&64_u64.to_le_bytes());
+        cw[54..56].copy_from_slice(&56_u16.to_le_bytes());
+        cw[56..58].copy_from_slice(&1_u16.to_le_bytes());
+        cw[64..68].copy_from_slice(&1_u32.to_le_bytes());
+        let descriptor = CwImageDescriptor {
+            sha256: "c".repeat(64),
+            size: 10240,
+        };
+        let identity = CwRuntimeProvenance {
+            schema_version: 1,
+            image_index_sha256: "d".repeat(64),
+            image_manifest: descriptor.clone(),
+            image_config: descriptor.clone(),
+            image_layer: descriptor,
+            layer_diff_id: "c".repeat(64),
+            payload: CwImagePayload {
+                schema_version: 2,
+                protocol_version: 1,
+                record_version: 1,
+                package_version: "0.1.0".to_owned(),
+                target: "x86_64-unknown-linux-musl".into(),
+                source_revision: "a".repeat(40),
+                source_tree_sha256: "b".repeat(64),
+                rustc: "rustc 1.93.0 (fixture)".into(),
+                sha256: format!("{:x}", Sha256::digest(&cw)),
+                size: cw.len() as u64,
+            },
+        };
+        let provenance = serde_json::to_vec(&identity).unwrap();
+        let archive =
+            canonical_guest_root_newc_with_cw(&cw, &cw, &cw, Some((&cw, &provenance))).unwrap();
+        let task = tempfile::tempdir().unwrap();
+        let path = task.path().join("cw-boot.cpio");
+        std::fs::write(&path, &archive).unwrap();
+        validate_initramfs(
+            &mut File::open(&path).unwrap(),
+            &path,
+            ArtifactArchitecture::X86_64,
+        )
+        .unwrap();
+        assert!(
+            validate_initramfs(
+                &mut File::open(&path).unwrap(),
+                &path,
+                ArtifactArchitecture::Aarch64
+            )
+            .is_err()
+        );
+        let selected = find_newc_entry(&archive, identity.archive_entry().as_bytes()).unwrap();
+        let start = selected.as_ptr() as usize - archive.as_ptr() as usize;
+        let mut changed = archive.clone();
+        changed[start + 135] = 1;
+        std::fs::write(&path, &changed).unwrap();
+        assert!(
+            validate_initramfs(
+                &mut File::open(&path).unwrap(),
+                &path,
+                ArtifactArchitecture::X86_64
+            )
+            .is_err()
+        );
+        let entry_name = identity.archive_entry();
+        let name_offset = archive
+            .windows(entry_name.len())
+            .position(|window| window == entry_name.as_bytes())
+            .unwrap();
+        changed = archive.clone();
+        // newc c_mode starts 14 bytes into the 110-byte header.
+        changed[name_offset - 110 + 14..name_offset - 110 + 22].copy_from_slice(b"000081ff");
+        std::fs::write(&path, &changed).unwrap();
+        assert!(
+            validate_initramfs(
+                &mut File::open(&path).unwrap(),
+                &path,
+                ArtifactArchitecture::X86_64
+            )
+            .is_err()
+        );
+        changed = archive;
+        changed.push(0);
+        std::fs::write(&path, &changed).unwrap();
+        assert!(
+            validate_initramfs(
+                &mut File::open(&path).unwrap(),
+                &path,
+                ArtifactArchitecture::X86_64
+            )
+            .is_err()
+        );
+        let mut changed_identity = identity;
+        changed_identity.payload.protocol_version = 2;
+        assert!(
+            canonical_guest_root_newc_with_cw(
+                &cw,
+                &cw,
+                &cw,
+                Some((&cw, &serde_json::to_vec(&changed_identity).unwrap()))
+            )
+            .is_err()
+        );
     }
 
     #[test]
