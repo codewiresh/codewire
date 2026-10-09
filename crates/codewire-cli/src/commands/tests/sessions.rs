@@ -258,11 +258,17 @@ fn session_table_aligns_columns_and_names_the_parent() {
         session("session-2", "", "session-1", "cargo test"),
         session("session-3", "orphan", "session-9", "sleep 5"),
     ];
-    assert_eq!(
-        running_children_hints(&sessions, "session-1", Some("team")),
-        ["cw: child session session-2 is still running; stop it with `cw stop team session-2`"]
-    );
-    assert!(running_children_hints(&sessions, "session-2", None).is_empty());
+    let mut owners = std::collections::BTreeSet::from(["session-1".to_string()]);
+    let children: Vec<String> = running_children(&sessions, &owners)
+        .into_iter()
+        .map(|child| child.session_id)
+        .collect();
+    assert_eq!(children, ["session-2"]);
+    owners.insert("session-2".to_string());
+    assert!(running_children(&sessions, &owners).is_empty());
+    let mut stopped = sessions[1].clone();
+    stopped.state = "Stopped".to_string();
+    assert!(running_children(&[stopped], &std::collections::BTreeSet::from(["session-1".to_string()])).is_empty());
     assert_eq!(
         format_environment_sessions(&sessions, "  "),
         concat!(

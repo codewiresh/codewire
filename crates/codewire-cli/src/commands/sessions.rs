@@ -749,78 +749,101 @@ pub(crate) async fn handle_stop_command(
         return super::member_control::managed::stop(globals, args).await;
     }
     let (target, session) = resolve_selected_session(globals, &args.target).await?;
-    let environment = (args.target.len() == 2).then(|| args.target[0].as_str());
-    #[cfg(unix)]
-    if matches!(target, EnvironmentSessionTarget::Platform { .. }) && managed_session(&session) {
-        let stopped = agents::platform_host::control_session(
-            target.clone(),
-            &session,
-            args.request_id.as_deref(),
-            args.expected_launch_generation,
-            args.cleanup_request_id,
-            codewire_client::platform_agents::EnvironmentAgentAction::Stop,
-        )
-        .await?;
-        print_environment_sessions(std::slice::from_ref(&stopped), args.output)?;
-        report_running_children(&target, &session, environment).await;
-        return Ok(());
-    }
+    let platform_managed =
+        matches!(target, EnvironmentSessionTarget::Platform { .. }) && managed_session(&session);
     anyhow::ensure!(
-        args.request_id.is_none()
-            && args.expected_launch_generation.is_none()
-            && args.cleanup_request_id.is_none(),
+        platform_managed
+            || (args.request_id.is_none()
+                && args.expected_launch_generation.is_none()
+                && args.cleanup_request_id.is_none()),
         "request and generation flags require --member or a managed platform session"
     );
-    #[cfg(target_os = "linux")]
-    if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) && managed_session(&session) {
-        let stopped = agents::stop_native_managed(&target, &session).await?;
-        print_environment_sessions(std::slice::from_ref(&stopped), args.output)?;
-        report_running_children(&target, &session, environment).await;
-        return Ok(());
+    let (parent, confirmed) = stop_one(&target, &session, Some(&args)).await?;
+    let mut stopped = vec![parent];
+    let mut unconfirmed = (!confirmed).then(|| stopped[0].status_message.clone());
+    // A parent owns its descendants: stop every one still running, level by
+    // level, so an orchestrator never leaves its workers behind.
+    let mut owners = std::collections::BTreeSet::from([session.session_id.clone()]);
+    let mut failure = None;
+    loop {
+        let children = running_children(&target.list().await?, &owners);
+        if children.is_empty() {
+            break;
+        }
+        for child in children {
+            owners.insert(child.session_id.clone());
+            match stop_one(&target, &child, None).await {
+                Ok((view, confirmed)) => {
+                    if !confirmed {
+                        unconfirmed.get_or_insert_with(|| view.status_message.clone());
+                    }
+                    stopped.push(view);
+                }
+                Err(error) => {
+                    let name = if child.name.is_empty() {
+                        &child.session_id
+                    } else {
+                        &child.name
+                    };
+                    failure.get_or_insert(error.context(format!("stop child session {name}")));
+                }
+            }
+        }
     }
-    let stopped = target.stop(&session.session_id).await?;
-    print_environment_sessions(std::slice::from_ref(&stopped), args.output)?;
-    if !session_is_terminal(&stopped) || stopped.cleanup_unknown {
-        anyhow::bail!("session stop is not confirmed: {}", stopped.status_message);
+    print_environment_sessions(&stopped, args.output)?;
+    if let Some(error) = failure {
+        return Err(error);
     }
-    report_running_children(&target, &session, environment).await;
+    if let Some(status) = unconfirmed {
+        anyhow::bail!("session stop is not confirmed: {status}");
+    }
     Ok(())
 }
 
-/// Stopping a parent never stops its children; name any still running so
-/// they are not left behind unnoticed.
-async fn report_running_children(
+/// Stop one session through its placement's owner. False when a plain
+/// session's stop is not confirmed; managed stops confirm themselves.
+async fn stop_one(
     target: &EnvironmentSessionTarget,
-    parent: &EnvironmentSessionView,
-    environment: Option<&str>,
-) {
-    let Ok(sessions) = target.list().await else {
-        return;
-    };
-    for line in running_children_hints(&sessions, &parent.session_id, environment) {
-        eprintln!("{line}");
+    session: &EnvironmentSessionView,
+    request: Option<&SessionTargetArgs>,
+) -> anyhow::Result<(EnvironmentSessionView, bool)> {
+    #[cfg(unix)]
+    if matches!(target, EnvironmentSessionTarget::Platform { .. }) && managed_session(session) {
+        let stopped = agents::platform_host::control_session(
+            target.clone(),
+            session,
+            request.and_then(|args| args.request_id.as_deref()),
+            request.and_then(|args| args.expected_launch_generation),
+            request.and_then(|args| args.cleanup_request_id),
+            codewire_client::platform_agents::EnvironmentAgentAction::Stop,
+        )
+        .await?;
+        return Ok((stopped, true));
     }
+    #[cfg(target_os = "linux")]
+    if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) && managed_session(session) {
+        return Ok((agents::stop_native_managed(target, session).await?, true));
+    }
+    let _ = request;
+    let stopped = target.stop(&session.session_id).await?;
+    let confirmed = session_is_terminal(&stopped) && !stopped.cleanup_unknown;
+    Ok((stopped, confirmed))
 }
 
-pub(super) fn running_children_hints(
+/// Running sessions whose parent is one of `owners` and that are not owners
+/// themselves, so a session whose stop failed is never revisited.
+pub(super) fn running_children(
     sessions: &[EnvironmentSessionView],
-    parent_session_id: &str,
-    environment: Option<&str>,
-) -> Vec<String> {
-    let scope = environment.map(|e| format!("{e} ")).unwrap_or_default();
+    owners: &std::collections::BTreeSet<String>,
+) -> Vec<EnvironmentSessionView> {
     sessions
         .iter()
-        .filter(|s| s.parent_session_id == parent_session_id && !session_is_terminal(s))
-        .map(|child| {
-            let name = if child.name.is_empty() {
-                &child.session_id
-            } else {
-                &child.name
-            };
-            format!(
-                "cw: child session {name} is still running; stop it with `cw stop {scope}{name}`"
-            )
+        .filter(|s| {
+            owners.contains(&s.parent_session_id)
+                && !owners.contains(&s.session_id)
+                && !session_is_terminal(s)
         })
+        .cloned()
         .collect()
 }
 
