@@ -519,13 +519,16 @@ print("cooperative cancellation: no adopted children")
         self.assertIn(["python3", str(self.root / "source/crates/codewire-local-vmm/src/darwin/path/test_mount_fixture.py"), "-v"], commands)
         cargo = [argv for argv in commands if argv[0] == "cargo" and argv[1] != "-V"]
         self.assertEqual([argv[1] for argv in cargo],
-                         ["build", "test", "test", "clippy", "clippy", "build", "test"])
+                         ["build", "test", "test", "test", "clippy", "clippy", "build", "test"])
         self.assertEqual(cargo[2], ["cargo", "test", "--locked", "--offline", "--target",
+                                   "aarch64-apple-darwin", "-p", "codewire-cw-release", "--",
+                                   "--skip", "compiled_trust_is_an_exact_producer_and_artifact_graph_input"])
+        self.assertEqual(cargo[3], ["cargo", "test", "--locked", "--offline", "--target",
                                    "aarch64-apple-darwin", "-p", "codewire-local-vmm", "--lib"])
-        self.assertEqual(cargo[4], ["cargo", "clippy", "--locked", "--offline", "--target",
+        self.assertEqual(cargo[5], ["cargo", "clippy", "--locked", "--offline", "--target",
                                    "aarch64-apple-darwin", "-p", "codewire-local-vmm", "--lib",
                                    "--", "-D", "warnings"])
-        self.assertEqual(cargo[6], ["cargo", "test", "--locked", "--offline", "--target",
+        self.assertEqual(cargo[7], ["cargo", "test", "--locked", "--offline", "--target",
                                    "x86_64-apple-darwin", "-p", "codewire-local-vmm", "--lib", "--no-run"])
         for argv in cargo:
             self.assertIn("--offline", argv)

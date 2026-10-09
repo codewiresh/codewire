@@ -24,7 +24,10 @@ fn fixture_process() {
     let Some(mode) = std::env::var_os(FIXTURE) else {
         return;
     };
-    let executable = std::env::current_exe().unwrap();
+    // macOS reports the invoked path, the managed entry link; Linux reports
+    // the resolved file. The launcher reads this before changing the
+    // selection, so resolving it here names the version that was executed.
+    let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
     let mut stdout = std::io::stdout();
     writeln!(stdout, "{IDENTITY_PREFIX}{}", executable.display()).unwrap();
     stdout.flush().unwrap();
