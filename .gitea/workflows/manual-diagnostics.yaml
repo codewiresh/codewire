@@ -38,8 +38,8 @@ jobs:
               ;;
           esac
 
-      - name: Set up Go 1.26.6
-        run: scripts/ci/setup/setup-go.sh 1.26.6
+      - name: Set up Go 1.26.9
+        run: scripts/ci/setup/setup-go.sh 1.26.9
 
       - name: Verify sealed Rust toolchain
         if: ${{ github.event.inputs.diagnostic == 'rust-stack' || github.event.inputs.diagnostic == 'go-tailnet' }}
