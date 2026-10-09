@@ -242,6 +242,16 @@ fn session_grammar_uses_environment_as_first_positional() {
         panic!("expected list command");
     };
     assert_eq!(args.environment.as_deref(), Some("builder"));
+    for argv in [vec!["cw", "list"], vec!["cw", "ls"], vec!["cw", "ls", "--all"]] {
+        let Command::List(args) = Cli::try_parse_from(argv).unwrap().command else {
+            panic!("expected list command");
+        };
+        assert_eq!(args.environment, None, "no ENV lists every environment");
+    }
+    let Command::List(args) = Cli::try_parse_from(["cw", "ls", "builder"]).unwrap().command else {
+        panic!("expected list command");
+    };
+    assert_eq!(args.environment.as_deref(), Some("builder"));
 
     let logs = Cli::try_parse_from(["cw", "logs", "builder", "session-1"]).unwrap();
     let Command::Logs(args) = logs.command else {

@@ -2,8 +2,10 @@
 
 The CLI uses an environment as the execution placement and a durable session
 as the process identity. Session names are unique within an environment;
-commands resolve an exact ID before a name. `cw list --all` inventories
-accessible environments and reports unavailable targets as errors.
+commands resolve an exact ID before a name. `cw list` (alias `cw ls`)
+inventories every accessible environment and its sessions, shows stopped
+environments as not running, and reports running environments it cannot
+reach as errors; `cw list ENV` lists one environment.
 
 ## Placements
 
@@ -55,7 +57,7 @@ Use the same session commands with `host-team`, `vm-team`, or `cloud-team`:
 ```sh
 cw run host-team --name tests --detach --no-tty -- make test
 cw list host-team
-cw list --all
+cw list
 cw wait host-team tests --timeout 10m
 cw logs host-team tests
 cw stop host-team tests

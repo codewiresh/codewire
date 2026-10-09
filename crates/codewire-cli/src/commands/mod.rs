@@ -403,7 +403,7 @@ pub(crate) enum CredentialsCommand {
     Add(CredentialAddArgs),
     #[command(about = "Generate a protected SSH identity and show its public key")]
     Generate(CredentialGenerateArgs),
-    #[command(about = "List credential metadata")]
+    #[command(visible_alias = "ls", about = "List credential metadata")]
     List(CredentialListArgs),
     #[command(about = "Show credential metadata")]
     Get(CredentialGetArgs),
@@ -559,7 +559,7 @@ pub(crate) enum CredentialProfileCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum CredentialProfilesCommand {
-    #[command(about = "List credential profile metadata")]
+    #[command(visible_alias = "ls", about = "List credential profile metadata")]
     List(CredentialListArgs),
 }
 
@@ -747,7 +747,7 @@ pub(crate) enum EnvCommand {
         long_about = "Create a new environment from direct CLI flags.\n\nMultiple repos can be specified as positional args or with --repo flags.\nUse URL[@branch][::/workspace/path] to set a branch and optional checkout path per repo."
     )]
     Create(Box<EnvCreateArgs>),
-    #[command(about = "List environments")]
+    #[command(visible_alias = "ls", about = "List environments")]
     List(EnvListArgs),
     #[command(about = "Show environment details")]
     Info(EnvInfoArgs),
@@ -1295,7 +1295,7 @@ pub(crate) struct EnvShareArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum EnvShareCommand {
-    #[command(about = "List collaborators for an environment")]
+    #[command(visible_alias = "ls", about = "List collaborators for an environment")]
     List(EnvShareTargetArgs),
     #[command(about = "Share an environment with a user")]
     Grant(EnvShareGrantArgs),
@@ -1347,7 +1347,7 @@ pub(crate) struct EnvPortArgs {
 pub(crate) enum EnvPortCommand {
     #[command(about = "Register a port and get a preview URL")]
     Add(EnvPortAddArgs),
-    #[command(alias = "ls", about = "List registered ports")]
+    #[command(visible_alias = "ls", about = "List registered ports")]
     List(EnvPortListArgs),
     #[command(about = "Remove a registered port")]
     Rm(EnvPortRmArgs),
@@ -1473,7 +1473,7 @@ pub(crate) struct CostArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum OrgCommand {
-    #[command(about = "List organizations")]
+    #[command(visible_alias = "ls", about = "List organizations")]
     List(OrgListArgs),
     #[command(about = "Show the current organization")]
     Current,
@@ -1533,7 +1533,7 @@ pub(crate) struct OrgInviteArgs {
 pub(crate) enum ApiKeyCommand {
     #[command(about = "Create an API key")]
     Create(ApiKeyCreateArgs),
-    #[command(about = "List API keys")]
+    #[command(visible_alias = "ls", about = "List API keys")]
     List,
     #[command(alias = "rm", about = "Delete an API key")]
     Delete(ApiKeyDeleteArgs),
@@ -1555,7 +1555,7 @@ pub(crate) struct ApiKeyDeleteArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum PresetCommand {
-    #[command(alias = "ls", about = "List environment presets")]
+    #[command(visible_alias = "ls", about = "List environment presets")]
     List,
     #[command(about = "Create an environment preset")]
     Create(PresetCreateArgs),
@@ -1606,7 +1606,10 @@ pub(crate) struct PresetRmArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum SecretsCommand {
-    #[command(about = "List key metadata in the explicitly selected scope")]
+    #[command(
+        visible_alias = "ls",
+        about = "List key metadata in the explicitly selected scope"
+    )]
     List(ScopedSecretListArgs),
     #[command(about = "Set one key using a hidden prompt or standard input")]
     Set(ScopedSecretKeyArgs),
@@ -1663,7 +1666,7 @@ pub(crate) struct SecretPreviewArgs {
 pub(crate) enum SecretProjectCommand {
     #[command(about = "Create a secret project")]
     Create(SecretProjectCreateArgs),
-    #[command(about = "List named secret projects")]
+    #[command(visible_alias = "ls", about = "List named secret projects")]
     List(ScopedSecretListArgs),
     #[command(about = "Delete an explicitly named project and all its keys")]
     Delete(SecretProjectDeleteArgs),
@@ -1722,7 +1725,11 @@ pub(crate) enum ConfigCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum NetworkCommand {
-    #[command(alias = "networks", about = "List Mesh networks you can use")]
+    #[command(
+        alias = "networks",
+        visible_alias = "ls",
+        about = "List Mesh networks you can use"
+    )]
     List(NetworkListArgs),
     #[command(about = "Create a Mesh network")]
     Create(NetworkCreateArgs),
@@ -1987,7 +1994,7 @@ pub(crate) struct ListArgs {
     #[arg(
         long,
         conflicts_with = "environment",
-        help = "List sessions across accessible environments"
+        help = "List every accessible environment (the default without ENV)"
     )]
     pub(crate) all: bool,
     #[arg(value_name = "ENV")]

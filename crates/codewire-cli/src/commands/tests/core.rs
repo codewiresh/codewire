@@ -1215,7 +1215,10 @@ fn top_level_help_groups_every_visible_command_once() {
         assert_eq!(sections, 1, "{name} belongs to exactly one help section");
         let rows = help
             .lines()
-            .filter(|line| line.trim_start().starts_with(&format!("{name} ")))
+            .filter(|line| {
+                let line = line.trim_start();
+                line.starts_with(&format!("{name} ")) || line.starts_with(&format!("{name}, "))
+            })
             .count();
         assert_eq!(rows, 1, "{name} is listed once");
     }
@@ -1231,4 +1234,29 @@ fn top_level_help_groups_every_visible_command_once() {
         .chain(["Options:".to_owned()])
         .collect();
     assert_eq!(headings, expected);
+}
+
+#[test]
+fn every_list_command_answers_to_ls() {
+    use clap::CommandFactory as _;
+    fn walk(command: &clap::Command, path: &str, lists: &mut Vec<String>) {
+        for subcommand in command.get_subcommands() {
+            let path = format!("{path} {}", subcommand.get_name());
+            if subcommand.get_name() == "list" {
+                assert!(
+                    subcommand.get_visible_aliases().any(|alias| alias == "ls"),
+                    "{path} shows the ls alias"
+                );
+                lists.push(path.clone());
+            }
+            walk(subcommand, &path, lists);
+        }
+    }
+    let mut lists = Vec::new();
+    walk(&crate::Cli::command(), "cw", &mut lists);
+    for path in ["cw list", "cw env list", "cw credentials list", "cw network list"] {
+        assert!(lists.iter().any(|list| list == path), "{path} exists");
+    }
+    let help = crate::cli_command().render_help().to_string();
+    assert!(help.lines().any(|line| line.trim_start().starts_with("list, ls ")));
 }

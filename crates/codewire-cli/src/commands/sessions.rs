@@ -1599,7 +1599,14 @@ async fn adjacent_environment_target(
 ) -> anyhow::Result<EnvironmentSessionTarget> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
-    let targets = attachment_environment_targets(globals, &paths, &env).await?;
+    let targets = attachment_environment_targets(globals, &paths, &env)
+        .await?
+        .into_iter()
+        .map(|(target, _)| target)
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        anyhow::bail!("no environments are available for attachment navigation");
+    }
     let current_index = targets
         .iter()
         .position(|target| target.kind == current.kind && target.target_ref == current.target_ref)
@@ -1613,25 +1620,35 @@ async fn adjacent_environment_target(
         .await
 }
 
+/// Every accessible environment, sorted, with whether it is running.
 async fn attachment_environment_targets(
     globals: &Globals,
     paths: &ResolvePaths,
     env: &impl config::Env,
-) -> anyhow::Result<Vec<config::CurrentTargetConfig>> {
+) -> anyhow::Result<Vec<(config::CurrentTargetConfig, bool)>> {
     #[cfg(target_os = "linux")]
     let mut targets = native_environments()
         .await?
         .into_iter()
-        .map(|environment| config::CurrentTargetConfig {
-            kind: "local".to_string(),
-            target_ref: environment.name.clone(),
-            name: environment.name,
+        .map(|environment| {
+            let running = environment.state
+                == codewire_local_vmm::control::v1::EnvironmentState::Running as i32;
+            let target = config::CurrentTargetConfig {
+                kind: "local".to_string(),
+                target_ref: environment.name.clone(),
+                name: environment.name,
+            };
+            (target, running)
         })
         .collect::<Vec<_>>();
     #[cfg(not(target_os = "linux"))]
     let mut targets = Vec::new();
     #[cfg(unix)]
-    targets.extend(host_environments()?.into_iter().map(|e| e.current_target()));
+    targets.extend(
+        host_environments()?
+            .into_iter()
+            .map(|e| (e.current_target(), e.state == "running")),
+    );
 
     match resolve_platform(globals, paths, env) {
         Ok(platform) => {
@@ -1646,28 +1663,28 @@ async fn attachment_environment_targets(
                 .map_err(display_client_error)?
                 .environments;
             targets.extend(environments.into_iter().map(|environment| {
-                config::CurrentTargetConfig {
+                let running = environment.state.as_known()
+                    == Some(codewire_client::EnvironmentState::Running);
+                let target = config::CurrentTargetConfig {
                     kind: "env".to_string(),
                     target_ref: environment.id.clone(),
                     name: trimmed_str(&environment.name)
                         .unwrap_or(&environment.id)
                         .to_string(),
-                }
+                };
+                (target, running)
             }));
         }
         Err(error) if targets.is_empty() => return Err(error),
         Err(_) => {}
     }
 
-    targets.sort_by(|left, right| {
+    targets.sort_by(|(left, _), (right, _)| {
         left.name
             .cmp(&right.name)
             .then_with(|| left.kind.cmp(&right.kind))
             .then_with(|| left.target_ref.cmp(&right.target_ref))
     });
-    if targets.is_empty() {
-        anyhow::bail!("no environments are available for attachment navigation");
-    }
     Ok(targets)
 }
 
@@ -1717,34 +1734,43 @@ pub(crate) async fn handle_list_command(globals: &Globals, args: ListArgs) -> an
     if globals.member.is_some() {
         return super::member_control::terminal::list(globals, args).await;
     }
-    if args.all {
+    if args.all || args.environment.is_none() {
         let paths = ResolvePaths::from_env(&OsEnv)?;
         let targets = attachment_environment_targets(globals, &paths, &OsEnv).await?;
         let mut rows = Vec::new();
         let mut incomplete = false;
-        for current in targets {
-            let result = match environment_session_target_from_current(
-                globals,
-                &paths,
-                &OsEnv,
-                current.clone(),
-            )
-            .await
-            {
-                Ok(target) => target.list().await,
-                Err(error) => Err(error),
-            };
-            match result {
-                Ok(sessions)=>rows.push(serde_json::json!({"environment_id":current.target_ref,"environment":current.name,
-                    "placement":if current.kind=="env"{"platform"}else{"local"},
-                    "type":if current.kind=="host"{"host"}else{"sandbox"},"sessions":sessions,"error":null})),
-                Err(error)=>{
-                    incomplete=true;
-                    rows.push(serde_json::json!({"environment_id":current.target_ref,"environment":current.name,
-                        "placement":if current.kind=="env"{"platform"}else{"local"},
-                        "type":if current.kind=="host"{"host"}else{"sandbox"},"sessions":[],"error":error.to_string()}));
+        for (current, running) in targets {
+            let mut sessions = serde_json::json!([]);
+            let mut error = None;
+            if running {
+                let result = match environment_session_target_from_current(
+                    globals,
+                    &paths,
+                    &OsEnv,
+                    current.clone(),
+                )
+                .await
+                {
+                    Ok(target) => target.list().await,
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(listed) => sessions = serde_json::to_value(listed)?,
+                    Err(failure) => {
+                        incomplete = true;
+                        error = Some(failure.to_string());
+                    }
                 }
             }
+            rows.push(serde_json::json!({
+                "environment_id": current.target_ref,
+                "environment": current.name,
+                "placement": if current.kind == "env" { "platform" } else { "local" },
+                "type": if current.kind == "host" { "host" } else { "sandbox" },
+                "running": running,
+                "sessions": sessions,
+                "error": error,
+            }));
         }
         match args.output {
             OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&rows)?),
@@ -1754,10 +1780,15 @@ pub(crate) async fn handle_list_command(globals: &Globals, args: ListArgs) -> an
                 }
                 for row in rows {
                     println!(
-                        "{} ({}/{})",
+                        "{} ({}/{}){}",
                         row["environment"].as_str().unwrap_or(""),
                         row["placement"].as_str().unwrap_or(""),
-                        row["type"].as_str().unwrap_or("")
+                        row["type"].as_str().unwrap_or(""),
+                        if row["running"] == true {
+                            ""
+                        } else {
+                            " not running"
+                        }
                     );
                     if let Some(error) = row["error"].as_str() {
                         println!("  unavailable: {error}");
