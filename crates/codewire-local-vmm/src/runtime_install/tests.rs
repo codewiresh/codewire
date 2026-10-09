@@ -295,6 +295,30 @@ async fn a_shared_runtime_directory_is_refused() {
     ));
 }
 
+#[test]
+fn the_install_lock_waits_briefly_then_reports_a_concurrent_install() {
+    let directory = tempfile::tempdir().unwrap();
+    let held = InstallGuard::acquire(directory.path()).unwrap();
+    // A brief holder, such as a process forked while the lock was held, is
+    // waited out.
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(held);
+    });
+    let started = std::time::Instant::now();
+    let guard = InstallGuard::acquire(directory.path()).unwrap();
+    assert!(started.elapsed() >= std::time::Duration::from_millis(150));
+    release.join().unwrap();
+    // A real concurrent install still fails rather than waiting for it.
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        InstallGuard::acquire(directory.path()),
+        Err(InstallError::Busy)
+    ));
+    assert!(started.elapsed() >= LOCK_WAIT);
+    drop(guard);
+}
+
 #[tokio::test]
 async fn the_cw_runtime_installs_beside_the_lock_and_follows_the_release() {
     let f = fixture();

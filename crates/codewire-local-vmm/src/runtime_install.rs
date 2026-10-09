@@ -29,6 +29,8 @@ pub const LOCAL_RUNTIME_DOCUMENT: &str = "local-runtime.json";
 const DOCUMENT_LIMIT: u64 = 1024 * 1024;
 const BLOB_LIMIT: u64 = 512 * 1024 * 1024;
 const EXECUTABLE_MODE: u32 = 0o500;
+/// How long an installer waits for the runtime directory's lock.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 const DATA_MODE: u32 = 0o400;
 
 /// One release's local VM runtime for every supported host target.
@@ -464,11 +466,22 @@ impl InstallGuard {
             .open(&path)
             .map_err(io_error(format!("open {}", path.display())))?;
         use std::os::fd::AsRawFd;
-        // SAFETY: flock takes an owned open descriptor and a flag.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(InstallError::Busy);
+        // A process forked while an earlier installer held the lock keeps
+        // that open file until it execs; wait briefly before reporting a
+        // concurrent install.
+        let deadline = std::time::Instant::now() + LOCK_WAIT;
+        loop {
+            // SAFETY: flock takes an owned open descriptor and a flag.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(Self { _file: file });
+            }
+            if io::Error::last_os_error().raw_os_error() != Some(libc::EWOULDBLOCK)
+                || std::time::Instant::now() >= deadline
+            {
+                return Err(InstallError::Busy);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        Ok(Self { _file: file })
     }
 }
 
