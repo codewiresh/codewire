@@ -27,9 +27,13 @@ exits unsuccessfully. `--detach` returns after launch.
 ## List
 
 ```bash
+cw list
 cw list my-app
 cw list my-app --output json
 ```
+
+Without an environment, `cw list` shows every accessible environment and its
+sessions. Every `list` command also answers to `ls`.
 
 ## Attach
 
