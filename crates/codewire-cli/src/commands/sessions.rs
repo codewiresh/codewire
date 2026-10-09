@@ -736,12 +736,11 @@ pub(crate) async fn handle_send_command(globals: &Globals, args: SendArgs) -> an
     Ok(())
 }
 
-pub(crate) async fn handle_stop_command(
-    globals: &Globals,
-    args: SessionTargetArgs,
-) -> anyhow::Result<()> {
+pub(crate) async fn handle_stop_command(globals: &Globals, args: StopArgs) -> anyhow::Result<()> {
+    let StopArgs { session: args, all } = args;
     #[cfg(target_os = "linux")]
     if globals.member.is_some() {
+        anyhow::ensure!(!all, "--all is not supported with --member");
         anyhow::ensure!(
             args.cleanup_request_id.is_none(),
             "--cleanup-request-id requires a managed platform Stop"
@@ -761,36 +760,40 @@ pub(crate) async fn handle_stop_command(
     let (parent, confirmed) = stop_one(&target, &session, Some(&args)).await?;
     let mut stopped = vec![parent];
     let mut unconfirmed = (!confirmed).then(|| stopped[0].status_message.clone());
-    // A parent owns its descendants: stop every one still running, level by
-    // level, so an orchestrator never leaves its workers behind.
+    // A parent owns its descendants. With --all, or when asked at a terminal,
+    // stop every one still running, level by level.
     let mut owners = std::collections::BTreeSet::from([session.session_id.clone()]);
     let mut failure = None;
-    loop {
-        let children = running_children(&target.list().await?, &owners);
-        if children.is_empty() {
-            break;
+    let children = running_children(&target.list().await?, &owners);
+    let environment = (args.target.len() == 2).then(|| args.target[0].as_str());
+    let stop_children = children.is_empty() || all || confirm_stop_children(&children)?;
+    if !stop_children {
+        print_environment_sessions(&stopped, args.output)?;
+        for line in running_children_hints(&children, &session, environment) {
+            eprintln!("{line}");
         }
-        for child in children {
-            owners.insert(child.session_id.clone());
-            match stop_one(&target, &child, None).await {
-                Ok((view, confirmed)) => {
-                    if !confirmed {
-                        unconfirmed.get_or_insert_with(|| view.status_message.clone());
+    } else {
+        let mut children = children;
+        while !children.is_empty() {
+            for child in children {
+                owners.insert(child.session_id.clone());
+                match stop_one(&target, &child, None).await {
+                    Ok((view, confirmed)) => {
+                        if !confirmed {
+                            unconfirmed.get_or_insert_with(|| view.status_message.clone());
+                        }
+                        stopped.push(view);
                     }
-                    stopped.push(view);
-                }
-                Err(error) => {
-                    let name = if child.name.is_empty() {
-                        &child.session_id
-                    } else {
-                        &child.name
-                    };
-                    failure.get_or_insert(error.context(format!("stop child session {name}")));
+                    Err(error) => {
+                        let name = session_label(&child);
+                        failure.get_or_insert(error.context(format!("stop child session {name}")));
+                    }
                 }
             }
+            children = running_children(&target.list().await?, &owners);
         }
+        print_environment_sessions(&stopped, args.output)?;
     }
-    print_environment_sessions(&stopped, args.output)?;
     if let Some(error) = failure {
         return Err(error);
     }
@@ -798,6 +801,62 @@ pub(crate) async fn handle_stop_command(
         anyhow::bail!("session stop is not confirmed: {status}");
     }
     Ok(())
+}
+
+fn session_label(session: &EnvironmentSessionView) -> &str {
+    if session.name.is_empty() {
+        &session.session_id
+    } else {
+        &session.name
+    }
+}
+
+/// Ask at a terminal whether to stop the running children too; never asks
+/// without one, so scripts and agents keep children unless they pass --all.
+fn confirm_stop_children(children: &[EnvironmentSessionView]) -> anyhow::Result<bool> {
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Ok(false);
+    }
+    let names: Vec<&str> = children.iter().map(session_label).collect();
+    let noun = if children.len() == 1 {
+        "session"
+    } else {
+        "sessions"
+    };
+    eprint!(
+        "Also stop {} running child {noun} ({})? [Y/n] ",
+        children.len(),
+        names.join(", ")
+    );
+    std::io::stderr().flush()?;
+    let mut response = String::new();
+    std::io::stdin().read_line(&mut response)?;
+    Ok(matches!(
+        response.trim().to_ascii_lowercase().as_str(),
+        "" | "y" | "yes"
+    ))
+}
+
+pub(super) fn running_children_hints(
+    children: &[EnvironmentSessionView],
+    parent: &EnvironmentSessionView,
+    environment: Option<&str>,
+) -> Vec<String> {
+    let scope = environment.map(|e| format!("{e} ")).unwrap_or_default();
+    let mut lines: Vec<String> = children
+        .iter()
+        .map(|child| {
+            format!(
+                "cw: child session {} is still running",
+                session_label(child)
+            )
+        })
+        .collect();
+    lines.push(format!(
+        "cw: stop them with `cw stop --all {scope}{}`",
+        session_label(parent)
+    ));
+    lines
 }
 
 /// Stop one session through its placement's owner. False when a plain

@@ -119,8 +119,10 @@ and driver identities in the same host environment; an unmanaged process
 cannot receive semantic worker results. `cw wait --message ID` returns the final
 reply; the message ID alone names its session. `cw logs ENV SESSION` shows each
 turn's prompt, the commands, edits and tools the agent uses, and its reply.
-`cw stop` stops the session and every descendant still running, since a parent
-owns its workers; `cw restart` affects only the named session.
+`cw stop` asks at a terminal whether to stop a session's running children too;
+`cw stop --all` stops every running descendant without asking. Without a
+terminal, children keep running and `cw stop` names them. `cw restart` affects
+only the named session.
 
 ```mermaid
 flowchart LR

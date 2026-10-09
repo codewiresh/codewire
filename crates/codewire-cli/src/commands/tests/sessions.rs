@@ -266,6 +266,22 @@ fn session_table_aligns_columns_and_names_the_parent() {
     assert_eq!(children, ["session-2"]);
     owners.insert("session-2".to_string());
     assert!(running_children(&sessions, &owners).is_empty());
+    assert_eq!(
+        running_children_hints(&sessions[1..2], &sessions[0], Some("team")),
+        [
+            "cw: child session session-2 is still running",
+            "cw: stop them with `cw stop --all team lead`",
+        ]
+    );
+    let Command::Stop(stop) = Cli::try_parse_from(["cw", "stop", "--all", "team", "lead"])
+        .unwrap()
+        .command
+    else {
+        panic!("stop expected");
+    };
+    assert!(stop.all);
+    assert_eq!(stop.session.target, ["team", "lead"]);
+    assert!(Cli::try_parse_from(["cw", "restart", "--all", "lead"]).is_err());
     let mut stopped = sessions[1].clone();
     stopped.state = "Stopped".to_string();
     assert!(running_children(&[stopped], &std::collections::BTreeSet::from(["session-1".to_string()])).is_empty());

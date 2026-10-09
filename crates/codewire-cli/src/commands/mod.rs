@@ -2052,6 +2052,17 @@ pub(crate) struct ListArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct StopArgs {
+    #[command(flatten)]
+    pub(crate) session: SessionTargetArgs,
+    #[arg(
+        long,
+        help = "Also stop every running descendant session without asking"
+    )]
+    pub(crate) all: bool,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct SessionTargetArgs {
     #[arg(long, help = "Durable request UUID for a member mutation")]
     pub(crate) request_id: Option<String>,

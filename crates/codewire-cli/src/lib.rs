@@ -286,8 +286,8 @@ enum Command {
     Send(SendArgs),
     #[command(about = "Wait for a session or managed message to finish")]
     Wait(WaitArgs),
-    #[command(about = "Stop an owned session")]
-    Stop(SessionTargetArgs),
+    #[command(about = "Stop an owned session; asks before stopping its running children")]
+    Stop(StopArgs),
     #[command(about = "Restart a retained session with its canonical identity")]
     Restart(SessionTargetArgs),
     #[cfg(unix)]
@@ -551,7 +551,7 @@ fn require_local_broker_smoke_executable() -> anyhow::Result<()> {
 fn validate_member_mutation_flags(cli: &Cli) -> anyhow::Result<()> {
     if cli.member.is_none() {
         match &cli.command {
-            Command::Stop(args)
+            Command::Stop(StopArgs { session: args, .. })
             | Command::Restart(args)
             | Command::Interrupt(args)
             | Command::Inbox(args) => anyhow::ensure!(
