@@ -467,7 +467,7 @@ run_docker_socket_contract_cases() {
           name: "workspace",
           volumeMounts: [{name: "docker-sock", mountPath: "/var/run/docker"}],
           readinessProbe: {
-            exec: {command: ["sh", "-ec", "docker version --format '\''{{.Server.Version}}'\'' >/dev/null"]},
+            exec: {command: ["sh", "-ec", "test -f /codewire/run/daemon/ready && docker version --format '\''{{.Server.Version}}'\'' >/dev/null"]},
             periodSeconds: 2,
             timeoutSeconds: 2,
             failureThreshold: 3,
