@@ -1657,10 +1657,12 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/mirror-github.sh|\
       scripts/ci/release/package-cw-release.sh|scripts/ci/release/publish-cw-release.sh|\
       scripts/ci/release/cw_release.py|scripts/ci/release/cw_release_r2.py|\
+      scripts/ci/release/cw_bootstrap.py|scripts/ci/release/generate-cw-bootstrap.py|\
       scripts/ci/release/sign-cw-release.sh|\
       scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/tests/cw_release_fixtures.py|scripts/ci/tests/test-cli-release-workflow.py|\
       scripts/ci/tests/test-cw-release-delivery.py|scripts/ci/tests/test-cw-release-r2.py|\
+      scripts/ci/tests/test-cw-bootstrap.py|\
       scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/tests/test-copy-image-to-ghcr.sh|\
       scripts/ci/tests/test-dispatch-deploy-dev.sh|scripts/ci/tests/test-dispatch-deploy-prod.sh|\
