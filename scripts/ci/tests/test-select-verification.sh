@@ -303,7 +303,6 @@ run_paths_case release pull_request refs/pull/3/head false \
   scripts/ci/images/run-skopeo-container.sh \
   scripts/ci/release/package-cw-release.sh \
   scripts/ci/release/publish-cw-release.sh \
-  scripts/ci/tests/test-cw-install-signature.sh \
   scripts/ci/tests/test-copy-image-to-ghcr.sh \
   scripts/ci/tests/test-publish-image-to-ghcr.sh \
   scripts/ci/tests/test-resolve-published-support-pair.sh \
@@ -320,14 +319,10 @@ run_paths_case release pull_request refs/pull/3/head false \
   install.sh
 # Presence matters: an unlisted existing script selects unknown/full, while
 # deleted scripts deliberately remain policy-only. Prove each new owner path.
-for bootstrap_path in \
-  scripts/ci/release/cw_bootstrap.py \
-  scripts/ci/release/generate-cw-bootstrap.py \
-  scripts/ci/tests/test-cw-bootstrap.py; do
-  run_present_paths_case "public_bootstrap_$(basename "$bootstrap_path")" \
-    pull_request refs/pull/952/head false \
-    'go_consumer_interop go_support policy release runtime_confidential' "$bootstrap_path"
-done
+run_present_paths_case public_installer_test \
+  pull_request refs/pull/952/head false \
+  'go_consumer_interop go_support policy release runtime_confidential' \
+  scripts/ci/tests/test-cw-install.py
 run_paths_case protected_delivery_credentials pull_request refs/pull/31/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential security' \
   scripts/ci/setup/curl-transport-retry.sh \
