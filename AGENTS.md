@@ -91,9 +91,11 @@ CI are necessary evidence; they are never proof of behavior.
   (`make kind-status`, then `make kind-watch`; see `docs/dev/AGENT-WORKFLOW.md`)
   and confirm http://nj.example.invalid:4174/ loads before editing. A broken local
   cluster is the first blocker, not a later gate.
-- Before pushing a user-visible change, walk its acceptance journey on the
-  retained local Kind cluster through the owner URL, including the empty, failure,
-  and recovery states it touches. Record what was run and what was observed.
+- Before pushing a user-visible change, walk its acceptance journey where it
+  runs: dashboard and platform changes on the retained local Kind cluster through
+  the owner URL, CLI and host changes with a built `cw` on the host. Include the
+  empty, failure, and recovery states it touches. Record what was run and what
+  was observed.
 - Every workstream and handoff names a mandatory local acceptance journey. If
   it depends on tooling that does not exist yet, that tooling lands first; a
   journey is never "optional if available".
@@ -113,8 +115,11 @@ Iterate on one retained local Kind cluster; commands live in
   repository classifier's selection to retained suites. If a narrow change asks
   for the full gate only because a mapping is missing, add the mapping and its
   suite instead of running the full gate.
-- The full `make e2e-kind` is a landing qualification: run it once per landing
-  head, never as an iteration step, and do not repeat it for an unchanged tree.
+- The full `make e2e-kind` is not a landing gate. Land on the required CI plus
+  the focused suites and journeys the change needs; a CLI change needs no Kind
+  run unless it changes a platform or dashboard path. Run the full gate only when
+  the owner asks, never as an iteration step, and never twice for an unchanged
+  tree.
 - Switch the credential-service to `real` only for journeys that need a real
   provider; the synthetic fixture remains the gate's default.
 
