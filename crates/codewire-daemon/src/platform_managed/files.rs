@@ -37,10 +37,15 @@ fn stamp(m: &Metadata) -> (u64, u64, u32, u32, u32, u64, u64, i64, i64, i64, i64
 fn anchor(m: &Metadata) -> bool {
     m.is_dir() && [0, unsafe { libc::geteuid() }].contains(&m.uid())
 }
-fn dir(m: &Metadata, leaf: bool) -> bool {
+fn dir(path: &Path, m: &Metadata, leaf: bool) -> bool {
+    // The one world-writable ancestor admitted is a root-owned sticky /tmp,
+    // as the host-control store admits: its sticky bit stops other accounts
+    // from replacing entries they do not own.
+    let sticky_tmp =
+        !leaf && path == Path::new("/tmp") && m.uid() == 0 && m.mode() & 0o7777 == 0o1777;
     m.is_dir()
         && [0, unsafe { libc::geteuid() }].contains(&m.uid())
-        && m.mode() & 0o022 == 0
+        && (m.mode() & 0o022 == 0 || sticky_tmp)
         && (!leaf || (m.uid() == unsafe { libc::geteuid() } && m.mode() & 0o7777 == 0o700))
 }
 fn leaf(m: &Metadata, bound: usize) -> bool {
@@ -118,7 +123,7 @@ impl Tree {
             if !(if is_home {
                 anchor(&metadata)
             } else {
-                dir(&metadata, named == path)
+                dir(&named, &metadata, named == path)
             }) {
                 return Err(Error::Refused);
             }
@@ -141,7 +146,7 @@ impl Tree {
             let admitted = if self.home == Some(i) {
                 anchor(&b)
             } else {
-                dir(&b, i + 1 == self.pins.len())
+                dir(path, &b, i + 1 == self.pins.len())
             };
             if !admitted
                 || (a.dev(), a.ino(), a.uid(), a.gid(), a.mode())

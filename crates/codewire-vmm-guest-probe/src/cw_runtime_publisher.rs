@@ -1662,6 +1662,7 @@ mod tests {
         kernel("readonly");
     }
     #[test]
+    #[ignore = "privileged kernel fixture: needs a private mount namespace (CAP_SYS_ADMIN); the transport local-vmm shard runs it where root or sudo can grant one"]
     fn live_runtime_readonly_mount_exposes_new_members_without_replacing_old_bytes() {
         kernel("readonly_mount");
     }

@@ -389,6 +389,7 @@ fn kernel_login_shell() {
 }
 
 #[test]
+#[ignore = "privileged kernel fixture: needs a private mount namespace (CAP_SYS_ADMIN); the transport local-vmm shard runs it where root or sudo can grant one"]
 fn source_launcher_login_shell_selects_a_b_a_on_readonly_mounts() {
     let executable = std::env::current_exe().unwrap();
     let mut child = if unsafe { libc::geteuid() } == 0 {

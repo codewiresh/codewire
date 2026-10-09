@@ -207,9 +207,12 @@ def run(tokens, family='rust-transport', fail=None, status=None, fail_tool=None,
     return records, result.stdout
 
 def generic(records):
+    # Privileged kernel fixtures run with --ignored only where the host can
+    # grant a mount namespace; they are not part of a package graph.
     return [r['args'] for r in records if r['tool'] == 'cargo'
             and r['args'][0] in ('build', 'clippy', 'test')
-            and '--features' not in r['args'] and '--manifest-path' not in r['args']]
+            and '--features' not in r['args'] and '--manifest-path' not in r['args']
+            and '--ignored' not in r['args']]
 
 def expected(*arguments):
     # Workspace clippy runs once in the fast compile job, not per package graph.

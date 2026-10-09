@@ -647,6 +647,14 @@ run_derp_contract() {
   )
 }
 
+privileged_mount_namespace_available() {
+  if [[ "$(id -u)" == 0 ]]; then
+    unshare --mount true 2>/dev/null
+  else
+    sudo -n unshare --mount true 2>/dev/null
+  fi
+}
+
 run_transport() {
   if rust_shard packages; then
     run_rust_packages transport_pkg_
@@ -690,6 +698,17 @@ run_transport() {
       -- --exact
   fi
   if selected transport_pkg_codewire_vmm_guest_probe; then
+    # These kernel fixtures need a private mount namespace, which only root
+    # with CAP_SYS_ADMIN (directly or through sudo -n) can create. An
+    # unprivileged CI container cannot; it says so instead of passing.
+    if privileged_mount_namespace_available; then
+      cargo test --locked -p codewire-vmm-guest-probe --lib -- --ignored --exact \
+        cw_runtime_publisher::tests::live_runtime_readonly_mount_exposes_new_members_without_replacing_old_bytes
+      cargo test --locked -p codewire-vmm-guest-probe --test cw-runtime-live -- --ignored --exact \
+        source_launcher_login_shell_selects_a_b_a_on_readonly_mounts
+    else
+      echo '::notice::guest-probe kernel fixtures not run: no CAP_SYS_ADMIN here; run this shard on a workstation with sudo'
+    fi
     scripts/ci/verify/build-local-vmm-initramfs.sh --verify
     cargo test --locked -p codewire-vmm-guest-probe --features macos-workload-network-fixture \
       --lib macos_workload_network_fixture::
