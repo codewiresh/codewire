@@ -44,6 +44,20 @@ E2FSPROGS_CONFIG = ("mke2fs_conf", "mke2fs.conf", "mke2fs.conf")
 MKE2FS_CONFIG_SHA256 = "539290aab306f0bd03a6b49c90ec2852044150c35538c04e4e9bee016bd3d973"
 E2FSPROGS_HINT = ("build it on this Mac with scripts/dev/macos-ext4-tool.py --source-archive "
                   "e2fsprogs-1.47.4.tar.gz --output DIR and pass DIR/bundle")
+# A stock Mac's /usr/bin/git only asks for the Xcode Command Line Tools, so the
+# runtime ships the pinned git that scripts/dev/macos-git-tool.py makes on this
+# Mac, with its HTTPS remote helper: (lock key, bundle file and installed name).
+GIT_TOOLS = (("git", "git"), ("git_remote_https", "git-remote-https"))
+GIT_VERSION = b"git version 2.56.0\n"
+# Stock macOS system libraries only (the dyld shared cache).
+GIT_LIBRARIES = {
+    "/usr/lib/libSystem.B.dylib", "/usr/lib/libcurl.4.dylib", "/usr/lib/libz.1.dylib",
+    "/usr/lib/libiconv.2.dylib",
+    "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+    "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices",
+}
+GIT_HINT = ("build it on this Mac with scripts/dev/macos-git-tool.py --source-archive "
+            "git-2.56.0.tar.xz --output DIR and pass DIR/bundle")
 LOCAL_RUNTIME_SCHEMA = "codewire.cw.local-runtime/v1"
 LOCAL_RUNTIME_DOCUMENT = "local-runtime.json"
 # cw's host target key (runtime_install::host_target) on Apple Silicon.
@@ -129,6 +143,31 @@ def check_e2fsprogs(bundle: Path) -> dict:
     if not config.is_file() or config.is_symlink() or identity(config)[0] != MKE2FS_CONFIG_SHA256:
         raise InstallError("%s is not the pinned mke2fs configuration; %s" % (config, E2FSPROGS_HINT))
     found[key] = (config, installed)
+    return found
+
+
+def check_git(bundle: Path) -> dict:
+    """The pinned git bundle: lock key -> (bundle file, installed name)."""
+    if not bundle.is_absolute() or not bundle.is_dir():
+        raise InstallError("GIT must be an absolute directory: %s; %s" % (bundle, GIT_HINT))
+    found = {}
+    for key, name in GIT_TOOLS:
+        path = bundle / name
+        if not path.is_file() or path.is_symlink():
+            raise InstallError("%s is missing; %s" % (path, GIT_HINT))
+        try:
+            thin_arm64_macho(path)
+            report = run([OTOOL, "-L", str(path)], capture=True).decode().splitlines()[1:]
+            dependencies = {line.split(" (", 1)[0].strip() for line in report}
+            if not dependencies <= GIT_LIBRARIES:
+                raise InstallError("%s links beyond the stock system libraries" % path)
+            run([CODESIGN, "--verify", "--strict", str(path)])
+        except InstallError as error:
+            raise InstallError("%s; %s" % (error, GIT_HINT)) from None
+        found[key] = (path, name)
+    version = run(["/usr/bin/env", "-i", str(bundle / "git"), "--version"], capture=True)
+    if version != GIT_VERSION:
+        raise InstallError("%s is not git 2.56.0; %s" % (bundle / "git", GIT_HINT))
     return found
 
 
@@ -408,7 +447,7 @@ def source_revision(given: str = "") -> str:
     return revision
 
 
-def pack(kernel: Path, initramfs: Path, e2fsprogs: Path, release: Path, cw_runtime=None,
+def pack(kernel: Path, initramfs: Path, e2fsprogs: Path, git: Path, release: Path, cw_runtime=None,
          revision: str = "") -> Path:
     """Write the release directory for this Mac's runtime into `release`."""
     require_host()
@@ -418,6 +457,7 @@ def pack(kernel: Path, initramfs: Path, e2fsprogs: Path, release: Path, cw_runti
         check_cw_runtime(cw_runtime)
         check_live_publisher(initramfs)
     tools = check_e2fsprogs(e2fsprogs)
+    git_tools = check_git(git)
     if release.exists():
         raise InstallError("%s already exists; pack into a new directory" % release)
     revision = source_revision(revision)
@@ -443,6 +483,8 @@ def pack(kernel: Path, initramfs: Path, e2fsprogs: Path, release: Path, cw_runti
         if key == "vz_runner":
             lock["e2fsprogs"] = {tool: spec(path, installed)
                                  for tool, (path, installed) in tools.items()}
+            lock["git"] = {tool: spec(path, installed)
+                           for tool, (path, installed) in git_tools.items()}
     signed.unlink()
     target = {"lock": lock}
     if cw_runtime is not None:
@@ -453,16 +495,17 @@ def pack(kernel: Path, initramfs: Path, e2fsprogs: Path, release: Path, cw_runti
     (release / LOCAL_RUNTIME_DOCUMENT).write_text(json.dumps(document, indent=2) + "\n")
     for key, name, _mode in ARTIFACTS:
         log("%-9s %s sha256=%s size=%d" % (key, name, lock[key]["sha256"], lock[key]["size"]))
-    for tool, entry in lock["e2fsprogs"].items():
-        log("%-9s %s sha256=%s size=%d" % ("e2fsprogs", entry["path"], entry["sha256"], entry["size"]))
+    for group in ("e2fsprogs", "git"):
+        for entry in lock[group].values():
+            log("%-9s %s sha256=%s size=%d" % (group, entry["path"], entry["sha256"], entry["size"]))
     log("packed %s (source %s)" % (release, revision))
     return release
 
 
-def install(kernel: Path, initramfs: Path, e2fsprogs: Path, replace: bool, cw: str, cw_runtime=None,
-            revision: str = "") -> int:
+def install(kernel: Path, initramfs: Path, e2fsprogs: Path, git: Path, replace: bool, cw: str,
+            cw_runtime=None, revision: str = "") -> int:
     with tempfile.TemporaryDirectory(prefix="cw-local-runtime-") as scratch:
-        release = pack(kernel, initramfs, e2fsprogs, Path(scratch) / "release", cw_runtime, revision)
+        release = pack(kernel, initramfs, e2fsprogs, git, Path(scratch) / "release", cw_runtime, revision)
         run([cw, "setup", "--local", "--from", str(release)] + (["--replace"] if replace else []))
     return 0
 
@@ -473,6 +516,8 @@ def main(argv=None) -> int:
     parser.add_argument("--initramfs", default="", help="absolute path to the arm64 guest root")
     parser.add_argument("--e2fsprogs", default="",
                         help="absolute directory holding the pinned e2fsprogs bundle from macos-ext4-tool.py")
+    parser.add_argument("--git", default="",
+                        help="absolute directory holding the pinned git bundle from macos-git-tool.py")
     parser.add_argument("--replace", action="store_true", help="replace a different installed runtime")
     parser.add_argument("--cw-runtime", default="",
                         help="absolute directory holding a sealed aarch64 cw-runtime.lock.json and runtime.pack")
@@ -487,6 +532,9 @@ def main(argv=None) -> int:
         if not args.e2fsprogs:
             raise InstallError("E2FSPROGS is required; " + E2FSPROGS_HINT)
         e2fsprogs = Path(args.e2fsprogs)
+        if not args.git:
+            raise InstallError("GIT is required; " + GIT_HINT)
+        git = Path(args.git)
         cw_runtime = None
         if args.cw_runtime:
             cw_runtime = Path(args.cw_runtime)
@@ -496,9 +544,9 @@ def main(argv=None) -> int:
             release = Path(args.pack)
             if not release.is_absolute():
                 raise InstallError("--pack must be an absolute path: %s" % args.pack)
-            pack(kernel, initramfs, e2fsprogs, release, cw_runtime, args.source_revision)
+            pack(kernel, initramfs, e2fsprogs, git, release, cw_runtime, args.source_revision)
             return 0
-        return install(kernel, initramfs, e2fsprogs, args.replace, args.cw, cw_runtime,
+        return install(kernel, initramfs, e2fsprogs, git, args.replace, args.cw, cw_runtime,
                        args.source_revision)
     except (InstallError, OSError) as error:
         print("macos-local-runtime: ERROR: %s" % error, file=sys.stderr)

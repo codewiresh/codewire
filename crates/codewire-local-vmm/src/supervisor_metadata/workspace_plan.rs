@@ -344,7 +344,9 @@ pub enum WorkspacePlanError {
     )]
     #[cfg_attr(
         target_os = "macos",
-        error("Git requires the Xcode Command Line Tools; install them: xcode-select --install")
+        error(
+            "the local VM runtime's git is missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+        )
     )]
     GitUnavailable,
     #[error("remote Git preparation failed")]

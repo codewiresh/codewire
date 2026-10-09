@@ -42,7 +42,8 @@ use crate::supervisor_metadata::workspace_plan::{
 };
 use crate::workspace::WorkspaceSource;
 
-const GIT: &str = "/usr/bin/git";
+/// Never present: a host without an admitted git fails its spawn.
+const MISSING_GIT: &str = "/nonexistent/codewire-runtime/git";
 const MAXIMUM_GIT_CONTROL_OUTPUT: usize = 16 * 1024 * 1024;
 const MAXIMUM_GIT_BUNDLE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
@@ -585,16 +586,12 @@ async fn git_output<'a>(
 }
 
 fn git_command(working_directory: &Path) -> Command {
-    // Darwin's stub /usr/bin/git without developer tools fails every command;
-    // the callers then report GitUnavailable with install guidance.
-    #[cfg(target_os = "macos")]
-    let program = if crate::host::developer_tools_present() {
-        GIT
-    } else {
-        "/nonexistent/xcode-command-line-tools/git"
-    };
-    #[cfg(target_os = "linux")]
-    let program = GIT;
+    // Without an admitted git the spawn fails, and the callers report
+    // GitUnavailable with reinstall guidance.
+    let git = crate::host::git();
+    let program = git
+        .as_ref()
+        .map_or_else(|| PathBuf::from(MISSING_GIT), |git| git.program.clone());
     let mut command = Command::new(program);
     command
         .args([
@@ -621,6 +618,7 @@ fn git_command(working_directory: &Path) -> Command {
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
+        .envs(git.into_iter().flat_map(|git| git.environment))
         .current_dir(working_directory)
         .stdin(Stdio::null())
         .kill_on_drop(true);

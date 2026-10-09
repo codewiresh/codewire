@@ -32,6 +32,10 @@ assert EXT4_SPEC and EXT4_SPEC.loader
 ext4_tool = importlib.util.module_from_spec(EXT4_SPEC)
 EXT4_SPEC.loader.exec_module(ext4_tool)
 LIBSYSTEM = "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)\n"
+GIT_SPEC = importlib.util.spec_from_file_location("macos_git_tool", SOURCE.with_name("macos-git-tool.py"))
+assert GIT_SPEC and GIT_SPEC.loader
+git_tool = importlib.util.module_from_spec(GIT_SPEC)
+GIT_SPEC.loader.exec_module(git_tool)
 
 
 def elf(machine: int = 183, interpreter: bool = False) -> bytes:
@@ -101,6 +105,7 @@ class FakeTools:
         self.installed = None
         self.dependencies = {}
         self.unsigned = set()
+        self.git_version = b"git version 2.56.0\n"
 
     def run(self, argv, **_kwargs):
         self.calls.append(list(argv))
@@ -116,6 +121,8 @@ class FakeTools:
             entitlements = self.signed_entitlements if self.signed_entitlements is not None else plist
             target.write_bytes(target.read_bytes() + SIGNATURE + entitlements)
             return subprocess.CompletedProcess(argv, 0, stdout=None)
+        if argv[:2] == ["/usr/bin/env", "-i"] and argv[3:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=self.git_version)
         if argv[0] == runtime.OTOOL and argv[1] == "-L":
             report = argv[2] + ":\n" + self.dependencies.get(argv[2], LIBSYSTEM)
             return subprocess.CompletedProcess(argv, 0, stdout=report.encode())
@@ -151,6 +158,10 @@ class PackTests(unittest.TestCase):
         for _key, name, _installed in runtime.E2FSPROGS_TOOLS:
             (self.e2fsprogs / name).write_bytes(macho(name.encode()))
         (self.e2fsprogs / runtime.E2FSPROGS_CONFIG[1]).write_bytes(ext4_tool.CONFIG)
+        self.git = self.scratch / "git" / "bundle"
+        self.git.mkdir(parents=True)
+        for _key, name in runtime.GIT_TOOLS:
+            (self.git / name).write_bytes(macho(name.encode()))
         self.tools = FakeTools(self.scratch)
         self.release = self.scratch / "release"
         for patch in (
@@ -161,10 +172,11 @@ class PackTests(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def main(self, *extra, kernel=None, initramfs=None, e2fsprogs=None):
+    def main(self, *extra, kernel=None, initramfs=None, e2fsprogs=None, git=None):
         argv = ["--kernel", str(kernel if kernel is not None else self.kernel),
                 "--initramfs", str(initramfs if initramfs is not None else self.initramfs),
-                "--e2fsprogs", str(e2fsprogs if e2fsprogs is not None else self.e2fsprogs), *extra]
+                "--e2fsprogs", str(e2fsprogs if e2fsprogs is not None else self.e2fsprogs),
+                "--git", str(git if git is not None else self.git), *extra]
         stdout, stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             status = runtime.main(argv)
@@ -181,7 +193,7 @@ class PackTests(unittest.TestCase):
         self.assertEqual(list(document["targets"]), ["macos-aarch64"])
         target = document["targets"]["macos-aarch64"]
         lock = target["lock"]
-        self.assertEqual(list(lock), ["schema_version", "vz_runner", "e2fsprogs", "kernel", "initramfs"])
+        self.assertEqual(list(lock), ["schema_version", "vz_runner", "e2fsprogs", "git", "kernel", "initramfs"])
         self.assertEqual(lock["schema_version"], 1)
         blobs = {name[len("blobs/sha256/"):]: data for name, data in files.items()
                  if name.startswith("blobs/sha256/")}
@@ -200,12 +212,19 @@ class PackTests(unittest.TestCase):
                                                       "sha256": hashlib.sha256(data).hexdigest(),
                                                       "architecture": "aarch64"})
             self.assertEqual(blobs[lock["e2fsprogs"][key]["sha256"]], data)
+        self.assertEqual(list(lock["git"]), [key for key, _name in runtime.GIT_TOOLS])
+        for key, name in runtime.GIT_TOOLS:
+            data = (self.git / name).read_bytes()
+            self.assertEqual(lock["git"][key], {"path": name, "size": len(data),
+                                                "sha256": hashlib.sha256(data).hexdigest(),
+                                                "architecture": "aarch64"})
+            self.assertEqual(blobs[lock["git"][key]["sha256"]], data)
         helper = blobs[lock["vz_runner"]["sha256"]]
         self.assertTrue(helper.startswith(self.tools.helper))
         self.assertTrue(helper.endswith(runtime.ENTITLEMENTS.read_bytes()))
         if cw_runtime is None:
             self.assertNotIn("cw_runtime", target)
-            self.assertEqual(len(blobs), 3 + len(tools))
+            self.assertEqual(len(blobs), 3 + len(tools) + len(runtime.GIT_TOOLS))
         else:
             for name, key in ((runtime.CW_RUNTIME_LOCK, "lock"), (runtime.CW_RUNTIME_PACK, "pack")):
                 data = (cw_runtime / name).read_bytes()
@@ -227,8 +246,9 @@ class PackTests(unittest.TestCase):
         # Only read-only inspection of the e2fsprogs bundle precedes the
         # revision, which is resolved before anything is built.
         inspections = [call for call in self.tools.calls
-                       if call[0] == runtime.OTOOL or call[:2] == [runtime.CODESIGN, "--verify"]]
-        self.assertEqual(len(inspections), 2 * len(runtime.E2FSPROGS_TOOLS))
+                       if call[0] == runtime.OTOOL or call[:2] == [runtime.CODESIGN, "--verify"]
+                       or call[:2] == ["/usr/bin/env", "-i"]]
+        self.assertEqual(len(inspections), 2 * len(runtime.E2FSPROGS_TOOLS) + 2 * len(runtime.GIT_TOOLS) + 1)
         calls = self.tools.calls[len(inspections):]
         self.assertEqual(self.tools.calls[:len(inspections)], inspections)
         self.assertEqual(calls[0], ["git", "-C", str(REPOSITORY), "rev-parse", "HEAD"])
@@ -343,6 +363,35 @@ class PackTests(unittest.TestCase):
         self.assertIn("E2FSPROGS is required", stderr)
         status, _stdout, _stderr = self.pack()
         self.assertEqual(status, 0)
+
+    def test_an_unpinned_git_bundle_fails_before_effects(self):
+        """Only the pinned 2.56.0 build linked to stock system libraries is shipped."""
+        helper = self.git / "git-remote-https"
+        cases = (
+            (lambda: helper.unlink(), lambda: helper.write_bytes(macho(b"git-remote-https")), "is missing"),
+            (lambda: helper.write_bytes(elf()), lambda: helper.write_bytes(macho(b"git-remote-https")),
+             "is not a thin arm64 Mach-O executable"),
+            (lambda: self.tools.dependencies.update(
+                {str(helper): LIBSYSTEM + "\t/opt/homebrew/opt/curl/lib/libcurl.4.dylib (x)\n"}),
+             lambda: self.tools.dependencies.clear(), "links beyond the stock system libraries"),
+            (lambda: self.tools.unsigned.add(str(helper)), lambda: self.tools.unsigned.clear(),
+             "command exited 1: /usr/bin/codesign --verify --strict"),
+            (lambda: setattr(self.tools, "git_version", b"git version 2.39.5 (Apple Git-154)\n"),
+             lambda: setattr(self.tools, "git_version", b"git version 2.56.0\n"), "is not git 2.56.0"),
+        )
+        for break_it, restore, message in cases:
+            break_it()
+            self.tools.calls.clear()
+            status, _stdout, stderr = self.pack()
+            restore()
+            self.assertEqual(status, 1, message)
+            self.assertIn(message, stderr)
+            self.assertIn("macos-git-tool.py", stderr)
+            self.assertFalse(any(call[0] == runtime.SWIFT for call in self.tools.calls), message)
+            self.assertFalse(self.release.exists(), message)
+        status, _stdout, stderr = self.main(git="")
+        self.assertEqual(status, 1)
+        self.assertIn("GIT is required", stderr)
 
     def test_missing_or_invalid_inputs_fail_before_effects(self):
         cases = (
@@ -479,7 +528,8 @@ class SourceContractTests(unittest.TestCase):
         self.assertIn('ArtifactArchitecture::Aarch64 => bytes.len() >= 0x3c && &bytes[0x38..0x3c] == b"ARM\\x64"', artifact)
         self.assertIn("const INITRAMFS_LIMIT: u64 = 512 * 1024 * 1024;", artifact)
         self.assertIn("Self::Aarch64 => 183,", artifact)
-        self.assertRegex(artifact, r"pub e2fsprogs: E2fsprogsSpec,\s*pub kernel: ArtifactSpec,\s*pub initramfs: ArtifactSpec,")
+        self.assertRegex(artifact, r"pub e2fsprogs: E2fsprogsSpec,(?:\s*///.*)*\s*#\[cfg\(target_os = \"macos\"\)\]"
+                                   r"\s*pub git: GitSpec,\s*pub kernel: ArtifactSpec,\s*pub initramfs: ArtifactSpec,")
         self.assertIn("Some(if executable { 0o500 } else { 0o400 })", artifact)
         installer = self.read("crates/codewire-local-vmm/src/runtime_install.rs")
         self.assertIn("const EXECUTABLE_MODE: u32 = 0o500;", installer)
@@ -495,6 +545,13 @@ class SourceContractTests(unittest.TestCase):
         for key, _name, installed in runtime.E2FSPROGS_TOOLS:
             self.assertIn('"%s" => &tools.%s,' % (installed, key), darwin)
         self.assertEqual(runtime.MKE2FS_CONFIG_SHA256, ext4_tool.CONFIG_SHA256)
+        git_spec = re.search(r"pub struct GitSpec \{(.*?)\}", artifact, re.DOTALL).group(1)
+        self.assertEqual(re.findall(r"pub (\w+): ArtifactSpec,", git_spec), [key for key, _name in runtime.GIT_TOOLS])
+        self.assertIn('("GIT_EXEC_PATH", helpers.into_os_string())', darwin)
+        self.assertIn('("GIT_TEMPLATE_DIR", OsString::new())', darwin)
+        self.assertEqual(runtime.GIT_LIBRARIES, git_tool.LIBRARIES)
+        self.assertEqual(runtime.GIT_VERSION, ("git version %s\n" % git_tool.VERSION).encode())
+        self.assertEqual([name for _target, name in git_tool.TARGETS], [name for _key, name in runtime.GIT_TOOLS])
         self.assertEqual([name for _directory, name in ext4_tool.TOOLS],
                          [name for _key, name, _installed in runtime.E2FSPROGS_TOOLS])
         cw_runtime = self.read("crates/codewire-local-vmm/src/cw_runtime.rs")

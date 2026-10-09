@@ -957,6 +957,13 @@ impl SupervisorCore {
         request: &v1::CreateEnvironmentRequest,
         environment_id: Uuid,
     ) -> Result<WorkspacePlan, SupervisorError> {
+        // Repository preparation runs the runtime's git before preflight
+        // admits the VM inputs. Without an admissible runtime, git-backed
+        // preparation reports the reinstall guidance and preflight the rest.
+        #[cfg(target_os = "macos")]
+        if let Ok(lock) = crate::artifact::ArtifactLock::read(&self.config.artifact_lock) {
+            let _ = lock.admit_host_tools(&self.config.artifact_root);
+        }
         let project: codewire_project::ProjectSpec =
             serde_json::from_slice(&request.project_spec_json)
                 .map_err(|_| SupervisorError::InvalidRequest)?;

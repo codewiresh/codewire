@@ -453,6 +453,10 @@ def worker(root, run):
                    "TMPDIR": str(isolated / "tmp") + "/", "LANG": "en_US.UTF-8",
                    "CARGO_NET_OFFLINE": "true", "RUSTUP_AUTO_INSTALL": "0",
                    "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+            # Tests run the runtime's pinned e2fsprogs and git, never Homebrew's
+            # or the Xcode Command Line Tools' (crates/codewire-local-vmm darwin).
+            if request.get("runtime_tools"):
+                env["CW_TEST_RUNTIME_TOOLS"] = request["runtime_tools"]
 
             def command(argv):
                 item = {"argv": argv, "log": f"command-{len(result['commands']):02d}.log"}
@@ -688,12 +692,17 @@ def main():
     parser.add_argument("--intel", action="store_true", help="also compile/link x86_64; never execute it")
     parser.add_argument("--seed-cargo", action="store_true", help="seed locked public source dependencies")
     parser.add_argument("--timeout", type=int, default=1800, help="remote deadline in seconds")
+    parser.add_argument("--runtime-tools", metavar="DIR",
+                        help="absolute directory on the Mac holding the runtime's pinned e2fsprogs "
+                             "and git under their installed names, for tests")
     parser.add_argument("--recover", metavar="RUN_ID", help="recover an earlier interrupted run")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_.@:-]+", args.host) or args.host.startswith("-"):
         parser.error("invalid SSH destination")
     if not 1 <= args.timeout <= 14400:
         parser.error("timeout must be between 1 and 14400 seconds")
+    if args.runtime_tools is not None and not re.fullmatch(r"/[A-Za-z0-9._/-]{1,512}", args.runtime_tools):
+        parser.error("--runtime-tools must be an absolute plain path on the Mac")
     if args.component in SWIFT_COMPONENTS and (args.action == "clippy" or args.intel or args.seed_cargo):
         parser.error("Swift components accept build, test, or verify without --intel/--seed-cargo")
     if args.component in VZ_FIXTURES and args.intel:
@@ -715,7 +724,8 @@ def main():
         request = source_archive(repo, stage / "source.tar.gz")
         request.update({"run_id": run_id, "component": args.component,
                         "action": args.action, "intel": args.intel,
-                        "timeout": args.timeout, "host_requested": args.host})
+                        "timeout": args.timeout, "host_requested": args.host,
+                        "runtime_tools": args.runtime_tools})
         # Read the frozen lock bytes, not a concurrently edited working-tree file.
         with tarfile.open(stage / "source.tar.gz") as archive:
             lock_bytes = archive.extractfile("Cargo.lock").read()

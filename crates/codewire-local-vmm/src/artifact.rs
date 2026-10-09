@@ -96,6 +96,10 @@ pub struct ArtifactLock {
     /// stock Mac has none, so the runtime ships its own pinned build.
     #[cfg(target_os = "macos")]
     pub e2fsprogs: E2fsprogsSpec,
+    /// The git that checks out and bundles workspace repositories. A stock
+    /// Mac has only a stub that asks for the Xcode Command Line Tools.
+    #[cfg(target_os = "macos")]
+    pub git: GitSpec,
     pub kernel: ArtifactSpec,
     pub initramfs: ArtifactSpec,
 }
@@ -111,6 +115,24 @@ pub struct E2fsprogsSpec {
     pub resize2fs: ArtifactSpec,
     pub debugfs: ArtifactSpec,
     pub mke2fs_conf: ArtifactSpec,
+}
+
+/// Pinned git (arm64 Mach-O, linked only to stock system libraries) and the
+/// HTTPS remote helper it runs from the same directory (`GIT_EXEC_PATH`).
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitSpec {
+    pub git: ArtifactSpec,
+    pub git_remote_https: ArtifactSpec,
+}
+
+/// The admitted git of a macOS runtime.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedGit {
+    pub git: AdmittedArtifact,
+    pub git_remote_https: AdmittedArtifact,
 }
 
 /// The admitted e2fsprogs of a macOS runtime.
@@ -227,6 +249,8 @@ pub struct AdmittedArtifacts {
     pub vz_runner: AdmittedArtifact,
     #[cfg(target_os = "macos")]
     pub e2fsprogs: AdmittedE2fsprogs,
+    #[cfg(target_os = "macos")]
+    pub git: AdmittedGit,
     pub kernel: AdmittedArtifact,
     pub initramfs: AdmittedArtifact,
 }
@@ -271,6 +295,8 @@ impl AdmittedArtifacts {
                 &tools.e2fsck,
                 &tools.resize2fs,
                 &tools.debugfs,
+                &self.git.git,
+                &self.git.git_remote_https,
             ]
         }
     }
@@ -296,6 +322,11 @@ impl AdmittedArtifacts {
                 resize2fs: AdmittedArtifact::for_test("/unused/resize2fs"),
                 debugfs: AdmittedArtifact::for_test("/unused/debugfs"),
                 mke2fs_conf: AdmittedArtifact::for_test("/unused/mke2fs.conf"),
+            },
+            #[cfg(target_os = "macos")]
+            git: AdmittedGit {
+                git: AdmittedArtifact::for_test("/unused/git"),
+                git_remote_https: AdmittedArtifact::for_test("/unused/git-remote-https"),
             },
             kernel,
             initramfs,
@@ -434,6 +465,8 @@ impl ArtifactLock {
                 &tools.e2fsck,
                 &tools.resize2fs,
                 &tools.debugfs,
+                &self.git.git,
+                &self.git.git_remote_https,
             ]
         }
     }
@@ -503,6 +536,17 @@ impl ArtifactLock {
                 },
             },
             #[cfg(target_os = "macos")]
+            git: GitSpec {
+                git: ArtifactSpec {
+                    path: PathBuf::from("git"),
+                    ..vmm.clone()
+                },
+                git_remote_https: ArtifactSpec {
+                    path: PathBuf::from("git-remote-https"),
+                    ..vmm.clone()
+                },
+            },
+            #[cfg(target_os = "macos")]
             vz_runner: vmm,
             kernel,
             initramfs,
@@ -531,6 +575,8 @@ impl ArtifactLock {
                 &mut tools.e2fsck,
                 &mut tools.resize2fs,
                 &mut tools.debugfs,
+                &mut self.git.git,
+                &mut self.git.git_remote_https,
             ]
         }
     }
@@ -601,25 +647,9 @@ impl ArtifactLock {
         #[cfg(target_os = "linux")]
         let executables = self.admit_linux_executables(&root, architecture).await?;
         #[cfg(target_os = "macos")]
-        let admit_macho = |spec: &ArtifactSpec| -> Result<AdmittedArtifact, ArtifactError> {
-            let artifact = admit_one(&root, spec, true)?;
-            with_opened(&root, &artifact, |file| {
-                validate_arm64_macho(file, artifact.path())
-            })?;
-            Ok(artifact)
-        };
+        let vz_runner = admit_macho(&root, &self.vz_runner)?;
         #[cfg(target_os = "macos")]
-        let vz_runner = admit_macho(&self.vz_runner)?;
-        #[cfg(target_os = "macos")]
-        let e2fsprogs = AdmittedE2fsprogs {
-            mkfs_ext4: admit_macho(&self.e2fsprogs.mkfs_ext4)?,
-            e2fsck: admit_macho(&self.e2fsprogs.e2fsck)?,
-            resize2fs: admit_macho(&self.e2fsprogs.resize2fs)?,
-            debugfs: admit_macho(&self.e2fsprogs.debugfs)?,
-            mke2fs_conf: admit_one(&root, &self.e2fsprogs.mke2fs_conf, false)?,
-        };
-        #[cfg(target_os = "macos")]
-        crate::host::use_e2fsprogs(&e2fsprogs);
+        let (e2fsprogs, git) = self.admit_tools(&root)?;
 
         let kernel = admit_one(&root, &self.kernel, false)?;
         with_opened(&root, &kernel, |file| {
@@ -642,9 +672,41 @@ impl ArtifactLock {
             vz_runner,
             #[cfg(target_os = "macos")]
             e2fsprogs,
+            #[cfg(target_os = "macos")]
+            git,
             kernel,
             initramfs,
         })
+    }
+
+    /// Admits only a macOS runtime's host tools and makes them the ones this
+    /// process uses, so workspace preparation can run them before the VM
+    /// inputs are admitted.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn admit_host_tools(&self, root_path: &Path) -> Result<(), ArtifactError> {
+        self.validate_metadata()?;
+        let root = PrivateRoot::open(root_path).map_err(ArtifactError::ConfinedPath)?;
+        self.admit_tools(&root).map(|_| ())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn admit_tools(
+        &self,
+        root: &PrivateRoot,
+    ) -> Result<(AdmittedE2fsprogs, AdmittedGit), ArtifactError> {
+        let e2fsprogs = AdmittedE2fsprogs {
+            mkfs_ext4: admit_macho(root, &self.e2fsprogs.mkfs_ext4)?,
+            e2fsck: admit_macho(root, &self.e2fsprogs.e2fsck)?,
+            resize2fs: admit_macho(root, &self.e2fsprogs.resize2fs)?,
+            debugfs: admit_macho(root, &self.e2fsprogs.debugfs)?,
+            mke2fs_conf: admit_one(root, &self.e2fsprogs.mke2fs_conf, false)?,
+        };
+        let git = AdmittedGit {
+            git: admit_macho(root, &self.git.git)?,
+            git_remote_https: admit_macho(root, &self.git.git_remote_https)?,
+        };
+        crate::host::use_runtime_tools(&e2fsprogs, &git);
+        Ok((e2fsprogs, git))
     }
 
     #[cfg(target_os = "linux")]
@@ -671,6 +733,15 @@ impl ArtifactLock {
         };
         Ok((cloud_hypervisor, virtiofsd))
     }
+}
+
+#[cfg(target_os = "macos")]
+fn admit_macho(root: &PrivateRoot, spec: &ArtifactSpec) -> Result<AdmittedArtifact, ArtifactError> {
+    let artifact = admit_one(root, spec, true)?;
+    with_opened(root, &artifact, |file| {
+        validate_arm64_macho(file, artifact.path())
+    })?;
+    Ok(artifact)
 }
 
 fn validate_spec(

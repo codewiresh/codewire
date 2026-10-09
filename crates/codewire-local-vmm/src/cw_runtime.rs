@@ -1438,43 +1438,10 @@ mod tests {
         assert_eq!(fs::read_dir(store.staging.path()).unwrap().count(), 0);
     }
 
-    /// A stock Mac has no e2fsprogs: admit the pinned bundle that
-    /// scripts/dev/macos-ext4-tool.py builds, named by `CW_TEST_E2FSPROGS`,
-    /// under the names the runtime installs it with.
-    #[cfg(target_os = "macos")]
-    fn use_pinned_e2fsprogs(root: &Path) {
-        let bundle = PathBuf::from(
-            std::env::var_os("CW_TEST_E2FSPROGS")
-                .expect("CW_TEST_E2FSPROGS names a macos-ext4-tool.py bundle"),
-        );
-        fs::create_dir(root).unwrap();
-        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
-        let admit = |from: &str, to: &str, executable: bool| {
-            let path = root.join(to);
-            fs::copy(bundle.join(from), &path).unwrap();
-            let mode = if executable { 0o500 } else { 0o400 };
-            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
-            crate::artifact::admit_test_artifact(&path, executable).unwrap()
-        };
-        crate::host::use_e2fsprogs(&crate::artifact::AdmittedE2fsprogs {
-            mkfs_ext4: admit("mke2fs", "mkfs.ext4", true),
-            e2fsck: admit("e2fsck", "e2fsck", true),
-            resize2fs: admit("resize2fs", "resize2fs", true),
-            debugfs: admit("debugfs", "debugfs", true),
-            mke2fs_conf: admit("mke2fs.conf", "mke2fs.conf", false),
-        });
-    }
-
     #[test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "needs the pinned e2fsprogs: CW_TEST_E2FSPROGS=<bundle> cargo test -- --ignored"
-    )]
     fn real_catalog_disk_has_root_metadata_and_preserves_the_old_immutable_generation() {
         let task = tempfile::tempdir().unwrap();
         fs::set_permissions(task.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        #[cfg(target_os = "macos")]
-        use_pinned_e2fsprogs(&task.path().join("e2fsprogs"));
         let engine = PrivateRoot::create(&task.path().join("engine")).unwrap();
         let store = CwRuntimeStore::create(&engine).unwrap();
         let (old_path, old_cw) = fixture_asset(&task.path().join("old"), 1);

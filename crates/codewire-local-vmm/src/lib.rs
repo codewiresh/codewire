@@ -61,6 +61,8 @@ pub mod workspace;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod workspace_plan;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod host_git;
 #[cfg(target_os = "linux")]
 pub mod linux;
 // Host primitives with the same names on each supported platform.

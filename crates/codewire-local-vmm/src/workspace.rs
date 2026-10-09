@@ -28,6 +28,7 @@ pub use crate::supervisor_metadata::workspace::WorkspaceSourceMode;
 use crate::workspace_plan::{WorkspaceInput, WorkspacePlan};
 use codewire_vmm_guest_probe::DIRECT_SHARE_PLAN_RELATIVE_PATH;
 
+#[cfg(test)]
 const GIT: &str = "/usr/bin/git";
 // Git maintenance stays in the owned command's family until it is joined.
 const GIT_FOREGROUND_MAINTENANCE: [&str; 4] = [
@@ -784,11 +785,8 @@ fn git_output(
     let stdout_limit = maximum_stdout
         .checked_add(1)
         .ok_or(WorkspaceError::GitOutputTooLarge)? as u64;
-    #[cfg(target_os = "macos")]
-    if !crate::host::developer_tools_present() {
-        return Err(WorkspaceError::GitUnavailable);
-    }
-    let mut command = Command::new(GIT);
+    let git = host_git()?;
+    let mut command = Command::new(&git.program);
     command
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
@@ -809,6 +807,7 @@ fn git_output(
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
+        .envs(git.environment)
         .current_dir(source)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1699,11 +1698,8 @@ fn import_git_bundle(
     destination: &Path,
     template: &Path,
 ) -> Result<(), WorkspaceError> {
-    #[cfg(target_os = "macos")]
-    if !crate::host::developer_tools_present() {
-        return Err(WorkspaceError::GitUnavailable);
-    }
-    let initialized = Command::new(GIT)
+    let git = host_git()?;
+    let initialized = Command::new(&git.program)
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
@@ -1725,6 +1721,7 @@ fn import_git_bundle(
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
+        .envs(git.environment.clone())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1734,7 +1731,7 @@ fn import_git_bundle(
         return Err(WorkspaceError::GitCloneFailed);
     }
 
-    let fetched = Command::new(GIT)
+    let fetched = Command::new(&git.program)
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
@@ -1763,6 +1760,7 @@ fn import_git_bundle(
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
+        .envs(git.environment)
         .current_dir(destination)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1780,7 +1778,8 @@ fn git_clone_output(
     destination: &Path,
     template: &Path,
 ) -> Result<Output, WorkspaceError> {
-    Command::new(GIT)
+    let git = host_git()?;
+    Command::new(&git.program)
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
@@ -1806,11 +1805,17 @@ fn git_clone_output(
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
+        .envs(git.environment)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
         .map_err(|_| WorkspaceError::GitUnavailable)
+}
+
+/// The git workspace preparation runs, or GitUnavailable without one.
+fn host_git() -> Result<crate::host_git::HostGit, WorkspaceError> {
+    crate::host::git().ok_or(WorkspaceError::GitUnavailable)
 }
 
 fn reject_git_submodules(source: &Path, commit: &str) -> Result<(), WorkspaceError> {
@@ -2191,7 +2196,9 @@ pub enum WorkspaceError {
     )]
     #[cfg_attr(
         target_os = "macos",
-        error("Git requires the Xcode Command Line Tools; install them: xcode-select --install")
+        error(
+            "the local VM runtime's git is missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+        )
     )]
     GitUnavailable,
     #[error("Git could not inspect the requested clean commit")]

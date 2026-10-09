@@ -9,26 +9,105 @@ pub(crate) mod supervisor_peer;
 #[cfg(test)]
 mod path_capability_tests;
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{PoisonError, RwLock};
 
-use crate::artifact::AdmittedE2fsprogs;
+use crate::artifact::{AdmittedE2fsprogs, AdmittedGit};
+use crate::host_git::HostGit;
 
-/// A stock Mac has no e2fsprogs, so the local runtime ships a pinned build.
-/// Admitting a runtime makes its programs the ones this process formats,
-/// checks and resizes ext4 disks with; nothing is found on PATH or in
-/// Homebrew.
-static E2FSPROGS: RwLock<Option<AdmittedE2fsprogs>> = RwLock::new(None);
+/// A stock Mac has neither e2fsprogs nor a working git, so the local runtime
+/// ships pinned builds. Admitting a runtime makes its programs the ones this
+/// process formats, checks and resizes ext4 disks and prepares workspace
+/// repositories with; nothing is found on PATH, in Homebrew or in the Xcode
+/// Command Line Tools.
+static RUNTIME_TOOLS: RwLock<Option<(AdmittedE2fsprogs, AdmittedGit)>> = RwLock::new(None);
 
-pub(crate) fn use_e2fsprogs(tools: &AdmittedE2fsprogs) {
-    *E2FSPROGS.write().unwrap_or_else(PoisonError::into_inner) = Some(tools.clone());
+pub(crate) fn use_runtime_tools(e2fsprogs: &AdmittedE2fsprogs, git: &AdmittedGit) {
+    *RUNTIME_TOOLS
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = Some((e2fsprogs.clone(), git.clone()));
+}
+
+fn runtime_tools() -> Option<(AdmittedE2fsprogs, AdmittedGit)> {
+    #[cfg(test)]
+    test_runtime_tools::admit_once();
+    RUNTIME_TOOLS
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// Tests run the same pinned programs a runtime ships, admitted from the
+/// directory `CW_TEST_RUNTIME_TOOLS` names under their installed names
+/// (`scripts/dev/macos-cli.py --runtime-tools`); nothing else is used.
+#[cfg(test)]
+mod test_runtime_tools {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::{Path, PathBuf};
+    use std::sync::Once;
+
+    use crate::artifact::{AdmittedE2fsprogs, AdmittedGit, admit_test_artifact};
+
+    static ADMITTED: Once = Once::new();
+
+    pub(super) fn admit_once() {
+        ADMITTED.call_once(|| {
+            let Some(source) = std::env::var_os("CW_TEST_RUNTIME_TOOLS").map(PathBuf::from) else {
+                return;
+            };
+            let root = tempfile::Builder::new()
+                .prefix("cw-test-runtime-tools-")
+                .tempdir()
+                .unwrap()
+                .keep();
+            let root = fs::canonicalize(root).unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+            let admit = |name: &str, executable: bool| {
+                let path = root.join(name);
+                fs::copy(Path::new(&source).join(name), &path).unwrap();
+                let mode = if executable { 0o500 } else { 0o400 };
+                fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+                admit_test_artifact(&path, executable).unwrap()
+            };
+            super::use_runtime_tools(
+                &AdmittedE2fsprogs {
+                    mkfs_ext4: admit("mkfs.ext4", true),
+                    e2fsck: admit("e2fsck", true),
+                    resize2fs: admit("resize2fs", true),
+                    debugfs: admit("debugfs", true),
+                    mke2fs_conf: admit("mke2fs.conf", false),
+                },
+                &AdmittedGit {
+                    git: admit("git", true),
+                    git_remote_https: admit("git-remote-https", true),
+                },
+            );
+        });
+    }
+}
+
+/// The admitted runtime's git, re-hashed immediately before use, with its
+/// helpers and (empty) templates pinned to the runtime.
+pub(crate) fn git() -> Option<HostGit> {
+    let (_, git) = runtime_tools()?;
+    git.git.revalidate().ok()?;
+    git.git_remote_https.revalidate().ok()?;
+    let helpers = git.git_remote_https.path().parent()?.to_owned();
+    Some(HostGit {
+        program: git.git.path().to_owned(),
+        environment: vec![
+            ("GIT_EXEC_PATH", helpers.into_os_string()),
+            ("GIT_TEMPLATE_DIR", OsString::new()),
+        ],
+    })
 }
 
 /// The admitted runtime's e2fsprogs program, such as `mkfs.ext4`, re-hashed
 /// immediately before use; a changed file is never run.
 pub(crate) fn e2fsprogs(program: &str) -> Option<PathBuf> {
-    let tools = E2FSPROGS.read().unwrap_or_else(PoisonError::into_inner);
-    let tools = tools.as_ref()?;
+    let (tools, _) = runtime_tools()?;
     let tool = match program {
         "mkfs.ext4" => &tools.mkfs_ext4,
         "e2fsck" => &tools.e2fsck,
@@ -43,21 +122,10 @@ pub(crate) fn e2fsprogs(program: &str) -> Option<PathBuf> {
 /// The pinned mke2fs configuration (`MKE2FS_CONFIG`) every format uses, so a
 /// disk never depends on a host or build-machine file.
 pub(crate) fn mke2fs_config() -> Option<PathBuf> {
-    let tools = E2FSPROGS.read().unwrap_or_else(PoisonError::into_inner);
-    let config = &tools.as_ref()?.mke2fs_conf;
+    let (tools, _) = runtime_tools()?;
+    let config = &tools.mke2fs_conf;
     config.revalidate().ok()?;
     Some(config.path().to_owned())
-}
-
-/// Without the Xcode Command Line Tools (or Xcode), `/usr/bin/git` is only a
-/// stub that asks to install them.
-pub(crate) fn developer_tools_present() -> bool {
-    [
-        "/Library/Developer/CommandLineTools/usr/bin/git",
-        "/Applications/Xcode.app/Contents/Developer/usr/bin/git",
-    ]
-    .iter()
-    .any(|path| Path::new(path).is_file())
 }
 
 /// macOS privacy protection refuses protected folders, such as Desktop,
