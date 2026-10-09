@@ -10,7 +10,7 @@ use std::ffi::OsStr;
 use std::io;
 use std::os::unix::ffi::OsStrExt as _;
 use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -94,6 +94,52 @@ pub struct LocalRepositoryProcessConfig {
     pub transport: LocalRepositoryTransport,
     pub platform_delegated: bool,
     pub ssh_runtime_directory: Option<PathBuf>,
+    /// The runtime git the executor must run; `None` uses the system git.
+    pub git: Option<LocalRepositoryGit>,
+}
+
+/// An admitted git program and the directory holding its helpers
+/// (`GIT_EXEC_PATH`), named by the supervisor that admitted the runtime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalRepositoryGit {
+    pub program: PathBuf,
+    pub exec_path: PathBuf,
+}
+
+impl LocalRepositoryGit {
+    pub(crate) fn from_proto(value: crate::control::v1::RepositoryGit) -> Result<Self, ()> {
+        let git = Self {
+            program: PathBuf::from(value.program),
+            exec_path: PathBuf::from(value.exec_path),
+        };
+        git.validate().map(|()| git)
+    }
+
+    pub(crate) fn to_proto(&self) -> crate::control::v1::RepositoryGit {
+        crate::control::v1::RepositoryGit {
+            program: self.program.to_string_lossy().into_owned(),
+            exec_path: self.exec_path.to_string_lossy().into_owned(),
+        }
+    }
+
+    /// Absolute, normal paths only; the program lies in its helper directory.
+    pub(crate) fn validate(&self) -> Result<(), ()> {
+        let normal = |path: &Path| {
+            path.is_absolute()
+                && path.to_str().is_some_and(|text| !text.contains('\0'))
+                && path
+                    .components()
+                    .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+        };
+        if normal(&self.program)
+            && normal(&self.exec_path)
+            && self.program.parent() == Some(self.exec_path.as_path())
+        {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
 }
 
 impl LocalRepositoryProcessConfig {
@@ -116,6 +162,7 @@ impl LocalRepositoryProcessConfig {
             || Uuid::parse_str(id).is_err()
             || Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() != id)
             || !valid_ssh_runtime
+            || self.git.as_ref().is_some_and(|git| git.validate().is_err())
         {
             return Err(LocalRepositorySpawnError::InvalidConfiguration);
         }
@@ -1211,6 +1258,7 @@ mod tests {
             transport: LocalRepositoryTransport::GitHubOAuth,
             platform_delegated: false,
             ssh_runtime_directory: None,
+            git: None,
         };
         github.validate().unwrap();
         let ssh = LocalRepositoryProcessConfig {
@@ -1237,6 +1285,56 @@ mod tests {
             .is_err()
         );
         assert!(validate_repository_ssh_runtime_path(&runtime).is_ok());
+    }
+
+    #[test]
+    fn runtime_git_is_an_absolute_program_in_its_helper_directory() {
+        let root = PathBuf::from("/run/user/1000/codewire");
+        let request_id = Uuid::new_v4();
+        let config = LocalRepositoryProcessConfig {
+            request_id,
+            staging_directory: root.join(format!("repository-executor-{request_id}")),
+            transport: LocalRepositoryTransport::GitHubOAuth,
+            platform_delegated: false,
+            ssh_runtime_directory: None,
+            git: None,
+        };
+        let artifacts = PathBuf::from("/Users/user/.cache/codewire/local-vmm-v1/artifacts");
+        let git = LocalRepositoryGit {
+            program: artifacts.join("git"),
+            exec_path: artifacts.clone(),
+        };
+        LocalRepositoryProcessConfig {
+            git: Some(git.clone()),
+            ..config.clone()
+        }
+        .validate()
+        .unwrap();
+        assert_eq!(LocalRepositoryGit::from_proto(git.to_proto()).unwrap(), git);
+        for invalid in [
+            LocalRepositoryGit {
+                program: PathBuf::from("git"),
+                exec_path: PathBuf::new(),
+            },
+            LocalRepositoryGit {
+                program: artifacts.join("../git"),
+                exec_path: artifacts.join(".."),
+            },
+            LocalRepositoryGit {
+                program: PathBuf::from("/usr/bin/git"),
+                exec_path: artifacts.clone(),
+            },
+        ] {
+            assert!(invalid.validate().is_err(), "{invalid:?}");
+            assert!(
+                LocalRepositoryProcessConfig {
+                    git: Some(invalid),
+                    ..config.clone()
+                }
+                .validate()
+                .is_err()
+            );
+        }
     }
 
     #[tokio::test]

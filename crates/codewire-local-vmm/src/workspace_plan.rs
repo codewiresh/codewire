@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use codewire_access::AccessProfileId;
 use codewire_local_credentials::{
-    AuthorityRuntimeConfig, LocalCredentialControlClient, validate_github_https_source,
+    AuthorityRuntimeConfig, LocalCredentialControlClient, LocalRepositoryGit,
+    validate_github_https_source,
 };
 use codewire_project::{
     RepositorySpec, canonical_repository_known_hosts, parse_repository_ssh_host,
@@ -345,6 +346,15 @@ async fn prepare_authenticated_repository(
         ],
     )
     .await?;
+    // The authority's executor runs the same admitted git as this planner;
+    // Linux executors use the system git.
+    let git = match crate::host::git() {
+        Some(git) => git.exec_path.map(|exec_path| LocalRepositoryGit {
+            program: git.program,
+            exec_path,
+        }),
+        None => return Err(WorkspacePlanError::GitUnavailable),
+    };
     let mut client = LocalCredentialControlClient::connect(credential_authority)
         .await
         .map_err(|_| WorkspacePlanError::CredentialAuthorityUnavailable)?;
@@ -358,6 +368,7 @@ async fn prepare_authenticated_repository(
             repository.revision.clone(),
             repository.known_hosts.clone(),
             access.platform.clone(),
+            git,
         )
         .await
         .map_err(credential_repository_rejection)?;

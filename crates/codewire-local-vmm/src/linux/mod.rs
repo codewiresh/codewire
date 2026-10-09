@@ -12,5 +12,6 @@ pub(crate) fn git() -> Option<crate::host_git::HostGit> {
     Some(crate::host_git::HostGit {
         program: "/usr/bin/git".into(),
         environment: Vec::new(),
+        exec_path: None,
     })
 }

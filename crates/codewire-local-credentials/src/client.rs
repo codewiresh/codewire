@@ -938,6 +938,7 @@ impl LocalCredentialControlClient {
         revision: String,
         known_hosts: Vec<String>,
         platform: Option<crate::RepositoryPlatformAccess>,
+        git: Option<crate::LocalRepositoryGit>,
     ) -> Result<PreparedGitRepository, Status> {
         let authorization = crate::RepositoryCredentialLeaseRequest {
             request_id,
@@ -955,6 +956,11 @@ impl LocalCredentialControlClient {
         }
         if let Some(platform) = &platform {
             platform.validate(&authorization)?;
+        }
+        if git.as_ref().is_some_and(|git| git.validate().is_err()) {
+            return Err(Status::invalid_argument(
+                "invalid repository preparation request",
+            ));
         }
         // The authority answers only after git has fetched and bundled the
         // repository, which can take minutes; the 30 s control deadline
@@ -987,6 +993,7 @@ impl LocalCredentialControlClient {
                 revision,
                 known_hosts,
                 platform: platform.map(crate::RepositoryPlatformAccess::into_proto),
+                git: git.as_ref().map(crate::LocalRepositoryGit::to_proto),
             })
             .await
         {

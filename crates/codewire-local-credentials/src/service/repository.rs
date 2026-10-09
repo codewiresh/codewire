@@ -91,6 +91,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
         self: &Arc<Self>,
         authorization: RepositoryCredentialLeaseRequest,
         platform: Option<crate::RepositoryPlatformAccess>,
+        git: Option<crate::LocalRepositoryGit>,
     ) -> Result<PreparedRepository, Status> {
         validate_repository_lease_request(&authorization)
             .map_err(|_| Status::invalid_argument("invalid repository preparation request"))?;
@@ -123,7 +124,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
                 complete: false,
             };
             let result = manager
-                .prepare_owned(authorization, platform, &mut cancellation)
+                .prepare_owned(authorization, platform, git, &mut cancellation)
                 .await;
             let result = match cancellation.ensure_live() {
                 Ok(()) => result,
@@ -186,6 +187,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
         &self,
         authorization: RepositoryCredentialLeaseRequest,
         platform: Option<crate::RepositoryPlatformAccess>,
+        git: Option<crate::LocalRepositoryGit>,
         cancellation: &mut JobCancellation,
     ) -> Result<PreparedRepository, Status> {
         let mut connection = match platform {
@@ -209,6 +211,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
         let outcome = AssertUnwindSafe(self.prepare_execution(
             authorization,
             connection.as_mut(),
+            git,
             cancellation,
         ))
         .catch_unwind()
@@ -229,6 +232,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
         &self,
         authorization: RepositoryCredentialLeaseRequest,
         platform: Option<&mut PlatformRepositoryConnection>,
+        git: Option<crate::LocalRepositoryGit>,
         cancellation: &mut JobCancellation,
     ) -> Result<PreparedRepository, Status> {
         cancellation.ensure_live()?;
@@ -278,6 +282,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
             ssh_runtime_directory: ssh_cleanup
                 .as_ref()
                 .and_then(|cleanup| cleanup.path.clone()),
+            git,
         };
         config.validate().map_err(|_| unavailable())?;
         let (authority_stream, executor_stream) =

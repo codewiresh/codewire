@@ -336,6 +336,13 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
             // pipe, discarding diagnostics, after stopping the whole group.
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Some(git) = &config.git {
+            command
+                .arg("--git")
+                .arg(&git.program)
+                .arg("--git-exec-path")
+                .arg(&git.exec_path);
+        }
         if config.platform_delegated {
             command.arg("--platform-delegated");
         }
@@ -558,6 +565,7 @@ mod tests {
                 transport,
                 platform_delegated: false,
                 ssh_runtime_directory: runtime_directory,
+                git: None,
             };
             let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();
             let mut child = LocalRepositoryProcessSpawner::spawn(&spawner, &config, peer).unwrap();
@@ -597,6 +605,7 @@ mod tests {
             transport: LocalRepositoryTransport::Ssh,
             platform_delegated: false,
             ssh_runtime_directory: None,
+            git: None,
         };
         let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();
         assert!(matches!(

@@ -395,6 +395,12 @@ pub(crate) struct LocalGitRepositoryExecutorArgs {
     pub(crate) request_id: String,
     #[arg(long)]
     pub(crate) staging_directory: PathBuf,
+    /// The admitted runtime's git and its helper directory (macOS); Linux
+    /// runs the system git.
+    #[arg(long, requires = "git_exec_path")]
+    pub(crate) git: Option<PathBuf>,
+    #[arg(long, requires = "git")]
+    pub(crate) git_exec_path: Option<PathBuf>,
     /// The authority's store: a macOS GitHub executor reads the selected
     /// backend, as a Linux one reads Secret Service.
     #[cfg(target_os = "macos")]

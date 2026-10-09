@@ -1633,7 +1633,15 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
             .platform
             .map(crate::RepositoryPlatformAccess::from_proto)
             .transpose()?;
-        let prepared = self.repositories.prepare(authorization, platform).await?;
+        let git = request
+            .git
+            .map(crate::LocalRepositoryGit::from_proto)
+            .transpose()
+            .map_err(|()| Status::invalid_argument("invalid repository preparation request"))?;
+        let prepared = self
+            .repositories
+            .prepare(authorization, platform, git)
+            .await?;
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         tokio::spawn(stream_prepared_repository(prepared, sender));
         Ok(Response::new(ReceiverStream::new(receiver)))

@@ -547,7 +547,7 @@ class SourceContractTests(unittest.TestCase):
         self.assertEqual(runtime.MKE2FS_CONFIG_SHA256, ext4_tool.CONFIG_SHA256)
         git_spec = re.search(r"pub struct GitSpec \{(.*?)\}", artifact, re.DOTALL).group(1)
         self.assertEqual(re.findall(r"pub (\w+): ArtifactSpec,", git_spec), [key for key, _name in runtime.GIT_TOOLS])
-        self.assertIn('("GIT_EXEC_PATH", helpers.into_os_string())', darwin)
+        self.assertIn('("GIT_EXEC_PATH", helpers.clone().into_os_string())', darwin)
         self.assertIn('("GIT_TEMPLATE_DIR", OsString::new())', darwin)
         self.assertEqual(runtime.GIT_LIBRARIES, git_tool.LIBRARIES)
         self.assertEqual(runtime.GIT_VERSION, ("git version %s\n" % git_tool.VERSION).encode())

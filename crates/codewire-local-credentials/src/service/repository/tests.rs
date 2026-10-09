@@ -21,6 +21,7 @@ struct RunningChild {
     exit_gate: std::os::unix::net::UnixStream,
     leased: oneshot::Receiver<()>,
     streaming: oneshot::Receiver<()>,
+    git: Option<crate::LocalRepositoryGit>,
 }
 
 struct SyntheticSpawner {
@@ -122,6 +123,7 @@ impl LocalRepositoryProcessSpawner for SyntheticSpawner {
         self.clients.lock().unwrap().push(task);
         self.started
             .send(RunningChild {
+                git: config.git.clone(),
                 pid: child.id().unwrap(),
                 staging: config.staging_directory.clone(),
                 exit_gate,
@@ -206,7 +208,7 @@ impl Fixture {
         let manager = Arc::clone(&self.manager);
         let mut request = self.request.clone();
         request.request_id = Uuid::new_v4();
-        tokio::spawn(async move { manager.prepare(request, None).await })
+        tokio::spawn(async move { manager.prepare(request, None, None).await })
     }
 
     async fn child(&mut self) -> RunningChild {
@@ -275,6 +277,40 @@ async fn dropped_waiter_keeps_child_and_channel_owned_through_reap() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_requested_runtime_git_reaches_the_executor_unchanged() {
+    let mut fixture = Fixture::new();
+    let git = crate::LocalRepositoryGit {
+        program: PathBuf::from("/runtime/artifacts/git"),
+        exec_path: PathBuf::from("/runtime/artifacts"),
+    };
+    let manager = Arc::clone(&fixture.manager);
+    let mut request = fixture.request.clone();
+    request.request_id = Uuid::new_v4();
+    let requested = git.clone();
+    let waiter = tokio::spawn(async move { manager.prepare(request, None, Some(requested)).await });
+    let child = fixture.child().await;
+    assert_eq!(child.git, Some(git));
+    fixture.shutdown().await;
+    let _ = waiter.await;
+    assert_reaped(&child);
+
+    // A git outside its own helper directory never reaches an executor.
+    let mut request = fixture.request.clone();
+    request.request_id = Uuid::new_v4();
+    let misplaced = crate::LocalRepositoryGit {
+        program: PathBuf::from("/usr/bin/git"),
+        exec_path: PathBuf::from("/runtime/artifacts"),
+    };
+    assert!(
+        fixture
+            .manager
+            .prepare(request, None, Some(misplaced))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_cancels_live_preparation_and_refuses_readmission() {
     let mut fixture = Fixture::new();
     let waiter = fixture.prepare();
@@ -283,7 +319,7 @@ async fn shutdown_cancels_live_preparation_and_refuses_readmission() {
     assert!(matches!(waiter.await.unwrap(), Err(error) if error.code() == tonic::Code::Cancelled));
     assert_reaped(&child);
     assert!(
-        matches!(fixture.manager.prepare(fixture.request.clone(), None).await,
+        matches!(fixture.manager.prepare(fixture.request.clone(), None, None).await,
         Err(error) if error.code() == tonic::Code::Unavailable)
     );
 }
@@ -383,7 +419,7 @@ async fn manager_bounds_live_executors_and_cancellation_drains_all_eight() {
         children.push(fixture.child().await);
     }
     assert!(
-        matches!(fixture.manager.prepare(fixture.request.clone(), None).await,
+        matches!(fixture.manager.prepare(fixture.request.clone(), None, None).await,
         Err(error) if error.code() == tonic::Code::ResourceExhausted)
     );
     for waiter in &waiters {
@@ -539,7 +575,7 @@ async fn failed_child_reap_preserves_staging_and_cannot_report_successful_shutdo
     assert!(
         fixture
             .manager
-            .prepare(fixture.request.clone(), None)
+            .prepare(fixture.request.clone(), None, None)
             .await
             .is_err()
     );

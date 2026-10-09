@@ -2,15 +2,17 @@
 use std::ffi::OsStr;
 use std::io;
 use std::os::fd::{FromRawFd as _, OwnedFd};
+#[cfg(target_os = "macos")]
 use std::path::Path;
 
 use anyhow::Context as _;
 #[cfg(target_os = "linux")]
 use codewire_local_credentials::AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES;
 use codewire_local_credentials::{
-    LocalRepositoryGitProcessSpawner, LocalRepositoryProcessConfig, LocalRepositoryTransport,
-    run_git_credential_helper_for_endpoint, run_local_repository_executor,
-    run_local_ssh_repository_executor, run_platform_repository_executor,
+    LocalRepositoryGit, LocalRepositoryGitProcessSpawner, LocalRepositoryProcessConfig,
+    LocalRepositoryTransport, run_git_credential_helper_for_endpoint,
+    run_local_repository_executor, run_local_ssh_repository_executor,
+    run_platform_repository_executor,
 };
 #[cfg(target_os = "linux")]
 use codewire_protected_store::ConnectedOsProtectedStore;
@@ -23,6 +25,7 @@ use super::credential_darwin::{
 };
 use super::{LocalGitCredentialHelperArgs, LocalGitRepositoryExecutorArgs};
 
+#[cfg(target_os = "linux")]
 const GIT: &str = "/usr/bin/git";
 
 /// A connected GitHub login is stored as the Codewire App's login bundle (or,
@@ -138,6 +141,10 @@ pub(crate) async fn run_local_git_repository_executor(
             _ => anyhow::bail!("invalid repository transport"),
         },
         ssh_runtime_directory: args.ssh_runtime_directory,
+        git: args
+            .git
+            .zip(args.git_exec_path)
+            .map(|(program, exec_path)| LocalRepositoryGit { program, exec_path }),
     };
     // SAFETY: FD 3 is created by the authority immediately before exec and is
     // the only descriptor deliberately retained across that exec. Ownership is
@@ -156,8 +163,21 @@ pub(crate) async fn run_local_git_repository_executor(
     let executable = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .context("resolve repository credential helper")?;
+    // A stock Mac's /usr/bin/git is only a stub: run the admitted runtime's
+    // git, whose helpers come only from its own directory.
+    #[cfg(target_os = "macos")]
+    let git = config.git.clone().context(
+        "the local VM runtime's git is unavailable; reinstall it: cw setup --local --replace",
+    )?;
+    #[cfg(target_os = "linux")]
+    let git = LocalRepositoryGit {
+        program: GIT.into(),
+        exec_path: std::path::PathBuf::new(),
+    };
     let git_spawner = ConfinedGitSpawner {
         parent_pid: unsafe { libc::getpid() },
+        #[cfg(target_os = "macos")]
+        exec_path: git.exec_path.clone(),
     };
     match config.transport {
         LocalRepositoryTransport::GitHubOAuth => {
@@ -180,7 +200,7 @@ pub(crate) async fn run_local_git_repository_executor(
                     authority_stream,
                     config,
                     &credential_runtime_directory,
-                    Path::new(GIT),
+                    &git.program,
                     &executable,
                     &git_spawner,
                 )
@@ -199,7 +219,7 @@ pub(crate) async fn run_local_git_repository_executor(
                 store,
                 config,
                 &credential_runtime_directory,
-                Path::new(GIT),
+                &git.program,
                 &executable,
                 &git_spawner,
                 &CodewireGitHubLogin,
@@ -210,7 +230,7 @@ pub(crate) async fn run_local_git_repository_executor(
             run_local_ssh_repository_executor(
                 authority_stream,
                 config,
-                Path::new(GIT),
+                &git.program,
                 &executable,
                 &git_spawner,
             )
@@ -222,6 +242,8 @@ pub(crate) async fn run_local_git_repository_executor(
 
 struct ConfinedGitSpawner {
     parent_pid: libc::pid_t,
+    #[cfg(target_os = "macos")]
+    exec_path: std::path::PathBuf,
 }
 
 #[cfg(target_os = "linux")]
@@ -283,6 +305,9 @@ impl LocalRepositoryGitProcessSpawner for ConfinedGitSpawner {
                 Ok(())
             });
         }
+        command
+            .env("GIT_EXEC_PATH", &self.exec_path)
+            .env("GIT_TEMPLATE_DIR", "");
         command.spawn()
     }
 }

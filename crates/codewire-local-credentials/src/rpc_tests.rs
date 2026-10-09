@@ -1145,6 +1145,7 @@ async fn prepare_github_repository_taking(work_seconds: u32) {
             String::new(),
             Vec::new(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1213,6 +1214,7 @@ async fn a_checkout_refreshes_a_due_github_login_through_the_authority_journal()
             "main".to_owned(),
             String::new(),
             Vec::new(),
+            None,
             None,
         )
         .await

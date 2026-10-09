@@ -98,9 +98,10 @@ pub(crate) fn git() -> Option<HostGit> {
     Some(HostGit {
         program: git.git.path().to_owned(),
         environment: vec![
-            ("GIT_EXEC_PATH", helpers.into_os_string()),
+            ("GIT_EXEC_PATH", helpers.clone().into_os_string()),
             ("GIT_TEMPLATE_DIR", OsString::new()),
         ],
+        exec_path: Some(helpers),
     })
 }
 
