@@ -259,13 +259,19 @@ def check_dry_run(text):
             errors.append(message)
 
     blocks = jobs(text)
-    need(list(blocks) == ["build-darwin", "assemble"], "unexpected dry-run job set")
+    need(list(blocks) == ["protected-main", "build-darwin", "assemble"], "unexpected dry-run job set")
+    guard = blocks.get("protected-main", "")
     darwin, assemble = blocks.get("build-darwin", ""), blocks.get("assemble", "")
+    need("    runs-on: ci-lite\n" in guard and "actions-checkout" not in guard
+         and "[ \"$GITHUB_REF\" = 'refs/heads/main' ]" in guard
+         and "[ \"$GITHUB_REF_NAME\" = 'main' ]" in guard and not re.search(r"^\s+if:", guard, re.M),
+         "the dry run does not refuse every ref but main before the protected builders")
+    need("    needs: [protected-main]\n" in darwin, "the macOS build does not wait for the main-only guard")
     for capability in CAPABILITIES:
         need(capability not in text, f"dry run holds capability {capability}")
     need("    runs-on: macos-arm64\n" in darwin, "the dry-run macOS build is not on the protected Mac runner")
     need(f"CW_RELEASE_TARGETS='{DARWIN_TARGETS}'" in darwin, "the dry-run macOS build is not the Mac pair")
-    need("    needs: [build-darwin]" in assemble and "    runs-on: ci-protected\n" in assemble,
+    need("    needs: [protected-main, build-darwin]" in assemble and "    runs-on: ci-protected\n" in assemble,
          "the dry-run assembly does not follow the macOS build on a protected runner")
     need(f"CW_RELEASE_TARGETS='{LINUX_TARGETS}'" in assemble and "CW_RELEASE_IMPORT_DIR=dist-darwin" in assemble,
          "the dry-run assembly does not package the four targets")
@@ -284,6 +290,12 @@ DRY_RUN_MUTATIONS = {
                                   "      KEY: ${{ secrets.CW_RELEASE_GPG_PRIVATE_KEY }}\n", 1),
     "pool Mac": lambda t: t.replace("    runs-on: macos-arm64\n", "    runs-on: ci-heavy\n", 1),
     "no verification": lambda t: t.replace("runtime_equal=true signed=false", "runtime_equal=true", 1),
+    "no main guard": lambda t: t.replace("          [ \"$GITHUB_REF\" = 'refs/heads/main' ]\n", "", 1),
+    "guard skipped": lambda t: t.replace("    name: Refuse anything but protected main\n    runs-on: ci-lite\n",
+                                         "    name: Refuse anything but protected main\n    runs-on: ci-lite\n"
+                                         "    if: github.event_name == 'push'\n", 1),
+    "Mac build without the guard": lambda t: t.replace("    needs: [protected-main]\n    runs-on: macos-arm64",
+                                                       "    runs-on: macos-arm64", 1),
 }
 
 

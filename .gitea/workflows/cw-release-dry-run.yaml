@@ -33,8 +33,22 @@ env:
   DRY_RUN_VERSION: v0.0.0
 
 jobs:
+  protected-main:
+    # Both builders are protected. Refuse any ref but main on a lite runner,
+    # before any job reaches mac-runner or ci-protected; a dispatch from a
+    # feature branch must not run its code there.
+    name: Refuse anything but protected main
+    runs-on: ci-lite
+    steps:
+      - name: Refuse anything but protected main
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF" = 'refs/heads/main' ]
+          [ "$GITHUB_REF_NAME" = 'main' ]
+
   build-darwin:
     name: Build the macOS cw natively
+    needs: [protected-main]
     runs-on: macos-arm64
     outputs:
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
@@ -73,7 +87,7 @@ jobs:
 
   assemble:
     name: Assemble and verify the unsigned four-target delivery
-    needs: [build-darwin]
+    needs: [protected-main, build-darwin]
     runs-on: ci-protected
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
