@@ -1122,19 +1122,56 @@ pub(super) fn print_environment_sessions(
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(sessions)?),
         OutputFormat::Text if sessions.is_empty() => println!("No sessions"),
-        OutputFormat::Text => {
-            for session in sessions {
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    session.session_id,
-                    session.name,
-                    session.state,
-                    session_command_label(session)
-                );
-            }
-        }
+        OutputFormat::Text => print!("{}", format_environment_sessions(sessions, "")),
     }
     Ok(())
+}
+
+/// Aligned session rows under a header. A child names its parent session
+/// from the same environment; COMMAND, the widest column, comes last.
+pub(super) fn format_environment_sessions(
+    sessions: &[EnvironmentSessionView],
+    indent: &str,
+) -> String {
+    let parent = |session: &EnvironmentSessionView| match session.parent_session_id.as_str() {
+        "" => "-".to_owned(),
+        id => sessions
+            .iter()
+            .find(|candidate| candidate.session_id == id && !candidate.name.is_empty())
+            .map_or_else(|| id.to_owned(), |candidate| candidate.name.clone()),
+    };
+    let rows: Vec<[String; 5]> =
+        std::iter::once(["NAME", "STATE", "PARENT", "SESSION", "COMMAND"].map(String::from))
+            .chain(sessions.iter().map(|session| {
+                [
+                    if session.name.is_empty() {
+                        "-".to_owned()
+                    } else {
+                        session.name.clone()
+                    },
+                    session.state.clone(),
+                    parent(session),
+                    session.session_id.clone(),
+                    session_command_label(session),
+                ]
+            }))
+            .collect();
+    let widths: [usize; 4] = std::array::from_fn(|column| {
+        rows.iter()
+            .map(|row| row[column].chars().count())
+            .max()
+            .unwrap_or(0)
+    });
+    let mut output = String::new();
+    for row in &rows {
+        output.push_str(indent);
+        for (cell, width) in row.iter().zip(widths) {
+            output.push_str(&format!("{cell:<width$}  "));
+        }
+        output.push_str(&row[4]);
+        output.push('\n');
+    }
+    output
 }
 
 pub(crate) async fn handle_environment_run_command(
@@ -1745,9 +1782,10 @@ pub(crate) async fn handle_list_command(globals: &Globals, args: ListArgs) -> an
         let paths = ResolvePaths::from_env(&OsEnv)?;
         let targets = attachment_environment_targets(globals, &paths, &OsEnv).await?;
         let mut rows = Vec::new();
+        let mut inventories = Vec::new();
         let mut incomplete = false;
         for (current, running) in targets {
-            let mut sessions = serde_json::json!([]);
+            let mut sessions = Vec::new();
             let mut error = None;
             if running {
                 let result = match environment_session_target_from_current(
@@ -1762,7 +1800,7 @@ pub(crate) async fn handle_list_command(globals: &Globals, args: ListArgs) -> an
                     Err(error) => Err(error),
                 };
                 match result {
-                    Ok(listed) => sessions = serde_json::to_value(listed)?,
+                    Ok(listed) => sessions = listed,
                     Err(failure) => {
                         incomplete = true;
                         error = Some(failure.to_string());
@@ -1778,6 +1816,7 @@ pub(crate) async fn handle_list_command(globals: &Globals, args: ListArgs) -> an
                 "sessions": sessions,
                 "error": error,
             }));
+            inventories.push(sessions);
         }
         match args.output {
             OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&rows)?),
@@ -1785,7 +1824,7 @@ pub(crate) async fn handle_list_command(globals: &Globals, args: ListArgs) -> an
                 if rows.is_empty() {
                     println!("No environments");
                 }
-                for row in rows {
+                for (row, sessions) in rows.iter().zip(&inventories) {
                     println!(
                         "{} ({}/{}){}",
                         row["environment"].as_str().unwrap_or(""),
@@ -1799,14 +1838,10 @@ pub(crate) async fn handle_list_command(globals: &Globals, args: ListArgs) -> an
                     );
                     if let Some(error) = row["error"].as_str() {
                         println!("  unavailable: {error}");
-                    }
-                    for session in row["sessions"].as_array().into_iter().flatten() {
-                        println!(
-                            "  {}\t{}\t{}",
-                            session["session_id"].as_str().unwrap_or(""),
-                            session["name"].as_str().unwrap_or(""),
-                            session["state"].as_str().unwrap_or("")
-                        );
+                    } else if row["running"] == true && sessions.is_empty() {
+                        println!("  No sessions");
+                    } else if !sessions.is_empty() {
+                        print!("{}", format_environment_sessions(sessions, "  "));
                     }
                 }
             }

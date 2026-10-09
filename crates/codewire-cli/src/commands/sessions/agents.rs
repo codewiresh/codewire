@@ -635,10 +635,15 @@ fn claude_activity(value: &Value) -> Vec<String> {
         .collect()
 }
 
-/// The session-log line for a Codex item as it starts or completes.
-fn codex_activity(item: &Value) -> Option<String> {
+/// The session-log line for a Codex item. A web search names its query only
+/// when it completes; every other item is logged as it starts.
+fn codex_activity(item: &Value, completed: bool) -> Option<String> {
     let text = |key: &str| item.get(key).and_then(Value::as_str);
-    match text("type")? {
+    let kind = text("type")?;
+    if completed != (kind == "webSearch") {
+        return None;
+    }
+    match kind {
         "commandExecution" => text("command").map(|command| format!("run: {}", preview(command))),
         "fileChange" => {
             let paths: Vec<&str> = item
@@ -655,7 +660,9 @@ fn codex_activity(item: &Value) -> Option<String> {
             text("tool").unwrap_or("tool")
         )),
         "dynamicToolCall" => Some(format!("tool {}", text("tool").unwrap_or("tool"))),
-        "webSearch" => text("query").map(|query| format!("search: {}", preview(query))),
+        "webSearch" => text("query")
+            .filter(|query| !query.trim().is_empty())
+            .map(|query| format!("search: {}", preview(query))),
         _ => None,
     }
 }
@@ -3570,11 +3577,20 @@ impl Driver {
                 }
             }
             "item/started" => {
-                if let Some(line) = params.get("item").and_then(codex_activity) {
+                if let Some(line) = params
+                    .get("item")
+                    .and_then(|item| codex_activity(item, false))
+                {
                     log(line);
                 }
             }
             "item/completed" => {
+                if let Some(line) = params
+                    .get("item")
+                    .and_then(|item| codex_activity(item, true))
+                {
+                    log(line);
+                }
                 if params.pointer("/item/type").and_then(Value::as_str) == Some("agentMessage")
                     && let Some(text) = params.pointer("/item/text").and_then(Value::as_str)
                 {
@@ -4375,7 +4391,7 @@ mod tests {
         );
         assert!(claude_activity(&json!({"message": {"content": "plain"}})).is_empty());
 
-        let item = |value: Value| codex_activity(&value);
+        let item = |value: Value| codex_activity(&value, false);
         assert_eq!(
             item(json!({"type": "commandExecution", "command": "cargo test -p cw"})).as_deref(),
             Some("run: cargo test -p cw")
@@ -4390,6 +4406,21 @@ mod tests {
             Some("tool docs/search")
         );
         assert_eq!(item(json!({"type": "reasoning", "summary": []})), None);
+        let search = json!({"type": "webSearch", "query": ""});
+        assert_eq!(codex_activity(&search, false), None);
+        assert_eq!(codex_activity(&search, true), None);
+        assert_eq!(
+            codex_activity(
+                &json!({"type": "webSearch", "query": "go1.26.9 sha256"}),
+                true
+            )
+            .as_deref(),
+            Some("search: go1.26.9 sha256")
+        );
+        assert_eq!(
+            codex_activity(&json!({"type": "commandExecution", "command": "ls"}), true),
+            None
+        );
 
         let long = "x".repeat(ACTIVITY_PREVIEW_BYTES + 50);
         let shown = preview(&long);

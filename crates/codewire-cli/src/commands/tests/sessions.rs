@@ -236,6 +236,40 @@ fn adjacent_session_wraps_without_mutating_selected_environment() {
 }
 
 #[test]
+fn session_table_aligns_columns_and_names_the_parent() {
+    let session = |id: &str, name: &str, parent: &str, command: &str| EnvironmentSessionView {
+        name: name.to_string(),
+        parent_session_id: parent.to_string(),
+        started_at: String::new(),
+        cleanup_unknown: false,
+        launch_generation: 1,
+        session_id: id.to_string(),
+        state: "Running".to_string(),
+        command: vec![command.to_string()],
+        working_dir: String::new(),
+        pty: false,
+        exit_code: None,
+        output_end_offset: 0,
+        output_start_offset: 0,
+        status_message: String::new(),
+    };
+    let sessions = [
+        session("session-1", "lead", "", "bash"),
+        session("session-2", "", "session-1", "cargo test"),
+        session("session-3", "orphan", "session-9", "sleep 5"),
+    ];
+    assert_eq!(
+        format_environment_sessions(&sessions, "  "),
+        concat!(
+            "  NAME    STATE    PARENT     SESSION    COMMAND\n",
+            "  lead    Running  -          session-1  bash\n",
+            "  -       Running  lead       session-2  cargo test\n",
+            "  orphan  Running  session-9  session-3  sleep 5\n",
+        )
+    );
+}
+
+#[test]
 fn session_grammar_uses_environment_as_first_positional() {
     let list = Cli::try_parse_from(["cw", "list", "builder"]).unwrap();
     let Command::List(args) = list.command else {
