@@ -306,7 +306,7 @@ where
         let stage = Workspace::create(&parent, "runtime-stage")?;
         let mut specs = lock.executables();
         let executables = specs.len();
-        specs.extend([&lock.kernel, &lock.initramfs]);
+        specs.extend(lock.data_files());
         for (index, spec) in specs.into_iter().enumerate() {
             let mode = if index < executables {
                 EXECUTABLE_MODE

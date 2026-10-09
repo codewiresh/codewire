@@ -67,8 +67,9 @@ impl RuntimeArtifactStore {
         for (artifact, spec) in admitted.executables().into_iter().zip(lock.executables()) {
             self.publish_blob(artifact, spec, true)?;
         }
-        self.publish_blob(&admitted.kernel, &lock.kernel, false)?;
-        self.publish_blob(&admitted.initramfs, &lock.initramfs, false)?;
+        for (artifact, spec) in admitted.data_files().into_iter().zip(lock.data_files()) {
+            self.publish_blob(artifact, spec, false)?;
+        }
         self.publish_generation(&generation, &lock)?;
 
         let stored = self.read_generation(&generation)?;
@@ -126,8 +127,9 @@ impl RuntimeArtifactStore {
             for spec in lock.executables() {
                 retain_blob(&mut retained_blobs, spec, true)?;
             }
-            retain_blob(&mut retained_blobs, &lock.kernel, false)?;
-            retain_blob(&mut retained_blobs, &lock.initramfs, false)?;
+            for spec in lock.data_files() {
+                retain_blob(&mut retained_blobs, spec, false)?;
+            }
         }
         for blob in retained_blobs.values() {
             self.verify_blob(&blob.spec, blob.executable)?;
@@ -193,13 +195,7 @@ impl RuntimeArtifactStore {
         &self,
         lock: &ArtifactLock,
     ) -> Result<AdmittedArtifacts, RuntimeArtifactStoreError> {
-        let mut cached = lock.clone();
-        for spec in cached.executables_mut() {
-            spec.path = blob_name(spec, true).into();
-        }
-        cached.kernel.path = blob_name(&cached.kernel, false).into();
-        cached.initramfs.path = blob_name(&cached.initramfs, false).into();
-        cached
+        cached_lock(lock)
             .admit(self.blobs.path())
             .await
             .map_err(RuntimeArtifactStoreError::from)
@@ -1090,17 +1086,26 @@ fn diagnose_blobs(
     }
 }
 
+/// `lock` with every file named by its blob in the store.
+fn cached_lock(lock: &ArtifactLock) -> ArtifactLock {
+    let mut cached = lock.clone();
+    for spec in cached.executables_mut() {
+        spec.path = blob_name(spec, true).into();
+    }
+    for spec in cached.data_files_mut() {
+        spec.path = blob_name(spec, false).into();
+    }
+    cached
+}
+
 fn retain_diagnostic_blobs(
     retained: &mut BTreeMap<String, DiagnosticRetainedBlob>,
     lock: &ArtifactLock,
 ) -> Result<(), ()> {
     let mut next = retained.clone();
     let mut executables = lock.executables().into_iter();
-    let mut specs = vec![
-        (executables.next().ok_or(())?, true),
-        (&lock.kernel, false),
-        (&lock.initramfs, false),
-    ];
+    let mut specs = vec![(executables.next().ok_or(())?, true)];
+    specs.extend(lock.data_files().into_iter().map(|spec| (spec, false)));
     specs.extend(executables.map(|spec| (spec, true)));
     for (spec, executable) in specs {
         let name = blob_name(spec, executable);
@@ -1550,6 +1555,42 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn cached_admission_names_every_lock_file_by_its_blob() {
+        let lock = lock();
+        // Executables and data files are every artifact the lock names.
+        let value = serde_json::to_value(&lock).unwrap();
+        fn artifacts(value: &serde_json::Value) -> usize {
+            match value {
+                serde_json::Value::Object(map) if map.contains_key("sha256") => 1,
+                serde_json::Value::Object(map) => map.values().map(artifacts).sum(),
+                _ => 0,
+            }
+        }
+        assert_eq!(
+            artifacts(&value),
+            lock.executables().len() + lock.data_files().len()
+        );
+        let cached = cached_lock(&lock);
+        let mut expected: Vec<String> = lock
+            .executables()
+            .into_iter()
+            .map(|spec| blob_name(spec, true))
+            .collect();
+        expected.extend(
+            lock.data_files()
+                .into_iter()
+                .map(|spec| blob_name(spec, false)),
+        );
+        let actual: Vec<String> = cached
+            .executables()
+            .into_iter()
+            .chain(cached.data_files())
+            .map(|spec| spec.path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(actual, expected);
     }
 
     #[test]

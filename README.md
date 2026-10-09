@@ -69,11 +69,15 @@ downloads or substitutes those artifacts at runtime.
 On an Apple Silicon Mac, local VMs run under Virtualization.framework through
 the signed `codewire-vz-runner` helper instead of Cloud Hypervisor, with the
 same artifact paths. Build the arm64 kernel Image and guest root on an x86_64
-Linux host, copy them to the Mac, install e2fsprogs (`brew install e2fsprogs`),
-then build, sign and install the helper with both files and their lock:
+Linux host and copy them to the Mac. On the Mac, build the pinned e2fsprogs
+the runtime ships (a stock Mac has none; nothing comes from Homebrew), then
+build, sign and install the helper with all three:
 
 ```bash
-make macos-local-runtime KERNEL=/abs/Image INITRAMFS=/abs/initramfs.cpio
+python3 scripts/dev/macos-ext4-tool.py --source-archive /abs/e2fsprogs-1.47.4.tar.gz \
+  --output /abs/private/e2fsprogs
+make macos-local-runtime KERNEL=/abs/Image INITRAMFS=/abs/initramfs.cpio \
+  E2FSPROGS=/abs/private/e2fsprogs/bundle
 ```
 
 Until the arm64 default workspace image is published, pass `--image` with a

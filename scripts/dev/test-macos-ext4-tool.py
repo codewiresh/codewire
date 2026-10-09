@@ -229,9 +229,12 @@ class FormatterContractTests(unittest.TestCase):
                 (cwd / "lib").mkdir()
                 (cwd / "lib/config.h").write_text("#define CONFIG_DISABLE_LIBARCHIVE 1\n")
                 (cwd / "MCONFIG").write_text("LIBUUID = $(LIB)/libuuid.a\nLIBBLKID = $(LIB)/libblkid.a $(LIBUUID)\n")
-            elif argv == ["/usr/bin/make", "-j4", "-C", "misc", "mke2fs"]:
-                (cwd / "misc").mkdir()
-                (cwd / "misc/mke2fs").write_bytes(self.binary.read_bytes())
+            elif argv[:3] == ["/usr/bin/make", "-j4", "-C"] and tuple(argv[3:]) in tool.TOOLS:
+                directory, name = argv[3:]
+                (cwd / directory).mkdir()
+                content_bytes = self.binary.read_bytes()
+                (cwd / directory / name).write_bytes(content_bytes if name == "mke2fs"
+                                                     else content_bytes + name.encode())
             elif argv[0] == "/usr/bin/otool":
                 content = "mke2fs:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
             elif argv[0] == "/usr/bin/lipo":
@@ -252,6 +255,16 @@ class FormatterContractTests(unittest.TestCase):
         self.assertEqual(result["version"], tool.VERSION)
         self.assertNotIn("input_binary", result)
         self.assertEqual(result["commands"][6]["argv"], ["/usr/bin/make", "-j4", "libs"])
+        self.assertEqual([item["argv"] for item in result["commands"][7:11]],
+                         [["/usr/bin/make", "-j4", "-C", directory, name] for directory, name in tool.TOOLS])
+        self.assertEqual(list(result["tools"]), [name for _directory, name in tool.TOOLS])
+        for name, checksum in result["tools"].items():
+            program = output / "bundle" / name
+            self.assertEqual(stat.S_IMODE(program.stat().st_mode), 0o500)
+            self.assertEqual(hashlib.sha256(program.read_bytes()).hexdigest(), checksum)
+        # Each shipped program is checked for libSystem-only, arm64 and its signature.
+        validations = [item["argv"][0] for item in result["commands"][11:]]
+        self.assertEqual(validations, ["/usr/bin/otool", "/usr/bin/lipo", "/usr/bin/codesign"] * len(tool.TOOLS))
         self.assertEqual((output / "bundle/NOTICE").read_text(), "synthetic notice")
         self.assertEqual((output / "bundle/libuuid-COPYING").read_text(), "synthetic uuid license")
 

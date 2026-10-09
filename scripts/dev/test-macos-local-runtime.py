@@ -27,6 +27,11 @@ SPEC = importlib.util.spec_from_file_location("macos_local_runtime", SOURCE)
 assert SPEC and SPEC.loader
 runtime = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runtime)
+EXT4_SPEC = importlib.util.spec_from_file_location("macos_ext4_tool", SOURCE.with_name("macos-ext4-tool.py"))
+assert EXT4_SPEC and EXT4_SPEC.loader
+ext4_tool = importlib.util.module_from_spec(EXT4_SPEC)
+EXT4_SPEC.loader.exec_module(ext4_tool)
+LIBSYSTEM = "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)\n"
 
 
 def elf(machine: int = 183, interpreter: bool = False) -> bytes:
@@ -94,6 +99,8 @@ class FakeTools:
         self.signed_entitlements = None
         self.cw_status = 0
         self.installed = None
+        self.dependencies = {}
+        self.unsigned = set()
 
     def run(self, argv, **_kwargs):
         self.calls.append(list(argv))
@@ -109,6 +116,11 @@ class FakeTools:
             entitlements = self.signed_entitlements if self.signed_entitlements is not None else plist
             target.write_bytes(target.read_bytes() + SIGNATURE + entitlements)
             return subprocess.CompletedProcess(argv, 0, stdout=None)
+        if argv[0] == runtime.OTOOL and argv[1] == "-L":
+            report = argv[2] + ":\n" + self.dependencies.get(argv[2], LIBSYSTEM)
+            return subprocess.CompletedProcess(argv, 0, stdout=report.encode())
+        if argv[0] == runtime.CODESIGN and argv[1] == "--verify":
+            return subprocess.CompletedProcess(argv, 1 if argv[-1] in self.unsigned else 0, stdout=None)
         if argv[0] == runtime.CODESIGN and argv[1] == "-d":
             data = Path(argv[-1]).read_bytes()
             if SIGNATURE not in data:
@@ -134,24 +146,25 @@ class PackTests(unittest.TestCase):
         self.kernel.write_bytes(kernel_image())
         self.initramfs = self.inputs / "initramfs.cpio"
         self.initramfs.write_bytes(guest_root())
-        self.e2fsprogs = self.scratch / "e2fsprogs" / "sbin"
+        self.e2fsprogs = self.scratch / "e2fsprogs" / "bundle"
         self.e2fsprogs.mkdir(parents=True)
-        for program in runtime.E2FSPROGS_PROGRAMS:
-            (self.e2fsprogs / program).write_bytes(b"")
+        for _key, name, _installed in runtime.E2FSPROGS_TOOLS:
+            (self.e2fsprogs / name).write_bytes(macho(name.encode()))
+        (self.e2fsprogs / runtime.E2FSPROGS_CONFIG[1]).write_bytes(ext4_tool.CONFIG)
         self.tools = FakeTools(self.scratch)
         self.release = self.scratch / "release"
         for patch in (
             mock.patch.object(runtime.platform, "system", return_value="Darwin"),
             mock.patch.object(runtime.platform, "machine", return_value="arm64"),
-            mock.patch.object(runtime, "E2FSPROGS_DIRECTORIES", (str(self.e2fsprogs),)),
             mock.patch.object(runtime.subprocess, "run", side_effect=self.tools.run),
         ):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def main(self, *extra, kernel=None, initramfs=None):
+    def main(self, *extra, kernel=None, initramfs=None, e2fsprogs=None):
         argv = ["--kernel", str(kernel if kernel is not None else self.kernel),
-                "--initramfs", str(initramfs if initramfs is not None else self.initramfs), *extra]
+                "--initramfs", str(initramfs if initramfs is not None else self.initramfs),
+                "--e2fsprogs", str(e2fsprogs if e2fsprogs is not None else self.e2fsprogs), *extra]
         stdout, stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             status = runtime.main(argv)
@@ -168,7 +181,7 @@ class PackTests(unittest.TestCase):
         self.assertEqual(list(document["targets"]), ["macos-aarch64"])
         target = document["targets"]["macos-aarch64"]
         lock = target["lock"]
-        self.assertEqual(list(lock), ["schema_version", "vz_runner", "kernel", "initramfs"])
+        self.assertEqual(list(lock), ["schema_version", "vz_runner", "e2fsprogs", "kernel", "initramfs"])
         self.assertEqual(lock["schema_version"], 1)
         blobs = {name[len("blobs/sha256/"):]: data for name, data in files.items()
                  if name.startswith("blobs/sha256/")}
@@ -179,12 +192,20 @@ class PackTests(unittest.TestCase):
                                          "architecture": "aarch64"})
         self.assertEqual(blobs[lock["kernel"]["sha256"]], self.kernel.read_bytes())
         self.assertEqual(blobs[lock["initramfs"]["sha256"]], self.initramfs.read_bytes())
+        tools = runtime.E2FSPROGS_TOOLS + (runtime.E2FSPROGS_CONFIG,)
+        self.assertEqual(list(lock["e2fsprogs"]), [key for key, _name, _installed in tools])
+        for key, name, installed in tools:
+            data = (self.e2fsprogs / name).read_bytes()
+            self.assertEqual(lock["e2fsprogs"][key], {"path": installed, "size": len(data),
+                                                      "sha256": hashlib.sha256(data).hexdigest(),
+                                                      "architecture": "aarch64"})
+            self.assertEqual(blobs[lock["e2fsprogs"][key]["sha256"]], data)
         helper = blobs[lock["vz_runner"]["sha256"]]
         self.assertTrue(helper.startswith(self.tools.helper))
         self.assertTrue(helper.endswith(runtime.ENTITLEMENTS.read_bytes()))
         if cw_runtime is None:
             self.assertNotIn("cw_runtime", target)
-            self.assertEqual(len(blobs), 3)
+            self.assertEqual(len(blobs), 3 + len(tools))
         else:
             for name, key in ((runtime.CW_RUNTIME_LOCK, "lock"), (runtime.CW_RUNTIME_PACK, "pack")):
                 data = (cw_runtime / name).read_bytes()
@@ -203,10 +224,16 @@ class PackTests(unittest.TestCase):
         self.assert_release(self.snapshot())
         self.assertEqual(stat.S_IMODE(self.release.stat().st_mode), 0o700)
         package = str(runtime.PACKAGE)
-        # The revision is resolved before anything is built.
-        self.assertEqual(self.tools.calls[0], ["git", "-C", str(REPOSITORY), "rev-parse", "HEAD"])
-        self.assertEqual(self.tools.calls[1], ["swift", "build", "-c", "release", "--package-path", package])
-        self.assertEqual(self.tools.calls[2][-1], "--show-bin-path")
+        # Only read-only inspection of the e2fsprogs bundle precedes the
+        # revision, which is resolved before anything is built.
+        inspections = [call for call in self.tools.calls
+                       if call[0] == runtime.OTOOL or call[:2] == [runtime.CODESIGN, "--verify"]]
+        self.assertEqual(len(inspections), 2 * len(runtime.E2FSPROGS_TOOLS))
+        calls = self.tools.calls[len(inspections):]
+        self.assertEqual(self.tools.calls[:len(inspections)], inspections)
+        self.assertEqual(calls[0], ["git", "-C", str(REPOSITORY), "rev-parse", "HEAD"])
+        self.assertEqual(calls[1], ["swift", "build", "-c", "release", "--package-path", package])
+        self.assertEqual(calls[2][-1], "--show-bin-path")
         sign = [call for call in self.tools.calls if call[:2] == ["/usr/bin/codesign", "--force"]][0]
         self.assertEqual(sign[:7], ["/usr/bin/codesign", "--force", "--sign", "-",
                                     "--identifier", "codewire-vz-runner", "--entitlements"])
@@ -286,13 +313,36 @@ class PackTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("--pack must be an absolute path", stderr)
 
-    def test_missing_e2fsprogs_fails_before_effects(self):
-        (self.e2fsprogs / "resize2fs").unlink()
-        status, _stdout, stderr = self.main()
+    def test_an_unpinned_e2fsprogs_bundle_fails_before_effects(self):
+        """Only the pinned, libSystem-only, signed arm64 build is shipped."""
+        resize = self.e2fsprogs / "resize2fs"
+        config = self.e2fsprogs / "mke2fs.conf"
+        cases = (
+            (lambda: resize.unlink(), lambda: resize.write_bytes(macho(b"resize2fs")), "is missing"),
+            (lambda: resize.write_bytes(elf()), lambda: resize.write_bytes(macho(b"resize2fs")),
+             "is not a thin arm64 Mach-O executable"),
+            (lambda: self.tools.dependencies.update({str(resize): LIBSYSTEM + "\t/opt/homebrew/lib/libintl.8.dylib (x)\n"}),
+             lambda: self.tools.dependencies.clear(), "links more than libSystem"),
+            (lambda: self.tools.unsigned.add(str(resize)), lambda: self.tools.unsigned.clear(),
+             "command exited 1: /usr/bin/codesign --verify --strict"),
+            (lambda: config.write_bytes(ext4_tool.CONFIG + b"\n"), lambda: config.write_bytes(ext4_tool.CONFIG),
+             "is not the pinned mke2fs configuration"),
+        )
+        for break_it, restore, message in cases:
+            break_it()
+            self.tools.calls.clear()
+            status, _stdout, stderr = self.pack()
+            restore()
+            self.assertEqual(status, 1, message)
+            self.assertIn(message, stderr)
+            self.assertIn("macos-ext4-tool.py", stderr)
+            self.assertFalse(any(call[0] == runtime.SWIFT for call in self.tools.calls), message)
+            self.assertFalse(self.release.exists(), message)
+        status, _stdout, stderr = self.main(e2fsprogs="")
         self.assertEqual(status, 1)
-        self.assertIn("e2fsprogs is missing", stderr)
-        self.assertIn("brew install e2fsprogs", stderr)
-        self.assertEqual(self.tools.calls, [])
+        self.assertIn("E2FSPROGS is required", stderr)
+        status, _stdout, _stderr = self.pack()
+        self.assertEqual(status, 0)
 
     def test_missing_or_invalid_inputs_fail_before_effects(self):
         cases = (
@@ -429,19 +479,25 @@ class SourceContractTests(unittest.TestCase):
         self.assertIn('ArtifactArchitecture::Aarch64 => bytes.len() >= 0x3c && &bytes[0x38..0x3c] == b"ARM\\x64"', artifact)
         self.assertIn("const INITRAMFS_LIMIT: u64 = 512 * 1024 * 1024;", artifact)
         self.assertIn("Self::Aarch64 => 183,", artifact)
-        self.assertRegex(artifact, r"pub vz_runner: ArtifactSpec,\s*pub kernel: ArtifactSpec,\s*pub initramfs: ArtifactSpec,")
+        self.assertRegex(artifact, r"pub e2fsprogs: E2fsprogsSpec,\s*pub kernel: ArtifactSpec,\s*pub initramfs: ArtifactSpec,")
         self.assertIn("Some(if executable { 0o500 } else { 0o400 })", artifact)
         installer = self.read("crates/codewire-local-vmm/src/runtime_install.rs")
         self.assertIn("const EXECUTABLE_MODE: u32 = 0o500;", installer)
         self.assertIn("const DATA_MODE: u32 = 0o400;", installer)
         darwin = self.read("crates/codewire-local-vmm/src/darwin/mod.rs")
-        directories = re.search(r"E2FSPROGS_DIRECTORIES: \[&str; \d+\] = \[(.*?)\];", darwin, re.DOTALL)
-        self.assertEqual(runtime.E2FSPROGS_DIRECTORIES, tuple(re.findall(r'"([^"]+)"', directories.group(1))))
         self.assertIn('Command::new("/usr/bin/codesign")', darwin)
+        self.assertRegex(artifact, r"pub vz_runner: ArtifactSpec,(?:\s*///.*)*\s*#\[cfg\(target_os = \"macos\"\)\]"
+                                   r"\s*pub e2fsprogs: E2fsprogsSpec,")
+        spec = re.search(r"pub struct E2fsprogsSpec \{(.*?)\}", artifact, re.DOTALL).group(1)
+        tools = runtime.E2FSPROGS_TOOLS + (runtime.E2FSPROGS_CONFIG,)
+        self.assertEqual(re.findall(r"pub (\w+): ArtifactSpec,", spec), [key for key, _name, _installed in tools])
+        # cw finds each shipped program by the name it is installed under.
+        for key, _name, installed in runtime.E2FSPROGS_TOOLS:
+            self.assertIn('"%s" => &tools.%s,' % (installed, key), darwin)
+        self.assertEqual(runtime.MKE2FS_CONFIG_SHA256, ext4_tool.CONFIG_SHA256)
+        self.assertEqual([name for _directory, name in ext4_tool.TOOLS],
+                         [name for _key, name, _installed in runtime.E2FSPROGS_TOOLS])
         cw_runtime = self.read("crates/codewire-local-vmm/src/cw_runtime.rs")
-        for program in runtime.E2FSPROGS_PROGRAMS:
-            self.assertTrue(program in cw_runtime or program in self.read("crates/codewire-local-vmm/src/runner.rs")
-                            or program in self.read("crates/codewire-local-vmm/src/workspace.rs"), program)
         self.assertIn('lock.pack.path != Path::new("%s")' % runtime.CW_RUNTIME_PACK, cw_runtime)
         config = self.read("crates/codewire-local-vmm/src/supervisor_config.rs")
         self.assertIn('with_file_name("%s")' % runtime.CW_RUNTIME_LOCK, config)

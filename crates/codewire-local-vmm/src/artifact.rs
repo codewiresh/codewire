@@ -92,8 +92,36 @@ pub struct ArtifactLock {
     /// signed bytes, so admission checks only its arm64 Mach-O header.
     #[cfg(target_os = "macos")]
     pub vz_runner: ArtifactSpec,
+    /// The ext4 tools that format, check and resize this runtime's disks. A
+    /// stock Mac has none, so the runtime ships its own pinned build.
+    #[cfg(target_os = "macos")]
+    pub e2fsprogs: E2fsprogsSpec,
     pub kernel: ArtifactSpec,
     pub initramfs: ArtifactSpec,
+}
+
+/// Pinned e2fsprogs programs (arm64 Mach-O, linked only to libSystem) and the
+/// mke2fs configuration every format uses.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct E2fsprogsSpec {
+    pub mkfs_ext4: ArtifactSpec,
+    pub e2fsck: ArtifactSpec,
+    pub resize2fs: ArtifactSpec,
+    pub debugfs: ArtifactSpec,
+    pub mke2fs_conf: ArtifactSpec,
+}
+
+/// The admitted e2fsprogs of a macOS runtime.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedE2fsprogs {
+    pub mkfs_ext4: AdmittedArtifact,
+    pub e2fsck: AdmittedArtifact,
+    pub resize2fs: AdmittedArtifact,
+    pub debugfs: AdmittedArtifact,
+    pub mke2fs_conf: AdmittedArtifact,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -197,6 +225,8 @@ pub struct AdmittedArtifacts {
     pub virtiofsd: Option<AdmittedArtifact>,
     #[cfg(target_os = "macos")]
     pub vz_runner: AdmittedArtifact,
+    #[cfg(target_os = "macos")]
+    pub e2fsprogs: AdmittedE2fsprogs,
     pub kernel: AdmittedArtifact,
     pub initramfs: AdmittedArtifact,
 }
@@ -206,9 +236,22 @@ impl AdmittedArtifacts {
         for executable in self.executables() {
             executable.revalidate()?;
         }
-        self.kernel.revalidate()?;
-        self.initramfs.revalidate()?;
+        for file in self.data_files() {
+            file.revalidate()?;
+        }
         Ok(())
+    }
+
+    /// The admitted data files, in the order of `ArtifactLock::data_files`.
+    pub(crate) fn data_files(&self) -> Vec<&AdmittedArtifact> {
+        let files = vec![&self.kernel, &self.initramfs];
+        #[cfg(target_os = "macos")]
+        let files = {
+            let mut files = files;
+            files.push(&self.e2fsprogs.mke2fs_conf);
+            files
+        };
+        files
     }
 
     /// The admitted executables, in the order of `ArtifactLock::executables`.
@@ -221,7 +264,14 @@ impl AdmittedArtifacts {
         }
         #[cfg(target_os = "macos")]
         {
-            vec![&self.vz_runner]
+            let tools = &self.e2fsprogs;
+            vec![
+                &self.vz_runner,
+                &tools.mkfs_ext4,
+                &tools.e2fsck,
+                &tools.resize2fs,
+                &tools.debugfs,
+            ]
         }
     }
 
@@ -239,6 +289,14 @@ impl AdmittedArtifacts {
             virtiofsd: None,
             #[cfg(target_os = "macos")]
             vz_runner: vmm,
+            #[cfg(target_os = "macos")]
+            e2fsprogs: AdmittedE2fsprogs {
+                mkfs_ext4: AdmittedArtifact::for_test("/unused/mkfs.ext4"),
+                e2fsck: AdmittedArtifact::for_test("/unused/e2fsck"),
+                resize2fs: AdmittedArtifact::for_test("/unused/resize2fs"),
+                debugfs: AdmittedArtifact::for_test("/unused/debugfs"),
+                mke2fs_conf: AdmittedArtifact::for_test("/unused/mke2fs.conf"),
+            },
             kernel,
             initramfs,
         }
@@ -369,8 +427,38 @@ impl ArtifactLock {
         }
         #[cfg(target_os = "macos")]
         {
-            vec![&self.vz_runner]
+            let tools = &self.e2fsprogs;
+            vec![
+                &self.vz_runner,
+                &tools.mkfs_ext4,
+                &tools.e2fsck,
+                &tools.resize2fs,
+                &tools.debugfs,
+            ]
         }
+    }
+
+    /// The non-executable entries in publication order.
+    pub(crate) fn data_files(&self) -> Vec<&ArtifactSpec> {
+        let files = vec![&self.kernel, &self.initramfs];
+        #[cfg(target_os = "macos")]
+        let files = {
+            let mut files = files;
+            files.push(&self.e2fsprogs.mke2fs_conf);
+            files
+        };
+        files
+    }
+
+    pub(crate) fn data_files_mut(&mut self) -> Vec<&mut ArtifactSpec> {
+        let files = vec![&mut self.kernel, &mut self.initramfs];
+        #[cfg(target_os = "macos")]
+        let files = {
+            let mut files = files;
+            files.push(&mut self.e2fsprogs.mke2fs_conf);
+            files
+        };
+        files
     }
 
     /// A test lock whose host VMM executable is `vmm`, with no other helper.
@@ -389,6 +477,31 @@ impl ArtifactLock {
             },
             #[cfg(target_os = "linux")]
             virtiofsd: None,
+            // The test tools are installed copies of the VMM bytes, and the
+            // configuration a copy of the initramfs, under their own names.
+            #[cfg(target_os = "macos")]
+            e2fsprogs: E2fsprogsSpec {
+                mkfs_ext4: ArtifactSpec {
+                    path: PathBuf::from("mkfs.ext4"),
+                    ..vmm.clone()
+                },
+                e2fsck: ArtifactSpec {
+                    path: PathBuf::from("e2fsck"),
+                    ..vmm.clone()
+                },
+                resize2fs: ArtifactSpec {
+                    path: PathBuf::from("resize2fs"),
+                    ..vmm.clone()
+                },
+                debugfs: ArtifactSpec {
+                    path: PathBuf::from("debugfs"),
+                    ..vmm.clone()
+                },
+                mke2fs_conf: ArtifactSpec {
+                    path: PathBuf::from("mke2fs.conf"),
+                    ..initramfs.clone()
+                },
+            },
             #[cfg(target_os = "macos")]
             vz_runner: vmm,
             kernel,
@@ -411,7 +524,14 @@ impl ArtifactLock {
         }
         #[cfg(target_os = "macos")]
         {
-            vec![&mut self.vz_runner]
+            let tools = &mut self.e2fsprogs;
+            vec![
+                &mut self.vz_runner,
+                &mut tools.mkfs_ext4,
+                &mut tools.e2fsck,
+                &mut tools.resize2fs,
+                &mut tools.debugfs,
+            ]
         }
     }
 
@@ -420,11 +540,7 @@ impl ArtifactLock {
             return Err(ArtifactError::UnsupportedSchema(self.schema_version));
         }
         let architecture = ArtifactArchitecture::host()?;
-        for spec in self
-            .executables()
-            .into_iter()
-            .chain([&self.kernel, &self.initramfs])
-        {
+        for spec in self.executables().into_iter().chain(self.data_files()) {
             validate_spec(spec, architecture)?;
         }
         #[cfg(target_os = "linux")]
@@ -485,13 +601,25 @@ impl ArtifactLock {
         #[cfg(target_os = "linux")]
         let executables = self.admit_linux_executables(&root, architecture).await?;
         #[cfg(target_os = "macos")]
-        let vz_runner = {
-            let artifact = admit_one(&root, &self.vz_runner, true)?;
+        let admit_macho = |spec: &ArtifactSpec| -> Result<AdmittedArtifact, ArtifactError> {
+            let artifact = admit_one(&root, spec, true)?;
             with_opened(&root, &artifact, |file| {
                 validate_arm64_macho(file, artifact.path())
             })?;
-            artifact
+            Ok(artifact)
         };
+        #[cfg(target_os = "macos")]
+        let vz_runner = admit_macho(&self.vz_runner)?;
+        #[cfg(target_os = "macos")]
+        let e2fsprogs = AdmittedE2fsprogs {
+            mkfs_ext4: admit_macho(&self.e2fsprogs.mkfs_ext4)?,
+            e2fsck: admit_macho(&self.e2fsprogs.e2fsck)?,
+            resize2fs: admit_macho(&self.e2fsprogs.resize2fs)?,
+            debugfs: admit_macho(&self.e2fsprogs.debugfs)?,
+            mke2fs_conf: admit_one(&root, &self.e2fsprogs.mke2fs_conf, false)?,
+        };
+        #[cfg(target_os = "macos")]
+        crate::host::use_e2fsprogs(&e2fsprogs);
 
         let kernel = admit_one(&root, &self.kernel, false)?;
         with_opened(&root, &kernel, |file| {
@@ -512,6 +640,8 @@ impl ArtifactLock {
             virtiofsd,
             #[cfg(target_os = "macos")]
             vz_runner,
+            #[cfg(target_os = "macos")]
+            e2fsprogs,
             kernel,
             initramfs,
         })

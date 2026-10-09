@@ -2017,7 +2017,8 @@ fn format_ext4(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
         .ok_or(WorkspaceError::MkfsUnavailable)?;
     #[cfg(target_os = "macos")]
     let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
-    let status = Command::new(mkfs)
+    let mut command = Command::new(mkfs);
+    command
         .args([
             OsStr::new("-q"),
             OsStr::new("-F"),
@@ -2028,7 +2029,13 @@ fn format_ext4(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
         .arg(staging)
         .arg(disk)
         .env_clear()
-        .env("LC_ALL", "C")
+        .env("LC_ALL", "C");
+    #[cfg(target_os = "macos")]
+    command.env(
+        "MKE2FS_CONFIG",
+        crate::host::mke2fs_config().ok_or(WorkspaceError::MkfsUnavailable)?,
+    );
+    let status = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2048,11 +2055,18 @@ fn format_empty_ext4(disk: &Path) -> Result<(), WorkspaceError> {
         .ok_or(WorkspaceError::MkfsUnavailable)?;
     #[cfg(target_os = "macos")]
     let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
-    let status = Command::new(mkfs)
+    let mut command = Command::new(mkfs);
+    command
         .args(["-q", "-F", "-m", "0"])
         .arg(disk)
         .env_clear()
-        .env("LC_ALL", "C")
+        .env("LC_ALL", "C");
+    #[cfg(target_os = "macos")]
+    command.env(
+        "MKE2FS_CONFIG",
+        crate::host::mke2fs_config().ok_or(WorkspaceError::MkfsUnavailable)?,
+    );
+    let status = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2216,7 +2230,9 @@ pub enum WorkspaceError {
     )]
     #[cfg_attr(
         target_os = "macos",
-        error("mkfs.ext4 is required; install e2fsprogs: brew install e2fsprogs")
+        error(
+            "the local VM runtime's mkfs.ext4 is missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+        )
     )]
     MkfsUnavailable,
     #[error("mkfs.ext4 failed to create the workspace disk")]

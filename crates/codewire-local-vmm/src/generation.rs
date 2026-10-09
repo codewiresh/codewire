@@ -150,6 +150,8 @@ fn format_ext4(disk: &Path, seed_directory: Option<&Path>) -> Result<(), Generat
         .ok_or(GenerationError::MkfsUnavailable)?;
     #[cfg(target_os = "macos")]
     let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(GenerationError::MkfsUnavailable)?;
+    #[cfg(target_os = "macos")]
+    let config = crate::host::mke2fs_config().ok_or(GenerationError::MkfsUnavailable)?;
     if let Some(seed) = seed_directory {
         let metadata = fs::symlink_metadata(seed).map_err(|source| GenerationError::Io {
             path: seed.to_owned(),
@@ -171,10 +173,10 @@ fn format_ext4(disk: &Path, seed_directory: Option<&Path>) -> Result<(), Generat
     if let Some(seed) = seed_directory {
         command.arg("-d").arg(seed);
     }
+    command.arg(disk).env_clear().env("LC_ALL", "C");
+    #[cfg(target_os = "macos")]
+    command.env("MKE2FS_CONFIG", config);
     let status = command
-        .arg(disk)
-        .env_clear()
-        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -233,7 +235,9 @@ pub enum GenerationError {
     )]
     #[cfg_attr(
         target_os = "macos",
-        error("mkfs.ext4 is required; install e2fsprogs: brew install e2fsprogs")
+        error(
+            "the local VM runtime's mkfs.ext4 is missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+        )
     )]
     MkfsUnavailable,
     #[error("mkfs.ext4 failed to create the root generation disk")]

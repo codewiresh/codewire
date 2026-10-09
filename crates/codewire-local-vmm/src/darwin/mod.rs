@@ -10,19 +10,43 @@ pub(crate) mod supervisor_peer;
 mod path_capability_tests;
 
 use std::path::{Path, PathBuf};
+use std::sync::{PoisonError, RwLock};
 
-/// Homebrew installs e2fsprogs keg-only, outside the default search path.
-const E2FSPROGS_DIRECTORIES: [&str; 2] = [
-    "/opt/homebrew/opt/e2fsprogs/sbin",
-    "/usr/local/opt/e2fsprogs/sbin",
-];
+use crate::artifact::AdmittedE2fsprogs;
 
-/// Locate one host e2fsprogs program, such as `mkfs.ext4`.
+/// A stock Mac has no e2fsprogs, so the local runtime ships a pinned build.
+/// Admitting a runtime makes its programs the ones this process formats,
+/// checks and resizes ext4 disks with; nothing is found on PATH or in
+/// Homebrew.
+static E2FSPROGS: RwLock<Option<AdmittedE2fsprogs>> = RwLock::new(None);
+
+pub(crate) fn use_e2fsprogs(tools: &AdmittedE2fsprogs) {
+    *E2FSPROGS.write().unwrap_or_else(PoisonError::into_inner) = Some(tools.clone());
+}
+
+/// The admitted runtime's e2fsprogs program, such as `mkfs.ext4`, re-hashed
+/// immediately before use; a changed file is never run.
 pub(crate) fn e2fsprogs(program: &str) -> Option<PathBuf> {
-    E2FSPROGS_DIRECTORIES
-        .iter()
-        .map(|directory| Path::new(directory).join(program))
-        .find(|path| path.is_file())
+    let tools = E2FSPROGS.read().unwrap_or_else(PoisonError::into_inner);
+    let tools = tools.as_ref()?;
+    let tool = match program {
+        "mkfs.ext4" => &tools.mkfs_ext4,
+        "e2fsck" => &tools.e2fsck,
+        "resize2fs" => &tools.resize2fs,
+        "debugfs" => &tools.debugfs,
+        _ => return None,
+    };
+    tool.revalidate().ok()?;
+    Some(tool.path().to_owned())
+}
+
+/// The pinned mke2fs configuration (`MKE2FS_CONFIG`) every format uses, so a
+/// disk never depends on a host or build-machine file.
+pub(crate) fn mke2fs_config() -> Option<PathBuf> {
+    let tools = E2FSPROGS.read().unwrap_or_else(PoisonError::into_inner);
+    let config = &tools.as_ref()?.mke2fs_conf;
+    config.revalidate().ok()?;
+    Some(config.path().to_owned())
 }
 
 /// Without the Xcode Command Line Tools (or Xcode), `/usr/bin/git` is only a

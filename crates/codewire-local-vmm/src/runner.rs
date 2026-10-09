@@ -4954,7 +4954,9 @@ pub enum RunnerError {
     #[cfg_attr(target_os = "linux", error("/usr/bin/e2fsck is unavailable"))]
     #[cfg_attr(
         target_os = "macos",
-        error("e2fsck is unavailable; install e2fsprogs: brew install e2fsprogs")
+        error(
+            "the local VM runtime's e2fsck is missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+        )
     )]
     E2fsckUnavailable,
     #[error("e2fsck failed with status {0:?}")]
@@ -4962,7 +4964,9 @@ pub enum RunnerError {
     #[cfg_attr(target_os = "linux", error("/usr/bin/resize2fs is unavailable"))]
     #[cfg_attr(
         target_os = "macos",
-        error("resize2fs is unavailable; install e2fsprogs: brew install e2fsprogs")
+        error(
+            "the local VM runtime's resize2fs is missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+        )
     )]
     Resize2fsUnavailable,
     #[error("resize2fs failed with status {0:?}")]

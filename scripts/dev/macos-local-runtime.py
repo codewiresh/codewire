@@ -4,7 +4,8 @@
 Developer tooling for an Apple Silicon Mac; it runs on the system Python 3.9.
 It builds the Virtualization.framework helper in release mode, signs it ad hoc
 with exactly developer-entitlements.plist, checks the supplied arm64 kernel
-Image and Codewire guest root the way artifact admission does, and writes a
+Image, Codewire guest root and pinned e2fsprogs bundle (from
+macos-ext4-tool.py) the way artifact admission does, and writes a
 release directory (blobs/sha256/<digest> and local-runtime.json, the format a
 release publishes). With --cw-runtime it adds a sealed aarch64 cw runtime
 (cw-runtime.lock.json and runtime.pack from `cw-runtime-image.py pack`). Then
@@ -32,9 +33,17 @@ ENTITLEMENTS = PACKAGE / "developer-entitlements.plist"
 PRODUCT = "codewire-vz-runner"
 SWIFT = "swift"
 CODESIGN = "/usr/bin/codesign"
-# The runtime looks only in Homebrew's keg-only e2fsprogs directories.
-E2FSPROGS_DIRECTORIES = ("/opt/homebrew/opt/e2fsprogs/sbin", "/usr/local/opt/e2fsprogs/sbin")
-E2FSPROGS_PROGRAMS = ("mkfs.ext4", "e2fsck", "resize2fs", "debugfs")
+OTOOL = "/usr/bin/otool"
+# A stock Mac has no e2fsprogs, so the runtime ships the pinned build that
+# scripts/dev/macos-ext4-tool.py makes on this Mac: (lock key, bundle file,
+# installed name). mke2fs installed as mkfs.ext4 formats ext4 by its name.
+E2FSPROGS_TOOLS = (("mkfs_ext4", "mke2fs", "mkfs.ext4"), ("e2fsck", "e2fsck", "e2fsck"),
+                   ("resize2fs", "resize2fs", "resize2fs"), ("debugfs", "debugfs", "debugfs"))
+E2FSPROGS_CONFIG = ("mke2fs_conf", "mke2fs.conf", "mke2fs.conf")
+# macos-ext4-tool.py CONFIG_SHA256: every format uses exactly this mke2fs.conf.
+MKE2FS_CONFIG_SHA256 = "539290aab306f0bd03a6b49c90ec2852044150c35538c04e4e9bee016bd3d973"
+E2FSPROGS_HINT = ("build it on this Mac with scripts/dev/macos-ext4-tool.py --source-archive "
+                  "e2fsprogs-1.47.4.tar.gz --output DIR and pass DIR/bundle")
 LOCAL_RUNTIME_SCHEMA = "codewire.cw.local-runtime/v1"
 LOCAL_RUNTIME_DOCUMENT = "local-runtime.json"
 # cw's host target key (runtime_install::host_target) on Apple Silicon.
@@ -96,12 +105,31 @@ def require_host() -> None:
                            % (system, machine))
 
 
-def require_e2fsprogs() -> None:
-    for directory in E2FSPROGS_DIRECTORIES:
-        if all(os.path.isfile(os.path.join(directory, program)) for program in E2FSPROGS_PROGRAMS):
-            return
-    raise InstallError("e2fsprogs is missing (cw needs mkfs.ext4, e2fsck and resize2fs from %s); "
-                       "install it with: brew install e2fsprogs" % E2FSPROGS_DIRECTORIES[0])
+def check_e2fsprogs(bundle: Path) -> dict:
+    """The pinned e2fsprogs bundle: lock key -> (bundle file, installed name)."""
+    if not bundle.is_absolute() or not bundle.is_dir():
+        raise InstallError("E2FSPROGS must be an absolute directory: %s; %s" % (bundle, E2FSPROGS_HINT))
+    found = {}
+    for key, name, installed in E2FSPROGS_TOOLS:
+        path = bundle / name
+        if not path.is_file() or path.is_symlink():
+            raise InstallError("%s is missing; %s" % (path, E2FSPROGS_HINT))
+        try:
+            thin_arm64_macho(path)
+            report = run([OTOOL, "-L", str(path)], capture=True).decode().splitlines()[1:]
+            dependencies = [line.split(" (", 1)[0].strip() for line in report]
+            if dependencies != ["/usr/lib/libSystem.B.dylib"]:
+                raise InstallError("%s links more than libSystem" % path)
+            run([CODESIGN, "--verify", "--strict", str(path)])
+        except InstallError as error:
+            raise InstallError("%s; %s" % (error, E2FSPROGS_HINT)) from None
+        found[key] = (path, installed)
+    key, name, installed = E2FSPROGS_CONFIG
+    config = bundle / name
+    if not config.is_file() or config.is_symlink() or identity(config)[0] != MKE2FS_CONFIG_SHA256:
+        raise InstallError("%s is not the pinned mke2fs configuration; %s" % (config, E2FSPROGS_HINT))
+    found[key] = (config, installed)
+    return found
 
 
 def input_file(value: str, flag: str) -> Path:
@@ -288,13 +316,17 @@ def check_live_publisher(initramfs: Path) -> None:
                            "rebuild the guest root from current source; %s" % (initramfs, GUEST_ROOT_HINT))
 
 
-def check_helper(path: Path) -> None:
-    """A thin arm64 Mach-O executable signed with exactly the developer entitlements."""
+def thin_arm64_macho(path: Path) -> None:
     with path.open("rb") as stream:
         header = stream.read(16)
     words = [int.from_bytes(header[index:index + 4], "little") for index in range(0, 16, 4)]
     if len(header) != 16 or words[0] != 0xFEEDFACF or words[1] != 0x0100000C or words[3] != 2:
         raise InstallError("%s is not a thin arm64 Mach-O executable" % path)
+
+
+def check_helper(path: Path) -> None:
+    """A thin arm64 Mach-O executable signed with exactly the developer entitlements."""
+    thin_arm64_macho(path)
     shown = run([CODESIGN, "-d", "--entitlements", "-", "--xml", str(path)], capture=True)
     start = shown.find(b"<?xml")
     try:
@@ -376,15 +408,16 @@ def source_revision(given: str = "") -> str:
     return revision
 
 
-def pack(kernel: Path, initramfs: Path, release: Path, cw_runtime=None, revision: str = "") -> Path:
+def pack(kernel: Path, initramfs: Path, e2fsprogs: Path, release: Path, cw_runtime=None,
+         revision: str = "") -> Path:
     """Write the release directory for this Mac's runtime into `release`."""
     require_host()
-    require_e2fsprogs()
     check_kernel(kernel)
     check_initramfs(initramfs)
     if cw_runtime is not None:
         check_cw_runtime(cw_runtime)
         check_live_publisher(initramfs)
+    tools = check_e2fsprogs(e2fsprogs)
     if release.exists():
         raise InstallError("%s already exists; pack into a new directory" % release)
     revision = source_revision(revision)
@@ -399,10 +432,17 @@ def pack(kernel: Path, initramfs: Path, release: Path, cw_runtime=None, revision
     check_helper(signed)
     sources = {"vz_runner": signed, "kernel": kernel, "initramfs": initramfs}
     lock = {"schema_version": 1}
+
+    def spec(source: Path, name: str) -> dict:
+        blob = put_blob(release, source)
+        return {"path": name, "size": blob["size"], "sha256": blob["sha256"],
+                "architecture": "aarch64"}
+
     for key, name, _mode in ARTIFACTS:
-        blob = put_blob(release, sources[key])
-        lock[key] = {"path": name, "size": blob["size"], "sha256": blob["sha256"],
-                     "architecture": "aarch64"}
+        lock[key] = spec(sources[key], name)
+        if key == "vz_runner":
+            lock["e2fsprogs"] = {tool: spec(path, installed)
+                                 for tool, (path, installed) in tools.items()}
     signed.unlink()
     target = {"lock": lock}
     if cw_runtime is not None:
@@ -413,14 +453,16 @@ def pack(kernel: Path, initramfs: Path, release: Path, cw_runtime=None, revision
     (release / LOCAL_RUNTIME_DOCUMENT).write_text(json.dumps(document, indent=2) + "\n")
     for key, name, _mode in ARTIFACTS:
         log("%-9s %s sha256=%s size=%d" % (key, name, lock[key]["sha256"], lock[key]["size"]))
+    for tool, entry in lock["e2fsprogs"].items():
+        log("%-9s %s sha256=%s size=%d" % ("e2fsprogs", entry["path"], entry["sha256"], entry["size"]))
     log("packed %s (source %s)" % (release, revision))
     return release
 
 
-def install(kernel: Path, initramfs: Path, replace: bool, cw: str, cw_runtime=None,
+def install(kernel: Path, initramfs: Path, e2fsprogs: Path, replace: bool, cw: str, cw_runtime=None,
             revision: str = "") -> int:
     with tempfile.TemporaryDirectory(prefix="cw-local-runtime-") as scratch:
-        release = pack(kernel, initramfs, Path(scratch) / "release", cw_runtime, revision)
+        release = pack(kernel, initramfs, e2fsprogs, Path(scratch) / "release", cw_runtime, revision)
         run([cw, "setup", "--local", "--from", str(release)] + (["--replace"] if replace else []))
     return 0
 
@@ -429,6 +471,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--kernel", default="", help="absolute path to the arm64 Linux kernel Image")
     parser.add_argument("--initramfs", default="", help="absolute path to the arm64 guest root")
+    parser.add_argument("--e2fsprogs", default="",
+                        help="absolute directory holding the pinned e2fsprogs bundle from macos-ext4-tool.py")
     parser.add_argument("--replace", action="store_true", help="replace a different installed runtime")
     parser.add_argument("--cw-runtime", default="",
                         help="absolute directory holding a sealed aarch64 cw-runtime.lock.json and runtime.pack")
@@ -440,6 +484,9 @@ def main(argv=None) -> int:
     try:
         kernel = input_file(args.kernel, "KERNEL")
         initramfs = input_file(args.initramfs, "INITRAMFS")
+        if not args.e2fsprogs:
+            raise InstallError("E2FSPROGS is required; " + E2FSPROGS_HINT)
+        e2fsprogs = Path(args.e2fsprogs)
         cw_runtime = None
         if args.cw_runtime:
             cw_runtime = Path(args.cw_runtime)
@@ -449,9 +496,10 @@ def main(argv=None) -> int:
             release = Path(args.pack)
             if not release.is_absolute():
                 raise InstallError("--pack must be an absolute path: %s" % args.pack)
-            pack(kernel, initramfs, release, cw_runtime, args.source_revision)
+            pack(kernel, initramfs, e2fsprogs, release, cw_runtime, args.source_revision)
             return 0
-        return install(kernel, initramfs, args.replace, args.cw, cw_runtime, args.source_revision)
+        return install(kernel, initramfs, e2fsprogs, args.replace, args.cw, cw_runtime,
+                       args.source_revision)
     except (InstallError, OSError) as error:
         print("macos-local-runtime: ERROR: %s" % error, file=sys.stderr)
         return 1
