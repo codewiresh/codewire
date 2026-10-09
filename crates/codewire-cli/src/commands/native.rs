@@ -1708,11 +1708,8 @@ where
     connect_supervisor().await
 }
 
-fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
-    let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env)?;
-    let root = absolute_override(NATIVE_STATE_ROOT_ENV)?
-        .unwrap_or_else(|| paths.mesh_data_dir.join("native-v1"));
+/// The installed local VM runtime: its artifact root and lock.
+pub(crate) fn runtime_artifact_paths() -> anyhow::Result<(PathBuf, PathBuf)> {
     let home = env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -1722,6 +1719,15 @@ fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
         .unwrap_or_else(|| artifact_parent.join("artifacts"));
     let artifact_lock = absolute_override(NATIVE_ARTIFACT_LOCK_ENV)?
         .unwrap_or_else(|| artifact_parent.join("artifacts.lock.json"));
+    Ok((artifact_root, artifact_lock))
+}
+
+fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
+    let env = OsEnv;
+    let paths = ResolvePaths::from_env(&env)?;
+    let root = absolute_override(NATIVE_STATE_ROOT_ENV)?
+        .unwrap_or_else(|| paths.mesh_data_dir.join("native-v1"));
+    let (artifact_root, artifact_lock) = runtime_artifact_paths()?;
     Ok(NativeRuntimeConfig {
         root,
         artifact_root,

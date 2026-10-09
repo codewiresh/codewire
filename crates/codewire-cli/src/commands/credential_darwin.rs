@@ -113,6 +113,15 @@ impl ChildStore {
     }
 }
 
+/// The local VM runtime's git and helper directory, admitted from the
+/// installed runtime against its lock at this moment.
+pub(crate) fn admit_runtime_git(root: &Path, lock: &Path) -> Option<(PathBuf, PathBuf)> {
+    codewire_local_vmm::artifact::ArtifactLock::read(lock)
+        .ok()?
+        .admit_runtime_git(root)
+        .ok()
+}
+
 /// An absolute path made only of characters that need no quoting in a
 /// Seatbelt string, without `.` or `..` components.
 pub(crate) fn plain_path(path: &Path) -> Option<&str> {

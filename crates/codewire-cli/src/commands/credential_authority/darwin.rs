@@ -29,7 +29,7 @@ use codewire_local_credentials::{
     LocalRepositorySpawnError, LocalRepositoryTransport, SpawnedAuthority,
 };
 
-use super::super::credential_darwin::child_store_arguments;
+use super::super::credential_darwin::{admit_runtime_git, child_store_arguments};
 
 /// `<sys/spawn.h>`; the libc crate does not define it.
 const POSIX_SPAWN_SETSID: libc::c_int = 0x0400;
@@ -217,6 +217,9 @@ pub(super) struct CwLocalCredentialProcessSpawner {
     pub(super) executable: PathBuf,
     pub(super) authority_root: PathBuf,
     pub(super) store: AuthorityProtectedStore,
+    /// The installed local VM runtime (artifact root, lock) whose git a
+    /// repository executor may run.
+    pub(super) runtime: Option<(PathBuf, PathBuf)>,
 }
 
 /// Bind the child to this exact authority before exec: a new session (so it
@@ -337,11 +340,27 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         if let Some(git) = &config.git {
+            // Git receives the repository credential. Admit the runtime's git
+            // against its lock here, immediately before exec, and run it only
+            // when the supervisor named exactly that admitted file.
+            let (root, lock) = self
+                .runtime
+                .as_ref()
+                .ok_or(LocalRepositorySpawnError::InvalidConfiguration)?;
+            let (program, exec_path) = admit_runtime_git(root, lock)
+                .ok_or(LocalRepositorySpawnError::InvalidConfiguration)?;
+            if program != git.program || exec_path != git.exec_path {
+                return Err(LocalRepositorySpawnError::InvalidConfiguration);
+            }
             command
                 .arg("--git")
-                .arg(&git.program)
+                .arg(&program)
                 .arg("--git-exec-path")
-                .arg(&git.exec_path);
+                .arg(&exec_path)
+                .arg("--runtime-artifact-root")
+                .arg(root)
+                .arg("--runtime-artifact-lock")
+                .arg(lock);
         }
         if config.platform_delegated {
             command.arg("--platform-delegated");
@@ -478,6 +497,7 @@ mod tests {
         let spawner = CwLocalCredentialProcessSpawner {
             executable: broker,
             authority_root: root.clone(),
+            runtime: None,
             store: AuthorityProtectedStore {
                 backend: codewire_protected_store::ProtectedStoreBackend::File,
                 keychain: None,
@@ -538,6 +558,7 @@ mod tests {
         let spawner = CwLocalCredentialProcessSpawner {
             executable: executor,
             authority_root: root.clone(),
+            runtime: None,
             store: AuthorityProtectedStore {
                 backend: codewire_protected_store::ProtectedStoreBackend::Keychain,
                 keychain: Some("/private/tmp/synthetic.keychain-db".into()),
@@ -601,7 +622,7 @@ mod tests {
         }
         let ssh_without_runtime = LocalRepositoryProcessConfig {
             request_id: request,
-            staging_directory: staging,
+            staging_directory: staging.clone(),
             transport: LocalRepositoryTransport::Ssh,
             platform_delegated: false,
             ssh_runtime_directory: None,
@@ -612,6 +633,33 @@ mod tests {
             LocalRepositoryProcessSpawner::spawn(&spawner, &ssh_without_runtime, peer),
             Err(LocalRepositorySpawnError::InvalidConfiguration)
         ));
+
+        // A requested git runs only after the authority admits it from the
+        // installed runtime; without an admissible runtime nothing is spawned.
+        let named_git = LocalRepositoryProcessConfig {
+            request_id: request,
+            staging_directory: staging,
+            transport: LocalRepositoryTransport::GitHubOAuth,
+            platform_delegated: false,
+            ssh_runtime_directory: None,
+            git: Some(codewire_local_credentials::LocalRepositoryGit {
+                program: root.join("runtime/git"),
+                exec_path: root.join("runtime"),
+            }),
+        };
+        let missing_runtime = CwLocalCredentialProcessSpawner {
+            runtime: Some((root.join("runtime"), root.join("artifacts.lock.json"))),
+            executable: spawner.executable.clone(),
+            authority_root: root.clone(),
+            store: spawner.store.clone(),
+        };
+        for spawner in [&spawner, &missing_runtime] {
+            let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+            assert!(matches!(
+                LocalRepositoryProcessSpawner::spawn(spawner, &named_git, peer),
+                Err(LocalRepositorySpawnError::InvalidConfiguration)
+            ));
+        }
     }
 
     #[test]

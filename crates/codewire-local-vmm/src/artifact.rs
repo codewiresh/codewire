@@ -689,6 +689,24 @@ impl ArtifactLock {
         self.admit_tools(&root).map(|_| ())
     }
 
+    /// The runtime's git and helper directory, admitted against this lock
+    /// from the installed runtime immediately before a credential-bearing
+    /// process runs it. A path that is not exactly the admitted file is
+    /// refused by the caller.
+    #[cfg(target_os = "macos")]
+    pub fn admit_runtime_git(&self, root_path: &Path) -> Result<(PathBuf, PathBuf), ArtifactError> {
+        self.validate_metadata()?;
+        let root = PrivateRoot::open(root_path).map_err(ArtifactError::ConfinedPath)?;
+        let git = admit_macho(&root, &self.git.git)?;
+        let helper = admit_macho(&root, &self.git.git_remote_https)?;
+        let helpers = helper
+            .path()
+            .parent()
+            .ok_or_else(|| ArtifactError::InvalidRelativePath(helper.path().to_owned()))?
+            .to_owned();
+        Ok((git.path().to_owned(), helpers))
+    }
+
     #[cfg(target_os = "macos")]
     fn admit_tools(
         &self,
@@ -1416,6 +1434,39 @@ mod tests {
         assert!(!valid_arm64_macho_header(
             &header(0xfeed_facf, 0x0100_000c, 2)[..12]
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn runtime_git_is_admitted_only_as_the_locked_file_in_the_runtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut program = Vec::new();
+        for word in [0xfeed_facf_u32, 0x0100_000c, 0, 2] {
+            program.extend_from_slice(&word.to_le_bytes());
+        }
+        program.extend_from_slice(b"synthetic git");
+        for name in ["git", "git-remote-https"] {
+            write_artifact(&root.join(name), &program, 0o500);
+        }
+        let lock = ArtifactLock::for_test(
+            spec("git", &program),
+            spec("kernel", b"kernel"),
+            spec("initramfs", b"initramfs"),
+        );
+        assert_eq!(
+            lock.admit_runtime_git(&root).unwrap(),
+            (root.join("git"), root.clone())
+        );
+
+        // A git swapped in place, with the same name and mode, is refused.
+        std::fs::remove_file(root.join("git")).unwrap();
+        let mut swapped = program.clone();
+        swapped.push(b'!');
+        write_artifact(&root.join("git"), &swapped, 0o500);
+        assert!(lock.admit_runtime_git(&root).is_err());
+        assert!(lock.admit_runtime_git(&root.join("elsewhere")).is_err());
     }
 
     #[test]

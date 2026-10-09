@@ -337,6 +337,14 @@ pub(crate) struct LocalCredentialAuthorityArgs {
     #[cfg(target_os = "macos")]
     #[arg(long)]
     pub(crate) keychain: Option<PathBuf>,
+    /// The installed local VM runtime whose git a repository executor may
+    /// run; the authority admits it against this lock (macOS).
+    #[cfg(target_os = "macos")]
+    #[arg(long, requires = "runtime_artifact_lock")]
+    pub(crate) runtime_artifact_root: Option<PathBuf>,
+    #[cfg(target_os = "macos")]
+    #[arg(long, requires = "runtime_artifact_root")]
+    pub(crate) runtime_artifact_lock: Option<PathBuf>,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -401,6 +409,13 @@ pub(crate) struct LocalGitRepositoryExecutorArgs {
     pub(crate) git: Option<PathBuf>,
     #[arg(long, requires = "git")]
     pub(crate) git_exec_path: Option<PathBuf>,
+    /// The runtime the git belongs to; re-admitted before every git spawn.
+    #[cfg(target_os = "macos")]
+    #[arg(long, requires = "runtime_artifact_lock")]
+    pub(crate) runtime_artifact_root: Option<PathBuf>,
+    #[cfg(target_os = "macos")]
+    #[arg(long, requires = "runtime_artifact_root")]
+    pub(crate) runtime_artifact_lock: Option<PathBuf>,
     /// The authority's store: a macOS GitHub executor reads the selected
     /// backend, as a Linux one reads Secret Service.
     #[cfg(target_os = "macos")]

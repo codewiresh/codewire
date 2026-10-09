@@ -84,6 +84,7 @@ pub(crate) async fn run_local_credential_authority(
         executable: config.executable.clone(),
         authority_root: config.root.clone(),
         store: store.clone(),
+        runtime: args.runtime_artifact_root.zip(args.runtime_artifact_lock),
     });
     let signer = Arc::new(ssh::LocalSshAgentAdapter::new(config.root.clone()));
     let result = serve_os_local_credential_authority_with_process_spawners(
@@ -303,6 +304,7 @@ fn canonical_current_executable() -> anyhow::Result<PathBuf> {
 fn authority_arguments(
     config: &AuthorityRuntimeConfig,
     store: &AuthorityProtectedStore,
+    runtime: Option<&(PathBuf, PathBuf)>,
 ) -> Vec<std::ffi::OsString> {
     let mut arguments = vec![
         "__local-credential-authority".into(),
@@ -317,6 +319,12 @@ fn authority_arguments(
         arguments.push("--keychain".into());
         arguments.push(keychain.clone().into_os_string());
     }
+    if let Some((root, lock)) = runtime {
+        arguments.push("--runtime-artifact-root".into());
+        arguments.push(root.clone().into_os_string());
+        arguments.push("--runtime-artifact-lock".into());
+        arguments.push(lock.clone().into_os_string());
+    }
     arguments
 }
 
@@ -325,9 +333,12 @@ fn spawn_authority(
     config: &AuthorityRuntimeConfig,
     store: &AuthorityProtectedStore,
 ) -> Result<darwin::SpawnedProcess, AuthorityRuntimeError> {
+    // The authority has no environment: name the runtime whose git its
+    // repository executors may run.
+    let runtime = super::native::runtime_artifact_paths().ok();
     darwin::spawn_detached(
         &config.executable,
-        &authority_arguments(config, store),
+        &authority_arguments(config, store, runtime.as_ref()),
         &config.root,
     )
     .map_err(|_| AuthorityRuntimeError::Spawn)
@@ -341,7 +352,7 @@ fn spawn_authority(
     let allowed_environment = authority_environment(|name| env::var_os(name));
     let mut command = Command::new(&config.executable);
     command
-        .args(authority_arguments(config, store))
+        .args(authority_arguments(config, store, None))
         .env_clear()
         .envs(allowed_environment)
         .current_dir(&config.root)
@@ -653,7 +664,7 @@ mod tests {
     fn the_default_store_keeps_the_exact_authority_argv() {
         let store = AuthorityProtectedStore::platform_default().unwrap();
         assert_eq!(
-            authority_arguments(&runtime_config(), &store),
+            authority_arguments(&runtime_config(), &store, None),
             [
                 "__local-credential-authority",
                 "--root",
@@ -672,7 +683,7 @@ mod tests {
             keychain: None,
         };
         assert_eq!(
-            authority_arguments(&runtime_config(), &store),
+            authority_arguments(&runtime_config(), &store, None),
             [
                 "__local-credential-authority",
                 "--root",
@@ -686,7 +697,7 @@ mod tests {
             keychain: Some("/private/tmp/synthetic.keychain-db".into()),
         };
         assert_eq!(
-            authority_arguments(&runtime_config(), &store),
+            authority_arguments(&runtime_config(), &store, None),
             [
                 "__local-credential-authority",
                 "--root",
@@ -696,8 +707,11 @@ mod tests {
             ]
         );
         let parsed = crate::Cli::try_parse_from(
-            std::iter::once(std::ffi::OsString::from("cw"))
-                .chain(authority_arguments(&runtime_config(), &store)),
+            std::iter::once(std::ffi::OsString::from("cw")).chain(authority_arguments(
+                &runtime_config(),
+                &store,
+                None,
+            )),
         )
         .unwrap();
         let crate::Command::LocalCredentialAuthority(args) = parsed.command else {

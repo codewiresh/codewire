@@ -20,8 +20,8 @@ use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
 use super::credential_darwin::{
-    ChildStore, bind_to_parent_and_deny_attachment, isolated_session_and_environment,
-    unprivileged_without_core_files,
+    ChildStore, admit_runtime_git, bind_to_parent_and_deny_attachment,
+    isolated_session_and_environment, unprivileged_without_core_files,
 };
 use super::{LocalGitCredentialHelperArgs, LocalGitRepositoryExecutorArgs};
 
@@ -166,9 +166,13 @@ pub(crate) async fn run_local_git_repository_executor(
     // A stock Mac's /usr/bin/git is only a stub: run the admitted runtime's
     // git, whose helpers come only from its own directory.
     #[cfg(target_os = "macos")]
-    let git = config.git.clone().context(
-        "the local VM runtime's git is unavailable; reinstall it: cw setup --local --replace",
-    )?;
+    let (git, runtime) = config
+        .git
+        .clone()
+        .zip(args.runtime_artifact_root.zip(args.runtime_artifact_lock))
+        .context(
+            "the local VM runtime's git is unavailable; reinstall it: cw setup --local --replace",
+        )?;
     #[cfg(target_os = "linux")]
     let git = LocalRepositoryGit {
         program: GIT.into(),
@@ -177,7 +181,9 @@ pub(crate) async fn run_local_git_repository_executor(
     let git_spawner = ConfinedGitSpawner {
         parent_pid: unsafe { libc::getpid() },
         #[cfg(target_os = "macos")]
-        exec_path: git.exec_path.clone(),
+        git: git.clone(),
+        #[cfg(target_os = "macos")]
+        runtime,
     };
     match config.transport {
         LocalRepositoryTransport::GitHubOAuth => {
@@ -242,8 +248,12 @@ pub(crate) async fn run_local_git_repository_executor(
 
 struct ConfinedGitSpawner {
     parent_pid: libc::pid_t,
+    /// The runtime's git, which the authority admitted for this request.
     #[cfg(target_os = "macos")]
-    exec_path: std::path::PathBuf,
+    git: LocalRepositoryGit,
+    /// The installed runtime (artifact root, lock) that git belongs to.
+    #[cfg(target_os = "macos")]
+    runtime: (std::path::PathBuf, std::path::PathBuf),
 }
 
 #[cfg(target_os = "linux")]
@@ -282,6 +292,19 @@ impl LocalRepositoryGitProcessSpawner for ConfinedGitSpawner {
 #[cfg(target_os = "macos")]
 impl LocalRepositoryGitProcessSpawner for ConfinedGitSpawner {
     fn spawn(&self, command: &mut tokio::process::Command) -> io::Result<tokio::process::Child> {
+        // Git receives the repository credential, so admit it against the
+        // runtime lock again immediately before every spawn: a file swapped
+        // since the authority admitted it is never run.
+        let (root, lock) = &self.runtime;
+        let admitted = admit_runtime_git(root, lock);
+        if command.as_std().get_program() != self.git.program.as_os_str()
+            || admitted != Some((self.git.program.clone(), self.git.exec_path.clone()))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the local VM runtime's git is missing or changed",
+            ));
+        }
         let parent_pid = self.parent_pid;
         // SAFETY: this post-fork hook makes only getppid, getdtablesize,
         // fcntl and setrlimit calls. It binds every Git subprocess to the
@@ -306,7 +329,7 @@ impl LocalRepositoryGitProcessSpawner for ConfinedGitSpawner {
             });
         }
         command
-            .env("GIT_EXEC_PATH", &self.exec_path)
+            .env("GIT_EXEC_PATH", &self.git.exec_path)
             .env("GIT_TEMPLATE_DIR", "");
         command.spawn()
     }
