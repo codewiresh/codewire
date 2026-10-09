@@ -715,7 +715,9 @@ mount_mode="${{CODEWIRE_DOCKER_MOUNT_MODE:-loop}}"
 codewire_dir="$(dirname "$data_image")"
 mkdir -p "$codewire_dir" "$data_root"
 chown 1000:1000 "$codewire_dir"
-chmod 0775 "$codewire_dir"
+# Owner-writable only: the workspace daemon refuses a group- or
+# world-writable ancestor of its platform session store.
+chmod 0755 "$codewire_dir"
 if [ "$mount_mode" = "loop" ]; then
   if [ ! -s "$data_image" ]; then
     truncate -s "$data_size" "$data_image"

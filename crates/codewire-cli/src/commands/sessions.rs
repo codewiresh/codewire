@@ -685,6 +685,9 @@ async fn resolve_selected_session(
 }
 
 fn managed_session(session: &EnvironmentSessionView) -> bool {
+    #[cfg(unix)]
+    return agents::is_managed_session(session);
+    #[cfg(not(unix))]
     session.command.iter().any(|arg| arg == "_agent-driver")
 }
 
