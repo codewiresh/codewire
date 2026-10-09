@@ -14,6 +14,7 @@ enum HostControlCommand {
     /// Inspect the retained host control capability without starting a daemon.
     Info(HostControlTarget),
     /// List explicit grants, including revoked tombstones.
+    #[command(visible_alias = "ls")]
     List(HostControlTarget),
     /// Grant bounded session verbs to one full caller/target key pair.
     Grant(HostControlGrantArgs),

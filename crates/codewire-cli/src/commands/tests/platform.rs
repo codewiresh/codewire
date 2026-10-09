@@ -300,6 +300,33 @@ fn doctor_warns_for_stale_org_and_is_ok_only_for_live_org() {
 }
 
 #[test]
+fn doctor_reports_the_build_revision_and_target() {
+    let record = |revision: Option<&str>| codewire_cw_release::build_record::BuildRecord {
+        package_version: "0.3.386".into(),
+        rustc: "rustc 1.93.0".into(),
+        source_revision: revision.map(Into::into),
+        source_tree_sha256: None,
+        target: "x86_64-unknown-linux-gnu".into(),
+    };
+    assert_eq!(
+        doctor_build_check(Ok(record(Some("086c8b8ca32aaaff26ce317d3a2a7cb612a9ba95")))),
+        doctor_check(
+            "cw",
+            DoctorStatus::Ok,
+            "0.3.386 086c8b8ca32a x86_64-unknown-linux-gnu"
+        )
+    );
+    assert_eq!(
+        doctor_build_check(Ok(record(None))).status,
+        DoctorStatus::Warn
+    );
+    assert_eq!(
+        doctor_build_check(Err(anyhow::anyhow!("no record"))).detail,
+        "build record unreadable: no record"
+    );
+}
+
+#[test]
 fn resolve_org_id_accepts_go_org_id_forms_and_slugs() {
     let orgs = vec![test_org("org_1", "Noel Labs", "noel-labs", "owner")];
     let platform = config::ResolvedPlatformConfig::static_token(

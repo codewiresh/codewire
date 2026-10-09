@@ -22,7 +22,7 @@ ZOLA_BIN=/path/to/zola apps/docs/zola/tests/verify.sh
 
 The wrapper normalizes Zola's nondeterministic Fuse index ordering and emits
 the no-trailing-slash link contract consumed by the Rust server. `routes.toml`
-is the exact 29-route mount and redirect manifest.
+is the exact 30-route mount and redirect manifest.
 
 ## Production-equivalent container
 

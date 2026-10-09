@@ -31,9 +31,10 @@ cw logs my-app <session-id>
 cw attach my-app <session-id>
 ```
 
-On Linux, the local supervisor runs each environment as a native VM. The
-workspace image is the supported local runtime image; the retired full image is
-not used.
+On Linux, local sandbox environments use a native VM owned by the local
+supervisor. An explicit `--local --type host` environment runs as the local
+user under its host daemon. The workspace image is the supported sandbox
+runtime image; the retired full image is not used.
 
 ## Platform environment
 
@@ -49,9 +50,11 @@ can omit the environment argument.
 
 ## One runtime owner
 
-The supervised daemon inside each environment owns its sessions and optional
-Mesh participation. The CLI does not run a second host-owned node, process
-server, messaging service, or MCP session server.
+A daemon owns the durable sessions for each environment: an owner-local daemon
+for a trusted Linux host, or the provisioned daemon inside a sandbox. Managed
+agent drivers handle native protocol messages and worker results. The native
+supervisor owns VM lifecycle separately from the guest's session owner.
 
-See [Sessions](@/cli/sessions.md), [Platform commands](@/cli/platform.md),
-[Mesh](@/cli/mesh.md), and [Configuration](@/cli/configuration.md).
+See [Agent orchestration](@/cli/orchestration.md), [Sessions](@/cli/sessions.md),
+[Platform commands](@/cli/platform.md), [Mesh](@/cli/mesh.md), and
+[Configuration](@/cli/configuration.md).
