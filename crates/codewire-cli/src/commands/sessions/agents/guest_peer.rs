@@ -272,11 +272,16 @@ fn terminate_birth(pid: u32, ticks: u64) -> io::Result<bool> {
     if process_stat(pid).ok().map(|stat| stat.start_ticks) != Some(ticks) {
         return Ok(false);
     }
+    // An unreaped zombie accepts signals but can no longer act on one. Check
+    // before signaling: a guardian that exits promptly because of this SIGTERM
+    // was signaled, not already exited.
+    if pidfd_exited(&process)? {
+        return Ok(false);
+    }
     match pidfd_signal(&process, libc::SIGTERM) {
         Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(false),
         Err(error) => Err(error),
-        // An unreaped zombie accepts signals but can no longer act on one.
-        Ok(()) => pidfd_exited(&process).map(|exited| !exited),
+        Ok(()) => Ok(true),
     }
 }
 
