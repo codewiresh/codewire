@@ -70,10 +70,7 @@ fn local_vm_roles_are_hidden_and_other_host_effect_entrypoints_stay_unavailable(
     ] {
         assert!(!help.contains(hidden), "{hidden}");
     }
-    for entrypoint in [
-        "__local-credential-authority",
-        "__local-credential-broker",
-    ] {
+    for entrypoint in ["__local-credential-authority", "__local-credential-broker"] {
         let output = command(home.path())
             .args([entrypoint, "--help"])
             .output()
