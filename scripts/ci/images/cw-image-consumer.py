@@ -276,6 +276,9 @@ def bind_context(command, targets, path):
     if command[2] == "build":
         result.extend(("--build-context", asset.CONTEXT_NAME + "=" + str(path)))
     else:
+        # Bake refuses a named context outside its working tree unless the
+        # read is granted; grant exactly this held directory, nothing wider.
+        result.append("--allow=fs.read=" + str(path))
         for target in sorted(set(targets)):
             result.extend(("--set", target + ".contexts." + asset.CONTEXT_NAME + "=" + str(path)))
     return result + command[3:]
