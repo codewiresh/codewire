@@ -1242,6 +1242,9 @@ run_present_paths_case darwin_cross_check pull_request refs/pull/20655/head fals
   scripts/ci/verify/check-darwin-cross.sh
 run_present_paths_case darwin_cross_check_tests pull_request refs/pull/20656/head false \
   "$policy policy_shell" scripts/ci/tests/test-darwin-cross-check.sh
+# The selection job runs the runner image contract on every run.
+run_present_paths_case ci_runner_image_contract_tests pull_request refs/pull/20657/head false \
+  "$policy policy_shell" scripts/ci/tests/test-ci-runner-image-contract.sh
 run_present_paths_case darwin_cross_test_unknown pull_request refs/pull/20656/head false \
   "$all_product_pr" scripts/ci/tests/test-darwin-cross-check-future.sh
 run_present_paths_case mesh_ingress_protocol_guard pull_request refs/pull/1902/head false \

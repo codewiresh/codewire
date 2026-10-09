@@ -433,6 +433,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-cargo-target-runner-failures.sh|\
       scripts/ci/tests/test-darwin-cross-check.sh|\
+      scripts/ci/tests/test-ci-runner-image-contract.sh|\
       scripts/ci/tests/test-ci-tool-downloads.sh|\
       scripts/ci/tests/test-service-ssh-image-verifier.sh|\
       scripts/ci/verify/run-product-verification.sh|\
