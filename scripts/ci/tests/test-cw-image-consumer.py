@@ -156,6 +156,9 @@ class Consumer(unittest.TestCase):
             self.assertTrue(required)
             bound = consumer.bind_context(command, targets, self.base / "verified")
             self.assertEqual(bound.count(expected + ".contexts.codewire-verified-cw=" + str(self.base / "verified")), 1)
+            self.assertEqual(bound.count("--allow=fs.read=" + str(self.base / "verified")), 1)
+            self.assertEqual([item for item in bound if item.startswith("--allow")],
+                             ["--allow=fs.read=" + str(self.base / "verified")])
         with self.assertRaises(consumer.asset.Refused):
             consumer.canonical_command(command, self.source, Path.cwd(), "release")
 
