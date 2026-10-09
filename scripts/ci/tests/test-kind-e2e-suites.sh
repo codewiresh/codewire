@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# ShellCheck follows the whole Kind suite tree from here. Its data-flow pass
+# needs over 10 GiB, more than a CI worker has, and reports nothing at the
+# policy's warning severity, so this file uses the ordinary analysis.
+# shellcheck extended-analysis=false
 set -euo pipefail
 
 # Synthetic ownership fixtures must not inherit the caller's live CI cluster.
