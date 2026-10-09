@@ -486,13 +486,17 @@ impl Guardian {
             .context("arm driver death notification")?;
         self.driver = Some(bind_driver(&self.receipt.identity)?);
         prctl_set(libc::PR_SET_CHILD_SUBREAPER, 1).context("become the family subreaper")?;
-        fs::metadata("/proc/thread-self/children")
-            .context("this kernel cannot list guardian children; family custody is unavailable")?;
+        survey_children().context("list guardian children; family custody is unavailable")?;
         self.persist_now().context("claim guest peer custody")?;
         self.journal.record(&format!(
-            "claimed custody guardian_pid={} threads={}",
+            "claimed custody guardian_pid={} threads={} survey={}",
             std::process::id(),
-            fs::read_dir("/proc/self/task").map_or(0, Iterator::count)
+            fs::read_dir("/proc/self/task").map_or(0, Iterator::count),
+            if task_children_available() {
+                "task-children"
+            } else {
+                "process-parents"
+            }
         ));
         if let Some(signal) = take_stop_signal() {
             anyhow::bail!("guardian received {signal} before the provider started");
@@ -849,7 +853,48 @@ fn bind_child(pid: u32, parent: u32) -> io::Result<Option<(Birth, u64)>> {
     }
 }
 
+/// Direct children of this process. A kernel built without
+/// `CONFIG_PROC_CHILDREN`, such as the Kata guest kernel of platform Sandboxes,
+/// has no task children lists; there every process's parent is read instead.
+/// As the family subreaper the guardian is the parent of every orphaned
+/// descendant either way, and `bind_child` still binds each candidate's
+/// parent and birth before it is trusted.
 fn survey_children() -> io::Result<BTreeSet<u32>> {
+    if task_children_available() {
+        survey_task_children()
+    } else {
+        survey_process_parents(std::process::id())
+    }
+}
+
+fn task_children_available() -> bool {
+    fs::metadata("/proc/thread-self/children").is_ok()
+}
+
+fn survey_process_parents(parent: u32) -> io::Result<BTreeSet<u32>> {
+    let mut children = BTreeSet::new();
+    for entry in fs::read_dir("/proc")? {
+        let Some(pid) = entry?
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        match process_stat(pid) {
+            Ok(stat) if stat.ppid == parent => {
+                children.insert(pid);
+            }
+            Ok(_) => {}
+            // A process that exits mid-survey is no longer a child to bind.
+            Err(error) if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(children)
+}
+
+fn survey_task_children() -> io::Result<BTreeSet<u32>> {
     let mut children = BTreeSet::new();
     for task in fs::read_dir("/proc/self/task")? {
         let list = match fs::read_to_string(task?.path().join("children")) {
@@ -2526,6 +2571,23 @@ esac
         signal_guardian(&fixture.dir, &identity).unwrap();
         let status = sentinel.0.wait().unwrap();
         assert_eq!(status.signal(), Some(libc::SIGTERM));
+    }
+
+    #[test]
+    fn process_parent_survey_finds_children_without_task_lists() {
+        let mut sentinel = Sentinel::spawn();
+        let (pid, _) = sentinel.birth();
+        let found = survey_process_parents(std::process::id()).unwrap();
+        assert!(found.contains(&pid), "the parent survey lists a live child");
+        if task_children_available() {
+            assert!(survey_task_children().unwrap().contains(&pid));
+        }
+        assert!(
+            !survey_process_parents(pid)
+                .unwrap()
+                .contains(&std::process::id())
+        );
+        assert!(sentinel.alive());
     }
 
     #[test]

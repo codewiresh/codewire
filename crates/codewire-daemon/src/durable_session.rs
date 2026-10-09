@@ -63,7 +63,7 @@ struct SessionEngineInner {
     config: Config,
     credential_bridge: CredentialBridge,
     root: PathBuf,
-    initialized: OnceCell<Result<(), String>>,
+    initialized: OnceCell<()>,
     sessions: Mutex<BTreeMap<String, Arc<SessionHandle>>>,
     active: Mutex<HashMap<String, ActiveSession>>,
     retention_admission: AsyncMutex<()>,
@@ -930,18 +930,19 @@ impl SessionEngine {
         Ok(metadata.to_record())
     }
 
+    /// A refused store is not cached: each request repeats every check, so a
+    /// corrected owner or mode is admitted without restarting the daemon.
     async fn ensure_initialized(&self) -> Result<(), SessionError> {
-        let result = self
-            .inner
+        self.inner
             .initialized
-            .get_or_init(|| async {
+            .get_or_try_init(|| async {
                 self.inner
                     .initialize()
                     .await
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| SessionError::Internal(error.to_string()))
             })
-            .await;
-        result.clone().map_err(SessionError::Internal)
+            .await
+            .map(|_| ())
     }
 
     #[cfg(target_os = "linux")]

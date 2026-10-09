@@ -621,7 +621,7 @@ impl Endpoint {
                                     .all(|byte| byte.is_ascii_digit()
                                         || (b'a'..=b'f').contains(&byte))
                         );
-                        assert_eq!(witness["qualified"], true);
+                        assert_eq!(witness["qualified"], true, "{raw}");
                         assert_eq!(witness["before"]["transport"], expected);
                         assert_eq!(witness["after"]["transport"], expected);
                         assert_eq!(witness["inbound_derp_counter_available"], false);
