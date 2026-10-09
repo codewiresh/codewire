@@ -271,6 +271,7 @@ jobs:
           tar -xf zig.tar.xz
           echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
           cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
 
       # The macOS cw links Apple frameworks, so only the protected mac-runner
       # runner links it (cli-release.yaml and cw-release-dry-run.yaml, which

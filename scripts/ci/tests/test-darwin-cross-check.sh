@@ -163,5 +163,14 @@ else:
     export = 'echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"'
     assert install in setup and export in setup and setup.index(install) < setup.index(export)
     assert '"${ZIG_X86_64_LINUX_SHA256}  zig.tar.xz" | sha256sum -c -' in setup
+    # The release-assets job runs the --cli check, which needs the installed
+    # cargo-zigbuild on PATH; that job keeps cargo's default home.
+    assets = ci.split('\n  cw-release-assets:\n', 1)[1].split('\n  workspace-image:\n', 1)[0]
+    setup = assets.split('      - name: Set up pinned cross-build tools\n', 1)[1].split('      - name:', 1)[0]
+    export = 'echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"'
+    assert install in setup and export in setup and setup.index(install) < setup.index(export)
+    assert 'CARGO_HOME:' not in assets.split('    steps:\n', 1)[0]
+    check = assets.split('      - name: Compile the macOS cw for both Mac targets\n', 1)[1].split('      - name:', 1)[0]
+    assert 'run: scripts/ci/verify/check-darwin-cross.sh --cli' in check
     print(f'Darwin cross-check wrapper: {cases} cases passed; old bare check rejected')
 PY
