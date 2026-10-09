@@ -333,7 +333,9 @@ impl TerminalView {
         self.session_name = Some("local".to_string());
         self.session_type = None;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        // $SHELL, then the account's login shell, then /bin/sh; never a shell
+        // the host may not have.
+        let shell = portable_pty::CommandBuilder::new_default_prog().get_shell();
         self.spawn(&shell, &[], "local shell", cx);
     }
 
