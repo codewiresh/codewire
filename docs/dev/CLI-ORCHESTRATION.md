@@ -116,7 +116,9 @@ Agent launches with `--prompt` and message commands return durable message
 IDs. `msg` sends a semantic task, follow-up or reply to the native agent protocol.
 A raw terminal write is refused for managed sessions. Parents are bound to canonical session
 and driver identities in the same host environment; an unmanaged process
-cannot receive semantic worker results.
+cannot receive semantic worker results. `cw wait --message ID` returns the final
+reply; the message ID alone names its session. `cw logs ENV SESSION` shows each
+turn's prompt, the commands, edits and tools the agent uses, and its reply.
 
 ```mermaid
 flowchart LR

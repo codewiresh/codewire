@@ -311,7 +311,26 @@ fn orchestration_arguments_preserve_terminal_and_semantic_boundaries() {
         Cli::try_parse_from(["cw", "send", "shell", "--no-newline", "--key", "ctrl-c"]).is_err()
     );
     assert!(Cli::try_parse_from(["cw", "list", "--all", "host-team"]).is_err());
-    assert!(Cli::try_parse_from(["cw", "wait", "--message", "task-id", "shell"]).is_err());
+}
+
+#[tokio::test]
+async fn wait_for_a_message_explains_that_its_id_names_the_session() {
+    let Command::Wait(args) =
+        Cli::try_parse_from(["cw", "wait", "builder", "shell", "--message", "task-id"])
+            .unwrap()
+            .command
+    else {
+        panic!("wait expected");
+    };
+    let globals = Globals {
+        server: None,
+        member: None,
+    };
+    let error = handle_wait_command(&globals, args).await.unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "a message ID already names its session; run `cw wait --message task-id` without ENV or SESSION"
+    );
 }
 
 #[cfg(unix)]

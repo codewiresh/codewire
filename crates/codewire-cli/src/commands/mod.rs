@@ -115,7 +115,7 @@ pub(crate) struct DoctorLocalArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct DoctorTailnetArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     environment: String,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     output: OutputFormat,
@@ -677,7 +677,10 @@ pub(crate) struct InitArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct VscodeArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV",
+        help = "Environment name or ID; defaults to the selected environment"
+    )]
     environment: Option<String>,
     #[arg(long, default_value = "/workspace", help = "Remote folder to open")]
     folder: String,
@@ -687,7 +690,10 @@ pub(crate) struct VscodeArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvironmentShellArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV",
+        help = "Environment name or ID; defaults to the selected environment"
+    )]
     pub(crate) environment: Option<String>,
     #[arg(long, help = "Pipe stdin/stdout for OpenSSH ProxyCommand")]
     stdio: bool,
@@ -701,11 +707,25 @@ pub(crate) struct EnvironmentRunArgs {
     pub(crate) name: Option<String>,
     #[arg(long, help = "Parent session name or ID within this environment")]
     pub(crate) parent: Option<String>,
-    #[arg(long, value_parser = ["codex", "claude", "kimi"], conflicts_with = "command")]
+    #[arg(
+        long,
+        value_parser = ["codex", "claude", "kimi"],
+        conflicts_with = "command",
+        help = "Launch a managed agent conversation instead of a command"
+    )]
     pub(crate) agent: Option<String>,
-    #[arg(long, requires = "agent")]
+    #[arg(
+        long,
+        requires = "agent",
+        help = "Agent model; defaults to the agent's own default"
+    )]
     pub(crate) model: Option<String>,
-    #[arg(long, requires = "agent", value_parser = ["low", "medium", "high", "xhigh", "max", "ultra"])]
+    #[arg(
+        long,
+        requires = "agent",
+        value_parser = ["low", "medium", "high", "xhigh", "max", "ultra"],
+        help = "Agent reasoning effort"
+    )]
     pub(crate) effort: Option<String>,
     #[arg(
         long,
@@ -713,11 +733,25 @@ pub(crate) struct EnvironmentRunArgs {
         help = "Initial task for the managed conversation"
     )]
     pub(crate) prompt: Option<String>,
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV",
+        help = "Environment name or ID; defaults to the selected environment"
+    )]
     pub(crate) environment: Option<String>,
-    #[arg(short = 'w', long = "workdir", alias = "dir", value_name = "DIR")]
+    #[arg(
+        short = 'w',
+        long = "workdir",
+        alias = "dir",
+        value_name = "DIR",
+        help = "Working directory inside the environment"
+    )]
     pub(crate) workdir: Option<String>,
-    #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
+    #[arg(
+        short = 'e',
+        long = "env",
+        value_name = "KEY=VALUE",
+        help = "Set a variable for this session; repeatable"
+    )]
     pub(crate) env: Vec<String>,
     #[arg(
         short = 't',
@@ -730,9 +764,14 @@ pub(crate) struct EnvironmentRunArgs {
     pub(crate) no_tty: bool,
     #[arg(short = 'd', long, help = "Launch the session without attaching")]
     pub(crate) detach: bool,
-    #[arg(short = 'o', long = "output", value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(short = 'o', long = "output", value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     pub(crate) output: OutputFormat,
-    #[arg(last = true, required_unless_present = "agent", value_name = "COMMAND")]
+    #[arg(
+        last = true,
+        required_unless_present = "agent",
+        value_name = "COMMAND",
+        help = "Command and arguments to run, after --"
+    )]
     pub(crate) command: Vec<String>,
 }
 
@@ -827,7 +866,7 @@ pub(crate) enum EnvAgentCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvAgentInfoArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     pub(crate) environment: String,
     #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) output: OutputFormat,
@@ -835,7 +874,7 @@ pub(crate) struct EnvAgentInfoArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvAgentObserveArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     pub(crate) environment: String,
     #[arg(long, value_name = "UUID")]
     pub(crate) request_id: uuid::Uuid,
@@ -876,7 +915,7 @@ pub(crate) struct EnvRuntimeQueryArgs {
 }
 #[derive(Debug, Args)]
 pub(crate) struct EnvRuntimeUpdateArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     environment: String,
     #[arg(
         long,
@@ -921,7 +960,7 @@ pub(crate) struct EnvRuntimeUpdateArgs {
 }
 #[derive(Debug, Args)]
 pub(crate) struct EnvRuntimeRollbackArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     environment: String,
     #[arg(long, help = "Native: observed live selector revision", value_parser = parse_runtime_revision, required_unless_present = "expected_generation", conflicts_with = "expected_generation")]
     expected_revision: Option<u64>,
@@ -934,7 +973,7 @@ pub(crate) struct EnvRuntimeRollbackArgs {
 }
 #[derive(Debug, Args)]
 pub(crate) struct EnvRuntimeOperationArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     environment: String,
     #[arg(long, value_name = "UUID", value_parser = parse_runtime_request_id)]
     request_id: uuid::Uuid,
@@ -1141,7 +1180,7 @@ pub(crate) enum StoragePlacementArg {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvUpdateArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     environment: String,
     #[arg(long, value_name = "PROJECT")]
     secrets: Option<String>,
@@ -1183,7 +1222,7 @@ pub(crate) struct EnvInfoArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvResizeArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     pub(crate) environment: String,
     #[arg(long, value_name = "CPU", help = "CPU (for example 500m, 0.5, or 4)")]
     pub(crate) cpu: Option<String>,
@@ -1427,7 +1466,10 @@ pub(crate) enum EnvDaemonCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvDaemonTargetArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV",
+        help = "Environment name or ID; defaults to the selected environment"
+    )]
     environment: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     output: OutputFormat,
@@ -1435,7 +1477,10 @@ pub(crate) struct EnvDaemonTargetArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvDaemonLogsArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV",
+        help = "Environment name or ID; defaults to the selected environment"
+    )]
     environment: Option<String>,
 }
 
@@ -1997,7 +2042,10 @@ pub(crate) struct ListArgs {
         help = "List every accessible environment (the default without ENV)"
     )]
     pub(crate) all: bool,
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV",
+        help = "Environment name or ID; omit to list every environment"
+    )]
     pub(crate) environment: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     pub(crate) output: OutputFormat,
@@ -2042,8 +2090,7 @@ pub(crate) struct WaitArgs {
     pub(crate) target: Vec<String>,
     #[arg(
         long,
-        conflicts_with = "target",
-        help = "Wait for a managed message's terminal result"
+        help = "Wait for a managed message's terminal result; the ID alone names its session"
     )]
     pub(crate) message: Option<String>,
     #[arg(

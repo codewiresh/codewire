@@ -585,6 +585,81 @@ fn truncate_utf8(value: &str, max: usize) -> (String, bool) {
     (value[..end].to_owned(), true)
 }
 
+/// One log line for agent activity: whitespace collapsed, at most
+/// [`ACTIVITY_PREVIEW_BYTES`] bytes.
+fn preview(text: &str) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match truncate_utf8(&line, ACTIVITY_PREVIEW_BYTES) {
+        (line, false) => line,
+        (line, true) => format!("{line}…"),
+    }
+}
+
+const ACTIVITY_PREVIEW_BYTES: usize = 200;
+
+/// Session-log lines for what a Claude assistant message does: its text and
+/// each tool it calls, with the input that identifies the call.
+fn claude_activity(value: &Value) -> Vec<String> {
+    let Some(Value::Array(blocks)) = value.pointer("/message/content") else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter_map(|block| match block.get("type").and_then(Value::as_str) {
+            Some("text") => block
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| format!("says: {}", preview(text))),
+            Some("tool_use") => {
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                let input = block.get("input");
+                let detail = [
+                    "command",
+                    "file_path",
+                    "path",
+                    "pattern",
+                    "url",
+                    "query",
+                    "description",
+                ]
+                .iter()
+                .find_map(|key| input?.get(key)?.as_str());
+                Some(match detail {
+                    Some(detail) => format!("tool {name}: {}", preview(detail)),
+                    None => format!("tool {name}"),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The session-log line for a Codex item as it starts or completes.
+fn codex_activity(item: &Value) -> Option<String> {
+    let text = |key: &str| item.get(key).and_then(Value::as_str);
+    match text("type")? {
+        "commandExecution" => text("command").map(|command| format!("run: {}", preview(command))),
+        "fileChange" => {
+            let paths: Vec<&str> = item
+                .get("changes")?
+                .as_array()?
+                .iter()
+                .filter_map(|change| change.get("path").and_then(Value::as_str))
+                .collect();
+            Some(format!("edit: {}", preview(&paths.join(" "))))
+        }
+        "mcpToolCall" => Some(format!(
+            "tool {}/{}",
+            text("server").unwrap_or("mcp"),
+            text("tool").unwrap_or("tool")
+        )),
+        "dynamicToolCall" => Some(format!("tool {}", text("tool").unwrap_or("tool"))),
+        "webSearch" => text("query").map(|query| format!("search: {}", preview(query))),
+        _ => None,
+    }
+}
+
 fn existing_private_dir(path: &Path) -> anyhow::Result<()> {
     let meta = fs::symlink_metadata(path)
         .with_context(|| format!("managed conversation state {} is missing", path.display()))?;
@@ -3115,7 +3190,7 @@ impl Driver {
                     .await?;
                 }
             }
-            log(format!("message {} running", record.id));
+            log(format!("message {} running: {}", record.id, preview(&text)));
         }
         Ok(())
     }
@@ -3466,7 +3541,11 @@ impl Driver {
     async fn on_codex_notification(&mut self, method: &str, params: Value) -> anyhow::Result<()> {
         if matches!(
             method,
-            "turn/started" | "turn/completed" | "item/completed" | "thread/tokenUsage/updated"
+            "turn/started"
+                | "turn/completed"
+                | "item/started"
+                | "item/completed"
+                | "thread/tokenUsage/updated"
         ) && params.get("threadId").and_then(Value::as_str)
             != self.state.native_thread_id.as_deref()
         {
@@ -3490,7 +3569,17 @@ impl Driver {
                     self.record_turn(&message_id, &turn)?;
                 }
             }
+            "item/started" => {
+                if let Some(line) = params.get("item").and_then(codex_activity) {
+                    log(line);
+                }
+            }
             "item/completed" => {
+                if params.pointer("/item/type").and_then(Value::as_str) == Some("agentMessage")
+                    && let Some(text) = params.pointer("/item/text").and_then(Value::as_str)
+                {
+                    log(format!("says: {}", preview(text)));
+                }
                 if params.pointer("/item/type").and_then(Value::as_str) == Some("agentMessage")
                     && let Some(text) = params.pointer("/item/text").and_then(Value::as_str)
                     && let Some(active) = self.active.as_mut()
@@ -3608,6 +3697,9 @@ impl Driver {
                 }
             }
             "assistant" => {
+                for line in claude_activity(&value) {
+                    log(line);
+                }
                 if let Some(text) = content_text(&value)
                     && let Some(active) = self.active.as_mut()
                 {
@@ -3779,6 +3871,13 @@ impl Driver {
         self.state.current_turn_id = None;
         self.persist_state()?;
         log(format!("message {} {}", main.id, main.state.name()));
+        if let Some(reply) = main
+            .result
+            .as_deref()
+            .filter(|reply| !reply.trim().is_empty())
+        {
+            eprintln!("{reply}");
+        }
         self.notify_parent(&main).await;
         Ok(())
     }
@@ -4254,5 +4353,47 @@ mod tests {
         assert!(saved.error.unwrap().len() <= 128 * 1024);
         assert_eq!(saved.usage, Some(json!({"truncated": true})));
         assert!(fs::metadata(message_path(&dir, &record.id)).unwrap().len() <= MAX_RECORD_BYTES);
+    }
+
+    #[test]
+    fn session_log_names_agent_activity_in_bounded_lines() {
+        let claude = json!({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "Checking   the\nDockerfile."},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "git status --short", "description": "status"}},
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": "images/workspace/Dockerfile"}},
+            {"type": "tool_use", "name": "TodoWrite", "input": {"todos": []}},
+            {"type": "thinking", "thinking": "private"}
+        ]}});
+        assert_eq!(
+            claude_activity(&claude),
+            [
+                "says: Checking the Dockerfile.",
+                "tool Bash: git status --short",
+                "tool Edit: images/workspace/Dockerfile",
+                "tool TodoWrite",
+            ]
+        );
+        assert!(claude_activity(&json!({"message": {"content": "plain"}})).is_empty());
+
+        let item = |value: Value| codex_activity(&value);
+        assert_eq!(
+            item(json!({"type": "commandExecution", "command": "cargo test -p cw"})).as_deref(),
+            Some("run: cargo test -p cw")
+        );
+        assert_eq!(
+            item(json!({"type": "fileChange", "changes": [{"path": "a.rs"}, {"path": "b.rs"}]}))
+                .as_deref(),
+            Some("edit: a.rs b.rs")
+        );
+        assert_eq!(
+            item(json!({"type": "mcpToolCall", "server": "docs", "tool": "search"})).as_deref(),
+            Some("tool docs/search")
+        );
+        assert_eq!(item(json!({"type": "reasoning", "summary": []})), None);
+
+        let long = "x".repeat(ACTIVITY_PREVIEW_BYTES + 50);
+        let shown = preview(&long);
+        assert!(shown.ends_with('…'));
+        assert_eq!(shown.len(), ACTIVITY_PREVIEW_BYTES + '…'.len_utf8());
     }
 }

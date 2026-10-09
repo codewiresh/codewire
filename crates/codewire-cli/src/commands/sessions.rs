@@ -831,6 +831,13 @@ pub(crate) async fn handle_restart_command(
 }
 
 pub(crate) async fn handle_wait_command(globals: &Globals, args: WaitArgs) -> anyhow::Result<()> {
+    if let Some(message) = &args.message
+        && !args.target.is_empty()
+    {
+        anyhow::bail!(
+            "a message ID already names its session; run `cw wait --message {message}` without ENV or SESSION"
+        );
+    }
     #[cfg(target_os = "linux")]
     if globals.member.is_some() {
         if args.message.is_some() {
