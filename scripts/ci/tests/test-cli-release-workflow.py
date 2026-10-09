@@ -99,13 +99,19 @@ def check(text, ci_text):
          "the received macOS pair is not checked against the built pair")
     need("cw_release.py verify --dist dist/cw-release --unsigned" in build, "build does not verify its delivery")
     need("delivery_sha256" in build, "build does not bind its delivery digest")
+    need("cargo build --locked --release -p codewire-cw-release \\\n"
+         "            --example verify-release-signatures" in build and "verifier_sha256" in build
+         and "name: cw-release-verifier-${{ github.run_id }}" in build,
+         "build does not compile, bind and hand over cw's release-signature verifier")
 
     need("    needs: [release-selection, build-release]" in package, "signing does not need a successful build")
     need("    enable-openid-connect: true" in package, "publication job lacks its OIDC exchange")
     need(not re.search(r"^    if:", package, re.M), "publication job can run without a successful build")
     names = [name for name, _ in steps(package)]
     order = ["Receive the unsigned delivery", "Verify the received delivery is the built delivery",
+             "Receive cw's release-signature verifier", "Verify the received verifier is the built verifier",
              "Reuse an already-published signed R2 release", "Sign release delivery",
+             "Verify the signed delivery with cw's built-in verifier",
              "Publish immutable R2 release objects", "Remove the R2 publisher credential",
              "Publish signed release assets"]
     positions = [names.index(name) if name in names else -1 for name in order]
@@ -116,6 +122,20 @@ def check(text, ci_text):
     sign = by_name.get("Sign release delivery", "")
     need([step for step, body in steps(package) if "fetch-openbao-release-signing-key.sh" in body]
          == ["Sign release delivery"], "the signing key is read outside the signing step")
+    # cw refuses signatures GnuPG accepts (armor headers, subkeys, more than
+    # one packet), so its exact built verifier must admit the signed bytes
+    # before any immutable publication. The signing job compiles nothing.
+    need("cargo " not in package, "the signing job compiles code while it holds release capabilities")
+    need('[ "$(sha256sum .release-verifier/verify-release-signatures | cut -c1-64)" = "$VERIFIER_SHA256" ]'
+         in by_name.get("Verify the received verifier is the built verifier", ""),
+         "the received verifier is not checked against the built digest")
+    compiled = re.findall(r'^const TRUST_FINGERPRINT: &str = "([0-9A-F]{40})";$',
+                          (ROOT / "crates/codewire-cli/src/public_fetch.rs").read_text(), re.M)
+    builtin = by_name.get("Verify the signed delivery with cw's built-in verifier", "")
+    need(len(compiled) == 1 and "../.release-verifier/verify-release-signatures apps/cli/GPG_PUBLIC_KEY.asc \\\n"
+         f"            {compiled[0]} dist/cw-release" in builtin,
+         "the built-in verifier does not check the delivery against cw's compiled release key")
+    need("if:" not in builtin, "the built-in verifier is conditional")
     for name in GPG:
         need(text.count(name) == sign.count(name) > 0, f"{name} appears outside the signing step")
     marks = [sign.find(mark) for mark in ("          trap cleanup_signing EXIT\n",
@@ -200,7 +220,33 @@ MUTATIONS = {
     "signing key not shredded": lambda t: t.replace("          trap cleanup_signing EXIT\n", "", 1),
     "signing key outlives signing": lambda t: t.replace("          cleanup_signing\n          trap - EXIT\n",
                                                          "          trap - EXIT\n", 1),
+    "no built-in verification": lambda t: re.sub(
+        r"      - name: Verify the signed delivery with cw's built-in verifier\n(?:        .*\n|\n(?=        ))*\n",
+        "", t, count=1),
+    "built-in verification after R2 publication": lambda t: move_step(
+        t, "Verify the signed delivery with cw's built-in verifier", "Remove the R2 publisher credential"),
+    "unbound verifier": lambda t: t.replace('= "$VERIFIER_SHA256" ]', "] || true", 1),
+    "verifier compiled while signing": lambda t: t.replace(
+        "          ../.release-verifier/verify-release-signatures",
+        "          cargo run --locked -p codewire-cw-release --example verify-release-signatures --\n"
+        "          ../.release-verifier/verify-release-signatures", 1),
+    "conditional verification": lambda t: t.replace(
+        "      - name: Verify the signed delivery with cw's built-in verifier\n",
+        "      - name: Verify the signed delivery with cw's built-in verifier\n"
+        "        if: ${{ inputs.r2_publication == 'immutable' }}\n", 1),
+    "verification by another key": lambda t: t.replace(
+        "            A38FF6BC6623FCA611A7A32B5EFBF0F4A5870815 dist/cw-release",
+        "            0000000000000000000000000000000000000000 dist/cw-release", 1),
 }
+
+
+def move_step(text, name, before):
+    """Move step `name` (and its body) to just before step `before`."""
+    start = text.index(f"      - name: {name}\n")
+    end = text.index("\n      - ", start + 1) + 1
+    step, text = text[start:end], text[:start] + text[end:]
+    target = text.index(f"      - name: {before}\n")
+    return text[:target] + step + text[target:]
 
 
 def route_guard_cases(text):

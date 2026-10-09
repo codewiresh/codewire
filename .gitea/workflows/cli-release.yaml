@@ -170,6 +170,7 @@ jobs:
     runs-on: ci-protected
     outputs:
       delivery_sha256: ${{ steps.prepare.outputs.delivery_sha256 }}
+      verifier_sha256: ${{ steps.verifier.outputs.verifier_sha256 }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
@@ -256,6 +257,29 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      # cw verifies signatures with its own narrow verifier, not GnuPG. The
+      # signing job runs this exact build of it before anything is published,
+      # and compiles nothing itself while it holds release capabilities.
+      - name: Build cw's release-signature verifier
+        id: verifier
+        working-directory: .release-source
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p codewire-cw-release \
+            --example verify-release-signatures --target-dir target/release-verifier
+          mkdir -m 0700 ../.release-verifier
+          cp target/release-verifier/release/examples/verify-release-signatures ../.release-verifier/
+          printf 'verifier_sha256=%s\n' \
+            "$(sha256sum ../.release-verifier/verify-release-signatures | cut -c1-64)" >> "$GITHUB_OUTPUT"
+
+      - name: Hand the signature verifier to signing
+        uses: https://git.example.invalid/noel/actions-upload-artifact@c6a3b2bd78b3985e4b2f15397fec357f0fd808de
+        with:
+          name: cw-release-verifier-${{ github.run_id }}
+          path: .release-verifier/
+          if-no-files-found: error
+          retention-days: 1
+
   package-release:
     # Signing, mirror and R2 capabilities exist only after a successful build.
     name: Sign and publish cw release
@@ -294,6 +318,21 @@ jobs:
           [[ "$DELIVERY_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [ "$(python3 ../scripts/ci/release/cw_release.py digest --dist dist/cw-release)" = "$DELIVERY_SHA256" ]
           python3 ../scripts/ci/release/cw_release.py verify --dist dist/cw-release --unsigned
+
+      - name: Receive cw's release-signature verifier
+        uses: https://git.example.invalid/noel/actions-download-artifact@ad191675b41f6a5b46da9a048cb6893812da158b
+        with:
+          name: cw-release-verifier-${{ github.run_id }}
+          path: .release-verifier
+
+      - name: Verify the received verifier is the built verifier
+        env:
+          VERIFIER_SHA256: ${{ needs.build-release.outputs.verifier_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$VERIFIER_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(sha256sum .release-verifier/verify-release-signatures | cut -c1-64)" = "$VERIFIER_SHA256" ]
+          chmod 0500 .release-verifier/verify-release-signatures
 
       - name: Reuse an already-published signed R2 release
         if: ${{ inputs.r2_publication == 'immutable' }}
@@ -345,6 +384,13 @@ jobs:
           gpg --import apps/cli/GPG_PUBLIC_KEY.asc
           gpg --verify dist/cw-release/SHA256SUMS.asc dist/cw-release/SHA256SUMS
           (cd dist/cw-release && sha256sum --check --ignore-missing SHA256SUMS)
+
+      - name: Verify the signed delivery with cw's built-in verifier
+        working-directory: .release-source
+        run: |
+          set -euo pipefail
+          ../.release-verifier/verify-release-signatures apps/cli/GPG_PUBLIC_KEY.asc \
+            A38FF6BC6623FCA611A7A32B5EFBF0F4A5870815 dist/cw-release
 
       - name: Publish immutable R2 release objects
         if: ${{ inputs.r2_publication == 'immutable' }}
