@@ -132,12 +132,24 @@ workspace_cache_cleanup_builder() {
   if [[ "$builder_created" == true ]]; then
     # A stopped daemon can leave substantial state to remove. Keep erasure
     # prompt while allowing bounded filesystem cleanup within the runner reserve.
+    local removal_output=''
     started=$SECONDS phase_status=0
-    timeout --signal=TERM --kill-after=3s 60s \
-      "$docker_bin" buildx rm --force "$builder" >/dev/null 2>&1 || phase_status=$?
+    removal_output="$(timeout --signal=TERM --kill-after=3s 60s \
+      "$docker_bin" buildx rm --force "$builder" 2>&1)" || phase_status=$?
+    # The guarantee is that the owned daemon container is gone. A removal that
+    # reports failure after that container no longer exists, such as a retry
+    # or a racing removal, has achieved it; an existing container still fails.
+    if [[ "$phase_status" != 0 ]] && workspace_cache_builder_container_absent; then
+      printf 'workspace cache cleanup: phase=builder-removal status=%s confirmed-absent=true\n' \
+        "$phase_status" >&2
+      phase_status=0
+    fi
     if [[ "$phase_status" != 0 ]]; then
       printf 'workspace cache cleanup: phase=builder-removal status=%s elapsed_seconds=%s\n' \
         "$phase_status" "$((SECONDS - started))" >&2
+      # Buildx reports builder and container names, never credential material.
+      printf '%s\n' "${removal_output:0:600}" | tr -cd '[:print:]\n' |
+        sed 's/^/workspace cache cleanup: builder-removal output: /' >&2
       status=$phase_status
     fi
   fi
@@ -147,6 +159,16 @@ workspace_cache_cleanup_builder() {
   # The workflow owns the original file through later Kind/host builds. Never
   # remove it here. A failed daemon cleanup prevents receipt emission.
   return "$status"
+}
+
+# True only when Docker names the exact owned BuildKit container as missing.
+# An unknown container identity or any other inspect failure is not proof.
+workspace_cache_builder_container_absent() {
+  local inspect_output='' inspect_status=0
+  [[ "$builder_container" =~ ^[0-9a-f]{64}$ ]] || return 1
+  inspect_output="$(timeout --signal=TERM --kill-after=3s 15s \
+    "$docker_bin" container inspect --format '{{.Id}}' "$builder_container" 2>&1)" || inspect_status=$?
+  [[ "$inspect_status" != 0 && "$inspect_output" == *"No such container"* ]]
 }
 
 workspace_cache_layer_args() {
