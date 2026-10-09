@@ -1764,6 +1764,7 @@ fn managed_member_isolated_kernel_journey() {
 
 #[test]
 fn managed_fixture_new_artifact_root_passes_exact_private_stage_guard() {
+    fs::create_dir_all(repository().join(".tmp")).unwrap();
     let parent = tempfile::tempdir_in(repository().join(".tmp")).unwrap();
     fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let sentinel = parent.path().join("unrelated-sentinel");
@@ -2050,6 +2051,7 @@ async fn managed_fixture_original_pidfd_wait_refuses_live_or_other_pidfd() {
 fn managed_fixture_actual_actor_birth_path_and_terminal_refusals_do_not_signal() {
     // A controlled kernel child proves the observer itself; it is never an
     // agent substitute and is not part of the managed product receipt.
+    fs::create_dir_all(repository().join(".tmp")).unwrap();
     let root = tempfile::tempdir_in(repository().join(".tmp")).unwrap();
     let image = root.path().join("owned-sleep");
     fs::copy("/usr/bin/sleep", &image).unwrap();

@@ -1241,7 +1241,9 @@ detached) trap '' TERM HUP INT; record detached $$; exec sleep 1000 ;;
 nested) sh "$0" "$d" grandchild & record nested $$; exec sleep 1000 ;;
 grandchild) trap '' TERM HUP INT; record grandchild $$; exec sleep 1000 ;;
 echo)
-  ls -l "/proc/$$/fd" > "$d/fds"
+  # A subshell keeps the redirection out of this shell's own descriptors;
+  # dash applies a simple command's redirection in the shell and saves fds.
+  (ls -l "/proc/$$/fd") > "$d/fds"
   printf 'out\000\377'
   cat
   printf 'err' >&2 ;;

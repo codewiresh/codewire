@@ -60,20 +60,24 @@ impl TestKey {
         let socket_path = PathBuf::from(String::from_utf8(derived.stdout).unwrap().trim());
         let socket_directory = socket_path.parent().unwrap().to_owned();
         assert_eq!(socket_path.file_name().unwrap(), "S.gpg-agent");
-        assert!(
-            socket_directory
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .starts_with("d.")
-        );
-        let parent = fs::symlink_metadata(socket_directory.parent().unwrap()).unwrap();
-        assert!(
-            parent.is_dir()
-                && parent.uid() == unsafe { libc::geteuid() }
-                && parent.mode() & 0o022 == 0
-        );
+        // Without /run/user/<uid> (a CI container) GnuPG keeps the socket in
+        // the private homedir itself.
+        if socket_directory != directory.path().canonicalize().unwrap() {
+            assert!(
+                socket_directory
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("d.")
+            );
+            let parent = fs::symlink_metadata(socket_directory.parent().unwrap()).unwrap();
+            assert!(
+                parent.is_dir()
+                    && parent.uid() == unsafe { libc::geteuid() }
+                    && parent.mode() & 0o022 == 0
+            );
+        }
         // gpgconf itself creates this derived empty directory on this build.
         // It is selected by the new random private homedir, never the default.
         let info = fs::symlink_metadata(&socket_directory).unwrap();
