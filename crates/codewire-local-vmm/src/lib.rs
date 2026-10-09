@@ -96,6 +96,8 @@ pub mod runner;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod runner_service;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod runtime_install;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod setup_pack;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod skill_snapshot;

@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Install the macOS local VM runtime inputs for `cw env create --local`.
+"""Pack the macOS local VM runtime and install it with `cw setup --local`.
 
 Developer tooling for an Apple Silicon Mac; it runs on the system Python 3.9.
 It builds the Virtualization.framework helper in release mode, signs it ad hoc
 with exactly developer-entitlements.plist, checks the supplied arm64 kernel
-Image and Codewire guest root the way artifact admission does, and installs the
-three files with the Darwin artifact lock that `cw` reads. With --cw-runtime it
-also installs a sealed aarch64 cw runtime (cw-runtime.lock.json and
-runtime.pack from `cw-runtime-image.py pack`) beside that lock, as on Linux.
-Nothing is downloaded. A different existing lock is replaced only with
---replace, and a Linux (Cloud Hypervisor) lock is never modified.
+Image and Codewire guest root the way artifact admission does, and writes a
+release directory (blobs/sha256/<digest> and local-runtime.json, the format a
+release publishes). With --cw-runtime it adds a sealed aarch64 cw runtime
+(cw-runtime.lock.json and runtime.pack from `cw-runtime-image.py pack`). Then
+`cw setup --local --from DIR` installs it; cw refuses a different installed
+runtime unless --replace is given. With --pack DIR it only writes DIR.
+Nothing is downloaded.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import plistlib
 import stat
 import subprocess
 import sys
+import tempfile
 
 PACKAGE = Path(__file__).resolve().parents[2] / "crates/codewire-local-vmm/macos-vz-runner"
 ENTITLEMENTS = PACKAGE / "developer-entitlements.plist"
@@ -33,9 +35,12 @@ CODESIGN = "/usr/bin/codesign"
 # The runtime looks only in Homebrew's keg-only e2fsprogs directories.
 E2FSPROGS_DIRECTORIES = ("/opt/homebrew/opt/e2fsprogs/sbin", "/usr/local/opt/e2fsprogs/sbin")
 E2FSPROGS_PROGRAMS = ("mkfs.ext4", "e2fsck", "resize2fs", "debugfs")
-ROOT_ENV = "CODEWIRE_NATIVE_ARTIFACT_ROOT"
-LOCK_ENV = "CODEWIRE_NATIVE_ARTIFACT_LOCK"
-# Lock key, installed file name inside the artifact root, and exact mode.
+LOCAL_RUNTIME_SCHEMA = "codewire.cw.local-runtime/v1"
+LOCAL_RUNTIME_DOCUMENT = "local-runtime.json"
+# cw's host target key (runtime_install::host_target) on Apple Silicon.
+TARGET = "macos-aarch64"
+REPOSITORY = Path(__file__).resolve().parents[2]
+# Lock key, installed file name inside the artifact root, and the mode cw sets.
 ARTIFACTS = (("vz_runner", PRODUCT, 0o500), ("kernel", "kernel", 0o400),
              ("initramfs", "initramfs", 0o400))
 INITRAMFS_LIMIT = 512 * 1024 * 1024
@@ -113,57 +118,6 @@ def input_file(value: str, flag: str) -> Path:
     if not stat.S_ISREG(status.st_mode) or status.st_size == 0:
         raise InstallError("%s must be a non-empty regular file: %s" % (flag, value))
     return path
-
-
-def artifact_paths(environ) -> tuple:
-    """The artifact root and lock exactly as cw resolves them."""
-
-    def override(name):
-        value = environ.get(name, "")
-        if value and not os.path.isabs(value):
-            raise InstallError("%s must be an absolute path" % name)
-        return Path(value) if value else None
-
-    root, lock = override(ROOT_ENV), override(LOCK_ENV)
-    if root is None or lock is None:
-        home = environ.get("HOME", "")
-        if not home:
-            raise InstallError("HOME is not set")
-        parent = Path(home) / ".cache" / "codewire" / "local-vmm-v1"
-        root = root or parent / "artifacts"
-        lock = lock or parent / "artifacts.lock.json"
-    if root.parent != lock.parent:
-        raise InstallError("the artifact root and lock must share one parent directory (%s, %s)"
-                           % (root, lock))
-    for path in (root, lock):
-        # cw opens these without following any symbolic link.
-        existing = path
-        while not os.path.lexists(existing):
-            existing = existing.parent
-        if os.path.normpath(str(path)) != str(path) or os.path.realpath(existing) != str(existing):
-            raise InstallError("%s must be a canonical path without symbolic links (for example "
-                               "/private/tmp rather than /tmp)" % path)
-    return root, lock
-
-
-def read_existing_lock(lock: Path):
-    """None, or the decoded existing lock (unrecognized bytes decode to a string)."""
-    try:
-        status = os.lstat(lock)
-    except FileNotFoundError:
-        return None
-    if not stat.S_ISREG(status.st_mode):
-        raise InstallError("existing lock %s is not a regular file; it is left untouched" % lock)
-    raw = lock.read_bytes()
-    try:
-        value = json.loads(raw)
-    except ValueError:
-        return raw.decode("utf-8", "replace")
-    if isinstance(value, dict) and "cloud_hypervisor" in value:
-        raise InstallError("%s is a Linux (Cloud Hypervisor) artifact lock and is left untouched, "
-                           "even with --replace; set %s and %s to install the macOS runtime "
-                           "elsewhere" % (lock, ROOT_ENV, LOCK_ENV))
-    return value
 
 
 def elf_header(data: bytes) -> bool:
@@ -334,13 +288,6 @@ def check_live_publisher(initramfs: Path) -> None:
                            "rebuild the guest root from current source; %s" % (initramfs, GUEST_ROOT_HINT))
 
 
-def read_existing(path: Path):
-    try:
-        return path.read_bytes()
-    except FileNotFoundError:
-        return None
-
-
 def check_helper(path: Path) -> None:
     """A thin arm64 Mach-O executable signed with exactly the developer entitlements."""
     with path.open("rb") as stream:
@@ -383,12 +330,8 @@ def build_helper() -> Path:
 
 
 def private_directory(path: Path) -> None:
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    status = os.lstat(path)
-    if (not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid()
-            or stat.S_IMODE(status.st_mode) != 0o700):
-        raise InstallError("%s must be a directory you own with mode 0700 (chmod 700 %s)"
-                           % (path, path))
+    path.mkdir(mode=0o700, parents=True)
+    os.chmod(path, 0o700)
 
 
 def stage_copy(source: Path, staged: Path) -> None:
@@ -410,116 +353,81 @@ def identity(path: Path) -> tuple:
     return checksum.hexdigest(), size
 
 
-def sync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+def put_blob(release: Path, source: Path) -> dict:
+    """Store `source` under its digest; return its blob reference."""
+    sha256, size = identity(source)
+    blobs = release / "blobs" / "sha256"
+    blobs.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not (blobs / sha256).exists():
+        stage_copy(source, blobs / sha256)
+    return {"sha256": sha256, "size": size}
 
 
-def unlink_if_present(path: Path) -> None:
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
+def source_revision() -> str:
+    """The checkout's commit: cw installs only a runtime from its own source."""
+    revision = run(["git", "-C", str(REPOSITORY), "rev-parse", "HEAD"], capture=True).decode().strip()
+    if len(revision) != 40 or not all(c in "0123456789abcdef" for c in revision):
+        raise InstallError("git rev-parse HEAD returned %r" % revision)
+    return revision
 
 
-def install(kernel: Path, initramfs: Path, replace: bool, environ, cw_runtime=None) -> int:
+def pack(kernel: Path, initramfs: Path, release: Path, cw_runtime=None) -> Path:
+    """Write the release directory for this Mac's runtime into `release`."""
     require_host()
     require_e2fsprogs()
-    root, lock = artifact_paths(environ)
-    existing = read_existing_lock(lock)
     check_kernel(kernel)
     check_initramfs(initramfs)
-    runtime_files = {}
     if cw_runtime is not None:
         check_cw_runtime(cw_runtime)
         check_live_publisher(initramfs)
-        runtime_files = {name: (cw_runtime / name).read_bytes() for name in (CW_RUNTIME_LOCK, CW_RUNTIME_PACK)}
-        existing_runtime = read_existing(lock.parent / CW_RUNTIME_LOCK)
-        if (existing_runtime is not None and existing_runtime != runtime_files[CW_RUNTIME_LOCK]
-                and not replace):
-            raise InstallError("%s already pins a different cw runtime; rerun with --replace "
-                               "(make macos-local-runtime ... REPLACE=1) to replace it"
-                               % (lock.parent / CW_RUNTIME_LOCK))
+    if release.exists():
+        raise InstallError("%s already exists; pack into a new directory" % release)
     helper = build_helper()
+    revision = source_revision()
+    private_directory(release)
+    signed = release / ("." + PRODUCT)
+    stage_copy(helper, signed)
+    # A fixed identifier keeps the signed bytes independent of the staging
+    # name, so an unchanged rebuild pins the same digest.
+    run([CODESIGN, "--force", "--sign", "-", "--identifier", PRODUCT,
+         "--entitlements", str(ENTITLEMENTS), str(signed)])
+    check_helper(signed)
+    sources = {"vz_runner": signed, "kernel": kernel, "initramfs": initramfs}
+    lock = {"schema_version": 1}
+    for key, name, _mode in ARTIFACTS:
+        blob = put_blob(release, sources[key])
+        lock[key] = {"path": name, "size": blob["size"], "sha256": blob["sha256"],
+                     "architecture": "aarch64"}
+    signed.unlink()
+    target = {"lock": lock}
+    if cw_runtime is not None:
+        target["cw_runtime"] = {"lock": put_blob(release, cw_runtime / CW_RUNTIME_LOCK),
+                                "pack": put_blob(release, cw_runtime / CW_RUNTIME_PACK)}
+    document = {"schema": LOCAL_RUNTIME_SCHEMA, "source_revision": revision,
+                "targets": {TARGET: target}}
+    (release / LOCAL_RUNTIME_DOCUMENT).write_text(json.dumps(document, indent=2) + "\n")
+    for key, name, _mode in ARTIFACTS:
+        log("%-9s %s sha256=%s size=%d" % (key, name, lock[key]["sha256"], lock[key]["size"]))
+    log("packed %s (source %s)" % (release, revision))
+    return release
 
-    private_directory(lock.parent)
-    private_directory(root)
-    sources = {"vz_runner": helper, "kernel": kernel, "initramfs": initramfs}
-    staged = {key: root / (".%s.partial" % name) for key, name, _ in ARTIFACTS}
-    lock_staged = lock.parent / (".%s.partial" % lock.name)
-    runtime_staged = {name: lock.parent / (".%s.partial" % name) for name in runtime_files}
-    try:
-        new_lock = {"schema_version": 1}
-        for key, name, mode in ARTIFACTS:
-            unlink_if_present(staged[key])
-            stage_copy(sources[key], staged[key])
-            if key == "vz_runner":
-                # A fixed identifier keeps the signed bytes independent of the
-                # staging name, so an unchanged rebuild pins the same digest.
-                run([CODESIGN, "--force", "--sign", "-", "--identifier", PRODUCT,
-                     "--entitlements", str(ENTITLEMENTS), str(staged[key])])
-                check_helper(staged[key])
-            elif key == "kernel":
-                check_kernel(staged[key])
-            else:
-                check_initramfs(staged[key])
-            os.chmod(staged[key], mode)
-            sha256, size = identity(staged[key])
-            new_lock[key] = {"path": name, "size": size, "sha256": sha256, "architecture": "aarch64"}
-        if existing is not None and existing != new_lock and not replace:
-            raise InstallError("%s already pins different artifacts; rerun with --replace "
-                               "(make macos-local-runtime ... REPLACE=1) to replace them" % lock)
 
-        for key, name, _ in ARTIFACTS:
-            os.replace(staged[key], root / name)
-        sync_directory(root)
-        unlink_if_present(lock_staged)
-        descriptor = os.open(lock_staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(descriptor, "w") as writer:
-            writer.write(json.dumps(new_lock, indent=2) + "\n")
-            writer.flush()
-            os.fsync(writer.fileno())
-        os.chmod(lock_staged, 0o400)
-        os.replace(lock_staged, lock)
-        # The pack first: its lock commits the runtime cw admits.
-        for name in (CW_RUNTIME_PACK, CW_RUNTIME_LOCK):
-            if name not in runtime_files:
-                continue
-            unlink_if_present(runtime_staged[name])
-            descriptor = os.open(runtime_staged[name], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(descriptor, "wb") as writer:
-                writer.write(runtime_files[name])
-                writer.flush()
-                os.fsync(writer.fileno())
-            os.chmod(runtime_staged[name], 0o400)
-            os.replace(runtime_staged[name], lock.parent / name)
-        sync_directory(lock.parent)
-    finally:
-        for path in (*staged.values(), lock_staged, *runtime_staged.values()):
-            unlink_if_present(path)
-
-    state = "unchanged" if existing == new_lock else ("replaced" if existing is not None else "written")
-    log("lock %s %s" % (lock, state))
-    for key, name, _ in ARTIFACTS:
-        log("%-9s %s sha256=%s size=%d" % (key, root / name, new_lock[key]["sha256"],
-                                           new_lock[key]["size"]))
-    if runtime_files:
-        pinned = json.loads(runtime_files[CW_RUNTIME_LOCK])
-        log("cw runtime %s image_index_sha256=%s pack sha256=%s" % (
-            lock.parent / CW_RUNTIME_LOCK, pinned["image_index_sha256"], pinned["pack"]["sha256"]))
+def install(kernel: Path, initramfs: Path, replace: bool, cw: str, cw_runtime=None) -> int:
+    with tempfile.TemporaryDirectory(prefix="cw-local-runtime-") as scratch:
+        release = pack(kernel, initramfs, Path(scratch) / "release", cw_runtime)
+        run([cw, "setup", "--local", "--from", str(release)] + (["--replace"] if replace else []))
     return 0
 
 
-def main(argv=None, environ=None) -> int:
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--kernel", default="", help="absolute path to the arm64 Linux kernel Image")
     parser.add_argument("--initramfs", default="", help="absolute path to the arm64 guest root")
-    parser.add_argument("--replace", action="store_true", help="replace a different existing macOS lock")
+    parser.add_argument("--replace", action="store_true", help="replace a different installed runtime")
     parser.add_argument("--cw-runtime", default="",
                         help="absolute directory holding a sealed aarch64 cw-runtime.lock.json and runtime.pack")
+    parser.add_argument("--pack", default="", help="only write the release directory to this new path")
+    parser.add_argument("--cw", default="cw", help="the cw that installs the runtime (default: cw on PATH)")
     args = parser.parse_args(argv)
     try:
         kernel = input_file(args.kernel, "KERNEL")
@@ -529,8 +437,13 @@ def main(argv=None, environ=None) -> int:
             cw_runtime = Path(args.cw_runtime)
             if not cw_runtime.is_absolute() or not cw_runtime.is_dir():
                 raise InstallError("CW_RUNTIME must be an absolute directory: %s" % args.cw_runtime)
-        return install(kernel, initramfs, args.replace, os.environ if environ is None else environ,
-                       cw_runtime)
+        if args.pack:
+            release = Path(args.pack)
+            if not release.is_absolute():
+                raise InstallError("--pack must be an absolute path: %s" % args.pack)
+            pack(kernel, initramfs, release, cw_runtime)
+            return 0
+        return install(kernel, initramfs, args.replace, args.cw, cw_runtime)
     except (InstallError, OSError) as error:
         print("macos-local-runtime: ERROR: %s" % error, file=sys.stderr)
         return 1

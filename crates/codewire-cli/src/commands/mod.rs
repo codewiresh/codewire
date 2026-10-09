@@ -168,6 +168,29 @@ pub(crate) struct SetupArgs {
     org_slug: Option<String>,
     #[arg(long, help = "Skip OpenSSH config update")]
     skip_ssh: bool,
+    /// Install and verify the local VM runtime instead of signing in.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[arg(
+        long,
+        conflicts_with_all = ["org", "create_org", "org_slug", "skip_ssh"],
+        help = "Install and verify the local VM runtime instead of signing in"
+    )]
+    pub(crate) local: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[arg(
+        long,
+        value_name = "DIR",
+        requires = "local",
+        help = "Install the local VM runtime from this release directory"
+    )]
+    pub(crate) from: Option<std::path::PathBuf>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[arg(
+        long,
+        requires = "local",
+        help = "Replace a different installed local VM runtime"
+    )]
+    pub(crate) replace: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

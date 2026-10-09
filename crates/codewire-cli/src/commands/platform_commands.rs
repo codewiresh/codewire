@@ -462,6 +462,10 @@ pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> 
 }
 
 pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> anyhow::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if args.local {
+        return super::native::setup_local_runtime(args.from, args.replace).await;
+    }
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
     let server_url = resolve_setup_server_url(globals, &paths, &env);

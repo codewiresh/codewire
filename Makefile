@@ -389,10 +389,11 @@ cli-install-system:
 	$(MAKE) -C apps/cli install-system
 
 # Apple Silicon only: build and ad-hoc sign the VZ helper, check the supplied
-# arm64 kernel Image and guest root, and install all three with the artifact
-# lock cw reads (docs/dev/MACOS-CLI.md). REPLACE=1 replaces a different lock.
+# arm64 kernel Image and guest root, pack them as a release directory and
+# install it with `cw setup --local` (docs/dev/MACOS-CLI.md). REPLACE=1
+# replaces a different installed runtime; CW=/abs/cw picks the installing cw.
 macos-local-runtime:
-	python3 scripts/dev/macos-local-runtime.py --kernel "$(KERNEL)" --initramfs "$(INITRAMFS)" $(if $(CW_RUNTIME),--cw-runtime "$(CW_RUNTIME)") $(if $(filter 1,$(REPLACE)),--replace)
+	python3 scripts/dev/macos-local-runtime.py --kernel "$(KERNEL)" --initramfs "$(INITRAMFS)" $(if $(CW_RUNTIME),--cw-runtime "$(CW_RUNTIME)") $(if $(filter 1,$(REPLACE)),--replace) $(if $(CW),--cw "$(CW)")
 
 # Build the workspace daemon support image for kind/local runtime smoke.
 build-daemon:

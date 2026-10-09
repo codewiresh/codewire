@@ -1733,6 +1733,53 @@ fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
     })
 }
 
+/// `cw setup --local`: install and verify the local VM runtime that belongs
+/// to this cw (#2492). The guest root renders session environments, so a
+/// runtime built from other source is refused.
+pub(crate) async fn setup_local_runtime(
+    from: Option<PathBuf>,
+    replace: bool,
+) -> anyhow::Result<()> {
+    use codewire_local_vmm::runtime_install::{
+        self, DirectoryBlobSource, InstallOutcome, RuntimePaths,
+    };
+    let from = from.context(
+        "releases do not publish the local VM runtime yet; pass --from DIR with a release directory",
+    )?;
+    let source = DirectoryBlobSource::new(&from);
+    let document = source
+        .document()
+        .with_context(|| format!("read the local VM runtime in {}", from.display()))?;
+    match crate::build_record::embedded()?.source_revision {
+        Some(revision) if revision != document.source_revision => anyhow::bail!(
+            "this local VM runtime was built from {}, but this cw from {revision}; install the runtime from the same release",
+            document.source_revision
+        ),
+        Some(_) => {}
+        None => eprintln!(
+            "Warning: this cw has no source provenance, so the runtime's source {} is not checked against it.",
+            document.source_revision
+        ),
+    }
+    let config = native_runtime_config()?;
+    let paths = RuntimePaths {
+        artifact_root: config.artifact_root,
+        artifact_lock: config.artifact_lock,
+    };
+    match runtime_install::install(&paths, &document, &source, replace).await? {
+        InstallOutcome::Installed { generation } => {
+            println!("Local VM runtime installed ({}).", &generation[..12]);
+        }
+        InstallOutcome::AlreadyInstalled { generation } => {
+            println!(
+                "Local VM runtime is installed and intact ({}).",
+                &generation[..12]
+            );
+        }
+    }
+    Ok(())
+}
+
 fn absolute_override(name: &str) -> anyhow::Result<Option<PathBuf>> {
     let Some(value) = env::var_os(name).filter(|value| !value.is_empty()) else {
         return Ok(None);

@@ -782,6 +782,26 @@ fn setup_parser_accepts_noninteractive_flags() {
     assert!(args.skip_ssh);
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn setup_local_installs_the_runtime_without_signing_in() {
+    let cli = Cli::try_parse_from(["cw", "setup", "--local", "--from", "/abs/release", "--replace"])
+        .unwrap();
+    let Command::Setup(args) = cli.command else {
+        panic!("expected setup command");
+    };
+    assert!(args.local && args.replace);
+    assert_eq!(args.from.as_deref(), Some(std::path::Path::new("/abs/release")));
+    for command in [
+        vec!["cw", "setup", "--from", "/abs/release"],
+        vec!["cw", "setup", "--replace"],
+        vec!["cw", "setup", "--local", "--org", "codewire"],
+        vec!["cw", "setup", "--local", "--skip-ssh"],
+    ] {
+        assert!(Cli::try_parse_from(command.clone()).is_err(), "{command:?}");
+    }
+}
+
 #[test]
 fn removed_platform_github_commands_and_setup_flags_are_rejected() {
     for command in [

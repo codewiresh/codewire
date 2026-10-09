@@ -81,14 +81,19 @@ def macho(tag: bytes) -> bytes:
 SIGNATURE = b"\nFAKE-ADHOC-SIGNATURE\n"
 
 
+REVISION = "c" * 40
+
+
 class FakeTools:
-    """In-process stand-ins for `swift build` and `/usr/bin/codesign`."""
+    """In-process stand-ins for `swift build`, `/usr/bin/codesign`, git and cw."""
 
     def __init__(self, scratch: Path):
         self.bin = scratch / "swift-bin"
         self.calls = []
         self.helper = macho(b"helper-one")
         self.signed_entitlements = None
+        self.cw_status = 0
+        self.installed = None
 
     def run(self, argv, **_kwargs):
         self.calls.append(list(argv))
@@ -109,15 +114,20 @@ class FakeTools:
             if SIGNATURE not in data:
                 return subprocess.CompletedProcess(argv, 1, stdout=b"")
             return subprocess.CompletedProcess(argv, 0, stdout=data.split(SIGNATURE, 1)[1])
+        if argv[:2] == ["git", "-C"] and argv[3:] == ["rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=REVISION.encode() + b"\n")
+        if argv[1:4] == ["setup", "--local", "--from"]:
+            release = Path(argv[4])
+            self.installed = {str(path.relative_to(release)): path.read_bytes()
+                              for path in sorted(release.rglob("*")) if path.is_file()}
+            return subprocess.CompletedProcess(argv, self.cw_status, stdout=None)
         raise AssertionError("unexpected command %r" % (argv,))
 
 
-class InstallTests(unittest.TestCase):
+class PackTests(unittest.TestCase):
     def setUp(self):
         self.scratch = Path(os.path.realpath(tempfile.mkdtemp(prefix="cw-macos-runtime-test-")))
         self.addCleanup(shutil.rmtree, self.scratch)
-        self.home = self.scratch / "home"
-        self.home.mkdir()
         self.inputs = self.scratch / "inputs"
         self.inputs.mkdir()
         self.kernel = self.inputs / "Image"
@@ -129,10 +139,7 @@ class InstallTests(unittest.TestCase):
         for program in runtime.E2FSPROGS_PROGRAMS:
             (self.e2fsprogs / program).write_bytes(b"")
         self.tools = FakeTools(self.scratch)
-        self.environ = {"HOME": str(self.home)}
-        self.parent = self.home / ".cache/codewire/local-vmm-v1"
-        self.root = self.parent / "artifacts"
-        self.lock = self.parent / "artifacts.lock.json"
+        self.release = self.scratch / "release"
         for patch in (
             mock.patch.object(runtime.platform, "system", return_value="Darwin"),
             mock.patch.object(runtime.platform, "machine", return_value="arm64"),
@@ -142,92 +149,97 @@ class InstallTests(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def install(self, *extra, kernel=None, initramfs=None):
+    def main(self, *extra, kernel=None, initramfs=None):
         argv = ["--kernel", str(kernel if kernel is not None else self.kernel),
                 "--initramfs", str(initramfs if initramfs is not None else self.initramfs), *extra]
         stdout, stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            status = runtime.main(argv, environ=self.environ)
+            status = runtime.main(argv)
         return status, stdout.getvalue(), stderr.getvalue()
 
-    def assert_installed(self, root, lock, cw_runtime=False):
-        document = json.loads(lock.read_text())
-        self.assertEqual(list(document), ["schema_version", "vz_runner", "kernel", "initramfs"])
-        self.assertEqual(document["schema_version"], 1)
-        for key, name, mode in runtime.ARTIFACTS:
-            installed = root / name
-            data = installed.read_bytes()
-            self.assertEqual(document[key], {"path": name, "size": len(data),
-                                             "sha256": hashlib.sha256(data).hexdigest(),
-                                             "architecture": "aarch64"})
-            self.assertEqual(stat.S_IMODE(installed.stat().st_mode), mode)
-            self.assertEqual(installed.stat().st_nlink, 1)
-        self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o400)
-        for directory in (root, lock.parent):
-            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
-        self.assertEqual(sorted(path.name for path in root.iterdir()),
-                         sorted(name for _, name, _ in runtime.ARTIFACTS))
-        runtime_files = ["cw-runtime.lock.json", "runtime.pack"] if cw_runtime else []
-        self.assertEqual(sorted(path.name for path in lock.parent.iterdir()),
-                         sorted([root.name, lock.name, *runtime_files]))
-        self.assertEqual((root / "kernel").read_bytes(), self.kernel.read_bytes())
-        self.assertEqual((root / "initramfs").read_bytes(), self.initramfs.read_bytes())
-        return document
+    def pack(self, *extra, **inputs):
+        return self.main("--pack", str(self.release), *extra, **inputs)
 
-    def snapshot(self, directory):
-        return {str(path.relative_to(directory)): path.read_bytes()
-                for path in sorted(directory.rglob("*")) if path.is_file()}
-
-    def test_installs_signed_helper_kernel_and_guest_root_with_darwin_lock(self):
-        status, stdout, stderr = self.install()
-        self.assertEqual(status, 0, stderr)
-        document = self.assert_installed(self.root, self.lock)
-        helper = (self.root / runtime.PRODUCT).read_bytes()
+    def assert_release(self, files, cw_runtime=None):
+        """`files` maps release-relative paths to bytes; returns the document."""
+        document = json.loads(files[runtime.LOCAL_RUNTIME_DOCUMENT])
+        self.assertEqual(document["schema"], "codewire.cw.local-runtime/v1")
+        self.assertEqual(document["source_revision"], REVISION)
+        self.assertEqual(list(document["targets"]), ["macos-aarch64"])
+        target = document["targets"]["macos-aarch64"]
+        lock = target["lock"]
+        self.assertEqual(list(lock), ["schema_version", "vz_runner", "kernel", "initramfs"])
+        self.assertEqual(lock["schema_version"], 1)
+        blobs = {name[len("blobs/sha256/"):]: data for name, data in files.items()
+                 if name.startswith("blobs/sha256/")}
+        for key, name, _mode in runtime.ARTIFACTS:
+            data = blobs[lock[key]["sha256"]]
+            self.assertEqual(lock[key], {"path": name, "size": len(data),
+                                         "sha256": hashlib.sha256(data).hexdigest(),
+                                         "architecture": "aarch64"})
+        self.assertEqual(blobs[lock["kernel"]["sha256"]], self.kernel.read_bytes())
+        self.assertEqual(blobs[lock["initramfs"]["sha256"]], self.initramfs.read_bytes())
+        helper = blobs[lock["vz_runner"]["sha256"]]
         self.assertTrue(helper.startswith(self.tools.helper))
         self.assertTrue(helper.endswith(runtime.ENTITLEMENTS.read_bytes()))
+        if cw_runtime is None:
+            self.assertNotIn("cw_runtime", target)
+            self.assertEqual(len(blobs), 3)
+        else:
+            for name, key in ((runtime.CW_RUNTIME_LOCK, "lock"), (runtime.CW_RUNTIME_PACK, "pack")):
+                data = (cw_runtime / name).read_bytes()
+                self.assertEqual(target["cw_runtime"][key], {"sha256": hashlib.sha256(data).hexdigest(),
+                                                             "size": len(data)})
+                self.assertEqual(blobs[target["cw_runtime"][key]["sha256"]], data)
+        return document
+
+    def snapshot(self):
+        return {str(path.relative_to(self.release)): path.read_bytes()
+                for path in sorted(self.release.rglob("*")) if path.is_file()}
+
+    def test_packs_the_signed_helper_kernel_and_guest_root(self):
+        status, stdout, stderr = self.pack()
+        self.assertEqual(status, 0, stderr)
+        self.assert_release(self.snapshot())
+        self.assertEqual(stat.S_IMODE(self.release.stat().st_mode), 0o700)
         package = str(runtime.PACKAGE)
         self.assertEqual(self.tools.calls[0], ["swift", "build", "-c", "release", "--package-path", package])
         self.assertEqual(self.tools.calls[1][-1], "--show-bin-path")
-        sign = self.tools.calls[2]
+        sign = [call for call in self.tools.calls if call[:2] == ["/usr/bin/codesign", "--force"]][0]
         self.assertEqual(sign[:7], ["/usr/bin/codesign", "--force", "--sign", "-",
                                     "--identifier", "codewire-vz-runner", "--entitlements"])
         self.assertEqual(sign[7], str(REPOSITORY / "crates/codewire-local-vmm/macos-vz-runner/developer-entitlements.plist"))
-        self.assertEqual(self.tools.calls[3][:5], ["/usr/bin/codesign", "-d", "--entitlements", "-", "--xml"])
-        self.assertIn("lock %s written" % self.lock, stdout)
-        self.assertIn(document["vz_runner"]["sha256"], stdout)
-
-        status, stdout, stderr = self.install()
-        self.assertEqual(status, 0, stderr)
-        self.assertIn("lock %s unchanged" % self.lock, stdout)
-        self.assertEqual(json.loads(self.lock.read_text()), document)
+        self.assertIn("packed %s (source %s)" % (self.release, REVISION), stdout)
+        self.assertIsNone(self.tools.installed, "--pack must not install")
+        # A pack never reuses an existing directory.
+        status, _stdout, stderr = self.pack()
+        self.assertEqual(status, 1)
+        self.assertIn("already exists; pack into a new directory", stderr)
 
     def live_guest_root(self):
         self.initramfs.write_bytes(guest_root(init=elf() + b"init" + runtime.LIVE_RUNTIME_CAPABILITY_MARKER))
 
-    def test_installs_a_sealed_arm64_cw_runtime_beside_the_lock(self):
+    def test_installs_through_cw_setup_local(self):
+        status, _stdout, stderr = self.main("--replace", "--cw", "/opt/dev/cw")
+        self.assertEqual(status, 0, stderr)
+        install = [call for call in self.tools.calls if call[1:3] == ["setup", "--local"]]
+        self.assertEqual(len(install), 1)
+        self.assertEqual(install[0][0], "/opt/dev/cw")
+        self.assertEqual(install[0][3], "--from")
+        self.assertEqual(install[0][5:], ["--replace"])
+        self.assert_release(self.tools.installed)
+        self.assertFalse(Path(install[0][4]).exists(), "the packed release is temporary")
+        self.tools.cw_status = 1
+        status, _stdout, stderr = self.main()
+        self.assertEqual(status, 1)
+        self.assertIn("command exited 1: cw setup --local --from", stderr)
+
+    def test_packs_a_sealed_arm64_cw_runtime(self):
         self.live_guest_root()
         source = cw_runtime(self.inputs / "runtime")
-        status, stdout, stderr = self.install("--cw-runtime", str(source))
+        status, _stdout, stderr = self.pack("--cw-runtime", str(source))
         self.assertEqual(status, 0, stderr)
-        self.assert_installed(self.root, self.lock, cw_runtime=True)
-        for name in ("cw-runtime.lock.json", "runtime.pack"):
-            installed = self.parent / name
-            self.assertEqual(installed.read_bytes(), (source / name).read_bytes())
-            self.assertEqual(stat.S_IMODE(installed.stat().st_mode), 0o400)
-        self.assertIn("cw runtime %s image_index_sha256=%s" % (self.parent / "cw-runtime.lock.json", "1" * 64),
-                      stdout)
-        # Rerunning without CW_RUNTIME leaves the installed runtime in place.
-        self.assertEqual(self.install()[0], 0)
-        self.assert_installed(self.root, self.lock, cw_runtime=True)
-        before = self.snapshot(self.parent)
-        other = cw_runtime(self.inputs / "other", payload=elf() + b"other cw")
-        status, _stdout, stderr = self.install("--cw-runtime", str(other))
-        self.assertEqual(status, 1)
-        self.assertIn("already pins a different cw runtime; rerun with --replace", stderr)
-        self.assertEqual(self.snapshot(self.parent), before)
-        status, _stdout, stderr = self.install("--cw-runtime", str(other), "--replace")
-        self.assertEqual(status, 0, stderr)
-        self.assertEqual((self.parent / "runtime.pack").read_bytes(), (other / "runtime.pack").read_bytes())
+        self.assert_release(self.snapshot(), cw_runtime=source)
 
     def test_invalid_cw_runtime_or_guest_root_fails_before_effects(self):
         self.live_guest_root()
@@ -249,112 +261,24 @@ class InstallTests(unittest.TestCase):
                 if root is not None:
                     initramfs = self.inputs / "old-initramfs.cpio"
                     initramfs.write_bytes(root)
-                status, _stdout, stderr = self.install("--cw-runtime", str(source), initramfs=initramfs)
+                status, _stdout, stderr = self.pack("--cw-runtime", str(source), initramfs=initramfs)
                 self.assertEqual(status, 1)
                 self.assertIn(message, stderr)
-                self.assertEqual(list(self.home.iterdir()), [])
+                self.assertFalse(self.release.exists())
                 self.assertEqual(self.tools.calls, [])
-        status, _stdout, stderr = self.install("--cw-runtime", "relative")
+        status, _stdout, stderr = self.pack("--cw-runtime", "relative")
         self.assertEqual(status, 1)
         self.assertIn("CW_RUNTIME must be an absolute directory", stderr)
-
-    def test_different_lock_requires_replace(self):
-        self.assertEqual(self.install()[0], 0)
-        before = self.snapshot(self.parent)
-        self.tools.helper = macho(b"helper-two")
-        status, _stdout, stderr = self.install()
+        status, _stdout, stderr = self.main("--pack", "relative")
         self.assertEqual(status, 1)
-        self.assertIn("already pins different artifacts; rerun with --replace", stderr)
-        self.assertEqual(self.snapshot(self.parent), before)
-
-        status, stdout, stderr = self.install("--replace")
-        self.assertEqual(status, 0, stderr)
-        self.assertIn("lock %s replaced" % self.lock, stdout)
-        document = self.assert_installed(self.root, self.lock)
-        self.assertTrue((self.root / runtime.PRODUCT).read_bytes().startswith(macho(b"helper-two")))
-        self.assertNotEqual(document, json.loads(before["artifacts.lock.json"]))
-
-    def test_unrecognized_lock_requires_replace(self):
-        self.root.mkdir(mode=0o700, parents=True)
-        self.parent.chmod(0o700)
-        self.lock.write_bytes(b"not json")
-        status, _stdout, stderr = self.install()
-        self.assertEqual(status, 1)
-        self.assertIn("--replace", stderr)
-        self.assertEqual(self.lock.read_bytes(), b"not json")
-        self.assertEqual(list(self.root.iterdir()), [])
-        self.assertEqual(self.install("--replace")[0], 0)
-        self.assert_installed(self.root, self.lock)
-
-    def test_linux_lock_is_left_untouched_even_with_replace(self):
-        self.root.mkdir(mode=0o700, parents=True)
-        self.parent.chmod(0o700)
-        (self.root / "vmlinux").write_bytes(b"linux kernel")
-        linux = json.dumps({"schema_version": 1, "cloud_hypervisor": {}, "kernel": {},
-                            "initramfs": {}}).encode()
-        self.lock.write_bytes(linux)
-        self.lock.chmod(0o400)
-        before = self.snapshot(self.parent)
-        for extra in ((), ("--replace",)):
-            status, _stdout, stderr = self.install(*extra)
-            self.assertEqual(status, 1)
-            self.assertIn("Linux (Cloud Hypervisor) artifact lock and is left untouched", stderr)
-            self.assertEqual(self.snapshot(self.parent), before)
-        self.assertEqual(self.tools.calls, [])
-
-    def test_artifact_environment_overrides_are_honored(self):
-        custom = self.scratch / "custom"
-        self.environ.update({runtime.ROOT_ENV: str(custom / "blobs"),
-                             runtime.LOCK_ENV: str(custom / "runtime.lock.json")})
-        status, _stdout, stderr = self.install()
-        self.assertEqual(status, 0, stderr)
-        self.assert_installed(custom / "blobs", custom / "runtime.lock.json")
-        self.assertFalse((self.home / ".cache").exists())
-
-    def test_one_override_keeps_the_other_default(self):
-        self.environ[runtime.ROOT_ENV] = str(self.parent / "alternate")
-        status, _stdout, stderr = self.install()
-        self.assertEqual(status, 0, stderr)
-        self.assert_installed(self.parent / "alternate", self.lock)
-
-    def test_invalid_artifact_locations_fail_before_effects(self):
-        cases = (
-            ({runtime.ROOT_ENV: "relative/artifacts"}, "must be an absolute path"),
-            ({runtime.ROOT_ENV: str(self.scratch / "a/artifacts"),
-              runtime.LOCK_ENV: str(self.scratch / "b/artifacts.lock.json")}, "share one parent"),
-            ({"HOME": ""}, "HOME is not set"),
-        )
-        for overrides, message in cases:
-            with self.subTest(message=message):
-                environ = dict(self.environ, **overrides)
-                with mock.patch.object(self, "environ", environ):
-                    status, _stdout, stderr = self.install()
-                self.assertEqual(status, 1)
-                self.assertIn(message, stderr)
-        link = self.scratch / "linked-home"
-        link.symlink_to(self.home)
-        self.environ["HOME"] = str(link)
-        status, _stdout, stderr = self.install()
-        self.assertEqual(status, 1)
-        self.assertIn("canonical path without symbolic links", stderr)
-        self.assertEqual(list(self.home.iterdir()), [])
-        self.assertEqual(self.tools.calls, [])
-
-    def test_private_directory_modes_are_required(self):
-        self.parent.mkdir(parents=True)
-        self.parent.chmod(0o755)
-        status, _stdout, stderr = self.install()
-        self.assertEqual(status, 1)
-        self.assertIn("must be a directory you own with mode 0700 (chmod 700 %s)" % self.parent, stderr)
-        self.assertEqual(list(self.parent.iterdir()), [])
+        self.assertIn("--pack must be an absolute path", stderr)
 
     def test_missing_e2fsprogs_fails_before_effects(self):
         (self.e2fsprogs / "resize2fs").unlink()
-        status, _stdout, stderr = self.install()
+        status, _stdout, stderr = self.main()
         self.assertEqual(status, 1)
         self.assertIn("e2fsprogs is missing", stderr)
         self.assertIn("brew install e2fsprogs", stderr)
-        self.assertEqual(list(self.home.iterdir()), [])
         self.assertEqual(self.tools.calls, [])
 
     def test_missing_or_invalid_inputs_fail_before_effects(self):
@@ -367,26 +291,25 @@ class InstallTests(unittest.TestCase):
         )
         for arguments, message in cases:
             with self.subTest(message=message):
-                status, _stdout, stderr = self.install(**arguments)
+                status, _stdout, stderr = self.main(**arguments)
                 self.assertEqual(status, 1)
                 self.assertIn(message, stderr)
         compressed = self.inputs / "Image.gz"
         compressed.write_bytes(b"\x1f\x8b" + bytes(4094))
-        status, _stdout, stderr = self.install(kernel=compressed)
+        status, _stdout, stderr = self.main(kernel=compressed)
         self.assertIn("not an uncompressed arm64 Linux kernel Image", stderr)
         noncanonical = self.inputs / "extra.cpio"
         noncanonical.write_bytes(guest_root() + bytes(512))
-        status, _stdout, stderr = self.install(initramfs=noncanonical)
+        status, _stdout, stderr = self.main(initramfs=noncanonical)
         self.assertEqual(status, 1)
         self.assertIn("not the exact canonical archive", stderr)
         self.assertIn("--verify-root --target aarch64-unknown-linux-musl", stderr)
-        self.assertEqual(list(self.home.iterdir()), [])
         self.assertEqual(self.tools.calls, [])
 
     def test_wrong_host_fails_before_effects(self):
         with mock.patch.object(runtime.platform, "system", return_value="Linux"), \
                 mock.patch.object(runtime.platform, "machine", return_value="x86_64"):
-            status, _stdout, stderr = self.install()
+            status, _stdout, stderr = self.main()
         self.assertEqual(status, 1)
         self.assertIn("need an Apple Silicon Mac (this host is Linux x86_64)", stderr)
         self.assertEqual(self.tools.calls, [])
@@ -394,18 +317,18 @@ class InstallTests(unittest.TestCase):
     def test_helper_must_carry_exactly_the_developer_entitlements(self):
         self.tools.signed_entitlements = plistlib.dumps(
             {"com.apple.security.virtualization": True, "com.apple.security.get-task-allow": True})
-        status, _stdout, stderr = self.install()
+        status, _stdout, stderr = self.pack()
         self.assertEqual(status, 1)
         self.assertIn("does not carry exactly developer-entitlements.plist", stderr)
-        self.assertEqual(list(self.root.iterdir()), [])
-        self.assertFalse(self.lock.exists())
+        self.assertFalse((self.release / runtime.LOCAL_RUNTIME_DOCUMENT).exists())
+        self.assertIsNone(self.tools.installed)
 
     def test_helper_must_be_thin_arm64_macho(self):
         self.tools.helper = b"\xca\xfe\xba\xbe" + bytes(60)
-        status, _stdout, stderr = self.install()
+        status, _stdout, stderr = self.pack()
         self.assertEqual(status, 1)
         self.assertIn("not a thin arm64 Mach-O executable", stderr)
-        self.assertEqual(list(self.root.iterdir()), [])
+        self.assertFalse((self.release / runtime.LOCAL_RUNTIME_DOCUMENT).exists())
 
 
 class GuestRootTests(unittest.TestCase):
@@ -478,6 +401,16 @@ class SourceContractTests(unittest.TestCase):
         cw_runtime = self.read("crates/codewire-vmm-guest-probe/src/cw_runtime.rs")
         self.assertIn('CW_RUNTIME_PROVENANCE_ENTRY: &[u8] = b"codewire-cw/provenance.json";', cw_runtime)
 
+    def test_release_directory_follows_the_installer(self):
+        installer = self.read("crates/codewire-local-vmm/src/runtime_install.rs")
+        self.assertIn('LOCAL_RUNTIME_SCHEMA: &str = "%s";' % runtime.LOCAL_RUNTIME_SCHEMA, installer)
+        self.assertIn('LOCAL_RUNTIME_DOCUMENT: &str = "%s";' % runtime.LOCAL_RUNTIME_DOCUMENT, installer)
+        self.assertIn('format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)', installer)
+        self.assertEqual(runtime.TARGET, "macos-aarch64")
+        self.assertIn('.join("blobs").join("sha256").join(sha256)', installer)
+        self.assertIn('CW_RUNTIME_LOCK: &str = "%s";' % runtime.CW_RUNTIME_LOCK, installer)
+        self.assertIn('CW_RUNTIME_PACK: &str = "%s";' % runtime.CW_RUNTIME_PACK, installer)
+
     def test_admission_and_paths_follow_the_runtime(self):
         artifact = self.read("crates/codewire-local-vmm/src/artifact.rs")
         self.assertIn('ArtifactArchitecture::Aarch64 => bytes.len() >= 0x3c && &bytes[0x38..0x3c] == b"ARM\\x64"', artifact)
@@ -485,6 +418,9 @@ class SourceContractTests(unittest.TestCase):
         self.assertIn("Self::Aarch64 => 183,", artifact)
         self.assertRegex(artifact, r"pub vz_runner: ArtifactSpec,\s*pub kernel: ArtifactSpec,\s*pub initramfs: ArtifactSpec,")
         self.assertIn("Some(if executable { 0o500 } else { 0o400 })", artifact)
+        installer = self.read("crates/codewire-local-vmm/src/runtime_install.rs")
+        self.assertIn("const EXECUTABLE_MODE: u32 = 0o500;", installer)
+        self.assertIn("const DATA_MODE: u32 = 0o400;", installer)
         darwin = self.read("crates/codewire-local-vmm/src/darwin/mod.rs")
         directories = re.search(r"E2FSPROGS_DIRECTORIES: \[&str; \d+\] = \[(.*?)\];", darwin, re.DOTALL)
         self.assertEqual(runtime.E2FSPROGS_DIRECTORIES, tuple(re.findall(r'"([^"]+)"', directories.group(1))))
@@ -504,11 +440,6 @@ class SourceContractTests(unittest.TestCase):
         live = self.read("crates/codewire-vmm-guest-probe/src/cw_runtime_live.rs")
         self.assertIn('LIVE_RUNTIME_CAPABILITY_MARKER: &[u8] = b"%s\\0";'
                       % runtime.LIVE_RUNTIME_CAPABILITY_MARKER[:-1].decode(), live)
-        native = self.read("crates/codewire-cli/src/commands/native.rs")
-        self.assertIn('NATIVE_ARTIFACT_ROOT_ENV: &str = "%s";' % runtime.ROOT_ENV, native)
-        self.assertIn('NATIVE_ARTIFACT_LOCK_ENV: &str = "%s";' % runtime.LOCK_ENV, native)
-        self.assertIn('home.join(".cache").join("codewire").join("local-vmm-v1")', native)
-        self.assertIn('artifact_parent.join("artifacts.lock.json")', native)
         self.assertTrue(runtime.ENTITLEMENTS.is_file())
         self.assertEqual(plistlib.loads(runtime.ENTITLEMENTS.read_bytes()),
                          {"com.apple.security.virtualization": True})
