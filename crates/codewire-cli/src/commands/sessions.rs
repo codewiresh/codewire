@@ -749,10 +749,11 @@ pub(crate) async fn handle_stop_command(
         return super::member_control::managed::stop(globals, args).await;
     }
     let (target, session) = resolve_selected_session(globals, &args.target).await?;
+    let environment = (args.target.len() == 2).then(|| args.target[0].as_str());
     #[cfg(unix)]
     if matches!(target, EnvironmentSessionTarget::Platform { .. }) && managed_session(&session) {
         let stopped = agents::platform_host::control_session(
-            target,
+            target.clone(),
             &session,
             args.request_id.as_deref(),
             args.expected_launch_generation,
@@ -760,7 +761,9 @@ pub(crate) async fn handle_stop_command(
             codewire_client::platform_agents::EnvironmentAgentAction::Stop,
         )
         .await?;
-        return print_environment_sessions(std::slice::from_ref(&stopped), args.output);
+        print_environment_sessions(std::slice::from_ref(&stopped), args.output)?;
+        report_running_children(&target, &session, environment).await;
+        return Ok(());
     }
     anyhow::ensure!(
         args.request_id.is_none()
@@ -771,14 +774,54 @@ pub(crate) async fn handle_stop_command(
     #[cfg(target_os = "linux")]
     if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) && managed_session(&session) {
         let stopped = agents::stop_native_managed(&target, &session).await?;
-        return print_environment_sessions(std::slice::from_ref(&stopped), args.output);
+        print_environment_sessions(std::slice::from_ref(&stopped), args.output)?;
+        report_running_children(&target, &session, environment).await;
+        return Ok(());
     }
     let stopped = target.stop(&session.session_id).await?;
     print_environment_sessions(std::slice::from_ref(&stopped), args.output)?;
     if !session_is_terminal(&stopped) || stopped.cleanup_unknown {
         anyhow::bail!("session stop is not confirmed: {}", stopped.status_message);
     }
+    report_running_children(&target, &session, environment).await;
     Ok(())
+}
+
+/// Stopping a parent never stops its children; name any still running so
+/// they are not left behind unnoticed.
+async fn report_running_children(
+    target: &EnvironmentSessionTarget,
+    parent: &EnvironmentSessionView,
+    environment: Option<&str>,
+) {
+    let Ok(sessions) = target.list().await else {
+        return;
+    };
+    for line in running_children_hints(&sessions, &parent.session_id, environment) {
+        eprintln!("{line}");
+    }
+}
+
+pub(super) fn running_children_hints(
+    sessions: &[EnvironmentSessionView],
+    parent_session_id: &str,
+    environment: Option<&str>,
+) -> Vec<String> {
+    let scope = environment.map(|e| format!("{e} ")).unwrap_or_default();
+    sessions
+        .iter()
+        .filter(|s| s.parent_session_id == parent_session_id && !session_is_terminal(s))
+        .map(|child| {
+            let name = if child.name.is_empty() {
+                &child.session_id
+            } else {
+                &child.name
+            };
+            format!(
+                "cw: child session {name} is still running; stop it with `cw stop {scope}{name}`"
+            )
+        })
+        .collect()
 }
 
 pub(crate) async fn handle_restart_command(

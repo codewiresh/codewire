@@ -259,6 +259,11 @@ fn session_table_aligns_columns_and_names_the_parent() {
         session("session-3", "orphan", "session-9", "sleep 5"),
     ];
     assert_eq!(
+        running_children_hints(&sessions, "session-1", Some("team")),
+        ["cw: child session session-2 is still running; stop it with `cw stop team session-2`"]
+    );
+    assert!(running_children_hints(&sessions, "session-2", None).is_empty());
+    assert_eq!(
         format_environment_sessions(&sessions, "  "),
         concat!(
             "  NAME    STATE    PARENT     SESSION    COMMAND\n",
