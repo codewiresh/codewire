@@ -12,7 +12,7 @@ expected_object='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 expected_target='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 mkdir "$TMP/assets" "$TMP/bin"
 printf 'fixture release asset\n' >"$TMP/assets/cw-v9.9.9-x86_64-unknown-linux-musl"
-printf 'fixture-github\n' >"$TMP/github-token"
+printf 'ghs_fixture.github-installation~token+0123\n' >"$TMP/github-token"
 chmod 0600 "$TMP/github-token"
 
 cat >"$TMP/bin/mirror-canonical-tag" <<'SH'
@@ -43,7 +43,7 @@ while [ "$#" -gt 0 ]; do
     --config)
       [ -f "$2" ]
       [ "$(stat -c '%a' -- "$2")" = 600 ]
-      grep -Fq 'header = "Authorization: Bearer fixture-github"' "$2"
+      grep -Fq 'header = "Authorization: Bearer ghs_fixture.github-installation~token+0123"' "$2"
       shift 2
       ;;
     -o)
@@ -171,10 +171,34 @@ grep -Fxq 'origin https://github.com/codewiresh/codewire.git refs/tags/v9.9.9' \
   "$TMP/mirror.log"
 grep -Fq 'https://git.example.invalid/api/v1/repos/codewire/codewire/releases/tags/v9.9.9' "$direct_log"
 grep -Fq 'https://api.github.com/repos/codewiresh/codewire/releases/tags/v9.9.9' "$direct_log"
-if grep -Fq 'fixture-github' "$arg_log"; then
+if grep -Fq 'ghs_fixture.github-installation~token+0123' "$arg_log"; then
   echo 'publish release test failed: GitHub token reached curl arguments' >&2
   exit 1
 fi
+
+# The token only has to be header-safe; a GitHub format change (here a period,
+# tilde and plus) must not break publication, but quoting characters must.
+for bad in 'ghs_fixture"token0123456789' 'ghs_fixture\\token0123456789' 'ghs_fixture token0123456789' 'short_token'; do
+  printf '%s\n' "$bad" >"$TMP/github-token-bad"
+  chmod 0600 "$TMP/github-token-bad"
+  if bad_output="$(
+    FIXTURE_CURL="$TMP/bin/curl" \
+      GITEA_TOKEN=fixture-gitea \
+      GITHUB_SERVER_URL=https://git.example.invalid \
+      GITHUB_REPOSITORY=codewire/codewire \
+      GH_MIRROR_TOKEN_FILE="$TMP/github-token-bad" \
+      MIRROR_CANONICAL_TAG_BIN="$TMP/bin/mirror-canonical-tag" \
+      FIXTURE_MIRROR_LOG="$TMP/mirror.log" \
+      CW_REQUIRE_GITHUB_MIRROR=1 \
+      CW_RELEASE_SOURCE_SHA="$expected_target" \
+      CW_RELEASE_TAG_OBJECT_SHA="$expected_object" \
+      bash "$PUBLISH" v9.9.9 "$TMP/assets" 2>&1
+  )"; then
+    echo 'publish release test failed: a header-unsafe token unexpectedly passed' >&2
+    exit 1
+  fi
+  grep -Fq 'GH_MIRROR_TOKEN_FILE contains a malformed token' <<<"$bad_output"
+done
 
 chmod 0644 "$TMP/github-token"
 if mode_output="$(
