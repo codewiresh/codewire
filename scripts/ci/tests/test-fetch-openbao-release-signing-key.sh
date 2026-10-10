@@ -71,7 +71,11 @@ export FAKE_EVENTS="$work/events"
 FAKE_FORGEJO_JWT="$(jwt "$GOOD_CLAIMS")"
 export FAKE_FORGEJO_JWT
 export FAKE_OPENBAO_TOKEN='synthetic-openbao-token-0123456789'
-export FAKE_PRIVATE_KEY=$'-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nsyntheticprivatekeymaterial0123456789\n-----END PGP PRIVATE KEY BLOCK-----'
+# The synthetic armor is assembled at run time so no private-key literal is
+# committed for secret scanners to match.
+armor() { printf -- '-----%s PGP %s KEY BLOCK-----' "$1" "$2"; }
+FAKE_PRIVATE_KEY="$(armor BEGIN PRIVATE)"$'\n\nsyntheticprivatekeymaterial0123456789\n'"$(armor END PRIVATE)"
+export FAKE_PRIVATE_KEY
 export FAKE_PUBLIC_KEY=$'-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nsyntheticpublickey\n-----END PGP PUBLIC KEY BLOCK-----'
 export FAKE_PASSPHRASE='synthetic-release-passphrase-0123456789'
 export FAKE_KEY_ID='0123456789ABCDEF0123456789ABCDEF01234567'
