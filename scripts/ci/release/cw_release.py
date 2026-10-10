@@ -63,7 +63,7 @@ CHANNELS = ("stable",)
 # Production trust: the checked-in release key and its exact fingerprint, the
 # same pair apps/cli/install.sh pins. Tests pass their own Trust explicitly.
 PRODUCTION_KEY = ROOT / "apps/cli/GPG_PUBLIC_KEY.asc"
-PRODUCTION_FINGERPRINT = "39F95DC66BA8EFBEAF49FAEF39D46239F95F4632"
+PRODUCTION_FINGERPRINT = "A38FF6BC6623FCA611A7A32B5EFBF0F4A5870815"
 # Source-digest inputs: the Rust/protocol patterns, every other file Cargo
 # compiles into cw, and the producers that turn those bytes into identities.
 # A build whose dep-info names any other repository file is refused.
