@@ -12,16 +12,18 @@ cargo build -p codewire-cli-bin --bin cw
 
 The binary is written to `target/debug/cw`.
 
-## Private-preview install and release verification
-
-Install from an authorized source checkout:
+## Install
 
 ```bash
-make cli-install
+curl -fsSL https://codewire.sh/install.sh | sh
 ```
 
-Signed release assets use the public key committed with the selected source.
-From the repository root:
+The installer needs only a POSIX shell, curl and a SHA-256 tool, so it works on
+a stock Mac. It installs a managed cw that `cw update` keeps current. From an
+authorized source checkout, `make cli-install` builds and installs the same way.
+
+cw verifies every release with its compiled key. To check release assets by
+hand, from the repository root:
 
 ```bash
 gpg --import apps/cli/GPG_PUBLIC_KEY.asc
@@ -155,32 +157,25 @@ Sandbox provider credentials stay with the selected external credential profile.
 
 ## Updating cw without restarting
 
-Install this executable into the ordinary-user version store:
+The installer and `make cli-install` both create a managed installation
+(`cw install --managed` does the same for a cw you built yourself):
 
 ```bash
-cw install --managed
+cw update                 # follow the stable channel
 cw update status
-cw update --from ./verified-release --sha256 <cw-sha256> --expect-generation <generation>
+cw update --version v1.2.3 --expect-generation <generation>
 cw update rollback --expect-generation <generation>
+cw update --from ./verified-release --sha256 <cw-sha256> --expect-generation <generation>
 ```
 
-The release directory contains `cw` and its `cw-runtime.json` identity.
 New invocations use the selected version; running processes keep their original
 executable. Read the current generation from `cw update status` before each
-selection change.
+selection change. A `--from` release directory contains `cw` and its
+`cw-runtime.json` identity.
 
-After public delivery at `releases.codewire.sh` is activated, choose a signed
-release or the stable channel:
-
-```bash
-cw update --version v1.2.3 --expect-generation <generation>
-cw update --channel stable --expect-generation <generation>
-```
-
-cw verifies the signed release with its compiled release key, without
-GnuPG, and checks the executable before selecting it; stable refuses
-downgrades and different bytes with the same version. Public delivery is not
-activated yet.
+cw verifies the signed release from `releases.codewire.sh` with its compiled
+release key, without GnuPG, and checks the executable before selecting it;
+stable refuses downgrades and different bytes with the same version.
 
 For cw inside a running native Linux VM:
 
