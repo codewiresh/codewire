@@ -136,13 +136,24 @@ configuration file, and each becomes an environment-owned point-in-time copy.
 Multi-repository entries use the same normalized project model as the platform.
 `image` in `codewire.yaml` and `--image` select any valid OCI workspace image. A
 `ports` entry with `port` declares a guest application port. A `host_port` and
-`guest_port` pair also publishes it for the VM lifetime on the host loopback
-address only:
+`guest_port` pair also publishes it on the host loopback address only:
 
 ```yaml
 ports:
   - host_port: 18080
     guest_port: 8080
+```
+
+A running local environment can publish or withdraw ports without a restart,
+including guest ports `codewire.yaml` does not declare. A stopped one records
+the change and binds it at its next start; changes persist across restarts.
+Only declared ports are reachable over Mesh.
+
+```bash
+cw env port add --local 47321 --env NAME                    # 127.0.0.1:47321 -> 47321
+cw env port add --local 8080 --host-port 18081 --env NAME   # 127.0.0.1:18081 -> 8080
+cw env port ls --local --env NAME
+cw env port rm --local 18081 --env NAME                     # by host port
 ```
 
 Native local environments join Mesh only when `--network NAME` is explicit or
