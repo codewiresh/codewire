@@ -76,7 +76,9 @@ impl Fixture {
         assert!(codewire_daemon_proto::ssh::valid_request_id(
             &request.request_id
         ));
-        assert!(remaining_deadline(request.deadline_unix_ms).unwrap() <= MAX_DEADLINE);
+        // A guest clock may run ahead of the host's, so the request leaves
+        // the host two seconds of room below its maximum.
+        assert!(remaining_deadline(request.deadline_unix_ms).unwrap() <= REQUEST_LIFETIME);
         request
     }
 

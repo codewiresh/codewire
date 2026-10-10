@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_daemon_proto::ssh::{
-    MAX_DEADLINE, SshOperation, agent, remaining_deadline, validate_request, validate_response,
+    REQUEST_LIFETIME, SshOperation, agent, remaining_deadline, validate_request, validate_response,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tonic::Status;
@@ -60,7 +60,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     F: Future<Output = ()>,
 {
-    serve(relay, stream, shutdown, MAX_DEADLINE).await
+    serve(relay, stream, shutdown, REQUEST_LIFETIME).await
 }
 
 async fn serve<R, S, F>(relay: &R, stream: S, shutdown: F, timeout: Duration) -> Result<(), Status>
