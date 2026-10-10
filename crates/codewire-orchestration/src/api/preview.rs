@@ -8,6 +8,8 @@ use axum::response::Response;
 use futures_util::{TryStream, TryStreamExt};
 use sqlx::Row;
 
+use std::sync::Arc;
+
 use super::ApiState;
 use super::environments::require_environment_access;
 use super::prepare::plain_error;
@@ -48,7 +50,7 @@ struct PreviewHostMatch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PreviewHostError {
+pub(crate) enum PreviewHostError {
     Invalid,
     Internal,
     NotFound,
@@ -86,30 +88,36 @@ pub async fn preview_proxy_middleware(
     let headers = request.headers().clone();
     let body = request.into_body();
 
-    let host_match =
-        match resolve_preview_host(&state.pool, &state.preview_base_domain, &host).await {
-            Ok(Some(m)) => m,
-            Ok(None) => {
-                return next
-                    .run(
-                        Request::builder()
-                            .method(method)
-                            .uri(uri)
-                            .body(body)
-                            .expect("request rebuild"),
-                    )
-                    .await;
-            }
-            Err(PreviewHostError::Invalid) => {
-                return preview_error(StatusCode::BAD_REQUEST, "invalid preview hostname");
-            }
-            Err(PreviewHostError::Internal) => {
-                return preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
-            }
-            Err(PreviewHostError::NotFound) => {
-                return preview_error(StatusCode::NOT_FOUND, "preview hostname not found");
-            }
-        };
+    let host_match = match resolve_preview_host_with(
+        &state.pool,
+        &state.org_slugs,
+        &state.preview_base_domain,
+        &host,
+    )
+    .await
+    {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            return next
+                .run(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(body)
+                        .expect("request rebuild"),
+                )
+                .await;
+        }
+        Err(PreviewHostError::Invalid) => {
+            return preview_error(StatusCode::BAD_REQUEST, "invalid preview hostname");
+        }
+        Err(PreviewHostError::Internal) => {
+            return preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        }
+        Err(PreviewHostError::NotFound) => {
+            return preview_error(StatusCode::NOT_FOUND, "preview hostname not found");
+        }
+    };
 
     let target = match resolve_preview_target(&state.pool, &host_match).await {
         Ok(target) => target,
@@ -294,6 +302,81 @@ fn normalize_dns_name(name: &str) -> String {
     name.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
+/// A longest-slug-first `(org id, slug)` snapshot exactly as the SQL
+/// produces it; see [`match_preview_host`] for why the order is load-bearing.
+type OrgSlugSnapshot = Arc<[(String, String)]>;
+
+/// Short-TTL snapshot cache of the `(org id, slug)` list used for preview
+/// host resolution (#2505 L5).
+///
+/// The list is queried on a pre-auth public path for every request to a
+/// preview host; before this cache that was one full-table organizations
+/// scan per request. Snapshots keep the SQL's longest-slug-first order, the
+/// order [`match_preview_host`] iterates, so matching cannot drift with the
+/// cache.
+///
+/// Staleness is bounded by `ttl` (5s in production). A just-created org's
+/// preview hosts may not resolve for one TTL window, and a just-renamed one
+/// may still match its previous slug for one window. Neither crosses orgs:
+/// the target lookup that follows is keyed by org id in the database.
+#[derive(Debug)]
+pub struct OrgSlugCache {
+    ttl: std::time::Duration,
+    inner: tokio::sync::RwLock<Option<(std::time::Instant, OrgSlugSnapshot)>>,
+}
+
+impl OrgSlugCache {
+    pub fn new(ttl: std::time::Duration) -> Self {
+        Self {
+            ttl,
+            inner: tokio::sync::RwLock::new(None),
+        }
+    }
+
+    /// The cached org list, refreshing from `pool` when absent or stale.
+    /// Concurrent misses share one refresh via the write lock; a failed
+    /// refresh propagates the error without caching anything.
+    pub(crate) async fn get(
+        &self,
+        pool: &sqlx::PgPool,
+    ) -> Result<OrgSlugSnapshot, PreviewHostError> {
+        {
+            let read = self.inner.read().await;
+            if let Some((at, snapshot)) = read.as_ref()
+                && at.elapsed() < self.ttl
+            {
+                return Ok(snapshot.clone());
+            }
+        }
+        let mut write = self.inner.write().await;
+        // Double-checked: another waiter may have refreshed while we queued.
+        if let Some((at, snapshot)) = write.as_ref()
+            && at.elapsed() < self.ttl
+        {
+            return Ok(snapshot.clone());
+        }
+        let rows = sqlx::query("SELECT id, slug FROM organizations ORDER BY length(slug) DESC")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| PreviewHostError::Internal)?;
+        let snapshot: OrgSlugSnapshot = rows
+            .iter()
+            .filter_map(|row| {
+                let id: String = row.try_get("id").ok()?;
+                let slug: String = row.try_get("slug").ok()?;
+                Some((id, slug))
+            })
+            .collect::<Vec<_>>()
+            .into();
+        *write = Some((std::time::Instant::now(), snapshot.clone()));
+        Ok(snapshot)
+    }
+}
+
+/// Uncached resolution (one organizations query per call). Production paths
+/// go through [`resolve_preview_host_with`]; this remains for tests that
+/// must observe database writes immediately.
+#[cfg(test)]
 async fn resolve_preview_host(
     pool: &sqlx::PgPool,
     base_domain: &str,
@@ -309,6 +392,16 @@ async fn resolve_preview_host(
         Some((id, slug))
     });
     match_preview_host(host, base_domain, orgs)
+}
+
+async fn resolve_preview_host_with(
+    pool: &sqlx::PgPool,
+    cache: &OrgSlugCache,
+    base_domain: &str,
+    host: &str,
+) -> Result<Option<PreviewHostMatch>, PreviewHostError> {
+    let orgs = cache.get(pool).await?;
+    match_preview_host(host, base_domain, orgs.iter().cloned())
 }
 
 fn match_preview_host<I>(
@@ -644,6 +737,35 @@ mod tests {
             ),
             Ok(None)
         );
+    }
+
+    /// #2505 L5 regression: the org-slug snapshot cache must preserve the
+    /// longest-slug-first order the SQL produced. Slugs `12345-acme` and
+    /// `acme` both suffix-match `web-99999-12345-acme` (`12345-acme` strips
+    /// to env prefix `99999`, `acme` to `12345`) and resolve to DIFFERENT
+    /// orgs; first match wins, so only the ordering decides which org the
+    /// preview host belongs to. A cache that drops or shuffles the order
+    /// would silently resolve preview hosts to the wrong organization.
+    #[test]
+    fn preview_host_matching_depends_on_longest_slug_first_order() {
+        let orgs = [
+            ("org-long".to_string(), "12345-acme".to_string()),
+            ("org-short".to_string(), "acme".to_string()),
+        ];
+        let host = "web-99999-12345-acme.preview.test";
+        let matched = match_preview_host(host, "preview.test", orgs.clone())
+            .expect("longest-suffix-first must match")
+            .expect("a match must exist");
+        assert_eq!(matched.org_id, "org-long");
+
+        // Control: the same set in short-first order resolves to the other
+        // org — proving the ordering (not the data) carries the security
+        // property.
+        let reversed: Vec<(String, String)> = orgs.iter().rev().cloned().collect();
+        let matched = match_preview_host(host, "preview.test", reversed)
+            .expect("short-first still matches")
+            .expect("a match must exist");
+        assert_eq!(matched.org_id, "org-short");
     }
 
     #[test]
