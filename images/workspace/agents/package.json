@@ -1,6 +1,7 @@
 {
   "name": "codewire-workspace-agents",
   "private": true,
+  "license": "AGPL-3.0-only",
   "description": "Coding agents seeded into the workspace image, installed with npm ci from the lockfile beside this file.",
   "dependencies": {
     "@anthropic-ai/claude-code": "2.1.288",
