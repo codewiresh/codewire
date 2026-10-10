@@ -1439,6 +1439,7 @@ dependencies = [
  "codewire-tls",
  "codewire-workload-secrets",
  "codewire-workspace-access",
+ "codewire-workspace-image",
  "connectrpc",
  "futures",
  "http 1.4.1",
@@ -2215,6 +2216,7 @@ dependencies = [
  "chrono",
  "codewire-daemon-proto",
  "codewire-proto",
+ "codewire-workspace-image",
  "connectrpc",
  "futures",
  "hmac 0.12.1",
@@ -2411,6 +2413,10 @@ dependencies = [
  "uuid",
  "zeroize",
 ]
+
+[[package]]
+name = "codewire-workspace-image"
+version = "0.1.0"
 
 [[package]]
 name = "combine"

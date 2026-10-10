@@ -18,7 +18,7 @@ readonly SM_DEFAULT_PROBE_IMAGE='registry.k8s.io/e2e-test-images/busybox@sha256:
 # ripgrep 15.2.0: a public Rust project with a committed Cargo.lock.
 readonly SM_DEFAULT_GIT_URL=https://github.com/BurntSushi/ripgrep
 readonly SM_DEFAULT_GIT_COMMIT=e89fff89ac9af12e8d4ce9d5fd07beb408ca730f
-readonly SM_RUNTIME_IMAGES="$ROOT/crates/codewire-server-core/src/runtime_images.rs"
+readonly SM_WORKSPACE_PIN="$ROOT/crates/codewire-workspace-image/src/pin.rs"
 readonly SM_TEMPLATE_IMAGES="$ROOT/crates/codewire-orchestration/src/sandbox/template/mod.rs"
 readonly SM_PROTECTED_NAMESPACES=" default kube-system kube-public kube-node-lease "
 
@@ -111,8 +111,8 @@ Storage and runtime:
 Images (digest-pinned references only):
   --fio-image REF               fio image with sh and sleep; required unless --skip-fio
   --probe-image REF             attach probe (default: pinned e2e busybox)
-  --workload-image REF          git/cargo image (default: DEFAULT_WORKSPACE_IMAGE
-                                from crates/codewire-server-core/src/runtime_images.rs)
+  --workload-image REF          git/cargo image (default: the published workspace
+                                pin, HARBOR_IMAGE in crates/codewire-workspace-image)
   --with-docker                 add a privileged dind container (default image:
                                 DEFAULT_DIND_IMAGE from the sandbox template) and
                                 time a docker build; the namespace must admit it
@@ -311,7 +311,7 @@ validate_args() {
     require_digest_ref --fio-image "$FIO_IMAGE"
   fi
   # The bench pod's workload container also writes snapshot markers.
-  [[ -n "$WORKLOAD_IMAGE" ]] || WORKLOAD_IMAGE="$(read_rust_image_const "$SM_RUNTIME_IMAGES" DEFAULT_WORKSPACE_IMAGE)"
+  [[ -n "$WORKLOAD_IMAGE" ]] || WORKLOAD_IMAGE="$(read_rust_image_const "$SM_WORKSPACE_PIN" HARBOR_IMAGE)"
   require_digest_ref --workload-image "$WORKLOAD_IMAGE"
   if ((WITH_DOCKER == 1)); then
     ((SKIP_WORKLOAD == 0)) || refuse "--with-docker needs the workload phase"

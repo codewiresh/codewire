@@ -97,7 +97,8 @@ grep -qF 'scripts/ci/images/build-push-image.sh workspace images/workspace/Docke
 grep -qF 'scripts/ci/images/build-push-image.sh confidential-probe images/confidential-probe/Dockerfile images/confidential-probe' \
   "$WORKFLOW" || fail 'confidential probe is not built by the canonical Gitea helper'
 publish_job="$(sed -n '/^  publish-support-images:/,/^  publish-confidential-probe:/p' "$WORKFLOW")"
-probe_job="$(sed -n '/^  publish-confidential-probe:/,$p' "$WORKFLOW")"
+probe_job="$(sed -n '/^  publish-confidential-probe:/,/^  propose-workspace-image-pin:/p' "$WORKFLOW")"
+pin_job="$(sed -n '/^  propose-workspace-image-pin:/,$p' "$WORKFLOW")"
 grep -Fq '    runs-on: ci-protected' <<<"$publish_job" ||
   fail 'support-pair publisher does not use the protected CI tier'
 grep -Fq '    runs-on: ci-protected' <<<"$probe_job" ||
@@ -313,5 +314,33 @@ for job_name in publish_job probe_job; do
 done
 grep -Fq 'registry.example.invalid/codewire/confidential-probe' <<<"$probe_job" ||
   fail 'confidential probe is not published to its Harbor repository'
+
+# The published workspace image is proposed as the new pin with only the
+# automatic token: after a successful public mirror, on one automation branch.
+# shellcheck disable=SC2016
+grep -Fq 'workspace_ref: ${{ steps.workspace.outputs.candidate_ref }}' <<<"$publish_job" ||
+  fail 'support publisher does not expose the published workspace digest'
+# shellcheck disable=SC2016
+grep -Fq "workspace_mirrored: \${{ steps.mirror.outcome == 'success' }}" <<<"$publish_job" ||
+  fail 'support publisher does not expose the public mirror outcome'
+grep -Fq '        id: mirror' <<<"$publish_job" || fail 'the GHCR mirror step has no outcome id'
+[[ -n "$pin_job" ]] || fail 'the published workspace image is never proposed as the pin'
+grep -Fq '    needs: [publish-support-images]' <<<"$pin_job" ||
+  fail 'the pin proposal does not wait for the support publication'
+# shellcheck disable=SC2016
+grep -Fq "if: \${{ needs.publish-support-images.outputs.workspace_mirrored == 'true' }}" <<<"$pin_job" ||
+  fail 'the pin proposal can name an image the public mirror lacks'
+grep -Fq '    runs-on: ci-protected' <<<"$pin_job" || fail 'the pin proposal leaves the protected tier'
+if grep -Eq 'enable-openid-connect|OPENBAO_|secrets\.' <<<"$pin_job"; then
+  fail 'the pin proposal holds a capability beyond the automatic token'
+fi
+# shellcheck disable=SC2016
+grep -Fq 'GITEA_TOKEN: ${{ github.token }}' <<<"$pin_job" ||
+  fail 'the pin proposal does not use the automatic token'
+# shellcheck disable=SC2016
+grep -Fq 'WORKSPACE_REF: ${{ needs.publish-support-images.outputs.workspace_ref }}' <<<"$pin_job" ||
+  fail 'the pin proposal does not use the published digest'
+grep -Fq 'run: scripts/ci/images/propose-workspace-image-pin.sh "$WORKSPACE_REF"' <<<"$pin_job" ||
+  fail 'the pin proposal does not run the reviewed proposer'
 
 echo 'support-image workflow contract: OK'

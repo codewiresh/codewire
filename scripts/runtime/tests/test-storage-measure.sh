@@ -295,10 +295,10 @@ check 'probe exits on TERM' '.items[1].spec.containers[0].command[2] | startswit
 (
   # shellcheck source=scripts/runtime/storage-measure/measure-storage.sh
   source "$SM/measure-storage.sh"
-  workspace="$(read_rust_image_const "$SM_RUNTIME_IMAGES" DEFAULT_WORKSPACE_IMAGE)"
+  workspace="$(read_rust_image_const "$SM_WORKSPACE_PIN" HARBOR_IMAGE)"
   dind="$(read_rust_image_const "$SM_TEMPLATE_IMAGES" DEFAULT_DIND_IMAGE)"
   [[ "$workspace" =~ ^registry\.example\.invalid/codewire/workspace@sha256:[0-9a-f]{64}$ ]] ||
-    fail "unexpected DEFAULT_WORKSPACE_IMAGE: $workspace"
+    fail "unexpected workspace pin HARBOR_IMAGE: $workspace"
   [[ "$dind" =~ @sha256:[0-9a-f]{64}$ ]] || fail "unexpected DEFAULT_DIND_IMAGE: $dind"
 )
 pass

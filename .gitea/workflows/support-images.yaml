@@ -70,6 +70,9 @@ jobs:
     enable-openid-connect: true
     needs: [support-selection]
     if: ${{ needs.support-selection.outputs.build_support_images == 'true' }}
+    outputs:
+      workspace_ref: ${{ steps.workspace.outputs.candidate_ref }}
+      workspace_mirrored: ${{ steps.mirror.outcome == 'success' }}
     env:
       OPENBAO_ROLE: codewire-source-support-publisher
       OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher
@@ -101,6 +104,7 @@ jobs:
 
       # Harbor serves every consumer; the public GHCR copy never gates it.
       - name: Mirror the support pair to GHCR without gating delivery
+        id: mirror
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -146,3 +150,23 @@ jobs:
             "${{ steps.confidential_probe.outputs.candidate_ref }}" \
             ghcr.io/codewiresh/confidential-probe \
             "$GITHUB_SHA"
+
+  propose-workspace-image-pin:
+    # The automatic token is the only capability: it pushes one automation
+    # branch and opens or updates one pull request. Forgejo starts no workflow
+    # for an event the Actions bot causes, so the proposal's CI runs when a
+    # person reopens it (docs/runbooks/workspace-image-pin.md).
+    name: Propose the published workspace image pin
+    runs-on: ci-protected
+    needs: [publish-support-images]
+    if: ${{ needs.publish-support-images.outputs.workspace_mirrored == 'true' }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Propose the pin for the published workspace image
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+          WORKSPACE_REF: ${{ needs.publish-support-images.outputs.workspace_ref }}
+        run: scripts/ci/images/propose-workspace-image-pin.sh "$WORKSPACE_REF"

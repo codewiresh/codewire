@@ -225,6 +225,16 @@ run_selected_family() {
 collect_changed_paths "$PREFLIGHT_CHANGED_PATHS"
 
 if [ -n "${PREFLIGHT_RELEASE_TAG_REF:-}" ]; then
+  # A release ships the workspace image its tree pins. A changed image
+  # definition must first be published and its proposed pin landed; no other
+  # verification substitutes for that, so a stale pin refuses the tag.
+  printf '==> release tag workspace image pin\n'
+  release_commit="$(git -C "$REPO_ROOT" rev-parse --verify --quiet \
+    "${PREFLIGHT_RELEASE_TAG_OBJECT_SHA:-}^{commit}")" ||
+    fail 'release tag does not name a commit'
+  python3 "$REPO_ROOT/scripts/ci/images/workspace-image-pin.py" check --release \
+    --commit "$release_commit" ||
+    fail 'release commit pins a stale workspace image; land the proposed pin before tagging'
   printf '==> release tag tested-tree receipt\n'
   if ! receipt_output="$($RELEASE_TAG_RECEIPT 2>&1)"; then
     printf 'release-tag receipt: checker failed unexpectedly; full local verification required\n' >&2

@@ -78,6 +78,17 @@ write_stub_tree() {
     "$repo/scripts/ci/tests/test-dashboard-image-network-probe.sh"
   install -m 755 "$ROOT/scripts/ci/verify/dashboard-image.sh" \
     "$repo/scripts/ci/verify/dashboard-image.sh"
+  mkdir -p "$repo/scripts/ci/images"
+  cat > "$repo/scripts/ci/images/workspace-image-pin.py" <<'EOF'
+#!/usr/bin/env python3
+import os
+import sys
+with open(os.environ["PREFLIGHT_TEST_TOOL_LOG"], "a", encoding="utf-8") as log:
+    log.write("workspace-image-pin " + " ".join(sys.argv[1:4]) + "\n")
+if os.environ.get("PREFLIGHT_TEST_PIN_STALE") == "1":
+    print("workspace image pin: synthetic stale pin", file=sys.stderr)
+    sys.exit(1)
+EOF
 cat > "$repo/scripts/ci/receipts/verify-release-tag-receipt.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -443,6 +454,27 @@ assert_contains release_tag "$tag_output" \
   'preflight: exact-main CI receipt accepted; signed release tag verified'
 assert_contains release_tag_tools "$(cat "$tag_log")" \
   'receipt-ref=refs/tags/v1.2.3 remote=origin'
+assert_contains release_tag_tools "$(cat "$tag_log")" \
+  'workspace-image-pin check --release --commit'
+
+# A stale workspace image pin refuses the release before any receipt or gate.
+stale_pin_log="$TMP/stale-pin-tools.log"
+if stale_pin_output="$({
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" \
+    PREFLIGHT_TEST_TOOL_LOG="$stale_pin_log" \
+    PREFLIGHT_TEST_PIN_STALE=1 \
+    PREFLIGHT_RELEASE_TAG_REF=refs/tags/v1.2.3 \
+    PREFLIGHT_RELEASE_TAG_OBJECT_SHA="$(git rev-parse refs/tags/v1.2.3)" \
+    PREFLIGHT_PUSH_REMOTE_NAME=origin \
+    PREFLIGHT_HEAD_SHA="$(git rev-parse refs/tags/v1.2.3)" \
+    "$repo/scripts/dev/preflight.sh"
+} 2>&1)"; then
+  fail 'release preflight accepted a stale workspace image pin'
+fi
+assert_contains stale_pin "$stale_pin_output" \
+  'release commit pins a stale workspace image; land the proposed pin before tagging'
+assert_not_contains stale_pin_tools "$(cat "$stale_pin_log")" 'receipt-ref='
 assert_not_contains release_tag_tools "$(cat "$tag_log")" 'integration '
 assert_not_contains release_tag_tools "$(cat "$tag_log")" 'kind'
 
