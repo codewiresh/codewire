@@ -652,6 +652,40 @@ mod tests {
     use crate::build_record::tests::{decoded, executable, framed, host, host_target, json, write};
     use crate::{Cli, Command};
 
+    /// Immutable Store versions are 0555; make them writable before the
+    /// temporary directory is removed so no test leaves an undeletable tree.
+    struct Scratch(tempfile::TempDir);
+
+    impl Scratch {
+        fn path(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            make_removable(self.0.path());
+        }
+    }
+
+    fn tempdir() -> Scratch {
+        Scratch(tempfile::tempdir().unwrap())
+    }
+
+    fn make_removable(path: &Path) {
+        let Ok(metadata) = fs::symlink_metadata(path) else {
+            return;
+        };
+        if metadata.is_dir() {
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+            if let Ok(entries) = fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    make_removable(&entry.path());
+                }
+            }
+        }
+    }
+
     fn parse(arguments: &[&str]) -> Result<Command, clap::Error> {
         Cli::try_parse_from(arguments).map(|cli| cli.command)
     }
@@ -818,7 +852,7 @@ mod tests {
 
     #[test]
     fn public_prefetch_admission_captures_verified_state_and_refuses_stale_or_corrupt_state() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let bin = directory.path().join("bin");
         fs::create_dir(&bin).unwrap();
         let store = Store::create(
@@ -860,7 +894,7 @@ mod tests {
 
     #[test]
     fn local_release_requires_a_valid_bounded_identity() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let missing = local_release(directory.path(), &"a".repeat(64)).unwrap_err();
         assert!(format!("{missing:#}").contains(LOCAL_RELEASE_IDENTITY));
         fs::write(directory.path().join(LOCAL_RELEASE_IDENTITY), b"{}").unwrap();
@@ -875,7 +909,7 @@ mod tests {
 
     #[test]
     fn local_release_refuses_fifo_and_symlink_identities_promptly() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let path = directory.path().join(LOCAL_RELEASE_IDENTITY);
         let fifo_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
         // SAFETY: `fifo_path` is a live, NUL-terminated path for this call.
@@ -920,7 +954,7 @@ mod tests {
 
     #[test]
     fn managed_install_refuses_an_unmanaged_entry_and_explains_migration() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let bin = directory.path().join("bin");
         fs::create_dir(&bin).unwrap();
         fs::write(bin.join("cw"), b"legacy cw").unwrap();
@@ -942,7 +976,7 @@ mod tests {
             // This test binary was built with explicit provenance.
             return;
         }
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let error = install(install_args(directory.path())).unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("without source provenance"), "{message}");
@@ -953,7 +987,7 @@ mod tests {
 
     #[test]
     fn self_install_admits_the_identity_of_its_exact_bytes() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let (executable, identity) = identified(directory.path(), host_target());
         assert_eq!(identity.package_version, "v1.2.30");
         install_identified(
@@ -979,7 +1013,7 @@ mod tests {
 
     #[test]
     fn self_install_refuses_stored_bytes_with_a_contradicting_identity() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let release = host().release_target().as_str();
         let (executable, identity) = identified(directory.path(), release);
         let mut pinned = identity.clone();
@@ -1010,7 +1044,7 @@ mod tests {
         assert_eq!(installed.store.status().unwrap().generation, generation);
 
         // The same bytes pinned under the identical identity are consistent.
-        let agreeing = tempfile::tempdir().unwrap();
+        let agreeing = tempdir();
         let entry = agreeing.path().join("bin");
         fs::create_dir(&entry).unwrap();
         store::install(
@@ -1031,7 +1065,7 @@ mod tests {
 
     #[test]
     fn self_install_refuses_bytes_other_than_its_identity() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir();
         let (executable, mut identity) = identified(directory.path(), host_target());
         identity.sha256 = "e".repeat(64);
         let error =

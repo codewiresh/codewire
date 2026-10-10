@@ -333,7 +333,7 @@ deploy_workflow="$ROOT/.gitea/workflows/deploy-prod.yaml"
 cli_workflow="$ROOT/.gitea/workflows/cli-release.yaml"
 image_builder="$ROOT/scripts/ci/images/build-push-image.sh"
 signing_key_test="$ROOT/scripts/ci/tests/test-verify-cw-release-signing-key.sh"
-installer_signature_test="$ROOT/scripts/ci/tests/test-cw-install-signature.sh"
+installer_test="$ROOT/scripts/ci/tests/test-cw-install.py"
 publish_release_test="$ROOT/scripts/ci/tests/test-publish-cw-release.sh"
 installer="$ROOT/apps/cli/install.sh"
 cli_readme="$ROOT/apps/cli/README.md"
@@ -493,31 +493,39 @@ if assert_release_publication_boundary "$trailing_publication_workflow" >/dev/nu
   exit 1
 fi
 
-# Signing material reaches only key verification and signing, after a
-# successful credential-free build; compilation never receives it.
-signing_preflight_line="$(grep -n 'name: Verify release signing key' <<<"$package_release" | cut -d: -f1)"
-signing_line="$(grep -n 'name: Sign release delivery' <<<"$package_release" | cut -d: -f1)"
-[[ -n "$signing_preflight_line" && -n "$signing_line" &&
-  "$signing_preflight_line" -lt "$signing_line" ]] || {
-  echo 'CLI signing preflight must run before release signing' >&2
+# The signing key is read from OpenBao only inside the signing step, after a
+# successful credential-free build. No step receives a Forgejo Actions secret,
+# and compilation never receives signing material.
+sign_step="$(sed -n '/- name: Sign release delivery/,/- name: /p' <<<"$package_release")"
+grep -Fq '../scripts/ci/setup/fetch-openbao-release-signing-key.sh "$signing_work/key"' <<<"$sign_step" || {
+  echo 'CLI release signing does not read its key from OpenBao' >&2
   exit 1
 }
+key_readers="$(grep -c 'fetch-openbao-release-signing-key\.sh' "$cli_workflow" || true)"
+[ "$key_readers" -eq 1 ] || {
+  echo 'CLI release workflow reads the signing key outside the signing step' >&2
+  exit 1
+}
+if grep -Fq 'secrets.' "$cli_workflow"; then
+  echo 'CLI release workflow reads a Forgejo Actions secret' >&2
+  exit 1
+fi
 for name in \
   CW_RELEASE_GPG_PRIVATE_KEY \
   CW_RELEASE_GPG_PASSPHRASE \
-  CW_RELEASE_GPG_KEY_ID; do
-  [ "$(grep -Fc "          ${name}: \${{ secrets.${name} }}" <<<"$package_release")" -eq 2 ] || {
-    printf 'CLI workflow does not pass %s to both preflight and signing\n' "$name" >&2
-    exit 1
-  }
-  if grep -Fq "secrets.${name}" <<<"$build_release"; then
+  CW_RELEASE_GPG_KEY_ID \
+  fetch-openbao-release-signing-key; do
+  if grep -Fq "$name" <<<"$build_release"; then
     printf 'CLI compilation receives %s\n' "$name" >&2
     exit 1
   fi
 done
 
 "$signing_key_test"
-"$installer_signature_test"
+python3 -B "$installer_test" >/dev/null 2>&1 || {
+  echo 'public installer tests failed' >&2
+  exit 1
+}
 "$publish_release_test"
 python3 -B "$ROOT/scripts/ci/tests/test-cli-release-workflow.py"
 python3 -B "$ROOT/scripts/ci/tests/test-cw-release-delivery.py" >/dev/null 2>&1 || {
@@ -529,23 +537,23 @@ python3 -B "$ROOT/scripts/ci/tests/test-cw-release-r2.py" >/dev/null 2>&1 || {
   exit 1
 }
 "$ROOT/scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh"
+"$ROOT/scripts/ci/tests/test-fetch-openbao-release-signing-key.sh"
 
-installer_fingerprint="$(
-  sed -n 's/^PRODUCTION_FINGERPRINT = "\([0-9A-F]*\)"$/\1/p' "$installer"
+compiled_fingerprint="$(
+  sed -n 's/^const TRUST_FINGERPRINT: &str = "\([0-9A-F]*\)";$/\1/p' \
+    "$ROOT/crates/codewire-cli/src/public_fetch.rs"
 )"
 public_key_fingerprint="$(
   gpg --batch --show-keys --with-colons "$release_public_key" 2>/dev/null |
     awk -F: '$1 == "fpr" { print $10; exit }'
 )"
-[ "$installer_fingerprint" = "$public_key_fingerprint" ] || {
-  echo 'installer fingerprint does not match the checked-in release key' >&2
+[ -n "$compiled_fingerprint" ] && [ "$compiled_fingerprint" = "$public_key_fingerprint" ] || {
+  echo 'cw compiled release fingerprint does not match the checked-in release key' >&2
   exit 1
 }
-# The installer embeds the exact checked-in consumer closure and public key.
-# The focused installer proof above verifies single-primary trust, ambient-key
-# isolation and valid-signature refusal before replacement.
-python3 -B "$ROOT/scripts/ci/release/generate-cw-bootstrap.py" --check
-grep -Fq 'ORIGIN = "https://releases.codewire.sh/"' "$installer"
+# The first install trusts HTTPS to the release origin and SHA256SUMS; the
+# installer proof above covers its refusals. cw verifies every update.
+grep -Fq "ORIGIN='https://releases.codewire.sh/'" "$installer"
 if grep -Eq 'https://(api\.)?github\.com|raw\.githubusercontent\.com' "$installer"; then
   echo 'installer still downloads release assets or trust from GitHub' >&2
   exit 1
