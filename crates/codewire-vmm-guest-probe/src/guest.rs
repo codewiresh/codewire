@@ -4022,7 +4022,7 @@ fn docker_tooling_present(root: &Path) -> bool {
         .all(|path| fs::symlink_metadata(root.join(path)).is_ok())
 }
 
-/// A musl image, such as Alpine's `docker:dind`, keeps its dynamic loader and
+/// A musl image, such as Alpine's Docker-in-Docker image, keeps its dynamic loader and
 /// C library in a real `/lib` directory. Glibc images keep theirs beneath
 /// `/usr`, which the private Docker root already shares.
 fn musl_library_directory(root: &Path) -> bool {
