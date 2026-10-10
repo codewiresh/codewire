@@ -277,6 +277,9 @@ jobs:
         with:
           name: cw-release-verifier-${{ github.run_id }}
           path: .release-verifier/
+          # The upload action skips hidden paths, the named directory
+          # included, unless asked; without this the verifier never uploads.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 
