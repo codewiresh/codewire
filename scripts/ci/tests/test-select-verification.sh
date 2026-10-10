@@ -1099,7 +1099,9 @@ run_paths_case workspace_image_pin_tool pull_request refs/pull/2255/head false \
 run_paths_case workspace_image_pin_proposal pull_request refs/pull/2255/head false \
   'go_consumer_interop go_support policy release runtime_confidential' \
   scripts/ci/images/propose-workspace-image-pin.sh \
-  scripts/ci/tests/test-propose-workspace-image-pin.sh
+  scripts/ci/tests/test-propose-workspace-image-pin.sh \
+  scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh \
+  scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh
 run_paths_case cw_runtime_image_tool pull_request refs/pull/2255/head false \
   'go_consumer_interop go_support policy release runtime_confidential transport transport_pkg_codewire_local_vmm' \
   scripts/dev/cw-runtime-image.py scripts/dev/test-cw-runtime-image.py

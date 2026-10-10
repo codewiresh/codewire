@@ -152,21 +152,29 @@ jobs:
             "$GITHUB_SHA"
 
   propose-workspace-image-pin:
-    # The automatic token is the only capability: it pushes one automation
-    # branch and opens or updates one pull request. Forgejo starts no workflow
-    # for an event the Actions bot causes, so the proposal's CI runs when a
-    # person reopens it (docs/runbooks/workspace-image-pin.md).
+    # zizmor: ignore[excessive-permissions] This exact protected job reads only the workspace-pin bot token, just in time.
+    # The workspace-pin bot's token is the only capability: it pushes one
+    # automation branch and opens or updates one pull request, which starts CI
+    # like a person's. The bot cannot merge. The checkout keeps no job token,
+    # so git sends only the bot's credential (docs/runbooks/workspace-image-pin.md).
     name: Propose the published workspace image pin
     runs-on: ci-protected
+    enable-openid-connect: true
     needs: [publish-support-images]
     if: ${{ needs.publish-support-images.outputs.workspace_mirrored == 'true' }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Propose the pin for the published workspace image
+      - name: Propose the pin as the workspace-pin bot
         env:
-          GITEA_TOKEN: ${{ github.token }}
           WORKSPACE_REF: ${{ needs.publish-support-images.outputs.workspace_ref }}
-        run: scripts/ci/images/propose-workspace-image-pin.sh "$WORKSPACE_REF"
+        run: |
+          set -euo pipefail
+          bot_work="$(mktemp -d "$RUNNER_TEMP/workspace-pin-bot.XXXXXX")"
+          trap 'find "$bot_work" -type f -exec shred -u {} +; rm -rf "$bot_work"' EXIT
+          scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh "$bot_work/token"
+          WORKSPACE_PIN_BOT_TOKEN_FILE="$bot_work/token" \
+            scripts/ci/images/propose-workspace-image-pin.sh "$WORKSPACE_REF"

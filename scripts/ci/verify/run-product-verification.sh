@@ -805,6 +805,7 @@ run_release() {
   scripts/ci/tests/test-run-skopeo-container.sh
   scripts/ci/tests/test-support-images-workflow.sh
   scripts/ci/tests/test-propose-workspace-image-pin.sh
+  scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
   python3 scripts/ci/tests/test-image-bundle.py
   scripts/ci/tests/test-deploy-prod-workflow.sh

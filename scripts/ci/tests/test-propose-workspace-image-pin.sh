@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Synthetic proof for the post-publish workspace pin proposal: one automation
-# branch, one pull request, only the pin changes, and the token never reaches
-# arguments or output.
+# branch, one pull request, only the pin changes, only the workspace-pin bot's
+# private token file is used, and the token never reaches arguments or output.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -16,7 +16,9 @@ pass() { CASES=$((CASES + 1)); }
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/propose-workspace-image-pin.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
-readonly TOKEN='synthetic-actions-token-0123456789abcdef'
+readonly TOKEN='synthetic-workspace-pin-bot-token-0123456789'
+printf '%s' "$TOKEN" >"$work/bot-token"
+chmod 0600 "$work/bot-token"
 OLD="sha256:$(printf '1%.0s' {1..64})"
 NEW="sha256:$(printf '2%.0s' {1..64})"
 readonly OLD NEW
@@ -100,7 +102,8 @@ propose() {
   shift
   (
     cd "$repo"
-    env PATH="$work/bin:$PATH" GITEA_TOKEN="$TOKEN" GITHUB_SHA="$published" \
+    env -u GITEA_TOKEN PATH="$work/bin:$PATH" WORKSPACE_PIN_BOT_TOKEN_FILE="$work/bot-token" \
+      GITHUB_SHA="$published" \
       GITHUB_REPOSITORY=codewire/codewire GITHUB_SERVER_URL=https://forgejo.invalid \
       RUNNER_TEMP="$work" FAKE_CURL_CALLS="$work/curl-calls" \
       FAKE_CREATED_BODY="$work/created-body.json" "$@" \
@@ -122,6 +125,12 @@ grep -Fq "    \"$OLD\"," <<<"$proposed" || fail 'the replaced digest is not kept
 grep -Fq '("codex", "2.0.0")' <<<"$proposed" || fail 'the proposal does not record the published agent versions'
 jq -e '.head == "automation/workspace-image-pin" and .base == "main"' "$work/created-body.json" >/dev/null ||
   fail 'the pull request does not target main from the automation branch'
+jq -e '(.body | contains("workspace-pin bot opened this pull request")) and
+  (.body | test("reopen"; "i") | not)' "$work/created-body.json" >/dev/null ||
+  fail 'the pull request body does not say the bot opened it, or still asks for a reopen'
+[[ "$(git -C "$origin" log -1 --format='%an <%ae>' automation/workspace-image-pin)" == \
+  'Codewire workspace pin bot <codewire-workspace-pin-bot@noreply.example.invalid>' ]] ||
+  fail 'the proposal commit is not authored by the workspace-pin bot'
 if grep -rqF "$TOKEN" "$work/curl-calls" "$work/propose.out" "$work/created-body.json"; then
   fail 'the token reached curl arguments, output or the request body'
 fi
@@ -156,6 +165,30 @@ propose "registry.example.invalid/codewire/workspace@sha256:$(printf '3%.0s' {1.
   >"$work/moved.out" 2>&1 || fail 'a moved main failed'
 grep -Fq 'its own publication proposes the pin' "$work/moved.out" || fail 'an outdated image was proposed'
 pass
+
+# Only the bot's private token file is a credential; the job token and any
+# other file are refused before git or the API is touched.
+ln -s "$work/bot-token" "$work/bot-token-link"
+install -m 0644 "$work/bot-token" "$work/bot-token-shared"
+printf 'not a token' >"$work/bot-token-malformed"
+chmod 0600 "$work/bot-token-malformed"
+before="$(git -C "$origin" rev-parse automation/workspace-image-pin)"
+for override in GITEA_TOKEN="$TOKEN" WORKSPACE_PIN_BOT_TOKEN_FILE="$work/absent" \
+    WORKSPACE_PIN_BOT_TOKEN_FILE="$work/bot-token-link" WORKSPACE_PIN_BOT_TOKEN_FILE="$work/bot-token-shared" \
+    WORKSPACE_PIN_BOT_TOKEN_FILE="$work/bot-token-malformed"; do
+  calls_before="$(wc -l <"$work/curl-calls")"
+  if propose "registry.example.invalid/codewire/workspace@sha256:$(printf '4%.0s' {1..64})" "$override" \
+      >"$work/credential.out" 2>&1; then
+    fail "an unapproved credential was accepted: ${override%%=*}"
+  fi
+  [[ "$(wc -l <"$work/curl-calls")" -eq "$calls_before" ]] || fail "${override%%=*} reached the API"
+  [[ "$(git -C "$origin" rev-parse automation/workspace-image-pin)" == "$before" ]] ||
+    fail "${override%%=*} pushed the automation branch"
+  if grep -qF "$TOKEN" "$work/credential.out"; then
+    fail 'a refused credential was printed'
+  fi
+  pass
+done
 
 # Only an exact Harbor workspace digest is accepted.
 for ref in "ghcr.io/codewiresh/workspace@$NEW" "registry.example.invalid/codewire/workspace:latest" \

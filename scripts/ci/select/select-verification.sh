@@ -1686,6 +1686,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-support-images-workflow.sh|\
       scripts/ci/images/propose-workspace-image-pin.sh|\
       scripts/ci/tests/test-propose-workspace-image-pin.sh|\
+      scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh|\
+      scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh|\
       scripts/ci/tests/test-workspace-image-verify-workflow.sh|\
       scripts/ci/tests/test-base-image-source.sh|\
       scripts/ci/tests/test-apt-get-with-retry.sh|\
