@@ -182,6 +182,14 @@ mod tests {
             .map(str::to_owned)
             .collect();
         assert_eq!(platform_projection_reserved_keys([]).unwrap(), runtime);
+        // The managed GitHub client also owns the git config that routes
+        // workspace git through it.
+        let github: Vec<&str> = codewire_access::HttpProvider::GitHubOAuth
+            .reserved_environment_keys()
+            .iter()
+            .copied()
+            .chain(["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"])
+            .collect();
         for (slot, keys) in [
             ("codex", &["CODEX_HOME"][..]),
             ("openai", &["OPENAI_BASE_URL", "OPENAI_API_KEY"][..]),
@@ -189,10 +197,7 @@ mod tests {
                 "anthropic",
                 codewire_access::HttpProvider::AnthropicApiKey.reserved_environment_keys(),
             ),
-            (
-                "github",
-                codewire_access::HttpProvider::GitHubOAuth.reserved_environment_keys(),
-            ),
+            ("github", &github[..]),
             ("ssh", &["SSH_AUTH_SOCK"][..]),
         ] {
             let mut expected = runtime.clone();
@@ -225,6 +230,9 @@ mod tests {
                 "GITHUB_TOKEN",
                 "GH_ENTERPRISE_TOKEN",
                 "GITHUB_ENTERPRISE_TOKEN",
+                "GIT_CONFIG_COUNT",
+                "GIT_CONFIG_KEY_0",
+                "GIT_CONFIG_VALUE_0",
             ],
             &["SSH_AUTH_SOCK"],
         ];
