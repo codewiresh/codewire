@@ -22,6 +22,11 @@ Environment:
   CW_RELEASE_SOURCE_SHA          Selected source commit (default: HEAD).
   CW_RELEASE_TAG_OBJECT_SHA      Selected tag object (default: the source commit,
                                  for unpublished dry runs).
+  CW_RELEASE_IMPORT_DIR          cw-<version>-<target> executables built on
+                                 another host (the macOS pair, built natively
+                                 on the Mac runner) that complete exactly the
+                                 four release targets. Preparation admits each
+                                 by its build record, as for a local build.
 EOF
 }
 
@@ -116,13 +121,29 @@ for target in $targets; do
   cp "$binary" "$dist_dir/cw-$version-$target"
 done
 
+release_set="$(printf '%s\n' $release_targets | sort | tr '\n' ' ')"
+import_dir="${CW_RELEASE_IMPORT_DIR:-}"
+imported=""
+if [ -n "$import_dir" ]; then
+  for target in $release_targets; do
+    case " $targets " in *" $target "*) continue ;; esac
+    file="$import_dir/cw-$version-$target"
+    [ -f "$file" ] && [ ! -L "$file" ] || die "missing imported release asset $file"
+    install -m 0755 "$file" "$dist_dir/cw-$version-$target"
+    imported="$imported $target"
+  done
+  # shellcheck disable=SC2086 # word lists of target triples
+  [ "$(printf '%s\n' $targets $imported | sort | tr '\n' ' ')" = "$release_set" ] ||
+    die "imported assets must complete exactly the four release targets"
+fi
+
 (
   cd "$dist_dir"
   sha256sum cw-* | sort -k2 > SHA256SUMS
 )
 
-sorted_targets="$(printf '%s\n' $targets | sort | tr '\n' ' ')"
-release_set="$(printf '%s\n' $release_targets | sort | tr '\n' ' ')"
+# shellcheck disable=SC2086 # word lists of target triples
+sorted_targets="$(printf '%s\n' $targets $imported | sort | tr '\n' ' ')"
 if [ "$sorted_targets" = "$release_set" ]; then
   python3 "$release_py" prepare \
     --dist "$dist_dir" \
@@ -136,4 +157,9 @@ else
 fi
 
 echo "release assets:"
-find "$dist_dir" -maxdepth 1 -type f -printf '  %f\n' | sort
+# Portable listing: the macOS pair is packaged on a Mac, whose find lacks -printf.
+for asset in "$dist_dir"/*; do
+  if [ -f "$asset" ]; then
+    printf '  %s\n' "${asset##*/}"
+  fi
+done

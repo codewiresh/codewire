@@ -333,7 +333,7 @@ deploy_workflow="$ROOT/.gitea/workflows/deploy-prod.yaml"
 cli_workflow="$ROOT/.gitea/workflows/cli-release.yaml"
 image_builder="$ROOT/scripts/ci/images/build-push-image.sh"
 signing_key_test="$ROOT/scripts/ci/tests/test-verify-cw-release-signing-key.sh"
-installer_signature_test="$ROOT/scripts/ci/tests/test-cw-install-signature.sh"
+installer_test="$ROOT/scripts/ci/tests/test-cw-install.py"
 publish_release_test="$ROOT/scripts/ci/tests/test-publish-cw-release.sh"
 installer="$ROOT/apps/cli/install.sh"
 cli_readme="$ROOT/apps/cli/README.md"
@@ -522,7 +522,10 @@ for name in \
 done
 
 "$signing_key_test"
-"$installer_signature_test"
+python3 -B "$installer_test" >/dev/null 2>&1 || {
+  echo 'public installer tests failed' >&2
+  exit 1
+}
 "$publish_release_test"
 python3 -B "$ROOT/scripts/ci/tests/test-cli-release-workflow.py"
 python3 -B "$ROOT/scripts/ci/tests/test-cw-release-delivery.py" >/dev/null 2>&1 || {
@@ -536,22 +539,21 @@ python3 -B "$ROOT/scripts/ci/tests/test-cw-release-r2.py" >/dev/null 2>&1 || {
 "$ROOT/scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh"
 "$ROOT/scripts/ci/tests/test-fetch-openbao-release-signing-key.sh"
 
-installer_fingerprint="$(
-  sed -n 's/^PRODUCTION_FINGERPRINT = "\([0-9A-F]*\)"$/\1/p' "$installer"
+compiled_fingerprint="$(
+  sed -n 's/^const TRUST_FINGERPRINT: &str = "\([0-9A-F]*\)";$/\1/p' \
+    "$ROOT/crates/codewire-cli/src/public_fetch.rs"
 )"
 public_key_fingerprint="$(
   gpg --batch --show-keys --with-colons "$release_public_key" 2>/dev/null |
     awk -F: '$1 == "fpr" { print $10; exit }'
 )"
-[ "$installer_fingerprint" = "$public_key_fingerprint" ] || {
-  echo 'installer fingerprint does not match the checked-in release key' >&2
+[ -n "$compiled_fingerprint" ] && [ "$compiled_fingerprint" = "$public_key_fingerprint" ] || {
+  echo 'cw compiled release fingerprint does not match the checked-in release key' >&2
   exit 1
 }
-# The installer embeds the exact checked-in consumer closure and public key.
-# The focused installer proof above verifies single-primary trust, ambient-key
-# isolation and valid-signature refusal before replacement.
-python3 -B "$ROOT/scripts/ci/release/generate-cw-bootstrap.py" --check
-grep -Fq 'ORIGIN = "https://releases.codewire.sh/"' "$installer"
+# The first install trusts HTTPS to the release origin and SHA256SUMS; the
+# installer proof above covers its refusals. cw verifies every update.
+grep -Fq "ORIGIN='https://releases.codewire.sh/'" "$installer"
 if grep -Eq 'https://(api\.)?github\.com|raw\.githubusercontent\.com' "$installer"; then
   echo 'installer still downloads release assets or trust from GitHub' >&2
   exit 1

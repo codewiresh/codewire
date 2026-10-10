@@ -1,8 +1,7 @@
-//! Temporary public bytes. The directory is retained if subprocess cleanup
-//! cannot be confirmed; downloaded executables are never made executable here.
+//! Temporary public bytes. The directory is retained if its cleanup cannot be
+//! confirmed; downloaded executables are never made executable here.
 
 use std::fs::{self, File, Metadata};
-use std::io::Write as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,7 +26,6 @@ pub(super) struct Scratch {
     path: PathBuf,
     ancestors: Vec<Directory>,
     directory: File,
-    gnupg_directory: File,
     owner: u32,
     retain: AtomicBool,
     cleaned: AtomicBool,
@@ -45,7 +43,7 @@ impl Scratch {
         );
         // Discard the caller's spelling after resolution. The opened canonical
         // chain must be root/current-user controlled: another UID must never
-        // redirect the GPG home or the later Candidate pathname.
+        // redirect the later Candidate pathname.
         let parent = fs::canonicalize(parent).context("resolve release scratch parent")?;
         let owner = unsafe { libc::geteuid() };
         let ancestors = admit_parent(&parent, owner)?;
@@ -76,17 +74,10 @@ impl Scratch {
             info.is_dir() && info.uid() == owner && info.mode() & 0o7777 == 0o700,
             "release scratch is not an owner-private directory"
         );
-        rfs::mkdirat(&directory, "gnupg", Mode::from_raw_mode(0o700))
-            .context("create private release verifier home")?;
-        let gnupg_directory = File::from(
-            rfs::openat(&directory, "gnupg", DIRECTORY_FLAGS, Mode::empty())
-                .context("hold private verifier home")?,
-        );
         let value = Self {
             path,
             ancestors,
             directory,
-            gnupg_directory,
             owner,
             retain: AtomicBool::new(false),
             cleaned: AtomicBool::new(false),
@@ -97,9 +88,6 @@ impl Scratch {
 
     pub(super) fn path(&self) -> &Path {
         &self.path
-    }
-    pub(super) fn gnupg_home(&self) -> PathBuf {
-        self.path.join("gnupg")
     }
 
     pub(super) fn create(&self, name: &str) -> anyhow::Result<File> {
@@ -125,15 +113,6 @@ impl Scratch {
         )
         .context("create held release scratch file")?;
         let file = File::from(fd);
-        self.check_file(&file)?;
-        Ok(file)
-    }
-
-    pub(super) fn write(&self, name: &str, bytes: &[u8]) -> anyhow::Result<File> {
-        let mut file = self.create(name)?;
-        file.write_all(bytes)
-            .context("write held public release bytes")?;
-        file.sync_all().context("sync held public release bytes")?;
         self.check_file(&file)?;
         Ok(file)
     }
@@ -165,12 +144,6 @@ impl Scratch {
                 .context("retained scratch name")?
                 .as_ref(),
             &self.directory,
-            self.owner,
-        )?;
-        check_private_child(
-            &self.directory,
-            Path::new("gnupg"),
-            &self.gnupg_directory,
             self.owner,
         )
     }
@@ -216,10 +189,9 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        // The known private directory is removed only after verifier guards
-        // have killed/reaped their children. This ordinary-user scratch is not
-        // an adversarial same-UID/root filesystem boundary. Other UIDs cannot
-        // write/rename the admitted ancestry or remove its sticky-owned child.
+        // This ordinary-user scratch is not an adversarial same-UID/root
+        // filesystem boundary. Other UIDs cannot write/rename the admitted
+        // ancestry or remove its sticky-owned child.
         let _ = self.cleanup();
     }
 }

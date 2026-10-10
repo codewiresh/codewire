@@ -61,7 +61,8 @@ RELEASE_SCHEMA = "codewire.cw.release/v1"
 CHANNEL_SCHEMA = "codewire.cw.channel/v1"
 CHANNELS = ("stable",)
 # Production trust: the checked-in release key and its exact fingerprint, the
-# same pair apps/cli/install.sh pins. Tests pass their own Trust explicitly.
+# same pair cw compiles in (crates/codewire-cli/src/public_fetch.rs). Tests
+# pass their own Trust explicitly.
 PRODUCTION_KEY = ROOT / "apps/cli/GPG_PUBLIC_KEY.asc"
 PRODUCTION_FINGERPRINT = "A38FF6BC6623FCA611A7A32B5EFBF0F4A5870815"
 # Source-digest inputs: the Rust/protocol patterns, every other file Cargo

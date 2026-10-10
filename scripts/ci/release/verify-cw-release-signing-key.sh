@@ -86,7 +86,7 @@ signature="$probe.asc"
 printf 'codewire release signing preflight\n' >"$probe"
 if ! printf '%s' "$CW_RELEASE_GPG_PASSPHRASE" |
   GNUPGHOME="$signing_home" gpg --batch --yes --pinentry-mode loopback \
-    --passphrase-fd 0 --local-user "$expected_fingerprint" --armor \
+    --passphrase-fd 0 --local-user "$expected_fingerprint!" --armor \
     --detach-sign --output "$signature" "$probe" >/dev/null 2>&1; then
   die 'private key/passphrase signing probe failed'
 fi

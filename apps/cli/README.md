@@ -177,9 +177,10 @@ cw update --version v1.2.3 --expect-generation <generation>
 cw update --channel stable --expect-generation <generation>
 ```
 
-Public downloads require GnuPG. The CLI verifies the signed release and its
-executable before selecting it; stable refuses downgrades and different bytes
-with the same version. Public delivery is not activated yet.
+cw verifies the signed release with its compiled release key, without
+GnuPG, and checks the executable before selecting it; stable refuses
+downgrades and different bytes with the same version. Public delivery is not
+activated yet.
 
 For cw inside a running native Linux VM:
 

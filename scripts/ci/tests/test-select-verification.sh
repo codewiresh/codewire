@@ -303,7 +303,6 @@ run_paths_case release pull_request refs/pull/3/head false \
   scripts/ci/images/run-skopeo-container.sh \
   scripts/ci/release/package-cw-release.sh \
   scripts/ci/release/publish-cw-release.sh \
-  scripts/ci/tests/test-cw-install-signature.sh \
   scripts/ci/tests/test-copy-image-to-ghcr.sh \
   scripts/ci/tests/test-publish-image-to-ghcr.sh \
   scripts/ci/tests/test-resolve-published-support-pair.sh \
@@ -320,14 +319,10 @@ run_paths_case release pull_request refs/pull/3/head false \
   install.sh
 # Presence matters: an unlisted existing script selects unknown/full, while
 # deleted scripts deliberately remain policy-only. Prove each new owner path.
-for bootstrap_path in \
-  scripts/ci/release/cw_bootstrap.py \
-  scripts/ci/release/generate-cw-bootstrap.py \
-  scripts/ci/tests/test-cw-bootstrap.py; do
-  run_present_paths_case "public_bootstrap_$(basename "$bootstrap_path")" \
-    pull_request refs/pull/952/head false \
-    'go_consumer_interop go_support policy release runtime_confidential' "$bootstrap_path"
-done
+run_present_paths_case public_installer_test \
+  pull_request refs/pull/952/head false \
+  'go_consumer_interop go_support policy release runtime_confidential' \
+  scripts/ci/tests/test-cw-install.py
 run_paths_case protected_delivery_credentials pull_request refs/pull/31/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential security' \
   scripts/ci/setup/curl-transport-retry.sh \
@@ -1235,11 +1230,16 @@ run_present_paths_case macos_formatter_with_runtime_source pull_request refs/pul
   scripts/dev/macos-ext4-tool.py crates/codewire-local-vmm/src/lib.rs
 run_present_paths_case macos_formatter_unknown pull_request refs/pull/2064/head false \
   "$all_product_pr" scripts/dev/macos-ext4-tool-future.py
+# The --cli mode compile-checks the macOS cw in the release-assets job, so the
+# script also selects the release group (as the SDK-less check it replaced).
 run_present_paths_case darwin_cross_check pull_request refs/pull/20655/head false \
-  'policy policy_shell transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'go_consumer_interop go_support policy policy_shell release runtime_confidential transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/check-darwin-cross.sh
 run_present_paths_case darwin_cross_check_tests pull_request refs/pull/20656/head false \
   "$policy policy_shell" scripts/ci/tests/test-darwin-cross-check.sh
+# The selection job runs the runner image contract on every run.
+run_present_paths_case ci_runner_image_contract_tests pull_request refs/pull/20657/head false \
+  "$policy policy_shell" scripts/ci/tests/test-ci-runner-image-contract.sh
 run_present_paths_case darwin_cross_test_unknown pull_request refs/pull/20656/head false \
   "$all_product_pr" scripts/ci/tests/test-darwin-cross-check-future.sh
 run_present_paths_case mesh_ingress_protocol_guard pull_request refs/pull/1902/head false \
@@ -2397,8 +2397,15 @@ grep -qF "needs.verification-selection.outputs.cw_package_selected != 'true'" \
   "$cw_block"
 grep -qF "needs.verification-selection.outputs.cw_package_selected == 'true'" \
   "$cw_block"
-grep -qF "CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin'" \
+# Pull requests package the Linux pair and compile the macOS pair without the
+# SDK; the protected Mac runner links it after merge (cw-release-dry-run.yaml).
+grep -qF "CW_RELEASE_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-gnu'" \
   "$cw_block"
+grep -qF 'run: scripts/ci/verify/check-darwin-cross.sh --cli' "$cw_block"
+if grep -qF 'apple-darwin' <(grep -F 'CW_RELEASE_TARGETS=' "$cw_block"); then
+  echo 'PR CW release-assets verification links the macOS cw without its SDK' >&2
+  exit 1
+fi
 grep -qF 'scripts/ci/release/package-cw-release.sh v0.0.0-ci' "$cw_block"
 jq -e '
   .artifacts.cw_cli_release_assets.release_targets == [
