@@ -115,7 +115,7 @@ pub(crate) struct DoctorLocalArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct DoctorTailnetArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     environment: String,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     output: OutputFormat,
@@ -403,7 +403,7 @@ pub(crate) enum CredentialsCommand {
     Add(CredentialAddArgs),
     #[command(about = "Generate a protected SSH identity and show its public key")]
     Generate(CredentialGenerateArgs),
-    #[command(about = "List credential metadata")]
+    #[command(visible_alias = "ls", about = "List credential metadata")]
     List(CredentialListArgs),
     #[command(about = "Show credential metadata")]
     Get(CredentialGetArgs),
@@ -559,7 +559,7 @@ pub(crate) enum CredentialProfileCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum CredentialProfilesCommand {
-    #[command(about = "List credential profile metadata")]
+    #[command(visible_alias = "ls", about = "List credential profile metadata")]
     List(CredentialListArgs),
 }
 
@@ -677,7 +677,10 @@ pub(crate) struct InitArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct VscodeArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV",
+        help = "Environment name or ID; defaults to the selected environment"
+    )]
     environment: Option<String>,
     #[arg(long, default_value = "/workspace", help = "Remote folder to open")]
     folder: String,
@@ -687,7 +690,10 @@ pub(crate) struct VscodeArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvironmentShellArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV",
+        help = "Environment name or ID; defaults to the selected environment"
+    )]
     pub(crate) environment: Option<String>,
     #[arg(long, help = "Pipe stdin/stdout for OpenSSH ProxyCommand")]
     stdio: bool,
@@ -701,11 +707,25 @@ pub(crate) struct EnvironmentRunArgs {
     pub(crate) name: Option<String>,
     #[arg(long, help = "Parent session name or ID within this environment")]
     pub(crate) parent: Option<String>,
-    #[arg(long, value_parser = ["codex", "claude", "kimi"], conflicts_with = "command")]
+    #[arg(
+        long,
+        value_parser = ["codex", "claude", "kimi"],
+        conflicts_with = "command",
+        help = "Launch a managed agent conversation instead of a command"
+    )]
     pub(crate) agent: Option<String>,
-    #[arg(long, requires = "agent")]
+    #[arg(
+        long,
+        requires = "agent",
+        help = "Agent model; defaults to the agent's own default"
+    )]
     pub(crate) model: Option<String>,
-    #[arg(long, requires = "agent", value_parser = ["low", "medium", "high", "xhigh", "max", "ultra"])]
+    #[arg(
+        long,
+        requires = "agent",
+        value_parser = ["low", "medium", "high", "xhigh", "max", "ultra"],
+        help = "Agent reasoning effort"
+    )]
     pub(crate) effort: Option<String>,
     #[arg(
         long,
@@ -713,11 +733,25 @@ pub(crate) struct EnvironmentRunArgs {
         help = "Initial task for the managed conversation"
     )]
     pub(crate) prompt: Option<String>,
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV",
+        help = "Environment name or ID; defaults to the selected environment"
+    )]
     pub(crate) environment: Option<String>,
-    #[arg(short = 'w', long = "workdir", alias = "dir", value_name = "DIR")]
+    #[arg(
+        short = 'w',
+        long = "workdir",
+        alias = "dir",
+        value_name = "DIR",
+        help = "Working directory inside the environment"
+    )]
     pub(crate) workdir: Option<String>,
-    #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
+    #[arg(
+        short = 'e',
+        long = "env",
+        value_name = "KEY=VALUE",
+        help = "Set a variable for this session; repeatable"
+    )]
     pub(crate) env: Vec<String>,
     #[arg(
         short = 't',
@@ -730,9 +764,14 @@ pub(crate) struct EnvironmentRunArgs {
     pub(crate) no_tty: bool,
     #[arg(short = 'd', long, help = "Launch the session without attaching")]
     pub(crate) detach: bool,
-    #[arg(short = 'o', long = "output", value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(short = 'o', long = "output", value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     pub(crate) output: OutputFormat,
-    #[arg(last = true, required_unless_present = "agent", value_name = "COMMAND")]
+    #[arg(
+        last = true,
+        required_unless_present = "agent",
+        value_name = "COMMAND",
+        help = "Command and arguments to run, after --"
+    )]
     pub(crate) command: Vec<String>,
 }
 
@@ -747,7 +786,7 @@ pub(crate) enum EnvCommand {
         long_about = "Create a new environment from direct CLI flags.\n\nMultiple repos can be specified as positional args or with --repo flags.\nUse URL[@branch][::/workspace/path] to set a branch and optional checkout path per repo."
     )]
     Create(Box<EnvCreateArgs>),
-    #[command(about = "List environments")]
+    #[command(visible_alias = "ls", about = "List environments")]
     List(EnvListArgs),
     #[command(about = "Show environment details")]
     Info(EnvInfoArgs),
@@ -827,7 +866,7 @@ pub(crate) enum EnvAgentCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvAgentInfoArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     pub(crate) environment: String,
     #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) output: OutputFormat,
@@ -835,7 +874,7 @@ pub(crate) struct EnvAgentInfoArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvAgentObserveArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     pub(crate) environment: String,
     #[arg(long, value_name = "UUID")]
     pub(crate) request_id: uuid::Uuid,
@@ -876,7 +915,7 @@ pub(crate) struct EnvRuntimeQueryArgs {
 }
 #[derive(Debug, Args)]
 pub(crate) struct EnvRuntimeUpdateArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     environment: String,
     #[arg(
         long,
@@ -921,7 +960,7 @@ pub(crate) struct EnvRuntimeUpdateArgs {
 }
 #[derive(Debug, Args)]
 pub(crate) struct EnvRuntimeRollbackArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     environment: String,
     #[arg(long, help = "Native: observed live selector revision", value_parser = parse_runtime_revision, required_unless_present = "expected_generation", conflicts_with = "expected_generation")]
     expected_revision: Option<u64>,
@@ -934,7 +973,7 @@ pub(crate) struct EnvRuntimeRollbackArgs {
 }
 #[derive(Debug, Args)]
 pub(crate) struct EnvRuntimeOperationArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     environment: String,
     #[arg(long, value_name = "UUID", value_parser = parse_runtime_request_id)]
     request_id: uuid::Uuid,
@@ -1141,7 +1180,7 @@ pub(crate) enum StoragePlacementArg {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvUpdateArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     environment: String,
     #[arg(long, value_name = "PROJECT")]
     secrets: Option<String>,
@@ -1183,7 +1222,7 @@ pub(crate) struct EnvInfoArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvResizeArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(value_name = "ENV", help = "Environment name or ID")]
     pub(crate) environment: String,
     #[arg(long, value_name = "CPU", help = "CPU (for example 500m, 0.5, or 4)")]
     pub(crate) cpu: Option<String>,
@@ -1295,7 +1334,7 @@ pub(crate) struct EnvShareArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum EnvShareCommand {
-    #[command(about = "List collaborators for an environment")]
+    #[command(visible_alias = "ls", about = "List collaborators for an environment")]
     List(EnvShareTargetArgs),
     #[command(about = "Share an environment with a user")]
     Grant(EnvShareGrantArgs),
@@ -1347,7 +1386,7 @@ pub(crate) struct EnvPortArgs {
 pub(crate) enum EnvPortCommand {
     #[command(about = "Register a port and get a preview URL")]
     Add(EnvPortAddArgs),
-    #[command(alias = "ls", about = "List registered ports")]
+    #[command(visible_alias = "ls", about = "List registered ports")]
     List(EnvPortListArgs),
     #[command(about = "Remove a registered port")]
     Rm(EnvPortRmArgs),
@@ -1427,7 +1466,10 @@ pub(crate) enum EnvDaemonCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvDaemonTargetArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV",
+        help = "Environment name or ID; defaults to the selected environment"
+    )]
     environment: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     output: OutputFormat,
@@ -1435,7 +1477,10 @@ pub(crate) struct EnvDaemonTargetArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvDaemonLogsArgs {
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV",
+        help = "Environment name or ID; defaults to the selected environment"
+    )]
     environment: Option<String>,
 }
 
@@ -1473,7 +1518,7 @@ pub(crate) struct CostArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum OrgCommand {
-    #[command(about = "List organizations")]
+    #[command(visible_alias = "ls", about = "List organizations")]
     List(OrgListArgs),
     #[command(about = "Show the current organization")]
     Current,
@@ -1533,7 +1578,7 @@ pub(crate) struct OrgInviteArgs {
 pub(crate) enum ApiKeyCommand {
     #[command(about = "Create an API key")]
     Create(ApiKeyCreateArgs),
-    #[command(about = "List API keys")]
+    #[command(visible_alias = "ls", about = "List API keys")]
     List,
     #[command(alias = "rm", about = "Delete an API key")]
     Delete(ApiKeyDeleteArgs),
@@ -1555,7 +1600,7 @@ pub(crate) struct ApiKeyDeleteArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum PresetCommand {
-    #[command(alias = "ls", about = "List environment presets")]
+    #[command(visible_alias = "ls", about = "List environment presets")]
     List,
     #[command(about = "Create an environment preset")]
     Create(PresetCreateArgs),
@@ -1606,7 +1651,10 @@ pub(crate) struct PresetRmArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum SecretsCommand {
-    #[command(about = "List key metadata in the explicitly selected scope")]
+    #[command(
+        visible_alias = "ls",
+        about = "List key metadata in the explicitly selected scope"
+    )]
     List(ScopedSecretListArgs),
     #[command(about = "Set one key using a hidden prompt or standard input")]
     Set(ScopedSecretKeyArgs),
@@ -1663,7 +1711,7 @@ pub(crate) struct SecretPreviewArgs {
 pub(crate) enum SecretProjectCommand {
     #[command(about = "Create a secret project")]
     Create(SecretProjectCreateArgs),
-    #[command(about = "List named secret projects")]
+    #[command(visible_alias = "ls", about = "List named secret projects")]
     List(ScopedSecretListArgs),
     #[command(about = "Delete an explicitly named project and all its keys")]
     Delete(SecretProjectDeleteArgs),
@@ -1722,7 +1770,11 @@ pub(crate) enum ConfigCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum NetworkCommand {
-    #[command(alias = "networks", about = "List Mesh networks you can use")]
+    #[command(
+        alias = "networks",
+        visible_alias = "ls",
+        about = "List Mesh networks you can use"
+    )]
     List(NetworkListArgs),
     #[command(about = "Create a Mesh network")]
     Create(NetworkCreateArgs),
@@ -1987,13 +2039,27 @@ pub(crate) struct ListArgs {
     #[arg(
         long,
         conflicts_with = "environment",
-        help = "List sessions across accessible environments"
+        help = "List every accessible environment (the default without ENV)"
     )]
     pub(crate) all: bool,
-    #[arg(value_name = "ENV")]
+    #[arg(
+        value_name = "ENV",
+        help = "Environment name or ID; omit to list every environment"
+    )]
     pub(crate) environment: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     pub(crate) output: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct StopArgs {
+    #[command(flatten)]
+    pub(crate) session: SessionTargetArgs,
+    #[arg(
+        long,
+        help = "Also stop every running descendant session without asking"
+    )]
+    pub(crate) all: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2035,8 +2101,7 @@ pub(crate) struct WaitArgs {
     pub(crate) target: Vec<String>,
     #[arg(
         long,
-        conflicts_with = "target",
-        help = "Wait for a managed message's terminal result"
+        help = "Wait for a managed message's terminal result; the ID alone names its session"
     )]
     pub(crate) message: Option<String>,
     #[arg(

@@ -230,8 +230,8 @@ impl Endpoint {
         }
         anyhow::ensure!(
             operation.phase.as_known() == Some(rpc::EnvironmentAgentPhase::Completed),
-            "request {id} remains {:?}; use cw env agent observe {} --request-id {id}; no replay was sent",
-            operation.phase.as_known(),
+            "request {id} remains {}; use cw env agent observe {} --request-id {id}; no replay was sent",
+            phase_name(&operation.phase),
             self.environment_id
         );
         Ok(operation)
@@ -336,6 +336,25 @@ fn save_location(location: &MessageLocation) -> anyhow::Result<()> {
     }
     write_private_json(&path, location)
 }
+/// The lowercase phase name shown to people, never a Rust debug rendering.
+fn phase_name(phase: &codewire_client::EnumValue<rpc::EnvironmentAgentPhase>) -> &'static str {
+    match phase.as_known() {
+        Some(rpc::EnvironmentAgentPhase::Admitted) => "admitted",
+        Some(rpc::EnvironmentAgentPhase::Issued) => "issued",
+        Some(rpc::EnvironmentAgentPhase::Completed) => "completed",
+        Some(rpc::EnvironmentAgentPhase::Rejected) => "rejected",
+        _ => "unknown",
+    }
+}
+
+fn agent_name(agent: &codewire_client::EnumValue<rpc::EnvironmentAgentKind>) -> &'static str {
+    match agent.as_known() {
+        Some(rpc::EnvironmentAgentKind::Codex) => "codex",
+        Some(rpc::EnvironmentAgentKind::Claude) => "claude",
+        _ => "unknown",
+    }
+}
+
 fn print_operation(
     op: &rpc::EnvironmentAgentOperation,
     output: OutputFormat,
@@ -343,7 +362,7 @@ fn print_operation(
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(op)?),
         OutputFormat::Text => println!(
-            "request {}\tsession {}\tmessage {}\t{:?}\tpipe {}\tnative {}",
+            "request {}\tsession {}\tmessage {}\t{}",
             op.request_id,
             op.session_id,
             if op.message_id.is_empty() {
@@ -351,9 +370,7 @@ fn print_operation(
             } else {
                 &op.message_id
             },
-            op.phase.as_known(),
-            op.pipe_acknowledged,
-            op.native_acknowledged
+            phase_name(&op.phase)
         ),
     }
     Ok(())
@@ -380,7 +397,7 @@ pub(super) async fn run(
     let provider = support
         .iter()
         .find(|a| a.agent.as_known() == Some(kind) && a.proxy_only_qualified)
-        .context("selected agent has no qualified provider proxy in this environment")?;
+        .context("selected agent has no qualified provider proxy in this environment; create it with --profile PROFILE for a credential profile that includes this provider, and check `cw env agent info ENV`")?;
     let (parent, parent_generation) = match args.parent.as_deref() {
         Some(reference) => {
             let parent = endpoint.find(reference).await?;
@@ -787,14 +804,17 @@ pub(crate) async fn handle_metadata(
                 .await?;
             match args.output {
                 OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                OutputFormat::Text if response.agents.is_empty() => println!(
+                    "No managed agents are available; create the environment with --profile PROFILE for a credential profile that includes Codex or Anthropic"
+                ),
                 OutputFormat::Text => {
                     for support in response.agents {
                         println!(
-                            "{:?}\tversion {}\tsteer {}\tinterrupt {}",
-                            support.agent.as_known(),
+                            "{}\tversion {}\tsteer {}\tinterrupt {}",
+                            agent_name(&support.agent),
                             support.provider_version,
-                            support.steer,
-                            support.interrupt
+                            if support.steer { "yes" } else { "no" },
+                            if support.interrupt { "yes" } else { "no" }
                         );
                     }
                 }

@@ -10,6 +10,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -394,7 +395,7 @@ class DeliveryTest(unittest.TestCase):
 
     def test_synthetic_keys_never_satisfy_production_trust(self):
         installer = (ROOT / "apps/cli/install.sh").read_text()
-        self.assertIn(f'GPG_KEY_ID="{release.PRODUCTION_FINGERPRINT}"', installer)
+        self.assertIn(f'PRODUCTION_FINGERPRINT = "{release.PRODUCTION_FINGERPRINT}"', installer)
         self.assertNotEqual(self.signer.fingerprint, release.PRODUCTION_FINGERPRINT)
         with self.assertRaises(release.ReleaseError):
             release.verify_delivery(self.dist, release.PRODUCTION_TRUST)
@@ -606,7 +607,37 @@ class SourceDigestTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    result = unittest.main(argv=[sys.argv[0], "-v"], exit=False).result
+    if sys.platform != "linux":
+        raise SystemExit("release delivery process fixtures require Linux custody")
+    spec = importlib.util.spec_from_file_location(
+        "delivery_fixture_custody", ROOT / "scripts/ci/verify/build-linux-vmm-kernel.py")
+    owner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(owner)
+    owner.arm_custody()
+
+    class FixtureResult(unittest.TextTestResult):
+        def stopTestRun(self):
+            # Every original body/direct wait and Signer.close has finished.
+            # Own only this isolated fixture process's adopted helpers; final
+            # ECHILD must precede unittest's success summary.
+            deadline = time.monotonic() + 5
+            while True:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("release delivery fixture cleanup did not reach ECHILD")
+                try:
+                    reaped, _ = os.waitpid(-1, os.WNOHANG | owner.WALL)
+                except ChildProcessError:
+                    break
+                except InterruptedError:
+                    continue
+                if not reaped:
+                    time.sleep(0.01)
+            super().stopTestRun()
+
+    class FixtureRunner(unittest.TextTestRunner):
+        resultclass = FixtureResult
+
+    result = unittest.main(argv=[sys.argv[0], "-v"], exit=False, testRunner=FixtureRunner).result
     print(f"test-cw-release-delivery: tests={result.testsRun} failures={len(result.failures)} "
           f"errors={len(result.errors)}")
     sys.exit(0 if result.wasSuccessful() and result.testsRun > 0 else 1)

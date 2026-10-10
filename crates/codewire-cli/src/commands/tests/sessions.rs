@@ -236,9 +236,80 @@ fn adjacent_session_wraps_without_mutating_selected_environment() {
 }
 
 #[test]
+fn session_table_aligns_columns_and_names_the_parent() {
+    let session = |id: &str, name: &str, parent: &str, command: &str| EnvironmentSessionView {
+        name: name.to_string(),
+        parent_session_id: parent.to_string(),
+        started_at: String::new(),
+        cleanup_unknown: false,
+        launch_generation: 1,
+        session_id: id.to_string(),
+        state: "Running".to_string(),
+        command: vec![command.to_string()],
+        working_dir: String::new(),
+        pty: false,
+        exit_code: None,
+        output_end_offset: 0,
+        output_start_offset: 0,
+        status_message: String::new(),
+    };
+    let sessions = [
+        session("session-1", "lead", "", "bash"),
+        session("session-2", "", "session-1", "cargo test"),
+        session("session-3", "orphan", "session-9", "sleep 5"),
+    ];
+    let mut owners = std::collections::BTreeSet::from(["session-1".to_string()]);
+    let children: Vec<String> = running_children(&sessions, &owners)
+        .into_iter()
+        .map(|child| child.session_id)
+        .collect();
+    assert_eq!(children, ["session-2"]);
+    owners.insert("session-2".to_string());
+    assert!(running_children(&sessions, &owners).is_empty());
+    assert_eq!(
+        running_children_hints(&sessions[1..2], &sessions[0], Some("team")),
+        [
+            "cw: child session session-2 is still running",
+            "cw: stop them with `cw stop --all team lead`",
+        ]
+    );
+    let Command::Stop(stop) = Cli::try_parse_from(["cw", "stop", "--all", "team", "lead"])
+        .unwrap()
+        .command
+    else {
+        panic!("stop expected");
+    };
+    assert!(stop.all);
+    assert_eq!(stop.session.target, ["team", "lead"]);
+    assert!(Cli::try_parse_from(["cw", "restart", "--all", "lead"]).is_err());
+    let mut stopped = sessions[1].clone();
+    stopped.state = "Stopped".to_string();
+    assert!(running_children(&[stopped], &std::collections::BTreeSet::from(["session-1".to_string()])).is_empty());
+    assert_eq!(
+        format_environment_sessions(&sessions, "  "),
+        concat!(
+            "  NAME    STATE    PARENT     SESSION    COMMAND\n",
+            "  lead    Running  -          session-1  bash\n",
+            "  -       Running  lead       session-2  cargo test\n",
+            "  orphan  Running  session-9  session-3  sleep 5\n",
+        )
+    );
+}
+
+#[test]
 fn session_grammar_uses_environment_as_first_positional() {
     let list = Cli::try_parse_from(["cw", "list", "builder"]).unwrap();
     let Command::List(args) = list.command else {
+        panic!("expected list command");
+    };
+    assert_eq!(args.environment.as_deref(), Some("builder"));
+    for argv in [vec!["cw", "list"], vec!["cw", "ls"], vec!["cw", "ls", "--all"]] {
+        let Command::List(args) = Cli::try_parse_from(argv).unwrap().command else {
+            panic!("expected list command");
+        };
+        assert_eq!(args.environment, None, "no ENV lists every environment");
+    }
+    let Command::List(args) = Cli::try_parse_from(["cw", "ls", "builder"]).unwrap().command else {
         panic!("expected list command");
     };
     assert_eq!(args.environment.as_deref(), Some("builder"));
@@ -301,7 +372,26 @@ fn orchestration_arguments_preserve_terminal_and_semantic_boundaries() {
         Cli::try_parse_from(["cw", "send", "shell", "--no-newline", "--key", "ctrl-c"]).is_err()
     );
     assert!(Cli::try_parse_from(["cw", "list", "--all", "host-team"]).is_err());
-    assert!(Cli::try_parse_from(["cw", "wait", "--message", "task-id", "shell"]).is_err());
+}
+
+#[tokio::test]
+async fn wait_for_a_message_explains_that_its_id_names_the_session() {
+    let Command::Wait(args) =
+        Cli::try_parse_from(["cw", "wait", "builder", "shell", "--message", "task-id"])
+            .unwrap()
+            .command
+    else {
+        panic!("wait expected");
+    };
+    let globals = Globals {
+        server: None,
+        member: None,
+    };
+    let error = handle_wait_command(&globals, args).await.unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "a message ID already names its session; run `cw wait --message task-id` without ENV or SESSION"
+    );
 }
 
 #[cfg(unix)]

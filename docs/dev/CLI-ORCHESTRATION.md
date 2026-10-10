@@ -2,8 +2,10 @@
 
 The CLI uses an environment as the execution placement and a durable session
 as the process identity. Session names are unique within an environment;
-commands resolve an exact ID before a name. `cw list --all` inventories
-accessible environments and reports unavailable targets as errors.
+commands resolve an exact ID before a name. `cw list` (alias `cw ls`)
+inventories every accessible environment and its sessions, shows stopped
+environments as not running, and reports running environments it cannot
+reach as errors; `cw list ENV` lists one environment.
 
 ## Placements
 
@@ -55,7 +57,7 @@ Use the same session commands with `host-team`, `vm-team`, or `cloud-team`:
 ```sh
 cw run host-team --name tests --detach --no-tty -- make test
 cw list host-team
-cw list --all
+cw list
 cw wait host-team tests --timeout 10m
 cw logs host-team tests
 cw stop host-team tests
@@ -114,7 +116,13 @@ Agent launches with `--prompt` and message commands return durable message
 IDs. `msg` sends a semantic task, follow-up or reply to the native agent protocol.
 A raw terminal write is refused for managed sessions. Parents are bound to canonical session
 and driver identities in the same host environment; an unmanaged process
-cannot receive semantic worker results.
+cannot receive semantic worker results. `cw wait --message ID` returns the final
+reply; the message ID alone names its session. `cw logs ENV SESSION` shows each
+turn's prompt, the commands, edits and tools the agent uses, and its reply.
+`cw stop` asks at a terminal whether to stop a session's running children too;
+`cw stop --all` stops every running descendant without asking. Without a
+terminal, children keep running and `cw stop` names them. `cw restart` affects
+only the named session.
 
 ```mermaid
 flowchart LR

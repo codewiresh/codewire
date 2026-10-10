@@ -93,11 +93,12 @@ cw attach my-app <session-id>
 cw logs my-app <session-id>
 cw logs --follow my-app <session-id>
 cw shell my-app
-cw list --all
+cw list
 ```
 
-`cw use my-app` selects a default environment, after which the environment
-argument may be omitted. The foreground `cw run` streams retained output and
+`cw list` (or `cw ls`) shows every environment and its sessions. `cw use
+my-app` selects a default environment, after which the environment argument
+of other session commands may be omitted. The foreground `cw run` streams retained output and
 fails when the durable command exits unsuccessfully. `--detach` returns after
 launch.
 

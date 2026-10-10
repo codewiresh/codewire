@@ -1628,7 +1628,9 @@ sessions = list((root / 'daemon' / 'sessions').glob('*/session.json'))
 assert sessions, 'managed session metadata is missing'
 for path in sessions:
     session = json.loads(path.read_text())
-    assert all(value.split('=', 1)[0] != 'DATABASE_URL' for value in session['env'])
+    # Launch values stay with the live owner: a saved session record never
+    # carries an environment, so no projected value can persist in it.
+    assert 'env' not in session
 PY
 printf 'application-secret-check-ok\\n'
 SCRIPT
@@ -1671,9 +1673,9 @@ sessions = list((root / 'daemon' / 'sessions').glob('*/session.json'))
 assert sessions, 'managed session metadata is missing'
 for path in sessions:
     session = json.loads(path.read_text())
-    for value in session['env']:
-        name, _, persisted = value.partition('=')
-        assert name not in keys or (name == config_key and persisted == 'ordinary-config')
+    # Launch values stay with the live owner: a saved session record never
+    # carries an environment, so no projected value can persist in it.
+    assert 'env' not in session
 PY
 printf 'application-secret-check-ok\\n'
 SCRIPT
@@ -2260,7 +2262,7 @@ assert_docker_socket_contract() {
     die "docker-sock emptyDir medium=${medium:-<default>}, want Memory for Kata cross-container Unix sockets"
   [[ "$workspace_mount_count" == "1" && "$dind_mount_count" == "1" ]] || \
     die "docker-sock mount counts workspace=$workspace_mount_count dind=$dind_mount_count, want 1/1"
-  [[ "$readiness_command" == "docker version --format '{{.Server.Version}}' >/dev/null" ]] || \
+  [[ "$readiness_command" == "test -f /codewire/run/daemon/ready && docker version --format '{{.Server.Version}}' >/dev/null" ]] || \
     die "workspace Docker readiness probe does not prove the cross-container daemon connection"
   jq -e '
     .spec.containers[]

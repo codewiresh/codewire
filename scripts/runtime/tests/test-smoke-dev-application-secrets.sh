@@ -797,8 +797,9 @@ printf 'fixture-random-workspace-marker\n' >"$guest_root/workspace/.cw-app-smoke
 marker_sha256="$(sha256sum "$guest_root/workspace/.cw-app-smoke/preservation-marker" | cut -d ' ' -f 1)"
 jq -n --arg key "${APP_SECRET_ALL_KEYS[5]}" '{($key):"ordinary-config"}' \
   >"$guest_root/home/.codewire/environment.json"
-jq -n --arg key "${APP_SECRET_ALL_KEYS[5]}" '{env:[($key + "=ordinary-config")]}' \
-  >"$guest_root/home/.codewire/daemon/sessions/one/session.json"
+# The daemon never serializes a session's environment (launch values stay
+# with the live owner), so a saved record has no env field.
+jq -n '{name:"one"}' >"$guest_root/home/.codewire/daemon/sessions/one/session.json"
 check="$(application_all_scopes_guest_check APP_SECRET_ALL_HASHES_A "$marker_sha256")"
 check="${check//\/workspace/$guest_root/workspace}"
 check="${check//\/home\/codewire/$guest_root/home}"
@@ -1000,7 +1001,7 @@ guest="$TMPDIR_SMOKE/guest"; mkdir -p "$guest/workspace/.cw-app-smoke" "$guest/h
 printf '1\n' >"$guest/workspace/.cw-app-smoke/install-count"
 printf 'workspace-preserved\n' >"$guest/workspace/.cw-app-smoke/preserved"
 printf '{"CW_DEV_PRECEDENCE":"ordinary-config"}\n' >"$guest/home/.codewire/environment.json"
-printf '{"env":["CW_DEV_PRECEDENCE=ordinary-config"]}\n' >"$guest/home/.codewire/daemon/sessions/one/session.json"
+printf '{"name":"one"}\n' >"$guest/home/.codewire/daemon/sessions/one/session.json"
 expected="$(printf synthetic-application | sha256sum | cut -d ' ' -f 1)"
 printf '%s\n' "$expected" >"$guest/workspace/.cw-app-smoke/startup-sha"
 check="$(application_guest_check "$expected")"
@@ -1009,6 +1010,12 @@ check="${check//\/home\/codewire/$guest/home}"
 DATABASE_URL=synthetic-application CW_DEV_PRECEDENCE=ordinary-config /bin/sh -c "$check" >"$TMPDIR_SMOKE/check.out"
 grep -qx application-secret-check-ok "$TMPDIR_SMOKE/check.out"
 pass
+# A record that persisted any launch environment is refused.
+printf '{"name":"one","env":["CW_DEV_PRECEDENCE=ordinary-config"]}\n' \
+  >"$guest/home/.codewire/daemon/sessions/one/session.json"
+expect_failure persisted-session-environment env DATABASE_URL=synthetic-application \
+  CW_DEV_PRECEDENCE=ordinary-config /bin/sh -c "$check"
+printf '{"name":"one"}\n' >"$guest/home/.codewire/daemon/sessions/one/session.json"
 expect_failure missing-projection env -u DATABASE_URL CW_DEV_PRECEDENCE=ordinary-config /bin/sh -c "$check"
 grep -qx 'application check failed: missing-projection' "$APP_TEST_ROOT/failure.err"
 expect_failure wrong-projection env DATABASE_URL=wrong-synthetic-value CW_DEV_PRECEDENCE=ordinary-config /bin/sh -c "$check"
@@ -1025,7 +1032,7 @@ expect_failure repeated-install env DATABASE_URL=synthetic-application CW_DEV_PR
 printf '1\n' >"$guest/workspace/.cw-app-smoke/install-count"
 printf '{"env":["DATABASE_URL=forbidden-persisted-value"]}\n' >"$guest/home/.codewire/daemon/sessions/one/session.json"
 expect_failure persisted-session-value env DATABASE_URL=synthetic-application CW_DEV_PRECEDENCE=ordinary-config /bin/sh -c "$check"
-printf '{"env":[]}\n' >"$guest/home/.codewire/daemon/sessions/one/session.json"
+printf '{"name":"one"}\n' >"$guest/home/.codewire/daemon/sessions/one/session.json"
 printf 'absent\n' >"$guest/workspace/.cw-app-smoke/startup-sha"
 check="$(application_guest_check absent)"; check="${check//\/workspace/$guest/workspace}"; check="${check//\/home\/codewire/$guest/home}"
 env -u DATABASE_URL CW_DEV_PRECEDENCE=ordinary-config /bin/sh -c "$check" >"$TMPDIR_SMOKE/check.out"

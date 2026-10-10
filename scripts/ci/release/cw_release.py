@@ -672,8 +672,8 @@ def verify_detached(data, signature, trust):
     with tempfile.TemporaryDirectory(prefix="cw-release-gpg.") as home:
         os.chmod(home, 0o700)
         env = {"GNUPGHOME": home, "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C"}
-        listed = subprocess.run(["gpg", "--batch", "--with-colons", "--import-options", "show-only",
-                                 "--import", str(trust.key_file)], env=env, capture_output=True, text=True)
+        listed = subprocess.run(["gpg", "--no-options", "--no-autostart", "--batch", "--with-colons", "--import-options", "show-only",
+                                 "--import", str(trust.key_file)], env=env, capture_output=True, text=True, timeout=15)
         primaries = [line.split(":") for line in listed.stdout.splitlines() if line.startswith("pub:")]
         fingerprints = []
         lines = listed.stdout.splitlines()
@@ -682,13 +682,13 @@ def verify_detached(data, signature, trust):
                 fingerprints.append(lines[index + 1].split(":")[9])
         require(listed.returncode == 0 and len(primaries) == 1 and fingerprints == [trust.fingerprint],
                 "trusted key file does not contain exactly the trusted primary key")
-        subprocess.run(["gpg", "--batch", "--import", str(trust.key_file)], env=env,
-                       capture_output=True, check=True)
+        subprocess.run(["gpg", "--no-options", "--no-autostart", "--batch", "--import", str(trust.key_file)], env=env,
+                       capture_output=True, check=True, timeout=15)
         data_path, sig_path = Path(home) / "data", Path(home) / "data.asc"
         data_path.write_bytes(data)
         sig_path.write_bytes(signature)
-        result = subprocess.run(["gpg", "--batch", "--status-fd", "1", "--verify", str(sig_path), str(data_path)],
-                                env=env, capture_output=True, text=True)
+        result = subprocess.run(["gpg", "--no-options", "--no-autostart", "--batch", "--status-fd", "1", "--verify", str(sig_path), str(data_path)],
+                                env=env, capture_output=True, text=True, timeout=15)
     status = [line.split() for line in result.stdout.splitlines() if line.startswith("[GNUPG:] ")]
     valid = [fields for fields in status if fields[1] == "VALIDSIG"]
     bad = [fields for fields in status if fields[1] in ("BADSIG", "ERRSIG", "EXPSIG", "EXPKEYSIG", "REVKEYSIG")]

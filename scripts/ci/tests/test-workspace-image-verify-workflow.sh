@@ -411,10 +411,20 @@ PY
     ;;
   'buildx rm')
     [[ "${FAKE_FAIL:-}" != cleanup ]] || exit 43
+    if [[ "${FAKE_FAIL:-}" == cleanup-gone ]]; then
+      # The CLI reports failure although the owned container is already gone.
+      : >"$FAKE_DAEMON_FILE.removed"
+      echo 'ERROR: failed to remove one or more builders' >&2
+      exit 43
+    fi
     # Exercise the real timeout boundary, not a fake timeout implementation.
     [[ "${FAKE_FAIL:-}" != slow-cleanup ]] || sleep 11
     ;;
   'container inspect')
+    if [[ "${FAKE_FAIL:-}" == cleanup-gone && -e "$FAKE_DAEMON_FILE.removed" ]]; then
+      echo "Error: No such container: ${*: -1}" >&2
+      exit 1
+    fi
     if [[ "$5" == '{{.Id}}' ]]; then
       printf '%064d\n' 4
     elif [[ "$5" == '{{.Image}}' ]]; then
@@ -676,6 +686,19 @@ for failure in full mounted cleanup cancel; do
 done
 grep -q 'workspace cache cleanup: phase=builder-removal status=43 elapsed_seconds=' \
   "$work/cleanup.out" || fail 'builder removal failure omitted its bounded diagnostic'
+grep -q 'workspace cache cleanup: builder-removal output: ' "$work/cleanup.out" ||
+  fail 'builder removal failure omitted its bounded Buildx output'
+
+# A removal the CLI reports as failed, after Docker confirms the exact owned
+# container is gone, achieved the cleanup and must not fail the verification.
+: >"$work/docker.log"
+rm -f "$work/daemon.aws.removed"
+run_mock_verifier cleanup-gone valid docker cleanup-gone >"$work/cleanup-gone.out" 2>&1 ||
+  fail 'confirmed-absent builder removal failed the verification'
+grep -q 'workspace cache cleanup: phase=builder-removal status=43 confirmed-absent=true' \
+  "$work/cleanup-gone.out" || fail 'confirmed-absent builder removal was not reported'
+[[ -e "$fixture_receipt" ]] || fail 'confirmed-absent builder removal emitted no receipt'
+rm -f "$work/daemon.aws.removed"
 
 if [[ "$standalone_producers" == 1 ]]; then
   for failure in full mounted cleanup receipt cw-mismatch; do
