@@ -160,7 +160,7 @@ const HELP_SECTIONS: &[(&str, &[&str])] = &[
 /// Descriptions come from the commands themselves, so the help cannot drift.
 fn cli_command() -> clap::Command {
     let command = Cli::command();
-    let mut visible: Vec<(String, String)> = command
+    let mut visible: Vec<(String, String, String)> = command
         .get_subcommands()
         .filter(|subcommand| !subcommand.is_hide_set())
         .map(|subcommand| {
@@ -168,39 +168,46 @@ fn cli_command() -> clap::Command {
                 .get_about()
                 .map(ToString::to_string)
                 .unwrap_or_default();
-            (subcommand.get_name().to_owned(), about)
+            let name = subcommand.get_name().to_owned();
+            let label = std::iter::once(name.as_str())
+                .chain(subcommand.get_visible_aliases())
+                .collect::<Vec<_>>()
+                .join(", ");
+            (name, label, about)
         })
         .collect();
     visible.push((
+        "help".to_owned(),
         "help".to_owned(),
         "Show help for cw or one of its commands".to_owned(),
     ));
     let width = visible
         .iter()
-        .map(|(name, _)| name.len())
+        .map(|(_, label, _)| label.len())
         .max()
         .unwrap_or(0);
     let mut sections = String::new();
     let mut listed = std::collections::HashSet::new();
-    let mut section = |heading: &str, names: &mut dyn Iterator<Item = &(String, String)>| {
-        let mut body = String::new();
-        for (name, about) in names {
-            body.push_str(&format!("  {name:<width$}  {about}\n"));
-        }
-        if !body.is_empty() {
-            sections.push_str(&format!("{heading}:\n{body}\n"));
-        }
-    };
+    let mut section =
+        |heading: &str, names: &mut dyn Iterator<Item = &(String, String, String)>| {
+            let mut body = String::new();
+            for (_, label, about) in names {
+                body.push_str(&format!("  {label:<width$}  {about}\n"));
+            }
+            if !body.is_empty() {
+                sections.push_str(&format!("{heading}:\n{body}\n"));
+            }
+        };
     for (heading, names) in HELP_SECTIONS {
         let mut members = names
             .iter()
-            .filter_map(|name| visible.iter().find(|(candidate, _)| candidate == name));
+            .filter_map(|name| visible.iter().find(|(candidate, _, _)| candidate == name));
         section(heading, &mut members);
         listed.extend(names.iter().copied());
     }
     let mut other = visible
         .iter()
-        .filter(|(name, _)| !listed.contains(name.as_str()));
+        .filter(|(name, _, _)| !listed.contains(name.as_str()));
     section("Other", &mut other);
     command.help_template(format!(
         "{{before-help}}{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{sections}Options:\n{{options}}{{after-help}}"
@@ -279,8 +286,8 @@ enum Command {
     Send(SendArgs),
     #[command(about = "Wait for a session or managed message to finish")]
     Wait(WaitArgs),
-    #[command(about = "Stop an owned session")]
-    Stop(SessionTargetArgs),
+    #[command(about = "Stop an owned session; asks before stopping its running children")]
+    Stop(StopArgs),
     #[command(about = "Restart a retained session with its canonical identity")]
     Restart(SessionTargetArgs),
     #[cfg(unix)]
@@ -396,7 +403,10 @@ enum Command {
     #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
     #[command(name = "__local-credential-broker-synthetic-smoke-check", hide = true)]
     LocalCredentialBrokerSyntheticSmokeCheck,
-    #[command(about = "List sessions for the selected or explicit environment")]
+    #[command(
+        visible_alias = "ls",
+        about = "List sessions in every environment, or only in ENV"
+    )]
     List(ListArgs),
     #[command(
         about = "Attach to a session in the selected or explicit environment",
@@ -572,7 +582,7 @@ pub(crate) struct UnavailableMemberControlArgs {
 fn validate_member_mutation_flags(cli: &Cli) -> anyhow::Result<()> {
     if cli.member.is_none() {
         match &cli.command {
-            Command::Stop(args)
+            Command::Stop(StopArgs { session: args, .. })
             | Command::Restart(args)
             | Command::Interrupt(args)
             | Command::Inbox(args) => anyhow::ensure!(

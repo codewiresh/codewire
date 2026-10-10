@@ -660,6 +660,11 @@ case "${1:-} ${2:-} ${3:-}" in
         --push|--pull|--load|--sbom=generator=*)
           shift
           ;;
+        --allow=fs.read=*)
+          # The consumer grants Bake exactly its held verified-cw context.
+          [[ "$1" == --allow=fs.read=/*/solve/verified-cw ]]
+          shift
+          ;;
         *)
           targets+=("$1")
           shift

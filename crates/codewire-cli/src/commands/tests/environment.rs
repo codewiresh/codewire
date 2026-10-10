@@ -1836,7 +1836,7 @@ fn env_lifecycle_parsers_accept_targets_and_output() {
     assert_eq!(args.environment, "builder");
     assert!(args.yes);
     assert!(Cli::try_parse_from(["cw", "env", "delete", "builder"]).is_err());
-    assert!(Cli::try_parse_from(["cw", "env", "ls"]).is_err());
+    assert!(Cli::try_parse_from(["cw", "env", "ls"]).is_ok());
 }
 
 #[test]
@@ -2147,7 +2147,7 @@ fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
     assert_eq!(args.environment, "builder");
     assert_eq!(args.user, "user-2");
 
-    assert!(Cli::try_parse_from(["cw", "env", "share", "ls", "builder"]).is_err());
+    assert!(Cli::try_parse_from(["cw", "env", "share", "ls", "builder"]).is_ok());
 }
 
 #[tokio::test]

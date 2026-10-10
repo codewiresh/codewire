@@ -690,6 +690,25 @@ async fn host_control_preserves_legacy_local_stop_prelock_projection_cancellatio
     engine.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn refused_session_store_is_admitted_once_corrected() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = host_engine(temp.path());
+    let sessions = temp.path().join("state/sessions");
+    std::fs::create_dir_all(temp.path().join("state")).unwrap();
+    std::fs::create_dir_all(temp.path().join("elsewhere")).unwrap();
+    std::os::unix::fs::symlink(temp.path().join("elsewhere"), &sessions).unwrap();
+    let refused = engine.list().await.unwrap_err();
+    assert!(
+        refused.to_string().contains("must not be a symlink"),
+        "{refused}"
+    );
+    // The refusal is not remembered: the corrected store opens on the next call.
+    std::fs::remove_file(&sessions).unwrap();
+    assert!(engine.list().await.unwrap().is_empty());
+    engine.shutdown().await.unwrap();
+}
+
 fn host_engine(root: &Path) -> SessionEngine {
     std::fs::create_dir_all(root.join("home")).unwrap();
     let mut config = tests::test_engine(root).inner.config.clone();

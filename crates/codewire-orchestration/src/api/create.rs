@@ -324,7 +324,7 @@ pub(crate) fn repository_analysis_pending() -> AppError {
     coded(
         StatusCode::BAD_REQUEST,
         "project_feature_pending",
-        "automatic repository analysis requires the platform typed repository executor",
+        "automatic repository analysis is not available yet; pass --preset SLUG or --image IMAGE with the repository",
     )
 }
 

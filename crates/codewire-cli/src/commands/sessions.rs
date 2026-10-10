@@ -685,6 +685,9 @@ async fn resolve_selected_session(
 }
 
 fn managed_session(session: &EnvironmentSessionView) -> bool {
+    #[cfg(unix)]
+    return agents::is_managed_session(session);
+    #[cfg(not(unix))]
     session.command.iter().any(|arg| arg == "_agent-driver")
 }
 
@@ -736,12 +739,11 @@ pub(crate) async fn handle_send_command(globals: &Globals, args: SendArgs) -> an
     Ok(())
 }
 
-pub(crate) async fn handle_stop_command(
-    globals: &Globals,
-    args: SessionTargetArgs,
-) -> anyhow::Result<()> {
+pub(crate) async fn handle_stop_command(globals: &Globals, args: StopArgs) -> anyhow::Result<()> {
+    let StopArgs { session: args, all } = args;
     #[cfg(target_os = "linux")]
     if globals.member.is_some() {
+        anyhow::ensure!(!all, "--all is not supported with --member");
         anyhow::ensure!(
             args.cleanup_request_id.is_none(),
             "--cleanup-request-id requires a managed platform Stop"
@@ -749,35 +751,161 @@ pub(crate) async fn handle_stop_command(
         return super::member_control::managed::stop(globals, args).await;
     }
     let (target, session) = resolve_selected_session(globals, &args.target).await?;
+    let platform_managed =
+        matches!(target, EnvironmentSessionTarget::Platform { .. }) && managed_session(&session);
+    anyhow::ensure!(
+        platform_managed
+            || (args.request_id.is_none()
+                && args.expected_launch_generation.is_none()
+                && args.cleanup_request_id.is_none()),
+        "request and generation flags require --member or a managed platform session"
+    );
+    let (parent, confirmed) = stop_one(&target, &session, Some(&args)).await?;
+    let mut stopped = vec![parent];
+    let mut unconfirmed = (!confirmed).then(|| stopped[0].status_message.clone());
+    // A parent owns its descendants. With --all, or when asked at a terminal,
+    // stop every one still running, level by level.
+    let mut owners = std::collections::BTreeSet::from([session.session_id.clone()]);
+    let mut failure = None;
+    let children = running_children(&target.list().await?, &owners);
+    let environment = (args.target.len() == 2).then(|| args.target[0].as_str());
+    let stop_children = children.is_empty() || all || confirm_stop_children(&children)?;
+    if !stop_children {
+        print_environment_sessions(&stopped, args.output)?;
+        for line in running_children_hints(&children, &session, environment) {
+            eprintln!("{line}");
+        }
+    } else {
+        let mut children = children;
+        while !children.is_empty() {
+            for child in children {
+                owners.insert(child.session_id.clone());
+                match stop_one(&target, &child, None).await {
+                    Ok((view, confirmed)) => {
+                        if !confirmed {
+                            unconfirmed.get_or_insert_with(|| view.status_message.clone());
+                        }
+                        stopped.push(view);
+                    }
+                    Err(error) => {
+                        let name = session_label(&child);
+                        failure.get_or_insert(error.context(format!("stop child session {name}")));
+                    }
+                }
+            }
+            children = running_children(&target.list().await?, &owners);
+        }
+        print_environment_sessions(&stopped, args.output)?;
+    }
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    if let Some(status) = unconfirmed {
+        anyhow::bail!("session stop is not confirmed: {status}");
+    }
+    Ok(())
+}
+
+fn session_label(session: &EnvironmentSessionView) -> &str {
+    if session.name.is_empty() {
+        &session.session_id
+    } else {
+        &session.name
+    }
+}
+
+/// Ask at a terminal whether to stop the running children too; never asks
+/// without one, so scripts and agents keep children unless they pass --all.
+fn confirm_stop_children(children: &[EnvironmentSessionView]) -> anyhow::Result<bool> {
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Ok(false);
+    }
+    let names: Vec<&str> = children.iter().map(session_label).collect();
+    let noun = if children.len() == 1 {
+        "session"
+    } else {
+        "sessions"
+    };
+    eprint!(
+        "Also stop {} running child {noun} ({})? [Y/n] ",
+        children.len(),
+        names.join(", ")
+    );
+    std::io::stderr().flush()?;
+    let mut response = String::new();
+    std::io::stdin().read_line(&mut response)?;
+    Ok(matches!(
+        response.trim().to_ascii_lowercase().as_str(),
+        "" | "y" | "yes"
+    ))
+}
+
+pub(super) fn running_children_hints(
+    children: &[EnvironmentSessionView],
+    parent: &EnvironmentSessionView,
+    environment: Option<&str>,
+) -> Vec<String> {
+    let scope = environment.map(|e| format!("{e} ")).unwrap_or_default();
+    let mut lines: Vec<String> = children
+        .iter()
+        .map(|child| {
+            format!(
+                "cw: child session {} is still running",
+                session_label(child)
+            )
+        })
+        .collect();
+    lines.push(format!(
+        "cw: stop them with `cw stop --all {scope}{}`",
+        session_label(parent)
+    ));
+    lines
+}
+
+/// Stop one session through its placement's owner. False when a plain
+/// session's stop is not confirmed; managed stops confirm themselves.
+async fn stop_one(
+    target: &EnvironmentSessionTarget,
+    session: &EnvironmentSessionView,
+    request: Option<&SessionTargetArgs>,
+) -> anyhow::Result<(EnvironmentSessionView, bool)> {
     #[cfg(unix)]
-    if matches!(target, EnvironmentSessionTarget::Platform { .. }) && managed_session(&session) {
+    if matches!(target, EnvironmentSessionTarget::Platform { .. }) && managed_session(session) {
         let stopped = agents::platform_host::control_session(
-            target,
-            &session,
-            args.request_id.as_deref(),
-            args.expected_launch_generation,
-            args.cleanup_request_id,
+            target.clone(),
+            session,
+            request.and_then(|args| args.request_id.as_deref()),
+            request.and_then(|args| args.expected_launch_generation),
+            request.and_then(|args| args.cleanup_request_id),
             codewire_client::platform_agents::EnvironmentAgentAction::Stop,
         )
         .await?;
-        return print_environment_sessions(std::slice::from_ref(&stopped), args.output);
+        return Ok((stopped, true));
     }
-    anyhow::ensure!(
-        args.request_id.is_none()
-            && args.expected_launch_generation.is_none()
-            && args.cleanup_request_id.is_none(),
-        "request and generation flags require --member or a managed platform session"
-    );
-    if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) && managed_session(&session) {
-        let stopped = agents::stop_native_managed(&target, &session).await?;
-        return print_environment_sessions(std::slice::from_ref(&stopped), args.output);
+    if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) && managed_session(session) {
+        return Ok((agents::stop_native_managed(target, session).await?, true));
     }
+    let _ = request;
     let stopped = target.stop(&session.session_id).await?;
-    print_environment_sessions(std::slice::from_ref(&stopped), args.output)?;
-    if !session_is_terminal(&stopped) || stopped.cleanup_unknown {
-        anyhow::bail!("session stop is not confirmed: {}", stopped.status_message);
-    }
-    Ok(())
+    let confirmed = session_is_terminal(&stopped) && !stopped.cleanup_unknown;
+    Ok((stopped, confirmed))
+}
+
+/// Running sessions whose parent is one of `owners` and that are not owners
+/// themselves, so a session whose stop failed is never revisited.
+pub(super) fn running_children(
+    sessions: &[EnvironmentSessionView],
+    owners: &std::collections::BTreeSet<String>,
+) -> Vec<EnvironmentSessionView> {
+    sessions
+        .iter()
+        .filter(|s| {
+            owners.contains(&s.parent_session_id)
+                && !owners.contains(&s.session_id)
+                && !session_is_terminal(s)
+        })
+        .cloned()
+        .collect()
 }
 
 pub(crate) async fn handle_restart_command(
@@ -829,6 +957,13 @@ pub(crate) async fn handle_restart_command(
 }
 
 pub(crate) async fn handle_wait_command(globals: &Globals, args: WaitArgs) -> anyhow::Result<()> {
+    if let Some(message) = &args.message
+        && !args.target.is_empty()
+    {
+        anyhow::bail!(
+            "a message ID already names its session; run `cw wait --message {message}` without ENV or SESSION"
+        );
+    }
     #[cfg(target_os = "linux")]
     if globals.member.is_some() {
         if args.message.is_some() {
@@ -1113,19 +1248,56 @@ pub(super) fn print_environment_sessions(
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(sessions)?),
         OutputFormat::Text if sessions.is_empty() => println!("No sessions"),
-        OutputFormat::Text => {
-            for session in sessions {
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    session.session_id,
-                    session.name,
-                    session.state,
-                    session_command_label(session)
-                );
-            }
-        }
+        OutputFormat::Text => print!("{}", format_environment_sessions(sessions, "")),
     }
     Ok(())
+}
+
+/// Aligned session rows under a header. A child names its parent session
+/// from the same environment; COMMAND, the widest column, comes last.
+pub(super) fn format_environment_sessions(
+    sessions: &[EnvironmentSessionView],
+    indent: &str,
+) -> String {
+    let parent = |session: &EnvironmentSessionView| match session.parent_session_id.as_str() {
+        "" => "-".to_owned(),
+        id => sessions
+            .iter()
+            .find(|candidate| candidate.session_id == id && !candidate.name.is_empty())
+            .map_or_else(|| id.to_owned(), |candidate| candidate.name.clone()),
+    };
+    let rows: Vec<[String; 5]> =
+        std::iter::once(["NAME", "STATE", "PARENT", "SESSION", "COMMAND"].map(String::from))
+            .chain(sessions.iter().map(|session| {
+                [
+                    if session.name.is_empty() {
+                        "-".to_owned()
+                    } else {
+                        session.name.clone()
+                    },
+                    session.state.clone(),
+                    parent(session),
+                    session.session_id.clone(),
+                    session_command_label(session),
+                ]
+            }))
+            .collect();
+    let widths: [usize; 4] = std::array::from_fn(|column| {
+        rows.iter()
+            .map(|row| row[column].chars().count())
+            .max()
+            .unwrap_or(0)
+    });
+    let mut output = String::new();
+    for row in &rows {
+        output.push_str(indent);
+        for (cell, width) in row.iter().zip(widths) {
+            output.push_str(&format!("{cell:<width$}  "));
+        }
+        output.push_str(&row[4]);
+        output.push('\n');
+    }
+    output
 }
 
 pub(crate) async fn handle_environment_run_command(
@@ -1597,7 +1769,14 @@ async fn adjacent_environment_target(
 ) -> anyhow::Result<EnvironmentSessionTarget> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
-    let targets = attachment_environment_targets(globals, &paths, &env).await?;
+    let targets = attachment_environment_targets(globals, &paths, &env)
+        .await?
+        .into_iter()
+        .map(|(target, _)| target)
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        anyhow::bail!("no environments are available for attachment navigation");
+    }
     let current_index = targets
         .iter()
         .position(|target| target.kind == current.kind && target.target_ref == current.target_ref)
@@ -1611,25 +1790,35 @@ async fn adjacent_environment_target(
         .await
 }
 
+/// Every accessible environment, sorted, with whether it is running.
 async fn attachment_environment_targets(
     globals: &Globals,
     paths: &ResolvePaths,
     env: &impl config::Env,
-) -> anyhow::Result<Vec<config::CurrentTargetConfig>> {
+) -> anyhow::Result<Vec<(config::CurrentTargetConfig, bool)>> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut targets = native_environments()
         .await?
         .into_iter()
-        .map(|environment| config::CurrentTargetConfig {
-            kind: "local".to_string(),
-            target_ref: environment.name.clone(),
-            name: environment.name,
+        .map(|environment| {
+            let running = environment.state
+                == codewire_local_vmm::control::v1::EnvironmentState::Running as i32;
+            let target = config::CurrentTargetConfig {
+                kind: "local".to_string(),
+                target_ref: environment.name.clone(),
+                name: environment.name,
+            };
+            (target, running)
         })
         .collect::<Vec<_>>();
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let mut targets = Vec::new();
     #[cfg(unix)]
-    targets.extend(host_environments()?.into_iter().map(|e| e.current_target()));
+    targets.extend(
+        host_environments()?
+            .into_iter()
+            .map(|e| (e.current_target(), e.state == "running")),
+    );
 
     match resolve_platform(globals, paths, env) {
         Ok(platform) => {
@@ -1644,28 +1833,28 @@ async fn attachment_environment_targets(
                 .map_err(display_client_error)?
                 .environments;
             targets.extend(environments.into_iter().map(|environment| {
-                config::CurrentTargetConfig {
+                let running = environment.state.as_known()
+                    == Some(codewire_client::EnvironmentState::Running);
+                let target = config::CurrentTargetConfig {
                     kind: "env".to_string(),
                     target_ref: environment.id.clone(),
                     name: trimmed_str(&environment.name)
                         .unwrap_or(&environment.id)
                         .to_string(),
-                }
+                };
+                (target, running)
             }));
         }
         Err(error) if targets.is_empty() => return Err(error),
         Err(_) => {}
     }
 
-    targets.sort_by(|left, right| {
+    targets.sort_by(|(left, _), (right, _)| {
         left.name
             .cmp(&right.name)
             .then_with(|| left.kind.cmp(&right.kind))
             .then_with(|| left.target_ref.cmp(&right.target_ref))
     });
-    if targets.is_empty() {
-        anyhow::bail!("no environments are available for attachment navigation");
-    }
     Ok(targets)
 }
 
@@ -1715,34 +1904,45 @@ pub(crate) async fn handle_list_command(globals: &Globals, args: ListArgs) -> an
     if globals.member.is_some() {
         return super::member_control::terminal::list(globals, args).await;
     }
-    if args.all {
+    if args.all || args.environment.is_none() {
         let paths = ResolvePaths::from_env(&OsEnv)?;
         let targets = attachment_environment_targets(globals, &paths, &OsEnv).await?;
         let mut rows = Vec::new();
+        let mut inventories = Vec::new();
         let mut incomplete = false;
-        for current in targets {
-            let result = match environment_session_target_from_current(
-                globals,
-                &paths,
-                &OsEnv,
-                current.clone(),
-            )
-            .await
-            {
-                Ok(target) => target.list().await,
-                Err(error) => Err(error),
-            };
-            match result {
-                Ok(sessions)=>rows.push(serde_json::json!({"environment_id":current.target_ref,"environment":current.name,
-                    "placement":if current.kind=="env"{"platform"}else{"local"},
-                    "type":if current.kind=="host"{"host"}else{"sandbox"},"sessions":sessions,"error":null})),
-                Err(error)=>{
-                    incomplete=true;
-                    rows.push(serde_json::json!({"environment_id":current.target_ref,"environment":current.name,
-                        "placement":if current.kind=="env"{"platform"}else{"local"},
-                        "type":if current.kind=="host"{"host"}else{"sandbox"},"sessions":[],"error":error.to_string()}));
+        for (current, running) in targets {
+            let mut sessions = Vec::new();
+            let mut error = None;
+            if running {
+                let result = match environment_session_target_from_current(
+                    globals,
+                    &paths,
+                    &OsEnv,
+                    current.clone(),
+                )
+                .await
+                {
+                    Ok(target) => target.list().await,
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(listed) => sessions = listed,
+                    Err(failure) => {
+                        incomplete = true;
+                        error = Some(failure.to_string());
+                    }
                 }
             }
+            rows.push(serde_json::json!({
+                "environment_id": current.target_ref,
+                "environment": current.name,
+                "placement": if current.kind == "env" { "platform" } else { "local" },
+                "type": if current.kind == "host" { "host" } else { "sandbox" },
+                "running": running,
+                "sessions": sessions,
+                "error": error,
+            }));
+            inventories.push(sessions);
         }
         match args.output {
             OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&rows)?),
@@ -1750,23 +1950,24 @@ pub(crate) async fn handle_list_command(globals: &Globals, args: ListArgs) -> an
                 if rows.is_empty() {
                     println!("No environments");
                 }
-                for row in rows {
+                for (row, sessions) in rows.iter().zip(&inventories) {
                     println!(
-                        "{} ({}/{})",
+                        "{} ({}/{}){}",
                         row["environment"].as_str().unwrap_or(""),
                         row["placement"].as_str().unwrap_or(""),
-                        row["type"].as_str().unwrap_or("")
+                        row["type"].as_str().unwrap_or(""),
+                        if row["running"] == true {
+                            ""
+                        } else {
+                            " not running"
+                        }
                     );
                     if let Some(error) = row["error"].as_str() {
                         println!("  unavailable: {error}");
-                    }
-                    for session in row["sessions"].as_array().into_iter().flatten() {
-                        println!(
-                            "  {}\t{}\t{}",
-                            session["session_id"].as_str().unwrap_or(""),
-                            session["name"].as_str().unwrap_or(""),
-                            session["state"].as_str().unwrap_or("")
-                        );
+                    } else if row["running"] == true && sessions.is_empty() {
+                        println!("  No sessions");
+                    } else if !sessions.is_empty() {
+                        print!("{}", format_environment_sessions(sessions, "  "));
                     }
                 }
             }
