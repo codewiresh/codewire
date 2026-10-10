@@ -97,7 +97,7 @@
         "scripts/dev/cw-runtime-image.py",
         "scripts/dev/build-cw.py",
         "scripts/ci/release/package-cw-release.sh",
-        "scripts/ci/release/check-cw-darwin-sdkless.sh",
+        "scripts/ci/verify/check-darwin-cross.sh",
         "images/cw-runtime/Dockerfile",
         "scripts/ci/images/prepare-cw-source-context.py",
         "scripts/ci/images/build-cw-runtime-source.py",

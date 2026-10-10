@@ -434,6 +434,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-cargo-target-runner-failures.sh|\
       scripts/ci/tests/test-darwin-cross-check.sh|\
+      scripts/ci/tests/test-ci-runner-image-contract.sh|\
       scripts/ci/tests/test-ci-tool-downloads.sh|\
       scripts/ci/tests/test-service-ssh-image-verifier.sh|\
       scripts/ci/verify/run-product-verification.sh|\
@@ -1632,6 +1633,7 @@ if [ "$event_selected" = false ]; then
     case "$path" in
       images/*|\
       .gitea/workflows/cli-release.yaml|\
+      .gitea/workflows/cw-release-dry-run.yaml|\
       .gitea/workflows/mirror-github.yaml|\
       .gitea/workflows/support-images.yaml|\
       keys/production-release.asc|\
@@ -1653,18 +1655,19 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/image-bundle.py|scripts/ci/release/mirror-canonical-release-tag.sh|\
       scripts/ci/release/mirror-git-tags.sh|\
       scripts/ci/*promot*.sh|scripts/ci/*promot*.py|\
-      scripts/ci/release/check-cw-darwin-sdkless.sh|\
+      scripts/ci/verify/check-darwin-cross.sh|\
       scripts/ci/release/mint-github-app-token.sh|\
       scripts/ci/release/mirror-github.sh|\
       scripts/ci/release/package-cw-release.sh|scripts/ci/release/publish-cw-release.sh|\
       scripts/ci/release/cw_release.py|scripts/ci/release/cw_release_r2.py|\
-      scripts/ci/release/cw_bootstrap.py|scripts/ci/release/generate-cw-bootstrap.py|\
       scripts/ci/release/sign-cw-release.sh|\
       scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh|\
+      scripts/ci/setup/fetch-openbao-release-signing-key.sh|\
       scripts/ci/tests/cw_release_fixtures.py|scripts/ci/tests/test-cli-release-workflow.py|\
       scripts/ci/tests/test-cw-release-delivery.py|scripts/ci/tests/test-cw-release-r2.py|\
-      scripts/ci/tests/test-cw-bootstrap.py|\
+      scripts/ci/tests/test-cw-install.py|\
       scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh|\
+      scripts/ci/tests/test-fetch-openbao-release-signing-key.sh|\
       scripts/ci/tests/test-copy-image-to-ghcr.sh|\
       scripts/ci/tests/test-dispatch-deploy-dev.sh|scripts/ci/tests/test-dispatch-deploy-prod.sh|\
       scripts/ci/tests/test-publish-image-to-ghcr.sh|\
@@ -1684,7 +1687,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh|\
       scripts/ci/tests/test-forgejo-action-mirrors.sh|\
       scripts/ci/tests/test-harbor-runtime-pull-contract.sh|\
-      scripts/ci/tests/test-cw-install-signature.sh|scripts/ci/tests/test-image-bundle.py|\
+      scripts/ci/tests/test-image-bundle.py|\
       scripts/ci/tests/test-mirror-git-tags.sh|scripts/ci/tests/test-publish-cw-release.sh|\
       scripts/ci/tests/test-mint-github-app-token.sh|\
       scripts/ci/tests/test-deploy-prod-workflow.sh|\

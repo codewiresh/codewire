@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Preserve the Linux-hosted Darwin package check, including bundled C inputs.
 # Installation belongs to the selected workflow job or local developer setup.
+#
+# With --cli it checks the macOS cw for both Mac targets instead. That cw
+# links Apple frameworks (Security, SystemConfiguration), so only a Mac links
+# it; this compile-only check catches its source errors on Linux.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -12,7 +16,12 @@ die() {
   exit 1
 }
 
-[[ $# -eq 0 ]] || die 'usage: check-darwin-cross.sh (no arguments)'
+mode=transport
+if [[ "${1:-}" == --cli ]]; then
+  mode=cli
+  shift
+fi
+[[ $# -eq 0 ]] || die 'usage: check-darwin-cross.sh [--cli]'
 [[ "$(uname -s)" == Linux ]] || die 'this cross-check requires a Linux host; use the native Mac developer loop on macOS'
 cd "$ROOT"
 
@@ -26,13 +35,20 @@ for variable in \
     AR_aarch64_apple_darwin RANLIB_aarch64_apple_darwin LD_aarch64_apple_darwin \
     CC_aarch64-apple-darwin CXX_aarch64-apple-darwin \
     AR_aarch64-apple-darwin RANLIB_aarch64-apple-darwin LD_aarch64-apple-darwin \
-    CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER SDKROOT ZIG_COMMAND \
+    CC_x86_64_apple_darwin CXX_x86_64_apple_darwin \
+    AR_x86_64_apple_darwin RANLIB_x86_64_apple_darwin LD_x86_64_apple_darwin \
+    CC_x86_64-apple-darwin CXX_x86_64-apple-darwin \
+    AR_x86_64-apple-darwin RANLIB_x86_64-apple-darwin LD_x86_64-apple-darwin \
+    CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER \
+    SDKROOT ZIG_COMMAND \
     CARGO_ZIGBUILD_ZIG_PATH CARGO_ZIGBUILD_PYTHON_PATH \
     CARGO_ZIGBUILD_ZIG_VERSION CARGO_ZIGBUILD_RUSTC_VERSION CARGO \
     CARGO_BIN_EXE_cargo-zigbuild LIBSQLITE3_SYS_USE_PKG_CONFIG LIBSQLITE3_FLAGS \
     CFLAGS CXXFLAGS TARGET_CFLAGS TARGET_CXXFLAGS \
     CFLAGS_aarch64_apple_darwin CXXFLAGS_aarch64_apple_darwin \
-    CFLAGS_aarch64-apple-darwin CXXFLAGS_aarch64-apple-darwin; do
+    CFLAGS_aarch64-apple-darwin CXXFLAGS_aarch64-apple-darwin \
+    CFLAGS_x86_64_apple_darwin CXXFLAGS_x86_64_apple_darwin \
+    CFLAGS_x86_64-apple-darwin CXXFLAGS_x86_64-apple-darwin; do
   if printenv "$variable" >/dev/null; then
     die "unset inherited $variable before the pinned Darwin cross-check"
   fi
@@ -61,6 +77,12 @@ zigbuild_version="$("$zigbuild_bin" --version)" || die 'the cargo-zigbuild versi
 [[ -x /usr/bin/false ]] || die 'missing /usr/bin/false for disabling Python Zig discovery'
 export CARGO_ZIGBUILD_PYTHON_PATH=/usr/bin/false
 export CARGO_ZIGBUILD_ZIG_PATH="$zig_bin"
+if [[ "$mode" == cli ]]; then
+  printf '[darwin-cross] Zig %s; cargo-zigbuild %s; macOS cw for aarch64 and x86_64\n' \
+    "$zig_version" "$DARWIN_CHECK_ZIGBUILD_VERSION"
+  exec "$zigbuild_bin" check --locked -p codewire-cli-bin --bin cw \
+    --target aarch64-apple-darwin --target x86_64-apple-darwin
+fi
 printf '[darwin-cross] Zig %s; cargo-zigbuild %s; target aarch64-apple-darwin\n' \
   "$zig_version" "$DARWIN_CHECK_ZIGBUILD_VERSION"
 

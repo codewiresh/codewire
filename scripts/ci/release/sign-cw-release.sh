@@ -64,10 +64,12 @@ export GNUPGHOME="$work/gnupg"
 printf '%s\n' "$CW_RELEASE_GPG_PRIVATE_KEY" | gpg --batch --import >/dev/null 2>&1 ||
   die 'CW_RELEASE_GPG_PRIVATE_KEY is not a valid OpenPGP private key'
 
+# The trailing ! selects the pinned primary key itself, never a subkey: cw's
+# built-in verifier admits only primary-key signatures.
 sign() {
   local input="$1" output="$2"
   local -a args=(--batch --yes --pinentry-mode loopback --armor --detach-sign
-    --local-user "$fingerprint" --output "$output")
+    --local-user "$fingerprint!" --output "$output")
   if [ -n "${CW_RELEASE_GPG_PASSPHRASE:-}" ]; then
     printf '%s' "$CW_RELEASE_GPG_PASSPHRASE" | gpg "${args[@]}" --passphrase-fd 0 "$input" >/dev/null 2>&1
   else

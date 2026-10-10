@@ -488,6 +488,10 @@ def worker(root, run):
                 if action in ("test", "verify"):
                     command(["python3", str(source / "crates/codewire-local-vmm/src/darwin/path/test_mount_fixture.py"), "-v"])
                     command(["cargo", "test", *native, "-p", "codewire-cli", "-p", "codewire-cli-bin"])
+                    # The release verifier and Store run natively here. The
+                    # artifact-graph test needs a git checkout; Linux CI runs it.
+                    command(["cargo", "test", *native, "-p", "codewire-cw-release", "--",
+                             "--skip", "compiled_trust_is_an_exact_producer_and_artifact_graph_input"])
                     command(["cargo", "test", *native, "-p", "codewire-local-vmm", "--lib"])
                     command(["cargo", "test", *native, *CREDENTIAL_CRATES, "--lib"])
                 if action in ("clippy", "verify"):
