@@ -7,6 +7,7 @@ WORKFLOW_DIR="$ROOT/.gitea/workflows"
 WORKFLOWS=(
   "$ROOT/.gitea/workflows/ci.yaml"
   "$ROOT/.gitea/workflows/cli-release.yaml"
+  "$ROOT/.gitea/workflows/cw-release-dry-run.yaml"
   "$ROOT/.gitea/workflows/manual-diagnostics.yaml"
 )
 

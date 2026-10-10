@@ -1680,6 +1680,9 @@ name = "codewire-cw-release"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
+ "libc",
+ "ring",
  "rustix",
  "serde",
  "serde_json",

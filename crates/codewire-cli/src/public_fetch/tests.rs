@@ -148,7 +148,7 @@ impl TestKey {
         key.run(&[
             "--quick-generate-key",
             "CW Disposable Fixture <fixture@example.invalid>",
-            "ed25519",
+            "rsa3072",
             "sign",
             if expired { "1d" } else { "0" },
         ]);
@@ -250,64 +250,42 @@ impl Drop for TestKey {
     }
 }
 
-async fn verifier(key: &TestKey) -> (Arc<scratch::Scratch>, gpg::Verifier) {
-    let scratch = Arc::new(scratch::Scratch::new().unwrap());
-    let verifier = gpg::Verifier::import(scratch.clone(), &key.public, &key.fingerprint)
-        .await
-        .unwrap();
-    (scratch, verifier)
+fn verifier(key: &TestKey) -> ReleaseKey {
+    ReleaseKey::import(&key.public, &key.fingerprint).unwrap()
 }
 
-#[tokio::test]
-async fn actual_disposable_key_verifies_exact_bytes_and_rejects_tampering() {
+// GnuPG signs and the built-in verifier admits, as a release does.
+#[test]
+fn actual_disposable_key_verifies_exact_bytes_and_rejects_tampering() {
     let key = TestKey::new(false);
     let signature = key.sign(b"canonical public release\n");
-    let (scratch, mut verifier) = verifier(&key).await;
+    let verifier = verifier(&key);
     verifier
         .verify(b"canonical public release\n", &signature)
-        .await
         .unwrap();
-    assert!(
-        verifier
-            .verify(b"changed release\n", &signature)
-            .await
-            .is_err()
-    );
+    assert!(verifier.verify(b"changed release\n", &signature).is_err());
     assert!(
         verifier
             .verify(b"canonical public release\n", b"not armor")
-            .await
             .is_err()
     );
-    drop(verifier);
-    scratch.cleanup().unwrap();
 }
 
-#[tokio::test]
-async fn actual_compiled_public_key_import_is_bound_to_its_primary_pin() {
-    let scratch = Arc::new(scratch::Scratch::new().unwrap());
-    let verifier = gpg::Verifier::import(scratch.clone(), TRUST_KEY, TRUST_FINGERPRINT)
-        .await
-        .unwrap();
-    drop(verifier);
-    scratch.cleanup().unwrap();
+#[test]
+fn actual_compiled_public_key_import_is_bound_to_its_primary_pin() {
+    ReleaseKey::import(TRUST_KEY, TRUST_FINGERPRINT).unwrap();
 }
 
-#[tokio::test]
-async fn actual_wrong_expired_and_revoked_keys_fail_closed() {
+#[test]
+fn actual_wrong_expired_revoked_and_subkey_keys_fail_closed() {
     let good = TestKey::new(false);
     let wrong = TestKey::new(false);
     let signature = good.sign(b"release\n");
-    let (scratch, mut v) = verifier(&wrong).await;
-    assert!(v.verify(b"release\n", &signature).await.is_err());
-    drop(v);
-    scratch.cleanup().unwrap();
+    assert!(verifier(&wrong).verify(b"release\n", &signature).is_err());
+
     let expired = TestKey::new(true);
-    let signature = expired.sign(b"release\n");
-    let (scratch, mut v) = verifier(&expired).await;
-    assert!(v.verify(b"release\n", &signature).await.is_err());
-    drop(v);
-    scratch.cleanup().unwrap();
+    assert!(ReleaseKey::import(&expired.public, &expired.fingerprint).is_err());
+
     let mut expired_signature = TestKey::new(true);
     expired_signature.run(&["--quick-set-expire", &expired_signature.fingerprint, "0"]);
     expired_signature.public =
@@ -326,48 +304,26 @@ async fn actual_wrong_expired_and_revoked_keys_fail_closed() {
         "--detach-sign",
         data.to_str().unwrap(),
     ]);
-    let (scratch, mut v) = verifier(&expired_signature).await;
-    assert!(v.verify(b"release\n", &signature).await.is_err());
-    drop(v);
-    scratch.cleanup().unwrap();
-    let mut revoked = TestKey::new(false);
-    let signature = revoked.sign(b"release\n");
-    revoked.revoke();
-    let (scratch, mut v) = verifier(&revoked).await;
-    assert!(v.verify(b"release\n", &signature).await.is_err());
-    drop(v);
-    scratch.cleanup().unwrap();
-}
+    assert!(
+        verifier(&expired_signature)
+            .verify(b"release\n", &signature)
+            .is_err()
+    );
 
-#[tokio::test]
-async fn actual_two_valid_signatures_by_one_primary_are_rejected() {
-    let mut key = TestKey::new(false);
-    key.run(&["--quick-add-key", &key.fingerprint, "ed25519", "sign", "0"]);
-    let listing = String::from_utf8(key.run(&["--with-colons", "--list-keys"])).unwrap();
-    let fingerprints: Vec<_> = listing
-        .lines()
-        .filter(|line| line.starts_with("fpr:"))
-        .map(|line| line.split(':').nth(9).unwrap().to_owned())
-        .collect();
-    assert_eq!(fingerprints.len(), 2);
-    key.public = key.run(&["--armor", "--export", &key.fingerprint]);
-    let data = key.directory.path().join("multiple.data");
-    fs::write(&data, b"release\n").unwrap();
-    let signature = key.run(&[
-        "--armor",
-        "--local-user",
-        &format!("{}!", fingerprints[0]),
-        "--local-user",
-        &format!("{}!", fingerprints[1]),
-        "--output",
-        "-",
-        "--detach-sign",
-        data.to_str().unwrap(),
+    let mut revoked = TestKey::new(false);
+    revoked.revoke();
+    assert!(ReleaseKey::import(&revoked.public, &revoked.fingerprint).is_err());
+
+    let mut subkey = TestKey::new(false);
+    subkey.run(&[
+        "--quick-add-key",
+        &subkey.fingerprint,
+        "rsa3072",
+        "sign",
+        "0",
     ]);
-    let (scratch, mut v) = verifier(&key).await;
-    assert!(v.verify(b"release\n", &signature).await.is_err());
-    drop(v);
-    scratch.cleanup().unwrap();
+    subkey.public = subkey.run(&["--armor", "--export", &subkey.fingerprint]);
+    assert!(ReleaseKey::import(&subkey.public, &subkey.fingerprint).is_err());
 }
 
 fn object(key: String, bytes: &[u8]) -> ObjectRef {
@@ -754,6 +710,25 @@ async fn actual_signed_store_selection_cas_and_local_rollback_preserve_old_bytes
 }
 
 #[cfg(target_os = "linux")]
+fn assert_dead_and_reaped(pidfd: &File, pid: i32) {
+    let mut poll = libc::pollfd {
+        fd: pidfd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(unsafe { libc::poll(&mut poll, 1, 0) }, 1);
+    assert_ne!(poll.revents & libc::POLLIN, 0);
+    assert_eq!(
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn signed_public_selection_and_rollback_leave_a_running_owned_elf_untouched() {
     use std::os::fd::FromRawFd as _;
@@ -1064,12 +1039,16 @@ async fn ambient_proxy_is_ignored_in_an_isolated_real_child() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let scratch = Arc::new(scratch::Scratch::new().unwrap());
-    let result = gpg::run_child(command, scratch.clone(), Duration::from_secs(5))
+    let mut child = tokio::process::Command::from(command);
+    let result = tokio::time::timeout(Duration::from_secs(30), child.kill_on_drop(true).output())
         .await
+        .unwrap()
         .unwrap();
-    assert!(String::from_utf8(result).unwrap().contains("1 passed"));
-    scratch.cleanup().unwrap();
+    assert!(
+        String::from_utf8(result.stdout)
+            .unwrap()
+            .contains("1 passed")
+    );
     assert_eq!(target.received_requests().await.unwrap().len(), 1);
     assert!(proxy.received_requests().await.unwrap().is_empty());
 }
@@ -1223,82 +1202,6 @@ async fn total_deadline_and_cancellation_refuse_before_store_and_remove_known_sc
     }
 }
 
-#[cfg(target_os = "linux")]
-async fn owned_fault(
-    action: &str,
-    timeout: Duration,
-) -> (
-    Arc<scratch::Scratch>,
-    tokio::task::JoinHandle<anyhow::Result<Vec<u8>>>,
-    File,
-    i32,
-) {
-    use std::os::fd::FromRawFd as _;
-    let scratch = Arc::new(scratch::Scratch::new().unwrap());
-    let mut command = Command::new("/usr/bin/python3");
-    command.env_clear().env("PATH","/usr/bin:/bin").args(["-c","import os,sys,time; p=sys.argv[1]; open(p+'/pid','x').write(str(os.getpid())); deadline=time.monotonic()+3\nwhile not os.path.exists(p+'/go'):\n if time.monotonic()>deadline: sys.exit(91)\n time.sleep(.005)\nif sys.argv[2]=='stdout': os.write(1,b'x'*65537)\nif sys.argv[2]=='stderr': os.write(2,b'x'*16385)\ntime.sleep(30)"])
-        .arg(scratch.path()).arg(action).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let held = scratch.clone();
-    let task = tokio::spawn(async move { gpg::run_child(command, held, timeout).await });
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let pid = loop {
-        if let Ok(text) = fs::read_to_string(scratch.path().join("pid"))
-            && let Ok(pid) = text.parse::<i32>()
-        {
-            break pid;
-        }
-        assert!(Instant::now() < deadline, "owned fault child readiness");
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    };
-    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) as i32 };
-    assert!(fd >= 0);
-    let pidfd = unsafe { File::from_raw_fd(fd) };
-    scratch.write("go", b"go").unwrap();
-    (scratch, task, pidfd, pid)
-}
-
-#[cfg(target_os = "linux")]
-fn assert_dead_and_reaped(pidfd: &File, pid: i32) {
-    let mut poll = libc::pollfd {
-        fd: pidfd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    assert_eq!(unsafe { libc::poll(&mut poll, 1, 0) }, 1);
-    assert_ne!(poll.revents & libc::POLLIN, 0);
-    assert_eq!(
-        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
-        -1
-    );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ECHILD)
-    );
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn actual_child_output_caps_timeout_and_cancellation_kill_and_reap_before_cleanup() {
-    for action in ["stdout", "stderr", "deadline", "cancel"] {
-        let timeout = if action == "deadline" {
-            Duration::from_millis(250)
-        } else {
-            Duration::from_secs(5)
-        };
-        let (scratch, task, pidfd, pid) = owned_fault(action, timeout).await;
-        if action == "cancel" {
-            task.abort();
-            assert!(task.await.unwrap_err().is_cancelled());
-        } else {
-            assert!(task.await.unwrap().is_err(), "action {action}");
-        }
-        assert_dead_and_reaped(&pidfd, pid);
-        let path = scratch.path().to_owned();
-        scratch.cleanup().unwrap();
-        assert!(!path.exists());
-    }
-}
-
 #[test]
 fn changed_private_scratch_identity_is_retained_without_touching_replacement() {
     let parent = tempfile::tempdir().unwrap();
@@ -1316,7 +1219,7 @@ fn changed_private_scratch_identity_is_retained_without_touching_replacement() {
 }
 
 #[test]
-fn writable_parent_is_refused_before_any_scratch_or_verifier_input() {
+fn writable_parent_is_refused_before_any_scratch_or_download() {
     let parent = tempfile::tempdir().unwrap();
     for mode in [0o777, 0o775, 0o707] {
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(mode)).unwrap();
@@ -1333,15 +1236,13 @@ fn writable_parent_is_refused_before_any_scratch_or_verifier_input() {
     }
     fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let scratch = scratch::Scratch::new_in(parent.path()).unwrap();
-    scratch
-        .write("public-input", b"synthetic public bytes")
-        .unwrap();
+    scratch.create("cw").unwrap();
     scratch.cleanup().unwrap();
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
 }
 
 #[test]
-fn replaced_ancestor_refuses_verifier_input_and_retains_unknown_cleanup() {
+fn replaced_ancestor_refuses_the_download_and_retains_unknown_cleanup() {
     let fixture = tempfile::tempdir().unwrap();
     let parent = fixture.path().join("parent");
     fs::create_dir(&parent).unwrap();
@@ -1354,10 +1255,9 @@ fn replaced_ancestor_refuses_verifier_input_and_retains_unknown_cleanup() {
     fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(parent.join("sentinel"), b"synthetic replacement").unwrap();
     // Same-user test deliberately changes the name. Production refuses the
-    // contradiction before even writing GPG's first public input; no verifier
-    // or ambient keyring is touched by this fixture.
-    assert!(scratch.write("public-key.asc", TRUST_KEY).is_err());
-    assert!(!retained.join(&leaf).join("public-key.asc").exists());
+    // contradiction before creating the downloaded executable.
+    assert!(scratch.create("cw").is_err());
+    assert!(!retained.join(&leaf).join("cw").exists());
     assert!(scratch.cleanup().is_err());
     drop(scratch);
     assert!(retained.join(leaf).is_dir());
@@ -1368,42 +1268,14 @@ fn replaced_ancestor_refuses_verifier_input_and_retains_unknown_cleanup() {
 }
 
 #[test]
-fn replaced_home_refuses_verifier_input_without_touching_synthetic_neighbor() {
-    use std::os::unix::fs::symlink;
-    let fixture = tempfile::tempdir().unwrap();
-    let scratch = scratch::Scratch::new_in(fixture.path()).unwrap();
-    let root = scratch.path().to_owned();
-    let neighbor = fixture.path().join("neighbor");
-    fs::create_dir(&neighbor).unwrap();
-    fs::set_permissions(&neighbor, fs::Permissions::from_mode(0o700)).unwrap();
-    fs::write(neighbor.join("sentinel"), b"not a keyring").unwrap();
-    fs::rename(root.join("gnupg"), root.join("retained-home")).unwrap();
-    symlink(&neighbor, root.join("gnupg")).unwrap();
-    assert!(scratch.write("public-key.asc", TRUST_KEY).is_err());
-    assert!(!root.join("public-key.asc").exists());
-    assert!(scratch.cleanup().is_err());
-    drop(scratch);
-    assert_eq!(
-        fs::read(neighbor.join("sentinel")).unwrap(),
-        b"not a keyring"
-    );
-    assert_eq!(fs::read_dir(&neighbor).unwrap().count(), 1);
-    assert!(root.join("retained-home").is_dir());
-}
-
-#[test]
-fn retained_ancestor_and_home_permissions_are_rechecked_before_input() {
+fn retained_ancestor_permissions_are_rechecked_before_the_download() {
     let parent = tempfile::tempdir().unwrap();
     fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let scratch = scratch::Scratch::new_in(parent.path()).unwrap();
     fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o777)).unwrap();
-    assert!(scratch.write("public-key.asc", TRUST_KEY).is_err());
-    assert!(!scratch.path().join("public-key.asc").exists());
+    assert!(scratch.create("cw").is_err());
+    assert!(!scratch.path().join("cw").exists());
     fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
-    fs::set_permissions(scratch.gnupg_home(), fs::Permissions::from_mode(0o707)).unwrap();
-    assert!(scratch.write("public-key.asc", TRUST_KEY).is_err());
-    assert!(!scratch.path().join("public-key.asc").exists());
-    fs::set_permissions(scratch.gnupg_home(), fs::Permissions::from_mode(0o700)).unwrap();
     scratch.check_paths().unwrap();
     scratch.cleanup().unwrap();
 }

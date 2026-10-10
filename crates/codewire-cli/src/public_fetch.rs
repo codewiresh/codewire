@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use codewire_cw_release::identity::{CwPayloadIdentity, Platform};
+use codewire_cw_release::openpgp::ReleaseKey;
 use codewire_cw_release::release::{
     ChannelEnvelope, MAX_JSON_BYTES, MAX_SIGNATURE_BYTES, ReleaseManifest, release_key,
     valid_release_tag,
@@ -16,12 +17,11 @@ use codewire_cw_release::store::{Admission, Candidate};
 
 use crate::build_record::admit_incoming;
 
-mod gpg;
 mod http;
 mod scratch;
 
 const TRUST_KEY: &[u8] = include_bytes!("../../../apps/cli/GPG_PUBLIC_KEY.asc");
-const TRUST_FINGERPRINT: &str = "39F95DC66BA8EFBEAF49FAEF39D46239F95F4632";
+const TRUST_FINGERPRINT: &str = "A38FF6BC6623FCA611A7A32B5EFBF0F4A5870815";
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(crate) enum Selection {
@@ -100,9 +100,9 @@ async fn controlled(
         Ok(value) => Ok(value),
         Err(error) => {
             if scratch.cleanup().is_err() {
-                return Err(error.context(
-                    "public release scratch retained because verifier cleanup is unknown",
-                ));
+                return Err(
+                    error.context("public release scratch retained because its cleanup is unknown")
+                );
             }
             Err(error)
         }
@@ -117,19 +117,17 @@ async fn fetch_inner(
     key: &[u8],
     fingerprint: &str,
 ) -> anyhow::Result<FetchedRelease> {
-    let mut verifier = gpg::Verifier::import(scratch.clone(), key, fingerprint).await?;
+    let verifier = ReleaseKey::import(key, fingerprint)?;
     let pointer = match &selection {
         Selection::Stable => {
             let bytes = http
                 .read("cw/v1/channels/stable.json", MAX_JSON_BYTES, None)
                 .await?;
             let channel = ChannelEnvelope::decode(&bytes)?;
-            verifier
-                .verify(
-                    &channel.pointer.signing_bytes()?,
-                    channel.signature.as_bytes(),
-                )
-                .await?;
+            verifier.verify(
+                &channel.pointer.signing_bytes()?,
+                channel.signature.as_bytes(),
+            )?;
             Some(channel.pointer)
         }
         Selection::Version(_) => None,
@@ -153,7 +151,7 @@ async fn fetch_inner(
             pointer.as_ref().map(|value| &value.release_signature),
         )
         .await?;
-    verifier.verify(&bytes, &signature).await?;
+    verifier.verify(&bytes, &signature)?;
     let manifest = ReleaseManifest::decode(&bytes)?;
     anyhow::ensure!(
         manifest.release_tag == *version && manifest.signing_fingerprint == fingerprint,
@@ -173,7 +171,7 @@ async fn fetch_inner(
             Some(&manifest.checksums.signature),
         )
         .await?;
-    verifier.verify(&sums, &sums_signature).await?;
+    verifier.verify(&sums, &sums_signature)?;
     manifest.verify_checksums(&sums)?;
     let entry = manifest.target(host);
     let mut file = scratch.create("cw")?;
@@ -197,7 +195,8 @@ async fn fetch_inner(
     })
 }
 
-// Actual fixture custody uses Linux's supervised GnuPG socket layout, pidfds
-// and waitid. The pure document/target tests live in the shared modules.
+// The synthetic signer is GnuPG with Linux's supervised agent socket layout.
+// The verifier's own fixtures and the pure document tests live in
+// codewire-cw-release.
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
