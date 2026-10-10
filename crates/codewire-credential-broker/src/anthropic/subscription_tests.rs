@@ -17,15 +17,32 @@ use super::*;
 /// Synthetic only; shaped like a `claude setup-token` value.
 const TOKEN: &[u8] = b"sk-ant-oat01-CW_TEST_SUBSCRIPTION_token-_~+/=";
 const BODY: &[u8] = br#"{"model":"synthetic-model","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"stream":true}"#;
-const USER_AGENT: &str = "claude-cli/2.1.238 (external, sdk-cli)";
+const USER_AGENT: &str = "claude-cli/2.1.288 (external, sdk-cli)";
 const SESSION: &str = "8566fd02-a622-43da-871a-2fa90259b0f9";
 /// Claude Code's own `anthropic-beta` features beside [`OAUTH_BETA`].
 const CLAUDE_CODE_BETA: &str = "claude-code-20250219";
-const THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
+const LATER_BETAS: &[&str] = &[
+    "interleaved-thinking-2025-05-14",
+    "thinking-token-count-2026-05-13",
+    "context-management-2025-06-27",
+    "prompt-caching-scope-2026-01-05",
+    "mid-conversation-system-2026-04-07",
+    "per-turn-control-2026-07-01",
+    "mid-conversation-tool-changes-2026-07-01",
+    "effort-2025-11-24",
+    "dangerous-tool-use-2026-09-03",
+    "afk-mode-2026-01-31",
+    "extended-cache-ttl-2025-04-11",
+];
 
-/// The `anthropic-beta` value Claude Code 2.1.238 sends in subscription mode.
+/// The `anthropic-beta` value Claude Code 2.1.288 sends in subscription mode.
 fn claude_code_betas() -> String {
-    [CLAUDE_CODE_BETA, OAUTH_BETA, THINKING_BETA].join(",")
+    [CLAUDE_CODE_BETA, OAUTH_BETA]
+        .iter()
+        .chain(LATER_BETAS)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 struct Lease {
@@ -98,7 +115,7 @@ impl BrokerCredentialLease for Lease {
     }
 }
 
-/// The request headers Claude Code 2.1.238 sends in subscription mode.
+/// The request headers Claude Code 2.1.288 sends in subscription mode.
 fn claude_code_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     let betas = claude_code_betas();
@@ -118,7 +135,7 @@ fn claude_code_headers() -> HeaderMap {
         ("x-stainless-arch", "x64"),
         ("x-stainless-lang", "js"),
         ("x-stainless-os", "Linux"),
-        ("x-stainless-package-version", "0.112.1"),
+        ("x-stainless-package-version", "0.128.0"),
         ("x-stainless-retry-count", "0"),
         ("x-stainless-runtime", "node"),
         ("x-stainless-runtime-version", "v26.3.0"),
@@ -339,7 +356,7 @@ fn malformed_or_repeated_identity_headers_are_dropped_and_the_request_proceeds()
     let long_app = "a".repeat(MAX_APP_BYTES + 1);
     for (name, value) in [
         ("user-agent", long_user_agent.as_str()),
-        ("user-agent", "claude-cli/2.1.238\t(external)"),
+        ("user-agent", "claude-cli/2.1.288\t(external)"),
         ("x-app", ""),
         ("x-app", "cli tool"),
         ("x-app", long_app.as_str()),

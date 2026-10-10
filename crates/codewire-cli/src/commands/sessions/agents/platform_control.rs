@@ -140,8 +140,8 @@ fn validate_envelope(environment: &str, request: &Envelope) -> anyhow::Result<()
             && (4..=512 * 1024 * 1024).contains(&origin.provider.size)
             && origin.provider.version
                 == match origin.agent {
-                    AgentKind::Codex => "0.157.0",
-                    AgentKind::Claude => "2.1.238",
+                    AgentKind::Codex => "0.160.0",
+                    AgentKind::Claude => "2.1.288",
                 }
             && origin.parent_generation.is_none_or(|g| g > 0),
         "platform incarnation differs"

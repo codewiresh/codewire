@@ -996,8 +996,8 @@ async fn actual(root: &Path, artifacts: &Path, direct: bool) -> Value {
         target.extra_environment.insert(key.into(), value);
     }
     for (name, expected) in [
-        ("codex", "codex-cli 0.157.0"),
-        ("claude", "2.1.238 (Claude Code)"),
+        ("codex", "codex-cli 0.160.0"),
+        ("claude", "2.1.288 (Claude Code)"),
     ] {
         let mut version = Command::new(Path::new(staged["agent_bin"].as_str().unwrap()).join(name));
         version

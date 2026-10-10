@@ -13,6 +13,9 @@ from typing import Any
 MAX_CAPTURE_BYTES = 1024 * 1024
 EXPECTED_MODEL = "claude-sonnet-4-6"
 EXPECTED_MESSAGE = "CW_LIVE_CLAUDE_OK"
+# The pinned client's one notice for a non-Anthropic base URL, such as the
+# managed loopback route: auto-mode classifier requests stay billed.
+GATEWAY_NOTICE = "We're changing auto mode to no longer charge for classifier requests in Claude Code."
 
 
 class InvalidOutput(ValueError):
@@ -61,6 +64,7 @@ def load_frames(path: str) -> list[dict[str, Any]]:
 def validate(frames: list[dict[str, Any]]) -> None:
     initialized = False
     requesting = False
+    noticed = False
     stream_state = 0
     streamed_text = ""
     assistant = False
@@ -80,6 +84,13 @@ def validate(frames: list[dict[str, Any]]) -> None:
                 if not initialized or requesting or stream_state != 0 or frame.get("status") != "requesting":
                     raise InvalidOutput("invalid Claude request status")
                 requesting = True
+            elif subtype == "informational":
+                # Informational only; it never substitutes for a required frame.
+                content = frame.get("content")
+                if (not initialized or noticed or frame.get("level") != "warning"
+                        or not isinstance(content, str) or not content.startswith(GATEWAY_NOTICE)):
+                    raise InvalidOutput("invalid Claude notice")
+                noticed = True
             else:
                 raise InvalidOutput("unknown Claude system frame")
         elif kind == "rate_limit_event":

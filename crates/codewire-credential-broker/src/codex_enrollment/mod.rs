@@ -64,7 +64,7 @@ pub enum CodexEnrollmentError {
     /// The pinned official CLI prompt was not accepted.
     #[error("Codex enrollment output is invalid or unsupported")]
     InvalidOutput,
-    /// This extraction supports only reviewed Codex 0.149.0/0.153.4/0.157.0 prompts.
+    /// This extraction supports only reviewed Codex 0.149.0/0.153.4/0.157.0/0.160.0 prompts.
     #[error("Codex enrollment executable version is unsupported")]
     UnsupportedVersion,
     /// The isolated process could not finish successfully.

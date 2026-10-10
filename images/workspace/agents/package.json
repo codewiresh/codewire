@@ -1,0 +1,21 @@
+{
+  "name": "codewire-workspace-agents",
+  "private": true,
+  "description": "Coding agents seeded into the workspace image, installed with npm ci from the lockfile beside this file.",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.288",
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@google/gemini-cli": "0.62.0",
+    "@moonshot-ai/kimi-code": "2.1.1",
+    "@openai/codex": "0.160.0"
+  },
+  "allowScripts": {
+    "@anthropic-ai/claude-code@2.1.288": true,
+    "@github/keytar": false,
+    "@google/genai": false,
+    "@moonshot-ai/kimi-code": false,
+    "esbuild": false,
+    "node-pty": false,
+    "protobufjs": false
+  }
+}
