@@ -973,7 +973,8 @@ mod tests {
         assert!(bootstrap.contains("mkfs.ext4"));
         assert!(bootstrap.contains("mount -o loop"));
         assert!(bootstrap.contains("chown 1000:1000 \"$codewire_dir\""));
-        assert!(bootstrap.contains("chmod 0775 \"$codewire_dir\""));
+        assert!(bootstrap.contains("chmod 0755 \"$codewire_dir\""));
+        assert!(!bootstrap.contains("0775"));
         assert!(bootstrap.contains("--data-root \"$data_root\""));
         assert!(bootstrap.contains("--storage-driver vfs"));
         assert!(dind["env"].as_array().unwrap().iter().any(|env| {

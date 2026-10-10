@@ -531,7 +531,7 @@ python3 -B "$ROOT/scripts/ci/tests/test-cw-release-r2.py" >/dev/null 2>&1 || {
 "$ROOT/scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh"
 
 installer_fingerprint="$(
-  sed -n 's/^GPG_KEY_ID="\([0-9A-F]*\)"$/\1/p' "$installer"
+  sed -n 's/^PRODUCTION_FINGERPRINT = "\([0-9A-F]*\)"$/\1/p' "$installer"
 )"
 public_key_fingerprint="$(
   gpg --batch --show-keys --with-colons "$release_public_key" 2>/dev/null |
@@ -541,13 +541,15 @@ public_key_fingerprint="$(
   echo 'installer fingerprint does not match the checked-in release key' >&2
   exit 1
 }
-grep -Fq 'downloaded_key_count="$(' "$installer"
-grep -Fq '[ "$downloaded_key_count" -eq 1 ]' "$installer"
-grep -Fq '[ "$downloaded_key_id" = "$GPG_KEY_ID" ]' "$installer"
-grep -Fq 'release_gnupg_home="${tmp_dir}/gnupg"' "$installer"
-grep -Fq 'GNUPGHOME="$release_gnupg_home"' "$installer"
-grep -Fq '[ "$valid_signature_count" -eq 1 ] && [ "$valid_signature_id" = "$GPG_KEY_ID" ]' "$installer"
-grep -Fq 'main/apps/cli/GPG_PUBLIC_KEY.asc' "$installer"
+# The installer embeds the exact checked-in consumer closure and public key.
+# The focused installer proof above verifies single-primary trust, ambient-key
+# isolation and valid-signature refusal before replacement.
+python3 -B "$ROOT/scripts/ci/release/generate-cw-bootstrap.py" --check
+grep -Fq 'ORIGIN = "https://releases.codewire.sh/"' "$installer"
+if grep -Eq 'https://(api\.)?github\.com|raw\.githubusercontent\.com' "$installer"; then
+  echo 'installer still downloads release assets or trust from GitHub' >&2
+  exit 1
+fi
 grep -Fq 'gpg --import apps/cli/GPG_PUBLIC_KEY.asc' "$cli_readme"
 grep -Fq -- '--passphrase-fd 0' "$sign_script"
 if grep -Fq -- '--passphrase "$CW_RELEASE_GPG_PASSPHRASE"' "$sign_script"; then
@@ -597,3 +599,4 @@ if [[ -e "$ROOT/keys/production-release.asc" ]]; then
   echo 'release tags are trusted through Forgejo; no pinned production key file may remain' >&2
   exit 1
 fi
+

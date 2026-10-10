@@ -1429,6 +1429,7 @@ pub(crate) async fn collect_doctor_report(
     env: &impl config::Env,
 ) -> DoctorReport {
     let checks = vec![
+        doctor_build_check(crate::build_record::embedded()),
         doctor_platform_check(globals, paths, env).await,
         doctor_org_check(globals, paths, env).await,
         doctor_completion_check(),
@@ -1439,6 +1440,40 @@ pub(crate) async fn collect_doctor_report(
         platform_config_dir: paths.platform_config_dir.display().to_string(),
         mesh_data_dir: paths.mesh_data_dir.display().to_string(),
         checks,
+    }
+}
+
+/// This executable's version, source revision and target, which tell apart
+/// builds that share a package version.
+pub(crate) fn doctor_build_check(
+    record: anyhow::Result<codewire_cw_release::build_record::BuildRecord>,
+) -> DoctorCheck {
+    match record {
+        Ok(record) => match record.source_revision {
+            Some(revision) => doctor_check(
+                "cw",
+                DoctorStatus::Ok,
+                format!(
+                    "{} {} {}",
+                    record.package_version,
+                    &revision[..revision.len().min(12)],
+                    record.target
+                ),
+            ),
+            None => doctor_check(
+                "cw",
+                DoctorStatus::Warn,
+                format!(
+                    "{} {}; built without source provenance",
+                    record.package_version, record.target
+                ),
+            ),
+        },
+        Err(error) => doctor_check(
+            "cw",
+            DoctorStatus::Warn,
+            format!("build record unreadable: {error:#}"),
+        ),
     }
 }
 
