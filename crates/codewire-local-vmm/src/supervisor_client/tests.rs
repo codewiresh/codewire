@@ -155,6 +155,13 @@ impl LocalSupervisorService for ProtocolPeer {
         Err(Status::unimplemented("unused synthetic method"))
     }
 
+    async fn update_host_ports(
+        &self,
+        _: Request<v1::UpdateHostPortsRequest>,
+    ) -> Result<Response<v1::Operation>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
+
     async fn update_environment_sources(
         &self,
         _: Request<v1::UpdateEnvironmentSourcesRequest>,

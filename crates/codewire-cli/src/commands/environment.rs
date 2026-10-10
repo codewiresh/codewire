@@ -201,10 +201,11 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
             handle_unified_environment_daemon_command(globals, placement, args.command).await
         }
         EnvCommand::Cp(args) => handle_unified_environment_cp(globals, placement, args).await,
+        EnvCommand::Port(args) => handle_unified_environment_port(globals, placement, args).await,
         command => {
             if placement.is_some() {
                 anyhow::bail!(
-                    "--local and --platform currently support only create, update, list, info, start, stop, restart, refresh-skills, rm, cp, access, share, and daemon diagnostics"
+                    "--local and --platform currently support only create, update, list, info, start, stop, restart, refresh-skills, rm, cp, port, access, share, and daemon diagnostics"
                 );
             }
             handle_platform_env_command(globals, command).await
@@ -271,6 +272,55 @@ async fn handle_unified_environment_cp(
             handle_env_cp_command(&environment_client, &org_id, args).await
         }
     }
+}
+
+/// A local environment's ports live on this host's 127.0.0.1; a platform
+/// environment's are preview URLs. `--env`, or the selected environment,
+/// decides which when no placement is given.
+async fn handle_unified_environment_port(
+    globals: &Globals,
+    placement: Option<EnvironmentPlacement>,
+    args: EnvPortArgs,
+) -> anyhow::Result<()> {
+    let target = match &args.command {
+        EnvPortCommand::Add(add) => add.env.clone(),
+        EnvPortCommand::List(list) => list.env.clone(),
+        EnvPortCommand::Rm(rm) => rm.env.clone(),
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let local = match (placement, target) {
+            (Some(EnvironmentPlacement::Platform), _) => None,
+            (_, Some(target)) => {
+                match resolve_unified_environment_target(globals, placement, &target, "port")
+                    .await?
+                {
+                    UnifiedEnvironmentTarget::NativeLocal(name) => Some(name),
+                    UnifiedEnvironmentTarget::Platform(_) => None,
+                }
+            }
+            (Some(EnvironmentPlacement::Local), None) => Some(
+                native_selected_environment()
+                    .await?
+                    .map(|environment| environment.name)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "no local environment selected; pass --env NAME or run `cw use NAME`"
+                        )
+                    })?,
+            ),
+            (None, None) => None,
+        };
+        if let Some(name) = local {
+            return handle_native_environment_port(&name, args.command).await;
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    if placement == Some(EnvironmentPlacement::Local) {
+        let _ = target;
+        anyhow::bail!("native local environments currently require Linux or macOS");
+    }
+    handle_platform_env_command(globals, EnvCommand::Port(args)).await
 }
 
 async fn handle_unified_environment_access(
@@ -2775,11 +2825,23 @@ pub(crate) async fn handle_env_port_command(
 ) -> anyhow::Result<()> {
     match command {
         EnvPortCommand::Add(args) => {
+            anyhow::ensure!(
+                args.host_port.is_none(),
+                "--host-port applies to local environments; a platform port is published as a preview URL"
+            );
             let port = parse_env_port_number(&args.port)?;
-            let label = trimmed_str(&args.label)
+            let label = args
+                .label
+                .as_deref()
+                .and_then(trimmed_str)
                 .ok_or_else(|| anyhow::anyhow!("--label is required"))?
                 .to_string();
-            let access = trimmed_str(&args.access).unwrap_or("creator").to_string();
+            let access = args
+                .access
+                .as_deref()
+                .and_then(trimmed_str)
+                .unwrap_or("creator")
+                .to_string();
             let environment_id = resolve_port_environment_id(
                 environment_client,
                 org_id,

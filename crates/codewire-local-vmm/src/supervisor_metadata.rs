@@ -364,13 +364,6 @@ impl EnvironmentRecord {
             }
             || !environment_access_metadata_valid(self)
             || self
-                .project_spec_json
-                .as_deref()
-                .and_then(|bytes| serde_json::from_slice(bytes).ok())
-                .is_none_or(|project: ProjectSpec| {
-                    validate_host_ports_for_project(&self.host_ports, &project).is_err()
-                })
-            || self
                 .active_artifact_generation
                 .as_ref()
                 .is_none_or(|generation| !valid_sha256(generation))

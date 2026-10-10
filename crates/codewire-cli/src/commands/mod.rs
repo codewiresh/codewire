@@ -1455,32 +1455,39 @@ pub(crate) struct EnvPortArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum EnvPortCommand {
-    #[command(about = "Register a port and get a preview URL")]
+    #[command(
+        about = "Publish a port: a preview URL on the platform, 127.0.0.1 on this host for a local environment"
+    )]
     Add(EnvPortAddArgs),
-    #[command(visible_alias = "ls", about = "List registered ports")]
+    #[command(visible_alias = "ls", about = "List published ports")]
     List(EnvPortListArgs),
-    #[command(about = "Remove a registered port")]
+    #[command(about = "Withdraw a published port (local: by host port)")]
     Rm(EnvPortRmArgs),
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvPortAddArgs {
-    #[arg(value_name = "PORT")]
+    #[arg(value_name = "PORT", help = "Port inside the environment")]
     port: String,
     #[arg(
         short,
         long,
-        required = true,
-        help = "DNS-safe label for the preview URL"
+        help = "DNS-safe label for the preview URL (platform; required there)"
     )]
-    label: String,
+    label: Option<String>,
     #[arg(
         short,
         long,
-        default_value = "creator",
-        help = "Access level: public, org_members, or creator"
+        help = "Access level: public, org_members, or creator (platform; default creator)"
     )]
-    access: String,
+    access: Option<String>,
+    #[arg(
+        long,
+        value_name = "HOST_PORT",
+        value_parser = clap::value_parser!(u16).range(1..),
+        help = "Port on this host's 127.0.0.1 (local; default: PORT)"
+    )]
+    host_port: Option<u16>,
     #[arg(short, long, help = "Environment ID or name (default: current)")]
     env: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]

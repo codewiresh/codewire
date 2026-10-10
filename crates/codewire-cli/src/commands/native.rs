@@ -26,7 +26,10 @@ use uuid::Uuid;
 
 use super::*;
 
+mod ports;
 mod sources;
+
+pub(crate) use ports::handle_native_environment_port;
 
 const NATIVE_STATE_ROOT_ENV: &str = "CODEWIRE_NATIVE_STATE_ROOT";
 const NATIVE_ARTIFACT_ROOT_ENV: &str = "CODEWIRE_NATIVE_ARTIFACT_ROOT";

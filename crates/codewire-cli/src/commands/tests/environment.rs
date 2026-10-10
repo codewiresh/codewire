@@ -2185,10 +2185,32 @@ fn env_port_parsers_accept_add_list_rm() {
         panic!("expected env port add command");
     };
     assert_eq!(args.port, "3000");
-    assert_eq!(args.label, "web");
-    assert_eq!(args.access, "public");
+    assert_eq!(args.label.as_deref(), Some("web"));
+    assert_eq!(args.access.as_deref(), Some("public"));
+    assert_eq!(args.host_port, None);
     assert_eq!(args.env.as_deref(), Some("builder"));
     assert!(matches!(args.output, OutputFormat::Json));
+
+    let cli = Cli::try_parse_from([
+        "cw", "env", "port", "add", "47321", "--host-port", "18080", "--local", "--env", "web",
+    ])
+    .unwrap();
+    let Command::Env(EnvArgs { command, .. }) = cli.command else {
+        panic!("expected env command");
+    };
+    let EnvCommand::Port(args) = command else {
+        panic!("expected env port command");
+    };
+    let EnvPortCommand::Add(args) = args.command else {
+        panic!("expected env port add command");
+    };
+    assert_eq!(args.port, "47321");
+    assert_eq!(args.host_port, Some(18_080));
+    assert_eq!(args.label, None);
+    assert_eq!(args.access, None);
+    assert!(
+        Cli::try_parse_from(["cw", "env", "port", "add", "47321", "--host-port", "0"]).is_err()
+    );
 
     let cli = Cli::try_parse_from(["cw", "env", "port", "ls", "--env", "builder"]).unwrap();
     let Command::Env(EnvArgs { command, .. }) = cli.command else {

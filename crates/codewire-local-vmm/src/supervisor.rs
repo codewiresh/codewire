@@ -1866,6 +1866,30 @@ impl SupervisorCore {
                 self.execute_source_operation(&operation).await?;
                 continue;
             }
+            if operation.kind == OperationKind::UpdateHostPorts {
+                // A failed update changes nothing recorded and leaves the
+                // environment as it was.
+                let operation = match self.update_host_ports(name, &operation).await {
+                    Ok(operation) => operation,
+                    Err(error) => {
+                        let error_code = match error {
+                            SupervisorError::HostPortUnavailable => "host_port_unavailable",
+                            _ if recovering => "host_ports_interrupted",
+                            _ => "host_ports_failed",
+                        };
+                        self.fail_pending_operation(&operation, error_code)?;
+                        continue;
+                    }
+                };
+                let result = self
+                    .state
+                    .environments
+                    .get(name)
+                    .map(environment_operation_result)
+                    .ok_or(SupervisorError::InvalidState)?;
+                self.complete_operation(&operation, &result)?;
+                continue;
+            }
             if operation.kind == OperationKind::Reconcile {
                 let operation = self.apply_reconcile_operation(&operation)?;
                 let result = self
@@ -3467,6 +3491,70 @@ impl SupervisorCore {
         Ok(())
     }
 
+    async fn update_host_ports(
+        &mut self,
+        name: &str,
+        operation: &OperationRecord,
+    ) -> Result<OperationRecord, SupervisorError> {
+        let target = operation
+            .payload
+            .get("target")
+            .cloned()
+            .and_then(|target| serde_json::from_value::<Vec<HostPortBinding>>(target).ok())
+            .ok_or(SupervisorError::InvalidState)?;
+        validate_canonical_host_port_bindings(&target)
+            .map_err(|_| SupervisorError::InvalidState)?;
+        let environment_id = operation
+            .environment_id
+            .ok_or(SupervisorError::InvalidState)?;
+        let mut operation = operation.clone();
+        loop {
+            let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? else {
+                return Ok(operation);
+            };
+            match effect {
+                LifecycleEffect::ApplyHostPorts => {
+                    let environment = self.environment(name)?;
+                    if environment.id != environment_id {
+                        return Err(SupervisorError::InvalidState);
+                    }
+                    if environment.state == StoredEnvironmentState::Running {
+                        let generation = environment.generation;
+                        let artifact_generation =
+                            artifact_generation_for_boot(environment, false)?.to_owned();
+                        let mut runner = self
+                            .runner_client_for_artifact(name, &artifact_generation)
+                            .await?;
+                        runner
+                            .set_host_ports(environment_id, generation, &target)
+                            .await
+                            .map_err(|status| {
+                                if status
+                                    .message()
+                                    .starts_with(crate::runner_service::HOST_PORT_UNAVAILABLE)
+                                {
+                                    SupervisorError::HostPortUnavailable
+                                } else {
+                                    SupervisorError::InvalidRunnerResponse
+                                }
+                            })?;
+                    }
+                    operation = self.checkpoint_operation(&operation)?;
+                }
+                LifecycleEffect::RecordHostPorts => {
+                    let mut next_state = self.state.clone();
+                    next_state
+                        .environments
+                        .get_mut(name)
+                        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?
+                        .host_ports = target.clone();
+                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                }
+                _ => return Err(SupervisorError::InvalidState),
+            }
+        }
+    }
+
     async fn prepare_environment_for_delete(&mut self, name: &str) -> Result<(), SupervisorError> {
         let environment = self.environment(name)?;
         let environment_id = environment.id;
@@ -4703,6 +4791,89 @@ impl LocalSupervisorService for SupervisorRpc {
         Ok(Response::new(response))
     }
 
+    async fn update_host_ports(
+        &self,
+        request: Request<v1::UpdateHostPortsRequest>,
+    ) -> Result<Response<v1::Operation>, Status> {
+        let request = request.into_inner();
+        if !valid_environment_name(&request.name) {
+            return Err(Status::from(SupervisorError::InvalidRequest));
+        }
+        let request_id = parse_request_id(&request.request_id).map_err(Status::from)?;
+        let expected_environment_id =
+            parse_optional_environment_id(&request.environment_id).map_err(Status::from)?;
+        let add = request
+            .add
+            .iter()
+            .map(|binding| serde_json::json!([binding.host_port, binding.guest_port]))
+            .collect::<Vec<_>>();
+        let mut core = self.core.lock().await;
+        core.replay_pending_operations()
+            .await
+            .map_err(Status::from)?;
+        let environment = core
+            .environment(&request.name)
+            .map_err(Status::from)?
+            .clone();
+        require_expected_environment(&environment, expected_environment_id)?;
+        let existing = core
+            .store
+            .operation_by_request(request_id)
+            .map_err(SupervisorError::from)
+            .map_err(Status::from)?;
+        let operation = if let Some(operation) = existing {
+            if operation.kind != OperationKind::UpdateHostPorts
+                || operation.environment_id != Some(environment.id)
+                || operation
+                    .payload
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(request.name.as_str())
+                || operation.payload.get("add") != Some(&serde_json::json!(add))
+                || operation.payload.get("remove") != Some(&serde_json::json!(request.remove))
+            {
+                return Err(Status::aborted("local lifecycle request ID collision"));
+            }
+            operation
+        } else {
+            if !matches!(
+                environment.state,
+                StoredEnvironmentState::Running | StoredEnvironmentState::Stopped
+            ) || core
+                .store
+                .has_pending_lifecycle_operation(environment.id)
+                .map_err(SupervisorError::from)
+                .map_err(Status::from)?
+            {
+                return Err(Status::failed_precondition(
+                    "host ports change only on a running or stopped environment",
+                ));
+            }
+            let target = updated_host_ports(&environment.host_ports, &request)?;
+            let payload = serde_json::json!({
+                "name": request.name,
+                "add": add,
+                "remove": request.remove,
+                "target": target,
+            });
+            core.store
+                .begin_operation(
+                    request_id,
+                    Some(environment.id),
+                    OperationKind::UpdateHostPorts,
+                    &payload,
+                )
+                .map_err(SupervisorError::from)
+                .map_err(Status::from)?
+        };
+        let response = operation_proto(&operation)?;
+        drop(core);
+        if !operation.phase.terminal() {
+            self.schedule_operation_worker(false);
+        }
+        Ok(Response::new(response))
+    }
+
     async fn update_environment_sources(
         &self,
         request: Request<v1::UpdateEnvironmentSourcesRequest>,
@@ -5223,6 +5394,7 @@ fn operation_proto(operation: &OperationRecord) -> Result<v1::Operation, Status>
         OperationKind::Reconcile => v1::OperationKind::Reconcile,
         OperationKind::UpdateCwRuntime => v1::OperationKind::UpdateCwRuntime,
         OperationKind::RollbackCwRuntime => v1::OperationKind::RollbackCwRuntime,
+        OperationKind::UpdateHostPorts => v1::OperationKind::UpdateHostPorts,
     };
     let phase = match operation.phase {
         OperationPhase::Intent => v1::OperationPhase::Intent,
@@ -5344,6 +5516,8 @@ fn operation_stage(operation: &OperationRecord) -> Result<v1::OperationStage, St
         LifecycleEffect::RemoveEnvironment => v1::OperationStage::RemoveEnvironment,
         LifecycleEffect::CleanupTrash => v1::OperationStage::CleanupTrash,
         LifecycleEffect::RecordObservation => v1::OperationStage::RecordObservation,
+        LifecycleEffect::ApplyHostPorts => v1::OperationStage::ApplyHostPorts,
+        LifecycleEffect::RecordHostPorts => v1::OperationStage::RecordHostPorts,
     })
 }
 
@@ -5889,6 +6063,56 @@ fn validate_resize(request: &v1::ResizeEnvironmentRequest) -> Result<Uuid, Super
         return Err(SupervisorError::InvalidRequest);
     }
     parse_request_id(&request.request_id)
+}
+
+/// The exact canonical set after withdrawing `remove` and publishing `add`.
+/// A published host port must be withdrawn before it is published again.
+fn updated_host_ports(
+    current: &[HostPortBinding],
+    request: &v1::UpdateHostPortsRequest,
+) -> Result<Vec<HostPortBinding>, Status> {
+    if request.add.is_empty() && request.remove.is_empty() {
+        return Err(Status::invalid_argument(
+            "no host ports to publish or withdraw",
+        ));
+    }
+    let mut target = current.to_vec();
+    for port in &request.remove {
+        let before = target.len();
+        target.retain(|binding| u32::from(binding.host_port) != *port);
+        if target.len() == before {
+            return Err(Status::failed_precondition(format!(
+                "host port {port} is not published"
+            )));
+        }
+    }
+    for binding in &request.add {
+        let (Ok(host_port), Ok(guest_port)) = (
+            u16::try_from(binding.host_port),
+            u16::try_from(binding.guest_port),
+        ) else {
+            return Err(Status::invalid_argument("ports are 1 to 65535"));
+        };
+        if target.iter().any(|current| current.host_port == host_port) {
+            return Err(Status::failed_precondition(format!(
+                "host port {host_port} is already published; withdraw it first"
+            )));
+        }
+        if target
+            .iter()
+            .any(|current| current.guest_port == guest_port)
+        {
+            return Err(Status::failed_precondition(format!(
+                "guest port {guest_port} is already published"
+            )));
+        }
+        target.push(HostPortBinding {
+            host_port,
+            guest_port,
+        });
+    }
+    canonical_host_port_bindings(target)
+        .map_err(|error| Status::invalid_argument(error.to_string()))
 }
 
 fn parse_request_id(value: &str) -> Result<Uuid, SupervisorError> {
@@ -7429,7 +7653,7 @@ pub enum SupervisorError {
     )]
     GuestDockerToolingMissing,
     #[error(
-        "a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; stop it or change host_port in codewire.yaml"
+        "a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; stop it, or publish a different host port"
     )]
     HostPortUnavailable,
     #[error("native VM stop failed")]
@@ -8323,6 +8547,13 @@ mod tests {
             self.unexpected_use()
         }
 
+        async fn set_host_ports(
+            &self,
+            _request: Request<v1::SetHostPortsRequest>,
+        ) -> Result<Response<v1::SetHostPortsResponse>, Status> {
+            self.unexpected_use()
+        }
+
         async fn prepare_retire_runner(
             &self,
             _request: Request<v1::PrepareRetireRunnerRequest>,
@@ -8497,7 +8728,7 @@ mod tests {
         );
         let live = child.capture(&executable);
         let service = TestRunnerProtocolService {
-            reply: TestRunnerProtocolReply::Version(4),
+            reply: TestRunnerProtocolReply::Version(5),
             useful_calls: Arc::new(AtomicUsize::new(0)),
             shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.0.stdin.take()))),
         };
@@ -8535,7 +8766,7 @@ mod tests {
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let socket = parent.path().join("unresponsive.sock");
         let (identity, calls, stop, server) =
-            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(4));
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(5));
         let executable = fs::canonicalize("/bin/sleep").unwrap();
         let mut child = ShutdownTestChild(
             crate::test_child(&mut Command::new(&executable))
@@ -11008,6 +11239,108 @@ mod tests {
         );
         assert_eq!(binding.profile_revision, 7);
         assert_eq!(reference.to_string(), "user/work");
+    }
+
+    #[test]
+    fn host_port_updates_withdraw_then_publish_into_one_canonical_set() {
+        let current = vec![HostPortBinding::new(18_080, 3_000).unwrap()];
+        let request = |add: &[(u32, u32)], remove: &[u32]| v1::UpdateHostPortsRequest {
+            name: "dev".to_owned(),
+            request_id: Uuid::new_v4().to_string(),
+            environment_id: String::new(),
+            add: add
+                .iter()
+                .map(|(host_port, guest_port)| v1::HostPortBinding {
+                    host_port: *host_port,
+                    guest_port: *guest_port,
+                })
+                .collect(),
+            remove: remove.to_vec(),
+        };
+        assert_eq!(
+            updated_host_ports(&current, &request(&[(18_079, 47_321)], &[])).unwrap(),
+            vec![
+                HostPortBinding::new(18_079, 47_321).unwrap(),
+                HostPortBinding::new(18_080, 3_000).unwrap(),
+            ]
+        );
+        assert_eq!(
+            updated_host_ports(&current, &request(&[(18_080, 47_321)], &[18_080])).unwrap(),
+            vec![HostPortBinding::new(18_080, 47_321).unwrap()]
+        );
+        assert!(
+            updated_host_ports(&current, &request(&[], &[18_080]))
+                .unwrap()
+                .is_empty()
+        );
+        for (add, remove, code) in [
+            (&[][..], &[][..], tonic::Code::InvalidArgument),
+            (
+                &[(18_080, 47_321)][..],
+                &[][..],
+                tonic::Code::FailedPrecondition,
+            ),
+            (
+                &[(18_081, 3_000)][..],
+                &[][..],
+                tonic::Code::FailedPrecondition,
+            ),
+            (&[][..], &[18_081][..], tonic::Code::FailedPrecondition),
+            (
+                &[(18_081, 7_777)][..],
+                &[][..],
+                tonic::Code::InvalidArgument,
+            ),
+            (&[(0, 47_321)][..], &[][..], tonic::Code::InvalidArgument),
+            (
+                &[(70_000, 47_321)][..],
+                &[][..],
+                tonic::Code::InvalidArgument,
+            ),
+        ] {
+            assert_eq!(
+                updated_host_ports(&current, &request(add, remove))
+                    .unwrap_err()
+                    .code(),
+                code,
+                "{add:?} {remove:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stopped_environment_records_updated_host_ports_for_its_next_start() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        core.environment_mut("dev").unwrap().state = StoredEnvironmentState::Stopped;
+        core.save().unwrap();
+        let environment_id = core.environment("dev").unwrap().id;
+        // Any guest port may be published after create, not only declared ones.
+        let target = vec![HostPortBinding::new(18_080, 47_321).unwrap()];
+        let operation = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::UpdateHostPorts,
+                &serde_json::json!({
+                    "name": "dev",
+                    "add": [[18_080, 47_321]],
+                    "remove": [],
+                    "target": target,
+                }),
+            )
+            .unwrap();
+        let completed = core.update_host_ports("dev", &operation).await.unwrap();
+        assert!(
+            supervisor_effect(completed.kind, completed.checkpoint)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(core.environment("dev").unwrap().host_ports, target);
+        assert_eq!(
+            SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"].host_ports,
+            target
+        );
     }
 
     #[test]

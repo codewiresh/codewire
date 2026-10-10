@@ -51,7 +51,7 @@ const MAXIMUM_GUEST_PROGRESS_FRAMES: usize = 64;
 const RUNNER_WATCH_BUFFER: usize = 8;
 // Bump for every detached-runner behavior change, even if the protobuf
 // message layout itself remains wire-compatible.
-const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 4;
+const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 5;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =
@@ -147,6 +147,28 @@ impl RunnerClient {
             .await?
             .into_inner()
             .disk_bytes)
+    }
+
+    pub async fn set_host_ports(
+        &mut self,
+        environment_id: Uuid,
+        generation: u64,
+        host_ports: &[HostPortBinding],
+    ) -> Result<(), Status> {
+        self.inner
+            .set_host_ports(v1::SetHostPortsRequest {
+                environment_id: environment_id.to_string(),
+                generation,
+                host_ports: host_ports
+                    .iter()
+                    .map(|binding| v1::HostPortBinding {
+                        host_port: u32::from(binding.host_port),
+                        guest_port: u32::from(binding.guest_port),
+                    })
+                    .collect(),
+            })
+            .await?;
+        Ok(())
     }
 
     pub async fn prepare_retire(&mut self) -> Result<(), Status> {
@@ -931,7 +953,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let vcpus = u8::try_from(request.vcpus)
             .map_err(|_| Status::invalid_argument("invalid vCPU count"))?;
         let setup = parse_setup_binding(&request)?;
-        let host_ports = parse_host_ports(&request)?;
+        let host_ports = parse_host_ports(&request.host_ports)?;
         let mesh = parse_mesh_attachment(&request)?;
         let direct_shares = parse_direct_shares(&request)?;
         let skill_snapshot_sha256 = parse_skill_snapshot(&request)?;
@@ -1348,6 +1370,40 @@ impl EnvironmentRunnerService for RunnerRpc {
         Ok(Response::new(v1::GrowStateDiskResponse { disk_bytes }))
     }
 
+    async fn set_host_ports(
+        &self,
+        request: Request<v1::SetHostPortsRequest>,
+    ) -> Result<Response<v1::SetHostPortsResponse>, Status> {
+        let request = request.into_inner();
+        let environment_id = parse_environment_id(&request.environment_id)?;
+        let host_ports = parse_host_ports(&request.host_ports)?;
+        let mut state = self.state.lock().await;
+        state.retirement.require_active()?;
+        if !state.adopted {
+            return Err(Status::failed_precondition("runner is not adopted"));
+        }
+        if environment_id != state.environment_id {
+            return Err(Status::permission_denied("runner identity mismatch"));
+        }
+        state
+            .observe_exit()
+            .await
+            .map_err(|_| Status::internal("observe VMM state failed"))?;
+        if state.generation != request.generation || state.state != v1::EnvironmentState::Running {
+            return Err(Status::failed_precondition(
+                "host ports change only on the running generation",
+            ));
+        }
+        let running = state.running.as_mut().ok_or_else(|| {
+            Status::failed_precondition("host ports change only on the running generation")
+        })?;
+        running
+            .set_host_ports(&host_ports)
+            .await
+            .map_err(map_host_port_error)?;
+        Ok(Response::new(v1::SetHostPortsResponse {}))
+    }
+
     async fn get_daemon_access(
         &self,
         _request: Request<v1::GetDaemonAccessRequest>,
@@ -1436,9 +1492,8 @@ fn parse_setup_binding(request: &v1::StartVmRequest) -> Result<Option<SetupBindi
     }
 }
 
-fn parse_host_ports(request: &v1::StartVmRequest) -> Result<Vec<HostPortBinding>, Status> {
-    let provided = request
-        .host_ports
+fn parse_host_ports(host_ports: &[v1::HostPortBinding]) -> Result<Vec<HostPortBinding>, Status> {
+    let provided = host_ports
         .iter()
         .map(|binding| {
             Ok(HostPortBinding {
@@ -1567,6 +1622,18 @@ fn parse_environment_projection(
         ));
     }
     Ok(Some(digest))
+}
+
+/// A busy port names itself after the stable code, so the supervisor can say
+/// which one is taken.
+fn map_host_port_error(error: RunnerError) -> Status {
+    match error {
+        RunnerError::HostPortUnavailable(port) => {
+            Status::failed_precondition(format!("{HOST_PORT_UNAVAILABLE} {port}"))
+        }
+        RunnerError::InvalidRequest => Status::invalid_argument("invalid host-port bindings"),
+        _ => Status::internal("host-port update failed"),
+    }
 }
 
 fn map_start_error(error: RunnerError) -> Status {

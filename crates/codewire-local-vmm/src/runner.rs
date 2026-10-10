@@ -564,6 +564,8 @@ impl CloudHypervisorRunner {
         };
         let (child, process) = startup.disarm();
         Ok(RunningVm {
+            // Evaluated before the request moves.
+            host_ports: prepared.request.host_ports.clone(),
             request: prepared.request,
             paths: prepared.paths,
             state_disk: prepared.state_disk,
@@ -682,6 +684,8 @@ impl CloudHypervisorRunner {
         let (child, process) = startup.disarm();
 
         Ok(RunningVm {
+            // Evaluated before the request moves.
+            host_ports: prepared.request.host_ports.clone(),
             request: prepared.request,
             paths: prepared.paths,
             state_disk: prepared.state_disk,
@@ -1210,6 +1214,9 @@ pub struct RunningVm {
     hybrid: HybridVsockTarget,
     network_worker: Option<NetworkWorkerProcess>,
     host_port_listeners: Vec<ReservedHostPort>,
+    /// The bindings this generation publishes now: the boot set, then each
+    /// applied `set_host_ports`.
+    host_ports: Vec<HostPortBinding>,
     _lock: VmLock,
 }
 
@@ -1236,6 +1243,59 @@ impl fmt::Debug for RunningVm {
 impl RunningVm {
     pub fn vm_id(&self) -> Uuid {
         self.request.vm_id
+    }
+
+    /// Converges this generation's published host ports to `bindings`. New
+    /// ports bind all-or-nothing before anything changes; a host port keeps
+    /// its guest port until it is withdrawn.
+    pub async fn set_host_ports(
+        &mut self,
+        bindings: &[HostPortBinding],
+    ) -> Result<(), RunnerError> {
+        validate_canonical_host_port_bindings(bindings).map_err(|_| RunnerError::InvalidRequest)?;
+        let published = |port: u16| {
+            self.host_ports
+                .iter()
+                .find(|binding| binding.host_port == port)
+        };
+        if bindings.iter().any(|binding| {
+            published(binding.host_port)
+                .is_some_and(|current| current.guest_port != binding.guest_port)
+        }) {
+            return Err(RunnerError::InvalidRequest);
+        }
+        let add = bindings
+            .iter()
+            .filter(|binding| published(binding.host_port).is_none())
+            .copied()
+            .collect::<Vec<_>>();
+        let remove = self
+            .host_ports
+            .iter()
+            .filter(|current| {
+                !bindings
+                    .iter()
+                    .any(|binding| binding.host_port == current.host_port)
+            })
+            .map(|current| current.host_port)
+            .collect::<Vec<_>>();
+        if add.is_empty() && remove.is_empty() {
+            return Ok(());
+        }
+        let commands = self
+            .network_worker
+            .as_ref()
+            .and_then(|worker| worker.host_port_commands.clone())
+            .ok_or(RunnerError::IngressControl)?;
+        let add = reserve_host_ports(&add)?;
+        let (reply, outcome) = tokio::sync::oneshot::channel();
+        commands
+            .send(HostPortCommand { add, remove, reply })
+            .await
+            .map_err(|_| RunnerError::IngressControl)?;
+        outcome.await.map_err(|_| RunnerError::IngressControl)??;
+        self.host_ports = bindings.to_vec();
+        Ok(())
     }
 
     pub fn generation(&self) -> u64 {
@@ -2021,7 +2081,16 @@ struct NetworkWorkerProcess {
     mesh_ingress_key: Option<Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>>,
     mesh_ingress_publisher: Option<MeshIngressPublisher>,
     ingress_forwarder: Option<JoinHandle<Result<(), RunnerError>>>,
+    host_port_commands: Option<tokio::sync::mpsc::Sender<HostPortCommand>>,
     mesh_transport: Option<MeshTransportProcess>,
+}
+
+/// Publishes `add` and withdraws `remove` (host ports) on the running
+/// forwarder. The reply comes after withdrawn listeners are closed.
+struct HostPortCommand {
+    add: Vec<ReservedHostPort>,
+    remove: Vec<u16>,
+    reply: tokio::sync::oneshot::Sender<Result<(), RunnerError>>,
 }
 
 fn take_ingress_forwarder_failure(
@@ -2107,6 +2176,7 @@ impl NetworkWorkerStartup {
             mesh_ingress_key,
             mesh_ingress_publisher: None,
             ingress_forwarder: None,
+            host_port_commands: None,
             mesh_transport: None,
         }
     }
@@ -2226,6 +2296,7 @@ async fn stop_network_worker_process_inner(
     worker: &mut NetworkWorkerProcess,
 ) -> Result<(), RunnerError> {
     drop(worker.mesh_ingress_publisher.take());
+    drop(worker.host_port_commands.take());
     if let Some(forwarder) = worker.ingress_forwarder.take() {
         forwarder.abort();
         let _ = forwarder.await;
@@ -2355,9 +2426,8 @@ fn start_ingress_forwarder(
     vm_id: Uuid,
     generation: u64,
 ) -> Result<(), RunnerError> {
-    if listeners.is_empty() && mesh_ports.is_none() {
-        return Ok(());
-    }
+    // Always started, even with nothing published yet, so host ports can be
+    // added to the running generation.
     let control = worker
         .ingress_control
         .take()
@@ -2370,19 +2440,10 @@ fn start_ingress_forwarder(
         .mesh_ingress_key
         .take()
         .ok_or(RunnerError::IngressControl)?;
-    let mut async_listeners = Vec::with_capacity(listeners.len());
-    for reserved in listeners {
-        let binding = reserved.binding;
-        let listener = tokio::net::TcpListener::from_std(reserved.listener)
-            .map_err(|_| RunnerError::IngressControl)?;
-        let address = listener
-            .local_addr()
-            .map_err(|_| RunnerError::IngressControl)?;
-        if address.ip() != Ipv4Addr::LOCALHOST || address.port() != binding.host_port {
-            return Err(RunnerError::IngressControl);
-        }
-        async_listeners.push((listener, binding));
-    }
+    let async_listeners = listeners
+        .into_iter()
+        .map(async_host_port_listener)
+        .collect::<Result<Vec<_>, _>>()?;
     let (mesh_ingress_publisher, mesh_ingress_receiver) =
         mesh_ingress_channel(mesh_ports.unwrap_or_default())
             .map_err(|_| RunnerError::IngressControl)?;
@@ -2400,13 +2461,18 @@ fn start_ingress_forwarder(
         ));
     }
     worker.mesh_ingress_publisher = mesh_ports.map(|_| mesh_ingress_publisher);
+    let (host_port_commands, host_port_command_receiver) = tokio::sync::mpsc::channel(1);
+    worker.host_port_commands = Some(host_port_commands);
     worker.ingress_forwarder = Some(tokio::spawn(run_ingress_forwarder(
         control,
         IngressControlKeys {
             host_port: host_port_key,
             mesh: mesh_ingress_key,
         },
-        async_listeners,
+        HostPortIngress {
+            listeners: async_listeners,
+            commands: host_port_command_receiver,
+        },
         mesh_ingress_receiver,
         process_wait_descriptors,
         vm_id,
@@ -2415,22 +2481,63 @@ fn start_ingress_forwarder(
     Ok(())
 }
 
+fn async_host_port_listener(
+    reserved: ReservedHostPort,
+) -> Result<(tokio::net::TcpListener, HostPortBinding), RunnerError> {
+    let binding = reserved.binding;
+    let listener = tokio::net::TcpListener::from_std(reserved.listener)
+        .map_err(|_| RunnerError::IngressControl)?;
+    let address = listener
+        .local_addr()
+        .map_err(|_| RunnerError::IngressControl)?;
+    if address.ip() != Ipv4Addr::LOCALHOST || address.port() != binding.host_port {
+        return Err(RunnerError::IngressControl);
+    }
+    Ok((listener, binding))
+}
+
+/// One acceptor per published host port. A failed acceptor reports its port;
+/// one withdrawn by its command is aborted instead and never reports.
+fn spawn_host_port_acceptor(
+    listener: tokio::net::TcpListener,
+    binding: HostPortBinding,
+    accepted: &tokio::sync::mpsc::Sender<AcceptedHostPort>,
+    failed: &tokio::sync::mpsc::UnboundedSender<u16>,
+) -> JoinHandle<()> {
+    let accepted = accepted.clone();
+    let failed = failed.clone();
+    tokio::spawn(async move {
+        let _ = accept_host_port(listener, binding, accepted).await;
+        let _ = failed.send(binding.host_port);
+    })
+}
+
+/// The host ports published at start and the channel that changes them.
+struct HostPortIngress {
+    listeners: Vec<(tokio::net::TcpListener, HostPortBinding)>,
+    commands: tokio::sync::mpsc::Receiver<HostPortCommand>,
+}
+
 async fn run_ingress_forwarder(
     mut control: tokio::net::UnixStream,
     keys: IngressControlKeys,
-    listeners: Vec<(tokio::net::TcpListener, HostPortBinding)>,
+    host_ports: HostPortIngress,
     mut mesh_ingress: tokio::sync::mpsc::Receiver<AcceptedMeshIngress>,
     process_wait_descriptors: Vec<(HostPortDependency, OwnedFd)>,
     vm_id: Uuid,
     generation: u64,
 ) -> Result<(), RunnerError> {
     let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::channel(HOST_PORT_ACCEPT_QUEUE);
-    let mut acceptors = JoinSet::new();
+    let (failed_tx, mut failed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let HostPortIngress {
+        listeners,
+        commands: mut host_port_commands,
+    } = host_ports;
+    let mut acceptors = std::collections::BTreeMap::new();
     for (listener, binding) in listeners {
-        let accepted_tx = accepted_tx.clone();
-        acceptors.spawn(accept_host_port(listener, binding, accepted_tx));
+        let acceptor = spawn_host_port_acceptor(listener, binding, &accepted_tx, &failed_tx);
+        acceptors.insert(binding.host_port, (binding, acceptor));
     }
-    drop(accepted_tx);
     let mut monitors = JoinSet::new();
     for (dependency, descriptor) in process_wait_descriptors {
         monitors.spawn(async move {
@@ -2447,12 +2554,20 @@ async fn run_ingress_forwarder(
     }
     let mut host_sequence = 1_u64;
     let mut mesh_sequence = 1_u64;
-    let mut accepting_host_ports = !acceptors.is_empty();
+    let mut accepting_host_ports = true;
+    let mut accepting_commands = true;
     let mut accepting_mesh = true;
     loop {
         tokio::select! {
             accepted = accepted_rx.recv(), if accepting_host_ports => {
                 let accepted = accepted.ok_or(RunnerError::IngressControl)?;
+                // A connection queued before its port was withdrawn is closed.
+                if acceptors
+                    .get(&accepted.binding.host_port)
+                    .is_none_or(|(binding, _)| *binding != accepted.binding)
+                {
+                    continue;
+                }
                 transfer_host_port_connection(
                     &mut control,
                     &keys.host_port,
@@ -2491,9 +2606,30 @@ async fn run_ingress_forwarder(
                     Err(_) => return Err(RunnerError::IngressControl),
                 }
             }
-            completed = acceptors.join_next(), if !acceptors.is_empty() => {
-                let _ = completed;
-                return Err(RunnerError::IngressControl);
+            failed = failed_rx.recv() => {
+                let port = failed.ok_or(RunnerError::IngressControl)?;
+                if acceptors.contains_key(&port) {
+                    return Err(RunnerError::IngressControl);
+                }
+            }
+            command = host_port_commands.recv(), if accepting_commands => {
+                let Some(command) = command else {
+                    accepting_commands = false;
+                    continue;
+                };
+                let outcome = if accepting_host_ports {
+                    apply_host_port_command(
+                        &mut acceptors,
+                        command.add,
+                        &command.remove,
+                        &accepted_tx,
+                        &failed_tx,
+                    )
+                    .await
+                } else {
+                    Err(RunnerError::IngressControl)
+                };
+                let _ = command.reply.send(outcome);
             }
             completed = monitors.join_next(), if !monitors.is_empty() => {
                 let dependency = completed
@@ -2507,8 +2643,10 @@ async fn run_ingress_forwarder(
                         // worker control stream here would turn the resulting
                         // fail-closed worker into a misleading worker failure.
                         accepting_host_ports = false;
-                        acceptors.abort_all();
-                        while acceptors.join_next().await.is_some() {}
+                        for (_, (_, acceptor)) in std::mem::take(&mut acceptors) {
+                            acceptor.abort();
+                            let _ = acceptor.await;
+                        }
                         accepted_rx.close();
                         while accepted_rx.try_recv().is_ok() {}
                     }
@@ -2516,6 +2654,38 @@ async fn run_ingress_forwarder(
             }
         }
     }
+}
+
+/// Withdrawn listeners are closed before the reply, so the next command can
+/// publish the same host port again.
+async fn apply_host_port_command(
+    acceptors: &mut std::collections::BTreeMap<u16, (HostPortBinding, JoinHandle<()>)>,
+    add: Vec<ReservedHostPort>,
+    remove: &[u16],
+    accepted: &tokio::sync::mpsc::Sender<AcceptedHostPort>,
+    failed: &tokio::sync::mpsc::UnboundedSender<u16>,
+) -> Result<(), RunnerError> {
+    let add = add
+        .into_iter()
+        .map(async_host_port_listener)
+        .collect::<Result<Vec<_>, _>>()?;
+    if add
+        .iter()
+        .any(|(_, binding)| acceptors.contains_key(&binding.host_port))
+    {
+        return Err(RunnerError::InvalidRequest);
+    }
+    for port in remove {
+        if let Some((_, acceptor)) = acceptors.remove(port) {
+            acceptor.abort();
+            let _ = acceptor.await;
+        }
+    }
+    for (listener, binding) in add {
+        let acceptor = spawn_host_port_acceptor(listener, binding, accepted, failed);
+        acceptors.insert(binding.host_port, (binding, acceptor));
+    }
+    Ok(())
 }
 
 async fn accept_host_port(
@@ -5079,8 +5249,11 @@ mod tests {
     use crate::host::path::{FileIdentity, current_uid, set_socket_private};
     use crate::host::process::ProcessIdentity;
     use crate::host_port::RESERVED_GUEST_DAEMON_PORT;
+    use crate::host_port::{HOST_PORT_CONTROL_FRAME_LEN, HostPortControlReceiver};
     use crate::mesh_ingress::{MESH_INGRESS_CONTROL_FRAME_LEN, MeshIngressControlReceiver};
-    use crate::network_worker::receive_mesh_ingress_descriptor;
+    use crate::network_worker::{
+        receive_mesh_ingress_descriptor, receive_worker_host_port_descriptor,
+    };
     use crate::state::{PERSISTED_STATE_SCHEMA_VERSION, RootGenerationPaths, VmPhase};
     #[cfg(target_os = "linux")]
     use codewire_vmm_guest_probe::DirectShareMount;
@@ -5511,6 +5684,7 @@ mod tests {
             mesh_ingress_key: None,
             mesh_ingress_publisher: None,
             ingress_forwarder: None,
+            host_port_commands: None,
             mesh_transport: Some(MeshTransportProcess {
                 child: mesh_child,
                 process: mesh_process,
@@ -5726,7 +5900,10 @@ mod tests {
                 host_port: Zeroizing::new([7_u8; HOST_PORT_CONTROL_KEY_LEN]),
                 mesh: Zeroizing::new(mesh_key),
             },
-            vec![(listener, HostPortBinding::new(host_port, 3_000).unwrap())],
+            HostPortIngress {
+                listeners: vec![(listener, HostPortBinding::new(host_port, 3_000).unwrap())],
+                commands: tokio::sync::mpsc::channel(1).1,
+            },
             mesh_receiver,
             vec![
                 (
@@ -5797,6 +5974,114 @@ mod tests {
             .unwrap()
             .unwrap();
 
+        vmm.signal(Signal::KILL).unwrap();
+        vmm_child.wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_ports_are_published_and_withdrawn_on_a_running_forwarder() {
+        let (mut vmm_child, vmm) = spawn_admitted_sleep("30").await;
+        let (mut worker_child, worker) = spawn_admitted_sleep("30").await;
+        let (control, worker_control) = StdUnixStream::pair().unwrap();
+        control.set_nonblocking(true).unwrap();
+        worker_control.set_nonblocking(true).unwrap();
+        let control = tokio::net::UnixStream::from_std(control).unwrap();
+        let mut worker_control = tokio::net::UnixStream::from_std(worker_control).unwrap();
+        let (_mesh_publisher, mesh_receiver) = mesh_ingress_channel(&[]).unwrap();
+        let (commands, command_receiver) = tokio::sync::mpsc::channel(1);
+        let vm_id = Uuid::new_v4();
+        let key = [7_u8; HOST_PORT_CONTROL_KEY_LEN];
+        let mut forwarder = tokio::spawn(run_ingress_forwarder(
+            control,
+            IngressControlKeys {
+                host_port: Zeroizing::new(key),
+                mesh: Zeroizing::new([8_u8; MESH_INGRESS_CONTROL_KEY_LEN]),
+            },
+            HostPortIngress {
+                listeners: Vec::new(),
+                commands: command_receiver,
+            },
+            mesh_receiver,
+            vec![
+                (
+                    HostPortDependency::Vmm,
+                    vmm.duplicate_wait_descriptor().unwrap(),
+                ),
+                (
+                    HostPortDependency::NetworkWorker,
+                    worker.duplicate_wait_descriptor().unwrap(),
+                ),
+            ],
+            vm_id,
+            1,
+        ));
+        let send = |add: Vec<ReservedHostPort>, remove: Vec<u16>| {
+            let commands = commands.clone();
+            async move {
+                let (reply, outcome) = tokio::sync::oneshot::channel();
+                commands
+                    .send(HostPortCommand { add, remove, reply })
+                    .await
+                    .unwrap();
+                outcome.await.unwrap()
+            }
+        };
+        let free = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let host_port = free.local_addr().unwrap().port();
+        drop(free);
+        let binding = HostPortBinding::new(host_port, 47_321).unwrap();
+
+        // Nothing was published at start; publish a port on the running VM.
+        send(reserve_host_ports(&[binding]).unwrap(), Vec::new())
+            .await
+            .unwrap();
+        let mut client = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, host_port))
+            .await
+            .unwrap();
+        let mut frame = [0_u8; HOST_PORT_CONTROL_FRAME_LEN];
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            worker_control.read_exact(&mut frame),
+        )
+        .await
+        .expect("host-port control frame was not forwarded")
+        .unwrap();
+        let decoded = HostPortControlReceiver::new(vm_id, 1)
+            .unwrap()
+            .decode(&frame, &key)
+            .unwrap();
+        assert_eq!(decoded.binding, binding);
+        let descriptor = tokio::time::timeout(
+            Duration::from_secs(1),
+            receive_worker_host_port_descriptor(&worker_control, binding),
+        )
+        .await
+        .expect("host-port descriptor was not forwarded")
+        .unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut admitted = std::net::TcpStream::from(descriptor);
+        // On macOS an accepted socket inherits the listener's O_NONBLOCK.
+        admitted.set_nonblocking(false).unwrap();
+        let mut received = [0_u8; 4];
+        admitted.read_exact(&mut received).unwrap();
+        assert_eq!(&received, b"ping");
+
+        // Withdrawing closes the listener before the reply, so the port can
+        // be bound again at once; publishing it again works too.
+        send(Vec::new(), vec![host_port]).await.unwrap();
+        drop(bind_loopback_listener(host_port).unwrap());
+        send(reserve_host_ports(&[binding]).unwrap(), Vec::new())
+            .await
+            .unwrap();
+        assert!(!forwarder.is_finished());
+
+        worker.signal(Signal::KILL).unwrap();
+        worker_child.wait().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), &mut forwarder)
+            .await
+            .expect("worker loss did not end the ingress forwarder")
+            .unwrap()
+            .unwrap();
         vmm.signal(Signal::KILL).unwrap();
         vmm_child.wait().await.unwrap();
     }

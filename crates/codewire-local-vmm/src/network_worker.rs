@@ -980,7 +980,7 @@ async fn run_ingress_control(
     }
 }
 
-async fn receive_worker_host_port_descriptor(
+pub(crate) async fn receive_worker_host_port_descriptor(
     control: &tokio::net::UnixStream,
     binding: HostPortBinding,
 ) -> Result<OwnedFd, NetworkWorkerError> {

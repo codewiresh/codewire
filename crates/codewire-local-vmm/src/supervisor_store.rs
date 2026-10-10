@@ -68,6 +68,7 @@ pub(crate) enum OperationKind {
     Reconcile,
     UpdateCwRuntime,
     RollbackCwRuntime,
+    UpdateHostPorts,
 }
 
 impl OperationKind {
@@ -88,6 +89,7 @@ impl OperationKind {
             Self::Reconcile => "reconcile",
             Self::UpdateCwRuntime => "update_cw_runtime",
             Self::RollbackCwRuntime => "rollback_cw_runtime",
+            Self::UpdateHostPorts => "update_host_ports",
         }
     }
 
@@ -105,6 +107,7 @@ impl OperationKind {
             "reconcile" => Some(Self::Reconcile),
             "update_cw_runtime" => Some(Self::UpdateCwRuntime),
             "rollback_cw_runtime" => Some(Self::RollbackCwRuntime),
+            "update_host_ports" => Some(Self::UpdateHostPorts),
             _ => None,
         }
     }

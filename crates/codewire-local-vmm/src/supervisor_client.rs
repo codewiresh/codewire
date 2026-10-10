@@ -256,6 +256,29 @@ impl NativeSupervisorClient {
             .await
     }
 
+    /// Publish `add` and withdraw `remove` (host ports), waiting for the
+    /// running VM to change or, when stopped, for the record.
+    pub async fn update_host_ports(
+        &mut self,
+        name: &str,
+        add: Vec<v1::HostPortBinding>,
+        remove: Vec<u32>,
+    ) -> Result<v1::Environment, Status> {
+        let operation = self
+            .inner
+            .update_host_ports(v1::UpdateHostPortsRequest {
+                name: name.to_owned(),
+                request_id: Uuid::new_v4().to_string(),
+                environment_id: String::new(),
+                add,
+                remove,
+            })
+            .await?
+            .into_inner();
+        self.follow_environment_operation(operation, name, &mut |_| {})
+            .await
+    }
+
     /// Update only the source selections, waiting on the existing durable operation stream.
     pub async fn update_environment_sources(
         &mut self,
@@ -549,8 +572,14 @@ fn operation_error_hint(error_code: &str) -> &'static str {
         "create_direct_share_changed" | "start_direct_share_changed" => {
             " (a direct-mount source directory was moved, removed or replaced since it was admitted; put the original directory back at its path, or remove and recreate the environment)"
         }
-        "create_host_port_unavailable" | "start_host_port_unavailable" => {
-            " (a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; `cw env info` lists its ports: stop that program or environment, or change host_port in codewire.yaml)"
+        "create_host_port_unavailable" => {
+            " (a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; stop it, or change host_port in codewire.yaml)"
+        }
+        "start_host_port_unavailable" => {
+            " (a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; `cw env --local port ls` lists its ports: stop that program, or withdraw the port with `cw env --local port rm` and publish another)"
+        }
+        "host_port_unavailable" => {
+            " (the host port is in use on 127.0.0.1 by another program or local environment; choose another with --host-port)"
         }
         #[cfg(target_os = "macos")]
         "create_registry_platform" => {
