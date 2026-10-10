@@ -355,7 +355,10 @@ pub enum WorkspacePlanError {
     CredentialAuthorityUnavailable,
     #[error("protected repository preparation is unavailable")]
     CredentialRepositoryUnavailable,
-    #[error("protected repository preparation was rejected ({0:?})")]
+    #[error(
+        "protected repository preparation was rejected ({0:?}){hint}",
+        hint = repository_rejection_hint(*.0)
+    )]
     CredentialRepositoryRejected(tonic::Code),
     #[error("protected repository output is invalid")]
     CredentialRepositoryInvalid,
@@ -384,4 +387,18 @@ pub enum WorkspacePlanError {
         path: PathBuf,
         source: std::io::Error,
     },
+}
+
+/// A fixed next step for refusals the user can fix. The authority's own
+/// message is never shown: it may carry provider text.
+fn repository_rejection_hint(code: tonic::Code) -> &'static str {
+    match code {
+        tonic::Code::FailedPrecondition
+        | tonic::Code::PermissionDenied
+        | tonic::Code::Unauthenticated
+        | tonic::Code::NotFound => {
+            "; check that GitHub is connected and can read the repository: cw credentials --local list"
+        }
+        _ => "",
+    }
 }

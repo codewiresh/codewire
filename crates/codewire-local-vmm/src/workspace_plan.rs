@@ -789,9 +789,20 @@ mod tests {
             let error = credential_repository_rejection(status);
             let display = error.to_string();
             let debug = format!("{error:?}");
+            let hint = if matches!(
+                code,
+                Code::FailedPrecondition
+                    | Code::PermissionDenied
+                    | Code::Unauthenticated
+                    | Code::NotFound
+            ) {
+                "; check that GitHub is connected and can read the repository: cw credentials --local list"
+            } else {
+                ""
+            };
             assert_eq!(
                 display,
-                format!("protected repository preparation was rejected ({code:?})")
+                format!("protected repository preparation was rejected ({code:?}){hint}")
             );
             assert_eq!(debug, format!("CredentialRepositoryRejected({code:?})"));
             for canary in [MESSAGE, DETAILS, METADATA] {
