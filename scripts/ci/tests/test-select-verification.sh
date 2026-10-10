@@ -1086,7 +1086,9 @@ run_paths_case cw_release_delivery_shell pull_request refs/pull/2255/head false 
   'go_consumer_interop go_support policy release runtime_confidential' \
   scripts/ci/release/sign-cw-release.sh \
   scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh \
-  scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh
+  scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh \
+  scripts/ci/setup/fetch-openbao-release-signing-key.sh \
+  scripts/ci/tests/test-fetch-openbao-release-signing-key.sh
 run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false \
   'go_consumer_interop go_support policy release runtime_confidential' \
   scripts/ci/tests/cw_release_fixtures.py scripts/ci/tests/test-cli-release-workflow.py \

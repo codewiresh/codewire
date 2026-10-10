@@ -21,7 +21,7 @@ mod http;
 mod scratch;
 
 const TRUST_KEY: &[u8] = include_bytes!("../../../apps/cli/GPG_PUBLIC_KEY.asc");
-const TRUST_FINGERPRINT: &str = "39F95DC66BA8EFBEAF49FAEF39D46239F95F4632";
+const TRUST_FINGERPRINT: &str = "A38FF6BC6623FCA611A7A32B5EFBF0F4A5870815";
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(crate) enum Selection {

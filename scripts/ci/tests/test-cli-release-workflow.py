@@ -87,18 +87,27 @@ def check(text, ci_text):
     need(not re.search(r"^    if:", package, re.M), "publication job can run without a successful build")
     names = [name for name, _ in steps(package)]
     order = ["Receive the unsigned delivery", "Verify the received delivery is the built delivery",
-             "Reuse an already-published signed R2 release", "Verify release signing key", "Sign release delivery",
+             "Reuse an already-published signed R2 release", "Sign release delivery",
              "Publish immutable R2 release objects", "Remove the R2 publisher credential",
              "Publish signed release assets"]
     positions = [names.index(name) if name in names else -1 for name in order]
     need(-1 not in positions and positions == sorted(positions), "publication steps are missing or reordered")
     need(names and names[-1] == "Publish signed release assets", "work follows mirror publication")
     by_name = dict(steps(package))
+    need("secrets." not in text, "the release workflow reads a Forgejo Actions secret")
+    sign = by_name.get("Sign release delivery", "")
+    need([step for step, body in steps(package) if "fetch-openbao-release-signing-key.sh" in body]
+         == ["Sign release delivery"], "the signing key is read outside the signing step")
     for name in GPG:
-        holders = [step for step, body in steps(package) if f"{name}: ${{{{ secrets.{name} }}}}" in body]
-        need(holders == ["Verify release signing key", "Sign release delivery"],
-             f"{name} reaches steps other than key verification and signing")
-        need(text.count(f"secrets.{name}") == 2, f"{name} appears outside the two signing steps")
+        need(text.count(name) == sign.count(name) > 0, f"{name} appears outside the signing step")
+    marks = [sign.find(mark) for mark in ("          trap cleanup_signing EXIT\n",
+                                         "fetch-openbao-release-signing-key.sh \"$signing_work/key\"",
+                                         "verify-cw-release-signing-key.sh apps/cli/GPG_PUBLIC_KEY.asc",
+                                         "sign-cw-release.sh dist/cw-release",
+                                         "          cleanup_signing\n")]
+    need(-1 not in marks and marks == sorted(marks),
+         "the signing key is not trapped, read, checked, used and shredded in that order")
+    need("find \"$signing_work\" -type f -exec shred -u {} +" in sign, "the signing key is not shredded")
     probe = by_name.get("Reuse an already-published signed R2 release", "")
     publish = by_name.get("Publish immutable R2 release objects", "")
     for step in (probe, publish):
@@ -153,6 +162,17 @@ MUTATIONS = {
     "signing without build": lambda t: t.replace("    needs: [release-selection, build-release]",
                                                  "    needs: [release-selection]", 1),
     "three targets": lambda t: t.replace(TARGETS, TARGETS.rsplit(" ", 1)[0], 1),
+    "Forgejo signing secret": lambda t: t.replace(
+        "      - name: Sign release delivery\n        working-directory: .release-source\n",
+        "      - name: Sign release delivery\n        working-directory: .release-source\n        env:\n"
+        "          CW_RELEASE_GPG_PASSPHRASE: ${{ secrets.CW_RELEASE_GPG_PASSPHRASE }}\n", 1),
+    "signing key in mirror step": lambda t: t.replace(
+        "          export GH_MIRROR_TOKEN_FILE=\"$github_work/token\"\n",
+        "          export GH_MIRROR_TOKEN_FILE=\"$github_work/token\"\n"
+        "          ../scripts/ci/setup/fetch-openbao-release-signing-key.sh \"$github_work/key\"\n", 1),
+    "signing key not shredded": lambda t: t.replace("          trap cleanup_signing EXIT\n", "", 1),
+    "signing key outlives signing": lambda t: t.replace("          cleanup_signing\n          trap - EXIT\n",
+                                                         "          trap - EXIT\n", 1),
 }
 
 

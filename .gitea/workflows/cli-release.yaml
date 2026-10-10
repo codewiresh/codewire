@@ -240,23 +240,30 @@ jobs:
             mv dist/cw-release-retained dist/cw-release
           fi
 
-      - name: Verify release signing key
-        working-directory: .release-source
-        env:
-          CW_RELEASE_GPG_PRIVATE_KEY: ${{ secrets.CW_RELEASE_GPG_PRIVATE_KEY }}
-          CW_RELEASE_GPG_PASSPHRASE: ${{ secrets.CW_RELEASE_GPG_PASSPHRASE }}
-          CW_RELEASE_GPG_KEY_ID: ${{ secrets.CW_RELEASE_GPG_KEY_ID }}
-        run: ../scripts/ci/release/verify-cw-release-signing-key.sh apps/cli/GPG_PUBLIC_KEY.asc
-
       - name: Sign release delivery
         working-directory: .release-source
-        env:
-          CW_RELEASE_GPG_PRIVATE_KEY: ${{ secrets.CW_RELEASE_GPG_PRIVATE_KEY }}
-          CW_RELEASE_GPG_PASSPHRASE: ${{ secrets.CW_RELEASE_GPG_PASSPHRASE }}
-          CW_RELEASE_GPG_KEY_ID: ${{ secrets.CW_RELEASE_GPG_KEY_ID }}
         run: |
           set -euo pipefail
-          ../scripts/ci/release/sign-cw-release.sh dist/cw-release
+          umask 077
+          # The signing key exists only in OpenBao. It is read here, used only
+          # by the key check and the signer, and shredded before anything else.
+          signing_work="$(mktemp -d "${RUNNER_TEMP:?}/codewire-release-signing.XXXXXX")"
+          cleanup_signing() {
+            find "$signing_work" -type f -exec shred -u {} + 2>/dev/null || true
+            rm -rf "$signing_work"
+          }
+          trap cleanup_signing EXIT
+          ../scripts/ci/setup/fetch-openbao-release-signing-key.sh "$signing_work/key"
+          (
+            CW_RELEASE_GPG_PRIVATE_KEY="$(<"$signing_work/key/private-key.asc")"
+            CW_RELEASE_GPG_PASSPHRASE="$(<"$signing_work/key/passphrase")"
+            CW_RELEASE_GPG_KEY_ID="$(<"$signing_work/key/key-id")"
+            export CW_RELEASE_GPG_PRIVATE_KEY CW_RELEASE_GPG_PASSPHRASE CW_RELEASE_GPG_KEY_ID
+            ../scripts/ci/release/verify-cw-release-signing-key.sh apps/cli/GPG_PUBLIC_KEY.asc
+            ../scripts/ci/release/sign-cw-release.sh dist/cw-release
+          )
+          cleanup_signing
+          trap - EXIT
           gpg --import apps/cli/GPG_PUBLIC_KEY.asc
           gpg --verify dist/cw-release/SHA256SUMS.asc dist/cw-release/SHA256SUMS
           (cd dist/cw-release && sha256sum --check --ignore-missing SHA256SUMS)
