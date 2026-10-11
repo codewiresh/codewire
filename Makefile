@@ -94,6 +94,9 @@ export RUST_LOG ?= codewire_server=debug,tower_http=debug
 export DRY_RUN ?= true
 export KUBE_CONTEXT ?= $(if $(strip $(CLUSTER)),kind-$(CLUSTER),kind-codewire)
 DASHBOARD_PORT ?= 5173
+# One-shot Cargo builds share the account's local compiler cache
+# (scripts/ci/verify/local-rust-cache.sh).
+LOCAL_RUST_CACHE := scripts/ci/verify/local-rust-cache.sh
 KUBECTL ?= kubectl --context $(KUBE_CONTEXT)
 AGENT_SANDBOX_REPO ?= https://github.com/noeljackson/agent-sandbox.git
 AGENT_SANDBOX_SHA ?= $(shell awk '/AGENT_SANDBOX_SHA:/ {print $$2; exit}' .gitea/workflows/ci.yaml)
@@ -151,7 +154,7 @@ dev:
 	@echo "Services ready! Run 'make db-init' to apply pending database migrations."
 
 db-init:
-	DATABASE_URL="$(DATABASE_URL)" cargo run --locked -p codewire-server-core --bin codewire-db-migrate
+	DATABASE_URL="$(DATABASE_URL)" $(LOCAL_RUST_CACHE) cargo run --locked -p codewire-server-core --bin codewire-db-migrate
 
 # Stop all services
 dev-down:
@@ -165,7 +168,7 @@ web:
 	CODEWIRE_IDENTITY_ORIGIN="$${CODEWIRE_IDENTITY_ORIGIN:-http://127.0.0.1:8080}" \
 	CODEWIRE_BILLING_ORIGIN="$${CODEWIRE_BILLING_ORIGIN:-http://127.0.0.1:8081}" \
 	CODEWIRE_BROWSER_API_ORIGIN="$${CODEWIRE_BROWSER_API_ORIGIN:-http://127.0.0.1:8080}" \
-	cargo run --locked -p codewire-dashboard-web
+	$(LOCAL_RUST_CACHE) cargo run --locked -p codewire-dashboard-web
 
 dashboard-ssr-dev: web
 
@@ -374,7 +377,7 @@ test-ui-debug: seed-test-user
 build: build-web
 
 build-web:
-	cargo build --locked -p codewire-dashboard-web
+	$(LOCAL_RUST_CACHE) cargo build --locked -p codewire-dashboard-web
 
 # Build and install the CLI from this source checkout.
 cli-build:

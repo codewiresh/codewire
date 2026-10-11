@@ -112,6 +112,8 @@ runner.parent.mkdir(parents=True)
 production = (source_root / 'scripts/ci/verify/run-product-verification.sh').read_text()
 runner.write_text(production)
 runner.chmod(0o755)
+shutil.copy(source_root / 'scripts/ci/verify/local-rust-cache.sh',
+            runner.parent / 'local-rust-cache.sh')
 binary = fixture / 'bin'
 binary.mkdir()
 trace = temporary / 'rust-composition-trace.jsonl'
@@ -181,8 +183,11 @@ for helper in ('scripts/ci/tests/test-openbao-only-secret-authority.sh',
 resolver = runner.parent / 'resolve-cargo-target-dir.sh'
 resolver.write_text('#!/usr/bin/env bash\nprintf "%s/target\\n" "$1"\n')
 resolver.chmod(0o755)
+# The trace covers composition, not the workstation compiler cache: never
+# start a real sccache server from a fixture.
 environment = dict(PATH=f'{binary}:{os.environ["PATH"]}',
                    HOME=str(fixture), COMPOSITION_TRACE=str(trace),
+                   CODEWIRE_LOCAL_RUST_CACHE='off',
                    RUST_COMPOSE_FORMAT='true', RUST_COMPOSE_FORMAT_DONE='true')
 cases = 0
 
@@ -216,9 +221,9 @@ def generic(records):
             and '--ignored' not in r['args']]
 
 def expected(*arguments):
-    # Workspace clippy runs once in the fast compile job, not per package graph.
-    return [['build', '--locked', *arguments],
-            ['test', *arguments, '--all-targets']]
+    # Workspace clippy runs once in the fast compile job, not per package graph,
+    # and the locked test build compiles the graph; no separate debug build.
+    return [['test', '--locked', *arguments, '--all-targets']]
 
 both = ['rust', 'transport', 'rust_pkg_codewire_alpha', 'transport_pkg_codewire_beta']
 records, _ = run([], status=1)
@@ -329,7 +334,7 @@ assert records[-1]['tool'] == 'test_console_pair_static_contract.py'
 records, _ = run(special, fail_feature=product_feature, status=45)
 assert records[-1]['args'] == product_test
 
-for command in ('fmt', 'build', 'test'):
+for command in ('fmt', 'test'):
     records, _ = run(both, fail=command)
     assert records[-1]['args'][0] == command
 

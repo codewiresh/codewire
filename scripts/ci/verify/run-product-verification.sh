@@ -10,6 +10,8 @@ cd "$ROOT"
 CARGO_TARGET_DIR="$(scripts/ci/verify/resolve-cargo-target-dir.sh "$ROOT")"
 export CARGO_TARGET_DIR
 CARGO_DEBUG_DIR="$CARGO_TARGET_DIR/debug"
+# shellcheck source=scripts/ci/verify/local-rust-cache.sh
+source "$ROOT/scripts/ci/verify/local-rust-cache.sh"
 # Composition state is never accepted from a caller's environment.
 RUST_COMPOSE_FORMAT=false
 RUST_COMPOSE_FORMAT_DONE=false
@@ -81,10 +83,12 @@ run_rust_packages() {
     cargo fmt --all --check || return $?
     RUST_COMPOSE_FORMAT_DONE=true
   fi
-  cargo build --locked "${RUST_PACKAGE_ARGS[@]}" || return $?
-  # Workspace clippy (default and all features) runs once in the fast compile
-  # job; package graphs here only build and test.
-  cargo test "${RUST_PACKAGE_ARGS[@]}" --all-targets || return $?
+  # Workspace clippy (default and all features, every target) runs once in the
+  # fast compile job, which every Rust or transport selection also runs, and
+  # this test build compiles and links each library and test target with the
+  # binaries their integration tests run. A separate debug build of the same
+  # graph would only repeat that work.
+  cargo test --locked "${RUST_PACKAGE_ARGS[@]}" --all-targets || return $?
 }
 
 # Rust/transport verification runs as parallel CI shards: packages (the
@@ -234,6 +238,8 @@ run_policy_core() {
   scripts/ci/tests/test-select-untrusted-rust-cache.sh
   scripts/ci/tests/test-fetch-openbao-sccache-r2-protected-credentials.sh
   scripts/ci/tests/test-select-protected-rust-cache.sh
+  scripts/ci/tests/test-run-host-rust-build.sh
+  scripts/ci/tests/test-local-rust-cache.sh
   scripts/ci/tests/test-retired-local-sdk-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
   scripts/runtime/tests/test-storage-measure.sh
@@ -1009,6 +1015,14 @@ run_security() {
     gosec -no-fail -quiet "${GO_PACKAGE_PATTERNS[@]}"
   fi
 }
+
+# Families that compile share the workstation's local compiler cache. Policy
+# families run cache-selection fixtures and must see the caller's environment.
+case "$FAMILY" in
+  contracts|go-support|web|rust|rust-transport|rust-compile|transport)
+    select_local_rust_cache "$ROOT" || true
+    ;;
+esac
 
 case "$FAMILY" in
   policy) run_policy ;;

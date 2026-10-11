@@ -5,6 +5,19 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+
+# A workstation build with no job selection uses the account's shared local
+# cache. Its server outlives this build, so the image runner below, which
+# starts and stops its own server, must not manage it.
+if [[ -z "${CODEWIRE_SCCACHE_MODE:-}" ]]; then
+  # shellcheck source=scripts/ci/verify/local-rust-cache.sh
+  source "$ROOT/scripts/ci/verify/local-rust-cache.sh"
+  if select_local_rust_cache "$ROOT"; then
+    export CODEWIRE_RUST_PROFILE=ci
+    exec "$@"
+  fi
+fi
+
 mode="${CODEWIRE_SCCACHE_MODE:-disabled}"
 
 case "$mode" in
