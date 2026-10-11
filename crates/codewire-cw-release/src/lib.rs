@@ -15,5 +15,6 @@ pub mod identity;
 pub mod local_runtime;
 pub mod openpgp;
 pub mod release;
+pub mod sha256;
 #[cfg(unix)]
 pub mod store;

@@ -30,11 +30,11 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::sha256::Sha256;
 use rustix::fs::{
     self as rfs, Access, AtFlags, FileType, FlockOperation, Mode, OFlags, RenameFlags,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 use crate::identity::{
     CwPayloadIdentity, EXECUTABLE_HEADER_BYTES, IdentityError, MAX_EXECUTABLE_BYTES,

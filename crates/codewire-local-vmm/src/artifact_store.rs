@@ -11,7 +11,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use codewire_cw_release::sha256::Sha256;
 use uuid::Uuid;
 
 use crate::artifact::{AdmittedArtifact, AdmittedArtifacts, ArtifactLock, ArtifactSpec};

@@ -12,13 +12,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use codewire_cw_release::sha256::Sha256;
 use codewire_vmm_guest_probe::cw_runtime::{
     CW_RUNTIME_MAX_CATALOG, CW_RUNTIME_MAX_PACK, CW_RUNTIME_MAX_VERSIONS, CwRuntimeCatalog,
     CwRuntimeProvenance, decode_runtime_pack,
 };
 pub use codewire_vmm_guest_probe::cw_runtime_live::{RuntimeSelection, SelectionOutcome};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::host::path::{FileIdentity, PathError, PrivateRoot};

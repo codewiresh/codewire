@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::{Duration, Instant};
 
+use codewire_cw_release::sha256::Sha256;
 use rustix::process::{Pid, Signal};
-use sha2::{Digest as _, Sha256};
 
 use super::path::FileIdentity;
 pub use crate::supervisor_metadata::legacy::ProcessIdentity;

@@ -5,8 +5,8 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
+use codewire_cw_release::sha256::Sha256;
 use futures::{Stream, StreamExt as _};
-use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use uuid::Uuid;
 

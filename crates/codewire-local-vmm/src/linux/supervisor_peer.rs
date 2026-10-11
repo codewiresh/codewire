@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use codewire_cw_release::sha256::Sha256;
 use codewire_cw_release::store::{Store, VersionRecord};
-use sha2::{Digest as _, Sha256};
 use tokio::net::UnixStream;
 
 use super::path::{FileIdentity, SocketIdentity, current_uid};

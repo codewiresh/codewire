@@ -4,10 +4,10 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use codewire_cw_release::sha256::Sha256;
 use rustix::process::{
     Pid, PidfdFlags, PidfdGetfdFlags, Signal, pidfd_getfd, pidfd_open, pidfd_send_signal,
 };
-use sha2::{Digest, Sha256};
 
 use super::path::FileIdentity;
 pub use crate::supervisor_metadata::legacy::ProcessIdentity;
