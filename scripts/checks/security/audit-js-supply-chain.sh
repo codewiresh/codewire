@@ -212,8 +212,28 @@ while IFS= read -r line; do
   fi
 done < <(git grep -nE 'bun install([^#]|$)' -- "${active_paths[@]}" 2>/dev/null || true)
 
+# The workspace image installs its reviewed agent lockfile with npm ci under
+# --strict-allow-scripts (only Claude Code's postinstall is admitted, see
+# images/workspace/agents/package.json). The support-images contract asserts
+# that exact Dockerfile line by grep; that assertion reads the Dockerfile and
+# installs nothing. Keep the exception line-scoped so a real npm ci anywhere
+# under scripts/ still needs --ignore-scripts.
+readonly agent_lockfile_assertion_exception='^scripts/ci/tests/test-support-images-workflow\.sh:[0-9]+:grep -qF '"'"'npm ci --strict-allow-scripts --no-audit --no-fund'"'"' "\$WORKSPACE_DOCKERFILE" \|\|$'
+if ! grep -Eq "$agent_lockfile_assertion_exception" <<< \
+    "scripts/ci/tests/test-support-images-workflow.sh:308:grep -qF 'npm ci --strict-allow-scripts --no-audit --no-fund' \"\$WORKSPACE_DOCKERFILE\" ||" \
+  || grep -Eq "$agent_lockfile_assertion_exception" <<< \
+    'scripts/ci/tests/test-support-images-workflow.sh:12:npm ci --strict-allow-scripts --no-audit --no-fund' \
+  || grep -Eq "$agent_lockfile_assertion_exception" <<< \
+    'scripts/ci/install.sh:4:grep -qF '"'"'npm ci --strict-allow-scripts --no-audit --no-fund'"'"' "$WORKSPACE_DOCKERFILE" ||'; then
+  echo "supply-chain audit: agent lockfile assertion exception self-test failed" >&2
+  fail=1
+fi
+
 while IFS= read -r line; do
   if is_ignored_line "$line"; then
+    continue
+  fi
+  if grep -Eq "$agent_lockfile_assertion_exception" <<<"$line"; then
     continue
   fi
   if [[ "$line" != *"--ignore-scripts"* ]]; then
