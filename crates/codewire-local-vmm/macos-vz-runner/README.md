@@ -25,6 +25,15 @@ name before it configures the VM, and again once the VM has started. A
 mismatch before start fails the helper; a mismatch after start stops the VM
 and exits 1. A guest symlink resolves inside the guest, never on the host.
 
+The kernel, initial ramdisk and disks are also named by path, because
+`VZLinuxBootLoader` and `VZDiskImageStorageDeviceAttachment` accept only URLs
+for regular files (VZ's file-handle disk attachment is for block devices).
+Linux's Cloud Hypervisor receives the same files by path. Each path is inside a
+directory only the user can write: the admitted runtime root or the
+environment's private state root. Replacing a file there needs the user's
+own authority, which can already control the user's VMs and `cw` itself, so a
+path grants the helper nothing the runner did not admit.
+
 The helper binds the configured hybrid-vsock Unix socket owner-only and never
 replaces an existing path. A client writes `CONNECT <port>\n`. The helper dials
 that guest vsock port and answers `OK <n>\n`, then copies bytes both ways,
@@ -38,7 +47,28 @@ or a requested stop completes, and 1 when the VM fails to start or stops with
 an error. It removes the socket only if that path is still the one it bound.
 The VM has no network, console or graphics device. The helper needs the
 `com.apple.security.virtualization` entitlement; developer builds are signed
-ad hoc with `developer-entitlements.plist`.
+ad hoc with the hardened runtime and `developer-entitlements.plist`
+(`scripts/dev/macos-local-runtime.py` refuses a helper without either).
+
+Posture, observed with `lsof`, `codesign` and `sandbox_check` while a VM ran
+on macOS 26:
+- The helper runs as the user, as a child of the runner, signed ad hoc with
+  the hardened runtime and that one entitlement. It holds `/dev/null` for
+  standard I/O, its `vz.json`, the VM's `vm.lock` and three Unix sockets. It
+  holds no internet socket and no other file, and writes no log of its own. It
+  has no Seatbelt profile.
+- Virtualization.framework runs the VM in Apple's
+  `com.apple.Virtualization.VirtualMachine` XPC service. That process is
+  sandboxed by Apple, has the hardened runtime and holds exactly:
+  - the kernel and the initial ramdisk;
+  - the four VM disks;
+  - the granted shares.
+  It holds no internet socket.
+- The helper does not parse guest data. It copies vsock bytes to and from
+  connections on its owner-only socket, and it reads only `CONNECT <port>`
+  lines, from those host-side clients.
+- Distribution needs Developer ID signing and notarization in place of the
+  ad hoc signature.
 
 The sections below describe the earlier fixed-topology developer fixtures,
 which remain separate from the product `vm --config` mode above.

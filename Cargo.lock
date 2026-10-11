@@ -1484,6 +1484,7 @@ dependencies = [
  "codewire-proto",
  "codewire-server-core",
  "codewire-tailnet",
+ "codewire-vmm-guest-probe",
  "connectrpc",
  "futures",
  "libc",
