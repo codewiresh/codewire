@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use super::*;
 
+mod host_support;
 mod ports;
 mod sources;
 
@@ -363,7 +364,9 @@ pub(crate) async fn create_native_environment(
     globals: &Globals,
     mut args: EnvCreateArgs,
 ) -> anyhow::Result<Option<v1::Environment>> {
+    host_support::require_local_vm_host()?;
     reject_unsupported_native_create_options(&args)?;
+    require_pinned_runtime()?;
     if args.name.as_deref().and_then(trimmed_str).is_none() {
         args.name = Some(default_native_name(
             args.path.as_deref(),
@@ -1027,6 +1030,8 @@ pub(crate) async fn select_native_environment(name: &str) -> anyhow::Result<v1::
 }
 
 pub(crate) async fn start_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
+    host_support::require_local_vm_host()?;
+    require_pinned_runtime()?;
     let mut client = native_client().await?;
     get_native_environment_with_required_authority(&mut client, name).await?;
     let progress = native_progress();
@@ -1050,6 +1055,8 @@ pub(crate) async fn stop_native_environment(name: &str) -> anyhow::Result<v1::En
 }
 
 pub(crate) async fn restart_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
+    host_support::require_local_vm_host()?;
+    require_pinned_runtime()?;
     let mut client = native_client().await?;
     let environment = get_native_environment_with_required_authority(&mut client, name).await?;
     client
@@ -1743,22 +1750,54 @@ fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
 }
 
 /// `cw setup --local`: install and verify the local VM runtime that belongs
-/// to this cw (#2492). The guest root renders session environments, so a
-/// runtime built from other source is refused.
+/// to this cw (#2492, #2539). A release's cw downloads exactly the runtime it
+/// pins; `--from DIR` installs a runtime directory built from the same source.
+/// The guest root renders session environments, so a runtime built from other
+/// source is refused.
 pub(crate) async fn setup_local_runtime(
     from: Option<PathBuf>,
     replace: bool,
 ) -> anyhow::Result<()> {
-    use codewire_local_vmm::runtime_install::{
-        self, DirectoryBlobSource, InstallOutcome, RuntimePaths,
+    use codewire_local_vmm::runtime_install::{self, DirectoryBlobSource, RuntimePaths};
+    host_support::require_local_vm_host()?;
+    let config = native_runtime_config()?;
+    let paths = RuntimePaths {
+        artifact_root: config.artifact_root,
+        artifact_lock: config.artifact_lock,
     };
-    let from = from.context(
-        "releases do not publish the local VM runtime yet; pass --from DIR with a release directory",
-    )?;
+    let Some(from) = from else {
+        let document = crate::local_runtime_pin::embedded()?.context(
+            "this cw is a development build with no pinned local VM runtime; pass --from DIR with a runtime directory built from the same source",
+        )?;
+        // Files this host already holds (the current or previous runtime) are
+        // reused; only the rest is downloaded, so rolling back to the previous
+        // runtime or re-running setup downloads nothing. A damaged local file
+        // fails its digest check, and the whole runtime is downloaded once.
+        let wanted = runtime_install::host_runtime(&document)?.install_blobs();
+        let local = runtime_install::LocalBlobs::open(&paths)?;
+        let missing: Vec<_> = wanted
+            .iter()
+            .filter(|blob| !local.has(&blob.sha256))
+            .cloned()
+            .collect();
+        match install_pinned_runtime(&paths, &document, &local, &missing).await {
+            Err(error) if local_file_damaged(&error) => {
+                let empty = runtime_install::LocalBlobs::empty();
+                install_pinned_runtime(&paths, &document, &empty, &wanted).await
+            }
+            result => result,
+        }?;
+        return Ok(());
+    };
     let source = DirectoryBlobSource::new(&from);
     let document = source
         .document()
-        .with_context(|| format!("read the local VM runtime in {}", from.display()))?;
+        .with_context(|| {
+            format!(
+                "read the local VM runtime in {} (a runtime directory packed before cw pinned its runtime must be packed again, e.g. with `make macos-local-runtime`)",
+                from.display()
+            )
+        })?;
     match crate::build_record::embedded()?.source_revision {
         Some(revision) if revision != document.source_revision => anyhow::bail!(
             "this local VM runtime was built from {}, but this cw from {revision}; install the runtime from the same release",
@@ -1770,12 +1809,51 @@ pub(crate) async fn setup_local_runtime(
             document.source_revision
         ),
     }
-    let config = native_runtime_config()?;
-    let paths = RuntimePaths {
-        artifact_root: config.artifact_root,
-        artifact_lock: config.artifact_lock,
+    report_runtime_install(runtime_install::install(&paths, &document, &source, replace).await?);
+    Ok(())
+}
+
+/// Installs `document`'s runtime from `local` files plus a download of
+/// `download`, replacing whatever another cw installed (kept as the previous
+/// runtime). Running VMs keep the generation they started with.
+async fn install_pinned_runtime(
+    paths: &codewire_local_vmm::runtime_install::RuntimePaths,
+    document: &codewire_local_vmm::runtime_install::LocalRuntimeDocument,
+    local: &codewire_local_vmm::runtime_install::LocalBlobs,
+    download: &[codewire_cw_release::local_runtime::BlobRef],
+) -> anyhow::Result<()> {
+    use codewire_local_vmm::runtime_install::{self, WithLocal};
+    if download.is_empty() {
+        report_runtime_install(runtime_install::install(paths, document, local, true).await?);
+        return Ok(());
+    }
+    let megabytes = download.iter().map(|blob| blob.size).sum::<u64>() / (1024 * 1024);
+    eprintln!(
+        "Downloading the local VM runtime ({} files, {megabytes} MiB)...",
+        download.len()
+    );
+    let fetched = crate::public_fetch::fetch_runtime(download).await?;
+    let source = WithLocal {
+        local,
+        fallback: &fetched,
     };
-    match runtime_install::install(&paths, &document, &source, replace).await? {
+    let installed = runtime_install::install(paths, document, &source, true).await;
+    let cleanup = fetched.cleanup();
+    report_runtime_install(installed?);
+    cleanup.context("the runtime is installed, but its download scratch was retained")
+}
+
+fn local_file_damaged(error: &anyhow::Error) -> bool {
+    use codewire_local_vmm::runtime_install::InstallError;
+    matches!(
+        error.downcast_ref::<InstallError>(),
+        Some(InstallError::BlobMismatch { .. } | InstallError::MissingBlob { .. })
+    )
+}
+
+fn report_runtime_install(outcome: codewire_local_vmm::runtime_install::InstallOutcome) {
+    use codewire_local_vmm::runtime_install::InstallOutcome;
+    match outcome {
         InstallOutcome::Installed { generation } => {
             println!("Local VM runtime installed ({}).", &generation[..12]);
         }
@@ -1786,7 +1864,17 @@ pub(crate) async fn setup_local_runtime(
             );
         }
     }
-    Ok(())
+}
+
+/// Require the runtime this cw pins before a local VM starts (#2539).
+fn require_pinned_runtime() -> anyhow::Result<()> {
+    let config = native_runtime_config()?;
+    crate::local_runtime_pin::require_installed(
+        &codewire_local_vmm::runtime_install::RuntimePaths {
+            artifact_root: config.artifact_root,
+            artifact_lock: config.artifact_lock,
+        },
+    )
 }
 
 fn absolute_override(name: &str) -> anyhow::Result<Option<PathBuf>> {
@@ -2355,6 +2443,26 @@ fn native_status(status: tonic::Status) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_damaged_or_missing_local_file_downloads_the_whole_runtime() {
+        use codewire_local_vmm::runtime_install::InstallError;
+        let sha256 = "a".repeat(64);
+        for error in [
+            InstallError::MissingBlob {
+                sha256: sha256.clone(),
+            },
+            InstallError::BlobMismatch { sha256 },
+        ] {
+            assert!(local_file_damaged(&anyhow::Error::from(error)));
+        }
+        assert!(!local_file_damaged(&anyhow::Error::from(
+            InstallError::Busy
+        )));
+        assert!(!local_file_damaged(&anyhow::anyhow!(
+            "the release download was canceled; nothing was installed"
+        )));
+    }
 
     #[test]
     fn native_id_lookup_resolves_the_private_name_without_following_a_uuid_shaped_name() {
