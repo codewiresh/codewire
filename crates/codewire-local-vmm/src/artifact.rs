@@ -7,6 +7,7 @@ use std::process::Stdio;
 #[cfg(target_os = "linux")]
 use std::time::Duration;
 
+use codewire_cw_release::sha256::Sha256;
 #[cfg(test)]
 use codewire_vmm_guest_probe::canonical_guest_root_newc;
 use codewire_vmm_guest_probe::canonical_guest_root_newc_with_cw;
@@ -18,7 +19,6 @@ pub use codewire_vmm_guest_probe::cw_runtime::{
     CwRuntimeProvenance, validate_static_cw,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 #[cfg(target_os = "linux")]
 use tokio::io::AsyncReadExt;
 

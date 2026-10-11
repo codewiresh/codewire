@@ -18,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use sha2::{Digest, Sha256};
+use codewire_cw_release::sha256::Sha256;
 
 use crate::artifact::{ArtifactError, ArtifactLock};
 

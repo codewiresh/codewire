@@ -10,9 +10,9 @@ use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::os::unix::fs::{FileExt as _, MetadataExt as _};
 use std::path::Path;
 
+use crate::sha256::Sha256;
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 use crate::identity::{
     Arch, CwPayloadIdentity, EXECUTABLE_HEADER_BYTES, MAX_EXECUTABLE_BYTES, Os,

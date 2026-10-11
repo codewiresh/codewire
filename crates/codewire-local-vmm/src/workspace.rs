@@ -13,10 +13,10 @@ use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use codewire_cw_release::sha256::Sha256;
 use rustix::fs::{Dir, Mode, OFlags, readlinkat};
 #[cfg(target_os = "linux")]
 use rustix::fs::{ResolveFlags, openat2};
-use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::host::path::{PrivateRoot, current_uid};

@@ -3,8 +3,8 @@
 
 use std::cmp::Ordering;
 
+use crate::sha256::Sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 use crate::identity::{
     CwPayloadIdentity, MAX_EXECUTABLE_BYTES, Platform, ReleaseTarget, canonical_json, is_sha256_hex,

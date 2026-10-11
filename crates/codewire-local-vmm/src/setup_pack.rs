@@ -10,11 +10,11 @@ use std::io::{self, Cursor, Read, Seek as _, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
+use codewire_cw_release::sha256::Sha256;
 use codewire_vmm_guest_probe::{
     LayerEncoding, SETUP_HEADER_LEN, SetupArchitecture, SetupBlob, SetupError, SetupHeader,
     SetupLayerBlob, SetupObject, Sha256Value,
 };
-use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::host::path::{PathError, PrivateRoot};

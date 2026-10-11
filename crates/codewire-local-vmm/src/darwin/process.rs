@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::{Duration, Instant};
 
+use codewire_cw_release::sha256::Sha256;
 use rustix::process::{Pid, Signal};
-use sha2::{Digest as _, Sha256};
 
 use super::path::FileIdentity;
 pub use crate::supervisor_metadata::legacy::ProcessIdentity;
@@ -270,6 +270,21 @@ impl ProcessIdentity {
             executable_sha256,
         })
     }
+}
+
+/// A live process's boot session and native start counter: its birth.
+pub(crate) fn birth_of(pid: u32) -> Result<(String, u64), RecoveryError> {
+    let birth = observe_pid(pid).map_err(RecoveryError::from_observation)?;
+    Ok((birth.boot_session.to_hyphenated(), birth.start_abstime))
+}
+
+/// The executable a live process runs, as the kernel reports its path, and
+/// the metadata of the file that path names. Darwin offers no handle to the
+/// running file.
+pub(crate) fn executable_of(pid: u32) -> Result<(PathBuf, fs::Metadata), RecoveryError> {
+    let executable = executable_path(pid)?;
+    let metadata = fs::metadata(&executable).map_err(RecoveryError::ReadProcess)?;
+    Ok((executable, metadata))
 }
 
 fn executable_path(pid: u32) -> Result<PathBuf, RecoveryError> {
