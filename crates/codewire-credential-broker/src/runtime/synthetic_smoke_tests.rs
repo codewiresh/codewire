@@ -176,19 +176,16 @@ async fn anthropic_exact_routes_filter_real_injection_and_complete_stream_or_cou
     }
 }
 
+/// A target the broker never builds fails the fixture; another route, method
+/// or query on the pinned origin is a stock-client request the fixture does
+/// not serve, which it answers as the provider would.
 #[tokio::test]
-async fn anthropic_rejects_target_method_and_query_changes() {
+async fn anthropic_rejects_foreign_targets_and_answers_unserved_routes() {
     for target in [
         "http://api.anthropic.com/v1/messages",
         "https://api.anthropic.com:444/v1/messages",
         "https://user@api.anthropic.com/v1/messages",
         "https://api.anthropic.com/v1/messages#fragment",
-        "https://api.anthropic.com/v1/messages?beta=false",
-        "https://api.anthropic.com/v1/messages?beta=true&beta=true",
-        "https://api.anthropic.com/v1/messages?beta=true&host=other",
-        "https://api.anthropic.com/v1/messages/count_tokens?beta=%74rue",
-        "https://api.anthropic.com/v1/models",
-        "https://api.anthropic.com/v1/messages/batches",
         "https://other.example/v1/messages",
     ] {
         let mut request = anthropic_request();
@@ -198,13 +195,22 @@ async fn anthropic_rejects_target_method_and_query_changes() {
             Err(BrokerUpstreamError::Protocol)
         ));
     }
+    for target in [
+        "https://api.anthropic.com/v1/messages?beta=false",
+        "https://api.anthropic.com/v1/messages?beta=true&beta=true",
+        "https://api.anthropic.com/v1/messages?beta=true&host=other",
+        "https://api.anthropic.com/v1/messages/count_tokens?beta=%74rue",
+        "https://api.anthropic.com/v1/models",
+        "https://api.anthropic.com/v1/messages/batches",
+    ] {
+        let mut request = anthropic_request();
+        request.target = Url::parse(target).unwrap();
+        not_found_answer(request, ANTHROPIC_KEY).await;
+    }
     for method in [Method::GET, Method::PUT, Method::DELETE] {
         let mut request = anthropic_request();
         request.method = method;
-        assert!(matches!(
-            SyntheticOpenAiSmokeTransport.execute(request).await,
-            Err(BrokerUpstreamError::Protocol)
-        ));
+        not_found_answer(request, ANTHROPIC_KEY).await;
     }
 }
 
@@ -430,12 +436,17 @@ async fn openai_and_chatgpt_route_and_account_negatives_remain_closed() {
                 Err(BrokerUpstreamError::Protocol)
             ));
         }
-        let mut invalid = request(target);
-        invalid.method = Method::GET;
-        assert!(matches!(
-            SyntheticOpenAiSmokeTransport.execute(invalid).await,
-            Err(BrokerUpstreamError::Protocol)
-        ));
+        let mut unserved = request(target);
+        unserved.method = Method::GET;
+        not_found_answer(
+            unserved,
+            if target.contains("chatgpt.com") {
+                CODEX_KEY
+            } else {
+                OPENAI_KEY
+            },
+        )
+        .await;
         let mut invalid = request(target);
         invalid.body.clear();
         assert!(matches!(
@@ -447,7 +458,21 @@ async fn openai_and_chatgpt_route_and_account_negatives_remain_closed() {
         "https://api.openai.com/v1/responses?other=true",
         "https://api.openai.com/v1/models",
         "https://chatgpt.com/backend-api/codex/responses?other=true",
+    ] {
+        not_found_answer(
+            request(target),
+            if target.contains("chatgpt.com") {
+                CODEX_KEY
+            } else {
+                OPENAI_KEY
+            },
+        )
+        .await;
+    }
+    for target in [
         "https://other.example/v1/responses",
+        "https://api.openai.com/v2/responses",
+        "https://chatgpt.com/backend-api/other",
     ] {
         assert!(matches!(
             SyntheticOpenAiSmokeTransport.execute(request(target)).await,
@@ -906,4 +931,164 @@ fn exact_api_identity_encoding_and_anthropic_version_stay_fixed() {
     let mut request = exact_api_request("anthropic");
     request.headers.remove("accept-encoding");
     exact_api_denied(&request, ANTHROPIC_KEY);
+}
+
+fn transparent_openai_request(method: Method, target: &str) -> BrokerUpstreamRequest {
+    let codex = target.starts_with("https://chatgpt.com/");
+    let mut headers = HeaderMap::from_iter([(
+        http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!(
+            "Bearer {}",
+            if codex { CODEX_KEY } else { OPENAI_KEY }
+        ))
+        .unwrap(),
+    )]);
+    if codex {
+        headers.insert(
+            "chatgpt-account-id",
+            HeaderValue::from_static(SYNTHETIC_CODEX_ACCOUNT_ID),
+        );
+    }
+    BrokerUpstreamRequest {
+        method,
+        target: Url::parse(target).unwrap(),
+        headers,
+        body: Vec::new(),
+    }
+}
+
+async fn not_found_answer(request: BrokerUpstreamRequest, key: &str) {
+    let label = format!("{} {}", request.method, request.target);
+    let response = SyntheticOpenAiSmokeTransport
+        .execute(request)
+        .await
+        .unwrap_or_else(|_| panic!("{label}: an HTTP answer, not a transport failure"));
+    let (status, headers, mut body) = response.into_parts();
+    assert_eq!(status, StatusCode::NOT_FOUND, "{label}");
+    assert_eq!(headers["content-type"], "application/json", "{label}");
+    let mut output = Vec::new();
+    while let Some(chunk) = body.next().await {
+        output.extend_from_slice(&chunk.unwrap());
+    }
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("not_found"), "{label}");
+    assert!(!output.contains(key), "{label}");
+}
+
+/// Transparent routes carry every stock-client request (#2536). One the
+/// fixture does not serve is answered as a provider answers a route it lacks,
+/// with a fixed 404, never as a transport failure: the broker reports a
+/// transport failure as UpstreamFailed, which ends the whole bridge epoch and
+/// with it every other slot's requests.
+#[tokio::test]
+async fn unserved_transparent_routes_answer_404_instead_of_a_transport_failure() {
+    for (method, target) in [
+        (
+            Method::GET,
+            "https://chatgpt.com/backend-api/codex/models?client_version=0.160.0",
+        ),
+        (
+            Method::GET,
+            "https://chatgpt.com/backend-api/codex/responses",
+        ),
+        (
+            Method::POST,
+            "https://chatgpt.com/backend-api/codex/responses/compact",
+        ),
+        (Method::GET, "https://api.openai.com/v1/models"),
+        (Method::DELETE, "https://api.openai.com/v1/responses"),
+        (
+            Method::POST,
+            "https://api.openai.com/v1/responses?stream=true",
+        ),
+    ] {
+        let key = if target.contains("chatgpt.com") {
+            CODEX_KEY
+        } else {
+            OPENAI_KEY
+        };
+        not_found_answer(transparent_openai_request(method, target), key).await;
+    }
+    for (method, target) in [
+        (Method::GET, "https://api.anthropic.com/v1/models"),
+        (Method::GET, "https://api.anthropic.com/api/oauth/usage"),
+        (
+            Method::POST,
+            "https://api.anthropic.com/v1/messages/batches",
+        ),
+    ] {
+        let mut request = anthropic_request();
+        request.method = method;
+        request.target = Url::parse(target).unwrap();
+        request.body.clear();
+        not_found_answer(request, ANTHROPIC_KEY).await;
+    }
+}
+
+/// An unserved route still requires exactly the credential the broker
+/// injects: a missing, foreign or guest-supplied one is a fixture failure.
+#[tokio::test]
+async fn unserved_transparent_routes_still_require_the_injected_credential() {
+    let codex_models = "https://chatgpt.com/backend-api/codex/models";
+    let openai_models = "https://api.openai.com/v1/models";
+    let mut cases = Vec::new();
+    for target in [codex_models, openai_models] {
+        let mut missing = transparent_openai_request(Method::GET, target);
+        missing.headers.remove("authorization");
+        cases.push(missing);
+        let mut foreign = transparent_openai_request(Method::GET, target);
+        foreign.headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {ANTHROPIC_KEY}")).unwrap(),
+        );
+        cases.push(foreign);
+        for (name, value) in [("cookie", "caller"), ("proxy-authorization", "caller")] {
+            let mut caller = transparent_openai_request(Method::GET, target);
+            caller.headers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+            cases.push(caller);
+        }
+    }
+    let mut wrong_account = transparent_openai_request(Method::GET, codex_models);
+    wrong_account.headers.insert(
+        "chatgpt-account-id",
+        HeaderValue::from_static("wrong-account"),
+    );
+    cases.push(wrong_account);
+    let mut guest_account = transparent_openai_request(Method::GET, openai_models);
+    guest_account.headers.insert(
+        "chatgpt-account-id",
+        HeaderValue::from_static(SYNTHETIC_CODEX_ACCOUNT_ID),
+    );
+    cases.push(guest_account);
+    for change in ["missing", "placeholder", "bearer"] {
+        let mut request = anthropic_request();
+        request.method = Method::GET;
+        request.target = Url::parse("https://api.anthropic.com/v1/models").unwrap();
+        match change {
+            "missing" => {
+                request.headers.remove("x-api-key");
+            }
+            "placeholder" => {
+                request
+                    .headers
+                    .insert("x-api-key", HeaderValue::from_static("codewire-managed"));
+            }
+            _ => {
+                request.headers.insert(
+                    "authorization",
+                    HeaderValue::from_str(&format!("Bearer {ANTHROPIC_KEY}")).unwrap(),
+                );
+            }
+        }
+        cases.push(request);
+    }
+    for request in cases {
+        assert!(matches!(
+            SyntheticOpenAiSmokeTransport.execute(request).await,
+            Err(BrokerUpstreamError::Protocol)
+        ));
+    }
 }

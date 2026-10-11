@@ -608,6 +608,13 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
         if let Some(answer) = Self::device_login(&method, &target, &body)? {
             return Ok(answer);
         }
+        if let Some(host) = unserved_host(&method, &target) {
+            return if Self::unserved_credential(host, &headers) {
+                Ok(Self::not_found(host))
+            } else {
+                Err(BrokerUpstreamError::Protocol)
+            };
+        }
         if target.host_str() == Some("api.anthropic.com") {
             return Self::anthropic(method, target, headers, body);
         }
@@ -688,8 +695,141 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
     }
 }
 
+/// A transparent provider route's pinned host (#2536), as the synthetic
+/// fixtures classify a request they do not serve.
+#[cfg(feature = "local-broker-synthetic-smoke")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyntheticProviderHost {
+    /// `https://chatgpt.com/backend-api/codex/`, the ChatGPT-login Codex base.
+    Codex,
+    /// `https://api.openai.com/v1/`, the OpenAI API-key base.
+    OpenAi,
+    /// `https://api.anthropic.com`, the Anthropic origin.
+    Anthropic,
+}
+
+#[cfg(feature = "local-broker-synthetic-smoke")]
+impl SyntheticProviderHost {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+        }
+    }
+}
+
+/// The pinned host of a request on a transparent route that no synthetic
+/// fixture serves: any method, path or query on a provider base other than
+/// the exact POST routes they implement. A structurally foreign target
+/// (another scheme, port or host, user info or a fragment) is no provider
+/// request at all and stays `None`.
+#[cfg(feature = "local-broker-synthetic-smoke")]
+fn unserved_host(method: &Method, target: &Url) -> Option<SyntheticProviderHost> {
+    if target.scheme() != "https"
+        || target.port().is_some()
+        || !target.username().is_empty()
+        || target.password().is_some()
+        || target.fragment().is_some()
+    {
+        return None;
+    }
+    let (path, query) = (target.path(), target.query());
+    let (host, served) = match target.host_str()? {
+        "chatgpt.com" if path.starts_with("/backend-api/codex/") => (
+            SyntheticProviderHost::Codex,
+            path == "/backend-api/codex/responses" && query.is_none(),
+        ),
+        "api.openai.com" if path.starts_with("/v1/") => (
+            SyntheticProviderHost::OpenAi,
+            path == "/v1/responses" && query.is_none(),
+        ),
+        "api.anthropic.com" => (
+            SyntheticProviderHost::Anthropic,
+            matches!(path, "/v1/messages" | "/v1/messages/count_tokens")
+                && matches!(query, None | Some("beta=true")),
+        ),
+        _ => return None,
+    };
+    (*method != Method::POST || !served).then_some(host)
+}
+
 #[cfg(feature = "local-broker-synthetic-smoke")]
 impl SyntheticOpenAiSmokeTransport {
+    /// The pinned host of a request on a transparent route (#2536) that no
+    /// synthetic fixture serves. Only the method and target are read.
+    pub fn unserved_host(request: &BrokerUpstreamRequest) -> Option<SyntheticProviderHost> {
+        unserved_host(&request.method, &request.target)
+    }
+
+    /// The fixtures' answer to an unserved request: what the provider answers
+    /// for a route it lacks, a fixed 404 that reflects nothing. A transport
+    /// failure would be wrong twice over: no provider fails that way, and the
+    /// broker reports one as UpstreamFailed, which ends the whole bridge epoch
+    /// and with it every other slot's requests.
+    pub fn not_found(host: SyntheticProviderHost) -> BrokerUpstreamResponse {
+        let body: &'static [u8] = match host {
+            SyntheticProviderHost::Anthropic => {
+                br#"{"type":"error","error":{"type":"not_found_error","message":"Synthetic provider route not served"}}"#
+            }
+            SyntheticProviderHost::Codex | SyntheticProviderHost::OpenAi => {
+                br#"{"error":{"message":"Synthetic provider route not served","type":"invalid_request_error","param":null,"code":"not_found"}}"#
+            }
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+        BrokerUpstreamResponse::new(
+            StatusCode::NOT_FOUND,
+            headers,
+            Box::pin(stream::once(async move { Ok(Bytes::from_static(body)) })),
+        )
+    }
+
+    /// An unserved request still carries exactly the credential this fixture
+    /// expects the broker to inject for that host, and nothing a guest could
+    /// have supplied in its place.
+    fn unserved_credential(host: SyntheticProviderHost, headers: &HeaderMap) -> bool {
+        let single = |name: &str| headers.get_all(name).iter().count() == 1;
+        let bearer = |prefix: &str| {
+            single("authorization")
+                && headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.strip_prefix("Bearer "))
+                    .is_some_and(|value| Self::canary(value, prefix))
+        };
+        if ["cookie", "proxy-authorization", "host"]
+            .iter()
+            .any(|name| headers.contains_key(*name))
+        {
+            return false;
+        }
+        match host {
+            SyntheticProviderHost::Codex => {
+                !headers.contains_key("x-api-key")
+                    && bearer("cwlocalbroker")
+                    && single("chatgpt-account-id")
+                    && headers
+                        .get("chatgpt-account-id")
+                        .and_then(|value| value.to_str().ok())
+                        == Some(SYNTHETIC_CODEX_ACCOUNT_ID)
+            }
+            SyntheticProviderHost::OpenAi => {
+                !headers.contains_key("x-api-key")
+                    && !headers.contains_key("chatgpt-account-id")
+                    && bearer("cwlocalopenai")
+            }
+            SyntheticProviderHost::Anthropic => {
+                !headers.contains_key("authorization")
+                    && single("x-api-key")
+                    && headers
+                        .get("x-api-key")
+                        .and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| Self::canary(value, "cwlocalanthropic"))
+            }
+        }
+    }
+
     /// Select only the fixed API family before route validation. An invalid
     /// URL on either API host must stay in this branch and be refused instead
     /// of falling through to an OAuth fixture.

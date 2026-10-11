@@ -48,14 +48,14 @@ pub use openai::{
     OpenAiApiKeyAdapter, OpenAiStreamingResponse, PreparedOpenAiRequest, PreparedOpenAiResponse,
     ValidatedOpenAiRequest,
 };
-#[cfg(feature = "local-broker-synthetic-smoke")]
-pub use runtime::SyntheticOpenAiSmokeTransport;
 pub use runtime::{
     BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest, BrokerHttpResponse,
     BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError,
     BrokerRequestError, BrokerResponseBody, BrokerUpstreamError, BrokerUpstreamRequest,
     BrokerUpstreamResponse, BrokerUpstreamTransport, OpenAiBroker,
 };
+#[cfg(feature = "local-broker-synthetic-smoke")]
+pub use runtime::{SyntheticOpenAiSmokeTransport, SyntheticProviderHost};
 
 use codewire_access::{CredentialMetadata, DerivedGrant, GrantPermission};
 use thiserror::Error;
