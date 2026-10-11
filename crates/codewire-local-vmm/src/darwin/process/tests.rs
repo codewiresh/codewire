@@ -91,6 +91,24 @@ fn current_process_observation_is_stable_and_native() {
     assert_ne!(*first.boot_session().as_bytes(), [0; 16]);
 }
 
+#[test]
+fn a_process_birth_matches_its_identity_without_reading_the_executable() {
+    let pid = std::process::id();
+    let birth = ProcessBirth::observe(pid).unwrap();
+    assert_eq!(birth, ProcessBirth::observe(pid).unwrap());
+    assert_eq!(birth.pid(), pid);
+    let identity = ProcessIdentity::capture(pid).unwrap();
+    assert!(birth.is(&identity));
+    // Another birth, or the same birth under another file, is not this one.
+    let mut other = identity.clone();
+    other.start_time_ticks += 1;
+    assert!(!birth.is(&other));
+    let mut moved = identity;
+    moved.executable_file.inode += 1;
+    assert!(!birth.is(&moved));
+    assert!(ProcessBirth::observe(0).is_err());
+}
+
 fn child_command(phase: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command

@@ -21,7 +21,7 @@ use codewire_cw_release::store::Store;
 use tokio::net::UnixStream;
 
 use super::path::{SocketIdentity, current_uid};
-use super::process::{ProcessIdentity, WatchedProcess};
+use super::process::{ProcessBirth, ProcessIdentity, WatchedProcess};
 use crate::supervisor_config::NativeRuntimeConfig;
 
 #[derive(Debug, thiserror::Error)]
@@ -35,11 +35,16 @@ pub(crate) enum PeerError {
 }
 
 /// Opaque and shared: reconnects cannot replace its socket identity or peer.
+///
+/// The peer is pinned by its process birth and executable file. Only a peer
+/// running another cw version has its executable hashed, once, to admit its
+/// provenance; a reconnect re-observes the birth and file and never reads
+/// the executable again (#2549).
 #[derive(Debug)]
 pub(crate) struct SupervisorPeerPin {
     socket: PathBuf,
     socket_identity: SocketIdentity,
-    peer: Option<ProcessIdentity>,
+    peer: Option<ProcessBirth>,
     configuration_digest: Option<[u8; 32]>,
 }
 
@@ -54,13 +59,18 @@ impl SupervisorPeerPin {
             None => (None, None),
             Some(requested) => {
                 let peer =
-                    ProcessIdentity::capture(peer_pid(stream)?).map_err(|_| PeerError::Identity)?;
-                let config = if peer.executable == requested.executable {
+                    ProcessBirth::observe(peer_pid(stream)?).map_err(|_| PeerError::Identity)?;
+                let config = if peer.executable() == requested.executable {
                     requested.clone()
                 } else {
-                    admit_provenance(&peer)?;
+                    let identity =
+                        ProcessIdentity::capture(peer.pid()).map_err(|_| PeerError::Identity)?;
+                    if !peer.is(&identity) {
+                        return Err(PeerError::Identity);
+                    }
+                    admit_provenance(&identity)?;
                     requested
-                        .with_supervisor_executable(peer.executable.clone())
+                        .with_supervisor_executable(peer.executable().to_owned())
                         .map_err(|_| PeerError::Identity)?
                 };
                 (Some(peer), Some(config.configuration_digest()))
@@ -93,8 +103,8 @@ impl SupervisorPeerPin {
             .revalidate(&self.socket)
             .map_err(|_| PeerError::Identity)?;
         if let Some(peer) = &self.peer
-            && (peer_pid(stream)? != peer.pid
-                || ProcessIdentity::capture(peer.pid).map_err(|_| PeerError::Identity)? != *peer)
+            && (peer_pid(stream)? != peer.pid()
+                || ProcessBirth::observe(peer.pid()).map_err(|_| PeerError::Identity)? != *peer)
         {
             return Err(PeerError::Identity);
         }

@@ -272,6 +272,52 @@ impl ProcessIdentity {
     }
 }
 
+/// A live process birth and the file its kernel-reported executable path
+/// names, without the file's digest. Observing it again proves the same
+/// process is still running from the same file, and costs no read of the
+/// executable; [`ProcessIdentity::capture`] adds the digest where provenance
+/// needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessBirth {
+    birth: ProcessBirthObservation,
+    executable: PathBuf,
+    executable_file: FileIdentity,
+}
+
+impl ProcessBirth {
+    pub(crate) fn observe(pid: u32) -> Result<Self, RecoveryError> {
+        let birth = observe_pid(pid).map_err(RecoveryError::from_observation)?;
+        let executable = executable_path(pid)?;
+        let metadata = fs::metadata(&executable).map_err(RecoveryError::ReadProcess)?;
+        let executable_file = FileIdentity::from_metadata(&metadata);
+        if observe_pid(pid).map_err(RecoveryError::from_observation)? != birth {
+            return Err(RecoveryError::IdentityMismatch);
+        }
+        Ok(Self {
+            birth,
+            executable,
+            executable_file,
+        })
+    }
+
+    pub(crate) fn pid(&self) -> u32 {
+        self.birth.pid
+    }
+
+    pub(crate) fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    /// Whether `identity` records this same birth and executable file.
+    pub(crate) fn is(&self, identity: &ProcessIdentity) -> bool {
+        identity.pid == self.birth.pid
+            && identity.boot_id == self.birth.boot_session.to_hyphenated()
+            && identity.start_time_ticks == self.birth.start_abstime
+            && identity.executable == self.executable
+            && identity.executable_file == self.executable_file
+    }
+}
+
 fn executable_path(pid: u32) -> Result<PathBuf, RecoveryError> {
     let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     // SAFETY: the buffer is writable for exactly the length passed.
