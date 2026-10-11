@@ -745,9 +745,10 @@ validate_retained_cluster() {
   renew_retained_synthetic_bearer
 }
 
-# A retained cluster outlives the four-hour synthetic product bearer that the
-# contract seed issues (tests/fixtures/billing/seed.sql). Renew only that seeded
-# token's lifetime, so a retained suite authenticates as on a fresh cluster.
+# A retained cluster outlives the four-hour synthetic product bearer and user
+# sessions that the contract seed issues (tests/fixtures/billing/seed.sql).
+# Renew only those seeded lifetimes, never the deliberately expired session, so
+# a retained suite authenticates as on a fresh cluster.
 renew_retained_synthetic_bearer() {
   local renewed
   renewed="$(kubectl -n "$NS" exec deploy/postgres -- \
@@ -759,7 +760,18 @@ renew_retained_synthetic_bearer() {
     echo '::error::retained Kind cluster lacks the seeded synthetic product bearer' >&2
     return 1
   fi
-  log "renewed the seeded synthetic product bearer"
+  renewed="$(kubectl -n "$NS" exec deploy/postgres -- \
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 -qtAc \
+      "UPDATE sessions SET expires_at = NOW() + INTERVAL '4 hours'
+         WHERE (id, token_hash) IN (
+           ('ses_contract_admin', encode(digest('contract-admin-session-token', 'sha256'), 'hex')),
+           ('ses_contract_user', encode(digest('contract-user-session-token', 'sha256'), 'hex')))
+         RETURNING 1")" || return $?
+  if [ "$(printf '%s' "$renewed" | tr -d '[:space:]')" != 11 ]; then
+    echo '::error::retained Kind cluster lacks the seeded contract sessions' >&2
+    return 1
+  fi
+  log "renewed the seeded synthetic product bearer and contract sessions"
 }
 
 # The prepared marker is scoped to its own cluster: parallel CI shard clusters

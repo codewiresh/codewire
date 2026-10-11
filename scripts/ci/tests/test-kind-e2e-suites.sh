@@ -2694,6 +2694,10 @@ kubectl() {
     *'get crd/sandboxclaims.extensions.agents.x-k8s.io'*) return 0 ;;
     *"exec deploy/postgres -- psql "*"UPDATE oidc_access_tokens SET expires_at"*"at_kind_connect_oidc_codewire_api"*)
       printf '%s\n' "${FAKE_RENEWED_BEARER-1}" ;;
+    *"exec deploy/postgres -- psql "*"UPDATE sessions SET expires_at"*"'ses_contract_user', encode(digest('contract-user-session-token'"*)
+      [[ "$*" != *ses_contract_stale* ]] || fail 'retained validation renewed the deliberately expired session'
+      printf '%s\n' "${FAKE_RENEWED_SESSIONS-1
+1}" ;;
     *) fail "unexpected fake kubectl invocation: $*" ;;
   esac
 }
@@ -2752,7 +2756,7 @@ FAKE_LEGACY_MARKER=1
 validate_retained_cluster >"$FIXTURE/legacy-accepted.out"
 grep -Fq 'accepted at compatibility version' "$FIXTURE/legacy-accepted.out" ||
   fail 'legacy prepared marker was not accepted through the fallback'
-grep -Fq 'renewed the seeded synthetic product bearer' "$FIXTURE/legacy-accepted.out" ||
+grep -Fq 'renewed the seeded synthetic product bearer and contract sessions' "$FIXTURE/legacy-accepted.out" ||
   fail 'retained validation did not renew the seeded synthetic product bearer'
 # A retained cluster whose seed lacks the synthetic product bearer is refused.
 FAKE_RENEWED_BEARER=''
@@ -2760,6 +2764,13 @@ expect_failure missing-bearer validate_retained_cluster
 grep -Fq 'lacks the seeded synthetic product bearer' "$FIXTURE/missing-bearer.out" ||
   fail 'a retained cluster without the seeded bearer was not refused'
 unset FAKE_RENEWED_BEARER
+# So is one whose seed lacks either contract session: a four-day-old cluster
+# failed workspace-services with SESSION_EXPIRED until these were renewed.
+FAKE_RENEWED_SESSIONS=1
+expect_failure missing-session validate_retained_cluster
+grep -Fq 'lacks the seeded contract sessions' "$FIXTURE/missing-session.out" ||
+  fail 'a retained cluster without both seeded contract sessions was not refused'
+unset FAKE_RENEWED_SESSIONS
 
 FAKE_SCOPED_MARKER=1
 FAKE_LEGACY_MARKER=0
@@ -2909,6 +2920,8 @@ set +e
       *'get crd/sandboxclaims.extensions.agents.x-k8s.io'*) return 0 ;;
       *"exec deploy/postgres -- psql "*"UPDATE oidc_access_tokens SET expires_at"*"at_kind_connect_oidc_codewire_api"*)
         printf '1\n' ;;
+      *"exec deploy/postgres -- psql "*"UPDATE sessions SET expires_at"*)
+        printf '1\n1\n' ;;
       *) fail "unexpected composed remote kubectl invocation: $*" ;;
     esac
   }
