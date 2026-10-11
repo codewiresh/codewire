@@ -142,6 +142,29 @@ mod tests {
         thread.join().unwrap();
     }
 
+    /// A profile Seatbelt refuses is reported as an error, never as success
+    /// with partial confinement: the worker and broker start only after this
+    /// call succeeds (#1905 condition 1), and refuse with their confinement
+    /// exit status otherwise.
+    #[test]
+    fn a_profile_seatbelt_refuses_is_an_error_and_confines_nothing() {
+        const CHILD_MARKER: &str = "CODEWIRE_TEST_DARWIN_REFUSED_PROFILE";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            assert!(apply_profile(c"(version 1)(this-is-not-an-operation)").is_err());
+            assert!(apply_profile(c"").is_err());
+            std::fs::File::open("/etc/hosts").unwrap();
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("darwin::sandbox::tests::a_profile_seatbelt_refuses_is_an_error_and_confines_nothing")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     #[test]
     fn deny_all_keeps_held_descriptors_and_refuses_new_authority() {
         const CHILD_MARKER: &str = "CODEWIRE_TEST_DARWIN_DENY_ALL";
