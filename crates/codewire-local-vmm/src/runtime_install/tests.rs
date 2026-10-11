@@ -550,4 +550,22 @@ async fn the_start_gate_requires_the_wanted_cw_runtime_too() {
         installed_runtime(&f.paths, &newer).unwrap(),
         InstalledRuntime::Different
     );
+    // A pack of the wrong size, or a missing cw runtime lock, is a damaged
+    // install too.
+    let pack = parent.join(CW_RUNTIME_PACK);
+    fs::write(&pack, b"cw pac").unwrap();
+    assert_eq!(
+        installed_runtime(&f.paths, &document).unwrap(),
+        InstalledRuntime::Incomplete
+    );
+    fs::write(&pack, b"cw pack").unwrap();
+    assert_eq!(
+        installed_runtime(&f.paths, &document).unwrap(),
+        InstalledRuntime::Same
+    );
+    fs::remove_file(parent.join(CW_RUNTIME_LOCK)).unwrap();
+    assert_eq!(
+        installed_runtime(&f.paths, &document).unwrap(),
+        InstalledRuntime::Incomplete
+    );
 }

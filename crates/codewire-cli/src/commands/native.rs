@@ -1792,12 +1792,7 @@ pub(crate) async fn setup_local_runtime(
     let source = DirectoryBlobSource::new(&from);
     let document = source
         .document()
-        .with_context(|| {
-            format!(
-                "read the local VM runtime in {} (a runtime directory packed before cw pinned its runtime must be packed again, e.g. with `make macos-local-runtime`)",
-                from.display()
-            )
-        })?;
+        .map_err(|error| runtime_document_error(&from, error))?;
     match crate::build_record::embedded()?.source_revision {
         Some(revision) if revision != document.source_revision => anyhow::bail!(
             "this local VM runtime was built from {}, but this cw from {revision}; install the runtime from the same release",
@@ -1841,6 +1836,25 @@ async fn install_pinned_runtime(
     let cleanup = fetched.cleanup();
     report_runtime_install(installed?);
     cleanup.context("the runtime is installed, but its download scratch was retained")
+}
+
+/// Why `--from` could not read its runtime document. Only a document that
+/// does not decode, as one packed before cw pinned its runtime, is worth
+/// packing again; a missing or unreadable one is not.
+fn runtime_document_error(
+    from: &Path,
+    error: codewire_local_vmm::runtime_install::InstallError,
+) -> anyhow::Error {
+    use codewire_local_vmm::runtime_install::InstallError;
+    let hint = if matches!(error, InstallError::Document(_)) {
+        " (a runtime directory packed before cw pinned its runtime must be packed again, e.g. with `make macos-local-runtime`)"
+    } else {
+        ""
+    };
+    anyhow::Error::from(error).context(format!(
+        "read the local VM runtime in {}{hint}",
+        from.display()
+    ))
 }
 
 fn local_file_damaged(error: &anyhow::Error) -> bool {
@@ -2443,6 +2457,24 @@ fn native_status(status: tonic::Status) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_undecodable_runtime_document_suggests_packing_again() {
+        use codewire_local_vmm::runtime_install::InstallError;
+        let from = Path::new("/runtime");
+        let undecodable = runtime_document_error(from, InstallError::Document("schema".into()));
+        assert!(format!("{undecodable:#}").contains("must be packed again"));
+        let unreadable = runtime_document_error(
+            from,
+            InstallError::Io {
+                context: "read /runtime/local-runtime.json".into(),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            },
+        );
+        let message = format!("{unreadable:#}");
+        assert!(message.starts_with("read the local VM runtime in /runtime: "));
+        assert!(!message.contains("packed again"));
+    }
 
     #[test]
     fn only_a_damaged_or_missing_local_file_downloads_the_whole_runtime() {
