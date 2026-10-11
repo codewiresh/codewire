@@ -561,6 +561,212 @@ def check_transports(executable_bytes, identity, oci_archive, image_receipt, pac
             "runtime lock does not bind the pack and image index")
 
 
+# --- Local VM runtime (#2539) ---------------------------------------------------
+# The document a release's cw embeds (crates/codewire-cli/build.rs) and the
+# blobs it pins. Shared contract with crates/codewire-cw-release/src/
+# local_runtime.rs, whose decoder this mirrors. release.json never lists it:
+# older cw decode release.json strictly, and the runtime is trusted through the
+# embedding cw's own verified bytes.
+
+LOCAL_RUNTIME_SCHEMA = "codewire.cw.local-runtime/v1"
+LOCAL_RUNTIME_NAME = "local-runtime.json"
+LOCAL_RUNTIME_DIR = "local-runtime"
+# The canonical document's first bytes: its keys sort schema first.
+LOCAL_RUNTIME_PREFIX = b'{"schema":"codewire.cw.local-runtime/v1",'
+MAX_OBJECT = MAX_EXECUTABLE + 8 * 1024 * 1024
+MAX_RUNTIME_COMPONENTS = 32
+MAX_RUNTIME_TEXT = 128
+RUNTIME_PLATFORMS = ("linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64")
+# The release target whose cw must embed a delivery's runtime.
+LOCAL_RUNTIME_TARGET = "aarch64-apple-darwin"
+SPEC_FIELDS = {"path", "size", "sha256", "architecture"}
+
+
+def _blob_size(value):
+    return type(value) is int and 1 <= value <= MAX_OBJECT
+
+
+def _runtime_text(value, extra):
+    return (isinstance(value, str) and 0 < len(value) <= MAX_RUNTIME_TEXT
+            and all(c.isascii() and (c.isalnum() or c in extra) for c in value))
+
+
+def _blob_ref(value, label):
+    require(isinstance(value, dict) and set(value) == {"sha256", "size"}
+            and is_hex(value["sha256"], 64) and _blob_size(value["size"]), f"local runtime {label} is invalid")
+    return value["sha256"], value["size"]
+
+
+def _runtime_lock_files(platform, lock):
+    """The lock's files, checked exactly as the Rust decoder checks them."""
+    require(isinstance(lock, dict), "local runtime lock is invalid")
+    architecture = platform.rsplit("-", 1)[1]
+    specs = []
+
+    def spec(value, versioned=False):
+        fields = SPEC_FIELDS | ({"version"} if versioned else set())
+        require(isinstance(value, dict) and set(value) == fields, "local runtime lock is invalid")
+        if versioned:
+            require(isinstance(value["version"], str) and 0 < len(value["version"]) <= MAX_RUNTIME_TEXT,
+                    "local runtime lock is invalid")
+        specs.append(value)
+
+    if platform.startswith("macos-"):
+        require(set(lock) == {"schema_version", "vz_runner", "e2fsprogs", "git", "kernel", "initramfs"}
+                and platform == "macos-aarch64", "local runtime lock is invalid")
+        e2fsprogs, git = lock["e2fsprogs"], lock["git"]
+        require(isinstance(e2fsprogs, dict) and set(e2fsprogs) == {"mkfs_ext4", "e2fsck", "resize2fs", "debugfs",
+                                                                  "mke2fs_conf"}
+                and isinstance(git, dict) and set(git) == {"git", "git_remote_https"},
+                "local runtime lock is invalid")
+        for value in (lock["vz_runner"], lock["kernel"], lock["initramfs"], e2fsprogs["mkfs_ext4"],
+                      e2fsprogs["e2fsck"], e2fsprogs["resize2fs"], e2fsprogs["debugfs"],
+                      e2fsprogs["mke2fs_conf"], git["git"], git["git_remote_https"]):
+            spec(value)
+    else:
+        require({"schema_version", "cloud_hypervisor", "kernel", "initramfs"} <= set(lock)
+                <= {"schema_version", "cloud_hypervisor", "virtiofsd", "kernel", "initramfs"},
+                "local runtime lock is invalid")
+        spec(lock["cloud_hypervisor"], versioned=True)
+        spec(lock["kernel"])
+        spec(lock["initramfs"])
+        if lock.get("virtiofsd") is not None:
+            spec(lock["virtiofsd"], versioned=True)
+    require(type(lock["schema_version"]) is int and lock["schema_version"] == 1, "local runtime lock is invalid")
+    paths = set()
+    for value in specs:
+        path = value["path"]
+        require(_runtime_text(path, "-_.") and path not in (".", "..") and path not in paths
+                and is_hex(value["sha256"], 64) and _blob_size(value["size"])
+                and value["architecture"] == architecture, "local runtime lock file is invalid")
+        paths.add(path)
+    return [(value["sha256"], value["size"]) for value in specs]
+
+
+def local_runtime_blobs(document):
+    """Validate a canonical local runtime document; return every blob it pins.
+
+    The result is each (sha256, size) once, sorted by digest: the lock files,
+    the cw runtime and the component sources of every target.
+    """
+    value = parse_canonical(document)
+    require(isinstance(value, dict) and set(value) == {"schema", "source_revision", "targets"}
+            and value["schema"] == LOCAL_RUNTIME_SCHEMA and is_hex(value["source_revision"], 40),
+            "local runtime identity is invalid")
+    targets = value["targets"]
+    require(isinstance(targets, dict) and targets, "local runtime targets are invalid")
+    references = []
+    for platform, target in targets.items():
+        require(platform in RUNTIME_PLATFORMS, "local runtime target is invalid")
+        require(isinstance(target, dict) and "lock" in target
+                and set(target) <= {"lock", "cw_runtime", "components"}, "local runtime target is invalid")
+        references += _runtime_lock_files(platform, target["lock"])
+        if "cw_runtime" in target:
+            cw_runtime = target["cw_runtime"]
+            require(isinstance(cw_runtime, dict) and set(cw_runtime) == {"lock", "pack"},
+                    "local runtime cw runtime is invalid")
+            references += [_blob_ref(cw_runtime["lock"], "cw runtime"), _blob_ref(cw_runtime["pack"], "cw runtime")]
+        if "components" in target:
+            components = target["components"]
+            require(isinstance(components, list) and 0 < len(components) <= MAX_RUNTIME_COMPONENTS,
+                    "local runtime components are invalid")
+            for component in components:
+                require(isinstance(component, dict) and set(component) == {"name", "version", "license", "source"}
+                        and _runtime_text(component["name"], "-_.")
+                        and _runtime_text(component["version"], "-_.+")
+                        and _runtime_text(component["license"], "-_.+ ()"),
+                        "local runtime component is invalid")
+                references.append(_blob_ref(component["source"], "component source"))
+    sizes = {}
+    for digest, size in references:
+        require(sizes.setdefault(digest, size) == size, "local runtime blob sizes disagree")
+    return sorted(sizes.items())
+
+
+def embedded_local_runtime(data):
+    """The local runtime document a cw executable embeds, or None.
+
+    build.rs includes the canonical document's exact bytes, which begin with
+    LOCAL_RUNTIME_PREFIX and end at their single newline. It must occur at most
+    once and must validate.
+    """
+    start = data.find(LOCAL_RUNTIME_PREFIX)
+    if start < 0:
+        return None
+    require(data.find(LOCAL_RUNTIME_PREFIX, start + 1) < 0, "executable embeds more than one local runtime")
+    end = data.find(b"\n", start, start + MAX_JSON)
+    require(end > start, "embedded local runtime is truncated or exceeds its bound")
+    document = data[start:end + 1]
+    local_runtime_blobs(document)
+    return document
+
+
+def local_runtime_paths(dist):
+    root = Path(dist) / DELIVERY / LOCAL_RUNTIME_DIR
+    return root, root / LOCAL_RUNTIME_NAME, root / "blobs/sha256"
+
+
+def _verify_blob_file(path, digest, size):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        raise ReleaseError(f"local runtime blob {digest} is not a readable regular file") from None
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_size == size, f"local runtime blob {digest} has the wrong size")
+        hasher, total = hashlib.sha256(), 0
+        while chunk := handle.read(1024 * 1024):
+            total += len(chunk)
+            require(total <= size, f"local runtime blob {digest} grew while it was read")
+            hasher.update(chunk)
+    require(total == size and hasher.hexdigest() == digest, f"local runtime blob {digest} differs from its digest")
+
+
+def load_local_runtime(dist):
+    """A delivery's local runtime directory, or None when it has none.
+
+    It holds exactly the canonical document and the blobs it pins, each with
+    its exact size and digest: nothing more.
+    """
+    root, document_path, blobs = local_runtime_paths(dist)
+    try:
+        info = os.lstat(root)
+    except FileNotFoundError:
+        return None
+    require(stat.S_ISDIR(info.st_mode) and sorted(os.listdir(root)) == ["blobs", LOCAL_RUNTIME_NAME]
+            and not os.path.islink(root / "blobs") and sorted(os.listdir(root / "blobs")) == ["sha256"]
+            and not os.path.islink(blobs), "local runtime directory holds other entries")
+    document = read_regular(document_path, MAX_JSON)
+    pinned = local_runtime_blobs(document)
+    require(sorted(os.listdir(blobs)) == [digest for digest, _ in pinned],
+            "local runtime blobs are not exactly the pinned files")
+    for digest, size in pinned:
+        _verify_blob_file(blobs / digest, digest, size)
+    return document, pinned
+
+
+def check_local_runtime(dist, executables, identities):
+    """A delivery publishes its runtime exactly when its macOS arm64 cw embeds one.
+
+    Every executable that embeds a document embeds this one, made from the same
+    source revision, so no released cw names a runtime this release lacks.
+    """
+    local = load_local_runtime(dist)
+    embedded = {target: embedded_local_runtime(data) for target, data in executables.items()}
+    if local is None:
+        require(all(document is None for document in embedded.values()),
+                "a cw embeds a local runtime the delivery does not carry")
+        return None
+    document, pinned = local
+    require(embedded.get(LOCAL_RUNTIME_TARGET) == document,
+            f"the {LOCAL_RUNTIME_TARGET} cw does not embed the delivery's local runtime")
+    require(all(found in (None, document) for found in embedded.values()),
+            "a cw embeds a different local runtime")
+    require(json.loads(document)["source_revision"] == identities[LOCAL_RUNTIME_TARGET]["source_revision"],
+            "local runtime source revision differs from the cw that embeds it")
+    return document, pinned
+
+
 # --- Manifest -----------------------------------------------------------------
 
 def object_ref(key, data):
@@ -834,7 +1040,10 @@ def verify_delivery(dist, trust=None, tool=RUNTIME_IMAGE_TOOL):
     oci, pack, lock = (read_regular(paths[name], MAX_EXECUTABLE + 8 * 1024 * 1024) for name in ("oci", "pack", "lock"))
     receipt = parse_json(read_regular(paths["image"], MAX_JSON))
     check_transports(executables[RUNTIME_TARGET], identities[RUNTIME_TARGET], oci, receipt, pack, lock, tool)
+    local_runtime = check_local_runtime(dist, executables, identities)
     result = {"targets": len(identities), "version": version, "runtime_equal": True, "signed": False}
+    if local_runtime is not None:
+        result["local_runtime"] = {"document_sha256": sha256(local_runtime[0]), "blobs": len(local_runtime[1])}
     if trust is None:
         return result
     verify_detached(sums, read_regular(paths["sums_sig"], MAX_SIGNATURE), trust)
@@ -1019,6 +1228,9 @@ def main(argv=None):
             result = verify_delivery(args.dist, None if args.unsigned else PRODUCTION_TRUST)
             print("cw-release: verified targets={targets} version={version} runtime_equal=true signed={signed}"
                   .format(targets=result["targets"], version=result["version"], signed=str(result["signed"]).lower()))
+            if "local_runtime" in result:
+                print("cw-release: local runtime document_sha256={document_sha256} blobs={blobs}"
+                      .format(**result["local_runtime"]))
         elif args.command == "digest":
             print(tree_digest(args.dist))
         elif args.command == "admit":

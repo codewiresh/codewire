@@ -45,9 +45,10 @@ def build_record(version=VERSION, target="x86_64-unknown-linux-musl", revision=R
 
 
 def executable(target, version=VERSION, tag=b"", static=True, revision=REVISION, tree=TREE, rustc=RUSTC,
-               record=None):
-    """Header-correct synthetic executable carrying one build record."""
-    body = bytearray(4096)
+               record=None, embedded=b""):
+    """Header-correct synthetic executable carrying one build record, and
+    optionally the bytes of an embedded local runtime document."""
+    body = bytearray(4096 + len(embedded))
     if "linux" in target:
         machine = 62 if target.startswith("x86_64") else 183
         body[:8] = b"\x7fELF\x02\x01\x01\x00"
@@ -62,7 +63,42 @@ def executable(target, version=VERSION, tag=b"", static=True, revision=REVISION,
         record = build_record(version, target, revision, tree, rustc)
     body[1024:1024 + len(record)] = record
     body[3072:3072 + len(tag)] = tag
+    body[4096:] = embedded
     return bytes(body)
+
+
+def local_runtime(revision):
+    """A synthetic macOS local runtime: its canonical document and blob bytes."""
+    files = {}
+
+    def ref(name):
+        data = f"synthetic {name}\n".encode()
+        files[digest(data)] = data
+        return {"sha256": digest(data), "size": len(data)}
+
+    def spec(path):
+        return {"path": path, "architecture": "aarch64", **ref(path)}
+
+    lock = {"schema_version": 1, "vz_runner": spec("codewire-vz-runner"), "kernel": spec("kernel"),
+            "initramfs": spec("initramfs"),
+            "e2fsprogs": {name: spec(path) for name, path in (
+                ("mkfs_ext4", "mkfs.ext4"), ("e2fsck", "e2fsck"), ("resize2fs", "resize2fs"),
+                ("debugfs", "debugfs"), ("mke2fs_conf", "mke2fs.conf"))},
+            "git": {"git": spec("git"), "git_remote_https": spec("git-remote-https")}}
+    components = [{"name": "e2fsprogs", "version": "1.47.4", "license": "GPL-2.0-only",
+                   "source": ref("e2fsprogs-1.47.4.tar.gz")},
+                  {"name": "git", "version": "2.56.0", "license": "GPL-2.0-only", "source": ref("git-2.56.0.tar.gz")}]
+    document = release.canonical({"schema": release.LOCAL_RUNTIME_SCHEMA, "source_revision": revision,
+                                  "targets": {"macos-aarch64": {"lock": lock, "components": components}}})
+    return document, files
+
+
+def write_local_runtime(dist, document, files):
+    root, document_path, blobs = release.local_runtime_paths(dist)
+    blobs.mkdir(parents=True)
+    document_path.write_bytes(document)
+    for name, data in files.items():
+        (blobs / name).write_bytes(data)
 
 
 def git(root, *args):
@@ -133,12 +169,14 @@ class Signer:
                        env=self.env, capture_output=True)
 
 
-def package(base, source, source_sha, version=VERSION, tag=b""):
-    """The package script's outputs: four raw assets plus SHA256SUMS."""
+def package(base, source, source_sha, version=VERSION, tag=b"", embedded=b""):
+    """The package script's outputs: four raw assets plus SHA256SUMS. The
+    macOS arm64 cw embeds `embedded`, as build.rs embeds a local runtime."""
     dist = base / "dist"
     dist.mkdir()
     tree = release.source_tree_sha256(source)
-    executables = {target: executable(target, version, tag, revision=source_sha, tree=tree)
+    executables = {target: executable(target, version, tag, revision=source_sha, tree=tree,
+                                      embedded=embedded if target == release.LOCAL_RUNTIME_TARGET else b"")
                    for target in release.RELEASE_TARGETS}
     for target, data in executables.items():
         (dist / release.asset_name(version, target)).write_bytes(data)
@@ -147,29 +185,35 @@ def package(base, source, source_sha, version=VERSION, tag=b""):
     return dist, executables
 
 
-def unsigned_delivery(base, version=VERSION, tag=b"", lib="pub fn demo() {}\n"):
+def unsigned_delivery(base, version=VERSION, tag=b"", lib="pub fn demo() {}\n", runtime=False):
     """Package and prepare a delivery exactly as the CLI's prepare step does."""
     source, source_sha = source_repo(base, lib)
     digest = release.source_tree_sha256(source)
-    dist, executables = package(base, source, source_sha, version, tag)
+    document, files = local_runtime(source_sha) if runtime else (b"", {})
+    dist, executables = package(base, source, source_sha, version, tag, document)
     entries, _, tree, rustc = release.prepare(dist, version, source, source_sha, source_sha, RUSTC,
                                               source_digest_before=digest)
     state = {"version": version, "tag_object_sha": source_sha, "source_sha": source_sha,
              "source_tree": tree, "rustc": rustc, "entries": entries}
     (dist / release.DELIVERY / "prepared.json").write_bytes(release.canonical(state))
+    if runtime:
+        write_local_runtime(dist, document, files)
     return dist, executables, source_sha
 
 
-def signed_delivery(base, signer, version=VERSION, tag=b"", lib="pub fn demo() {}\n"):
+def signed_delivery(base, signer, version=VERSION, tag=b"", lib="pub fn demo() {}\n", runtime=False):
     """A complete signed delivery, built by the same functions the CLI runs."""
     source, source_sha = source_repo(base, lib)
     digest = release.source_tree_sha256(source)
-    dist, executables = package(base, source, source_sha, version, tag)
+    document, files = local_runtime(source_sha) if runtime else (b"", {})
+    dist, executables = package(base, source, source_sha, version, tag, document)
     entries, _, tree, rustc = release.prepare(dist, version, source, source_sha, source_sha, RUSTC,
                                               source_digest_before=digest)
     state = {"version": version, "tag_object_sha": source_sha, "source_sha": source_sha,
              "source_tree": tree, "rustc": rustc, "entries": entries}
     (dist / release.DELIVERY / "prepared.json").write_bytes(release.canonical(state))
+    if runtime:
+        write_local_runtime(dist, document, files)
     sign_delivery(dist, signer, version, source_sha, tree, rustc, entries)
     return dist, executables, source_sha
 

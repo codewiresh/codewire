@@ -46,6 +46,11 @@ class PublisherTest(unittest.TestCase):
         # This run's freshly built, not yet signed delivery of the same source.
         (cls.base / "fresh").mkdir()
         cls.fresh = fx.unsigned_delivery(cls.base / "fresh", tag=b"rebuilt")[0]
+        # The same, with the local VM runtime the macOS cw embeds (#2539).
+        (cls.base / "runtime").mkdir()
+        cls.deliveries["runtime"] = fx.signed_delivery(cls.base / "runtime", cls.signer, runtime=True)[0]
+        (cls.base / "fresh-runtime").mkdir()
+        cls.fresh_runtime = fx.unsigned_delivery(cls.base / "fresh-runtime", tag=b"rebuilt", runtime=True)[0]
 
     @classmethod
     def tearDownClass(cls):
@@ -231,6 +236,50 @@ class PublisherTest(unittest.TestCase):
                 self.assertEqual({key: value[0] for key, value in self.fake.objects.items()},
                                  {key: value[0] for key, value in reference.items()})
                 shutil.rmtree(retained)
+
+    def test_local_runtime_blobs_publish_and_read_back_before_the_receipt(self):
+        dist = self.deliveries["runtime"]
+        counts, _ = self.publish("runtime")
+        version, _, objects, blobs = r2.immutable_objects(dist)
+        _, pinned = release.load_local_runtime(dist)
+        self.assertEqual(len(pinned), 12)
+        self.assertEqual(counts, {"created": len(objects), "identical": 0})
+        self.assertEqual(blobs, len(r2.immutable_objects(self.deliveries["new"])[2]) - len(SIGNED_SEQUENCE)
+                         + len(pinned))
+        runtime_keys = {release.blob_key(digest) for digest, _ in pinned}
+        self.assertTrue(runtime_keys <= {key for key, _, _ in objects[:blobs]})
+        for digest, size in pinned:
+            data = self.fake.objects[release.blob_key(digest)][0]
+            self.assertEqual((fx.digest(data), len(data)), (digest, size))
+        # Nothing names the runtime outside the content-addressed blobs.
+        self.assertFalse([key for key in self.fake.objects if "local-runtime" in key])
+        puts = [request[2] for request in self.fake.puts()]
+        receipt = puts.index(r2.object_path(release.release_key(version, r2.RECEIPT)))
+        self.assertTrue(all(r2.object_path(key) in puts[:receipt] for key in runtime_keys))
+        reads = {request[2] for request in self.fake.requests[:self.fake.requests.index(self.fake.puts()[receipt])]
+                 if request[0] == "GET"}
+        self.assertTrue(all(r2.object_path(key) in reads for key in runtime_keys))
+
+    def test_a_retained_retry_restores_the_local_runtime_from_its_blobs(self):
+        dist = self.deliveries["runtime"]
+        objects = r2.immutable_objects(dist)[2]
+        blobs = len(objects) - len(SIGNED_SEQUENCE)
+        # Interrupted after the recovery receipt, before SHA256SUMS.
+        stop = objects[blobs + 1][0]
+        self.fake.faults = [("PUT", stop, "lost"), ("GET", stop, "lost")]
+        with self.assertRaises(r2.Uncertain):
+            self.publish("runtime")
+        retained = self.retain_dir()
+        self.assertEqual(self.probe(self.fresh_runtime, retained), "retained")
+        original, kept = release.local_runtime_paths(dist), release.local_runtime_paths(retained)
+        self.assertEqual(kept[1].read_bytes(), original[1].read_bytes())
+        self.assertEqual({path.name: path.read_bytes() for path in kept[2].iterdir()},
+                         {path.name: path.read_bytes() for path in original[2].iterdir()})
+        fx.sign_channel(retained, self.signer, fx.VERSION)
+        counts, _ = self.publish(dist=retained)
+        self.assertEqual(counts["created"], len(SIGNED_SEQUENCE) - 1)
+        self.assertEqual(counts["identical"], len(objects) - counts["created"])
+        shutil.rmtree(retained)
 
     def test_orphan_signed_objects_without_receipt_or_manifest_are_refused(self):
         for name in ("SHA256SUMS", "SHA256SUMS.asc", "release.json.asc"):
