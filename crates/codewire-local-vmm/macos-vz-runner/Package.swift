@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
   name: "CodewireVZRunner",
-  platforms: [.macOS("15.0")],
+  platforms: [.macOS("26.0")],
   products: [
     .executable(name: "codewire-vz-runner", targets: ["CodewireVZRunner"])
   ],
