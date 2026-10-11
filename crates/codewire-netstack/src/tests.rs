@@ -890,3 +890,167 @@ async fn reading_a_chunk_wakes_the_driver() {
         .await
         .expect("the read freed receive-queue space without waking the driver");
 }
+
+/// Several clients dialing one listener at the same moment are all accepted
+/// and deliver their requests intact (#2546). With one parked LISTEN socket,
+/// every SYN after the first was answered with RST and the client's write or
+/// half-close failed with "userspace TCP connection aborted".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_dialers_are_all_accepted() {
+    const DIALERS: usize = 16;
+    let (client_stack, server_stack) = wired_pair();
+    let mut listener = server_stack.bind(7404).await.expect("listener");
+    let client_stack = Arc::new(client_stack);
+    let mut dialers = Vec::new();
+    for index in 0..DIALERS {
+        let client_stack = client_stack.clone();
+        dialers.push(tokio::spawn(async move {
+            let request = format!("concurrent request {index}").into_bytes();
+            short_request_then_fin(&client_stack, 7404, &request).await;
+        }));
+    }
+    let mut received = Vec::new();
+    for _ in 0..DIALERS {
+        let mut server = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("accept timed out")
+            .expect("accepted stream");
+        let mut request = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), server.read_to_end(&mut request))
+            .await
+            .expect("server did not observe the request and FIN")
+            .expect("server read through FIN");
+        received.push(String::from_utf8(request).expect("utf-8 request"));
+    }
+    for dialer in dialers {
+        dialer.await.expect("dialer");
+    }
+    received.sort();
+    let mut expected: Vec<_> = (0..DIALERS)
+        .map(|index| format!("concurrent request {index}"))
+        .collect();
+    expected.sort();
+    assert_eq!(received, expected);
+}
+
+/// Relay packets from `rx` to `tx`, keeping a copy of every initial SYN.
+fn syn_recording_link(
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    tx: mpsc::Sender<Vec<u8>>,
+) -> Arc<Mutex<Vec<Vec<u8>>>> {
+    let syns = Arc::new(Mutex::new(Vec::new()));
+    let recorded = syns.clone();
+    tokio::spawn(async move {
+        while let Some(packet) = rx.recv().await {
+            let initial_syn = Ipv6Packet::new_checked(&packet[..])
+                .ok()
+                .filter(|ip| ip.next_header() == IpProtocol::Tcp)
+                .and_then(|ip| TcpPacket::new_checked(ip.payload()).ok())
+                .is_some_and(|tcp| tcp.syn() && !tcp.ack());
+            if initial_syn {
+                recorded.lock().unwrap().push(packet.clone());
+            }
+            if tx.send(packet).await.is_err() {
+                return;
+            }
+        }
+    });
+    syns
+}
+
+async fn accept_one(listener: &mut super::TcpListener) -> super::TcpStream {
+    tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("accept timed out")
+        .expect("accepted stream")
+}
+
+fn tcp_source_port(packet: &[u8]) -> u16 {
+    let ip = Ipv6Packet::new_checked(packet).expect("IPv6");
+    TcpPacket::new_checked(ip.payload())
+        .expect("TCP")
+        .src_port()
+}
+
+/// A SYN repeating an established connection's 4-tuple (a late retransmission
+/// or duplicate) is not handed to a spare LISTEN socket (#2546). smoltcp gives
+/// a SYN to the first accepting socket in slot order, so a LISTEN socket in a
+/// slot freed below the connection's would open a phantom second socket for
+/// the same 4-tuple, which takes the connection's later segments and resets
+/// the client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repeated_syn_never_opens_a_second_socket() {
+    let (a_out_tx, a_out_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    let (b_in_tx, b_in_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    let (b_out_tx, a_in_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    let syns = syn_recording_link(a_out_rx, b_in_tx.clone());
+    let client_stack = Netstack::new(IpAddr::V6(A_IP), PREFIX, a_in_rx, a_out_tx);
+    let server_stack = Netstack::new(IpAddr::V6(B_IP), PREFIX, b_in_rx, b_out_tx);
+    let mut listener = server_stack.bind(7406).await.expect("listener");
+
+    // The first connection takes the listener's first socket slot.
+    let mut first = client_stack
+        .connect(SocketAddr::new(IpAddr::V6(B_IP), 7406))
+        .await
+        .expect("first client");
+    first.write_all(b"first").await.expect("first request");
+    let mut first_server = accept_one(&mut listener).await;
+    let mut request = [0_u8; 5];
+    first_server
+        .read_exact(&mut request)
+        .await
+        .expect("first read");
+
+    // The second connection's socket takes a later slot.
+    let mut second = client_stack
+        .connect(SocketAddr::new(IpAddr::V6(B_IP), 7406))
+        .await
+        .expect("second client");
+    second.write_all(b"second").await.expect("second request");
+    let mut second_server = accept_one(&mut listener).await;
+    let mut request = [0_u8; 6];
+    second_server
+        .read_exact(&mut request)
+        .await
+        .expect("second read");
+
+    // Free the first slot, then repeat the second connection's SYN.
+    drop(first_server);
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let port = second.local_addr().port();
+    let repeated = syns
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|packet| tcp_source_port(packet) == port)
+        .cloned()
+        .expect("recorded SYN");
+    b_in_tx.send(repeated).await.expect("repeat SYN");
+
+    // Past a phantom socket's SYN-ACK retransmission, the connection still
+    // carries data both ways, and nothing else was accepted.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    second.write_all(b"ping").await.expect("client write");
+    let mut ping = [0_u8; 4];
+    tokio::time::timeout(Duration::from_secs(5), second_server.read_exact(&mut ping))
+        .await
+        .expect("server read timed out")
+        .expect("server read");
+    assert_eq!(&ping, b"ping");
+    second_server
+        .write_all(b"pong")
+        .await
+        .expect("server write");
+    let mut pong = [0_u8; 4];
+    tokio::time::timeout(Duration::from_secs(5), second.read_exact(&mut pong))
+        .await
+        .expect("client read timed out")
+        .expect("client read");
+    assert_eq!(&pong, b"pong");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), listener.accept())
+            .await
+            .is_err()
+    );
+}
