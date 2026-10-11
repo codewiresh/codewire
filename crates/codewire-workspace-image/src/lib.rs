@@ -10,7 +10,8 @@
 mod pin;
 
 pub use pin::{
-    AGENT_VERSIONS, DIGEST, HARBOR_IMAGE, INPUTS_SHA256, PREVIOUS_DIGESTS, PUBLIC_IMAGE, SOURCE_SHA,
+    AGENT_VERSIONS, DIGEST, HARBOR_IMAGE, INPUTS_SHA256, PLATFORMS, PREVIOUS_DIGESTS, PUBLIC_IMAGE,
+    SOURCE_SHA,
 };
 
 /// Repository deployments pull the workspace image from.
@@ -54,6 +55,17 @@ mod tests {
         }
         let agents: Vec<&str> = AGENT_VERSIONS.iter().map(|(name, _)| *name).collect();
         assert_eq!(agents, ["claude", "codex", "gemini", "kimi", "pi"]);
+    }
+
+    #[test]
+    fn the_pinned_image_serves_amd64_and_known_platforms_in_order() {
+        assert!(PLATFORMS.contains(&"linux/amd64"));
+        let known = ["linux/amd64", "linux/arm64"];
+        let ordered: Vec<&str> = known
+            .into_iter()
+            .filter(|platform| PLATFORMS.contains(platform))
+            .collect();
+        assert_eq!(PLATFORMS, ordered.as_slice());
     }
 
     #[test]

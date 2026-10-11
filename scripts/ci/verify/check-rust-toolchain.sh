@@ -222,6 +222,9 @@ done
 rust_workspace_image="rust:${channel}-slim-bookworm@sha256:776861219cd851131c1cec3bbd7cbeb16b99a794048097eb69ad9682a8ed0d57"
 [[ "$(grep -Fxc "FROM $rust_workspace_image AS cw-toolchain" "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
   die "workspace build-stage compiler differs from $channel"
+# shellcheck disable=SC2016 # Match the literal Dockerfile platform argument.
+[[ "$(grep -Fxc "FROM --platform=\$BUILDPLATFORM $rust_build_image AS cw-cross-compiler" "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
+  die "workspace arm64 cw cross-compiler differs from the reviewed $rust_build_image"
 [[ "$(grep -Fxc "RUN rustup component add --toolchain ${channel} rustfmt clippy" "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
   die "workspace build stage does not select exact $channel rustfmt and clippy components"
 [[ "$(grep -Fxc 'COPY --from=cw-toolchain --chown=codewire:codewire /usr/local/cargo/ /home/codewire/.cargo/' "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||

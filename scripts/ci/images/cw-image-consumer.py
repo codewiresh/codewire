@@ -192,7 +192,7 @@ def canonical_plan(command, source_dir, cwd, profile, docker_bin="docker"):
         asset.require(len(profile_overrides) <= 1 and all(value == profile for value in profile_overrides),
                       "consumer profile override refused")
         # The owning profile is explicit even when the Dockerfile default is
-        # different; the native ARM route receives the same selected profile.
+        # different; the cross-compiled ARM route receives the same profile.
         if not profile_overrides:
             injected += ["--build-arg", "CODEWIRE_RUST_PROFILE=" + profile]
         if selected is None:
@@ -404,7 +404,7 @@ def consume_plan(args, source_dir, cwd, version, plan, held):
     targets, amd64, command = plan["targets"], plan["needs_cw_asset"], plan["command"]
     output = fresh_output(Path(args.output))
     if not amd64:
-        # ARM still uses its original native compiler. It receives no x86 CW
+        # ARM cross-compiles its own CW from source. It receives no x86 CW
         # context and cannot emit this verified-startup consumer receipt.
         held.revalidate()
         try:

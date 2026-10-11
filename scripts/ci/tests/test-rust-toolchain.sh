@@ -129,6 +129,15 @@ fi
 grep -Fq 'workspace build-stage compiler differs from' "$fixture/workspace-digest-drift.log"
 cp "$ROOT/images/workspace/Dockerfile" "$fixture/images/workspace/Dockerfile"
 
+sed -i 's/@sha256:[0-9a-f]\{64\} AS cw-cross-compiler$/@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa AS cw-cross-compiler/' \
+  "$fixture/images/workspace/Dockerfile"
+if "$CHECK" --root "$fixture" >"$fixture/workspace-cross-digest-drift.log" 2>&1; then
+  printf 'Rust toolchain guard accepted an unreviewed arm64 cw cross-compiler digest\n' >&2
+  exit 1
+fi
+grep -Fq 'workspace arm64 cw cross-compiler differs from the reviewed' "$fixture/workspace-cross-digest-drift.log"
+cp "$ROOT/images/workspace/Dockerfile" "$fixture/images/workspace/Dockerfile"
+
 sed -i '0,/rust-version = "1.93.0"/s//rust-version = "1.92.0"/' \
   "$fixture/crates/codewire-desktop/Cargo.toml"
 if "$CHECK" --root "$fixture" >"$fixture/msrv-drift.log" 2>&1; then
