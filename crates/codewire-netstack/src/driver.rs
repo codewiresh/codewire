@@ -7,12 +7,12 @@
 //! `Send` and ordinary-async-shaped while smoltcp stays single-threaded.
 //!
 //! Responsibilities each wakeup:
-//!   1. Stage inbound IP packets from the consumer transport into the device.
+//!   1. Stage inbound IP packets from the consumer transport into the device,
+//!      and admit each new inbound SYN to a LISTEN socket of its own.
 //!   2. Apply pending control commands (connect/bind).
 //!   3. `poll` smoltcp (advances handshakes, ACKs, retransmits, emits packets).
 //!   4. Service every managed socket: drain RX -> stream, push queued TX into
-//!      the socket, detect established/closed transitions, replenish LISTEN
-//!      backlog.
+//!      the socket, detect established/closed transitions.
 //!   5. Sleep until the earliest of: a new inbound packet, a new command, or
 //!      smoltcp's own `poll_at` deadline (retransmit/delayed-ACK timers).
 
@@ -20,25 +20,18 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
-use smoltcp::socket::tcp;
+use smoltcp::socket::{tcp, AnySocket};
 use smoltcp::time::{Duration as SmolDuration, Instant};
-use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint};
+use smoltcp::wire::{
+    HardwareAddress, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, IpProtocol, Ipv4Packet,
+    Ipv6Packet, TcpPacket,
+};
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
 use super::device::ChannelDevice;
 use super::stream::{ByteChunk, StreamControl, TcpListener, TcpStream};
 use super::NetstackLimits;
-
-/// How many LISTEN-state sockets to keep parked per bound port.
-///
-/// smoltcp does not expose a kernel-style accept queue here; each parked
-/// listener is a real TCP socket. Keeping multiple sockets on the same listen
-/// endpoint can make later payload packets race sibling LISTEN sockets instead
-/// of the newly-established socket. Keep one listener and replenish it
-/// immediately after accept. A simultaneous SYN can retransmit during that
-/// tiny handoff window, while established stream demux stays deterministic.
-const LISTEN_BACKLOG: usize = 1;
 
 /// A TCP socket with the netstack's buffers and idle timeout.
 fn tcp_socket(limits: &NetstackLimits) -> tcp::Socket<'static> {
@@ -103,7 +96,8 @@ impl Conn {
 struct ListenSlot {
     /// Driver -> listener: newly accepted streams.
     to_listener: mpsc::Sender<TcpStream>,
-    /// Handles currently parked in LISTEN on this port (the backlog).
+    /// Sockets on this endpoint not yet accepted: in LISTEN, or handshaking
+    /// with one client. At most `accept_queue` of them exist (the backlog).
     listening: Vec<SocketHandle>,
 }
 
@@ -145,26 +139,25 @@ impl Driver {
                     return;
                 }
                 let (to_listener, incoming) = mpsc::channel(self.limits.accept_queue);
-                let mut slot = ListenSlot {
-                    to_listener,
-                    listening: Vec::new(),
-                };
-                for _ in 0..LISTEN_BACKLOG {
-                    if let Some(h) = self.spawn_listen_socket(endpoint) {
-                        slot.listening.push(h);
-                    }
-                }
-                if slot.listening.len() != LISTEN_BACKLOG {
+                // One LISTEN socket now, which also checks the endpoint; each
+                // further SYN gets its own in `admit_syns`.
+                let Some(handle) = self.spawn_listen_socket(endpoint) else {
                     let _ = reply.send(Err(std::io::Error::other(
                         "netstack could not allocate a TCP listener socket",
                     )));
                     return;
-                }
-                self.listeners.insert(endpoint, slot);
+                };
+                self.listeners.insert(
+                    endpoint,
+                    ListenSlot {
+                        to_listener,
+                        listening: vec![handle],
+                    },
+                );
                 tracing::debug!(
                     listen_addr = ?endpoint.addr,
                     listen_port = endpoint.port,
-                    backlog = LISTEN_BACKLOG,
+                    backlog = self.limits.accept_queue,
                     "rust userspace netstack listener bound"
                 );
                 let listener = TcpListener {
@@ -283,6 +276,138 @@ impl Driver {
         Some(self.sockets.add(socket))
     }
 
+    /// Decide each staged SYN before smoltcp sees it (#2546). smoltcp hands a
+    /// SYN to the first socket that accepts it, in slot order, and answers
+    /// with RST when none does.
+    ///
+    /// - A new SYN to a bound endpoint gets a LISTEN socket of its own, up to
+    ///   the listener's accept queue. Beyond it the SYN is dropped, so the
+    ///   client retries, as with a full kernel SYN queue.
+    /// - A SYN repeating a 4-tuple that is already handshaking or established
+    ///   (a retransmission or a duplicate) is dropped. That socket retransmits
+    ///   its own SYN-ACK, and a spare LISTEN socket cannot take the SYN and
+    ///   open a second connection for the same 4-tuple.
+    fn admit_syns(&mut self) {
+        if self.listeners.is_empty()
+            || !self
+                .device
+                .inbound
+                .iter()
+                .any(|packet| initial_syn(packet).is_some())
+        {
+            return;
+        }
+        self.prune_closed_listening();
+        // Every 4-tuple a socket still holds, in any state: a late duplicate
+        // SYN for a closing connection is as much a repeat as one for a live
+        // handshake. A closed or reaped socket holds none, so a reused client
+        // port still connects.
+        let mut open: HashSet<(IpEndpoint, IpEndpoint)> = self
+            .sockets
+            .iter()
+            .filter_map(|(_, socket)| {
+                let socket = tcp::Socket::downcast(socket)?;
+                Some((socket.local_endpoint()?, socket.remote_endpoint()?))
+            })
+            .collect();
+        // Unaccepted sockets count against the connection limit too, so a
+        // peer cannot hold buffers beyond it across many listeners.
+        let mut unaccepted: usize = self
+            .listeners
+            .values()
+            .map(|slot| slot.listening.len())
+            .sum();
+        let mut free: HashMap<IpListenEndpoint, usize> = self
+            .listeners
+            .iter()
+            .map(|(endpoint, slot)| {
+                let listening = slot
+                    .listening
+                    .iter()
+                    .filter(|&&h| self.sockets.get::<tcp::Socket>(h).state() == tcp::State::Listen)
+                    .count();
+                (*endpoint, listening)
+            })
+            .collect();
+        for packet in std::mem::take(&mut self.device.inbound) {
+            let Some((local, remote)) = initial_syn(&packet) else {
+                self.device.inbound.push_back(packet);
+                continue;
+            };
+            if !open.insert((local, remote)) {
+                tracing::debug!(
+                    local_port = local.port,
+                    remote_port = remote.port,
+                    "rust userspace netstack dropped a repeated TCP SYN"
+                );
+                continue;
+            }
+            let Some(endpoint) = self.listen_endpoint_for(local) else {
+                // Not listening: smoltcp answers with RST.
+                self.device.inbound.push_back(packet);
+                continue;
+            };
+            let available = free.entry(endpoint).or_default();
+            if *available == 0
+                && self.listeners[&endpoint].listening.len() < self.limits.accept_queue
+                && self.conns.len() + unaccepted < self.limits.max_connections
+            {
+                if let Some(handle) = self.spawn_listen_socket(endpoint) {
+                    if let Some(slot) = self.listeners.get_mut(&endpoint) {
+                        slot.listening.push(handle);
+                    }
+                    unaccepted += 1;
+                    *available += 1;
+                }
+            }
+            if *available == 0 {
+                tracing::debug!(
+                    listen_port = endpoint.port,
+                    backlog = self.limits.accept_queue,
+                    "rust userspace netstack dropped a TCP SYN at the accept queue limit"
+                );
+                continue;
+            }
+            *available -= 1;
+            self.device.inbound.push_back(packet);
+        }
+    }
+
+    /// A listening socket whose handshake timed out, or that was reset before
+    /// it was promoted, is closed: it must stop counting against the accept
+    /// queue, or a few lost handshakes would wedge the listener.
+    fn prune_closed_listening(&mut self) {
+        let mut closed = Vec::new();
+        for slot in self.listeners.values_mut() {
+            slot.listening.retain(|&handle| {
+                let done = self.sockets.get::<tcp::Socket>(handle).state() == tcp::State::Closed;
+                if done {
+                    closed.push(handle);
+                }
+                !done
+            });
+        }
+        for handle in closed {
+            self.sockets.remove(handle);
+        }
+    }
+
+    /// The bound endpoint a packet to `local` is for: an exact address before
+    /// a wildcard.
+    fn listen_endpoint_for(&self, local: IpEndpoint) -> Option<IpListenEndpoint> {
+        let exact = IpListenEndpoint {
+            addr: Some(local.addr),
+            port: local.port,
+        };
+        let any = IpListenEndpoint {
+            addr: None,
+            port: local.port,
+        };
+        [exact, any]
+            .into_iter()
+            .find(|endpoint| self.listeners.contains_key(endpoint))
+    }
+
     fn next_ephemeral_port(&mut self) -> u16 {
         let port = self.next_ephemeral_port;
         self.next_ephemeral_port = if port == u16::MAX { 49152 } else { port + 1 };
@@ -303,6 +428,7 @@ impl Driver {
         // receive/write/ACK work promptly.
         for _ in 0..8 {
             let pending_aborts: Vec<_> = self.abort_after_poll.iter().copied().collect();
+            self.admit_syns();
             let _ = self.iface.poll(now, &mut self.device, &mut self.sockets);
             for handle in pending_aborts {
                 if self
@@ -372,8 +498,8 @@ impl Driver {
     fn service_sockets(&mut self) {
         self.reap_closed_handles();
 
-        // 1) Promote any LISTEN socket that became connected into an accepted
-        //    stream, and replenish the backlog.
+        // 1) Promote any listening socket that became connected into an
+        //    accepted stream. New SYNs get sockets in `admit_syns`.
         let mut promotions: Vec<(IpListenEndpoint, SocketHandle)> = Vec::new();
         for (endpoint, slot) in self.listeners.iter() {
             for &h in slot.listening.iter() {
@@ -423,21 +549,6 @@ impl Driver {
 
             if !accepted {
                 self.schedule_abort(h);
-            }
-
-            // Replenish the single parked socket only while the listener's
-            // bounded accept receiver still exists.
-            let replenish = self
-                .listeners
-                .get(&endpoint)
-                .is_some_and(|slot| !slot.to_listener.is_closed());
-            if replenish {
-                let new_listener = self.spawn_listen_socket(endpoint);
-                if let (Some(slot), Some(handle)) =
-                    (self.listeners.get_mut(&endpoint), new_listener)
-                {
-                    slot.listening.push(handle);
-                }
             }
         }
 
@@ -707,6 +818,45 @@ pub(crate) fn spawn(
     });
 
     Ok(handle)
+}
+
+/// The `(local, remote)` endpoints of an initial TCP SYN (SYN without ACK or
+/// RST), or `None` for any other packet. IPv6 extension headers are not
+/// followed: such a packet goes to smoltcp unchanged.
+fn initial_syn(packet: &[u8]) -> Option<(IpEndpoint, IpEndpoint)> {
+    let (source, destination, payload) = match packet.first()? >> 4 {
+        4 => {
+            let ip = Ipv4Packet::new_checked(packet).ok()?;
+            if ip.next_header() != IpProtocol::Tcp || ip.more_frags() || ip.frag_offset() != 0 {
+                return None;
+            }
+            (
+                IpAddress::Ipv4(ip.src_addr()),
+                IpAddress::Ipv4(ip.dst_addr()),
+                ip.payload(),
+            )
+        }
+        6 => {
+            let ip = Ipv6Packet::new_checked(packet).ok()?;
+            if ip.next_header() != IpProtocol::Tcp {
+                return None;
+            }
+            (
+                IpAddress::Ipv6(ip.src_addr()),
+                IpAddress::Ipv6(ip.dst_addr()),
+                ip.payload(),
+            )
+        }
+        _ => return None,
+    };
+    let tcp = TcpPacket::new_checked(payload).ok()?;
+    if !tcp.syn() || tcp.ack() || tcp.rst() {
+        return None;
+    }
+    Some((
+        IpEndpoint::new(destination, tcp.dst_port()),
+        IpEndpoint::new(source, tcp.src_port()),
+    ))
 }
 
 #[cfg(test)]
