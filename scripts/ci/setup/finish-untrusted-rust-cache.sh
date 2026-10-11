@@ -28,6 +28,15 @@ case "${CODEWIRE_SCCACHE_MODE:-disabled}" in
   disabled) ;;
   *) echo '::warning::unknown sccache mode during cleanup' ;;
 esac
+# A server whose startup timed out during selection may have come up later on
+# its own mode socket; stop it too.
+if command -v sccache >/dev/null 2>&1; then
+  for socket in "$RUNNER_TEMP/codewire-sccache-r2.sock" "$RUNNER_TEMP/codewire-sccache-local.sock"; do
+    if [[ -S "$socket" && "$socket" != "${SCCACHE_SERVER_UDS:-}" ]]; then
+      SCCACHE_SERVER_UDS="$socket" sccache --stop-server >/dev/null 2>&1 || true
+    fi
+  done
+fi
 
 if [[ -f "$credentials_file" && ! -L "$credentials_file" ]]; then
   shred -u -- "$credentials_file"
