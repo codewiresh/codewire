@@ -65,7 +65,12 @@ impl SupervisorPeerPin {
                 } else {
                     let identity =
                         ProcessIdentity::capture(peer.pid()).map_err(|_| PeerError::Identity)?;
-                    if !peer.is(&identity) {
+                    // The digest is of the file the pin names only if the
+                    // file did not change while it was read.
+                    if !peer.is(&identity)
+                        || ProcessBirth::observe(peer.pid()).map_err(|_| PeerError::Identity)?
+                            != peer
+                    {
                         return Err(PeerError::Identity);
                     }
                     admit_provenance(&identity)?;

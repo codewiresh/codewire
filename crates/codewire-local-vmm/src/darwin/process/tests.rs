@@ -109,6 +109,28 @@ fn a_process_birth_matches_its_identity_without_reading_the_executable() {
     assert!(ProcessBirth::observe(0).is_err());
 }
 
+#[test]
+fn a_rewritten_executable_is_not_the_same_birth() {
+    use std::os::unix::fs::PermissionsExt as _;
+    // A same-user process can change the file and restore its mode, size and
+    // links; only its change time records that it happened.
+    let directory = tempfile::tempdir().unwrap();
+    let executable = directory.path().join("sleeper");
+    std::fs::copy("/bin/sleep", &executable).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut child = Command::new(&executable).arg("30").spawn().unwrap();
+    let pid = child.id();
+    let birth = ProcessBirth::observe(pid).unwrap();
+    assert_eq!(birth, ProcessBirth::observe(pid).unwrap());
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let after = ProcessBirth::observe(pid);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_ne!(after.unwrap(), birth);
+}
+
 fn child_command(phase: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command

@@ -102,23 +102,25 @@ impl AdmittedCwRuntimeAsset {
             CW_RUNTIME_MAX_PACK,
             Some(lock.pack.size),
         )?;
-        if sha(&bytes) != lock.pack.sha256 {
+        let pack_sha256 = sha(&bytes);
+        if pack_sha256 != lock.pack.sha256 {
             return Err(CwRuntimeError::InvalidAsset);
         }
-        let asset = Self::decode(bytes)?;
+        let asset = Self::decode(bytes, pack_sha256)?;
         if asset.provenance.image_index_sha256 != lock.image_index_sha256 {
             return Err(CwRuntimeError::InvalidAsset);
         }
         Ok(asset)
     }
 
-    fn decode(bytes: Vec<u8>) -> Result<Self, CwRuntimeError> {
+    /// `pack_sha256` is the hash of `bytes`, computed once by the caller.
+    fn decode(bytes: Vec<u8>, pack_sha256: String) -> Result<Self, CwRuntimeError> {
         let (provenance, payload) =
             decode_runtime_pack(&bytes).map_err(CwRuntimeError::InvalidCatalog)?;
         let payload_offset = bytes.len() - payload.len();
         Ok(Self {
             provenance,
-            pack_sha256: sha(&bytes),
+            pack_sha256,
             bytes,
             payload_offset,
         })
@@ -310,7 +312,8 @@ impl CwRuntimeStore {
             CW_RUNTIME_MAX_PACK,
             None,
         )?;
-        let asset = AdmittedCwRuntimeAsset::decode(bytes)?;
+        let pack_sha256 = sha(&bytes);
+        let asset = AdmittedCwRuntimeAsset::decode(bytes, pack_sha256)?;
         if asset.provenance.payload.sha256 != payload {
             return Err(CwRuntimeError::InvalidAsset);
         }

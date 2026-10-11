@@ -10,6 +10,7 @@ use std::fs;
 use std::io::{self, Read as _};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::ffi::OsStringExt as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::{Duration, Instant};
@@ -274,14 +275,17 @@ impl ProcessIdentity {
 
 /// A live process birth and the file its kernel-reported executable path
 /// names, without the file's digest. Observing it again proves the same
-/// process is still running from the same file, and costs no read of the
-/// executable; [`ProcessIdentity::capture`] adds the digest where provenance
-/// needs it.
+/// process is still running from the same, unmodified file, and costs no read
+/// of the executable; [`ProcessIdentity::capture`] adds the digest where
+/// provenance needs it. The file's change time is part of it: any write,
+/// chmod or rename of the file advances it, and a user process cannot set
+/// it back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProcessBirth {
     birth: ProcessBirthObservation,
     executable: PathBuf,
     executable_file: FileIdentity,
+    executable_changed: (i64, i64),
 }
 
 impl ProcessBirth {
@@ -290,6 +294,7 @@ impl ProcessBirth {
         let executable = executable_path(pid)?;
         let metadata = fs::metadata(&executable).map_err(RecoveryError::ReadProcess)?;
         let executable_file = FileIdentity::from_metadata(&metadata);
+        let executable_changed = (metadata.ctime(), metadata.ctime_nsec());
         if observe_pid(pid).map_err(RecoveryError::from_observation)? != birth {
             return Err(RecoveryError::IdentityMismatch);
         }
@@ -297,6 +302,7 @@ impl ProcessBirth {
             birth,
             executable,
             executable_file,
+            executable_changed,
         })
     }
 
