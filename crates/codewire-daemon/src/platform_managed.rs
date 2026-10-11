@@ -10,7 +10,7 @@ use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
-use codewire_access::ManagedCredentialClient;
+use codewire_access::{ManagedCredentialClient, ManagedCredentialClients};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -50,6 +50,50 @@ impl Agent {
         match self {
             Self::Codex => 1,
             Self::Claude => 2,
+        }
+    }
+
+    /// The route this agent's private home uses with the binding's `selected`
+    /// slots, or `None` when no selected slot serves it. Codex prefers the
+    /// Codex slot, as Codex's own `~/.codex` configuration in the Sandbox
+    /// does; the OpenAI API-key slot serves it only without one.
+    pub(crate) fn route(self, selected: ManagedCredentialClients) -> Option<Route> {
+        match self {
+            Self::Codex if selected.contains(ManagedCredentialClient::Codex) => Some(Route::Codex),
+            Self::Codex if selected.contains(ManagedCredentialClient::OpenAi) => {
+                Some(Route::OpenAi)
+            }
+            Self::Claude if selected.contains(ManagedCredentialClient::Anthropic) => {
+                Some(Route::Anthropic)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The broker route of one managed agent, fixed when the agent is prepared.
+/// Every route is credential-free: the private home names only a loopback
+/// endpoint, and the broker adds the selected slot's credential outside the
+/// Sandbox. None of them reads Codex's delivered `~/.codex/auth.json`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Route {
+    /// Codex through the Codex slot's `/v1` route: the owner's ChatGPT
+    /// sign-in, or an API key held in that slot.
+    #[serde(rename = "codex")]
+    Codex,
+    /// Codex through the OpenAI API-key slot's `/_codewire/openai/v1` route.
+    #[serde(rename = "openai")]
+    OpenAi,
+    /// Claude through the Anthropic slot.
+    #[serde(rename = "anthropic")]
+    Anthropic,
+}
+
+impl Route {
+    pub fn agent(self) -> Agent {
+        match self {
+            Self::Codex | Self::OpenAi => Agent::Codex,
+            Self::Anthropic => Agent::Claude,
         }
     }
 }
@@ -173,11 +217,6 @@ fn safe_image(m: &std::fs::Metadata) -> bool {
 pub(crate) fn validate_selection(config: &Config, origin: &Origin) -> Result<(), Error> {
     let bridge = config.credential_bridge.as_ref().ok_or(Error::Refused)?;
     let projection = config.launch_projection.as_ref().ok_or(Error::Refused)?;
-    let selected = config.managed_credential_clients;
-    let proxy = match origin.agent {
-        Agent::Codex => selected.contains(ManagedCredentialClient::OpenAi),
-        Agent::Claude => selected.contains(ManagedCredentialClient::Anthropic),
-    };
     if config.host.is_some()
         || config.process_execution != ProcessExecution::Native
         || config.home_root != Path::new(HOME)
@@ -187,7 +226,10 @@ pub(crate) fn validate_selection(config: &Config, origin: &Origin) -> Result<(),
         || bridge.environment_generation != origin.binding_generation
         || bridge.ingress_uid != 1000 || bridge.ingress_gid != 1000
         || projection.selection_sha256 != origin.projection_selection_sha256
-        || !proxy
+        || origin
+            .agent
+            .route(config.managed_credential_clients)
+            .is_none()
     {
         return Err(Error::Refused);
     }
@@ -407,14 +449,30 @@ mod tests {
             },
             parent_generation: None,
         };
-        // Selected Codex personal-login is not selected OpenAi typed proxy.
-        assert!(matches!(
-            validate_selection(&config, &origin),
-            Err(Error::Refused)
-        ));
+        // Codex qualifies with the Codex slot, the OpenAI API-key slot or
+        // both, and never with neither.
+        for slots in [&["codex"][..], &["openai"], &["codex", "openai"]] {
+            config.managed_credential_clients =
+                codewire_access::ManagedCredentialClients::from_profile_slots(
+                    slots.iter().copied(),
+                )
+                .unwrap();
+            assert!(validate_selection(&config, &origin).is_ok(), "{slots:?}");
+        }
+        for slots in [&["anthropic"][..], &[], &["anthropic", "github", "ssh"]] {
+            config.managed_credential_clients =
+                codewire_access::ManagedCredentialClients::from_profile_slots(
+                    slots.iter().copied(),
+                )
+                .unwrap();
+            assert!(
+                matches!(validate_selection(&config, &origin), Err(Error::Refused)),
+                "{slots:?}"
+            );
+        }
         config.managed_credential_clients =
-            codewire_access::ManagedCredentialClients::from_profile_slots(["openai"]).unwrap();
-        assert!(validate_selection(&config, &origin).is_ok());
+            codewire_access::ManagedCredentialClients::from_profile_slots(["codex", "openai"])
+                .unwrap();
         origin.agent = Agent::Claude;
         assert!(validate_selection(&config, &origin).is_err());
         config.managed_credential_clients =
@@ -426,5 +484,39 @@ mod tests {
             .unwrap()
             .environment_generation -= 1;
         assert!(validate_selection(&config, &origin).is_err());
+    }
+
+    #[test]
+    fn platform_managed_route_prefers_the_codex_slot_and_names_its_agent() {
+        let route = |agent: Agent, slots: &[&str]| {
+            agent.route(
+                codewire_access::ManagedCredentialClients::from_profile_slots(
+                    slots.iter().copied(),
+                )
+                .unwrap(),
+            )
+        };
+        assert_eq!(route(Agent::Codex, &["codex"]), Some(Route::Codex));
+        assert_eq!(route(Agent::Codex, &["openai"]), Some(Route::OpenAi));
+        // Codex's own `~/.codex` configuration uses the Codex slot when both
+        // are selected; the OpenAI slot is for API clients.
+        assert_eq!(
+            route(Agent::Codex, &["openai", "codex"]),
+            Some(Route::Codex)
+        );
+        assert_eq!(route(Agent::Codex, &[]), None);
+        assert_eq!(route(Agent::Codex, &["anthropic", "github", "ssh"]), None);
+        assert_eq!(route(Agent::Claude, &["anthropic"]), Some(Route::Anthropic));
+        assert_eq!(route(Agent::Claude, &["codex", "openai"]), None);
+        for (route, agent, wire) in [
+            (Route::Codex, Agent::Codex, "\"codex\""),
+            (Route::OpenAi, Agent::Codex, "\"openai\""),
+            (Route::Anthropic, Agent::Claude, "\"anthropic\""),
+        ] {
+            assert_eq!(route.agent(), agent);
+            assert_eq!(serde_json::to_string(&route).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<Route>(wire).unwrap(), route);
+        }
+        assert!(serde_json::from_str::<Route>("\"open_ai\"").is_err());
     }
 }

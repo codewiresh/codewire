@@ -604,11 +604,11 @@ impl PlatformManagedService for Service {
         self.check_info(&r).map_err(status)?;
         let (hash, size) = ImagePin::identity().map_err(status)?;
         let mut agents = Vec::new();
-        for (agent, slot) in [
-            (Agent::Codex, ManagedCredentialClient::OpenAi),
-            (Agent::Claude, ManagedCredentialClient::Anthropic),
-        ] {
-            if self.inner.config.managed_credential_clients.contains(slot) {
+        for agent in [Agent::Codex, Agent::Claude] {
+            if agent
+                .route(self.inner.config.managed_credential_clients)
+                .is_some()
+            {
                 let pin = ProviderPin::discover(agent).map_err(status)?;
                 agents.push(v1::PlatformManagedAgentSupport {
                     agent: agent.wire(),

@@ -249,8 +249,8 @@ fn platform_control_private_proxy_homes_never_copy_inherited_auth_or_routes() {
     let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
     let sentinel = f._temp.path().join("unrelated-auth.json");
     fs::write(&sentinel, b"synthetic unrelated login").unwrap();
-    proxy::prepare(&f.dir, &config).unwrap();
-    let environment = proxy::environment(&f.dir, &config)
+    proxy::prepare(&f.dir, &config, Route::OpenAi).unwrap();
+    let environment = proxy::environment(&f.dir, &config, Route::OpenAi)
         .unwrap()
         .into_iter()
         .collect::<std::collections::BTreeMap<_, _>>();
@@ -266,7 +266,7 @@ fn platform_control_private_proxy_homes_never_copy_inherited_auth_or_routes() {
         b"model_provider=\"unrelated\"\n",
     )
     .unwrap();
-    assert!(proxy::environment(&f.dir, &config).is_err());
+    assert!(proxy::environment(&f.dir, &config, Route::OpenAi).is_err());
 }
 
 #[test]
@@ -290,7 +290,7 @@ fn platform_control_claude_prefix_uses_the_pinned_cli_option_names() {
     // Claude 2.1.288 exits during startup on an unknown option such as
     // `--settings-sources`; these are the names it accepts.
     assert_eq!(
-        proxy::arguments(AgentKind::Claude),
+        proxy::arguments(Route::Anthropic),
         [
             "--setting-sources",
             "",
@@ -304,32 +304,209 @@ fn platform_control_claude_prefix_uses_the_pinned_cli_option_names() {
 
 #[test]
 fn platform_control_codex_private_config_allows_only_its_exact_project_suffix() {
+    for route in [Route::OpenAi, Route::Codex] {
+        let f = Fixture::new();
+        let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
+        proxy::prepare(&f.dir, &config, route).unwrap();
+        let path = f.dir.join("codex/config.toml");
+        let baseline = fs::read(&path).unwrap();
+        let suffix = format!(
+            "\n[projects.{}]\ntrust_level = \"trusted\"\n",
+            serde_json::to_string(&config.working_dir).unwrap()
+        );
+        let mut admitted = baseline.clone();
+        admitted.extend(suffix.as_bytes());
+        fs::write(&path, &admitted).unwrap();
+        assert_eq!(proxy::check(&f.dir, &config).unwrap(), route);
+        assert!(proxy::environment(&f.dir, &config, route).is_ok());
+        for extra in [
+            b"\n[projects.\"/other\"]\ntrust_level = \"trusted\"\n".as_slice(),
+            b"\nmodel_provider = \"unrelated\"\n",
+        ] {
+            let mut invalid = admitted.clone();
+            invalid.extend(extra);
+            fs::write(&path, &invalid).unwrap();
+            assert!(proxy::environment(&f.dir, &config, route).is_err());
+        }
+        fs::write(&path, admitted).unwrap();
+        let mut changed = config.clone();
+        changed.working_dir = "/other".into();
+        assert!(proxy::environment(&f.dir, &changed, route).is_err());
+    }
+}
+
+/// Parse the generated private Codex configuration and the command-line
+/// overrides into one table each, so tests compare what Codex reads.
+fn codex_settings(dir: &Path, route: Route) -> (toml::Table, toml::Table) {
+    let file: toml::Table =
+        toml::from_str(&fs::read_to_string(dir.join("codex/config.toml")).unwrap()).unwrap();
+    fn merge(into: &mut toml::Table, from: toml::Table) {
+        for (key, value) in from {
+            match (into.get_mut(&key), value) {
+                (Some(toml::Value::Table(existing)), toml::Value::Table(table)) => {
+                    merge(existing, table)
+                }
+                (_, value) => {
+                    into.insert(key, value);
+                }
+            }
+        }
+    }
+    let mut overrides = toml::Table::new();
+    let arguments = proxy::arguments(route);
+    assert_eq!(arguments.len() % 2, 0);
+    for pair in arguments.chunks(2) {
+        assert_eq!(pair[0], "-c");
+        merge(&mut overrides, toml::from_str(&pair[1]).unwrap());
+    }
+    (file, overrides)
+}
+
+#[test]
+fn platform_control_codex_slot_route_is_credential_free_through_the_codex_route() {
     let f = Fixture::new();
     let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
-    proxy::prepare(&f.dir, &config).unwrap();
-    let path = f.dir.join("codex/config.toml");
-    let baseline = fs::read(&path).unwrap();
-    let suffix = format!(
-        "\n[projects.{}]\ntrust_level = \"trusted\"\n",
-        serde_json::to_string(&config.working_dir).unwrap()
+    let sentinel = f._temp.path().join("unrelated-auth.json");
+    fs::write(&sentinel, b"synthetic unrelated login").unwrap();
+    proxy::prepare(&f.dir, &config, Route::Codex).unwrap();
+    assert_eq!(proxy::check(&f.dir, &config).unwrap(), Route::Codex);
+    let environment = proxy::environment(&f.dir, &config, Route::Codex)
+        .unwrap()
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    // Its own fixed home and no key, placeholder or OpenAI base URL; nothing
+    // from `~/.codex`.
+    assert_eq!(
+        environment.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["CODEX_HOME", "HOME", "LANG", "LOGNAME", "PATH", "USER"]
     );
-    let mut admitted = baseline.clone();
-    admitted.extend(suffix.as_bytes());
-    fs::write(&path, &admitted).unwrap();
-    assert!(proxy::environment(&f.dir, &config).is_ok());
-    for extra in [
-        b"\n[projects.\"/other\"]\ntrust_level = \"trusted\"\n".as_slice(),
-        b"\nmodel_provider = \"unrelated\"\n",
-    ] {
-        let mut invalid = admitted.clone();
-        invalid.extend(extra);
-        fs::write(&path, &invalid).unwrap();
-        assert!(proxy::environment(&f.dir, &config).is_err());
+    assert_eq!(
+        environment["CODEX_HOME"],
+        f.dir.join("codex").to_string_lossy()
+    );
+    assert!(environment["HOME"].ends_with("/home"));
+    assert!(!environment.values().any(|value| value.contains(".codex")));
+    assert!(!f.dir.join("codex/auth.json").exists());
+    assert_eq!(fs::read(&sentinel).unwrap(), b"synthetic unrelated login");
+
+    let (file, overrides) = codex_settings(&f.dir, Route::Codex);
+    // The file and the overrides configure the same provider.
+    for settings in [&file, &overrides] {
+        assert_eq!(
+            settings["model_provider"].as_str(),
+            Some("codewire_platform_codex")
+        );
+        assert_eq!(settings["forced_login_method"].as_str(), Some("api"));
+        assert_eq!(
+            settings["cli_auth_credentials_store"].as_str(),
+            Some("file")
+        );
+        assert_eq!(
+            settings["features"]["enable_request_compression"].as_bool(),
+            Some(false)
+        );
+        let provider = settings["model_providers"]["codewire_platform_codex"]
+            .as_table()
+            .unwrap();
+        // The Codex slot's own route on the managed ingress; no key name.
+        assert_eq!(
+            provider["base_url"].as_str().unwrap(),
+            format!("http://127.0.0.1:{}/v1", codewire_access::MANAGED_HTTP_PORT)
+        );
+        assert_eq!(provider["wire_api"].as_str(), Some("responses"));
+        assert_eq!(provider["requires_openai_auth"].as_bool(), Some(false));
+        assert_eq!(provider["supports_websockets"].as_bool(), Some(false));
+        assert!(!provider.contains_key("env_key"));
+        assert!(!provider.contains_key("experimental_bearer_token"));
     }
-    fs::write(&path, admitted).unwrap();
-    let mut changed = config.clone();
-    changed.working_dir = "/other".into();
-    assert!(proxy::environment(&f.dir, &changed).is_err());
+    assert_eq!(file, overrides);
+
+    // The recorded route is the only one admitted for this home.
+    assert!(proxy::environment(&f.dir, &config, Route::OpenAi).is_err());
+    assert!(proxy::environment(&f.dir, &config, Route::Anthropic).is_err());
+}
+
+#[test]
+fn platform_control_openai_route_keeps_its_key_slot_configuration() {
+    let f = Fixture::new();
+    let config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
+    proxy::prepare(&f.dir, &config, Route::OpenAi).unwrap();
+    assert_eq!(proxy::check(&f.dir, &config).unwrap(), Route::OpenAi);
+    let (file, overrides) = codex_settings(&f.dir, Route::OpenAi);
+    for settings in [&file, &overrides] {
+        assert_eq!(
+            settings["model_provider"].as_str(),
+            Some("codewire_platform_api")
+        );
+        let provider = settings["model_providers"]["codewire_platform_api"]
+            .as_table()
+            .unwrap();
+        assert_eq!(
+            provider["base_url"].as_str().unwrap(),
+            format!(
+                "http://127.0.0.1:{}{}",
+                codewire_access::MANAGED_HTTP_PORT,
+                codewire_access::MANAGED_OPENAI_API_PREFIX
+            )
+        );
+        assert_eq!(provider["env_key"].as_str(), Some("OPENAI_API_KEY"));
+    }
+    assert_eq!(file, overrides);
+    assert!(proxy::environment(&f.dir, &config, Route::Codex).is_err());
+}
+
+#[test]
+fn platform_control_private_home_is_written_only_for_a_route_of_its_agent() {
+    let f = Fixture::new();
+    let codex: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
+    let mut claude = codex.clone();
+    claude.agent = AgentKind::Claude;
+    for (config, route) in [
+        (&codex, Route::Anthropic),
+        (&claude, Route::Codex),
+        (&claude, Route::OpenAi),
+    ] {
+        let stage = f
+            ._temp
+            .path()
+            .join(format!("stage-{}", uuid::Uuid::new_v4()));
+        private_directory(&stage).unwrap();
+        assert!(proxy::prepare(&stage, config, route).is_err());
+        assert_eq!(fs::read_dir(&stage).unwrap().count(), 0, "{route:?}");
+    }
+    let stage = f._temp.path().join("claude-stage");
+    private_directory(&stage).unwrap();
+    proxy::prepare(&stage, &claude, Route::Anthropic).unwrap();
+    assert_eq!(proxy::check(&stage, &claude).unwrap(), Route::Anthropic);
+}
+
+#[test]
+fn platform_control_prepare_requires_a_route_of_the_origin_agent() {
+    let fixture = Fixture::new();
+    let prepare = |route: serde_json::Value| {
+        json!({"version":1,"origin":fixture.origin,"session_id":fixture.session,
+            "launch_generation":1,"request":{"op":"prepare","model":"synthetic","effort":null,
+            "working_dir":"/","name":"","prompt":null,"parent_session_id":"",
+            "initial_message_id":null,"route":route}})
+    };
+    let mut missing = prepare(json!("codex"));
+    missing["request"].as_object_mut().unwrap().remove("route");
+    for invalid in [
+        missing,
+        prepare(json!("open_ai")),
+        prepare(json!("chatgpt")),
+    ] {
+        assert!(serde_json::from_value::<Envelope>(invalid).is_err());
+    }
+    let envelope = serde_json::from_value::<Envelope>(prepare(json!("anthropic"))).unwrap();
+    let error = handle_fixed(&fixture.environment, envelope).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("platform route serves another agent"),
+        "{error:#}"
+    );
+    for route in ["codex", "openai"] {
+        assert!(serde_json::from_value::<Envelope>(prepare(json!(route))).is_ok());
+    }
 }
 
 #[test]
