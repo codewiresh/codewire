@@ -165,6 +165,7 @@ for helper in ('scripts/ci/tests/test-openbao-only-secret-authority.sh',
                'scripts/ci/tests/test-admin-proto-boundary.sh',
                'scripts/ci/tests/test-cli-host-managed.py',
                'scripts/ci/tests/test-cli-update-mesh-endpoints.py',
+               'scripts/ci/tests/test-build-cw-release-dir.py',
                'scripts/dev/test-cw-runtime-image.py',
                'scripts/dev/test-cli-native-managed.py',
                'scripts/dev/test-cli-native-update.py',
@@ -237,7 +238,8 @@ assert generic(records) == expected('--workspace') + expected(
     *[a for p in sorted(packages) for a in ('-p', p)])
 assert any(r['args'] == ['--production-features'] for r in records)
 assert any('--features' in r['args'] and 'platform' in r['args'] for r in records)
-for helper in ('test-cli-host-managed.py', 'test-cli-update-mesh-endpoints.py'):
+for helper in ('test-cli-host-managed.py', 'test-cli-update-mesh-endpoints.py',
+               'test-build-cw-release-dir.py'):
     assert sum(r['tool'] == helper for r in records) == 1
     run(['rust', 'rust_workspace'], fail_tool=helper, status=44)
 
