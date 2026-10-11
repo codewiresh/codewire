@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Pre-push dispatcher: resolve the pushing worktree and validate its receipt.
+# Pre-push dispatcher: resolve the pushing worktree and run its own policy
+# (scripts/dev/pre-push.sh), or validate an older worktree's receipt.
 # Install via `bun run hooks:install` (copies this dispatcher into the common
 # Git directory so deleting the installing worktree cannot break every hook).
 
@@ -11,6 +12,14 @@ if ! INVOKING_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" ||
   exit 1
 fi
 
+# A worktree that owns its pre-push policy decides everything itself, so the
+# policy versions with the tree it verifies and this copy rarely changes.
+WORKTREE_HOOK="$INVOKING_ROOT/scripts/dev/pre-push.sh"
+if [ -x "$WORKTREE_HOOK" ]; then
+  exec "$WORKTREE_HOOK" "$@"
+fi
+
+# Older worktrees without scripts/dev/pre-push.sh keep their receipt policy.
 PREFLIGHT="$INVOKING_ROOT/scripts/dev/preflight.sh"
 LOCAL_RECEIPT="$INVOKING_ROOT/scripts/ci/receipts/local-prepush-receipt.py"
 if [ ! -x "$PREFLIGHT" ]; then

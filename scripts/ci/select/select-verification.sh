@@ -434,6 +434,8 @@ if [ "$event_selected" = false ]; then
       scripts/dev/macos-local-runtime.py|scripts/dev/test-macos-local-runtime.py|\
       scripts/dev/macos-app-sandbox-canary.py|scripts/dev/test-macos-app-sandbox-canary.py|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
+      scripts/dev/pre-push.sh|scripts/dev/preflight-push.sh|\
+      scripts/dev/preflight-environment.sh|\
       scripts/ci/select/emit-verification-matrices.sh|\
       scripts/ci/select/require-verification-results.sh|\
       scripts/ci/receipts/local-prepush-receipt.py|\
