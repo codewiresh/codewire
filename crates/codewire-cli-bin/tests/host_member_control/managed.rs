@@ -2057,14 +2057,14 @@ fn managed_fixture_actual_actor_birth_path_and_terminal_refusals_do_not_signal()
     fs::copy("/usr/bin/sleep", &image).unwrap();
     fs::set_permissions(&image, fs::Permissions::from_mode(0o500)).unwrap();
     let launch_deadline = Instant::now() + Duration::from_secs(30);
-    let mut child = Command::new(&image)
+    let mut command = Command::new(&image);
+    command
         .arg("30")
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::null());
+    let mut child = cw_fixture::spawn_written(|| command.spawn()).unwrap();
     let owned = OwnedChild::capture_launch(child.id(), &image, launch_deadline).unwrap();
     let actor = Actor::capture(child.id(), owned.birth, std::process::id(), &image);
     for (birth, parent) in [

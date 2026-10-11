@@ -728,6 +728,22 @@ fn assert_dead_and_reaped(pidfd: &File, pid: i32) {
     );
 }
 
+/// Spawn an executable this test process just wrote or copied. A concurrent
+/// test's fork child holds the write descriptor until its own exec, so the
+/// kernel briefly refuses this exec with ETXTBSY; retry only that, bounded.
+#[cfg(target_os = "linux")]
+fn spawn_written<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    for _ in 1..50 {
+        match spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+    spawn()
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn signed_public_selection_and_rollback_leave_a_running_owned_elf_untouched() {
@@ -755,14 +771,14 @@ async fn signed_public_selection_and_rollback_leave_a_running_owned_elf_untouche
             Some(0),
         )
         .unwrap();
-    let child = Command::new(store.version_executable(&published.sha256))
+    let mut command = Command::new(store.version_executable(&published.sha256));
+    command
         .env_clear()
         .arg("30")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::null());
+    let child = spawn_written(|| command.spawn()).unwrap();
     struct Owned(Child);
     impl Drop for Owned {
         fn drop(&mut self) {
