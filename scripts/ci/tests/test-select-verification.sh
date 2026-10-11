@@ -1155,10 +1155,10 @@ run_paths_case workspace_image_pin pull_request refs/pull/2255/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_server_core rust_pkg_codewire_workspace_image' \
   crates/codewire-workspace-image/src/pin.rs
 run_paths_case workspace_image_pin_tool pull_request refs/pull/2255/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential security' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/images/workspace-image-pin.py
 run_paths_case workspace_image_pin_proposal pull_request refs/pull/2255/head false \
-  'go_consumer_interop go_support policy release runtime_confidential' \
+  'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/images/propose-workspace-image-pin.sh \
   scripts/ci/tests/test-propose-workspace-image-pin.sh \
   scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh \
