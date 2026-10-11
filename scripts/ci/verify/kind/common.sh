@@ -1555,6 +1555,13 @@ load_images_into_kind() {
       # side-loaded name with imagePullPolicy Never. No registry credential is
       # copied into the nested cluster.
       docker image tag "$source" "$alias" || return $?
+      if [ "$alias" = "$KIND_WORKSPACE_LOCAL_IMAGE" ] \
+          && [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ]; then
+        # Only release-image runs use the approved workspace. Source and CI
+        # runs loaded their selected workspace above; importing this unused
+        # multi-gigabyte image cost each shard minutes.
+        continue
+      fi
       log "loading approved platform image into kind"
       kind load docker-image --name "$KIND_CLUSTER_NAME" "$alias" || return $?
       wait_for_kind_api_after_image_load || return $?

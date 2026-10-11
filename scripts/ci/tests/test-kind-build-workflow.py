@@ -1047,6 +1047,30 @@ class CommonConsumerContractTests(unittest.TestCase):
                 ! grep -Fq 'codewire-workspace:verified-fixture' "$CALLS"
                 ! grep -q '^workspace-reuse ' "$CALLS"
 
+                # The five sealed platform images are proven in every mode, but
+                # the approved workspace is imported only where it runs: in
+                # release-image mode. CI and source runs load their own.
+                validate_sealed_kind_images() { return 0; }
+                docker() { record "docker $*"; }
+                for mode in build-ci prebuilt-ci prebuilt-release; do
+                  : >"$CALLS"
+                  CODEWIRE_KIND_PRODUCT_IMAGE_MODE="$mode" load_images_into_kind
+                  grep -Fxq "docker image tag $KIND_WORKSPACE_IMAGE $KIND_WORKSPACE_LOCAL_IMAGE" "$CALLS" ||
+                    fail "$mode did not prove the approved workspace"
+                  grep -Fxq "kind load docker-image --name codewire-e2e-ci $KIND_DIND_LOCAL_IMAGE" "$CALLS" ||
+                    fail "$mode skipped a sealed platform image"
+                  if [[ "$mode" == prebuilt-release ]]; then
+                    grep -Fxq "kind load docker-image --name codewire-e2e-ci $KIND_WORKSPACE_LOCAL_IMAGE" "$CALLS" ||
+                      fail 'release mode did not import its approved workspace'
+                  else
+                    ! grep -Fq "kind load docker-image --name codewire-e2e-ci $KIND_WORKSPACE_LOCAL_IMAGE" "$CALLS" ||
+                      fail "$mode imported the unused approved workspace"
+                    grep -Fxq 'kind load docker-image --name codewire-e2e-ci codewire-workspace:verified-fixture' "$CALLS" ||
+                      fail "$mode skipped its selected workspace"
+                  fi
+                done
+                validate_sealed_kind_images() { return 1; }
+
                 docker() {
                   record "docker $*"
                   case "$*" in
