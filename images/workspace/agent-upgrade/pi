@@ -23,4 +23,4 @@ if [ "${1:-}" = update ]; then
   fi
   set -- update "$@"
 fi
-exec /opt/codewire/agents/npm/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js "$@"
+exec /opt/codewire/agents/npm/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js "$@"

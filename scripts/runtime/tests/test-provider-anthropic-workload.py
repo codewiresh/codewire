@@ -84,6 +84,26 @@ class ParserTests(unittest.TestCase):
                 self.write(frames)
                 self.assertTrue(self.parsed())
 
+    def test_accepts_one_gateway_notice_and_rejects_others(self) -> None:
+        # Observed from Claude 2.1.288 through the managed loopback base URL.
+        notice = {"type": "system", "subtype": "informational", "level": "warning",
+                  "content": PARSER.GATEWAY_NOTICE + " However, this session isn't eligible."}
+        good = lifecycle()
+        stop = len(good) - 3
+        self.write(good[:stop] + [notice] + good[stop:])
+        self.assertTrue(self.parsed())
+        variants = [
+            good[:stop] + [notice, notice] + good[stop:],
+            [notice] + good,
+            good[:stop] + [dict(notice, level="error")] + good[stop:],
+            good[:stop] + [dict(notice, content="Another notice.")] + good[stop:],
+            good[:stop] + [notice] + good[stop + 1:],
+        ]
+        for frames in variants:
+            with self.subTest(frames=frames):
+                self.write(frames)
+                self.assertFalse(self.parsed())
+
     def test_rejects_each_missing_required_frame(self) -> None:
         good = lifecycle()
         for index in range(len(good)):
@@ -166,7 +186,7 @@ class WorkloadContractTests(unittest.TestCase):
 
     def test_fixed_stock_command_projection_and_prompt(self) -> None:
         self.assertIn("readonly CLAUDE_BIN=/opt/codewire/agents/npm/bin/claude", self.source)
-        self.assertIn("readonly EXPECTED_VERSION='2.1.238 (Claude Code)'", self.source)
+        self.assertIn("readonly EXPECTED_VERSION='2.1.288 (Claude Code)'", self.source)
         self.assertIn("readonly SCRATCH_PARENT=/dev/shm", self.source)
         self.assertIn("--model claude-sonnet-4-6", self.source)
         self.assertIn("--max-turns 1 --tools '' --strict-mcp-config", self.source)
@@ -236,9 +256,9 @@ class WorkloadContractTests(unittest.TestCase):
 set -euo pipefail
 if [[ "$#" == 1 && "$1" == --version ]]; then
   if [[ "${FAKE_CLAUDE_VERSION_NUL:-0}" == 1 ]]; then
-    printf '2.1.238 (Claude Code)\\0\\n'
+    printf '2.1.288 (Claude Code)\\0\\n'
   else
-    printf '2.1.238 (Claude Code)\\n'
+    printf '2.1.288 (Claude Code)\\n'
   fi
   exit 0
 fi
