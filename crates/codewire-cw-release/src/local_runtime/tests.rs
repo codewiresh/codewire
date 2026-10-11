@@ -202,4 +202,11 @@ fn blobs_list_every_lock_file_cw_runtime_and_source_once() {
             .iter()
             .any(|blob| blob.sha256 == digest(20) && blob.size == 9_000_000)
     );
+    // An install never fetches component sources.
+    let target = document
+        .target(Platform::parse("macos-aarch64").unwrap())
+        .unwrap();
+    let install = target.install_blobs();
+    assert_eq!(install.len(), 10 + 2);
+    assert!(install.iter().all(|blob| blob.sha256 != digest(20)));
 }

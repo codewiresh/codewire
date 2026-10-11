@@ -135,16 +135,27 @@ impl RuntimeTarget {
         Ok(())
     }
 
-    /// The lock's files, the cw runtime and every component source.
-    pub fn blobs(&self) -> Vec<BlobRef> {
-        let mut blobs = Vec::new();
+    /// What an install fetches: the lock's files and the cw runtime, each
+    /// once. Component sources are published beside them, not installed.
+    pub fn install_blobs(&self) -> Vec<BlobRef> {
+        let mut blobs = BTreeMap::new();
         if let Ok(lock) = serde_json::from_value::<LockFiles>(self.lock.clone()) {
-            blobs.extend(lock.0);
+            for blob in lock.0 {
+                blobs.insert(blob.sha256.clone(), blob);
+            }
         }
         if let Some(cw_runtime) = &self.cw_runtime {
-            blobs.push(cw_runtime.lock.clone());
-            blobs.push(cw_runtime.pack.clone());
+            for blob in [&cw_runtime.lock, &cw_runtime.pack] {
+                blobs.insert(blob.sha256.clone(), blob.clone());
+            }
         }
+        blobs.into_values().collect()
+    }
+
+    /// Everything a release publishes for this target: the install blobs
+    /// and every component source.
+    pub fn blobs(&self) -> Vec<BlobRef> {
+        let mut blobs = self.install_blobs();
         blobs.extend(
             self.components
                 .iter()

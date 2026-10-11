@@ -1764,19 +1764,25 @@ pub(crate) async fn setup_local_runtime(
         let document = crate::local_runtime_pin::embedded()?.context(
             "this cw is a development build with no pinned local VM runtime; pass --from DIR with a runtime directory built from the same source",
         )?;
-        let blobs = runtime_install::host_runtime(&document)?.blobs();
-        let megabytes = blobs.iter().map(|blob| blob.size).sum::<u64>() / (1024 * 1024);
-        eprintln!(
-            "Downloading the local VM runtime ({} files, {megabytes} MiB)...",
-            blobs.len()
-        );
-        let fetched = crate::public_fetch::fetch_runtime(&blobs).await?;
-        // The runtime must match this cw, so whatever another cw installed is
-        // replaced; running VMs keep the generation they started with.
-        let installed = runtime_install::install(&paths, &document, &fetched, true).await;
-        let cleanup = fetched.cleanup();
-        report_runtime_install(installed?);
-        return cleanup.context("the runtime is installed, but its download scratch was retained");
+        // Files this host already holds (the current or previous runtime) are
+        // reused; only the rest is downloaded, so rolling back to the previous
+        // runtime or re-running setup downloads nothing. A damaged local file
+        // fails its digest check, and the whole runtime is downloaded once.
+        let wanted = runtime_install::host_runtime(&document)?.install_blobs();
+        let local = runtime_install::LocalBlobs::open(&paths)?;
+        let missing: Vec<_> = wanted
+            .iter()
+            .filter(|blob| !local.has(&blob.sha256))
+            .cloned()
+            .collect();
+        match install_pinned_runtime(&paths, &document, &local, &missing).await {
+            Err(error) if local_file_damaged(&error) => {
+                let empty = runtime_install::LocalBlobs::empty();
+                install_pinned_runtime(&paths, &document, &empty, &wanted).await
+            }
+            result => result,
+        }?;
+        return Ok(());
     };
     let source = DirectoryBlobSource::new(&from);
     let document = source
@@ -1795,6 +1801,44 @@ pub(crate) async fn setup_local_runtime(
     }
     report_runtime_install(runtime_install::install(&paths, &document, &source, replace).await?);
     Ok(())
+}
+
+/// Installs `document`'s runtime from `local` files plus a download of
+/// `download`, replacing whatever another cw installed (kept as the previous
+/// runtime). Running VMs keep the generation they started with.
+async fn install_pinned_runtime(
+    paths: &codewire_local_vmm::runtime_install::RuntimePaths,
+    document: &codewire_local_vmm::runtime_install::LocalRuntimeDocument,
+    local: &codewire_local_vmm::runtime_install::LocalBlobs,
+    download: &[codewire_cw_release::local_runtime::BlobRef],
+) -> anyhow::Result<()> {
+    use codewire_local_vmm::runtime_install::{self, WithLocal};
+    if download.is_empty() {
+        report_runtime_install(runtime_install::install(paths, document, local, true).await?);
+        return Ok(());
+    }
+    let megabytes = download.iter().map(|blob| blob.size).sum::<u64>() / (1024 * 1024);
+    eprintln!(
+        "Downloading the local VM runtime ({} files, {megabytes} MiB)...",
+        download.len()
+    );
+    let fetched = crate::public_fetch::fetch_runtime(download).await?;
+    let source = WithLocal {
+        local,
+        fallback: &fetched,
+    };
+    let installed = runtime_install::install(paths, document, &source, true).await;
+    let cleanup = fetched.cleanup();
+    report_runtime_install(installed?);
+    cleanup.context("the runtime is installed, but its download scratch was retained")
+}
+
+fn local_file_damaged(error: &anyhow::Error) -> bool {
+    use codewire_local_vmm::runtime_install::InstallError;
+    matches!(
+        error.downcast_ref::<InstallError>(),
+        Some(InstallError::BlobMismatch { .. } | InstallError::MissingBlob { .. })
+    )
 }
 
 fn report_runtime_install(outcome: codewire_local_vmm::runtime_install::InstallOutcome) {

@@ -87,3 +87,6 @@ buffa = { workspace = true }
 connectrpc = { workspace = true, features = ["axum", "client"] }
 tempfile = { workspace = true }
 wiremock = { workspace = true }
+
+[build-dependencies]
+codewire-cw-release = { workspace = true }

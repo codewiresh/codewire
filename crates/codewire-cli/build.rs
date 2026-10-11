@@ -168,7 +168,12 @@ const MAX_LOCAL_RUNTIME: usize = 64 * 1024;
 /// supplies `CODEWIRE_LOCAL_RUNTIME` (#2539). Its digests pin the runtime
 /// `cw setup --local` downloads, covered by the trust already placed in this
 /// cw. A build without it embeds nothing and installs only `--from DIR`.
-/// cw decodes the embedded bytes strictly before any use.
+/// It is decoded strictly here and again by cw before any use.
+///
+/// No cycle: the document must never pin a blob that contains the cw binary
+/// embedding it. Only the macOS cw embeds a runtime today, whose guest root
+/// is Linux and holds no host cw; a Linux runtime's guest binaries must come
+/// from a build that embeds no runtime (the release publisher asserts it).
 fn embed_local_runtime(out: &std::path::Path, revision: Option<&str>) {
     println!("cargo:rerun-if-env-changed=CODEWIRE_LOCAL_RUNTIME");
     let bytes = match input("CODEWIRE_LOCAL_RUNTIME") {
@@ -181,21 +186,18 @@ fn embed_local_runtime(out: &std::path::Path, revision: Option<&str>) {
             println!("cargo:rerun-if-changed={}", path.display());
             let bytes = fs::read(&path)
                 .unwrap_or_else(|error| fail(&format!("read CODEWIRE_LOCAL_RUNTIME: {error}")));
-            if bytes.is_empty()
-                || bytes.len() > MAX_LOCAL_RUNTIME
-                || !bytes.is_ascii()
-                || !bytes.ends_with(b"}\n")
-            {
-                fail("CODEWIRE_LOCAL_RUNTIME is not a bounded canonical document");
+            if bytes.len() > MAX_LOCAL_RUNTIME {
+                fail("CODEWIRE_LOCAL_RUNTIME exceeds its bound");
             }
-            // A canonical document spells its revision exactly once, and the
-            // runtime's guest root must come from this cw's own source.
+            // The same strict decoder cw applies before any use: canonical,
+            // closed, with every target's lock checked.
+            let document = codewire_cw_release::local_runtime::LocalRuntimeDocument::decode(&bytes)
+                .unwrap_or_else(|error| fail(&format!("CODEWIRE_LOCAL_RUNTIME: {error}")));
+            // The runtime's guest root must come from this cw's own source.
             let Some(revision) = revision else {
                 fail("a pinned local runtime needs CODEWIRE_SOURCE_REVISION");
             };
-            let needle = format!("\"source_revision\":\"{revision}\"");
-            let text = String::from_utf8(bytes.clone()).expect("ASCII");
-            if text.matches(&needle).count() != 1 {
+            if document.source_revision != revision {
                 fail("CODEWIRE_LOCAL_RUNTIME was built from another source revision");
             }
             bytes

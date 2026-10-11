@@ -119,7 +119,12 @@ fn leftovers(f: &Fixture) -> Vec<String> {
     let mut names: Vec<_> = fs::read_dir(f.paths.artifact_lock.parent().unwrap())
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with(".runtime-") && name != ".runtime-install.lock")
+        .filter(|name| {
+            name.starts_with(".runtime-")
+                && name != ".runtime-install.lock"
+                && name != PREVIOUS_ROOT
+                && name != PREVIOUS_LOCK
+        })
         .collect();
     names.sort();
     names
@@ -398,6 +403,86 @@ async fn the_installed_runtime_is_compared_with_a_document() {
     let newer = release(other.path(), [b"v2", b"k", b"i"]);
     assert_eq!(
         installed_runtime(&f.paths, &newer).unwrap(),
+        InstalledRuntime::Different
+    );
+}
+
+#[tokio::test]
+async fn a_replaced_runtime_is_kept_and_a_rollback_needs_no_download() {
+    let f = fixture();
+    let first = release(&f.source, [b"vmm-1", b"kernel-1", b"initramfs-1"]);
+    let source = DirectoryBlobSource::new(&f.source);
+    install_with(&f.paths, &first, &source, false, admit_by_digest)
+        .await
+        .unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let second = release(other.path(), [b"vmm-2", b"kernel-2", b"initramfs-1"]);
+    let second_source = DirectoryBlobSource::new(other.path());
+    install_with(&f.paths, &second, &second_source, true, admit_by_digest)
+        .await
+        .unwrap();
+    let parent = f.paths.artifact_lock.parent().unwrap();
+    assert_eq!(
+        ArtifactLock::read(&parent.join(PREVIOUS_LOCK)).unwrap(),
+        host_lock(&first).unwrap()
+    );
+    assert_eq!(
+        fs::read(parent.join(PREVIOUS_ROOT).join("vmm")).unwrap(),
+        b"vmm-1"
+    );
+
+    // Rolling back reinstalls the previous runtime from local files alone,
+    // and the replaced one becomes the previous runtime in turn.
+    let local = LocalBlobs::open(&f.paths).unwrap();
+    for blob in host_runtime(&first).unwrap().install_blobs() {
+        assert!(local.has(&blob.sha256), "{}", blob.sha256);
+    }
+    install_with(&f.paths, &first, &local, true, admit_by_digest)
+        .await
+        .unwrap();
+    assert_eq!(
+        installed_runtime(&f.paths, &first).unwrap(),
+        InstalledRuntime::Same
+    );
+    assert_eq!(
+        ArtifactLock::read(&parent.join(PREVIOUS_LOCK)).unwrap(),
+        host_lock(&second).unwrap()
+    );
+
+    // Repairing a damaged current runtime keeps the real previous one.
+    let installed = f.paths.artifact_root.join("kernel");
+    fs::set_permissions(&installed, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&installed, b"damaged").unwrap();
+    install_with(&f.paths, &first, &source, false, admit_by_digest)
+        .await
+        .unwrap();
+    assert_eq!(
+        ArtifactLock::read(&parent.join(PREVIOUS_LOCK)).unwrap(),
+        host_lock(&second).unwrap()
+    );
+    assert!(leftovers(&f).is_empty());
+}
+
+#[tokio::test]
+async fn the_start_gate_requires_the_wanted_cw_runtime_too() {
+    let f = fixture();
+    let document = release_with(
+        &f.source,
+        [b"v", b"k", b"i"],
+        Some((b"cw lock".as_slice(), b"cw pack".as_slice())),
+    );
+    let source = DirectoryBlobSource::new(&f.source);
+    install_with(&f.paths, &document, &source, false, admit_by_digest)
+        .await
+        .unwrap();
+    assert_eq!(
+        installed_runtime(&f.paths, &document).unwrap(),
+        InstalledRuntime::Same
+    );
+    let parent = f.paths.artifact_lock.parent().unwrap();
+    fs::remove_file(parent.join(CW_RUNTIME_PACK)).unwrap();
+    assert_eq!(
+        installed_runtime(&f.paths, &document).unwrap(),
         InstalledRuntime::Different
     );
 }
