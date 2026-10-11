@@ -48,7 +48,6 @@ pub(crate) enum StoredEnvironmentState {
 }
 
 impl StoredEnvironmentState {
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Stopped => "stopped",
@@ -80,7 +79,6 @@ impl StoredEnvironmentState {
         }
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn from_proto(value: i32) -> Result<Self, SupervisorMetadataError> {
         match v1::EnvironmentState::try_from(value) {
             Ok(v1::EnvironmentState::Stopped) => Ok(Self::Stopped),
@@ -99,7 +97,6 @@ pub(crate) struct RunnerRecord {
     pub(crate) process: ProcessIdentity,
     pub(crate) socket: SocketIdentity,
     pub(crate) artifact_generation: String,
-    #[cfg(target_os = "linux")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) cw_runtime_catalog_generation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,7 +104,6 @@ pub(crate) struct RunnerRecord {
 }
 
 /// Independent runtime custody; these generations never identify a boot or workspace.
-#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CwRuntimeBinding {
@@ -119,7 +115,6 @@ pub(crate) struct CwRuntimeBinding {
     pub(crate) rollback_catalog_generation: Option<String>,
 }
 
-#[cfg(target_os = "linux")]
 impl CwRuntimeBinding {
     pub(crate) fn validate(&self) -> Result<(), SupervisorMetadataError> {
         if self.schema_version != 1
@@ -166,7 +161,6 @@ pub(crate) struct EnvironmentRecord {
     pub(crate) access_binding: Option<EnvironmentAccessBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) platform_source_authority: Option<PlatformSourceAuthority>,
-    #[cfg(target_os = "linux")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) cw_runtime: Option<CwRuntimeBinding>,
     pub(crate) runner: Option<RunnerRecord>,
@@ -255,7 +249,6 @@ impl EnvironmentRecord {
     }
 
     pub(crate) fn validate(&self, key: &str) -> Result<(), SupervisorMetadataError> {
-        #[cfg(target_os = "linux")]
         if self
             .cw_runtime
             .as_ref()
@@ -370,13 +363,6 @@ impl EnvironmentRecord {
                 _ => true,
             }
             || !environment_access_metadata_valid(self)
-            || self
-                .project_spec_json
-                .as_deref()
-                .and_then(|bytes| serde_json::from_slice(bytes).ok())
-                .is_none_or(|project: ProjectSpec| {
-                    validate_host_ports_for_project(&self.host_ports, &project).is_err()
-                })
             || self
                 .active_artifact_generation
                 .as_ref()
@@ -510,7 +496,8 @@ impl PlatformSourceAuthority {
     }
 }
 
-pub(crate) fn valid_environment_name(name: &str) -> bool {
+/// The rule every local environment name follows.
+pub fn valid_environment_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     !bytes.is_empty()
         && bytes.len() <= 63
@@ -858,7 +845,6 @@ pub(crate) enum SupervisorMetadataError {
     InvalidState,
     #[error("native supervisor state must never contain a secret")]
     SecretInState,
-    #[cfg(any(target_os = "linux", test))]
     #[error("native environment runner returned invalid state")]
     InvalidRunnerResponse,
     #[error("workspace generation identity is invalid")]

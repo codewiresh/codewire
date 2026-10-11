@@ -1873,6 +1873,12 @@ function generalEgress(){
         }
         if output.stdout != CODEX_VERSION.as_bytes() {
             stage("version-output-mismatch");
+            // Version text carries no secret; show a bounded copy of it.
+            let shown = &output.stdout[..output.stdout.len().min(256)];
+            eprintln!(
+                "codewire-local-codex-bridge-smoke: codex --version printed {:?}",
+                String::from_utf8_lossy(shown)
+            );
             return Err(failed());
         }
         Ok(())
@@ -2700,7 +2706,11 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
             let payload = payload.unwrap_or(Value::Null);
             let messages = payload["messages"].as_array().map(Vec::len);
             let valid = parts.method == http::Method::POST
-                && matches!(path, "/v1/messages" | "/v1/messages?beta=true")
+                && matches!(
+                    path,
+                    "/_codewire/anthropic/v1/messages"
+                        | "/_codewire/anthropic/v1/messages?beta=true"
+                )
                 && headers_valid
                 && payload["model"] == CLAUDE_MODEL
                 && payload["stream"] == true

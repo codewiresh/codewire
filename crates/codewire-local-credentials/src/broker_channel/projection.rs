@@ -96,13 +96,12 @@ impl<S: ProtectedStore + 'static> BrokerLeaseRpc<S> {
         context
             .validate_at(crate::unix_millis().map_err(|_| projection_denied())?)
             .map_err(|_| projection_denied())?;
+        let permit =
+            projection_permit(&self.projection_operations, context.deadline_unix_ms).await?;
         let operation = self
             .refresh_lifetime
             .acquire()
             .ok_or_else(projection_denied)?;
-        let permit = Arc::clone(&self.projection_operations)
-            .try_acquire_owned()
-            .map_err(|_| Status::resource_exhausted("environment projection authority is busy"))?;
         let authority = Arc::clone(&self.authority);
         let lifetime = Arc::clone(&self.refresh_lifetime);
         let completed_context = context.clone();

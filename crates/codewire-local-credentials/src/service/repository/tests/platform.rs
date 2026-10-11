@@ -157,7 +157,7 @@ async fn platform_checkout_uses_exact_create_identity_and_never_the_local_profil
     let (mut fixture, selected, seen, closed) = fixture(false);
     let manager = Arc::clone(&fixture.manager);
     let request = fixture.request.clone();
-    let waiter = tokio::spawn(async move { manager.prepare(request, Some(selected)).await });
+    let waiter = tokio::spawn(async move { manager.prepare(request, Some(selected), None).await });
     let child = fixture.child().await;
     assert!(seen.load(Ordering::Acquire));
     let staging = child.staging.clone();
@@ -183,7 +183,7 @@ async fn dropped_waiter_during_platform_body_drains_all_local_owners_without_bun
     let (mut fixture, selected, seen, closed) = fixture(true);
     let manager = Arc::clone(&fixture.manager);
     let request = fixture.request.clone();
-    let waiter = tokio::spawn(async move { manager.prepare(request, Some(selected)).await });
+    let waiter = tokio::spawn(async move { manager.prepare(request, Some(selected), None).await });
     let mut child = tokio::time::timeout(Duration::from_secs(3), fixture.started.recv())
         .await
         .unwrap()

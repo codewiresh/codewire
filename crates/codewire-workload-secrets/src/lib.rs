@@ -24,8 +24,8 @@ pub use composition_plan::{ProjectionCompositionPlan, ProjectionSourceInventory}
 
 pub use launch::{
     EnvironmentProjection, MAX_ENVIRONMENT_PROJECTION_BYTES, MAX_PROJECTION_LIFETIME_MS,
-    MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES, ProjectionContext, ProjectionContributor,
-    ProjectionError, ProjectionRecipient, compose_environment_projection,
+    MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES, PROJECTION_REQUEST_LIFETIME_MS, ProjectionContext,
+    ProjectionContributor, ProjectionError, ProjectionRecipient, compose_environment_projection,
     seal_environment_projection, seal_environment_projection_fragment,
     validate_projection_recipient,
 };

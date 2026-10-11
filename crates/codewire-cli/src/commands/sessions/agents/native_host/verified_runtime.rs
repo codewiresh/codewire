@@ -202,7 +202,8 @@ except BaseException:
     os._exit(125)
 "#;
 
-#[cfg(test)]
+// The launcher runs in the Linux guest; these tests execute it on Linux.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use sha2::{Digest as _, Sha256};

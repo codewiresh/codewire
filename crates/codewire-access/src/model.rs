@@ -275,6 +275,11 @@ pub enum HttpProvider {
     /// selected by a Sandbox profile or exposed as a managed client route.
     #[serde(skip)]
     GitHubAppAuthorization,
+    /// Codewire's own Codex (ChatGPT) device login: the enrollment endpoints
+    /// only. Like `GitHubAppAuthorization`, never profile-selected and never
+    /// a Sandbox route; the Codex bridge keeps `CodexOAuth`.
+    #[serde(skip)]
+    CodexDeviceEnrollment,
 }
 
 impl HttpProvider {
@@ -298,7 +303,7 @@ impl HttpProvider {
                 "GH_ENTERPRISE_TOKEN",
                 "GITHUB_ENTERPRISE_TOKEN",
             ],
-            Self::GitHubAppAuthorization => &[],
+            Self::GitHubAppAuthorization | Self::CodexDeviceEnrollment => &[],
         }
     }
 
@@ -311,6 +316,7 @@ impl HttpProvider {
             Self::AnthropicSubscriptionToken => "anthropic-subscription-token",
             Self::GitHubOAuth => "github-oauth",
             Self::GitHubAppAuthorization => "github-app-authorization",
+            Self::CodexDeviceEnrollment => "codex-device-enrollment",
         }
     }
 

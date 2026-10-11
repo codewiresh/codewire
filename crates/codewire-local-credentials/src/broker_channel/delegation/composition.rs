@@ -13,6 +13,7 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use super::*;
+use crate::broker_channel::projection_permit;
 use crate::{
     LocalCredentialAuthority, LocalEnvironmentProjectionBinding, PlatformCredentialBinding,
 };
@@ -144,10 +145,8 @@ impl<S: ProtectedStore + 'static> ProjectionComposer<S> {
             ));
         }
         let local_inventories = if self.mixed {
+            let permit = projection_permit(&self.operations, context.deadline_unix_ms).await?;
             let operation = self.lifetime.acquire().ok_or_else(denied)?;
-            let permit = Arc::clone(&self.operations)
-                .try_acquire_owned()
-                .map_err(|_| denied())?;
             let owner = Arc::clone(&self);
             let context = context.clone();
             tokio::task::spawn_blocking(move || {
@@ -256,10 +255,8 @@ impl<S: ProtectedStore + 'static> ProjectionComposer<S> {
             }
             _ => return Err(denied()),
         };
+        let permit = projection_permit(&self.operations, pending.context.deadline_unix_ms).await?;
         let operation = self.lifetime.acquire().ok_or_else(denied)?;
-        let permit = Arc::clone(&self.operations)
-            .try_acquire_owned()
-            .map_err(|_| denied())?;
         let owner = Arc::clone(&self);
         let context = pending.context;
         let completed_context = context.clone();

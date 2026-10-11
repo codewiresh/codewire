@@ -18,6 +18,11 @@ pub const MAX_PUBLIC_KEY_BYTES: usize = 16 * 1024;
 pub const MAX_SIGNING_DATA_BYTES: usize = 64 * 1024;
 pub const MAX_SIGNATURE_BYTES: usize = 16 * 1024;
 pub const MAX_DEADLINE: Duration = Duration::from_secs(30);
+/// The lifetime a guest requests. The host checks the deadline against its own
+/// clock, and a guest clock may run up to two seconds ahead of it (a macOS
+/// guest follows its RTC only once it is two seconds off), so the guest stays
+/// that far below the maximum.
+pub const REQUEST_LIFETIME: Duration = Duration::from_secs(28);
 
 /// Fixed operation inferred from the closed request, never a caller route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

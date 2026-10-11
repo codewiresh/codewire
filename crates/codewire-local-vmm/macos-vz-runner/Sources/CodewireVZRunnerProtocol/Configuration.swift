@@ -23,6 +23,7 @@ public enum ConfigurationError: Error, Equatable, CustomStringConvertible {
   case invalidVsockPort
   case invalidArtifact
   case invalidDataDisk
+  case invalidShare
 
   public var description: String {
     switch self {
@@ -37,6 +38,7 @@ public enum ConfigurationError: Error, Equatable, CustomStringConvertible {
     case .invalidVsockPort: "daemon vsock port is invalid"
     case .invalidArtifact: "immutable artifact identity is invalid"
     case .invalidDataDisk: "data disk identity is invalid"
+    case .invalidShare: "shared directory is invalid"
     }
   }
 }

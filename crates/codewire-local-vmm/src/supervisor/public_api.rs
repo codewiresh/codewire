@@ -83,13 +83,12 @@ pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
         .route_service(PUBLIC_FILE_ROUTE, files)
         .layer(axum::middleware::from_fn(enforce_connect_only));
 
-    axum::Router::new()
-        .route_service(
-            "/codewire.local.v1.LinuxCwRuntimeService/{*method}",
-            v1::linux_cw_runtime_service_server::LinuxCwRuntimeServiceServer::new(
-                supervisor.clone(),
-            ),
-        )
+    let router = axum::Router::new();
+    let router = router.route_service(
+        "/codewire.local.v1.LinuxCwRuntimeService/{*method}",
+        v1::linux_cw_runtime_service_server::LinuxCwRuntimeServiceServer::new(supervisor.clone()),
+    );
+    router
         .route_service(
             PRIVATE_SUPERVISOR_ROUTE,
             LocalSupervisorServiceServer::new(supervisor),
@@ -1798,7 +1797,7 @@ fn private_resources(
     let disk_bytes = u64::try_from(disk_gb)
         .ok()
         .and_then(|value| value.checked_mul(GIB))
-        .filter(|value| *value >= crate::linux::state::MINIMUM_STATE_DISK_BYTES)
+        .filter(|value| *value >= crate::state::MINIMUM_STATE_DISK_BYTES)
         .ok_or_else(|| {
             connectrpc::ConnectError::invalid_argument("local disk resources are out of range")
         })?;

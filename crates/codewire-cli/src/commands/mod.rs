@@ -32,35 +32,37 @@ mod member_control;
 #[cfg(target_os = "linux")]
 pub(crate) use member_control::*;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use native::*;
-#[cfg(target_os = "macos")]
-mod native_supervisor;
-#[cfg(target_os = "macos")]
-pub(crate) use native_supervisor::run_native_supervisor;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credential_authority;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod native_progress;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use credential_authority::*;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credential_broker;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use credential_broker::*;
 #[cfg(target_os = "linux")]
 mod credential_broker_confinement;
 #[cfg(target_os = "linux")]
 pub(crate) use credential_broker_confinement::run_local_credential_broker_confinement_probe;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+mod credential_darwin;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credential_repository;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use credential_repository::*;
 mod credential_input;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credentials;
 mod platform_credentials;
 mod platform_profiles;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod provider_login;
 pub(crate) use credential_input::*;
 
 #[derive(Debug, Args)]
@@ -99,14 +101,14 @@ pub(crate) struct DoctorArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum DoctorCommand {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(about = "Inspect native local VM orphans without mutating them")]
     Local(DoctorLocalArgs),
     #[command(about = "Probe environment tailnet transport paths")]
     Tailnet(DoctorTailnetArgs),
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct DoctorLocalArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
@@ -166,6 +168,29 @@ pub(crate) struct SetupArgs {
     org_slug: Option<String>,
     #[arg(long, help = "Skip OpenSSH config update")]
     skip_ssh: bool,
+    /// Install and verify the local VM runtime instead of signing in.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[arg(
+        long,
+        conflicts_with_all = ["org", "create_org", "org_slug", "skip_ssh"],
+        help = "Install and verify the local VM runtime instead of signing in"
+    )]
+    pub(crate) local: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[arg(
+        long,
+        value_name = "DIR",
+        requires = "local",
+        help = "Install the local VM runtime from this release directory"
+    )]
+    pub(crate) from: Option<std::path::PathBuf>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[arg(
+        long,
+        requires = "local",
+        help = "Replace a different installed local VM runtime"
+    )]
+    pub(crate) replace: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -243,7 +268,7 @@ pub(crate) struct NativeSupervisorArgs {
     pub(crate) credential_authority_root: PathBuf,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct NativeRunnerArgs {
     #[arg(long)]
@@ -260,7 +285,7 @@ pub(crate) struct NativeRunnerArgs {
     pub(crate) platform_config_dir: PathBuf,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct NativeNetworkWorkerArgs {
     #[arg(long)]
@@ -269,7 +294,7 @@ pub(crate) struct NativeNetworkWorkerArgs {
     pub(crate) generation: u64,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct NativeEgressBrokerArgs {
     #[arg(long)]
@@ -278,7 +303,7 @@ pub(crate) struct NativeEgressBrokerArgs {
     pub(crate) generation: u64,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct NativeMeshTransportArgs {
     #[arg(long)]
@@ -287,7 +312,7 @@ pub(crate) struct NativeMeshTransportArgs {
     pub(crate) generation: u64,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct NativeMeshEnrollmentBrokerArgs {
     #[arg(long)]
@@ -300,14 +325,29 @@ pub(crate) struct NativeMeshEnrollmentBrokerArgs {
     pub(crate) platform_config_dir: PathBuf,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct LocalCredentialAuthorityArgs {
     #[arg(long)]
     pub(crate) root: PathBuf,
+    /// Present only for a backend other than the platform default.
+    #[arg(long)]
+    pub(crate) protected_store: Option<String>,
+    /// Test-only explicit keychain file for the keychain backend.
+    #[cfg(target_os = "macos")]
+    #[arg(long)]
+    pub(crate) keychain: Option<PathBuf>,
+    /// The installed local VM runtime whose git a repository executor may
+    /// run; the authority admits it against this lock (macOS).
+    #[cfg(target_os = "macos")]
+    #[arg(long, requires = "runtime_artifact_lock")]
+    pub(crate) runtime_artifact_root: Option<PathBuf>,
+    #[cfg(target_os = "macos")]
+    #[arg(long, requires = "runtime_artifact_root")]
+    pub(crate) runtime_artifact_lock: Option<PathBuf>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct LocalCredentialAuthorityProbeArgs {
     #[arg(long)]
@@ -316,7 +356,7 @@ pub(crate) struct LocalCredentialAuthorityProbeArgs {
     pub(crate) shutdown: bool,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct LocalCredentialBrokerArgs {
     #[arg(long)]
@@ -333,6 +373,10 @@ pub(crate) struct LocalCredentialBrokerArgs {
     pub(crate) http_providers: Vec<String>,
     #[arg(long)]
     pub(crate) platform_delegated: bool,
+    /// The authority's store: macOS brokers read the selected backend.
+    #[cfg(target_os = "macos")]
+    #[command(flatten)]
+    pub(crate) store: credential_darwin::ChildStoreArgs,
 }
 
 #[cfg(target_os = "linux")]
@@ -344,7 +388,7 @@ pub(crate) struct EnvironmentLaunchArgs {
     pub(crate) command: Vec<std::ffi::OsString>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct LocalGitRepositoryExecutorArgs {
     #[arg(long)]
@@ -359,9 +403,27 @@ pub(crate) struct LocalGitRepositoryExecutorArgs {
     pub(crate) request_id: String,
     #[arg(long)]
     pub(crate) staging_directory: PathBuf,
+    /// The admitted runtime's git and its helper directory (macOS); Linux
+    /// runs the system git.
+    #[arg(long, requires = "git_exec_path")]
+    pub(crate) git: Option<PathBuf>,
+    #[arg(long, requires = "git")]
+    pub(crate) git_exec_path: Option<PathBuf>,
+    /// The runtime the git belongs to; re-admitted before every git spawn.
+    #[cfg(target_os = "macos")]
+    #[arg(long, requires = "runtime_artifact_lock")]
+    pub(crate) runtime_artifact_root: Option<PathBuf>,
+    #[cfg(target_os = "macos")]
+    #[arg(long, requires = "runtime_artifact_root")]
+    pub(crate) runtime_artifact_lock: Option<PathBuf>,
+    /// The authority's store: a macOS GitHub executor reads the selected
+    /// backend, as a Linux one reads Secret Service.
+    #[cfg(target_os = "macos")]
+    #[command(flatten)]
+    pub(crate) store: credential_darwin::ChildStoreArgs,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
 pub(crate) struct LocalGitCredentialHelperArgs {
     #[arg(long)]
@@ -1047,7 +1109,7 @@ pub(crate) struct EnvCreateArgs {
         long = "path-mode",
         value_enum,
         value_name = "MODE",
-        help = "Prepare the implicit --path source as auto, clone, or copy; requires --local"
+        help = "How --path becomes the workspace: mount (default, live), snapshot, clone, copy, or empty; requires --local"
     )]
     path_mode: Option<PathModeArg>,
     #[arg(
@@ -1151,11 +1213,20 @@ pub(crate) struct EnvCreateArgs {
     save_preset: Option<String>,
 }
 
+/// How `cw env create --local` turns the `--path` directory into the
+/// workspace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum PathModeArg {
-    Auto,
+    /// Mount the directory live, read-write, at /workspace/<name> (default).
+    Mount,
+    /// Copy it once: clone a Git repository's committed state, otherwise copy.
+    Snapshot,
+    /// Clone the Git repository's committed state once.
     Clone,
+    /// Copy the directory once.
     Copy,
+    /// Start with an empty /workspace.
+    Empty,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1384,32 +1455,39 @@ pub(crate) struct EnvPortArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum EnvPortCommand {
-    #[command(about = "Register a port and get a preview URL")]
+    #[command(
+        about = "Publish a port: a preview URL on the platform, 127.0.0.1 on this host for a local environment"
+    )]
     Add(EnvPortAddArgs),
-    #[command(visible_alias = "ls", about = "List registered ports")]
+    #[command(visible_alias = "ls", about = "List published ports")]
     List(EnvPortListArgs),
-    #[command(about = "Remove a registered port")]
+    #[command(about = "Withdraw a published port (local: by host port)")]
     Rm(EnvPortRmArgs),
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct EnvPortAddArgs {
-    #[arg(value_name = "PORT")]
+    #[arg(value_name = "PORT", help = "Port inside the environment")]
     port: String,
     #[arg(
         short,
         long,
-        required = true,
-        help = "DNS-safe label for the preview URL"
+        help = "DNS-safe label for the preview URL (platform; required there)"
     )]
-    label: String,
+    label: Option<String>,
     #[arg(
         short,
         long,
-        default_value = "creator",
-        help = "Access level: public, org_members, or creator"
+        help = "Access level: public, org_members, or creator (platform; default creator)"
     )]
-    access: String,
+    access: Option<String>,
+    #[arg(
+        long,
+        value_name = "HOST_PORT",
+        value_parser = clap::value_parser!(u16).range(1..),
+        help = "Port on this host's 127.0.0.1 (local; default: PORT)"
+    )]
+    host_port: Option<u16>,
     #[arg(short, long, help = "Environment ID or name (default: current)")]
     env: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]

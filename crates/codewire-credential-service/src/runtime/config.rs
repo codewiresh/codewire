@@ -56,8 +56,6 @@ pub struct CredentialServiceConfig {
     pub(super) public_origin: http::HeaderValue,
     pub(super) private_listen: SocketAddr,
     pub(super) private_tls: ServerTlsFiles,
-    pub(super) codex_executable: PathBuf,
-    pub(super) github_executable: PathBuf,
     pub(super) github_app_authorization: Option<GitHubAppAuthorizationConfig>,
     pub(super) runtime_directory: PathBuf,
     pub(super) keks: KekAuthorityConfig,
@@ -192,8 +190,6 @@ impl CredentialServiceConfig {
             public_origin,
             private_listen,
             private_tls,
-            codex_executable: path("CREDENTIAL_CODEX_EXECUTABLE")?,
-            github_executable: path("CREDENTIAL_GITHUB_EXECUTABLE")?,
             github_app_authorization,
             runtime_directory: path("CREDENTIAL_RUNTIME_DIR")?,
             keks,
@@ -358,8 +354,6 @@ mod tests {
             ("CREDENTIAL_BROKER_TLS_LISTEN_ADDR", "0.0.0.0:9443"),
             ("CREDENTIAL_BROKER_TLS_CERT_FILE", "/mounted/broker/tls.crt"),
             ("CREDENTIAL_BROKER_TLS_KEY_FILE", "/mounted/broker/tls.key"),
-            ("CREDENTIAL_CODEX_EXECUTABLE", "/usr/local/bin/codex"),
-            ("CREDENTIAL_GITHUB_EXECUTABLE", "/usr/local/bin/gh"),
             ("CREDENTIAL_RUNTIME_DIR", "/run/codewire-credentials"),
             (
                 "CREDENTIAL_BAO_ADDR",
@@ -664,8 +658,6 @@ mod tests {
             ("CREDENTIAL_HTTP_LISTEN_ADDR", "0.0.0.0:9443"),
             ("CREDENTIAL_BROKER_TLS_LISTEN_ADDR", "0.0.0.0:8086"),
             ("CREDENTIAL_RUNTIME_DIR", "relative"),
-            ("CREDENTIAL_CODEX_EXECUTABLE", "codex"),
-            ("CREDENTIAL_GITHUB_EXECUTABLE", "gh"),
         ] {
             let mut values = inputs();
             values.insert(name, value.into());

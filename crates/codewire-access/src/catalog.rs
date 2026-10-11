@@ -207,6 +207,7 @@ mod tests {
         }
         assert!(serde_json::from_str::<HttpProvider>("\"unknown\"").is_err());
         assert!(HttpProvider::parse("github-app-authorization").is_none());
+        assert!(HttpProvider::parse("codex-device-enrollment").is_none());
         for provider in [
             HttpProvider::AnthropicApiKey,
             HttpProvider::AnthropicSubscriptionToken,

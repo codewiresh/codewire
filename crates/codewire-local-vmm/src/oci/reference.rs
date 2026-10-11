@@ -131,22 +131,18 @@ impl RegistryReference {
         })
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub fn original(&self) -> &str {
         &self.original
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub fn registry(&self) -> &str {
         &self.registry
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub fn repository(&self) -> &str {
         &self.repository
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub fn manifest_reference(&self) -> &str {
         &self.manifest_reference
     }
@@ -155,7 +151,6 @@ impl RegistryReference {
         self.digest.as_ref()
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub fn distribution_base_url(&self) -> Result<Url, RegistryReferenceError> {
         let registry = if self.registry == "docker.io" {
             "registry-1.docker.io"

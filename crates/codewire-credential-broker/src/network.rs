@@ -9,6 +9,10 @@ use futures::StreamExt as _;
 use http::{HeaderMap, Method};
 use reqwest::redirect::Policy;
 
+use crate::provider_oauth::{
+    CODEX_DEVICE_TOKEN_PATH, CODEX_DEVICE_USERCODE_PATH, GITHUB_ACCESS_TOKEN_PATH,
+    GITHUB_DEVICE_CODE_PATH, OPENAI_AUTH_HOST, OPENAI_TOKEN_PATH,
+};
 use crate::refresh_failure::TransportFailure;
 use crate::{
     BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport,
@@ -16,7 +20,6 @@ use crate::{
 
 const OPENAI_HOST: &str = "api.openai.com";
 const CHATGPT_HOST: &str = "chatgpt.com";
-const OPENAI_AUTH_HOST: &str = "auth.openai.com";
 const ANTHROPIC_HOST: &str = "api.anthropic.com";
 const GITHUB_API_HOST: &str = "api.github.com";
 const GITHUB_GIT_HOST: &str = "github.com";
@@ -24,7 +27,6 @@ const OPENAI_PORT: u16 = 443;
 /// Transparent routes' pinned base paths (#2536); Anthropic's is its origin.
 const OPENAI_BASE_PATH: &str = "/v1/";
 const CHATGPT_CODEX_BASE_PATH: &str = "/backend-api/codex/";
-const OPENAI_REFRESH_PATH: &str = "/oauth/token";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const REFRESH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -176,7 +178,7 @@ impl BrokerUpstreamTransport for ProviderHttpsTransport {
         let (method, target, headers, body) = request.into_parts();
         validate_target(&target, &method, &self.selected)?;
         let is_refresh =
-            target.host_str() == Some(OPENAI_AUTH_HOST) && target.path() == OPENAI_REFRESH_PATH;
+            target.host_str() == Some(OPENAI_AUTH_HOST) && target.path() == OPENAI_TOKEN_PATH;
         let provider_host = provider_host(&target);
         let mut request = self
             .client
@@ -241,6 +243,7 @@ fn selected_hosts(
         .flat_map(|provider| match provider {
             HttpProvider::OpenAiApiKey => &[OPENAI_HOST][..],
             HttpProvider::CodexOAuth => &[CHATGPT_HOST, OPENAI_AUTH_HOST][..],
+            HttpProvider::CodexDeviceEnrollment => &[OPENAI_AUTH_HOST][..],
             HttpProvider::AnthropicApiKey | HttpProvider::AnthropicSubscriptionToken => {
                 &[ANTHROPIC_HOST][..]
             }
@@ -268,10 +271,17 @@ fn validate_target(
                 && target.path().starts_with(CHATGPT_CODEX_BASE_PATH)
         }
         Some(OPENAI_AUTH_HOST) => {
-            selected.contains(&HttpProvider::CodexOAuth)
-                && method == Method::POST
-                && target.path() == OPENAI_REFRESH_PATH
+            method == Method::POST
                 && target.query().is_none()
+                && ((selected.contains(&HttpProvider::CodexOAuth)
+                    && target.path() == OPENAI_TOKEN_PATH)
+                    || (selected.contains(&HttpProvider::CodexDeviceEnrollment)
+                        && matches!(
+                            target.path(),
+                            CODEX_DEVICE_USERCODE_PATH
+                                | CODEX_DEVICE_TOKEN_PATH
+                                | OPENAI_TOKEN_PATH
+                        )))
         }
         Some(ANTHROPIC_HOST) => {
             (selected.contains(&HttpProvider::AnthropicApiKey)
@@ -303,7 +313,10 @@ fn validate_target(
                 .is_ok())
                 || (selected.contains(&HttpProvider::GitHubAppAuthorization)
                     && method == Method::POST
-                    && target.path() == "/login/oauth/access_token"
+                    && matches!(
+                        target.path(),
+                        GITHUB_ACCESS_TOKEN_PATH | GITHUB_DEVICE_CODE_PATH
+                    )
                     && target.query().is_none())
         }
         _ => false,
@@ -627,6 +640,7 @@ mod tests {
         let selected = BTreeSet::from([HttpProvider::GitHubAppAuthorization]);
         for (method, target) in [
             (Method::POST, "https://github.com/login/oauth/access_token"),
+            (Method::POST, "https://github.com/login/device/code"),
             (Method::GET, "https://api.github.com/user"),
             (
                 Method::GET,
@@ -644,6 +658,12 @@ mod tests {
         }
         for (method, target) in [
             (Method::GET, "https://github.com/login/oauth/access_token"),
+            (Method::GET, "https://github.com/login/device/code"),
+            (
+                Method::POST,
+                "https://github.com/login/device/code?scope=repo",
+            ),
+            (Method::POST, "https://github.com/login/device"),
             (Method::POST, "https://api.github.com/user"),
             (
                 Method::GET,
@@ -671,6 +691,56 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn codex_device_enrollment_transport_has_only_device_login_routes() {
+        let selected = BTreeSet::from([HttpProvider::CodexDeviceEnrollment]);
+        assert_eq!(
+            selected_hosts(&selected).unwrap(),
+            BTreeSet::from(["auth.openai.com"])
+        );
+        for target in [
+            "https://auth.openai.com/api/accounts/deviceauth/usercode",
+            "https://auth.openai.com/api/accounts/deviceauth/token",
+            "https://auth.openai.com/oauth/token",
+        ] {
+            assert!(
+                validate_target(&url::Url::parse(target).unwrap(), &Method::POST, &selected)
+                    .is_ok(),
+                "{target}"
+            );
+            assert_eq!(
+                validate_target(&url::Url::parse(target).unwrap(), &Method::GET, &selected),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{target}"
+            );
+        }
+        for target in [
+            "https://auth.openai.com/api/accounts/deviceauth/usercode?next=evil",
+            "https://auth.openai.com/api/accounts/deviceauth/other",
+            "https://auth.openai.com/codex/device",
+            "https://auth.openai.com/oauth/revoke",
+            "https://chatgpt.com/backend-api/codex/responses",
+            "https://api.openai.com/v1/responses",
+        ] {
+            assert_eq!(
+                validate_target(&url::Url::parse(target).unwrap(), &Method::POST, &selected),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{target}"
+            );
+        }
+        // The Codex bridge family keeps refresh only, not the device login.
+        assert_eq!(
+            validate_target(
+                &url::Url::parse("https://auth.openai.com/api/accounts/deviceauth/usercode")
+                    .unwrap(),
+                &Method::POST,
+                &BTreeSet::from([HttpProvider::CodexOAuth]),
+            ),
+            Err(BrokerUpstreamError::DestinationDenied)
+        );
+    }
+
     use crate::openai::response_admission_test_cases::{accepted_encodings, denied_encodings};
 
     #[test]

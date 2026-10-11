@@ -19,6 +19,9 @@ service LocalSupervisorService {
   rpc RefreshEnvironmentSkills(EnvironmentSelector) returns (Operation);
   rpc ResizeEnvironment(ResizeEnvironmentRequest) returns (Operation);
   rpc UpdateEnvironmentSources(UpdateEnvironmentSourcesRequest) returns (Operation);
+  // Publishes or withdraws host ports on 127.0.0.1. A running VM changes
+  // without a restart; a stopped one binds the recorded set at its next start.
+  rpc UpdateHostPorts(UpdateHostPortsRequest) returns (Operation);
   rpc DeleteEnvironment(EnvironmentSelector) returns (Operation);
   rpc GetOperation(GetOperationRequest) returns (Operation);
   rpc WatchOperation(WatchOperationRequest) returns (stream Operation);
@@ -102,6 +105,10 @@ service EnvironmentRunnerService {
   rpc StartVm(StartVmRequest) returns (RunnerInfo);
   rpc StopVm(StopVmRequest) returns (RunnerInfo);
   rpc GrowStateDisk(GrowStateDiskRequest) returns (GrowStateDiskResponse);
+  // Converges the running generation's host listeners to exactly this set.
+  // New ports bind all-or-nothing before any change; withdrawn ones are
+  // closed before the reply.
+  rpc SetHostPorts(SetHostPortsRequest) returns (SetHostPortsResponse);
   // Stops the exact owned VMM and releases its device handles. The runner
   // never removes environment storage; only the supervisor may tombstone it.
   rpc PrepareRetireRunner(PrepareRetireRunnerRequest) returns (PrepareRetireRunnerResponse);
@@ -146,6 +153,7 @@ enum OperationKind {
   OPERATION_KIND_UPDATE_ENVIRONMENT_SOURCES = 11;
   OPERATION_KIND_UPDATE_CW_RUNTIME = 12;
   OPERATION_KIND_ROLLBACK_CW_RUNTIME = 13;
+  OPERATION_KIND_UPDATE_HOST_PORTS = 14;
 }
 
 enum OperationPhase {
@@ -197,6 +205,8 @@ enum OperationStage {
   OPERATION_STAGE_RECORD_ENVIRONMENT_SOURCES = 31;
   OPERATION_STAGE_RECORD_SOURCE_OUTCOME = 32;
   OPERATION_STAGE_APPLY_SOURCE_ACCESS_BINDING = 33;
+  OPERATION_STAGE_APPLY_HOST_PORTS = 34;
+  OPERATION_STAGE_RECORD_HOST_PORTS = 35;
 }
 
 message Operation {
@@ -361,6 +371,17 @@ message EnvironmentSelector {
   // Optional stable identity precondition. Public adapters set this so a
   // delete-and-recreate race can never redirect a mutation by name.
   string environment_id = 3;
+}
+
+message UpdateHostPortsRequest {
+  string name = 1;
+  string request_id = 2;
+  // Optional stable identity precondition.
+  string environment_id = 3;
+  // Bindings to publish. A host port must not already be published.
+  repeated HostPortBinding add = 4;
+  // Published host ports to withdraw.
+  repeated uint32 remove = 5;
 }
 
 message ResizeEnvironmentRequest {
@@ -607,6 +628,12 @@ message GrowStateDiskRequest {
 message GrowStateDiskResponse {
   uint64 disk_bytes = 1;
 }
+message SetHostPortsRequest {
+  string environment_id = 1;
+  uint64 generation = 2;
+  repeated HostPortBinding host_ports = 3;
+}
+message SetHostPortsResponse {}
 message PrepareRetireRunnerRequest {}
 message PrepareRetireRunnerResponse {}
 message ShutdownRunnerRequest {

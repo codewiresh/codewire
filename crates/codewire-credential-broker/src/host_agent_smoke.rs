@@ -194,18 +194,15 @@ fn jwt(value: serde_json::Value) -> String {
 }
 
 fn codex_material(access: &str) -> Result<CanonicalCodexOAuthBundle, HostAgentSmokeError> {
-    let source = Zeroizing::new(
-        json!({"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{
-            "id_token":jwt(json!({"email":"host-fixture@example.test",
-                "https://api.openai.com/auth":{"chatgpt_account_id":ACCOUNT,
-                    "chatgpt_account_is_fedramp":false}})),
-            "access_token":access,"refresh_token":"synthetic-host-fixture-refresh",
-            "account_id":ACCOUNT}})
-        .to_string(),
-    );
-    crate::import_codex_auth_json(source.as_bytes())
-        .map(|import| import.into_parts().0)
-        .map_err(|_| HostAgentSmokeError::Startup)
+    crate::import_codex_tokens(
+        Zeroizing::new(jwt(json!({"email":"host-fixture@example.test",
+            "https://api.openai.com/auth":{"chatgpt_account_id":ACCOUNT,
+                "chatgpt_account_is_fedramp":false}}))),
+        Zeroizing::new(access.to_owned()),
+        Zeroizing::new("synthetic-host-fixture-refresh".to_owned()),
+    )
+    .map(|import| import.into_parts().0)
+    .map_err(|_| HostAgentSmokeError::Startup)
 }
 
 fn catalog() -> Result<ProviderCatalog, HostAgentSmokeError> {

@@ -36,6 +36,8 @@ pub(super) const BUNDLE_FILE_NAME: &str = "source.bundle";
 /// Executor-local Git launcher. The production implementation applies a
 /// parent-death signal in the post-fork child before every Git exec, so an
 /// abrupt executor death cannot orphan a credential-bearing Git process.
+/// Darwin has no parent-death signal: there the executor leads a process
+/// group that its authority stops as a whole.
 pub trait LocalRepositoryGitProcessSpawner: Send + Sync {
     fn spawn(&self, command: &mut Command) -> io::Result<tokio::process::Child>;
 }
@@ -60,6 +62,42 @@ pub enum RepositoryExecutorError {
     Filesystem,
 }
 
+/// A stored GitHub login as host Git sees it.
+pub enum GitHubLoginState {
+    /// Its access token, valid for this checkout.
+    Ready(Zeroizing<String>),
+    /// Due for renewal: refresh it before use.
+    Due,
+}
+
+/// The GitHub login format, which the caller owns: whether a stored login is
+/// ready or due, and the provider exchange of a due login for its rotated
+/// material. A login that needs reconnecting is an error from `classify`.
+pub trait GitHubLoginRenewer: Sync {
+    fn classify(&self, material: &[u8]) -> Result<GitHubLoginState, RepositoryExecutorError>;
+
+    fn renew<'a>(
+        &'a self,
+        material: &'a [u8],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        codewire_protected_store::ProtectedValue,
+                        RepositoryExecutorError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    >;
+}
+
+/// Leases, refresh attempts and waits for a broker's refresh, within the
+/// authority's own bound for one channel.
+const MAX_GITHUB_LOGIN_ATTEMPTS: u32 = 32;
+const BROKER_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run_local_repository_executor<S>(
     authority_stream: UnixStream,
     protected_store: S,
@@ -68,6 +106,7 @@ pub async fn run_local_repository_executor<S>(
     git_executable: &Path,
     credential_helper_executable: &Path,
     git_spawner: &dyn LocalRepositoryGitProcessSpawner,
+    github_login: &dyn GitHubLoginRenewer,
 ) -> Result<(), RepositoryExecutorError>
 where
     S: ProtectedStore + Clone + 'static,
@@ -92,11 +131,57 @@ where
         .report_ready()
         .await
         .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?;
-    let lease = leases
-        .lease_github(protected_store)
+    let mut lease = leases
+        .lease_github(protected_store.clone())
         .await
         .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?;
-    let token = lease.material();
+    // A login due for renewal is refreshed through the authority's journal,
+    // which a running environment's broker shares, then leased again: Git only
+    // ever sends a token the authority has just admitted.
+    let mut attempts = 0;
+    let token = loop {
+        if let GitHubLoginState::Ready(token) = github_login.classify(lease.material())? {
+            break token;
+        }
+        attempts += 1;
+        if attempts > MAX_GITHUB_LOGIN_ATTEMPTS {
+            return Err(RepositoryExecutorError::LeaseUnavailable);
+        }
+        match leases
+            .begin_github_refresh(&lease)
+            .await
+            .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?
+        {
+            super::RepositoryRefreshBegin::LeaseAgain { wait } => {
+                if wait {
+                    tokio::time::sleep(BROKER_REFRESH_WAIT).await;
+                }
+            }
+            super::RepositoryRefreshBegin::Reserved(reservation) => {
+                let started = leases
+                    .start_github_refresh(reservation)
+                    .await
+                    .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?;
+                match github_login.renew(lease.material()).await {
+                    Ok(material) => leases
+                        .commit_github_refresh(started, material, protected_store.clone())
+                        .await
+                        .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?,
+                    Err(error) => {
+                        // Refused or ambiguous: the old refresh token may be
+                        // spent, so the login is never retried with it.
+                        let _ = leases.fail_github_refresh(started).await;
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        lease = leases
+            .lease_github(protected_store.clone())
+            .await
+            .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?;
+    };
+    let token = token.as_bytes();
     if token.is_empty()
         || token.len() > MAX_GITHUB_TOKEN_BYTES
         || !token.iter().all(u8::is_ascii_graphic)
@@ -929,6 +1014,29 @@ pub(crate) fn cleanup_repository_staging(
     Ok(())
 }
 
+/// macOS executors put their one-use credential socket directory in the
+/// authority root (Darwin has no per-user runtime directory). A killed
+/// executor can leave that directory behind with at most its socket, never
+/// material; the next authority removes it before serving.
+#[cfg(target_os = "macos")]
+pub(crate) fn cleanup_repository_credential_sockets(
+    authority_root: &Path,
+) -> Result<(), RepositoryExecutorError> {
+    for entry in fs::read_dir(authority_root).map_err(|_| RepositoryExecutorError::Filesystem)? {
+        let entry = entry.map_err(|_| RepositoryExecutorError::Filesystem)?;
+        let name = entry.file_name();
+        let Some(id) = name.to_str().and_then(|name| name.strip_prefix("cwgr-")) else {
+            continue;
+        };
+        if Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id) {
+            let path = entry.path();
+            validate_private_staging_directory(&path)?;
+            fs::remove_dir_all(path).map_err(|_| RepositoryExecutorError::Filesystem)?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_credential_socket_path(path: &Path) -> Result<(), RepositoryExecutorError> {
     if !path.is_absolute() {
         return Err(RepositoryExecutorError::InvalidConfiguration);
@@ -961,6 +1069,28 @@ fn validate_credential_socket_path(path: &Path) -> Result<(), RepositoryExecutor
         return Err(RepositoryExecutorError::InvalidConfiguration);
     }
     Ok(())
+}
+
+/// Read the token the executor writes once to a connected one-use socket.
+fn read_one_use_token(
+    stream: std::os::unix::net::UnixStream,
+) -> Result<Zeroizing<Vec<u8>>, RepositoryExecutorError> {
+    match stream.set_read_timeout(Some(REPOSITORY_LEASE_REQUEST_TIMEOUT)) {
+        Ok(()) => {}
+        // Darwin refuses socket options (EINVAL) once the executor has
+        // written the token and closed its end. The token is then already
+        // buffered and the read below returns it without blocking.
+        #[cfg(target_os = "macos")]
+        Err(error) if error.raw_os_error() == Some(rustix::io::Errno::INVAL.raw_os_error()) => {}
+        Err(_) => return Err(RepositoryExecutorError::InvalidCredential),
+    }
+    let mut token = Zeroizing::new(Vec::with_capacity(MAX_GITHUB_TOKEN_BYTES));
+    stream
+        .take(u64::try_from(MAX_GITHUB_TOKEN_BYTES + 1).expect("token bound fits u64"))
+        .read_to_end(&mut token)
+        .map_err(|_| RepositoryExecutorError::InvalidCredential)?;
+    validate_credential(&token)?;
+    Ok(token)
 }
 
 /// Implement Git's credential-helper protocol without consulting ambient
@@ -1045,15 +1175,7 @@ pub fn run_git_credential_helper_for_endpoint(
     validate_credential_socket_path(credential_socket)?;
     let stream = std::os::unix::net::UnixStream::connect(credential_socket)
         .map_err(|_| RepositoryExecutorError::InvalidCredential)?;
-    stream
-        .set_read_timeout(Some(REPOSITORY_LEASE_REQUEST_TIMEOUT))
-        .map_err(|_| RepositoryExecutorError::InvalidCredential)?;
-    let mut token = Zeroizing::new(Vec::with_capacity(MAX_GITHUB_TOKEN_BYTES));
-    stream
-        .take(u64::try_from(MAX_GITHUB_TOKEN_BYTES + 1).expect("token bound fits u64"))
-        .read_to_end(&mut token)
-        .map_err(|_| RepositoryExecutorError::InvalidCredential)?;
-    validate_credential(&token)?;
+    let token = read_one_use_token(stream)?;
     output
         .write_all(b"username=x-access-token\npassword=")
         .and_then(|()| output.write_all(&token))

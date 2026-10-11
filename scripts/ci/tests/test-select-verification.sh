@@ -117,11 +117,9 @@ assert_contract_field() {
 }
 
 policy=policy
-for enrollment_input in src/provider_enrollment.rs src/codex_enrollment/mod.rs src/codex_enrollment/parser.rs; do
-  run_paths_case shared_codex_enrollment pull_request refs/pull/1/head false \
-    'database policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_broker rust_pkg_codewire_credential_service' \
-    "crates/codewire-credential-broker/$enrollment_input"
-done
+run_paths_case shared_provider_enrollment pull_request refs/pull/1/head false \
+  'database policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_broker rust_pkg_codewire_credential_service' \
+  crates/codewire-credential-broker/src/provider_enrollment.rs
 run_paths_case platform_credential_store pull_request refs/pull/1/head false \
   'database policy rust rust_pkg_codewire_credential_broker rust_pkg_codewire_platform_credentials' \
   crates/codewire-platform-credentials/src/store.rs
@@ -509,6 +507,7 @@ run_paths_case local_vmm_kvm_smoke pull_request refs/pull/5014/head false \
   scripts/ci/verify/smoke-local-vmm-cloud-hypervisor.sh
 for kernel_input in scripts/ci/verify/build-linux-vmm-kernel.py \
     scripts/ci/verify/linux-vmm-kernel/x86_64.config \
+    scripts/ci/verify/linux-vmm-kernel/arm64.config \
     scripts/ci/verify/linux-vmm-kernel/dax.patch \
     scripts/ci/verify/linux-vmm-kernel/provenance.json \
     scripts/ci/tests/test-linux-vmm-kernel.py; do
@@ -1225,6 +1224,10 @@ run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head fal
   "$policy" scripts/dev/macos-cli.py scripts/dev/test-macos-cli.py
 run_present_paths_case macos_formatter_developer_tool pull_request refs/pull/2064/head false \
   "$policy" scripts/dev/macos-ext4-tool.py scripts/dev/test-macos-ext4-tool.py
+run_present_paths_case macos_git_developer_tool pull_request refs/pull/2064/head false \
+  "$policy" scripts/dev/macos-git-tool.py scripts/dev/test-macos-git-tool.py
+run_present_paths_case macos_local_runtime_installer pull_request refs/pull/2064/head false \
+  "$policy" Makefile scripts/dev/macos-local-runtime.py scripts/dev/test-macos-local-runtime.py
 run_present_paths_case macos_formatter_with_runtime_source pull_request refs/pull/2064/head false \
   'policy transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-ext4-tool.py crates/codewire-local-vmm/src/lib.rs
@@ -1608,7 +1611,7 @@ grep -qF 'cargo test --locked -p codewire-credential-service --features enrollme
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' "$integration_runner"
 grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
-grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 88' "$integration_runner"
+grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 89' "$integration_runner"
 grep -qF 'assert_passed_count "idp db_flow" "$logfile" 13' "$integration_runner"
 grep -qF 'assert_passed_count "idp two-factor replacement" "$logfile" 11' "$integration_runner"
 grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 23' "$integration_runner"
@@ -3286,8 +3289,8 @@ run_platform_broker_rust_case() {
     [[ "$status" == 0 ]] || { cat "$primitive_probe/broker-$name.out" >&2; exit 1; }
   fi
   graph_count="$(grep -c '^tree --locked -p codewire-credential-broker --no-default-features --features platform --edges normal,build ' "$log" || true)"
-  clippy_count="$(grep -cxF 'clippy --locked -p codewire-credential-broker --no-default-features --features platform,codex-enrollment --all-targets -- -D warnings' "$log" || true)"
-  test_count="$(grep -cxF 'test --locked -p codewire-credential-broker --no-default-features --features platform,codex-enrollment --all-targets' "$log" || true)"
+  clippy_count="$(grep -cxF 'clippy --locked -p codewire-credential-broker --no-default-features --features platform --all-targets -- -D warnings' "$log" || true)"
+  test_count="$(grep -cxF 'test --locked -p codewire-credential-broker --no-default-features --features platform --all-targets' "$log" || true)"
   [[ "$graph_count" == "$expected" ]] || { echo "$name: missing or duplicate broker graph check" >&2; exit 1; }
   if [[ "$fail" == tree || "$features" != platform ]]; then
     [[ "$clippy_count" == 0 && "$test_count" == 0 ]] || { echo "$name: broker checks followed invalid graph" >&2; exit 1; }

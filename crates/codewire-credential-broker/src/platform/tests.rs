@@ -198,13 +198,10 @@ pub(super) fn bundle(access_expired: bool, label: &str) -> CanonicalCodexOAuthBu
     let access = token(
         serde_json::json!({"exp": if access_expired {1} else {unix_now().unwrap()+7_200}, "synthetic":label}),
     );
-    crate::import_codex_auth_json(
-        &serde_json::to_vec(&serde_json::json!({
-            "auth_mode":"chatgpt", "tokens": {"access_token":access,
-                "refresh_token":format!("synthetic-refresh-{label}"), "id_token":id_token(),
-                "account_id":"synthetic-account"}
-        }))
-        .unwrap(),
+    crate::import_codex_tokens(
+        zeroize::Zeroizing::new(id_token()),
+        zeroize::Zeroizing::new(access),
+        zeroize::Zeroizing::new(format!("synthetic-refresh-{label}")),
     )
     .unwrap()
     .into_parts()

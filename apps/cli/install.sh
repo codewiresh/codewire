@@ -2,7 +2,8 @@
 # Install cw from releases.codewire.sh with only stock macOS or Linux tools:
 # a POSIX shell, curl and a SHA-256 tool. This first download trusts HTTPS to
 # releases.codewire.sh: the executable must match the SHA-256 that the
-# release's SHA256SUMS lists for this platform. cw then verifies every update
+# release's SHA256SUMS lists for this platform. The verified cw then installs
+# itself as a managed installation, so `cw update` verifies every later release
 # with its compiled release key and needs neither GnuPG nor Python.
 #
 # Usage: curl -fsSL https://codewire.sh/install.sh | sh -s -- [--version vX.Y.Z] [--prefix DIR] [--verbose]
@@ -16,6 +17,7 @@ MAX_EXECUTABLE=268435456
 MIN_EXECUTABLE=64
 
 stage=''
+previous=''
 work=''
 
 reject() {
@@ -23,7 +25,20 @@ reject() {
   exit 1
 }
 
+# Put a cw that was set aside back, unless the managed entry replaced it.
+restore_previous() {
+  if [ -n "$previous" ]; then
+    if [ ! -e "$dir/cw" ] && [ ! -L "$dir/cw" ]; then
+      mv -f "$previous" "$dir/cw" || printf 'cw install: the previous cw remains at %s\n' "$previous" >&2
+    else
+      rm -f "$previous"
+    fi
+    previous=''
+  fi
+}
+
 cleanup() {
+  restore_previous
   if [ -n "$stage" ]; then rm -f "$stage"; fi
   if [ -n "$work" ]; then rm -rf "$work"; fi
 }
@@ -134,11 +149,12 @@ prepare_directory() {
   done
 }
 
-# An existing cw is replaced only when it is an ordinary file of this user
-# or root: never a link, directory, hard link or set-id file.
+# An existing cw is either a symbolic link, which cw accepts only as its own
+# managed entry, or an ordinary file of this user or root, which is replaced:
+# never a directory, hard link or set-id file.
 check_destination() {
   [ -e "$1" ] || [ -L "$1" ] || return 0
-  [ ! -L "$1" ] || reject "$1 is a symbolic link"
+  [ ! -L "$1" ] || return 0
   [ -n "$(find "$1" -prune -type f -links 1 \( -user "$uid" -o -user 0 \) \
     ! -perm -4000 ! -perm -2000 ! -perm -0020 ! -perm -0002 2>/dev/null </dev/null)" ] ||
     reject "existing $1 is not an owner-controlled regular file"
@@ -221,12 +237,25 @@ main() {
   [ "$actual" = "$digests" ] || reject "the downloaded executable does not match SHA256SUMS for $asset"
   chmod 0755 "$stage" || reject 'could not make the executable runnable'
   check_destination "$dir/cw"
-  mv -f "$stage" "$dir/cw" || reject "could not replace $dir/cw"
+  # The managed entry is only ever created where no file exists, so an
+  # ordinary cw from an earlier install is set aside and restored on failure.
+  if [ -f "$dir/cw" ] && [ ! -L "$dir/cw" ]; then
+    previous="$(mktemp "$dir/.cw-install.XXXXXX")" || reject "could not stage in $dir"
+    mv -f "$dir/cw" "$previous" || reject "could not set $dir/cw aside"
+  fi
+  if ! "$stage" install --managed --bin-dir "$dir" </dev/null >"$work/managed" 2>&1; then
+    restore_previous
+    sed -n '1,20p' "$work/managed" >&2
+    reject "cw $version could not install itself as a managed installation in $dir"
+  fi
+  restore_previous
+  rm -f "$stage"
   stage=''
 
   printf '==> Installed cw %s to %s\n' "$version" "$dir/cw"
   if [ "$verbose" = true ]; then
     printf '    target=%s sha256=%s size=%s\n' "$target" "$actual" "$size"
+    sed -n '1,20p' "$work/managed" | sed 's/^/    /'
   fi
   case ":${PATH:-}:" in
     *":$dir:"*) ;;

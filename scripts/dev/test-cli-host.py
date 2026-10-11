@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Observed Linux host CLI journey, with synthetic native peers by default.
+"""Observed Linux/macOS host CLI journey, with synthetic native peers by default.
 
 Run against a built cw, without replacing HOME or accessing login files:
   scripts/dev/test-cli-host.py --cw target/debug/cw
@@ -8,6 +8,10 @@ Run against a built cw, without replacing HOME or accessing login files:
 The native option uses the installed agents' ordinary login. It proves a Codex
 lead can invoke cw itself and a Claude worker's result starts a parent turn.
 All runtime/config/workspace files and processes belong to this invocation.
+Linux joins every owned descendant through a child subreaper. Darwin has none,
+so macOS runs the journey as a new session leader and requires that no live
+process remains in that session or names the journey's private root by its
+working directory or arguments (see owned_family).
 """
 import argparse
 import ctypes
@@ -16,6 +20,7 @@ import os
 from pathlib import Path
 import select
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -23,6 +28,8 @@ import time
 
 
 WALL = 0x40000000  # Linux __WALL includes non-SIGCHLD clone children.
+LINUX = sys.platform.startswith("linux")
+MACOS = sys.platform == "darwin"
 
 
 def require_owned_subreaper():
@@ -58,6 +65,118 @@ def reap_owned_family(timeout=10):
             return
         if not pid:
             time.sleep(0.02)
+
+
+class Darwin:
+    """libproc views of processes; Darwin has no subreaper or /proc."""
+    ALL_PIDS = 1
+    BSDINFO, BSDINFO_SIZE, SZOMB = 3, 136, 5  # struct proc_bsdinfo; pbi_status at 4
+    # struct proc_vnodepathinfo: cwd vnode_info (152 bytes), then its path.
+    VNODEPATHINFO, VNODEPATHINFO_SIZE, VNODE_INFO_SIZE, MAXPATHLEN = 9, 2352, 152, 1024
+
+    def __init__(self):
+        self.lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        self.lib.proc_listpids.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int]
+        self.lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                                          ctypes.c_void_p, ctypes.c_int]
+
+    def pids(self):
+        size = self.lib.proc_listpids(self.ALL_PIDS, 0, None, 0)
+        if size <= 0:
+            raise AssertionError("host journey cannot list processes")
+        buffer = (ctypes.c_int * (size // 4 + 256))()
+        used = self.lib.proc_listpids(self.ALL_PIDS, 0, buffer, ctypes.sizeof(buffer))
+        if used <= 0 or used >= ctypes.sizeof(buffer):
+            raise AssertionError("host journey cannot list processes")
+        return [pid for pid in buffer[:used // 4] if pid > 0]
+
+    def info(self, pid, flavor, size):
+        buffer = ctypes.create_string_buffer(size)
+        if self.lib.proc_pidinfo(pid, flavor, 0, buffer, size) != size:
+            return None
+        return buffer.raw
+
+    def live(self, pid):
+        # proc_pidinfo refuses a zombie, which kill(pid, 0) still accepts.
+        info = self.info(pid, self.BSDINFO, self.BSDINFO_SIZE)
+        return info is not None and int.from_bytes(info[4:8], sys.byteorder) != self.SZOMB
+
+    def cwd(self, pid):
+        info = self.info(pid, self.VNODEPATHINFO, self.VNODEPATHINFO_SIZE)
+        if info is None:
+            return None
+        path = info[self.VNODE_INFO_SIZE:self.VNODE_INFO_SIZE + self.MAXPATHLEN]
+        return os.fsdecode(path.split(b"\0", 1)[0])
+
+
+def arm_owned_session():
+    """Run the journey as the leader of a new session (macOS).
+
+    A forked child that calls setsid cannot share its session with any earlier
+    process. The parent forwards termination signals, so an interrupted journey
+    still runs its own cleanup, and relays the child's exit status.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    child = os.fork()
+    if child:
+        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(number, lambda received, _: os.kill(child, received))
+        _, status = os.waitpid(child, 0)
+        code = os.waitstatus_to_exitcode(status)
+        os._exit(code if code >= 0 else 128 - code)
+    os.setsid()
+
+
+def owned_family(root):
+    """Live processes that this macOS journey owns, by pid.
+
+    Darwin reparents an orphan to launchd, so ancestry cannot be followed after
+    a descendant's parent exits. The host daemon and its sessions also start new
+    sessions. Ownership is therefore this journey's own session, or a process
+    whose working directory is inside, or whose arguments name, its private
+    root. Every journey runtime process starts with such a directory or argument.
+    """
+    darwin = Darwin()
+    roots = {str(root), os.path.realpath(root)}
+    me, session = os.getpid(), os.getsid(0)
+    listed = subprocess.run(["/bin/ps", "-axww", "-o", "pid=", "-o", "command="],
+                            capture_output=True, text=True, check=True).stdout
+    commands = {}
+    for line in listed.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        commands[int(pid)] = command
+    found = {}
+    for pid in darwin.pids():
+        if pid == me or not darwin.live(pid):
+            continue
+        try:
+            in_session = os.getsid(pid) == session
+        except OSError:
+            in_session = False
+        cwd = darwin.cwd(pid) or ""
+        command = commands.get(pid, "")
+        if (in_session or any(cwd == r or cwd.startswith(r + "/") for r in roots)
+                or any(r in command for r in roots)):
+            found[pid] = command or cwd
+    return found
+
+
+def reap_marked_family(root, timeout=10):
+    """Join this journey's children and require its owned family to be gone."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            while os.waitpid(-1, os.WNOHANG)[0]:
+                pass
+        except ChildProcessError:
+            pass
+        remaining = owned_family(root)
+        if not remaining:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"host journey owned-family cleanup remains unknown: {remaining}")
+        time.sleep(0.2)
 
 
 class Journey:
@@ -166,6 +285,8 @@ class Journey:
         owned = self.launch("tree", ["sh", "-c", 'sleep 300 & echo $! > "$1"; wait', "sh", str(child_pid_file)])
         self.until(child_pid_file.exists, bool)
         child_pid = int(child_pid_file.read_text())
+        if MACOS:
+            assert child_pid in owned_family(self.root), "owned-family scan misses a session descendant"
         stopped = self.call("stop", self.environment, "tree", "--output", "json", data=True)[0]
         assert stopped["state"] == "Stopped" and not stopped["cleanup_unknown"], stopped
         assert not process_alive(child_pid), "ordinary child survived Stop"
@@ -232,6 +353,8 @@ class Journey:
             assert self.wait_message(holding["id"])["result"] == "STEERED"
             assert self.wait_message(steered["id"])["state"] == "completed"
             holding = self.call("msg", self.environment, "worker", "HOLD", "--output", "json", data=True)
+            # Acceptance precedes the driver's active-turn publication.
+            self.until(lambda: self.inbox("worker"), lambda v: v["driver"]["active_message_id"] == holding["id"])
             interrupted = self.call("interrupt", self.environment, "worker", "--output", "json", data=True)
             assert self.wait_message(interrupted["id"])["state"] == "completed"
             assert self.wait_message(holding["id"], ok=False)["state"] == "interrupted"
@@ -401,7 +524,10 @@ class Journey:
             finally:
                 self.sentinel.terminate()
                 self.sentinel.wait(timeout=5)
-                reap_owned_family()
+                if MACOS:
+                    reap_marked_family(self.root)
+                else:
+                    reap_owned_family()
             if not preserve:
                 self.remove_files()
         except Exception:
@@ -413,6 +539,8 @@ class Journey:
 
 
 def process_alive(pid):
+    if MACOS:
+        return Darwin().live(pid)
     stat = Path(f"/proc/{pid}/stat")
     try:
         fields = stat.read_text().rsplit(") ", 1)[1].split()
@@ -426,9 +554,12 @@ def main():
     parser.add_argument("--cw", required=True)
     parser.add_argument("--native-agents", action="store_true")
     args = parser.parse_args()
-    if not sys.platform.startswith("linux"):
-        parser.error("trusted host placement is currently qualified on Linux")
-    arm_owned_family()
+    if not (LINUX or MACOS):
+        parser.error("trusted host placement is qualified on Linux and macOS")
+    if MACOS:
+        arm_owned_session()
+    else:
+        arm_owned_family()
     journey = Journey(args.cw, args.native_agents)
     passed = False
     try:

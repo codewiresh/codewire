@@ -157,6 +157,7 @@ impl Fixture {
             None,
             ready_tx,
             shutdown_rx,
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
         ));
         let mut client = LocalCredentialRepositoryLeaseClient::connect(
             client_stream,

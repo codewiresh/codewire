@@ -29,7 +29,9 @@ version can still be selected or reused, but a new version is refused.
 ## Commands
 
 ```sh
+curl -fsSL https://codewire.sh/install.sh | sh   # stock tools; installs a managed cw
 make cli-install                      # build, then `cw install --managed`
+cw update                             # same as --channel stable
 cw update status [--json]
 cw update --from DIR --sha256 HEX     # pinned local release: DIR/cw + DIR/cw-runtime.json
 cw update --version v1.2.3           # explicit signed public release
@@ -40,8 +42,8 @@ cw update rollback [--to VERSION]     # previous, or a digest, 8+ digit prefix o
 `--expect-generation N` refuses a change unless the selection generation is
 still `N`. Public fetching is implemented with the compiled release primary key;
 `--version` or `--channel stable` selects signed assets at the fixed public origin.
-Unavailable assets or origin refuse before selection; `cw update` alone requires
-an explicit source. Local `--from`/`--sha256` updates and retained rollback remain
+Unavailable assets or origin refuse before selection; `cw update` alone follows
+the stable channel. Local `--from`/`--sha256` updates and retained rollback remain
 available. A synthetic test key is never production trust. See
 [cw release delivery](../runbooks/cw-release-delivery.md#explicit-public-updates).
 

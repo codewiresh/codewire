@@ -32,11 +32,11 @@ use crate::control::v1::environment_runner_service_server::{
     EnvironmentRunnerService, EnvironmentRunnerServiceServer,
 };
 use crate::direct_share::{DirectShareIdentity, DirectShareRequest};
+use crate::host::path::PrivateRoot;
 use crate::host_port::{HostPortBinding, canonical_host_port_bindings};
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
-use crate::linux::path::PrivateRoot;
-use crate::linux::runner::ExitClass;
 use crate::mesh_ingress::{MeshAttachment, MeshEnrollmentAuthSource};
+use crate::runner::ExitClass;
 use crate::uds::{UdsError, bind_owner_only, connect_owner_only, remove_bound_socket};
 use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerError, RunningVm};
 
@@ -51,7 +51,7 @@ const MAXIMUM_GUEST_PROGRESS_FRAMES: usize = 64;
 const RUNNER_WATCH_BUFFER: usize = 8;
 // Bump for every detached-runner behavior change, even if the protobuf
 // message layout itself remains wire-compatible.
-const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 4;
+const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 5;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =
@@ -147,6 +147,28 @@ impl RunnerClient {
             .await?
             .into_inner()
             .disk_bytes)
+    }
+
+    pub async fn set_host_ports(
+        &mut self,
+        environment_id: Uuid,
+        generation: u64,
+        host_ports: &[HostPortBinding],
+    ) -> Result<(), Status> {
+        self.inner
+            .set_host_ports(v1::SetHostPortsRequest {
+                environment_id: environment_id.to_string(),
+                generation,
+                host_ports: host_ports
+                    .iter()
+                    .map(|binding| v1::HostPortBinding {
+                        host_port: u32::from(binding.host_port),
+                        guest_port: u32::from(binding.guest_port),
+                    })
+                    .collect(),
+            })
+            .await?;
+        Ok(())
     }
 
     pub async fn prepare_retire(&mut self) -> Result<(), Status> {
@@ -470,7 +492,7 @@ impl RunnerEvents {
         cw_runtime_catalog_generation: Option<&str>,
     ) -> Result<v1::RunnerEvent, Status> {
         if cw_runtime_catalog_generation
-            .is_some_and(|generation| !crate::linux::state::valid_root_generation(generation))
+            .is_some_and(|generation| !crate::state::valid_root_generation(generation))
         {
             return Err(Status::internal("runner runtime attachment is invalid"));
         }
@@ -537,11 +559,17 @@ fn guest_boot_stage_proto(stage: GuestBootStage) -> v1::GuestBootStage {
         GuestBootStage::WorkspaceRunning => v1::GuestBootStage::WorkspaceRunning,
         GuestBootStage::DaemonStarted => v1::GuestBootStage::DaemonStarted,
         GuestBootStage::SetupFailed => v1::GuestBootStage::SetupFailed,
-        GuestBootStage::WorkspaceFailed => v1::GuestBootStage::WorkspaceFailed,
+        GuestBootStage::WorkspaceFailed | GuestBootStage::DockerToolingMissing => {
+            v1::GuestBootStage::WorkspaceFailed
+        }
     }
 }
 
 pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerServiceError> {
+    // Darwin has no parent-death signal: the runner exits with its supervisor
+    // and is never adopted by another one.
+    #[cfg(target_os = "macos")]
+    crate::host::process::exit_with_parent().map_err(|_| RunnerServiceError::Configuration)?;
     if !config.mesh_data_dir.is_absolute() || !config.platform_config_dir.is_absolute() {
         return Err(RunnerServiceError::Configuration);
     }
@@ -588,6 +616,7 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
     };
     let server = tokio::spawn(serve_runner_rpc(config.socket, service));
     let adoption = adoption_rx.recv().await.ok_or(RunnerServiceError::Serve)?;
+    #[cfg(target_os = "linux")]
     clear_parent_death_signal().map_err(|_| RunnerServiceError::Adoption)?;
     let _ = adoption.acknowledged.send(());
     server.await.map_err(|_| RunnerServiceError::Serve)?
@@ -924,7 +953,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let vcpus = u8::try_from(request.vcpus)
             .map_err(|_| Status::invalid_argument("invalid vCPU count"))?;
         let setup = parse_setup_binding(&request)?;
-        let host_ports = parse_host_ports(&request)?;
+        let host_ports = parse_host_ports(&request.host_ports)?;
         let mesh = parse_mesh_attachment(&request)?;
         let direct_shares = parse_direct_shares(&request)?;
         let skill_snapshot_sha256 = parse_skill_snapshot(&request)?;
@@ -988,14 +1017,15 @@ impl EnvironmentRunnerService for RunnerRpc {
         {
             Ok(prepared) => prepared,
             Err(error) => {
+                let error_code = prepare_error_code(&error);
                 state.state = v1::EnvironmentState::Error;
-                state.error_code = Some("prepare_failed");
+                state.error_code = Some(error_code);
                 self.events.publish(
                     v1::EnvironmentState::Error,
                     request.generation,
                     v1::RunnerStage::Error,
                     None,
-                    Some("prepare_failed"),
+                    Some(error_code),
                     state.cw_runtime_catalog_generation(),
                 )?;
                 return Err(map_start_error(error));
@@ -1340,6 +1370,40 @@ impl EnvironmentRunnerService for RunnerRpc {
         Ok(Response::new(v1::GrowStateDiskResponse { disk_bytes }))
     }
 
+    async fn set_host_ports(
+        &self,
+        request: Request<v1::SetHostPortsRequest>,
+    ) -> Result<Response<v1::SetHostPortsResponse>, Status> {
+        let request = request.into_inner();
+        let environment_id = parse_environment_id(&request.environment_id)?;
+        let host_ports = parse_host_ports(&request.host_ports)?;
+        let mut state = self.state.lock().await;
+        state.retirement.require_active()?;
+        if !state.adopted {
+            return Err(Status::failed_precondition("runner is not adopted"));
+        }
+        if environment_id != state.environment_id {
+            return Err(Status::permission_denied("runner identity mismatch"));
+        }
+        state
+            .observe_exit()
+            .await
+            .map_err(|_| Status::internal("observe VMM state failed"))?;
+        if state.generation != request.generation || state.state != v1::EnvironmentState::Running {
+            return Err(Status::failed_precondition(
+                "host ports change only on the running generation",
+            ));
+        }
+        let running = state.running.as_mut().ok_or_else(|| {
+            Status::failed_precondition("host ports change only on the running generation")
+        })?;
+        running
+            .set_host_ports(&host_ports)
+            .await
+            .map_err(map_host_port_error)?;
+        Ok(Response::new(v1::SetHostPortsResponse {}))
+    }
+
     async fn get_daemon_access(
         &self,
         _request: Request<v1::GetDaemonAccessRequest>,
@@ -1395,7 +1459,7 @@ fn parse_cw_runtime_catalog_generation(
     if generation.is_empty() {
         return Ok(None);
     }
-    if !crate::linux::state::valid_root_generation(generation) {
+    if !crate::state::valid_root_generation(generation) {
         return Err(Status::invalid_argument(
             "invalid cw runtime catalog generation",
         ));
@@ -1428,9 +1492,8 @@ fn parse_setup_binding(request: &v1::StartVmRequest) -> Result<Option<SetupBindi
     }
 }
 
-fn parse_host_ports(request: &v1::StartVmRequest) -> Result<Vec<HostPortBinding>, Status> {
-    let provided = request
-        .host_ports
+fn parse_host_ports(host_ports: &[v1::HostPortBinding]) -> Result<Vec<HostPortBinding>, Status> {
+    let provided = host_ports
         .iter()
         .map(|binding| {
             Ok(HostPortBinding {
@@ -1561,8 +1624,33 @@ fn parse_environment_projection(
     Ok(Some(digest))
 }
 
+/// A busy port names itself after the stable code, so the supervisor can say
+/// which one is taken.
+fn map_host_port_error(error: RunnerError) -> Status {
+    match error {
+        RunnerError::HostPortUnavailable(port) => {
+            Status::failed_precondition(format!("{HOST_PORT_UNAVAILABLE} {port}"))
+        }
+        RunnerError::InvalidRequest => Status::invalid_argument("invalid host-port bindings"),
+        _ => Status::internal("host-port update failed"),
+    }
+}
+
 fn map_start_error(error: RunnerError) -> Status {
     Status::failed_precondition(error.to_string())
+}
+
+/// The runner error code for a guest whose image lacks Docker tooling.
+pub(crate) const GUEST_DOCKER_TOOLING_MISSING: &str = "guest_docker_tooling_missing";
+/// The runner error code for a published host port another program holds.
+pub(crate) const HOST_PORT_UNAVAILABLE: &str = "host_port_unavailable";
+
+/// Name the one prepare failure a user can fix without reading runner logs.
+fn prepare_error_code(error: &RunnerError) -> &'static str {
+    match error {
+        RunnerError::HostPortUnavailable(_) => HOST_PORT_UNAVAILABLE,
+        _ => "prepare_failed",
+    }
 }
 
 fn network_start_error_code(error: &RunnerError) -> &'static str {
@@ -1571,10 +1659,11 @@ fn network_start_error_code(error: &RunnerError) -> &'static str {
         RunnerError::NetworkWorkerSpawn => "network_worker_spawn",
         RunnerError::NetworkWorkerStartTimeout => "network_worker_start_timeout",
         RunnerError::NetworkWorkerBootstrap => "network_worker_bootstrap",
+        RunnerError::GuestDockerToolingMissing => GUEST_DOCKER_TOOLING_MISSING,
         RunnerError::NetworkWorkerStartup(failure) => failure.runner_error_code(),
         RunnerError::NetworkWorkerWait => "network_worker_wait",
         RunnerError::NetworkWorkerKillTimeout => "network_worker_kill_timeout",
-        RunnerError::HostPortUnavailable(_) => "host_port_unavailable",
+        RunnerError::HostPortUnavailable(_) => HOST_PORT_UNAVAILABLE,
         RunnerError::IngressControl => "ingress_forwarder_start",
         RunnerError::EgressBrokerSpawn => "egress_broker_spawn",
         RunnerError::EgressBrokerStartTimeout => "egress_broker_start_timeout",
@@ -1865,6 +1954,7 @@ async fn wait_for_guest_daemon(
     result?
 }
 
+#[cfg(target_os = "linux")]
 fn clear_parent_death_signal() -> Result<(), Status> {
     // SAFETY: PR_SET_PDEATHSIG with zero only clears the calling process's
     // parent-death signal and has no pointer argument.
@@ -1937,12 +2027,18 @@ mod tests {
         (parent, listener, access)
     }
 
+    #[cfg(target_os = "linux")]
     fn current_process_liveness() -> OwnedFd {
         rustix::process::pidfd_open(
             rustix::process::getpid(),
             rustix::process::PidfdFlags::empty(),
         )
         .unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn current_process_liveness() -> OwnedFd {
+        crate::host::process::exit_queue(std::process::id()).unwrap()
     }
 
     fn bootstrap_rpc() -> (tempfile::TempDir, RunnerRpc) {
@@ -1953,12 +2049,11 @@ mod tests {
         let artifact = crate::artifact::AdmittedArtifact::for_test("/nonexistent/test-artifact");
         let runner = CloudHypervisorRunner::from_admitted(
             parent.path().join("state"),
-            crate::artifact::AdmittedArtifacts {
-                cloud_hypervisor: artifact.clone(),
-                virtiofsd: None,
-                kernel: artifact.clone(),
-                initramfs: artifact,
-            },
+            crate::artifact::AdmittedArtifacts::for_test(
+                artifact.clone(),
+                artifact.clone(),
+                artifact,
+            ),
         )
         .unwrap();
         let rpc = RunnerRpc {
@@ -2415,14 +2510,22 @@ mod tests {
         let (_parent, _listener, access) = bootstrap_access();
         let environment_id = Uuid::new_v4();
         let cell = GenerationAccessCell::new(environment_id);
-        let mut child = tokio::process::Command::new("/bin/sleep")
-            .arg("60")
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        let pid = rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap();
-        let descriptor =
-            rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).unwrap();
+        let mut command = tokio::process::Command::new("/bin/sleep");
+        crate::test_child(command.as_std_mut());
+        let mut child = command.arg("60").kill_on_drop(true).spawn().unwrap();
+        #[cfg(target_os = "linux")]
+        let descriptor = {
+            let pid = rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap();
+            rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).unwrap()
+        };
+        #[cfg(target_os = "macos")]
+        let descriptor = crate::host::process::LiveProcess::capture_child(
+            child.id().unwrap(),
+            std::path::Path::new("/bin/sleep"),
+        )
+        .unwrap()
+        .duplicate_wait_descriptor()
+        .unwrap();
         let _guard = cell.install(1, access, descriptor).unwrap();
         assert!(cell.get(environment_id, 1).is_ok());
         child.kill().await.unwrap();
@@ -2775,6 +2878,18 @@ mod tests {
     }
 
     #[test]
+    fn prepare_names_only_an_unavailable_host_port() {
+        assert_eq!(
+            prepare_error_code(&RunnerError::HostPortUnavailable(18_080)),
+            HOST_PORT_UNAVAILABLE
+        );
+        assert_eq!(
+            prepare_error_code(&RunnerError::InvalidRequest),
+            "prepare_failed"
+        );
+    }
+
+    #[test]
     fn private_start_requires_an_exact_complete_setup_binding() {
         let root_generation = "a".repeat(64);
         let header_sha256 = "b".repeat(64);
@@ -2858,6 +2973,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn private_start_binds_direct_shares_to_exact_host_identity_and_guest_order() {
         let source = tempfile::tempdir().unwrap();
@@ -2931,7 +3047,10 @@ mod tests {
 
     #[tokio::test]
     async fn authenticated_guest_progress_stream_is_fixed_port_and_terminal() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
         let socket = temp.path().join("hybrid.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -2987,7 +3106,10 @@ mod tests {
 
     #[test]
     fn guest_progress_validator_rejects_replay_regression_and_flood() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
         let socket = temp.path().join("hybrid.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();

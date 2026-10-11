@@ -11,10 +11,8 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(25);
 
 fn ensure_host_supported() -> anyhow::Result<()> {
-    if !cfg!(target_os = "linux") {
-        anyhow::bail!(
-            "trusted host environments are currently qualified on Linux; macOS requires its owned-process cleanup adapter before admission"
-        );
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        anyhow::bail!("trusted host environments are supported on Linux and macOS");
     }
     Ok(())
 }

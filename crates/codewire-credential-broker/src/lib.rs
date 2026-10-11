@@ -10,13 +10,9 @@
 
 pub mod anthropic;
 mod bridge;
-#[cfg(feature = "codex-enrollment")]
-pub mod codex_enrollment;
 mod codex_oauth;
 pub mod github;
 pub mod github_app;
-#[cfg(feature = "codex-enrollment")]
-pub mod github_enrollment;
 #[cfg(all(feature = "host-agent-synthetic-smoke", target_os = "linux"))]
 pub mod host_agent_smoke;
 #[cfg(test)]
@@ -25,31 +21,27 @@ mod network;
 mod openai;
 #[cfg(feature = "platform")]
 pub mod platform;
-#[cfg(all(
-    test,
-    any(
-        feature = "codex-enrollment",
-        all(feature = "ssh-agent", target_os = "linux")
-    )
-))]
+#[cfg(all(test, feature = "ssh-agent", target_os = "linux"))]
 mod process_test_support;
-#[cfg(any(feature = "codex-enrollment", feature = "ssh-agent"))]
+#[cfg(feature = "ssh-agent")]
 pub mod provider_enrollment;
+pub mod provider_oauth;
 mod reconnect;
 mod refresh_failure;
 mod runtime;
-#[cfg(all(feature = "ssh-agent", target_os = "linux"))]
+#[cfg(all(feature = "ssh-agent", any(target_os = "linux", target_os = "macos")))]
 pub mod ssh_agent;
 pub mod timing;
 mod transparent;
 
 pub use codewire_access::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection};
 pub use codex_oauth::{
-    CanonicalCodexOAuthBundle, CodexOAuthImport, CodexOAuthMaterialError, import_codex_auth_json,
+    CanonicalCodexOAuthBundle, CodexOAuthImport, CodexOAuthMaterialError, import_codex_tokens,
 };
 pub use github_app::{
     GitHubAppAuthorizationConfig, GitHubAppAuthorizationError, GitHubAppAuthorizationImport,
-    GitHubAppAuthorizationOwner, GitHubAppRefreshError, GitHubAppUserOAuthBundle,
+    GitHubAppAuthorizationOwner, GitHubAppInstallationReach, GitHubAppRefreshError,
+    GitHubAppUserOAuthBundle, github_access_token,
 };
 pub use network::ProviderHttpsTransport;
 pub use openai::{

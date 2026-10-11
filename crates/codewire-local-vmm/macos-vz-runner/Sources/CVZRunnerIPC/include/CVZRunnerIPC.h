@@ -82,4 +82,19 @@ int cw_vz_bridge_daemon_streams(int local_fd, int guest_fd, int cancellation_fd,
 int cw_vz_prepare_control(int socket_fd);
 int cw_vz_control_event(int socket_fd, int milliseconds);
 
+// Product VM hybrid vsock. Bind a new owner-only listener at an absolute path
+// (never replacing one); returns the descriptor or -1.
+int cw_vz_listen_unix(const char *path);
+// Read exactly one "CONNECT <decimal port>\n" line within two seconds.
+int cw_vz_read_connect(int fd, uint32_t *port);
+int cw_vz_write_all(int fd, const uint8_t *bytes, size_t size);
+// Copy both directions until each has reached EOF, forwarding each EOF as a
+// write shutdown. Returns 0 after both EOFs and -1 on error. Does not close.
+int cw_vz_splice(int a, int b);
+
+// Product VM shared directory. Open `path` without following a symlink in any
+// component and require this user's directory `device`/`inode` (raw st_dev and
+// st_ino), still named exactly `path`. Returns 0 on a match and -1 otherwise.
+int cw_vz_verify_shared_directory(const char *path, uint32_t device, uint64_t inode);
+
 #endif

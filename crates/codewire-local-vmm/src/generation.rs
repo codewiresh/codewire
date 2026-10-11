@@ -14,8 +14,8 @@ use std::process::{Command, Stdio};
 
 use uuid::Uuid;
 
-use crate::linux::path::PrivateRoot;
-use crate::linux::state::{
+use crate::host::path::PrivateRoot;
+use crate::state::{
     MAXIMUM_ROOT_GENERATIONS, RootGenerationPaths, StateDiskIdentity, VmPaths,
     admitted_generation_names,
 };
@@ -143,10 +143,15 @@ pub(crate) fn ensure_root_generation(
 }
 
 fn format_ext4(disk: &Path, seed_directory: Option<&Path>) -> Result<(), GenerationError> {
+    #[cfg(target_os = "linux")]
     let mkfs = ["/usr/sbin/mkfs.ext4", "/usr/bin/mkfs.ext4"]
         .into_iter()
         .find(|candidate| Path::new(candidate).is_file())
         .ok_or(GenerationError::MkfsUnavailable)?;
+    #[cfg(target_os = "macos")]
+    let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(GenerationError::MkfsUnavailable)?;
+    #[cfg(target_os = "macos")]
+    let config = crate::host::mke2fs_config().ok_or(GenerationError::MkfsUnavailable)?;
     if let Some(seed) = seed_directory {
         let metadata = fs::symlink_metadata(seed).map_err(|source| GenerationError::Io {
             path: seed.to_owned(),
@@ -168,10 +173,10 @@ fn format_ext4(disk: &Path, seed_directory: Option<&Path>) -> Result<(), Generat
     if let Some(seed) = seed_directory {
         command.arg("-d").arg(seed);
     }
+    command.arg(disk).env_clear().env("LC_ALL", "C");
+    #[cfg(target_os = "macos")]
+    command.env("MKE2FS_CONFIG", config);
     let status = command
-        .arg(disk)
-        .env_clear()
-        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -224,7 +229,16 @@ pub enum GenerationError {
         expected: u64,
         actual: u64,
     },
-    #[error("mkfs.ext4 is required for root generation preparation")]
+    #[cfg_attr(
+        target_os = "linux",
+        error("mkfs.ext4 is required for root generation preparation")
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error(
+            "the local VM runtime's mkfs.ext4 is missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+        )
+    )]
     MkfsUnavailable,
     #[error("mkfs.ext4 failed to create the root generation disk")]
     MkfsFailed,
@@ -233,9 +247,9 @@ pub enum GenerationError {
     #[error("root generation seed directory is invalid: {0}")]
     InvalidSeedDirectory(PathBuf),
     #[error(transparent)]
-    Path(#[from] crate::linux::path::PathError),
+    Path(#[from] crate::host::path::PathError),
     #[error(transparent)]
-    State(#[from] crate::linux::state::StateError),
+    State(#[from] crate::state::StateError),
     #[error("filesystem operation failed for {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
 }
@@ -281,6 +295,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn creation_is_reported_only_by_the_publishing_invocation() {
         let engine = tempfile::tempdir().unwrap();
@@ -320,7 +335,7 @@ mod tests {
                 MINIMUM_ROOT_DISK_BYTES,
             ),
             Err(GenerationError::State(
-                crate::linux::state::StateError::InvalidRootGeneration
+                crate::state::StateError::InvalidRootGeneration
             ))
         ));
     }
@@ -346,6 +361,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn skill_snapshot_generation_requires_explicit_seed_before_publication() {
         let engine = tempfile::tempdir().unwrap();

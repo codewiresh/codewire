@@ -109,7 +109,7 @@ async fn bootstrap_three_phases_get_fresh_bound_context_and_finish_drains_pendin
         assert_eq!(&context[32..64], &[3; 32]);
         let deadline = u64::from_be_bytes(context[64..72].try_into().unwrap());
         assert!(deadline > now_unix_ms().unwrap());
-        assert!(deadline <= now_unix_ms().unwrap() + MAX_PROJECTION_LIFETIME_MS);
+        assert!(deadline <= now_unix_ms().unwrap() + PROJECTION_REQUEST_LIFETIME_MS);
         channels.push(channel);
     }
     let mut finish = UnixStream::connect(&path).await.unwrap();

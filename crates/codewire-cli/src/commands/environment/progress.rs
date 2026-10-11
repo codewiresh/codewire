@@ -399,6 +399,25 @@ impl<W: Write> StartProgress<W> {
         self.redraw(now)
     }
 
+    /// Sets or clears the detail shown beside an open local stage on the live
+    /// line, such as what a booting guest is doing. Plain output omits it.
+    pub(crate) fn set_local_detail(
+        &mut self,
+        key: &str,
+        detail: Option<&str>,
+        now: Instant,
+    ) -> std::io::Result<()> {
+        let Some(stage) = self.open.iter_mut().rev().find(|stage| stage.key == key) else {
+            return Ok(());
+        };
+        let detail = detail.map(str::to_owned);
+        if stage.detail == detail {
+            return Ok(());
+        }
+        stage.detail = detail;
+        self.redraw(now)
+    }
+
     /// Writes a permanent notice line.
     pub(crate) fn note(&mut self, text: &str) -> std::io::Result<()> {
         self.line(&format!("  ! {}", terminal_text(text)))?;

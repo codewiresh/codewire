@@ -367,11 +367,16 @@ async fn cancellation_does_not_reopen_blocking_projection_capacity() {
     gate.started.notified().await;
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
-    let denied = service
-        .project_bound_environment(request(&context, &recipient))
+    // The cancelled worker still holds the permit, so a second projection
+    // waits for it and does not read the store.
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            service.project_bound_environment(request(&context, &recipient)),
+        )
         .await
-        .unwrap_err();
-    assert_eq!(denied.code(), tonic::Code::ResourceExhausted);
+        .is_err()
+    );
     assert_eq!(store.reads.load(Ordering::Relaxed), 1);
     drop(release);
     let _barrier = service.projection_operations.acquire().await.unwrap();
@@ -390,4 +395,31 @@ async fn cancellation_does_not_reopen_blocking_projection_capacity() {
             .load(Ordering::Acquire),
         0
     );
+}
+
+#[tokio::test]
+async fn a_concurrent_projection_waits_for_the_permit_and_then_succeeds() {
+    let gate = Arc::new(Gate::default());
+    let release = ReleaseGate(Arc::clone(&gate));
+    let store = Store {
+        gate: Some(Arc::clone(&gate)),
+        ..Default::default()
+    };
+    let (_temp, authority, context) = fixture(store.clone());
+    let service = Arc::new(rpc(authority, &context));
+    let recipient = ProjectionRecipient::new();
+    let first_service = Arc::clone(&service);
+    let first_input = request(&context, &recipient);
+    let first =
+        tokio::spawn(async move { first_service.project_bound_environment(first_input).await });
+    gate.started.notified().await;
+    let second_service = Arc::clone(&service);
+    let second_input = request(&context, &recipient);
+    let second =
+        tokio::spawn(async move { second_service.project_bound_environment(second_input).await });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(!second.is_finished());
+    drop(release);
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
 }
