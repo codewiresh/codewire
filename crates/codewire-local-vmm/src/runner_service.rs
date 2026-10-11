@@ -1018,6 +1018,10 @@ impl EnvironmentRunnerService for RunnerRpc {
             Ok(prepared) => prepared,
             Err(error) => {
                 let error_code = prepare_error_code(&error);
+                // A failed attempt consumes its generation as a prepared one
+                // does (below), so the generation this runner reports matches
+                // its last event, which a retry compares it with (#2579).
+                state.generation = state.generation.max(request.generation);
                 state.state = v1::EnvironmentState::Error;
                 state.error_code = Some(error_code);
                 self.events.publish(
@@ -2314,6 +2318,29 @@ mod tests {
             RetirementState::ShutdownRequested
         );
         assert_retired_capabilities_denied(&rpc).await;
+    }
+
+    /// A start that fails before its VM is prepared still consumes its
+    /// generation, so the generation the runner reports and the one on its
+    /// last event agree. A supervisor's retry compares the two; when they
+    /// disagreed, the first retry after a failed start (such as a taken host
+    /// port) was refused as an invalid runner response (#2579).
+    #[tokio::test]
+    async fn a_start_that_fails_to_prepare_reports_its_generation_consistently() {
+        let (_parent, rpc) = bootstrap_rpc();
+        let id = rpc.events.environment_id;
+        let request = stopped_start_request(id);
+        rpc.start_vm(Request::new(request.clone()))
+            .await
+            .unwrap_err();
+        let info = rpc.state.lock().await.info();
+        let last = rpc.events.subscribe().borrow().clone();
+        let event = last.runner.as_ref().unwrap();
+        assert_eq!(last.stage, v1::RunnerStage::Error as i32, "{last:?}");
+        assert_eq!(info.state, v1::EnvironmentState::Error as i32);
+        assert_eq!(event.generation, request.generation);
+        assert_eq!(info.generation, event.generation);
+        assert_eq!(info.error_code, event.error_code);
     }
 
     #[tokio::test]
