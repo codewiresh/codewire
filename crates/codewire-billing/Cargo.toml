@@ -68,3 +68,4 @@ futures-util = "0.3"
 codewire-admin-proto = { workspace = true, features = ["client"] }
 codewire-proto = { workspace = true, features = ["client"] }
 connectrpc = { workspace = true, features = ["client"] }
+codewire-workspace-hack.workspace = true

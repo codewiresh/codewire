@@ -53,3 +53,6 @@ libc = "0.2"
 tempfile = { workspace = true }
 tonic = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+codewire-workspace-hack.workspace = true
