@@ -150,7 +150,7 @@ fn launch(id: Uuid) -> ManagedMutation {
                     name: "Synthetic".into(),
                     expected_provider_sha256: vec![0xcc; 32],
                     expected_provider_size: 4,
-                    expected_provider_version: "0.157.0".into(),
+                    expected_provider_version: "0.160.0".into(),
                     ..Default::default()
                 },
             ),

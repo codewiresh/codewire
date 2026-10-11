@@ -69,7 +69,7 @@ mod linux {
     type SmokeResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
     const CODEX_BIN: &str = "codex";
-    const CODEX_VERSION: &str = "codex-cli 0.157.0\n";
+    const CODEX_VERSION: &str = "codex-cli 0.160.0\n";
     const CODEX_MODEL: &str = "codewire-synthetic";
     const CODEX_PROMPT: &str = "Return the synthetic marker.";
     const CODEX_MARKER: &str = "CWCODEX149 synthetic";
@@ -78,8 +78,12 @@ mod linux {
     const MANAGED_CLAUDE_MARKER: &str = "CWCLAUDE21238 broker [REDACTED]";
     const SSH_PUBLIC_KEY_PATH: &str = "/workspace/fixtures/native-ssh-public-key.pub";
     const STOCK_SSH_WORKLOAD_PATH: &str = "/workspace/fixtures/stock-ssh-workload.sh";
-    const CLAUDE_VERSION: &str = "2.1.238 (Claude Code)\n";
+    const CLAUDE_VERSION: &str = "2.1.288 (Claude Code)\n";
     const CLAUDE_MODEL: &str = "claude-sonnet-4-6";
+    /// The pinned client's one notice for a non-Anthropic base URL, such as
+    /// the managed loopback route: auto-mode classifier requests stay billed.
+    const CLAUDE_GATEWAY_NOTICE: &str =
+        "We're changing auto mode to no longer charge for classifier requests in Claude Code.";
     const CLAUDE_PATHS: [&str; 2] = [
         "/opt/codewire/agents/npm/bin/claude",
         "/home/codewire/.npm-global/bin/claude",
@@ -308,8 +312,8 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         require(
             output
                 .stderr
-                .windows(b"OpenAI Codex v0.157.0".len())
-                .any(|window| window == b"OpenAI Codex v0.157.0"),
+                .windows(b"OpenAI Codex v0.160.0".len())
+                .any(|window| window == b"OpenAI Codex v0.160.0"),
         )?;
 
         println!("codewire-local-codex-bridge-smoke: PASS");
@@ -1294,6 +1298,7 @@ function generalEgress(){
         require(text.ends_with('\n'))?;
         let mut initialized = false;
         let mut requesting = false;
+        let mut noticed = false;
         let mut stream_state = 0;
         let mut streamed_text = String::new();
         let mut assistant = false;
@@ -1318,6 +1323,19 @@ function generalEgress(){
                                 && frame["status"] == "requesting",
                         )?;
                         requesting = true;
+                    }
+                    Some("informational") => {
+                        // Informational only; it never substitutes for the
+                        // complete stream and successful final result below.
+                        require(
+                            initialized
+                                && !noticed
+                                && frame["level"] == "warning"
+                                && frame["content"].as_str().is_some_and(|content| {
+                                    content.starts_with(CLAUDE_GATEWAY_NOTICE)
+                                }),
+                        )?;
+                        noticed = true;
                     }
                     _ => return Err(failed()),
                 },
@@ -1416,8 +1434,8 @@ function generalEgress(){
                 && output.stdout == format!("{MANAGED_CODEX_MARKER}\n").as_bytes()
                 && output
                     .stderr
-                    .windows(b"OpenAI Codex v0.157.0".len())
-                    .any(|window| window == b"OpenAI Codex v0.157.0"),
+                    .windows(b"OpenAI Codex v0.160.0".len())
+                    .any(|window| window == b"OpenAI Codex v0.160.0"),
         )
     }
 
@@ -2541,7 +2559,7 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
 
         #[test]
         fn claude_accepts_observed_requesting_status_without_weakening_stream_proof() {
-            // Observed from the exact pinned workspace's Claude 2.1.238 with
+            // Observed from the exact pinned workspace's Claude 2.1.288 with
             // the managed arguments and public auth placeholders. A progress
             // event is not another startup, response, or successful result.
             let requesting = serde_json::json!({
@@ -2575,6 +2593,41 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
                 invalid.insert(position, requesting.clone());
                 assert!(validate_claude_output(&claude_output(&invalid)).is_err());
             }
+        }
+
+        #[test]
+        fn claude_accepts_one_observed_gateway_notice_without_weakening_stream_proof() {
+            // Observed from Claude 2.1.288 with the managed arguments and the
+            // loopback base URL, between message_delta and message_stop.
+            let notice = serde_json::json!({
+                "type":"system", "subtype":"informational", "level":"warning",
+                "content": format!("{CLAUDE_GATEWAY_NOTICE} However, this session isn't eligible because your requests go through 127.0.0.1:38081, which isn't compatible with this update."),
+            });
+            let mut frames = claude_frames();
+            let stop = frames.len() - 3;
+            frames.insert(stop, notice.clone());
+            assert!(validate_claude_output(&claude_output(&frames)).is_ok());
+            let mut twice = frames.clone();
+            twice.insert(stop, notice.clone());
+            assert!(validate_claude_output(&claude_output(&twice)).is_err());
+            let mut early = claude_frames();
+            early.insert(0, notice.clone());
+            assert!(validate_claude_output(&claude_output(&early)).is_err());
+            for (field, value) in [
+                ("level", Value::from("error")),
+                ("content", Value::from("Another notice.")),
+                ("content", Value::Null),
+            ] {
+                let mut other = notice.clone();
+                other[field] = value;
+                let mut invalid = claude_frames();
+                invalid.insert(stop, other);
+                assert!(validate_claude_output(&claude_output(&invalid)).is_err());
+            }
+            // The notice never stands in for a missing required frame.
+            let mut missing = frames.clone();
+            missing.remove(stop + 1);
+            assert!(validate_claude_output(&claude_output(&missing)).is_err());
         }
 
         // This is the synthetic transport's *post-redaction* Messages stream,

@@ -164,8 +164,9 @@ FROM workspace-foundation AS workspace-floating-tools
 USER root
 # Moving convenience channels intentionally resolve at image-build time. Their
 # result remains visible to the SBOM and is identified by the immutable output
-# image digest.
-RUN NPM_CONFIG_PREFIX=/usr/local npm install -g --ignore-scripts npm@latest pnpm yarn && \
+# image digest. The package managers are exact pins: npm also installs the
+# shipped agents below.
+RUN NPM_CONFIG_PREFIX=/usr/local npm install -g --ignore-scripts npm@12.2.0 pnpm@12.9.0 yarn@1.22.22 && \
     npm cache clean --force && \
     curl --proto '=https' --tlsv1.2 -fsSL https://bun.sh/install | bash && \
     install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun && \
@@ -184,14 +185,23 @@ FROM workspace-floating-tools AS workspace
 # contract, outside the persistent home mount. Interactive users can install
 # newer versions into their own prefix without sudo; PATH gives those versions
 # precedence. No startup installer or image-home copy is needed.
-# Lifecycle scripts stay disabled except for Claude's official package, whose
-# native binary is installed by its required postinstall hook.
-RUN npm install --prefix /opt/codewire/agents/npm -g --ignore-scripts \
-      @openai/codex@0.157.0 \
-      @google/gemini-cli@0.56.0 \
-      @moonshot-ai/kimi-code@0.38.0 \
-      @earendil-works/pi-coding-agent@0.84.2 && \
-    npm install --prefix /opt/codewire/agents/npm -g @anthropic-ai/claude-code@2.1.238
+# npm ci installs the reviewed lockfile, every transitive version included, in
+# the layout of a global install. Its allowScripts policy runs only the
+# postinstall of Claude's official package, which places its native binary,
+# and fails on any other unreviewed lifecycle script. The user's global npm
+# configuration does not apply to this project install. Only the agents'
+# own commands are linked.
+RUN --mount=type=bind,source=images/workspace/agents,target=/tmp/codewire-agents,readonly \
+    mkdir -p /opt/codewire/agents/npm/lib /opt/codewire/agents/npm/bin && \
+    cp /tmp/codewire-agents/package.json /tmp/codewire-agents/package-lock.json \
+      /opt/codewire/agents/npm/lib/ && \
+    cd /opt/codewire/agents/npm/lib && \
+    env -u NPM_CONFIG_ALLOW_SCRIPTS -u NPM_CONFIG_PREFIX \
+      npm ci --strict-allow-scripts --no-audit --no-fund && \
+    npm cache clean --force && \
+    for agent in claude codex gemini kimi pi; do \
+      ln -s "../lib/node_modules/.bin/$agent" "/opt/codewire/agents/npm/bin/$agent"; \
+    done
 
 USER root
 # The home is a persistent mount, so interactive shell settings live in the image.

@@ -9,7 +9,7 @@ const PROMPT: &str = "\nWelcome to Codex [v\x1b[90m0.149.0\x1b[0m]\n\x1b[90mOpen
 
 #[test]
 fn pinned_prompt_accepts_every_chunk_boundary_and_only_typed_challenge() {
-    for version in ["0.149.0", "0.153.4", "0.157.0"] {
+    for version in ["0.149.0", "0.153.4", "0.157.0", "0.160.0"] {
         assert_pinned_prompt(&PROMPT.replace("0.149.0", version));
     }
 }
@@ -65,7 +65,7 @@ fn prompt_rejects_wrong_url_codes_controls_duplicates_and_truncation() {
         "x".repeat(4097),
         PROMPT[..PROMPT.len() - 3].to_owned(),
     ];
-    for version in ["0.149.0", "0.153.4", "0.157.0"] {
+    for version in ["0.149.0", "0.153.4", "0.157.0", "0.160.0"] {
         for input in &cases {
             let input = input.replace("0.149.0", version);
             let mut parser = ChallengeParser::new(1234);
@@ -92,7 +92,7 @@ fn prompt_rejects_wrong_url_codes_controls_duplicates_and_truncation() {
 
 #[test]
 fn unsupported_version_and_all_errors_are_closed_and_value_blind() {
-    for version in ["0.150.0", "0.157.1", "0.158.0"] {
+    for version in ["0.150.0", "0.157.1", "0.158.0", "0.160.1"] {
         let mut parser = ChallengeParser::new(1234);
         assert_eq!(
             parser
@@ -301,7 +301,7 @@ async fn completed_publication_cleans_private_home_without_logout() {
     isolated_process_fixture(
         "codex_enrollment::tests::completed_publication_cleans_private_home_without_logout",
         async {
-            for version in ["0.149.0", "0.153.4"] {
+            for version in ["0.149.0", "0.153.4", "0.157.0"] {
                 assert_completed_publication(version).await;
             }
         },
@@ -310,13 +310,13 @@ async fn completed_publication_cleans_private_home_without_logout() {
 }
 
 #[tokio::test]
-async fn codex_0_157_0_completes_isolated_enrollment_and_cleans_private_home() {
+async fn codex_0_160_0_completes_isolated_enrollment_and_cleans_private_home() {
     isolated_process_fixture(
-        "codex_enrollment::tests::codex_0_157_0_completes_isolated_enrollment_and_cleans_private_home",
+        "codex_enrollment::tests::codex_0_160_0_completes_isolated_enrollment_and_cleans_private_home",
         async {
             tokio::time::timeout(
                 Duration::from_secs(15),
-                assert_completed_publication("0.157.0"),
+                assert_completed_publication("0.160.0"),
             )
             .await
             .expect("synthetic enrollment and cleanup must finish within the bound");

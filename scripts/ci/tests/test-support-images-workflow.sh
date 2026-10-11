@@ -6,6 +6,7 @@ readonly ROOT
 readonly WORKFLOW="$ROOT/.gitea/workflows/support-images.yaml"
 readonly LEGACY_GITHUB_WORKFLOW="$ROOT/.github/workflows/build-workspace-image.yml"
 readonly WORKSPACE_DOCKERFILE="$ROOT/images/workspace/Dockerfile"
+readonly WORKSPACE_AGENTS="$ROOT/images/workspace/agents"
 readonly CONFIDENTIAL_PROBE_DOCKERFILE="$ROOT/images/confidential-probe/Dockerfile"
 
 fail() {
@@ -192,7 +193,7 @@ grep -qF 'rm -rf /tmp/cargo-target' <<<"$builder_stage" ||
 [[ "$(grep -c '^RUN ' <<<"$builder_stage")" == 1 ]] ||
   fail 'workspace target cleanup must share the compile layer'
 floating_stage="$(sed -n '/^FROM workspace-foundation AS workspace-floating-tools$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
-for tool in 'NPM_CONFIG_PREFIX=/usr/local npm install' 'npm@latest pnpm yarn' \
+for tool in 'NPM_CONFIG_PREFIX=/usr/local npm install' 'npm@12.2.0 pnpm@12.9.0 yarn@1.22.22' \
   'https://bun.sh/install' 'gopls@latest' 'hcloud@latest' 'pipx install poetry' 'pipx install uv' 'pipx install aider-chat'; do
   grep -qF "$tool" <<<"$floating_stage" || fail "floating tool omitted from the fresh stage: $tool"
 done
@@ -274,17 +275,46 @@ grep -qF 'snapshot.ubuntu.com/ubuntu/20260803T000000Z/' "$ROOT/images/base/ubunt
 grep -qF 'snapshot.debian.org/archive/debian/20251208T000000Z/' \
   "$ROOT/images/workspace/debian.sources" ||
   fail 'workspace builder apt inputs are not bound to the reviewed Debian snapshot'
-for agent_package in @openai/codex@0.157.0 @anthropic-ai/claude-code@2.1.238 \
-  @google/gemini-cli@0.56.0 @moonshot-ai/kimi-code@0.38.0 \
-  @earendil-works/pi-coding-agent@0.84.2; do
-  grep -qF "$agent_package" "$WORKSPACE_DOCKERFILE" ||
-    fail "workspace omits moving agent package $agent_package"
-  if grep -Fq "${agent_package}@" "$WORKSPACE_DOCKERFILE"; then
-    fail "moving agent package $agent_package is unexpectedly version-pinned"
-  fi
-done
-grep -qF 'npm@latest pnpm yarn' "$WORKSPACE_DOCKERFILE" ||
-  fail 'workspace does not update the Node archive npm together with its package managers'
+# The shipped agents come from one exact lockfile: every package from the
+# registry with its integrity, and only Claude's reviewed installer allowed.
+python3 - "$WORKSPACE_AGENTS/package.json" "$WORKSPACE_AGENTS/package-lock.json" <<'PY' ||
+import json
+import re
+import sys
+
+package = json.load(open(sys.argv[1]))
+lock = json.load(open(sys.argv[2]))
+agents = {
+    "@anthropic-ai/claude-code": "2.1.288",
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@google/gemini-cli": "0.62.0",
+    "@moonshot-ai/kimi-code": "2.1.1",
+    "@openai/codex": "0.160.0",
+}
+assert package["dependencies"] == agents
+assert lock["lockfileVersion"] == 3
+assert lock["packages"][""]["dependencies"] == agents
+for path, entry in lock["packages"].items():
+    if path:
+        assert not entry.get("link"), path
+        assert re.fullmatch(r"https://registry\.npmjs\.org/\S+\.tgz", entry["resolved"]), path
+        assert entry["integrity"].startswith("sha512-"), path
+for name, version in agents.items():
+    assert lock["packages"]["node_modules/" + name]["version"] == version, name
+allowed = [spec for spec, allow in package["allowScripts"].items() if allow is not False]
+assert allowed == ["@anthropic-ai/claude-code@2.1.288"], allowed
+PY
+  fail 'workspace agents are not one exact, registry-pinned lockfile'
+grep -qF 'npm ci --strict-allow-scripts --no-audit --no-fund' "$WORKSPACE_DOCKERFILE" ||
+  fail 'workspace does not install the agent lockfile under its strict script policy'
+grep -qF 'env -u NPM_CONFIG_ALLOW_SCRIPTS -u NPM_CONFIG_PREFIX' "$WORKSPACE_DOCKERFILE" ||
+  fail 'workspace agent install inherits the user-facing global npm configuration'
+if grep -Eq 'npm install .*(@openai/codex|@anthropic-ai/claude-code|@google/gemini-cli|@moonshot-ai/kimi-code|@earendil-works/pi-coding-agent)' \
+    "$WORKSPACE_DOCKERFILE"; then
+  fail 'workspace installs an agent outside its lockfile'
+fi
+grep -qF 'npm@12.2.0 pnpm@12.9.0 yarn@1.22.22' "$WORKSPACE_DOCKERFILE" ||
+  fail 'workspace does not pin the Node archive npm together with its package managers'
 grep -qF 'npm cache clean --force' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace retains the root package-manager installer cache'
 grep -qFx -- 'ENV NPM_CONFIG_ALLOW_SCRIPTS="@anthropic-ai/claude-code"' \
