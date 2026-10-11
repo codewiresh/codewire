@@ -74,7 +74,6 @@ impl WorkspaceGenerationRecord {
         )
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn new_with_skill_snapshot(
         project_spec_json: &[u8],
         project_sha256: String,
@@ -181,7 +180,6 @@ impl WorkspaceGenerationRecord {
     /// currently authorized source selectors. In particular, rolling back a
     /// workspace must not roll back credential or application-secret choices.
     /// The immutable built generation, setup hash and skill plan are untouched.
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn project_intent_with_current_sources(
         &self,
         current_project_json: &[u8],
@@ -200,7 +198,6 @@ impl WorkspaceGenerationRecord {
         Ok((bytes, sha256))
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn project_spec_json(&self) -> Result<&[u8], WorkspaceGenerationError> {
         self.validate()?;
         Ok(self.project_spec_json.as_bytes())
@@ -218,7 +215,6 @@ impl WorkspaceGenerationRecord {
         Ok(self.skill_snapshot.as_ref())
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn encode_canonical(&self) -> Result<Vec<u8>, WorkspaceGenerationError> {
         self.validate()?;
         encode_bounded(self)

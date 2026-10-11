@@ -11,7 +11,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use uuid::Uuid;
 
 use super::Sha256Digest;
-use crate::linux::path::{PathError, PrivateRoot};
+use crate::host::path::{PathError, PrivateRoot};
 
 const CONTENT_DIRECTORY: &str = "content";
 const BLOBS_DIRECTORY: &str = "blobs";
@@ -425,6 +425,7 @@ impl Drop for TemporaryBlob {
 
 fn path_error_is_not_found(error: &PathError) -> bool {
     match error {
+        #[cfg(target_os = "linux")]
         PathError::Openat2 { source, .. } => *source == rustix::io::Errno::NOENT,
         PathError::Io { source, .. } => source.kind() == io::ErrorKind::NotFound,
         _ => false,
@@ -532,11 +533,20 @@ mod tests {
             store.blobs.path().join("second-link"),
         )
         .unwrap();
+        #[cfg(target_os = "linux")]
         assert!(matches!(
             store
                 .admit_bytes(&digest, Bytes::copy_from_slice(bytes))
                 .await,
             Err(ContentStoreError::ExistingBlobInvalid)
+        ));
+        // Darwin refuses a multiply linked file at open (O_UNIQUE).
+        #[cfg(target_os = "macos")]
+        assert!(matches!(
+            store
+                .admit_bytes(&digest, Bytes::copy_from_slice(bytes))
+                .await,
+            Err(ContentStoreError::Path(PathError::Io { .. }))
         ));
     }
 

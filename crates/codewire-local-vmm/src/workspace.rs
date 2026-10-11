@@ -7,25 +7,28 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
-use std::os::fd::{AsFd as _, BorrowedFd};
+use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use rustix::fs::{Dir, Mode, OFlags, ResolveFlags, openat2, readlinkat};
+use rustix::fs::{Dir, Mode, OFlags, readlinkat};
+#[cfg(target_os = "linux")]
+use rustix::fs::{ResolveFlags, openat2};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use crate::linux::path::{PrivateRoot, current_uid};
-use crate::linux::state::{
+use crate::host::path::{PrivateRoot, current_uid};
+use crate::oci::ContentStore;
+use crate::state::{
     MINIMUM_DOCKER_DISK_BYTES, MINIMUM_STATE_DISK_BYTES, StateDiskIdentity, VmPaths,
 };
-use crate::oci::ContentStore;
 pub use crate::supervisor_metadata::workspace::WorkspaceSourceMode;
 use crate::workspace_plan::{WorkspaceInput, WorkspacePlan};
 use codewire_vmm_guest_probe::DIRECT_SHARE_PLAN_RELATIVE_PATH;
 
+#[cfg(test)]
 const GIT: &str = "/usr/bin/git";
 // Git maintenance stays in the owned command's family until it is joined.
 const GIT_FOREGROUND_MAINTENANCE: [&str; 4] = [
@@ -40,9 +43,15 @@ const MAXIMUM_COPY_ENTRIES: u64 = 1_000_000;
 const MAXIMUM_COPY_DEPTH: usize = 128;
 const MAXIMUM_COPY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 const COPY_MANIFEST_SCHEMA: &[u8] = b"codewire-workspace-copy-v1\0";
+#[cfg(target_os = "linux")]
 const RESOLVE_SOURCE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_MAGICLINKS)
     .union(ResolveFlags::NO_XDEV);
+// Darwin has no O_PATH; a read-only directory open serves the identity check.
+#[cfg(target_os = "linux")]
+const IDENTITY_ONLY: OFlags = OFlags::PATH;
+#[cfg(target_os = "macos")]
+const IDENTITY_ONLY: OFlags = OFlags::RDONLY;
 
 pub fn workspace_content_limit(disk_bytes: u64) -> u64 {
     disk_bytes.saturating_sub(MINIMUM_EXT4_HEADROOM)
@@ -776,7 +785,8 @@ fn git_output(
     let stdout_limit = maximum_stdout
         .checked_add(1)
         .ok_or(WorkspaceError::GitOutputTooLarge)? as u64;
-    let mut command = Command::new(GIT);
+    let git = host_git()?;
+    let mut command = Command::new(&git.program);
     command
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
@@ -797,6 +807,7 @@ fn git_output(
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
+        .envs(git.environment)
         .current_dir(source)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -851,6 +862,11 @@ fn open_source_directory(requested_source: &Path) -> Result<SourceDirectory, Wor
         path: requested_source.to_owned(),
         source,
     })?;
+    // Snapshots follow the same source policy as direct shares: never the
+    // home directory itself, a broad root or a credential store.
+    if let Some(reason) = crate::direct_share::workspace_source_refusal(&path) {
+        return Err(WorkspaceError::RefusedSource(path, reason));
+    }
     let directory = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -958,12 +974,11 @@ pub(crate) fn snapshot_confined_open_directory(
     maximum_bytes: u64,
     maximum_entries: u64,
 ) -> Result<DirectorySnapshot, WorkspaceError> {
-    let directory = openat2(
+    let directory = open_beneath(
         root_descriptor,
         Path::new("."),
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-        RESOLVE_SOURCE.union(ResolveFlags::NO_SYMLINKS),
+        true,
     )
     .map_err(|source| WorkspaceError::SourceOpen {
         path: requested_root.to_owned(),
@@ -996,12 +1011,11 @@ fn snapshot_confined_source_directory(
     }
     validate_copy_path(relative)?;
     let selected_path = root.path.join(relative);
-    let directory = openat2(
+    let directory = open_beneath(
         root.directory.as_fd(),
         relative,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-        RESOLVE_SOURCE.union(ResolveFlags::NO_SYMLINKS),
+        true,
     )
     .map_err(|source| WorkspaceError::SourceOpen {
         path: selected_path.clone(),
@@ -1024,12 +1038,11 @@ fn snapshot_confined_source_directory(
     let snapshot =
         copy_directory_manifest(&source, Some(destination), maximum_bytes, maximum_entries)?;
 
-    let reopened = openat2(
+    let reopened = open_beneath(
         root.directory.as_fd(),
         relative,
-        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-        RESOLVE_SOURCE.union(ResolveFlags::NO_SYMLINKS),
+        IDENTITY_ONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        true,
     )
     .map_err(|source| WorkspaceError::SourceOpen {
         path: selected_path.clone(),
@@ -1039,7 +1052,7 @@ fn snapshot_confined_source_directory(
         path: selected_path.clone(),
         source,
     })?;
-    if reopened.st_dev != metadata.dev() || reopened.st_ino != metadata.ino() {
+    if !same_object(&reopened, &metadata) {
         return Err(WorkspaceError::SourceRootChanged(selected_path));
     }
     verify_source_root(&root)?;
@@ -1184,12 +1197,10 @@ fn copy_directory_level(
                 walk,
             )?;
         } else if metadata.file_type().is_symlink() {
-            let target =
-                readlinkat(&identity, Path::new(""), Vec::new()).map_err(|source_error| {
-                    WorkspaceError::SourceOpen {
-                        path: source.path.join(&entry_relative),
-                        source: source_error,
-                    }
+            let target = read_source_symlink(directory, Path::new(&name), &identity, &metadata)
+                .map_err(|source_error| WorkspaceError::SourceOpen {
+                    path: source.path.join(&entry_relative),
+                    source: source_error,
                 })?;
             let target = PathBuf::from(OsString::from_vec(target.to_bytes().to_vec()));
             validate_internal_symlink(&entry_relative, &target)?;
@@ -1230,17 +1241,58 @@ fn copy_directory_level(
     Ok(())
 }
 
+/// Open beneath a retained source directory: openat2 on Linux; on Darwin,
+/// O_RESOLVE_BENEATH plus O_NOFOLLOW_ANY where Linux adds RESOLVE_NO_SYMLINKS.
+/// Darwin has no RESOLVE_NO_XDEV, so callers compare device numbers.
+#[cfg(target_os = "linux")]
+fn open_beneath(
+    directory: BorrowedFd<'_>,
+    path: &Path,
+    flags: OFlags,
+    no_symlinks: bool,
+) -> rustix::io::Result<OwnedFd> {
+    let resolve = if no_symlinks {
+        RESOLVE_SOURCE.union(ResolveFlags::NO_SYMLINKS)
+    } else {
+        RESOLVE_SOURCE
+    };
+    openat2(directory, path, flags, Mode::empty(), resolve)
+}
+
+#[cfg(target_os = "macos")]
+fn open_beneath(
+    directory: BorrowedFd<'_>,
+    path: &Path,
+    flags: OFlags,
+    no_symlinks: bool,
+) -> rustix::io::Result<OwnedFd> {
+    const O_RESOLVE_BENEATH: libc::c_int = 0x1000;
+    let mut flags = flags | OFlags::from_bits_retain(O_RESOLVE_BENEATH as _);
+    if no_symlinks {
+        // O_NOFOLLOW_ANY covers the final component; Darwin rejects both.
+        flags.remove(OFlags::NOFOLLOW);
+        flags |= OFlags::from_bits_retain(libc::O_NOFOLLOW_ANY as _);
+    }
+    rustix::fs::openat(directory, path, flags, Mode::empty())
+}
+
+/// `st_dev` is `u64` on Linux and `i32` on Darwin; std widens it the same way.
+#[allow(clippy::unnecessary_cast)]
+fn same_object(stat: &rustix::fs::Stat, metadata: &fs::Metadata) -> bool {
+    stat.st_dev as u64 == metadata.dev() && stat.st_ino as u64 == metadata.ino()
+}
+
+#[cfg(target_os = "linux")]
 fn open_source_entry(
     directory: &File,
     name: &Path,
     relative: &Path,
 ) -> Result<File, WorkspaceError> {
-    let owned = openat2(
+    let owned = open_beneath(
         directory.as_fd(),
         name,
         OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-        RESOLVE_SOURCE,
+        false,
     )
     .map_err(|source| WorkspaceError::SourceOpen {
         path: relative.to_owned(),
@@ -1249,17 +1301,77 @@ fn open_source_entry(
     Ok(File::from(owned))
 }
 
+/// Darwin has no O_PATH. Inspect the entry without opening it, never open a
+/// device, FIFO or socket, and open a symbolic link itself with O_SYMLINK.
+#[cfg(target_os = "macos")]
+fn open_source_entry(
+    directory: &File,
+    name: &Path,
+    relative: &Path,
+) -> Result<File, WorkspaceError> {
+    let named = rustix::fs::statat(directory, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|source| WorkspaceError::SourceOpen {
+            path: relative.to_owned(),
+            source,
+        })?;
+    let flags = match named.st_mode & libc::S_IFMT {
+        libc::S_IFDIR | libc::S_IFREG => OFlags::RDONLY | OFlags::NOFOLLOW,
+        libc::S_IFLNK => OFlags::RDONLY | OFlags::from_bits_retain(libc::O_SYMLINK as _),
+        _ => return Err(WorkspaceError::UnsupportedCopyEntry(relative.to_owned())),
+    };
+    let owned = open_beneath(directory.as_fd(), name, flags | OFlags::CLOEXEC, false).map_err(
+        |source| WorkspaceError::SourceOpen {
+            path: relative.to_owned(),
+            source,
+        },
+    )?;
+    let opened = rustix::fs::fstat(&owned).map_err(|source| WorkspaceError::SourceOpen {
+        path: relative.to_owned(),
+        source,
+    })?;
+    if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino) {
+        return Err(WorkspaceError::SourceEntryChanged(relative.to_owned()));
+    }
+    Ok(File::from(owned))
+}
+
+#[cfg(target_os = "linux")]
+fn read_source_symlink(
+    _directory: &File,
+    _name: &Path,
+    identity: &File,
+    _metadata: &fs::Metadata,
+) -> rustix::io::Result<std::ffi::CString> {
+    readlinkat(identity, Path::new(""), Vec::new())
+}
+
+/// Darwin cannot read a link through its descriptor, so read it by name and
+/// require the name to still be the admitted link afterwards.
+#[cfg(target_os = "macos")]
+fn read_source_symlink(
+    directory: &File,
+    name: &Path,
+    _identity: &File,
+    metadata: &fs::Metadata,
+) -> rustix::io::Result<std::ffi::CString> {
+    let target = readlinkat(directory, name, Vec::new())?;
+    let named = rustix::fs::statat(directory, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
+    if !same_object(&named, metadata) {
+        return Err(rustix::io::Errno::STALE);
+    }
+    Ok(target)
+}
+
 fn open_source_directory_entry(
     directory: &File,
     name: &Path,
     relative: &Path,
 ) -> Result<File, WorkspaceError> {
-    let owned = openat2(
+    let owned = open_beneath(
         directory.as_fd(),
         name,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-        RESOLVE_SOURCE,
+        false,
     )
     .map_err(|source| WorkspaceError::SourceOpen {
         path: relative.to_owned(),
@@ -1273,12 +1385,11 @@ fn open_source_regular_entry(
     name: &Path,
     relative: &Path,
 ) -> Result<File, WorkspaceError> {
-    let owned = openat2(
+    let owned = open_beneath(
         directory.as_fd(),
         name,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-        RESOLVE_SOURCE,
+        false,
     )
     .map_err(|source| WorkspaceError::SourceOpen {
         path: relative.to_owned(),
@@ -1587,7 +1698,8 @@ fn import_git_bundle(
     destination: &Path,
     template: &Path,
 ) -> Result<(), WorkspaceError> {
-    let initialized = Command::new(GIT)
+    let git = host_git()?;
+    let initialized = Command::new(&git.program)
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
@@ -1609,6 +1721,7 @@ fn import_git_bundle(
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
+        .envs(git.environment.clone())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1618,7 +1731,7 @@ fn import_git_bundle(
         return Err(WorkspaceError::GitCloneFailed);
     }
 
-    let fetched = Command::new(GIT)
+    let fetched = Command::new(&git.program)
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
@@ -1647,6 +1760,7 @@ fn import_git_bundle(
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
+        .envs(git.environment)
         .current_dir(destination)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1664,7 +1778,8 @@ fn git_clone_output(
     destination: &Path,
     template: &Path,
 ) -> Result<Output, WorkspaceError> {
-    Command::new(GIT)
+    let git = host_git()?;
+    Command::new(&git.program)
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
@@ -1690,11 +1805,17 @@ fn git_clone_output(
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
+        .envs(git.environment)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
         .map_err(|_| WorkspaceError::GitUnavailable)
+}
+
+/// The git workspace preparation runs, or GitUnavailable without one.
+fn host_git() -> Result<crate::host_git::HostGit, WorkspaceError> {
+    crate::host::git().ok_or(WorkspaceError::GitUnavailable)
 }
 
 fn reject_git_submodules(source: &Path, commit: &str) -> Result<(), WorkspaceError> {
@@ -1894,11 +2015,15 @@ fn bounded_staging_regular_bytes(root: &Path, maximum: u64) -> Result<u64, Works
 }
 
 fn format_ext4(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
+    #[cfg(target_os = "linux")]
     let mkfs = ["/usr/sbin/mkfs.ext4", "/usr/bin/mkfs.ext4"]
         .into_iter()
         .find(|candidate| Path::new(candidate).is_file())
         .ok_or(WorkspaceError::MkfsUnavailable)?;
-    let status = Command::new(mkfs)
+    #[cfg(target_os = "macos")]
+    let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
+    let mut command = Command::new(mkfs);
+    command
         .args([
             OsStr::new("-q"),
             OsStr::new("-F"),
@@ -1909,7 +2034,13 @@ fn format_ext4(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
         .arg(staging)
         .arg(disk)
         .env_clear()
-        .env("LC_ALL", "C")
+        .env("LC_ALL", "C");
+    #[cfg(target_os = "macos")]
+    command.env(
+        "MKE2FS_CONFIG",
+        crate::host::mke2fs_config().ok_or(WorkspaceError::MkfsUnavailable)?,
+    );
+    let status = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1922,15 +2053,25 @@ fn format_ext4(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
 }
 
 fn format_empty_ext4(disk: &Path) -> Result<(), WorkspaceError> {
+    #[cfg(target_os = "linux")]
     let mkfs = ["/usr/sbin/mkfs.ext4", "/usr/bin/mkfs.ext4"]
         .into_iter()
         .find(|candidate| Path::new(candidate).is_file())
         .ok_or(WorkspaceError::MkfsUnavailable)?;
-    let status = Command::new(mkfs)
+    #[cfg(target_os = "macos")]
+    let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
+    let mut command = Command::new(mkfs);
+    command
         .args(["-q", "-F", "-m", "0"])
         .arg(disk)
         .env_clear()
-        .env("LC_ALL", "C")
+        .env("LC_ALL", "C");
+    #[cfg(target_os = "macos")]
+    command.env(
+        "MKE2FS_CONFIG",
+        crate::host::mke2fs_config().ok_or(WorkspaceError::MkfsUnavailable)?,
+    );
+    let status = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2014,13 +2155,25 @@ pub enum WorkspaceError {
     SubmoduleUnsupported,
     #[error("workspace Git tree is malformed")]
     InvalidTree,
-    #[error("workspace source entry could not be opened safely at {path}: {source}")]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        error("workspace source entry could not be opened safely at {path}: {source}")
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error(
+            "workspace source entry could not be opened safely at {path}: {source}{}",
+            crate::host::privacy_hint(.source.raw_os_error())
+        )
+    )]
     SourceOpen {
         path: PathBuf,
         source: rustix::io::Errno,
     },
     #[error("workspace copy crossed a mount boundary at {0}")]
     SourceMountBoundary(PathBuf),
+    #[error("workspace source {0} is refused: {1}")]
+    RefusedSource(PathBuf, &'static str),
     #[error("workspace source entry changed while it was copied: {0}")]
     SourceEntryChanged(PathBuf),
     #[error("workspace copy contains an invalid relative path: {0}")]
@@ -2037,7 +2190,16 @@ pub enum WorkspaceError {
     UnsafeCopySymlink(PathBuf),
     #[error("workspace content does not fit on the requested disk")]
     WorkspaceTooLarge,
-    #[error("/usr/bin/git is required for native clone-mode workspaces")]
+    #[cfg_attr(
+        target_os = "linux",
+        error("/usr/bin/git is required for native clone-mode workspaces")
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error(
+            "the local VM runtime's git is missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+        )
+    )]
     GitUnavailable,
     #[error("Git could not inspect the requested clean commit")]
     GitCommandFailed,
@@ -2069,19 +2231,38 @@ pub enum WorkspaceError {
         expected: u64,
         actual: u64,
     },
-    #[error("mkfs.ext4 is required for native workspace provisioning")]
+    #[cfg_attr(
+        target_os = "linux",
+        error("mkfs.ext4 is required for native workspace provisioning")
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error(
+            "the local VM runtime's mkfs.ext4 is missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+        )
+    )]
     MkfsUnavailable,
     #[error("mkfs.ext4 failed to create the workspace disk")]
     MkfsFailed,
     #[error(transparent)]
-    Path(#[from] crate::linux::path::PathError),
+    Path(#[from] crate::host::path::PathError),
     #[error(transparent)]
-    State(#[from] crate::linux::state::StateError),
+    State(#[from] crate::state::StateError),
     #[error(transparent)]
     Plan(#[from] crate::workspace_plan::WorkspacePlanError),
     #[error(transparent)]
     Content(#[from] crate::oci::ContentStoreError),
-    #[error("filesystem operation failed for {path}: {source}")]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        error("filesystem operation failed for {path}: {source}")
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error(
+            "filesystem operation failed for {path}: {source}{}",
+            crate::host::privacy_hint(.source.raw_os_error().unwrap_or(0))
+        )
+    )]
     Io { path: PathBuf, source: io::Error },
 }
 
@@ -2175,6 +2356,7 @@ mod tests {
         assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"preserve");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn docker_data_disk_is_formatted_then_replayed_by_exact_identity() {
         let engine = tempfile::tempdir().unwrap();
@@ -2608,6 +2790,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn clone_provisioning_builds_the_ext4_workspace_disk() {
         let source = tempfile::tempdir().unwrap();
@@ -2647,6 +2830,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn nested_copy_input_provisioning_builds_the_ext4_workspace_disk() {
         let source = tempfile::tempdir().unwrap();

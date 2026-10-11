@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use crate::linux::path::{FileIdentity, PathError, PrivateRoot};
+use crate::host::path::{FileIdentity, PathError, PrivateRoot};
 
 const MAXIMUM_LOCK_BYTES: usize = 16 * 1024;
 const MAXIMUM_MANIFEST_BYTES: usize = CW_RUNTIME_MAX_CATALOG + MAXIMUM_LOCK_BYTES;
@@ -540,12 +540,10 @@ impl CwRuntimeStore {
         let name = Path::new("publication.lock");
         let opened = match self.root.create_regular(name, 0o600, true) {
             Ok(opened) => opened,
-            Err(PathError::Openat2 {
-                source: rustix::io::Errno::EXIST,
-                ..
-            }) => self
-                .root
-                .open_regular(name, true, Some(0), false, Some(0o600))?,
+            Err(error) if already_exists(&error) => {
+                self.root
+                    .open_regular(name, true, Some(0), false, Some(0o600))?
+            }
             Err(error) => return Err(error.into()),
         };
         let file = opened.into_file();
@@ -733,6 +731,29 @@ impl CwRuntimeStore {
 }
 
 struct PublicationGuard(File);
+
+fn already_exists(error: &PathError) -> bool {
+    match error {
+        #[cfg(target_os = "linux")]
+        PathError::Openat2 { source, .. } => *source == rustix::io::Errno::EXIST,
+        #[cfg(target_os = "macos")]
+        PathError::Io { source, .. } => source.kind() == io::ErrorKind::AlreadyExists,
+        _ => false,
+    }
+}
+
+/// The trusted e2fsprogs that build and inspect a catalog disk: the system
+/// tools on Linux, the admitted runtime's pinned build on Darwin.
+fn filesystem_tool(name: &str) -> Result<PathBuf, CwRuntimeError> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Path::new("/usr/sbin").join(name))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::host::e2fsprogs(name).ok_or(CwRuntimeError::E2fsprogsUnavailable)
+    }
+}
 // Closing the final reference releases flock. Explicit LOCK_UN would also
 // release an orphan leaf tool's reference to this same open file description.
 
@@ -888,10 +909,11 @@ fn format_runtime_disk(
     publication: &PublicationGuard,
     deadline: Instant,
 ) -> Result<(), CwRuntimeError> {
+    let debugfs = filesystem_tool("debugfs")?;
     run_tool(
         temporary,
         publication,
-        "/usr/sbin/mkfs.ext4",
+        &filesystem_tool("mkfs.ext4")?,
         &[
             "-q".into(),
             "-F".into(),
@@ -952,7 +974,7 @@ fn format_runtime_disk(
     run_tool(
         temporary,
         publication,
-        "/usr/sbin/debugfs",
+        &debugfs,
         &[
             "-w".into(),
             "-f".into(),
@@ -967,7 +989,7 @@ fn format_runtime_disk(
         let output = run_tool(
             temporary,
             publication,
-            "/usr/sbin/debugfs",
+            &debugfs,
             &[
                 "-R".into(),
                 format!("stat {path}").into(),
@@ -1017,7 +1039,7 @@ fn validate_inode_report(
 fn run_tool(
     temporary: &PrivateRoot,
     publication: &PublicationGuard,
-    tool: &str,
+    tool: &Path,
     arguments: &[std::ffi::OsString],
     operation_deadline: Instant,
 ) -> Result<Vec<u8>, CwRuntimeError> {
@@ -1032,10 +1054,13 @@ fn run_tool(
         permissions: 0o600,
     };
     let mut command = Command::new(tool);
+    command.args(arguments).env_clear().env("LC_ALL", "C");
+    #[cfg(target_os = "macos")]
+    command.env(
+        "MKE2FS_CONFIG",
+        crate::host::mke2fs_config().ok_or(CwRuntimeError::E2fsprogsUnavailable)?,
+    );
     command
-        .args(arguments)
-        .env_clear()
-        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(output.try_clone()?)
         .stderr(output);
@@ -1098,11 +1123,18 @@ fn inherit_publication_custody(
     // These trusted tools are leaf children. Retain the same locked open file
     // description until leaf exit, including the parent-death signal window.
     // Acquiring the publication lock therefore proves the prior writer exited.
+    // Darwin has no parent-death signal: a leaf whose producer died runs its
+    // bounded format or inspection to completion, still holding the lock.
+    // Darwin also marks new descriptors close-on-exec in a second call, so
+    // sweep every inherited descriptor before passing only the lock.
     unsafe {
         command.pre_exec(move || {
+            #[cfg(target_os = "linux")]
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
                 return Err(io::Error::last_os_error());
             }
+            #[cfg(target_os = "macos")]
+            crate::host::process::mark_inherited_descriptors_close_on_exec();
             if libc::getppid() != parent {
                 return Err(io::Error::from(io::ErrorKind::Interrupted));
             }
@@ -1206,6 +1238,11 @@ pub enum CwRuntimeError {
     DiskChanged,
     #[error("cw runtime disk production or inode verification failed")]
     ToolFailed,
+    #[cfg(target_os = "macos")]
+    #[error(
+        "the local VM runtime's debugfs or mkfs.ext4 is missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+    )]
+    E2fsprogsUnavailable,
     #[error(transparent)]
     Path(#[from] PathError),
     #[error(transparent)]
@@ -1214,15 +1251,18 @@ pub enum CwRuntimeError {
 
 impl CwRuntimeError {
     fn is_not_found(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if matches!(
+            self,
+            Self::Path(PathError::Openat2 {
+                source: rustix::io::Errno::NOENT,
+                ..
+            })
+        ) {
+            return true;
+        }
         matches!(self, Self::Io(error) if error.kind() == io::ErrorKind::NotFound)
             || matches!(self, Self::Path(PathError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound)
-            || matches!(
-                self,
-                Self::Path(PathError::Openat2 {
-                    source: rustix::io::Errno::NOENT,
-                    ..
-                })
-            )
     }
 }
 
@@ -1230,8 +1270,15 @@ impl CwRuntimeError {
 mod tests {
     use super::*;
     use codewire_vmm_guest_probe::cw_runtime::{CwImageDescriptor, CwImagePayload};
+    #[cfg(target_os = "linux")]
     use std::os::fd::AsRawFd as _;
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::OpenOptionsExt as _;
+
+    #[cfg(target_os = "linux")]
+    const SLEEP: &str = "/usr/bin/sleep";
+    #[cfg(target_os = "macos")]
+    const SLEEP: &str = "/bin/sleep";
 
     fn fixture_asset(root: &Path, marker: u8) -> (PathBuf, Vec<u8>) {
         fs::create_dir(root).unwrap();
@@ -1239,7 +1286,9 @@ mod tests {
         let mut cw = vec![0_u8; 136];
         cw[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
         cw[16..18].copy_from_slice(&2_u16.to_le_bytes());
-        cw[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        cw[18..20].copy_from_slice(
+            &codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_ELF_MACHINE.to_le_bytes(),
+        );
         cw[32..40].copy_from_slice(&64_u64.to_le_bytes());
         cw[54..56].copy_from_slice(&56_u16.to_le_bytes());
         cw[56..58].copy_from_slice(&1_u16.to_le_bytes());
@@ -1261,7 +1310,7 @@ mod tests {
                 protocol_version: 1,
                 record_version: 1,
                 package_version: "0.1.0".into(),
-                target: "x86_64-unknown-linux-musl".into(),
+                target: codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_TARGET.into(),
                 source_revision: format!("{marker:040x}"),
                 source_tree_sha256: "c".repeat(64),
                 rustc: "rustc 1.93.0 (synthetic fixture)".into(),
@@ -1436,7 +1485,7 @@ mod tests {
         );
         disk.revalidate().unwrap();
         // Independently inspect actual ext4 bytes, not the host seed's UID.
-        let read = Command::new("/usr/sbin/debugfs")
+        let read = Command::new(filesystem_tool("debugfs").unwrap())
             .args(["-R", &format!("cat /{}/cw", old.payload.sha256)])
             .arg(&next.path)
             .env_clear()
@@ -1482,7 +1531,7 @@ mod tests {
             run_tool(
                 &root,
                 &publication,
-                "/missing-codewire-filesystem-tool",
+                Path::new("/missing-codewire-filesystem-tool"),
                 &[],
                 Instant::now() + Duration::from_secs(1)
             )
@@ -1493,7 +1542,7 @@ mod tests {
             run_tool(
                 &root,
                 &publication,
-                "/usr/bin/sleep",
+                Path::new(SLEEP),
                 &["30".into()],
                 Instant::now() + Duration::from_millis(50)
             )
@@ -1561,7 +1610,7 @@ mod tests {
         let engine = PrivateRoot::create(&task.path().join("engine")).unwrap();
         let store = CwRuntimeStore::create(&engine).unwrap();
         let publication = store.publication_guard().unwrap();
-        let mut command = Command::new("/usr/bin/sleep");
+        let mut command = Command::new(SLEEP);
         command
             .arg("30")
             .env_clear()
@@ -1617,6 +1666,8 @@ mod tests {
 
     // A separate process lets the test kill a producer without forking the
     // threaded Rust harness or killing another test's thread.
+    // Producer death stops the leaf only with Linux's parent-death signal.
+    #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "invoked only by killed_producer_stops_leaf_before_recovery"]
     fn publication_lock_child_fixture() {
@@ -1645,7 +1696,7 @@ mod tests {
         let _ = run_tool(
             &directory,
             &publication,
-            "/usr/bin/python3",
+            Path::new("/usr/bin/python3"),
             &[
                 "-c".into(),
                 "import os,sys,time\nexpected=os.stat(sys.argv[2])\nheld=False\nfor value in os.listdir('/proc/self/fd'):\n if int(value)<=2:continue\n try:actual=os.fstat(int(value))\n except OSError:continue\n held|=(actual.st_dev,actual.st_ino)==(expected.st_dev,expected.st_ino)\nassert held\nopen(sys.argv[1],'x').write(str(os.getpid()))\ntime.sleep(30)"
@@ -1657,10 +1708,13 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     const ISOLATED_PRODUCER_CASE: &str = "CODEWIRE_RUNTIME_TEST_ISOLATED_CASE";
 
+    #[cfg(target_os = "linux")]
     struct IsolatedProducerChild(std::process::Child);
 
+    #[cfg(target_os = "linux")]
     impl Drop for IsolatedProducerChild {
         fn drop(&mut self) {
             match self.0.try_wait() {
@@ -1688,6 +1742,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn assert_no_producer_case_children() {
         // WNOWAIT preserves any unexpected child's evidence. Only ECHILD is
         // accepted; a terminal but unreaped leaf is not completed custody.
@@ -1710,6 +1765,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     fn isolated_producer_case(name: &str) -> bool {
         if let Some(case) = std::env::var_os(ISOLATED_PRODUCER_CASE) {
             assert_eq!(case, name);
@@ -1787,6 +1843,7 @@ mod tests {
         false
     }
 
+    #[cfg(target_os = "linux")]
     fn producer_leaf_stat(pid: u32) -> (String, u32, u64) {
         let mut bytes = Vec::new();
         File::open(format!("/proc/{pid}/stat"))
@@ -1805,6 +1862,7 @@ mod tests {
         )
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn killed_producer_stops_leaf_before_recovery() {
         if isolated_producer_case("cw_runtime::tests::killed_producer_stops_leaf_before_recovery") {
@@ -1812,6 +1870,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn killed_producer_with_closed_stdio_stops_leaf_before_recovery() {
         if isolated_producer_case(
@@ -1821,6 +1880,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn assert_killed_producer_cleanup(closed_stdio: bool) {
         let task = tempfile::tempdir().unwrap();
         fs::set_permissions(task.path(), fs::Permissions::from_mode(0o700)).unwrap();

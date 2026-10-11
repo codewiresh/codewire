@@ -1,10 +1,13 @@
-//! GitHub device enrollment uses the same owner capacity and publication path.
+//! GitHub device enrollment is the Codewire GitHub App's own device login. It
+//! uses the same owner capacity, identity checks and publication path as the
+//! browser authorization.
 
 use codewire_proto::codewire::v1::{
     EnrollGithubResponse, GithubDeviceChallenge, enroll_github_response,
 };
 
-use super::enrollment::{Completed, Outcome, github_error};
+use super::enrollment::{Completed, Outcome};
+use super::github_app::reconnect_account_matches;
 use super::*;
 
 impl CredentialMutationOwner {
@@ -58,11 +61,15 @@ async fn run(
     if !matches!(target, EnrollmentTarget::Reconnect(_)) {
         ensure_github_unconnected(&shared, scope).await?;
     }
-    let mut pending = shared.github_enrollment.start().map_err(github_error)?;
-    let challenge = scope
-        .wait(pending.challenge())
+    let login = shared
+        .github_login
+        .as_ref()
+        .ok_or(Error::GitHubAppNotConfigured)?;
+    let pending = scope
+        .wait(login.start())
         .await?
-        .map_err(github_error)?;
+        .map_err(device_login_error)?;
+    let challenge = pending.challenge();
     let response = EnrollGithubResponse {
         event: Some(enroll_github_response::Event::Challenge(Box::new(
             GithubDeviceChallenge {
@@ -74,22 +81,24 @@ async fn run(
         ))),
         ..Default::default()
     };
-    drop(challenge);
     scope
         .wait(sender.send(Ok(response)))
         .await?
         .map_err(|_| Error::Cancelled)?;
-    let mut completed = Completed::Github(
-        scope
-            .wait(pending.complete())
-            .await?
-            .map_err(github_error)?,
-    );
+    let import = scope
+        .wait(login.complete(pending))
+        .await?
+        .map_err(device_login_error)?;
+    if let EnrollmentTarget::Reconnect(record) = &target
+        && !reconnect_account_matches(
+            record.metadata.account_hint.as_deref(),
+            import.account_hint(),
+        )
+    {
+        return Err(Error::EnrollmentFailed);
+    }
+    let mut completed = Completed::GithubApp(import);
     let publication = publication::enroll(&shared, scope, &mut completed, target).await;
-    completed
-        .finish(publication.outcome)
-        .await
-        .map_err(|_| Error::CleanupFailed)?;
     let metadata = publication
         .result
         .map_err(|error| unpublished_terminal_error(publication.outcome, error))?;

@@ -44,16 +44,16 @@ pub(crate) async fn resolve_named_execution_target(
     if let Some(host) = resolve_host_reference(globals, target_ref, placement).await? {
         return Ok(host.current_target());
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let local = if placement != Some(EnvironmentPlacement::Platform) {
         native_environment(target_ref).await?
     } else {
         None
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let local: Option<()> = None;
     if placement == Some(EnvironmentPlacement::Local) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(environment) = local.as_ref() {
             return Ok(config::CurrentTargetConfig {
                 kind: "local".to_string(),
@@ -61,7 +61,7 @@ pub(crate) async fn resolve_named_execution_target(
                 name: environment.name.clone(),
             });
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let _ = local;
         {
             anyhow::bail!("local environment {target_ref:?} not found");
@@ -71,7 +71,7 @@ pub(crate) async fn resolve_named_execution_target(
     let platform = match resolve_platform(globals, paths, env) {
         Ok(platform) => platform,
         Err(error) if placement.is_none() => {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             if let Some(environment) = local.as_ref() {
                 return Ok(config::CurrentTargetConfig {
                     kind: "local".to_string(),
@@ -104,7 +104,7 @@ pub(crate) async fn resolve_named_execution_target(
         return Ok(current_target_from_environment(&environment));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     match (local, platform_match) {
         (_, Some((environment_id, EnvironmentMatchKind::ExactId))) => {
             let environment = environment_client
@@ -134,7 +134,7 @@ pub(crate) async fn resolve_named_execution_target(
         }
         (None, None) => anyhow::bail!("environment {target_ref:?} not found"),
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     match platform_match {
         Some((environment_id, _)) => {
             let environment = environment_client
@@ -462,6 +462,10 @@ pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> 
 }
 
 pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> anyhow::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if args.local {
+        return super::native::setup_local_runtime(args.from, args.replace).await;
+    }
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
     let server_url = resolve_setup_server_url(globals, &paths, &env);
@@ -1321,7 +1325,10 @@ pub(crate) fn inspect_config(output: OutputFormat) -> anyhow::Result<()> {
     let platform =
         config::resolve_platform(config::PlatformResolveOptions::default(), &paths, &env);
     let mesh = config::resolve_mesh(config::MeshResolveOptions::default(), &paths, &env);
-    let report = config::ConfigReport::from_results(&paths, platform, mesh);
+    let local_credential_store = super::configured_local_credential_store(&paths.mesh_data_dir)
+        .ok()
+        .map(|backend| backend.as_str().to_owned());
+    let report = config::ConfigReport::from_results(&paths, platform, mesh, local_credential_store);
 
     match output {
         OutputFormat::Json => {
@@ -1354,6 +1361,13 @@ pub(crate) fn inspect_config(output: OutputFormat) -> anyhow::Result<()> {
                 }
                 None => println!("mesh=unconfigured"),
             }
+            println!(
+                "local_credential_store={}",
+                report
+                    .local_credential_store
+                    .as_deref()
+                    .unwrap_or("invalid")
+            );
         }
     }
 
@@ -1408,7 +1422,7 @@ pub(crate) async fn handle_doctor_command(
 ) -> anyhow::Result<()> {
     if let Some(command) = args.command {
         return match command {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             DoctorCommand::Local(args) => {
                 let report = native_orphan_report()?;
                 print_native_orphan_report(&report, args.output)

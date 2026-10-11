@@ -82,7 +82,7 @@ impl ResolvedImage {
         Ok(())
     }
 
-    #[cfg(feature = "synthetic-oci-input-smoke")]
+    #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
     pub(crate) fn from_cached_source(
         source_reference: String,
         architecture: OciArchitecture,
@@ -130,14 +130,14 @@ impl ResolvedImage {
     }
 }
 
-#[cfg(feature = "synthetic-oci-input-smoke")]
+#[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
 pub(crate) fn source_descriptor_from_oci(
     descriptor: &Descriptor,
 ) -> Result<ResolvedDescriptor, RegistryResolverError> {
     descriptor_from_oci(descriptor, DescriptorKind::Source)
 }
 
-#[cfg(feature = "synthetic-oci-input-smoke")]
+#[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
 pub(crate) fn validate_layout_index(index: &ImageIndex) -> Result<(), RegistryResolverError> {
     validate_index(index)
 }
@@ -832,7 +832,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::linux::path::PrivateRoot;
+    use crate::host::path::PrivateRoot;
     use crate::oci::ContentStoreError;
 
     struct Fixture {

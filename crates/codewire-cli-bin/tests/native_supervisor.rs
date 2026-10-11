@@ -55,26 +55,32 @@ fn every_supervisor_path_is_required_without_state_effects() {
 }
 
 #[test]
-fn supervisor_is_hidden_and_other_host_effect_entrypoints_stay_unavailable() {
+fn local_vm_roles_are_hidden_and_other_host_effect_entrypoints_stay_unavailable() {
     let home = fixture();
     let help = command(home.path()).arg("--help").output().unwrap();
     assert!(help.status.success());
-    assert!(!String::from_utf8_lossy(&help.stdout).contains("__native-supervisor"));
-    for entrypoint in [
+    let help = String::from_utf8_lossy(&help.stdout);
+    // The local VM, Mesh and credential roles are hidden macOS entrypoints;
+    // the Linux-only launch helper stays unavailable.
+    for hidden in [
+        "__native-supervisor",
+        "__local-credential-authority",
+        "__local-credential-broker",
+        "__local-git-repository-executor",
+        "__local-git-credential-helper",
         "__native-runner",
         "__native-network-worker",
         "__native-egress-broker",
         "__native-mesh-transport",
         "__native-mesh-enrollment-broker",
-        "__local-credential-authority",
-        "__local-credential-broker",
     ] {
-        let output = command(home.path())
-            .args([entrypoint, "--help"])
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(2), "{entrypoint}");
+        assert!(!help.contains(hidden), "{hidden}");
     }
+    let output = command(home.path())
+        .args(["__environment-launch", "--help"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
     assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
 }
 
@@ -124,7 +130,7 @@ impl Drop for OwnedSupervisor<'_> {
 }
 
 #[tokio::test]
-async fn packaged_supervisor_serves_private_metadata_and_reopens_after_shutdown() {
+async fn packaged_supervisor_serves_private_metadata_and_reopens_after_exit() {
     let mut home = fixture();
     let path = home.path().to_owned();
     let socket = path.join("state/supervisor.sock");
@@ -177,11 +183,11 @@ async fn packaged_supervisor_serves_private_metadata_and_reopens_after_shutdown(
                 .unwrap()
                 .unwrap_err()
                 .code(),
-            tonic::Code::Unimplemented
+            tonic::Code::NotFound
         );
         assert!(
             tokio::time::Instant::now() < deadline,
-            "refused start completed after its deadline"
+            "start of an unknown environment completed after its deadline"
         );
         drop(client);
         assert!(path.join("state/supervisor.db").is_file());
@@ -199,29 +205,25 @@ async fn packaged_supervisor_serves_private_metadata_and_reopens_after_shutdown(
         }
         // This fixture remains the exclusive waiter of this freshly spawned
         // child. Verify the no-autoreap premise before signaling that owned PID;
-        // this is test cleanup, not a product process-adoption capability.
+        // this is test cleanup, not a product process-adoption capability. The
+        // detached supervisor has no graceful signal path: a killed one leaves
+        // its socket, which the next supervisor replaces under its lock.
         codewire_local_vmm::darwin::process::observe_owned_child(&mut child.child).unwrap();
         // SAFETY: the validated owned child remains unreaped with this sole waiter.
         assert_eq!(
-            unsafe { libc::kill(child.child.id() as libc::pid_t, libc::SIGTERM) },
+            unsafe { libc::kill(child.child.id() as libc::pid_t, libc::SIGKILL) },
             0
         );
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            if let Some(status) = child.child.try_wait().unwrap() {
-                assert!(
-                    Instant::now() < deadline,
-                    "terminal status arrived after its deadline"
-                );
-                assert!(status.success(), "supervisor termination failed: {status}");
+            if child.child.try_wait().unwrap().is_some() {
                 break;
             }
             assert!(
                 Instant::now() < deadline,
-                "supervisor termination exceeded its bound"
+                "supervisor exit exceeded its bound"
             );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        assert!(!socket.exists());
     }
 }

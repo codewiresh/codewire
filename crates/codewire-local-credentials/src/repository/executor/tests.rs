@@ -239,3 +239,51 @@ fn regular_files_contain(root: &Path, needle: &[u8]) -> bool {
         }
     })
 }
+
+/// The executor writes the token once and closes its end, possibly before the
+/// helper sets its read timeout (Darwin then refuses the socket option). The
+/// buffered token is still read; an empty or invalid one is still refused.
+#[test]
+fn a_token_whose_writer_already_closed_is_still_read_once() {
+    let (helper, mut executor) = std::os::unix::net::UnixStream::pair().unwrap();
+    executor
+        .write_all(b"synthetic-closed-writer-token")
+        .unwrap();
+    drop(executor);
+    assert_eq!(
+        read_one_use_token(helper).unwrap().as_slice(),
+        b"synthetic-closed-writer-token"
+    );
+    let (helper, executor) = std::os::unix::net::UnixStream::pair().unwrap();
+    drop(executor);
+    assert!(matches!(
+        read_one_use_token(helper),
+        Err(RepositoryExecutorError::InvalidCredential)
+    ));
+}
+
+/// A macOS executor's one-use socket directory lives in the authority root;
+/// the next authority removes exactly those a killed executor left behind.
+#[cfg(target_os = "macos")]
+#[test]
+fn authority_start_removes_only_abandoned_credential_socket_directories() {
+    let root = TempDir::new().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let abandoned = root.path().join(format!("cwgr-{}", Uuid::new_v4()));
+    DirBuilder::new().mode(0o700).create(&abandoned).unwrap();
+    fs::write(abandoned.join("c"), b"").unwrap();
+    for kept in ["cwgr-not-a-uuid", "protected-v1", "signer"] {
+        DirBuilder::new()
+            .mode(0o700)
+            .create(root.path().join(kept))
+            .unwrap();
+    }
+    cleanup_repository_credential_sockets(root.path()).unwrap();
+    assert!(!abandoned.exists());
+    let mut remaining = fs::read_dir(root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    remaining.sort();
+    assert_eq!(remaining, ["cwgr-not-a-uuid", "protected-v1", "signer"]);
+}

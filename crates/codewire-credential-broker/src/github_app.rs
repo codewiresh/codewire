@@ -1,12 +1,12 @@
 //! GitHub App user-to-server authorization inside the isolated credential
 //! authority.
 //!
-//! This is intentionally separate from `github_enrollment`: that module owns
-//! the GitHub CLI device flow used by `cw`.  A browser callback carries an
-//! OAuth authorization code from a GitHub App installation, which this owner
-//! exchanges only from the credential authority that holds the App client
-//! secret.  The resulting user token never reaches the dashboard or a
-//! Sandbox.
+//! A browser callback carries an OAuth authorization code from a GitHub App
+//! installation, which this owner exchanges only from the credential authority
+//! that holds the App client secret.  The resulting user token never reaches
+//! the dashboard or a Sandbox.  The App's own device login
+//! (`provider_oauth::github`) needs no secret and ends in the same identity
+//! checks and import.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -65,6 +65,18 @@ impl GitHubAppAuthorizationConfig {
             app_slug,
             callback_url,
         })
+    }
+
+    /// The same App's public identity for its device login, which needs no
+    /// client secret.
+    pub fn device_login_config(
+        &self,
+    ) -> Result<crate::provider_oauth::github::GitHubDeviceLoginConfig, GitHubAppAuthorizationError>
+    {
+        crate::provider_oauth::github::GitHubDeviceLoginConfig::new(
+            self.client_id.clone(),
+            self.app_slug.clone(),
+        )
     }
 }
 
@@ -181,6 +193,21 @@ impl GitHubAppUserOAuthBundle {
     }
 }
 
+/// The access token in stored GitHub OAuth material, for host-side Git such as
+/// a repository checkout: a raw token as stored, or an App bundle's access
+/// token while it is not due for renewal. A token due for renewal returns
+/// `Unavailable` (refresh it first); an expired refresh token, `Denied`.
+pub fn github_access_token(
+    material: &[u8],
+    now_unix: u64,
+) -> Result<Zeroizing<String>, GitHubAppAuthorizationError> {
+    let credential = GitHubOAuthCredential::parse(material)?;
+    if credential.should_refresh(now_unix)? {
+        return Err(GitHubAppAuthorizationError::Unavailable);
+    }
+    credential.access_token()
+}
+
 /// Closed GitHub credential material accepted by the fixed GitHub proxy. Raw
 /// material remains for the CLI device flow and existing non-expiring user
 /// tokens. A malformed tagged App bundle is never interpreted as raw bytes.
@@ -276,11 +303,21 @@ struct GitHubAppRefreshExpectation {
     installation_id: u64,
 }
 
+/// One account (user or organization) where the App is installed, as public
+/// metadata: GitHub shows the same on the App's installation pages.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitHubAppInstallationReach {
+    pub account: String,
+    /// All of the account's repositories, or only the ones selected for it.
+    pub all_repositories: bool,
+}
+
 /// A protected GitHub user token plus the verified GitHub login.  This type
 /// intentionally has no Debug/Clone/serialization implementation.
 pub struct GitHubAppAuthorizationImport {
     material: Zeroizing<Vec<u8>>,
     account_hint: String,
+    reach: Vec<GitHubAppInstallationReach>,
 }
 
 impl GitHubAppAuthorizationImport {
@@ -289,6 +326,11 @@ impl GitHubAppAuthorizationImport {
     /// that existing profiles already reference.
     pub fn account_hint(&self) -> &str {
         &self.account_hint
+    }
+
+    /// The accounts whose repositories this login can reach through the App.
+    pub fn reach(&self) -> &[GitHubAppInstallationReach] {
+        &self.reach
     }
 
     pub fn take_import(
@@ -304,13 +346,21 @@ impl GitHubAppAuthorizationImport {
     }
 }
 
-/// The only owner permitted to exchange browser callback codes for the
-/// configured App.  Its upstream transport must be resolved with the separate
-/// GitHub App authorization destination family, never the Sandbox bridge
-/// transport.
+/// The only owner permitted to exchange browser callback codes or rotate user
+/// tokens for the configured App.  Its upstream transport must be resolved
+/// with the separate GitHub App authorization destination family, never the
+/// Sandbox bridge transport.
 pub struct GitHubAppAuthorizationOwner {
-    config: GitHubAppAuthorizationConfig,
+    client: AppClient,
     upstream: Arc<dyn BrokerUpstreamTransport>,
+}
+
+/// Credential-service holds the App's client secret and exchanges browser
+/// callback codes. A local `cw` is a public client: it only rotates tokens
+/// from the App's device login, which GitHub accepts with the client ID alone.
+enum AppClient {
+    Confidential(GitHubAppAuthorizationConfig),
+    Public(crate::provider_oauth::github::GitHubDeviceLoginConfig),
 }
 
 impl GitHubAppAuthorizationOwner {
@@ -318,7 +368,36 @@ impl GitHubAppAuthorizationOwner {
         config: GitHubAppAuthorizationConfig,
         upstream: Arc<dyn BrokerUpstreamTransport>,
     ) -> Self {
-        Self { config, upstream }
+        Self {
+            client: AppClient::Confidential(config),
+            upstream,
+        }
+    }
+
+    /// A refresh-only owner without the client secret, for device-login
+    /// tokens on a local placement. It cannot complete a browser callback.
+    pub fn public_client(
+        config: crate::provider_oauth::github::GitHubDeviceLoginConfig,
+        upstream: Arc<dyn BrokerUpstreamTransport>,
+    ) -> Self {
+        Self {
+            client: AppClient::Public(config),
+            upstream,
+        }
+    }
+
+    fn client_id(&self) -> &str {
+        match &self.client {
+            AppClient::Confidential(config) => &config.client_id,
+            AppClient::Public(config) => config.client_id(),
+        }
+    }
+
+    fn app_slug(&self) -> &str {
+        match &self.client {
+            AppClient::Confidential(config) => &config.app_slug,
+            AppClient::Public(config) => config.app_slug(),
+        }
     }
 
     /// Exchange one browser callback code, verify its GitHub user identity,
@@ -334,23 +413,7 @@ impl GitHubAppAuthorizationOwner {
         }
         let response = self.exchange_authorization_code(&authorization_code).await;
         authorization_code.zeroize();
-        let response = response?;
-        let user = self.user(&response.access_token).await?;
-        let installation_id = self
-            .verify_installation(&response.access_token, None)
-            .await?;
-        let material = GitHubAppUserOAuthBundle::from_initial_response(
-            response,
-            unix_now()?,
-            user.id,
-            self.config.app_slug.clone(),
-            installation_id,
-        )
-        .map(GitHubAppAuthorizationMaterial::into_bytes)?;
-        Ok(GitHubAppAuthorizationImport {
-            material,
-            account_hint: user.login,
-        })
+        import_initial_authorization(self.upstream.as_ref(), self.app_slug(), response?).await
     }
 
     /// Rotate an already-validated expiring GitHub App user credential. This
@@ -366,19 +429,21 @@ impl GitHubAppAuthorizationOwner {
             .refresh_expectation()
             .map_err(GitHubAppRefreshError::permanent)?;
         let response = self.exchange_refresh(&refresh_token).await?;
-        let user = self
-            .user(&response.access_token)
+        let user = user(self.upstream.as_ref(), &response.access_token)
             .await
             .map_err(GitHubAppRefreshError::from_authorization)?;
         if user.id != expected.user_id {
             return Err(GitHubAppRefreshError::Permanent);
         }
-        let installation_id = self
-            .verify_installation(&response.access_token, Some(expected.installation_id))
-            .await
-            .map_err(GitHubAppRefreshError::from_authorization)?;
-        if installation_id != expected.installation_id || expected.app_slug != self.config.app_slug
-        {
+        let installation_id = verify_installation(
+            self.upstream.as_ref(),
+            self.app_slug(),
+            &response.access_token,
+            Some(expected.installation_id),
+        )
+        .await
+        .map_err(GitHubAppRefreshError::from_authorization)?;
+        if installation_id != expected.installation_id || expected.app_slug != self.app_slug() {
             return Err(GitHubAppRefreshError::Permanent);
         }
         GitHubAppUserOAuthBundle::from_refresh_response(response, unix_now_refresh()?, expected)
@@ -389,38 +454,39 @@ impl GitHubAppAuthorizationOwner {
         &self,
         authorization_code: &[u8],
     ) -> Result<TokenResponse, GitHubAppAuthorizationError> {
+        let AppClient::Confidential(config) = &self.client else {
+            return Err(GitHubAppAuthorizationError::Configuration);
+        };
         let code = std::str::from_utf8(authorization_code)
             .map_err(|_| GitHubAppAuthorizationError::InvalidAuthorizationCode)?;
         let mut body = {
             let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-            serializer.append_pair("client_id", &self.config.client_id);
-            serializer.append_pair("client_secret", &self.config.client_secret);
+            serializer.append_pair("client_id", &config.client_id);
+            serializer.append_pair("client_secret", &config.client_secret);
             serializer.append_pair("code", code);
-            serializer.append_pair("redirect_uri", &self.config.callback_url);
+            serializer.append_pair("redirect_uri", &config.callback_url);
             Zeroizing::new(serializer.finish().into_bytes())
         };
-        let response = self
-            .request(
-                Method::POST,
-                TOKEN_EXCHANGE_URL,
-                HeaderMap::from_iter([
-                    (header::ACCEPT, HeaderValue::from_static("application/json")),
-                    (
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/x-www-form-urlencoded"),
-                    ),
-                    (
-                        header::USER_AGENT,
-                        HeaderValue::from_static("Codewire-Credential-Service"),
-                    ),
-                ]),
-                std::mem::take(&mut *body),
-            )
-            .await?;
+        let response = request(
+            self.upstream.as_ref(),
+            Method::POST,
+            TOKEN_EXCHANGE_URL,
+            HeaderMap::from_iter([
+                (header::ACCEPT, HeaderValue::from_static("application/json")),
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/x-www-form-urlencoded"),
+                ),
+                (
+                    header::USER_AGENT,
+                    HeaderValue::from_static("Codewire-Credential-Service"),
+                ),
+            ]),
+            std::mem::take(&mut *body),
+        )
+        .await?;
         let response: TokenResponse = response_json(response).await?;
-        if !response.token_type.eq_ignore_ascii_case("bearer")
-            || !valid_user_token(&response.access_token)
-        {
+        if !response.is_user_token() {
             return Err(GitHubAppAuthorizationError::InvalidResponse);
         }
         Ok(response)
@@ -435,105 +501,189 @@ impl GitHubAppAuthorizationOwner {
         }
         let mut body = {
             let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-            serializer.append_pair("client_id", &self.config.client_id);
-            serializer.append_pair("client_secret", &self.config.client_secret);
+            serializer.append_pair("client_id", self.client_id());
+            // GitHub requires the secret except for device-flow tokens, so
+            // a public client sends only its client ID.
+            if let AppClient::Confidential(config) = &self.client {
+                serializer.append_pair("client_secret", &config.client_secret);
+            }
             serializer.append_pair("grant_type", "refresh_token");
             serializer.append_pair("refresh_token", refresh_token);
             Zeroizing::new(serializer.finish().into_bytes())
         };
-        let response = self
-            .request(
-                Method::POST,
-                TOKEN_EXCHANGE_URL,
-                HeaderMap::from_iter([
-                    (header::ACCEPT, HeaderValue::from_static("application/json")),
-                    (
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/x-www-form-urlencoded"),
-                    ),
-                    (
-                        header::USER_AGENT,
-                        HeaderValue::from_static("Codewire-Credential-Service"),
-                    ),
-                ]),
-                std::mem::take(&mut *body),
-            )
-            .await
-            .map_err(GitHubAppRefreshError::from_authorization)?;
+        let response = request(
+            self.upstream.as_ref(),
+            Method::POST,
+            TOKEN_EXCHANGE_URL,
+            HeaderMap::from_iter([
+                (header::ACCEPT, HeaderValue::from_static("application/json")),
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/x-www-form-urlencoded"),
+                ),
+                (
+                    header::USER_AGENT,
+                    HeaderValue::from_static("Codewire-Credential-Service"),
+                ),
+            ]),
+            std::mem::take(&mut *body),
+        )
+        .await
+        .map_err(GitHubAppRefreshError::from_authorization)?;
         let response: TokenResponse = response_json(response)
             .await
             .map_err(GitHubAppRefreshError::from_authorization)?;
-        if !response.token_type.eq_ignore_ascii_case("bearer")
-            || !valid_user_token(&response.access_token)
-        {
+        if !response.is_user_token() {
             return Err(GitHubAppRefreshError::Permanent);
         }
         Ok(response)
     }
+}
 
-    async fn user(&self, token: &str) -> Result<VerifiedUser, GitHubAppAuthorizationError> {
-        let response = self
-            .request(
-                Method::GET,
-                USER_URL,
-                authorization_headers(token)?,
-                Vec::new(),
-            )
-            .await?;
-        let response: UserResponse = response_json(response).await?;
-        if response.id == 0 || !valid_login(&response.login) {
-            return Err(GitHubAppAuthorizationError::InvalidResponse);
-        }
-        Ok(VerifiedUser {
-            id: response.id,
-            login: response.login,
-        })
-    }
+/// Verify a fresh token's GitHub user and that user's installation of this
+/// App, then build the canonical import. Every initial authorization, from
+/// the browser callback or a device login, passes through here.
+pub(crate) async fn import_initial_authorization(
+    upstream: &dyn BrokerUpstreamTransport,
+    app_slug: &str,
+    response: TokenResponse,
+) -> Result<GitHubAppAuthorizationImport, GitHubAppAuthorizationError> {
+    let user = user(upstream, &response.access_token).await?;
+    let (installation_id, reach) =
+        app_installations(upstream, app_slug, &response.access_token).await?;
+    let material = GitHubAppUserOAuthBundle::from_initial_response(
+        response,
+        unix_now()?,
+        user.id,
+        app_slug.to_owned(),
+        installation_id,
+    )
+    .map(GitHubAppAuthorizationMaterial::into_bytes)?;
+    Ok(GitHubAppAuthorizationImport {
+        material,
+        account_hint: user.login,
+        reach,
+    })
+}
 
-    async fn verify_installation(
-        &self,
-        token: &str,
-        expected_installation_id: Option<u64>,
-    ) -> Result<u64, GitHubAppAuthorizationError> {
-        for page in 1..=MAX_INSTALLATION_PAGES {
-            let target = format!("{INSTALLATIONS_URL}?per_page=100&page={page}");
-            let response = self
-                .request(
-                    Method::GET,
-                    &target,
-                    authorization_headers(token)?,
-                    Vec::new(),
-                )
-                .await?;
-            let response: InstallationsResponse = response_json(response).await?;
-            if let Some(installation) = response.installations.iter().find(|installation| {
-                installation.id > 0
-                    && installation.app_slug == self.config.app_slug
-                    && expected_installation_id.is_none_or(|expected| expected == installation.id)
-            }) {
-                return Ok(installation.id);
+/// The first installation of this App the login can use (the one a bundle
+/// binds, as `verify_installation` finds it) and every account it is
+/// installed on, for the person connecting to see what Codewire can reach.
+/// Accounts without a valid login are omitted from the reach; they never
+/// widen access.
+async fn app_installations(
+    upstream: &dyn BrokerUpstreamTransport,
+    app_slug: &str,
+    token: &str,
+) -> Result<(u64, Vec<GitHubAppInstallationReach>), GitHubAppAuthorizationError> {
+    let mut first = None;
+    let mut reach = Vec::new();
+    for page in 1..=MAX_INSTALLATION_PAGES {
+        let target = format!("{INSTALLATIONS_URL}?per_page=100&page={page}");
+        let response = request(
+            upstream,
+            Method::GET,
+            &target,
+            authorization_headers(token)?,
+            Vec::new(),
+        )
+        .await?;
+        let response: InstallationsResponse = response_json(response).await?;
+        let last = response.installations.len() < 100;
+        for installation in response.installations {
+            if installation.id == 0 || installation.app_slug != app_slug {
+                continue;
             }
-            if response.installations.len() < 100 {
-                return Err(GitHubAppAuthorizationError::InstallationRequired);
+            first.get_or_insert(installation.id);
+            if let Some(account) = installation.account.map(|account| account.login)
+                && valid_login(&account)
+            {
+                reach.push(GitHubAppInstallationReach {
+                    account,
+                    all_repositories: installation.repository_selection == "all",
+                });
             }
         }
-        // Exhausting the bounded listing is not proof that the App is absent.
-        Err(GitHubAppAuthorizationError::Unavailable)
+        if last {
+            let installation_id = first.ok_or(GitHubAppAuthorizationError::InstallationRequired)?;
+            reach.sort_by(|left, right| left.account.cmp(&right.account));
+            reach.dedup();
+            return Ok((installation_id, reach));
+        }
     }
+    // Exhausting the bounded listing is not proof that the App is absent.
+    match first {
+        Some(installation_id) => Ok((installation_id, reach)),
+        None => Err(GitHubAppAuthorizationError::Unavailable),
+    }
+}
 
-    async fn request(
-        &self,
-        method: Method,
-        target: &str,
-        headers: HeaderMap,
-        body: Vec<u8>,
-    ) -> Result<crate::BrokerUpstreamResponse, GitHubAppAuthorizationError> {
-        let target = Url::parse(target).map_err(|_| GitHubAppAuthorizationError::Configuration)?;
-        self.upstream
-            .execute(BrokerUpstreamRequest::new(method, target, headers, body))
-            .await
-            .map_err(|_| GitHubAppAuthorizationError::Unavailable)
+async fn user(
+    upstream: &dyn BrokerUpstreamTransport,
+    token: &str,
+) -> Result<VerifiedUser, GitHubAppAuthorizationError> {
+    let response = request(
+        upstream,
+        Method::GET,
+        USER_URL,
+        authorization_headers(token)?,
+        Vec::new(),
+    )
+    .await?;
+    let response: UserResponse = response_json(response).await?;
+    if response.id == 0 || !valid_login(&response.login) {
+        return Err(GitHubAppAuthorizationError::InvalidResponse);
     }
+    Ok(VerifiedUser {
+        id: response.id,
+        login: response.login,
+    })
+}
+
+async fn verify_installation(
+    upstream: &dyn BrokerUpstreamTransport,
+    app_slug: &str,
+    token: &str,
+    expected_installation_id: Option<u64>,
+) -> Result<u64, GitHubAppAuthorizationError> {
+    for page in 1..=MAX_INSTALLATION_PAGES {
+        let target = format!("{INSTALLATIONS_URL}?per_page=100&page={page}");
+        let response = request(
+            upstream,
+            Method::GET,
+            &target,
+            authorization_headers(token)?,
+            Vec::new(),
+        )
+        .await?;
+        let response: InstallationsResponse = response_json(response).await?;
+        if let Some(installation) = response.installations.iter().find(|installation| {
+            installation.id > 0
+                && installation.app_slug == app_slug
+                && expected_installation_id.is_none_or(|expected| expected == installation.id)
+        }) {
+            return Ok(installation.id);
+        }
+        if response.installations.len() < 100 {
+            return Err(GitHubAppAuthorizationError::InstallationRequired);
+        }
+    }
+    // Exhausting the bounded listing is not proof that the App is absent.
+    Err(GitHubAppAuthorizationError::Unavailable)
+}
+
+async fn request(
+    upstream: &dyn BrokerUpstreamTransport,
+    method: Method,
+    target: &str,
+    headers: HeaderMap,
+    body: Vec<u8>,
+) -> Result<crate::BrokerUpstreamResponse, GitHubAppAuthorizationError> {
+    let target = Url::parse(target).map_err(|_| GitHubAppAuthorizationError::Configuration)?;
+    upstream
+        .execute(BrokerUpstreamRequest::new(method, target, headers, body))
+        .await
+        .map_err(|_| GitHubAppAuthorizationError::Unavailable)
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -577,8 +727,10 @@ impl GitHubAppRefreshError {
     }
 }
 
+/// A GitHub token endpoint answer: authorization-code, device-code and
+/// refresh grants share it.
 #[derive(Deserialize)]
-struct TokenResponse {
+pub(crate) struct TokenResponse {
     access_token: Zeroizing<String>,
     token_type: String,
     expires_in: Option<u64>,
@@ -587,6 +739,11 @@ struct TokenResponse {
 }
 
 impl TokenResponse {
+    /// A bearer GitHub App user token (`ghu_`), the only kind an App issues.
+    pub(crate) fn is_user_token(&self) -> bool {
+        self.token_type.eq_ignore_ascii_case("bearer") && valid_user_token(&self.access_token)
+    }
+
     fn into_initial_material(
         self,
         now_unix: u64,
@@ -664,6 +821,15 @@ struct InstallationsResponse {
 struct Installation {
     id: u64,
     app_slug: String,
+    #[serde(default)]
+    account: Option<InstallationAccount>,
+    #[serde(default)]
+    repository_selection: String,
+}
+
+#[derive(Deserialize)]
+struct InstallationAccount {
+    login: String,
 }
 
 fn bundle_from_expiring_tokens(
@@ -814,11 +980,11 @@ fn authorization_headers(token: &str) -> Result<HeaderMap, GitHubAppAuthorizatio
     ]))
 }
 
-fn valid_client_value(value: &str) -> bool {
+pub(crate) fn valid_client_value(value: &str) -> bool {
     !value.is_empty() && value.len() <= 1024 && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
-fn valid_app_slug(value: &str) -> bool {
+pub(crate) fn valid_app_slug(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 100
         && !value.starts_with('-')
@@ -1134,6 +1300,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_public_client_rotates_device_tokens_without_the_secret() {
+        let provider = Arc::new(ExpiringProvider::default());
+        let confidential = GitHubAppAuthorizationOwner::new(config(), provider.clone());
+        let mut imported = confidential
+            .complete(Zeroizing::new(b"synthetic-code-123".to_vec()))
+            .await
+            .unwrap();
+        let (material, _) = imported.take_import().unwrap();
+        let bundle = GitHubAppUserOAuthBundle::parse(&material).unwrap();
+        let public = GitHubAppAuthorizationOwner::public_client(
+            crate::provider_oauth::github::GitHubDeviceLoginConfig::new(
+                "Iv1.syntheticclient".into(),
+                "codewire".into(),
+            )
+            .unwrap(),
+            provider.clone(),
+        );
+        let rotated = public.refresh(bundle).await.unwrap();
+        assert_eq!(
+            rotated.access_token().unwrap().as_str(),
+            "ghu_rotated_user_token_1234567890"
+        );
+        assert_eq!(
+            std::str::from_utf8(&provider.requests.lock().unwrap()[3].3).unwrap(),
+            "client_id=Iv1.syntheticclient&grant_type=refresh_token&refresh_token=ghr_synthetic_refresh_token_1234567890"
+        );
+        // Without the secret it cannot complete a browser callback.
+        assert!(matches!(
+            public
+                .complete(Zeroizing::new(b"synthetic-code-123".to_vec()))
+                .await,
+            Err(GitHubAppAuthorizationError::Configuration)
+        ));
+    }
+
+    #[tokio::test]
     async fn refresh_rejects_a_different_github_user_or_app_installation() {
         for (user_id, installation_id, app_slug) in [
             (74, 41, "codewire"),
@@ -1158,6 +1360,46 @@ mod tests {
                 Err(GitHubAppRefreshError::Permanent)
             ));
         }
+    }
+
+    #[test]
+    fn host_git_gets_the_bundles_access_token_never_the_bundle() {
+        let now = 1_800_000_000;
+        let bundle = bundle_from_expiring_tokens(
+            Zeroizing::new("ghu_synthetic_access_token".into()),
+            28_800,
+            Zeroizing::new("ghr_synthetic_refresh_token".into()),
+            15_897_600,
+            now,
+            GitHubAppRefreshExpectation {
+                user_id: 7,
+                app_slug: "codewire-sh".into(),
+                installation_id: 9,
+            },
+        )
+        .unwrap()
+        .into_bytes();
+        assert_eq!(
+            github_access_token(&bundle, now).unwrap().as_str(),
+            "ghu_synthetic_access_token"
+        );
+        // Due for renewal: refused, never sent stale.
+        assert!(matches!(
+            github_access_token(&bundle, now + 28_800),
+            Err(GitHubAppAuthorizationError::Unavailable)
+        ));
+        // An expired refresh token needs a new login.
+        assert!(matches!(
+            github_access_token(&bundle, now + 15_897_600),
+            Err(GitHubAppAuthorizationError::Denied)
+        ));
+        assert_eq!(
+            github_access_token(b"gho_synthetic_raw_token", now)
+                .unwrap()
+                .as_str(),
+            "gho_synthetic_raw_token"
+        );
+        assert!(github_access_token(b"codewire-github-app-user-v1:not-json", now).is_err());
     }
 
     #[test]

@@ -48,7 +48,7 @@ use organization_client::{
     CreateInvitationRequest, CreateOrgRequest, CreatePresetRequest, OrgWithRole,
     OrganizationClient, OrganizationDeletionOutcome, OrganizationDeletionStart, Preset,
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use presentation::EnvironmentDaemonRepair;
 use presentation::{
     CreateEnvironmentRequest, Environment, EnvironmentAccessGrant, EnvironmentDaemonStatus,
@@ -75,7 +75,7 @@ pub fn prepare_local_credential_broker_process() -> std::io::Result<()> {
 
 /// The repository executor gives Git this private symlink to the current cw
 /// binary, allowing a shell-free SSH trampoline before normal CLI startup.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn is_local_git_ssh_helper(program: &std::ffi::OsStr) -> bool {
     std::path::Path::new(program).file_name()
         == Some(std::ffi::OsStr::new(
@@ -85,7 +85,7 @@ pub fn is_local_git_ssh_helper(program: &std::ffi::OsStr) -> bool {
 
 /// Execute fixed stock SSH under the isolated repository's captured parent,
 /// pinned public host trust and selected agent. No normal configuration loads.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn run_local_git_ssh_helper(arguments: Vec<std::ffi::OsString>) -> std::io::Result<()> {
     commands::run_git_ssh_helper(arguments)
         .map_err(|_| std::io::Error::other("repository SSH failed"))
@@ -353,33 +353,39 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(about = "Manage pinned trusted host members")]
     Member(MemberArgs),
+    #[cfg(not(target_os = "linux"))]
+    #[command(about = "Manage trusted Mesh access to a local host (Linux only)")]
+    Control(UnavailableMemberControlArgs),
+    #[cfg(not(target_os = "linux"))]
+    #[command(about = "Manage pinned trusted host members (Linux only)")]
+    Member(UnavailableMemberControlArgs),
     #[command(name = "__hosted-daemon", hide = true)]
     HostedDaemon,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-supervisor", hide = true)]
     NativeSupervisor(NativeSupervisorArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-runner", hide = true)]
     NativeRunner(NativeRunnerArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-network-worker", hide = true)]
     NativeNetworkWorker(NativeNetworkWorkerArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-egress-broker", hide = true)]
     NativeEgressBroker(NativeEgressBrokerArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-mesh-transport", hide = true)]
     NativeMeshTransport(NativeMeshTransportArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-mesh-enrollment-broker", hide = true)]
     NativeMeshEnrollmentBroker(NativeMeshEnrollmentBrokerArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__local-credential-authority", hide = true)]
     LocalCredentialAuthority(LocalCredentialAuthorityArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__local-credential-authority-probe", hide = true)]
     LocalCredentialAuthorityProbe(LocalCredentialAuthorityProbeArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__local-credential-broker", hide = true)]
     LocalCredentialBroker(LocalCredentialBrokerArgs),
     #[cfg(target_os = "linux")]
@@ -388,10 +394,10 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(name = "__local-credential-broker-confinement-probe", hide = true)]
     LocalCredentialBrokerConfinementProbe,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__local-git-repository-executor", hide = true)]
     LocalGitRepositoryExecutor(LocalGitRepositoryExecutorArgs),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__local-git-credential-helper", hide = true)]
     LocalGitCredentialHelper(LocalGitCredentialHelperArgs),
     #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
@@ -500,9 +506,18 @@ pub async fn run_host_agent_control_from(arguments: Vec<std::ffi::OsString>) -> 
     commands::run_host_agent_control(arguments).await
 }
 
+/// A local credential authority that refused to take over its recorded
+/// protected store exits with a status its starting client decodes.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn local_credential_authority_exit_code(error: &anyhow::Error) -> Option<i32> {
+    error
+        .downcast_ref::<codewire_local_credentials::AuthorityRuntimeError>()
+        .and_then(codewire_local_credentials::authority_exit_code)
+}
+
 /// Preserve the fixed private worker failure taxonomy across the thin binary
 /// wrapper. Ordinary CLI failures continue to use the generic exit status.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn native_network_worker_exit_code(error: &anyhow::Error) -> Option<i32> {
     error
         .downcast_ref::<codewire_local_vmm::network_worker::NetworkWorkerError>()
@@ -511,7 +526,7 @@ pub fn native_network_worker_exit_code(error: &anyhow::Error) -> Option<i32> {
 
 /// Preserve the fixed private broker failure taxonomy across the thin binary
 /// wrapper without printing process-internal detail to ambient stderr.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn native_egress_broker_exit_code(error: &anyhow::Error) -> Option<i32> {
     error
         .downcast_ref::<codewire_local_vmm::egress_broker::EgressBrokerProcessError>()
@@ -520,7 +535,7 @@ pub fn native_egress_broker_exit_code(error: &anyhow::Error) -> Option<i32> {
 
 /// Preserve the fixed private Mesh-process failure taxonomy without printing
 /// credential-adjacent process detail to ambient stderr.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn native_mesh_transport_exit_code(error: &anyhow::Error) -> Option<i32> {
     error
         .downcast_ref::<codewire_local_vmm::mesh_process::MeshTransportProcessError>()
@@ -529,7 +544,7 @@ pub fn native_mesh_transport_exit_code(error: &anyhow::Error) -> Option<i32> {
 
 /// Preserve the fixed one-shot enrollment-issuer failure taxonomy without
 /// exposing credential-adjacent detail on ambient stderr.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn native_mesh_enrollment_broker_exit_code(error: &anyhow::Error) -> Option<i32> {
     error
         .downcast_ref::<codewire_local_vmm::mesh_enrollment::MeshEnrollmentProcessError>()
@@ -546,6 +561,22 @@ fn require_local_broker_smoke_executable() -> anyhow::Result<()> {
         "synthetic local credential broker build must be named cw-local-credential-broker-smoke"
     );
     Ok(())
+}
+
+/// Delegated member control keeps custody of every process a member session
+/// starts, including descendants whose parent has exited. Linux tracks that
+/// family with pidfds and a subreaper. On macOS only a private libproc
+/// record (the original parent's unique ID) survives reparenting to launchd,
+/// and Codewire uses no private API, so a Mac host cannot be a member.
+#[cfg(not(target_os = "linux"))]
+const MEMBER_CONTROL_REQUIRES_LINUX: &str = "delegated member control (cw control, cw member, --member) requires Linux: macOS offers no public way to find a session's processes after their parent exits, which member control needs to stop them all; on a Mac, run sessions in a local VM (cw env create --local) instead";
+
+/// `cw control` and `cw member` are refused before their arguments are read.
+#[cfg(not(target_os = "linux"))]
+#[derive(Debug, clap::Args)]
+pub(crate) struct UnavailableMemberControlArgs {
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+    _arguments: Vec<std::ffi::OsString>,
 }
 
 fn validate_member_mutation_flags(cli: &Cli) -> anyhow::Result<()> {
@@ -599,7 +630,7 @@ where
             "--member supports run, list, send, logs, wait, stop, restart, msg, steer, interrupt, inbox and member commands"
         );
         #[cfg(not(target_os = "linux"))]
-        anyhow::bail!("trusted host member commands require Linux");
+        anyhow::bail!(MEMBER_CONTROL_REQUIRES_LINUX);
     }
     // Validate an explicitly selected Mesh state root before any ordinary
     // command effects, including routes that otherwise need only platform state.
@@ -661,26 +692,28 @@ where
         Command::Control(args) => handle_host_control_command(&globals, args).await,
         #[cfg(target_os = "linux")]
         Command::Member(args) => handle_member_command(&globals, args).await,
+        #[cfg(not(target_os = "linux"))]
+        Command::Control(_) | Command::Member(_) => anyhow::bail!(MEMBER_CONTROL_REQUIRES_LINUX),
         Command::HostedDaemon => run_hosted_daemon().await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeSupervisor(args) => run_native_supervisor(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeRunner(args) => run_native_runner(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeNetworkWorker(args) => run_native_network_worker(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeEgressBroker(args) => run_native_egress_broker(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeMeshTransport(args) => run_native_mesh_transport(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeMeshEnrollmentBroker(args) => run_native_mesh_enrollment_broker(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::LocalCredentialAuthority(args) => run_local_credential_authority(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::LocalCredentialAuthorityProbe(args) => {
             run_local_credential_authority_probe(args).await
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::LocalCredentialBroker(args) => run_local_credential_broker(args).await,
         #[cfg(target_os = "linux")]
         Command::EnvironmentLaunch(args) => codewire_daemon::execution::run_environment_launcher(
@@ -692,9 +725,9 @@ where
         Command::LocalCredentialBrokerConfinementProbe => {
             run_local_credential_broker_confinement_probe().await
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::LocalGitRepositoryExecutor(args) => run_local_git_repository_executor(args).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::LocalGitCredentialHelper(args) => run_local_git_credential_helper(args),
         #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
         Command::LocalCredentialBrokerSyntheticSmokeCheck => {

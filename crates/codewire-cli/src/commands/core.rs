@@ -76,7 +76,7 @@ pub(crate) async fn handle_use_command(
     #[cfg(not(unix))]
     let target =
         resolve_named_execution_target(globals, &paths, &env, &args.target, placement).await?;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if target.kind == "local" && target.target_ref != "local" {
         select_native_environment(&target.target_ref).await?;
     }

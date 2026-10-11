@@ -151,10 +151,12 @@ pub fn parse_ipv4_dns_question(
     let ancount = u16::from_be_bytes([dns[6], dns[7]]);
     let nscount = u16::from_be_bytes([dns[8], dns[9]]);
     let arcount = u16::from_be_bytes([dns[10], dns[11]]);
-    // Admit only a standard single-question query. RD and CD are the only
-    // request flags retained; compressed names and EDNS are intentionally a
-    // later, separately bounded extension.
-    if flags & !(0x0100 | 0x0010) != 0
+    // Admit only a standard single-question query. RD, AD and CD are the only
+    // request flags admitted; compressed names and EDNS are intentionally a
+    // later, separately bounded extension. AD in a query only says the client
+    // understands AD in a reply (RFC 6840 5.7); musl's res_mkquery sets it,
+    // so BusyBox nslookup sends it. Replies never set AD.
+    if flags & !(0x0100 | 0x0020 | 0x0010) != 0
         || qdcount != 1
         || ancount != 0
         || nscount != 0
@@ -415,6 +417,33 @@ mod tests {
         assert_eq!(
             &udp.payload()[udp.payload().len() - 4..],
             &answer_ip.octets()
+        );
+    }
+
+    /// musl's res_mkquery, and so BusyBox nslookup, sets AD in its queries.
+    #[test]
+    fn authentic_data_query_bit_is_admitted_and_never_answered() {
+        let mut dns = dns_query("example.com");
+        dns[3] |= 0x20;
+        let question = parse_ipv4_dns_question(&query_packet(DNS_PORT, &dns), RESOLVER, 1232)
+            .expect("query with AD");
+        assert!(question.recursion_desired);
+        let response = build_ipv4_dns_response(
+            &question,
+            DnsAnswer::Ipv4(Ipv4Addr::new(203, 0, 113, 44)),
+            30,
+            1500,
+        )
+        .unwrap();
+        let ipv4 = Ipv4Packet::new_checked(response.as_slice()).unwrap();
+        let udp = UdpPacket::new_checked(ipv4.payload()).unwrap();
+        assert_eq!(&udp.payload()[..4], &[0x12, 0x34, 0x81, 0x80]);
+
+        let mut truncated = dns_query("example.com");
+        truncated[2] |= 0x02;
+        assert_eq!(
+            parse_ipv4_dns_question(&query_packet(DNS_PORT, &truncated), RESOLVER, 1232),
+            Err(DnsBoundaryError::UnsupportedDnsShape)
         );
     }
 

@@ -55,7 +55,7 @@ async fn generated_enrollment_oauth_only_commits_metadata_without_material_leaks
         for auth in [Auth::Missing, Auth::CookieWrongOrigin, Auth::ApiKey] {
             h.rpc.denied_enrollment(auth).await?;
         }
-        ensure!(!h.control("before-challenge.pid").exists() && h.count().await? == 0);
+        ensure!(h.device.started() == 0 && h.count().await? == 0);
         ensure!(h.provider.generate_calls.load(Ordering::SeqCst) == 0);
         for statement in [
             "SELECT secret FROM public.oidc_clients LIMIT 0",
@@ -133,10 +133,6 @@ async fn generated_enrollment_oauth_only_commits_metadata_without_material_leaks
         ensure!(
             h.count().await? == 1 && material_count(&h.db.pool, credential_id.as_str()).await? == 1
         );
-        ensure!(
-            !h.logged_out(),
-            "success revoked the imported provider credential"
-        );
         Ok(())
     }
     .await;
@@ -161,14 +157,14 @@ async fn disconnect_before_challenge_and_during_envelope_preparation_drains() ->
         let rpc = h.rpc.clone();
         let mut request =
             tokio::spawn(async move { rpc.enroll(Auth::Alice, "before-challenge").await });
-        h.wait_file("before-challenge.pid").await?;
+        h.wait_started().await?;
         request.abort();
         match tokio::time::timeout(TIMEOUT, &mut request).await? {
             Ok(response) => drop(response?),
             Err(error) => ensure!(error.is_cancelled()),
         }
         h.drained().await?;
-        ensure!(h.count().await? == 0 && !h.logged_out());
+        ensure!(h.count().await? == 0);
 
         h.reset_login().await?;
         h.provider.generate_gate.arm();
@@ -178,7 +174,7 @@ async fn disconnect_before_challenge_and_during_envelope_preparation_drains() ->
         h.provider.generate_gate.wait().await?;
         drop(response);
         h.drained().await?;
-        ensure!(h.count().await? == 0 && h.logged_out());
+        ensure!(h.count().await? == 0);
         ensure!(h.owner.capacity.available_permits() == MAX_OPERATIONS);
         Ok(())
     }
@@ -206,7 +202,7 @@ async fn login_cannot_outlive_original_oauth_revocation_or_expiry() -> Result<()
         h.release()?;
         response.error("unauthenticated").await?;
         h.drained().await?;
-        ensure!(h.count().await?==0 && h.logged_out());
+        ensure!(h.count().await?==0);
 
         h.reset_login().await?;
         sqlx::query("INSERT INTO oidc_access_tokens(token_hash,client_id,user_id,scopes,expires_at) \
@@ -223,7 +219,7 @@ async fn login_cannot_outlive_original_oauth_revocation_or_expiry() -> Result<()
             .bind(hash_oauth_token(&oauth(ALICE))).execute(&h.db.pool).await?;
         response.error("deadline_exceeded").await?;
         h.drained().await?;
-        ensure!(h.count().await?==0 && !h.logged_out());
+        ensure!(h.count().await?==0);
         Ok(())
     }.await;
     h.finish(result).await
@@ -243,7 +239,7 @@ async fn generated_session_login_requires_origin_and_cannot_outlive_logout() -> 
         h.release()?;
         response.error("unauthenticated").await?;
         h.drained().await?;
-        ensure!(h.count().await? == 0 && h.logged_out());
+        ensure!(h.count().await? == 0);
         Ok(())
     }
     .await;
@@ -263,7 +259,7 @@ async fn generated_duplicate_name_rolls_back_only_new_publication() -> Result<()
         h.release()?;
         response.error("already_exists").await?;
         h.drained().await?;
-        ensure!(h.count().await? == 1 && h.logged_out());
+        ensure!(h.count().await? == 1);
         ensure!(envelope_bytes(&h.db.pool, id(&original)?).await? == before);
         let state: (String, i64) = sqlx::query_as(
             "SELECT status,revocation_generation FROM platform_credentials WHERE id=$1",
@@ -342,7 +338,7 @@ async fn generated_lifecycle_requires_owner_current_revision_and_revoked_unrefer
             .await?;
         ensure!(status.is_success() && value["credential"]["revocationGeneration"] == "2");
         ensure!(value["credential"]["status"] == "CREDENTIAL_STATUS_REVOKED");
-        ensure!(material_count(&h.db.pool, identifier).await? == 0 && !h.logged_out());
+        ensure!(material_count(&h.db.pool, identifier).await? == 0);
         h.rpc
             .lifecycle_error(
                 "DeleteCredential",
@@ -434,7 +430,6 @@ async fn generated_slow_commit_outlives_mutation_deadline_and_publishes() -> Res
             .context("slow COMMIT did not publish after its barrier cleared")??;
         h.drained().await?;
         ensure!(metadata["name"] == "slow-commit" && h.count().await? == 1);
-        ensure!(!h.logged_out());
         Ok(())
     }
     .await;
@@ -492,10 +487,6 @@ async fn generated_publication_cancellation_before_commit_rolls_back_after_issue
                 .await??
                 .map_err(|error| anyhow::anyhow!("closed mutation shutdown: {error:?}"))?;
             ensure!(h.count().await? == i64::from(after_issue));
-            ensure!(
-                h.logged_out() != after_issue,
-                "publication disposition revoked a potentially committed login"
-            );
             ensure!(h.owner.capacity.available_permits() == MAX_OPERATIONS);
             Ok(())
         }
@@ -612,7 +603,7 @@ async fn generated_late_commit_continues_after_client_disconnect_and_disposes_no
                 ensure!(!bytes.windows(canary.len()).any(|window| window == canary.as_bytes()));
             }
         }
-        ensure!(!h.logged_out() && h.provider.generate_calls.load(Ordering::SeqCst) == 1);
+        ensure!(h.provider.generate_calls.load(Ordering::SeqCst) == 1);
         Ok(())
     }
     .await;
@@ -645,7 +636,7 @@ async fn owner_queue_preserves_terminal_failure_behind_unconsumed_challenge() ->
             .owner
             .enroll(authority, "buffered-failure".into(), None, None)
             .map_err(|error| anyhow::anyhow!("closed enrollment error: {error:?}"))?;
-        h.wait_file("native.pid").await?;
+        h.wait_started().await?;
         tokio::time::timeout(TIMEOUT, async {
             while events.receiver.is_empty() {
                 tokio::task::yield_now().await;
@@ -672,7 +663,7 @@ async fn owner_queue_preserves_terminal_failure_behind_unconsumed_challenge() ->
                 .await?
                 .is_none()
         );
-        ensure!(h.count().await? == 0 && h.logged_out());
+        ensure!(h.count().await? == 0);
         Ok(())
     }
     .await;

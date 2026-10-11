@@ -23,8 +23,9 @@ use codewire_access::{
     CredentialAuthKind, CredentialId, CredentialMetadata, Owner, OwnerId, ProviderId,
 };
 use codewire_credential_broker::GitHubAppAuthorizationOwner;
-use codewire_credential_broker::codex_enrollment::{CodexEnrollmentError, CodexEnrollmentOwner};
-use codewire_credential_broker::github_enrollment::GitHubEnrollmentOwner;
+use codewire_credential_broker::provider_oauth::DeviceLoginError;
+use codewire_credential_broker::provider_oauth::codex::CodexDeviceLogin;
+use codewire_credential_broker::provider_oauth::github::GitHubDeviceLogin;
 use codewire_platform_credentials::{
     CredentialRecord, CredentialRegistration, PlatformCredentialError, PlatformCredentialStore,
 };
@@ -76,8 +77,9 @@ type Error = CredentialMutationError;
 struct Shared {
     pool: PgPool,
     store: Arc<PlatformCredentialStore>,
-    enrollment: Arc<CodexEnrollmentOwner>,
-    github_enrollment: Arc<GitHubEnrollmentOwner>,
+    codex_login: CodexDeviceLogin,
+    /// Present exactly when the GitHub App is configured.
+    github_login: Option<GitHubDeviceLogin>,
     github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
 }
 
@@ -97,16 +99,16 @@ impl CredentialMutationOwner {
     pub fn new(
         pool: PgPool,
         store: Arc<PlatformCredentialStore>,
-        enrollment: CodexEnrollmentOwner,
-        github_enrollment: GitHubEnrollmentOwner,
+        codex_login: CodexDeviceLogin,
+        github_login: Option<GitHubDeviceLogin>,
         github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 pool,
                 store,
-                enrollment: Arc::new(enrollment),
-                github_enrollment: Arc::new(github_enrollment),
+                codex_login,
+                github_login,
                 github_app_authorization,
             }),
             accepting: Mutex::new(true),
@@ -133,27 +135,15 @@ impl CredentialMutationOwner {
         }
     }
 
-    /// Signal cancellation and await every disposition and provider child.
-    /// Runtime owners may call `start_shutdown` first to close sibling
-    /// services before beginning any transport grace period.
-    /// Local drain cannot guarantee a remote COMMIT stopped; uncertain
-    /// outcomes retain the possibly published provider credential.
+    /// Signal cancellation and await every disposition. Runtime owners may
+    /// call `start_shutdown` first to close sibling services before beginning
+    /// any transport grace period. Local drain cannot guarantee a remote
+    /// COMMIT stopped; uncertain outcomes retain the possibly published
+    /// provider credential.
     pub async fn shutdown(&self) -> Result<(), Error> {
         self.start_shutdown();
         self.workers.wait().await;
-        let codex = self
-            .shared
-            .enrollment
-            .shutdown()
-            .await
-            .map_err(enrollment_error);
-        let github = self
-            .shared
-            .github_enrollment
-            .shutdown()
-            .await
-            .map_err(enrollment::github_error);
-        codex.and(github)
+        Ok(())
     }
 
     fn enroll(
@@ -419,11 +409,11 @@ async fn run_enrollment(
     sender: &mpsc::Sender<Result<EnrollCodexResponse, Error>>,
 ) -> Result<(), Error> {
     let target = enrollment_target(&shared, scope, "openai", name, replacement).await?;
-    let mut pending = shared.enrollment.start().map_err(enrollment_error)?;
-    let challenge = scope
-        .wait(pending.challenge())
+    let pending = scope
+        .wait(shared.codex_login.start())
         .await?
-        .map_err(enrollment_error)?;
+        .map_err(device_login_error)?;
+    let challenge = pending.challenge();
     let response = EnrollCodexResponse {
         event: Some(enroll_codex_response::Event::Challenge(Box::new(
             codewire_proto::codewire::v1::CodexDeviceChallenge {
@@ -435,24 +425,17 @@ async fn run_enrollment(
         ))),
         ..Default::default()
     };
-    drop(challenge);
     scope
         .wait(sender.send(Ok(response)))
         .await?
         .map_err(|_| Error::Cancelled)?;
-    let mut completed = enrollment::Completed::Codex(
+    let mut completed = enrollment::Completed::Codex(Some(
         scope
-            .wait(pending.complete())
+            .wait(shared.codex_login.complete(pending))
             .await?
-            .map_err(enrollment_error)?,
-    );
+            .map_err(device_login_error)?,
+    ));
     let result = publication::enroll(&shared, scope, &mut completed, target).await;
-    // An issued COMMIT is never followed by NotPublished, even when its
-    // acknowledgement was lost. Cleanup never revokes possibly stored tokens.
-    completed
-        .finish(result.outcome)
-        .await
-        .map_err(|_| Error::CleanupFailed)?;
     let credential = result.result?;
     scope
         .wait(sender.send(Ok(EnrollCodexResponse {
@@ -474,8 +457,8 @@ async fn enrollment_target(
     replacement: Option<(CredentialId, u64)>,
 ) -> Result<EnrollmentTarget, Error> {
     scope.check()?;
-    // Validate the exact owner/name/kind/full version before starting a provider
-    // child or emitting its challenge. Keep this record through publication;
+    // Validate the exact owner/name/kind/full version before starting a device
+    // login or emitting its challenge. Keep this record through publication;
     // neither a concurrent refresh nor revoke can be silently overwritten.
     let target = if let Some((id, revision)) = replacement {
         let record = scope
@@ -593,15 +576,18 @@ fn validate_claude_subscription_token(material: &[u8]) -> Result<(), Error> {
     }
 }
 
-fn enrollment_error(error: CodexEnrollmentError) -> Error {
+/// The provider's device-login outcome. No provider text survives.
+fn device_login_error(error: DeviceLoginError) -> Error {
     match error {
-        CodexEnrollmentError::Cancelled => Error::Cancelled,
-        CodexEnrollmentError::Expired => Error::Expired,
-        CodexEnrollmentError::Unavailable | CodexEnrollmentError::Configuration => {
-            Error::Unavailable
+        DeviceLoginError::Expired => Error::Expired,
+        DeviceLoginError::Unavailable => Error::Unavailable,
+        DeviceLoginError::InstallationRequired => Error::GitHubInstallationRequired,
+        // A malformed provider answer is a failed attempt; only a disabled
+        // device login is something the user must change before retrying.
+        DeviceLoginError::AccessDenied | DeviceLoginError::InvalidResponse => {
+            Error::EnrollmentFailed
         }
-        CodexEnrollmentError::Cleanup => Error::CleanupFailed,
-        _ => Error::EnrollmentFailed,
+        DeviceLoginError::DeviceLoginDisabled => Error::EnrollmentUnsupported,
     }
 }
 

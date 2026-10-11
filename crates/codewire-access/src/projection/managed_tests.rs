@@ -153,7 +153,10 @@ fn managed_clients_have_exactly_32_canonical_private_encodings_preserving_v1() {
 fn managed_clients_reserve_only_selected_client_names() {
     for (slots, expected) in [
         (vec![], vec![]),
-        (vec!["github"], vec![]),
+        (
+            vec!["github"],
+            vec!["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"],
+        ),
         (vec!["ssh"], vec!["SSH_AUTH_SOCK"]),
         (vec!["codex"], vec!["CODEX_HOME"]),
         (vec!["openai"], vec!["OPENAI_API_KEY", "OPENAI_BASE_URL"]),
@@ -231,11 +234,26 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
         ManagedCredentialClientPlacement::Native,
         ManagedCredentialClientPlacement::Platform,
     ] {
-        for empty in [clients(&[]), clients(&["github"])] {
-            let projection = empty.for_placement(placement);
-            assert!(projection.environment.is_empty());
-            assert!(projection.codex.is_none());
-        }
+        let empty = clients(&[]).for_placement(placement);
+        assert!(empty.environment.is_empty());
+        assert!(empty.codex.is_none());
+        // GitHub projects only Git's URL rewrite to the managed route.
+        let github = clients(&["github"]).for_placement(placement);
+        assert!(github.codex.is_none());
+        assert_eq!(
+            github.environment,
+            BTreeMap::from([
+                ("GIT_CONFIG_COUNT".to_owned(), "1".to_owned()),
+                (
+                    "GIT_CONFIG_KEY_0".to_owned(),
+                    "url.http://127.0.0.1:38081/_codewire/github/.insteadOf".to_owned()
+                ),
+                (
+                    "GIT_CONFIG_VALUE_0".to_owned(),
+                    "https://github.com/".to_owned()
+                ),
+            ])
+        );
         let codex = clients(&["codex"]).for_placement(placement);
         let expected_home = match placement {
             ManagedCredentialClientPlacement::Native => "/run/codewire-agent/codex",
@@ -495,4 +513,44 @@ fn anthropic_subscription_projection_is_the_exact_claude_code_oauth_placeholder(
             ])
         );
     }
+}
+
+#[test]
+fn github_git_configuration_is_only_the_loopback_route() {
+    for placement in [
+        ManagedCredentialClientPlacement::Native,
+        ManagedCredentialClientPlacement::Platform,
+    ] {
+        let projection = clients(&["github"]).for_placement(placement);
+        for (name, value) in &projection.environment {
+            // An endpoint only: no credential, token, placeholder or userinfo.
+            for forbidden in ["@", "token", "codewire-managed", "Bearer", "Basic", "gh"] {
+                assert!(
+                    !value.contains(forbidden) || value == "https://github.com/",
+                    "{name}={value} carries {forbidden:?}"
+                );
+            }
+        }
+        let key = &projection.environment["GIT_CONFIG_KEY_0"];
+        assert!(key.starts_with("url.http://127.0.0.1:38081/_codewire/github/"));
+        assert!(key.ends_with(".insteadOf"));
+    }
+}
+
+#[test]
+fn a_declared_git_configuration_is_refused_while_github_is_selected() {
+    let github = clients(&["github"]);
+    for name in ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"] {
+        assert_eq!(
+            github.check_collisions([name]),
+            Err(ProjectionError::ManagedEnvironmentCollision),
+            "{name}"
+        );
+        assert_eq!(clients(&["codex"]).check_collisions([name]), Ok(()));
+    }
+    // Other git settings stay the workload's own.
+    assert_eq!(
+        github.check_collisions(["GIT_CONFIG_KEY_1", "GIT_AUTHOR_NAME"]),
+        Ok(())
+    );
 }

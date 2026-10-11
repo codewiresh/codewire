@@ -430,6 +430,8 @@ if [ "$event_selected" = false ]; then
       scripts/dev/dashboard-watch.py|\
       scripts/dev/macos-cli.py|scripts/dev/test-macos-cli.py|\
       scripts/dev/macos-ext4-tool.py|scripts/dev/test-macos-ext4-tool.py|\
+      scripts/dev/macos-git-tool.py|scripts/dev/test-macos-git-tool.py|\
+      scripts/dev/macos-local-runtime.py|scripts/dev/test-macos-local-runtime.py|\
       scripts/dev/macos-app-sandbox-canary.py|scripts/dev/test-macos-app-sandbox-canary.py|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
       scripts/ci/select/emit-verification-matrices.sh|\
@@ -1189,10 +1191,9 @@ if [ "$event_selected" = false ]; then
         # matrix in addition to the material-free Kubernetes unit fixtures.
         select_token database
         ;;
-      crates/codewire-credential-broker/src/provider_enrollment.rs|\
-      crates/codewire-credential-broker/src/codex_enrollment/*)
-        # Shared by CLI and the isolated platform mutation service;
-        # package-default tests alone do not cover this opt-in feature.
+      crates/codewire-credential-broker/src/provider_enrollment.rs)
+        # Shared by CLI and the isolated platform mutation service (its SSH
+        # runtime); package-default tests alone do not cover these features.
         select_token rust
         select_token rust_pkg_codewire_cli
         select_token rust_pkg_codewire_credential_service

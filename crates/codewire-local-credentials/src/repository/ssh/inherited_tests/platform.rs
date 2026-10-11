@@ -53,6 +53,7 @@ impl PlatformFixture {
             )),
             ready,
             stopped,
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
         ));
         let mut client = LocalCredentialRepositoryLeaseClient::connect(
             client_stream,

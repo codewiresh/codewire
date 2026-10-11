@@ -284,6 +284,12 @@ struct TestRepositorySpawner {
     store: TestProtectedStore,
     leased_material: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    /// When set, the stand-in executor treats its login as due and refreshes
+    /// it to this material through the lease channel before Git would run.
+    refresh_to: Option<&'static [u8]>,
+    /// How long the stand-in executor works after its lease, holding the
+    /// lease channel open as a real fetch does.
+    work_seconds: u32,
 }
 
 impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
@@ -302,7 +308,9 @@ impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
         let store = self.store.clone();
         let request_id = config.request_id;
         let leased_material = self.leased_material.clone();
+        let refresh_to = self.refresh_to;
         let marker = config.staging_directory.join("lease-complete");
+        let work = std::time::Duration::from_secs(u64::from(self.work_seconds));
         let task = tokio::spawn(async move {
             let Ok(mut client) =
                 LocalCredentialRepositoryLeaseClient::connect(stream, request_id).await
@@ -312,10 +320,40 @@ impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
             if client.report_ready().await.is_err() {
                 return;
             }
-            let Ok(lease) = client.lease_github(store).await else {
+            let Ok(lease) = client.lease_github(store.clone()).await else {
                 return;
             };
             let _ = leased_material.send(lease.material().to_vec());
+            if let Some(rotated) = refresh_to {
+                // No second lease before a refresh outcome.
+                let early = client.lease_github(store.clone()).await;
+                let _ = leased_material.send(if early.is_err() {
+                    b"second-lease-denied".to_vec()
+                } else {
+                    b"second-lease-allowed".to_vec()
+                });
+                let Ok(crate::repository::RepositoryRefreshBegin::Reserved(reservation)) =
+                    client.begin_github_refresh(&lease).await
+                else {
+                    return;
+                };
+                let Ok(started) = client.start_github_refresh(reservation).await else {
+                    return;
+                };
+                let rotated = ProtectedValue::from_slice(rotated).unwrap();
+                if client
+                    .commit_github_refresh(started, rotated, store.clone())
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let Ok(lease) = client.lease_github(store).await else {
+                    return;
+                };
+                let _ = leased_material.send(lease.material().to_vec());
+            }
+            tokio::time::sleep(work).await;
             let _ = fs::write(marker, b"ready");
         });
         self.tasks
@@ -334,6 +372,10 @@ impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
+        // A macOS executor of either transport leads its process group and
+        // pipes stderr, which its authority drains after stopping the group.
+        #[cfg(target_os = "macos")]
+        child.stderr(std::process::Stdio::piped()).process_group(0);
         let child = child
             .spawn()
             .map_err(|_| LocalRepositorySpawnError::Spawn)?;
@@ -894,6 +936,7 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
         AuthorityInfo {
             protocol_version: AUTHORITY_PROTOCOL_VERSION,
             protected_store_persistence: ProtectedStorePersistence::ProcessLifetime,
+            protected_store: None,
         }
     );
 
@@ -1043,6 +1086,17 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
 
 #[tokio::test(flavor = "multi_thread")]
 async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
+    prepare_github_repository_taking(0).await;
+}
+
+/// A fetch that outlasts the 30 s control deadline still completes: the
+/// preparation call has its own, longer deadline (#2499).
+#[tokio::test(flavor = "multi_thread")]
+async fn repository_preparation_outlasts_the_control_request_deadline() {
+    prepare_github_repository_taking(32).await;
+}
+
+async fn prepare_github_repository_taking(work_seconds: u32) {
     let temp = tempfile::tempdir().unwrap();
     let config = runtime_config(&temp);
     let store = TestProtectedStore::default();
@@ -1051,6 +1105,8 @@ async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
         store: store.clone(),
         leased_material: material_tx,
         tasks: Arc::new(Mutex::new(Vec::new())),
+        refresh_to: None,
+        work_seconds,
     });
     let (shutdown, task) =
         start_server_with_repository_spawner(config.clone(), store, spawner).await;
@@ -1089,6 +1145,7 @@ async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
             String::new(),
             Vec::new(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1101,6 +1158,88 @@ async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
     assert_eq!(u64::try_from(bundle.len()).unwrap(), prepared.bundle_size);
     assert!(!bundle.windows(token.len()).any(|window| window == token));
     assert_eq!(material_rx.recv().await.unwrap(), token);
+
+    shutdown.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+/// A checkout whose GitHub login is due refreshes it through the lease channel
+/// and the shared journal, then leases the rotated generation.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_checkout_refreshes_a_due_github_login_through_the_authority_journal() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let (material_tx, mut material_rx) = tokio::sync::mpsc::unbounded_channel();
+    let spawner = Arc::new(TestRepositorySpawner {
+        store: store.clone(),
+        leased_material: material_tx,
+        tasks: Arc::new(Mutex::new(Vec::new())),
+        refresh_to: Some(b"rotated-github-app-bundle"),
+        work_seconds: 0,
+    });
+    let (shutdown, task) =
+        start_server_with_repository_spawner(config.clone(), store, spawner).await;
+    let mut client = connect_when_ready(&config).await;
+    let token = b"synthetic-private-github-token";
+    let _connection = client
+        .add_credential(
+            NewCredential {
+                provider: provider("github"),
+                authentication_kind: CredentialAuthKind::OAuth,
+                display_name: "github-work".to_owned(),
+                account_hint: None,
+                expires_at_unix: None,
+            },
+            ProtectedValue::from_slice(token).unwrap(),
+        )
+        .await
+        .unwrap();
+    let profile = client
+        .create_profile(
+            &AccessProfileName::parse("github-work").unwrap(),
+            &BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut control = LocalCredentialControlClient::connect(&config)
+        .await
+        .unwrap();
+    let mut prepared = control
+        .prepare_git_repository(
+            Uuid::new_v4(),
+            &profile.profile.id,
+            profile.profile.revision,
+            "https://github.com/codewire/codewire.git".to_owned(),
+            "main".to_owned(),
+            String::new(),
+            Vec::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(prepared.branch, "main");
+    assert_eq!(prepared.commit.len(), 40);
+    let mut bundle = Vec::new();
+    while let Some(chunk) = prepared.next_bundle_chunk().await.unwrap() {
+        bundle.extend_from_slice(&chunk);
+    }
+    assert_eq!(u64::try_from(bundle.len()).unwrap(), prepared.bundle_size);
+    assert!(!bundle.windows(token.len()).any(|window| window == token));
+    assert_eq!(material_rx.recv().await.unwrap(), token);
+    assert_eq!(material_rx.recv().await.unwrap(), b"second-lease-denied");
+    // Git would send only the refreshed login, admitted again by the authority,
+    // and the post-checkout check accepted this channel's own refresh.
+    assert_eq!(
+        material_rx.recv().await.unwrap(),
+        b"rotated-github-app-bundle"
+    );
+    let refreshed = client
+        .get_credential(&_connection.metadata.id)
+        .await
+        .unwrap();
+    assert_eq!(refreshed.metadata.revocation_generation, 2);
 
     shutdown.send(()).unwrap();
     task.await.unwrap().unwrap();
@@ -1376,9 +1515,12 @@ async fn connect_or_start_reuses_the_admitted_authority_without_spawning() {
     assert_eq!(admitted.info().protocol_version, AUTHORITY_PROTOCOL_VERSION);
     drop(admitted);
 
-    let client = LocalCredentialClient::connect_or_start_with(&config, |_| {
-        panic!("an admitted authority must not spawn a replacement")
-    })
+    let client = LocalCredentialClient::connect_or_start_with(
+        &config,
+        |_| -> Result<Child, AuthorityRuntimeError> {
+            panic!("an admitted authority must not spawn a replacement")
+        },
+    )
     .await
     .unwrap();
     assert_eq!(client.info().protocol_version, AUTHORITY_PROTOCOL_VERSION);
@@ -1403,8 +1545,26 @@ async fn existing_authority_admission_skips_an_absent_socket_without_spawning() 
     assert!(!config.root.exists());
 }
 
+/// An authority running as a task in this test process.
+/// Like a dropped `Child`, dropping it leaves the authority running.
+struct InProcessAuthority;
+
+impl SpawnedAuthority for InProcessAuthority {
+    fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        Ok(None)
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+        Ok(std::os::unix::process::ExitStatusExt::from_raw(0))
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn existing_authority_admission_fails_closed_for_a_dead_socket_without_spawning() {
+async fn a_dead_authority_socket_is_absent_for_admission_and_replaced_on_start() {
     let temp = tempfile::tempdir().unwrap();
     let config = runtime_config(&temp);
     config.prepare_root().unwrap();
@@ -1412,23 +1572,46 @@ async fn existing_authority_admission_fails_closed_for_a_dead_socket_without_spa
     fs::set_permissions(config.socket(), fs::Permissions::from_mode(0o600)).unwrap();
     drop(listener);
     let before = fs::symlink_metadata(config.socket()).unwrap();
-    let error = LocalCredentialClient::admit_existing_or_replace_with(&config, |_| {
-        panic!("an unadmitted authority socket must not spawn")
-    })
-    .await
-    .unwrap_err();
-    assert!(matches!(error, AuthorityRuntimeError::Connect));
-    let error = LocalCredentialClient::connect_or_start_with(&config, |_| {
-        panic!("a present dead socket must not grant replacement permission")
-    })
-    .await
-    .unwrap_err();
-    assert!(matches!(error, AuthorityRuntimeError::Connect));
-    let after = fs::symlink_metadata(config.socket()).unwrap();
-    assert_eq!(
-        (before.dev(), before.ino(), before.mode()),
-        (after.dev(), after.ino(), after.mode())
+
+    // Admission alone treats a socket nothing listens on as absent and leaves it.
+    assert!(
+        LocalCredentialClient::admit_existing_or_replace_with(&config, |_| {
+            panic!("admission must not spawn")
+        })
+        .await
+        .unwrap()
+        .is_none()
     );
+    let after = fs::symlink_metadata(config.socket()).unwrap();
+    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+
+    // A start launches a new authority, which takes the lock and only then
+    // replaces the dead socket.
+    let (shutdown, shutdown_rx) = oneshot::channel::<()>();
+    let mut server = None;
+    let client = LocalCredentialClient::connect_or_start_with(&config, |config| {
+        let config = config.clone();
+        server = Some(tokio::spawn(async move {
+            serve_until(
+                config,
+                TestProtectedStore::default(),
+                catalog(),
+                async move {
+                    let _ = shutdown_rx.await;
+                },
+            )
+            .await
+        }));
+        Ok(InProcessAuthority)
+    })
+    .await
+    .unwrap();
+    // The new authority answers where nothing listened before. (A freed
+    // inode number can be reused, so the socket's inode proves nothing.)
+    assert_eq!(client.info().protocol_version, AUTHORITY_PROTOCOL_VERSION);
+    client.shutdown().await.unwrap();
+    server.unwrap().await.unwrap().unwrap();
+    drop(shutdown);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1445,9 +1628,12 @@ async fn existing_authority_admission_rejects_an_invalid_socket_without_spawning
     .await
     .unwrap_err();
     assert!(matches!(error, AuthorityRuntimeError::InvalidPrivateSocket));
-    let error = LocalCredentialClient::connect_or_start_with(&config, |_| {
-        panic!("a present invalid endpoint must not grant replacement permission")
-    })
+    let error = LocalCredentialClient::connect_or_start_with(
+        &config,
+        |_| -> Result<Child, AuthorityRuntimeError> {
+            panic!("a present invalid endpoint must not grant replacement permission")
+        },
+    )
     .await
     .unwrap_err();
     assert!(matches!(error, AuthorityRuntimeError::InvalidPrivateSocket));
@@ -1489,6 +1675,7 @@ impl tonic::server::UnaryService<v1::GetAuthorityInfoRequest> for CompatibilityA
                     protocol_version: AUTHORITY_PROTOCOL_VERSION - 1,
                     protected_store_persistence: v1::ProtectedStorePersistence::ProcessLifetime
                         as i32,
+                    protected_store_backend: String::new(),
                 }))
             }
         })
@@ -1669,7 +1856,7 @@ async fn assert_present_authority_refusal_retains_process(mode: &str) {
     let before = fs::symlink_metadata(config.socket()).unwrap();
     let spawns = AtomicUsize::new(0);
     for (request_count, admission_only) in [(1, true), (2, false)] {
-        let spawn = |_: &AuthorityRuntimeConfig| {
+        let spawn = |_: &AuthorityRuntimeConfig| -> Result<Child, AuthorityRuntimeError> {
             spawns.fetch_add(1, Ordering::SeqCst);
             Err(AuthorityRuntimeError::Spawn)
         };

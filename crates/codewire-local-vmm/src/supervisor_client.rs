@@ -2,8 +2,8 @@
 //!
 //! Connection admission checks socket identity, owner UID and the exact protocol.
 //! Only configuration-aware callers additionally bind an expected digest. None
-//! of these checks is process adoption. Linux startup and restart effects remain
-//! in the native supervisor; Darwin can only connect to an existing endpoint.
+//! of these checks is process adoption. Linux also pins the supervisor's
+//! socket-derived process birth; Darwin admits the owner-only socket.
 
 use std::path::Path;
 use std::time::Duration;
@@ -13,17 +13,11 @@ use uuid::Uuid;
 
 use crate::control::v1;
 use crate::control::v1::local_supervisor_service_client::LocalSupervisorServiceClient;
-#[cfg(target_os = "linux")]
-use crate::linux::supervisor_peer::SupervisorPeerPin;
-#[cfg(target_os = "linux")]
+use crate::host::supervisor_peer::SupervisorPeerPin;
 use crate::supervisor_config::NativeRuntimeConfig;
 use crate::supervisor_config::{SupervisorConfigError, admit_supervisor_info};
 pub use crate::uds::UdsError;
-#[cfg(target_os = "macos")]
-use crate::uds::connect_owner_only;
-#[cfg(target_os = "linux")]
 use crate::uds::{capture_supervisor_peer, connect_supervisor_peer};
-#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
 const SUPERVISOR_INFO_TIMEOUT: Duration = Duration::from_secs(3);
@@ -31,20 +25,17 @@ const SUPERVISOR_INFO_TIMEOUT: Duration = Duration::from_secs(3);
 #[derive(Clone)]
 pub struct NativeSupervisorClient {
     inner: LocalSupervisorServiceClient<tonic::transport::Channel>,
-    #[cfg(target_os = "linux")]
     pub(crate) peer_pin: Arc<SupervisorPeerPin>,
-    #[cfg(target_os = "linux")]
     pub(crate) expected_configuration_digest: [u8; 32],
-    #[cfg(target_os = "linux")]
     pub(crate) reconnect_enabled: bool,
 }
 
 impl NativeSupervisorClient {
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(test)]
     pub(crate) fn into_rpc_client_for_test(
         self,
     ) -> LocalSupervisorServiceClient<tonic::transport::Channel> {
-        // The Linux source-transition regression must submit and disconnect
+        // The source-transition regression must submit and disconnect
         // before following completion. Keep this escape hatch test-only.
         self.inner
     }
@@ -53,21 +44,10 @@ impl NativeSupervisorClient {
         socket: &Path,
         expected_configuration_digest: Option<[u8; 32]>,
     ) -> Result<Self, SupervisorClientError> {
-        #[cfg(target_os = "linux")]
-        {
-            let pin = capture_supervisor_peer(socket, None).await?;
-            Self::connect_pinned(pin, expected_configuration_digest, false).await
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let channel = connect_owner_only(socket).await?;
-            let mut inner = LocalSupervisorServiceClient::new(channel);
-            query_supervisor_info(&mut inner, expected_configuration_digest).await?;
-            Ok(Self { inner })
-        }
+        let pin = capture_supervisor_peer(socket, None).await?;
+        Self::connect_pinned(pin, expected_configuration_digest, false).await
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) async fn connect_configured(
         config: &NativeRuntimeConfig,
     ) -> Result<Self, SupervisorClientError> {
@@ -79,7 +59,6 @@ impl NativeSupervisorClient {
         Self::connect_pinned(pin, Some(expected), true).await
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) async fn connect_pinned(
         peer_pin: Arc<SupervisorPeerPin>,
         expected_configuration_digest: Option<[u8; 32]>,
@@ -97,7 +76,6 @@ impl NativeSupervisorClient {
         })
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn supervisor_peer_pin(&self) -> Arc<SupervisorPeerPin> {
         self.peer_pin.clone()
     }
@@ -105,9 +83,54 @@ impl NativeSupervisorClient {
         &mut self,
         request: v1::CreateEnvironmentRequest,
     ) -> Result<v1::Environment, Status> {
+        self.create_observed(request, &mut |_| {}).await
+    }
+
+    /// Create, reporting the lifecycle operation and each of its non-terminal
+    /// updates to `observe` as the supervisor publishes them.
+    pub async fn create_observed(
+        &mut self,
+        request: v1::CreateEnvironmentRequest,
+        observe: &mut (dyn FnMut(&v1::Operation) + Send),
+    ) -> Result<v1::Environment, Status> {
         let name = request.name.clone();
-        let operation = self.inner.create_environment(request).await?.into_inner();
-        self.follow_environment_operation(operation, &name).await
+        let operation = match self.inner.create_environment(request).await {
+            Ok(response) => response.into_inner(),
+            Err(status) if status.code() == tonic::Code::AlreadyExists => {
+                return Err(Status::already_exists(format!(
+                    "{} (remove it with `cw env --local rm {name}` or choose another --name)",
+                    status.message()
+                )));
+            }
+            Err(status) => return Err(status),
+        };
+        match self
+            .follow_environment_operation(operation, &name, observe)
+            .await
+        {
+            Err(failure) if failure.code() == tonic::Code::FailedPrecondition => {
+                Err(self.with_create_cleanup_outcome(failure, &name).await)
+            }
+            outcome => outcome,
+        }
+    }
+
+    /// A failed create removes what it recorded (#2491). Reading the
+    /// environment waits for that rollback, so the message says only what
+    /// is known: removed, kept, or unknown.
+    async fn with_create_cleanup_outcome(&mut self, failure: Status, name: &str) -> Status {
+        let outcome = match self.get(name).await {
+            Err(status) if status.code() == tonic::Code::NotFound => {
+                " Nothing was kept.".to_owned()
+            }
+            Ok(_) => format!(
+                " The failed environment could not be removed; run `cw env --local rm {name}`."
+            ),
+            Err(_) => format!(
+                " Whether the failed environment was removed is unknown; check `cw env --local list` and remove {name} if it is listed."
+            ),
+        };
+        Status::new(failure.code(), format!("{}{outcome}", failure.message()))
     }
 
     pub async fn list(&mut self) -> Result<Vec<v1::Environment>, Status> {
@@ -152,12 +175,22 @@ impl NativeSupervisorClient {
     }
 
     pub async fn start(&mut self, name: &str) -> Result<v1::Environment, Status> {
+        self.start_observed(name, &mut |_| {}).await
+    }
+
+    /// Start, reporting the lifecycle operation's progress to `observe`.
+    pub async fn start_observed(
+        &mut self,
+        name: &str,
+        observe: &mut (dyn FnMut(&v1::Operation) + Send),
+    ) -> Result<v1::Environment, Status> {
         let operation = self
             .inner
             .start_environment(mutation_selector(name))
             .await?
             .into_inner();
-        self.follow_environment_operation(operation, name).await
+        self.follow_environment_operation(operation, name, observe)
+            .await
     }
 
     pub async fn stop(&mut self, name: &str) -> Result<v1::Environment, Status> {
@@ -166,7 +199,8 @@ impl NativeSupervisorClient {
             .stop_environment(mutation_selector(name))
             .await?
             .into_inner();
-        self.follow_environment_operation(operation, name).await
+        self.follow_environment_operation(operation, name, &mut |_| {})
+            .await
     }
 
     pub async fn restart(
@@ -183,7 +217,8 @@ impl NativeSupervisorClient {
             })
             .await?
             .into_inner();
-        self.follow_environment_operation(operation, name).await
+        self.follow_environment_operation(operation, name, &mut |_| {})
+            .await
     }
 
     pub async fn refresh_skills(&mut self, name: &str) -> Result<v1::Environment, Status> {
@@ -192,7 +227,8 @@ impl NativeSupervisorClient {
             .refresh_environment_skills(mutation_selector(name))
             .await?
             .into_inner();
-        self.follow_environment_operation(operation, name).await
+        self.follow_environment_operation(operation, name, &mut |_| {})
+            .await
     }
 
     pub async fn resize(
@@ -216,7 +252,31 @@ impl NativeSupervisorClient {
             })
             .await?
             .into_inner();
-        self.follow_environment_operation(operation, name).await
+        self.follow_environment_operation(operation, name, &mut |_| {})
+            .await
+    }
+
+    /// Publish `add` and withdraw `remove` (host ports), waiting for the
+    /// running VM to change or, when stopped, for the record.
+    pub async fn update_host_ports(
+        &mut self,
+        name: &str,
+        add: Vec<v1::HostPortBinding>,
+        remove: Vec<u32>,
+    ) -> Result<v1::Environment, Status> {
+        let operation = self
+            .inner
+            .update_host_ports(v1::UpdateHostPortsRequest {
+                name: name.to_owned(),
+                request_id: Uuid::new_v4().to_string(),
+                environment_id: String::new(),
+                add,
+                remove,
+            })
+            .await?
+            .into_inner();
+        self.follow_environment_operation(operation, name, &mut |_| {})
+            .await
     }
 
     /// Update only the source selections, waiting on the existing durable operation stream.
@@ -229,7 +289,7 @@ impl NativeSupervisorClient {
             .update_environment_sources(request)
             .await?
             .into_inner();
-        self.follow_operation(operation).await
+        self.follow_operation(operation, &mut |_| {}).await
     }
 
     pub async fn delete(&mut self, name: &str) -> Result<v1::DeleteEnvironmentResponse, Status> {
@@ -238,7 +298,7 @@ impl NativeSupervisorClient {
             .delete_environment(mutation_selector(name))
             .await?
             .into_inner();
-        let operation = self.follow_operation(operation).await?;
+        let operation = self.follow_operation(operation, &mut |_| {}).await?;
         match operation.result.and_then(|result| result.value) {
             Some(v1::operation_result::Value::Deletion(deletion)) => Ok(deletion),
             _ => Err(Status::internal(
@@ -282,7 +342,6 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
-    #[cfg(target_os = "linux")]
     async fn runtime_client(
         &self,
     ) -> Result<
@@ -305,7 +364,6 @@ impl NativeSupervisorClient {
         Ok(v1::linux_cw_runtime_service_client::LinuxCwRuntimeServiceClient::new(channel))
     }
 
-    #[cfg(target_os = "linux")]
     pub async fn runtime_resolve(&self, selector: &str) -> Result<String, Status> {
         let resolved = self
             .runtime_client()
@@ -327,7 +385,6 @@ impl NativeSupervisorClient {
         Ok(resolved.environment_id)
     }
 
-    #[cfg(target_os = "linux")]
     pub async fn runtime_info(
         &self,
         environment_id: &str,
@@ -341,7 +398,6 @@ impl NativeSupervisorClient {
             .await
             .map(|response| response.into_inner())
     }
-    #[cfg(target_os = "linux")]
     pub async fn runtime_update(
         &self,
         request: v1::LinuxCwRuntimeMutation,
@@ -352,7 +408,6 @@ impl NativeSupervisorClient {
             .await
             .map(|response| response.into_inner())
     }
-    #[cfg(target_os = "linux")]
     pub async fn runtime_rollback(
         &self,
         request: v1::LinuxCwRuntimeMutation,
@@ -363,7 +418,6 @@ impl NativeSupervisorClient {
             .await
             .map(|response| response.into_inner())
     }
-    #[cfg(target_os = "linux")]
     pub async fn runtime_observe(
         &self,
         environment_id: &str,
@@ -378,7 +432,6 @@ impl NativeSupervisorClient {
             .await
             .map(|response| response.into_inner())
     }
-    #[cfg(target_os = "linux")]
     pub async fn runtime_cancel(
         &self,
         environment_id: &str,
@@ -398,14 +451,16 @@ impl NativeSupervisorClient {
         &mut self,
         operation: v1::Operation,
         name: &str,
+        observe: &mut (dyn FnMut(&v1::Operation) + Send),
     ) -> Result<v1::Environment, Status> {
-        self.follow_operation(operation).await?;
+        self.follow_operation(operation, observe).await?;
         self.get(name).await
     }
 
     async fn follow_operation(
         &mut self,
         operation: v1::Operation,
+        observe: &mut (dyn FnMut(&v1::Operation) + Send),
     ) -> Result<v1::Operation, Status> {
         let operation_id = operation.operation_id.clone();
         if operation_terminal(&operation)
@@ -413,6 +468,7 @@ impl NativeSupervisorClient {
         {
             return operation_outcome(operation);
         }
+        observe(&operation);
         let mut reconnects = 0_u8;
         loop {
             let stream = self
@@ -433,7 +489,7 @@ impl NativeSupervisorClient {
                             {
                                 return operation_outcome(operation);
                             }
-                            Ok(Some(_)) => {}
+                            Ok(Some(operation)) => observe(&operation),
                             Ok(None) => {
                                 break Status::unavailable(
                                     "local lifecycle operation stream ended before a terminal result",
@@ -492,13 +548,62 @@ pub(crate) fn operation_outcome(operation: v1::Operation) -> Result<v1::Operatio
                 operation.error_code.as_str()
             };
             Err(Status::failed_precondition(format!(
-                "local lifecycle operation {} failed: {error_code}",
-                operation.operation_id
+                "local lifecycle operation {} failed: {error_code}{}",
+                operation.operation_id,
+                operation_error_hint(error_code)
             )))
         }
         _ => Err(Status::internal(
             "local lifecycle operation is not terminal",
         )),
+    }
+}
+
+/// A plain-language reason for an operation error code, where the code alone
+/// does not tell the user what to change.
+fn operation_error_hint(error_code: &str) -> &'static str {
+    match error_code {
+        "create_guest_docker_tooling_missing" => {
+            " (the image has no Docker tooling; create with --no-docker or choose an image that includes Docker)"
+        }
+        "delete_failed" | "delete_interrupted" => {
+            " (nothing was removed and the environment was kept; see cw env info, then run cw env rm again)"
+        }
+        "create_direct_share_changed" | "start_direct_share_changed" => {
+            " (a direct-mount source directory was moved, removed or replaced since it was admitted; put the original directory back at its path, or remove and recreate the environment)"
+        }
+        "create_host_port_unavailable" => {
+            " (a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; stop it, or change host_port in codewire.yaml)"
+        }
+        "start_host_port_unavailable" => {
+            " (a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; `cw env --local port ls` lists its ports: stop that program, or withdraw the port with `cw env --local port rm` and publish another)"
+        }
+        "host_port_unavailable" => {
+            " (the host port is in use on 127.0.0.1 by another program or local environment; choose another with --host-port)"
+        }
+        #[cfg(target_os = "macos")]
+        "create_registry_platform" => {
+            " (the image has no linux/arm64 variant; macOS local environments run arm64 Linux, so pass --image with a multi-architecture or arm64 image, such as node:22-bookworm or ubuntu:24.04)"
+        }
+        #[cfg(not(target_os = "macos"))]
+        "create_registry_platform" => {
+            " (the image has no variant for this host's architecture; pass --image with one that has)"
+        }
+        "create_name_taken" => {
+            " (an environment with this name already exists; remove it with cw env --local rm NAME or choose another --name)"
+        }
+        "create_interrupted" => {
+            " (the local supervisor stopped during the create; create it again)"
+        }
+        #[cfg(target_os = "macos")]
+        "create_vz_helper_missing" => {
+            " (the Virtualization.framework helper named by the local VM artifact lock is missing; install the signed codewire-vz-runner at that path)"
+        }
+        #[cfg(target_os = "macos")]
+        "create_vz_helper_unentitled" => {
+            " (the Virtualization.framework helper is not signed with the com.apple.security.virtualization entitlement; sign it with codesign --entitlements and update its artifact lock entry)"
+        }
+        _ => "",
     }
 }
 
@@ -515,21 +620,6 @@ fn mutation_selector(name: &str) -> v1::EnvironmentSelector {
         name: name.to_owned(),
         request_id: Uuid::new_v4().to_string(),
         environment_id: String::new(),
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl NativeSupervisorClient {
-    /// Connect without creating/restarting a supervisor or binding its configuration.
-    pub async fn connect(socket: &Path) -> Result<Self, SupervisorClientError> {
-        Self::connect_admitted(socket, None).await
-    }
-
-    async fn reconnect_after_watch_failure(&mut self, operation_id: &str) -> Result<(), Status> {
-        Err(operation_watch_failure(
-            operation_id,
-            Status::unavailable("local supervisor reconnect is unavailable"),
-        ))
     }
 }
 

@@ -7,9 +7,16 @@
 //! entry IDs recorded in its metadata journal. Provider material must not be
 //! passed to a VM supervisor or serialized into placement metadata.
 //!
+//! Local authorities select one persistent backend: Secret Service on Linux,
+//! and on macOS the login Keychain (default) or owner-only files.
+//!
 //! The opt-in `platform` feature adds authenticated tenant-secret envelopes,
 //! OpenBao Transit wrapping, and pod-bound Kubernetes workload identities.
 
+#[cfg(unix)]
+mod file;
+#[cfg(any(test, target_os = "macos"))]
+mod keychain;
 #[cfg(feature = "platform")]
 pub mod openbao_workload_identity;
 #[cfg(feature = "platform")]
@@ -17,8 +24,15 @@ pub mod secret_envelope;
 #[cfg(feature = "ssh-material")]
 pub mod ssh_material;
 
+#[cfg(unix)]
+pub use file::FileProtectedStore;
+#[cfg(target_os = "macos")]
+pub use keychain::KeychainProtectedStore;
+
 use std::collections::BTreeMap;
 use std::fmt;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::path::Path;
 use std::sync::Mutex;
 
 #[cfg(target_os = "linux")]
@@ -154,6 +168,59 @@ impl fmt::Debug for ProtectedValue {
     }
 }
 
+/// The persistent local backend an authority stores values in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ProtectedStoreBackend {
+    /// Linux Secret Service (the user's login keyring).
+    SecretService,
+    /// macOS Keychain through `/usr/bin/security`.
+    Keychain,
+    /// One owner-only file per entry under the private authority root.
+    File,
+}
+
+impl ProtectedStoreBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SecretService => "secret-service",
+            Self::Keychain => "keychain",
+            Self::File => "file",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        [Self::SecretService, Self::Keychain, Self::File]
+            .into_iter()
+            .find(|backend| backend.as_str() == value)
+    }
+
+    /// The backend used when no explicit selection exists.
+    pub const fn platform_default() -> Option<Self> {
+        if cfg!(target_os = "linux") {
+            Some(Self::SecretService)
+        } else if cfg!(target_os = "macos") {
+            Some(Self::Keychain)
+        } else {
+            None
+        }
+    }
+
+    /// Linux brokers and repository executors read Secret Service directly,
+    /// so Linux offers no other backend.
+    pub const fn supported(self) -> bool {
+        match self {
+            Self::SecretService => cfg!(target_os = "linux"),
+            Self::Keychain | Self::File => cfg!(target_os = "macos"),
+        }
+    }
+}
+
+impl fmt::Display for ProtectedStoreBackend {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 pub trait ProtectedStore: Send + Sync {
     fn persistence(&self) -> ProtectedStorePersistence;
     fn get(&self, id: &ProtectedEntryId) -> Result<Option<ProtectedValue>, ProtectedStoreError>;
@@ -235,19 +302,11 @@ impl ProtectedStore for OsProtectedStore {
         {
             linux_get(id)
         }
-        #[cfg(all(target_os = "macos", feature = "apple-keychain"))]
+        #[cfg(target_os = "macos")]
         {
-            let entry = keyring_entry(id)?;
-            match entry.get_secret() {
-                Ok(value) => protected_value_from_store(value).map(Some),
-                Err(keyring::Error::NoEntry) => Ok(None),
-                Err(error) => Err(map_keyring_error(error)),
-            }
+            KeychainProtectedStore::login().get(id)
         }
-        #[cfg(not(any(
-            target_os = "linux",
-            all(target_os = "macos", feature = "apple-keychain")
-        )))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = id;
             Err(ProtectedStoreError::UnsupportedPlatform)
@@ -263,16 +322,11 @@ impl ProtectedStore for OsProtectedStore {
         {
             linux_put(id, value)
         }
-        #[cfg(all(target_os = "macos", feature = "apple-keychain"))]
+        #[cfg(target_os = "macos")]
         {
-            keyring_entry(id)?
-                .set_secret(value.expose_secret())
-                .map_err(map_keyring_error)
+            KeychainProtectedStore::login().put(id, value)
         }
-        #[cfg(not(any(
-            target_os = "linux",
-            all(target_os = "macos", feature = "apple-keychain")
-        )))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = (id, value);
             Err(ProtectedStoreError::UnsupportedPlatform)
@@ -284,21 +338,116 @@ impl ProtectedStore for OsProtectedStore {
         {
             linux_delete(id)
         }
-        #[cfg(all(target_os = "macos", feature = "apple-keychain"))]
+        #[cfg(target_os = "macos")]
         {
-            match keyring_entry(id)?.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-                Err(error) => Err(map_keyring_error(error)),
-            }
+            KeychainProtectedStore::login().delete(id)
         }
-        #[cfg(not(any(
-            target_os = "linux",
-            all(target_os = "macos", feature = "apple-keychain")
-        )))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = id;
             Err(ProtectedStoreError::UnsupportedPlatform)
         }
+    }
+}
+
+/// One selected persistent backend for a local authority.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, PartialEq, Eq)]
+pub enum SelectedProtectedStore {
+    #[cfg(target_os = "linux")]
+    SecretService,
+    #[cfg(target_os = "macos")]
+    Keychain(KeychainProtectedStore),
+    #[cfg(target_os = "macos")]
+    File(FileProtectedStore),
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl SelectedProtectedStore {
+    /// `file_directory` is used only by the file backend; `keychain` selects
+    /// an explicit keychain file instead of the login keychain (tests and
+    /// synthetic acceptance only).
+    pub fn open(
+        backend: ProtectedStoreBackend,
+        file_directory: &Path,
+        keychain: Option<&Path>,
+    ) -> Result<Self, ProtectedStoreError> {
+        if !backend.supported() {
+            return Err(ProtectedStoreError::UnsupportedPlatform);
+        }
+        match backend {
+            #[cfg(target_os = "linux")]
+            ProtectedStoreBackend::SecretService if keychain.is_none() => {
+                let _ = file_directory;
+                Ok(Self::SecretService)
+            }
+            #[cfg(target_os = "macos")]
+            ProtectedStoreBackend::Keychain => Ok(Self::Keychain(match keychain {
+                Some(path) => KeychainProtectedStore::with_keychain(path.to_owned())?,
+                None => KeychainProtectedStore::login(),
+            })),
+            #[cfg(target_os = "macos")]
+            ProtectedStoreBackend::File => {
+                let _ = keychain;
+                FileProtectedStore::new(file_directory.to_owned()).map(Self::File)
+            }
+            _ => Err(ProtectedStoreError::UnsupportedPlatform),
+        }
+    }
+
+    fn store(&self) -> &dyn ProtectedStore {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::SecretService => &OsProtectedStore,
+            #[cfg(target_os = "macos")]
+            Self::Keychain(store) => store,
+            #[cfg(target_os = "macos")]
+            Self::File(store) => store,
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl fmt::Debug for SelectedProtectedStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "SelectedProtectedStore({})", self.backend())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl SelectedProtectedStore {
+    pub fn backend(&self) -> ProtectedStoreBackend {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::SecretService => ProtectedStoreBackend::SecretService,
+            #[cfg(target_os = "macos")]
+            Self::Keychain(_) => ProtectedStoreBackend::Keychain,
+            #[cfg(target_os = "macos")]
+            Self::File(_) => ProtectedStoreBackend::File,
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl ProtectedStore for SelectedProtectedStore {
+    fn persistence(&self) -> ProtectedStorePersistence {
+        ProtectedStorePersistence::OperatingSystem
+    }
+
+    fn get(&self, id: &ProtectedEntryId) -> Result<Option<ProtectedValue>, ProtectedStoreError> {
+        self.store().get(id)
+    }
+
+    fn put(
+        &self,
+        id: &ProtectedEntryId,
+        value: &ProtectedValue,
+    ) -> Result<(), ProtectedStoreError> {
+        self.store().put(id, value)
+    }
+
+    fn delete(&self, id: &ProtectedEntryId) -> Result<(), ProtectedStoreError> {
+        self.store().delete(id)
     }
 }
 
@@ -405,11 +554,7 @@ async fn linux_get_with_service(
     protected_value_from_store(value).map(Some)
 }
 
-#[cfg(any(
-    test,
-    target_os = "linux",
-    all(target_os = "macos", feature = "apple-keychain")
-))]
+#[cfg(any(test, unix))]
 fn protected_value_from_store(value: Vec<u8>) -> Result<ProtectedValue, ProtectedStoreError> {
     ProtectedValue::new(value).map_err(|_| ProtectedStoreError::CorruptEntry)
 }
@@ -580,36 +725,6 @@ fn map_linux_secret_service_error(error: secret_service::Error) -> ProtectedStor
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "apple-keychain"))]
-fn keyring_entry(id: &ProtectedEntryId) -> Result<keyring::Entry, ProtectedStoreError> {
-    keyring::Entry::new(CODEWIRE_CREDENTIAL_SERVICE, id.expose_reference())
-        .map_err(map_keyring_error)
-}
-
-#[cfg(all(target_os = "macos", feature = "apple-keychain"))]
-fn map_keyring_error(error: keyring::Error) -> ProtectedStoreError {
-    match error {
-        keyring::Error::NoStorageAccess(_) => ProtectedStoreError::AccessDenied,
-        keyring::Error::PlatformFailure(_) => ProtectedStoreError::Unavailable,
-        keyring::Error::NoEntry => ProtectedStoreError::Unavailable,
-        keyring::Error::BadEncoding(mut value) => {
-            value.zeroize();
-            ProtectedStoreError::CorruptEntry
-        }
-        keyring::Error::TooLong(mut attribute, _) => {
-            attribute.zeroize();
-            ProtectedStoreError::InvalidEntryId
-        }
-        keyring::Error::Invalid(mut attribute, mut reason) => {
-            attribute.zeroize();
-            reason.zeroize();
-            ProtectedStoreError::InvalidEntryId
-        }
-        keyring::Error::Ambiguous(_) => ProtectedStoreError::AmbiguousEntry,
-        _ => ProtectedStoreError::Unavailable,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,43 +857,66 @@ mod tests {
         );
     }
 
-    #[cfg(all(target_os = "macos", feature = "apple-keychain"))]
     #[test]
-    fn keyring_errors_are_flattened_without_sources_or_payloads() {
-        let secret = b"synthetic-secret-that-must-not-escape".to_vec();
-        let mapped = map_keyring_error(keyring::Error::BadEncoding(secret.clone()));
-        assert_eq!(mapped, ProtectedStoreError::CorruptEntry);
-        assert!(!format!("{mapped:?} {mapped}").contains("synthetic-secret"));
-        assert!(std::error::Error::source(&mapped).is_none());
-
-        assert_eq!(
-            map_keyring_error(keyring::Error::Invalid(
-                "user".into(),
-                "synthetic-secret-that-must-not-escape".into(),
-            )),
-            ProtectedStoreError::InvalidEntryId
-        );
-    }
-
-    #[cfg(all(target_os = "macos", not(feature = "apple-keychain")))]
-    #[test]
-    fn os_store_fails_closed_without_keychain_feature() {
-        let store = OsProtectedStore;
-        let id = entry("credentials/synthetic/generations/1");
-        let value = ProtectedValue::new(b"synthetic-value".to_vec()).unwrap();
-
-        assert!(matches!(
-            store.get(&id),
-            Err(ProtectedStoreError::UnsupportedPlatform)
-        ));
-        assert_eq!(
-            store.put(&id, &value),
-            Err(ProtectedStoreError::UnsupportedPlatform)
-        );
-        assert_eq!(
-            store.delete(&id),
-            Err(ProtectedStoreError::UnsupportedPlatform)
-        );
+    fn backends_have_stable_names_and_platform_support() {
+        for backend in [
+            ProtectedStoreBackend::SecretService,
+            ProtectedStoreBackend::Keychain,
+            ProtectedStoreBackend::File,
+        ] {
+            assert_eq!(
+                ProtectedStoreBackend::parse(backend.as_str()),
+                Some(backend)
+            );
+            assert_eq!(backend.to_string(), backend.as_str());
+        }
+        assert_eq!(ProtectedStoreBackend::parse("keyring"), None);
+        assert_eq!(ProtectedStoreBackend::parse(""), None);
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(
+                ProtectedStoreBackend::platform_default(),
+                Some(ProtectedStoreBackend::SecretService)
+            );
+            assert!(ProtectedStoreBackend::SecretService.supported());
+            assert!(!ProtectedStoreBackend::Keychain.supported());
+            assert!(!ProtectedStoreBackend::File.supported());
+            let directory = Path::new("/synthetic/protected-v1");
+            assert_eq!(
+                SelectedProtectedStore::open(ProtectedStoreBackend::File, directory, None).err(),
+                Some(ProtectedStoreError::UnsupportedPlatform)
+            );
+            assert_eq!(
+                SelectedProtectedStore::open(
+                    ProtectedStoreBackend::SecretService,
+                    directory,
+                    Some(Path::new("/synthetic/k.keychain-db"))
+                )
+                .err(),
+                Some(ProtectedStoreError::UnsupportedPlatform)
+            );
+            let store =
+                SelectedProtectedStore::open(ProtectedStoreBackend::SecretService, directory, None)
+                    .unwrap();
+            assert_eq!(store.backend(), ProtectedStoreBackend::SecretService);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                ProtectedStoreBackend::platform_default(),
+                Some(ProtectedStoreBackend::Keychain)
+            );
+            assert!(!ProtectedStoreBackend::SecretService.supported());
+            let directory = Path::new("/synthetic/protected-v1");
+            for backend in [ProtectedStoreBackend::Keychain, ProtectedStoreBackend::File] {
+                let store = SelectedProtectedStore::open(backend, directory, None).unwrap();
+                assert_eq!(store.backend(), backend);
+                assert_eq!(
+                    format!("{store:?}"),
+                    format!("SelectedProtectedStore({backend})")
+                );
+            }
+        }
     }
 
     #[test]

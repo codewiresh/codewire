@@ -1911,16 +1911,10 @@ impl SessionEngine {
         }
         #[cfg(unix)]
         if self.inner.config.host.is_some() {
-            // SAFETY: setsid is async-signal-safe and does not touch allocator
-            // state after fork. Host launches own a fresh session and group.
+            // SAFETY: prepare_host_child makes only async-signal-safe calls
+            // and does not touch allocator state after fork.
             unsafe {
-                process.pre_exec(|| {
-                    if libc::setsid() == -1 {
-                        Err(std::io::Error::last_os_error())
-                    } else {
-                        Ok(())
-                    }
-                });
+                process.pre_exec(prepare_host_child);
             }
         }
 
@@ -2195,6 +2189,8 @@ impl SessionEngine {
             result = prepared.project_spawned(child.process_id()) => result,
         };
         if projection.is_err() {
+            #[cfg(target_os = "macos")]
+            drop(pair.master);
             let confirmed = terminate_session_pty_launch(
                 &mut child,
                 #[cfg(unix)]
@@ -2214,6 +2210,8 @@ impl SessionEngine {
         if host_group.is_some()
             && let Err(error) = set_host_pty_nonblocking(&*pair.master)
         {
+            #[cfg(target_os = "macos")]
+            drop(pair.master);
             let confirmed = terminate_session_pty_launch(&mut child, host_group.as_mut()).await;
             return self
                 .record_launch_cleanup(handle, confirmed, format!("prepare host PTY: {error}"))
@@ -2223,6 +2221,8 @@ impl SessionEngine {
         let reader = match pair.master.try_clone_reader() {
             Ok(reader) => reader,
             Err(error) => {
+                #[cfg(target_os = "macos")]
+                drop(pair.master);
                 let confirmed = terminate_session_pty_launch(
                     &mut child,
                     #[cfg(unix)]
@@ -2241,6 +2241,8 @@ impl SessionEngine {
         let writer = match pair.master.take_writer() {
             Ok(writer) => writer,
             Err(error) => {
+                #[cfg(target_os = "macos")]
+                drop((reader, pair.master));
                 let confirmed = terminate_session_pty_launch(
                     &mut child,
                     #[cfg(unix)]
@@ -2259,6 +2261,8 @@ impl SessionEngine {
 
         let running = self.record_starting_running(&handle).await;
         if running.is_err() || launch_is_cancelled(&handle, cancel) {
+            #[cfg(target_os = "macos")]
+            drop((reader, writer, pair.master));
             let confirmed = terminate_session_pty_launch(
                 &mut child,
                 #[cfg(unix)]
@@ -2511,6 +2515,12 @@ impl SessionEngineInner {
             ))
         })?;
         let mut loaded = BTreeMap::new();
+        // A workload store skips a record it cannot read, decode or reconcile
+        // instead of refusing every session request; the record stays on
+        // disk. Host and platform stores keep refusing: their records carry
+        // process-cleanup and admission obligations.
+        let tolerate_damage = self.config.host.is_none() && platform_tree.is_none();
+        let mut damaged = std::collections::BTreeSet::new();
         while let Some(entry) = entries.next_entry().await.map_err(|error| {
             SessionError::Internal(format!(
                 "read session store entry {}: {error}",
@@ -2599,28 +2609,40 @@ impl SessionEngineInner {
             };
             #[cfg(not(target_os = "linux"))]
             let private_bytes: Option<Vec<u8>> = None;
-            let bytes = match private_bytes {
-                Some(bytes) => bytes,
+            let decoded = match private_bytes {
+                Some(bytes) => Ok(bytes),
                 None => tokio::fs::read(&path).await.map_err(|error| {
                     SessionError::Internal(format!(
                         "read session metadata {}: {error}",
                         path.display()
                     ))
-                })?,
-            };
-            let mut metadata =
+                }),
+            }
+            .and_then(|bytes| {
                 serde_json::from_slice::<PersistedSession>(&bytes).map_err(|error| {
                     SessionError::Internal(format!(
                         "decode session metadata {}: {error}",
                         path.display()
                     ))
-                })?;
-            if metadata.session_id != session_id {
-                return Err(SessionError::Internal(format!(
-                    "session metadata identity mismatch in {}",
-                    path.display()
-                )));
-            }
+                })
+            })
+            .and_then(|metadata| {
+                if metadata.session_id != session_id {
+                    return Err(SessionError::Internal(format!(
+                        "session metadata identity mismatch in {}",
+                        path.display()
+                    )));
+                }
+                Ok(metadata)
+            });
+            let mut metadata = match decoded {
+                Ok(metadata) => metadata,
+                Err(error) if tolerate_damage => {
+                    skip_damaged_session(&mut damaged, session_id, &error);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             #[cfg(target_os = "linux")]
             if let Some(origin) = &metadata.control_origin {
                 origin.validate().map_err(|_| {
@@ -2659,7 +2681,14 @@ impl SessionEngineInner {
                 validate_session_id(parent)?;
             }
             let (mut metadata_changed, output_index) =
-                reconcile_output_cursor(&self.root, &mut metadata).await?;
+                match reconcile_output_cursor(&self.root, &mut metadata).await {
+                    Ok(reconciled) => reconciled,
+                    Err(error) if tolerate_damage => {
+                        skip_damaged_session(&mut damaged, session_id, &error);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
             metadata_changed |= legacy_projection;
             if is_live_state(metadata.state) {
                 metadata.state = v1::SessionLifecycleState::Interrupted as i32;
@@ -2689,7 +2718,15 @@ impl SessionEngineInner {
         }
         let mut names = std::collections::BTreeSet::new();
         for handle in loaded.values() {
-            let metadata = handle.metadata.lock().await;
+            let mut metadata = handle.metadata.lock().await;
+            // A child keeps running history when its parent record is damaged.
+            if metadata
+                .parent_session_id
+                .as_ref()
+                .is_some_and(|id| damaged.contains(id))
+            {
+                metadata.parent_session_id = None;
+            }
             if !metadata.name.is_empty() && !names.insert(metadata.name.clone()) {
                 return Err(SessionError::Internal(
                     "duplicate retained session name".into(),
@@ -2867,6 +2904,8 @@ async fn terminate_session_launch(
     terminate_native_launch(child).await
 }
 
+/// On macOS a session leader's exit waits for its terminal output to drain,
+/// so launch cleanup closes every PTY master handle before waiting to reap.
 async fn terminate_session_pty_launch(
     child: &mut crate::execution::PtyLaunchGuard,
     #[cfg(unix)] group: Option<&mut crate::host_process::OwnedProcessGroup>,
@@ -3667,6 +3706,11 @@ async fn append_output(
     file.write_all(data)
         .await
         .map_err(|error| SessionError::Internal(format!("write session output data: {error}")))?;
+    // Tokio writes in the background and reports a failed write only on the
+    // next write or flush; sync alone would not see it.
+    file.flush()
+        .await
+        .map_err(|error| SessionError::Internal(format!("write session output data: {error}")))?;
     file.sync_data()
         .await
         .map_err(|error| SessionError::Internal(format!("sync session output: {error}")))?;
@@ -3753,6 +3797,10 @@ async fn compact_output(
         });
         physical += OUTPUT_FRAME_HEADER_SIZE as u64 + frame.length;
     }
+    target
+        .flush()
+        .await
+        .map_err(|error| SessionError::Internal(format!("write retained output: {error}")))?;
     target
         .sync_all()
         .await
@@ -3942,6 +3990,19 @@ async fn truncate_incomplete_output(
     })
 }
 
+fn skip_damaged_session(
+    damaged: &mut std::collections::BTreeSet<String>,
+    session_id: String,
+    error: &SessionError,
+) {
+    tracing::warn!(
+        session_id = %session_id,
+        error = %error,
+        "workspace daemon: skipping a damaged session record"
+    );
+    damaged.insert(session_id);
+}
+
 async fn persist_metadata(root: &Path, metadata: &PersistedSession) -> Result<(), SessionError> {
     validate_session_id(&metadata.session_id)?;
     let directory = session_directory(root, &metadata.session_id)?;
@@ -3983,12 +4044,37 @@ async fn persist_metadata(root: &Path, metadata: &PersistedSession) -> Result<()
             temporary.display()
         ))
     })?;
+    // A failed background write (for example ENOSPC) surfaces only here; a
+    // record that is not complete must never replace the published one.
+    file.flush().await.map_err(|error| {
+        SessionError::Internal(format!(
+            "write session metadata {}: {error}",
+            temporary.display()
+        ))
+    })?;
     file.sync_all().await.map_err(|error| {
         SessionError::Internal(format!(
             "sync session metadata {}: {error}",
             temporary.display()
         ))
     })?;
+    let written = file
+        .metadata()
+        .await
+        .map_err(|error| {
+            SessionError::Internal(format!(
+                "inspect session metadata {}: {error}",
+                temporary.display()
+            ))
+        })?
+        .len();
+    if written != bytes.len() as u64 {
+        return Err(SessionError::Internal(format!(
+            "session metadata {} is incomplete ({written} of {} bytes)",
+            temporary.display(),
+            bytes.len()
+        )));
+    }
     drop(file);
     set_private_file_permissions(&temporary).await?;
     tokio::fs::rename(&temporary, &path)
@@ -4165,6 +4251,35 @@ pub fn status_from_session_error(error: SessionError) -> Status {
         SessionError::FailedPrecondition(message) => Status::failed_precondition(message),
         SessionError::ResourceExhausted(message) => Status::resource_exhausted(message),
         SessionError::Internal(message) => Status::internal(message),
+    }
+}
+
+/// Prepare a host launch between fork and exec: it owns a fresh session and
+/// group, and on Darwin inherits no descriptor beyond stdio.
+#[cfg(unix)]
+fn prepare_host_child() -> std::io::Result<()> {
+    // SAFETY: setsid takes no arguments.
+    if unsafe { libc::setsid() } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(target_os = "macos")]
+    mark_inherited_descriptors_close_on_exec();
+    Ok(())
+}
+
+/// Darwin creates pipes and sockets close-on-exec only in a second call, so a
+/// descriptor another thread is creating can reach a child spawned in between:
+/// another session's pipe, for example, which then stays open until this
+/// child exits. Between fork and exec, mark every descriptor beyond stdio
+/// close-on-exec, as Linux's atomic close-on-exec flags already ensure.
+#[cfg(target_os = "macos")]
+fn mark_inherited_descriptors_close_on_exec() {
+    // SAFETY: getdtablesize and fcntl take only scalar arguments. A number
+    // that is not an open descriptor fails with EBADF and is skipped.
+    unsafe {
+        for descriptor in 3..libc::getdtablesize() {
+            libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
     }
 }
 
@@ -4981,6 +5096,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_skips_damaged_records_instead_of_refusing_every_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = test_engine(temp.path());
+        let empty = record_fixture(&engine, 2, v1::SessionLifecycleState::Exited).await;
+        let truncated = record_fixture(&engine, 3, v1::SessionLifecycleState::Exited).await;
+        let parent = record_fixture(&engine, 4, v1::SessionLifecycleState::Exited).await;
+        let child = record_fixture(&engine, 5, v1::SessionLifecycleState::Exited).await;
+        let retained = record_fixture(&engine, 6, v1::SessionLifecycleState::Stopped).await;
+        {
+            let handle = engine.handle(&child).unwrap();
+            let mut metadata = handle.metadata.lock().await;
+            metadata.parent_session_id = Some(parent.clone());
+            persist_metadata(&engine.inner.root, &metadata)
+                .await
+                .unwrap();
+        }
+        let root = engine.inner.root.clone();
+        // What a full disk left behind before writes were verified: an empty
+        // record, and a record cut short.
+        tokio::fs::write(root.join(&empty).join(METADATA_FILE), b"")
+            .await
+            .unwrap();
+        for damaged in [&truncated, &parent] {
+            let path = root.join(damaged).join(METADATA_FILE);
+            let bytes = tokio::fs::read(&path).await.unwrap();
+            tokio::fs::write(&path, &bytes[..bytes.len() / 2])
+                .await
+                .unwrap();
+        }
+
+        let recovered = test_engine(temp.path());
+        let mut sessions = recovered
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|session| session.session_id)
+            .collect::<Vec<_>>();
+        sessions.sort();
+        assert_eq!(sessions, [child.clone(), retained]);
+        assert!(
+            recovered
+                .handle(&child)
+                .unwrap()
+                .metadata
+                .lock()
+                .await
+                .parent_session_id
+                .is_none()
+        );
+        // Damaged records are left for diagnosis, never deleted.
+        for damaged in [&empty, &truncated, &parent] {
+            assert!(root.join(damaged).join(OUTPUT_FILE).exists());
+            assert!(matches!(
+                recovered.handle(damaged),
+                Err(SessionError::NotFound(_))
+            ));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_failed_metadata_write_never_replaces_the_published_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = test_engine(temp.path());
+        let session_id = record_fixture(&engine, 7, v1::SessionLifecycleState::Exited).await;
+        let directory = engine.inner.root.join(&session_id);
+        let published = tokio::fs::read(directory.join(METADATA_FILE))
+            .await
+            .unwrap();
+        // Every write to the temporary record fails as on a full disk.
+        std::os::unix::fs::symlink("/dev/full", directory.join(METADATA_TEMP_FILE)).unwrap();
+        let handle = engine.handle(&session_id).unwrap();
+        let mut metadata = handle.metadata.lock().await;
+        metadata.status_message = "changed while the disk is full".into();
+        assert!(
+            persist_metadata(&engine.inner.root, &metadata)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            tokio::fs::read(directory.join(METADATA_FILE))
+                .await
+                .unwrap(),
+            published
+        );
+    }
+
+    #[tokio::test]
     async fn startup_prunes_inherited_over_limit_confirmed_records() {
         let temp = tempfile::tempdir().unwrap();
         let engine = test_engine(temp.path());
@@ -5269,9 +5473,47 @@ mod tests {
             OUTPUT_FRAME_HEADER_SIZE as u64 + 3
         );
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn host_launch_inherits_no_descriptor_beyond_stdio() {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::process::CommandExt as _;
+        // An inheritable pipe end stands in for a pipe another session's
+        // launch has created but not yet marked close-on-exec.
+        let mut ends = [0; 2];
+        // SAFETY: a two-element output array.
+        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+        // SAFETY: both are fresh descriptors that only this test owns.
+        let (read, _write) =
+            unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
+        // SAFETY: a scalar fcntl on an owned descriptor.
+        assert_eq!(
+            unsafe { libc::fcntl(read.as_raw_fd(), libc::F_SETFD, 0) },
+            0
+        );
+        let inherited = |prepare: bool| {
+            let mut command = std::process::Command::new("/bin/test");
+            command
+                .arg("-e")
+                .arg(format!("/dev/fd/{}", read.as_raw_fd()));
+            if prepare {
+                // SAFETY: as in the host launch.
+                unsafe {
+                    command.pre_exec(prepare_host_child);
+                }
+            }
+            command.status().unwrap().success()
+        };
+        assert!(
+            inherited(false),
+            "control: an inheritable descriptor reaches the child"
+        );
+        assert!(!inherited(true));
+    }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 #[path = "durable_session/host_tests.rs"]
 mod host_tests;
 

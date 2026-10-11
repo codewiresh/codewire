@@ -30,6 +30,8 @@ mod skill_snapshot;
 #[cfg(target_os = "linux")]
 pub mod guest;
 #[cfg(target_os = "linux")]
+mod rtc_clock;
+#[cfg(target_os = "linux")]
 mod setup_apply;
 #[cfg(target_os = "linux")]
 mod setup_archive;

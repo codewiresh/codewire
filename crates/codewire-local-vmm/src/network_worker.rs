@@ -34,6 +34,7 @@ use crate::host_port::{
     HOST_PORT_CONTROL_FRAME_LEN, HOST_PORT_CONTROL_KEY_LEN, HostPortBinding,
     HostPortControlReceiver, is_host_port_control_frame,
 };
+#[cfg(target_os = "linux")]
 use crate::linux::confinement::{
     install_denied_syscalls, install_deny_all_filesystem_domain as restrict_filesystem,
     require_single_threaded_process as require_single_thread,
@@ -75,30 +76,41 @@ const WORKER_HOST_PORT_DESCRIPTOR_MARKER: u8 = b'P';
 const WORKER_MESH_INGRESS_DESCRIPTOR_MARKER: u8 = b'M';
 const WORKER_CONTROL_BYTES: usize = 64;
 
-#[cfg(target_env = "musl")]
+#[cfg(any(target_env = "musl", target_os = "macos"))]
 type ControlLength = libc::socklen_t;
-#[cfg(not(target_env = "musl"))]
+#[cfg(not(any(target_env = "musl", target_os = "macos")))]
 type ControlLength = libc::size_t;
 
-#[cfg(target_env = "musl")]
+#[cfg(any(target_env = "musl", target_os = "macos"))]
 fn encode_control_length(value: usize) -> Option<ControlLength> {
     value.try_into().ok()
 }
 
-#[cfg(not(target_env = "musl"))]
+#[cfg(not(any(target_env = "musl", target_os = "macos")))]
 fn encode_control_length(value: usize) -> Option<ControlLength> {
     Some(value)
 }
 
-#[cfg(target_env = "musl")]
+#[cfg(any(target_env = "musl", target_os = "macos"))]
 fn decode_control_length(value: ControlLength) -> usize {
     value as usize
 }
 
-#[cfg(not(target_env = "musl"))]
+#[cfg(not(any(target_env = "musl", target_os = "macos")))]
 fn decode_control_length(value: ControlLength) -> usize {
     value
 }
+
+// Darwin has neither MSG_NOSIGNAL nor MSG_CMSG_CLOEXEC: the sender sets
+// SO_NOSIGPIPE, and each received descriptor is marked close-on-exec at once.
+#[cfg(target_os = "linux")]
+const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
+#[cfg(target_os = "macos")]
+const SEND_FLAGS: libc::c_int = 0;
+#[cfg(target_os = "linux")]
+const RECEIVE_FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
+#[cfg(target_os = "macos")]
+const RECEIVE_FLAGS: libc::c_int = 0;
 
 const BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB1\0";
 const BOOTSTRAP_LEN: usize = 64;
@@ -365,7 +377,23 @@ fn send_worker_descriptor(bootstrap: RawFd, descriptor: RawFd, marker: u8) -> io
                 })?;
         std::ptr::write(libc::CMSG_DATA(header).cast::<RawFd>(), descriptor);
     }
-    let sent = unsafe { libc::sendmsg(bootstrap, &raw const message, libc::MSG_NOSIGNAL) };
+    #[cfg(target_os = "macos")]
+    {
+        let enabled: libc::c_int = 1;
+        if unsafe {
+            libc::setsockopt(
+                bootstrap,
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                (&raw const enabled).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    let sent = unsafe { libc::sendmsg(bootstrap, &raw const message, SEND_FLAGS) };
     if sent == marker.len() as isize {
         Ok(())
     } else if sent == -1 {
@@ -427,7 +455,7 @@ fn receive_worker_descriptor(bootstrap: RawFd, expected_marker: u8) -> io::Resul
     message.msg_control = unsafe { control.bytes.as_mut_ptr().cast() };
     message.msg_controllen = encode_control_length(WORKER_CONTROL_BYTES)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid control length"))?;
-    let received = unsafe { libc::recvmsg(bootstrap, &raw mut message, libc::MSG_CMSG_CLOEXEC) };
+    let received = unsafe { libc::recvmsg(bootstrap, &raw mut message, RECEIVE_FLAGS) };
     if received == -1 {
         return Err(io::Error::last_os_error());
     }
@@ -465,6 +493,10 @@ fn receive_worker_descriptor(bootstrap: RawFd, expected_marker: u8) -> io::Resul
                 continue;
             }
             descriptors.push(unsafe { OwnedFd::from_raw_fd(descriptor) });
+            #[cfg(target_os = "macos")]
+            if unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                valid_control = false;
+            }
         }
         header = unsafe { libc::CMSG_NXTHDR(&raw const message, header) };
     }
@@ -693,7 +725,7 @@ pub async fn run_inherited_worker(vm_id: Uuid, generation: u64) -> Result<(), Ne
         bootstrap
             .set_write_timeout(Some(HANDSHAKE_TIMEOUT))
             .map_err(|_| NetworkWorkerError::BootstrapIo)?;
-        if std::env::vars_os().next().is_some() {
+        if ambient_environment_present() {
             return Err(NetworkWorkerError::AmbientEnvironment);
         }
         require_single_threaded_process()?;
@@ -780,7 +812,7 @@ pub async fn run_inherited_worker_with_broker<B: EgressBroker>(
         bootstrap
             .set_write_timeout(Some(HANDSHAKE_TIMEOUT))
             .map_err(|_| NetworkWorkerError::BootstrapIo)?;
-        if std::env::vars_os().next().is_some() {
+        if ambient_environment_present() {
             return Err(NetworkWorkerError::AmbientEnvironment);
         }
         require_single_threaded_process()?;
@@ -948,7 +980,7 @@ async fn run_ingress_control(
     }
 }
 
-async fn receive_worker_host_port_descriptor(
+pub(crate) async fn receive_worker_host_port_descriptor(
     control: &tokio::net::UnixStream,
     binding: HostPortBinding,
 ) -> Result<OwnedFd, NetworkWorkerError> {
@@ -1169,6 +1201,15 @@ fn read_worker_bytes(descriptor: RawFd, buffer: &mut [u8]) -> io::Result<usize> 
     }
 }
 
+/// Whether this process inherited any environment variable. On macOS,
+/// CoreFoundation (which cw links) sets `__CF_USER_TEXT_ENCODING` itself while
+/// the process loads, from the user ID rather than from the parent, so that
+/// one name is not ambient input.
+pub(crate) fn ambient_environment_present() -> bool {
+    std::env::vars_os()
+        .any(|(name, _)| !(cfg!(target_os = "macos") && name == "__CF_USER_TEXT_ENCODING"))
+}
+
 fn send_worker_bytes(descriptor: RawFd, buffer: &[u8]) -> io::Result<usize> {
     loop {
         let written = unsafe { libc::write(descriptor, buffer.as_ptr().cast(), buffer.len()) };
@@ -1182,14 +1223,38 @@ fn send_worker_bytes(descriptor: RawFd, buffer: &[u8]) -> io::Result<usize> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn require_single_threaded_process() -> Result<(), NetworkWorkerError> {
     require_single_thread().map_err(|_| NetworkWorkerError::ThreadConfinement)
 }
 
+#[cfg(target_os = "linux")]
 fn install_deny_all_filesystem_domain() -> Result<(), NetworkWorkerError> {
     restrict_filesystem().map_err(|_| NetworkWorkerError::FilesystemConfinement)
 }
 
+#[cfg(target_os = "macos")]
+fn require_single_threaded_process() -> Result<(), NetworkWorkerError> {
+    crate::host::sandbox::require_single_thread().map_err(|_| NetworkWorkerError::ThreadConfinement)
+}
+
+/// Darwin replaces Landlock with a deny-all Seatbelt profile: the worker
+/// keeps only the descriptors it already holds or later receives.
+#[cfg(target_os = "macos")]
+fn install_deny_all_filesystem_domain() -> Result<(), NetworkWorkerError> {
+    crate::host::sandbox::deny_all().map_err(|_| NetworkWorkerError::FilesystemConfinement)
+}
+
+/// The deny-all Seatbelt profile already refuses dials, binds, process
+/// creation and signals, which the Linux syscall layer adds to Landlock. It
+/// leaves only unnamed socketpairs, which reach nothing. There is no separate
+/// layer to install.
+#[cfg(target_os = "macos")]
+fn install_network_worker_seccomp() -> Result<(), NetworkWorkerError> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 const NETWORK_WORKER_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_socket,
     libc::SYS_socketpair,
@@ -1237,14 +1302,15 @@ const NETWORK_WORKER_DENIED_SYSCALLS: &[libc::c_long] = &[
 // fork or vfork syscall numbers. Keep the legacy x86_64 entry points denied
 // where they exist without making the release build depend on absent libc
 // constants on AArch64.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const NETWORK_WORKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[libc::SYS_fork, libc::SYS_vfork];
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const NETWORK_WORKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[];
 
 /// Install the worker's dedicated syscall layer only after the exact
 /// single-threaded Tokio runtime has created its private internal wakeup
 /// descriptor. No guest-controlled byte is read before this filter is active.
+#[cfg(target_os = "linux")]
 fn install_network_worker_seccomp() -> Result<(), NetworkWorkerError> {
     install_denied_syscalls(
         NETWORK_WORKER_DENIED_SYSCALLS,
@@ -1261,10 +1327,15 @@ fn inherited_std_unix_stream(descriptor: RawFd) -> Result<StdUnixStream, Network
 }
 
 fn validate_inherited_unix_socket(descriptor: RawFd) -> Result<(), NetworkWorkerError> {
+    // Darwin has no SO_DOMAIN and cannot read SO_ACCEPTCONN; the connected
+    // AF_UNIX peer address below proves the domain and that it is no listener.
+    #[cfg(target_os = "linux")]
     if socket_option(descriptor, libc::SO_DOMAIN)? != libc::AF_UNIX
-        || socket_option(descriptor, libc::SO_TYPE)? != libc::SOCK_STREAM
         || socket_option(descriptor, libc::SO_ACCEPTCONN)? != 0
     {
+        return Err(NetworkWorkerError::InheritedDescriptor);
+    }
+    if socket_option(descriptor, libc::SO_TYPE)? != libc::SOCK_STREAM {
         return Err(NetworkWorkerError::InheritedDescriptor);
     }
 
@@ -1290,10 +1361,15 @@ fn validate_connected_ipv4_stream(
     descriptor: RawFd,
     expected: Option<HostPortBinding>,
 ) -> Result<(SocketAddrV4, SocketAddrV4), NetworkWorkerError> {
+    // Darwin has no SO_DOMAIN and cannot read SO_ACCEPTCONN; the AF_INET
+    // local and peer addresses below prove the domain and a connection.
+    #[cfg(target_os = "linux")]
     if socket_option(descriptor, libc::SO_DOMAIN)? != libc::AF_INET
-        || socket_option(descriptor, libc::SO_TYPE)? != libc::SOCK_STREAM
         || socket_option(descriptor, libc::SO_ACCEPTCONN)? != 0
     {
+        return Err(NetworkWorkerError::InheritedDescriptor);
+    }
+    if socket_option(descriptor, libc::SO_TYPE)? != libc::SOCK_STREAM {
         return Err(NetworkWorkerError::InheritedDescriptor);
     }
     let local = ipv4_socket_address(descriptor, false)?;
@@ -2467,6 +2543,115 @@ mod tests {
         assert!(matches!(result, Err(NetworkWorkerError::FrameIo)));
     }
 
+    /// The confined worker still completes its descriptor protocol: status
+    /// writes, SCM_RIGHTS receipt and Tokio I/O on a received stream.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_confined_worker_keeps_its_descriptor_protocol() {
+        use std::io::Read as _;
+        use tokio::io::AsyncReadExt as _;
+
+        const CHILD_MARKER: &str = "CODEWIRE_TEST_NETWORK_WORKER_SEATBELT";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .unwrap();
+            let (control, mut runner) = StdUnixStream::pair().unwrap();
+            let (broker, mut broker_peer) = StdUnixStream::pair().unwrap();
+            install_deny_all_filesystem_domain().unwrap();
+            install_network_worker_seccomp().unwrap();
+            control.set_read_timeout(None).unwrap();
+            write_worker_control_message(&control, WORKER_PREPARED_MESSAGE).unwrap();
+            let mut prepared = [0_u8; WORKER_PREPARED_MESSAGE.len()];
+            runner.read_exact(&mut prepared).unwrap();
+            assert_eq!(&prepared, WORKER_PREPARED_MESSAGE);
+            send_worker_broker_descriptor(runner.as_raw_fd(), broker.as_raw_fd()).unwrap();
+            drop(broker);
+            let received = receive_worker_broker_descriptor(control.as_raw_fd()).unwrap();
+            runtime.block_on(async {
+                let mut stream = transferred_tokio_unix_stream(received).unwrap();
+                broker_peer.write_all(b"ok").unwrap();
+                let mut bytes = [0_u8; 2];
+                tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut bytes))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(&bytes, b"ok");
+            });
+            assert!(std::fs::File::open("/etc/hosts").is_err());
+            assert!(std::net::TcpStream::connect("127.0.0.1:9").is_err());
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("network_worker::tests::seatbelt_confined_worker_keeps_its_descriptor_protocol")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    /// The deny-all worker reads and writes a connected TCP stream it receives
+    /// after confinement (the broker's dials and host-port connections), and
+    /// still cannot dial one itself.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_confined_worker_uses_a_received_tcp_stream() {
+        const CHILD_MARKER: &str = "CODEWIRE_TEST_NETWORK_WORKER_SEATBELT_TCP";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut peer, _) = listener.accept().unwrap();
+            let (control, runner) = StdUnixStream::pair().unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .unwrap();
+            install_deny_all_filesystem_domain().unwrap();
+            install_network_worker_seccomp().unwrap();
+            send_worker_host_port_descriptor(runner.as_raw_fd(), client.as_raw_fd()).unwrap();
+            drop(client);
+            let received =
+                receive_worker_descriptor(control.as_raw_fd(), WORKER_HOST_PORT_DESCRIPTOR_MARKER)
+                    .unwrap();
+            let mut transferred = {
+                let _runtime_context = runtime.enter();
+                transferred_stream(received).unwrap()
+            };
+            runtime.block_on(async {
+                transferred.write_all(b"worker-to-peer").await.unwrap();
+                let mut received = [0_u8; 14];
+                std::io::Read::read_exact(&mut peer, &mut received).unwrap();
+                assert_eq!(&received, b"worker-to-peer");
+                std::io::Write::write_all(&mut peer, b"peer-to-worker").unwrap();
+                let mut returned = [0_u8; 14];
+                tokio::time::timeout(
+                    Duration::from_secs(2),
+                    transferred.read_exact(&mut returned),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(&returned, b"peer-to-worker");
+            });
+            assert!(std::net::TcpStream::connect(listener.local_addr().unwrap()).is_err());
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("network_worker::tests::seatbelt_confined_worker_uses_a_received_tcp_stream")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn deny_all_landlock_blocks_new_path_access() {
         const CHILD_MARKER: &str = "CODEWIRE_TEST_NETWORK_WORKER_LANDLOCK";
@@ -2486,6 +2671,7 @@ mod tests {
         assert!(status.success());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn seccomp_denies_dial_process_and_async_io_authority() {
         const CHILD_MARKER: &str = "CODEWIRE_TEST_NETWORK_WORKER_SECCOMP";
@@ -2563,6 +2749,7 @@ mod tests {
         assert!(status.success());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn confined_transferred_tcp_stream_uses_only_read_write_authority() {
         const CHILD_MARKER: &str = "CODEWIRE_TEST_TRANSFERRED_TCP_SECCOMP";

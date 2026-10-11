@@ -21,29 +21,90 @@ spec.loader.exec_module(kernel)
 
 class Configuration(unittest.TestCase):
     def setUp(self):
-        self.pins = json.loads((kernel.INPUTS / "provenance.json").read_text())
-        self.config = (kernel.INPUTS / "x86_64.config").read_bytes()
+        self.document = json.loads((kernel.INPUTS / "provenance.json").read_text())
+        self.pins = {arch: kernel.architecture_pins(self.document, arch) for arch in kernel.ARCHITECTURES}
+        self.configs = {arch: (kernel.INPUTS / shape["config"]).read_bytes()
+                        for arch, shape in kernel.ARCHITECTURES.items()}
 
     def test_actual_config_is_only_the_required_feature_change(self):
-        baseline = kernel.configuration(self.config, self.pins)
-        self.assertIn(b"# CONFIG_PROC_CHILDREN is not set\n", baseline)
-        self.assertEqual(len(self.config.split(b"CONFIG_PROC_CHILDREN=y\n")), 2)
+        for arch, config in self.configs.items():
+            with self.subTest(arch=arch):
+                baseline = kernel.configuration(config, self.pins[arch])
+                self.assertIn(b"# CONFIG_PROC_CHILDREN is not set\n", baseline)
+                self.assertEqual(len(config.split(b"CONFIG_PROC_CHILDREN=y\n")), 2)
 
     def test_exact_old_qualified_config_is_refused(self):
-        baseline = self.config.replace(b"CONFIG_PROC_CHILDREN=y\n", b"# CONFIG_PROC_CHILDREN is not set\n")
-        with self.assertRaisesRegex(ValueError, "config differs"):
-            kernel.configuration(baseline, self.pins)
+        for arch, config in self.configs.items():
+            baseline = config.replace(b"CONFIG_PROC_CHILDREN=y\n", b"# CONFIG_PROC_CHILDREN is not set\n")
+            with self.subTest(arch=arch), self.assertRaisesRegex(ValueError, "config differs"):
+                kernel.configuration(baseline, self.pins[arch])
 
     def test_unadmitted_kernel_surface_and_duplicate_flag_are_refused(self):
-        for changed in [self.config + b"CONFIG_PROC_CHILDREN=y\n",
-                        self.config.replace(b"# CONFIG_CHECKPOINT_RESTORE is not set\n", b"CONFIG_CHECKPOINT_RESTORE=y\n"),
-                        self.config.replace(b"CONFIG_PROC_FS=y\n", b"# CONFIG_PROC_FS is not set\n")]:
-            with self.subTest(size=len(changed)), self.assertRaises(ValueError):
-                kernel.configuration(changed, self.pins)
+        for arch, config in self.configs.items():
+            for changed in [config + b"CONFIG_PROC_CHILDREN=y\n",
+                            config.replace(b"# CONFIG_CHECKPOINT_RESTORE is not set\n", b"CONFIG_CHECKPOINT_RESTORE=y\n"),
+                            config.replace(b"CONFIG_PROC_FS=y\n", b"# CONFIG_PROC_FS is not set\n")]:
+                with self.subTest(arch=arch, size=len(changed)), self.assertRaises(ValueError):
+                    kernel.configuration(changed, self.pins[arch])
+
+    def test_config_is_bound_to_its_own_architecture(self):
+        with self.assertRaisesRegex(ValueError, "config differs"):
+            kernel.configuration(self.configs["x86_64"], self.pins["arm64"])
+        with self.assertRaisesRegex(ValueError, "config differs"):
+            kernel.configuration(self.configs["arm64"], self.pins["x86_64"])
+
+    def test_pahole_detection_must_match_the_pinned_tool(self):
+        self.assertIn(b"CONFIG_PAHOLE_VERSION=0\n", self.configs["x86_64"])
+        self.assertIn(b"CONFIG_PAHOLE_VERSION=131\n", self.configs["arm64"])
+        for arch, other in (("x86_64", "v1.31"), ("arm64", None)):
+            pins = {**self.pins[arch], "pahole_version": other}
+            with self.subTest(arch=arch), self.assertRaisesRegex(ValueError, "pahole detection"):
+                kernel.configuration(self.configs[arch], pins)
+
+    def test_x86_64_pins_are_unchanged(self):
+        x86 = self.pins["x86_64"]
+        self.assertEqual(x86["config_sha256"], "c02a08863f75099b9a18389cf0518134c94b1fe9f499a2566e4891251699274e")
+        self.assertEqual(x86["baseline_config_sha256"], "f4c7056b7b1622e3939179521280db1bbc5ce21355685dc9e455fd83add9a4f3")
+        self.assertEqual((x86["gcc_version"], x86["ld_version"], x86["pahole_version"]),
+                         ("gcc (GCC) 16.1.1 20260728", "GNU ld (GNU Binutils) 2.47", None))
+        self.assertEqual(kernel.ARCHITECTURES["x86_64"], {
+            "config": "x86_64.config", "make": ("ARCH=x86_64",), "prefix": "", "target": "bzImage",
+            "image": "arch/x86/boot/bzImage", "published": "vmlinuz-"})
+
+    def test_arm64_baseline_is_the_qualified_codewire1_config(self):
+        arm64 = self.pins["arm64"]
+        self.assertEqual(arm64["baseline_config_sha256"], "34ac00e19ea5e9973bc36eec4f8a96ef15ec79e1267103c07ecfe687c3e20716")
+        self.assertEqual((arm64["gcc_version"], arm64["ld_version"], arm64["pahole_version"]),
+                         ("aarch64-linux-gnu-gcc (GCC) 16.1.0", "GNU ld (GNU Binutils) 2.47", "v1.31"))
+        self.assertEqual(kernel.ARCHITECTURES["arm64"]["make"], ("ARCH=arm64", "CROSS_COMPILE=aarch64-linux-gnu-"))
+
+    def test_architecture_pins_are_complete_and_unshadowed(self):
+        with self.assertRaisesRegex(ValueError, "architecture pins differ"):
+            kernel.architecture_pins(self.document, "riscv64")
+        extra = {**self.document, "architectures": {**self.document["architectures"], "riscv64": {}}}
+        with self.assertRaisesRegex(ValueError, "architecture pins differ"):
+            kernel.architecture_pins(extra, "arm64")
+        shadow = json.loads(json.dumps(self.document))
+        shadow["architectures"]["arm64"]["release"] = "6.18.48-other"
+        with self.assertRaisesRegex(ValueError, "shadow"):
+            kernel.architecture_pins(shadow, "arm64")
 
     def test_original_compatibility_patch_and_distinct_release_are_pinned(self):
-        self.assertEqual(kernel.digest(kernel.INPUTS / "dax.patch"), self.pins["patch_sha256"])
-        self.assertEqual(self.pins["release"], "6.18.48-codewire2")
+        for arch, pins in self.pins.items():
+            with self.subTest(arch=arch):
+                self.assertEqual(kernel.digest(kernel.INPUTS / "dax.patch"), pins["patch_sha256"])
+                self.assertEqual(pins["release"], "6.18.48-codewire2")
+
+    def test_image_release_checks(self):
+        banner = b"Linux version 6.18.48-codewire2 (codewire@codewire) "
+        arm64 = bytearray(0x40); arm64[0x38:0x3c] = b"ARM\x64"
+        kernel.check_image(bytes(arm64) + banner, self.pins["arm64"])
+        for bad in (bytes(0x40) + banner, bytes(arm64) + banner.replace(b"codewire2", b"codewire1")):
+            with self.assertRaisesRegex(ValueError, "arm64 kernel image"):
+                kernel.check_image(bad, self.pins["arm64"])
+        kernel.check_image(bytes(512) + b"6.18.48-codewire2", self.pins["x86_64"])
+        with self.assertRaisesRegex(ValueError, "release"):
+            kernel.check_image(bytes(65536) + b"6.18.48-codewire2", self.pins["x86_64"])
 
 
 class FileCustody(unittest.TestCase):

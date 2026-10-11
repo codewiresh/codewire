@@ -150,11 +150,12 @@ async fn github_singleton_staged_upgrade_drops_pinned_entries_and_enforces_one_c
         seed_legacy_github(&pool).await?;
         pool.close().await;
 
-        ensure_schema(&db.url).await?;
+        // Through 29 only: 0040 later retires every GitHub OAuth connection.
+        apply_migrations_before(&db.url, VERSION + 1).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let after = applied_migrations(&pool).await?;
         anyhow::ensure!(
-            after.len() == MIGRATOR.iter().filter(|m| m.migration_type.is_up_migration()).count()
+            after.len() == VERSION as usize
                 && after[..28] == before
                 && after[28].0 == VERSION
         );
@@ -212,7 +213,7 @@ async fn github_singleton_staged_upgrade_drops_pinned_entries_and_enforces_one_c
         seed_github(&pool, "github-revoked-a", "credential-user-a", "revoked").await?;
         pool.close().await;
 
-        ensure_schema(&db.url).await?;
+        apply_migrations_before(&db.url, VERSION + 1).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         anyhow::ensure!(applied_migrations(&pool).await? == after);
         pool.close().await;

@@ -72,6 +72,16 @@ impl OwnedProcessGroup {
         // SAFETY: the caller still owns the unreaped group leader.
         if unsafe { libc::kill(-self.pid, signal) } == -1 {
             let error = io::Error::last_os_error();
+            // Darwin reports EPERM, not ESRCH, for a group of only zombies,
+            // such as an exited leader that this owner has not yet reaped.
+            #[cfg(target_os = "macos")]
+            if error.raw_os_error() == Some(libc::EPERM)
+                && !listed_pids(PROC_PGRP_ONLY, self.pid as u32)?
+                    .into_iter()
+                    .any(live)
+            {
+                return Ok(());
+            }
             if error.raw_os_error() != Some(libc::ESRCH) {
                 return Err(error);
             }
@@ -81,23 +91,17 @@ impl OwnedProcessGroup {
 
     pub(crate) async fn terminate(&mut self) -> io::Result<()> {
         let term = self.signal(libc::SIGTERM);
-        #[cfg(target_os = "linux")]
         let term = term.and(self.signal_session_members(libc::SIGTERM).map(|_| ()));
         tokio::time::sleep(TERM_GRACE).await;
         // Always send KILL before reaping, even if TERM already ended the
         // leader: shell children may still hold stdin/stdout or ignore TERM.
-        #[cfg(target_os = "linux")]
         let descendants = self.terminate_session_members().await;
         let kill = self.signal(libc::SIGKILL);
         self.armed = false;
-        #[cfg(target_os = "linux")]
-        return kill.and(descendants).and(term);
-        #[cfg(not(target_os = "linux"))]
-        kill.and(term)
+        kill.and(descendants).and(term)
     }
     /// PTY job control can create additional process groups without escaping the
     /// owned session. Linux pidfds signal those exact processes, never bare PIDs.
-    #[cfg(target_os = "linux")]
     async fn terminate_session_members(&self) -> io::Result<()> {
         let deadline = tokio::time::Instant::now() + JOIN_TIMEOUT;
         loop {
@@ -109,6 +113,33 @@ impl OwnedProcessGroup {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// macOS has no pidfd. Each member is rechecked with getsid immediately
+    /// before its signal, and the unreaped leader keeps the session ID from
+    /// being reused, so a recycled PID can match only a process that joined
+    /// this session itself. The remaining window between that check and the
+    /// signal is a PID reuse in microseconds, by a process of this same user.
+    #[cfg(target_os = "macos")]
+    fn signal_session_members(&self, signal: libc::c_int) -> io::Result<usize> {
+        self.exited()?; // The exact leader continues reserving the session ID.
+        let mut live = 0;
+        for pid in listed_pids(PROC_ALL_PIDS, 0)? {
+            // Darwin's getsid fails with ESRCH for a zombie, so this also
+            // skips members that have exited but are not yet reaped.
+            if pid <= 0 || pid == self.pid || unsafe { libc::getsid(pid) } != self.pid {
+                continue;
+            }
+            live += 1;
+            // SAFETY: plain kill of a just-rechecked member of the owned session.
+            if unsafe { libc::kill(pid, signal) } == -1 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(live)
     }
 
     #[cfg(target_os = "linux")]
@@ -183,6 +214,59 @@ impl OwnedProcessGroup {
         }
         Ok(live)
     }
+}
+
+// <libproc.h> selectors; the libc crate does not export them.
+#[cfg(target_os = "macos")]
+const PROC_ALL_PIDS: u32 = 1;
+#[cfg(target_os = "macos")]
+const PROC_PGRP_ONLY: u32 = 2;
+
+/// The PIDs a libproc selector names. The kernel may add processes between
+/// the size query and the listing, so the buffer has headroom and is retried.
+#[cfg(target_os = "macos")]
+fn listed_pids(selector: u32, argument: u32) -> io::Result<Vec<libc::pid_t>> {
+    for _ in 0..2 {
+        // SAFETY: a null buffer asks only for the required size in bytes.
+        let bytes = unsafe { libc::proc_listpids(selector, argument, std::ptr::null_mut(), 0) };
+        if bytes < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let capacity = bytes as usize / std::mem::size_of::<libc::pid_t>() + 256;
+        let mut pids = vec![0 as libc::pid_t; capacity];
+        let size = (capacity * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+        // SAFETY: the buffer holds exactly `size` bytes of pid_t entries.
+        let used =
+            unsafe { libc::proc_listpids(selector, argument, pids.as_mut_ptr().cast(), size) };
+        if used < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if used < size {
+            pids.truncate(used as usize / std::mem::size_of::<libc::pid_t>());
+            return Ok(pids);
+        }
+    }
+    Err(io::Error::other("process list kept growing"))
+}
+
+/// Whether `pid` names a process that has not exited. Darwin's proc_pidinfo
+/// fails with ESRCH for a zombie, which kill(pid, 0) still accepts.
+#[cfg(target_os = "macos")]
+pub(crate) fn live(pid: libc::pid_t) -> bool {
+    const SZOMB: u32 = 5;
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: proc_pidinfo writes at most `size` bytes into `info`.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    pid > 0 && written == size && info.pbi_status != SZOMB
 }
 
 impl Drop for OwnedProcessGroup {

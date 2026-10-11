@@ -355,20 +355,7 @@ fn driver_state(driver: &GuestDriver) -> anyhow::Result<Option<DriverState>> {
     Ok(state)
 }
 
-/// The operation remains durable when the requesting CLI or its input RPC is
-/// cancelled. Only the driver owning this exact peer instance can accept it.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ShutdownRecord {
-    pub(super) version: u32,
-    pub(super) operation_id: String,
-    pub(super) peer: guest_peer::PeerIdentity,
-    pub(super) requested_at: String,
-    pub(super) accepted_at: Option<String>,
-    pub(super) finished_at: Option<String>,
-    pub(super) cleanup_unknown: bool,
-    pub(super) error: Option<String>,
-}
+pub(super) use super::guest_custody::ShutdownRecord;
 
 fn shutdown_path(dir: &Path, instance_id: &str) -> anyhow::Result<PathBuf> {
     Ok(dir.join(format!("shutdown-{}.json", canonical_uuid(instance_id)?)))

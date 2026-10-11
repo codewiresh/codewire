@@ -37,6 +37,9 @@ use url::{Host, Url};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+#[cfg(target_os = "macos")]
+use crate::host::sandbox::require_single_thread as require_single_threaded_process;
+#[cfg(target_os = "linux")]
 use crate::linux::confinement::{
     install_deny_all_filesystem_domain, install_inet_and_unix_stream_pair_syscalls,
     lock_process_privileges, require_single_threaded_process,
@@ -80,6 +83,7 @@ const NETWORK_SETUP_TIMEOUT: Duration = Duration::from_secs(15);
 // runner retains a separate outer deadline around the complete Mesh stack.
 pub(crate) const MESH_TRANSPORT_CONFINEMENT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(40);
 
+#[cfg(target_os = "linux")]
 const MESH_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_listen,
     libc::SYS_accept,
@@ -127,10 +131,34 @@ const MESH_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_prctl,
 ];
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const MESH_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[libc::SYS_fork, libc::SYS_vfork];
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const MESH_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[];
+
+/// Darwin has no dumpability or no-new-privileges switch. The transport is
+/// an owner process, not a boundary against the same user, and the Seatbelt
+/// profile it enters before carrying traffic refuses process creation.
+#[cfg(target_os = "macos")]
+fn lock_process_privileges() -> io::Result<()> {
+    Ok(())
+}
+
+/// Enter the transport's confined domain before it carries any traffic:
+/// Landlock plus an INET and Unix-socketpair syscall filter on Linux, one
+/// Seatbelt profile with the same reach on Darwin.
+fn enter_transport_confinement() -> Result<(), MeshTransportProcessError> {
+    #[cfg(target_os = "linux")]
+    {
+        install_deny_all_filesystem_domain()
+            .map_err(|_| MeshTransportProcessError::FilesystemConfinement)?;
+        install_inet_and_unix_stream_pair_syscalls(MESH_DENIED_SYSCALLS, MESH_ARCH_DENIED_SYSCALLS)
+            .map_err(|_| MeshTransportProcessError::SyscallConfinement)
+    }
+    #[cfg(target_os = "macos")]
+    crate::host::sandbox::confine_mesh_transport()
+        .map_err(|_| MeshTransportProcessError::FilesystemConfinement)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeshTransportStartupFailure {
@@ -595,13 +623,8 @@ pub async fn run_inherited_mesh_transport(
         Err(error) => return fail_startup(&control, error),
     };
     drop(enrollment);
-    if install_deny_all_filesystem_domain().is_err() {
-        return fail_startup(&control, MeshTransportProcessError::FilesystemConfinement);
-    }
-    if install_inet_and_unix_stream_pair_syscalls(MESH_DENIED_SYSCALLS, MESH_ARCH_DENIED_SYSCALLS)
-        .is_err()
-    {
-        return fail_startup(&control, MeshTransportProcessError::SyscallConfinement);
+    if let Err(error) = enter_transport_confinement() {
+        return fail_startup(&control, error);
     }
 
     control
@@ -705,13 +728,8 @@ pub async fn run_inherited_mesh_transport_fixture(
     drop(enrollment_code);
     drop(expected_enrollment);
     drop(enrollment);
-    if install_deny_all_filesystem_domain().is_err() {
-        return fail_startup(&control, MeshTransportProcessError::FilesystemConfinement);
-    }
-    if install_inet_and_unix_stream_pair_syscalls(MESH_DENIED_SYSCALLS, MESH_ARCH_DENIED_SYSCALLS)
-        .is_err()
-    {
-        return fail_startup(&control, MeshTransportProcessError::SyscallConfinement);
+    if let Err(error) = enter_transport_confinement() {
+        return fail_startup(&control, error);
     }
     let guest_port = bootstrap
         .attachment
@@ -982,7 +1000,7 @@ fn prepare_mesh_bootstrap(
     generation: u64,
 ) -> Result<Bootstrap, MeshTransportProcessError> {
     validate_identity(environment_id, generation)?;
-    if std::env::vars_os().next().is_some() {
+    if crate::network_worker::ambient_environment_present() {
         return Err(MeshTransportProcessError::AmbientEnvironment);
     }
     require_single_threaded_process().map_err(|_| MeshTransportProcessError::ThreadConfinement)?;
@@ -1516,10 +1534,15 @@ fn configure_handshake_stream(
 fn inherited_std_unix_stream(
     descriptor: RawFd,
 ) -> Result<StdUnixStream, MeshTransportProcessError> {
+    // Darwin has no SO_DOMAIN and cannot read SO_ACCEPTCONN; the connected
+    // AF_UNIX peer address below proves the domain and that it is no listener.
+    #[cfg(target_os = "linux")]
     if socket_option(descriptor, libc::SO_DOMAIN)? != libc::AF_UNIX
-        || socket_option(descriptor, libc::SO_TYPE)? != libc::SOCK_STREAM
         || socket_option(descriptor, libc::SO_ACCEPTCONN)? != 0
     {
+        return Err(MeshTransportProcessError::InheritedDescriptor);
+    }
+    if socket_option(descriptor, libc::SO_TYPE)? != libc::SOCK_STREAM {
         return Err(MeshTransportProcessError::InheritedDescriptor);
     }
     let mut peer: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -1592,6 +1615,53 @@ impl From<MeshTransportError> for MeshTransportProcessError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The transport and the enrollment issuer check again that they are
+    /// single-threaded after reading the host DNS configuration, which on
+    /// macOS goes through SystemConfiguration. That read must not leave a
+    /// thread behind. libtest runs the test on its own thread, so compare
+    /// counts rather than requiring exactly one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_dns_configuration_starts_no_thread() {
+        const CHILD_MARKER: &str = "CODEWIRE_TEST_MESH_SYSTEM_DNS_THREADS";
+        fn threads() -> i32 {
+            let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+            let written = unsafe {
+                libc::proc_pidinfo(
+                    libc::getpid(),
+                    libc::PROC_PIDTASKINFO,
+                    0,
+                    (&raw mut info).cast(),
+                    size,
+                )
+            };
+            assert_eq!(written, size);
+            info.pti_threadnum
+        }
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let before = threads();
+                let resolver = SystemDnsResolver::from_system_config().unwrap();
+                drop(resolver);
+                assert_eq!(threads(), before);
+            });
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("mesh_process::tests::system_dns_configuration_starts_no_thread")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
 
     fn identity() -> (Uuid, u64) {
         (

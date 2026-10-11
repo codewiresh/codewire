@@ -45,7 +45,7 @@ enum EnvironmentSessionTarget {
         target: config::CurrentTargetConfig,
         environment: HostEnvironment,
     },
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     NativeLocal {
         target: config::CurrentTargetConfig,
         environment_id: String,
@@ -69,7 +69,7 @@ impl EnvironmentSessionTarget {
                     .stop(session_id)
                     .await?,
             )),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Self::NativeLocal { environment_id, .. } => Ok(platform_environment_session_view(
                 native_environment_session_client(environment_id)
                     .await?
@@ -108,7 +108,7 @@ impl EnvironmentSessionTarget {
                 .send_input(session_id, data)
                 .await
                 .map_err(Into::into),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Self::NativeLocal { environment_id, .. } => {
                 native_environment_session_client(environment_id)
                     .await?
@@ -140,7 +140,7 @@ impl EnvironmentSessionTarget {
         match self {
             #[cfg(unix)]
             Self::Host { .. } => Ok(()),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Self::NativeLocal { .. } => Ok(()),
             Self::Platform { .. } => Ok(()),
         }
@@ -156,7 +156,7 @@ impl EnvironmentSessionTarget {
                 .into_iter()
                 .map(host_environment_session_view)
                 .collect()),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Self::NativeLocal { environment_id, .. } => {
                 Ok(native_environment_session_client(environment_id)
                     .await?
@@ -213,7 +213,7 @@ impl EnvironmentSessionTarget {
                     eof: response.eof,
                 })
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Self::NativeLocal { environment_id, .. } => {
                 let response = native_environment_session_client(environment_id)
                     .await?
@@ -293,7 +293,7 @@ impl EnvironmentSessionTarget {
                     .await?;
                 Ok(host_environment_session_view(session))
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Self::NativeLocal { environment_id, .. } => {
                 let session = native_environment_session_client(environment_id)
                     .await?
@@ -355,7 +355,7 @@ impl EnvironmentSessionTarget {
                     .get(session_id)
                     .await?,
             )),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Self::NativeLocal { environment_id, .. } => Ok(platform_environment_session_view(
                 native_environment_session_client(environment_id)
                     .await?
@@ -395,7 +395,7 @@ impl EnvironmentSessionTarget {
                     .restart(session_id)
                     .await?,
             )),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Self::NativeLocal { environment_id, .. } => Ok(platform_environment_session_view(
                 native_environment_session_client(environment_id)
                     .await?
@@ -430,7 +430,7 @@ impl EnvironmentSessionTarget {
         match self {
             #[cfg(unix)]
             Self::Host { target, .. } => target,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Self::NativeLocal { target, .. } => target,
             Self::Platform { target, .. } => target,
         }
@@ -440,7 +440,7 @@ impl EnvironmentSessionTarget {
         match self {
             #[cfg(unix)]
             Self::Host { environment, .. } => environment.path.to_string_lossy().into_owned(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Self::NativeLocal { working_dir, .. } => working_dir.clone(),
             // Empty: the hosted daemon starts the session in the environment's
             // declared working directory.
@@ -469,7 +469,7 @@ async fn resolve_environment_session_target(
             environment,
         });
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(requested) = environment.and_then(trimmed_str)
         && let Ok(target) = config::current_target(&paths.mesh_data_dir)
         && target.kind == "local"
@@ -479,7 +479,7 @@ async fn resolve_environment_session_target(
     {
         return Ok(native_session_target(environment));
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if environment.and_then(trimmed_str).is_none() {
         if let Ok(target) = config::current_target(&paths.mesh_data_dir)
             && !(target.kind == "local" && target.target_ref == "local")
@@ -505,7 +505,7 @@ async fn resolve_environment_session_target(
     environment_session_target_from_current(globals, &paths, &env, target).await
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn native_session_request_matches(
     environment: &codewire_local_vmm::control::v1::Environment,
     requested: &str,
@@ -517,7 +517,7 @@ pub(crate) fn native_session_request_matches(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn native_session_target(
     environment: codewire_local_vmm::control::v1::Environment,
 ) -> EnvironmentSessionTarget {
@@ -535,7 +535,7 @@ fn native_session_target(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn native_environment_session_working_dir(
     environment: &codewire_local_vmm::control::v1::Environment,
 ) -> String {
@@ -561,7 +561,7 @@ async fn environment_session_target_from_current(
             })
         }
         "local" => {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             let environment = native_environment(&target.target_ref)
                 .await?
                 .ok_or_else(|| {
@@ -569,10 +569,10 @@ async fn environment_session_target_from_current(
                         "no local environment selected; use `cw use --local ENV` or pass ENV"
                     )
                 })?;
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             return Ok(native_session_target(environment));
-            #[cfg(not(target_os = "linux"))]
-            anyhow::bail!("native local environments currently require Linux")
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            anyhow::bail!("native local environments currently require Linux or macOS")
         }
         "env" => {
             let platform = resolve_platform(globals, paths, env)?;
@@ -884,7 +884,6 @@ async fn stop_one(
         .await?;
         return Ok((stopped, true));
     }
-    #[cfg(target_os = "linux")]
     if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) && managed_session(session) {
         return Ok((agents::stop_native_managed(target, session).await?, true));
     }
@@ -951,7 +950,6 @@ pub(crate) async fn handle_restart_command(
     if session.cleanup_unknown {
         anyhow::bail!("session cleanup is unknown; restart is fenced");
     }
-    #[cfg(target_os = "linux")]
     if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) && managed_session(&session) {
         let restarted = agents::restart_native_managed(&target, &session).await?;
         return print_environment_sessions(std::slice::from_ref(&restarted), args.output);
@@ -1493,7 +1491,7 @@ async fn attach_environment_session(
                 )
                 .await?
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             EnvironmentSessionTarget::NativeLocal { environment_id, .. } => {
                 let client = native_environment_session_client(environment_id).await?;
                 let attachment = client.attach(&session.session_id, output_offset).await?;
@@ -1800,7 +1798,7 @@ async fn attachment_environment_targets(
     paths: &ResolvePaths,
     env: &impl config::Env,
 ) -> anyhow::Result<Vec<(config::CurrentTargetConfig, bool)>> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut targets = native_environments()
         .await?
         .into_iter()
@@ -1815,7 +1813,7 @@ async fn attachment_environment_targets(
             (target, running)
         })
         .collect::<Vec<_>>();
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let mut targets = Vec::new();
     #[cfg(unix)]
     targets.extend(
@@ -2199,7 +2197,7 @@ async fn follow_session_output(
                 )
                 .await?
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             EnvironmentSessionTarget::NativeLocal { environment_id, .. } => {
                 let client = native_environment_session_client(environment_id).await?;
                 attach_platform_environment_session(

@@ -552,20 +552,23 @@ for offset in range(span):
             listener.close()
         continue
     listeners.append(listener)
-    if len(listeners) == 4:
+    if len(listeners) == 5:
         break
-if len(listeners) != 4:
-    raise SystemExit("fewer than four loopback ports are free in the native smoke range")
+if len(listeners) != 5:
+    raise SystemExit("fewer than five loopback ports are free in the native smoke range")
 for listener in listeners:
     print(listener.getsockname()[1])
 PY
 )
-[[ ${#LOCAL_PORTS[@]} -eq 4 ]] || die 'failed to select four loopback smoke ports'
+[[ ${#LOCAL_PORTS[@]} -eq 5 ]] || die 'failed to select five loopback smoke ports'
 HOST_PORT="${LOCAL_PORTS[0]}"
 MESH_PORT="${LOCAL_PORTS[1]}"
 DERP_PORT="${LOCAL_PORTS[2]}"
 DOCKER_HOST_PORT="${LOCAL_PORTS[3]}"
-for port in "$HOST_PORT" "$MESH_PORT" "$DERP_PORT" "$DOCKER_HOST_PORT"; do
+DYNAMIC_HOST_PORT="${LOCAL_PORTS[4]}"
+# Not declared in codewire.yaml: published only while the VM runs.
+DYNAMIC_GUEST_PORT=47321
+for port in "$HOST_PORT" "$MESH_PORT" "$DERP_PORT" "$DOCKER_HOST_PORT" "$DYNAMIC_HOST_PORT"; do
   [[ "$port" =~ ^[0-9]+$ ]] || die 'failed to select a loopback smoke port'
 done
 MOUNT_SOURCE="$SMOKE_ROOT/m"
@@ -850,7 +853,7 @@ run_named_reader_smoke() {
       .session_id == $id and .name == $name and .parent_session_id == $parent and
       .pty == false and .state == "Stopped" and .cleanup_unknown == false)
   ' "$LAST_STDOUT" >/dev/null || die 'reader stop did not return its terminal known-clean record'
-  run_cw list --output json
+  run_cw list "$NAME" --output json
   jq -e --arg id "$reader_id" --arg name "$reader_name" --arg parent "$parent_id" '
     [.[] | select(.name == $name)] |
     length == 1 and (.[0] |
@@ -1565,113 +1568,6 @@ remove_isolated_keyring_runtime() {
   KEYRING_DBUS_ADDRESS=''
 }
 
-install_synthetic_codex() {
-  cat >"$SMOKE_ROOT/bin/codex" <<'EOF'
-#!/bin/sh
-set -eu
-
-case "${1-}" in
-  login)
-    [ "$#" -eq 4 ]
-    [ "$2" = '--device-auth' ]
-    [ "$3" = '-c' ]
-    [ "$4" = 'cli_auth_credentials_store="file"' ]
-    [ "$HOME" = "$CODEX_HOME" ]
-    [ "$XDG_CONFIG_HOME" = "$CODEX_HOME" ]
-    [ "$XDG_CACHE_HOME" = "$CODEX_HOME" ]
-    [ "$TMPDIR" = "$CODEX_HOME" ]
-    [ "$(pwd -P)" = "$CODEX_HOME" ]
-    [ -z "${XDG_RUNTIME_DIR+x}" ]
-    [ -z "${DBUS_SESSION_BUS_ADDRESS+x}" ]
-    [ -z "${OPENAI_API_KEY+x}" ]
-    login_parent=${CODEX_HOME%/*}
-    [ -f "$login_parent/.codewire-synthetic-login-root" ]
-    [ "$(findmnt -nro FSTYPE -T "$CODEX_HOME")" = tmpfs ]
-    printf '\nWelcome to Codex [v\033[90m0.160.0\033[0m]\n\033[90mOpenAI\047s command-line coding agent\033[0m\n\n'
-    printf 'Follow these steps to sign in with ChatGPT using device code authorization:\n\n'
-    printf '1. Open this link in your browser and sign in to your account\n   \033[94mhttps://auth.openai.com/codex/device\033[0m\n\n'
-    printf '2. Enter this one-time code \033[90m(expires in 15 minutes)\033[0m\n   \033[94mSYNTH-ETIC\033[0m\n\n'
-    printf '\033[90mContinue only if you started this login in Codex. If a website or another person gave you this code, cancel.\033[0m\n\n'
-    boot_id=$(tr -d '-' </proc/sys/kernel/random/boot_id)
-    [ "${#boot_id}" -eq 32 ]
-    access_token="cwlocalbroker$boot_id"
-    refresh_token="cwlocalrefresh$boot_id"
-    jwt_header=$(printf '%s' '{"alg":"none"}' | /usr/bin/base64 -w 0 | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '=')
-    jwt_payload=$(printf '%s' '{"email":"native-smoke@example.test","https://api.openai.com/auth":{"chatgpt_account_id":"account-native-broker","chatgpt_account_is_fedramp":false}}' | /usr/bin/base64 -w 0 | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '=')
-    id_token="$jwt_header.$jwt_payload.synthetic-signature"
-    umask 077
-    printf '%s' "{\"auth_mode\":\"chatgpt\",\"OPENAI_API_KEY\":null,\"tokens\":{\"id_token\":\"$id_token\",\"access_token\":\"$access_token\",\"refresh_token\":\"$refresh_token\",\"account_id\":\"account-native-broker\"}}" >"$CODEX_HOME/auth.json"
-    chmod 0600 "$CODEX_HOME/auth.json"
-    ;;
-  logout)
-    [ "$#" -eq 3 ]
-    [ "$2" = '-c' ]
-    [ "$3" = 'cli_auth_credentials_store="file"' ]
-    rm -f -- "$CODEX_HOME/auth.json"
-    ;;
-  *)
-    exit 64
-    ;;
-esac
-EOF
-  chmod 0700 "$SMOKE_ROOT/bin/codex"
-  touch "$KEYRING_RUNTIME/.codewire-synthetic-login-root"
-  chmod 0600 "$KEYRING_RUNTIME/.codewire-synthetic-login-root"
-}
-
-install_synthetic_github() {
-  cat >"$SMOKE_ROOT/bin/gh" <<'EOF'
-#!/bin/sh
-set -eu
-
-case "${1-}:${2-}" in
-  auth:login)
-    [ "$#" -eq 9 ]
-    [ "$3" = '--hostname' ]
-    [ "$4" = 'github.com' ]
-    [ "$5" = '--git-protocol' ]
-    [ "$6" = 'https' ]
-    [ "$7" = '--web' ]
-    [ "$8" = '--insecure-storage' ]
-    [ "$9" = '--skip-ssh-key' ]
-    [ "$HOME" = "$GH_CONFIG_DIR" ]
-    [ "$XDG_CONFIG_HOME" = "$GH_CONFIG_DIR" ]
-    [ "$XDG_CACHE_HOME" = "$GH_CONFIG_DIR" ]
-    [ "$TMPDIR" = "$GH_CONFIG_DIR" ]
-    [ "$(pwd -P)" = "$GH_CONFIG_DIR" ]
-    [ "$PATH" = '/usr/bin:/bin' ]
-    [ -z "${XDG_RUNTIME_DIR+x}" ]
-    [ -z "${DBUS_SESSION_BUS_ADDRESS+x}" ]
-    [ -z "${GH_TOKEN+x}" ]
-    [ -z "${GITHUB_TOKEN+x}" ]
-    login_parent=${GH_CONFIG_DIR%/*}
-    [ -f "$login_parent/.codewire-synthetic-login-root" ]
-    [ "$(findmnt -nro FSTYPE -T "$GH_CONFIG_DIR")" = tmpfs ]
-    boot_id=$(tr -d '-' </proc/sys/kernel/random/boot_id)
-    [ "${#boot_id}" -eq 32 ]
-    oauth_token="cwlocalgithub$boot_id"
-    umask 077
-    printf 'github.com:\n  user: synthetic-smoke\n  oauth_token: %s\n  git_protocol: https\n' \
-      "$oauth_token" >"$GH_CONFIG_DIR/hosts.yml"
-    chmod 0600 "$GH_CONFIG_DIR/hosts.yml"
-    ;;
-  auth:token)
-    [ "$#" -eq 4 ]
-    [ "$3" = '--hostname' ]
-    [ "$4" = 'github.com' ]
-    [ -f "$GH_CONFIG_DIR/hosts.yml" ]
-    boot_id=$(tr -d '-' </proc/sys/kernel/random/boot_id)
-    [ "${#boot_id}" -eq 32 ]
-    printf '%s\n' "cwlocalgithub$boot_id"
-    ;;
-  *)
-    exit 64
-    ;;
-esac
-EOF
-  chmod 0700 "$SMOKE_ROOT/bin/gh"
-}
-
 secret_tool_isolated() {
   env -i PATH='/usr/bin:/bin' LC_ALL=C \
     XDG_RUNTIME_DIR="$KEYRING_RUNTIME" \
@@ -2218,7 +2114,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   start_isolated_keyring
   CREDENTIAL_CANARY="cwlocalbroker$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   CREDENTIAL_REFRESH_CANARY="cwlocalrefresh$(tr -d '-' </proc/sys/kernel/random/boot_id)"
-  GITHUB_CREDENTIAL_CANARY="cwlocalgithub$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  GITHUB_CREDENTIAL_CANARY="ghu_cwlocalgithub$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   OPENAI_CREDENTIAL_CANARY="cwlocalopenai$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   ANTHROPIC_CREDENTIAL_CANARY="cwlocalanthropic$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   WORKLOAD_SECRET_CANARY="cwworkload$(tr -d '-' </proc/sys/kernel/random/boot_id)"
@@ -2240,16 +2136,6 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   [[ ${#WORKLOAD_SECRET_CANARY} -ge 16 && ${#WORKLOAD_SECRET_CANARY} -le 256 &&
      "$WORKLOAD_SECRET_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
     die 'generated workload-secret canary is invalid'
-  install_synthetic_codex
-  install_synthetic_github
-  for canary in "$CREDENTIAL_CANARY" "$CREDENTIAL_REFRESH_CANARY" \
-    "$GITHUB_CREDENTIAL_CANARY" "$OPENAI_CREDENTIAL_CANARY" \
-    "$ANTHROPIC_CREDENTIAL_CANARY"; do
-    if rg -qF "$canary" "$SMOKE_ROOT/bin/codex" "$SMOKE_ROOT/bin/gh"; then
-      die 'synthetic provider executable contains a generated credential canary'
-    fi
-  done
-
   log 'enrolling synthetic protected Codex/GitHub OAuth, OpenAI/Anthropic API-key, and generated SSH credentials through public commands'
   run_cw_connect_synthetic_codex
   run_cw_connect_synthetic_github
@@ -2271,12 +2157,6 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   run_cw secrets --local --user list --output json
   jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
     die 'local personal-secret store was not empty before its selected fixture'
-  [[ -z "$(find "$KEYRING_RUNTIME" -mindepth 1 -maxdepth 1 -type d \
-    -name '.codewire-codex-login-*' -print -quit)" ]] ||
-    die 'transient Codex login directory remained after enrollment'
-  [[ -z "$(find "$KEYRING_RUNTIME" -mindepth 1 -maxdepth 1 -type d \
-    -name '.codewire-github-login-*' -print -quit)" ]] ||
-    die 'transient GitHub login directory remained after enrollment'
   run_cw credentials --local list --output json
   jq -e '
     length == 5 and
@@ -2805,7 +2685,7 @@ cat "$SMOKE_ROOT/host-port.stdout" "$SMOKE_ROOT/host-port.stderr" >>"$TRANSCRIPT
   die 'native host-port receipt drifted'
 HOST_PORT_SESSION_EXITED=0
 for _attempt in {1..100}; do
-  run_cw list --output json
+  run_cw list "$NAME" --output json
   if jq -e --arg session_id "$HOST_PORT_SESSION_ID" '
     any(.[];
       .session_id == $session_id and
@@ -2820,6 +2700,75 @@ for _attempt in {1..100}; do
 done
 [[ "$HOST_PORT_SESSION_EXITED" -eq 1 ]] ||
   die 'host-port guest session did not exit successfully'
+
+start_guest_port_server() {
+  local port="$1" session_id
+  run_cw run --detach --no-tty --output json -- node -e "${HOST_PORT_SERVER/listen(3000,/listen($port,}"
+  session_id="$(jq -er '.session_id | select(type == "string" and length > 0)' "$LAST_STDOUT")" ||
+    die "guest port $port listener did not return an identity"
+  for _attempt in {1..200}; do
+    run_cw logs "$NAME" "$session_id" --raw
+    rg -qxF 'codewire-host-port-ready' "$LAST_STDOUT" && return 0
+    sleep 0.05
+  done
+  die "guest port $port listener did not become ready"
+}
+
+host_port_round_trip() {
+  /usr/bin/env python3 - "$1" >>"$TRANSCRIPT" 2>&1 <<'PY'
+import socket
+import sys
+
+with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=2) as stream:
+    stream.settimeout(2)
+    stream.sendall(b"codewire-host-port-request")
+    stream.shutdown(socket.SHUT_WR)
+    response = bytearray()
+    while chunk := stream.recv(4096):
+        response.extend(chunk)
+if bytes(response) != b"codewire-host-port-response":
+    raise SystemExit(f"unexpected host-port response: {bytes(response)!r}")
+PY
+}
+
+host_port_refused() {
+  /usr/bin/env python3 - "$1" >>"$TRANSCRIPT" 2>&1 <<'PY'
+import socket
+import sys
+
+try:
+    socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=2).close()
+except ConnectionRefusedError:
+    raise SystemExit(0)
+raise SystemExit("a withdrawn host port still accepted a connection")
+PY
+}
+
+published_ports_include() {
+  jq -e --arg listen "127.0.0.1:$1" --argjson guest "$2" '
+    any(.[]; .listen == $listen and .guest_port == $guest)
+  ' "$LAST_STDOUT" >/dev/null
+}
+
+log 'checking host ports published and withdrawn on the running native VM'
+run_cw env port add --local "$DYNAMIC_GUEST_PORT" --host-port "$DYNAMIC_HOST_PORT" \
+  --env "$NAME" --output json
+published_ports_include "$DYNAMIC_HOST_PORT" "$DYNAMIC_GUEST_PORT" ||
+  die 'dynamic host port was not published'
+published_ports_include "$HOST_PORT" 3000 ||
+  die 'publishing a dynamic host port dropped the declared one'
+start_guest_port_server "$DYNAMIC_GUEST_PORT"
+host_port_round_trip "$DYNAMIC_HOST_PORT" ||
+  die 'dynamic host-port round trip failed'
+run_cw env port rm --local "$DYNAMIC_HOST_PORT" --env "$NAME" --output json
+! published_ports_include "$DYNAMIC_HOST_PORT" "$DYNAMIC_GUEST_PORT" ||
+  die 'withdrawn host port is still listed'
+host_port_refused "$DYNAMIC_HOST_PORT" ||
+  die 'withdrawn host port still accepts connections'
+run_cw env port add --local "$DYNAMIC_GUEST_PORT" --host-port "$DYNAMIC_HOST_PORT" \
+  --env "$NAME" --output json
+published_ports_include "$DYNAMIC_HOST_PORT" "$DYNAMIC_GUEST_PORT" ||
+  die 'a withdrawn host port could not be published again'
 
 log 'checking stock Codex 0.160.0 over the synthetic guest credential bridge'
 run_codex_credential_bridge_smoke
@@ -2996,6 +2945,12 @@ run_cw run --no-tty -- /bin/sh -lc \
   'printf "sentinel="; cat /workspace/sentinel.txt; printf "\nmachine-id="; cat /etc/machine-id'
 rg -qxF 'sentinel=persistence-ok' "$LAST_STDOUT" ||
   die 'workspace sentinel did not survive explicit native restart'
+run_cw env port ls --local --env "$NAME" --output json
+published_ports_include "$DYNAMIC_HOST_PORT" "$DYNAMIC_GUEST_PORT" ||
+  die 'a host port published while running did not survive restart'
+start_guest_port_server "$DYNAMIC_GUEST_PORT"
+host_port_round_trip "$DYNAMIC_HOST_PORT" ||
+  die 'dynamic host-port round trip failed after restart'
 rg -qxF "machine-id=$EXPECTED_MACHINE_ID" "$LAST_STDOUT" ||
   die 'environment identity did not survive explicit native restart'
 run_docker_persistence_smoke docker-explicit-restart-persistence-ok
@@ -3070,7 +3025,7 @@ log 'checking nonzero status and saved session output'
 run_cw_expect_failure run --no-tty -- /bin/sh -lc 'printf saved-nonzero; exit 42'
 rg -qF 'saved-nonzero' "$LAST_STDOUT" || die 'nonzero session output was not returned'
 rg -qF 'session exited with code 42' "$LAST_STDERR" || die 'guest exit code 42 was not propagated'
-run_cw list --output json
+run_cw list "$NAME" --output json
 SESSION_ID="$(jq -er '
   .[] |
   select(.command == ["/bin/sh", "-lc", "printf saved-nonzero; exit 42"]) |
