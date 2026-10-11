@@ -25,6 +25,15 @@ name before it configures the VM, and again once the VM has started. A
 mismatch before start fails the helper; a mismatch after start stops the VM
 and exits 1. A guest symlink resolves inside the guest, never on the host.
 
+The kernel, initial ramdisk and disks are also named by path, because
+`VZLinuxBootLoader` and `VZDiskImageStorageDeviceAttachment` accept only URLs
+for regular files (VZ's file-handle disk attachment is for block devices).
+Linux's Cloud Hypervisor receives the same files by path. Each path is inside a
+directory only the user can write: the admitted runtime root or the
+environment's private state root. Replacing a file there needs the user's
+own authority, which can already control the user's VMs and `cw` itself, so a
+path grants the helper nothing the runner did not admit.
+
 The helper binds the configured hybrid-vsock Unix socket owner-only and never
 replaces an existing path. A client writes `CONNECT <port>\n`. The helper dials
 that guest vsock port and answers `OK <n>\n`, then copies bytes both ways,
