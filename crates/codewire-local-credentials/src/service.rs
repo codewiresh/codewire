@@ -2115,9 +2115,7 @@ fn status_for_error(error: LocalCredentialError) -> Status {
         | LocalCredentialError::CredentialOperationLeaseDenied
         | LocalCredentialError::CredentialRefreshInProgress
         | LocalCredentialError::StaleCredentialRefresh
-        | LocalCredentialError::CredentialInUse
         | LocalCredentialError::StaleProfileRevision
-        | LocalCredentialError::ProfileInUse
         | LocalCredentialError::StaleEnvironmentBinding
         | LocalCredentialError::ProtectedEntryCollision
         | LocalCredentialError::OwnerMismatch
@@ -2127,6 +2125,13 @@ fn status_for_error(error: LocalCredentialError) -> Status {
         | LocalCredentialError::CorruptMetadata => {
             Status::failed_precondition("local credential operation cannot be applied")
         }
+        // Both are the user's to resolve, so say what holds the record.
+        LocalCredentialError::CredentialInUse => Status::failed_precondition(
+            "local credential is selected by an access profile or environment; unset it from the profile (cw credentials --local --profile NAME unset PROVIDER) or remove the environment first",
+        ),
+        LocalCredentialError::ProfileInUse => Status::failed_precondition(
+            "local access profile is selected by an environment; remove the environment first",
+        ),
         LocalCredentialError::SshCredentialRequiresEnrollment => Status::failed_precondition(
             "SSH credentials require the dedicated enrollment operation",
         ),
@@ -2167,6 +2172,36 @@ fn status_for_error(error: LocalCredentialError) -> Status {
         LocalCredentialError::InvalidDatabasePath | LocalCredentialError::InvalidTime => {
             Status::internal("local credential authority state is invalid")
         }
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn a_record_in_use_says_what_holds_it() {
+        let credential = status_for_error(LocalCredentialError::CredentialInUse);
+        assert_eq!(credential.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            credential
+                .message()
+                .contains("selected by an access profile or environment")
+        );
+        assert!(
+            credential
+                .message()
+                .contains("--profile NAME unset PROVIDER")
+        );
+        let profile = status_for_error(LocalCredentialError::ProfileInUse);
+        assert_eq!(profile.code(), tonic::Code::FailedPrecondition);
+        assert!(profile.message().contains("selected by an environment"));
+        // Internal states stay undisclosed.
+        let corrupt = status_for_error(LocalCredentialError::CorruptMetadata);
+        assert_eq!(
+            corrupt.message(),
+            "local credential operation cannot be applied"
+        );
     }
 }
 
