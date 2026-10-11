@@ -548,9 +548,11 @@ workflow_output="$(push_branch "$linked_workflow" linked-workflow "$workflow_log
 assert_contains linked_workflow "$workflow_output" \
   '  .gitea/workflows/ci.yaml'
 assert_contains linked_workflow "$workflow_output" \
-  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|runtime_dev_smoke|rust_curated_locks|complete|'
+  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|runtime_dev_smoke|rust_curated_locks|security|security_js|complete|'
 assert_contains workflow_tools "$(cat "$workflow_log")" \
   'product rust-curated-locks '
+assert_contains workflow_tools "$(cat "$workflow_log")" \
+  'product security '
 assert_contains workflow_tools "$(cat "$workflow_log")" \
   'product runtime-dev-smoke '
 assert_not_contains workflow_tools "$(cat "$workflow_log")" 'integration '
@@ -680,7 +682,7 @@ sdk_runner_output="$({
     PREFLIGHT_CHANGED_FILES="$sdk_runner_paths" "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains sdk_runner "$sdk_runner_output" \
-  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|sdk_python|complete|'
+  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|sdk_python|security|security_js|complete|'
 assert_contains sdk_runner_tools "$(cat "$sdk_runner_log")" 'product sdk-python '
 assert_not_contains sdk_runner_tools "$(cat "$sdk_runner_log")" 'integration '
 assert_not_contains sdk_runner_tools "$(cat "$sdk_runner_log")" 'kind'
@@ -694,7 +696,7 @@ apikey_tooling_output="$({
     PREFLIGHT_CHANGED_FILES="$apikey_tooling_paths" "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains apikey_tooling "$apikey_tooling_output" \
-  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|service_apikey_smoke|complete|'
+  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|security|security_js|service_apikey_smoke|complete|'
 assert_contains apikey_tooling_tools "$(cat "$apikey_tooling_log")" \
   'product service-apikey-smoke '
 assert_not_contains apikey_tooling_tools "$(cat "$apikey_tooling_log")" 'integration '
@@ -711,7 +713,7 @@ confidential_tooling_output="$({
     PREFLIGHT_CHANGED_FILES="$confidential_tooling_paths" "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains confidential_tooling "$confidential_tooling_output" \
-  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|runtime_confidential|complete|'
+  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|runtime_confidential|security|security_js|complete|'
 assert_contains confidential_tooling_tools "$(cat "$confidential_tooling_log")" \
   'product runtime-confidential '
 assert_not_contains confidential_tooling_tools \
@@ -732,7 +734,7 @@ dev_smoke_tooling_output="$({
     "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains dev_smoke_tooling "$dev_smoke_tooling_output" \
-  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|runtime_dev_smoke|complete|'
+  'preflight selection: |valid:v3|policy|policy_shell|policy_shell_omittable|runtime_dev_smoke|security|security_js|complete|'
 assert_contains dev_smoke_tooling_tools "$(cat "$dev_smoke_tooling_log")" \
   'product runtime-dev-smoke '
 assert_not_contains dev_smoke_tooling_tools \
@@ -750,7 +752,7 @@ sdk_tooling_output="$({
     PREFLIGHT_CHANGED_FILES="$sdk_tooling_paths" "$repo/scripts/dev/preflight.sh"
 } 2>&1)"
 assert_contains sdk_tooling "$sdk_tooling_output" \
-  'preflight selection: |valid:v3|go_consumer_interop|go_support|policy|policy_shell_omittable|sdk_go|complete|'
+  'preflight selection: |valid:v3|go_consumer_interop|go_support|policy|policy_shell_omittable|sdk_go|security|security_js|complete|'
 assert_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'product sdk-go '
 assert_not_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'integration '
 assert_not_contains sdk_tooling_tools "$(cat "$sdk_tooling_log")" 'kind'
