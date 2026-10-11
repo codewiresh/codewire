@@ -16,6 +16,7 @@ use codewire_project::{
 use super::verify_common_confinement;
 
 pub(crate) fn run_git_ssh_helper(arguments: Vec<OsString>) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
     crate::prepare_local_credential_broker_process()?;
     verify_common_confinement()?;
     let owner = std::env::var(SSH_HELPER_OWNER_ENV)
@@ -28,6 +29,9 @@ pub(crate) fn run_git_ssh_helper(arguments: Vec<OsString>) -> anyhow::Result<()>
         .filter(|pid| pid.as_raw_pid() > 1 && *pid != owner)
         .context("invalid repository SSH parent")?;
     require_parent_session(parent, owner)?;
+    // Darwin has no parent-death signal that survives exec: stock SSH stays
+    // in the executor's process group, which its authority stops as a whole.
+    #[cfg(target_os = "linux")]
     rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))?;
     require_parent_session(parent, owner)?;
 
@@ -62,6 +66,7 @@ pub(crate) fn run_git_ssh_helper(arguments: Vec<OsString>) -> anyhow::Result<()>
     // SAFETY: this is the single-threaded early binary entrypoint. The syscall
     // only marks descriptors >=3 close-on-exec; stdio remains the existing
     // Git transport and authority-owned diagnostic/lifetime pipe.
+    #[cfg(target_os = "linux")]
     if unsafe {
         libc::syscall(
             libc::SYS_close_range,
@@ -73,6 +78,9 @@ pub(crate) fn run_git_ssh_helper(arguments: Vec<OsString>) -> anyhow::Result<()>
     {
         return Err(std::io::Error::last_os_error().into());
     }
+    // Darwin has no close_range: mark each descriptor >=3 close-on-exec.
+    #[cfg(target_os = "macos")]
+    codewire_local_vmm::darwin::process::mark_inherited_descriptors_close_on_exec();
     Err(command.exec()).context("start repository SSH")
 }
 
@@ -292,7 +300,7 @@ fn ssh_command(
     command
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod process_tests;
 
 #[cfg(test)]
@@ -455,6 +463,12 @@ mod tests {
     fn repository_transport_is_required_and_closed_in_the_private_cli() {
         use clap::Parser as _;
         let request = uuid::Uuid::new_v4().to_string();
+        // A macOS executor also names its authority's store.
+        let store: &[&str] = if cfg!(target_os = "macos") {
+            &["--protected-store", "keychain"]
+        } else {
+            &[]
+        };
         let base = [
             "cw",
             "__local-git-repository-executor",
@@ -464,16 +478,20 @@ mod tests {
             &request,
             "--staging-directory",
             "/run/synthetic-repository",
-        ];
-        assert!(crate::Cli::try_parse_from(base).is_err());
+        ]
+        .into_iter()
+        .chain(store.iter().copied())
+        .collect::<Vec<_>>();
+        assert!(crate::Cli::try_parse_from(base.iter().copied()).is_err());
         for transport in ["github-oauth", "ssh"] {
             assert!(
-                crate::Cli::try_parse_from(base.into_iter().chain(["--transport", transport]))
+                crate::Cli::try_parse_from(base.iter().copied().chain(["--transport", transport]))
                     .is_ok()
             );
         }
         assert!(
-            crate::Cli::try_parse_from(base.into_iter().chain(["--transport", "auto"])).is_err()
+            crate::Cli::try_parse_from(base.iter().copied().chain(["--transport", "auto"]))
+                .is_err()
         );
     }
 }

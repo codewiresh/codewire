@@ -1873,6 +1873,12 @@ function generalEgress(){
         }
         if output.stdout != CODEX_VERSION.as_bytes() {
             stage("version-output-mismatch");
+            // Version text carries no secret; show a bounded copy of it.
+            let shown = &output.stdout[..output.stdout.len().min(256)];
+            eprintln!(
+                "codewire-local-codex-bridge-smoke: codex --version printed {:?}",
+                String::from_utf8_lossy(shown)
+            );
             return Err(failed());
         }
         Ok(())

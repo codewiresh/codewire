@@ -11,7 +11,6 @@ description = "Isolated provider credential brokerage for Codewire environments"
 default = ["local"]
 local = ["dep:codewire-local-credentials", "dep:codewire-protected-store"]
 platform = ["dep:codewire-platform-credentials", "dep:codewire-protected-store", "dep:tonic"]
-codex-enrollment = ["dep:rustix"]
 ssh-agent = ["dep:rustix", "dep:codewire-protected-store", "codewire-protected-store/ssh-material"]
 local-broker-synthetic-smoke = []
 host-agent-synthetic-smoke = ["local", "local-broker-synthetic-smoke", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:rand", "dep:subtle", "dep:rustix"]

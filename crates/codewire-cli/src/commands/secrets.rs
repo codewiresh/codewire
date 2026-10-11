@@ -6,11 +6,11 @@ use super::storage_placement::{
 };
 use super::*;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use codewire_local_credentials::{
     LocalCredentialClient, LocalSecretProject, WorkloadSecretMetadata,
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use codewire_protected_store::ProtectedValue;
 use codewire_workload_secrets::{
     MAX_WORKLOAD_SECRET_VALUE_BYTES, ResolvedWorkloadSecretMetadata, WorkloadSecretSource,
@@ -171,12 +171,12 @@ fn secret_operation_json(operation: &SecretOperation) -> bool {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 async fn handle_local_secrets_command(_command: SecretOperation) -> anyhow::Result<()> {
     anyhow::bail!("local workload-secret management is not available on this operating system")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn handle_local_secrets_command(command: SecretOperation) -> anyhow::Result<()> {
     let mut client = connect_local_credential_authority().await?;
     match command {
@@ -309,7 +309,7 @@ fn workload_secret_source_label(source: WorkloadSecretSource) -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn local_user_command(
     client: &mut LocalCredentialClient,
     command: ScopedSecretCommand,
@@ -354,7 +354,7 @@ async fn local_user_command(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn local_project_command(
     client: &mut LocalCredentialClient,
     command: SecretProjectCommand,
@@ -396,7 +396,7 @@ async fn local_project_command(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn local_project_key_command(
     client: &mut LocalCredentialClient,
     project_name: &str,
@@ -487,7 +487,7 @@ fn read_secret_project_delete_confirmation(
     Ok(count > 0 && count < 65 && matches!(input.trim(), "y" | "Y" | "yes" | "Yes" | "YES"))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn resolve_local_project_by_name(
     client: &mut LocalCredentialClient,
     name: &str,
@@ -499,7 +499,7 @@ async fn resolve_local_project_by_name(
     Ok(resolve_local_project(&projects, name)?.clone())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn resolve_local_project<'a>(
     projects: &'a [LocalSecretProject],
     name: &str,
@@ -521,7 +521,7 @@ fn resolve_local_project<'a>(
     Ok(project)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn print_local_secret_metadata(
     secrets: &[WorkloadSecretMetadata],
     empty: &str,
@@ -538,7 +538,7 @@ fn print_local_secret_metadata(
     print_secret_metadata_list(&secrets, empty, output)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn print_local_secret_projects(
     projects: &[LocalSecretProject],
     output: OutputFormat,
@@ -556,7 +556,7 @@ fn print_local_secret_projects(
     print_secret_project_list(&projects, output)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn format_unix_millis(value: u64) -> String {
     i64::try_from(value)
         .ok()
@@ -565,7 +565,7 @@ fn format_unix_millis(value: u64) -> String {
         .unwrap_or_default()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn prompt_workload_secret_value() -> anyhow::Result<ProtectedValue> {
     let mut value = prompt_workload_secret_bytes()?;
     ProtectedValue::new(std::mem::take(&mut *value)).context("invalid workload-secret value")

@@ -945,7 +945,7 @@ func (x *GetCredentialResponse) GetCredential() *Credential {
 
 type EnrollCodexRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The server selects its pinned official Codex executable and isolated home.
+	// The server runs the Codex device login itself; no provider CLI runs.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// Reconnect the resolved identity. Both fields must be present together and
 	// the generation positive. Absence means create-only, never implicit upsert.
@@ -1008,7 +1008,7 @@ func (x *EnrollCodexRequest) GetExpectedRevocationGeneration() uint64 {
 
 type EnrollGithubRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The server selects its pinned official GitHub CLI and isolated home.
+	// The server runs the GitHub App device login itself; no provider CLI runs.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// Both reconnect fields must be present together, with a positive generation.
 	// Absence means create-only; reconnect preserves identity and profile bindings.

@@ -110,10 +110,11 @@ verify_services_dockerfile_contract() {
     fail 'non-promotable Kind services image lacks its test-only feature'
   [[ "$(head -n 1 "$SERVICES_DOCKERFILE")" == '# syntax=docker/dockerfile:1.20' ]] ||
     fail 'services checksum ADD requires an active Dockerfile frontend directive'
-  for binary in codex-LICENSE codex-NOTICE; do
-    grep -qxF "!deployments/docker/licenses/$binary" "$SERVICES_DOCKERIGNORE" ||
-      fail "services build context omits official Codex $binary"
-  done
+  # Provider logins are native OAuth: the services image ships no provider CLI.
+  ! grep -qE 'registry\.npmjs\.org/@openai/codex|github\.com/cli/cli/releases' "$SERVICES_DOCKERFILE" ||
+    fail 'services image must not download a provider CLI'
+  ! grep -qF 'deployments/docker/licenses' "$SERVICES_DOCKERIGNORE" ||
+    fail 'services build context must not include provider CLI licenses'
   # Each architecture supplies exactly its reviewed tools/crypto bytes. The
   # runtime inherits their minimal closure, never the extracted package tree.
   for architecture in amd64 arm64; do

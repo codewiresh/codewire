@@ -738,8 +738,8 @@ fn oauth_refresh_serializes_and_promotes_one_exact_protected_generation() {
     else {
         panic!("expected reservation");
     };
-    assert_eq!(permit.current_material_generation, 1);
-    assert_eq!(permit.next_material_generation, 2);
+    assert_eq!(permit.current_material_generation(), 1);
+    assert_eq!(permit.next_material_generation(), 2);
     assert_eq!(
         authority.begin_environment_credential_refresh(
             Uuid::new_v4(),
@@ -801,6 +801,198 @@ fn oauth_refresh_serializes_and_promotes_one_exact_protected_generation() {
     assert_eq!(
         lease.with_material(<[u8]>::to_vec),
         b"refreshed-oauth-bundle"
+    );
+    assert_eq!(store.entry_count(), 1);
+}
+
+/// A GitHub connection and the exact repository request that admits it.
+fn github_repository_fixture(
+    root: &std::path::Path,
+    store: TestProtectedStore,
+) -> (
+    LocalCredentialAuthority<TestProtectedStore>,
+    CredentialRecord,
+    RepositoryCredentialLeaseRequest,
+) {
+    let authority =
+        LocalCredentialAuthority::open(root, store, codewire_access::builtin_provider_catalog())
+            .expect("open authority");
+    let credential = authority
+        .add_credential(
+            NewCredential {
+                provider: provider("github"),
+                authentication_kind: CredentialAuthKind::OAuth,
+                display_name: "github-work".to_owned(),
+                account_hint: None,
+                expires_at_unix: None,
+            },
+            material(b"first-github-app-bundle"),
+        )
+        .expect("add GitHub credential");
+    let profile = authority
+        .create_profile(
+            AccessProfileName::parse("github-work").unwrap(),
+            BTreeMap::new(),
+        )
+        .expect("create GitHub profile");
+    let request = RepositoryCredentialLeaseRequest {
+        request_id: Uuid::new_v4(),
+        profile_id: profile.profile.id.clone(),
+        profile_revision: profile.profile.revision,
+        source: "https://github.com/codewire/codewire.git".to_owned(),
+        branch: "main".to_owned(),
+        revision: String::new(),
+        known_hosts: Vec::new(),
+    };
+    (authority, credential, request)
+}
+
+fn github_repository_material_generation(
+    authority: &LocalCredentialAuthority<TestProtectedStore>,
+    request: &RepositoryCredentialLeaseRequest,
+) -> u64 {
+    let RepositoryCredentialAdmission::GitHubOAuth(admission) = authority
+        .admit_repository_credential_operation(request)
+        .expect("admit repository lease")
+    else {
+        panic!("expected GitHub OAuth admission");
+    };
+    admission.material_generation
+}
+
+#[test]
+fn repository_refresh_promotes_one_github_generation_through_the_shared_journal() {
+    let temp = TempDir::new().expect("temporary directory");
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let (authority, credential, request) =
+        github_repository_fixture(&authority_root(&temp), store.clone());
+    let id = credential.metadata.id.clone();
+    let revocation = credential.metadata.revocation_generation;
+    assert_eq!(
+        github_repository_material_generation(&authority, &request),
+        1
+    );
+    let (channel_id, refresh_id, request_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let CredentialRefreshAdmission::Reserved(permit) = authority
+        .begin_repository_credential_refresh(
+            channel_id, refresh_id, request_id, &request, &id, revocation, 1,
+        )
+        .expect("begin repository refresh")
+    else {
+        panic!("expected reservation");
+    };
+    assert_eq!(permit.credential_id(), &id);
+    assert_eq!(permit.next_material_generation(), 2);
+    // One refresh per credential, whoever asks: another checkout, a manual
+    // rotation or a deletion waits for this one.
+    assert_eq!(
+        authority.begin_repository_credential_refresh(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &request,
+            &id,
+            revocation,
+            1,
+        ),
+        Err(LocalCredentialError::CredentialRefreshInProgress)
+    );
+    assert_eq!(
+        authority.rotate_credential_material(
+            &id,
+            revocation,
+            material(b"manual-rotation"),
+            None,
+            None,
+        ),
+        Err(LocalCredentialError::CredentialRefreshInProgress)
+    );
+    // The repository marker survives as its own form.
+    let marker = load_credential_refresh_marker(&authority.connection().unwrap(), &id)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        marker.permit,
+        CredentialRefreshPermit::Repository(_)
+    ));
+    assert_eq!(marker.phase, CredentialRefreshPhase::Reserved);
+
+    authority
+        .start_environment_credential_refresh(channel_id, refresh_id, request_id)
+        .expect("durable start before the provider exchange");
+    store
+        .put(
+            &protected_entry_id(&id, 2).expect("next entry"),
+            &material(b"refreshed-github-app-bundle"),
+        )
+        .expect("stage the rotated bundle");
+    let (refreshed, generation) = authority
+        .commit_environment_credential_refresh(channel_id, refresh_id, request_id)
+        .expect("commit repository refresh");
+    assert_eq!(generation, 2);
+    assert_eq!(refreshed.metadata.revocation_generation, revocation + 1);
+    assert_eq!(
+        github_repository_material_generation(&authority, &request),
+        2
+    );
+    // A checkout that read the old generation cannot start another refresh.
+    assert_eq!(
+        authority.begin_repository_credential_refresh(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &request,
+            &id,
+            revocation,
+            1,
+        ),
+        Err(LocalCredentialError::StaleCredentialRefresh)
+    );
+    assert_eq!(store.entry_count(), 1);
+}
+
+#[test]
+fn repository_refresh_recovers_a_staged_github_bundle_after_authority_crash() {
+    let temp = TempDir::new().expect("temporary directory");
+    let root = authority_root(&temp);
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let request;
+    {
+        let (authority, credential, admitted) = github_repository_fixture(&root, store.clone());
+        request = admitted;
+        let id = credential.metadata.id.clone();
+        let (channel_id, refresh_id, request_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        authority
+            .begin_repository_credential_refresh(
+                channel_id,
+                refresh_id,
+                request_id,
+                &request,
+                &id,
+                credential.metadata.revocation_generation,
+                1,
+            )
+            .expect("begin repository refresh");
+        authority
+            .start_environment_credential_refresh(channel_id, refresh_id, request_id)
+            .expect("durable start");
+        store
+            .put(
+                &protected_entry_id(&id, 2).expect("next entry"),
+                &material(b"durable-rotated-github-bundle"),
+            )
+            .expect("stage the rotated bundle");
+        // Dropped before commit: GitHub has already rotated the refresh token.
+    }
+    let authority = LocalCredentialAuthority::open(
+        &root,
+        store.clone(),
+        codewire_access::builtin_provider_catalog(),
+    )
+    .expect("recover authority");
+    assert_eq!(
+        github_repository_material_generation(&authority, &request),
+        2
     );
     assert_eq!(store.entry_count(), 1);
 }
@@ -953,8 +1145,8 @@ fn oauth_refresh_lost_start_ack_and_started_without_output_never_reopen_old_toke
         )
         .unwrap()
         .unwrap();
-        assert_eq!(marker.permit.request_id, request_id);
-        assert_eq!(*marker.permit.grant, grant);
+        assert_eq!(marker.permit.request_id(), request_id);
+        assert_eq!(environment_grant(&marker.permit), &grant);
         assert!(
             !serde_json::to_string(&marker)
                 .unwrap()
@@ -1071,7 +1263,7 @@ fn oauth_refresh_start_rechecks_binding_and_hard_expiry_after_reservation() {
         .unwrap()
         .unwrap();
         assert_eq!(marker.phase, CredentialRefreshPhase::Reserved);
-        assert_eq!(*marker.permit.grant, grant);
+        assert_eq!(environment_grant(&marker.permit), &grant);
         authority
             .abort_environment_credential_refresh(channel_id, refresh_id, request_id)
             .unwrap();
@@ -1158,9 +1350,9 @@ fn oauth_refresh_attempt_id_cannot_alias_another_credential_after_rebind() {
         let first_marker = load_credential_refresh_marker(&connection, &first.metadata.id)
             .unwrap()
             .unwrap();
-        assert_eq!(first_marker.permit.refresh_id, refresh_id);
-        assert_eq!(first_marker.permit.request_id, request_id);
-        assert_eq!(*first_marker.permit.grant, first_grant);
+        assert_eq!(first_marker.permit.refresh_id(), refresh_id);
+        assert_eq!(first_marker.permit.request_id(), request_id);
+        assert_eq!(environment_grant(&first_marker.permit), &first_grant);
         assert!(
             load_credential_refresh_marker(&connection, &second.metadata.id)
                 .unwrap()
@@ -1382,7 +1574,10 @@ fn oauth_refresh_start_accepts_only_attenuated_live_request_deadlines() {
         load_credential_refresh_marker(&authority.connection().unwrap(), &credential.metadata.id)
             .unwrap()
             .unwrap();
-    assert_eq!(marker.permit.grant.expires_at_unix, pinned.expires_at_unix);
+    assert_eq!(
+        environment_grant(&marker.permit).expires_at_unix,
+        pinned.expires_at_unix
+    );
 }
 
 #[test]
@@ -3528,4 +3723,12 @@ fn invalid_workload_secret_requests_do_not_trigger_pending_reconciliation() {
     );
     assert_eq!(workload_secret_journal_count(&authority), 1);
     assert_eq!(store.entry_values(), vec![b"synthetic-pending".to_vec()]);
+}
+
+/// The environment grant a broker refresh permit pins.
+fn environment_grant(permit: &CredentialRefreshPermit) -> &DerivedGrant {
+    match permit {
+        CredentialRefreshPermit::Environment(permit) => &permit.grant,
+        CredentialRefreshPermit::Repository(_) => panic!("expected an environment refresh"),
+    }
 }

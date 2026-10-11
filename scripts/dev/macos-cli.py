@@ -268,7 +268,8 @@ def cache_lock(root):
 
 @contextlib.contextmanager
 def isolated_runtime(root, run):
-    runtime = Path(tempfile.mkdtemp(prefix="cw-", dir="/tmp"))
+    # Resolved: Darwin's /tmp is a symlink, which private-root checks refuse.
+    runtime = Path(tempfile.mkdtemp(prefix="cw-", dir="/tmp")).resolve()
     marker = root / "inflight.json"
     # This fail-closed marker exists before any child can start. An abrupt
     # worker death or failed cleanup cannot silently unlock cache reuse.
@@ -285,8 +286,15 @@ def isolated_runtime(root, run):
         raise
     finally:
         if not retain:
-            shutil.rmtree(runtime)
+            shutil.rmtree(runtime, onerror=writable_retry)
             marker.unlink()
+
+
+def writable_retry(function, path, _):
+    # Tests may leave read-only directories (for example a managed release
+    # store) inside this helper-owned tree; make the parent writable once.
+    os.chmod(os.path.dirname(path), 0o700)
+    function(path)
 
 
 def group_absent(process):
@@ -327,6 +335,12 @@ def stop_group(process):
                 break
             time.sleep(0.02)
     raise CleanupUnknown("command group remains; runtime and cache retained")
+
+
+# The credential authority's crates carry macOS signer and repository paths
+# (and the selected-key SSH signer feature the CLI enables on macOS).
+CREDENTIAL_CRATES = ["-p", "codewire-local-credentials", "-p", "codewire-credential-broker",
+                     "--features", "codewire-credential-broker/ssh-agent"]
 
 
 def run_command(argv, cwd, env, log, cancel, deadline):
@@ -374,7 +388,11 @@ def import_git_seeds(seeded, cargo, command):
             stream.seek(-20, os.SEEK_END)
             pack_name = "pack-" + stream.read().hex()
         for suffix in (".pack", ".idx"):
-            shutil.copy2(pack.with_suffix(suffix), database / "objects/pack" / (pack_name + suffix))
+            # The name is the pack's content hash, so an earlier seed's file
+            # (read-only once indexed) already holds these bytes.
+            destination = database / "objects/pack" / (pack_name + suffix)
+            if not destination.exists():
+                shutil.copy2(pack.with_suffix(suffix), destination)
         command(["git", f"--git-dir={database}", "update-ref",
                  "refs/commit/" + item["commit"], item["commit"]])
 
@@ -435,6 +453,10 @@ def worker(root, run):
                    "TMPDIR": str(isolated / "tmp") + "/", "LANG": "en_US.UTF-8",
                    "CARGO_NET_OFFLINE": "true", "RUSTUP_AUTO_INSTALL": "0",
                    "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+            # Tests run the runtime's pinned e2fsprogs and git, never Homebrew's
+            # or the Xcode Command Line Tools' (crates/codewire-local-vmm darwin).
+            if request.get("runtime_tools"):
+                env["CW_TEST_RUNTIME_TOOLS"] = request["runtime_tools"]
 
             def command(argv):
                 item = {"argv": argv, "log": f"command-{len(result['commands']):02d}.log"}
@@ -475,10 +497,13 @@ def worker(root, run):
                     command(["cargo", "test", *native, "-p", "codewire-cw-release", "--",
                              "--skip", "compiled_trust_is_an_exact_producer_and_artifact_graph_input"])
                     command(["cargo", "test", *native, "-p", "codewire-local-vmm", "--lib"])
+                    command(["cargo", "test", *native, *CREDENTIAL_CRATES, "--lib"])
                 if action in ("clippy", "verify"):
                     command(["cargo", "clippy", *native, "-p", "codewire-cli", "-p", "codewire-cli-bin",
                              "--all-targets", "--", "-D", "warnings"])
                     command(["cargo", "clippy", *native, "-p", "codewire-local-vmm", "--lib",
+                             "--", "-D", "warnings"])
+                    command(["cargo", "clippy", *native, *CREDENTIAL_CRATES, "--all-targets",
                              "--", "-D", "warnings"])
                 if request["intel"]:
                     command(["cargo", "build", *common, "--target", "x86_64-apple-darwin",
@@ -667,12 +692,17 @@ def main():
     parser.add_argument("--intel", action="store_true", help="also compile/link x86_64; never execute it")
     parser.add_argument("--seed-cargo", action="store_true", help="seed locked public source dependencies")
     parser.add_argument("--timeout", type=int, default=1800, help="remote deadline in seconds")
+    parser.add_argument("--runtime-tools", metavar="DIR",
+                        help="absolute directory on the Mac holding the runtime's pinned e2fsprogs "
+                             "and git under their installed names, for tests")
     parser.add_argument("--recover", metavar="RUN_ID", help="recover an earlier interrupted run")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_.@:-]+", args.host) or args.host.startswith("-"):
         parser.error("invalid SSH destination")
     if not 1 <= args.timeout <= 14400:
         parser.error("timeout must be between 1 and 14400 seconds")
+    if args.runtime_tools is not None and not re.fullmatch(r"/[A-Za-z0-9._/-]{1,512}", args.runtime_tools):
+        parser.error("--runtime-tools must be an absolute plain path on the Mac")
     if args.component in SWIFT_COMPONENTS and (args.action == "clippy" or args.intel or args.seed_cargo):
         parser.error("Swift components accept build, test, or verify without --intel/--seed-cargo")
     if args.component in VZ_FIXTURES and args.intel:
@@ -694,7 +724,8 @@ def main():
         request = source_archive(repo, stage / "source.tar.gz")
         request.update({"run_id": run_id, "component": args.component,
                         "action": args.action, "intel": args.intel,
-                        "timeout": args.timeout, "host_requested": args.host})
+                        "timeout": args.timeout, "host_requested": args.host,
+                        "runtime_tools": args.runtime_tools})
         # Read the frozen lock bytes, not a concurrently edited working-tree file.
         with tarfile.open(stage / "source.tar.gz") as archive:
             lock_bytes = archive.extractfile("Cargo.lock").read()
@@ -716,7 +747,11 @@ def main():
             response = ssh(args.host, ["python3", "-c", BOOTSTRAP, key, run_id],
                            stdin=stream, stdout=subprocess.PIPE, check=True)
         remote = response.stdout.decode().strip()
-        command = ["python3", remote + "/worker.py", "--worker", str(Path(remote).parents[1]), remote]
+        # A Mac set to idle-sleep otherwise sleeps through most of a long build,
+        # waking only briefly for network traffic; -i alone does not stop its
+        # maintenance sleep, -s does on AC power. Both assertions end with the run.
+        command = ["/usr/bin/caffeinate", "-i", "-s", "python3", remote + "/worker.py", "--worker",
+                   str(Path(remote).parents[1]), remote]
         process = subprocess.Popen(["ssh", *SSH_OPTIONS, "--", args.host, shlex.join(command)],
                                    stdin=subprocess.PIPE)
         try:

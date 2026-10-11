@@ -779,25 +779,20 @@ mod tests {
     }
 
     fn oauth_bundle(fedramp: bool) -> CanonicalCodexOAuthBundle {
-        let source = serde_json::to_vec(&json!({
-            "auth_mode": "chatgpt",
-            "OPENAI_API_KEY": null,
-            "tokens": {
-                "id_token": jwt(json!({
-                    "email": "developer@example.test",
-                    "https://api.openai.com/auth": {
-                        "chatgpt_account_id": "account-work",
-                        "chatgpt_account_is_fedramp": fedramp
-                    }
-                })),
-                "access_token": "synthetic.oauth.access-token",
-                "refresh_token": "synthetic-oauth-refresh-token",
-                "account_id": "account-work"
-            }
-        }))
-        .expect("Codex auth JSON");
-        let imported = crate::import_codex_auth_json(&source).expect("Codex OAuth import");
-        imported.into_parts().0
+        crate::import_codex_tokens(
+            zeroize::Zeroizing::new(jwt(json!({
+                "email": "developer@example.test",
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "account-work",
+                    "chatgpt_account_is_fedramp": fedramp
+                }
+            }))),
+            zeroize::Zeroizing::new("synthetic.oauth.access-token".to_owned()),
+            zeroize::Zeroizing::new("synthetic-oauth-refresh-token".to_owned()),
+        )
+        .expect("Codex OAuth import")
+        .into_parts()
+        .0
     }
 
     fn provider(value: &str) -> ProviderId {

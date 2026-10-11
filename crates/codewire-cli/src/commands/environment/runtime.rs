@@ -12,11 +12,11 @@ pub(super) async fn handle(
     if placement == Some(EnvironmentPlacement::Platform) {
         return platform::handle(globals, command).await;
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         handle_linux(command).await
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = command;
         anyhow::bail!(
@@ -63,7 +63,6 @@ fn validate_placement(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 fn selection(
     status: &codewire_local_vmm::control::v1::LinuxCwRuntimeStatus,
 ) -> anyhow::Result<codewire_local_vmm::cw_runtime::RuntimeSelection> {
@@ -77,7 +76,6 @@ fn selection(
     Ok(selection)
 }
 
-#[cfg(target_os = "linux")]
 fn print(
     status: &codewire_local_vmm::control::v1::LinuxCwRuntimeStatus,
     output: OutputFormat,
@@ -127,7 +125,6 @@ fn print(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 async fn handle_linux(command: EnvRuntimeCommand) -> anyhow::Result<()> {
     use codewire_local_vmm::control::v1;
     use uuid::Uuid;
@@ -220,7 +217,6 @@ async fn handle_linux(command: EnvRuntimeCommand) -> anyhow::Result<()> {
     }
 }
 
-#[cfg(target_os = "linux")]
 async fn follow(
     client: &codewire_local_vmm::supervisor::NativeSupervisorClient,
     id: &str,

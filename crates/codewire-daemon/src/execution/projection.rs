@@ -3,7 +3,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use codewire_workload_secrets::launcher::{
     LAUNCH_COMMIT, LAUNCH_READY, encode_context, encode_override_names, now_unix_ms,
 };
-use codewire_workload_secrets::{MAX_PROJECTION_LIFETIME_MS, ProjectionContext};
+use codewire_workload_secrets::{PROJECTION_REQUEST_LIFETIME_MS, ProjectionContext};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 
@@ -52,7 +52,7 @@ impl PreparedProcess {
             operation_generation: identity.environment_generation,
             selection_sha256: projection.selection_sha256,
             deadline_unix_ms: now_unix_ms()?
-                .checked_add(MAX_PROJECTION_LIFETIME_MS)
+                .checked_add(PROJECTION_REQUEST_LIFETIME_MS)
                 .ok_or_else(denied)?,
         };
         context.validate_at(now_unix_ms()?).map_err(|_| denied())?;

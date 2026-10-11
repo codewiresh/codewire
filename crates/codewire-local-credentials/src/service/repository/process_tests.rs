@@ -45,7 +45,7 @@ async fn ssh_group_reap_waits_for_descendant_stderr_eof_before_runtime_cleanup_b
             .unwrap()
             .unwrap()
     );
-    let RepositoryChild::Ssh(group) = &child else {
+    let RepositoryChild::Group(group) = &child else {
         panic!("expected SSH repository process group");
     };
     assert!(
@@ -58,4 +58,36 @@ async fn ssh_group_reap_waits_for_descendant_stderr_eof_before_runtime_cleanup_b
     drop(runtime);
     assert!(!runtime_path.exists());
     assert!(!failed.load(Ordering::Acquire));
+}
+
+/// Darwin has no parent-death signal for Git, so a GitHub executor is also
+/// stopped and drained as a process group there; Linux keeps the single child.
+#[tokio::test]
+async fn a_github_executor_is_a_process_group_exactly_on_macos() {
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg("exit 0")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .process_group(0);
+    let mut child = RepositoryChild::new(
+        command.spawn().unwrap(),
+        LocalRepositoryTransport::GitHubOAuth,
+    );
+    assert!(child.construction_valid());
+    assert_eq!(
+        matches!(child, RepositoryChild::Group(_)),
+        cfg!(target_os = "macos")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    assert!(child.stop_and_drain(true).await);
 }

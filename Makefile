@@ -1,5 +1,5 @@
 .PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-list kind-down kind-deploy kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-runtime-images kind-watch kind-status design-system design-check e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-daemon build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
-.PHONY: dogfood cli-build cli-smoke cli-install cli-install-user cli-install-system scan-supply-chain verify-dashboard-image sync-local-secrets accept-secrets-credentials
+.PHONY: dogfood cli-build cli-smoke cli-install cli-install-user cli-install-system macos-local-runtime scan-supply-chain verify-dashboard-image sync-local-secrets accept-secrets-credentials
 
 # The older codewire/default-namespace topology has its own fixed endpoints.
 # Reject named selection before its build prerequisites or runtime mutations.
@@ -56,6 +56,7 @@ help:
 	@echo "  make cli-install        - Install CLI for the current user"
 	@echo "  make cli-install-user   - Install CLI to XDG_BIN_HOME or ~/.local/bin"
 	@echo "  make cli-install-system - Install CLI to /usr/local/bin"
+	@echo "  make macos-local-runtime KERNEL=/abs/Image INITRAMFS=/abs/cpio E2FSPROGS=/abs/bundle GIT_BUNDLE=/abs/bundle [CW_RUNTIME=/abs/dir] - Install the macOS local VM runtime"
 	@echo ""
 	@echo "Kind (local k8s):"
 	@echo "  make up           - Build images + deploy everything into kind"
@@ -103,7 +104,7 @@ export TEST_USER_PASSWORD ?= testpassword123
 export TEST_USER_NAME ?= Test User
 REGISTRY ?= git.example.com
 BUF ?= $(shell command -v buf 2>/dev/null || echo "$(HOME)/go/bin/buf")
-GO_BIN ?= $(shell go env GOPATH)/bin
+GO_BIN ?= $(shell go env GOPATH 2>/dev/null)/bin
 SUPPLYCHAIN ?= supplychain
 override SUPPLYCHAIN_REQUIRED_REVISION := ea79415
 # protoc is pinned because buf.gen.codewire.yaml uses protoc's built-in
@@ -386,6 +387,13 @@ cli-install-user:
 
 cli-install-system:
 	$(MAKE) -C apps/cli install-system
+
+# Apple Silicon only: build and ad-hoc sign the VZ helper, check the supplied
+# arm64 kernel Image and guest root, pack them as a release directory and
+# install it with `cw setup --local` (docs/dev/MACOS-CLI.md). REPLACE=1
+# replaces a different installed runtime; CW=/abs/cw picks the installing cw.
+macos-local-runtime:
+	python3 scripts/dev/macos-local-runtime.py --kernel "$(KERNEL)" --initramfs "$(INITRAMFS)" --e2fsprogs "$(E2FSPROGS)" --git "$(GIT_BUNDLE)" $(if $(CW_RUNTIME),--cw-runtime "$(CW_RUNTIME)") $(if $(filter 1,$(REPLACE)),--replace) $(if $(CW),--cw "$(CW)")
 
 # Build the workspace daemon support image for kind/local runtime smoke.
 build-daemon:

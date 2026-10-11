@@ -13,25 +13,34 @@ use codewire_credential_broker::{
     BrokerBridgeError, CredentialBridgeRelayOutput, OpenAiBroker, admit_credential_bridge,
     run_admitted_credential_bridge, run_admitted_credential_bridge_relay,
 };
+#[cfg(target_os = "linux")]
+use codewire_local_credentials::AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES;
 use codewire_local_credentials::{
-    AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, LocalCredentialBrokerLeaseClient,
-    LocalCredentialDelegationClient,
+    LocalCredentialBrokerLeaseClient, LocalCredentialDelegationClient,
 };
 use codewire_local_vmm::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
 use codewire_local_vmm::runner_service::RunnerClient;
+#[cfg(target_os = "linux")]
 use codewire_protected_store::ConnectedOsProtectedStore;
 use futures::StreamExt as _;
 use uuid::Uuid;
 
 use super::LocalCredentialBrokerArgs;
+#[cfg(target_os = "linux")]
 use super::credential_broker_confinement::{
     apply_broker_landlock_confinement, apply_broker_seccomp_confinement,
 };
+
+#[cfg(target_os = "macos")]
+mod darwin;
 
 pub(crate) async fn run_local_credential_broker(
     args: LocalCredentialBrokerArgs,
 ) -> anyhow::Result<()> {
     verify_broker_process_confinement()?;
+    // Validate the store selection before any channel or provider effect.
+    #[cfg(target_os = "macos")]
+    let store = super::credential_darwin::ChildStore::from_args(&args.store)?;
     anyhow::ensure!(args.authority_fd == 3, "invalid broker authority channel");
     let environment_id = EnvironmentId::parse(args.environment_id.clone())
         .map_err(|_| anyhow::anyhow!("invalid broker environment identity"))?;
@@ -64,6 +73,11 @@ pub(crate) async fn run_local_credential_broker(
     // the only descriptor deliberately retained across that exec. Ownership is
     // transferred exactly once into this process.
     let authority_fd = unsafe { OwnedFd::from_raw_fd(args.authority_fd) };
+    // The macOS broker runs Apple's security tool for keychain reads; that
+    // child must not inherit the authority channel.
+    #[cfg(target_os = "macos")]
+    rustix::io::fcntl_setfd(&authority_fd, rustix::io::FdFlags::CLOEXEC)
+        .context("prepare broker authority channel")?;
     let authority_stream = std::os::unix::net::UnixStream::from(authority_fd);
     authority_stream
         .set_nonblocking(true)
@@ -116,7 +130,12 @@ pub(crate) async fn run_local_credential_broker(
         // The original guest Ready is retained in `bridge`. This branch has
         // no provider DNS, protected-store connection, or raw lease provider.
         // The only authority endpoint is the parent's inherited FD3 channel.
+        #[cfg(target_os = "linux")]
         apply_broker_landlock_confinement().context("confine platform credential relay")?;
+        // One deny-all Seatbelt profile replaces Landlock and seccomp: the
+        // relay keeps only the bridge and authority descriptors it holds.
+        #[cfg(target_os = "macos")]
+        darwin::confine_relay().context("confine platform credential relay")?;
         let mut delegation = LocalCredentialDelegationClient::connect(
             authority_stream,
             environment_id,
@@ -124,6 +143,7 @@ pub(crate) async fn run_local_credential_broker(
         )
         .await
         .context("connect platform credential relay authority")?;
+        #[cfg(target_os = "linux")]
         apply_broker_seccomp_confinement().context("seal platform credential relay")?;
         return run_admitted_credential_bridge_relay(bridge, move |ready, input| async move {
             let output = delegation
@@ -157,9 +177,38 @@ pub(crate) async fn run_local_credential_broker(
     };
     #[cfg(feature = "local-broker-synthetic-smoke")]
     let upstream = (!http_providers.is_empty()).then_some(SyntheticOpenAiSmokeTransport);
-    apply_broker_landlock_confinement().context("confine credential broker filesystem")?;
-    let protected_store =
-        ConnectedOsProtectedStore::connect().context("connect broker protected store")?;
+    // A selected GitHub connection may be an expiring App login. Its refresh
+    // uses the App's own family with the public client ID only; resolve it
+    // with the other provider addresses, before confinement.
+    #[cfg(not(feature = "local-broker-synthetic-smoke"))]
+    let github_app = if http_providers.contains(&HttpProvider::GitHubOAuth) {
+        Some(std::sync::Arc::new(
+            codewire_credential_broker::GitHubAppAuthorizationOwner::public_client(
+                codewire_credential_broker::provider_oauth::github::codewire_github_app(),
+                std::sync::Arc::new(
+                    ProviderHttpsTransport::resolve(&BTreeSet::from([
+                        HttpProvider::GitHubAppAuthorization,
+                    ]))
+                    .await
+                    .context("resolve the GitHub App refresh endpoint")?,
+                ),
+            ),
+        ))
+    } else {
+        None
+    };
+    #[cfg(target_os = "linux")]
+    let protected_store = {
+        apply_broker_landlock_confinement().context("confine credential broker filesystem")?;
+        ConnectedOsProtectedStore::connect().context("connect broker protected store")?
+    };
+    // One Seatbelt profile replaces Landlock and seccomp: provider HTTPS to
+    // the addresses resolved above, and reads of exactly the selected store.
+    #[cfg(target_os = "macos")]
+    let protected_store = {
+        darwin::confine(&store, !http_providers.is_empty()).context("confine credential broker")?;
+        store.open().context("open broker protected store")?
+    };
     let mut leases = LocalCredentialBrokerLeaseClient::connect(
         authority_stream,
         protected_store,
@@ -168,6 +217,7 @@ pub(crate) async fn run_local_credential_broker(
     )
     .await
     .context("connect broker lease authority")?;
+    #[cfg(target_os = "linux")]
     apply_broker_seccomp_confinement().context("seal credential broker runtime")?;
     leases
         .report_ready(bridge.ready().clone())
@@ -175,11 +225,22 @@ pub(crate) async fn run_local_credential_broker(
         .context("complete broker launch handshake")?;
     let broker = OpenAiBroker::new(leases, upstream)
         .map_err(|_| anyhow::anyhow!("initialize broker provider policy"))?;
+    #[cfg(not(feature = "local-broker-synthetic-smoke"))]
+    let broker = match github_app {
+        Some(owner) => broker.with_github_app_authorization_owner(owner),
+        None => broker,
+    };
     run_admitted_credential_bridge(broker, bridge)
         .await
         .context("run guest credential bridge")
 }
 
+#[cfg(target_os = "macos")]
+fn verify_broker_process_confinement() -> anyhow::Result<()> {
+    darwin::verify_process()
+}
+
+#[cfg(target_os = "linux")]
 fn verify_broker_process_confinement() -> anyhow::Result<()> {
     anyhow::ensure!(
         rustix::thread::no_new_privs().unwrap_or(false),
@@ -226,7 +287,7 @@ fn verify_broker_process_confinement() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use std::collections::BTreeMap;
 

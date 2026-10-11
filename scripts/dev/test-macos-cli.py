@@ -352,6 +352,17 @@ class HelperTests(unittest.TestCase):
         with helper.cache_lock(self.root):
             pass
 
+    def test_confirmed_cleanup_removes_read_only_test_leftovers(self):
+        with helper.cache_lock(self.root):
+            with helper.isolated_runtime(self.root, self.root / "fixture-run") as runtime:
+                # A managed release store leaves read-only version directories.
+                version = runtime / "tmp/store/versions/synthetic"
+                version.mkdir(parents=True)
+                (version / "identity.json").write_bytes(b"{}")
+                version.chmod(0o555)
+        self.assertFalse(runtime.exists())
+        self.assertFalse((self.root / "inflight.json").exists())
+
     def test_cancel_kills_fixture_grandchild(self):
         cancel = threading.Event()
         marker = self.root / "escaped"
@@ -519,16 +530,23 @@ print("cooperative cancellation: no adopted children")
         self.assertIn(["python3", str(self.root / "source/crates/codewire-local-vmm/src/darwin/path/test_mount_fixture.py"), "-v"], commands)
         cargo = [argv for argv in commands if argv[0] == "cargo" and argv[1] != "-V"]
         self.assertEqual([argv[1] for argv in cargo],
-                         ["build", "test", "test", "test", "clippy", "clippy", "build", "test"])
+                         ["build", "test", "test", "test", "test", "clippy", "clippy", "clippy", "build", "test"])
         self.assertEqual(cargo[2], ["cargo", "test", "--locked", "--offline", "--target",
                                    "aarch64-apple-darwin", "-p", "codewire-cw-release", "--",
                                    "--skip", "compiled_trust_is_an_exact_producer_and_artifact_graph_input"])
         self.assertEqual(cargo[3], ["cargo", "test", "--locked", "--offline", "--target",
                                    "aarch64-apple-darwin", "-p", "codewire-local-vmm", "--lib"])
-        self.assertEqual(cargo[5], ["cargo", "clippy", "--locked", "--offline", "--target",
+        credential_crates = ["-p", "codewire-local-credentials", "-p", "codewire-credential-broker",
+                             "--features", "codewire-credential-broker/ssh-agent"]
+        self.assertEqual(cargo[4], ["cargo", "test", "--locked", "--offline", "--target",
+                                   "aarch64-apple-darwin", *credential_crates, "--lib"])
+        self.assertEqual(cargo[6], ["cargo", "clippy", "--locked", "--offline", "--target",
                                    "aarch64-apple-darwin", "-p", "codewire-local-vmm", "--lib",
                                    "--", "-D", "warnings"])
-        self.assertEqual(cargo[7], ["cargo", "test", "--locked", "--offline", "--target",
+        self.assertEqual(cargo[7], ["cargo", "clippy", "--locked", "--offline", "--target",
+                                   "aarch64-apple-darwin", *credential_crates, "--all-targets",
+                                   "--", "-D", "warnings"])
+        self.assertEqual(cargo[9], ["cargo", "test", "--locked", "--offline", "--target",
                                    "x86_64-apple-darwin", "-p", "codewire-local-vmm", "--lib", "--no-run"])
         for argv in cargo:
             self.assertIn("--offline", argv)

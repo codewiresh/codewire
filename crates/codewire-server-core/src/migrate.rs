@@ -45,6 +45,7 @@ pub async fn ensure_schema_logged(database_url: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     mod authority_stamp_removal;
+    mod github_cli_oauth_retirement;
     mod github_singleton;
     mod owner_sources;
     mod preview_browser;
@@ -227,7 +228,7 @@ mod tests {
             );
             anyhow::ensure!(cw != canonical && cw.len() == 64);
             println!("CW_RUNTIME_SCHEMA38_FINGERPRINT={cw}");
-            ensure_schema(&test_db.url).await?;
+            apply_migrations_before(&test_db.url, 40).await?;
             let managed = fingerprint(pool.clone()).await?;
             let history39 = applied_migrations(&pool).await?;
             anyhow::ensure!(
@@ -238,7 +239,7 @@ mod tests {
             );
             anyhow::ensure!(managed != cw && managed.len() == 64);
             println!("PLATFORM_MANAGED_SCHEMA39_FINGERPRINT={managed}");
-            ensure_schema(&test_db.url).await?;
+            apply_migrations_before(&test_db.url, 40).await?;
             anyhow::ensure!(
                 fingerprint(pool.clone()).await? == managed
                     && applied_migrations(&pool).await? == history39
@@ -5272,6 +5273,9 @@ mod tests {
         }
         if version > 38 {
             platform_managed_journal_pins_accepted_history38()?;
+        }
+        if version > 39 {
+            github_cli_oauth_retirement::assert_accepted_history39()?;
         }
         if version > PLATFORM_BINDING_CONSENT_VERSION {
             let consent = MIGRATOR

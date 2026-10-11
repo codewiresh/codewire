@@ -394,6 +394,39 @@ async fn wait_for_a_message_explains_that_its_id_names_the_session() {
     );
 }
 
+/// A Mac host cannot be a member: Codewire has no public macOS API to keep
+/// custody of a session's whole process family. Every member-control entry
+/// point says so and why, before reading its arguments.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn member_control_is_refused_off_linux_with_its_reason() {
+    // The complete command future needs more than a test thread's stack.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            for arguments in [
+                &["cw", "member", "up", "--json"][..],
+                &["cw", "control", "status"][..],
+                &["cw", "--member", "studio", "list"][..],
+            ] {
+                let error = runtime
+                    .block_on(crate::run_from(arguments.iter().copied()))
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("requires Linux"), "{error}");
+                assert!(error.contains("process"), "{error}");
+                assert!(error.contains("cw env create --local"), "{error}");
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn host_creation_is_explicit_and_rejects_vm_or_provider_projection_options() {
@@ -410,12 +443,12 @@ fn host_creation_is_explicit_and_rejects_vm_or_provider_projection_options() {
         panic!("create expected");
     };
     assert_eq!(create.environment_type, EnvironmentTypeArg::Host);
-    if !cfg!(target_os = "linux") {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
         assert!(
             validate_host_create(&create, placement)
                 .unwrap_err()
                 .to_string()
-                .contains("qualified on Linux")
+                .contains("supported on Linux and macOS")
         );
         return;
     }

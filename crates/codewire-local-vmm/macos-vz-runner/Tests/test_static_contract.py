@@ -88,6 +88,43 @@ for forbidden in (
     if forbidden in runtime:
         fail(f"runtime gained prohibited capability: {forbidden}")
 
+vm_configuration = source("Sources/CodewireVZRunnerProtocol/VMConfiguration.swift")
+for required in (
+    "schemaVersion = 2", "maxShares = 16", 'shareTagPrefix = "cw-direct-"',
+    "Set(root.keys) == Set(CodingKeys.allNames)",
+    'Set($0.keys) == ["tag", "path", "readOnly", "device", "inode"]',
+    "share.tag == Self.shareTag(index)", "share.inode != 0",
+    "Set(shares.map(\\.path)).count == shares.count",
+):
+    if required not in vm_configuration:
+        fail(f"product VM configuration lost share admission: {required}")
+vm_runtime = source("Sources/CodewireVZRunnerRuntime/VMRuntime.swift")
+for required in (
+    "try verifySharedDirectories(request.shares)",
+    "startedCheck: { (try? verifySharedDirectories(shares)) != nil }",
+    "cw_vz_verify_shared_directory(share.path, share.device, share.inode)",
+    "VZVirtioFileSystemDeviceConfiguration.validateTag(share.tag)",
+    "VZVirtioFileSystemDeviceConfiguration(tag: share.tag)",
+    "VZSingleDirectoryShare(", "readOnly: share.readOnly",
+    "url: URL(fileURLWithPath: share.path, isDirectory: true)",
+    "self.startCheckFailed = true",
+):
+    if required not in vm_runtime:
+        fail(f"product VM lost exact shared-directory topology: {required}")
+if vm_runtime.count("VZSharedDirectory(") != 1:
+    fail("product VM must share only the admitted request directories")
+for forbidden in ("VZMultipleDirectoryShare", "VZLinuxRosettaDirectoryShare", "Process("):
+    if forbidden in vm_runtime:
+        fail(f"product VM gained prohibited capability: {forbidden}")
+vm_bridge = source("Sources/CVZRunnerIPC/VMBridge.c")
+for required in (
+    "O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC", "F_GETPATH",
+    "strcmp(current, path) == 0", "status.st_uid == geteuid()",
+    "(uint32_t)status.st_dev == device", "(uint64_t)status.st_ino == inode",
+):
+    if required not in vm_bridge:
+        fail(f"shared-directory admission lost exact identity check: {required}")
+
 inode_probe = source("Sources/CodewireVZRunnerRuntime/InodeProbe.swift")
 for required in (
     "VZVirtualMachine(configuration: configuration, queue: queue)",

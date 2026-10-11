@@ -347,6 +347,7 @@ fn workspace_owned_environment_keys() -> BTreeSet<String> {
             "openai",
             "anthropic",
             "ssh",
+            "github",
         ])
         .expect("closed slots")
         .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)

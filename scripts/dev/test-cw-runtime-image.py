@@ -27,10 +27,10 @@ def build_record(version="0.1.0", revision="a" * 40, tree="b" * 64, target=None)
     return image.release.BUILD_RECORD_MAGIC + struct.pack("<I", len(body)) + body
 
 
-def static_cw(record):
+def static_cw(record, machine=62):
     cw = bytearray(136)
     cw[:7] = b"\x7fELF\x02\x01\x01"
-    struct.pack_into("<HH", cw, 16, 2, 62)
+    struct.pack_into("<HH", cw, 16, 2, machine)
     struct.pack_into("<Q", cw, 32, 64)
     struct.pack_into("<HH", cw, 54, 56, 1)
     struct.pack_into("<I", cw, 64, 1)
@@ -51,9 +51,10 @@ class Admission(unittest.TestCase):
                                   (image.META_PATH, 0o444, image.encode(self.metadata if metadata is None else metadata))]
                                + list(extra))
 
-    def package(self, layer=None, config_edit=None, manifest_edit=None, index_edit=None, extra=()):
+    def package(self, layer=None, config_edit=None, manifest_edit=None, index_edit=None, extra=(),
+                architecture="amd64"):
         layer = self.layer() if layer is None else layer
-        config = {"os": "linux", "architecture": "amd64", "config": {},
+        config = {"os": "linux", "architecture": architecture, "config": {},
                   "rootfs": {"type": "layers", "diff_ids": ["sha256:" + image.sha(layer)]}}
         if config_edit:
             config_edit(config)
@@ -64,7 +65,7 @@ class Admission(unittest.TestCase):
             manifest_edit(manifest)
         manifest_raw = image.encode(manifest)
         selected = image.descriptor(image.MANIFEST, manifest_raw)
-        selected["platform"] = {"os": "linux", "architecture": "amd64"}
+        selected["platform"] = {"os": "linux", "architecture": architecture}
         index = {"schemaVersion": 2, "manifests": [selected]}
         if index_edit:
             index_edit(index)
@@ -98,6 +99,36 @@ class Admission(unittest.TestCase):
             self.assertEqual(provenance["image_manifest"]["sha256"], receipt["manifest_sha256"])
             self.assertEqual(provenance["payload"], self.metadata)
             self.assertNotIn(str(task), json.dumps(provenance))
+
+    def test_arm64_payload_roundtrips_only_in_an_arm64_image(self):
+        target = "aarch64-unknown-linux-musl"
+        cw = static_cw(build_record(target=target), machine=183)
+        metadata = dict(self.metadata, target=target, sha256=image.sha(cw), size=len(cw))
+        layer = self.layer(metadata=metadata, cw=cw)
+        admitted, provenance = image.admit(*self.package(layer=layer, architecture="arm64"))
+        self.assertEqual(admitted, cw)
+        self.assertEqual(image.decode(provenance)["payload"], metadata)
+        self.refuses(*self.package(layer=layer))
+        # An arm64 image cannot carry an x86_64 payload, and the target, the
+        # build record and the ELF machine must agree.
+        self.refuses(*self.package(architecture="arm64"))
+        for changed_cw, changed_target in ((static_cw(build_record(target=target)), target),
+                                           (static_cw(build_record(), machine=183), target)):
+            changed = dict(metadata, target=changed_target, sha256=image.sha(changed_cw), size=len(changed_cw))
+            self.refuses(*self.package(layer=self.layer(metadata=changed, cw=changed_cw), architecture="arm64"))
+        with tempfile.TemporaryDirectory() as task:
+            task = Path(task)
+            (task / "cw").write_bytes(cw)
+            (task / "cw").chmod(0o500)
+            descriptor = task / "artifact.json"
+            descriptor.write_bytes(image.encode({key: value for key, value in metadata.items() if key != "size"}
+                                                | {"path": str(task / "cw")}))
+            with contextlib.redirect_stdout(io.StringIO()):
+                image.build(descriptor, task / "image")
+            receipt = json.loads((task / "image/image.json").read_bytes())
+            archive = image.read_regular(task / "image/cw.oci.tar", image.MAX_ARCHIVE, private=True)
+            self.assertEqual(image.admit(archive, receipt["index_sha256"])[0], cw)
+            self.assertIn(b'"architecture":"arm64"', archive)
 
     def test_external_index_pin_and_corrupt_blob(self):
         archive, pin = self.package()

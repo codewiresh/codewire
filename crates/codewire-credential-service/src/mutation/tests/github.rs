@@ -1,4 +1,5 @@
-//! Real restricted mutation mount with a synthetic, isolated official-gh flow.
+//! Real restricted mutation mount with the GitHub App device login against a
+//! synthetic in-process provider.
 
 use super::*;
 
@@ -28,7 +29,7 @@ async fn github_app_missing_configuration_is_definite_and_never_publishes() -> R
         h.drained().await?;
         ensure!(h.count().await? == 0);
         ensure!(h.provider.generate_calls.load(Ordering::SeqCst) == 0);
-        ensure!(!h.control("version.pid").exists());
+        ensure!(h.device.started() == 0);
         Ok(())
     }
     .await;
@@ -57,7 +58,7 @@ async fn github_create_and_reconnect_use_protected_storage_and_exact_identity() 
                 .error(auth.denial_code())
                 .await?;
         }
-        ensure!(!h.control("version.pid").exists());
+        ensure!(h.device.started() == 0);
         ensure!(h.count().await? == 0);
         ensure!(h.provider.generate_calls.load(Ordering::SeqCst) == 0);
         let mut stream = h.rpc.enroll_github_request(Auth::Alice, json!({})).await?;
@@ -90,7 +91,7 @@ async fn github_create_and_reconnect_use_protected_storage_and_exact_identity() 
         let mut duplicate = h.rpc.enroll_github_request(Auth::Alice, json!({})).await?;
         duplicate.error("already_exists").await?;
         h.drained().await?;
-        ensure!(h.count().await? == 1 && !h.logged_out());
+        ensure!(h.count().await? == 1);
         ensure!(h.store.record(&owner, &credential_id).await? == original);
         // A legacy named create is still a second connection.
         let mut legacy = h
@@ -99,7 +100,7 @@ async fn github_create_and_reconnect_use_protected_storage_and_exact_identity() 
             .await?;
         legacy.error("already_exists").await?;
         h.drained().await?;
-        ensure!(h.count().await? == 1 && !h.logged_out());
+        ensure!(h.count().await? == 1);
         // Reconnect replaces the one connection in place.
         h.reset_login().await?;
         let mut stream = h
@@ -118,7 +119,7 @@ async fn github_create_and_reconnect_use_protected_storage_and_exact_identity() 
         h.drained().await?;
         ensure!(replaced["id"] == metadata["id"] && replaced["revocationGeneration"] == "2");
         ensure!(replaced["name"] == metadata["name"]);
-        ensure!(h.count().await? == 1 && !h.logged_out());
+        ensure!(h.count().await? == 1);
         let stored = h.store.record(&owner, &credential_id).await?;
         ensure!(stored.version.material_generation == original.version.material_generation + 1);
         Ok(())
@@ -139,7 +140,7 @@ async fn github_reconnect_rejects_wrong_provider_and_original_oauth_revocation()
         })).await?;
         stream.error("invalid_argument").await?;
         h.drained().await?;
-        ensure!(!h.control("version.pid").exists());
+        ensure!(h.device.started() == 0);
         let mut stream = h
             .rpc
             .enroll_github_request(Auth::Alice, json!({"name":"revoked-login"}))
@@ -155,7 +156,7 @@ async fn github_reconnect_rejects_wrong_provider_and_original_oauth_revocation()
         // acknowledgement ambiguity.
         stream.error("failed_precondition").await?;
         h.drained().await?;
-        ensure!(h.count().await? == 1 && !h.logged_out());
+        ensure!(h.count().await? == 1);
         Ok(())
     }
     .await;
@@ -193,7 +194,7 @@ async fn github_delete_is_direct_keeps_profiles_and_reconnect_restores_use() -> 
             .lifecycle("DeleteCredential", Auth::Cookie, &first, 1)
             .await?;
         ensure!(status.is_success(), "direct GitHub delete failed: {value}");
-        ensure!(h.count().await? == 0 && !h.logged_out());
+        ensure!(h.count().await? == 0);
         ensure!(material_count(&h.db.pool, &first).await? == 0);
         let kept = manager.get(&owner, &profile.id).await?;
         ensure!(kept.revision == profile.revision && kept.includes_github());

@@ -1,5 +1,6 @@
-//! Linux-only live runtime transactions. Transfer owns no lifecycle lock; only
-//! admission and the short selector commit hold the authoritative core lock.
+//! Live runtime transactions for local Linux guests. Transfer owns no
+//! lifecycle lock; only admission and the short selector commit hold the
+//! authoritative core lock.
 use super::*;
 use crate::cw_runtime::AdmittedCwRuntimeAsset;
 use codewire_vmm_guest_probe::cw_runtime::CwRuntimeProvenance;
@@ -12,6 +13,26 @@ use tokio::net::UnixStream;
 use v1::environment_runner_service_client::EnvironmentRunnerServiceClient;
 use v1::linux_cw_runtime_service_server::LinuxCwRuntimeService;
 
+#[cfg(target_os = "linux")]
+use crate::host::process::LiveProcess as RecordedProcess;
+use crate::host::process::ProcessIdentity;
+#[cfg(target_os = "macos")]
+use crate::host::process::WatchedProcess as RecordedProcess;
+
+/// Observe a recorded runner or VMM birth for liveness. Linux recovers it as
+/// a pidfd; Darwin never adopts a process it did not spawn, so it only
+/// watches that exact birth's exit.
+fn recorded(identity: &ProcessIdentity) -> Result<RecordedProcess, RecoveryError> {
+    #[cfg(target_os = "linux")]
+    {
+        LiveProcess::recover(identity)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        RecordedProcess::watch(identity)
+    }
+}
+
 // Info/observe also verify all retained sealed members in the guest; their
 // deadline must cover the same bounded admission as publication/selection.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(LIVE_RUNTIME_TIMEOUT_SECONDS);
@@ -23,7 +44,7 @@ const RUNNER_OBSERVE_MAX_BYTES: usize = 4096;
 struct RuntimeRunnerPin {
     socket: PathBuf,
     identity: SocketIdentity,
-    process: crate::linux::ProcessIdentity,
+    process: ProcessIdentity,
     peer: OwnedFd,
 }
 
@@ -47,7 +68,7 @@ impl RuntimeRunnerPin {
         self.identity
             .revalidate(&self.socket)
             .map_err(|_| runner_peer_changed())?;
-        LiveProcess::recover(&self.process).map_err(|_| runner_peer_changed())?;
+        recorded(&self.process).map_err(|_| runner_peer_changed())?;
         self.require_live_peer()?;
         Ok(())
     }
@@ -60,9 +81,8 @@ impl RuntimeRunnerPin {
                 .map_err(|_| {
                     io::Error::new(io::ErrorKind::TimedOut, "retained runner connect timed out")
                 })??;
-        let peer =
-            crate::linux::supervisor_peer::admit_known_process_stream(&stream, &self.process)
-                .map_err(|_| runner_peer_changed())?;
+        let peer = crate::host::supervisor_peer::admit_known_process_stream(&stream, &self.process)
+            .map_err(|_| runner_peer_changed())?;
         self.identity
             .revalidate(&self.socket)
             .map_err(|_| runner_peer_changed())?;
@@ -144,7 +164,7 @@ async fn observe_retained_runner(
         .await
         .map_err(|_| Status::deadline_exceeded("retained runner connect timed out"))?
         .map_err(|_| Status::failed_precondition("retained runner is unavailable"))?;
-    let peer = crate::linux::supervisor_peer::admit_known_process_stream(&initial, &runner.process)
+    let peer = crate::host::supervisor_peer::admit_known_process_stream(&initial, &runner.process)
         .map_err(|_| Status::failed_precondition("retained runner birth changed"))?;
     runner
         .socket
@@ -220,7 +240,7 @@ async fn observe_retained_runner(
 struct Intent {
     binding: RuntimeBinding,
     runner: RunnerRecord,
-    vmm: crate::linux::ProcessIdentity,
+    vmm: ProcessIdentity,
     vsock: SocketIdentity,
     expected_revision: u64,
     target: CwRuntimeProvenance,
@@ -375,8 +395,8 @@ struct Endpoint {
     binding: RuntimeBinding,
     socket: PathBuf,
     socket_identity: SocketIdentity,
-    runner: LiveProcess,
-    vmm: LiveProcess,
+    runner: RecordedProcess,
+    vmm: RecordedProcess,
     // Startup already owns its runner directly; ordinary runtime calls keep
     // their admitted socket-derived runner pin for the entire transaction.
     runner_pin: Option<Arc<RuntimeRunnerPin>>,
@@ -523,7 +543,7 @@ async fn admit_endpoint(
             "runtime operation belongs to a different VM birth",
         ));
     }
-    let _live = LiveProcess::recover(&runner.process)
+    let _live = recorded(&runner.process)
         .map_err(|_| Status::failed_precondition("runtime runner birth unavailable"))?;
     // No generic daemon_access/reconcile/adopt/spawn/retire route is reachable.
     // The retained runner's actual birth, protocol and Running reply are read
@@ -581,20 +601,20 @@ fn admit_physical_endpoint(
     expected: Option<&Intent>,
 ) -> Result<(Endpoint, RunnerRecord), Status> {
     let id = identity.environment_id;
-    let live = LiveProcess::recover(&runner.process)
+    let live = recorded(&runner.process)
         .map_err(|_| Status::failed_precondition("runtime runner birth unavailable"))?;
     let vm_root = core.config.engine_root().join("vms").join(id.to_string());
-    let socket = vm_root.join("vsock/vsock.sock");
+    let socket = vm_root.join("vsock").join(crate::state::VSOCK_SOCKET_NAME);
     if Path::new(&access.hybrid_socket) != socket || access.guest_port != DAEMON_VSOCK_PORT {
         return Err(Status::failed_precondition(
             "runtime transport is not the authoritative VM endpoint",
         ));
     }
-    let persisted = crate::linux::state::PersistedVmState::read(&vm_root.join("state.json"))
+    let persisted = crate::state::PersistedVmState::read(&vm_root.join("state.json"))
         .map_err(|_| Status::failed_precondition("runtime VM state is unavailable"))?;
     if persisted.vm_id != id
         || persisted.generation != identity.generation
-        || persisted.phase != crate::linux::state::VmPhase::Running
+        || persisted.phase != crate::state::VmPhase::Running
     {
         return Err(Status::failed_precondition(
             "runtime VM incarnation changed",
@@ -621,7 +641,7 @@ fn admit_physical_endpoint(
     socket_identity
         .revalidate(&socket)
         .map_err(|_| Status::failed_precondition("runtime VM endpoint was replaced"))?;
-    let vmm = LiveProcess::recover(&persisted.process)
+    let vmm = recorded(&persisted.process)
         .map_err(|_| Status::failed_precondition("runtime VMM birth is unavailable"))?;
     Ok((
         Endpoint {
@@ -921,7 +941,7 @@ pub(super) async fn recover(
                 // permission failure is treated as process death.
                 let vmm_exited = matches!(
                     LiveProcess::recover(&intent.vmm),
-                    Err(crate::linux::process::RecoveryError::ProcessExited)
+                    Err(RecoveryError::ProcessExited)
                 );
                 if vmm_exited
                     && core.state.environments.values().any(|environment| {
@@ -1401,6 +1421,16 @@ mod tests {
     };
     use std::os::unix::fs::PermissionsExt as _;
 
+    /// A short canonical root for sockets within Darwin's 103-byte limit.
+    #[cfg(target_os = "linux")]
+    const SOCKET_TMP: &str = "/var/tmp";
+    #[cfg(target_os = "macos")]
+    const SOCKET_TMP: &str = "/private/var/tmp";
+    #[cfg(target_os = "linux")]
+    const SLEEP: &str = "/usr/bin/sleep";
+    #[cfg(target_os = "macos")]
+    const SLEEP: &str = "/bin/sleep";
+
     fn member(byte: char) -> CwRuntimeProvenance {
         let descriptor = CwImageDescriptor {
             sha256: "a".repeat(64),
@@ -1418,7 +1448,7 @@ mod tests {
                 protocol_version: 1,
                 record_version: 1,
                 package_version: "0.1.0".into(),
-                target: "x86_64-unknown-linux-musl".into(),
+                target: codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_TARGET.into(),
                 source_revision: "c".repeat(40),
                 source_tree_sha256: "d".repeat(64),
                 rustc: "rustc 1.93.0 (synthetic protocol fixture)".into(),
@@ -1517,9 +1547,9 @@ mod tests {
         let (store, _) = SupervisorStore::open(&private).unwrap();
         let socket_path = root.path().join("peer.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
-        crate::linux::path::set_socket_private(&socket_path).unwrap();
+        crate::host::path::set_socket_private(&socket_path).unwrap();
         let socket = SocketIdentity::capture(&socket_path).unwrap();
-        let process = crate::linux::ProcessIdentity::capture(std::process::id()).unwrap();
+        let process = ProcessIdentity::capture(std::process::id()).unwrap();
         let (_, mut selected) = selection();
         let original = RuntimeBinding {
             environment_id: selected.environment_id,
@@ -1660,9 +1690,9 @@ mod tests {
         let (store, _) = SupervisorStore::open(&private).unwrap();
         let listener =
             std::os::unix::net::UnixListener::bind(root.path().join("peer.sock")).unwrap();
-        crate::linux::path::set_socket_private(&root.path().join("peer.sock")).unwrap();
+        crate::host::path::set_socket_private(&root.path().join("peer.sock")).unwrap();
         let socket = SocketIdentity::capture(&root.path().join("peer.sock")).unwrap();
-        let process = crate::linux::ProcessIdentity::capture(std::process::id()).unwrap();
+        let process = ProcessIdentity::capture(std::process::id()).unwrap();
         let (_, mut selected) = selection();
         let mut receipt = committed(&mut selected, 'b');
         let binding = RuntimeBinding {
@@ -1728,12 +1758,12 @@ mod tests {
         let root = tempfile::Builder::new()
             .prefix("cw-rt-")
             .permissions(fs::Permissions::from_mode(0o700))
-            .tempdir_in("/var/tmp")
+            .tempdir_in(SOCKET_TMP)
             .unwrap();
         let socket = root.path().join("vmm.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        crate::linux::path::set_socket_private(&socket).unwrap();
-        let expected = crate::linux::ProcessIdentity::capture(std::process::id()).unwrap();
+        crate::host::path::set_socket_private(&socket).unwrap();
+        let expected = ProcessIdentity::capture(std::process::id()).unwrap();
         let (_, selected) = selection();
         let binding = RuntimeBinding {
             environment_id: selected.environment_id,
@@ -1750,8 +1780,8 @@ mod tests {
             binding,
             socket: socket.clone(),
             socket_identity: SocketIdentity::capture(&socket).unwrap(),
-            runner: LiveProcess::recover(&expected).unwrap(),
-            vmm: LiveProcess::recover(&expected).unwrap(),
+            runner: recorded(&expected).unwrap(),
+            vmm: recorded(&expected).unwrap(),
             runner_pin: None,
         };
         let fixture_reply = reply.clone();
@@ -1801,7 +1831,7 @@ mod tests {
         worker.await.unwrap();
         fs::remove_file(&socket).unwrap();
         let _replacement = tokio::net::UnixListener::bind(&socket).unwrap();
-        crate::linux::path::set_socket_private(&socket).unwrap();
+        crate::host::path::set_socket_private(&socket).unwrap();
         assert!(endpoint.call(RuntimeAction::Info, None).await.is_err());
     }
 
@@ -1814,13 +1844,17 @@ mod tests {
                 let _ = self.0.wait();
             }
         }
-        let sentinel = Sentinel(Command::new("/usr/bin/sleep").arg("60").spawn().unwrap());
+        let sentinel = Sentinel(
+            crate::test_child(Command::new(SLEEP).arg("60"))
+                .spawn()
+                .unwrap(),
+        );
         // spawn may return before exec; admit the sleeping sentinel only after
         // its actual image is visible, while the unreaped Child owns its birth.
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         let sentinel_identity = loop {
-            let identity = crate::linux::ProcessIdentity::capture(sentinel.0.id()).unwrap();
-            if identity.executable == Path::new("/usr/bin/sleep") {
+            let identity = ProcessIdentity::capture(sentinel.0.id()).unwrap();
+            if identity.executable == Path::new(SLEEP) {
                 break identity;
             }
             assert!(
@@ -1829,7 +1863,7 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
-        let live = LiveProcess::recover(&sentinel_identity).unwrap();
+        let live = recorded(&sentinel_identity).unwrap();
         for kind in [
             OperationKind::Start,
             OperationKind::Restart,
@@ -1954,7 +1988,7 @@ mod tests {
             );
             assert!(!live.is_exited().unwrap());
             assert_eq!(
-                crate::linux::ProcessIdentity::capture(sentinel_identity.pid).unwrap(),
+                ProcessIdentity::capture(sentinel_identity.pid).unwrap(),
                 sentinel_identity
             );
             // Removing the real UUID must not select the UUID-shaped decoy.
@@ -2058,6 +2092,12 @@ mod tests {
         ) -> Result<Response<v1::GrowStateDiskResponse>, Status> {
             self.forbidden()
         }
+        async fn set_host_ports(
+            &self,
+            _: Request<v1::SetHostPortsRequest>,
+        ) -> Result<Response<v1::SetHostPortsResponse>, Status> {
+            self.forbidden()
+        }
         async fn prepare_retire_runner(
             &self,
             _: Request<v1::PrepareRetireRunnerRequest>,
@@ -2083,7 +2123,7 @@ mod tests {
         let root = tempfile::Builder::new()
             .prefix("cw-rtr-")
             .permissions(fs::Permissions::from_mode(0o700))
-            .tempdir_in("/var/tmp")
+            .tempdir_in(SOCKET_TMP)
             .unwrap();
         let socket = root.path().join("runner.sock");
         let (incoming, identity) = crate::uds::bind_owner_only(&socket).unwrap();
@@ -2101,7 +2141,7 @@ mod tests {
             cw_runtime_catalog_generation: binding.bootstrap_catalog_sha256.clone(),
         };
         let service = ObservedRunnerFixture {
-            protocol: Arc::new(std::sync::atomic::AtomicU32::new(4)),
+            protocol: Arc::new(std::sync::atomic::AtomicU32::new(5)),
             info: Arc::new(std::sync::Mutex::new(info.clone())),
             reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             access_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -2123,7 +2163,7 @@ mod tests {
                 .unwrap();
         });
         let runner = RunnerRecord {
-            process: crate::linux::ProcessIdentity::capture(std::process::id()).unwrap(),
+            process: ProcessIdentity::capture(std::process::id()).unwrap(),
             socket: identity,
             artifact_generation: info.artifact_generation.clone(),
             cw_runtime_catalog_generation: Some(binding.bootstrap_catalog_sha256.clone()),
@@ -2141,7 +2181,7 @@ mod tests {
         assert_eq!(access.guest_port, DAEMON_VSOCK_PORT);
         assert_eq!(service.reads.load(Ordering::SeqCst), 2);
         assert_eq!(service.access_reads.load(Ordering::SeqCst), 1);
-        for protocol in [0, 3, 5] {
+        for protocol in [0, 4, 6] {
             service.protocol.store(protocol, Ordering::SeqCst);
             let reads = service.reads.load(Ordering::SeqCst);
             assert!(
@@ -2151,7 +2191,7 @@ mod tests {
             );
             assert_eq!(service.reads.load(Ordering::SeqCst), reads);
         }
-        service.protocol.store(4, Ordering::SeqCst);
+        service.protocol.store(5, Ordering::SeqCst);
         for mismatch in 0..6 {
             let mut changed = info.clone();
             match mismatch {
@@ -2184,7 +2224,7 @@ mod tests {
         assert_eq!(service.forbidden.load(Ordering::SeqCst), 0);
         fs::remove_file(&socket).unwrap();
         let _replacement = tokio::net::UnixListener::bind(&socket).unwrap();
-        crate::linux::path::set_socket_private(&socket).unwrap();
+        crate::host::path::set_socket_private(&socket).unwrap();
         assert!(pin.connect().await.is_err());
         assert!(
             observe_retained_runner(socket, &binding, &runner)

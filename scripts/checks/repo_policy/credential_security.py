@@ -65,8 +65,6 @@ def assert_credential_service(
             "runAsUser: 65532", "runAsGroup: 65532", "fsGroup: 65532",
             "seccompProfile: type: RuntimeDefault",
             "name: CREDENTIAL_DATABASE_URL valueFrom: secretKeyRef: key: url name: codewire-credential-database",
-            "name: CREDENTIAL_CODEX_EXECUTABLE value: /usr/local/bin/codex",
-            "name: CREDENTIAL_GITHUB_EXECUTABLE value: /usr/local/bin/gh",
             "name: CREDENTIAL_GITHUB_APP_CLIENT_ID valueFrom: secretKeyRef: key: client-id name: codewire-github-app-authorization optional: true",
             "name: CREDENTIAL_GITHUB_APP_CLIENT_SECRET valueFrom: secretKeyRef: key: client-secret name: codewire-github-app-authorization optional: true",
             "name: CREDENTIAL_GITHUB_APP_SLUG valueFrom: secretKeyRef: key: slug name: codewire-github-app-authorization optional: true",
@@ -79,7 +77,9 @@ def assert_credential_service(
         ]:
             if required not in shape:
                 failures.append(f"{label}: isolated credential Deployment missing {required}")
-        for forbidden in ["envFrom:", "hostPath:", "hostNetwork: true", "privileged: true", "subPath:"]:
+        # Provider logins are native OAuth; the service runs no provider CLI.
+        for forbidden in ["envFrom:", "hostPath:", "hostNetwork: true", "privileged: true", "subPath:",
+                          "CREDENTIAL_CODEX_EXECUTABLE", "CREDENTIAL_GITHUB_EXECUTABLE"]:
             if forbidden in shape:
                 failures.append(f"{label}: isolated credential Deployment contains {forbidden}")
         if (shape.count("secretKeyRef:") != 4 or shape.count("secretName:") != 1
@@ -135,10 +135,10 @@ def credential_service_self_test(resources: list[str], target: dict[str, str]) -
         ("Deployment", "codewire-credential-service", "secretKeyRef:", "envFrom:", "unexpected secret input"),
         ("Deployment", "codewire-credential-service", "name: codewire-credential-database",
          "name: codewire-secrets", "CREDENTIAL_DATABASE_URL"),
-        ("Deployment", "codewire-credential-service", "CREDENTIAL_GITHUB_EXECUTABLE",
-         "MISSING_GITHUB_EXECUTABLE", "CREDENTIAL_GITHUB_EXECUTABLE"),
-        ("Deployment", "codewire-credential-service", "/usr/local/bin/gh",
-         "/untrusted/bin/gh", "CREDENTIAL_GITHUB_EXECUTABLE"),
+        ("Deployment", "codewire-credential-service", "name: CREDENTIAL_BROKER_TLS_KEY_FILE",
+         "name: CREDENTIAL_CODEX_EXECUTABLE", "contains CREDENTIAL_CODEX_EXECUTABLE"),
+        ("Deployment", "codewire-credential-service", "name: CREDENTIAL_BROKER_TLS_KEY_FILE",
+         "name: CREDENTIAL_GITHUB_EXECUTABLE", "contains CREDENTIAL_GITHUB_EXECUTABLE"),
         ("Deployment", "codewire-credential-service", "key: client-secret",
          "key: deploy-key", "CREDENTIAL_GITHUB_APP_CLIENT_SECRET"),
         ("Deployment", "codewire-credential-service", "name: codewire-github-app-authorization",

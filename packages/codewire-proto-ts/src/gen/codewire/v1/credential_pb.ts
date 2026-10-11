@@ -389,7 +389,7 @@ export const GetCredentialResponseSchema: GenMessage<GetCredentialResponse> = /*
  */
 export type EnrollCodexRequest = Message<"codewire.v1.EnrollCodexRequest"> & {
   /**
-   * The server selects its pinned official Codex executable and isolated home.
+   * The server runs the Codex device login itself; no provider CLI runs.
    *
    * @generated from field: string name = 1;
    */
@@ -421,7 +421,7 @@ export const EnrollCodexRequestSchema: GenMessage<EnrollCodexRequest> = /*@__PUR
  */
 export type EnrollGithubRequest = Message<"codewire.v1.EnrollGithubRequest"> & {
   /**
-   * The server selects its pinned official GitHub CLI and isolated home.
+   * The server runs the GitHub App device login itself; no provider CLI runs.
    *
    * @generated from field: string name = 1;
    */
@@ -1060,8 +1060,8 @@ export const CredentialMutationService: GenService<{
     output: typeof EnrollCodexResponseSchema;
   },
   /**
-   * Same owned challenge/publication protocol, using the pinned GitHub CLI.
-   * This remains the device-code path used by the `cw` CLI.
+   * Same owned challenge/publication protocol, using the Codewire GitHub
+   * App's device login. This remains the device-code path used by `cw`.
    *
    * @generated from rpc codewire.v1.CredentialMutationService.EnrollGithub
    */

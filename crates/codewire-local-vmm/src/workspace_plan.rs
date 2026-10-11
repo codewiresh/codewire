@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use codewire_access::AccessProfileId;
 use codewire_local_credentials::{
-    AuthorityRuntimeConfig, LocalCredentialControlClient, validate_github_https_source,
+    AuthorityRuntimeConfig, LocalCredentialControlClient, LocalRepositoryGit,
+    validate_github_https_source,
 };
 use codewire_project::{
     RepositorySpec, canonical_repository_known_hosts, parse_repository_ssh_host,
@@ -28,7 +29,7 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::direct_share::{AdmittedDirectShare, admit_direct_share, reopen_direct_share};
-use crate::linux::path::{PrivateRoot, current_uid};
+use crate::host::path::{PrivateRoot, current_uid};
 use crate::oci::{ContentStore, Sha256Digest};
 #[cfg(test)]
 use crate::supervisor_metadata::workspace_plan::{
@@ -42,7 +43,8 @@ use crate::supervisor_metadata::workspace_plan::{
 };
 use crate::workspace::WorkspaceSource;
 
-const GIT: &str = "/usr/bin/git";
+/// Never present: a host without an admitted git fails its spawn.
+const MISSING_GIT: &str = "/nonexistent/codewire-runtime/git";
 const MAXIMUM_GIT_CONTROL_OUTPUT: usize = 16 * 1024 * 1024;
 const MAXIMUM_GIT_BUNDLE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
@@ -344,6 +346,15 @@ async fn prepare_authenticated_repository(
         ],
     )
     .await?;
+    // The authority's executor runs the same admitted git as this planner;
+    // Linux executors use the system git.
+    let git = match crate::host::git() {
+        Some(git) => git.exec_path.map(|exec_path| LocalRepositoryGit {
+            program: git.program,
+            exec_path,
+        }),
+        None => return Err(WorkspacePlanError::GitUnavailable),
+    };
     let mut client = LocalCredentialControlClient::connect(credential_authority)
         .await
         .map_err(|_| WorkspacePlanError::CredentialAuthorityUnavailable)?;
@@ -357,6 +368,7 @@ async fn prepare_authenticated_repository(
             repository.revision.clone(),
             repository.known_hosts.clone(),
             access.platform.clone(),
+            git,
         )
         .await
         .map_err(credential_repository_rejection)?;
@@ -448,6 +460,11 @@ async fn prepare_authenticated_repository(
 }
 
 fn credential_repository_rejection(status: tonic::Status) -> WorkspacePlanError {
+    // A repository that outlasts the preparation deadline is a timeout, not
+    // a rejection; say so instead of naming a status code.
+    if status.code() == tonic::Code::DeadlineExceeded {
+        return WorkspacePlanError::GitTimeout;
+    }
     WorkspacePlanError::CredentialRepositoryRejected(status.code())
 }
 
@@ -580,7 +597,13 @@ async fn git_output<'a>(
 }
 
 fn git_command(working_directory: &Path) -> Command {
-    let mut command = Command::new(GIT);
+    // Without an admitted git the spawn fails, and the callers report
+    // GitUnavailable with reinstall guidance.
+    let git = crate::host::git();
+    let program = git
+        .as_ref()
+        .map_or_else(|| PathBuf::from(MISSING_GIT), |git| git.program.clone());
+    let mut command = Command::new(program);
     command
         .args([
             "-c",
@@ -606,6 +629,7 @@ fn git_command(working_directory: &Path) -> Command {
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
+        .envs(git.into_iter().flat_map(|git| git.environment))
         .current_dir(working_directory)
         .stdin(Stdio::null())
         .kill_on_drop(true);
@@ -741,7 +765,6 @@ mod tests {
             Code::Cancelled,
             Code::Unknown,
             Code::InvalidArgument,
-            Code::DeadlineExceeded,
             Code::NotFound,
             Code::AlreadyExists,
             Code::PermissionDenied,
@@ -766,9 +789,20 @@ mod tests {
             let error = credential_repository_rejection(status);
             let display = error.to_string();
             let debug = format!("{error:?}");
+            let hint = if matches!(
+                code,
+                Code::FailedPrecondition
+                    | Code::PermissionDenied
+                    | Code::Unauthenticated
+                    | Code::NotFound
+            ) {
+                "; check that GitHub is connected and can read the repository: cw credentials --local list"
+            } else {
+                ""
+            };
             assert_eq!(
                 display,
-                format!("protected repository preparation was rejected ({code:?})")
+                format!("protected repository preparation was rejected ({code:?}){hint}")
             );
             assert_eq!(debug, format!("CredentialRepositoryRejected({code:?})"));
             for canary in [MESSAGE, DETAILS, METADATA] {
@@ -777,6 +811,13 @@ mod tests {
             }
             assert!(std::error::Error::source(&error).is_none());
         }
+        let timeout = credential_repository_rejection(Status::with_details_and_metadata(
+            Code::DeadlineExceeded,
+            MESSAGE,
+            bytes::Bytes::from_static(DETAILS.as_bytes()),
+            MetadataMap::new(),
+        ));
+        assert_eq!(timeout.to_string(), "remote Git preparation timed out");
     }
 
     #[test]

@@ -38,6 +38,8 @@ pub(crate) enum LifecycleEffect {
     RemoveEnvironment,
     CleanupTrash,
     RecordObservation,
+    ApplyHostPorts,
+    RecordHostPorts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +63,8 @@ impl LifecycleEffect {
             | Self::RecordEnvironmentSources
             | Self::RecordSourceOutcome
             | Self::RemoveEnvironment
-            | Self::RecordObservation => EffectDurability::Transactional,
+            | Self::RecordObservation
+            | Self::RecordHostPorts => EffectDurability::Transactional,
             Self::ProvisionWorkspace
             | Self::BindEnvironmentAccess
             | Self::RequireEnvironmentAccess
@@ -75,7 +78,8 @@ impl LifecycleEffect {
             | Self::PrepareDelete
             | Self::MoveToTrash
             | Self::RevokeEnvironmentAccess
-            | Self::CleanupTrash => EffectDurability::ExternalIdempotent,
+            | Self::CleanupTrash
+            | Self::ApplyHostPorts => EffectDurability::ExternalIdempotent,
         }
     }
 }
@@ -157,6 +161,12 @@ const UPDATE_ENVIRONMENT_SOURCES: &[LifecycleEffect] = &[
     LifecycleEffect::RecordSourceOutcome,
 ];
 const RECONCILE: &[LifecycleEffect] = &[LifecycleEffect::RecordObservation];
+// A running generation converges to the target set first (idempotent, so a
+// replay after a crash converges again); a stopped one binds it at start.
+const UPDATE_HOST_PORTS: &[LifecycleEffect] = &[
+    LifecycleEffect::ApplyHostPorts,
+    LifecycleEffect::RecordHostPorts,
+];
 
 pub(crate) fn effects(kind: OperationKind) -> &'static [LifecycleEffect] {
     match kind {
@@ -170,6 +180,7 @@ pub(crate) fn effects(kind: OperationKind) -> &'static [LifecycleEffect] {
         OperationKind::UpdateEnvironmentSources => UPDATE_ENVIRONMENT_SOURCES,
         OperationKind::Delete => DELETE,
         OperationKind::Reconcile => RECONCILE,
+        OperationKind::UpdateHostPorts => UPDATE_HOST_PORTS,
         // Their closed transaction/recovery runs before lifecycle dispatch.
         OperationKind::UpdateCwRuntime | OperationKind::RollbackCwRuntime => &[],
     }
@@ -214,8 +225,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
-    use crate::linux::path::PrivateRoot;
-    use crate::linux::state::{
+    use crate::host::path::PrivateRoot;
+    use crate::state::{
         DeletionTreeLocation, VmPaths, cleanup_trashed_vm, deletion_tree_location,
         move_stopped_vm_to_trash,
     };
@@ -233,6 +244,7 @@ mod tests {
         OperationKind::GrowDisk,
         OperationKind::Delete,
         OperationKind::Reconcile,
+        OperationKind::UpdateHostPorts,
     ];
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,6 +432,7 @@ mod tests {
                         | LifecycleEffect::RecordSourceOutcome
                         | LifecycleEffect::RemoveEnvironment
                         | LifecycleEffect::RecordObservation
+                        | LifecycleEffect::RecordHostPorts
                 );
                 assert_eq!(
                     effect.durability() == EffectDurability::Transactional,

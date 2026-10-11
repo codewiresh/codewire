@@ -20,14 +20,12 @@ use std::time::Duration;
 
 use codewire_access::{HttpProvider, builtin_provider_catalog};
 use codewire_credential_broker::GitHubAppAuthorizationOwner;
-use codewire_credential_broker::codex_enrollment::{CodexEnrollmentConfig, CodexEnrollmentOwner};
-use codewire_credential_broker::github_enrollment::{
-    GitHubEnrollmentConfig, GitHubEnrollmentOwner,
-};
 use codewire_credential_broker::platform::bridge::{
     PlatformBridgeAuthenticator, PlatformCredentialBridgeService,
 };
 use codewire_credential_broker::platform::keepalive::OAuthKeepAlive;
+use codewire_credential_broker::provider_oauth::codex::CodexDeviceLogin;
+use codewire_credential_broker::provider_oauth::github::GitHubDeviceLogin;
 use codewire_credential_broker::{BrokerUpstreamTransport, ProviderHttpsTransport};
 use codewire_platform_credentials::PlatformAccessProfileStore;
 use codewire_protected_store::openbao_workload_identity::{
@@ -72,8 +70,6 @@ pub enum RuntimeError {
     Kubernetes,
     #[error("isolated credential OpenBao authority unavailable")]
     OpenBao,
-    #[error("isolated Codex enrollment unavailable")]
-    Enrollment,
     #[error("credential provider transport unavailable")]
     Provider,
     #[error("credential broker TLS identity unavailable")]
@@ -208,25 +204,41 @@ async fn run_connected(
     ]))
     .await
     .map_err(|_| RuntimeError::Provider)?;
-    // Browser App authorization has a separate fixed transport family. Its
-    // owner is composed privately into the credential broker solely for
-    // durable refresh; guest requests still cannot reach its OAuth exchange
-    // or account-discovery endpoints.
-    let github_app_authorization = match config.github_app_authorization {
-        Some(config) => Some(Arc::new(GitHubAppAuthorizationOwner::new(
-            config,
-            Arc::new(
+    // GitHub App authorization has a separate fixed transport family, shared
+    // by the browser authorization, the App's device login and durable
+    // refresh. Guest requests still cannot reach its OAuth exchange or
+    // account-discovery endpoints.
+    let (github_app_authorization, github_login) = match config.github_app_authorization {
+        Some(config) => {
+            let transport: Arc<dyn BrokerUpstreamTransport> = Arc::new(
                 ProviderHttpsTransport::resolve(&std::collections::BTreeSet::from([
                     HttpProvider::GitHubAppAuthorization,
                 ]))
                 .await
                 .map_err(|_| RuntimeError::Provider)?,
-            ),
-        ))),
-        None => None,
+            );
+            let device = config
+                .device_login_config()
+                .map_err(|_| RuntimeError::Configuration("GitHub App authorization"))?;
+            (
+                Some(Arc::new(GitHubAppAuthorizationOwner::new(
+                    config,
+                    transport.clone(),
+                ))),
+                Some(GitHubDeviceLogin::new(device, transport)),
+            )
+        }
+        None => (None, None),
     };
-    let enrollment = enrollment_config(config.codex_executable, config.runtime_directory.clone())?;
-    let github = github_enrollment_config(config.github_executable, &config.runtime_directory)?;
+    // Codex device login has its own family: only the three enrollment
+    // routes, never the Codex bridge.
+    let codex_login = CodexDeviceLogin::new(Arc::new(
+        ProviderHttpsTransport::resolve(&std::collections::BTreeSet::from([
+            HttpProvider::CodexDeviceEnrollment,
+        ]))
+        .await
+        .map_err(|_| RuntimeError::Provider)?,
+    ));
     let store = authorities.credential_store(pool.clone());
     // Idle rotating OAuth credentials are refreshed by this same process,
     // through the same journal, transport and App owner as on-demand refresh.
@@ -264,8 +276,8 @@ async fn run_connected(
     let mutation = Arc::new(CredentialMutationOwner::new(
         pool.clone(),
         store,
-        CodexEnrollmentOwner::new(enrollment),
-        GitHubEnrollmentOwner::new(github),
+        codex_login,
+        github_login,
         github_app_authorization,
     ));
     serve_owned(
@@ -284,54 +296,6 @@ async fn run_connected(
         shutdown,
     )
     .await
-}
-
-fn github_enrollment_config(
-    executable: std::path::PathBuf,
-    runtime_directory: &std::path::Path,
-) -> Result<GitHubEnrollmentConfig, RuntimeError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        let private = runtime_directory.join("github-enrollment");
-        match std::fs::DirBuilder::new().mode(0o700).create(&private) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err(RuntimeError::Enrollment),
-        }
-        GitHubEnrollmentConfig::new(executable, private, "/usr/bin:/bin".into())
-            .map_err(|_| RuntimeError::Enrollment)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (executable, runtime_directory);
-        Err(RuntimeError::Enrollment)
-    }
-}
-
-fn enrollment_config(
-    executable: std::path::PathBuf,
-    runtime_directory: std::path::PathBuf,
-) -> Result<CodexEnrollmentConfig, RuntimeError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        let private = runtime_directory.join("codex-enrollment");
-        // The memory-volume mount itself may be root/group-owned. Create only
-        // our private child, never chmod an existing object or create parents.
-        match std::fs::DirBuilder::new().mode(0o700).create(&private) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err(RuntimeError::Enrollment),
-        }
-        CodexEnrollmentConfig::new(executable, private, "/usr/bin:/bin".into())
-            .map_err(|_| RuntimeError::Enrollment)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (executable, runtime_directory);
-        Err(RuntimeError::Enrollment)
-    }
 }
 
 struct Listeners {

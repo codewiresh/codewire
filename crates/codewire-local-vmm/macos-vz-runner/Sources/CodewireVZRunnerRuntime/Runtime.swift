@@ -16,6 +16,7 @@ import Foundation
     case dataDiskIdentityMismatch
     case bootControlCopyFailed
     case virtualMachineConfigurationInvalid
+    case sharedDirectoryChanged
 
     var description: String {
       switch self {
@@ -29,6 +30,7 @@ import Foundation
       case .bootControlCopyFailed: "the path-backed boot control copy failed"
       case .virtualMachineConfigurationInvalid:
         "Virtualization.framework rejected the fixed topology"
+      case .sharedDirectoryChanged: "an admitted shared directory changed"
       }
     }
   }

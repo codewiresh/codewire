@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::artifact_store::runtime_artifact_diagnostics;
-use crate::linux::path::{PrivateRoot, SocketIdentity, current_uid};
-use crate::linux::state::{StateDiskIdentity, validate_owned_vm_tree};
+use crate::host::path::{PrivateRoot, SocketIdentity, current_uid};
+use crate::state::{StateDiskIdentity, validate_owned_vm_tree};
 
 const MAX_ACCOUNTING_ENTRIES: usize = 10_000;
 const MAX_CONTENT_OBJECTS: usize = 65_536;

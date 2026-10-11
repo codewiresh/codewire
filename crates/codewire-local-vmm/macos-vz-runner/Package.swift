@@ -41,7 +41,8 @@ let package = Package(
     .testTarget(
       name: "CodewireVZRunnerTests",
       dependencies: [
-        "CodewireVZRunnerProtocol", "CodewireVZRunnerRuntime", "CVZRunnerIPCTestSupport",
+        "CVZRunnerIPC", "CodewireVZRunnerProtocol", "CodewireVZRunnerRuntime",
+        "CVZRunnerIPCTestSupport",
       ],
       path: "Tests/CodewireVZRunnerTests"
     ),

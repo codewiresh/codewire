@@ -23,7 +23,7 @@ use hyper_util::rt::TokioIo;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UnixStream;
-use tokio::sync::{Mutex, Notify, Semaphore, oneshot, watch};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore, oneshot, watch};
 use tokio_stream::{StreamExt as _, once, pending};
 use tonic::transport::server::Connected;
 use tonic::transport::{Channel, Endpoint, Server};
@@ -46,6 +46,22 @@ use crate::{
 mod delegation;
 mod projection;
 mod ssh;
+
+/// Projections run one at a time. A concurrent launch waits for the permit
+/// until its own deadline, which its context already bounds, rather than
+/// failing at once while another launch is being sealed.
+async fn projection_permit(
+    operations: &Arc<Semaphore>,
+    deadline_unix_ms: u64,
+) -> Result<OwnedSemaphorePermit, Status> {
+    let busy = || Status::resource_exhausted("environment projection authority is busy");
+    let now = crate::unix_millis().map_err(|_| busy())?;
+    let remaining = std::time::Duration::from_millis(deadline_unix_ms.saturating_sub(now));
+    tokio::time::timeout(remaining, Arc::clone(operations).acquire_owned())
+        .await
+        .map_err(|_| busy())?
+        .map_err(|_| busy())
+}
 pub use delegation::{LocalCredentialDelegationClient, LocalCredentialDelegationOutput};
 pub use projection::LocalEnvironmentProjectionBinding;
 pub(crate) use ssh::LocalSshOperationRuntime;
@@ -522,22 +538,12 @@ where
             let _operation_permit = operation_permit;
             // Capacity waits cannot extend the bounded execution window. Once
             // the blocking write begins, shutdown drains it before recovery.
-            if crate::unix_millis()
-                .ok()
-                .is_none_or(|now| now >= started.execution_deadline_unix_ms)
-            {
-                return Err(codewire_protected_store::ProtectedStoreError::Unavailable);
-            }
-            if store.get(&entry_id)?.is_some() {
-                return Err(codewire_protected_store::ProtectedStoreError::AmbiguousEntry);
-            }
-            if crate::unix_millis()
-                .ok()
-                .is_none_or(|now| now >= started.execution_deadline_unix_ms)
-            {
-                return Err(codewire_protected_store::ProtectedStoreError::Unavailable);
-            }
-            store.put(&entry_id, &material)
+            crate::stage_refreshed_material(
+                &store,
+                &entry_id,
+                &material,
+                started.execution_deadline_unix_ms,
+            )
         })
         .await
         .map_err(|_| BrokerLeaseChannelError::Unavailable)?;
@@ -1333,11 +1339,11 @@ where
         let outcome = match admission {
             CredentialRefreshAdmission::Reserved(permit) => {
                 Outcome::Reserved(v1::BrokerCredentialRefreshReservation {
-                    refresh_id: permit.refresh_id.to_string(),
-                    request_id: permit.request_id.to_string(),
-                    credential_id: permit.grant.credential_id.to_string(),
-                    current_material_generation: permit.current_material_generation,
-                    next_material_generation: permit.next_material_generation,
+                    refresh_id: permit.refresh_id().to_string(),
+                    request_id: permit.request_id().to_string(),
+                    credential_id: permit.credential_id().to_string(),
+                    current_material_generation: permit.current_material_generation(),
+                    next_material_generation: permit.next_material_generation(),
                 })
             }
             CredentialRefreshAdmission::Recovered => {

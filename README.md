@@ -66,6 +66,29 @@ artifacts under `~/.cache/codewire/local-vmm-v1/artifacts` with the sibling lock
 `~/.cache/codewire/local-vmm-v1/artifacts.lock.json`. The preview never
 downloads or substitutes those artifacts at runtime.
 
+On an Apple Silicon Mac, local VMs run under Virtualization.framework through
+the signed `codewire-vz-runner` helper instead of Cloud Hypervisor, with the
+same artifact paths. Build the arm64 kernel Image and guest root on an x86_64
+Linux host and copy them to the Mac. On the Mac, build the pinned e2fsprogs
+and git the runtime ships (a stock Mac has neither; nothing comes from Homebrew
+or the Xcode Command Line Tools), then build, sign and install the helper with
+all four:
+
+```bash
+python3 scripts/dev/macos-ext4-tool.py --source-archive /abs/e2fsprogs-1.47.4.tar.gz \
+  --output /abs/private/e2fsprogs
+python3 scripts/dev/macos-git-tool.py --source-archive /abs/git-2.56.0.tar.xz \
+  --output /abs/private/git
+make macos-local-runtime KERNEL=/abs/Image INITRAMFS=/abs/initramfs.cpio \
+  E2FSPROGS=/abs/private/e2fsprogs/bundle GIT_BUNDLE=/abs/private/git/bundle
+```
+
+Until the arm64 default workspace image is published, pass `--image` with a
+multi-architecture image, for example
+`--image docker.io/library/alpine:3.22 --no-docker`. See
+[macOS CLI](docs/dev/MACOS-CLI.md) for the full flow and what macOS local
+environments cannot do yet.
+
 ```bash
 # Build the CLI
 cargo build -p codewire-cli-bin --bin cw
@@ -113,13 +136,24 @@ configuration file, and each becomes an environment-owned point-in-time copy.
 Multi-repository entries use the same normalized project model as the platform.
 `image` in `codewire.yaml` and `--image` select any valid OCI workspace image. A
 `ports` entry with `port` declares a guest application port. A `host_port` and
-`guest_port` pair also publishes it for the VM lifetime on the host loopback
-address only:
+`guest_port` pair also publishes it on the host loopback address only:
 
 ```yaml
 ports:
   - host_port: 18080
     guest_port: 8080
+```
+
+A running local environment can publish or withdraw ports without a restart,
+including guest ports `codewire.yaml` does not declare. A stopped one records
+the change and binds it at its next start; changes persist across restarts.
+Only declared ports are reachable over Mesh.
+
+```bash
+cw env port add --local 47321 --env NAME                    # 127.0.0.1:47321 -> 47321
+cw env port add --local 8080 --host-port 18081 --env NAME   # 127.0.0.1:18081 -> 8080
+cw env port ls --local --env NAME
+cw env port rm --local 18081 --env NAME                     # by host port
 ```
 
 Native local environments join Mesh only when `--network NAME` is explicit or

@@ -20,6 +20,15 @@ use serde_json::{Value, json};
 use super::TARGET;
 
 pub(super) const ACCOUNT: &str = "codewire-kind-synthetic-account";
+// Fixed public device-login values. Approval is automatic: the first poll
+// after the challenge is approved, so the journey still observes a challenge.
+const CODEX_DEVICE_AUTH_ID: &str = "kind-synthetic-codex-device-auth";
+const CODEX_USER_CODE: &str = "KIND-CODX";
+const CODEX_AUTHORIZATION_CODE: &str = "kind-synthetic-codex-authorization-code";
+const CODEX_CODE_VERIFIER: &str = "kind-synthetic-codex-code-verifier";
+const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const GITHUB_DEVICE_CODE: &str = "kind-synthetic-github-device-code";
+const GITHUB_USER_CODE: &str = "KIND-GHUB";
 const TOKEN_SIGNATURE: &str = "synthetic-kind-signature";
 const MAX_GENERATION: u64 = 10_000;
 const MAX_BODY: usize = 4 * 1024 * 1024;
@@ -30,7 +39,6 @@ const LEGACY_REREAD_MARKER: &[u8] = b"CW_KIND_NATIVE_REREAD";
 // Fixed, non-secret identities for the checked-in Kind fixture.  They are
 // deliberately accepted only by this in-process provider, never a network
 // listener or production configuration path.
-pub(super) const GITHUB_DEVICE_TOKEN: &str = "gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 #[cfg(feature = "kind-e2e")]
 pub(super) const OPENAI_API_KEY: &str = "cwlocalopenai0123456789abcdef0123456789abcdef";
 #[cfg(feature = "kind-e2e")]
@@ -792,9 +800,17 @@ impl BrokerUpstreamTransport for SyntheticProvider {
         if headers.contains_key("proxy-authorization") || headers.contains_key("cookie") {
             return Err(BrokerUpstreamError::Protocol);
         }
+        if method == Method::POST && target.as_str() == "https://github.com/login/device/code" {
+            return github_device_code(&headers, &body);
+        }
         if method == Method::POST
             && target.as_str() == "https://github.com/login/oauth/access_token"
         {
+            if url::form_urlencoded::parse(&body).any(|(key, value)| {
+                key == "grant_type" && value == "urn:ietf:params:oauth:grant-type:device_code"
+            }) {
+                return github_device_token(&headers, &body);
+            }
             return self.github_app_exchange(&headers, &body);
         }
         if target.host_str() == Some("github.com") {
@@ -818,6 +834,20 @@ impl BrokerUpstreamTransport for SyntheticProvider {
         }
         match target.as_str() {
             "https://chatgpt.com/backend-api/codex/responses" => self.responses(headers, &body),
+            "https://auth.openai.com/api/accounts/deviceauth/usercode" => {
+                codex_device_usercode(&headers, &body)
+            }
+            "https://auth.openai.com/api/accounts/deviceauth/token" => {
+                codex_device_token(&headers, &body)
+            }
+            "https://auth.openai.com/oauth/token"
+                if headers.get("content-type")
+                    == Some(&HeaderValue::from_static(
+                        "application/x-www-form-urlencoded",
+                    )) =>
+            {
+                codex_device_exchange(&headers, &body)
+            }
             "https://auth.openai.com/oauth/token" => self.refresh(headers, &body),
             _ => Err(BrokerUpstreamError::Protocol),
         }
@@ -931,6 +961,140 @@ fn anthropic_reply(
     Ok(("text/event-stream", body))
 }
 
+fn codex_device_usercode(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+    let request: Value = serde_json::from_slice(body).map_err(|_| BrokerUpstreamError::Protocol)?;
+    if !json_post_headers(headers) || request != json!({"client_id": CODEX_CLIENT_ID}) {
+        return Err(BrokerUpstreamError::Protocol);
+    }
+    tracing::info!(target: TARGET, event = "codex_device_login", "codex_device_login");
+    json_response(json!({
+        "device_auth_id": CODEX_DEVICE_AUTH_ID,
+        "user_code": CODEX_USER_CODE,
+        "interval": "1",
+    }))
+}
+
+fn codex_device_token(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+    let request: Value = serde_json::from_slice(body).map_err(|_| BrokerUpstreamError::Protocol)?;
+    if !json_post_headers(headers)
+        || request != json!({"device_auth_id": CODEX_DEVICE_AUTH_ID, "user_code": CODEX_USER_CODE})
+    {
+        return Err(BrokerUpstreamError::Protocol);
+    }
+    json_response(json!({
+        "authorization_code": CODEX_AUTHORIZATION_CODE,
+        "code_challenge": "kind-synthetic-codex-code-challenge",
+        "code_verifier": CODEX_CODE_VERIFIER,
+    }))
+}
+
+fn codex_device_exchange(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+    let expected = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "authorization_code")
+        .append_pair("code", CODEX_AUTHORIZATION_CODE)
+        .append_pair(
+            "redirect_uri",
+            "https://auth.openai.com/deviceauth/callback",
+        )
+        .append_pair("client_id", CODEX_CLIENT_ID)
+        .append_pair("code_verifier", CODEX_CODE_VERIFIER)
+        .finish();
+    if !exact_headers(
+        headers,
+        &[
+            ("accept", "application/json"),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ],
+    ) || body != expected.as_bytes()
+    {
+        return Err(BrokerUpstreamError::Protocol);
+    }
+    // The claims stock Codex reads from a ChatGPT login's ID token, so the
+    // login the daemon delivers reads as a ChatGPT account with a plan. A
+    // personal plan: business, enterprise and edu make Codex fetch workspace
+    // configuration at startup.
+    let id_payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&json!({
+            "email": "kind-fixture@example.test",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": ACCOUNT,
+                "chatgpt_plan_type": "plus",
+                "chatgpt_user_id": "user-codewire-kind-synthetic",
+            }
+        }))
+        .map_err(|_| BrokerUpstreamError::Protocol)?,
+    );
+    json_response(json!({
+        "id_token": format!("e30.{id_payload}.{TOKEN_SIGNATURE}"),
+        "access_token": access_token(0)?,
+        "refresh_token": refresh_token(0),
+    }))
+}
+
+fn github_device_code(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+    if !github_device_headers(headers)
+        || body != format!("client_id={GITHUB_APP_CLIENT_ID}").as_bytes()
+    {
+        return Err(BrokerUpstreamError::Protocol);
+    }
+    tracing::info!(target: TARGET, event = "github_device_login", "github_device_login");
+    json_response(json!({
+        "device_code": GITHUB_DEVICE_CODE,
+        "user_code": GITHUB_USER_CODE,
+        "verification_uri": "https://github.com/login/device",
+        "expires_in": 900,
+        "interval": 1,
+    }))
+}
+
+fn github_device_token(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+    let expected = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("client_id", GITHUB_APP_CLIENT_ID)
+        .append_pair("device_code", GITHUB_DEVICE_CODE)
+        .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+        .finish();
+    if !github_device_headers(headers) || body != expected.as_bytes() {
+        return Err(BrokerUpstreamError::Protocol);
+    }
+    json_response(json!({"access_token": GITHUB_APP_USER_TOKEN, "token_type": "bearer"}))
+}
+
+fn json_post_headers(headers: &HeaderMap) -> bool {
+    exact_headers(
+        headers,
+        &[
+            ("accept", "application/json"),
+            ("content-type", "application/json"),
+        ],
+    )
+}
+
+fn github_device_headers(headers: &HeaderMap) -> bool {
+    exact_headers(
+        headers,
+        &[
+            ("accept", "application/json"),
+            ("content-type", "application/x-www-form-urlencoded"),
+            ("user-agent", "Codewire"),
+        ],
+    )
+}
+
 fn github_app_refresh_body() -> String {
     format!(
         "client_id={GITHUB_APP_CLIENT_ID}&client_secret={GITHUB_APP_CLIENT_SECRET}&grant_type=refresh_token&refresh_token={GITHUB_APP_INITIAL_REFRESH_TOKEN}"
@@ -973,15 +1137,11 @@ fn github_bearer_authorization(headers: &HeaderMap) -> bool {
     let Some(value) = headers.get("authorization") else {
         return false;
     };
-    [
-        GITHUB_DEVICE_TOKEN,
-        GITHUB_APP_USER_TOKEN,
-        GITHUB_APP_REFRESHED_USER_TOKEN,
-    ]
-    .iter()
-    .any(|token| {
-        value == HeaderValue::from_str(&format!("Bearer {token}")).expect("synthetic token")
-    })
+    [GITHUB_APP_USER_TOKEN, GITHUB_APP_REFRESHED_USER_TOKEN]
+        .iter()
+        .any(|token| {
+            value == HeaderValue::from_str(&format!("Bearer {token}")).expect("synthetic token")
+        })
 }
 
 fn github_refreshed_app_git_authorization(headers: &HeaderMap) -> bool {
@@ -1722,7 +1882,7 @@ mod tests {
             HeaderValue::from_str(&format!(
                 "Basic {}",
                 base64::engine::general_purpose::STANDARD
-                    .encode("x-access-token:gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+                    .encode(format!("x-access-token:{GITHUB_APP_USER_TOKEN}"))
             ))
             .unwrap(),
         );
@@ -1808,11 +1968,7 @@ mod tests {
     #[test]
     fn repository_fixture_is_bounded_paginated_and_requires_its_synthetic_identity() {
         let provider = SyntheticProvider::new();
-        for token in [
-            GITHUB_DEVICE_TOKEN,
-            GITHUB_APP_USER_TOKEN,
-            GITHUB_APP_REFRESHED_USER_TOKEN,
-        ] {
+        for token in [GITHUB_APP_USER_TOKEN, GITHUB_APP_REFRESHED_USER_TOKEN] {
             let headers = HeaderMap::from_iter([(
                 http::header::AUTHORIZATION,
                 HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
