@@ -82,6 +82,11 @@ MANAGED_AGENT_UPDATE_A_LOCK=''
 MANAGED_AGENT_UPDATE_A_SHA256=''
 CREDENTIAL_ROOT=''
 CREDENTIAL_PROFILE_NAME='native-broker'
+# The login the synthetic broker's GitHub `/user` returns
+# (codewire-credential-broker runtime.rs); native GitHub login records it as
+# the credential's account hint. test-native-managed-update-entrypoint.py
+# keeps the two equal.
+readonly SYNTHETIC_GITHUB_LOGIN='synthetic-smoke'
 CREDENTIAL_ID=''
 CREDENTIAL_CANARY=''
 CREDENTIAL_REFRESH_CANARY=''
@@ -2697,7 +2702,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
     die 'local personal-secret store was not empty before its selected fixture'
   run_cw credentials --local list --output json
-  jq -e '
+  jq -e --arg github_login "$SYNTHETIC_GITHUB_LOGIN" '
     length == 5 and
     ([.[] | select(.provider == "github")] | length) == 1 and
     any(.[];
@@ -2718,7 +2723,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
       .provider == "github" and
       .authentication_kind == "oauth" and
       .name == "native-broker-github" and
-      .account_hint == null and
+      .account_hint == $github_login and
       .status == "active" and
       .revocation_generation == 1 and
       .protected_store_persistence == "operating_system" and
