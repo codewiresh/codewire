@@ -10,7 +10,6 @@
 //! different installed runtime is replaced only on request.
 
 use std::{
-    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     future::Future,
     io::{self, Read, Write},
@@ -18,62 +17,23 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::artifact::{ArtifactError, ArtifactLock};
 
-pub const LOCAL_RUNTIME_SCHEMA: &str = "codewire.cw.local-runtime/v1";
-/// The document's name inside a release or `--from` directory.
-pub const LOCAL_RUNTIME_DOCUMENT: &str = "local-runtime.json";
-const DOCUMENT_LIMIT: u64 = 1024 * 1024;
+pub use codewire_cw_release::local_runtime::{
+    BlobRef, CwRuntimeFiles, LOCAL_RUNTIME_NAME as LOCAL_RUNTIME_DOCUMENT, LOCAL_RUNTIME_SCHEMA,
+    LocalRuntimeDocument, RuntimeTarget,
+};
+use codewire_cw_release::release::MAX_JSON_BYTES;
+
 const BLOB_LIMIT: u64 = 512 * 1024 * 1024;
 const EXECUTABLE_MODE: u32 = 0o500;
 /// How long an installer waits for the runtime directory's lock.
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 const DATA_MODE: u32 = 0o400;
 
-/// One release's local VM runtime for every supported host target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LocalRuntimeDocument {
-    pub schema: String,
-    /// The source revision the guest root and cw were built from; the guest
-    /// renders session environments, so they must match.
-    pub source_revision: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub release_tag: Option<String>,
-    /// Each target's runtime, keyed by [`host_target`].
-    pub targets: BTreeMap<String, RuntimeTarget>,
-}
-
-/// One host target's runtime.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeTarget {
-    /// The exact artifact lock the supervisor admits.
-    pub lock: serde_json::Value,
-    /// The sealed cw runtime for managed agents in local VMs, when published.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cw_runtime: Option<CwRuntimeFiles>,
-}
-
-/// The sealed cw runtime's two files, installed beside the artifact lock.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CwRuntimeFiles {
-    pub lock: BlobRef,
-    pub pack: BlobRef,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BlobRef {
-    pub sha256: String,
-    pub size: u64,
-}
-
-/// The cw runtime file names `cw` admits beside the artifact lock.
+/// The sealed cw runtime file names `cw` admits beside the artifact lock.
 pub const CW_RUNTIME_LOCK: &str = "cw-runtime.lock.json";
 pub const CW_RUNTIME_PACK: &str = "runtime.pack";
 
@@ -115,46 +75,23 @@ fn io_error(context: impl Into<String>) -> impl FnOnce(io::Error) -> InstallErro
     move |source| InstallError::Io { context, source }
 }
 
-impl LocalRuntimeDocument {
-    pub fn parse(bytes: &[u8]) -> Result<Self, InstallError> {
-        let document: Self = serde_json::from_slice(bytes)
-            .map_err(|error| InstallError::Document(error.to_string()))?;
-        if document.schema != LOCAL_RUNTIME_SCHEMA {
-            return Err(InstallError::Document(format!(
-                "schema {:?} is not {LOCAL_RUNTIME_SCHEMA}",
-                document.schema
-            )));
-        }
-        if document.source_revision.len() != 40
-            || !document
-                .source_revision
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(InstallError::Document(
-                "source_revision must be a 40-character commit".into(),
-            ));
-        }
-        Ok(document)
-    }
+/// This host's runtime in `document`.
+pub fn host_runtime(document: &LocalRuntimeDocument) -> Result<&RuntimeTarget, InstallError> {
+    let target = host_target();
+    document
+        .targets
+        .get(&target)
+        .ok_or(InstallError::UnknownTarget(target))
+}
 
-    /// This host's runtime.
-    pub fn host_target(&self) -> Result<&RuntimeTarget, InstallError> {
-        let target = host_target();
-        self.targets
-            .get(&target)
-            .ok_or(InstallError::UnknownTarget(target))
-    }
-
-    /// The validated lock for this host.
-    pub fn host_lock(&self) -> Result<ArtifactLock, InstallError> {
-        let target = host_target();
-        let value = &self.host_target()?.lock;
-        let lock: ArtifactLock = serde_json::from_value(value.clone())
-            .map_err(|error| InstallError::Document(format!("{target} lock: {error}")))?;
-        lock.validate_metadata()?;
-        Ok(lock)
-    }
+/// The validated lock for this host in `document`.
+pub fn host_lock(document: &LocalRuntimeDocument) -> Result<ArtifactLock, InstallError> {
+    let target = host_target();
+    let value = &host_runtime(document)?.lock;
+    let lock: ArtifactLock = serde_json::from_value(value.clone())
+        .map_err(|error| InstallError::Document(format!("{target} lock: {error}")))?;
+    lock.validate_metadata()?;
+    Ok(lock)
 }
 
 /// Where release blobs come from. Blobs are named by their SHA-256.
@@ -177,13 +114,11 @@ impl DirectoryBlobSource {
         let path = self.root.join(LOCAL_RUNTIME_DOCUMENT);
         let file = open_regular(&path)?;
         let mut bytes = Vec::new();
-        file.take(DOCUMENT_LIMIT + 1)
+        file.take(MAX_JSON_BYTES as u64 + 1)
             .read_to_end(&mut bytes)
             .map_err(io_error(format!("read {}", path.display())))?;
-        if bytes.len() as u64 > DOCUMENT_LIMIT {
-            return Err(InstallError::Document("the document is too large".into()));
-        }
-        LocalRuntimeDocument::parse(&bytes)
+        LocalRuntimeDocument::decode(&bytes)
+            .map_err(|error| InstallError::Document(error.to_string()))
     }
 }
 
@@ -235,6 +170,29 @@ pub enum InstallOutcome {
     AlreadyInstalled { generation: String },
 }
 
+/// How the installed runtime compares with `document`'s for this host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstalledRuntime {
+    Missing,
+    Same,
+    Different,
+}
+
+/// Compares the installed artifact lock with `document`'s for this host. It
+/// reads only the lock; [`install`] admits the files themselves.
+pub fn installed_runtime(
+    paths: &RuntimePaths,
+    document: &LocalRuntimeDocument,
+) -> Result<InstalledRuntime, InstallError> {
+    let wanted = host_lock(document)?;
+    match ArtifactLock::read(&paths.artifact_lock) {
+        Ok(installed) if installed == wanted => Ok(InstalledRuntime::Same),
+        Ok(_) => Ok(InstalledRuntime::Different),
+        Err(_) if lock_missing(&paths.artifact_lock) => Ok(InstalledRuntime::Missing),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Installs `document`'s runtime for this host from `source`.
 pub async fn install(
     paths: &RuntimePaths,
@@ -261,7 +219,7 @@ where
     A: Fn(ArtifactLock, PathBuf) -> F,
     F: Future<Output = Result<(), ArtifactError>>,
 {
-    let lock = document.host_lock()?;
+    let lock = host_lock(document)?;
     let parent = paths
         .artifact_lock
         .parent()
@@ -291,7 +249,7 @@ where
         }
         _ => false,
     };
-    let wanted_cw_runtime = document.host_target()?.cw_runtime.as_ref();
+    let wanted_cw_runtime = host_runtime(document)?.cw_runtime.as_ref();
     let cw_runtime = cw_runtime_state(&parent, wanted_cw_runtime)?;
     if cw_runtime == CwRuntimeState::Different && !replace {
         return Err(InstallError::DifferentRuntimeInstalled(

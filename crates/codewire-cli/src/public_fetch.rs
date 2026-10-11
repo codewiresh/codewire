@@ -1,19 +1,25 @@
 //! Public release resolution. Trust and transport admission finish before the
-//! ordinary Store receives a candidate. This never publishes a VM runtime.
+//! ordinary Store receives a candidate. The local VM runtime is fetched only by
+//! the digests this cw pins (#2539); this never publishes anything.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::future::Future;
+use std::io::Read;
+use std::os::unix::fs::FileExt as _;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use codewire_cw_release::identity::{CwPayloadIdentity, Platform};
+use codewire_cw_release::identity::{CwPayloadIdentity, Platform, is_sha256_hex};
+use codewire_cw_release::local_runtime::{BlobRef, MAX_BLOB_BYTES};
 use codewire_cw_release::openpgp::ReleaseKey;
 use codewire_cw_release::release::{
-    ChannelEnvelope, MAX_JSON_BYTES, MAX_SIGNATURE_BYTES, ReleaseManifest, release_key,
+    ChannelEnvelope, MAX_JSON_BYTES, MAX_SIGNATURE_BYTES, ObjectRef, ReleaseManifest, release_key,
     valid_release_tag,
 };
 use codewire_cw_release::store::{Admission, Candidate};
+use codewire_local_vmm::runtime_install::{BlobSource, InstallError};
 
 use crate::build_record::admit_incoming;
 
@@ -23,6 +29,9 @@ mod scratch;
 const TRUST_KEY: &[u8] = include_bytes!("../../../apps/cli/GPG_PUBLIC_KEY.asc");
 const TRUST_FINGERPRINT: &str = "A38FF6BC6623FCA611A7A32B5EFBF0F4A5870815";
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+/// A runtime blob's deadline: a fixed base plus its size at this slowest rate.
+const BLOB_BASE_DEADLINE: Duration = Duration::from_secs(30);
+const BLOB_MIN_RATE: u64 = 256 * 1024;
 
 pub(crate) enum Selection {
     Version(String),
@@ -79,12 +88,12 @@ pub(crate) async fn fetch(selection: Selection, host: Platform) -> anyhow::Resul
     .await
 }
 
-async fn controlled(
-    operation: impl Future<Output = anyhow::Result<FetchedRelease>>,
+async fn controlled<T>(
+    operation: impl Future<Output = anyhow::Result<T>>,
     scratch: Arc<scratch::Scratch>,
     timeout: Duration,
     cancellation: impl Future<Output = anyhow::Result<()>>,
-) -> anyhow::Result<FetchedRelease> {
+) -> anyhow::Result<T> {
     let result = tokio::select! {
         biased;
         signal = cancellation => {
@@ -107,6 +116,110 @@ async fn controlled(
             Err(error)
         }
     }
+}
+
+/// The pinned local VM runtime's files, held privately until the installer
+/// has admitted them (#2539).
+pub(crate) struct FetchedRuntime {
+    files: BTreeMap<String, File>,
+    scratch: Arc<scratch::Scratch>,
+}
+
+impl FetchedRuntime {
+    pub(crate) fn cleanup(self) -> anyhow::Result<()> {
+        drop(self.files);
+        self.scratch.cleanup()
+    }
+}
+
+impl BlobSource for FetchedRuntime {
+    fn open(&self, sha256: &str) -> Result<Box<dyn Read + '_>, InstallError> {
+        let file = self
+            .files
+            .get(sha256)
+            .ok_or_else(|| InstallError::MissingBlob {
+                sha256: sha256.to_owned(),
+            })?;
+        Ok(Box::new(HeldReader { file, offset: 0 }))
+    }
+}
+
+/// Reads a held file from its start without moving its shared offset.
+struct HeldReader<'a> {
+    file: &'a File,
+    offset: u64,
+}
+
+impl Read for HeldReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.file.read_at(buffer, self.offset)?;
+        self.offset += read as u64;
+        Ok(read)
+    }
+}
+
+fn blob_deadline(size: u64) -> Duration {
+    BLOB_BASE_DEADLINE + Duration::from_secs(size / BLOB_MIN_RATE)
+}
+
+/// Download exactly the pinned `blobs` from the fixed release origin, each
+/// checked for its size and SHA-256 within its own deadline.
+pub(crate) async fn fetch_runtime(blobs: &[BlobRef]) -> anyhow::Result<FetchedRuntime> {
+    let http = http::FixedHttp::for_blobs()?;
+    let scratch = Arc::new(scratch::Scratch::new()?);
+    let total = blobs
+        .iter()
+        .map(|blob| blob_deadline(blob.size))
+        .sum::<Duration>()
+        + BLOB_BASE_DEADLINE;
+    let mut termination = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("observe local runtime download termination")?;
+    let cancellation = async move {
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.context("observe local runtime download cancellation"),
+            result = termination.recv() => result.context("local runtime download cancellation observer ended"),
+        }
+    };
+    controlled(
+        fetch_runtime_inner(blobs, &http, scratch.clone()),
+        scratch,
+        total,
+        cancellation,
+    )
+    .await
+}
+
+async fn fetch_runtime_inner(
+    blobs: &[BlobRef],
+    http: &http::FixedHttp,
+    scratch: Arc<scratch::Scratch>,
+) -> anyhow::Result<FetchedRuntime> {
+    let mut files = BTreeMap::new();
+    for blob in blobs {
+        anyhow::ensure!(
+            is_sha256_hex(&blob.sha256) && (1..=MAX_BLOB_BYTES).contains(&blob.size),
+            "pinned local runtime blob is invalid"
+        );
+        if files.contains_key(&blob.sha256) {
+            continue;
+        }
+        let mut file = scratch.create(&blob.sha256)?;
+        let reference = ObjectRef {
+            key: format!("cw/v1/blobs/sha256/{}", blob.sha256),
+            sha256: blob.sha256.clone(),
+            size: blob.size,
+        };
+        tokio::time::timeout(
+            blob_deadline(blob.size),
+            http.blob(&reference, MAX_BLOB_BYTES, &mut file),
+        )
+        .await
+        .with_context(|| format!("download of {} exceeded its deadline", blob.sha256))??;
+        scratch.check_file(&file)?;
+        files.insert(blob.sha256.clone(), file);
+    }
+    scratch.check_paths()?;
+    Ok(FetchedRuntime { files, scratch })
 }
 
 async fn fetch_inner(

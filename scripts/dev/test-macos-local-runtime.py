@@ -187,13 +187,17 @@ class PackTests(unittest.TestCase):
 
     def assert_release(self, files, cw_runtime=None):
         """`files` maps release-relative paths to bytes; returns the document."""
-        document = json.loads(files[runtime.LOCAL_RUNTIME_DOCUMENT])
+        raw = files[runtime.LOCAL_RUNTIME_DOCUMENT]
+        document = json.loads(raw)
+        # cw decodes it strictly, so it is canonical: sorted, compact, ASCII.
+        self.assertEqual(raw, (json.dumps(document, sort_keys=True, separators=(",", ":"),
+                                          ensure_ascii=True) + "\n").encode())
         self.assertEqual(document["schema"], "codewire.cw.local-runtime/v1")
         self.assertEqual(document["source_revision"], REVISION)
         self.assertEqual(list(document["targets"]), ["macos-aarch64"])
         target = document["targets"]["macos-aarch64"]
         lock = target["lock"]
-        self.assertEqual(list(lock), ["schema_version", "vz_runner", "e2fsprogs", "git", "kernel", "initramfs"])
+        self.assertEqual(list(lock), ["e2fsprogs", "git", "initramfs", "kernel", "schema_version", "vz_runner"])
         self.assertEqual(lock["schema_version"], 1)
         blobs = {name[len("blobs/sha256/"):]: data for name, data in files.items()
                  if name.startswith("blobs/sha256/")}
@@ -205,14 +209,14 @@ class PackTests(unittest.TestCase):
         self.assertEqual(blobs[lock["kernel"]["sha256"]], self.kernel.read_bytes())
         self.assertEqual(blobs[lock["initramfs"]["sha256"]], self.initramfs.read_bytes())
         tools = runtime.E2FSPROGS_TOOLS + (runtime.E2FSPROGS_CONFIG,)
-        self.assertEqual(list(lock["e2fsprogs"]), [key for key, _name, _installed in tools])
+        self.assertEqual(list(lock["e2fsprogs"]), sorted(key for key, _name, _installed in tools))
         for key, name, installed in tools:
             data = (self.e2fsprogs / name).read_bytes()
             self.assertEqual(lock["e2fsprogs"][key], {"path": installed, "size": len(data),
                                                       "sha256": hashlib.sha256(data).hexdigest(),
                                                       "architecture": "aarch64"})
             self.assertEqual(blobs[lock["e2fsprogs"][key]["sha256"]], data)
-        self.assertEqual(list(lock["git"]), [key for key, _name in runtime.GIT_TOOLS])
+        self.assertEqual(list(lock["git"]), sorted(key for key, _name in runtime.GIT_TOOLS))
         for key, name in runtime.GIT_TOOLS:
             data = (self.git / name).read_bytes()
             self.assertEqual(lock["git"][key], {"path": name, "size": len(data),
@@ -515,8 +519,9 @@ class SourceContractTests(unittest.TestCase):
 
     def test_release_directory_follows_the_installer(self):
         installer = self.read("crates/codewire-local-vmm/src/runtime_install.rs")
-        self.assertIn('LOCAL_RUNTIME_SCHEMA: &str = "%s";' % runtime.LOCAL_RUNTIME_SCHEMA, installer)
-        self.assertIn('LOCAL_RUNTIME_DOCUMENT: &str = "%s";' % runtime.LOCAL_RUNTIME_DOCUMENT, installer)
+        document = self.read("crates/codewire-cw-release/src/local_runtime.rs")
+        self.assertIn('LOCAL_RUNTIME_SCHEMA: &str = "%s";' % runtime.LOCAL_RUNTIME_SCHEMA, document)
+        self.assertIn('LOCAL_RUNTIME_NAME: &str = "%s";' % runtime.LOCAL_RUNTIME_DOCUMENT, document)
         self.assertIn('format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)', installer)
         self.assertEqual(runtime.TARGET, "macos-aarch64")
         self.assertIn('.join("blobs").join("sha256").join(sha256)', installer)

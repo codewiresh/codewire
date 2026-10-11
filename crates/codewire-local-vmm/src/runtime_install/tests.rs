@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use super::*;
@@ -61,18 +62,18 @@ fn release_with(
     let document = LocalRuntimeDocument {
         schema: LOCAL_RUNTIME_SCHEMA.into(),
         source_revision: "a".repeat(40),
-        release_tag: None,
         targets: BTreeMap::from([(
             host_target(),
             RuntimeTarget {
                 lock: serde_json::to_value(&lock).unwrap(),
                 cw_runtime,
+                components: Vec::new(),
             },
         )]),
     };
     fs::write(
         source.join(LOCAL_RUNTIME_DOCUMENT),
-        serde_json::to_vec(&document).unwrap(),
+        codewire_cw_release::identity::canonical_json(&document).unwrap(),
     )
     .unwrap();
     document
@@ -128,7 +129,7 @@ fn leftovers(f: &Fixture) -> Vec<String> {
 async fn installs_exact_files_and_writes_the_lock_last() {
     let f = fixture();
     let document = release(&f.source, [b"vmm-1", b"kernel-1", b"initramfs-1"]);
-    let generation = document.host_lock().unwrap().generation().unwrap();
+    let generation = host_lock(&document).unwrap().generation().unwrap();
     assert_eq!(
         run(&f, false).await.unwrap(),
         InstallOutcome::Installed {
@@ -150,7 +151,7 @@ async fn installs_exact_files_and_writes_the_lock_last() {
         b"kernel-1"
     );
     let lock = ArtifactLock::read(&f.paths.artifact_lock).unwrap();
-    assert_eq!(lock, document.host_lock().unwrap());
+    assert_eq!(lock, host_lock(&document).unwrap());
     let parent = fs::metadata(f.paths.artifact_lock.parent().unwrap()).unwrap();
     assert_eq!(parent.mode() & 0o777, 0o700);
     assert!(leftovers(&f).is_empty(), "{:?}", leftovers(&f));
@@ -201,7 +202,7 @@ async fn a_different_runtime_is_replaced_only_on_request() {
     );
     assert_eq!(
         ArtifactLock::read(&f.paths.artifact_lock).unwrap(),
-        newer.host_lock().unwrap()
+        host_lock(&newer).unwrap()
     );
     assert!(leftovers(&f).is_empty());
 }
@@ -210,7 +211,7 @@ async fn a_different_runtime_is_replaced_only_on_request() {
 async fn a_mismatched_or_missing_blob_installs_nothing() {
     let f = fixture();
     let document = release(&f.source, [b"vmm-1", b"kernel-1", b"initramfs-1"]);
-    let initramfs = document.host_lock().unwrap().initramfs.sha256;
+    let initramfs = host_lock(&document).unwrap().initramfs.sha256;
     let blob = f.source.join("blobs").join("sha256").join(&initramfs);
     fs::write(&blob, b"initramfs-X").unwrap();
     assert!(matches!(
@@ -253,11 +254,21 @@ async fn a_failed_admission_keeps_the_previous_runtime() {
 fn documents_name_their_schema_revision_and_host_target() {
     let f = fixture();
     let document = release(&f.source, [b"v", b"k", b"i"]);
+    // A `--from` directory's document is decoded exactly as a release's.
+    let source = DirectoryBlobSource::new(&f.source);
+    let path = f.source.join(LOCAL_RUNTIME_DOCUMENT);
     let parse = |value: serde_json::Value| {
-        LocalRuntimeDocument::parse(&serde_json::to_vec(&value).unwrap())
+        fs::write(
+            &path,
+            codewire_cw_release::identity::canonical_json(&value).unwrap(),
+        )
+        .unwrap();
+        source.document()
     };
     let mut value = serde_json::to_value(&document).unwrap();
     assert!(parse(value.clone()).is_ok());
+    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    assert!(matches!(source.document(), Err(InstallError::Document(_))));
     value["schema"] = "codewire.cw.local-runtime/v2".into();
     assert!(matches!(
         parse(value.clone()),
@@ -277,7 +288,7 @@ fn documents_name_their_schema_revision_and_host_target() {
     let target = other.targets.remove(&host_target()).unwrap();
     other.targets = BTreeMap::from([("plan9-mips".into(), target)]);
     assert!(matches!(
-        other.host_lock(),
+        host_lock(&other),
         Err(InstallError::UnknownTarget(_))
     ));
 }
@@ -365,4 +376,28 @@ async fn the_cw_runtime_installs_beside_the_lock_and_follows_the_release() {
         .filter(|name| name.ends_with(".partial"))
         .collect();
     assert!(partials.is_empty(), "{partials:?}");
+}
+
+#[tokio::test]
+async fn the_installed_runtime_is_compared_with_a_document() {
+    let f = fixture();
+    let document = release(&f.source, [b"v", b"k", b"i"]);
+    assert_eq!(
+        installed_runtime(&f.paths, &document).unwrap(),
+        InstalledRuntime::Missing
+    );
+    let source = DirectoryBlobSource::new(&f.source);
+    install_with(&f.paths, &document, &source, false, admit_by_digest)
+        .await
+        .unwrap();
+    assert_eq!(
+        installed_runtime(&f.paths, &document).unwrap(),
+        InstalledRuntime::Same
+    );
+    let other = tempfile::tempdir().unwrap();
+    let newer = release(other.path(), [b"v2", b"k", b"i"]);
+    assert_eq!(
+        installed_runtime(&f.paths, &newer).unwrap(),
+        InstalledRuntime::Different
+    );
 }

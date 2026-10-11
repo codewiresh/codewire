@@ -12,6 +12,7 @@
 #[cfg(unix)]
 pub mod build_record;
 pub mod identity;
+pub mod local_runtime;
 pub mod openpgp;
 pub mod release;
 #[cfg(unix)]

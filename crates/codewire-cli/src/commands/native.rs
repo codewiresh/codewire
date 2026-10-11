@@ -364,6 +364,7 @@ pub(crate) async fn create_native_environment(
     mut args: EnvCreateArgs,
 ) -> anyhow::Result<Option<v1::Environment>> {
     reject_unsupported_native_create_options(&args)?;
+    require_pinned_runtime()?;
     if args.name.as_deref().and_then(trimmed_str).is_none() {
         args.name = Some(default_native_name(
             args.path.as_deref(),
@@ -1027,6 +1028,7 @@ pub(crate) async fn select_native_environment(name: &str) -> anyhow::Result<v1::
 }
 
 pub(crate) async fn start_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
+    require_pinned_runtime()?;
     let mut client = native_client().await?;
     get_native_environment_with_required_authority(&mut client, name).await?;
     let progress = native_progress();
@@ -1050,6 +1052,7 @@ pub(crate) async fn stop_native_environment(name: &str) -> anyhow::Result<v1::En
 }
 
 pub(crate) async fn restart_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
+    require_pinned_runtime()?;
     let mut client = native_client().await?;
     let environment = get_native_environment_with_required_authority(&mut client, name).await?;
     client
@@ -1743,18 +1746,38 @@ fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
 }
 
 /// `cw setup --local`: install and verify the local VM runtime that belongs
-/// to this cw (#2492). The guest root renders session environments, so a
-/// runtime built from other source is refused.
+/// to this cw (#2492, #2539). A release's cw downloads exactly the runtime it
+/// pins; `--from DIR` installs a runtime directory built from the same source.
+/// The guest root renders session environments, so a runtime built from other
+/// source is refused.
 pub(crate) async fn setup_local_runtime(
     from: Option<PathBuf>,
     replace: bool,
 ) -> anyhow::Result<()> {
-    use codewire_local_vmm::runtime_install::{
-        self, DirectoryBlobSource, InstallOutcome, RuntimePaths,
+    use codewire_local_vmm::runtime_install::{self, DirectoryBlobSource, RuntimePaths};
+    let config = native_runtime_config()?;
+    let paths = RuntimePaths {
+        artifact_root: config.artifact_root,
+        artifact_lock: config.artifact_lock,
     };
-    let from = from.context(
-        "releases do not publish the local VM runtime yet; pass --from DIR with a release directory",
-    )?;
+    let Some(from) = from else {
+        let document = crate::local_runtime_pin::embedded()?.context(
+            "this cw is a development build with no pinned local VM runtime; pass --from DIR with a runtime directory built from the same source",
+        )?;
+        let blobs = runtime_install::host_runtime(&document)?.blobs();
+        let megabytes = blobs.iter().map(|blob| blob.size).sum::<u64>() / (1024 * 1024);
+        eprintln!(
+            "Downloading the local VM runtime ({} files, {megabytes} MiB)...",
+            blobs.len()
+        );
+        let fetched = crate::public_fetch::fetch_runtime(&blobs).await?;
+        // The runtime must match this cw, so whatever another cw installed is
+        // replaced; running VMs keep the generation they started with.
+        let installed = runtime_install::install(&paths, &document, &fetched, true).await;
+        let cleanup = fetched.cleanup();
+        report_runtime_install(installed?);
+        return cleanup.context("the runtime is installed, but its download scratch was retained");
+    };
     let source = DirectoryBlobSource::new(&from);
     let document = source
         .document()
@@ -1770,12 +1793,13 @@ pub(crate) async fn setup_local_runtime(
             document.source_revision
         ),
     }
-    let config = native_runtime_config()?;
-    let paths = RuntimePaths {
-        artifact_root: config.artifact_root,
-        artifact_lock: config.artifact_lock,
-    };
-    match runtime_install::install(&paths, &document, &source, replace).await? {
+    report_runtime_install(runtime_install::install(&paths, &document, &source, replace).await?);
+    Ok(())
+}
+
+fn report_runtime_install(outcome: codewire_local_vmm::runtime_install::InstallOutcome) {
+    use codewire_local_vmm::runtime_install::InstallOutcome;
+    match outcome {
         InstallOutcome::Installed { generation } => {
             println!("Local VM runtime installed ({}).", &generation[..12]);
         }
@@ -1786,7 +1810,17 @@ pub(crate) async fn setup_local_runtime(
             );
         }
     }
-    Ok(())
+}
+
+/// Require the runtime this cw pins before a local VM starts (#2539).
+fn require_pinned_runtime() -> anyhow::Result<()> {
+    let config = native_runtime_config()?;
+    crate::local_runtime_pin::require_installed(
+        &codewire_local_vmm::runtime_install::RuntimePaths {
+            artifact_root: config.artifact_root,
+            artifact_lock: config.artifact_lock,
+        },
+    )
 }
 
 fn absolute_override(name: &str) -> anyhow::Result<Option<PathBuf>> {
