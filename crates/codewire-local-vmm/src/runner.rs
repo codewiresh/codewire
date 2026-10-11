@@ -5236,6 +5236,7 @@ pub enum RunnerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host_port::tests::{free_loopback_port, once_released};
     use std::fs;
     use std::io::{Seek, SeekFrom, Write};
     use std::net::SocketAddrV4;
@@ -6026,13 +6027,11 @@ mod tests {
                 outcome.await.unwrap()
             }
         };
-        let free = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let host_port = free.local_addr().unwrap().port();
-        drop(free);
+        let host_port = free_loopback_port();
         let binding = HostPortBinding::new(host_port, 47_321).unwrap();
 
         // Nothing was published at start; publish a port on the running VM.
-        send(reserve_host_ports(&[binding]).unwrap(), Vec::new())
+        send(once_released(|| reserve_host_ports(&[binding])), Vec::new())
             .await
             .unwrap();
         let mut client = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, host_port))
@@ -6066,11 +6065,12 @@ mod tests {
         admitted.read_exact(&mut received).unwrap();
         assert_eq!(&received, b"ping");
 
-        // Withdrawing closes the listener before the reply, so the port can
-        // be bound again at once; publishing it again works too.
+        // Withdrawing closes the listener before the reply, so nothing of ours
+        // holds the port and it can be bound again; publishing it again works
+        // too.
         send(Vec::new(), vec![host_port]).await.unwrap();
-        drop(bind_loopback_listener(host_port).unwrap());
-        send(reserve_host_ports(&[binding]).unwrap(), Vec::new())
+        drop(once_released(|| bind_loopback_listener(host_port)));
+        send(once_released(|| reserve_host_ports(&[binding])), Vec::new())
             .await
             .unwrap();
         assert!(!forwarder.is_finished());

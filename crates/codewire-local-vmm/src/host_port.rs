@@ -294,7 +294,7 @@ pub enum HostPortError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn key() -> [u8; HOST_PORT_CONTROL_KEY_LEN] {
@@ -323,12 +323,33 @@ mod tests {
         );
     }
 
-    fn free_loopback_port() -> u16 {
-        TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
+    /// A free loopback port below the Linux and macOS ephemeral ranges. A
+    /// concurrent test's bind(0) or connect() is never handed such a port, so
+    /// a test can close its own sockets on it and bind it again.
+    pub(crate) fn free_loopback_port() -> u16 {
+        (0..64)
+            .map(|_| 20_000 + rand::random::<u16>() % 12_000)
+            .find(|port| TcpListener::bind((Ipv4Addr::LOCALHOST, *port)).is_ok())
+            .expect("a free loopback port below the ephemeral range")
+    }
+
+    /// Bind a loopback port this test has just closed. Other tests in this
+    /// process fork children concurrently, and each child holds copies of our
+    /// descriptors until it execs, so the port can stay bound for a moment. A
+    /// port still held after two seconds fails the test.
+    pub(crate) fn once_released<T, E: std::fmt::Debug>(
+        mut bind: impl FnMut() -> Result<T, E>,
+    ) -> T {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match bind() {
+                Ok(value) => return value,
+                Err(error) if std::time::Instant::now() >= deadline => {
+                    panic!("loopback port was not released: {error:?}")
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
     }
 
     #[test]
@@ -338,7 +359,7 @@ mod tests {
         assert!(bind_loopback_listener(port).is_err());
         drop(wildcard);
 
-        let listener = bind_loopback_listener(port).unwrap();
+        let listener = once_released(|| bind_loopback_listener(port));
         assert_eq!(
             listener.local_addr().unwrap(),
             SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into()
@@ -352,7 +373,7 @@ mod tests {
     #[test]
     fn loopback_listener_rebinds_over_its_own_time_wait_connections() {
         let port = free_loopback_port();
-        let listener = bind_loopback_listener(port).unwrap();
+        let listener = once_released(|| bind_loopback_listener(port));
         let client = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
         let (accepted, _) = listener.accept().unwrap();
         drop(accepted);
@@ -360,7 +381,7 @@ mod tests {
         assert_eq!(std::io::Read::read(&mut &client, &mut byte).unwrap(), 0);
         drop(client);
         drop(listener);
-        let rebound = bind_loopback_listener(port).unwrap();
+        let rebound = once_released(|| bind_loopback_listener(port));
         assert_eq!(
             rebound.local_addr().unwrap(),
             SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into()
