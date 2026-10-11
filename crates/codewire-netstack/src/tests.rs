@@ -728,3 +728,90 @@ async fn loopback_multi_segment_stream() {
         "server must have received the whole payload across segments"
     );
 }
+
+/// A peer that sends a short request and closes its sending half before the
+/// server even accepts must still deliver every byte before EOF (#2540). This
+/// is the Mesh ingress shape: dial, write, FIN, then the bridge accepts.
+async fn short_request_then_fin(client_stack: &Netstack, port: u16, request: &[u8]) {
+    let mut client = client_stack
+        .connect(SocketAddr::new(IpAddr::V6(B_IP), port))
+        .await
+        .expect("client");
+    client.write_all(request).await.expect("client request");
+    client.shutdown().await.expect("client half-close");
+    // Keep the client open: closing it fully is not part of this exchange.
+    std::mem::forget(client);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_short_request_then_fin_reaches_the_server_before_eof() {
+    for limits in [None, Some(tight_limits())] {
+        let (client_stack, server_stack) = match limits {
+            Some(limits) => wired_pair_with_limits(limits, limits),
+            None => wired_pair(),
+        };
+        let mut listener = server_stack.bind(7400).await.expect("listener");
+        let rounds = if limits.is_some() { 3 } else { 64 };
+        for round in 0..rounds {
+            let request = format!("mesh request {round}").into_bytes();
+            short_request_then_fin(&client_stack, 7400, &request).await;
+            let mut server = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .expect("accept timed out")
+                .expect("accepted stream");
+            let mut received = Vec::new();
+            tokio::time::timeout(Duration::from_secs(5), server.read_to_end(&mut received))
+                .await
+                .expect("server did not observe the request and FIN")
+                .expect("server read through FIN");
+            assert_eq!(received, request, "round {round}");
+        }
+    }
+}
+
+/// Relay packets from `rx` to `tx`, delaying every other one so adjacent
+/// packets arrive swapped: a reordering path such as a DERP relay under load.
+fn reordering_link(mut rx: mpsc::Receiver<Vec<u8>>, tx: mpsc::Sender<Vec<u8>>) {
+    tokio::spawn(async move {
+        let index = Arc::new(AtomicUsize::new(0));
+        while let Some(packet) = rx.recv().await {
+            let tx = tx.clone();
+            let delay = if index.fetch_add(1, Ordering::Relaxed).is_multiple_of(2) {
+                Duration::from_millis(3)
+            } else {
+                Duration::ZERO
+            };
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let _ = tx.send(packet).await;
+            });
+        }
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_short_request_then_fin_survives_reordered_packets() {
+    let (a_out_tx, a_out_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    let (b_in_tx, b_in_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    let (b_out_tx, b_out_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    let (a_in_tx, a_in_rx) = mpsc::channel::<Vec<u8>>(PACKET_QUEUE);
+    reordering_link(a_out_rx, b_in_tx);
+    reordering_link(b_out_rx, a_in_tx);
+    let client_stack = Netstack::new(IpAddr::V6(A_IP), PREFIX, a_in_rx, a_out_tx);
+    let server_stack = Netstack::new(IpAddr::V6(B_IP), PREFIX, b_in_rx, b_out_tx);
+    let mut listener = server_stack.bind(7402).await.expect("listener");
+    for round in 0..32 {
+        let request = format!("reordered request {round}").into_bytes();
+        short_request_then_fin(&client_stack, 7402, &request).await;
+        let mut server = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("accept timed out")
+            .expect("accepted stream");
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), server.read_to_end(&mut received))
+            .await
+            .expect("server did not observe the request and FIN")
+            .expect("server read through FIN");
+        assert_eq!(received, request, "round {round}");
+    }
+}
