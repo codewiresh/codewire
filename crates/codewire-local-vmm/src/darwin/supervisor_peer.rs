@@ -15,13 +15,12 @@
 use std::os::fd::{AsRawFd as _, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
-use codewire_cw_release::store::Store;
 use tokio::net::UnixStream;
 
 use super::path::{SocketIdentity, current_uid};
-use super::process::{ProcessBirth, ProcessIdentity, WatchedProcess};
+use super::process::{ProcessIdentity, WatchedProcess};
+use crate::process_birth::{AdmissionError, ProcessBirth, admit_retained_version};
 use crate::supervisor_config::NativeRuntimeConfig;
 
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +31,15 @@ pub(crate) enum PeerError {
     Identity,
     #[error("retained native supervisor executable provenance is unavailable or changed")]
     Provenance,
+}
+
+impl From<AdmissionError> for PeerError {
+    fn from(error: AdmissionError) -> Self {
+        match error {
+            AdmissionError::Identity => Self::Identity,
+            AdmissionError::Provenance => Self::Provenance,
+        }
+    }
 }
 
 /// Opaque and shared: reconnects cannot replace its socket identity or peer.
@@ -65,15 +73,7 @@ impl SupervisorPeerPin {
                 } else {
                     let identity =
                         ProcessIdentity::capture(peer.pid()).map_err(|_| PeerError::Identity)?;
-                    // The digest is of the file the pin names only if the
-                    // file did not change while it was read.
-                    if !peer.is(&identity)
-                        || ProcessBirth::observe(peer.pid()).map_err(|_| PeerError::Identity)?
-                            != peer
-                    {
-                        return Err(PeerError::Identity);
-                    }
-                    admit_provenance(&identity)?;
+                    admit_retained_version(&peer, &identity)?;
                     requested
                         .with_supervisor_executable(peer.executable().to_owned())
                         .map_err(|_| PeerError::Identity)?
@@ -137,23 +137,6 @@ pub(crate) fn admit_known_process_stream(
         return Err(PeerError::Identity);
     }
     Ok(watched.into_exit_descriptor())
-}
-
-/// The peer's executable must be a version the managed store retains, with the
-/// digest the store recorded for it.
-fn admit_provenance(peer: &ProcessIdentity) -> Result<(), PeerError> {
-    let root = Store::locate(&peer.executable).ok_or(PeerError::Provenance)?;
-    let store = Store::open(&root, Duration::from_secs(1)).map_err(|_| PeerError::Provenance)?;
-    let record = store
-        .verify(&peer.executable_sha256)
-        .map_err(|_| PeerError::Provenance)?;
-    if store.version_executable(&record.sha256) != peer.executable
-        || record.sha256 != peer.executable_sha256
-        || record.size != peer.executable_file.size
-    {
-        return Err(PeerError::Provenance);
-    }
-    Ok(())
 }
 
 fn peer_pid(stream: &UnixStream) -> Result<u32, PeerError> {

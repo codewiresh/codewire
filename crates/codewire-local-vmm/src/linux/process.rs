@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use codewire_cw_release::sha256::Sha256;
@@ -14,19 +14,7 @@ pub use crate::supervisor_metadata::legacy::ProcessIdentity;
 
 impl ProcessIdentity {
     pub fn capture(pid: u32) -> Result<Self, RecoveryError> {
-        if pid == 0 || pid > i32::MAX as u32 {
-            return Err(RecoveryError::InvalidPid(pid));
-        }
-        let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
-            .map_err(RecoveryError::ReadProcess)?
-            .trim()
-            .to_owned();
-        if boot_id.is_empty() {
-            return Err(RecoveryError::MalformedProcess);
-        }
-        let stat =
-            fs::read_to_string(format!("/proc/{pid}/stat")).map_err(RecoveryError::ReadProcess)?;
-        let start_time_ticks = parse_start_time(&stat)?;
+        let (boot_id, start_time_ticks) = birth_of(pid)?;
         let executable =
             fs::read_link(format!("/proc/{pid}/exe")).map_err(RecoveryError::ReadProcess)?;
         if !executable.is_absolute()
@@ -243,6 +231,41 @@ fn validate_pidfd_target(pidfd: &OwnedFd, expected_pid: u32) -> Result<(), Recov
         return Err(RecoveryError::IdentityMismatch);
     }
     Ok(())
+}
+
+/// A live process's boot ID and start time in clock ticks: its birth.
+pub(crate) fn birth_of(pid: u32) -> Result<(String, u64), RecoveryError> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(RecoveryError::InvalidPid(pid));
+    }
+    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map_err(RecoveryError::ReadProcess)?
+        .trim()
+        .to_owned();
+    if boot_id.is_empty() {
+        return Err(RecoveryError::MalformedProcess);
+    }
+    let stat =
+        fs::read_to_string(format!("/proc/{pid}/stat")).map_err(RecoveryError::ReadProcess)?;
+    Ok((boot_id, parse_start_time(&stat)?))
+}
+
+/// The executable a live process runs: its canonical path, and the metadata of
+/// the running file, which that path must still name.
+pub(crate) fn executable_of(pid: u32) -> Result<(PathBuf, fs::Metadata), RecoveryError> {
+    let link = format!("/proc/{pid}/exe");
+    let executable = fs::read_link(&link).map_err(RecoveryError::ReadProcess)?;
+    if !executable.is_absolute() || fs::canonicalize(&executable).ok().as_ref() != Some(&executable)
+    {
+        return Err(RecoveryError::MalformedProcess);
+    }
+    // Only this kernel-owned proc link is followed: it names the running file.
+    let metadata = fs::metadata(&link).map_err(RecoveryError::ReadProcess)?;
+    let named = fs::symlink_metadata(&executable).map_err(RecoveryError::ReadProcess)?;
+    if FileIdentity::from_metadata(&named) != FileIdentity::from_metadata(&metadata) {
+        return Err(RecoveryError::IdentityMismatch);
+    }
+    Ok((executable, metadata))
 }
 
 fn parse_start_time(stat: &str) -> Result<u64, RecoveryError> {

@@ -91,46 +91,6 @@ fn current_process_observation_is_stable_and_native() {
     assert_ne!(*first.boot_session().as_bytes(), [0; 16]);
 }
 
-#[test]
-fn a_process_birth_matches_its_identity_without_reading_the_executable() {
-    let pid = std::process::id();
-    let birth = ProcessBirth::observe(pid).unwrap();
-    assert_eq!(birth, ProcessBirth::observe(pid).unwrap());
-    assert_eq!(birth.pid(), pid);
-    let identity = ProcessIdentity::capture(pid).unwrap();
-    assert!(birth.is(&identity));
-    // Another birth, or the same birth under another file, is not this one.
-    let mut other = identity.clone();
-    other.start_time_ticks += 1;
-    assert!(!birth.is(&other));
-    let mut moved = identity;
-    moved.executable_file.inode += 1;
-    assert!(!birth.is(&moved));
-    assert!(ProcessBirth::observe(0).is_err());
-}
-
-#[test]
-fn a_rewritten_executable_is_not_the_same_birth() {
-    use std::os::unix::fs::PermissionsExt as _;
-    // A same-user process can change the file and restore its mode, size and
-    // links; only its change time records that it happened.
-    let directory = tempfile::tempdir().unwrap();
-    let executable = directory.path().join("sleeper");
-    std::fs::copy("/bin/sleep", &executable).unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut child = Command::new(&executable).arg("30").spawn().unwrap();
-    let pid = child.id();
-    let birth = ProcessBirth::observe(pid).unwrap();
-    assert_eq!(birth, ProcessBirth::observe(pid).unwrap());
-    std::thread::sleep(Duration::from_millis(20));
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let after = ProcessBirth::observe(pid);
-    child.kill().unwrap();
-    child.wait().unwrap();
-    assert_ne!(after.unwrap(), birth);
-}
-
 fn child_command(phase: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command

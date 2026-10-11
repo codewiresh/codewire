@@ -10,7 +10,6 @@ use std::fs;
 use std::io::{self, Read as _};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::ffi::OsStringExt as _;
-use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::{Duration, Instant};
@@ -273,55 +272,19 @@ impl ProcessIdentity {
     }
 }
 
-/// A live process birth and the file its kernel-reported executable path
-/// names, without the file's digest. Observing it again proves the same
-/// process is still running from the same, unmodified file, and costs no read
-/// of the executable; [`ProcessIdentity::capture`] adds the digest where
-/// provenance needs it. The file's change time is part of it: any write,
-/// chmod or rename of the file advances it, and a user process cannot set
-/// it back.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProcessBirth {
-    birth: ProcessBirthObservation,
-    executable: PathBuf,
-    executable_file: FileIdentity,
-    executable_changed: (i64, i64),
+/// A live process's boot session and native start counter: its birth.
+pub(crate) fn birth_of(pid: u32) -> Result<(String, u64), RecoveryError> {
+    let birth = observe_pid(pid).map_err(RecoveryError::from_observation)?;
+    Ok((birth.boot_session.to_hyphenated(), birth.start_abstime))
 }
 
-impl ProcessBirth {
-    pub(crate) fn observe(pid: u32) -> Result<Self, RecoveryError> {
-        let birth = observe_pid(pid).map_err(RecoveryError::from_observation)?;
-        let executable = executable_path(pid)?;
-        let metadata = fs::metadata(&executable).map_err(RecoveryError::ReadProcess)?;
-        let executable_file = FileIdentity::from_metadata(&metadata);
-        let executable_changed = (metadata.ctime(), metadata.ctime_nsec());
-        if observe_pid(pid).map_err(RecoveryError::from_observation)? != birth {
-            return Err(RecoveryError::IdentityMismatch);
-        }
-        Ok(Self {
-            birth,
-            executable,
-            executable_file,
-            executable_changed,
-        })
-    }
-
-    pub(crate) fn pid(&self) -> u32 {
-        self.birth.pid
-    }
-
-    pub(crate) fn executable(&self) -> &Path {
-        &self.executable
-    }
-
-    /// Whether `identity` records this same birth and executable file.
-    pub(crate) fn is(&self, identity: &ProcessIdentity) -> bool {
-        identity.pid == self.birth.pid
-            && identity.boot_id == self.birth.boot_session.to_hyphenated()
-            && identity.start_time_ticks == self.birth.start_abstime
-            && identity.executable == self.executable
-            && identity.executable_file == self.executable_file
-    }
+/// The executable a live process runs, as the kernel reports its path, and
+/// the metadata of the file that path names. Darwin offers no handle to the
+/// running file.
+pub(crate) fn executable_of(pid: u32) -> Result<(PathBuf, fs::Metadata), RecoveryError> {
+    let executable = executable_path(pid)?;
+    let metadata = fs::metadata(&executable).map_err(RecoveryError::ReadProcess)?;
+    Ok((executable, metadata))
 }
 
 fn executable_path(pid: u32) -> Result<PathBuf, RecoveryError> {

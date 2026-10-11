@@ -47,6 +47,8 @@ pub mod network_session;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod network_worker;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod process_birth;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod supervisor_client;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod supervisor_config;
