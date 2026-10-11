@@ -3,19 +3,41 @@
 # supply the exact base image built from the same source tree.
 ARG BASE_IMAGE_REF
 
-# Checksum-pinned compiler-cache tools; neither archive enters the runtime.
+# The developer Rust toolchain shipped in the workspace, for the image's own
+# platform. The workspace copies only its Cargo and Rustup homes.
+FROM rust:1.93.0-slim-bookworm@sha256:776861219cd851131c1cec3bbd7cbeb16b99a794048097eb69ad9682a8ed0d57 AS cw-toolchain
+RUN rustup component add --toolchain 1.93.0 rustfmt clippy
+
+# Checksum-pinned compiler tools, selected for the build platform. None of
+# these archives enters the runtime.
 FROM scratch AS sccache-amd64
 ADD --checksum=sha256:67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006 \
   https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz /sccache.tar.gz
 FROM scratch AS sccache-arm64
 ADD --checksum=sha256:821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae84193c1c77 \
   https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-aarch64-unknown-linux-musl.tar.gz /sccache.tar.gz
-FROM sccache-${TARGETARCH} AS sccache-archive
-
-FROM rust:1.93.0-slim-bookworm@sha256:776861219cd851131c1cec3bbd7cbeb16b99a794048097eb69ad9682a8ed0d57 AS cw-toolchain
+FROM scratch AS protoc-amd64
 ADD --checksum=sha256:6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 \
-  https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip \
-  /tmp/protoc.zip
+  https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip /protoc.zip
+FROM scratch AS protoc-arm64
+ADD --checksum=sha256:01bf9d08808c7f96678b63f4bd8efa559bb4f83d5a7a270d5edaf507f9d5d9cf \
+  https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-aarch_64.zip /protoc.zip
+FROM scratch AS zig-amd64
+ADD --checksum=sha256:02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239 \
+  https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz /zig.tar.xz
+FROM scratch AS zig-arm64
+ADD --checksum=sha256:958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f \
+  https://ziglang.org/download/0.15.2/zig-aarch64-linux-0.15.2.tar.xz /zig.tar.xz
+FROM sccache-${BUILDARCH} AS build-sccache
+FROM protoc-${BUILDARCH} AS build-protoc
+FROM zig-${BUILDARCH} AS build-zig
+
+# The arm64 cw is cross-compiled natively on the build platform, never under
+# emulation, to the same static musl form as the admitted amd64 asset.
+FROM --platform=$BUILDPLATFORM rust:1.93.0-bookworm@sha256:d0a4aa3ca2e1088ac0c81690914a0d810f2eee188197034edf366ed010a2b382 AS cw-cross-compiler
+COPY --from=build-protoc /protoc.zip /tmp/protoc.zip
+COPY --from=build-sccache /sccache.tar.gz /tmp/sccache.tar.gz
+COPY --from=build-zig /zig.tar.xz /tmp/zig.tar.xz
 COPY images/workspace/debian.sources /etc/apt/sources.list.d/debian.sources
 COPY images/base/apt-transport.conf /etc/apt/apt.conf.d/80-codewire-transport
 COPY --chmod=0755 images/base/apt-get-with-retry /usr/local/sbin/apt-get-with-retry
@@ -23,19 +45,26 @@ RUN rm -f /etc/apt/sources.list && \
     apt-get-with-retry update && \
     grep -RqsF 'snapshot.debian.org/archive/debian/20251208T000000Z/' /etc/apt/sources.list.d && \
     ! grep -RqsE '(deb|security)\.debian\.org' /etc/apt/sources.list /etc/apt/sources.list.d && \
-    apt-get-with-retry install -y --no-install-recommends unzip && \
+    apt-get-with-retry install -y --no-install-recommends unzip xz-utils && \
     rm -rf /var/lib/apt/lists/* && \
     unzip -q /tmp/protoc.zip -d /opt/protoc && \
     rm /tmp/protoc.zip && \
-    test "$(/opt/protoc/bin/protoc --version)" = 'libprotoc 35.1'
-ENV PROTOC=/opt/protoc/bin/protoc
-RUN rustup component add --toolchain 1.93.0 rustfmt clippy
-COPY --from=sccache-archive /sccache.tar.gz /tmp/sccache.tar.gz
-RUN mkdir /tmp/sccache && \
+    test "$(/opt/protoc/bin/protoc --version)" = 'libprotoc 35.1' && \
+    mkdir /tmp/sccache && \
     tar -xzf /tmp/sccache.tar.gz --strip-components=1 -C /tmp/sccache && \
     install -m 0755 /tmp/sccache/sccache /usr/local/bin/sccache && \
     rm -rf /tmp/sccache /tmp/sccache.tar.gz && \
-    test "$(sccache --version)" = 'sccache 0.17.0'
+    test "$(sccache --version)" = 'sccache 0.17.0' && \
+    mkdir /opt/zig && \
+    tar -xJf /tmp/zig.tar.xz --strip-components=1 -C /opt/zig && \
+    rm /tmp/zig.tar.xz && \
+    test "$(/opt/zig/zig version)" = '0.15.2'
+ENV PROTOC=/opt/protoc/bin/protoc
+ENV PATH="/opt/zig:${PATH}"
+RUN test "$(rustc --version)" = 'rustc 1.93.0 (254b59607 2026-01-19)' && \
+    rustup target add --toolchain 1.93.0 aarch64-unknown-linux-musl && \
+    cargo install --locked cargo-zigbuild --version 0.23.0 && \
+    test "$(cargo-zigbuild --version)" = 'cargo-zigbuild 0.23.0'
 COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-rust-build
 
 FROM scratch AS codewire-verified-cw
@@ -44,9 +73,9 @@ FROM scratch AS cw-builder-amd64
 COPY --from=codewire-verified-cw --chown=0:0 --chmod=0555 /cw /out/cw
 COPY --from=codewire-verified-cw --chown=0:0 --chmod=0444 /provenance.json /out/provenance/provenance.json
 
-# Keep the native ARM compiler path and the developer toolchain. Only amd64
-# receives the separately admitted static startup asset and its provenance.
-FROM cw-toolchain AS cw-builder-arm64
+# Only amd64 receives the separately admitted static startup asset and its
+# provenance. arm64 cross-compiles the same static musl target from source.
+FROM cw-cross-compiler AS cw-builder-arm64
 ARG CODEWIRE_RUST_PROFILE=release
 ARG CODEWIRE_SCCACHE_MODE=disabled
 ARG SCCACHE_BUCKET
@@ -61,10 +90,10 @@ RUN --mount=type=bind,target=/src,readonly \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,id=codewire-workspace-sccache-v1,target=/var/cache/sccache,sharing=shared \
     --mount=type=secret,id=aws_shared_credentials \
-    SCCACHE_BASEDIRS=/src codewire-rust-build cargo build --manifest-path /src/Cargo.toml --locked --profile "$CODEWIRE_RUST_PROFILE" \
-      -p codewire-cli-bin --bin cw --target-dir /tmp/cargo-target && \
+    SCCACHE_BASEDIRS=/src codewire-rust-build cargo zigbuild --manifest-path /src/Cargo.toml --locked --profile "$CODEWIRE_RUST_PROFILE" \
+      --target aarch64-unknown-linux-musl -p codewire-cli-bin --bin cw --target-dir /tmp/cargo-target && \
     mkdir -p /out/provenance && \
-    install -D -m 0755 "/tmp/cargo-target/$CODEWIRE_RUST_PROFILE/cw" /out/cw && \
+    install -D -m 0755 "/tmp/cargo-target/aarch64-unknown-linux-musl/$CODEWIRE_RUST_PROFILE/cw" /out/cw && \
     rm -rf /tmp/cargo-target
 
 FROM cw-builder-${TARGETARCH} AS cw-builder
@@ -73,6 +102,8 @@ FROM cw-builder-${TARGETARCH} AS cw-builder
 # signed, version-pinned packages without executing maintainer scripts: this
 # neither enables a system SSH service nor creates image-wide host keys.
 FROM ${BASE_IMAGE_REF} AS stock-ssh-fixture
+# OCI image configs do not carry the base SHELL; never inherit it.
+SHELL ["/bin/bash", "-c"]
 USER root
 ARG TARGETARCH
 RUN set -euo pipefail; \
@@ -97,6 +128,8 @@ RUN set -euo pipefail; \
     chown -R root:root /out; chmod -R go-w /out
 
 FROM ${BASE_IMAGE_REF} AS workspace-foundation
+# OCI image configs do not carry the base SHELL; never inherit it.
+SHELL ["/bin/bash", "-c"]
 USER root
 ARG TARGETARCH
 ARG NODE_VERSION=22.23.2

@@ -20,8 +20,7 @@ readonly TOKEN='synthetic-workspace-pin-bot-token-0123456789'
 printf '%s' "$TOKEN" >"$work/bot-token"
 chmod 0600 "$work/bot-token"
 OLD="sha256:$(printf '1%.0s' {1..64})"
-NEW="sha256:$(printf '2%.0s' {1..64})"
-readonly OLD NEW
+readonly OLD
 
 # A fixture repository with the real tool, script and pin layout.
 repo="$work/repo"
@@ -53,7 +52,7 @@ root = pathlib.Path(sys.argv[1])
 spec = importlib.util.spec_from_file_location("pin", root / "scripts/ci/images/workspace-image-pin.py")
 tool = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tool)
-pin = tool.validate({"digest": sys.argv[2], "source_sha": sys.argv[3],
+pin = tool.validate({"digest": sys.argv[2], "platforms": ["linux/amd64"], "source_sha": sys.argv[3],
                      "inputs_sha256": tool.inputs_sha256(root, sys.argv[3]),
                      "agents": dict(sorted(tool.agent_versions(root, sys.argv[3]).items())),
                      "previous_digests": []})
@@ -96,6 +95,32 @@ esac
 MOCK
 chmod +x "$work/bin/curl"
 
+# The published index, as `docker buildx imagetools inspect --raw` prints it:
+# two images and BuildKit's attestation manifest.
+platform_entry() {
+  printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:%s","size":1,"platform":{"os":"%s","architecture":"%s"}}' \
+    "$(printf "${1}%.0s" {1..64})" "$2" "$3"
+}
+attestation='{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:'"$(printf '9%.0s' {1..64})"'","size":1,"platform":{"os":"unknown","architecture":"unknown"},"annotations":{"vnd.docker.reference.digest":"sha256:'"$(printf 'a%.0s' {1..64})"'","vnd.docker.reference.type":"attestation-manifest"}}'
+index_with() {
+  local IFS=,
+  printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[%s]}' "$*"
+}
+TWO_PLATFORMS="$(index_with "$(platform_entry a linux amd64)" "$(platform_entry b linux arm64)" "$attestation")"
+digest_of() { printf 'sha256:%s' "$(printf '%s' "$1" | sha256sum | cut -d' ' -f1)"; }
+NEW="$(digest_of "$TWO_PLATFORMS")"
+readonly NEW
+# The pinned Skopeo runner prints the raw index bytes the registry serves.
+cat >"$work/bin/skopeo-runner" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%q ' "$@" >>"${FAKE_SKOPEO_CALLS:?}"
+printf '\n' >>"$FAKE_SKOPEO_CALLS"
+[[ "$1 $2 $3" == 'inspect --raw --no-creds' ]] || exit 92
+printf '%s' "${FAKE_INDEX:?}"
+MOCK
+chmod +x "$work/bin/skopeo-runner"
+
 # propose REF [NAME=VALUE...]: run the proposal for REF with extra environment.
 propose() {
   local ref="$1"
@@ -105,7 +130,9 @@ propose() {
     env -u GITEA_TOKEN PATH="$work/bin:$PATH" WORKSPACE_PIN_BOT_TOKEN_FILE="$work/bot-token" \
       GITHUB_SHA="$published" \
       GITHUB_REPOSITORY=codewire/codewire GITHUB_SERVER_URL=https://forgejo.invalid \
-      RUNNER_TEMP="$work" FAKE_CURL_CALLS="$work/curl-calls" \
+      RUNNER_TEMP="$work" FAKE_CURL_CALLS="$work/curl-calls" FAKE_SKOPEO_CALLS="$work/skopeo-calls" \
+      SKOPEO_RUNNER="$work/bin/skopeo-runner" \
+      FAKE_INDEX="$TWO_PLATFORMS" \
       FAKE_CREATED_BODY="$work/created-body.json" "$@" \
       scripts/ci/images/propose-workspace-image-pin.sh "$ref"
   )
@@ -123,6 +150,10 @@ grep -Fq "pub const DIGEST: &str = \"$NEW\";" <<<"$proposed" || fail 'the propos
 grep -Fq "pub const SOURCE_SHA: &str = \"$published\";" <<<"$proposed" || fail 'the proposal does not record its source'
 grep -Fq "    \"$OLD\"," <<<"$proposed" || fail 'the replaced digest is not kept as previous'
 grep -Fq '("codex", "2.0.0")' <<<"$proposed" || fail 'the proposal does not record the published agent versions'
+grep -Fq 'pub const PLATFORMS: &[&str] = &["linux/amd64", "linux/arm64"];' <<<"$proposed" ||
+  fail 'the proposal does not record both published platforms'
+grep -Fq "inspect --raw --no-creds docker://ghcr.io/codewiresh/workspace@$NEW" "$work/skopeo-calls" ||
+  fail 'the proposal did not read the published index anonymously from the public mirror'
 jq -e '.head == "automation/workspace-image-pin" and .base == "main"' "$work/created-body.json" >/dev/null ||
   fail 'the pull request does not target main from the automation branch'
 jq -e '(.body | contains("workspace-pin bot opened this pull request")) and
@@ -187,6 +218,35 @@ for override in GITEA_TOKEN="$TOKEN" WORKSPACE_PIN_BOT_TOKEN_FILE="$work/absent"
   if grep -qF "$TOKEN" "$work/credential.out"; then
     fail 'a refused credential was printed'
   fi
+  pass
+done
+
+# An image that is not one index serving both platforms is refused before
+# anything is pushed or opened.
+before="$(git -C "$origin" rev-parse automation/workspace-image-pin)"
+current="$(git -C "$origin" rev-parse main)"
+for case in amd64-only plain-manifest unexpected-platform wrong-bytes; do
+  case "$case" in
+    amd64-only) index="$(index_with "$(platform_entry a linux amd64)" "$attestation")" ;;
+    plain-manifest) index='{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}' ;;
+    unexpected-platform) index="$(index_with "$(platform_entry a linux amd64)" "$(platform_entry b linux arm64)" \
+      "$(platform_entry c linux s390x)")" ;;
+    wrong-bytes) index="$TWO_PLATFORMS " ;;
+  esac
+  published_digest="$(digest_of "$index")"
+  # Bytes that are not what the published digest names.
+  [[ "$case" != wrong-bytes ]] ||
+    published_digest="$(digest_of "$(index_with "$(platform_entry c linux amd64)" "$(platform_entry d linux arm64)")")"
+  calls_before="$(wc -l <"$work/curl-calls")"
+  if propose "registry.example.invalid/codewire/workspace@$published_digest" FAKE_INDEX="$index" \
+      GITHUB_SHA="$current" >"$work/platforms.out" 2>&1; then
+    fail "an image that is not a two-platform index was proposed: $case"
+  fi
+  grep -Eq 'not linux/amd64 and linux/arm64|not a valid image index|does not hash to the published digest' "$work/platforms.out" ||
+    fail "the $case refusal does not say why: $(cat "$work/platforms.out")"
+  [[ "$(wc -l <"$work/curl-calls")" -eq "$calls_before" ]] || fail "$case reached the API"
+  [[ "$(git -C "$origin" rev-parse automation/workspace-image-pin)" == "$before" ]] ||
+    fail "$case pushed the automation branch"
   pass
 done
 

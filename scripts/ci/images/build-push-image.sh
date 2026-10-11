@@ -126,6 +126,25 @@ if [ -n "$base_image_ref" ]; then
   fi
 fi
 
+# The support pair publishes one index for every supported architecture, so a
+# native environment on either host pulls the same digest. The workspace
+# cross-compiles its arm64 cw on the build platform; BuildKit's bundled
+# emulator runs only the arm64 package installs, so runners need no binfmt
+# registration. Historical release recipes compiled that cw under emulation
+# with the x86-64 protoc and cannot build arm64; they keep their native platform.
+readonly SUPPORT_IMAGE_PLATFORMS='linux/amd64,linux/arm64'
+image_platforms=''
+case "$image_name" in
+  base|workspace)
+    workspace_recipe="$source_dir/images/workspace/Dockerfile"
+    [ "$image_name" != workspace ] || workspace_recipe="$dockerfile"
+    if grep -Fqx 'FROM cw-cross-compiler AS cw-builder-arm64' "$workspace_recipe" 2>/dev/null; then
+      image_platforms="$SUPPORT_IMAGE_PLATFORMS"
+    fi
+    ;;
+esac
+readonly image_platforms
+
 tags_output="$(
   scripts/ci/images/compute-image-tags.sh \
     "$REGISTRY_REPOSITORY_PREFIX" "$image_name" "$source_sha" "$release_tag" \
@@ -399,6 +418,34 @@ ensure_immutable_tag() {
   fi
 }
 
+# A single-platform image exposes one attestation. A multi-platform index
+# exposes a map keyed by platform: every requested platform, and only those,
+# must carry its own valid attestation.
+attestation_format() {
+  local field="$1" member="$2"
+  if [ -n "$image_platforms" ]; then
+    printf '{{json .%s}}' "$field"
+  else
+    printf '{{json .%s.%s}}' "$field" "$member"
+  fi
+}
+
+attestation_selection() {
+  local member="$1" validator="$2"
+  if [ -n "$image_platforms" ]; then
+    # shellcheck disable=SC2016 # $platforms is a jq variable.
+    printf 'type == "object" and keys == $platforms and all(.[]; .%s | %s)' \
+      "$member" "$validator"
+  else
+    printf '%s' "$validator"
+  fi
+}
+
+expected_platforms_json() {
+  jq -cn --arg platforms "$image_platforms" \
+    'if $platforms == "" then [] else $platforms | split(",") | sort end'
+}
+
 verify_build_provenance() {
   local reference="${canonical_repository}@${source_digest}"
   local provenance_output provenance_error attempt
@@ -406,26 +453,29 @@ verify_build_provenance() {
     provenance_output="$(mktemp "$work/provenance-output.XXXXXX")"
     provenance_error="$(mktemp "$work/provenance-error.XXXXXX")"
     if DOCKER_CONFIG="$docker_config" docker buildx imagetools inspect \
-      --format '{{json .Provenance.SLSA}}' "$reference" \
+      --format "$(attestation_format Provenance SLSA)" "$reference" \
       >"$provenance_output" 2>"$provenance_error"; then
       if jq -e \
         --arg builder "$provenance_builder_id" \
         --arg revision "$source_sha" \
-        --arg source "$PROVENANCE_SOURCE_URL" '
-          (.predicate // .) as $predicate
-          | (if has("predicate") then
-               ._type == "https://in-toto.io/Statement/v1"
-               and .predicateType == "https://slsa.dev/provenance/v1"
-             else true
-             end)
-          and ($predicate | type == "object")
-          and $predicate.buildDefinition.buildType
-            == "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md"
-          and $predicate.runDetails.builder.id == $builder
-          and $predicate.runDetails.metadata.buildkit_metadata.vcs.revision == $revision
-          and $predicate.runDetails.metadata.buildkit_metadata.vcs.source == $source
-          and ([($predicate.buildDefinition.internalParameters // {}) | keys[]
-            | select(startswith("github_"))] | length == 0)
+        --arg source "$PROVENANCE_SOURCE_URL" \
+        --argjson platforms "$(expected_platforms_json)" '
+          def valid_slsa:
+            (.predicate // .) as $predicate
+            | (if has("predicate") then
+                 ._type == "https://in-toto.io/Statement/v1"
+                 and .predicateType == "https://slsa.dev/provenance/v1"
+               else true
+               end)
+            and ($predicate | type == "object")
+            and $predicate.buildDefinition.buildType
+              == "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md"
+            and $predicate.runDetails.builder.id == $builder
+            and $predicate.runDetails.metadata.buildkit_metadata.vcs.revision == $revision
+            and $predicate.runDetails.metadata.buildkit_metadata.vcs.source == $source
+            and ([($predicate.buildDefinition.internalParameters // {}) | keys[]
+              | select(startswith("github_"))] | length == 0);
+          '"$(attestation_selection SLSA valid_slsa)"'
         ' "$provenance_output" >/dev/null; then
         return 0
       fi
@@ -453,12 +503,14 @@ verify_build_sbom() {
     sbom_output="$(mktemp "$work/sbom-output.XXXXXX")"
     sbom_error="$(mktemp "$work/sbom-error.XXXXXX")"
     if DOCKER_CONFIG="$docker_config" docker buildx imagetools inspect \
-      --format '{{json .SBOM.SPDX}}' "$reference" \
+      --format "$(attestation_format SBOM SPDX)" "$reference" \
       >"$sbom_output" 2>"$sbom_error"; then
-      if jq -e '
-        .spdxVersion == "SPDX-2.3"
-        and (.documentNamespace | type == "string" and length > 0)
-        and (.packages | type == "array" and length > 0)
+      if jq -e --argjson platforms "$(expected_platforms_json)" '
+        def valid_spdx:
+          .spdxVersion == "SPDX-2.3"
+          and (.documentNamespace | type == "string" and length > 0)
+          and (.packages | type == "array" and length > 0);
+        '"$(attestation_selection SPDX valid_spdx)"'
       ' "$sbom_output" >/dev/null; then
         return 0
       fi
@@ -489,6 +541,10 @@ label_args=(
 build_args=()
 if [ -n "$base_image_ref" ]; then
   build_args+=("--build-arg" "BASE_IMAGE_REF=$base_image_ref")
+fi
+platform_args=()
+if [ -n "$image_platforms" ]; then
+  platform_args=(--platform "$image_platforms")
 fi
 if [ "$image_name" = workspace ]; then
   # Every actual build refreshes moving tool channels. Historical release
@@ -679,7 +735,7 @@ else
     image_command=(docker buildx build --builder "$buildx_builder" --push
       --provenance="$provenance" \
       --sbom="generator=$SBOM_GENERATOR_IMAGE" \
-      --metadata-file "$build_metadata" "${build_args[@]}" \
+      --metadata-file "$build_metadata" "${platform_args[@]}" "${build_args[@]}" \
       -f "$dockerfile" --tag "$source_tag" "${label_args[@]}" "$context")
     if [ "$image_name:$dockerfile_from_context" = workspace:images/workspace/Dockerfile ]; then
       cw_selected_source_dir="$(cd "$source_dir" && pwd -P)"

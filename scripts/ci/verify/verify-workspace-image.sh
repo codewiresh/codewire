@@ -276,6 +276,29 @@ workspace_cache_build workspace "$source_tree" "$architecture" "$build_log_root/
   "$ROOT"
 chmod 0400 "$workspace_archive"
 
+# The published arm64 leg cross-compiles cw on the build platform. Build only
+# that stage here, without emulation, so a cross-compile break fails before
+# protected publication. The CI profile skips release LTO. Measurements keep
+# their unchanged build set.
+if [[ "$architecture" == amd64 && -z "$workspace_measurement_case" ]]; then
+  # The cw stage never consumes the base image, but a frontend may resolve
+  # every stage's base. Name the base recipe's own pinned multi-arch foundation.
+  base_foundation="$(sed -n 's/^FROM \(ubuntu:noble@sha256:[0-9a-f]\{64\}\)$/\1/p' "$ROOT/images/base/Dockerfile")"
+  [[ "$base_foundation" =~ ^ubuntu:noble@sha256:[0-9a-f]{64}$ ]] || {
+    echo 'workspace image verification: base recipe foundation is not one exact digest' >&2
+    exit 1
+  }
+  workspace_cache_build cw-arm64 "$source_tree" arm64 "$build_log_root/arm64-cw-build.log" \
+    --target cw-builder-arm64 \
+    --provenance=false --sbom=false \
+    --output type=cacheonly \
+    "${compiler_args[@]}" \
+    --build-arg CODEWIRE_RUST_PROFILE=ci \
+    --build-arg "BASE_IMAGE_REF=$base_foundation" \
+    --file "$ROOT/images/workspace/Dockerfile" \
+    "$ROOT"
+fi
+
 # Loaded runtime bytes do not depend on BuildKit. Remove its provider file and
 # state before any runtime inspection or potentially slow agent command.
 if [[ -n "$report_dir" ]]; then

@@ -2,26 +2,29 @@
 // the post-publish proposal rewrites this file and policy refuses other edits.
 
 /// Content digest of the published workspace image.
-pub const DIGEST: &str = "sha256:84902c621e8cebd99618ac9049d669aacdcef1fcec914dd53608e1a3ce1ea959";
+pub const DIGEST: &str = "sha256:16ad1207d9598fb8c3a840e0c5f9c6b78c71b7417746e5bb60bfc3df742c3419";
 /// The image at the Harbor repository every deployment pulls.
-pub const HARBOR_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:84902c621e8cebd99618ac9049d669aacdcef1fcec914dd53608e1a3ce1ea959";
+pub const HARBOR_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:16ad1207d9598fb8c3a840e0c5f9c6b78c71b7417746e5bb60bfc3df742c3419";
 /// The same digest at the public GHCR mirror, pulled anonymously by local
 /// environments.
-pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:84902c621e8cebd99618ac9049d669aacdcef1fcec914dd53608e1a3ce1ea959";
+pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:16ad1207d9598fb8c3a840e0c5f9c6b78c71b7417746e5bb60bfc3df742c3419";
+/// Platforms the published image index serves.
+pub const PLATFORMS: &[&str] = &["linux/amd64"];
 /// Commit the image was built from.
-pub const SOURCE_SHA: &str = "e8a4bac2cc8703bbc7797401d7d1a2c434618ecd";
+pub const SOURCE_SHA: &str = "784f0e23f0666feff3c154e17f7be4a620866422";
 /// Identity of the image definition at `SOURCE_SHA`; see the generator.
-pub const INPUTS_SHA256: &str = "51b8a0069d638511ffc0f7e4396cf491182ec788264968367bfb252011e1afc7";
+pub const INPUTS_SHA256: &str = "c4a5fcd762b3e4a49db06a78fb8c7a55dd4cc5ba5b87289c2097ef638a741281";
 /// Agent CLI versions the image definition at `SOURCE_SHA` installs.
 pub const AGENT_VERSIONS: &[(&str, &str)] = &[
-    ("claude", "2.1.238"),
-    ("codex", "0.157.0"),
-    ("gemini", "0.56.0"),
-    ("kimi", "0.38.0"),
-    ("pi", "0.84.2"),
+    ("claude", "2.1.288"),
+    ("codex", "0.160.0"),
+    ("gemini", "0.62.0"),
+    ("kimi", "2.1.1"),
+    ("pi", "1.0.0"),
 ];
 /// Earlier published digests, newest first, that older clients may send.
 pub const PREVIOUS_DIGESTS: &[&str] = &[
+    "sha256:84902c621e8cebd99618ac9049d669aacdcef1fcec914dd53608e1a3ce1ea959",
     "sha256:ad1f2db5ff86c616ea7fb7b8c3f196b271a0bc5b75a636f4b4ffd77fb1ee2313",
     "sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff",
 ];

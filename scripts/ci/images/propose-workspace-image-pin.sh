@@ -79,8 +79,22 @@ if [[ "$(pin show --commit "$main_sha" digest)" == "$digest" ]]; then
   exit 0
 fi
 
+# The published image must be one index serving linux/amd64 (Dev and Production
+# Sandboxes) and linux/arm64 (local VMs on Apple silicon). This job runs only
+# after the public GHCR mirror succeeded, so the index is read there with the
+# pinned Skopeo runner and no credentials, and must hash to the digest.
+index="$work/index.json"
+skopeo_runner="${SKOPEO_RUNNER:-$ROOT/scripts/ci/images/run-skopeo-container.sh}"
+"$skopeo_runner" inspect --raw --no-creds "docker://ghcr.io/codewiresh/workspace@${digest}" >"$index" ||
+  die 'cannot read the published image index from the public mirror'
+[[ "sha256:$(sha256sum "$index" | cut -d' ' -f1)" == "$digest" ]] ||
+  die 'the image index read from the public mirror does not hash to the published digest'
+platforms="$(pin index-platforms <"$index")" || die 'the published image is not a valid image index'
+[[ "$platforms" == 'linux/amd64,linux/arm64' ]] ||
+  die "the published image serves ${platforms:-no image platform}, not linux/amd64 and linux/arm64"
+
 git switch -q --force-create "$BRANCH" "$main_sha"
-pin render --digest "$digest" --source-sha "$GITHUB_SHA"
+pin render --digest "$digest" --source-sha "$GITHUB_SHA" --platforms "$platforms"
 pin check
 [[ "$(git status --porcelain)" == " M $PIN" ]] || die 'the proposal changed more than the pin'
 git add "$PIN"
