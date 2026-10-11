@@ -16,8 +16,9 @@ use crate::udp_relay;
 
 use super::disco_transport::{handle_disco_packet, send_disco_actions};
 use super::discovery::{
-    apply_discovered_endpoint, apply_peer_update, refresh_advertised_endpoints,
-    retry_unverified_direct_candidates, send_stun_refresh, take_stun_response,
+    apply_discovered_endpoint, apply_peer_update, maintain_direct_paths,
+    refresh_advertised_endpoints, retry_unverified_direct_candidates, send_stun_refresh,
+    take_stun_response,
 };
 use super::peer_relay::{
     apply_peer_relay_request, handle_relay_packet, retry_unverified_peer_relay_negotiation,
@@ -194,6 +195,15 @@ async fn run_direct_transport(
                 }
                 send_disco_actions(&shared, &socket, &fallback_tx, actions).await;
 
+                let actions = maintain_direct_paths(&shared, now);
+                if !actions.is_empty() {
+                    tracing::debug!(
+                        action_count = actions.len(),
+                        "rust tailnet keeping direct UDP paths alive"
+                    );
+                }
+                send_disco_actions(&shared, &socket, &fallback_tx, actions).await;
+
                 let actions = retry_unverified_peer_relay_negotiation(&shared, now);
                 if !actions.is_empty() {
                     tracing::debug!(
@@ -296,7 +306,7 @@ async fn send_wg_datagram(
     fallback_tx: &mpsc::UnboundedSender<WgDatagram>,
     dg: WgDatagram,
 ) {
-    let sent = match active_path_for_peer(shared, dg.peer.as_bytes()) {
+    let sent = match active_path_for_peer(shared, dg.peer.as_bytes(), Instant::now()) {
         Some(ActivePeerPath::Direct(endpoint)) => match socket.send_to(&dg.data, endpoint).await {
             Ok(_) => {
                 shared.stats.direct_wg_sent.fetch_add(1, Ordering::Relaxed);
