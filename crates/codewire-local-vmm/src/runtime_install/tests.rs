@@ -410,13 +410,21 @@ async fn the_installed_runtime_is_compared_with_a_document() {
 #[tokio::test]
 async fn a_replaced_runtime_is_kept_and_a_rollback_needs_no_download() {
     let f = fixture();
-    let first = release(&f.source, [b"vmm-1", b"kernel-1", b"initramfs-1"]);
+    let first = release_with(
+        &f.source,
+        [b"vmm-1", b"kernel-1", b"initramfs-1"],
+        Some((b"cw-lock-1".as_slice(), b"cw-pack-1".as_slice())),
+    );
     let source = DirectoryBlobSource::new(&f.source);
     install_with(&f.paths, &first, &source, false, admit_by_digest)
         .await
         .unwrap();
     let other = tempfile::tempdir().unwrap();
-    let second = release(other.path(), [b"vmm-2", b"kernel-2", b"initramfs-1"]);
+    let second = release_with(
+        other.path(),
+        [b"vmm-2", b"kernel-2", b"initramfs-1"],
+        Some((b"cw-lock-2".as_slice(), b"cw-pack-2".as_slice())),
+    );
     let second_source = DirectoryBlobSource::new(other.path());
     install_with(&f.paths, &second, &second_source, true, admit_by_digest)
         .await
@@ -430,6 +438,8 @@ async fn a_replaced_runtime_is_kept_and_a_rollback_needs_no_download() {
         fs::read(parent.join(PREVIOUS_ROOT).join("vmm")).unwrap(),
         b"vmm-1"
     );
+    let previous_pack = parent.join(PREVIOUS_CW_RUNTIME).join(CW_RUNTIME_PACK);
+    assert_eq!(fs::read(&previous_pack).unwrap(), b"cw-pack-1");
 
     // Rolling back reinstalls the previous runtime from local files alone,
     // and the replaced one becomes the previous runtime in turn.
@@ -448,6 +458,7 @@ async fn a_replaced_runtime_is_kept_and_a_rollback_needs_no_download() {
         ArtifactLock::read(&parent.join(PREVIOUS_LOCK)).unwrap(),
         host_lock(&second).unwrap()
     );
+    assert_eq!(fs::read(&previous_pack).unwrap(), b"cw-pack-2");
 
     // Repairing a damaged current runtime keeps the real previous one.
     let installed = f.paths.artifact_root.join("kernel");
@@ -459,6 +470,49 @@ async fn a_replaced_runtime_is_kept_and_a_rollback_needs_no_download() {
     assert_eq!(
         ArtifactLock::read(&parent.join(PREVIOUS_LOCK)).unwrap(),
         host_lock(&second).unwrap()
+    );
+    assert!(leftovers(&f).is_empty());
+}
+
+#[tokio::test]
+async fn a_local_file_that_is_gone_is_reported_missing_and_installs_nothing() {
+    let f = fixture();
+    let first = release(&f.source, [b"vmm-1", b"kernel-1", b"initramfs-1"]);
+    let source = DirectoryBlobSource::new(&f.source);
+    install_with(&f.paths, &first, &source, false, admit_by_digest)
+        .await
+        .unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let second = release(other.path(), [b"vmm-2", b"kernel-2", b"initramfs-2"]);
+    install_with(
+        &f.paths,
+        &second,
+        &DirectoryBlobSource::new(other.path()),
+        true,
+        admit_by_digest,
+    )
+    .await
+    .unwrap();
+
+    // The previous lock still names a file that is gone: the local copy is
+    // missing, so the caller downloads it instead.
+    let local = LocalBlobs::open(&f.paths).unwrap();
+    let kernel = host_lock(&first).unwrap().kernel.sha256;
+    assert!(local.has(&kernel));
+    let parent = f.paths.artifact_lock.parent().unwrap();
+    fs::remove_file(parent.join(PREVIOUS_ROOT).join("kernel")).unwrap();
+    let empty = DirectoryBlobSource::new(other.path().join("absent"));
+    let with_local = WithLocal {
+        local: &local,
+        fallback: &empty,
+    };
+    assert!(matches!(
+        install_with(&f.paths, &first, &with_local, true, admit_by_digest).await,
+        Err(InstallError::MissingBlob { sha256 }) if sha256 == kernel
+    ));
+    assert_eq!(
+        installed_runtime(&f.paths, &second).unwrap(),
+        InstalledRuntime::Same
     );
     assert!(leftovers(&f).is_empty());
 }
@@ -483,6 +537,17 @@ async fn the_start_gate_requires_the_wanted_cw_runtime_too() {
     fs::remove_file(parent.join(CW_RUNTIME_PACK)).unwrap();
     assert_eq!(
         installed_runtime(&f.paths, &document).unwrap(),
+        InstalledRuntime::Incomplete
+    );
+    // Another release's cw runtime is a different runtime, not a damaged one.
+    let other = tempfile::tempdir().unwrap();
+    let newer = release_with(
+        other.path(),
+        [b"v", b"k", b"i"],
+        Some((b"other lock".as_slice(), b"cw pack".as_slice())),
+    );
+    assert_eq!(
+        installed_runtime(&f.paths, &newer).unwrap(),
         InstalledRuntime::Different
     );
 }

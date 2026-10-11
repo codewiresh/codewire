@@ -182,6 +182,8 @@ pub enum InstallOutcome {
 pub enum InstalledRuntime {
     Missing,
     Same,
+    /// This runtime's files, partly missing or damaged.
+    Incomplete,
     Different,
 }
 
@@ -201,11 +203,22 @@ pub fn installed_runtime(
     if artifacts != InstalledRuntime::Same {
         return Ok(artifacts);
     }
+    // Compare the cw runtime by its small lock and the pack's size: a start
+    // never hashes the whole pack, which install admits in full.
     let parent = paths.artifact_lock.parent().unwrap_or(Path::new("/"));
-    let wanted_cw_runtime = host_runtime(document)?.cw_runtime.as_ref();
-    Ok(match cw_runtime_state(parent, wanted_cw_runtime)? {
-        CwRuntimeState::Current => InstalledRuntime::Same,
-        CwRuntimeState::Repairable | CwRuntimeState::Different => InstalledRuntime::Different,
+    let wanted = host_runtime(document)?.cw_runtime.as_ref();
+    let lock = file_digest(&parent.join(CW_RUNTIME_LOCK))?;
+    Ok(match wanted {
+        None if lock.is_none() => InstalledRuntime::Same,
+        None => InstalledRuntime::Different,
+        Some(_) if lock.is_none() => InstalledRuntime::Incomplete,
+        Some(wanted) if !matches(&lock, &wanted.lock) => InstalledRuntime::Different,
+        Some(wanted) => match fs::symlink_metadata(parent.join(CW_RUNTIME_PACK)) {
+            Ok(metadata) if metadata.is_file() && metadata.len() == wanted.pack.size => {
+                InstalledRuntime::Same
+            }
+            _ => InstalledRuntime::Incomplete,
+        },
     })
 }
 
@@ -265,7 +278,17 @@ impl BlobSource for LocalBlobs {
             .ok_or_else(|| InstallError::MissingBlob {
                 sha256: sha256.to_owned(),
             })?;
-        Ok(Box::new(open_regular(path)?))
+        match open_regular(path) {
+            Ok(file) => Ok(Box::new(file)),
+            // A file a lock still names but that is gone (deleted, or a crash
+            // between swapping a root and writing its lock) is simply absent.
+            Err(InstallError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                Err(InstallError::MissingBlob {
+                    sha256: sha256.to_owned(),
+                })
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -327,7 +350,7 @@ where
 
     let installed_lock = ArtifactLock::read(&paths.artifact_lock);
     // Repairing the installed runtime keeps the real previous one.
-    let keep_previous = !matches!(&installed_lock, Ok(existing) if *existing == lock);
+    let keep_previous = matches!(&installed_lock, Ok(existing) if *existing != lock);
     let artifacts_current = match installed_lock {
         // The same runtime is re-admitted; a damaged file is fetched again.
         Ok(existing) if existing == lock => admit(lock.clone(), paths.artifact_root.clone())
@@ -445,24 +468,32 @@ fn install_cw_runtime(
 ) -> Result<(), InstallError> {
     let lock = parent.join(CW_RUNTIME_LOCK);
     let pack = parent.join(CW_RUNTIME_PACK);
-    keep_previous_cw_runtime(parent, wanted)?;
     let Some(wanted) = wanted else {
+        keep_previous_cw_runtime(parent, None)?;
         for path in [&lock, &pack] {
             remove_file_if_present(path)?;
         }
         return Ok(());
     };
-    for (name, blob) in [
+    // Fetch first: the source may read the kept previous runtime, which the
+    // rotation below replaces.
+    let files = [
         (CW_RUNTIME_PACK, &wanted.pack),
         (CW_RUNTIME_LOCK, &wanted.lock),
-    ] {
+    ];
+    for (name, blob) in files {
         let partial = parent.join(format!(".{name}.partial"));
         let _ = fs::remove_file(&partial);
         if let Err(error) = fetch(source, &blob.sha256, blob.size, &partial, DATA_MODE) {
-            let _ = fs::remove_file(&partial);
+            for (name, _) in files {
+                let _ = fs::remove_file(parent.join(format!(".{name}.partial")));
+            }
             return Err(error);
         }
-        fs::rename(&partial, parent.join(name))
+    }
+    keep_previous_cw_runtime(parent, Some(wanted))?;
+    for (name, _) in files {
+        fs::rename(parent.join(format!(".{name}.partial")), parent.join(name))
             .map_err(io_error(format!("install {}", parent.join(name).display())))?;
     }
     if let Ok(directory) = File::open(parent) {

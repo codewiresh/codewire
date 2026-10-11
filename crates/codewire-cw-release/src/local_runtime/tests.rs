@@ -153,6 +153,12 @@ fn targets_and_lock_files_are_exact() {
         *changed.pointer_mut(pointer).unwrap() = value;
         assert!(decode(&changed).is_err(), "{pointer}");
     }
+    // The same digest with two sizes is refused.
+    let mut conflicting = published();
+    conflicting["targets"]["macos-aarch64"]["components"][0]["source"] =
+        json!({"sha256": digest(2), "size": 1});
+    assert!(decode(&conflicting).is_err());
+
     let mut missing_git = published();
     missing_git["targets"]["macos-aarch64"]["lock"]
         .as_object_mut()

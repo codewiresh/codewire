@@ -98,7 +98,7 @@ async fn controlled<T>(
         biased;
         signal = cancellation => {
             signal.and_then(|_| {
-                Err(anyhow::anyhow!("public release fetch was canceled before Store admission"))
+                Err(anyhow::anyhow!("the release download was canceled; nothing was installed"))
             })
         }
         result = tokio::time::timeout(timeout, operation) => {

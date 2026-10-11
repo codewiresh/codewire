@@ -44,6 +44,9 @@ pub(crate) fn require_installed(paths: &RuntimePaths) -> anyhow::Result<()> {
         InstalledRuntime::Missing => {
             anyhow::bail!("the local VM runtime is not installed; run `cw setup --local`")
         }
+        InstalledRuntime::Incomplete => {
+            anyhow::bail!("the local VM runtime is incomplete; run `cw setup --local` to repair it")
+        }
         InstalledRuntime::Different => anyhow::bail!(
             "the installed local VM runtime belongs to another cw version; run `cw setup --local` to install this one (running VMs keep theirs)"
         ),

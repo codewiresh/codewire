@@ -173,7 +173,8 @@ const MAX_LOCAL_RUNTIME: usize = 64 * 1024;
 /// No cycle: the document must never pin a blob that contains the cw binary
 /// embedding it. Only the macOS cw embeds a runtime today, whose guest root
 /// is Linux and holds no host cw; a Linux runtime's guest binaries must come
-/// from a build that embeds no runtime (the release publisher asserts it).
+/// from a build that embeds no runtime. The release publisher must assert
+/// this when it publishes a Linux runtime (#2539 slice 2).
 fn embed_local_runtime(out: &std::path::Path, revision: Option<&str>) {
     println!("cargo:rerun-if-env-changed=CODEWIRE_LOCAL_RUNTIME");
     let bytes = match input("CODEWIRE_LOCAL_RUNTIME") {

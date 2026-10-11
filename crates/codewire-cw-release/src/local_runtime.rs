@@ -98,6 +98,17 @@ impl LocalRuntimeDocument {
                 Platform::parse(key).ok_or(ReleaseError::Invalid("local runtime target"))?;
             target.validate(platform)?;
         }
+        // One digest names one file: the same SHA-256 never has two sizes.
+        let mut sizes = BTreeMap::new();
+        for blob in self
+            .targets
+            .values()
+            .flat_map(RuntimeTarget::all_references)
+        {
+            if *sizes.entry(blob.sha256.clone()).or_insert(blob.size) != blob.size {
+                return Err(ReleaseError::Invalid("local runtime blob sizes"));
+            }
+        }
         Ok(())
     }
 
@@ -135,20 +146,37 @@ impl RuntimeTarget {
         Ok(())
     }
 
+    /// The lock's files and the cw runtime, repeats included.
+    fn installed_references(&self) -> Vec<BlobRef> {
+        let mut blobs = serde_json::from_value::<LockFiles>(self.lock.clone())
+            .map(|lock| lock.0)
+            .unwrap_or_default();
+        if let Some(cw_runtime) = &self.cw_runtime {
+            blobs.push(cw_runtime.lock.clone());
+            blobs.push(cw_runtime.pack.clone());
+        }
+        blobs
+    }
+
+    /// Every file reference, repeats included.
+    fn all_references(&self) -> Vec<BlobRef> {
+        let mut blobs = self.installed_references();
+        blobs.extend(
+            self.components
+                .iter()
+                .map(|component| component.source.clone()),
+        );
+        blobs
+    }
+
     /// What an install fetches: the lock's files and the cw runtime, each
     /// once. Component sources are published beside them, not installed.
     pub fn install_blobs(&self) -> Vec<BlobRef> {
-        let mut blobs = BTreeMap::new();
-        if let Ok(lock) = serde_json::from_value::<LockFiles>(self.lock.clone()) {
-            for blob in lock.0 {
-                blobs.insert(blob.sha256.clone(), blob);
-            }
-        }
-        if let Some(cw_runtime) = &self.cw_runtime {
-            for blob in [&cw_runtime.lock, &cw_runtime.pack] {
-                blobs.insert(blob.sha256.clone(), blob.clone());
-            }
-        }
+        let blobs: BTreeMap<_, _> = self
+            .installed_references()
+            .into_iter()
+            .map(|blob| (blob.sha256.clone(), blob))
+            .collect();
         blobs.into_values().collect()
     }
 

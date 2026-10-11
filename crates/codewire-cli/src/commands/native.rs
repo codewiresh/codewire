@@ -1787,7 +1787,12 @@ pub(crate) async fn setup_local_runtime(
     let source = DirectoryBlobSource::new(&from);
     let document = source
         .document()
-        .with_context(|| format!("read the local VM runtime in {}", from.display()))?;
+        .with_context(|| {
+            format!(
+                "read the local VM runtime in {} (a runtime directory packed before cw pinned its runtime must be packed again, e.g. with `make macos-local-runtime`)",
+                from.display()
+            )
+        })?;
     match crate::build_record::embedded()?.source_revision {
         Some(revision) if revision != document.source_revision => anyhow::bail!(
             "this local VM runtime was built from {}, but this cw from {revision}; install the runtime from the same release",
@@ -2433,6 +2438,26 @@ fn native_status(status: tonic::Status) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_damaged_or_missing_local_file_downloads_the_whole_runtime() {
+        use codewire_local_vmm::runtime_install::InstallError;
+        let sha256 = "a".repeat(64);
+        for error in [
+            InstallError::MissingBlob {
+                sha256: sha256.clone(),
+            },
+            InstallError::BlobMismatch { sha256 },
+        ] {
+            assert!(local_file_damaged(&anyhow::Error::from(error)));
+        }
+        assert!(!local_file_damaged(&anyhow::Error::from(
+            InstallError::Busy
+        )));
+        assert!(!local_file_damaged(&anyhow::anyhow!(
+            "the release download was canceled; nothing was installed"
+        )));
+    }
 
     #[test]
     fn native_id_lookup_resolves_the_private_name_without_following_a_uuid_shaped_name() {
