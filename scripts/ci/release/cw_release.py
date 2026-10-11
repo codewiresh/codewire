@@ -723,12 +723,19 @@ def _verify_blob_file(path, digest, size):
 
 
 def load_local_runtime(dist):
-    """A delivery's local runtime directory, or None when it has none.
+    """A delivery's local runtime directory, or None when it has none."""
+    return load_local_runtime_dir(local_runtime_paths(dist)[0])
+
+
+def load_local_runtime_dir(root):
+    """A local runtime directory, or None when there is none.
 
     It holds exactly the canonical document and the blobs it pins, each with
-    its exact size and digest: nothing more.
+    its exact size and digest: nothing more. The release packer stages one
+    as <dist>/local-runtime and prepare moves it into the delivery.
     """
-    root, document_path, blobs = local_runtime_paths(dist)
+    root = Path(root)
+    document_path, blobs = root / LOCAL_RUNTIME_NAME, root / "blobs/sha256"
     try:
         info = os.lstat(root)
     except FileNotFoundError:
@@ -972,6 +979,10 @@ def prepare(dist, version, source_root, source_sha, tag_object_sha, rustc_output
     paths = delivery_paths(dist)
     require(not (dist / DELIVERY).exists(), "delivery directory already exists")
     (dist / DELIVERY).mkdir(mode=0o755)
+    # The runtime the macOS cw was built to embed, staged by the packer.
+    staged = dist / LOCAL_RUNTIME_DIR
+    if load_local_runtime_dir(staged) is not None:
+        os.rename(staged, local_runtime_paths(dist)[0])
     paths["identities"].mkdir()
     executables, entries = {}, {}
     for target in RELEASE_TARGETS:
@@ -1182,6 +1193,9 @@ def main(argv=None):
     digest.add_argument("--dist", type=Path, required=True)
     source = sub.add_parser("source-digest")
     source.add_argument("--source-root", type=Path, required=True)
+    runtime = sub.add_parser("local-runtime", help="check a local runtime directory before a cw embeds it")
+    runtime.add_argument("--dir", type=Path, required=True)
+    runtime.add_argument("--source-sha", required=True)
     admit = sub.add_parser("admit")
     admit.add_argument("--source-root", type=Path, required=True)
     admit.add_argument("--executable", type=Path, required=True)
@@ -1233,6 +1247,13 @@ def main(argv=None):
                       .format(**result["local_runtime"]))
         elif args.command == "digest":
             print(tree_digest(args.dist))
+        elif args.command == "local-runtime":
+            loaded = load_local_runtime_dir(args.dir)
+            require(loaded is not None, "local runtime directory is missing")
+            document, pinned = loaded
+            require(json.loads(document)["source_revision"] == args.source_sha,
+                    "local runtime was built from another source revision")
+            print(f"cw-release: local runtime document_sha256={sha256(document)} blobs={len(pinned)}")
         elif args.command == "admit":
             rustc = toolchain_rustc(args.source_root, subprocess.check_output(
                 ["rustc", "--version"], cwd=args.source_root, text=True))
