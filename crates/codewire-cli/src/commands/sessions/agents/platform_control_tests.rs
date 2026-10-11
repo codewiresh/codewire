@@ -39,7 +39,7 @@ impl Fixture {
             provider: codewire_daemon::platform_managed::ProviderIdentity {
                 sha256: [3; 32],
                 size: 1024,
-                version: "0.157.0".into(),
+                version: "0.160.0".into(),
             },
             parent_generation: None,
         };
@@ -287,7 +287,7 @@ fn platform_control_directories_below_a_setgid_home_are_exactly_private() {
 
 #[test]
 fn platform_control_claude_prefix_uses_the_pinned_cli_option_names() {
-    // Claude 2.1.238 exits during startup on an unknown option such as
+    // Claude 2.1.288 exits during startup on an unknown option such as
     // `--settings-sources`; these are the names it accepts.
     assert_eq!(
         proxy::arguments(AgentKind::Claude),

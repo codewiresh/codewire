@@ -129,7 +129,12 @@ configure_github_mirror() {
 
   local mirror_token
   mirror_token="$(tr -d '\n' <"$GH_MIRROR_TOKEN_FILE")"
-  [[ "$mirror_token" =~ ^[A-Za-z0-9_-]+$ ]] \
+  # GitHub's installation-token format is not a stable contract (release run
+  # 11957 refused a real token under an alphanumeric-only check). The token
+  # only has to be safe inside the quoted curl header and the base64 git
+  # header below: printable ASCII with no space, double quote or backslash.
+  [[ ${#mirror_token} -ge 20 && ${#mirror_token} -le 4096 ]] \
+    && [ -z "$(printf '%s' "$mirror_token" | LC_ALL=C tr -d '\041\043-\133\135-\176')" ] \
     || die "GH_MIRROR_TOKEN_FILE contains a malformed token"
   [ "$(wc -l <"$GH_MIRROR_TOKEN_FILE")" -le 1 ] \
     || die "GH_MIRROR_TOKEN_FILE must contain one token"

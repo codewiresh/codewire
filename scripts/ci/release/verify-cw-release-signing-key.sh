@@ -39,6 +39,12 @@ expected_fingerprint="$(
 
 tmp="$(mktemp -d)"
 cleanup() {
+  # Stop both agents before their homes disappear; the signing agent holds the
+  # unlocked key, and neither may outlive this check.
+  local home
+  for home in "$tmp/signing" "$tmp/verify"; do
+    [ ! -d "$home" ] || GNUPGHOME="$home" gpgconf --kill all >/dev/null 2>&1 || true
+  done
   rm -rf "$tmp"
 }
 trap cleanup EXIT

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Focused stdlib-only fixtures for codex_login.py; never runs Codex,
 Kubernetes or real auth. A synthetic Codex makes the HTTP calls stock Codex
-0.157 makes with a ChatGPT login."""
+0.160 makes with a ChatGPT login."""
 
 import base64
 import contextlib
@@ -61,7 +61,7 @@ def login(generation=0, *, refresh=driver.PLACEHOLDER, plan=driver.PLAN, exp=Non
 MANAGED_CONFIG = driver.MANAGED_HEADER + b'\nmodel_provider = "codewire_openai"\n'
 
 # A synthetic Codex: JSON-RPC over stdio for `app-server`, revoke-then-delete
-# for `logout`. It reads auth.json and sends the calls Codex 0.157 sends with
+# for `logout`. It reads auth.json and sends the calls Codex 0.160 sends with
 # a ChatGPT login, to the base URLs the driver passed with -c.
 FAKE = r'''
 import json, os, sys, urllib.request, urllib.error
@@ -120,7 +120,7 @@ for line in sys.stdin:
               "primary": {"usedPercent": window["used_percent"],
                           "windowDurationMins": window["limit_window_seconds"] // 60}}}})
     elif method == "thread/start":
-        call(openai + "/models?client_version=0.157.0")
+        call(openai + "/models?client_version=0.160.0")
         websocket = call(openai + "/responses")[0]
         assert websocket == 426, websocket
         send({"id": request_id, "result": {"thread": {"id": "thread-1", "ephemeral": True,

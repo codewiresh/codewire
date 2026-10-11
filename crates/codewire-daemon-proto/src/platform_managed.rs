@@ -68,8 +68,8 @@ pub fn validate_info(r: &v1::PlatformManagedInfoRequest) -> Result<(), &'static 
 }
 pub fn provider_version(a: v1::PlatformManagedAgent) -> Option<&'static str> {
     match a {
-        v1::PlatformManagedAgent::Codex => Some("0.157.0"),
-        v1::PlatformManagedAgent::Claude => Some("2.1.238"),
+        v1::PlatformManagedAgent::Codex => Some("0.160.0"),
+        v1::PlatformManagedAgent::Claude => Some("2.1.288"),
         _ => None,
     }
 }

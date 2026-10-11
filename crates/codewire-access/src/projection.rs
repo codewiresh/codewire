@@ -307,7 +307,7 @@ impl ManagedCredentialClients {
                 // send its own OAuth form (bearer plus the OAuth beta) to
                 // the managed route, where the broker replaces it with the
                 // owner's Claude subscription token. The token itself never
-                // enters the Sandbox. Claude Code 2.1.238 treats the empty
+                // enters the Sandbox. Claude Code 2.1.288 treats the empty
                 // higher-precedence names as unset (pinned-client probe).
                 environment.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), "codewire-managed".into());
                 environment.insert("ANTHROPIC_AUTH_TOKEN".into(), String::new());

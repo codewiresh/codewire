@@ -635,6 +635,17 @@ fn claude_activity(value: &Value) -> Vec<String> {
         .collect()
 }
 
+/// Why a Claude turn failed. Claude reports a provider error, such as
+/// `API Error: 400 ...`, as an error result whose subtype is still `success`;
+/// that subtype names no failure, so it is left out.
+fn claude_turn_error(subtype: &str, detail: &str) -> String {
+    if subtype == "success" {
+        format!("Claude's turn failed: {detail}")
+    } else {
+        format!("Claude ended the turn with {subtype}: {detail}")
+    }
+}
+
 /// The session-log line for a Codex item. A web search names its query only
 /// when it completes; every other item is logged as it starts.
 fn codex_activity(item: &Value, completed: bool) -> Option<String> {
@@ -3758,7 +3769,7 @@ impl Driver {
                     let detail = errors.or_else(|| text.clone()).unwrap_or_default();
                     (
                         TurnStatus::Failed,
-                        Some(format!("Claude ended the turn with {subtype}: {detail}")),
+                        Some(claude_turn_error(subtype, &detail)),
                     )
                 };
                 self.finish_turn(status, text, error, Some(usage)).await?;
@@ -4248,6 +4259,20 @@ async fn claude_control_probe(peer: &mut Peer, request_id: &str) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_claude_api_error_reads_as_a_failure() {
+        // Claude Code 2.1.288 ends a turn the provider refused with
+        // `"subtype":"success","is_error":true`.
+        assert_eq!(
+            claude_turn_error("success", "API Error: 400 model not supported"),
+            "Claude's turn failed: API Error: 400 model not supported"
+        );
+        assert_eq!(
+            claude_turn_error("error_max_turns", "reached the turn limit"),
+            "Claude ended the turn with error_max_turns: reached the turn limit"
+        );
+    }
 
     #[test]
     fn effort_uses_native_provider_levels_and_preserves_configured_claude_default() {

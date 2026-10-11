@@ -3,7 +3,8 @@
 # refuses that layout. Upgrading installs it into the home's npm prefix, which
 # PATH prefers from then on. Everything else is Kimi Code itself.
 set -eu
-case "${1:-}:${2:-}" in
-  upgrade: | update:) exec npm install --global @moonshot-ai/kimi-code@latest ;;
+case "${1:-}:${2:-}:${3:-}" in
+  upgrade:: | update:: | upgrade:-y: | update:-y: | upgrade:--yes: | update:--yes:)
+    exec npm install --global @moonshot-ai/kimi-code@latest ;;
 esac
 exec /opt/codewire/agents/npm/lib/node_modules/@moonshot-ai/kimi-code/dist/main.mjs "$@"
