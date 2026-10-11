@@ -182,6 +182,10 @@ impl AsyncRead for TcpStream {
 
         match self.rx.poll_recv(cx) {
             Poll::Ready(Some(chunk)) => {
+                // Taking a chunk frees receive-queue space. Wake the driver so
+                // it moves the socket's buffered bytes on and reopens the TCP
+                // window now, not at its next unrelated wakeup.
+                self.control.notify.notify_one();
                 let n = chunk.len().min(buf.remaining());
                 buf.put_slice(&chunk[..n]);
                 if n < chunk.len() {

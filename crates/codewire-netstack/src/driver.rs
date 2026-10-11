@@ -40,6 +40,19 @@ use super::NetstackLimits;
 /// tiny handoff window, while established stream demux stays deterministic.
 const LISTEN_BACKLOG: usize = 1;
 
+/// A TCP socket with the netstack's buffers and idle timeout.
+fn tcp_socket(limits: &NetstackLimits) -> tcp::Socket<'static> {
+    let rx = tcp::SocketBuffer::new(vec![0u8; limits.socket_buffer_bytes]);
+    let tx = tcp::SocketBuffer::new(vec![0u8; limits.socket_buffer_bytes]);
+    let mut socket = tcp::Socket::new(rx, tx);
+    socket.set_timeout(Some(SmolDuration::from(limits.tcp_idle_timeout)));
+    // The netstack relays bytes another TCP stack already segmented, so Nagle
+    // would only add the peer's delayed-ACK wait (40 ms for a Linux guest) to
+    // every small write that follows an unacknowledged one.
+    socket.set_nagle_enabled(false);
+    socket
+}
+
 /// Control messages from handles/the API into the driver.
 pub(crate) enum Command {
     /// Bind a listener on `port`; reply with the listener's incoming-stream
@@ -111,11 +124,7 @@ struct Driver {
 
 impl Driver {
     fn fresh_tcp_socket(&self) -> tcp::Socket<'static> {
-        let rx = tcp::SocketBuffer::new(vec![0u8; self.limits.socket_buffer_bytes]);
-        let tx = tcp::SocketBuffer::new(vec![0u8; self.limits.socket_buffer_bytes]);
-        let mut socket = tcp::Socket::new(rx, tx);
-        socket.set_timeout(Some(SmolDuration::from(self.limits.tcp_idle_timeout)));
-        socket
+        tcp_socket(&self.limits)
     }
 
     fn handle_command(&mut self, cmd: Command) {
@@ -698,4 +707,15 @@ pub(crate) fn spawn(
     });
 
     Ok(handle)
+}
+
+#[cfg(test)]
+mod socket_tests {
+    use super::*;
+
+    #[test]
+    fn relayed_sockets_send_small_writes_without_nagle() {
+        let socket = tcp_socket(&NetstackLimits::default());
+        assert!(!socket.nagle_enabled());
+    }
 }
