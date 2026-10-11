@@ -82,6 +82,40 @@ with open(values["--output"], "wb") as handle:
 '''
 
 
+# A stand-in release cw: it records its arguments and does what
+# `cw install --managed --bin-dir DIR` does to the entry, refusing an ordinary
+# file or a link that its store does not manage.
+FAKE_CW = r'''#!PYTHON -I
+# Test cw for TARGET.
+import hashlib, json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_CW_LOG"], "a") as handle:
+    handle.write(json.dumps(args) + "\n")
+if os.environ.get("FAKE_CW_FAIL"):
+    sys.stderr.write("cw: refused by the test\n")
+    sys.exit(1)
+assert args[:3] == ["install", "--managed", "--bin-dir"] and len(args) == 4, args
+entry = os.path.join(args[3], "cw")
+data = os.environ.get("XDG_DATA_HOME") or os.path.join(os.environ["HOME"], ".local/share")
+versions = os.path.join(data, "codewire/cli/versions") + "/"
+if os.path.islink(entry) and not os.readlink(entry).startswith(versions):
+    sys.stderr.write("cw: %s is a symbolic link that this store does not manage\n" % entry)
+    sys.exit(1)
+if os.path.lexists(entry) and not os.path.islink(entry):
+    sys.stderr.write("cw: %s is an unmanaged regular file\n" % entry)
+    sys.exit(1)
+body = open(sys.argv[0], "rb").read()
+stored = os.path.join(versions, hashlib.sha256(body).hexdigest(), "cw")
+os.makedirs(os.path.dirname(stored), exist_ok=True)
+with open(stored, "wb") as handle:
+    handle.write(body)
+os.chmod(stored, 0o755)
+os.symlink(stored, entry + ".new")
+os.replace(entry + ".new", entry)
+print("Selected the test cw for new invocations of %s" % entry)
+'''
+
+
 def available_shells():
     shells = [["/bin/sh"]]
     for name, argv in (("dash", ["dash"]), ("busybox", ["busybox", "sh"]),
@@ -93,7 +127,7 @@ def available_shells():
 
 
 def executable(target):
-    return b"\x7fELF" + hashlib.sha512(target.encode()).digest() * 2
+    return FAKE_CW.replace("PYTHON", sys.executable).replace("TARGET", target).encode()
 
 
 class Fixture:
@@ -170,6 +204,7 @@ class Fixture:
             "FAKE_CURL_ROOT": str(self.objects),
             "FAKE_CURL_LOG": str(self.log),
             "FAKE_CURL_RULES": str(self.rules),
+            "FAKE_CW_LOG": str(self.base / "cw.log"),
         }
         environment.update(env or {})
         source = script if script is not None else INSTALLER.read_bytes()
@@ -187,6 +222,15 @@ class Fixture:
         if not self.log.exists():
             return []
         return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def managed_installs(self):
+        log = self.base / "cw.log"
+        if not log.exists():
+            return []
+        return [json.loads(line) for line in log.read_text().splitlines()]
+
+    def store(self, home=None):
+        return (home or self.base / "home") / ".local/share/codewire/cli/versions"
 
     def leftovers(self, directory):
         return sorted(p.name for p in Path(directory).iterdir() if p.name.startswith(".cw-install"))
@@ -236,6 +280,11 @@ class InstallerTest(unittest.TestCase):
             installed = fx.prefix / "bin/cw"
             self.assertEqual(installed.read_bytes(), fx.expected(target))
             self.assertEqual(stat.S_IMODE(installed.stat().st_mode), 0o755)
+            # The verified cw installed itself: the entry is its managed link.
+            self.assertTrue(installed.is_symlink())
+            self.assertTrue(os.readlink(installed).startswith(f"{fx.store()}/"))
+            self.assertEqual(fx.managed_installs(),
+                             [["install", "--managed", "--bin-dir", str(fx.prefix / "bin")]])
             self.assertEqual(result.stdout.decode().splitlines(), [
                 f"==> Installed cw {VERSION} to {installed}",
                 f"NOTE: add {fx.prefix / 'bin'} to your PATH",
@@ -246,17 +295,21 @@ class InstallerTest(unittest.TestCase):
             self.assertEqual(keys, ["cw/v1/channels/stable.json", f"cw/v1/releases/{VERSION}/SHA256SUMS",
                                     f"cw/v1/blobs/sha256/{digest}"])
 
-            # An exact version replaces the installed bytes; --verbose names them.
+            # An exact version selects new bytes through the managed entry;
+            # --verbose names them and shows what cw reported.
             fx.publish("v1.2.4")
             result = fx.run(shell, "--version", "v1.2.4", "--prefix", str(fx.prefix), "--verbose",
                             env={"PATH": f"{fx.tools()}:{fx.prefix / 'bin'}"})
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             data = fx.expected(target, "v1.2.4")
             self.assertEqual(installed.read_bytes(), data)
+            self.assertTrue(installed.is_symlink())
             self.assertEqual(result.stdout.decode().splitlines(), [
                 f"==> Installed cw v1.2.4 to {installed}",
                 f"    target={target} sha256={hashlib.sha256(data).hexdigest()} size={len(data)}",
+                f"    Selected the test cw for new invocations of {installed}",
             ])
+            self.assertEqual(fx.leftovers(fx.prefix / "bin"), [])
 
     def test_piped_script_and_relative_prefix(self):
         for shell, fx in self.each_shell():
@@ -297,6 +350,32 @@ class InstallerTest(unittest.TestCase):
             self.assert_rejected(fx.run(shell, "--prefix", str(fx.prefix)), f"exactly one {mine}")
             self.assertEqual((bin_dir / "cw").read_bytes(), b"old cw")
 
+    def test_an_earlier_ordinary_cw_becomes_managed_or_is_restored(self):
+        target = host_target()
+        for shell, fx in self.each_shell():
+            bin_dir = fx.prefix / "bin"
+            for directory in (fx.prefix, bin_dir):
+                directory.mkdir(mode=0o755)
+                directory.chmod(0o755)
+            installed = bin_dir / "cw"
+            installed.write_bytes(b"old cw")
+            installed.chmod(0o755)
+
+            # cw refuses: the earlier cw is back, byte for byte, with nothing left over.
+            result = fx.run(shell, "--prefix", str(fx.prefix), env={"FAKE_CW_FAIL": "1"})
+            self.assert_rejected(result, "could not install itself as a managed installation")
+            self.assertIn("cw: refused by the test", result.stderr.decode())
+            self.assertFalse(installed.is_symlink())
+            self.assertEqual(installed.read_bytes(), b"old cw")
+            self.assertEqual(fx.leftovers(bin_dir), [])
+
+            # cw installs itself: the earlier file is replaced by the managed link.
+            result = fx.run(shell, "--prefix", str(fx.prefix))
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertTrue(installed.is_symlink())
+            self.assertEqual(installed.read_bytes(), fx.expected(target))
+            self.assertEqual(fx.leftovers(bin_dir), [])
+
     def test_channel_must_name_exactly_one_valid_tag(self):
         for shell, fx in self.each_shell():
             for channel in (fx.channel("1.2.3"), fx.channel("v1.2.3;rm"), b"{}\n",
@@ -329,9 +408,12 @@ class InstallerTest(unittest.TestCase):
                 directory.chmod(0o755)
             victim = fx.base / "victim"
             victim.write_bytes(b"not cw")
+            # A link is cw's to judge: only its own managed entry is accepted.
             (bin_dir / "cw").symlink_to(victim)
             self.assert_rejected(fx.run(shell, "--prefix", str(fx.prefix)), "symbolic link")
             self.assertEqual(victim.read_bytes(), b"not cw")
+            self.assertEqual(os.readlink(bin_dir / "cw"), str(victim))
+            self.assertEqual(fx.leftovers(bin_dir), [])
             (bin_dir / "cw").unlink()
 
             (bin_dir / "cw").mkdir()
