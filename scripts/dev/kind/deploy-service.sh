@@ -19,6 +19,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # shellcheck source=scripts/dev/kind/profile.sh
 source "$ROOT/scripts/dev/kind/profile.sh"
 kind_profile_load "$ROOT" || exit $?
+# shellcheck source=scripts/ci/verify/kind/credentials.sh
+source "$ROOT/scripts/ci/verify/kind/credentials.sh"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
 SERVICE="${1:-}"
 BUILDER="codewire-kind-dev"
@@ -41,7 +43,7 @@ case "$SERVICE" in
   credential-service)
     features="enrollment,kind-e2e"
     # Built exactly as services.Dockerfile builds the fake-mode fixture.
-    fixture=credential-service
+    fixture="credential-service"
     fixture_features=enrollment,kind-e2e
     ;;
   dashboard)
@@ -185,6 +187,9 @@ fi
 
 log "loading ${IMAGE} into ${KIND_CLUSTER_NAME}"
 kind load docker-image "$IMAGE" --name "$KIND_CLUSTER_NAME" >/dev/null
+# Republish the synthetic trust roots before anything restarts, so a cluster
+# past its 72-hour root renewal still trusts the leaves its services present.
+publish_kind_trust_roots --context "kind-${KIND_CLUSTER_NAME}"
 if [ "$SERVICE" = daemon ] && [ "$KIND_PROFILE" != 1 ]; then
   log "sandboxes created from now on run the current daemon"
   exit 0

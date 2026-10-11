@@ -97,14 +97,68 @@ deploy_kind_credential_issuers() {
     certificate/codewire-kind-postgres-tls \
     certificate/codewire-kind-coordinator-root issuer/codewire-kind-coordinator \
     certificate/codewire-kind-coordinator-tls || return $?
+  publish_kind_trust_roots || return $?
+}
+
+# The trust bundle for one synthetic root: the current root first, then every
+# certificate already published that has not expired and is not a duplicate,
+# in published order. Roots renew at 72 of their 96 hours, and leaves signed by
+# the previous root stay in use until they renew, so a retained cluster must
+# trust both until the previous root expires. Only public certificates pass
+# through here.
+kind_trust_bundle_union() (
+  set -euo pipefail
+  local current="$1" published="$2" dir file fingerprint
+  local -a current_files=() published_files=()
+  local -A seen=()
+  dir="$(mktemp -d)"
+  trap 'rm -rf "$dir"' EXIT
+  split_certificates() {
+    awk -v prefix="$2" '
+      /-----BEGIN CERTIFICATE-----/ { count++; file = sprintf("%s-%04d.pem", prefix, count) }
+      count && file { print > file }
+      /-----END CERTIFICATE-----/ { close(file); file = "" }
+    ' <<<"$1"
+  }
+  split_certificates "$current" "$dir/current"
+  split_certificates "$published" "$dir/published"
+  shopt -s nullglob
+  current_files=("$dir"/current-*.pem)
+  published_files=("$dir"/published-*.pem)
+  shopt -u nullglob
+  if [ "${#current_files[@]}" -ne 1 ] \
+      || ! openssl x509 -in "${current_files[0]}" -noout -checkend 0 >/dev/null 2>&1; then
+    echo '::error::the current Kind trust root is not exactly one unexpired certificate' >&2
+    exit 1
+  fi
+  for file in "${current_files[@]}" "${published_files[@]}"; do
+    fingerprint="$(openssl x509 -in "$file" -noout -fingerprint -sha256 2>/dev/null)" || {
+      echo '::error::a published Kind trust root is not a certificate' >&2
+      exit 1
+    }
+    [ -z "${seen[$fingerprint]+x}" ] || continue
+    openssl x509 -in "$file" -noout -checkend 0 >/dev/null 2>&1 || continue
+    seen[$fingerprint]=1
+    openssl x509 -in "$file"
+  done
+)
+
+# Publish each synthetic Kind trust domain to the ConfigMaps its verifiers
+# read, keeping the previous root while it is still valid. The initial deploy,
+# every `make kind-deploy` and `make kind-trust-roots` call this, so a retained
+# cluster survives its 72-hour root renewal. Arguments go before each kubectl
+# subcommand, for example `--context kind-NAME`. Only public `tls.crt` and
+# `ca.crt` certificates are read; no private key leaves its Secret.
+# shellcheck disable=SC2120 # the dev-loop callers pass their --context
+publish_kind_trust_roots() {
+  local -a kube=(kubectl "$@")
+  local ns="${NS:-codewire-e2e}" sandbox_ns="${SANDBOX_NS:-dev-sandboxes}"
   local broker_roots orchestration_roots coordinator_roots
-  # Only public certificates leave these synthetic controller-owned Secrets.
-  # No private key is copied into the host, workspace, ConfigMap or log.
-  broker_roots="$(kubectl -n "$NS" get secret codewire-kind-credential-broker-root \
+  broker_roots="$("${kube[@]}" -n "$ns" get secret codewire-kind-credential-broker-root \
     -o 'jsonpath={.data.tls\.crt}' | base64 -d)" || return $?
-  orchestration_roots="$(kubectl -n "$NS" get secret codewire-kind-orchestration-internal-root \
+  orchestration_roots="$("${kube[@]}" -n "$ns" get secret codewire-kind-orchestration-internal-root \
     -o 'jsonpath={.data.tls\.crt}' | base64 -d)" || return $?
-  coordinator_roots="$(kubectl -n "$NS" get secret codewire-kind-coordinator-root \
+  coordinator_roots="$("${kube[@]}" -n "$ns" get secret codewire-kind-coordinator-root \
     -o 'jsonpath={.data.tls\.crt}' | base64 -d)" || return $?
   [ -n "$broker_roots" ] && [ -n "$orchestration_roots" ] && [ -n "$coordinator_roots" ] \
     && [ "$orchestration_roots" != "$broker_roots" ] \
@@ -113,21 +167,37 @@ deploy_kind_credential_issuers() {
     echo '::error::Kind credential trust domains are missing or not distinct' >&2
     return 1
   }
-  # Orchestration, the credential relay, verifies the broker with these roots
-  # in its own namespace.
-  kubectl -n "$NS" create configmap codewire-credential-broker-roots \
-    --from-literal="ca.crt=$broker_roots" --dry-run=client -o yaml | kubectl_apply -f - || return $?
-  # Workspace daemons (sandbox namespace) verify orchestration's binding
-  # listener with these roots, and Mesh (this namespace) its internal one.
-  local namespace
-  for namespace in "$SANDBOX_NS" "$NS"; do
-    kubectl -n "$namespace" create configmap codewire-orchestration-internal-roots \
-      --from-literal="ca.crt=$orchestration_roots" --dry-run=client -o yaml | kubectl_apply -f - || return $?
-  done
-  # Workspace daemons (SANDBOX_COORDINATOR_EXTRA_ROOTS) verify the in-cluster
+  local target namespace name roots published bundle
+  # Orchestration, the credential relay, verifies the broker in its own
+  # namespace. Workspace daemons (sandbox namespace) verify orchestration's
+  # binding listener, and Mesh (this namespace) its internal one. Workspace
+  # daemons (SANDBOX_COORDINATOR_EXTRA_ROOTS) verify the in-cluster
   # coordinator edge with this root alone, beside the WebPKI roots.
-  kubectl -n "$SANDBOX_NS" create configmap codewire-coordinator-extra-roots \
-    --from-literal="ca.crt=$coordinator_roots" --dry-run=client -o yaml | kubectl_apply -f - || return $?
+  for target in \
+      "$ns codewire-credential-broker-roots broker" \
+      "$sandbox_ns codewire-orchestration-internal-roots orchestration" \
+      "$ns codewire-orchestration-internal-roots orchestration" \
+      "$sandbox_ns codewire-coordinator-extra-roots coordinator"; do
+    read -r namespace name roots <<<"$target"
+    case "$roots" in
+      broker) roots="$broker_roots" ;;
+      orchestration) roots="$orchestration_roots" ;;
+      coordinator) roots="$coordinator_roots" ;;
+    esac
+    published="$("${kube[@]}" -n "$namespace" get configmap "$name" --ignore-not-found \
+      -o 'jsonpath={.data.ca\.crt}')" || return $?
+    bundle="$(kind_trust_bundle_union "$roots" "$published")" || return $?
+    if [ "$bundle" = "$published" ]; then
+      printf '[kind-trust-roots] %s/%s is current\n' "$namespace" "$name" >&2
+      continue
+    fi
+    "${kube[@]}" -n "$namespace" create configmap "$name" \
+      --from-literal="ca.crt=$bundle" --dry-run=client -o yaml \
+      | "${kube[@]}" --request-timeout="${KUBECTL_REQUEST_TIMEOUT:-30s}" apply -f - >/dev/null \
+      || return $?
+    printf '[kind-trust-roots] published %s root(s) to %s/%s\n' \
+      "$(grep -c -- '-----BEGIN CERTIFICATE-----' <<<"$bundle")" "$namespace" "$name" >&2
+  done
 }
 
 start_kind_credential_fixture() {
