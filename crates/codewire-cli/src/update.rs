@@ -175,13 +175,13 @@ pub(crate) async fn run(args: UpdateArgs) -> anyhow::Result<()> {
         (None, None, None, Some(version), None) => {
             public_release(public_fetch::Selection::Version(version), args.selection).await
         }
-        (None, None, None, None, Some(channel)) if channel == "stable" => {
+        // Without a source, cw follows the signed stable channel.
+        (None, None, None, None, channel) if channel.as_deref().is_none_or(|c| c == "stable") => {
             public_release(public_fetch::Selection::Stable, args.selection).await
         }
         _ => anyhow::bail!(
-            "cw update requires an explicit source: --version vMAJOR.MINOR.PATCH, \
-             --channel stable, or --from DIR --sha256 HEX; public delivery may not yet \
-             be available during the private preview. For source installs, use `make cli-install`"
+            "cw update takes one source: --version vMAJOR.MINOR.PATCH, --channel stable, \
+             or --from DIR --sha256 HEX"
         ),
     }
 }
@@ -569,9 +569,10 @@ fn unmanaged(executable: Option<&Path>, root: &Path) -> anyhow::Error {
         |path| format!("this cw ({})", path.display()),
     );
     anyhow::anyhow!(
-        "{running} is not a managed installation and no managed store exists at {}; install one \
-         with `make cli-install` from an authorized source checkout or `cw install --managed`. \
-         An existing regular-file cw is never replaced automatically.",
+        "{running} is not a managed installation and no managed store exists at {}; reinstall \
+         with `curl -fsSL https://codewire.sh/install.sh | sh`, which installs a managed cw, or \
+         use `make cli-install` from an authorized source checkout. An existing regular-file cw \
+         is never replaced automatically.",
         root.display()
     )
 }
@@ -827,7 +828,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_has_no_implicit_public_source_and_explains_source_install() {
+    async fn update_without_a_source_follows_the_stable_channel() {
+        // The stable channel opens the managed store before any fetch, so a
+        // missing store proves the selection without touching the network.
+        let directory = tempdir();
+        let store = directory.path().join("missing-store");
         let error = run(UpdateArgs {
             command: None,
             from: None,
@@ -837,17 +842,19 @@ mod tests {
             selection: SelectionArgs {
                 expect_generation: None,
                 store: StoreArgs {
-                    store: None,
+                    store: Some(store.clone()),
                     json: false,
                 },
             },
         })
         .await
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("private preview"));
-        assert!(error.contains("make cli-install"));
-        assert!(error.contains("--from DIR --sha256 HEX"));
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&format!("open managed cw store {}", store.display())),
+            "{message}"
+        );
+        assert!(!message.contains("takes one source"), "{message}");
     }
 
     #[test]
