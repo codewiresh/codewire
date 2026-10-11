@@ -169,6 +169,7 @@ async fn spawn_daemon_ssh_with_access(ready: bool) -> DaemonSsh {
         host: None,
         launch_projection: None,
         managed_credential_clients: Default::default(),
+        session_working_dir: None,
     };
     let (connector, local) = local_transport();
     let (shutdown, shutdown_rx) = watch::channel(false);
