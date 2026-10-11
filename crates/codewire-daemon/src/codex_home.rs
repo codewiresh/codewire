@@ -618,6 +618,7 @@ mod tests {
                     daemon_credential: "synthetic-workspace-daemon-credential",
                     projection_selection_sha256: &digest,
                     managed_credential_clients: clients,
+                    working_directory: "",
                 })
                 .unwrap();
             [

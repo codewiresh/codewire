@@ -23,6 +23,7 @@ pub(crate) fn config(root: &Path) -> crate::Config {
         host: Some(crate::HostConfig {
             state_root: root.join("state"),
         }),
+        session_working_dir: None,
     }
 }
 

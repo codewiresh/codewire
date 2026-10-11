@@ -13,7 +13,7 @@ class BindWorkspaceRequest(_message.Message):
     def __init__(self, wait_seconds: _Optional[int] = ...) -> None: ...
 
 class BindWorkspaceResponse(_message.Message):
-    __slots__ = ("environment_id", "pod_uid", "operation_generation", "daemon_credential", "projection_selection_sha256", "managed_credential_clients", "access")
+    __slots__ = ("environment_id", "pod_uid", "operation_generation", "daemon_credential", "projection_selection_sha256", "managed_credential_clients", "access", "working_directory")
     ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
     POD_UID_FIELD_NUMBER: _ClassVar[int]
     OPERATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
@@ -21,6 +21,7 @@ class BindWorkspaceResponse(_message.Message):
     PROJECTION_SELECTION_SHA256_FIELD_NUMBER: _ClassVar[int]
     MANAGED_CREDENTIAL_CLIENTS_FIELD_NUMBER: _ClassVar[int]
     ACCESS_FIELD_NUMBER: _ClassVar[int]
+    WORKING_DIRECTORY_FIELD_NUMBER: _ClassVar[int]
     environment_id: str
     pod_uid: str
     operation_generation: int
@@ -28,7 +29,8 @@ class BindWorkspaceResponse(_message.Message):
     projection_selection_sha256: str
     managed_credential_clients: str
     access: WorkspaceAccess
-    def __init__(self, environment_id: _Optional[str] = ..., pod_uid: _Optional[str] = ..., operation_generation: _Optional[int] = ..., daemon_credential: _Optional[str] = ..., projection_selection_sha256: _Optional[str] = ..., managed_credential_clients: _Optional[str] = ..., access: _Optional[_Union[WorkspaceAccess, _Mapping]] = ...) -> None: ...
+    working_directory: str
+    def __init__(self, environment_id: _Optional[str] = ..., pod_uid: _Optional[str] = ..., operation_generation: _Optional[int] = ..., daemon_credential: _Optional[str] = ..., projection_selection_sha256: _Optional[str] = ..., managed_credential_clients: _Optional[str] = ..., access: _Optional[_Union[WorkspaceAccess, _Mapping]] = ..., working_directory: _Optional[str] = ...) -> None: ...
 
 class WorkspaceAccess(_message.Message):
     __slots__ = ("peer_token", "peer_token_expires_at", "operation_generation", "coordinator_url", "direct_udp_endpoints", "peer_relay_endpoints", "app_ports")

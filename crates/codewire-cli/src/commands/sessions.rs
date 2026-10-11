@@ -442,7 +442,9 @@ impl EnvironmentSessionTarget {
             Self::Host { environment, .. } => environment.path.to_string_lossy().into_owned(),
             #[cfg(target_os = "linux")]
             Self::NativeLocal { working_dir, .. } => working_dir.clone(),
-            Self::Platform { .. } => LOCAL_WORKSPACE_PATH.to_string(),
+            // Empty: the hosted daemon starts the session in the environment's
+            // declared working directory.
+            Self::Platform { .. } => String::new(),
         }
     }
 }

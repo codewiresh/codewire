@@ -574,6 +574,7 @@ fn respond(
         projection_selection_sha256: binding.projection_selection_sha256.unwrap_or_default(),
         managed_credential_clients: binding.managed_credential_clients,
         access: Some(access).into(),
+        working_directory: binding.working_directory,
         ..Default::default()
     })
 }

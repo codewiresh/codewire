@@ -331,6 +331,7 @@ mod tests {
                     managed_credential_clients: Default::default(),
                     host: None,
                     launch_projection: None,
+                    session_working_dir: None,
                 },
                 tokio_stream::wrappers::ReceiverStream::new(incoming_rx),
                 async {
@@ -419,6 +420,7 @@ mod tests {
                     managed_credential_clients: Default::default(),
                     host: None,
                     launch_projection: None,
+                    session_working_dir: None,
                 },
                 tokio_stream::once(Ok::<_, io::Error>(stream)),
                 async {
