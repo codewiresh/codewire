@@ -777,6 +777,7 @@ run_edge() {
   python3 -B scripts/ci/tests/test-kind-profile-artifacts.py
   python3 -B scripts/ci/tests/test-kind-profile-gate.py
   scripts/ci/tests/test-kind-forwards.sh
+  scripts/ci/tests/test-kind-trust-roots.sh
   python3 -B scripts/ci/tests/test-kind-codex-session.py
   python3 -B scripts/ci/tests/test-kind-codex-login.py
   python3 -B scripts/ci/tests/test-kind-credentials.py

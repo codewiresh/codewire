@@ -1372,7 +1372,8 @@ if [ "$event_selected" = false ]; then
         select_token policy
         recognized=true
         ;;
-      scripts/dev/kind/dev-loop.sh|scripts/dev/kind/deploy-service.sh)
+      scripts/dev/kind/dev-loop.sh|scripts/dev/kind/deploy-service.sh|\
+      scripts/dev/kind/trust-roots.sh)
         # Retained-cluster review helpers (`make kind-*`) that the Kind gate
         # never runs. The runtime-image table has a hermetic policy fixture.
         select_token policy
@@ -1528,6 +1529,7 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/ci/tests/test-kind-e2e-*.sh|scripts/ci/tests/test-kind-forwards.sh|\
+      scripts/ci/tests/test-kind-trust-roots.sh|\
       scripts/ci/tests/test-kind-codex-session.py|scripts/ci/tests/test-kind-codex-login.py|\
       scripts/ci/tests/test-kind-credentials.py|scripts/ci/tests/test-kind-cluster-profiles.py|\
       scripts/ci/tests/test-kind-dev-profile.py|scripts/ci/tests/test-kind-profile-artifacts.py|\

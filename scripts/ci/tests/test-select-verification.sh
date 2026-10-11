@@ -278,7 +278,7 @@ run_paths_case kind_retained_helpers_main push refs/heads/main false \
   'policy policy_shell security security_js' scripts/dev/kind/dev-loop.sh scripts/ci/tests/test-kind-runtime-images.sh \
   scripts/ci/tests/test-kind-watch-github-app.sh
 run_paths_case kind_deploy_helper_main push refs/heads/main false \
-  'policy policy_shell security security_js' scripts/dev/kind/deploy-service.sh \
+  'policy policy_shell security security_js' scripts/dev/kind/deploy-service.sh scripts/dev/kind/trust-roots.sh \
   deployments/docker/kind-dev-binary.Dockerfile
 run_paths_case kind_dev_helper_main push refs/heads/main false \
   'edge_kind kind policy policy_shell security security_js' scripts/dev/kind/kind-forwards.sh
@@ -787,7 +787,8 @@ run_paths_case kind_harness_opt_in pull_request refs/pull/846/head true \
 run_paths_case kind_fixture_only pull_request refs/pull/847/head false \
   'policy security security_js' \
   scripts/ci/tests/test-kind-e2e-suites.sh \
-  scripts/ci/tests/test-kind-forwards.sh
+  scripts/ci/tests/test-kind-forwards.sh \
+  scripts/ci/tests/test-kind-trust-roots.sh
 for kind_runtime_fixture in test-kind-cw-runtime.py test-kind-cw-runtime-probe.py; do
   run_paths_case "${kind_runtime_fixture%.py}_pr" pull_request refs/pull/8471/head false \
     'policy security security_js' "scripts/ci/tests/$kind_runtime_fixture"
