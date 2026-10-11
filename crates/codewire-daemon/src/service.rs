@@ -1383,6 +1383,7 @@ mod tests {
             managed_credential_clients: Default::default(),
             host: None,
             launch_projection: None,
+            session_working_dir: None,
         };
         (
             temp,
@@ -1413,6 +1414,7 @@ mod tests {
             managed_credential_clients: Default::default(),
             host: None,
             launch_projection: None,
+            session_working_dir: None,
         };
         // A daemon that serves no tailnet refuses the push.
         let unbound = DaemonServiceImpl::new(config.clone());
@@ -1811,6 +1813,7 @@ mod tests {
             host: Some(crate::HostConfig {
                 state_root: temp.path().join("state"),
             }),
+            session_working_dir: None,
         };
         let (app_ports, current_ports) =
             tokio::sync::watch::channel(crate::app_ports::AppPorts::from([8080]));
@@ -1987,6 +1990,7 @@ mod tests {
                 state_root: temp.path().join("state"),
             }),
             launch_projection: None,
+            session_working_dir: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         tokio::spawn(async move {

@@ -177,6 +177,7 @@ impl BindingClient {
             daemon_credential: &response.daemon_credential,
             projection_selection_sha256: &response.projection_selection_sha256,
             managed_credential_clients: &response.managed_credential_clients,
+            working_directory: &response.working_directory,
         };
         let accepted = config.validate(&fields);
         // The response owns copies of the credential and peer token; wipe

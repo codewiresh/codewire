@@ -729,6 +729,7 @@ pub async fn run_daemon() -> Result<()> {
             ingress_uid: plan.identity.uid,
             ingress_gid: plan.identity.gid,
         }),
+        session_working_dir: None,
     };
 
     let daemon = codewire_daemon::serve_grpc_with_incoming(

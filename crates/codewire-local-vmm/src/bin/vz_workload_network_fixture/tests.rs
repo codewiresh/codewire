@@ -388,6 +388,7 @@ impl Daemon {
             managed_credential_clients: Default::default(),
             host: None,
             launch_projection: None,
+            session_working_dir: None,
         };
         let task = tokio::spawn(async move {
             codewire_daemon::server::serve_grpc_with_incoming_and_runtime_state(

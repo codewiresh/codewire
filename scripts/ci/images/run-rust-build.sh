@@ -11,6 +11,18 @@ case "$build_profile" in
     exit 2
     ;;
 esac
+# Local mode is a closed disk-only boundary: sccache auto-enables S3 whenever
+# remote cache variables survive, so remove every one of them.
+clear_remote_cache_env() {
+  unset SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION SCCACHE_S3_USE_SSL
+  unset SCCACHE_S3_KEY_PREFIX SCCACHE_MULTILEVEL_CHAIN
+  unset SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY SCCACHE_IGNORE_SERVER_IO_ERROR
+  unset AWS_SHARED_CREDENTIALS_FILE AWS_PROFILE
+  unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+  unset AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN
+  export AWS_EC2_METADATA_DISABLED=true
+}
+
 case "$mode" in
   disabled)
     # A preceding workflow selection may have exported a wrapper. Disabling
@@ -19,16 +31,9 @@ case "$mode" in
     ;;
   local)
     # The workflow exports the reviewed R2 endpoint and bucket before it knows
-    # whether short-lived identity is available. sccache auto-enables S3 when
-    # those variables survive a fallback. Make local mode a closed disk-only
-    # boundary even when the caller has remote cache configuration in scope.
-    unset SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION SCCACHE_S3_USE_SSL
-    unset SCCACHE_S3_KEY_PREFIX SCCACHE_MULTILEVEL_CHAIN
-    unset SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY SCCACHE_IGNORE_SERVER_IO_ERROR
-    unset AWS_SHARED_CREDENTIALS_FILE AWS_PROFILE
-    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-    unset AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN
-    export AWS_EC2_METADATA_DISABLED=true
+    # whether short-lived identity is available. Make local mode disk-only even
+    # when the caller has remote cache configuration in scope.
+    clear_remote_cache_env
     export RUSTC_WRAPPER=/usr/local/bin/sccache
     export SCCACHE_DIR="${SCCACHE_DIR:-/var/cache/sccache}"
     ;;
@@ -92,13 +97,34 @@ export SCCACHE_SERVER_UDS="${SCCACHE_SERVER_UDS:-/tmp/codewire-sccache.sock}"
 # Cargo pointing at an output that is absent from this executor's target tree.
 export SCCACHE_DIRECT=false
 started_at="$(date +%s)"
+sccache_conf=''
+if [ "$mode" != disabled ] && [ -z "${SCCACHE_CONF:-}" ]; then
+  # The sccache client waits a fixed 10 s for its server unless the config file
+  # sets server_startup_timeout_ms. With R2, server startup reads and writes a
+  # check object on the bucket first, which can take longer than that.
+  sccache_conf="$(mktemp "${TMPDIR:-/tmp}/codewire-sccache-conf.XXXXXX")"
+  printf 'server_startup_timeout_ms = 60000\n' >"$sccache_conf"
+  export SCCACHE_CONF="$sccache_conf"
+fi
 sccache_active=false
 if [ "$mode" != disabled ]; then
-  # Starting the server can time out when the cache backend is unreachable.
-  # A cache outage must not fail the build: compile without the wrapper.
+  # Starting the server can time out or fail when the cache backend is slow or
+  # unreachable. A cache outage must not fail the build: retry R2 as the local
+  # disk cache, then compile without the wrapper.
   if sccache --zero-stats >/dev/null; then
     sccache_active=true
-  else
+  elif [ "$mode" = r2 ]; then
+    printf 'codewire-rust-build: warning: sccache did not start with R2; retrying with the local cache\n' >&2
+    sccache --stop-server >/dev/null 2>&1 || true
+    clear_remote_cache_env
+    # A late R2 server may still bind the first socket; never share it.
+    export SCCACHE_SERVER_UDS="$SCCACHE_SERVER_UDS.local"
+    mode=local
+    if sccache --zero-stats >/dev/null; then
+      sccache_active=true
+    fi
+  fi
+  if [ "$sccache_active" != true ]; then
     printf 'codewire-rust-build: warning: sccache did not start; compiling without it\n' >&2
     sccache --stop-server >/dev/null 2>&1 || true
     unset RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
@@ -113,6 +139,7 @@ if [ "$sccache_active" = true ]; then
   sccache --show-stats || printf 'codewire-rust-build: warning: sccache statistics unavailable\n' >&2
   sccache --stop-server >/dev/null 2>&1 || true
 fi
+[ -z "$sccache_conf" ] || rm -f -- "$sccache_conf"
 printf 'CODEWIRE_CI_PHASE name=rust-compile-link mode=%s seconds=%s status=%s\n' \
   "$mode" "$(( $(date +%s) - started_at ))" "$status"
 exit "$status"

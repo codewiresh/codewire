@@ -244,6 +244,7 @@ fn binding(scope: WorkspaceCredentialScope) -> LiveBinding {
         managed_credential_clients: "github".into(),
         credential_scope: scope,
         environment_generation: ENVIRONMENT_GENERATION,
+        working_directory: "/workspace/app".into(),
     }
 }
 
@@ -609,6 +610,7 @@ async fn a_bound_pod_gets_its_binding_and_a_pod_scoped_credential() {
     assert_eq!(response.operation_generation, 7);
     assert_eq!(response.projection_selection_sha256, "ab".repeat(32));
     assert_eq!(response.managed_credential_clients, "github");
+    assert_eq!(response.working_directory, "/workspace/app");
     assert_eq!(
         response.daemon_credential,
         issue_workspace_daemon_credential(SECRET, ENVIRONMENT_ID, POD_UID).unwrap()

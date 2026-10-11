@@ -287,6 +287,7 @@ mod tests {
             managed_credential_clients: Default::default(),
             host: None,
             launch_projection: None,
+            session_working_dir: None,
         }
     }
 

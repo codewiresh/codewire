@@ -35,17 +35,14 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
 
-readonly workspace_image='ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff'
-# The CLI's local default keeps a public GHCR image. Deployments use the Harbor
-# default, which is written only in the runtime image defaults module.
+# The workspace digest is the published pin (crates/codewire-workspace-image).
+# Deployments take its Harbor reference from the runtime image defaults module;
+# the CLI's local default is the same digest at the public GHCR mirror.
 readonly runtime_defaults='crates/codewire-server-core/src/runtime_images.rs'
-harbor_workspace_image="$(grep -oE 'registry\.example\.invalid/codewire/workspace@sha256:[0-9a-f]{64}' \
-  "$runtime_defaults" || true)"
-if [[ "$(grep -c . <<<"$harbor_workspace_image")" != 1 ]]; then
-  echo "runtime image audit: $runtime_defaults must define one Harbor workspace digest" >&2
+if ! python3 scripts/ci/images/workspace-image-pin.py show >/dev/null; then
+  echo "runtime image audit: the published workspace pin is not well formed" >&2
   exit 1
 fi
-readonly harbor_workspace_image
 readonly dind_image='docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c'
 rust_channel="$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' \
   rust-toolchain.toml)"
@@ -104,7 +101,8 @@ fi
 
 for assertion in \
   "crates/codewire-orchestration/src/sandbox/mod.rs:codewire_server_core::runtime_images::DEFAULT_WORKSPACE_IMAGE" \
-  "crates/codewire-cli/src/commands/collaboration.rs:$workspace_image" \
+  "$runtime_defaults:pub const DEFAULT_WORKSPACE_IMAGE: &str = codewire_workspace_image::HARBOR_IMAGE;" \
+  "crates/codewire-cli/src/commands/collaboration.rs:codewire_workspace_image::PUBLIC_IMAGE" \
   "crates/codewire-orchestration/src/sandbox/template/mod.rs:$dind_image"; do
   path="${assertion%%:*}"
   expected="${assertion#*:}"

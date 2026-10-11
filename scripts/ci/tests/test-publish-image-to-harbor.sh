@@ -148,8 +148,11 @@ grep -qxF "$harbor/workspace@$digest $harbor/workspace keep-${digest/:/-}" "$FAK
 # Compiled-in defaults already in Harbor are only kept; the public mirror is
 # never contacted.
 mapfile -t pinned < <(
-  grep -ohE 'registry\.example\.invalid/codewire/(workspace|daemon)@sha256:[0-9a-f]{64}' \
-    "$ROOT/crates/codewire-server-core/src/runtime_images.rs" | sort -u
+  {
+    python3 "$ROOT/scripts/ci/images/workspace-image-pin.py" show harbor-image
+    grep -ohE 'registry\.example\.invalid/codewire/daemon@sha256:[0-9a-f]{64}' \
+      "$ROOT/crates/codewire-server-core/src/runtime_images.rs"
+  } | sort -u
 )
 [[ "${#pinned[@]}" -ge 2 ]] || fail 'source does not pin Harbor workspace and daemon defaults'
 reset_logs

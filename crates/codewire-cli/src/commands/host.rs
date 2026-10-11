@@ -757,6 +757,7 @@ fn host_daemon_config(
         host: Some(codewire_daemon::config::HostConfig {
             state_root: environment.root(),
         }),
+        session_working_dir: None,
     })
 }
 

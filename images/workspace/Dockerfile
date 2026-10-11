@@ -100,7 +100,7 @@ FROM ${BASE_IMAGE_REF} AS workspace-foundation
 USER root
 ARG TARGETARCH
 ARG NODE_VERSION=22.23.2
-ARG GO_VERSION=1.26.6
+ARG GO_VERSION=1.26.9
 
 # Node and Go are direct, checksum-verified upstream archives on both supported
 # architectures. Unknown architectures fail closed.
@@ -109,11 +109,11 @@ RUN set -euo pipefail; \
       amd64) \
         node_arch=x64; \
         node_sha=b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a; \
-        go_sha=708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89 ;; \
+        go_sha=42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d ;; \
       arm64) \
         node_arch=arm64; \
         node_sha=013b59cfd2819703a6f4a14ab891fc46fc2a4e3f5bcd92de3fb4929b43e35b30; \
-        go_sha=d0507e9e9d7fe012aae570108cbd76c15de879e17130ab8cb90d4d7445cb1f2e ;; \
+        go_sha=4a97373d49fcacdcf3694fea368a500b00ee3e963974f3e7514132717632f052 ;; \
       *) echo "unsupported workspace image architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     curl --proto '=https' --tlsv1.2 -fsSL \

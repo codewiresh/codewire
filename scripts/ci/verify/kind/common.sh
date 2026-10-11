@@ -125,7 +125,8 @@ KIND_SHARD_TRANSACTION=0
 export -n KIND_SHARD_TRANSACTION
 KIND_PROFILE_ARTIFACTS_VERIFIED=0
 if [ -z "${DEFAULT_KIND_WORKSPACE_IMAGE+x}" ]; then
-  DEFAULT_KIND_WORKSPACE_IMAGE='ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff'
+  # The published workspace pin (crates/codewire-workspace-image), never a copy.
+  DEFAULT_KIND_WORKSPACE_IMAGE="$(python3 "$ROOT/scripts/ci/images/workspace-image-pin.py" show public-image)"
 fi
 if [ -z "${DEFAULT_KIND_DIND_IMAGE+x}" ]; then
   DEFAULT_KIND_DIND_IMAGE='docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c'

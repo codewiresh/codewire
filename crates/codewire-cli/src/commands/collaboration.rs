@@ -1,6 +1,8 @@
 use super::*;
 
-pub(crate) const CANONICAL_WORKSPACE_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff";
+/// The default workspace: the published pin at its public mirror, which local
+/// environments pull anonymously and the platform resolves to Harbor.
+pub(crate) const CANONICAL_WORKSPACE_IMAGE: &str = codewire_workspace_image::PUBLIC_IMAGE;
 
 pub(crate) fn selected_network_or_error(mesh: &config::ResolvedMeshConfig) -> anyhow::Result<&str> {
     mesh.selected_network

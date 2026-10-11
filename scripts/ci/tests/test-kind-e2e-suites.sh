@@ -2207,7 +2207,7 @@ PY
       "${kind_rendered}.public-${surface}.out" ||
       fail "public DinD ${surface} did not fail at the image guard"
   done
-  if grep -Fq 'ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff' "$kind_rendered"; then
+  if grep -Fq "$DEFAULT_KIND_WORKSPACE_IMAGE" "$kind_rendered"; then
     fail 'sealed Kind overlay retained the public workspace image'
   fi
 BASH
@@ -2316,8 +2316,9 @@ env \
   templates_json="$accepted_templates_json"
 
   pods_json="$(jq -cn \
+    --arg public "$DEFAULT_KIND_WORKSPACE_IMAGE" \
     --arg dind "$KIND_DIND_LOCAL_IMAGE" \
-    '{items:[{spec:{containers:[{image:"ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff"},{image:$dind}]}}]}')"
+    '{items:[{spec:{containers:[{image:$public},{image:$dind}]}}]}')"
   if assert_sandbox_supply_chain >/dev/null 2>&1; then
     fail 'sealed runtime accepted a public workspace reference'
   fi

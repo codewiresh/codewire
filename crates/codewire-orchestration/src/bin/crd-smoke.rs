@@ -375,7 +375,7 @@ fn access_template_opts(namespace: &str) -> TemplateOpts {
     let server_namespace =
         std::env::var("CRD_SMOKE_SERVER_NAMESPACE").unwrap_or_else(|_| namespace.into());
     let workspace_image = std::env::var("CRD_SMOKE_WORKSPACE_IMAGE").unwrap_or_else(|_| {
-        "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff".into()
+        codewire_orchestration::sandbox::PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE.into()
     });
     TemplateOpts {
         name: "tmpl-crd-smoke".into(),

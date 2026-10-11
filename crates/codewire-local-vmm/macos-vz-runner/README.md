@@ -40,13 +40,15 @@ The VM has no network, console or graphics device. The helper needs the
 `com.apple.security.virtualization` entitlement; developer builds are signed
 ad hoc with `developer-entitlements.plist`.
 
-The sections below describe the earlier fixed-topology developer fixtures.
+The sections below describe the earlier fixed-topology developer fixtures,
+which remain separate from the product `vm --config` mode above.
 
-`codewire-vz-runner` is an additive, currently unreachable Swift helper for
-validating a fixed Virtualization.framework configuration on macOS 26 or later
-on Apple Silicon. It is not linked from Cargo, `codewire-local-vmm`, or `cw`, and
-its default validation does not start a VM. The separately invoked developer
-fixtures below own disposable VMs; none exposes a product environment path.
+Those fixture subcommands validate a fixed Virtualization.framework
+configuration on macOS 26 or later on Apple Silicon, and their default
+validation does not start a VM. The separately invoked developer fixtures below
+own disposable VMs; none exposes a product environment path. The service-VM
+networking topology some of them use is superseded for the product by the
+#1905 decision (host packet worker and egress broker under Seatbelt).
 
 The separately invoked `inode-probe` subcommand is source for one synthetic
 hardware fixture, not product lifecycle wiring. Its parent is

@@ -480,7 +480,10 @@ impl SessionEngine {
             ));
         }
         let working_dir = if request.working_dir.trim().is_empty() {
-            self.inner.config.home_root.to_string_lossy().into_owned()
+            match hosted_default_working_dir(&self.inner.config).await {
+                Some(directory) => directory,
+                None => self.inner.config.home_root.to_string_lossy().into_owned(),
+            }
         } else {
             request.working_dir
         };
@@ -1107,11 +1110,15 @@ impl SessionEngine {
             }
         }
         let working_dir = if launch.working_dir.is_empty() {
-            self.inner
-                .config
-                .workspace_root
-                .to_string_lossy()
-                .into_owned()
+            match hosted_default_working_dir(&self.inner.config).await {
+                Some(directory) => directory,
+                None => self
+                    .inner
+                    .config
+                    .workspace_root
+                    .to_string_lossy()
+                    .into_owned(),
+            }
         } else {
             launch.working_dir
         };
@@ -4135,6 +4142,20 @@ async fn path_is_directory(path: &str) -> bool {
         .is_ok_and(|metadata| metadata.is_dir())
 }
 
+/// Hosted only: where a session launched without a working directory starts.
+/// That is the environment's declared directory, or the workspace root while
+/// the declared one does not exist (for example after a failed clone). Local
+/// and host daemons return None and keep their own defaults.
+async fn hosted_default_working_dir(config: &Config) -> Option<String> {
+    let declared = config.session_working_dir.as_ref()?;
+    let declared = declared.to_string_lossy().into_owned();
+    Some(if path_is_directory(&declared).await {
+        declared
+    } else {
+        config.workspace_root.to_string_lossy().into_owned()
+    })
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -4291,10 +4312,96 @@ mod tests {
             managed_credential_clients: Default::default(),
             host: None,
             launch_projection: None,
+            session_working_dir: None,
         };
         let engine = SessionEngine::new(&config, CredentialBridge::new(None));
         engine.ensure_initialized().await.unwrap();
         (temp, engine)
+    }
+
+    /// An engine whose home and workspace roots are distinct directories under
+    /// one temporary root. `declared` names the hosted session directory
+    /// relative to that root; None is a local or host daemon.
+    async fn working_dir_engine(declared: Option<&str>) -> (tempfile::TempDir, SessionEngine) {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("home")).unwrap();
+        std::fs::create_dir_all(temp.path().join("workspace")).unwrap();
+        let config = Config {
+            listen_addr: "unused:0".into(),
+            workspace_root: temp.path().join("workspace"),
+            home_root: temp.path().join("home"),
+            auth_token: crate::DaemonAuthToken::new("synthetic-working-dir-test").unwrap(),
+            process_execution: ProcessExecution::Native,
+            credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            host: None,
+            launch_projection: None,
+            session_working_dir: declared.map(|relative| temp.path().join(relative)),
+        };
+        let engine = SessionEngine::new(&config, CredentialBridge::new(None));
+        engine.ensure_initialized().await.unwrap();
+        (temp, engine)
+    }
+
+    fn true_request(working_dir: &Path) -> v1::LaunchSessionRequest {
+        v1::LaunchSessionRequest {
+            command: vec!["/bin/true".into()],
+            working_dir: working_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unlisted_session_starts_in_the_hosted_default_directory() {
+        let unlisted = Path::new("");
+        // Local and host daemons keep the home directory.
+        let (temp, engine) = working_dir_engine(None).await;
+        let record = engine.launch(true_request(unlisted)).await.unwrap();
+        assert_eq!(Path::new(&record.working_dir), temp.path().join("home"));
+
+        // A hosted daemon starts in the declared directory when it exists.
+        let (temp, engine) = working_dir_engine(Some("workspace/app")).await;
+        std::fs::create_dir(temp.path().join("workspace/app")).unwrap();
+        let record = engine.launch(true_request(unlisted)).await.unwrap();
+        assert_eq!(
+            Path::new(&record.working_dir),
+            temp.path().join("workspace/app")
+        );
+
+        // ... and in the workspace root while it does not, for example after
+        // a failed clone.
+        let (temp, engine) = working_dir_engine(Some("workspace/missing")).await;
+        let record = engine.launch(true_request(unlisted)).await.unwrap();
+        assert_eq!(
+            Path::new(&record.working_dir),
+            temp.path().join("workspace")
+        );
+
+        // An explicit directory is used as given and still must exist.
+        let (temp, engine) = working_dir_engine(Some("workspace")).await;
+        let record = engine
+            .launch(true_request(&temp.path().join("home")))
+            .await
+            .unwrap();
+        assert_eq!(Path::new(&record.working_dir), temp.path().join("home"));
+        assert!(matches!(
+            engine
+                .launch(true_request(&temp.path().join("absent")))
+                .await,
+            Err(SessionError::InvalidArgument(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_hosted_default_is_only_for_hosted_daemons() {
+        let (temp, engine) = working_dir_engine(None).await;
+        assert_eq!(hosted_default_working_dir(&engine.inner.config).await, None);
+        drop(temp);
+        let (temp, engine) = working_dir_engine(Some("workspace/missing")).await;
+        assert_eq!(
+            hosted_default_working_dir(&engine.inner.config).await,
+            Some(temp.path().join("workspace").to_string_lossy().into_owned())
+        );
     }
 
     fn marker_request(marker: &Path) -> v1::LaunchSessionRequest {
@@ -4747,6 +4854,7 @@ mod tests {
                     process_directory: temp.path().join("must-not-inspect-processes"),
                 }),
             }),
+            session_working_dir: None,
         };
         let bridge = CredentialBridge::new(config.credential_bridge.clone());
         let engine = SessionEngine::new(&config, bridge);
@@ -4887,6 +4995,7 @@ mod tests {
             managed_credential_clients: Default::default(),
             host: None,
             launch_projection: None,
+            session_working_dir: None,
         };
         SessionEngine::new(&config, CredentialBridge::new(None))
     }

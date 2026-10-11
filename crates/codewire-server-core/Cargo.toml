@@ -28,6 +28,7 @@ async-trait = { workspace = true, optional = true }
 kube = { workspace = true, optional = true }
 k8s-openapi = { workspace = true, optional = true }
 codewire-daemon-proto = { workspace = true, optional = true }
+codewire-workspace-image = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }

@@ -44,6 +44,9 @@ pub struct LiveBinding {
     /// The environment's current operation generation, read in the same
     /// statement. Peer tokens and host keys are bound to it.
     pub environment_generation: i64,
+    /// The environment's declared working directory, or empty. Read on every
+    /// bind, so a restarted Pod gets the current value.
+    pub working_directory: String,
 }
 
 impl std::fmt::Debug for LiveBinding {
@@ -149,6 +152,7 @@ type LiveBindingRow = (
     String,
     String,
     i64,
+    String,
 );
 
 #[async_trait]
@@ -170,7 +174,8 @@ impl BindingStore for PgBindingStore {
                       w.projection_selection_sha256,
                       w.managed_credential_clients,
                       w.credential_scope,
-                      e.environment_operation_generation
+                      e.environment_operation_generation,
+                      COALESCE(e.project_spec->>'working_directory', '')
                  FROM sandbox_workspace_bindings w
                  JOIN sandbox_environment_backend b
                    ON b.environment_id = w.environment_id
@@ -347,6 +352,7 @@ fn live_binding_from_row(
         managed_credential_clients,
         credential_scope,
         environment_generation,
+        working_directory,
     ): LiveBindingRow,
 ) -> Result<LiveBinding, BindingStoreUnavailable> {
     // The schema constrains the scope; anything else is a broken store.
@@ -364,6 +370,7 @@ fn live_binding_from_row(
         managed_credential_clients,
         credential_scope,
         environment_generation,
+        working_directory,
     })
 }
 
@@ -507,6 +514,7 @@ mod tests {
                 String::new(),
                 scope.into(),
                 7,
+                "/workspace/app".into(),
             )
         };
         assert_eq!(

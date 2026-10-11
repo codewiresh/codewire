@@ -761,7 +761,7 @@ fn env_create_request_builds_one_canonical_project_spec() {
     assert_eq!(spec.repositories[0].branch, "main");
     assert_eq!(
         spec.image,
-        "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff"
+        CANONICAL_WORKSPACE_IMAGE
     );
     assert_eq!(spec.install_command, "go mod download");
     assert_eq!(spec.startup_script, "go test ./...");
@@ -944,7 +944,7 @@ fn env_create_preset_authoring_flags_do_not_block_request_resolution() {
     assert_eq!(args.save_preset.as_deref(), Some("Fullstack Dev"));
     assert_eq!(
         request.project_spec.image,
-        "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff"
+        CANONICAL_WORKSPACE_IMAGE
     );
 }
 
@@ -962,7 +962,7 @@ fn env_create_bare_defaults_to_workspace_image() {
 
     assert_eq!(
         request.project_spec.image,
-        "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff"
+        CANONICAL_WORKSPACE_IMAGE
     );
     assert!(request.preset_id.is_none());
     assert!(request.project_spec.preset.is_empty());
@@ -1154,7 +1154,7 @@ async fn init_command_writes_codewire_yaml_from_direct_flags() {
     let spec = parsed.spec;
     assert_eq!(
         spec.image,
-        "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff"
+        CANONICAL_WORKSPACE_IMAGE
     );
     assert_eq!(spec.install_command, "pnpm install");
     assert_eq!(spec.startup_script, "pnpm dev");
@@ -1378,9 +1378,9 @@ fn normalize_git_url_matches_go_helper() {
 #[test]
 fn codewire_yaml_from_request_round_trips_the_canonical_project_spec() {
     let project_spec = codewire_project::parse_project_yaml(
-                r#"
+                &r#"
     version: 1
-    image: ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff
+    image: CANONICAL_WORKSPACE_IMAGE
     repositories:
       - source: https://example.test/org/api.git
         revision: deadbeef
@@ -1402,7 +1402,7 @@ fn codewire_yaml_from_request_round_trips_the_canonical_project_spec() {
     disk: "40Gi"
     secrets: {project: prod, organization: true, user: platform}
     credentials: {profile: platform:user/work}
-    "#,
+    "#.replace("CANONICAL_WORKSPACE_IMAGE", CANONICAL_WORKSPACE_IMAGE),
             )
             .unwrap()
             .spec;
@@ -1432,7 +1432,7 @@ fn write_resolved_codewire_yaml_creates_parent_dirs() {
     let path = dir.path().join("nested/codewire.yaml");
     let request = CreateEnvironmentRequest {
                 project_spec: codewire_project::ProjectSpec {
-                    image: "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff".to_string(),
+                    image: CANONICAL_WORKSPACE_IMAGE.to_string(),
                     install_command: "go mod download".to_string(),
                     ..Default::default()
                 },
@@ -1444,7 +1444,7 @@ fn write_resolved_codewire_yaml_creates_parent_dirs() {
     let parsed = config::load_project_document(&path).unwrap();
     assert_eq!(
         parsed.spec.image,
-        "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff"
+        CANONICAL_WORKSPACE_IMAGE
     );
     assert_eq!(parsed.spec.install_command, "go mod download");
     assert!(!parsed.spec.secrets.organization);
@@ -1457,7 +1457,7 @@ fn create_preset_request_from_environment_copies_one_canonical_spec() {
                 ttl_seconds: Some(3600),
                 project_spec: codewire_project::ProjectSpec {
                     preset: "base".to_string(),
-                    image: "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff".to_string(),
+                    image: CANONICAL_WORKSPACE_IMAGE.to_string(),
                     install_command: "bun install".to_string(),
                     startup_script: "bun dev".to_string(),
                     environment: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
@@ -1494,7 +1494,7 @@ fn create_preset_request_from_environment_copies_one_canonical_spec() {
     assert_eq!(preset.project_spec.resources.cpu_millicores, Some(2000));
     assert_eq!(
         preset.project_spec.image,
-        "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff"
+        CANONICAL_WORKSPACE_IMAGE
     );
     assert_eq!(preset.project_spec.environment["FOO"], "bar");
     assert_eq!(preset.project_spec.agents.tools, ["claude-code"]);

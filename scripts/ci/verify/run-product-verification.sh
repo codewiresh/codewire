@@ -253,6 +253,8 @@ run_policy_core() {
   python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
   python3 scripts/checks/repo_checks.py design-tokens --self-test
   python3 scripts/checks/repo_checks.py identity-free-workspace --self-test
+  python3 scripts/checks/repo_checks.py workspace-image-pin --self-test
+  python3 scripts/checks/repo_checks.py workspace-image-pin
   python3 scripts/checks/repo_checks.py epoch-material-cache-owner --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source
@@ -804,6 +806,8 @@ run_release() {
   scripts/ci/tests/test-resolve-published-support-pair.sh
   scripts/ci/tests/test-run-skopeo-container.sh
   scripts/ci/tests/test-support-images-workflow.sh
+  scripts/ci/tests/test-propose-workspace-image-pin.sh
+  scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
   python3 scripts/ci/tests/test-image-bundle.py
   scripts/ci/tests/test-deploy-prod-workflow.sh
