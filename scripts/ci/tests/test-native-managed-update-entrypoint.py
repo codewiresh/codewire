@@ -87,6 +87,15 @@ env() {
         args = self.capture.read_bytes().rstrip(b'\0').decode().split('\0') if self.capture.exists() else []
         return result, args
 
+    def test_synthetic_github_login_matches_the_synthetic_broker(self):
+        smoke = re.search(r"^readonly SYNTHETIC_GITHUB_LOGIN='([^']+)'$", SOURCE.read_text(), re.MULTILINE)
+        broker = re.search(
+            r'\("GET", "https://api\.github\.com/user"\) => \{\s*serde_json::json!\(\{"id": 1, "login": "([^"]+)"\}\)',
+            (ROOT / 'crates/codewire-credential-broker/src/runtime.rs').read_text())
+        self.assertIsNotNone(smoke, 'smoke lacks its synthetic GitHub login')
+        self.assertIsNotNone(broker, 'synthetic broker lacks its GitHub /user login')
+        self.assertEqual(smoke[1], broker[1])
+
     def test_default_invokes_original_journey_once(self):
         result, args = self.shell('run_native_managed_agent_smoke', update=False)
         self.assertEqual(result.returncode, 0, result.stderr)
