@@ -815,3 +815,78 @@ async fn a_short_request_then_fin_survives_reordered_packets() {
         assert_eq!(received, request, "round {round}");
     }
 }
+
+/// A reader that falls behind fills the receive queue and closes the TCP
+/// window. Taking data must wake the driver to reopen it; otherwise every
+/// window's worth waits for the driver's next unrelated wakeup (its 50 ms idle
+/// tick), and a guest upload through a slow relay collapsed to a few MB/s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reader_that_falls_behind_reopens_the_window_at_once() {
+    const BYTES: usize = 16 * 1024 * 1024;
+    let (client_stack, server_stack) = wired_pair();
+    let mut listener = server_stack.bind(7410).await.expect("listener");
+    let writer = tokio::spawn(async move {
+        let mut client = client_stack
+            .connect(SocketAddr::new(IpAddr::V6(B_IP), 7410))
+            .await
+            .expect("client");
+        client.write_all(&vec![7_u8; BYTES]).await.expect("upload");
+        client.shutdown().await.expect("client half-close");
+        (client_stack, client)
+    });
+    let mut server = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("accept timed out")
+        .expect("accepted stream");
+    // Let the receive queue and the window fill before reading.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut received = 0;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = tokio::time::timeout(Duration::from_secs(10), server.read(&mut buffer))
+            .await
+            .expect("read stalled")
+            .expect("read");
+        if read == 0 {
+            break;
+        }
+        received += read;
+    }
+    let _ = writer.await.expect("writer");
+    // The wake itself is proved deterministically below; this end-to-end run
+    // proves the bytes all arrive intact once the reader catches up.
+    assert_eq!(received, BYTES);
+}
+
+/// Taking a chunk from the receive queue wakes the driver, which then moves
+/// the socket's buffered bytes on and reopens the window.
+#[tokio::test]
+async fn reading_a_chunk_wakes_the_driver() {
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    let notify = Arc::new(Notify::new());
+    let (to_stream, rx) = mpsc::channel(1);
+    let (tx, _from_stream) = mpsc::channel(1);
+    let (driver_tx, _commands) = mpsc::channel(1);
+    let endpoint = smoltcp::wire::IpEndpoint::new(IpAddress::Ipv6(A_IP), 7414);
+    let mut stream = super::stream::TcpStream::new(
+        rx,
+        tx,
+        Arc::new(super::stream::StreamControl::new(notify.clone())),
+        driver_tx,
+        endpoint,
+        endpoint,
+        1024,
+    );
+    to_stream
+        .send(b"queued".to_vec())
+        .await
+        .expect("queue a chunk");
+    let mut buffer = [0_u8; 16];
+    let read = stream.read(&mut buffer).await.expect("read");
+    assert_eq!(&buffer[..read], b"queued");
+    tokio::time::timeout(Duration::from_millis(100), notify.notified())
+        .await
+        .expect("the read freed receive-queue space without waking the driver");
+}
