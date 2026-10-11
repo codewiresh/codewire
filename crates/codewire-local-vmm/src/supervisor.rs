@@ -2349,6 +2349,18 @@ impl SupervisorCore {
         {
             return self.fail_operation(operation, error_code);
         }
+        // A failed operation's record cannot say whether it changed the
+        // environment's state, so the move into Error is recorded as a
+        // reconcile carrying the operation's code, the record an environment
+        // without a runner reports its error from (#2572).
+        let generation = self.environment(name)?.generation;
+        self.record_reconcile_observation(
+            name,
+            StoredEnvironmentState::Error,
+            generation,
+            false,
+            Some(error_code),
+        )?;
         let mut next_state = self.state.clone();
         next_state
             .environments
@@ -15782,7 +15794,54 @@ mod runner_exit_tests {
             core.environment("dev").unwrap().state,
             StoredEnvironmentState::Error
         );
-        assert_eq!(shown_error_code(&core), "");
+        assert_eq!(shown_error_code(&core), "start_interrupted");
+    }
+
+    #[test]
+    fn a_failed_operation_into_error_says_its_own_code() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let id = core.environment("dev").unwrap().id;
+        core.environment_mut("dev").unwrap().state = StoredEnvironmentState::Starting;
+        core.save().unwrap();
+        let start = operation(&core, id, OperationKind::Start);
+        let failed = core
+            .fail_operation_with_environment_error(&start, "dev", "start_interrupted")
+            .unwrap();
+        assert_eq!(failed.phase, OperationPhase::Failed);
+        assert_eq!(failed.error_code.as_deref(), Some("start_interrupted"));
+        assert_eq!(
+            core.environment("dev").unwrap().state,
+            StoredEnvironmentState::Error
+        );
+        assert_eq!(shown_error_code(&core), "start_interrupted");
+
+        // A failure that leaves the state alone does not replace it, nor does
+        // another failure into Error while it is still there.
+        let stop = operation(&core, id, OperationKind::Stop);
+        core.fail_operation(&stop, "stop_failed").unwrap();
+        let restart = operation(&core, id, OperationKind::Restart);
+        core.fail_operation_with_environment_error(&restart, "dev", "restart_interrupted")
+            .unwrap();
+        assert_eq!(shown_error_code(&core), "start_interrupted");
+    }
+
+    #[test]
+    fn a_failed_operation_with_a_live_runner_records_the_code_on_it() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let id = running_with_a_runner(&mut core);
+        let start = operation(&core, id, OperationKind::Restart);
+        core.fail_operation_with_environment_error(&start, "dev", "restart_interrupted")
+            .unwrap();
+        let environment = core.environment("dev").unwrap();
+        assert_eq!(environment.state, StoredEnvironmentState::Error);
+        assert_eq!(
+            environment
+                .runner
+                .as_ref()
+                .and_then(|runner| runner.error_code.as_deref()),
+            Some("restart_interrupted")
+        );
+        assert_eq!(shown_error_code(&core), "restart_interrupted");
     }
 
     #[test]
