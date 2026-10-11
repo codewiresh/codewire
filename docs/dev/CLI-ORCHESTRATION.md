@@ -230,6 +230,10 @@ python3 scripts/dev/cw-runtime-image.py build \
   --output /absolute/fresh/owned/cw-image
 ```
 
+The static build compiles C dependencies with the target's musl gcc
+(`x86_64-linux-musl-gcc`) when it is on PATH; otherwise it uses
+`cargo-zigbuild` and `zig` from PATH, as release delivery does.
+
 The image contains only static Linux `cw` and public build provenance. A local
 VM runs its host's architecture: an x86_64 Linux host uses the default
 x86_64 target, and an Apple Silicon Mac uses `--target
