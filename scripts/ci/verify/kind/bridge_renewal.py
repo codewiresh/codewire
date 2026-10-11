@@ -25,7 +25,7 @@ import time
 
 HOST = "127.0.0.1"
 PORT = 38081
-TARGET = "/v1/messages"
+TARGET = "/_codewire/anthropic/v1/messages"
 # A fixed public synthetic request; the broker denies it before any upstream.
 BODY = json.dumps({
     "model": "codewire-synthetic",

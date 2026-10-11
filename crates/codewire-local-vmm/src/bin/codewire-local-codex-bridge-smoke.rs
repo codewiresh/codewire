@@ -2772,7 +2772,10 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
                 .env("HOME", home)
                 .env("TMPDIR", home)
                 .env("PATH", "/usr/bin:/bin")
-                .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:38081")
+                .env(
+                    "ANTHROPIC_BASE_URL",
+                    "http://127.0.0.1:38081/_codewire/anthropic",
+                )
                 .env("ANTHROPIC_AUTH_TOKEN", "codewire-managed")
                 .env("ANTHROPIC_API_KEY", "")
                 .env("CLAUDE_CODE_OAUTH_TOKEN", "")

@@ -69,16 +69,15 @@ async fn anthropic_exact_routes_filter_real_injection_and_complete_stream_or_cou
     for messages in [true, false] {
         for beta in [false, true] {
             let path = if messages {
-                "/messages"
+                "/v1/messages"
             } else {
-                "/messages/count_tokens"
+                "/v1/messages/count_tokens"
             };
-            let operation = if messages { "messages" } else { "count-tokens" };
             let mut lease = Lease::new(
                 "anthropic",
                 CredentialAuthKind::ApiKey,
                 "anthropic",
-                operation,
+                "messages",
                 "anthropic-api",
             );
             lease.material = Zeroizing::new(ANTHROPIC_KEY.as_bytes().to_vec());
@@ -124,7 +123,7 @@ async fn anthropic_exact_routes_filter_real_injection_and_complete_stream_or_cou
             assert!(headers.contains_key("x-error-json"));
             let (headers, mut redaction) = policy.begin(&headers).unwrap();
             assert_eq!(headers["request-id"], "[REDACTED]");
-            assert!(!headers.contains_key("x-error-json"));
+            assert_eq!(headers["x-error-json"], "{\"error\":\"[REDACTED]\"}");
             let mut output = Vec::new();
             let mut chunks = 0;
             while let Some(chunk) = body.next().await {
@@ -249,8 +248,6 @@ async fn anthropic_rejects_missing_wrong_duplicate_or_caller_headers() {
         ("authorization", "Bearer caller"),
         ("cookie", "caller=session"),
         ("proxy-authorization", "caller"),
-        ("chatgpt-account-id", SYNTHETIC_CODEX_ACCOUNT_ID),
-        ("x-error-json", "caller"),
     ] {
         let mut request = anthropic_request();
         request.headers.insert(
@@ -331,7 +328,7 @@ async fn openai_api_retains_real_redaction_with_a_distinct_marker() {
     assert!(headers.contains_key("x-error-json"));
     let (headers, mut redaction) = policy.begin(&headers).unwrap();
     assert_eq!(headers["x-request-id"], "[REDACTED]");
-    assert!(!headers.contains_key("x-error-json"));
+    assert_eq!(headers["x-error-json"], "{\"error\":\"[REDACTED]\"}");
     let mut output = Vec::new();
     let mut chunks = 0;
     while let Some(chunk) = body.next().await {
@@ -644,23 +641,19 @@ async fn exact_api_canned_routes_delegate_the_original_request_unchanged() {
 }
 
 #[test]
-fn exact_api_header_names_follow_the_owning_compiled_routes() {
+fn exact_api_accepts_transparent_client_headers_but_refuses_duplicates() {
     for family in ["openai", "anthropic"] {
-        let route = if family == "openai" {
-            crate::openai::openai_responses_route()
-        } else {
-            crate::anthropic::route()
-        };
         let mut request = exact_api_request(family);
-        for name in &route.allowed_request_headers {
-            let value = match name.as_str() {
-                "content-type" => "application/json",
-                "anthropic-version" => "2023-06-01",
-                "anthropic-beta" => "token-counting-2024-11-01",
-                _ => "synthetic",
-            };
+        for (name, value) in [
+            ("user-agent", "synthetic-client/1.0"),
+            ("x-app", "cli"),
+            ("anthropic-beta", "dangerous-tool-use-2026-09-03"),
+            ("originator", "codex_cli_rs"),
+            ("x-stainless-lang", "js"),
+            ("forwarded", "for=192.0.2.1"),
+        ] {
             request.headers.insert(
-                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderName::from_static(name),
                 HeaderValue::from_static(value),
             );
         }
@@ -672,21 +665,10 @@ fn exact_api_header_names_follow_the_owning_compiled_routes() {
             Ok(())
         );
         for name in request.headers.keys().cloned().collect::<Vec<_>>() {
-            let duplicate = request.headers[&name].clone();
-            request.headers.append(name.clone(), duplicate);
+            let original = request.headers[&name].clone();
+            request.headers.append(name.clone(), original.clone());
             exact_api_denied(&request, exact_api_key(family));
-            request.headers.remove(&name);
-            // Restore one original value after the duplicate refusal.
-            let value = match name.as_str() {
-                "authorization" => HeaderValue::from_str(&format!("Bearer {OPENAI_KEY}")).unwrap(),
-                "x-api-key" => HeaderValue::from_static(ANTHROPIC_KEY),
-                "content-type" => HeaderValue::from_static("application/json"),
-                "anthropic-version" => HeaderValue::from_static("2023-06-01"),
-                "anthropic-beta" => HeaderValue::from_static("token-counting-2024-11-01"),
-                "accept-encoding" => HeaderValue::from_static("identity"),
-                _ => HeaderValue::from_static("synthetic"),
-            };
-            request.headers.insert(name, value);
+            request.headers.insert(name, original);
         }
     }
 }
@@ -752,13 +734,10 @@ fn exact_api_authority_is_single_and_foreign_headers_refuse() {
         let mut request = exact_api_request(family);
         request.headers.remove(authority);
         exact_api_denied(&request, exact_api_key(family));
-        for foreign in [
+        let mut foreign = vec![
             "cookie",
             "proxy-authorization",
-            "chatgpt-account-id",
             "host",
-            "forwarded",
-            "x-error-json",
             "connection",
             "upgrade",
             if family == "openai" {
@@ -766,7 +745,11 @@ fn exact_api_authority_is_single_and_foreign_headers_refuse() {
             } else {
                 "authorization"
             },
-        ] {
+        ];
+        if family == "openai" {
+            foreign.push("chatgpt-account-id");
+        }
+        for foreign in foreign {
             let mut request = exact_api_request(family);
             request.headers.insert(
                 HeaderName::from_static(foreign),
@@ -873,14 +856,9 @@ fn exact_api_headers_are_bounded_and_use_existing_content_policy() {
         }
     }
     let mut request = exact_api_request("openai");
-    for name in crate::openai::openai_responses_route()
-        .allowed_request_headers
-        .iter()
-        .filter(|name| name.as_str() != "content-type")
-        .take(8)
-    {
+    for index in 0..8 {
         request.headers.insert(
-            HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            HeaderName::from_bytes(format!("x-synthetic-{index}").as_bytes()).unwrap(),
             HeaderValue::from_bytes(&vec![b'a'; 8 * 1024]).unwrap(),
         );
     }

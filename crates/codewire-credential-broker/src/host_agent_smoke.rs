@@ -108,8 +108,7 @@ impl BrokerLeaseProvider for SmokeAuthority {
         if request_id.is_nil()
             || !matches!(
                 (capability_slot.as_str(), operation.as_str(), route.as_str()),
-                ("codex", "responses", "openai-api")
-                    | ("anthropic", "messages" | "count-tokens", "anthropic-api")
+                ("codex", "responses", "openai-api") | ("anthropic", "messages", "anthropic-api")
             )
         {
             return Err(BrokerLeaseError::Denied);
@@ -224,7 +223,7 @@ fn catalog() -> Result<ProviderCatalog, HostAgentSmokeError> {
                 CredentialAuthKind::ApiKey,
                 "anthropic",
                 "anthropic-api",
-                vec!["messages", "count-tokens"],
+                vec!["messages"],
             ),
         ]
         .into_iter()
@@ -438,12 +437,16 @@ impl Drop for ConnectionCount {
     }
 }
 
+/// The fixture's own capability bearer selects nothing; the path does. Like
+/// the product ingress, each provider family is transparent below its base.
 fn closed_route<B>(
     state: &State,
     request: &Request<B>,
-) -> Result<(&'static str, &'static str), StatusCode> {
-    if request.method() != Method::POST
-        || request.uri().scheme().is_some()
+) -> Result<(&'static str, String), StatusCode> {
+    if !matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) || request.uri().scheme().is_some()
         || request.uri().authority().is_some()
         || request.headers().len() > MAX_HEADERS
         || request
@@ -474,14 +477,15 @@ fn closed_route<B>(
     {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    match (request.uri().path(), request.uri().query()) {
-        ("/codex/v1/responses", None) => Ok(("codex", "/responses")),
-        ("/anthropic/v1/messages", None | Some("beta=true")) => Ok(("anthropic", "/messages")),
-        ("/anthropic/v1/messages/count_tokens", None | Some("beta=true")) => {
-            Ok(("anthropic", "/messages/count_tokens"))
-        }
-        _ => Err(StatusCode::FORBIDDEN),
-    }
+    let path = request.uri().path();
+    let (slot, provider_path) = if let Some(rest) = path.strip_prefix("/codex/v1/") {
+        ("codex", rest)
+    } else if let Some(rest) = path.strip_prefix("/anthropic/") {
+        ("anthropic", rest)
+    } else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    Ok((slot, format!("/{provider_path}")))
 }
 
 fn fixed_response(status: StatusCode) -> Response<HttpBody> {
@@ -535,8 +539,8 @@ async fn handle(
         .collect();
     let request = v1::CredentialBridgeRequest {
         request_id: Uuid::new_v4().to_string(),
-        method: "POST".into(),
-        path: path.into(),
+        method: parts.method.as_str().into(),
+        path,
         query: parts.uri.query().unwrap_or_default().into(),
         headers,
         body: bytes.to_vec(),
@@ -807,12 +811,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_query_origin_and_duplicate_auth_are_denied_before_lease() {
+    async fn route_origin_and_duplicate_auth_are_denied_before_lease() {
         let fixture = Fixture::start().await;
         for (path, extra) in [
             ("/v1/responses", ""),
-            ("/codex/v1/responses?beta=true", ""),
-            ("/anthropic/v1/messages?beta=false", ""),
+            ("/openai/v1/responses", ""),
             ("/codex/v1/responses", "Origin: http://example.test\r\n"),
             ("/codex/v1/responses", "Authorization: Bearer wrong\r\n"),
             ("/codex/v1/responses", "X-Api-Key: wrong\r\n"),

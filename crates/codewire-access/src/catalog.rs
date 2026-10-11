@@ -81,8 +81,9 @@ pub fn builtin_provider_catalog() -> ProviderCatalog {
             ]),
         },
         // One Anthropic slot holds either an API key or a Claude subscription
-        // token (`claude setup-token`), its OAuth form. Both reach only the
-        // same two Messages routes through the broker; neither is delivered.
+        // token (`claude setup-token`), its OAuth form. Both reach the whole
+        // Anthropic API through the broker's transparent route, whose one
+        // operation covers every request; neither is delivered.
         ProviderDefinition {
             id: ProviderId::parse("anthropic").expect("built-in Anthropic provider ID"),
             authentication_kinds: BTreeSet::from([
@@ -93,10 +94,7 @@ pub fn builtin_provider_catalog() -> ProviderCatalog {
                 CapabilitySlot::anthropic(),
                 policy(
                     &[CredentialAuthKind::OAuth, CredentialAuthKind::ApiKey],
-                    &[
-                        ("messages", "anthropic-api"),
-                        ("count-tokens", "anthropic-api"),
-                    ],
+                    &[("messages", "anthropic-api")],
                 ),
             )]),
         },
@@ -336,10 +334,7 @@ mod tests {
             anthropic.capabilities[&CapabilitySlot::anthropic()],
             policy(
                 &[CredentialAuthKind::OAuth, CredentialAuthKind::ApiKey],
-                &[
-                    ("messages", "anthropic-api"),
-                    ("count-tokens", "anthropic-api")
-                ]
+                &[("messages", "anthropic-api")]
             )
         );
     }

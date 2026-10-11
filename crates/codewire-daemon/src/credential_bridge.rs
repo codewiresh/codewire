@@ -1095,11 +1095,11 @@ mod tests {
             ),
             (
                 "POST",
-                "/v1/messages?beta=true",
+                "/_codewire/anthropic/v1/messages?beta=true",
                 "localhost",
                 "anthropic",
                 "anthropic-api",
-                "/messages",
+                "/v1/messages",
                 "beta=true",
             ),
             (
@@ -1169,7 +1169,7 @@ mod tests {
             );
         }
         for (uri, host) in [
-            ("/v1/unknown", "localhost"),
+            ("/v2/unknown", "localhost"),
             ("/repos/owner/repo/issues", "foreign.invalid"),
             ("http://foreign.invalid/v1/responses", "localhost"),
             ("/v1/responses", "api.github.com"),

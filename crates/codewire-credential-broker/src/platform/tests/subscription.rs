@@ -133,7 +133,7 @@ fn claude_code_request() -> CredentialBridgeRequest {
         route: "anthropic-api".into(),
         request_id: Uuid::new_v4().to_string(),
         method: "POST".into(),
-        path: "/messages".into(),
+        path: "/v1/messages".into(),
         query: "beta=true".into(),
         headers: vec![
             header("content-type", "application/json"),

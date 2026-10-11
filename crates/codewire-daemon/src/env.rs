@@ -399,7 +399,10 @@ mod tests {
             );
             assert_eq!(values["ANTHROPIC_API_KEY"], "");
             assert_eq!(values["ANTHROPIC_AUTH_TOKEN"], "codewire-managed");
-            assert_eq!(values["ANTHROPIC_BASE_URL"], "http://127.0.0.1:38081");
+            assert_eq!(
+                values["ANTHROPIC_BASE_URL"],
+                "http://127.0.0.1:38081/_codewire/anthropic"
+            );
             assert_eq!(values["CLAUDE_CODE_OAUTH_TOKEN"], "");
             assert_eq!(values["GITHUB_TOKEN"], "unselected-image-value");
             assert_eq!(
@@ -451,7 +454,10 @@ mod tests {
             assert_eq!(values["CLAUDE_CODE_OAUTH_TOKEN"], "codewire-managed");
             assert_eq!(values["ANTHROPIC_AUTH_TOKEN"], "");
             assert_eq!(values["ANTHROPIC_API_KEY"], "");
-            assert_eq!(values["ANTHROPIC_BASE_URL"], "http://127.0.0.1:38081");
+            assert_eq!(
+                values["ANTHROPIC_BASE_URL"],
+                "http://127.0.0.1:38081/_codewire/anthropic"
+            );
             assert!(!values.contains_key(MANAGED_CREDENTIAL_CLIENTS_ENV));
             assert!(!values.values().any(|value| value.starts_with("image-")));
         }

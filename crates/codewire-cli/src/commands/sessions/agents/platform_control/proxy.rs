@@ -2,7 +2,7 @@
 //! This never opens the inherited HOME, auth.json, settings or environment.
 use super::*;
 pub(super) const OPENAI: &str = "http://127.0.0.1:38081/_codewire/openai/v1";
-pub(super) const ANTHROPIC: &str = "http://127.0.0.1:38081";
+pub(super) const ANTHROPIC: &str = "http://127.0.0.1:38081/_codewire/anthropic";
 const CODEX_CONFIG: &str = concat!(
     "model_provider = \"codewire_platform_api\"\n",
     "forced_login_method = \"api\"\n",

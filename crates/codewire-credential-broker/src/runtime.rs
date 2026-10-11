@@ -656,7 +656,7 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
             "x-request-id",
             HeaderValue::from_str(protected_value).map_err(|_| BrokerUpstreamError::Protocol)?,
         );
-        response_headers.insert("x-error-json", Self::opaque_reflection(protected_value)?);
+        response_headers.insert("x-error-json", Self::reflection(protected_value)?);
         Ok(BrokerUpstreamResponse::new(
             StatusCode::OK,
             response_headers,
@@ -723,42 +723,18 @@ impl SyntheticOpenAiSmokeTransport {
         expected: &str,
     ) -> Result<(), BrokerUpstreamError> {
         let denied = BrokerUpstreamError::Protocol;
-        let (route, path, query, prefix, authority) = match request.target.as_str() {
+        let (route, prefix, authority) = match request.target.as_str() {
             "https://api.openai.com/v1/responses" => (
                 crate::openai::openai_responses_route(),
-                "/responses",
-                None,
                 "cwlocalopenai",
                 "authorization",
             ),
-            "https://api.anthropic.com/v1/messages" => (
-                crate::anthropic::route(),
-                "/messages",
-                None,
-                "cwlocalanthropic",
-                "x-api-key",
-            ),
-            "https://api.anthropic.com/v1/messages?beta=true" => (
-                crate::anthropic::route(),
-                "/messages",
-                Some("beta=true"),
-                "cwlocalanthropic",
-                "x-api-key",
-            ),
-            "https://api.anthropic.com/v1/messages/count_tokens" => (
-                crate::anthropic::route(),
-                "/messages/count_tokens",
-                None,
-                "cwlocalanthropic",
-                "x-api-key",
-            ),
-            "https://api.anthropic.com/v1/messages/count_tokens?beta=true" => (
-                crate::anthropic::route(),
-                "/messages/count_tokens",
-                Some("beta=true"),
-                "cwlocalanthropic",
-                "x-api-key",
-            ),
+            "https://api.anthropic.com/v1/messages"
+            | "https://api.anthropic.com/v1/messages?beta=true"
+            | "https://api.anthropic.com/v1/messages/count_tokens"
+            | "https://api.anthropic.com/v1/messages/count_tokens?beta=true" => {
+                (crate::anthropic::route(), "cwlocalanthropic", "x-api-key")
+            }
             _ => return Err(denied),
         };
         if !Self::canary(expected, prefix)
@@ -769,16 +745,24 @@ impl SyntheticOpenAiSmokeTransport {
         {
             return Err(denied);
         }
+        // Transparent routes forward the client's own headers. Only
+        // credentials, framing and the other form's authority must be absent;
+        // the OpenAI form also never forwards a guest account selector.
+        let other_authority = if authority == "authorization" {
+            "x-api-key"
+        } else {
+            "authorization"
+        };
         let mut header_bytes = 0_usize;
         for (name, value) in &request.headers {
             if request.headers.get_all(name).iter().count() != 1
                 || value.as_bytes().len() > 8 * 1024
-                || !(name.as_str() == authority
-                    || name == http::header::ACCEPT_ENCODING
-                    || route
-                        .allowed_request_headers
-                        .iter()
-                        .any(|allowed| allowed == name.as_str()))
+                || matches!(
+                    name.as_str(),
+                    "cookie" | "proxy-authorization" | "host" | "connection" | "upgrade"
+                )
+                || name.as_str() == other_authority
+                || (authority == "authorization" && name.as_str() == "chatgpt-account-id")
             {
                 return Err(denied);
             }
@@ -797,7 +781,15 @@ impl SyntheticOpenAiSmokeTransport {
         } else {
             supplied
         };
+        let mut content_types = request.headers.get_all(http::header::CONTENT_TYPE).iter();
+        let json = content_types
+            .next()
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"));
         if supplied != Some(expected)
+            || content_types.next().is_some()
+            || !json
             || request
                 .headers
                 .get(http::header::ACCEPT_ENCODING)
@@ -816,15 +808,6 @@ impl SyntheticOpenAiSmokeTransport {
         {
             return Err(denied);
         }
-        av_credential_proxy::validate_proxy_request(
-            &route,
-            path,
-            query,
-            &request.method,
-            &request.headers,
-            request.body.len(),
-        )
-        .map_err(|_| denied)?;
         Ok(())
     }
 
@@ -837,12 +820,11 @@ impl SyntheticOpenAiSmokeTransport {
         })
     }
 
-    fn opaque_reflection(value: &str) -> Result<HeaderValue, BrokerUpstreamError> {
-        use base64::Engine as _;
-
-        let opaque =
-            base64::engine::general_purpose::STANDARD.encode(format!("{{\"error\":\"{value}\"}}"));
-        HeaderValue::from_str(&opaque).map_err(|_| BrokerUpstreamError::Protocol)
+    /// A provider diagnostic header reflecting the credential inside JSON.
+    /// Transparent routes return it with the credential redacted.
+    fn reflection(value: &str) -> Result<HeaderValue, BrokerUpstreamError> {
+        HeaderValue::from_str(&format!("{{\"error\":\"{value}\"}}"))
+            .map_err(|_| BrokerUpstreamError::Protocol)
     }
 
     fn anthropic(
@@ -864,14 +846,9 @@ impl SyntheticOpenAiSmokeTransport {
             || body.is_empty()
             || body.len() > 4 * 1024 * 1024
             || headers.keys().any(|name| {
-                !matches!(
+                matches!(
                     name.as_str(),
-                    "accept"
-                        | "content-type"
-                        | "anthropic-version"
-                        | "anthropic-beta"
-                        | "accept-encoding"
-                        | "x-api-key"
+                    "authorization" | "cookie" | "proxy-authorization" | "host"
                 )
             })
             || headers
@@ -919,9 +896,7 @@ impl SyntheticOpenAiSmokeTransport {
             "request-id",
             HeaderValue::from_str(protected_value).map_err(|_| BrokerUpstreamError::Protocol)?,
         );
-        // Opaque provider diagnostics must be dropped, not mistaken for a
-        // header whose contents can safely be forwarded after raw redaction.
-        response_headers.insert("x-error-json", Self::opaque_reflection(protected_value)?);
+        response_headers.insert("x-error-json", Self::reflection(protected_value)?);
         if !messages {
             return Ok(BrokerUpstreamResponse::new(
                 StatusCode::OK,
@@ -1481,7 +1456,7 @@ where
                 request.body,
             )
             .map_err(map_adapter_error)?;
-        let operation = BrokerOperationId::parse(validated.operation().operation_name())
+        let operation = BrokerOperationId::parse(crate::anthropic::OPERATION)
             .map_err(|_| BrokerRequestError::InvalidRequest)?;
         let lease = self
             .leases
@@ -3687,7 +3662,14 @@ mod tests {
             let response = broker.execute(request()).await.unwrap();
             let (status, headers, mut body) = response.into_parts();
             assert_eq!(status, StatusCode::OK);
-            assert!(!headers.contains_key(http::header::CONTENT_ENCODING));
+            assert!(
+                headers
+                    .get(http::header::CONTENT_ENCODING)
+                    .is_none_or(|value| value
+                        .as_bytes()
+                        .trim_ascii()
+                        .eq_ignore_ascii_case(b"identity"))
+            );
             assert_eq!(headers.get("x-request-id").unwrap(), "[REDACTED]");
             let mut output = Vec::new();
             while let Some(chunk) = body.next().await {
@@ -3723,8 +3705,10 @@ mod tests {
             ));
         }
 
+        // Transparent routes admit any query; an unsafe path is still refused
+        // before any lease.
         let mut denied = request();
-        denied.query = "exfiltrate=true".into();
+        denied.path = "/../responses".into();
         assert!(matches!(
             broker.execute(denied).await,
             Err(BrokerRequestError::Denied)

@@ -1,16 +1,19 @@
-//! Closed, material-free HTTP routing shared by ingress owners.
+//! Material-free HTTP routing shared by ingress owners.
 //!
-//! This only selects a provider family. The broker still validates each exact
-//! operation, query, header, body and lease before accessing provider material.
-//! Callers authenticate the ingress first and validate its configured authority
-//! before normalizing HTTP/2 to origin-form. Host is never an upstream URL.
+//! This only selects a provider family. The Anthropic and OpenAI families are
+//! transparent: every request under their base path reaches the broker, which
+//! changes only its credential. GitHub keeps its closed families. Callers
+//! authenticate the ingress first and validate its configured authority before
+//! normalizing HTTP/2 to origin-form. Host is never an upstream URL.
 
 use std::collections::BTreeSet;
 use std::net::Ipv6Addr;
 
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header::HOST, uri::Authority};
 
-pub use codewire_access::{MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX};
+pub use codewire_access::{
+    MANAGED_ANTHROPIC_API_PREFIX, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX,
+};
 
 const GITHUB_API_HOST: &str = "api.github.com";
 const MAX_PATH_BYTES: usize = 2048;
@@ -26,13 +29,15 @@ pub struct ClassifiedHttpRequest<'a> {
     pub query: Option<&'a str>,
 }
 
-/// Classify only origin-form managed requests or exact-host GitHub API calls.
+/// Classify origin-form managed requests or exact-host GitHub API calls.
 ///
 /// Non-GitHub managed routes may omit Host after trusted ingress normalization;
 /// a present Host must be unique and well formed. Its configured value remains
 /// the ingress owner's responsibility. GitHub API routing requires the exact
 /// canonical `api.github.com` Host, with no port, alias or fallback to another
-/// provider. Unknown routes and malformed metadata fail before body polling.
+/// provider. A provider family admits any method, path and query under its base
+/// path; the path stays provider-relative. Unknown routes and malformed metadata
+/// fail before body polling.
 pub fn classify_http_request<'a>(
     method: &Method,
     uri: &'a Uri,
@@ -60,9 +65,9 @@ pub fn classify_http_request<'a>(
     }
     let host = validate_host(headers)?;
     let path = uri.path();
-    let parts = path_parts(path).ok_or(denied)?;
     let query = uri.query();
     if host == Some(GITHUB_API_HOST) {
+        let parts = path_parts(path).ok_or(denied)?;
         if !github_api_family(method, &parts, query) {
             return Err(denied);
         }
@@ -74,22 +79,14 @@ pub fn classify_http_request<'a>(
             query,
         });
     }
-    let (capability_slot, route, path) = match path {
-        "/v1/responses" if method == Method::POST && query.is_none() => {
-            ("codex", "openai-api", "/responses")
-        }
-        _ if method == Method::POST
-            && query.is_none()
-            && path.strip_prefix(MANAGED_OPENAI_API_PREFIX) == Some("/responses") =>
-        {
-            ("openai", "openai-api", "/responses")
-        }
-        "/v1/messages" | "/v1/messages/count_tokens"
-            if method == Method::POST && matches!(query, None | Some("beta=true")) =>
-        {
-            ("anthropic", "anthropic-api", &path[3..])
-        }
-        _ if path.starts_with(MANAGED_GITHUB_GIT_PREFIX) => {
+    // Most specific base first: the Codex client's bare `/v1` comes last.
+    let (capability_slot, route, path) =
+        if let Some(provider_path) = under(path, MANAGED_ANTHROPIC_API_PREFIX) {
+            ("anthropic", "anthropic-api", provider_path)
+        } else if let Some(provider_path) = under(path, MANAGED_OPENAI_API_PREFIX) {
+            ("openai", "openai-api", provider_path)
+        } else if path.starts_with(MANAGED_GITHUB_GIT_PREFIX) {
+            path_parts(path).ok_or(denied)?;
             let provider_path = &path[MANAGED_GITHUB_GIT_PREFIX.len() - 1..];
             let provider_parts = path_parts(provider_path).ok_or(denied)?;
             let admitted = match provider_parts.as_slice() {
@@ -109,9 +106,25 @@ pub fn classify_http_request<'a>(
                 return Err(denied);
             }
             ("github", "github-https", provider_path)
-        }
-        _ => return Err(denied),
-    };
+        } else if let Some(provider_path) = under(path, "/v1") {
+            ("codex", "openai-api", provider_path)
+        } else {
+            return Err(denied);
+        };
+    if capability_slot != "github"
+        && (!matches!(
+            *method,
+            Method::GET
+                | Method::HEAD
+                | Method::POST
+                | Method::PUT
+                | Method::PATCH
+                | Method::DELETE
+        ) || !provider_path_is_safe(path)
+            || query.is_some_and(|query| query.len() > MAX_QUERY_BYTES))
+    {
+        return Err(denied);
+    }
     Ok(ClassifiedHttpRequest {
         capability_slot,
         route,
@@ -194,6 +207,26 @@ fn path_parts(path: &str) -> Option<Vec<&str>> {
         return None;
     }
     Some(parts)
+}
+
+/// The provider-relative path under one base path, which itself maps to `/`.
+fn under<'a>(path: &'a str, base: &str) -> Option<&'a str> {
+    match path.strip_prefix(base) {
+        Some("") => Some("/"),
+        Some(rest) if rest.starts_with('/') => Some(rest),
+        _ => None,
+    }
+}
+
+/// A transparent route forwards any path the URI parser admitted, bounded and
+/// without dot segments, empty segments or control characters.
+fn provider_path_is_safe(path: &str) -> bool {
+    path.len() <= MAX_PATH_BYTES
+        && path.starts_with('/')
+        && !path.contains("//")
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && !path.split('/').any(|segment| matches!(segment, "." | ".."))
 }
 
 fn github_api_family(method: &Method, parts: &[&str], query: Option<&str>) -> bool {

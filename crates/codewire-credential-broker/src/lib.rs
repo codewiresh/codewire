@@ -41,6 +41,7 @@ mod runtime;
 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
 pub mod ssh_agent;
 pub mod timing;
+mod transparent;
 
 pub use codewire_access::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection};
 pub use codex_oauth::{

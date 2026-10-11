@@ -21,8 +21,9 @@ const ANTHROPIC_HOST: &str = "api.anthropic.com";
 const GITHUB_API_HOST: &str = "api.github.com";
 const GITHUB_GIT_HOST: &str = "github.com";
 const OPENAI_PORT: u16 = 443;
-const OPENAI_PATH: &str = "/v1/responses";
-const CHATGPT_CODEX_PATH: &str = "/backend-api/codex/responses";
+/// Transparent routes' pinned base paths (#2536); Anthropic's is its origin.
+const OPENAI_BASE_PATH: &str = "/v1/";
+const CHATGPT_CODEX_BASE_PATH: &str = "/backend-api/codex/";
 const OPENAI_REFRESH_PATH: &str = "/oauth/token";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -258,15 +259,13 @@ fn validate_target(
     let allowed = match target.host_str() {
         Some(OPENAI_HOST) => {
             selected.contains(&HttpProvider::OpenAiApiKey)
-                && method == Method::POST
-                && target.path() == OPENAI_PATH
-                && target.query().is_none()
+                && transparent_method(method)
+                && target.path().starts_with(OPENAI_BASE_PATH)
         }
         Some(CHATGPT_HOST) => {
             selected.contains(&HttpProvider::CodexOAuth)
-                && method == Method::POST
-                && target.path() == CHATGPT_CODEX_PATH
-                && target.query().is_none()
+                && transparent_method(method)
+                && target.path().starts_with(CHATGPT_CODEX_BASE_PATH)
         }
         Some(OPENAI_AUTH_HOST) => {
             selected.contains(&HttpProvider::CodexOAuth)
@@ -277,9 +276,7 @@ fn validate_target(
         Some(ANTHROPIC_HOST) => {
             (selected.contains(&HttpProvider::AnthropicApiKey)
                 || selected.contains(&HttpProvider::AnthropicSubscriptionToken))
-                && method == Method::POST
-                && matches!(target.path(), "/v1/messages" | "/v1/messages/count_tokens")
-                && matches!(target.query(), None | Some("beta=true"))
+                && transparent_method(method)
         }
         Some(GITHUB_API_HOST) => {
             (selected.contains(&HttpProvider::GitHubOAuth)
@@ -321,6 +318,14 @@ fn validate_target(
         return Err(BrokerUpstreamError::DestinationDenied);
     }
     Ok(())
+}
+
+/// Transparent provider routes carry any CRUD request on their pinned host.
+fn transparent_method(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::GET | Method::HEAD | Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    )
 }
 
 fn github_app_query(path: &str, query: Option<&str>) -> bool {
@@ -502,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_provider_destination_policy_requires_selected_host_exact_method_route_and_query() {
+    fn multi_provider_destination_policy_pins_selected_hosts_and_github_routes() {
         let selected = BTreeSet::from([
             HttpProvider::OpenAiApiKey,
             HttpProvider::AnthropicApiKey,
@@ -517,6 +522,17 @@ mod tests {
                 Method::POST,
                 "https://api.anthropic.com/v1/messages/count_tokens",
             ),
+            // The Anthropic route is transparent on its pinned host.
+            (Method::GET, "https://api.anthropic.com/v1/messages"),
+            (
+                Method::POST,
+                "https://api.anthropic.com/v1/messages?beta=false",
+            ),
+            (
+                Method::POST,
+                "https://api.anthropic.com/v1/messages/batches",
+            ),
+            (Method::GET, "https://api.openai.com/v1/models?limit=1"),
             (
                 Method::GET,
                 "https://api.github.com/repos/owner/repo/issues?page=2",
@@ -538,15 +554,9 @@ mod tests {
         }
         for (method, target) in [
             (Method::POST, "https://auth.openai.com/oauth/token"),
-            (Method::GET, "https://api.anthropic.com/v1/messages"),
-            (
-                Method::POST,
-                "https://api.anthropic.com/v1/messages?beta=false",
-            ),
-            (
-                Method::POST,
-                "https://api.anthropic.com/v1/messages/batches",
-            ),
+            (Method::OPTIONS, "https://api.anthropic.com/v1/messages"),
+            (Method::GET, "https://api.openai.com/v2/models"),
+            (Method::GET, "https://chatgpt.com/backend-api/codex/models"),
             (
                 Method::GET,
                 "https://api.github.com/repos/owner/repo/actions",
@@ -574,30 +584,34 @@ mod tests {
     }
 
     #[test]
-    fn claude_subscription_token_transport_reaches_only_the_two_anthropic_routes() {
+    fn claude_subscription_token_transport_reaches_only_the_anthropic_api_host() {
         let selected = BTreeSet::from([HttpProvider::AnthropicSubscriptionToken]);
         assert_eq!(
             selected_hosts(&selected).unwrap(),
             BTreeSet::from(["api.anthropic.com"])
         );
-        for target in [
-            "https://api.anthropic.com/v1/messages",
-            "https://api.anthropic.com/v1/messages?beta=true",
-            "https://api.anthropic.com/v1/messages/count_tokens",
-            "https://api.anthropic.com/v1/messages/count_tokens?beta=true",
+        for (method, target) in [
+            (Method::POST, "https://api.anthropic.com/v1/messages"),
+            (
+                Method::POST,
+                "https://api.anthropic.com/v1/messages?beta=true",
+            ),
+            (Method::GET, "https://api.anthropic.com/v1/messages"),
+            (Method::GET, "https://api.anthropic.com/api/oauth/usage"),
+            (Method::GET, "https://api.anthropic.com/v1/models"),
+            (Method::DELETE, "https://api.anthropic.com/v1/files/file_x"),
         ] {
             assert!(
-                validate_target(&url::Url::parse(target).unwrap(), &Method::POST, &selected)
-                    .is_ok(),
+                validate_target(&url::Url::parse(target).unwrap(), &method, &selected).is_ok(),
                 "{target}"
             );
         }
         for (method, target) in [
-            (Method::GET, "https://api.anthropic.com/v1/messages"),
-            (Method::POST, "https://api.anthropic.com/v1/oauth/token"),
+            (Method::OPTIONS, "https://api.anthropic.com/v1/messages"),
             (Method::POST, "https://console.anthropic.com/v1/oauth/token"),
-            (Method::GET, "https://api.anthropic.com/api/oauth/usage"),
-            (Method::POST, "https://api.anthropic.com/v1/models"),
+            (Method::POST, "http://api.anthropic.com/v1/messages"),
+            (Method::POST, "https://api.anthropic.com:444/v1/messages"),
+            (Method::POST, "https://user@api.anthropic.com/v1/messages"),
             (Method::POST, "https://api.openai.com/v1/responses"),
         ] {
             assert_eq!(
@@ -678,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn destination_is_exact_and_never_redirectable() {
+    fn destination_is_pinned_and_never_redirectable() {
         assert!(
             validate_target(
                 &url::Url::parse("https://api.openai.com/v1/responses").unwrap(),
@@ -703,11 +717,24 @@ mod tests {
             )
             .is_ok()
         );
+        for allowed in [
+            "https://api.openai.com/v1/responses?stream=true",
+            "https://api.openai.com/v1/models",
+        ] {
+            assert!(
+                validate_target(
+                    &url::Url::parse(allowed).unwrap(),
+                    &Method::POST,
+                    &BTreeSet::from([HttpProvider::OpenAiApiKey]),
+                )
+                .is_ok(),
+                "{allowed}"
+            );
+        }
         for denied in [
             "http://api.openai.com/v1/responses",
             "https://api.openai.com.evil.test/v1/responses",
-            "https://api.openai.com/v1/responses?next=evil",
-            "https://api.openai.com/v1/other",
+            "https://api.openai.com/v2/responses",
             "https://user@api.openai.com/v1/responses",
             "https://api.openai.com:444/v1/responses",
         ] {
@@ -721,10 +748,17 @@ mod tests {
                 "{denied}"
             );
         }
+        assert!(
+            validate_target(
+                &url::Url::parse("https://chatgpt.com/backend-api/codex/models?x=1").unwrap(),
+                &Method::GET,
+                &BTreeSet::from([HttpProvider::CodexOAuth]),
+            )
+            .is_ok()
+        );
         for denied in [
             "https://api.openai.com/v1/responses",
-            "https://chatgpt.com/backend-api/codex/responses?next=evil",
-            "https://chatgpt.com/backend-api/codex/other",
+            "https://chatgpt.com/backend-api/other",
             "https://auth.openai.com/oauth/revoke",
             "https://user@auth.openai.com/oauth/token",
         ] {
@@ -1081,7 +1115,7 @@ mod tests {
             format!("https://{OPENAI_HOST}:{port}/v1/responses"),
             format!("http://{OPENAI_HOST}/v1/responses"),
             format!("https://{CHATGPT_HOST}/backend-api/codex/responses"),
-            format!("https://{OPENAI_HOST}/v1/other"),
+            format!("https://{OPENAI_HOST}/v2/other"),
         ] {
             let request = BrokerUpstreamRequest::new(
                 Method::POST,

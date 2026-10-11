@@ -1907,7 +1907,7 @@ class BridgeRenewalProbe(unittest.TestCase):
         for connection in self.connections:
             self.assertEqual(connection.args, (("127.0.0.1", 38081), {"timeout": 20}))
             request = connection.request.call_args
-            self.assertEqual(request.args, ("POST", "/v1/messages"))
+            self.assertEqual(request.args, ("POST", "/_codewire/anthropic/v1/messages"))
             self.assertEqual(request.kwargs["headers"],
                              {"Host": "localhost", "Content-Type": "application/json"})
             self.assertNotIn("Authorization", request.kwargs["headers"])
@@ -2140,10 +2140,10 @@ class ClaudeSessionDriver(unittest.TestCase):
     The environment passed in stands for what the workspace daemon projected
     into the session; the driver must only observe it."""
 
-    SUBSCRIPTION = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081",
+    SUBSCRIPTION = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081/_codewire/anthropic",
                     "CLAUDE_CODE_OAUTH_TOKEN": "codewire-managed",
                     "ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_API_KEY": ""}
-    API_KEY = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081",
+    API_KEY = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081/_codewire/anthropic",
                "ANTHROPIC_AUTH_TOKEN": "codewire-managed",
                "ANTHROPIC_API_KEY": "", "CLAUDE_CODE_OAUTH_TOKEN": ""}
 

@@ -736,10 +736,7 @@ fn claude_subscription_tokens_are_personal_anthropic_oauth_only() {
         .expect("Anthropic grant");
     assert_eq!(
         grant.permissions,
-        BTreeSet::from([
-            permission("messages", "anthropic-api"),
-            permission("count-tokens", "anthropic-api"),
-        ])
+        BTreeSet::from([permission("messages", "anthropic-api")])
     );
     assert_eq!(
         HttpProvider::for_credential(&slot("anthropic"), &personal),

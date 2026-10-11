@@ -319,7 +319,7 @@ impl CredentialBridge {
         ))
     }
 
-    /// Serve only the closed managed HTTP families in [`classify_http_request`].
+    /// Serve only the managed HTTP families in [`classify_http_request`].
     /// Authentication, endpoint authority validation and removal of identity
     /// headers belong to the ingress adapter, before this method. The broker
     /// remains the final operation, policy and credential-lease authority.
