@@ -545,6 +545,39 @@ class SourceDigestTest(unittest.TestCase):
         self.assertEqual(release.source_tree_sha256(source), before)
 
 
+    def test_native_managed_build_falls_back_to_zigbuild_without_a_musl_gcc(self):
+        spec = importlib.util.spec_from_file_location(
+            "build_native_managed_agent", ROOT / "scripts/dev/build-native-managed-agent.py")
+        native = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native)
+        tools = self.base / "compiler-route"
+        tools.mkdir()
+        home = self.base / "compiler-route-home"
+
+        def provide(*names):
+            for entry in tools.iterdir():
+                entry.unlink()
+            for name in names:
+                (tools / name).write_text("#!/bin/sh\nexit 0\n")
+                (tools / name).chmod(0o700)
+
+        path = str(tools)
+        for target, gcc in ((release.RUNTIME_TARGET, "x86_64-linux-musl-gcc"),
+                            ("aarch64-unknown-linux-musl", "aarch64-linux-musl-gcc")):
+            with self.subTest(target=target, route="musl gcc"):
+                provide(gcc, "cargo-zigbuild", "zig")
+                self.assertEqual(native.compiler_route(target, path, home), (
+                    ["build"], {"RUSTFLAGS": "-C linker=rust-lld -C target-feature=+crt-static"}))
+            with self.subTest(target=target, route="zigbuild"):
+                provide("cargo-zigbuild", "zig")
+                self.assertEqual(native.compiler_route(target, path, home),
+                                 (["zigbuild"], {"HOME": str(home)}))
+            for present in (("zig",), ("cargo-zigbuild",), ()):
+                with self.subTest(target=target, present=present):
+                    provide(*present)
+                    with self.assertRaisesRegex(RuntimeError, f"needs {gcc}, or cargo-zigbuild and zig"):
+                        native.compiler_route(target, path, home)
+
     def test_compiled_inputs_must_all_be_in_the_source_digest(self):
         base = self.base / "depinfo"
         base.mkdir()
