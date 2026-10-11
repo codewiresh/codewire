@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use super::*;
 
+mod host_support;
 mod ports;
 mod sources;
 
@@ -363,6 +364,7 @@ pub(crate) async fn create_native_environment(
     globals: &Globals,
     mut args: EnvCreateArgs,
 ) -> anyhow::Result<Option<v1::Environment>> {
+    host_support::require_local_vm_host()?;
     reject_unsupported_native_create_options(&args)?;
     if args.name.as_deref().and_then(trimmed_str).is_none() {
         args.name = Some(default_native_name(
@@ -1027,6 +1029,7 @@ pub(crate) async fn select_native_environment(name: &str) -> anyhow::Result<v1::
 }
 
 pub(crate) async fn start_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
+    host_support::require_local_vm_host()?;
     let mut client = native_client().await?;
     get_native_environment_with_required_authority(&mut client, name).await?;
     let progress = native_progress();
@@ -1050,6 +1053,7 @@ pub(crate) async fn stop_native_environment(name: &str) -> anyhow::Result<v1::En
 }
 
 pub(crate) async fn restart_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
+    host_support::require_local_vm_host()?;
     let mut client = native_client().await?;
     let environment = get_native_environment_with_required_authority(&mut client, name).await?;
     client
@@ -1752,6 +1756,7 @@ pub(crate) async fn setup_local_runtime(
     use codewire_local_vmm::runtime_install::{
         self, DirectoryBlobSource, InstallOutcome, RuntimePaths,
     };
+    host_support::require_local_vm_host()?;
     let from = from.context(
         "releases do not publish the local VM runtime yet; pass --from DIR with a release directory",
     )?;
