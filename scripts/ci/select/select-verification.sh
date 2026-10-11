@@ -1718,6 +1718,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/setup/fetch-openbao-release-signing-key.sh|\
       scripts/ci/tests/cw_release_fixtures.py|scripts/ci/tests/test-cli-release-workflow.py|\
       scripts/ci/tests/test-cw-release-delivery.py|scripts/ci/tests/test-cw-release-r2.py|\
+      scripts/ci/tests/test-package-cw-release.py|\
       scripts/ci/tests/test-cw-install.py|\
       scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-release-signing-key.sh|\

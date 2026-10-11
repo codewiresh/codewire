@@ -27,6 +27,13 @@ Environment:
                                  on the Mac runner) that complete exactly the
                                  four release targets. Preparation admits each
                                  by its build record, as for a local build.
+                                 Its local-runtime directory, if any, comes too.
+  CW_RELEASE_LOCAL_RUNTIME_DIR   Absolute path of a local VM runtime directory
+                                 (local-runtime.json and blobs/sha256/*) built
+                                 from the selected source. Only the
+                                 aarch64-apple-darwin cw embeds its document;
+                                 the directory is carried as <dist>/local-runtime
+                                 and preparation makes it the delivery's runtime.
 EOF
 }
 
@@ -89,6 +96,22 @@ esac
 # admission and preparation recheck it afterwards.
 source_digest_before="$(python3 "$release_py" source-digest --source-root .)"
 
+# The local VM runtime the macOS arm64 cw embeds (#2539). It is checked before
+# anything is built, and every other target is built without it.
+runtime_dir="${CW_RELEASE_LOCAL_RUNTIME_DIR:-}"
+if [ -n "$runtime_dir" ]; then
+  case "$runtime_dir" in
+    /*) ;;
+    *) die "CW_RELEASE_LOCAL_RUNTIME_DIR must be an absolute path" ;;
+  esac
+  case " $targets " in
+    *" aarch64-apple-darwin "*) ;;
+    *) die "CW_RELEASE_LOCAL_RUNTIME_DIR needs the aarch64-apple-darwin build that embeds it" ;;
+  esac
+  python3 "$release_py" local-runtime --dir "$runtime_dir" --source-sha "$source_sha" ||
+    die "CW_RELEASE_LOCAL_RUNTIME_DIR is not a local runtime of the selected source"
+fi
+
 rm -rf "$dist_dir"
 mkdir -p "$dist_dir"
 
@@ -96,7 +119,13 @@ for target in $targets; do
   echo "building cw $version for $target"
   # shellcheck disable=SC2206
   cmd=($build_cmd)
-  CODEWIRE_VERSION="$version" \
+  runtime_env=()
+  if [ -n "$runtime_dir" ] && [ "$target" = aarch64-apple-darwin ]; then
+    runtime_env=("CODEWIRE_LOCAL_RUNTIME=$runtime_dir/local-runtime.json")
+  fi
+  # macOS bash 3.2 treats an empty array as unbound under set -u.
+  env -u CODEWIRE_LOCAL_RUNTIME ${runtime_env[@]+"${runtime_env[@]}"} \
+    CODEWIRE_VERSION="$version" \
     CODEWIRE_SOURCE_REVISION="$source_sha" \
     CODEWIRE_SOURCE_TREE_SHA256="$source_digest_before" \
     "${cmd[@]}" \
@@ -121,6 +150,15 @@ for target in $targets; do
   cp "$binary" "$dist_dir/cw-$version-$target"
 done
 
+stage_runtime() {
+  cp -R "$1" "$dist_dir/local-runtime"
+  python3 "$release_py" local-runtime --dir "$dist_dir/local-runtime" --source-sha "$source_sha" ||
+    die "staged local runtime does not verify"
+}
+if [ -n "$runtime_dir" ]; then
+  stage_runtime "$runtime_dir"
+fi
+
 release_set="$(printf '%s\n' $release_targets | sort | tr '\n' ' ')"
 import_dir="${CW_RELEASE_IMPORT_DIR:-}"
 imported=""
@@ -135,6 +173,10 @@ if [ -n "$import_dir" ]; then
   # shellcheck disable=SC2086 # word lists of target triples
   [ "$(printf '%s\n' $targets $imported | sort | tr '\n' ' ')" = "$release_set" ] ||
     die "imported assets must complete exactly the four release targets"
+  if [ -e "$import_dir/local-runtime" ]; then
+    [ -z "$runtime_dir" ] || die "a local runtime is both imported and given"
+    stage_runtime "$import_dir/local-runtime"
+  fi
 fi
 
 (
