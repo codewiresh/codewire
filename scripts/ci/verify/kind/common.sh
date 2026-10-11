@@ -1130,10 +1130,11 @@ build_images_and_smokes() {
     prebuilt-ci)
       log "importing exact same-run CI artifacts without rebuilding"
       local group manifest
-      for group in workspace product smokes; do
+      for group in workspace product daemon smokes; do
         case "$group" in
           workspace) manifest="${CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256:?missing workspace producer digest}" ;;
           product) manifest="${CODEWIRE_KIND_PRODUCT_MANIFEST_SHA256:?missing product producer digest}" ;;
+          daemon) manifest="${CODEWIRE_KIND_DAEMON_MANIFEST_SHA256:?missing daemon producer digest}" ;;
           smokes) manifest="${CODEWIRE_KIND_SMOKES_MANIFEST_SHA256:?missing smoke producer digest}" ;;
         esac
         RUN_DIR="$RUN_DIR" EXPECTED_MANIFEST_SHA256="$manifest" \
@@ -1438,6 +1439,12 @@ kind_workspace_runtime_image() {
   local sealed_status=0
   validate_sealed_kind_images || sealed_status=$?
   [ "$sealed_status" -le 1 ] || return "$sealed_status"
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-ci ]; then
+    # The consumed workspace artifact selected either the exact-source build
+    # or the published pin pulled by digest; the helper proves either one.
+    python3 "$ROOT/scripts/ci/verify/kind-build-artifacts.py" workspace-image
+    return $?
+  fi
   if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ]; then
     python3 "$ROOT/scripts/ci/verify/workspace-image-artifact.py" reuse "$ROOT" \
       "$ROOT/.tmp/codewire-workspace-image-verification.json"
@@ -1520,7 +1527,7 @@ load_images_into_kind() {
 
   if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ]; then
     image="$(kind_workspace_runtime_image)" || return $?
-    log "loading the exact verified source workspace image into Kind"
+    log "loading the selected verified workspace image into Kind"
     kind load docker-image --name "$KIND_CLUSTER_NAME" "$image" || return $?
     wait_for_kind_api_after_image_load || return $?
   fi

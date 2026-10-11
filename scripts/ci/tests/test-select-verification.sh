@@ -2174,7 +2174,7 @@ cancelling = {
     "cw-release-assets", "workspace-image", "policy", "standard", "tooling",
     "rust-compile", "rust-packages", "rust-features", "rust-transport",
     "database", "services-control", "services-runtime", "kind-workspace",
-    "kind-product", "kind-smokes", "edge-kind",
+    "kind-product", "kind-daemon", "kind-smokes", "edge-kind",
 }
 exempt = {
     "verification-selection", "required-verification",
@@ -2376,8 +2376,8 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 18 ]] || {
-  echo 'Codewire CI requires thirteen ordinary heavy groups (policy included), three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe' >&2
+[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 19 ]] || {
+  echo 'Codewire CI requires thirteen ordinary heavy groups (policy included), four parallel Kind producers, one opted-in measurement matrix and its post-measurement probe' >&2
   exit 1
 }
 [[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 2 ]] || {
@@ -2393,6 +2393,7 @@ for output in selector_version classification selection required_local_mode \
     cw_package_state cw_package_selected desktop_package_state \
     desktop_package_selected workspace_image_state workspace_image_selected \
     workspace_cache_experiment workspace_cache_measurement_matrix \
+    kind_workspace_source \
     tested_tree_receipt tested_tree_reason \
     tested_tree_pr tested_tree_head tested_tree_run; do
   grep -qF "      ${output}:" "$selection_block" || {
@@ -2463,8 +2464,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 20 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eleven groups, three Kind producers, aggregate, opted-in measurement matrix and post-measurement probe" >&2
+if [ "$top_level_jobs" != 21 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eleven groups, four Kind producers, aggregate, opted-in measurement matrix and post-measurement probe" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \
