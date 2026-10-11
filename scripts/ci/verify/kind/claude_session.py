@@ -21,7 +21,7 @@ and the expected outcome:
               fixture refuses a well-formed synthetic subscription token this
               way, as a real provider refuses an expired or revoked one.
 
-Pinned to Claude Code 2.1.238, whose probe showed that `claude -p` sends only
+Pinned to Claude Code 2.1.288, whose probe showed that `claude -p` sends only
 POST /v1/messages?beta=true to the base URL, that CLAUDE_CODE_OAUTH_TOKEN
 selects its subscription mode, that the empty ANTHROPIC_AUTH_TOKEN and
 ANTHROPIC_API_KEY are treated as unset, and that a 401 `authentication_error`

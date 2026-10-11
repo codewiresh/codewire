@@ -103,6 +103,10 @@ def check(text, ci_text):
          "            --example verify-release-signatures" in build and "verifier_sha256" in build
          and "name: cw-release-verifier-${{ github.run_id }}" in build,
          "build does not compile, bind and hand over cw's release-signature verifier")
+    verifier_upload = dict(steps(build)).get("Hand the signature verifier to signing", "")
+    need("          path: .release-verifier/\n" in verifier_upload
+         and "          include-hidden-files: true\n" in verifier_upload,
+         "the hidden verifier directory is not uploaded (the upload action skips hidden paths)")
 
     need("    needs: [release-selection, build-release]" in package, "signing does not need a successful build")
     need("    enable-openid-connect: true" in package, "publication job lacks its OIDC exchange")
@@ -218,6 +222,7 @@ MUTATIONS = {
         "          export GH_MIRROR_TOKEN_FILE=\"$github_work/token\"\n"
         "          ../scripts/ci/setup/fetch-openbao-release-signing-key.sh \"$github_work/key\"\n", 1),
     "signing key not shredded": lambda t: t.replace("          trap cleanup_signing EXIT\n", "", 1),
+    "hidden verifier skipped": lambda t: t.replace("          include-hidden-files: true\n", "", 1),
     "signing key outlives signing": lambda t: t.replace("          cleanup_signing\n          trap - EXIT\n",
                                                          "          trap - EXIT\n", 1),
     "no built-in verification": lambda t: re.sub(

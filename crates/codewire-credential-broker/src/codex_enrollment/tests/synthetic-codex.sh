@@ -11,6 +11,7 @@ if [ "${1-}" = native ]; then
   fixture_version=0.149.0
   if [ -f "$fixture_root/codex-0.153.4" ]; then fixture_version=0.153.4; fi
   if [ -f "$fixture_root/codex-0.157.0" ]; then fixture_version=0.157.0; fi
+  if [ -f "$fixture_root/codex-0.160.0" ]; then fixture_version=0.160.0; fi
   printf '\nWelcome to Codex [v\033[9'
   printf '0m%s\033[0m]\n\033[90mOpenAI\047s command-line coding agent\033[0m\n\n' "$fixture_version"
   printf 'Follow these steps to sign in with ChatGPT using device code authorization:\n\n'
