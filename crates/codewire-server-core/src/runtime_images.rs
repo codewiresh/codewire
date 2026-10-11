@@ -1,12 +1,27 @@
 //! Default runtime images, by Harbor digest.
 //!
-//! This is the only place these digests are written. Orchestration, the
-//! dashboard, publication, audit and browser tests all read them from here.
-//! Deployments still pin the daemon per release through `SANDBOX_DAEMON_IMAGE`;
-//! this default applies only when that is unset.
+//! Orchestration, the dashboard, publication, audit and browser tests read
+//! them from here. The daemon digest is written only here; the workspace digest
+//! is the published pin in `codewire-workspace-image`, which support-images.yaml
+//! proposes after each publication. Deployments still pin the daemon per
+//! release through `SANDBOX_DAEMON_IMAGE`; this default applies only when that
+//! is unset.
+
+pub use codewire_workspace_image as workspace_image;
 
 /// Workspace image used when a Sandbox does not choose one.
-pub const DEFAULT_WORKSPACE_IMAGE: &str = "registry.example.invalid/codewire/workspace@sha256:ad1f2db5ff86c616ea7fb7b8c3f196b271a0bc5b75a636f4b4ffd77fb1ee2313";
+pub const DEFAULT_WORKSPACE_IMAGE: &str = codewire_workspace_image::HARBOR_IMAGE;
+
+/// The same workspace image at its public mirror: what cw sends as its
+/// default and what local environments pull.
+pub const PUBLIC_WORKSPACE_IMAGE: &str = codewire_workspace_image::PUBLIC_IMAGE;
+
+/// Whether a reference names the canonical workspace image: the current
+/// digest, or an earlier one older clients and stored presets still send, at
+/// Harbor or its public mirror.
+pub fn is_canonical_workspace_image(image_ref: &str) -> bool {
+    codewire_workspace_image::is_canonical(image_ref)
+}
 
 /// Support image the workspace daemon runs from when `SANDBOX_DAEMON_IMAGE`
 /// is unset: the daemon Production runs since v0.3.384.

@@ -31,6 +31,7 @@ from repo_policy import (  # noqa: E402 - dispatcher directory is the import roo
     source_classification,
     ses_security,
     turnstile_security,
+    workspace_image_pin,
 )
 from repo_policy.kubernetes import documents, resource_name, top_level_field
 
@@ -93,6 +94,11 @@ COMMANDS = {
     "epoch-material-cache-owner": (
         material_cache.check_epoch_material_cache_owner,
         "epoch material cache owner: OK",
+        True,
+    ),
+    "workspace-image-pin": (
+        workspace_image_pin.check_workspace_image_pin,
+        "workspace image pin: OK",
         True,
     ),
 }

@@ -15,7 +15,7 @@ TREE="$FIXTURE/tree"
 STATE="$FIXTURE/state"
 CALLS="$FIXTURE/docker-calls"
 SCRIPT="$TREE/scripts/dev/kind/dev-loop.sh"
-WORKSPACE_CONSTANTS="$TREE/crates/codewire-server-core/src/runtime_images.rs"
+WORKSPACE_CONSTANTS="$TREE/crates/codewire-workspace-image/src/pin.rs"
 DIND_CONSTANTS="$TREE/crates/codewire-orchestration/src/sandbox/template/mod.rs"
 
 readonly WS_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -38,7 +38,7 @@ cp "$ROOT/scripts/dev/kind/dev-loop.sh" "$SCRIPT"
 cp "$ROOT/scripts/dev/kind/profile.sh" "$TREE/scripts/dev/kind/profile.sh"
 
 write_constants() {
-  printf 'pub const DEFAULT_WORKSPACE_IMAGE: &str = "%s";\n' "$1" >"$WORKSPACE_CONSTANTS"
+  printf 'pub const HARBOR_IMAGE: &str = "%s";\n' "$1" >"$WORKSPACE_CONSTANTS"
   printf 'pub const DEFAULT_DIND_IMAGE: &str = "%s";\n' "$2" >"$DIND_CONSTANTS"
 }
 
@@ -125,8 +125,8 @@ call_count() {
 }
 
 # The real product constants resolve, and each source pins the same digest.
-real_workspace="$(sed -n 's/^pub const DEFAULT_WORKSPACE_IMAGE: &str = "\(.*\)";$/\1/p' \
-  "$ROOT/crates/codewire-server-core/src/runtime_images.rs")"
+real_workspace="$(sed -n 's/^pub const HARBOR_IMAGE: &str = "\(.*\)";$/\1/p' \
+  "$ROOT/crates/codewire-workspace-image/src/pin.rs")"
 real_dind="$(sed -n 's/^pub const DEFAULT_DIND_IMAGE: &str = "\(.*\)";$/\1/p' \
   "$ROOT/crates/codewire-orchestration/src/sandbox/template/mod.rs")"
 expected="workspace ${real_workspace} <- ghcr.io/codewiresh/workspace@${real_workspace##*@}
@@ -203,9 +203,9 @@ malformed_case dind_tag_only 'DEFAULT_DIND_IMAGE is not a reference the dind row
   "$WS_REF" 'docker.io/library/docker:29.7.1-dind'
 malformed_case dind_other_repository 'DEFAULT_DIND_IMAGE is not a reference the dind row accepts' \
   "$WS_REF" "docker.io/library/docker:dind@${DIND_DIGEST}"
-malformed_case workspace_other_registry 'DEFAULT_WORKSPACE_IMAGE is not a reference the workspace row accepts' \
+malformed_case workspace_other_registry 'HARBOR_IMAGE is not a reference the workspace row accepts' \
   "ghcr.io/codewiresh/workspace@${WS_DIGEST}" "$DIND_REF"
-malformed_case workspace_uppercase_digest 'DEFAULT_WORKSPACE_IMAGE is not a reference the workspace row accepts' \
+malformed_case workspace_uppercase_digest 'HARBOR_IMAGE is not a reference the workspace row accepts' \
   "registry.example.invalid/codewire/workspace@sha256:${WS_DIGEST_UPPER}" "$DIND_REF"
 
 reset_nodes
@@ -221,10 +221,10 @@ write_constants "$WS_REF" "$DIND_REF"
 cp "$SCRIPT" "$FIXTURE/dev-loop.sh"
 sed -i "s#ghcr.io/codewiresh/\\\\1@\\\\2#ghcr.io/codewiresh/\\\\1@${OTHER_DIGEST}#" "$SCRIPT"
 ! cmp -s "$SCRIPT" "$FIXTURE/dev-loop.sh" || fail "could not rewrite the workspace row"
-expect_failure other_digest_source 'does not pin DEFAULT_WORKSPACE_IMAGE' run_loader --dry-run
+expect_failure other_digest_source 'does not pin HARBOR_IMAGE' run_loader --dry-run
 cp "$FIXTURE/dev-loop.sh" "$SCRIPT"
 sed -i 's#ghcr.io/codewiresh/\\1@\\2#ghcr.io/codewiresh/\\1:latest#' "$SCRIPT"
 ! cmp -s "$SCRIPT" "$FIXTURE/dev-loop.sh" || fail "could not rewrite the workspace row"
-expect_failure tagged_source 'does not pin DEFAULT_WORKSPACE_IMAGE' run_loader --dry-run
+expect_failure tagged_source 'does not pin HARBOR_IMAGE' run_loader --dry-run
 
 printf '[test-kind-runtime-images] table, digest identity, idempotence and fail-closed loads passed\n'

@@ -1149,6 +1149,20 @@ run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false 
   'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/cw_release_fixtures.py scripts/ci/tests/test-cli-release-workflow.py \
   scripts/ci/tests/test-cw-release-delivery.py scripts/ci/tests/test-cw-release-r2.py
+# The published workspace pin selects every consumer that compiles it; its
+# tool and post-publish proposal select the release proofs that run them.
+run_paths_case workspace_image_pin pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_server_core rust_pkg_codewire_workspace_image' \
+  crates/codewire-workspace-image/src/pin.rs
+run_paths_case workspace_image_pin_tool pull_request refs/pull/2255/head false \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security' \
+  scripts/ci/images/workspace-image-pin.py
+run_paths_case workspace_image_pin_proposal pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential' \
+  scripts/ci/images/propose-workspace-image-pin.sh \
+  scripts/ci/tests/test-propose-workspace-image-pin.sh \
+  scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh \
+  scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh
 run_paths_case cw_runtime_image_tool pull_request refs/pull/2255/head false \
   'go_consumer_interop go_support policy release runtime_confidential security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/cw-runtime-image.py scripts/dev/test-cw-runtime-image.py

@@ -4429,13 +4429,13 @@ mod tests {
     #[test]
     fn workspace_image_and_repositories_are_complementary_inputs() {
         let submission = EnvironmentSubmission::parse(
-            b"image=ghcr.io%2Fcodewiresh%2Fworkspace%40sha256%3A18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff&repo_url_0=https%3A%2F%2Fexample.test%2Frepo&preset_id=preset-id",
+            b"image=ghcr.io%2Fcodewiresh%2Fworkspace%40sha256%3Aeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee&repo_url_0=https%3A%2F%2Fexample.test%2Frepo&preset_id=preset-id",
         )
         .expect("combined submission");
         assert_eq!(submission.repositories.len(), 1);
         assert_eq!(
             submission.image,
-            "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff"
+            "ghcr.io/codewiresh/workspace@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         );
         assert_eq!(submission.preset_id, "preset-id");
     }

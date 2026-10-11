@@ -33,15 +33,15 @@ const DELETION_PROTECTION_FINALIZER: &str = "codewire.sh/deletion-protection";
 pub const CANONICAL_WORKSPACE_RUNTIME_IMAGE: &str =
     codewire_server_core::runtime_images::DEFAULT_WORKSPACE_IMAGE;
 
-/// The same canonical workspace digest at its former public GHCR location.
-/// Stored presets and older clients may still send it; it resolves to Harbor.
-pub const LEGACY_GHCR_CANONICAL_WORKSPACE_RUNTIME_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff";
+/// The canonical workspace digest at its public GHCR mirror, which cw sends.
+/// It and the earlier published digests older clients or stored presets still
+/// send all resolve to [`CANONICAL_WORKSPACE_RUNTIME_IMAGE`].
+pub const PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE: &str =
+    codewire_server_core::runtime_images::PUBLIC_WORKSPACE_IMAGE;
 
 /// Mirrors `sandbox.IsCanonicalWorkspaceRuntimeImage`.
 pub fn is_canonical_workspace_runtime_image(image_ref: &str) -> bool {
-    let image_ref = image_ref.trim();
-    image_ref == CANONICAL_WORKSPACE_RUNTIME_IMAGE
-        || image_ref == LEGACY_GHCR_CANONICAL_WORKSPACE_RUNTIME_IMAGE
+    codewire_server_core::runtime_images::is_canonical_workspace_image(image_ref)
 }
 
 /// Mirrors `sandbox.EnvironmentTemplateName`: base + "-" + envID,

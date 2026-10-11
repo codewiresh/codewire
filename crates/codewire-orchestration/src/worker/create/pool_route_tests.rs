@@ -110,7 +110,7 @@ fn only_an_exact_canonical_standard_binding_shape_is_a_pool_candidate() {
         Err(ColdReason::Tier)
     );
     for image in [
-        crate::sandbox::LEGACY_GHCR_CANONICAL_WORKSPACE_RUNTIME_IMAGE,
+        crate::sandbox::PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE,
         "registry.example.invalid/custom/workspace@sha256:4444444444444444444444444444444444444444444444444444444444444444",
     ] {
         assert_eq!(

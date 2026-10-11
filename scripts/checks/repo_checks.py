@@ -17,6 +17,7 @@ from repo_policy.permanent_raw import check_permanent_raw_surface
 from repo_policy.production import check_production_source_ownership
 from repo_policy.proto import check_proto_package_boundaries
 from repo_policy.workspace_identity import check_identity_free_workspace
+from repo_policy.workspace_image_pin import check_workspace_image_pin
 from repo_policy.source_classification import (
     check_go_source_classification,
     check_retired_reference_source,
@@ -67,6 +68,9 @@ def main(argv: list[str] | None = None) -> int:
     design_parser.add_argument("--self-test", action="store_true")
     design_parser.add_argument("--root", default=str(ROOT))
     design_parser.set_defaults(func=check_design_tokens)
+    workspace_pin_parser = subparsers.add_parser("workspace-image-pin")
+    workspace_pin_parser.add_argument("--self-test", action="store_true")
+    workspace_pin_parser.set_defaults(func=check_workspace_image_pin)
     material_cache_parser = subparsers.add_parser("epoch-material-cache-owner")
     material_cache_parser.add_argument("--self-test", action="store_true")
     material_cache_parser.set_defaults(func=check_epoch_material_cache_owner)

@@ -98,7 +98,8 @@ grep -qF 'scripts/ci/images/build-push-image.sh workspace images/workspace/Docke
 grep -qF 'scripts/ci/images/build-push-image.sh confidential-probe images/confidential-probe/Dockerfile images/confidential-probe' \
   "$WORKFLOW" || fail 'confidential probe is not built by the canonical Gitea helper'
 publish_job="$(sed -n '/^  publish-support-images:/,/^  publish-confidential-probe:/p' "$WORKFLOW")"
-probe_job="$(sed -n '/^  publish-confidential-probe:/,$p' "$WORKFLOW")"
+probe_job="$(sed -n '/^  publish-confidential-probe:/,/^  propose-workspace-image-pin:/p' "$WORKFLOW")"
+pin_job="$(sed -n '/^  propose-workspace-image-pin:/,$p' "$WORKFLOW")"
 grep -Fq '    runs-on: ci-protected' <<<"$publish_job" ||
   fail 'support-pair publisher does not use the protected CI tier'
 grep -Fq '    runs-on: ci-protected' <<<"$probe_job" ||
@@ -107,8 +108,8 @@ grep -Fq '    enable-openid-connect: true' <<<"$publish_job" ||
   fail 'support-pair publisher lacks job-scoped OIDC'
 grep -Fq '    enable-openid-connect: true' <<<"$probe_job" ||
   fail 'confidential-probe publisher lacks job-scoped OIDC'
-[[ "$(grep -Fc 'enable-openid-connect: true' "$WORKFLOW")" -eq 2 ]] ||
-  fail 'support workflow exposes OIDC outside the two publisher jobs'
+[[ "$(grep -Fc 'enable-openid-connect: true' "$WORKFLOW")" -eq 3 ]] ||
+  fail 'support workflow exposes OIDC outside the two publisher jobs and the pin proposal'
 grep -qF 'needs: [support-selection]' <<<"$publish_job" ||
   fail 'support-pair publisher is not bound to selection'
 grep -qF 'needs: [support-selection]' <<<"$probe_job" ||
@@ -343,5 +344,76 @@ for job_name in publish_job probe_job; do
 done
 grep -Fq 'registry.example.invalid/codewire/confidential-probe' <<<"$probe_job" ||
   fail 'confidential probe is not published to its Harbor repository'
+
+# The published workspace image is proposed as the new pin by the
+# workspace-pin bot: after a successful public mirror, on one automation
+# branch, with only the bot token read just in time from its exact OpenBao role.
+# shellcheck disable=SC2016
+grep -Fq 'workspace_ref: ${{ steps.workspace.outputs.candidate_ref }}' <<<"$publish_job" ||
+  fail 'support publisher does not expose the published workspace digest'
+# shellcheck disable=SC2016
+grep -Fq "workspace_mirrored: \${{ steps.mirror.outcome == 'success' }}" <<<"$publish_job" ||
+  fail 'support publisher does not expose the public mirror outcome'
+grep -Fq '        id: mirror' <<<"$publish_job" || fail 'the GHCR mirror step has no outcome id'
+
+# pin_job_violation JOB prints the first broken pin-proposal rule, if any.
+# shellcheck disable=SC2016
+pin_job_violation() {
+  local job="$1"
+  [[ -n "$job" ]] || { echo 'the published workspace image is never proposed as the pin'; return; }
+  grep -Fq '    needs: [publish-support-images]' <<<"$job" ||
+    { echo 'the pin proposal does not wait for the support publication'; return; }
+  grep -Fq "if: \${{ needs.publish-support-images.outputs.workspace_mirrored == 'true' }}" <<<"$job" ||
+    { echo 'the pin proposal can name an image the public mirror lacks'; return; }
+  grep -Fq '    runs-on: ci-protected' <<<"$job" ||
+    { echo 'the pin proposal leaves the protected tier'; return; }
+  grep -Fq '    enable-openid-connect: true' <<<"$job" ||
+    { echo 'the pin proposal lacks job-scoped OIDC for the bot token'; return; }
+  grep -Fq '          persist-credentials: false' <<<"$job" ||
+    { echo 'the pin checkout keeps the job token, which git would send beside the bot token'; return; }
+  if grep -Eq 'github\.token|GITEA_TOKEN|GITHUB_TOKEN|OPENBAO_|secrets\.' <<<"$job"; then
+    echo 'the pin proposal holds a capability beyond the workspace-pin bot token'
+    return
+  fi
+  if [[ "$(grep -c 'fetch-openbao-' <<<"$job")" -ne 1 ]] ||
+      ! grep -Fq 'scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh "$bot_work/token"' <<<"$job"; then
+    echo 'the pin proposal does not read exactly the workspace-pin bot token'
+    return
+  fi
+  grep -Fq "trap 'find \"\$bot_work\" -type f -exec shred -u {} +; rm -rf \"\$bot_work\"' EXIT" <<<"$job" ||
+    { echo 'the workspace-pin bot token outlives its step'; return; }
+  if ! grep -Fq 'WORKSPACE_PIN_BOT_TOKEN_FILE="$bot_work/token"' <<<"$job" ||
+      ! grep -Fq 'scripts/ci/images/propose-workspace-image-pin.sh "$WORKSPACE_REF"' <<<"$job"; then
+    echo 'the pin proposal does not run the reviewed proposer with the bot token file'
+    return
+  fi
+  grep -Fq 'WORKSPACE_REF: ${{ needs.publish-support-images.outputs.workspace_ref }}' <<<"$job" ||
+    { echo 'the pin proposal does not use the published digest'; return; }
+}
+violation="$(pin_job_violation "$pin_job")"
+[[ -z "$violation" ]] || fail "$violation"
+
+# Each rule refuses its own regression of the reviewed job.
+# shellcheck disable=SC2016
+pin_mutations=(
+  'drop OIDC::/enable-openid-connect: true/d'
+  'keep checkout credentials::/persist-credentials: false/d'
+  'job token beside the bot::/WORKSPACE_REF:/i\          GITEA_TOKEN: ${{ github.token }}'
+  'job token instead of the bot::s|WORKSPACE_PIN_BOT_TOKEN_FILE="$bot_work/token"|GITEA_TOKEN="${{ github.token }}"|'
+  'publisher OpenBao role::/WORKSPACE_REF:/i\          OPENBAO_ROLE: codewire-source-support-publisher'
+  'Actions secret::/WORKSPACE_REF:/i\          TOKEN: ${{ secrets.WORKSPACE_PIN_TOKEN }}'
+  'another document::s|fetch-openbao-workspace-pin-bot-token.sh|fetch-openbao-ghcr-credentials.sh|'
+  'a second document::/fetch-openbao-workspace-pin-bot-token.sh/a\          scripts/ci/setup/fetch-openbao-harbor-credentials.sh "$bot_work/harbor"'
+  'token outlives the step::/trap /d'
+  'unprotected tier::s|runs-on: ci-protected|runs-on: ci|'
+  'no mirror gate::/workspace_mirrored == .true./d'
+  'no publication wait::/needs: \[publish-support-images\]/d'
+)
+for mutation in "${pin_mutations[@]}"; do
+  label="${mutation%%::*}"
+  mutated="$(sed -e "${mutation#*::}" <<<"$pin_job")"
+  [[ "$mutated" != "$pin_job" ]] || fail "pin job mutation did not apply: $label"
+  [[ -n "$(pin_job_violation "$mutated")" ]] || fail "pin job mutation was accepted: $label"
+done
 
 echo 'support-image workflow contract: OK'

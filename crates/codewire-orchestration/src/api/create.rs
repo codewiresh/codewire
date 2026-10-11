@@ -411,15 +411,18 @@ fn generate_short_id() -> String {
 
 /// Mirrors `normalizeImageRef`.
 pub(crate) fn normalize_image_ref(image_ref: &str) -> String {
-    match image_ref.trim() {
+    let image_ref = image_ref.trim();
+    if matches!(
+        image_ref,
         "workspace"
-        | "codewiresh/workspace"
-        | "ghcr.io/codewiresh/workspace"
-        | "registry.example.invalid/codewire/workspace"
-        | crate::sandbox::LEGACY_GHCR_CANONICAL_WORKSPACE_RUNTIME_IMAGE => {
-            crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE.to_string()
-        }
-        other => other.to_string(),
+            | "codewiresh/workspace"
+            | "ghcr.io/codewiresh/workspace"
+            | "registry.example.invalid/codewire/workspace"
+    ) || crate::sandbox::is_canonical_workspace_runtime_image(image_ref)
+    {
+        crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE.to_string()
+    } else {
+        image_ref.to_string()
     }
 }
 
@@ -1983,14 +1986,23 @@ credentials: {profile: user/work}
             crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE
         );
         assert_eq!(normalize_image_ref("python:3.12"), "python:3.12");
-        // The former public GHCR location of the same digest resolves to the
-        // Harbor reference deployments pull, as do the short workspace names.
+        // The public mirror of the same digest, earlier published digests that
+        // older clients and stored presets still send, and the short workspace
+        // names all resolve to the Harbor reference deployments pull.
+        use codewire_server_core::runtime_images::workspace_image as pin;
+        let previous: Vec<String> = pin::PREVIOUS_DIGESTS
+            .iter()
+            .map(|digest| format!("{}@{digest}", pin::PUBLIC_REPOSITORY))
+            .collect();
         for legacy in [
-            crate::sandbox::LEGACY_GHCR_CANONICAL_WORKSPACE_RUNTIME_IMAGE,
+            crate::sandbox::PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE,
             "ghcr.io/codewiresh/workspace",
             "registry.example.invalid/codewire/workspace",
             " workspace ",
-        ] {
+        ]
+        .into_iter()
+        .chain(previous.iter().map(String::as_str))
+        {
             assert_eq!(
                 normalize_image_ref(legacy),
                 crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_IMAGE
@@ -2001,7 +2013,7 @@ credentials: {profile: user/work}
                 .starts_with("registry.example.invalid/codewire/workspace@sha256:")
         );
         assert!(crate::sandbox::is_canonical_workspace_runtime_image(
-            crate::sandbox::LEGACY_GHCR_CANONICAL_WORKSPACE_RUNTIME_IMAGE
+            crate::sandbox::PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE
         ));
         assert!(!crate::sandbox::is_canonical_workspace_runtime_image(
             "ghcr.io/codewiresh/workspace@sha256:2058b7f1fd76f6f77b1dba596a9b54c698c049380e5ace6a0493f10a9d41e1b4"

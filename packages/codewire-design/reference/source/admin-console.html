@@ -651,7 +651,7 @@
           <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">Workspace image</label>
           <div style="{{ imageRowStyle }}">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8a8a8a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><path d="m3.3 7 8.7 5 8.7-5"></path><path d="M12 22V12"></path></svg>
-            <input value="{{ cImage }}" onChange="{{ onCImage }}" placeholder="ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff" style="flex: 1; min-width: 0; background: none; border: none; outline: none; font-size: 12.5px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+            <input value="{{ cImage }}" onChange="{{ onCImage }}" placeholder="ghcr.io/codewiresh/workspace@sha256:0000000000000000000000000000000000000000000000000000000000000000" style="flex: 1; min-width: 0; background: none; border: none; outline: none; font-size: 12.5px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
             <button onClick="{{ resetImage }}" style="background: none; border: none; color: #6e6e6e; font-size: 12px; cursor: pointer; padding: 2px 4px; flex: none" style-hover="color: #ededed">Reset</button>
           </div>
           <p style="margin: 7px 0 0; font-size: 11.5px; color: #6e6e6e; line-height: 1.5">{{ imageHint }}</p>
@@ -930,7 +930,7 @@ class Component extends DCLogic {
 
   openCreate() {
     this.setState({ orgOpen: false, userOpen: false, create: {
-      image: 'ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff',
+      image: 'ghcr.io/codewiresh/workspace@sha256:0000000000000000000000000000000000000000000000000000000000000000',
       snapshot: '', repoUrl: '', repoBranch: '', repoMount: '',
       ports: [], agents: ['Claude Code'],
       installTools: false,

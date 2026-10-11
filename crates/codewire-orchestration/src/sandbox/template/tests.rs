@@ -1447,7 +1447,7 @@ mod tests {
                 "codewire-runtime",
                 &TemplateOpts {
                     name: format!("tmpl-dind-memory-{name}"),
-                    image: "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff".into(),
+                    image: crate::sandbox::PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE.into(),
                     runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
             daemon_auth_token: "test-daemon-token".into(),
                     memory_mib,
@@ -1476,7 +1476,7 @@ mod tests {
             "codewire-runtime",
             &TemplateOpts {
                 name: "tmpl-dind-image".into(),
-                image: "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff".into(),
+                image: crate::sandbox::PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE.into(),
                 dind_image: image.into(),
                 runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
                 daemon_auth_token: "test-daemon-token".into(),

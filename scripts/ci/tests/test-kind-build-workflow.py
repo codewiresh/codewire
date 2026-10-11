@@ -774,6 +774,13 @@ class CommonConsumerContractTests(unittest.TestCase):
             (fixture / "tests/e2e/kind").mkdir(parents=True)
             shutil.copy2(COMMON, fixture / "scripts/ci/verify/kind/common.sh")
             shutil.copy2(CREDENTIALS, fixture / "scripts/ci/verify/kind/credentials.sh")
+            # common.sh reads its default workspace image from the published pin.
+            for relative in (
+                "scripts/ci/images/workspace-image-pin.py",
+                "crates/codewire-workspace-image/src/pin.rs",
+            ):
+                (fixture / relative).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / relative, fixture / relative)
             for relative in (
                 "scripts/ci/verify/playwright-browser-runtime.sh",
                 "scripts/ci/verify/kind-host-runtime.sh",

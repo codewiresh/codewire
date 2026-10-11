@@ -42,6 +42,7 @@ members = [
     "crates/codewire-vmm-guest-probe",
     "crates/codewire-workload-secrets",
     "crates/codewire-workspace-access",
+    "crates/codewire-workspace-image",
 ]
 exclude = [
     "crates/codewire-desktop",
@@ -60,6 +61,7 @@ authors = ["Sonica"]
 codewire-access = { path = "crates/codewire-access" }
 codewire-client = { path = "crates/codewire-client" }
 codewire-types = { path = "crates/codewire-types" }
+codewire-workspace-image = { path = "crates/codewire-workspace-image" }
 codewire-server-core = { path = "crates/codewire-server-core" }
 codewire-oidc = { path = "crates/codewire-oidc" }
 codewire-daemon-proto = { path = "crates/codewire-daemon-proto" }
