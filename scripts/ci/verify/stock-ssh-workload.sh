@@ -546,6 +546,7 @@ expect_host_denied() {
 
 prove_fixture() {
   local expected_host_key="$1" before after fingerprint wrapper upload download sftp_download clone command_output
+  local pushed
   local -a scp_options sftp_options
   require_installed
   : "${SSH_AUTH_SOCK:?managed SSH agent is required}"
@@ -608,6 +609,21 @@ WRAPPER
     fail 'Git-over-SSH revision drifted'
   [[ "$(cat -- "$clone/proof.txt")" == 'selected-agent Git-over-SSH proof' ]] ||
     fail 'Git-over-SSH content drifted'
+  # Push a new commit through the same selected signer and require the
+  # target's own branch to move from the installed revision to exactly it.
+  printf 'selected-agent Git-over-SSH push proof\n' >"$clone/push.txt"
+  /usr/bin/git -C "$clone" add push.txt
+  /usr/bin/git -C "$clone" -c user.name=Synthetic \
+    -c user.email=synthetic@example.invalid commit --quiet -m 'synthetic push'
+  pushed="$(/usr/bin/git -C "$clone" rev-parse HEAD)"
+  [[ "$pushed" != "$(cat -- "$STATE_ROOT/revision")" ]] || fail 'Git-over-SSH push commit is not new'
+  bounded_client env GIT_SSH="$wrapper" GIT_SSH_VARIANT=ssh \
+    /usr/bin/git -C "$clone" push --quiet origin HEAD:refs/heads/main \
+      >/dev/null 2>"$CLIENT_ROOT/git-push.stderr" || fail 'Git-over-SSH push failed'
+  [[ "$(/usr/bin/git --git-dir="$STATE_ROOT/repository.git" rev-parse refs/heads/main)" == "$pushed" ]] ||
+    fail 'Git-over-SSH push did not advance the target branch'
+  [[ "$(/usr/bin/git --git-dir="$STATE_ROOT/repository.git" show "$pushed:push.txt")" == \
+     'selected-agent Git-over-SSH push proof' ]] || fail 'Git-over-SSH pushed content drifted'
 
   : >"$CLIENT_ROOT/empty-known-hosts"
   expect_host_denied "$CLIENT_ROOT/empty-known-hosts" unknown
@@ -618,11 +634,11 @@ WRAPPER
   expect_host_denied "$CLIENT_ROOT/wrong-known-hosts" changed
 
   after="$(accepted_count)"
-  [[ "$after" == 5 ]] || fail "target accepted $after authentications, want 5"
+  [[ "$after" == 6 ]] || fail "target accepted $after authentications, want 6"
   fingerprint="$(/usr/bin/ssh-keygen -lf "$STATE_ROOT/client_key.pub" -E sha256 | awk '{print $2}')"
   [[ "$fingerprint" == SHA256:* ]] || fail 'selected public-key fingerprint is unavailable'
-  [[ "$(grep -F "Accepted publickey for $TARGET_USER " "$SERVER_LOG" | grep -cF "$fingerprint")" == 5 ]] ||
-    fail 'target did not authenticate the exact selected public key five times'
+  [[ "$(grep -F "Accepted publickey for $TARGET_USER " "$SERVER_LOG" | grep -cF "$fingerprint")" == 6 ]] ||
+    fail 'target did not authenticate the exact selected public key six times'
   printf '%s\n' "$after" >"$STATE_ROOT/proved-accepted-count"
   printf 'stock-ssh-workload-proved\n'
 }

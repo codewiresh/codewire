@@ -113,6 +113,7 @@ impl WorkspaceBindingService for ScriptedService {
             projection_selection_sha256: String::new(),
             managed_credential_clients: "v1:none".into(),
             access: access.map(::buffa::MessageField::some).unwrap_or_default(),
+            working_directory: "/workspace/app".into(),
             ..Default::default()
         })
     }
@@ -266,6 +267,15 @@ async fn an_accepted_binding_carries_the_credential_and_requested_wait() {
     assert_eq!(
         binding.daemon_credential().expose_secret(),
         SYNTHETIC_CREDENTIAL
+    );
+    // Unlisted sessions start in the environment's declared directory.
+    assert_eq!(
+        fixture
+            .config
+            .clone()
+            .into_config(&binding)
+            .session_working_dir,
+        Some(std::path::PathBuf::from("/workspace/app"))
     );
     let recorded = fixture.recorded.lock().unwrap();
     assert_eq!(recorded.waits, [20]);

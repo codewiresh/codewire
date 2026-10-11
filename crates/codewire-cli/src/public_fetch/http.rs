@@ -9,9 +9,13 @@ use anyhow::Context as _;
 use codewire_cw_release::identity::{MAX_EXECUTABLE_BYTES, is_sha256_hex};
 use codewire_cw_release::release::{ObjectRef, valid_release_tag};
 use reqwest::{Client, Response, StatusCode, Url, header};
+use sha2::{Digest as _, Sha256};
 
 const ORIGIN: &str = "https://releases.codewire.sh/";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Runtime blobs carry their own size-scaled deadline; this only bounds a
+/// request the caller has not.
+const BLOB_REQUEST_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -23,6 +27,12 @@ pub(super) struct FixedHttp {
 impl FixedHttp {
     pub(super) fn new() -> anyhow::Result<Self> {
         Self::build(ORIGIN, true, REQUEST_TIMEOUT, READ_TIMEOUT)
+    }
+
+    /// For runtime blobs: the same origin and stall bound, without the
+    /// document-sized request deadline.
+    pub(super) fn for_blobs() -> anyhow::Result<Self> {
+        Self::build(ORIGIN, true, BLOB_REQUEST_TIMEOUT, READ_TIMEOUT)
     }
 
     fn build(
@@ -129,34 +139,61 @@ impl FixedHttp {
         Ok(bytes)
     }
 
+    /// Stream a release executable of exactly its signed size. Its identity
+    /// admission hashes it afterwards.
     pub(super) async fn executable(
         &self,
         reference: &ObjectRef,
         file: &mut File,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            reference.size <= MAX_EXECUTABLE_BYTES,
-            "release executable exceeds its bound"
-        );
+        self.stream(reference, MAX_EXECUTABLE_BYTES, file, false)
+            .await
+    }
+
+    /// Stream one pinned runtime blob, refusing anything but its exact size
+    /// and SHA-256.
+    pub(super) async fn blob(
+        &self,
+        reference: &ObjectRef,
+        cap: u64,
+        file: &mut File,
+    ) -> anyhow::Result<()> {
+        self.stream(reference, cap, file, true).await
+    }
+
+    async fn stream(
+        &self,
+        reference: &ObjectRef,
+        cap: u64,
+        file: &mut File,
+        check_digest: bool,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(reference.size <= cap, "release object exceeds its bound");
         let mut response = self
-            .request(&reference.key, MAX_EXECUTABLE_BYTES, Some(reference.size))
+            .request(&reference.key, cap, Some(reference.size))
             .await?;
         let mut size = 0_u64;
-        while let Some(chunk) = response.chunk().await.context("read release executable")? {
+        let mut digest = Sha256::new();
+        while let Some(chunk) = response.chunk().await.context("read release object")? {
             let length = chunk.len() as u64;
             anyhow::ensure!(
                 length <= reference.size.saturating_sub(size),
-                "release executable exceeds its signed size"
+                "release object exceeds its pinned size"
             );
+            digest.update(&chunk);
             file.write_all(&chunk)
-                .context("write held release executable")?;
+                .context("write held release object")?;
             size += length;
         }
         anyhow::ensure!(
             size == reference.size,
-            "release executable is shorter than its signed size"
+            "release object is shorter than its pinned size"
         );
-        file.sync_all().context("sync held release executable")?;
+        anyhow::ensure!(
+            !check_digest || format!("{:x}", digest.finalize()) == reference.sha256,
+            "release object differs from its pinned SHA-256"
+        );
+        file.sync_all().context("sync held release object")?;
         Ok(())
     }
 }

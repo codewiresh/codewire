@@ -34,6 +34,7 @@ codewire-mesh = { path = "../codewire-mesh" }
 codewire-proto = { workspace = true, features = ["client"] }
 codewire-server-core = { workspace = true }
 codewire-tailnet = { workspace = true }
+codewire-vmm-guest-probe = { workspace = true }
 connectrpc = { workspace = true, features = ["client"] }
 futures = { workspace = true }
 libc = "0.2"
@@ -45,7 +46,9 @@ uuid = { workspace = true }
 zeroize = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
+codewire-egress-broker = { workspace = true }
 codewire-local-vmm = { path = "../codewire-local-vmm" }
+codewire-vmm-guest-probe = { workspace = true }
 libc = "0.2"
 tempfile = { workspace = true }
 tonic = { workspace = true }

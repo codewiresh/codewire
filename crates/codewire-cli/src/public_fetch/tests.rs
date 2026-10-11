@@ -728,6 +728,22 @@ fn assert_dead_and_reaped(pidfd: &File, pid: i32) {
     );
 }
 
+/// Spawn an executable this test process just wrote or copied. A concurrent
+/// test's fork child holds the write descriptor until its own exec, so the
+/// kernel briefly refuses this exec with ETXTBSY; retry only that, bounded.
+#[cfg(target_os = "linux")]
+fn spawn_written<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    for _ in 1..50 {
+        match spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+    spawn()
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn signed_public_selection_and_rollback_leave_a_running_owned_elf_untouched() {
@@ -755,14 +771,14 @@ async fn signed_public_selection_and_rollback_leave_a_running_owned_elf_untouche
             Some(0),
         )
         .unwrap();
-    let child = Command::new(store.version_executable(&published.sha256))
+    let mut command = Command::new(store.version_executable(&published.sha256));
+    command
         .env_clear()
         .arg("30")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::null());
+    let child = spawn_written(|| command.spawn()).unwrap();
     struct Owned(Child);
     impl Drop for Owned {
         fn drop(&mut self) {
@@ -1278,4 +1294,81 @@ fn retained_ancestor_permissions_are_rechecked_before_the_download() {
     fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
     scratch.check_paths().unwrap();
     scratch.cleanup().unwrap();
+}
+
+fn pinned(bytes: &[u8]) -> BlobRef {
+    BlobRef {
+        sha256: format!("{:x}", Sha256::digest(bytes)),
+        size: bytes.len() as u64,
+    }
+}
+
+async fn serve_blob(server: &MockServer, digest: &str, body: &[u8]) {
+    Mock::given(method("GET"))
+        .and(path(format!("/cw/v1/blobs/sha256/{digest}")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.to_vec()))
+        .mount(server)
+        .await;
+}
+
+async fn fetch_pinned(server: &MockServer, blobs: &[BlobRef]) -> anyhow::Result<FetchedRuntime> {
+    let scratch = Arc::new(scratch::Scratch::new().unwrap());
+    let http =
+        http::FixedHttp::synthetic(&format!("{}/", server.uri()), Duration::from_secs(10)).unwrap();
+    controlled(
+        fetch_runtime_inner(blobs, &http, scratch.clone()),
+        scratch,
+        Duration::from_secs(10),
+        std::future::pending(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn pinned_runtime_blobs_stream_exactly_and_refuse_other_bytes() {
+    let server = MockServer::start().await;
+    let kernel = b"synthetic kernel".to_vec();
+    let root = b"synthetic guest root".to_vec();
+    serve_blob(&server, &pinned(&kernel).sha256, &kernel).await;
+    serve_blob(&server, &pinned(&root).sha256, &root).await;
+
+    // Each pinned blob is fetched once and read back from the held file.
+    let fetched = fetch_pinned(&server, &[pinned(&kernel), pinned(&root), pinned(&kernel)])
+        .await
+        .unwrap();
+    for bytes in [&kernel, &root] {
+        let mut read = Vec::new();
+        fetched
+            .open(&pinned(bytes).sha256)
+            .unwrap()
+            .read_to_end(&mut read)
+            .unwrap();
+        assert_eq!(&read, bytes);
+    }
+    assert!(matches!(
+        fetched.open(&"0".repeat(64)),
+        Err(InstallError::MissingBlob { .. })
+    ));
+    fetched.cleanup().unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+
+    // The origin's bytes must be exactly the pinned ones.
+    let pinned_other = pinned(b"the bytes cw pins");
+    serve_blob(&server, &pinned_other.sha256, b"the bytes cw pinz").await;
+    let error = fetch_pinned(&server, &[pinned_other]).await.err().unwrap();
+    assert!(format!("{error:#}").contains("pinned SHA-256"), "{error:#}");
+
+    let short = pinned(b"a longer pinned object");
+    serve_blob(&server, &short.sha256, b"a longer").await;
+    assert!(fetch_pinned(&server, &[short]).await.is_err());
+
+    let missing = pinned(b"never published");
+    assert!(fetch_pinned(&server, &[missing]).await.is_err());
+
+    let invalid = BlobRef {
+        sha256: "not a digest".into(),
+        size: 1,
+    };
+    assert!(fetch_pinned(&server, &[invalid]).await.is_err());
 }

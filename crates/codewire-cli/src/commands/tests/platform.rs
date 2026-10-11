@@ -532,7 +532,7 @@ fn test_preset(id: &str, name: &str, slug: &str, image: &str) -> Preset {
 
 #[test]
 fn format_preset_list_text_reads_canonical_project_resources() {
-    let workspace_image = "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff";
+    let workspace_image = CANONICAL_WORKSPACE_IMAGE;
     let mut private = test_preset("preset_2", "Private", "private", "unused");
     private.language = None;
     private.project_spec.image.clear();
@@ -577,22 +577,25 @@ fn format_preset_info_text_reads_canonical_project_resources() {
         "preset_1",
         "Workspace",
         "workspace",
-        "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff",
+        CANONICAL_WORKSPACE_IMAGE,
     );
 
     assert_eq!(
         format_preset_info_text(&preset),
-        concat!(
-            "ID:        preset_1\n",
-            "Name:      Workspace\n",
-            "Slug:      workspace\n",
-            "Language:  rust\n",
-            "Image:     ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff\n",
-            "Official:  false\n",
-            "Build:     ready\n",
-            "CPU:      2000m\n",
-            "Memory:   4096MB\n",
-            "Disk:     20GB\n",
+        format!(
+            concat!(
+                "ID:        preset_1\n",
+                "Name:      Workspace\n",
+                "Slug:      workspace\n",
+                "Language:  rust\n",
+                "Image:     {}\n",
+                "Official:  false\n",
+                "Build:     ready\n",
+                "CPU:      2000m\n",
+                "Memory:   4096MB\n",
+                "Disk:     20GB\n",
+            ),
+            CANONICAL_WORKSPACE_IMAGE
         )
     );
 }
@@ -657,7 +660,7 @@ fn find_preset_rejects_same_precedence_slug_ambiguity() {
 fn expand_image_ref_matches_go_direct_preset_shorthand() {
     assert_eq!(
         expand_image_ref("workspace"),
-        "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff"
+        CANONICAL_WORKSPACE_IMAGE
     );
     assert_eq!(
         expand_image_ref("workspace:v2"),

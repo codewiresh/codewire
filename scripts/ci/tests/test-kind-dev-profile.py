@@ -70,7 +70,23 @@ if tool == "kind":
         print("dev-a\ndev-b\ncodewire-e2e-ci\ncodewire-ux-2099")
     elif args[:2] != ["load", "docker-image"]: sys.exit(64)
 elif tool == "kubectl":
-    if "get" in args:
+    if "get" in args and "secret" in args:
+        import base64
+        name = args[args.index("secret") + 1]
+        print(base64.b64encode((state / "roots" / f"{name}.pem").read_bytes()).decode(), end="")
+    elif "get" in args and "configmap" in args:
+        name = args[args.index("configmap") + 1]
+        published = state / "configmaps" / f"{args[args.index('-n') + 1]}-{name}.pem"
+        if published.exists(): sys.stdout.write(published.read_text())
+    elif "create" in args and "configmap" in args:
+        # The fake applies at once; `apply -f -` below only consumes the YAML.
+        name = args[args.index("configmap") + 1]
+        literal = next(arg for arg in args if arg.startswith("--from-literal=ca.crt="))
+        (state / "configmaps").mkdir(exist_ok=True)
+        (state / "configmaps" / f"{args[args.index('-n') + 1]}-{name}.pem").write_text(literal.split("=", 2)[2])
+        print("kind: ConfigMap")
+    elif "apply" in args: sys.stdin.read()
+    elif "get" in args:
         if "pods" in args: print("pod/old-one\npod/old-two")
         elif any(a.startswith("go-template=") for a in args): print("app=selected,")
         elif any("command[0]" in a for a in args): print("/codewire-kind-fixtures/credential-service")
@@ -106,7 +122,7 @@ elif tool == "docker":
         binary = destination / os.environ["KIND_DEV_BIN"]
         binary.write_text(os.environ.get("FAKE_BINARY_CONTENT", "synthetic-current-source"))
         binary.chmod(0o755)
-        if "kind-dev-binary.args.KIND_DEV_FIXTURE_FEATURES=enrollment" in args and not os.environ.get("FAKE_MISSING_FIXTURE"):
+        if "kind-dev-binary.args.KIND_DEV_FIXTURE_FEATURES=enrollment,kind-e2e" in args and not os.environ.get("FAKE_MISSING_FIXTURE"):
             fixture = destination / "kind-fixtures" / os.environ["KIND_DEV_BIN"]
             fixture.parent.mkdir()
             fixture.write_text(os.environ.get("FAKE_FIXTURE_CONTENT", "synthetic-current-fixture"))
@@ -150,8 +166,15 @@ class DeveloperProfileTests(unittest.TestCase):
         self.tree = self.directory / "tree"
         self.state = self.directory / "state"
         self.tools = self.directory / "bin"
-        for path in (self.tree / "scripts/dev/kind", self.tree / "scripts/ci/verify", self.state, self.tools):
+        for path in (self.tree / "scripts/dev/kind", self.tree / "scripts/ci/verify/kind", self.state, self.tools):
             path.mkdir(parents=True, mode=0o700)
+        shutil.copy2(ROOT / "scripts/ci/verify/kind/credentials.sh",
+                     self.tree / "scripts/ci/verify/kind/credentials.sh")
+        # Distinct synthetic public roots for deploy-service.sh's republish step.
+        (self.state / "roots").mkdir(mode=0o700)
+        for name in ("codewire-kind-credential-broker-root", "codewire-kind-orchestration-internal-root",
+                     "codewire-kind-coordinator-root", "previous-orchestration-internal-root"):
+            self.certificate(self.state / "roots" / f"{name}.pem", name)
         self.calls_path = self.state / "calls"
         self.calls_path.touch()
         for name in ("dev-loop.sh", "deploy-service.sh", "test-selected.sh"):
@@ -179,6 +202,11 @@ class DeveloperProfileTests(unittest.TestCase):
                     "BASH_ENV": str(self.bash_env), "CLUSTER": "dev-a", "KIND_PROFILE_LOCK_TIMEOUT_SECONDS": "1"}
         for name, offset in (("dev-a", 0), ("dev-b", 20)):
             self.create_profile(name, offset)
+
+    def certificate(self, path: Path, name: str) -> None:
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+                        "-nodes", "-keyout", str(self.directory / f"{name}.key"), "-subj", f"/CN={name}",
+                        "-days", "2", "-out", str(path)], check=True, capture_output=True)
 
     @staticmethod
     def write_program(path: Path, source: str) -> None:
@@ -552,6 +580,26 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assertIn("names a different image", result.stderr)
         self.assertEqual(json.loads((self.state / "aliases.json").read_text())[alias], "sha256:" + "f" * 64)
         self.assertFalse([call for call in self.calls("docker") if call["args"][0] == "tag"])
+
+    def test_deploy_republishes_trust_roots_before_restart(self) -> None:
+        roots = self.state / "roots"
+        (self.state / "configmaps").mkdir()
+        previous = (roots / "previous-orchestration-internal-root.pem").read_text().strip()
+        stale = self.state / "configmaps" / "dev-sandboxes-codewire-orchestration-internal-roots.pem"
+        stale.write_text(previous)
+        result = self.run_script("deploy-service.sh", "orchestration")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        current = (roots / "codewire-kind-orchestration-internal-root.pem").read_text().strip()
+        published = stale.read_text()
+        self.assertTrue(published.startswith(current), published)
+        self.assertIn(previous, published)
+        self.assertEqual(published.count("BEGIN CERTIFICATE"), 2)
+        kube = self.calls("kubectl")
+        creates = [i for i, call in enumerate(kube) if "create" in call["args"] and "configmap" in call["args"]]
+        changes = [i for i, call in enumerate(kube) if "set" in call["args"] or "rollout" in call["args"]]
+        self.assertEqual(len(creates), 4)
+        self.assertTrue(changes and max(creates) < min(changes))
+        self.assertFalse([call for call in kube if any("tls.key" in arg for arg in call["args"])])
 
     def test_identical_named_deploy_restarts_once(self) -> None:
         result = self.run_script("deploy-service.sh", "idp", FAKE_SAME_IMAGE="1")

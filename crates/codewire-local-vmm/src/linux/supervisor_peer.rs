@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use codewire_cw_release::store::{Store, VersionRecord};
-use sha2::{Digest as _, Sha256};
+use codewire_cw_release::sha256::Sha256;
 use tokio::net::UnixStream;
 
 use super::path::{FileIdentity, SocketIdentity, current_uid};
 use super::process::ProcessIdentity;
+use crate::process_birth::{AdmissionError, ProcessBirth, admit_retained_version};
 use crate::supervisor_config::NativeRuntimeConfig;
 
 const MAX_ARGV_BYTES: usize = 16 * 1024;
@@ -34,22 +34,29 @@ pub(crate) enum PeerError {
     Provenance,
 }
 
-#[derive(Debug, Clone)]
-struct Provenance {
-    root: PathBuf,
-    record: VersionRecord,
+impl From<AdmissionError> for PeerError {
+    fn from(error: AdmissionError) -> Self {
+        match error {
+            AdmissionError::Identity => Self::Identity,
+            AdmissionError::Provenance => Self::Provenance,
+        }
+    }
 }
 
 /// Opaque and shared: reconnects cannot replace its socket or process birth.
+///
+/// The peer is pinned by its pidfd, its process birth and executable file, and
+/// its arguments. Only a peer running another cw version has its executable
+/// hashed, once, to admit its provenance; a reconnect re-observes the birth
+/// and never reads the executable again (#2549).
 #[derive(Debug)]
 pub(crate) struct SupervisorPeerPin {
     socket: PathBuf,
     socket_identity: SocketIdentity,
     pidfd: OwnedFd,
-    process: ProcessIdentity,
+    peer: ProcessBirth,
     argv: Vec<OsString>,
     config: Option<NativeRuntimeConfig>,
-    provenance: Option<Provenance>,
 }
 
 impl SupervisorPeerPin {
@@ -62,12 +69,12 @@ impl SupervisorPeerPin {
         let deadline = Instant::now() + ADMISSION_TIMEOUT;
         let (pidfd, pid) = socket_pidfd(stream)?;
         require_live(&pidfd)?;
-        let process = capture_process(pid, deadline)?;
+        let peer = ProcessBirth::observe(pid).map_err(|_| PeerError::Identity)?;
         let argv = process_argv(pid)?;
         let config = requested
             .map(|config| {
                 config
-                    .with_supervisor_executable(process.executable.clone())
+                    .with_supervisor_executable(peer.executable().to_owned())
                     .map_err(|_| PeerError::Identity)
             })
             .transpose()?;
@@ -76,20 +83,16 @@ impl SupervisorPeerPin {
         {
             return Err(PeerError::Role);
         }
-        let provenance = if requested.is_some_and(|config| config.executable != process.executable)
-        {
-            Some(admit_provenance(&process)?)
-        } else {
-            None
-        };
+        if requested.is_some_and(|config| config.executable != peer.executable()) {
+            admit_retained_version(&peer, &capture_process(pid, deadline)?)?;
+        }
         let pin = Arc::new(Self {
             socket: socket.to_owned(),
             socket_identity,
             pidfd,
-            process,
+            peer,
             argv,
             config,
-            provenance,
         });
         pin.revalidate(deadline)?;
         Ok(pin)
@@ -109,7 +112,7 @@ impl SupervisorPeerPin {
         let deadline = Instant::now() + ADMISSION_TIMEOUT;
         let (peer, pid) = socket_pidfd(stream)?;
         require_live(&peer)?;
-        if pid != self.process.pid {
+        if pid != self.peer.pid() {
             return Err(PeerError::Identity);
         }
         self.revalidate(deadline)
@@ -120,20 +123,10 @@ impl SupervisorPeerPin {
         self.socket_identity
             .revalidate(&self.socket)
             .map_err(|_| PeerError::Identity)?;
-        if capture_process(self.process.pid, deadline)? != self.process
-            || process_argv(self.process.pid)? != self.argv
+        if ProcessBirth::observe(self.peer.pid()).map_err(|_| PeerError::Identity)? != self.peer
+            || process_argv(self.peer.pid())? != self.argv
         {
             return Err(PeerError::Identity);
-        }
-        if let Some(provenance) = &self.provenance
-            && admit_provenance(&self.process)?.record != provenance.record
-        {
-            return Err(PeerError::Provenance);
-        }
-        if let Some(provenance) = &self.provenance
-            && Store::locate(&self.process.executable).as_ref() != Some(&provenance.root)
-        {
-            return Err(PeerError::Provenance);
         }
         require_live(&self.pidfd)?;
         if Instant::now() >= deadline {
@@ -351,21 +344,6 @@ fn capture_process(pid: u32, deadline: Instant) -> Result<ProcessIdentity, PeerE
         executable_file,
         executable_sha256: format!("{:x}", digest.finalize()),
     })
-}
-
-fn admit_provenance(process: &ProcessIdentity) -> Result<Provenance, PeerError> {
-    let root = Store::locate(&process.executable).ok_or(PeerError::Provenance)?;
-    let store = Store::open(&root, Duration::from_secs(1)).map_err(|_| PeerError::Provenance)?;
-    let record = store
-        .verify(&process.executable_sha256)
-        .map_err(|_| PeerError::Provenance)?;
-    if store.version_executable(&record.sha256) != process.executable
-        || record.sha256 != process.executable_sha256
-        || record.size != process.executable_file.size
-    {
-        return Err(PeerError::Provenance);
-    }
-    Ok(Provenance { root, record })
 }
 
 #[cfg(test)]

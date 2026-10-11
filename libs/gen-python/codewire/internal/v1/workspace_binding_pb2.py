@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n,codewire/internal/v1/workspace_binding.proto\x12\x14\x63odewire.internal.v1\"9\n\x14\x42indWorkspaceRequest\x12!\n\x0cwait_seconds\x18\x01 \x01(\rR\x0bwaitSeconds\"\xf9\x02\n\x15\x42indWorkspaceResponse\x12%\n\x0e\x65nvironment_id\x18\x01 \x01(\tR\renvironmentId\x12\x17\n\x07pod_uid\x18\x02 \x01(\tR\x06podUid\x12\x31\n\x14operation_generation\x18\x03 \x01(\x03R\x13operationGeneration\x12\x30\n\x11\x64\x61\x65mon_credential\x18\x04 \x01(\tB\x03\x80\x01\x01R\x10\x64\x61\x65monCredential\x12>\n\x1bprojection_selection_sha256\x18\x05 \x01(\tR\x19projectionSelectionSha256\x12<\n\x1amanaged_credential_clients\x18\x06 \x01(\tR\x18managedCredentialClients\x12=\n\x06\x61\x63\x63\x65ss\x18\x07 \x01(\x0b\x32%.codewire.internal.v1.WorkspaceAccessR\x06\x61\x63\x63\x65ss\"\xc5\x02\n\x0fWorkspaceAccess\x12\"\n\npeer_token\x18\x01 \x01(\tB\x03\x80\x01\x01R\tpeerToken\x12\x31\n\x15peer_token_expires_at\x18\x02 \x01(\x03R\x12peerTokenExpiresAt\x12\x31\n\x14operation_generation\x18\x03 \x01(\x03R\x13operationGeneration\x12\'\n\x0f\x63oordinator_url\x18\x04 \x01(\tR\x0e\x63oordinatorUrl\x12\x30\n\x14\x64irect_udp_endpoints\x18\x05 \x03(\tR\x12\x64irectUdpEndpoints\x12\x30\n\x14peer_relay_endpoints\x18\x06 \x03(\tR\x12peerRelayEndpoints\x12\x1b\n\tapp_ports\x18\x07 \x03(\x05R\x08\x61ppPorts\"\x16\n\x14RefreshAccessRequest\"V\n\x15RefreshAccessResponse\x12=\n\x06\x61\x63\x63\x65ss\x18\x01 \x01(\x0b\x32%.codewire.internal.v1.WorkspaceAccessR\x06\x61\x63\x63\x65ss\"D\n\x14RecordHostKeyRequest\x12,\n\x12public_key_openssh\x18\x01 \x01(\tR\x10publicKeyOpenssh\"\x17\n\x15RecordHostKeyResponse\"d\n\x18\x41llocatePeerRelayRequest\x12\x1d\n\ndisco_keys\x18\x01 \x03(\tR\tdiscoKeys\x12)\n\x10relay_generation\x18\x02 \x01(\rR\x0frelayGeneration\"\xc2\x02\n\x19\x41llocatePeerRelayResponse\x12)\n\x10relay_generation\x18\x01 \x01(\rR\x0frelayGeneration\x12(\n\x10server_disco_key\x18\x02 \x01(\tR\x0eserverDiscoKey\x12\x1d\n\ndisco_keys\x18\x03 \x03(\tR\tdiscoKeys\x12\x1d\n\nlamport_id\x18\x04 \x01(\x04R\tlamportId\x12\x10\n\x03vni\x18\x05 \x01(\rR\x03vni\x12(\n\x10\x62ind_lifetime_ns\x18\x06 \x01(\x04R\x0e\x62indLifetimeNs\x12\x37\n\x18steady_state_lifetime_ns\x18\x07 \x01(\x04R\x15steadyStateLifetimeNs\x12\x1d\n\naddr_ports\x18\x08 \x03(\tR\taddrPorts2\xdc\x03\n\x17WorkspaceBindingService\x12m\n\rBindWorkspace\x12*.codewire.internal.v1.BindWorkspaceRequest\x1a+.codewire.internal.v1.BindWorkspaceResponse\"\x03\x90\x02\x02\x12m\n\rRefreshAccess\x12*.codewire.internal.v1.RefreshAccessRequest\x1a+.codewire.internal.v1.RefreshAccessResponse\"\x03\x90\x02\x01\x12m\n\rRecordHostKey\x12*.codewire.internal.v1.RecordHostKeyRequest\x1a+.codewire.internal.v1.RecordHostKeyResponse\"\x03\x90\x02\x02\x12t\n\x11\x41llocatePeerRelay\x12..codewire.internal.v1.AllocatePeerRelayRequest\x1a/.codewire.internal.v1.AllocatePeerRelayResponseB\xef\x01\n\x18\x63om.codewire.internal.v1B\x15WorkspaceBindingProtoP\x01ZJgithub.com/codewiresh/codewire/libs/gen-go/codewire/internal/v1;internalv1\xa2\x02\x03\x43IX\xaa\x02\x14\x43odewire.Internal.V1\xca\x02\x14\x43odewire\\Internal\\V1\xe2\x02 Codewire\\Internal\\V1\\GPBMetadata\xea\x02\x16\x43odewire::Internal::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n,codewire/internal/v1/workspace_binding.proto\x12\x14\x63odewire.internal.v1\"9\n\x14\x42indWorkspaceRequest\x12!\n\x0cwait_seconds\x18\x01 \x01(\rR\x0bwaitSeconds\"\xa6\x03\n\x15\x42indWorkspaceResponse\x12%\n\x0e\x65nvironment_id\x18\x01 \x01(\tR\renvironmentId\x12\x17\n\x07pod_uid\x18\x02 \x01(\tR\x06podUid\x12\x31\n\x14operation_generation\x18\x03 \x01(\x03R\x13operationGeneration\x12\x30\n\x11\x64\x61\x65mon_credential\x18\x04 \x01(\tB\x03\x80\x01\x01R\x10\x64\x61\x65monCredential\x12>\n\x1bprojection_selection_sha256\x18\x05 \x01(\tR\x19projectionSelectionSha256\x12<\n\x1amanaged_credential_clients\x18\x06 \x01(\tR\x18managedCredentialClients\x12=\n\x06\x61\x63\x63\x65ss\x18\x07 \x01(\x0b\x32%.codewire.internal.v1.WorkspaceAccessR\x06\x61\x63\x63\x65ss\x12+\n\x11working_directory\x18\x08 \x01(\tR\x10workingDirectory\"\xc5\x02\n\x0fWorkspaceAccess\x12\"\n\npeer_token\x18\x01 \x01(\tB\x03\x80\x01\x01R\tpeerToken\x12\x31\n\x15peer_token_expires_at\x18\x02 \x01(\x03R\x12peerTokenExpiresAt\x12\x31\n\x14operation_generation\x18\x03 \x01(\x03R\x13operationGeneration\x12\'\n\x0f\x63oordinator_url\x18\x04 \x01(\tR\x0e\x63oordinatorUrl\x12\x30\n\x14\x64irect_udp_endpoints\x18\x05 \x03(\tR\x12\x64irectUdpEndpoints\x12\x30\n\x14peer_relay_endpoints\x18\x06 \x03(\tR\x12peerRelayEndpoints\x12\x1b\n\tapp_ports\x18\x07 \x03(\x05R\x08\x61ppPorts\"\x16\n\x14RefreshAccessRequest\"V\n\x15RefreshAccessResponse\x12=\n\x06\x61\x63\x63\x65ss\x18\x01 \x01(\x0b\x32%.codewire.internal.v1.WorkspaceAccessR\x06\x61\x63\x63\x65ss\"D\n\x14RecordHostKeyRequest\x12,\n\x12public_key_openssh\x18\x01 \x01(\tR\x10publicKeyOpenssh\"\x17\n\x15RecordHostKeyResponse\"d\n\x18\x41llocatePeerRelayRequest\x12\x1d\n\ndisco_keys\x18\x01 \x03(\tR\tdiscoKeys\x12)\n\x10relay_generation\x18\x02 \x01(\rR\x0frelayGeneration\"\xc2\x02\n\x19\x41llocatePeerRelayResponse\x12)\n\x10relay_generation\x18\x01 \x01(\rR\x0frelayGeneration\x12(\n\x10server_disco_key\x18\x02 \x01(\tR\x0eserverDiscoKey\x12\x1d\n\ndisco_keys\x18\x03 \x03(\tR\tdiscoKeys\x12\x1d\n\nlamport_id\x18\x04 \x01(\x04R\tlamportId\x12\x10\n\x03vni\x18\x05 \x01(\rR\x03vni\x12(\n\x10\x62ind_lifetime_ns\x18\x06 \x01(\x04R\x0e\x62indLifetimeNs\x12\x37\n\x18steady_state_lifetime_ns\x18\x07 \x01(\x04R\x15steadyStateLifetimeNs\x12\x1d\n\naddr_ports\x18\x08 \x03(\tR\taddrPorts2\xdc\x03\n\x17WorkspaceBindingService\x12m\n\rBindWorkspace\x12*.codewire.internal.v1.BindWorkspaceRequest\x1a+.codewire.internal.v1.BindWorkspaceResponse\"\x03\x90\x02\x02\x12m\n\rRefreshAccess\x12*.codewire.internal.v1.RefreshAccessRequest\x1a+.codewire.internal.v1.RefreshAccessResponse\"\x03\x90\x02\x01\x12m\n\rRecordHostKey\x12*.codewire.internal.v1.RecordHostKeyRequest\x1a+.codewire.internal.v1.RecordHostKeyResponse\"\x03\x90\x02\x02\x12t\n\x11\x41llocatePeerRelay\x12..codewire.internal.v1.AllocatePeerRelayRequest\x1a/.codewire.internal.v1.AllocatePeerRelayResponseB\xef\x01\n\x18\x63om.codewire.internal.v1B\x15WorkspaceBindingProtoP\x01ZJgithub.com/codewiresh/codewire/libs/gen-go/codewire/internal/v1;internalv1\xa2\x02\x03\x43IX\xaa\x02\x14\x43odewire.Internal.V1\xca\x02\x14\x43odewire\\Internal\\V1\xe2\x02 Codewire\\Internal\\V1\\GPBMetadata\xea\x02\x16\x43odewire::Internal::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -45,21 +45,21 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_BINDWORKSPACEREQUEST']._serialized_start=70
   _globals['_BINDWORKSPACEREQUEST']._serialized_end=127
   _globals['_BINDWORKSPACERESPONSE']._serialized_start=130
-  _globals['_BINDWORKSPACERESPONSE']._serialized_end=507
-  _globals['_WORKSPACEACCESS']._serialized_start=510
-  _globals['_WORKSPACEACCESS']._serialized_end=835
-  _globals['_REFRESHACCESSREQUEST']._serialized_start=837
-  _globals['_REFRESHACCESSREQUEST']._serialized_end=859
-  _globals['_REFRESHACCESSRESPONSE']._serialized_start=861
-  _globals['_REFRESHACCESSRESPONSE']._serialized_end=947
-  _globals['_RECORDHOSTKEYREQUEST']._serialized_start=949
-  _globals['_RECORDHOSTKEYREQUEST']._serialized_end=1017
-  _globals['_RECORDHOSTKEYRESPONSE']._serialized_start=1019
-  _globals['_RECORDHOSTKEYRESPONSE']._serialized_end=1042
-  _globals['_ALLOCATEPEERRELAYREQUEST']._serialized_start=1044
-  _globals['_ALLOCATEPEERRELAYREQUEST']._serialized_end=1144
-  _globals['_ALLOCATEPEERRELAYRESPONSE']._serialized_start=1147
-  _globals['_ALLOCATEPEERRELAYRESPONSE']._serialized_end=1469
-  _globals['_WORKSPACEBINDINGSERVICE']._serialized_start=1472
-  _globals['_WORKSPACEBINDINGSERVICE']._serialized_end=1948
+  _globals['_BINDWORKSPACERESPONSE']._serialized_end=552
+  _globals['_WORKSPACEACCESS']._serialized_start=555
+  _globals['_WORKSPACEACCESS']._serialized_end=880
+  _globals['_REFRESHACCESSREQUEST']._serialized_start=882
+  _globals['_REFRESHACCESSREQUEST']._serialized_end=904
+  _globals['_REFRESHACCESSRESPONSE']._serialized_start=906
+  _globals['_REFRESHACCESSRESPONSE']._serialized_end=992
+  _globals['_RECORDHOSTKEYREQUEST']._serialized_start=994
+  _globals['_RECORDHOSTKEYREQUEST']._serialized_end=1062
+  _globals['_RECORDHOSTKEYRESPONSE']._serialized_start=1064
+  _globals['_RECORDHOSTKEYRESPONSE']._serialized_end=1087
+  _globals['_ALLOCATEPEERRELAYREQUEST']._serialized_start=1089
+  _globals['_ALLOCATEPEERRELAYREQUEST']._serialized_end=1189
+  _globals['_ALLOCATEPEERRELAYRESPONSE']._serialized_start=1192
+  _globals['_ALLOCATEPEERRELAYRESPONSE']._serialized_end=1514
+  _globals['_WORKSPACEBINDINGSERVICE']._serialized_start=1517
+  _globals['_WORKSPACEBINDINGSERVICE']._serialized_end=1993
 # @@protoc_insertion_point(module_scope)

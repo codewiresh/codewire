@@ -150,6 +150,61 @@ run_paths_case gitleaks_policy pull_request refs/pull/10101/head false \
   'policy security' .gitleaks.toml
 run_paths_case bun_review_baseline pull_request refs/pull/10102/head false \
   "$policy" .supplychain/bun-baseline.json
+# The JavaScript supply-chain audit is grep-only, so every path it scans
+# selects it beside that path's own families. #2517 changed a scanned script
+# without selecting it, and the violation surfaced only on main.
+run_paths_case js_audit_scanned_script pull_request refs/pull/2517/head false \
+  'go_consumer_interop go_support policy policy_shell release runtime_confidential security security_js' \
+  scripts/ci/tests/test-support-images-workflow.sh
+run_paths_case js_audit_scanned_workflow pull_request refs/pull/10103/head false \
+  'deploy policy security security_js' .gitea/workflows/deploy-dev.yaml
+run_paths_case js_audit_scanned_dockerfile pull_request refs/pull/10104/head false \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js web' \
+  apps/dashboard/Dockerfile
+run_paths_case js_audit_scanned_root_package pull_request refs/pull/10105/head false \
+  'contracts contracts_proto policy security security_js web' package.json
+run_paths_case js_audit_scanned_package_json pull_request refs/pull/10106/head false \
+  'contracts contracts_proto policy security security_js' \
+  packages/codewire-proto-ts/tsconfig.json
+run_paths_case js_audit_unscanned_crate pull_request refs/pull/10107/head false \
+  'policy rust rust_pkg_codewire_billing service_billing service_integration' \
+  crates/codewire-billing/src/connect/billing.rs
+
+# A wider audit must not outrun its selection: the selector's list covers a
+# representative path for every pathspec the audit scans.
+mapfile -t selector_js_audit_paths < <(
+  sed -n '/^js_audit_paths=(/,/^)/s/^  "\(.*\)"$/\1/p' "$SELECTOR")
+js_audit_selected() {
+  local pattern
+  for pattern in "${selector_js_audit_paths[@]}"; do
+    # shellcheck disable=SC2053 # The unquoted side is the glob to match.
+    [[ "$1" == $pattern ]] && return 0
+  done
+  return 1
+}
+if [ "${#selector_js_audit_paths[@]}" -eq 0 ] \
+    || js_audit_selected crates/codewire-billing/src/lib.rs; then
+  echo 'js_audit_paths: selector list is missing or matches an unscanned crate' >&2
+  exit 1
+fi
+for audit_array in active_paths web_runtime_paths runtime_template_paths; do
+  mapfile -t audit_pathspecs < <(
+    sed -n "/^${audit_array}=(/,/^)/s/^  \"\\(.*\\)\"\$/\\1/p" \
+      "$ROOT/scripts/checks/security/audit-js-supply-chain.sh")
+  if [ "${#audit_pathspecs[@]}" -eq 0 ]; then
+    echo "js_audit_paths: audit ${audit_array} not found" >&2
+    exit 1
+  fi
+  for pathspec in "${audit_pathspecs[@]}"; do
+    [[ "$pathspec" == ':('* ]] && continue
+    example="${pathspec//\*\*/x/y}"
+    example="${example//\*/x}"
+    if ! js_audit_selected "$example"; then
+      echo "js_audit_paths: selector does not cover audit pathspec ${pathspec}" >&2
+      exit 1
+    fi
+  done
+done
 run_paths_case license_texts pull_request refs/pull/1011/head false "$policy" \
   LICENSE LICENSE-MIT LICENSE-APACHE LICENSE-BSD-3-CLAUSE \
   crates/codewire-cli/LICENSE packages/codewire-proto-ts/LICENSE-APACHE \
@@ -159,7 +214,7 @@ run_paths_case local_compose pull_request refs/pull/11/head false \
 run_paths_case local_compose_kind_opt_in pull_request refs/pull/111/head true \
   'database deploy edge_kind kind policy web' docker-compose.yml
 run_paths_case ci_self pull_request refs/pull/2/head false \
-  'go_consumer_interop go_support policy policy_shell release runtime_confidential runtime_dev_smoke rust_curated_locks' \
+  'go_consumer_interop go_support policy policy_shell release runtime_confidential runtime_dev_smoke rust_curated_locks security security_js' \
   .gitea/workflows/ci.yaml .gitea/workflows/manual-diagnostics.yaml \
   .gitea/workflows/source-approval.yml \
   scripts/ci/select/select-verification.sh \
@@ -176,7 +231,7 @@ run_paths_case ci_self pull_request refs/pull/2/head false \
   scripts/ci/tests/test-local-prepush-receipt.sh \
   scripts/ci/tests/test-source-approval-workflow.sh
 run_paths_case ci_rewrite pull_request refs/pull/20/head false \
-  'policy runtime_dev_smoke rust_curated_locks' \
+  'policy runtime_dev_smoke rust_curated_locks security security_js' \
   .githooks/pre-push scripts/dev/preflight.sh \
   scripts/ci/receipts/local-prepush-receipt.py \
   scripts/ci/tests/test-local-prepush-receipt.sh \
@@ -196,7 +251,7 @@ run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   scripts/ci/tests/fixtures/cargo-cache-df.sh \
   scripts/ci/tests/test-select-verification.sh
 run_paths_case retired_cache_surface pull_request refs/pull/200/head false \
-  "$policy" \
+  "$policy security security_js" \
   .gitea/workflows/rust-cache-refresh.yaml \
   scripts/ci/cache/prepare-rust-dependency-cache.sh \
   scripts/ci/cache/select-rust-cache-key.sh \
@@ -205,32 +260,32 @@ run_paths_case retired_cache_surface pull_request refs/pull/200/head false \
   scripts/ci/tests/test-rust-cache-workflow.sh \
   scripts/ci/tests/test-rust-cache-receipts.sh
 run_paths_case shellcheck_policy_domain_future pull_request refs/pull/2001/head false \
-  'policy policy_shell' scripts/ci/tests/test-shellcheck-policy-domain.sh
+  'policy policy_shell security security_js' scripts/ci/tests/test-shellcheck-policy-domain.sh
 grep -qF 'scripts/ci/tests/test-shellcheck-policy-domain.sh' "$SELECTOR"
 run_paths_case openbao_secret_authority_policy pull_request refs/pull/20011/head false \
-  'policy policy_shell' scripts/ci/tests/test-openbao-only-secret-authority.sh \
+  'policy policy_shell security security_js' scripts/ci/tests/test-openbao-only-secret-authority.sh \
   scripts/ci/tests/test-preflight-openbao-native-secrets.sh \
   scripts/ci/tests/test-sync-local-secrets.sh
 run_paths_case local_secret_sync_policy pull_request refs/pull/20012/head false \
-  'policy policy_shell' scripts/dev/kind/sync-local-secrets.sh
+  'policy policy_shell security security_js' scripts/dev/kind/sync-local-secrets.sh
 run_paths_case kind_runtime_images_fixture pull_request refs/pull/20014/head false \
-  'policy policy_shell' scripts/ci/tests/test-kind-runtime-images.sh
+  'policy policy_shell security security_js' scripts/ci/tests/test-kind-runtime-images.sh
 run_paths_case kind_watch_github_app_fixture pull_request refs/pull/20015/head false \
-  'policy policy_shell' scripts/ci/tests/test-kind-watch-github-app.sh
+  'policy policy_shell security security_js' scripts/ci/tests/test-kind-watch-github-app.sh
 # The retained-cluster helpers are policy even where Kind would run; any other
 # scripts/dev/kind helper still selects the Kind gate.
 run_paths_case kind_retained_helpers_main push refs/heads/main false \
-  'policy policy_shell' scripts/dev/kind/dev-loop.sh scripts/ci/tests/test-kind-runtime-images.sh \
+  'policy policy_shell security security_js' scripts/dev/kind/dev-loop.sh scripts/ci/tests/test-kind-runtime-images.sh \
   scripts/ci/tests/test-kind-watch-github-app.sh
 run_paths_case kind_deploy_helper_main push refs/heads/main false \
-  'policy policy_shell' scripts/dev/kind/deploy-service.sh \
+  'policy policy_shell security security_js' scripts/dev/kind/deploy-service.sh scripts/dev/kind/trust-roots.sh \
   deployments/docker/kind-dev-binary.Dockerfile
 run_paths_case kind_dev_helper_main push refs/heads/main false \
-  'edge_kind kind policy policy_shell' scripts/dev/kind/kind-forwards.sh
+  'edge_kind kind policy policy_shell security security_js' scripts/dev/kind/kind-forwards.sh
 run_paths_case root_secret_authority_inputs pull_request refs/pull/20013/head false \
   'policy' .env.example secret-authority.example.json
 run_paths_case ci_tool_download_contract pull_request refs/pull/2002/head false \
-  'deploy policy policy_shell' scripts/ci/tests/test-ci-tool-downloads.sh
+  'deploy policy policy_shell security security_js' scripts/ci/tests/test-ci-tool-downloads.sh
 # The local Kind dev-binary Dockerfile is not a product image input.
 run_paths_case kind_dev_binary_dockerfile pull_request refs/pull/2091/head false \
   'policy' deployments/docker/kind-dev-binary.Dockerfile
@@ -238,52 +293,52 @@ run_paths_case kind_dev_binary_with_product_dockerfile pull_request refs/pull/20
   'deploy go_consumer_interop go_support policy release runtime_confidential' \
   deployments/docker/kind-dev-binary.Dockerfile docker-bake.hcl
 run_paths_case product_image_build_graph pull_request refs/pull/2003/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   docker-bake.hcl scripts/ci/images/build-kind-images.sh \
   scripts/ci/images/run-rust-build.sh
 run_paths_case product_image_build_graph_kind pull_request refs/pull/2004/head true \
-  'deploy edge_kind go_consumer_interop go_support kind policy release runtime_confidential' \
+  'deploy edge_kind go_consumer_interop go_support kind policy release runtime_confidential security security_js' \
   docker-bake.hcl scripts/ci/images/build-kind-images.sh \
   scripts/ci/images/run-rust-build.sh
 run_paths_case harbor_runtime_pull_contract pull_request refs/pull/2006/head false \
-  'go_consumer_interop go_support policy release runtime_confidential' \
+  'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/test-harbor-runtime-pull-contract.sh
 run_paths_case protected_runtime_signing pull_request refs/pull/2005/head false \
-  'deploy go_consumer_interop go_support policy policy_shell release runtime_confidential security' \
+  'deploy go_consumer_interop go_support policy policy_shell release runtime_confidential security security_js' \
   scripts/ci/images/cosign-private-signing-config.json \
   scripts/ci/images/sign-runtime-image-set.sh \
   scripts/ci/tests/test-sign-runtime-image-set.sh \
   scripts/ci/trust/codewire-runtime-signing.pub
 run_paths_case runtime_plan_ci pull_request refs/pull/201/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/deploy/resolve-deployed-source.sh \
   scripts/ci/plan/apply-deploy-plan.py \
   scripts/ci/images/resolve-published-support-pair.sh \
   scripts/ci/tests/test-resolve-published-support-pair.sh \
   scripts/ci/tests/test-resolve-deployed-source.sh
 run_paths_case repo_checks pull_request refs/pull/21/head false \
-  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
+  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek security_js' \
   scripts/checks/repo_checks.py
 run_paths_case repo_policy_modules pull_request refs/pull/22/head false \
-  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
+  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek security_js' \
   scripts/checks/repo_policy/mesh.py
 run_paths_case repo_license_inventory pull_request refs/pull/2201/head false \
-  'policy' scripts/checks/repo_policy/licensing.py
+  'policy security security_js' scripts/checks/repo_policy/licensing.py
 run_paths_case repo_license_with_other_policy pull_request refs/pull/2202/head false \
-  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
+  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek security_js' \
   scripts/checks/repo_policy/licensing.py scripts/checks/repo_policy/mesh.py
 run_paths_case repo_policy_fixture pull_request refs/pull/23/head false \
-  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
+  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek security_js' \
   scripts/ci/tests/test-repo-checks-modules.py
 run_paths_case service_ssh_image_verifier pull_request refs/pull/1922/head false \
-  'policy' scripts/ci/tests/test-service-ssh-image-verifier.sh \
+  'policy security security_js' scripts/ci/tests/test-service-ssh-image-verifier.sh \
   scripts/ci/verify/service-ssh-image-contract.sh scripts/ci/verify/verify-service-ssh-image.sh
 run_paths_case apt_transactions pull_request refs/pull/3/head false \
-  'go_consumer_interop go_support policy release runtime_confidential' \
+  'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/test-apt-get-with-retry.sh
 
 run_paths_case release pull_request refs/pull/3/head false \
-  'go_consumer_interop go_support policy release runtime_confidential' \
+  'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   .gitea/workflows/cli-release.yaml \
   .gitea/workflows/mirror-github.yaml \
   apps/cli/GPG_PUBLIC_KEY.asc \
@@ -319,10 +374,10 @@ run_paths_case release pull_request refs/pull/3/head false \
 # deleted scripts deliberately remain policy-only. Prove each new owner path.
 run_present_paths_case public_installer_test \
   pull_request refs/pull/952/head false \
-  'go_consumer_interop go_support policy release runtime_confidential' \
+  'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/test-cw-install.py
 run_paths_case protected_delivery_credentials pull_request refs/pull/31/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential security' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/setup/curl-transport-retry.sh \
   scripts/ci/setup/fetch-forgejo-deploy-prod-token.sh \
   scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh \
@@ -331,32 +386,32 @@ run_paths_case protected_delivery_credentials pull_request refs/pull/31/head fal
   scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh \
   scripts/ci/tests/test-mint-github-app-token.sh
 run_paths_case sccache_r2_consumer pull_request refs/pull/1749/head false \
-  'policy security' \
+  'policy security security_js' \
   scripts/ci/setup/fetch-openbao-sccache-r2-credentials.sh
 run_paths_case sccache_r2_consumer_fixture pull_request refs/pull/1750/head false \
-  'policy security' \
+  'policy security security_js' \
   scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh
 run_paths_case sccache_r2_protected_consumer pull_request refs/pull/2354/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential security' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/setup/fetch-openbao-sccache-r2-protected-credentials.sh
 run_paths_case sccache_r2_protected_consumer_fixture pull_request refs/pull/2355/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential security' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/test-fetch-openbao-sccache-r2-protected-credentials.sh
 run_paths_case sccache_r2_protected_selector pull_request refs/pull/2356/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential security' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/setup/select-protected-rust-cache.sh
 run_paths_case sccache_r2_protected_selector_fixture pull_request refs/pull/2357/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential security' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/test-select-protected-rust-cache.sh
 run_paths_case sccache_host_selector pull_request refs/pull/1751/head false \
-  'policy rust rust_workspace security' \
+  'policy rust rust_workspace security security_js' \
   scripts/ci/setup/select-untrusted-rust-cache.sh \
   scripts/ci/setup/finish-untrusted-rust-cache.sh
 run_paths_case sccache_host_selector_fixture pull_request refs/pull/1752/head false \
-  'policy security' \
+  'policy security security_js' \
   scripts/ci/tests/test-select-untrusted-rust-cache.sh
 run_paths_case workspace_cache_consumers pull_request refs/pull/2047/head false \
-  'policy security' \
+  'policy security security_js' \
   scripts/ci/setup/select-untrusted-workspace-cache.sh \
   scripts/ci/setup/prepare-workspace-cache-measurement.sh \
   scripts/ci/setup/select-workspace-cache-experiment.py \
@@ -370,7 +425,7 @@ run_paths_case workspace_cache_consumers pull_request refs/pull/2047/head false 
   scripts/ci/verify/workspace-cache-probes.py \
   scripts/ci/tests/canary-workspace-r2-cache.sh
 run_paths_case cw_image_source_consumers pull_request refs/pull/2255/head false \
-  'policy security' \
+  'policy security security_js' \
   scripts/ci/images/prepare-cw-source-context.py \
   scripts/ci/images/build-cw-runtime-source.py \
   scripts/ci/images/finalize-cw-runtime-source.py \
@@ -385,7 +440,7 @@ run_paths_case cw_image_source_consumers pull_request refs/pull/2255/head false 
   scripts/ci/tests/test-cw-image-source.py \
   scripts/ci/tests/cw_image_fixtures.py
 run_present_paths_case workspace_cache_experiment_consumers pull_request refs/pull/2047/head false \
-  'policy policy_shell security' \
+  'policy policy_shell security security_js' \
   scripts/ci/setup/select-workspace-cache-experiment.py \
   scripts/ci/tests/probe-workspace-r2-cache.sh \
   scripts/ci/tests/test-workspace-cache-experiment.py \
@@ -393,38 +448,38 @@ run_present_paths_case workspace_cache_experiment_consumers pull_request refs/pu
   scripts/ci/verify/workspace-cache-probes.py \
   scripts/ci/verify/workspace-cache-report.py
 run_paths_case dev_deploy_contract pull_request refs/pull/30/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential' scripts/ci/tests/test-deploy-dev.sh
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' scripts/ci/tests/test-deploy-dev.sh
 run_paths_case dev_smoke_receipt pull_request refs/pull/302/head false \
-  'policy' \
+  'policy security security_js' \
   .gitea/workflows/dev-deployment-smoke-receipt.yaml \
   scripts/ci/tests/test-dev-deployment-smoke-receipt.sh
 run_paths_case retired_prod_readonly_smoke pull_request refs/pull/3021/head false \
-  'policy' \
+  'policy security security_js' \
   .gitea/workflows/prod-readonly-smoke.yaml \
   scripts/ci/setup/setup-kubeconfig.sh \
   scripts/ci/tests/test-setup-kubeconfig.sh
 run_paths_case retired_promotion_control pull_request refs/pull/300/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/deprecated-promotion-control.sh \
   scripts/ci/test-deprecated-promotion-control.py
 run_paths_case sha_dispatch pull_request refs/pull/301/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/deploy/dispatch-deploy-dev.sh \
   scripts/ci/tests/test-dispatch-deploy-dev.sh \
   scripts/ci/deploy/dispatch-deploy-prod.sh \
   scripts/ci/tests/test-dispatch-deploy-prod.sh
 run_paths_case dev_deploy_oidc pull_request refs/pull/3011/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential security' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/setup/fetch-forgejo-deploy-dev-token.sh \
   scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh
 run_paths_case production_source_ownership pull_request refs/pull/31/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek security_js' \
   deployments/k8s/overlays/production/config-images.yaml
 run_paths_case idp_kek_boundary pull_request refs/pull/32/head false \
-  'deploy policy security security_idp_kek' \
+  'deploy policy security security_idp_kek security_js' \
   deployments/k8s/idp/deployment.yaml
 run_paths_case orchestration_host_key_authz pull_request refs/pull/910/head false \
-  'deploy policy security security_idp_kek' deployments/k8s/orchestration/internal-roots-authz.yaml
+  'deploy policy security security_idp_kek security_js' deployments/k8s/orchestration/internal-roots-authz.yaml
 run_paths_case leaf_rust pull_request refs/pull/4/head false \
   'policy rust rust_pkg_codewire_cli' \
   crates/codewire-cli/src/commands/info.rs
@@ -444,17 +499,17 @@ run_paths_case detached_ui pull_request refs/pull/403/head false \
   'policy rust rust_pkg_codewire_desktop' \
   crates/codewire-ui/src/lib.rs
 run_paths_case native_desktop_ui_guard pull_request refs/pull/4031/head false \
-  'policy rust rust_pkg_codewire_desktop' \
+  'policy rust rust_pkg_codewire_desktop security security_js' \
   scripts/checks/source/check-native-desktop-ui.py \
   scripts/checks/contracts/native-desktop-ui-policy.json
 run_paths_case detached_desktop_package pull_request refs/pull/404/head false \
-  'policy rust rust_pkg_codewire_desktop' \
+  'policy rust rust_pkg_codewire_desktop security security_js' \
   scripts/ci/release/package-codewire-desktop.sh \
   scripts/ci/tests/test-package-codewire-desktop.sh
 run_paths_case retired_desktop_workflow pull_request refs/pull/405/head false \
-  'policy' .gitea/workflows/desktop-package.yaml
+  'policy security security_js' .gitea/workflows/desktop-package.yaml
 run_paths_case artifact_plan_policy pull_request refs/pull/406/head false \
-  'policy' scripts/ci/plan/planner.py scripts/ci/plan/artifact-graph.json
+  'policy security security_js' scripts/ci/plan/planner.py scripts/ci/plan/artifact-graph.json
 python3 "$ROOT/scripts/ci/plan/tests/test_decision_corpus.py"
 run_paths_case rust_root pull_request refs/pull/5/head false \
   'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
@@ -500,10 +555,10 @@ run_paths_case local_vmm_network_fixture pull_request refs/pull/50121/head false
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   testdata/local-vm-network/protocol-v1.json
 run_paths_case local_vmm_initramfs_builder pull_request refs/pull/5013/head false \
-  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/build-local-vmm-initramfs.sh
 run_paths_case local_vmm_kvm_smoke pull_request refs/pull/5014/head false \
-  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/smoke-local-vmm-cloud-hypervisor.sh
 for kernel_input in scripts/ci/verify/build-linux-vmm-kernel.py \
     scripts/ci/verify/linux-vmm-kernel/x86_64.config \
@@ -512,14 +567,14 @@ for kernel_input in scripts/ci/verify/build-linux-vmm-kernel.py \
     scripts/ci/verify/linux-vmm-kernel/provenance.json \
     scripts/ci/tests/test-linux-vmm-kernel.py; do
   run_paths_case "local_vmm_kernel_${kernel_input##*/}" pull_request refs/pull/2255/head false \
-    'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+    'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
     "$kernel_input"
 done
 run_paths_case native_local_environment_smoke pull_request refs/pull/5015/head false \
-  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/smoke-native-local-environment.sh
 run_paths_case shared_stock_ssh_smoke pull_request refs/pull/5016/head false \
-  'policy runtime_dev_smoke transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'policy runtime_dev_smoke security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/stock-ssh-workload.sh
 for ssh_input in scripts/runtime/dev/provider-ssh-smoke.sh scripts/runtime/tests/test-provider-ssh-smoke.sh \
     scripts/runtime/dev/provider-codex-smoke.sh scripts/runtime/dev/provider-codex-workload.sh \
@@ -534,17 +589,23 @@ for ssh_input in scripts/runtime/dev/provider-ssh-smoke.sh scripts/runtime/tests
     scripts/runtime/dev/smoke-dev-initial-private-checkout.sh scripts/runtime/tests/test-dev-initial-private-checkout.sh \
     scripts/runtime/dev/hosted-checkout-fixture.py scripts/runtime/dev/hosted-checkout-target.sh \
     scripts/runtime/tests/test-hosted-checkout-fixture.py scripts/runtime/dev/testdata/acceptance-identity.json \
-    apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts \
-    apps/dashboard/scripts/dev-ux-ownership.ts apps/dashboard/scripts/dev-ux-ownership.test.ts apps/dashboard/scripts/dev-ux-walkthrough.ts \
     scripts/runtime/dev/smoke-local-platform-sources.sh scripts/runtime/tests/test-local-platform-sources-smoke.sh \
     scripts/runtime/dev/run-secrets-credentials-acceptance.sh scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh \
     scripts/runtime/dev/native-mesh-listener.py scripts/runtime/tests/test-native-mesh-listener.py \
     scripts/runtime/tests/fixtures/local-platform/__local-credential-authority; do
   run_paths_case provider_ssh_dev_smoke pull_request refs/pull/5017/head false \
+    'policy runtime_dev_smoke security security_js' "$ssh_input"
+done
+# Dashboard-owned scripts are outside the JavaScript audit's scanned paths.
+for ssh_input in apps/dashboard/scripts/prepare-dev-smoke-browser-auth.ts \
+    apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts \
+    apps/dashboard/scripts/dev-ux-ownership.ts apps/dashboard/scripts/dev-ux-ownership.test.ts \
+    apps/dashboard/scripts/dev-ux-walkthrough.ts; do
+  run_paths_case provider_ssh_dev_smoke_dashboard pull_request refs/pull/5017/head false \
     'policy runtime_dev_smoke' "$ssh_input"
 done
 run_paths_case application_secret_smoke_fixture pull_request refs/pull/5018/head false \
-  'policy runtime_dev_smoke' scripts/runtime/tests/test-smoke-dev-application-secrets.sh
+  'policy runtime_dev_smoke security security_js' scripts/runtime/tests/test-smoke-dev-application-secrets.sh
 run_paths_case curated_derp_member_manifest pull_request refs/pull/502/head false \
   'policy rust_curated_locks transport transport_derp_contract transport_pkg_codewire_derp' \
   crates/codewire-derp/Cargo.toml
@@ -552,14 +613,14 @@ run_paths_case curated_derp_lock pull_request refs/pull/504/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential rust_curated_locks' \
   deployments/docker/derp.Cargo.lock
 run_paths_case curated_lock_guard pull_request refs/pull/505/head false \
-  'policy rust_curated_locks' \
+  'policy rust_curated_locks security security_js' \
   scripts/ci/verify/check-curated-rust-locks.sh \
   scripts/ci/tests/test-curated-rust-locks.sh \
   scripts/ci/verify/curated_rust_locks.py \
   scripts/dev/sync-curated-rust-locks.sh \
   scripts/ci/verify/compile-all-targets.sh
 run_paths_case rust_toolchain_guard pull_request refs/pull/506/head false \
-  'policy' \
+  'policy security security_js' \
   .gitea/workflows/rust-latest-canary.yaml \
   scripts/ci/verify/check-rust-toolchain.sh \
   scripts/ci/tests/test-rust-toolchain.sh
@@ -655,7 +716,7 @@ for profile_input in src/access_profiles.rs src/connect/access_profiles.rs tests
     "crates/codewire-orchestration/$profile_input"
 done
 run_paths_case credential_kind_fixtures pull_request refs/pull/721/head false \
-  'policy' scripts/ci/tests/test-kind-codex-session.py scripts/ci/tests/test-kind-codex-login.py \
+  'policy security security_js' scripts/ci/tests/test-kind-codex-session.py scripts/ci/tests/test-kind-codex-login.py \
   scripts/ci/tests/test-kind-credentials.py
 run_paths_case orchestration_wire_contract pull_request refs/pull/71/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
@@ -695,7 +756,7 @@ run_paths_case retired_connectcore_deletion pull_request refs/pull/83/head false
   'policy service_billing service_connectcore service_integration service_orchestration' \
   tests/contract/connectcore/connectcore_test.go
 run_paths_case integration_service_harness pull_request refs/pull/831/head false \
-  'database policy service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+  'database policy security security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   scripts/ci/verify/run-integration-verification.sh
 run_paths_case temporal_service pull_request refs/pull/84/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration service_temporal' \
@@ -710,7 +771,7 @@ run_paths_case reconciler_ttl_kind_driver pull_request refs/pull/844/head false 
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/src/bin/reconciler-ttl-smoke.rs
 run_paths_case kind_harness pull_request refs/pull/845/head false \
-  'policy' \
+  'policy security security_js' \
   scripts/ci/verify/kind-e2e.sh \
   scripts/ci/verify/kind/common.sh \
   scripts/ci/verify/kind/suites/integrated.sh \
@@ -720,23 +781,24 @@ run_paths_case kind_harness pull_request refs/pull/845/head false \
   scripts/ci/tests/test-kind-e2e-suites.sh \
   scripts/ci/tests/test-kind-forwards.sh
 run_paths_case kind_harness_opt_in pull_request refs/pull/846/head true \
-  'edge_kind kind policy' \
+  'edge_kind kind policy security security_js' \
   scripts/ci/verify/kind/suites/final-fencing.sh \
   scripts/ci/verify/kind/suites/environment-session.sh
 run_paths_case kind_fixture_only pull_request refs/pull/847/head false \
-  'policy' \
+  'policy security security_js' \
   scripts/ci/tests/test-kind-e2e-suites.sh \
-  scripts/ci/tests/test-kind-forwards.sh
+  scripts/ci/tests/test-kind-forwards.sh \
+  scripts/ci/tests/test-kind-trust-roots.sh
 for kind_runtime_fixture in test-kind-cw-runtime.py test-kind-cw-runtime-probe.py; do
   run_paths_case "${kind_runtime_fixture%.py}_pr" pull_request refs/pull/8471/head false \
-    'policy' "scripts/ci/tests/$kind_runtime_fixture"
+    'policy security security_js' "scripts/ci/tests/$kind_runtime_fixture"
   run_paths_case "${kind_runtime_fixture%.py}_opt_in" pull_request refs/pull/8472/head true \
-    'edge_kind policy' "scripts/ci/tests/$kind_runtime_fixture"
+    'edge_kind policy security security_js' "scripts/ci/tests/$kind_runtime_fixture"
   run_paths_case "${kind_runtime_fixture%.py}_main" push refs/heads/main false \
-    'edge_kind policy' "scripts/ci/tests/$kind_runtime_fixture"
+    'edge_kind policy security security_js' "scripts/ci/tests/$kind_runtime_fixture"
 done
 run_paths_case kind_runtime_fixture_mixed_opt_in pull_request refs/pull/8473/head true \
-  'edge_kind kind policy' \
+  'edge_kind kind policy security security_js' \
   scripts/ci/tests/test-kind-cw-runtime.py \
   scripts/ci/tests/test-kind-cw-runtime-probe.py \
   scripts/ci/verify/kind/suites/integrated.sh
@@ -747,7 +809,7 @@ run_paths_case nats_service pull_request refs/pull/85/head false \
   'policy service_coordinator service_integration service_nats transport transport_pkg_codewire_coordinator' \
   crates/codewire-coordinator/src/nats.rs
 run_paths_case apikey_smoke pull_request refs/pull/86/head false \
-  'policy service_apikey_smoke' \
+  'policy security security_js service_apikey_smoke' \
   scripts/runtime/tests/test-apikey-smoke.sh
 run_paths_case retired_go_e2e_source pull_request refs/pull/87/head false \
   'policy' \
@@ -780,15 +842,15 @@ run_paths_case preset_proto pull_request refs/pull/1101/head false \
   'contracts contracts_proto go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_proto sdk_go sdk_python sdk_ts web' \
   proto/codewire/v1/preset.proto
 run_paths_case admin_rust_proto_boundary pull_request refs/pull/1111/head false \
-  'contracts contracts_proto policy rust rust_pkg_codewire_admin_proto rust_pkg_codewire_cli_bin' \
+  'contracts contracts_proto policy rust rust_pkg_codewire_admin_proto rust_pkg_codewire_cli_bin security security_js' \
   crates/codewire-admin-proto/Cargo.toml \
   scripts/ci/proto/build-rust-descriptors.sh \
   scripts/ci/tests/test-admin-proto-boundary.sh
 run_paths_case admin_boundary_guard pull_request refs/pull/11110/head false \
-  'policy rust rust_pkg_codewire_cli_bin' \
+  'policy rust rust_pkg_codewire_cli_bin security security_js' \
   scripts/ci/tests/test-admin-proto-boundary.sh
 run_paths_case rust_descriptor_generator pull_request refs/pull/11113/head false \
-  'contracts contracts_proto policy' \
+  'contracts contracts_proto policy security security_js' \
   scripts/ci/proto/build-rust-descriptors.sh
 run_paths_case admin_proto_crate pull_request refs/pull/11111/head false \
   'contracts contracts_proto policy rust rust_pkg_codewire_admin_proto' \
@@ -803,13 +865,13 @@ run_paths_case google_rpc_python_template pull_request refs/pull/1115/head false
   'contracts contracts_proto go_consumer_interop go_support policy' \
   proto/buf.gen.google-rpc-python.yaml
 run_paths_case edge_ownership pull_request refs/pull/114/head false \
-  'contracts contracts_proto policy' scripts/checks/contracts/connect-edge-ownership.json
+  'contracts contracts_proto policy security security_js' scripts/checks/contracts/connect-edge-ownership.json
 run_paths_case proto_breaking_policy pull_request refs/pull/1141/head false \
-  'contracts contracts_proto policy' \
+  'contracts contracts_proto policy security security_js' \
   scripts/checks/proto_breaking.py \
   scripts/checks/contracts/proto-breaking-preimages.sha256
 run_paths_case proto_retirement_ledger_transition pull_request refs/pull/1142/head false \
-  'contracts contracts_proto policy' \
+  'contracts contracts_proto policy security security_js' \
   scripts/checks/contracts/proto-retirements.sha256
 run_paths_case generated_connect_go pull_request refs/pull/111/head false \
   'contracts contracts_proto go_consumer_interop go_support policy' libs/gen-go/codewire/v1/api_key.pb.go
@@ -825,31 +887,31 @@ run_paths_case generated_google_rpc_ts pull_request refs/pull/1124/head false \
 run_paths_case generated_connect_python pull_request refs/pull/113/head false \
   'contracts contracts_proto policy' libs/gen-python/codewire/v1/api_key_pb2.py
 run_paths_case permanent_raw_policy_guard pull_request refs/pull/117/head false \
-  'policy' scripts/checks/contracts/permanent-raw-surface-policy.json
+  'policy security security_js' scripts/checks/contracts/permanent-raw-surface-policy.json
 run_present_paths_case design_token_policy pull_request refs/pull/2203/head false \
-  'policy' scripts/checks/contracts/design-token-policy.json
+  'policy security security_js' scripts/checks/contracts/design-token-policy.json
 run_present_paths_case design_token_guard_module pull_request refs/pull/22032/head false \
-  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
+  'contracts contracts_proto deploy go_consumer_interop go_support policy release runtime_confidential security security_idp_kek security_js' \
   scripts/checks/repo_policy/design_tokens.py
 run_present_paths_case design_system_stylesheets pull_request refs/pull/22034/head false \
-  'policy web' packages/codewire-design/styles.css packages/codewire-design/routes/settings.css
+  'policy security security_js web' packages/codewire-design/styles.css packages/codewire-design/routes/settings.css
 run_paths_case retired_openapi_deletions pull_request refs/pull/1175/head false \
-  'policy' openapi.json crates/codewire-api-contract/src/lib.rs \
+  'policy security security_js' openapi.json crates/codewire-api-contract/src/lib.rs \
   crates/codewire-api-types/src/lib.rs crates/codewire-core/src/lib.rs \
   libs/api-client-go/client_gen.go libs/api-client-python/pyproject.toml \
   libs/api-client-ts/package.json packages/codewire-types/package.json
 run_paths_case mesh_policy_guard pull_request refs/pull/1171/head false \
-  'policy' scripts/checks/contracts/mesh-final-surface-policy.json
+  'policy security security_js' scripts/checks/contracts/mesh-final-surface-policy.json
 run_paths_case mesh_policy_go_sdk pull_request refs/pull/1172/head false \
-  'go_consumer_interop go_support policy sdk_go' \
+  'go_consumer_interop go_support policy sdk_go security security_js' \
   scripts/checks/contracts/mesh-final-surface-policy.json \
   libs/sdk-go/mesh_networks.go
 run_paths_case mesh_policy_rust_client pull_request refs/pull/1173/head false \
-  'policy rust rust_pkg_codewire_client' \
+  'policy rust rust_pkg_codewire_client security security_js' \
   scripts/checks/contracts/mesh-final-surface-policy.json \
   crates/codewire-client/src/mesh.rs
 run_paths_case mesh_policy_runtime pull_request refs/pull/1174/head false \
-  'policy transport transport_pkg_codewire_mesh' \
+  'policy security security_js transport transport_pkg_codewire_mesh' \
   scripts/checks/contracts/mesh-final-surface-policy.json \
   crates/codewire-mesh/src/server.rs
 run_paths_case mesh_store_database pull_request refs/pull/1175/head false \
@@ -861,7 +923,7 @@ run_paths_case package_contract_tooling pull_request refs/pull/118/head false \
 run_paths_case generic_package pull_request refs/pull/119/head false \
   'policy web' packages/shared/src/index.ts
 run_paths_case dashboard pull_request refs/pull/12/head false \
-  'policy web' apps/dashboard/playwright.config.ts
+  'policy security security_js web' apps/dashboard/playwright.config.ts
 # Browser specs run only under Edge/Kind: a push to main runs Kind for them,
 # and a pull request runs Kind only when opted in.
 run_paths_case dashboard_e2e_pull_request pull_request refs/pull/12/head false \
@@ -871,9 +933,9 @@ run_paths_case dashboard_e2e_pull_request_opt_in pull_request refs/pull/12/head 
 run_paths_case dashboard_e2e_push push refs/heads/main false \
   'edge_kind kind policy web' apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts
 run_paths_case dashboard_browser_gate pull_request refs/pull/1202/head false \
-  'policy web' scripts/ci/tests/test-dashboard-browser-gate.sh
+  'policy security security_js web' scripts/ci/tests/test-dashboard-browser-gate.sh
 run_paths_case dashboard_design_preview pull_request refs/pull/120/head false \
-  'policy web' scripts/dev/design-system-server.py
+  'policy security security_js web' scripts/dev/design-system-server.py
 run_paths_case design_fixture_spec_push push refs/heads/main false \
   'policy web' apps/dashboard/e2e/ssr-dashboard.design-system.ssr.ts
 run_paths_case design_fixture_spec_kind_opt_in pull_request refs/pull/2206/head true \
@@ -881,26 +943,26 @@ run_paths_case design_fixture_spec_kind_opt_in pull_request refs/pull/2206/head 
 run_paths_case design_fixture_list_push push refs/heads/main false \
   'edge_kind kind policy web' apps/dashboard/e2e/helpers/design-fixtures.ts
 run_paths_case design_fixture_runner pull_request refs/pull/2203/head false \
-  'policy web' scripts/ci/verify/run-design-fixtures.sh
+  'policy security security_js web' scripts/ci/verify/run-design-fixtures.sh
 run_paths_case design_fixture_runner_test pull_request refs/pull/2204/head false \
-  'policy web' scripts/ci/tests/test-run-design-fixtures.sh
+  'policy security security_js web' scripts/ci/tests/test-run-design-fixtures.sh
 run_paths_case design_fixture_browser_runtime pull_request refs/pull/2205/head false \
-  'policy web' scripts/ci/verify/playwright-browser-runtime.sh
+  'policy security security_js web' scripts/ci/verify/playwright-browser-runtime.sh
 run_paths_case marketing_brand_assets pull_request refs/pull/1201/head false \
   'policy web' favicon.svg logo/wordmark.svg
 run_paths_case dashboard_runtime_inventory pull_request refs/pull/121/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential security web' \
   apps/dashboard/runtime-inventory.json
 run_paths_case dashboard_rust_route pull_request refs/pull/122/head false \
-  'deploy policy rust rust_pkg_codewire_dashboard_web web' \
+  'deploy policy rust rust_pkg_codewire_dashboard_web security security_js web' \
   crates/codewire-dashboard-web/src/docs.rs
 run_paths_case dashboard_rust_surface pull_request refs/pull/1221/head false \
-  'deploy policy rust rust_pkg_codewire_dashboard_web web' \
+  'deploy policy rust rust_pkg_codewire_dashboard_web security security_js web' \
   crates/codewire-dashboard-web/src/routes/environments.rs \
   crates/codewire-dashboard-web/templates/dashboard.html \
   crates/codewire-dashboard-web/assets/htmx-2.0.10.min.js
 run_paths_case dashboard_image_verifier pull_request refs/pull/123/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential security web' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js web' \
   scripts/ci/verify/dashboard-image.sh
 run_paths_case dashboard_sandbox_image_inputs pull_request refs/pull/1231/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
@@ -908,7 +970,7 @@ run_paths_case dashboard_sandbox_image_inputs pull_request refs/pull/1231/head f
   crates/codewire-orchestration/src/sandbox/template.rs \
   crates/codewire-orchestration/src/sandbox/template/network.rs
 run_paths_case local_image_verifiers pull_request refs/pull/1231/head false \
-  'policy' \
+  'policy security security_js' \
   scripts/ci/images/build-local-image.sh \
   scripts/ci/tests/test-build-local-image.sh \
   scripts/ci/tests/test-workspace-agent-contract.sh \
@@ -937,11 +999,11 @@ run_paths_case sdk_ts pull_request refs/pull/14/head false \
 run_paths_case sdk_python pull_request refs/pull/15/head false \
   'policy sdk_python' libs/sdk-python/codewire/client.py
 run_paths_case sdk_python_runner pull_request refs/pull/151/head false \
-  'policy sdk_python' \
+  'policy sdk_python security security_js' \
   scripts/runtime/dev/run-sdk-python-e2e.sh \
   scripts/runtime/tests/test-run-sdk-python-e2e.sh
 run_paths_case sdk_ts_runner pull_request refs/pull/1511/head false \
-  'policy sdk_ts' \
+  'policy sdk_ts security security_js' \
   scripts/runtime/dev/run-sdk-ts-e2e.sh \
   scripts/runtime/tests/test-run-sdk-ts-e2e.sh
 run_paths_case retired_sdk_examples pull_request refs/pull/1512/head false \
@@ -951,7 +1013,7 @@ run_paths_case retired_sdk_examples pull_request refs/pull/1512/head false \
   libs/sdk-examples/run-claude/python/run_claude.py \
   libs/sdk-examples/run-claude/typescript/run_claude.ts
 run_paths_case retired_cli_assets pull_request refs/pull/1513/head false \
-  'policy' \
+  'policy security security_js' \
   apps/cli/.env.example \
   apps/cli/Caddyfile \
   apps/cli/Dockerfile \
@@ -970,12 +1032,12 @@ run_paths_case cli_deploy_assets pull_request refs/pull/1515/head false \
   apps/cli/charts/codewire-mesh/values.yaml \
   apps/cli/k8s/demo-site/deployment.yaml
 run_paths_case runtime_dev_tooling pull_request refs/pull/1516/head false \
-  'policy runtime_dev_smoke' \
+  'policy runtime_dev_smoke security security_js' \
   scripts/runtime/dev/measure-dev-commodity-overhead.sh \
   scripts/runtime/dev/smoke-dev-commodity.sh \
   scripts/runtime/kata/kata-genpolicy.sh
 run_paths_case runtime_dev_proofs pull_request refs/pull/2411/head false \
-  'policy runtime_dev_smoke' \
+  'policy runtime_dev_smoke security security_js' \
   scripts/runtime/dev/prove-dev-workspace-binding.sh \
   scripts/runtime/dev/prove-dev-warm-pools.sh \
   scripts/runtime/tests/test-workspace-binding-proof.sh \
@@ -983,18 +1045,18 @@ run_paths_case runtime_dev_proofs pull_request refs/pull/2411/head false \
   scripts/runtime/agent-sandbox/drop-crd-conversion.sh \
   scripts/runtime/tests/test-drop-crd-conversion.sh
 run_paths_case runtime_dev_auth pull_request refs/pull/1517/head false \
-  'policy runtime_dev_smoke security security_dev_smoke_auth' \
+  'policy runtime_dev_smoke security security_dev_smoke_auth security_js' \
   scripts/runtime/dev/provision-dev-smoke-user.sh \
   scripts/runtime/dev/with-dev-smoke-auth.sh \
   scripts/runtime/tests/test-with-dev-smoke-auth.sh
 run_paths_case runtime_confidential pull_request refs/pull/1518/head false \
-  'policy runtime_confidential' \
+  'policy runtime_confidential security security_js' \
   scripts/runtime/confidential/resolve-coco-support-lock.sh \
   scripts/runtime/tests/test-resolve-coco-support-lock.sh
 run_paths_case makefile_only pull_request refs/pull/152/head false \
-  'policy' Makefile
+  'policy security security_js' Makefile
 run_paths_case buildx_two_file_replay pull_request refs/pull/1520/head false \
-  'deploy go_consumer_interop go_support policy release runtime_confidential security' \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
   Makefile scripts/checks/security/audit-runtime-images.sh
 [ ! -e "$ROOT/.gitea/workflows/desktop-package.yaml" ] || {
   echo 'standalone desktop package workflow still exists' >&2
@@ -1017,16 +1079,16 @@ run_paths_case cli_makefile pull_request refs/pull/1521/head false \
   'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
   apps/cli/Makefile
 run_paths_case cli_host_journey pull_request refs/pull/2255/head false \
-  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js' \
   scripts/dev/test-cli-host.py
 run_paths_case source_approval_policy pull_request refs/pull/2255/head false \
   'policy' .supplychain/source-policy.json
 for host_input in scripts/dev/test-cli-host-managed.py scripts/ci/tests/test-cli-host-managed.py scripts/dev/fixtures/host-member-managed-assets.py; do
   run_paths_case "host_managed_${host_input//\//_}" pull_request refs/pull/2255/head false \
-    'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' "$host_input"
+    'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js' "$host_input"
 done
 run_paths_case host_managed_and_source_policy pull_request refs/pull/2255/head false \
-  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js' \
   .supplychain/source-policy.json scripts/dev/test-cli-host-managed.py \
   scripts/ci/tests/test-cli-host-managed.py
 # Nearby unrecognized files retain conservative fallback; do not broaden
@@ -1048,62 +1110,79 @@ for neighbor in .supplychain/source-policy-unlisted.json \
   }
 done
 run_paths_case cli_host_update_journey pull_request refs/pull/2255/head false \
-  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js' \
   scripts/dev/test-cli-update.py
 run_paths_case cli_host_update_port_regression pull_request refs/pull/2255/head false \
-  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js' \
   scripts/ci/tests/test-cli-update-mesh-endpoints.py
+run_paths_case cli_release_dir_producer_fixture pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js' \
+  scripts/ci/tests/test-build-cw-release-dir.py
 run_paths_case cli_agent_peer_fixture pull_request refs/pull/2255/head false \
-  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js' \
   scripts/dev/fixtures/agent-peer.py
 run_paths_case cli_native_managed_startup pull_request refs/pull/2255/head false \
-  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js' \
   scripts/dev/test-native-managed-startup.py
 run_paths_case cli_native_managed_journey pull_request refs/pull/2255/head false \
-  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/test-cli-native-managed.py
 run_paths_case cli_native_update_journey pull_request refs/pull/2255/head false \
-  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/test-cli-native-update.py
 run_paths_case cli_native_update_entrypoint_regression pull_request refs/pull/2255/head false \
-  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/ci/tests/test-native-managed-update-entrypoint.py
 run_paths_case cli_native_managed_artifact pull_request refs/pull/2255/head false \
-  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin transport transport_pkg_codewire_local_vmm' \
+  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/build-native-managed-agent.py
 # Release delivery sources and their proofs were unclassified (all product
 # verification) or missed the release suite; each now selects it.
 run_paths_case cw_release_delivery_core pull_request refs/pull/2255/head false \
-  'go_consumer_interop go_support policy release runtime_confidential' \
+  'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/release/cw_release.py scripts/ci/release/cw_release_r2.py
 run_paths_case cw_release_delivery_shell pull_request refs/pull/2255/head false \
-  'go_consumer_interop go_support policy release runtime_confidential' \
+  'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/release/sign-cw-release.sh \
   scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh \
   scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh \
   scripts/ci/setup/fetch-openbao-release-signing-key.sh \
   scripts/ci/tests/test-fetch-openbao-release-signing-key.sh
 run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false \
-  'go_consumer_interop go_support policy release runtime_confidential' \
+  'go_consumer_interop go_support policy release runtime_confidential security security_js' \
   scripts/ci/tests/cw_release_fixtures.py scripts/ci/tests/test-cli-release-workflow.py \
   scripts/ci/tests/test-cw-release-delivery.py scripts/ci/tests/test-cw-release-r2.py
+# The published workspace pin selects every consumer that compiles it; its
+# tool and post-publish proposal select the release proofs that run them.
+run_paths_case workspace_image_pin pull_request refs/pull/2255/head false \
+  'policy rust rust_pkg_codewire_cli rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_server_core rust_pkg_codewire_workspace_image' \
+  crates/codewire-workspace-image/src/pin.rs
+run_paths_case workspace_image_pin_tool pull_request refs/pull/2255/head false \
+  'deploy go_consumer_interop go_support policy release runtime_confidential security security_js' \
+  scripts/ci/images/workspace-image-pin.py
+run_paths_case workspace_image_pin_proposal pull_request refs/pull/2255/head false \
+  'go_consumer_interop go_support policy release runtime_confidential security security_js' \
+  scripts/ci/images/propose-workspace-image-pin.sh \
+  scripts/ci/tests/test-propose-workspace-image-pin.sh \
+  scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh \
+  scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh
 run_paths_case cw_runtime_image_tool pull_request refs/pull/2255/head false \
-  'go_consumer_interop go_support policy release runtime_confidential transport transport_pkg_codewire_local_vmm' \
+  'go_consumer_interop go_support policy release runtime_confidential security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/cw-runtime-image.py scripts/dev/test-cw-runtime-image.py
 run_paths_case cw_host_build_tool pull_request refs/pull/2255/head false \
-  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin' \
+  'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin security security_js' \
   scripts/dev/build-cw.py
 run_paths_case cw_build_record_producer pull_request refs/pull/2255/head false \
   'go_consumer_interop go_support policy release runtime_confidential rust rust_pkg_codewire_cli' \
   crates/codewire-cli/build.rs crates/codewire-cli/src/build_record.rs
 run_paths_case edge_harness pull_request refs/pull/153/head false \
-  'policy' scripts/ci/verify/kind-e2e.sh
+  'policy security security_js' scripts/ci/verify/kind-e2e.sh
 run_paths_case edge_host_runtime pull_request refs/pull/1529/head true \
-  'edge_kind kind policy' scripts/ci/verify/kind-host-runtime.sh
+  'edge_kind kind policy security security_js' scripts/ci/verify/kind-host-runtime.sh
 run_paths_case edge_browser_runtime pull_request refs/pull/1530/head true \
-  'edge_kind kind policy web' scripts/ci/verify/playwright-browser-runtime.sh
+  'edge_kind kind policy security security_js web' scripts/ci/verify/playwright-browser-runtime.sh
 run_paths_case pinned_browser_installer pull_request refs/pull/1531/head true \
-  'edge_kind kind policy web' scripts/ci/install-pinned-playwright-chromium.sh
+  'edge_kind kind policy security security_js web' scripts/ci/install-pinned-playwright-chromium.sh
 run_paths_case mixed_sdk_and_runtime pull_request refs/pull/154/head false \
   'policy rust rust_pkg_codewire_server_core sdk_python service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   libs/sdk-python/codewire/client.py crates/codewire-server-core/src/lib.rs
@@ -1112,11 +1191,11 @@ run_paths_case edge_without_kind pull_request refs/pull/16/head false \
 run_paths_case edge_with_kind pull_request refs/pull/17/head true \
   'edge_kind kind policy' Caddyfile
 run_paths_case temporal_installer_without_kind pull_request refs/pull/171/head false \
-  'policy' scripts/dev/kind/install-temporal.sh scripts/ci/tests/test-install-temporal.sh
+  'policy security security_js' scripts/dev/kind/install-temporal.sh scripts/ci/tests/test-install-temporal.sh
 run_paths_case temporal_installer_with_kind pull_request refs/pull/172/head true \
-  'edge_kind kind policy' scripts/dev/kind/install-temporal.sh scripts/ci/tests/test-install-temporal.sh
+  'edge_kind kind policy security security_js' scripts/dev/kind/install-temporal.sh scripts/ci/tests/test-install-temporal.sh
 run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
-  'go_consumer_interop go_support policy release runtime_confidential runtime_dev_smoke rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin rust_pkg_codewire_desktop rust_pkg_codewire_orchestration sdk_go sdk_python sdk_ts service_integration service_orchestration service_temporal web' \
+  'go_consumer_interop go_support policy release runtime_confidential runtime_dev_smoke rust rust_pkg_codewire_cli rust_pkg_codewire_cli_bin rust_pkg_codewire_desktop rust_pkg_codewire_orchestration sdk_go sdk_python sdk_ts security security_js service_integration service_orchestration service_temporal web' \
   CONTRIBUTING.md \
   README.md \
   apps/cli/.env.example \
@@ -1219,56 +1298,56 @@ all_product='contracts contracts_proto database deploy edge_kind go_consumer_int
 # A pull request without the Kind opt-in never selects Kind.
 all_product_pr='contracts contracts_proto database deploy go_consumer_interop go_support go_tailnet policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
-  "$policy" scripts/dev/dashboard-watch.py
+  "$policy security security_js" scripts/dev/dashboard-watch.py
 run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head false \
-  "$policy" scripts/dev/macos-cli.py scripts/dev/test-macos-cli.py
+  "$policy security security_js" scripts/dev/macos-cli.py scripts/dev/test-macos-cli.py
 run_present_paths_case macos_formatter_developer_tool pull_request refs/pull/2064/head false \
-  "$policy" scripts/dev/macos-ext4-tool.py scripts/dev/test-macos-ext4-tool.py
+  "$policy security security_js" scripts/dev/macos-ext4-tool.py scripts/dev/test-macos-ext4-tool.py
 run_present_paths_case macos_git_developer_tool pull_request refs/pull/2064/head false \
-  "$policy" scripts/dev/macos-git-tool.py scripts/dev/test-macos-git-tool.py
+  "$policy security security_js" scripts/dev/macos-git-tool.py scripts/dev/test-macos-git-tool.py
 run_present_paths_case macos_local_runtime_installer pull_request refs/pull/2064/head false \
-  "$policy" Makefile scripts/dev/macos-local-runtime.py scripts/dev/test-macos-local-runtime.py
+  "$policy security security_js" Makefile scripts/dev/macos-local-runtime.py scripts/dev/test-macos-local-runtime.py
 run_present_paths_case macos_formatter_with_runtime_source pull_request refs/pull/2064/head false \
-  'policy transport transport_pkg_codewire_local_vmm' \
+  'policy security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-ext4-tool.py crates/codewire-local-vmm/src/lib.rs
 run_present_paths_case macos_formatter_unknown pull_request refs/pull/2064/head false \
   "$all_product_pr" scripts/dev/macos-ext4-tool-future.py
 # The --cli mode compile-checks the macOS cw in the release-assets job, so the
 # script also selects the release group (as the SDK-less check it replaced).
 run_present_paths_case darwin_cross_check pull_request refs/pull/20655/head false \
-  'go_consumer_interop go_support policy policy_shell release runtime_confidential transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'go_consumer_interop go_support policy policy_shell release runtime_confidential security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/check-darwin-cross.sh
 run_present_paths_case darwin_cross_check_tests pull_request refs/pull/20656/head false \
-  "$policy policy_shell" scripts/ci/tests/test-darwin-cross-check.sh
+  "$policy policy_shell security security_js" scripts/ci/tests/test-darwin-cross-check.sh
 # The selection job runs the runner image contract on every run.
 run_present_paths_case ci_runner_image_contract_tests pull_request refs/pull/20657/head false \
-  "$policy policy_shell" scripts/ci/tests/test-ci-runner-image-contract.sh
+  "$policy policy_shell security security_js" scripts/ci/tests/test-ci-runner-image-contract.sh
 run_present_paths_case darwin_cross_test_unknown pull_request refs/pull/20656/head false \
   "$all_product_pr" scripts/ci/tests/test-darwin-cross-check-future.sh
 run_present_paths_case mesh_ingress_protocol_guard pull_request refs/pull/1902/head false \
-  'deploy policy policy_shell' scripts/ci/tests/test-deploy-mesh-ingress-protocol.sh
+  'deploy policy policy_shell security security_js' scripts/ci/tests/test-deploy-mesh-ingress-protocol.sh
 run_present_paths_case mesh_ingress_protocol_unknown pull_request refs/pull/1902/head false \
   "$all_product_pr" scripts/ci/tests/test-mesh-ingress-protocol-future.sh
 run_present_paths_case macos_console_pair pull_request refs/pull/20641/head false \
-  'policy transport transport_pkg_codewire_local_vmm' \
+  'policy security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-vz-console-pair.py scripts/dev/test-macos-vz-console-pair.py
 run_present_paths_case macos_console_pair_unknown pull_request refs/pull/20642/head false \
   "$all_product_pr" scripts/dev/macos-vz-console-pair-future.py
 run_present_paths_case macos_product_network pull_request refs/pull/20644/head false \
-  'policy transport transport_pkg_codewire_local_vmm' \
+  'policy security security_js transport transport_pkg_codewire_local_vmm' \
   scripts/dev/macos-vz-product-network.py scripts/dev/test-macos-vz-product-network.py
 run_present_paths_case macos_product_network_unknown pull_request refs/pull/20645/head false \
   "$all_product_pr" scripts/dev/macos-vz-product-network-future.py
 run_present_paths_case macos_workload_network pull_request refs/pull/20646/head true \
-  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/dev/macos-vz-workload-network.py scripts/dev/test-macos-vz-workload-network.py
 run_present_paths_case macos_workload_network_unknown pull_request refs/pull/20647/head false \
   "$all_product_pr" scripts/dev/macos-vz-workload-network-future.py
 run_present_paths_case macos_workspace_inputs_parent pull_request refs/pull/20652/head true \
-  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/dev/macos-vz-workspace-inputs.py
 run_present_paths_case macos_workspace_inputs_tests pull_request refs/pull/20653/head true \
-  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/dev/test-macos-vz-workspace-inputs.py
 run_present_paths_case macos_workspace_inputs_unknown pull_request refs/pull/20654/head false \
   "$all_product_pr" scripts/dev/macos-vz-workspace-inputs-future.py
@@ -1297,12 +1376,12 @@ run_paths_case macos_console_pair_rust pull_request refs/pull/20643/head false \
   'policy transport transport_pkg_codewire_local_vmm' \
   crates/codewire-local-vmm/src/macos_console_pair_fixture/runtime.rs
 run_present_paths_case macos_sandbox_canary_harness pull_request refs/pull/2066/head false \
-  "$policy" scripts/dev/macos-app-sandbox-canary.py scripts/dev/test-macos-app-sandbox-canary.py
+  "$policy security security_js" scripts/dev/macos-app-sandbox-canary.py scripts/dev/test-macos-app-sandbox-canary.py
 run_present_paths_case macos_vz_inode_probe pull_request refs/pull/2065/head false \
-  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/dev/macos-vz-inode-probe.py scripts/dev/test-macos-vz-inode-probe.py
 run_present_paths_case macos_vz_production_boot pull_request refs/pull/2064/head false \
-  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/dev/macos-vz-production-boot.py scripts/dev/test-macos-vz-production-boot.py
 run_present_paths_case dashboard_watch_unlisted pull_request refs/pull/2003/head false \
   "$all_product_pr" scripts/dev/unlisted-dashboard-helper.py

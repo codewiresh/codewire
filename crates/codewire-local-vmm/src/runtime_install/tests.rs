@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use super::*;
@@ -61,18 +62,18 @@ fn release_with(
     let document = LocalRuntimeDocument {
         schema: LOCAL_RUNTIME_SCHEMA.into(),
         source_revision: "a".repeat(40),
-        release_tag: None,
         targets: BTreeMap::from([(
             host_target(),
             RuntimeTarget {
                 lock: serde_json::to_value(&lock).unwrap(),
                 cw_runtime,
+                components: Vec::new(),
             },
         )]),
     };
     fs::write(
         source.join(LOCAL_RUNTIME_DOCUMENT),
-        serde_json::to_vec(&document).unwrap(),
+        codewire_cw_release::identity::canonical_json(&document).unwrap(),
     )
     .unwrap();
     document
@@ -118,7 +119,12 @@ fn leftovers(f: &Fixture) -> Vec<String> {
     let mut names: Vec<_> = fs::read_dir(f.paths.artifact_lock.parent().unwrap())
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with(".runtime-") && name != ".runtime-install.lock")
+        .filter(|name| {
+            name.starts_with(".runtime-")
+                && name != ".runtime-install.lock"
+                && name != PREVIOUS_ROOT
+                && name != PREVIOUS_LOCK
+        })
         .collect();
     names.sort();
     names
@@ -128,7 +134,7 @@ fn leftovers(f: &Fixture) -> Vec<String> {
 async fn installs_exact_files_and_writes_the_lock_last() {
     let f = fixture();
     let document = release(&f.source, [b"vmm-1", b"kernel-1", b"initramfs-1"]);
-    let generation = document.host_lock().unwrap().generation().unwrap();
+    let generation = host_lock(&document).unwrap().generation().unwrap();
     assert_eq!(
         run(&f, false).await.unwrap(),
         InstallOutcome::Installed {
@@ -150,7 +156,7 @@ async fn installs_exact_files_and_writes_the_lock_last() {
         b"kernel-1"
     );
     let lock = ArtifactLock::read(&f.paths.artifact_lock).unwrap();
-    assert_eq!(lock, document.host_lock().unwrap());
+    assert_eq!(lock, host_lock(&document).unwrap());
     let parent = fs::metadata(f.paths.artifact_lock.parent().unwrap()).unwrap();
     assert_eq!(parent.mode() & 0o777, 0o700);
     assert!(leftovers(&f).is_empty(), "{:?}", leftovers(&f));
@@ -201,7 +207,7 @@ async fn a_different_runtime_is_replaced_only_on_request() {
     );
     assert_eq!(
         ArtifactLock::read(&f.paths.artifact_lock).unwrap(),
-        newer.host_lock().unwrap()
+        host_lock(&newer).unwrap()
     );
     assert!(leftovers(&f).is_empty());
 }
@@ -210,7 +216,7 @@ async fn a_different_runtime_is_replaced_only_on_request() {
 async fn a_mismatched_or_missing_blob_installs_nothing() {
     let f = fixture();
     let document = release(&f.source, [b"vmm-1", b"kernel-1", b"initramfs-1"]);
-    let initramfs = document.host_lock().unwrap().initramfs.sha256;
+    let initramfs = host_lock(&document).unwrap().initramfs.sha256;
     let blob = f.source.join("blobs").join("sha256").join(&initramfs);
     fs::write(&blob, b"initramfs-X").unwrap();
     assert!(matches!(
@@ -253,11 +259,21 @@ async fn a_failed_admission_keeps_the_previous_runtime() {
 fn documents_name_their_schema_revision_and_host_target() {
     let f = fixture();
     let document = release(&f.source, [b"v", b"k", b"i"]);
+    // A `--from` directory's document is decoded exactly as a release's.
+    let source = DirectoryBlobSource::new(&f.source);
+    let path = f.source.join(LOCAL_RUNTIME_DOCUMENT);
     let parse = |value: serde_json::Value| {
-        LocalRuntimeDocument::parse(&serde_json::to_vec(&value).unwrap())
+        fs::write(
+            &path,
+            codewire_cw_release::identity::canonical_json(&value).unwrap(),
+        )
+        .unwrap();
+        source.document()
     };
     let mut value = serde_json::to_value(&document).unwrap();
     assert!(parse(value.clone()).is_ok());
+    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    assert!(matches!(source.document(), Err(InstallError::Document(_))));
     value["schema"] = "codewire.cw.local-runtime/v2".into();
     assert!(matches!(
         parse(value.clone()),
@@ -277,7 +293,7 @@ fn documents_name_their_schema_revision_and_host_target() {
     let target = other.targets.remove(&host_target()).unwrap();
     other.targets = BTreeMap::from([("plan9-mips".into(), target)]);
     assert!(matches!(
-        other.host_lock(),
+        host_lock(&other),
         Err(InstallError::UnknownTarget(_))
     ));
 }
@@ -365,4 +381,191 @@ async fn the_cw_runtime_installs_beside_the_lock_and_follows_the_release() {
         .filter(|name| name.ends_with(".partial"))
         .collect();
     assert!(partials.is_empty(), "{partials:?}");
+}
+
+#[tokio::test]
+async fn the_installed_runtime_is_compared_with_a_document() {
+    let f = fixture();
+    let document = release(&f.source, [b"v", b"k", b"i"]);
+    assert_eq!(
+        installed_runtime(&f.paths, &document).unwrap(),
+        InstalledRuntime::Missing
+    );
+    let source = DirectoryBlobSource::new(&f.source);
+    install_with(&f.paths, &document, &source, false, admit_by_digest)
+        .await
+        .unwrap();
+    assert_eq!(
+        installed_runtime(&f.paths, &document).unwrap(),
+        InstalledRuntime::Same
+    );
+    let other = tempfile::tempdir().unwrap();
+    let newer = release(other.path(), [b"v2", b"k", b"i"]);
+    assert_eq!(
+        installed_runtime(&f.paths, &newer).unwrap(),
+        InstalledRuntime::Different
+    );
+}
+
+#[tokio::test]
+async fn a_replaced_runtime_is_kept_and_a_rollback_needs_no_download() {
+    let f = fixture();
+    let first = release_with(
+        &f.source,
+        [b"vmm-1", b"kernel-1", b"initramfs-1"],
+        Some((b"cw-lock-1".as_slice(), b"cw-pack-1".as_slice())),
+    );
+    let source = DirectoryBlobSource::new(&f.source);
+    install_with(&f.paths, &first, &source, false, admit_by_digest)
+        .await
+        .unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let second = release_with(
+        other.path(),
+        [b"vmm-2", b"kernel-2", b"initramfs-1"],
+        Some((b"cw-lock-2".as_slice(), b"cw-pack-2".as_slice())),
+    );
+    let second_source = DirectoryBlobSource::new(other.path());
+    install_with(&f.paths, &second, &second_source, true, admit_by_digest)
+        .await
+        .unwrap();
+    let parent = f.paths.artifact_lock.parent().unwrap();
+    assert_eq!(
+        ArtifactLock::read(&parent.join(PREVIOUS_LOCK)).unwrap(),
+        host_lock(&first).unwrap()
+    );
+    assert_eq!(
+        fs::read(parent.join(PREVIOUS_ROOT).join("vmm")).unwrap(),
+        b"vmm-1"
+    );
+    let previous_pack = parent.join(PREVIOUS_CW_RUNTIME).join(CW_RUNTIME_PACK);
+    assert_eq!(fs::read(&previous_pack).unwrap(), b"cw-pack-1");
+
+    // Rolling back reinstalls the previous runtime from local files alone,
+    // and the replaced one becomes the previous runtime in turn.
+    let local = LocalBlobs::open(&f.paths).unwrap();
+    for blob in host_runtime(&first).unwrap().install_blobs() {
+        assert!(local.has(&blob.sha256), "{}", blob.sha256);
+    }
+    install_with(&f.paths, &first, &local, true, admit_by_digest)
+        .await
+        .unwrap();
+    assert_eq!(
+        installed_runtime(&f.paths, &first).unwrap(),
+        InstalledRuntime::Same
+    );
+    assert_eq!(
+        ArtifactLock::read(&parent.join(PREVIOUS_LOCK)).unwrap(),
+        host_lock(&second).unwrap()
+    );
+    assert_eq!(fs::read(&previous_pack).unwrap(), b"cw-pack-2");
+
+    // Repairing a damaged current runtime keeps the real previous one.
+    let installed = f.paths.artifact_root.join("kernel");
+    fs::set_permissions(&installed, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&installed, b"damaged").unwrap();
+    install_with(&f.paths, &first, &source, false, admit_by_digest)
+        .await
+        .unwrap();
+    assert_eq!(
+        ArtifactLock::read(&parent.join(PREVIOUS_LOCK)).unwrap(),
+        host_lock(&second).unwrap()
+    );
+    assert!(leftovers(&f).is_empty());
+}
+
+#[tokio::test]
+async fn a_local_file_that_is_gone_is_reported_missing_and_installs_nothing() {
+    let f = fixture();
+    let first = release(&f.source, [b"vmm-1", b"kernel-1", b"initramfs-1"]);
+    let source = DirectoryBlobSource::new(&f.source);
+    install_with(&f.paths, &first, &source, false, admit_by_digest)
+        .await
+        .unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let second = release(other.path(), [b"vmm-2", b"kernel-2", b"initramfs-2"]);
+    install_with(
+        &f.paths,
+        &second,
+        &DirectoryBlobSource::new(other.path()),
+        true,
+        admit_by_digest,
+    )
+    .await
+    .unwrap();
+
+    // The previous lock still names a file that is gone: the local copy is
+    // missing, so the caller downloads it instead.
+    let local = LocalBlobs::open(&f.paths).unwrap();
+    let kernel = host_lock(&first).unwrap().kernel.sha256;
+    assert!(local.has(&kernel));
+    let parent = f.paths.artifact_lock.parent().unwrap();
+    fs::remove_file(parent.join(PREVIOUS_ROOT).join("kernel")).unwrap();
+    let empty = DirectoryBlobSource::new(other.path().join("absent"));
+    let with_local = WithLocal {
+        local: &local,
+        fallback: &empty,
+    };
+    assert!(matches!(
+        install_with(&f.paths, &first, &with_local, true, admit_by_digest).await,
+        Err(InstallError::MissingBlob { sha256 }) if sha256 == kernel
+    ));
+    assert_eq!(
+        installed_runtime(&f.paths, &second).unwrap(),
+        InstalledRuntime::Same
+    );
+    assert!(leftovers(&f).is_empty());
+}
+
+#[tokio::test]
+async fn the_start_gate_requires_the_wanted_cw_runtime_too() {
+    let f = fixture();
+    let document = release_with(
+        &f.source,
+        [b"v", b"k", b"i"],
+        Some((b"cw lock".as_slice(), b"cw pack".as_slice())),
+    );
+    let source = DirectoryBlobSource::new(&f.source);
+    install_with(&f.paths, &document, &source, false, admit_by_digest)
+        .await
+        .unwrap();
+    assert_eq!(
+        installed_runtime(&f.paths, &document).unwrap(),
+        InstalledRuntime::Same
+    );
+    let parent = f.paths.artifact_lock.parent().unwrap();
+    fs::remove_file(parent.join(CW_RUNTIME_PACK)).unwrap();
+    assert_eq!(
+        installed_runtime(&f.paths, &document).unwrap(),
+        InstalledRuntime::Incomplete
+    );
+    // Another release's cw runtime is a different runtime, not a damaged one.
+    let other = tempfile::tempdir().unwrap();
+    let newer = release_with(
+        other.path(),
+        [b"v", b"k", b"i"],
+        Some((b"other lock".as_slice(), b"cw pack".as_slice())),
+    );
+    assert_eq!(
+        installed_runtime(&f.paths, &newer).unwrap(),
+        InstalledRuntime::Different
+    );
+    // A pack of the wrong size, or a missing cw runtime lock, is a damaged
+    // install too.
+    let pack = parent.join(CW_RUNTIME_PACK);
+    fs::write(&pack, b"cw pac").unwrap();
+    assert_eq!(
+        installed_runtime(&f.paths, &document).unwrap(),
+        InstalledRuntime::Incomplete
+    );
+    fs::write(&pack, b"cw pack").unwrap();
+    assert_eq!(
+        installed_runtime(&f.paths, &document).unwrap(),
+        InstalledRuntime::Same
+    );
+    fs::remove_file(parent.join(CW_RUNTIME_LOCK)).unwrap();
+    assert_eq!(
+        installed_runtime(&f.paths, &document).unwrap(),
+        InstalledRuntime::Incomplete
+    );
 }

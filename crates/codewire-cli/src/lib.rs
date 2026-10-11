@@ -7,6 +7,7 @@ mod hosted_access;
 #[cfg(unix)]
 mod hosted_binding;
 mod hosted_exec;
+mod local_runtime_pin;
 mod mesh;
 mod organization_client;
 #[cfg(target_os = "linux")]

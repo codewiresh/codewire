@@ -610,9 +610,9 @@ mod tests {
         );
 
         let project_spec = codewire_project::parse_project_yaml(
-            r#"
+            &r#"
 version: 1
-image: ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff
+image: CANONICAL_WORKSPACE_IMAGE
 repositories:
   - source: https://example.test/org/app.git
     destination: /workspace/app
@@ -625,7 +625,11 @@ ports: [{port: 8080, label: api, access: private}]
 cpu: "2"
 memory: "8Gi"
 disk: "40Gi"
-"#,
+"#
+            .replace(
+                "CANONICAL_WORKSPACE_IMAGE",
+                codewire_workspace_image::PUBLIC_IMAGE,
+            ),
         )
         .unwrap()
         .spec;

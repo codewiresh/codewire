@@ -167,6 +167,7 @@ impl DaemonHarness {
                     managed_credential_clients: Default::default(),
                     host: None,
                     launch_projection: None,
+                    session_working_dir: None,
                 };
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
                 let server = tokio::spawn(async move {
@@ -205,6 +206,7 @@ impl DaemonHarness {
                     managed_credential_clients: Default::default(),
                     host: None,
                     launch_projection: None,
+                    session_working_dir: None,
                 };
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
                 let server = tokio::spawn(async move {

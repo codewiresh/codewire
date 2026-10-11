@@ -334,6 +334,7 @@ impl DaemonHarness {
             host: None,
             launch_projection: None,
             managed_credential_clients: Default::default(),
+            session_working_dir: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
@@ -380,6 +381,7 @@ impl DaemonHarness {
             host: None,
             launch_projection: None,
             managed_credential_clients: Default::default(),
+            session_working_dir: None,
         };
         let service = GatedDaemonService {
             inner: DaemonServiceServer::new(DaemonServiceImpl::new(config))

@@ -373,6 +373,7 @@ mod tests {
             host: Some(codewire_daemon::HostConfig {
                 state_root: root.clone(),
             }),
+            session_working_dir: None,
         };
         let socket = root.join("daemon.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();

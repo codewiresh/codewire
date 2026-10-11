@@ -101,6 +101,7 @@ class FakeTools:
         self.calls = []
         self.helper = macho(b"helper-one")
         self.signed_entitlements = None
+        self.hardened = None
         self.cw_status = 0
         self.installed = None
         self.dependencies = {}
@@ -119,7 +120,11 @@ class FakeTools:
             target = Path(argv[-1])
             plist = Path(argv[argv.index("--entitlements") + 1]).read_bytes()
             entitlements = self.signed_entitlements if self.signed_entitlements is not None else plist
-            target.write_bytes(target.read_bytes() + SIGNATURE + entitlements)
+            hardened = "--options" in argv and argv[argv.index("--options") + 1] == "runtime"
+            if self.hardened is not None:
+                hardened = self.hardened
+            flags = b"0x10002(adhoc,runtime)" if hardened else b"0x2(adhoc)"
+            target.write_bytes(target.read_bytes() + SIGNATURE + flags + SIGNATURE + entitlements)
             return subprocess.CompletedProcess(argv, 0, stdout=None)
         if argv[:2] == ["/usr/bin/env", "-i"] and argv[3:] == ["--version"]:
             return subprocess.CompletedProcess(argv, 0, stdout=self.git_version)
@@ -132,7 +137,11 @@ class FakeTools:
             data = Path(argv[-1]).read_bytes()
             if SIGNATURE not in data:
                 return subprocess.CompletedProcess(argv, 1, stdout=b"")
-            return subprocess.CompletedProcess(argv, 0, stdout=data.split(SIGNATURE, 1)[1])
+            _, flags, entitlements = data.split(SIGNATURE, 2)
+            if "--verbose=2" in argv:
+                report = b"Format=Mach-O thin (arm64)\nCodeDirectory v=20400 size=1 flags=%s hashes=1+0 location=embedded\n" % flags
+                return subprocess.CompletedProcess(argv, 0, stdout=report)
+            return subprocess.CompletedProcess(argv, 0, stdout=entitlements)
         if argv[:2] == ["git", "-C"] and argv[3:] == ["rev-parse", "HEAD"]:
             return subprocess.CompletedProcess(argv, 0, stdout=REVISION.encode() + b"\n")
         if argv[1:4] == ["setup", "--local", "--from"]:
@@ -187,13 +196,17 @@ class PackTests(unittest.TestCase):
 
     def assert_release(self, files, cw_runtime=None):
         """`files` maps release-relative paths to bytes; returns the document."""
-        document = json.loads(files[runtime.LOCAL_RUNTIME_DOCUMENT])
+        raw = files[runtime.LOCAL_RUNTIME_DOCUMENT]
+        document = json.loads(raw)
+        # cw decodes it strictly, so it is canonical: sorted, compact, ASCII.
+        self.assertEqual(raw, (json.dumps(document, sort_keys=True, separators=(",", ":"),
+                                          ensure_ascii=True) + "\n").encode())
         self.assertEqual(document["schema"], "codewire.cw.local-runtime/v1")
         self.assertEqual(document["source_revision"], REVISION)
         self.assertEqual(list(document["targets"]), ["macos-aarch64"])
         target = document["targets"]["macos-aarch64"]
         lock = target["lock"]
-        self.assertEqual(list(lock), ["schema_version", "vz_runner", "e2fsprogs", "git", "kernel", "initramfs"])
+        self.assertEqual(list(lock), ["e2fsprogs", "git", "initramfs", "kernel", "schema_version", "vz_runner"])
         self.assertEqual(lock["schema_version"], 1)
         blobs = {name[len("blobs/sha256/"):]: data for name, data in files.items()
                  if name.startswith("blobs/sha256/")}
@@ -205,14 +218,14 @@ class PackTests(unittest.TestCase):
         self.assertEqual(blobs[lock["kernel"]["sha256"]], self.kernel.read_bytes())
         self.assertEqual(blobs[lock["initramfs"]["sha256"]], self.initramfs.read_bytes())
         tools = runtime.E2FSPROGS_TOOLS + (runtime.E2FSPROGS_CONFIG,)
-        self.assertEqual(list(lock["e2fsprogs"]), [key for key, _name, _installed in tools])
+        self.assertEqual(list(lock["e2fsprogs"]), sorted(key for key, _name, _installed in tools))
         for key, name, installed in tools:
             data = (self.e2fsprogs / name).read_bytes()
             self.assertEqual(lock["e2fsprogs"][key], {"path": installed, "size": len(data),
                                                       "sha256": hashlib.sha256(data).hexdigest(),
                                                       "architecture": "aarch64"})
             self.assertEqual(blobs[lock["e2fsprogs"][key]["sha256"]], data)
-        self.assertEqual(list(lock["git"]), [key for key, _name in runtime.GIT_TOOLS])
+        self.assertEqual(list(lock["git"]), sorted(key for key, _name in runtime.GIT_TOOLS))
         for key, name in runtime.GIT_TOOLS:
             data = (self.git / name).read_bytes()
             self.assertEqual(lock["git"][key], {"path": name, "size": len(data),
@@ -255,9 +268,9 @@ class PackTests(unittest.TestCase):
         self.assertEqual(calls[1], ["swift", "build", "-c", "release", "--package-path", package])
         self.assertEqual(calls[2][-1], "--show-bin-path")
         sign = [call for call in self.tools.calls if call[:2] == ["/usr/bin/codesign", "--force"]][0]
-        self.assertEqual(sign[:7], ["/usr/bin/codesign", "--force", "--sign", "-",
+        self.assertEqual(sign[:9], ["/usr/bin/codesign", "--force", "--sign", "-", "--options", "runtime",
                                     "--identifier", "codewire-vz-runner", "--entitlements"])
-        self.assertEqual(sign[7], str(REPOSITORY / "crates/codewire-local-vmm/macos-vz-runner/developer-entitlements.plist"))
+        self.assertEqual(sign[9], str(REPOSITORY / "crates/codewire-local-vmm/macos-vz-runner/developer-entitlements.plist"))
         self.assertIn("packed %s (source %s)" % (self.release, REVISION), stdout)
         self.assertIsNone(self.tools.installed, "--pack must not install")
         # A pack never reuses an existing directory.
@@ -435,6 +448,14 @@ class PackTests(unittest.TestCase):
         self.assertFalse((self.release / runtime.LOCAL_RUNTIME_DOCUMENT).exists())
         self.assertIsNone(self.tools.installed)
 
+    def test_helper_must_have_the_hardened_runtime(self):
+        self.tools.hardened = False
+        status, _stdout, stderr = self.pack()
+        self.assertEqual(status, 1)
+        self.assertIn("does not have the hardened runtime", stderr)
+        self.assertFalse((self.release / runtime.LOCAL_RUNTIME_DOCUMENT).exists())
+        self.assertIsNone(self.tools.installed)
+
     def test_helper_must_be_thin_arm64_macho(self):
         self.tools.helper = b"\xca\xfe\xba\xbe" + bytes(60)
         status, _stdout, stderr = self.pack()
@@ -515,8 +536,9 @@ class SourceContractTests(unittest.TestCase):
 
     def test_release_directory_follows_the_installer(self):
         installer = self.read("crates/codewire-local-vmm/src/runtime_install.rs")
-        self.assertIn('LOCAL_RUNTIME_SCHEMA: &str = "%s";' % runtime.LOCAL_RUNTIME_SCHEMA, installer)
-        self.assertIn('LOCAL_RUNTIME_DOCUMENT: &str = "%s";' % runtime.LOCAL_RUNTIME_DOCUMENT, installer)
+        document = self.read("crates/codewire-cw-release/src/local_runtime.rs")
+        self.assertIn('LOCAL_RUNTIME_SCHEMA: &str = "%s";' % runtime.LOCAL_RUNTIME_SCHEMA, document)
+        self.assertIn('LOCAL_RUNTIME_NAME: &str = "%s";' % runtime.LOCAL_RUNTIME_DOCUMENT, document)
         self.assertIn('format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)', installer)
         self.assertEqual(runtime.TARGET, "macos-aarch64")
         self.assertIn('.join("blobs").join("sha256").join(sha256)', installer)

@@ -2,7 +2,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::process::{Child, Command, Stdio};
 
-use codewire_cw_release::store::{Admission, Candidate};
+use codewire_cw_release::store::{Admission, Candidate, Store};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixListener;
 use tower::ServiceExt as _;
@@ -96,7 +96,8 @@ while time.monotonic() < end:
 "#,
         )
         .unwrap();
-        let mut child = Command::new(&config.executable)
+        let mut command = Command::new(&config.executable);
+        command
             .args(supervisor_argv(&config).into_iter().skip(1))
             .args(extra)
             .env_clear()
@@ -105,9 +106,8 @@ while time.monotonic() < end:
             .current_dir(&root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        let mut child = crate::spawn_written(|| command.spawn()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while !root.join("ready").exists() {
             assert!(
@@ -181,10 +181,13 @@ async fn retained_peer_binds_real_birth_image_role_provenance_and_all_configurat
     let fixture = Fixture::start(true, &[]);
     let request = fixture.request();
     let pin = pin(&fixture).await;
-    assert_eq!(pin.process.pid, fixture.child.id());
-    assert!(pin.process.start_time_ticks > 0);
-    assert!(uuid::Uuid::parse_str(&pin.process.boot_id).is_ok());
-    assert_eq!(pin.process.executable, fixture.config.executable);
+    assert_eq!(pin.peer.pid(), fixture.child.id());
+    assert_eq!(pin.peer, ProcessBirth::observe(fixture.child.id()).unwrap());
+    assert!(
+        pin.peer
+            .is(&ProcessIdentity::capture(fixture.child.id()).unwrap())
+    );
+    assert_eq!(pin.peer.executable(), fixture.config.executable);
     assert_eq!(
         pin.configuration_digest(),
         Some(fixture.config.configuration_digest())
@@ -194,7 +197,8 @@ async fn retained_peer_binds_real_birth_image_role_provenance_and_all_configurat
         Some(request.configuration_digest())
     );
     assert_eq!(pin.argv, supervisor_argv(&fixture.config));
-    assert!(pin.provenance.is_some());
+    // Another version than the requested one: its provenance was admitted.
+    assert_ne!(request.executable, fixture.config.executable);
     // SAFETY: inspect our retained owned descriptor without changing it.
     assert_ne!(
         unsafe { libc::fcntl(pin.pidfd.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
@@ -261,8 +265,11 @@ async fn configured_peer_refuses_every_other_path_and_role_extension() {
     );
 }
 
+/// Provenance is admitted once per process birth (#2549). A new admission
+/// needs the store to retain the version; an admitted peer is re-observed by
+/// its birth and file, which a rewritten executable no longer matches.
 #[tokio::test]
-async fn retained_peer_refuses_unmanaged_missing_and_changed_version_provenance() {
+async fn retained_peer_refuses_unmanaged_missing_and_rewritten_versions() {
     let unmanaged = Fixture::start(false, &[]);
     assert!(
         capture_supervisor_peer(
@@ -274,21 +281,30 @@ async fn retained_peer_refuses_unmanaged_missing_and_changed_version_provenance(
     );
     let mut fixture = Fixture::start(true, &[]);
     let pin = pin(&fixture).await;
+    let socket = fixture.config.supervisor_socket();
     let record = fixture.record();
     let original = fs::read(&record).unwrap();
     fs::set_permissions(record.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
     fs::remove_file(&record).unwrap();
     fs::set_permissions(record.parent().unwrap(), fs::Permissions::from_mode(0o555)).unwrap();
-    assert!(pin.revalidate(Instant::now() + ADMISSION_TIMEOUT).is_err());
+    assert!(
+        capture_supervisor_peer(&socket, Some(&fixture.request()))
+            .await
+            .is_err()
+    );
+    pin.revalidate(Instant::now() + ADMISSION_TIMEOUT).unwrap();
     fs::set_permissions(record.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(&record, &original).unwrap();
     fs::set_permissions(&record, fs::Permissions::from_mode(0o444)).unwrap();
     fs::set_permissions(record.parent().unwrap(), fs::Permissions::from_mode(0o555)).unwrap();
-    let mut value: VersionRecord = serde_json::from_slice(&original).unwrap();
-    value.package_version = "9.9.9".into();
-    fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
-    fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
-    fs::set_permissions(&record, fs::Permissions::from_mode(0o444)).unwrap();
+    capture_supervisor_peer(&socket, Some(&fixture.request()))
+        .await
+        .unwrap();
+    // Mode, size and links restored; only the change time records the write.
+    std::thread::sleep(Duration::from_millis(20));
+    let executable = &fixture.config.executable;
+    fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(executable, fs::Permissions::from_mode(0o555)).unwrap();
     assert!(pin.revalidate(Instant::now() + ADMISSION_TIMEOUT).is_err());
     assert!(fixture.child.try_wait().unwrap().is_none());
 }
@@ -383,7 +399,7 @@ async fn same_birth_exec_divergence_refuses_without_signalling_an_unrelated_proc
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(2);
     while fs::read_link(format!("/proc/{}/exe", fixture.child.id())).unwrap()
-        == pin.process.executable
+        == pin.peer.executable()
     {
         assert!(Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(5)).await;

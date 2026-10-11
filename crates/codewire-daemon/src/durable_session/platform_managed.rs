@@ -199,12 +199,15 @@ impl SessionEngine {
             }
         }
         if launch.working_dir.is_empty() {
-            launch.working_dir = self
-                .inner
-                .config
-                .workspace_root
-                .to_string_lossy()
-                .into_owned();
+            launch.working_dir = match hosted_default_working_dir(&self.inner.config).await {
+                Some(directory) => directory,
+                None => self
+                    .inner
+                    .config
+                    .workspace_root
+                    .to_string_lossy()
+                    .into_owned(),
+            };
         }
         if !path_is_directory(&launch.working_dir).await {
             return Err(Error::Refused);

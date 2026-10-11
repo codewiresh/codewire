@@ -192,12 +192,16 @@ impl Fixture {
     }
 
     async fn run(&self, binary: &Path, args: &[&str]) -> Output {
-        let mut child = std::process::Command::new(binary);
-        self.configure(&mut child);
-        child.args(args);
-        let mut child = Command::from(child);
-        child.kill_on_drop(true);
-        tokio::time::timeout(Duration::from_secs(40), child.output())
+        let mut command = std::process::Command::new(binary);
+        self.configure(&mut command);
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut command = Command::from(command);
+        command.kill_on_drop(true);
+        let child = cw_fixture::spawn_written(|| command.spawn()).unwrap();
+        tokio::time::timeout(Duration::from_secs(40), child.wait_with_output())
             .await
             .expect("bounded synthetic CLI command")
             .unwrap()
@@ -254,7 +258,7 @@ impl Drop for Fixture {
             .args(["mesh", "down", "--output", "json"])
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let clean = match command.spawn() {
+        let clean = match cw_fixture::spawn_written(|| command.spawn()) {
             Ok(mut child) => {
                 let deadline = Instant::now() + Duration::from_secs(40);
                 loop {

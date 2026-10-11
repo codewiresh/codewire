@@ -37,6 +37,7 @@ fn config(directory: &Path) -> Config {
             selection_sha256: [3; 32],
             native: None,
         }),
+        session_working_dir: None,
     }
 }
 

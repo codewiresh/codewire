@@ -3,8 +3,8 @@
 
 Developer tooling for an Apple Silicon Mac; it runs on the system Python 3.9.
 It builds the Virtualization.framework helper in release mode, signs it ad hoc
-with exactly developer-entitlements.plist, checks the supplied arm64 kernel
-Image, Codewire guest root and pinned e2fsprogs bundle (from
+with the hardened runtime and exactly developer-entitlements.plist, checks the
+supplied arm64 kernel Image, Codewire guest root and pinned e2fsprogs bundle (from
 macos-ext4-tool.py) the way artifact admission does, and writes a
 release directory (blobs/sha256/<digest> and local-runtime.json, the format a
 release publishes). With --cw-runtime it adds a sealed aarch64 cw runtime
@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 import platform
 import plistlib
+import re
 import stat
 import subprocess
 import sys
@@ -364,8 +365,14 @@ def thin_arm64_macho(path: Path) -> None:
 
 
 def check_helper(path: Path) -> None:
-    """A thin arm64 Mach-O executable signed with exactly the developer entitlements."""
+    """A thin arm64 Mach-O executable signed with the hardened runtime and
+    exactly the developer entitlements."""
     thin_arm64_macho(path)
+    # codesign reports the CodeDirectory flags on stderr.
+    shown = run([CODESIGN, "-d", "--verbose=2", str(path)], capture=True, merge_stderr=True)
+    flags = re.search(rb"^CodeDirectory .*flags=0x[0-9a-f]+\(([a-z,-]*)\)", shown, re.MULTILINE)
+    if flags is None or b"runtime" not in flags.group(1).split(b","):
+        raise InstallError("the signed helper does not have the hardened runtime")
     shown = run([CODESIGN, "-d", "--entitlements", "-", "--xml", str(path)], capture=True)
     start = shown.find(b"<?xml")
     try:
@@ -376,12 +383,17 @@ def check_helper(path: Path) -> None:
         raise InstallError("the signed helper does not carry exactly %s" % ENTITLEMENTS.name)
 
 
-def run(argv: list, capture: bool = False) -> bytes:
-    """Run a tool; a captured query also keeps its stderr chatter quiet."""
+def run(argv: list, capture: bool = False, merge_stderr: bool = False) -> bytes:
+    """Run a tool; a captured query also keeps its stderr chatter quiet unless
+    `merge_stderr` captures it with stdout."""
+    if merge_stderr:
+        stderr = subprocess.STDOUT
+    else:
+        stderr = subprocess.DEVNULL if capture else None
     try:
         result = subprocess.run(argv, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE if capture else None,
-                                stderr=subprocess.DEVNULL if capture else None, check=False)
+                                stderr=stderr, check=False)
     except FileNotFoundError:
         raise InstallError("%s is unavailable; install the Xcode Command Line Tools "
                            "(xcode-select --install)" % argv[0]) from None
@@ -467,7 +479,7 @@ def pack(kernel: Path, initramfs: Path, e2fsprogs: Path, git: Path, release: Pat
     stage_copy(helper, signed)
     # A fixed identifier keeps the signed bytes independent of the staging
     # name, so an unchanged rebuild pins the same digest.
-    run([CODESIGN, "--force", "--sign", "-", "--identifier", PRODUCT,
+    run([CODESIGN, "--force", "--sign", "-", "--options", "runtime", "--identifier", PRODUCT,
          "--entitlements", str(ENTITLEMENTS), str(signed)])
     check_helper(signed)
     sources = {"vz_runner": signed, "kernel": kernel, "initramfs": initramfs}
@@ -492,7 +504,10 @@ def pack(kernel: Path, initramfs: Path, e2fsprogs: Path, git: Path, release: Pat
                                 "pack": put_blob(release, cw_runtime / CW_RUNTIME_PACK)}
     document = {"schema": LOCAL_RUNTIME_SCHEMA, "source_revision": revision,
                 "targets": {TARGET: target}}
-    (release / LOCAL_RUNTIME_DOCUMENT).write_text(json.dumps(document, indent=2) + "\n")
+    # cw decodes the document strictly: canonical JSON (sorted keys, compact,
+    # ASCII, one trailing newline), exactly as a release's cw embeds it.
+    (release / LOCAL_RUNTIME_DOCUMENT).write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n")
     for key, name, _mode in ARTIFACTS:
         log("%-9s %s sha256=%s size=%d" % (key, name, lock[key]["sha256"], lock[key]["size"]))
     for group in ("e2fsprogs", "git"):

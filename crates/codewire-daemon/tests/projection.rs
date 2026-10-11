@@ -111,6 +111,7 @@ fn projection_daemon_child() {
                     process_directory: root.join("processes"),
                 }),
             }),
+            session_working_dir: None,
         };
         println!("\nCW_PROJECTION_ENDPOINT={endpoint}");
         std::io::stdout().flush().unwrap();

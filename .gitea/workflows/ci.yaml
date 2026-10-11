@@ -21,9 +21,12 @@ on:
         required: false
         default: local
 
+# A newer push to a pull request supersedes its older run. Runs on main
+# are the post-merge confirmation, so each one finishes; later main runs
+# queue behind it instead of cancelling it.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY_HOST: ${{ vars.REGISTRY_HOST }}

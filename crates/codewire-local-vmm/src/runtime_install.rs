@@ -18,62 +18,29 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use codewire_cw_release::sha256::Sha256;
 
 use crate::artifact::{ArtifactError, ArtifactLock};
 
-pub const LOCAL_RUNTIME_SCHEMA: &str = "codewire.cw.local-runtime/v1";
-/// The document's name inside a release or `--from` directory.
-pub const LOCAL_RUNTIME_DOCUMENT: &str = "local-runtime.json";
-const DOCUMENT_LIMIT: u64 = 1024 * 1024;
+pub use codewire_cw_release::local_runtime::{
+    BlobRef, CwRuntimeFiles, LOCAL_RUNTIME_NAME as LOCAL_RUNTIME_DOCUMENT, LOCAL_RUNTIME_SCHEMA,
+    LocalRuntimeDocument, RuntimeTarget,
+};
+use codewire_cw_release::release::MAX_JSON_BYTES;
+
 const BLOB_LIMIT: u64 = 512 * 1024 * 1024;
 const EXECUTABLE_MODE: u32 = 0o500;
 /// How long an installer waits for the runtime directory's lock.
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 const DATA_MODE: u32 = 0o400;
 
-/// One release's local VM runtime for every supported host target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LocalRuntimeDocument {
-    pub schema: String,
-    /// The source revision the guest root and cw were built from; the guest
-    /// renders session environments, so they must match.
-    pub source_revision: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub release_tag: Option<String>,
-    /// Each target's runtime, keyed by [`host_target`].
-    pub targets: BTreeMap<String, RuntimeTarget>,
-}
+/// One previous runtime is kept beside the current one, so a rollback to it
+/// (#2255 A-B-A) reinstalls from local files without downloading.
+const PREVIOUS_ROOT: &str = ".runtime-previous";
+const PREVIOUS_LOCK: &str = ".runtime-previous.lock.json";
+const PREVIOUS_CW_RUNTIME: &str = ".cw-runtime-previous";
 
-/// One host target's runtime.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeTarget {
-    /// The exact artifact lock the supervisor admits.
-    pub lock: serde_json::Value,
-    /// The sealed cw runtime for managed agents in local VMs, when published.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cw_runtime: Option<CwRuntimeFiles>,
-}
-
-/// The sealed cw runtime's two files, installed beside the artifact lock.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CwRuntimeFiles {
-    pub lock: BlobRef,
-    pub pack: BlobRef,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BlobRef {
-    pub sha256: String,
-    pub size: u64,
-}
-
-/// The cw runtime file names `cw` admits beside the artifact lock.
+/// The sealed cw runtime file names `cw` admits beside the artifact lock.
 pub const CW_RUNTIME_LOCK: &str = "cw-runtime.lock.json";
 pub const CW_RUNTIME_PACK: &str = "runtime.pack";
 
@@ -115,46 +82,23 @@ fn io_error(context: impl Into<String>) -> impl FnOnce(io::Error) -> InstallErro
     move |source| InstallError::Io { context, source }
 }
 
-impl LocalRuntimeDocument {
-    pub fn parse(bytes: &[u8]) -> Result<Self, InstallError> {
-        let document: Self = serde_json::from_slice(bytes)
-            .map_err(|error| InstallError::Document(error.to_string()))?;
-        if document.schema != LOCAL_RUNTIME_SCHEMA {
-            return Err(InstallError::Document(format!(
-                "schema {:?} is not {LOCAL_RUNTIME_SCHEMA}",
-                document.schema
-            )));
-        }
-        if document.source_revision.len() != 40
-            || !document
-                .source_revision
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(InstallError::Document(
-                "source_revision must be a 40-character commit".into(),
-            ));
-        }
-        Ok(document)
-    }
+/// This host's runtime in `document`.
+pub fn host_runtime(document: &LocalRuntimeDocument) -> Result<&RuntimeTarget, InstallError> {
+    let target = host_target();
+    document
+        .targets
+        .get(&target)
+        .ok_or(InstallError::UnknownTarget(target))
+}
 
-    /// This host's runtime.
-    pub fn host_target(&self) -> Result<&RuntimeTarget, InstallError> {
-        let target = host_target();
-        self.targets
-            .get(&target)
-            .ok_or(InstallError::UnknownTarget(target))
-    }
-
-    /// The validated lock for this host.
-    pub fn host_lock(&self) -> Result<ArtifactLock, InstallError> {
-        let target = host_target();
-        let value = &self.host_target()?.lock;
-        let lock: ArtifactLock = serde_json::from_value(value.clone())
-            .map_err(|error| InstallError::Document(format!("{target} lock: {error}")))?;
-        lock.validate_metadata()?;
-        Ok(lock)
-    }
+/// The validated lock for this host in `document`.
+pub fn host_lock(document: &LocalRuntimeDocument) -> Result<ArtifactLock, InstallError> {
+    let target = host_target();
+    let value = &host_runtime(document)?.lock;
+    let lock: ArtifactLock = serde_json::from_value(value.clone())
+        .map_err(|error| InstallError::Document(format!("{target} lock: {error}")))?;
+    lock.validate_metadata()?;
+    Ok(lock)
 }
 
 /// Where release blobs come from. Blobs are named by their SHA-256.
@@ -177,13 +121,11 @@ impl DirectoryBlobSource {
         let path = self.root.join(LOCAL_RUNTIME_DOCUMENT);
         let file = open_regular(&path)?;
         let mut bytes = Vec::new();
-        file.take(DOCUMENT_LIMIT + 1)
+        file.take(MAX_JSON_BYTES as u64 + 1)
             .read_to_end(&mut bytes)
             .map_err(io_error(format!("read {}", path.display())))?;
-        if bytes.len() as u64 > DOCUMENT_LIMIT {
-            return Err(InstallError::Document("the document is too large".into()));
-        }
-        LocalRuntimeDocument::parse(&bytes)
+        LocalRuntimeDocument::decode(&bytes)
+            .map_err(|error| InstallError::Document(error.to_string()))
     }
 }
 
@@ -235,6 +177,137 @@ pub enum InstallOutcome {
     AlreadyInstalled { generation: String },
 }
 
+/// How the installed runtime compares with `document`'s for this host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstalledRuntime {
+    Missing,
+    Same,
+    /// This runtime's files, partly missing or damaged.
+    Incomplete,
+    Different,
+}
+
+/// Compares the installed artifact lock with `document`'s for this host. It
+/// reads only the lock; [`install`] admits the files themselves.
+pub fn installed_runtime(
+    paths: &RuntimePaths,
+    document: &LocalRuntimeDocument,
+) -> Result<InstalledRuntime, InstallError> {
+    let wanted = host_lock(document)?;
+    let artifacts = match ArtifactLock::read(&paths.artifact_lock) {
+        Ok(installed) if installed == wanted => InstalledRuntime::Same,
+        Ok(_) => InstalledRuntime::Different,
+        Err(_) if lock_missing(&paths.artifact_lock) => InstalledRuntime::Missing,
+        Err(error) => return Err(error.into()),
+    };
+    if artifacts != InstalledRuntime::Same {
+        return Ok(artifacts);
+    }
+    // Compare the cw runtime by its small lock and the pack's size: a start
+    // never hashes the whole pack, which install admits in full.
+    let parent = paths.artifact_lock.parent().unwrap_or(Path::new("/"));
+    let wanted = host_runtime(document)?.cw_runtime.as_ref();
+    let lock = file_digest(&parent.join(CW_RUNTIME_LOCK))?;
+    Ok(match wanted {
+        None if lock.is_none() => InstalledRuntime::Same,
+        None => InstalledRuntime::Different,
+        Some(_) if lock.is_none() => InstalledRuntime::Incomplete,
+        Some(wanted) if !matches(&lock, &wanted.lock) => InstalledRuntime::Different,
+        Some(wanted) => match fs::symlink_metadata(parent.join(CW_RUNTIME_PACK)) {
+            Ok(metadata) if metadata.is_file() && metadata.len() == wanted.pack.size => {
+                InstalledRuntime::Same
+            }
+            _ => InstalledRuntime::Incomplete,
+        },
+    })
+}
+
+/// The runtime files already on this host, current and previous, by digest.
+/// Every file is checked against its digest again when it is installed.
+pub struct LocalBlobs {
+    files: BTreeMap<String, PathBuf>,
+}
+
+impl LocalBlobs {
+    pub fn open(paths: &RuntimePaths) -> Result<Self, InstallError> {
+        let mut files = BTreeMap::new();
+        let parent = paths.artifact_lock.parent().unwrap_or(Path::new("/"));
+        for (root, lock) in [
+            (paths.artifact_root.clone(), paths.artifact_lock.clone()),
+            (parent.join(PREVIOUS_ROOT), parent.join(PREVIOUS_LOCK)),
+        ] {
+            let Ok(lock) = ArtifactLock::read(&lock) else {
+                continue;
+            };
+            let mut specs = lock.executables();
+            specs.extend(lock.data_files());
+            for spec in specs {
+                files
+                    .entry(spec.sha256.clone())
+                    .or_insert_with(|| root.join(&spec.path));
+            }
+        }
+        for directory in [parent.to_path_buf(), parent.join(PREVIOUS_CW_RUNTIME)] {
+            for name in [CW_RUNTIME_LOCK, CW_RUNTIME_PACK] {
+                let path = directory.join(name);
+                if let Some((sha256, _)) = file_digest(&path)? {
+                    files.entry(sha256).or_insert(path);
+                }
+            }
+        }
+        Ok(Self { files })
+    }
+
+    /// No local files: every blob comes from the fallback.
+    pub fn empty() -> Self {
+        Self {
+            files: BTreeMap::new(),
+        }
+    }
+
+    pub fn has(&self, sha256: &str) -> bool {
+        self.files.contains_key(sha256)
+    }
+}
+
+impl BlobSource for LocalBlobs {
+    fn open(&self, sha256: &str) -> Result<Box<dyn Read + '_>, InstallError> {
+        let path = self
+            .files
+            .get(sha256)
+            .ok_or_else(|| InstallError::MissingBlob {
+                sha256: sha256.to_owned(),
+            })?;
+        match open_regular(path) {
+            Ok(file) => Ok(Box::new(file)),
+            // A file a lock still names but that is gone (deleted, or a crash
+            // between swapping a root and writing its lock) is simply absent.
+            Err(InstallError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                Err(InstallError::MissingBlob {
+                    sha256: sha256.to_owned(),
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// Local files first, then `fallback` for whatever this host lacks.
+pub struct WithLocal<'a> {
+    pub local: &'a LocalBlobs,
+    pub fallback: &'a dyn BlobSource,
+}
+
+impl BlobSource for WithLocal<'_> {
+    fn open(&self, sha256: &str) -> Result<Box<dyn Read + '_>, InstallError> {
+        if self.local.has(sha256) {
+            self.local.open(sha256)
+        } else {
+            self.fallback.open(sha256)
+        }
+    }
+}
+
 /// Installs `document`'s runtime for this host from `source`.
 pub async fn install(
     paths: &RuntimePaths,
@@ -261,7 +334,7 @@ where
     A: Fn(ArtifactLock, PathBuf) -> F,
     F: Future<Output = Result<(), ArtifactError>>,
 {
-    let lock = document.host_lock()?;
+    let lock = host_lock(document)?;
     let parent = paths
         .artifact_lock
         .parent()
@@ -275,7 +348,10 @@ where
     let _guard = InstallGuard::acquire(&parent)?;
     let generation = lock.generation()?;
 
-    let artifacts_current = match ArtifactLock::read(&paths.artifact_lock) {
+    let installed_lock = ArtifactLock::read(&paths.artifact_lock);
+    // Repairing the installed runtime keeps the real previous one.
+    let keep_previous = matches!(&installed_lock, Ok(existing) if *existing != lock);
+    let artifacts_current = match installed_lock {
         // The same runtime is re-admitted; a damaged file is fetched again.
         Ok(existing) if existing == lock => admit(lock.clone(), paths.artifact_root.clone())
             .await
@@ -291,7 +367,7 @@ where
         }
         _ => false,
     };
-    let wanted_cw_runtime = document.host_target()?.cw_runtime.as_ref();
+    let wanted_cw_runtime = host_runtime(document)?.cw_runtime.as_ref();
     let cw_runtime = cw_runtime_state(&parent, wanted_cw_runtime)?;
     if cw_runtime == CwRuntimeState::Different && !replace {
         return Err(InstallError::DifferentRuntimeInstalled(
@@ -322,7 +398,7 @@ where
             )?;
         }
         admit(lock.clone(), stage.path.clone()).await?;
-        publish(paths, &parent, stage, &lock)?;
+        publish(paths, &parent, stage, &lock, keep_previous)?;
         admit(lock, paths.artifact_root.clone()).await?;
     }
     if cw_runtime != CwRuntimeState::Current {
@@ -393,31 +469,61 @@ fn install_cw_runtime(
     let lock = parent.join(CW_RUNTIME_LOCK);
     let pack = parent.join(CW_RUNTIME_PACK);
     let Some(wanted) = wanted else {
+        keep_previous_cw_runtime(parent, None)?;
         for path in [&lock, &pack] {
-            match fs::remove_file(path) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                    return Err(io_error(format!("remove {}", path.display()))(error));
-                }
-                _ => {}
-            }
+            remove_file_if_present(path)?;
         }
         return Ok(());
     };
-    for (name, blob) in [
+    // Fetch first: the source may read the kept previous runtime, which the
+    // rotation below replaces.
+    let files = [
         (CW_RUNTIME_PACK, &wanted.pack),
         (CW_RUNTIME_LOCK, &wanted.lock),
-    ] {
+    ];
+    for (name, blob) in files {
         let partial = parent.join(format!(".{name}.partial"));
         let _ = fs::remove_file(&partial);
         if let Err(error) = fetch(source, &blob.sha256, blob.size, &partial, DATA_MODE) {
-            let _ = fs::remove_file(&partial);
+            for (name, _) in files {
+                let _ = fs::remove_file(parent.join(format!(".{name}.partial")));
+            }
             return Err(error);
         }
-        fs::rename(&partial, parent.join(name))
+    }
+    keep_previous_cw_runtime(parent, Some(wanted))?;
+    for (name, _) in files {
+        fs::rename(parent.join(format!(".{name}.partial")), parent.join(name))
             .map_err(io_error(format!("install {}", parent.join(name).display())))?;
     }
     if let Ok(directory) = File::open(parent) {
         let _ = directory.sync_all();
+    }
+    Ok(())
+}
+
+/// Keeps an installed cw runtime other than `wanted` as the previous one,
+/// replacing any older one, so a rollback reinstalls it without a download.
+fn keep_previous_cw_runtime(
+    parent: &Path,
+    wanted: Option<&CwRuntimeFiles>,
+) -> Result<(), InstallError> {
+    let installed = file_digest(&parent.join(CW_RUNTIME_LOCK))?;
+    if installed.is_none() || wanted.is_some_and(|wanted| matches(&installed, &wanted.lock)) {
+        return Ok(());
+    }
+    let previous = parent.join(PREVIOUS_CW_RUNTIME);
+    remove_tree(&previous)?;
+    fs::create_dir(&previous).map_err(io_error(format!("create {}", previous.display())))?;
+    fs::set_permissions(&previous, fs::Permissions::from_mode(0o700))
+        .map_err(io_error(format!("protect {}", previous.display())))?;
+    for name in [CW_RUNTIME_PACK, CW_RUNTIME_LOCK] {
+        match fs::rename(parent.join(name), previous.join(name)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                return Err(io_error(format!("keep the previous {name}"))(error));
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -567,8 +673,18 @@ fn publish(
     parent: &Path,
     stage: Workspace,
     lock: &ArtifactLock,
+    keep_previous: bool,
 ) -> Result<(), InstallError> {
-    let previous = parent.join(format!(".runtime-previous-{:016x}", rand::random::<u64>()));
+    // A replaced runtime becomes the previous one, replacing any older one
+    // kept beside it. A repaired copy of the same runtime is discarded.
+    let previous = if keep_previous {
+        let previous = parent.join(PREVIOUS_ROOT);
+        remove_tree(&previous)?;
+        remove_file_if_present(&parent.join(PREVIOUS_LOCK))?;
+        previous
+    } else {
+        parent.join(format!(".runtime-replaced-{:016x}", rand::random::<u64>()))
+    };
     let had_previous = match fs::symlink_metadata(&paths.artifact_root) {
         Ok(_) => {
             fs::rename(&paths.artifact_root, &previous).map_err(io_error(format!(
@@ -606,6 +722,17 @@ fn publish(
         })?;
     let partial = parent.join(format!(".{}.partial", lock_name.to_string_lossy()));
     let _ = fs::remove_file(&partial);
+    if had_previous && keep_previous {
+        match fs::rename(&paths.artifact_lock, parent.join(PREVIOUS_LOCK)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                return Err(io_error(format!(
+                    "keep the previous {}",
+                    paths.artifact_lock.display()
+                ))(error));
+            }
+            _ => {}
+        }
+    }
     let mut bytes = serde_json::to_vec_pretty(lock).map_err(ArtifactError::EncodeLock)?;
     bytes.push(b'\n');
     let mut file = OpenOptions::new()
@@ -627,11 +754,35 @@ fn publish(
     if let Ok(directory) = File::open(parent) {
         let _ = directory.sync_all();
     }
-    if had_previous {
-        let _ = fs::set_permissions(&previous, fs::Permissions::from_mode(0o700));
-        let _ = fs::remove_dir_all(&previous);
+    if had_previous && !keep_previous {
+        let _ = remove_tree(&previous);
     }
     Ok(())
+}
+
+fn remove_file_if_present(path: &Path) -> Result<(), InstallError> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            Err(io_error(format!("remove {}", path.display()))(error))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Removes a kept runtime directory, whose files are read-only.
+fn remove_tree(path: &Path) -> Result<(), InstallError> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_error(format!("inspect {}", path.display()))(error)),
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+            return Err(InstallError::UnsafeDirectory {
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(_) => {}
+    }
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    fs::remove_dir_all(path).map_err(io_error(format!("remove {}", path.display())))
 }
 
 #[cfg(test)]

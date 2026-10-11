@@ -256,6 +256,7 @@ async fn daemon_proof_requires_authenticated_ready_rpc_on_injected_unix_stream()
             managed_credential_clients: Default::default(),
             host: None,
             launch_projection: None,
+            session_working_dir: None,
         };
         let state = if is_ready {
             DaemonRuntimeState::ready()
@@ -369,6 +370,7 @@ async fn verifier_rejects_k_or_network_eof_after_readiness_but_before_workload()
             managed_credential_clients: Default::default(),
             host: None,
             launch_projection: None,
+            session_working_dir: None,
         };
         let server = tokio::spawn(
             codewire_daemon::server::serve_grpc_with_incoming_and_runtime_state(
@@ -457,6 +459,7 @@ async fn failed_workload_emits_no_workload_marker() {
         managed_credential_clients: Default::default(),
         host: None,
         launch_projection: None,
+        session_working_dir: None,
     };
     let server = tokio::spawn(
         codewire_daemon::server::serve_grpc_with_incoming_and_runtime_state(
@@ -537,6 +540,7 @@ async fn verifier_readiness_and_workload_precede_arming_and_only_armed_eof_compl
             managed_credential_clients: Default::default(),
             host: None,
             launch_projection: None,
+            session_working_dir: None,
         };
         let server = tokio::spawn(
             codewire_daemon::server::serve_grpc_with_incoming_and_runtime_state(

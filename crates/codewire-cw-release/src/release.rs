@@ -3,8 +3,8 @@
 
 use std::cmp::Ordering;
 
+use crate::sha256::Sha256;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 use crate::identity::{
     CwPayloadIdentity, MAX_EXECUTABLE_BYTES, Platform, ReleaseTarget, canonical_json, is_sha256_hex,
@@ -12,7 +12,7 @@ use crate::identity::{
 
 pub const MAX_JSON_BYTES: usize = 64 * 1024;
 pub const MAX_SIGNATURE_BYTES: usize = 16 * 1024;
-const MAX_OBJECT_BYTES: u64 = MAX_EXECUTABLE_BYTES + 8 * 1024 * 1024;
+pub(crate) const MAX_OBJECT_BYTES: u64 = MAX_EXECUTABLE_BYTES + 8 * 1024 * 1024;
 const RELEASE_SCHEMA: &str = "codewire.cw.release/v1";
 const CHANNEL_SCHEMA: &str = "codewire.cw.channel/v1";
 const TARGET_ORDER: [&str; 4] = [
@@ -55,7 +55,7 @@ pub struct ObjectRef {
 }
 
 impl ObjectRef {
-    fn validate(&self, expected: &str, cap: u64) -> Result<()> {
+    pub(crate) fn validate(&self, expected: &str, cap: u64) -> Result<()> {
         if self.key != expected || !is_sha256_hex(&self.sha256) || !(1..=cap).contains(&self.size) {
             return Err(ReleaseError::Invalid("object reference"));
         }
@@ -293,7 +293,9 @@ pub fn validate_signature(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn decode_canonical<T: for<'de> Deserialize<'de> + Serialize>(bytes: &[u8]) -> Result<T> {
+pub(crate) fn decode_canonical<T: for<'de> Deserialize<'de> + Serialize>(
+    bytes: &[u8],
+) -> Result<T> {
     if bytes.is_empty() || bytes.len() > MAX_JSON_BYTES {
         return Err(ReleaseError::Bounds);
     }
@@ -335,7 +337,7 @@ pub fn valid_fingerprint(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
 }
 
-fn lower_hex(value: &str, len: usize) -> bool {
+pub(crate) fn lower_hex(value: &str, len: usize) -> bool {
     value.len() == len
         && value
             .bytes()

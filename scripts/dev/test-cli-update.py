@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Observe pinned cw A -> B -> A with retained Linux host conversations.
 
-Both directories must contain a real built cw and its complete cw-runtime.json.
+Both directories must contain a real built cw and its complete cw-runtime.json,
+for a release target: `cw update --from` admits only release targets. Build them
+from this committed checkout with distinct versions, for example
+`CODEWIRE_VERSION=0.1.0-journey.a scripts/dev/build-cw.py --target
+x86_64-unknown-linux-musl --release-dir A`.
 Both assets must contain this checkout's admitted compiler and mesh-path code.
 This journey uses the existing synthetic agent peers and public CLI commands;
 it never contacts a provider, replaces a user installation or restarts a daemon

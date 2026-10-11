@@ -781,7 +781,7 @@ mod tests {
             "codewire-daemon:e2e",
             "registry.example.invalid/codewire/daemon:main",
             "docker.io/library/docker:29-dind",
-            "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff",
+            crate::sandbox::PUBLIC_CANONICAL_WORKSPACE_RUNTIME_IMAGE,
             "docker.io/evil/docker@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
             "registry.example.invalid.evil/x@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c",
             "registry.example.invalid/codewire/daemon@sha256:E8FAAD5A8DC5279DFF929AFC5449F2791736912FFF9F99351D742DB2FAD01B4C",

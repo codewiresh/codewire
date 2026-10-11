@@ -831,6 +831,7 @@ fn only_a_hosted_daemon_with_codex_selected_runs_the_writer() {
         }),
         managed_credential_clients: clients(slots),
         launch_projection: None,
+        session_working_dir: None,
     };
     let home = CodexHome::at("/nonexistent/.codex");
     assert!(

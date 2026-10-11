@@ -10,11 +10,16 @@ source. This prepares local artifacts; it never publishes or changes a VM.
 A local VM runs its host's architecture: the default x86_64 target serves
 Linux hosts, and --target aarch64-unknown-linux-musl serves Apple Silicon Macs
 (build it natively on an arm64 Linux host, never under emulation).
+
+C dependencies need a musl C compiler. With the target-prefixed musl gcc on
+PATH, rust-lld links directly; without one, cargo-zigbuild and zig (both on
+PATH) build and link, as release delivery does.
 """
 import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -53,6 +58,23 @@ def bounded_build(command, environment, output, timeout):
         raise
 
 
+def compiler_route(target, path, private_home):
+    """Cargo subcommand and environment for the static musl build.
+
+    A target-prefixed musl gcc keeps the direct rust-lld link. Otherwise
+    cargo-zigbuild compiles C dependencies and links with zig, the same as
+    release delivery; it keeps its zig caches under a private HOME.
+    """
+    gcc = target.split("-", 1)[0] + "-linux-musl-gcc"
+    if shutil.which(gcc, path=path):
+        return ["build"], {"RUSTFLAGS": "-C linker=rust-lld -C target-feature=+crt-static"}
+    missing = [tool for tool in ("cargo-zigbuild", "zig") if not shutil.which(tool, path=path)]
+    if missing:
+        raise RuntimeError(f"the static {target} build needs {gcc}, or cargo-zigbuild and zig, "
+                           f"on PATH; missing {', '.join([gcc, *missing])}")
+    return ["zigbuild"], {"HOME": str(private_home)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -86,16 +108,20 @@ def main():
         source = args.cargo_cache / name
         if source.is_dir():
             (public_cargo / name).symlink_to(source, target_is_directory=True)
+    path = str(tools) + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")
+    private_home = args.output / "home"
+    subcommand, route = compiler_route(args.target, path, private_home)
+    if subcommand == ["zigbuild"]:
+        private_home.mkdir(mode=0o700)
     environment = {
-        "PATH": str(tools) + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
+        "PATH": path,
         "CARGO_HOME": str(public_cargo), "CARGO_TARGET_DIR": str(target_dir),
         "CARGO_BUILD_JOBS": str(args.jobs), "CARGO_INCREMENTAL": "0", "LC_ALL": "C",
-        "RUSTFLAGS": "-C linker=rust-lld -C target-feature=+crt-static",
-        "PROTOC": str(protoc), "SOURCE_DATE_EPOCH": "0", "TZ": "UTC",
+        "PROTOC": str(protoc), "SOURCE_DATE_EPOCH": "0", "TZ": "UTC", **route,
         # The build record embeds exactly these explicit inputs.
         **release.build_environment(version, revision, before),
     }
-    command = [str(tools / "cargo"), "build", "--offline", "--locked", "--profile", "ci",
+    command = [str(tools / "cargo"), *subcommand, "--offline", "--locked", "--profile", "ci",
                "--target", args.target, "-p", "codewire-cli-bin", "--bin", "cw"]
     log = args.output / "build.log"
     with log.open("wb") as output:

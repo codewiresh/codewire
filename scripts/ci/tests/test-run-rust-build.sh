@@ -18,11 +18,19 @@ cat >"$work/bin/sccache" <<'EOF'
 set -euo pipefail
 case "${1:-}" in
   --zero-stats)
-    # Model a server that cannot start because its backend is unreachable.
-    [[ "${FAKE_SCCACHE_START:-ok}" == ok ]] || {
-      printf 'sccache: error: Timed out waiting for server startup\n' >&2
-      exit 2
-    }
+    [[ -z "${FAKE_SCCACHE_LOG:-}" ]] ||
+      printf 'start bucket=%s uds=%s conf=%s\n' "${SCCACHE_BUCKET:-none}" \
+        "$SCCACHE_SERVER_UDS" "$(cat "${SCCACHE_CONF:-/dev/null}")" >>"$FAKE_SCCACHE_LOG"
+    # Model a server that cannot start because its backend is unreachable,
+    # or one whose R2 level alone times out.
+    case "${FAKE_SCCACHE_START:-ok}" in
+      ok) ;;
+      fail-r2) [[ -z "${SCCACHE_BUCKET:-}" ]] || exit 2 ;;
+      *)
+        printf 'sccache: error: Timed out waiting for server startup\n' >&2
+        exit 2
+        ;;
+    esac
     ;;
   --show-stats|--stop-server) ;;
   *) exit 64 ;;
@@ -104,3 +112,40 @@ set -e
   exit 1
 }
 printf '[test-run-rust-build] the build status survives the fallback\n'
+
+# An R2 server that cannot start retries as the disk-only cache on its own
+# socket, with the minute-long startup wait, and still compiles cached.
+printf '%s\n' '[default]' 'aws_access_key_id = synthetic' >"$work/r2.aws"
+r2_log="$work/r2-start.log"
+env \
+  PATH="$work/bin:$PATH" \
+  TMPDIR="$work" \
+  FAKE_SCCACHE_START=fail-r2 \
+  FAKE_SCCACHE_LOG="$r2_log" \
+  CODEWIRE_SCCACHE_MODE=r2 \
+  SCCACHE_BUCKET=remote-bucket \
+  SCCACHE_ENDPOINT=https://example.invalid \
+  CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/v1 \
+  AWS_SHARED_CREDENTIALS_FILE="$work/r2.aws" \
+  "$RUNNER" bash -eu -c '
+    [[ "$RUSTC_WRAPPER" == /usr/local/bin/sccache ]]
+    [[ ! -v SCCACHE_BUCKET && ! -v SCCACHE_MULTILEVEL_CHAIN && ! -v AWS_SHARED_CREDENTIALS_FILE ]]
+    [[ "$SCCACHE_SERVER_UDS" == /tmp/codewire-sccache.sock.local ]]' \
+  >"$work/r2.out" 2>&1 || {
+    cat "$work/r2.out" >&2
+    printf 'an R2 startup failure did not fall back to the local cache\n' >&2
+    exit 1
+  }
+[[ "$(cat "$r2_log")" == "start bucket=remote-bucket uds=/tmp/codewire-sccache.sock conf=server_startup_timeout_ms = 60000
+start bucket=none uds=/tmp/codewire-sccache.sock.local conf=server_startup_timeout_ms = 60000" ]] || {
+  cat "$r2_log" >&2
+  printf 'R2 fallback did not retry exactly once, disk-only, on its own socket\n' >&2
+  exit 1
+}
+grep -qF 'sccache did not start with R2; retrying with the local cache' "$work/r2.out"
+grep -qF 'CODEWIRE_CI_PHASE name=rust-compile-link mode=local' "$work/r2.out"
+[[ -z "$(find "$work" -maxdepth 1 -name 'codewire-sccache-conf.*' -print -quit)" ]] || {
+  printf 'the startup timeout config outlived the build\n' >&2
+  exit 1
+}
+printf '[test-run-rust-build] an R2 startup failure falls back to the local cache\n'

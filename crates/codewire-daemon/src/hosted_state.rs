@@ -121,6 +121,7 @@ mod tests {
                 daemon_credential: SYNTHETIC_CREDENTIAL,
                 projection_selection_sha256: digest,
                 managed_credential_clients: clients,
+                working_directory: "",
             })
             .unwrap()
     }

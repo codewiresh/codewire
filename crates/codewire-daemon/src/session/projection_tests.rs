@@ -155,6 +155,7 @@ async fn eof_during_actual_pending_projection_reaps_launcher_before_terminal_exi
                 process_directory: process_directory.clone(),
             }),
         }),
+        session_working_dir: None,
     };
     let bridge = CredentialBridge::new(config.credential_bridge.clone());
     let (input, input_rx) = mpsc::channel(4);

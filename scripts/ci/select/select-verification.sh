@@ -131,6 +131,41 @@ select_js_security() {
   select_token security_js
 }
 
+# Every path scripts/checks/security/audit-js-supply-chain.sh scans: its
+# active_paths and web_runtime_paths pathspecs, plus the vendored browser
+# assets it hashes. Without glob magic a Git pathspec `*` also matches `/`, as
+# a [[ == ]] pattern does. test-select-verification.sh fails when the audit
+# scans a pathspec that this list does not cover.
+js_audit_paths=(
+  ".gitea/**"
+  "apps/**/Dockerfile"
+  "apps/**/Dockerfile.*"
+  "apps/dashboard/playwright.config.ts"
+  "deployments/**/*.yaml"
+  "deployments/**/*.yml"
+  "Dockerfile"
+  "Dockerfile.*"
+  "Makefile"
+  "package.json"
+  "packages/**/*.json"
+  "scripts/**"
+  "apps/docs/zola/**"
+  "crates/codewire-dashboard-web/src/**"
+  "crates/codewire-dashboard-web/templates/**"
+  "docs/homepage/**"
+  "packages/codewire-design/**"
+  "crates/codewire-dashboard-web/assets/**"
+)
+
+js_audit_scans() {
+  local pattern
+  for pattern in "${js_audit_paths[@]}"; do
+    # shellcheck disable=SC2053 # The unquoted side is the glob to match.
+    [[ "$1" == $pattern ]] && return 0
+  done
+  return 1
+}
+
 select_services() {
   select_token service_integration
   select_token service_apikey_smoke
@@ -317,6 +352,12 @@ if [ "$event_selected" = false ]; then
         select_token policy_shell
         ;;
     esac
+
+    # The JavaScript supply-chain audit is grep-only. Run it for any path it
+    # scans, in addition to that path's own classification.
+    if js_audit_scans "$path"; then
+      select_js_security
+    fi
 
     # The Kind dev-binary build is local-only (`make kind-deploy`): no CI,
     # release or deploy workflow and no bake group builds it, so it is not a
@@ -858,7 +899,7 @@ if [ "$event_selected" = false ]; then
         select_token ios
         recognized=true
         ;;
-      apps/cli/Makefile|scripts/dev/test-cli-host.py|scripts/dev/test-cli-host-managed.py|scripts/ci/tests/test-cli-host-managed.py|scripts/dev/test-cli-update.py|scripts/ci/tests/test-cli-update-mesh-endpoints.py|scripts/dev/test-native-managed-startup.py|scripts/dev/fixtures/agent-peer.py|scripts/dev/fixtures/host-member-managed-assets.py)
+      apps/cli/Makefile|scripts/dev/test-cli-host.py|scripts/dev/test-cli-host-managed.py|scripts/ci/tests/test-cli-host-managed.py|scripts/dev/test-cli-update.py|scripts/ci/tests/test-cli-update-mesh-endpoints.py|scripts/ci/tests/test-build-cw-release-dir.py|scripts/dev/test-native-managed-startup.py|scripts/dev/fixtures/agent-peer.py|scripts/dev/fixtures/host-member-managed-assets.py)
         select_token rust
         select_token rust_pkg_codewire_cli
         select_token rust_pkg_codewire_cli_bin
@@ -972,6 +1013,16 @@ if [ "$event_selected" = false ]; then
           select_token rust
           select_token rust_pkg_codewire_desktop
           select_token rust_pkg_codewire_types
+          ;;
+        codewire-workspace-image)
+          # The published workspace pin: every consumer compiles its constants,
+          # and a post-publish proposal changes nothing else.
+          select_token rust
+          select_token rust_pkg_codewire_workspace_image
+          select_token rust_pkg_codewire_server_core
+          select_token rust_pkg_codewire_orchestration
+          select_token rust_pkg_codewire_dashboard_web
+          select_token rust_pkg_codewire_cli
           ;;
         codewire-platform-native)
           # Deletion-only tombstone: a revival of the retired ambient-SSH
@@ -1321,7 +1372,8 @@ if [ "$event_selected" = false ]; then
         select_token policy
         recognized=true
         ;;
-      scripts/dev/kind/dev-loop.sh|scripts/dev/kind/deploy-service.sh)
+      scripts/dev/kind/dev-loop.sh|scripts/dev/kind/deploy-service.sh|\
+      scripts/dev/kind/trust-roots.sh)
         # Retained-cluster review helpers (`make kind-*`) that the Kind gate
         # never runs. The runtime-image table has a hermetic policy fixture.
         select_token policy
@@ -1477,6 +1529,7 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/ci/tests/test-kind-e2e-*.sh|scripts/ci/tests/test-kind-forwards.sh|\
+      scripts/ci/tests/test-kind-trust-roots.sh|\
       scripts/ci/tests/test-kind-codex-session.py|scripts/ci/tests/test-kind-codex-login.py|\
       scripts/ci/tests/test-kind-credentials.py|scripts/ci/tests/test-kind-cluster-profiles.py|\
       scripts/ci/tests/test-kind-dev-profile.py|scripts/ci/tests/test-kind-profile-artifacts.py|\
@@ -1675,6 +1728,10 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-resolve-published-support-pair.sh|\
       scripts/ci/tests/test-run-skopeo-container.sh|\
       scripts/ci/tests/test-support-images-workflow.sh|\
+      scripts/ci/images/propose-workspace-image-pin.sh|\
+      scripts/ci/tests/test-propose-workspace-image-pin.sh|\
+      scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh|\
+      scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh|\
       scripts/ci/tests/test-workspace-image-verify-workflow.sh|\
       scripts/ci/tests/test-base-image-source.sh|\
       scripts/ci/tests/test-apt-get-with-retry.sh|\
@@ -1739,7 +1796,8 @@ if [ "$event_selected" = false ]; then
         select_token security_js
         recognized=true
         ;;
-      scripts/checks/security/audit-runtime-images.sh)
+      scripts/checks/security/audit-runtime-images.sh|\
+      scripts/ci/images/workspace-image-pin.py)
         select_token security
         select_token deploy
         select_token edge_kind

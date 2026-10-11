@@ -227,6 +227,7 @@ impl TwoPodStore {
                 managed_credential_clients: String::new(),
                 credential_scope: WorkspaceCredentialScope::Pod,
                 environment_generation: 3,
+                working_directory: String::new(),
             },
         );
     }

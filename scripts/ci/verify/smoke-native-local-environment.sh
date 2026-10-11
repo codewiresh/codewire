@@ -56,7 +56,7 @@ GITEA_COMMIT='bcbae548ab2f4f0e407068aa8717cec341084d7a'
 GITEA_README_SHA256='d4911db7bc817528fbcbaaf39e76851700084b65494dac1e29afb997867ac006'
 GITHUB_COMMIT='93f68ba4abc9f6e222481265b9b759e71d332575'
 GITHUB_README_SHA256='3661bce99f8eba5e48077eeddb4840f4404c1ceafbf200b9e8470bc7b4f22e50'
-WORKSPACE_IMAGE='ghcr.io/codewiresh/workspace@sha256:fa5d2fa61bb03b0e9181915b57ce5f2f8fa053eec8b7c6a950ecaadf93bc3645'
+WORKSPACE_IMAGE="$(python3 "$SOURCE_ROOT/scripts/ci/images/workspace-image-pin.py" show public-image)"
 DOCKER_PUBLIC_IMAGE='ghcr.io/stargz-containers/alpine@sha256:237e28761b771d41d0b841bacfe39f4a49d30b1c8dfecc90aef09b68d86ebc99'
 SCRATCH_MOUNT_OPTIONS=''
 NAME='native-smoke'
@@ -121,6 +121,18 @@ KEYRING_DAEMON_PID=''
 CREATE_ACCESS_ARGS=()
 CREATE_DOCKER_ARGS=()
 DIRECT_SHARE_PIDS=()
+NETWORK_QUALIFICATION=0
+NETWORK_PROBE_PID=''
+# Public HTTPS targets for the opt-in network qualification. The guest reaches
+# them only through the packet worker and the developer-policy egress broker;
+# the host measures the same URLs for its baseline.
+readonly NETWORK_PROBE_URL='https://releases.codewire.sh/cw/v1/channels/stable.json'
+# The published v0.3.387 x86_64-unknown-linux-musl cw executable.
+readonly THROUGHPUT_DOWNLOAD_URL='https://releases.codewire.sh/cw/v1/blobs/sha256/8a7d291d1c796c7e7180125888af9aad64a1b56a0fbd08850225eaecf7399adc'
+readonly THROUGHPUT_DOWNLOAD_BYTES=61632080
+readonly THROUGHPUT_UPLOAD_URL='https://speed.cloudflare.com/__up'
+readonly THROUGHPUT_UPLOAD_BYTES=33554432
+readonly THROUGHPUT_ROUNDS=3
 
 usage() {
   cat <<'USAGE' >&2
@@ -139,6 +151,7 @@ usage: smoke-native-local-environment.sh \
    --managed-agent-update-cw-image-receipt ABSOLUTE_B_IMAGE_RECEIPT \
    --managed-agent-update-cw-sha256 B_CW_SHA256] \
   [--workspace-image-import-bin ABSOLUTE_PATH] \
+  [--network-qualification] \
   [--scratch-parent ABSOLUTE_DIRECTORY]
 
 Runs the built cw Linux/KVM native-environment product smoke with 2 vCPUs and
@@ -190,6 +203,16 @@ The three update inputs additionally select the running-VM A-to-B-to-A journey.
 They require both managed modes. Host and both asset identities are admitted
 before allocating scratch; the same journey repeats admission and preserves
 every existing managed-session assertion before revocation and cleanup.
+
+--network-qualification adds the Linux network qualification to either mode.
+It reads the serving packet worker's descriptor table under the running VM;
+measures guest download and upload through the worker and broker against the
+host's own on the same public URLs (MB/s and guest/host ratios); then SIGKILLs
+the worker, and after stop/start the broker, while a guest HTTPS probe loop
+runs. Each kill must give a typed environment error, fail every probe from the
+kill second, leave no internet socket on the egress path, and stop/start must
+restore egress. It needs public HTTPS to releases.codewire.sh and
+speed.cloudflare.com from the host and the broker.
 USAGE
 }
 
@@ -288,6 +311,11 @@ while [[ $# -gt 0 ]]; do
       MANAGED_AGENT_SESSIONS=1
       shift
       ;;
+    --network-qualification)
+      [[ "$NETWORK_QUALIFICATION" -eq 0 ]] || { usage; exit 2; }
+      NETWORK_QUALIFICATION=1
+      shift
+      ;;
     --managed-agent-cw-image-receipt)
       [[ $# -ge 2 && -n "$2" && "$MANAGED_AGENT_CW_IMAGE_RECEIPT_SEEN" -eq 0 ]] || { usage; exit 2; }
       MANAGED_AGENT_CW_IMAGE_RECEIPT_SEEN=1
@@ -340,6 +368,9 @@ fi
 for tool in awk base64 cat chmod cp dirname e2fsck find findmnt git id jq ln mkdir mktemp python3 readlink realpath resize2fs rg script sha256sum sleep stat tail timeout touch tr uname; do
   require_cmd "$tool"
 done
+if [[ "$NETWORK_QUALIFICATION" -eq 1 ]]; then
+  [[ -x /usr/bin/curl ]] || die 'network qualification requires /usr/bin/curl for the host baseline'
+fi
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   [[ -n "$WORKSPACE_IMAGE_IMPORT_BIN" ]] || die 'managed smoke requires --workspace-image-import-bin'
   require_absolute_canonical_file 'workspace image importer' "$WORKSPACE_IMAGE_IMPORT_BIN"
@@ -941,6 +972,509 @@ stop_smoke_mesh() {
   jq -e '.stopped == true and .state == "stopped"' "$LAST_STDOUT" >/dev/null ||
     die 'standalone Mesh shutdown metadata drifted'
   MESH_STARTED=0
+}
+
+# Linux network qualification (--network-qualification). The packet worker,
+# the egress broker and every other process of the environment are found as
+# the exact current runner and its descendants; nothing is selected by name.
+network_process_report() {
+  # Prints one JSON object describing the runner's process tree: each
+  # process's role, confinement status, and every descriptor it holds, with
+  # Unix and internet sockets resolved against the kernel tables. A process
+  # whose descriptor table is not readable (it made itself non-dumpable) is
+  # reported as opaque.
+  /usr/bin/env python3 - "$RUNNER_PID" "$CW_BIN" <<'PY'
+import ipaddress
+import json
+import os
+import socket
+import struct
+import sys
+
+runner = int(sys.argv[1])
+cw = os.path.realpath(sys.argv[2])
+
+
+def read(path, mode="r"):
+    with open(path, mode) as source:
+        return source.read()
+
+
+children = {}
+for entry in os.listdir("/proc"):
+    if not entry.isdigit():
+        continue
+    try:
+        stat = read(f"/proc/{entry}/stat")
+    except OSError:
+        continue
+    fields = stat.rsplit(") ", 1)[1].split()
+    if fields[0] in ("Z", "X"):
+        continue
+    children.setdefault(int(fields[1]), []).append(int(entry))
+tree, pending = [], [runner]
+while pending:
+    pid = pending.pop()
+    tree.append(pid)
+    pending.extend(children.get(pid, []))
+
+
+def inet_table():
+    sockets = {}
+    for name, family in (("tcp", 4), ("udp", 4), ("raw", 4), ("udplite", 4),
+                         ("tcp6", 6), ("udp6", 6), ("raw6", 6), ("udplite6", 6)):
+        try:
+            lines = read(f"/proc/{runner}/net/{name}").splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            columns = line.split()
+
+            def address(text):
+                host, port = text.split(":")
+                raw = bytes.fromhex(host)
+                if family == 4:
+                    value = ipaddress.IPv4Address(raw[::-1])
+                else:
+                    value = ipaddress.IPv6Address(b"".join(
+                        raw[index:index + 4][::-1] for index in range(0, 16, 4)))
+                return str(value), int(port, 16)
+
+            local, remote = address(columns[1]), address(columns[2])
+            sockets[int(columns[9])] = {"table": name, "local": local, "remote": remote}
+    return sockets
+
+
+def unix_table():
+    sockets = {}
+    for line in read(f"/proc/{runner}/net/unix").splitlines()[1:]:
+        columns = line.split()
+        sockets[int(columns[6])] = {
+            "type": int(columns[4], 16),
+            "state": int(columns[5], 16),
+            "named": len(columns) > 7,
+        }
+    return sockets
+
+
+def loopback(address):
+    value = ipaddress.ip_address(address)
+    if isinstance(value, ipaddress.IPv6Address) and value.ipv4_mapped:
+        value = value.ipv4_mapped
+    return value.is_loopback
+
+
+inet, unix = inet_table(), unix_table()
+processes = []
+for pid in sorted(tree):
+    try:
+        argv = read(f"/proc/{pid}/cmdline", "rb").split(b"\0")
+        status = read(f"/proc/{pid}/status")
+    except OSError:
+        continue
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except PermissionError:
+        # A non-dumpable process hides its executable link; its argv[0] is
+        # the exact path the runner started.
+        exe = os.fsdecode(argv[0])
+    except OSError:
+        continue
+    fields = dict(line.split(":", 1) for line in status.splitlines() if ":" in line)
+    if os.path.realpath(exe) == cw and len(argv) > 1:
+        role = os.fsdecode(argv[1])
+    else:
+        role = os.path.basename(exe)
+    record = {
+        "pid": pid,
+        "role": role,
+        "exe": exe,
+        "threads": int(fields["Threads"]),
+        "seccomp": int(fields["Seccomp"]),
+        "no_new_privs": int(fields["NoNewPrivs"]),
+        "cap_eff": fields["CapEff"].strip(),
+    }
+    try:
+        descriptors = os.listdir(f"/proc/{pid}/fd")
+    except PermissionError:
+        record["opaque"] = True
+        processes.append(record)
+        continue
+    record["opaque"] = False
+    files, unix_sockets, inet_sockets, other = [], [], [], []
+    for fd in sorted(descriptors, key=int):
+        try:
+            target = os.readlink(f"/proc/{pid}/fd/{fd}")
+        except OSError:
+            continue
+        if target.startswith("socket:["):
+            inode = int(target[8:-1])
+            if inode in inet:
+                local, remote = inet[inode]["local"], inet[inode]["remote"]
+                # A listener or unconnected socket has no remote port.
+                confined = loopback(local[0]) and (remote[1] == 0 or loopback(remote[0]))
+                inet_sockets.append({"fd": int(fd), **inet[inode], "loopback": confined})
+            elif inode in unix:
+                unix_sockets.append({"fd": int(fd), "inode": inode, **unix[inode]})
+            else:
+                other.append({"fd": int(fd), "target": target})
+        elif target.startswith("anon_inode:"):
+            other.append({"fd": int(fd), "target": target})
+        else:
+            files.append({"fd": int(fd), "target": target})
+    record.update(files=files, unix=unix_sockets, inet=inet_sockets, other=other)
+    processes.append(record)
+print(json.dumps({"runner": runner, "processes": processes}, sort_keys=True))
+PY
+}
+
+require_serving_worker_boundary() {
+  local label="$1"
+  local report="$SMOKE_ROOT/network-$label-processes.json"
+  network_process_report >"$report" || die "network process report failed: $label"
+  cat "$report" >>"$TRANSCRIPT"
+  # Under the running VM the worker holds standard I/O on /dev/null, its epoll
+  # and eventfd, and connected unnamed Unix streams only: no file and no
+  # internet socket. The broker is non-dumpable, so only its confinement
+  # status is readable; it must be single threaded, filtered and capability-free.
+  jq -e '
+    ([.processes[] | select(.role == "__native-network-worker")] | length) == 1 and
+    ([.processes[] | select(.role == "__native-egress-broker")] | length) == 1 and
+    (.processes[] | select(.role == "__native-network-worker") |
+      .opaque == false and .threads == 1 and .seccomp == 2 and .no_new_privs == 1 and
+      .cap_eff == "0000000000000000" and
+      (.files | all(.fd <= 2 and .target == "/dev/null")) and
+      (.files | length) == 3 and
+      (.inet | length) == 0 and
+      (.unix | length) >= 2 and
+      (.unix | all(.type == 1 and .state == 3 and .named == false)) and
+      (.other | all(.target == "anon_inode:[eventpoll]" or .target == "anon_inode:[eventfd]"))) and
+    (.processes[] | select(.role == "__native-egress-broker") |
+      .threads == 1 and .seccomp == 2 and .no_new_privs == 1 and
+      .cap_eff == "0000000000000000")
+  ' "$report" >/dev/null || die "serving packet worker boundary drifted: $label ($report)"
+  log "network: $label worker $(jq -c '.processes[] | select(.role == "__native-network-worker") |
+    {pid, files: (.files | length), unix: (.unix | length), inet: (.inet | length), other: [.other[].target]}' "$report")"
+}
+
+require_no_egress_path_internet_socket() {
+  local label="$1"
+  local killed_role="$2"
+  local report="$SMOKE_ROOT/network-$label-processes.json"
+  network_process_report >"$report" || die "network process report failed: $label"
+  cat "$report" >>"$TRANSCRIPT"
+  # After either kill the broker must be gone: it is the only process allowed
+  # to dial, and it is non-dumpable. Every other process of the environment
+  # must be readable and hold no non-loopback internet socket. The Mesh
+  # transport is a separate ingress path, non-dumpable by design; it is
+  # reported, not inspected.
+  jq -e --arg killed "$killed_role" '
+    ([.processes[] | select(.role == $killed)] | length) == 0 and
+    ([.processes[] | select(.role == "__native-egress-broker")] | length) == 0 and
+    ([.processes[] | select(.opaque and .role != "__native-mesh-transport")] | length) == 0 and
+    ([.processes[] | select(.opaque | not) | .inet[] | select(.loopback | not)] | length) == 0 and
+    ([.processes[] | select(.role == "__native-network-worker") | .inet[]] | length) == 0
+  ' "$report" >/dev/null || die "an egress-path process kept an internet socket after $label ($report)"
+  log "network: $label process tree $(jq -c '[.processes[] |
+    {role, opaque, inet: [(.inet // [])[] | "\(.table) \(.local[0]):\(.local[1])->\(.remote[0]):\(.remote[1])"]}]' "$report")"
+}
+
+kill_network_process() {
+  # SIGKILL the one exact role process under the current runner through a
+  # pidfd, after re-reading its identity. Prints "PID EPOCH_SECONDS", the
+  # host time immediately before the signal.
+  local role="$1"
+  /usr/bin/env python3 - "$RUNNER_PID" "$CW_BIN" "$role" "$ENVIRONMENT_ID" <<'PY'
+import os
+import signal
+import sys
+import time
+
+runner, cw, role, environment = int(sys.argv[1]), os.path.realpath(sys.argv[2]), sys.argv[3], sys.argv[4]
+
+
+def identity(pid):
+    with open(f"/proc/{pid}/stat", "r", encoding="ascii") as source:
+        fields = source.read().rsplit(") ", 1)[1].split()
+    with open(f"/proc/{pid}/cmdline", "rb") as source:
+        argv = source.read().split(b"\0")
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except PermissionError:
+        # The broker is non-dumpable; argv[0] is the exact path the runner ran.
+        exe = os.fsdecode(argv[0])
+    return int(fields[1]), int(fields[19]), os.path.realpath(exe), argv
+
+
+matches = []
+for entry in os.listdir("/proc"):
+    if not entry.isdigit():
+        continue
+    try:
+        parent, start, exe, argv = identity(int(entry))
+    except OSError:
+        continue
+    if (parent == runner and exe == cw and len(argv) > 3 and argv[1] == role.encode()
+            and argv[2] == b"--environment-id" and argv[3] == environment.encode()):
+        matches.append((int(entry), start))
+if len(matches) != 1:
+    raise SystemExit(f"expected exactly one {role} under runner {runner}, found {len(matches)}")
+pid, start = matches[0]
+pidfd = os.pidfd_open(pid, 0)
+try:
+    if identity(pid)[:3] != (runner, start, cw):
+        raise SystemExit(f"{role} identity changed before the kill")
+    killed_at = time.time()
+    signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+finally:
+    os.close(pidfd)
+print(pid, f"{killed_at:.6f}")
+PY
+}
+
+start_guest_probe_loop() {
+  # A guest HTTPS probe once every quarter second, each line "START RESULT"
+  # with the guest's wall-clock start time, appended to the read-write direct
+  # share so the host reads it live. The loop ends at its stop file.
+  local label="$1"
+  rm -f -- "$DIRECT_RW_SOURCE/network-probe-$label.log" "$DIRECT_RW_SOURCE/network-probe-$label.stop"
+  # shellcheck disable=SC2016 # Expanded by the guest shell.
+  cw_isolated run --no-tty -- /bin/sh -c '
+    unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
+    log="/workspace/direct-rw/network-probe-$1.log"
+    stop="/workspace/direct-rw/network-probe-$1.stop"
+    count=0
+    while [ ! -e "$stop" ] && [ "$count" -lt 1200 ]; do
+      started="$(date +%s.%N)"
+      code="$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 2 --max-time 3 "$2" 2>/dev/null)" ||
+        code=fail
+      printf "%s %s\n" "$started" "$code" >>"$log"
+      count=$((count + 1))
+      sleep 0.25
+    done
+    printf "network-probe-loop-done %s\n" "$count"
+  ' network-probe "$label" "$NETWORK_PROBE_URL" \
+    >"$SMOKE_ROOT/network-probe-$label.stdout" 2>"$SMOKE_ROOT/network-probe-$label.stderr" &
+  NETWORK_PROBE_PID=$!
+  for _attempt in {1..240}; do
+    if [[ -f "$DIRECT_RW_SOURCE/network-probe-$label.log" ]] &&
+       (( $(awk '$2 == "200"' "$DIRECT_RW_SOURCE/network-probe-$label.log" | wc -l) >= 4 )) &&
+       [[ "$(tail -n 1 "$DIRECT_RW_SOURCE/network-probe-$label.log" | awk '{print $2}')" == 200 ]]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  die "guest HTTPS probe loop did not succeed before the $label kill"
+}
+
+stop_guest_probe_loop() {
+  local label="$1"
+  touch "$DIRECT_RW_SOURCE/network-probe-$label.stop"
+  for _attempt in {1..120}; do
+    kill -0 "$NETWORK_PROBE_PID" 2>/dev/null || break
+    sleep 0.25
+  done
+  if kill -0 "$NETWORK_PROBE_PID" 2>/dev/null; then
+    pkill -TERM -P "$NETWORK_PROBE_PID" 2>/dev/null || true
+    kill -TERM "$NETWORK_PROBE_PID" 2>/dev/null || true
+  fi
+  wait "$NETWORK_PROBE_PID" 2>/dev/null || true
+  NETWORK_PROBE_PID=''
+  cat "$SMOKE_ROOT/network-probe-$label.stdout" "$SMOKE_ROOT/network-probe-$label.stderr" \
+    >>"$TRANSCRIPT" 2>/dev/null || true
+}
+
+wait_for_probes_after() {
+  local label="$1"
+  local after="$2"
+  for _attempt in {1..240}; do
+    if (( $(awk -v after="$after" '$1 >= after' "$DIRECT_RW_SOURCE/network-probe-$label.log" | wc -l) >= 6 )); then
+      return 0
+    fi
+    sleep 0.25
+  done
+  die "guest HTTPS probe loop stopped reporting after the $label kill"
+}
+
+require_probes_fail_from_kill() {
+  # Every probe the guest started from the kill second on failed, and the
+  # probes before the kill succeeded. Guest and host clocks share kvmclock;
+  # one second absorbs their skew and a probe already in flight at the kill.
+  local label="$1"
+  local killed_at="$2"
+  local log_file="$DIRECT_RW_SOURCE/network-probe-$label.log"
+  cp -- "$log_file" "$SMOKE_ROOT/network-probe-$label.log"
+  cat "$log_file" >>"$TRANSCRIPT"
+  /usr/bin/env python3 - "$log_file" "$killed_at" "$label" <<'PY' >&2 || die "guest HTTPS probes did not fail closed from the $label kill second"
+import sys
+
+path, killed_at, label = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+probes = []
+with open(path, "r", encoding="ascii") as source:
+    for line in source:
+        started, result = line.split()
+        probes.append((float(started) - killed_at, result))
+before = [result for offset, result in probes if offset < -0.5]
+after = [result for offset, result in probes if offset >= 1.0]
+first_failure = next((offset for offset, result in probes if offset > -0.5 and result != "200"), None)
+last_success = max((offset for offset, result in probes if result == "200"), default=None)
+print(f"[native-local-environment-smoke] network: {label} probes before={len(before)} "
+      f"ok_before={before.count('200')} after_kill_second={len(after)} "
+      f"ok_after_kill_second={after.count('200')} first_failure_offset_s={first_failure} "
+      f"last_success_offset_s={last_success}")
+if len(before) < 4 or before[-4:] != ["200"] * 4:
+    raise SystemExit(1)
+if len(after) < 4 or any(result == "200" for result in after):
+    raise SystemExit(1)
+if first_failure is None or first_failure > 1.5:
+    raise SystemExit(1)
+PY
+}
+
+require_guest_egress_restored() {
+  local label="$1"
+  # shellcheck disable=SC2016 # Expanded by the guest shell.
+  run_cw run --no-tty -- /bin/sh -c '
+    unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+      code="$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 5 "$1" 2>/dev/null)" ||
+        code=fail
+      if [ "$code" = 200 ]; then
+        printf "guest-egress-restored %s\n" "$attempt"
+        exit 0
+      fi
+      sleep 1
+    done
+    exit 1
+  ' egress-restored "$NETWORK_PROBE_URL"
+  rg -q '^guest-egress-restored [0-9]+$' "$LAST_STDOUT" ||
+    die "stop/start did not restore guest egress after the $label kill"
+  log "network: $label egress restored after stop/start ($(cat "$LAST_STDOUT"))"
+}
+
+restart_failed_environment() {
+  local label="$1"
+  run_cw env stop --local "$NAME" --output json
+  jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null ||
+    die "environment did not stop after the $label kill"
+  wait_for_journal_complete || die "stop after the $label kill left a partial journal"
+  assert_direct_share_processes_stopped
+  run_cw env start --local "$NAME" --output json
+  jq -e '.state == "running" and (has("error_code") | not)' "$LAST_STDOUT" >/dev/null ||
+    die "environment did not restart cleanly after the $label kill"
+  wait_for_journal_complete || die "start after the $label kill left a partial journal"
+  RUNNER_PID="$(native_database_value runner_pid)"
+  [[ -d "/proc/$RUNNER_PID" ]] || die "restarted runner is not live after the $label kill"
+  assert_direct_share_processes
+}
+
+require_network_kill_fails_closed() {
+  local role="$1"
+  local label="$2"
+  local error_code="$3"
+  local kill_record killed_pid killed_at
+  log "network: SIGKILL the $label while a guest HTTPS probe loop runs"
+  start_guest_probe_loop "$label"
+  kill_record="$(kill_network_process "$role")" || die "exact $label kill failed"
+  read -r killed_pid killed_at <<<"$kill_record"
+  wait_for_pid_death "$killed_pid" || die "killed $label process remained live"
+  wait_for_environment_state error || die "$label kill was not classified as an environment error"
+  jq -e --arg code "$error_code" '.state == "error" and .error_code == $code' "$LAST_STDOUT" >/dev/null ||
+    die "$label kill did not reach CLI status as $error_code"
+  log "network: $label kill gave state=error error_code=$error_code"
+  wait_for_probes_after "$label" "$(awk -v at="$killed_at" 'BEGIN { printf "%.6f", at + 1.0 }')"
+  require_no_egress_path_internet_socket "$label-killed" "$role"
+  stop_guest_probe_loop "$label"
+  require_probes_fail_from_kill "$label" "$killed_at"
+  restart_failed_environment "$label"
+  require_guest_egress_restored "$label"
+}
+
+measure_network_throughput() {
+  # Single-stream HTTPS download and upload, interleaving host and guest
+  # rounds so both see the same line. MB/s is 10^6 bytes per second as curl
+  # reports the transfer rate.
+  local round host_line guest_line
+  local results="$SMOKE_ROOT/network-throughput.tsv"
+  : >"$results"
+  for round in $(seq 1 "$THROUGHPUT_ROUNDS"); do
+    # shellcheck disable=SC2016 # Expanded by the host baseline shell.
+    host_line="$(env -i PATH=/usr/bin:/bin LC_ALL=C /bin/sh -c '
+      download="$(/usr/bin/curl -sS -o /dev/null -w "%{http_code} %{size_download} %{speed_download}" \
+        --connect-timeout 10 --max-time 300 "$1")"
+      upload="$(head -c "$3" /dev/zero | /usr/bin/curl -sS -o /dev/null \
+        -w "%{http_code} %{size_upload} %{speed_upload}" --connect-timeout 10 --max-time 300 \
+        -H "Content-Type: application/octet-stream" --data-binary @- "$2")"
+      printf "%s %s\n" "$download" "$upload"
+    ' host-throughput "$THROUGHPUT_DOWNLOAD_URL" "$THROUGHPUT_UPLOAD_URL" "$THROUGHPUT_UPLOAD_BYTES")" ||
+      die "host throughput round $round failed"
+    printf 'host %s %s\n' "$round" "$host_line" >>"$results"
+    CW_COMMAND_TIMEOUT_SECONDS=900
+    # shellcheck disable=SC2016 # Expanded by the guest shell.
+    run_cw run --no-tty -- /bin/sh -c '
+      unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
+      download="$(curl -sS -o /dev/null -w "%{http_code} %{size_download} %{speed_download}" \
+        --connect-timeout 10 --max-time 300 "$1")"
+      upload="$(head -c "$3" /dev/zero | curl -sS -o /dev/null \
+        -w "%{http_code} %{size_upload} %{speed_upload}" --connect-timeout 10 --max-time 300 \
+        -H "Content-Type: application/octet-stream" --data-binary @- "$2")"
+      printf "guest-throughput %s %s\n" "$download" "$upload"
+    ' guest-throughput "$THROUGHPUT_DOWNLOAD_URL" "$THROUGHPUT_UPLOAD_URL" "$THROUGHPUT_UPLOAD_BYTES"
+    CW_COMMAND_TIMEOUT_SECONDS=180
+    guest_line="$(rg -o '^guest-throughput (.*)$' -r '$1' "$LAST_STDOUT")" ||
+      die "guest throughput round $round printed no result"
+    printf 'guest %s %s\n' "$round" "$guest_line" >>"$results"
+  done
+  cat "$results" >>"$TRANSCRIPT"
+  /usr/bin/env python3 - "$results" "$THROUGHPUT_DOWNLOAD_BYTES" "$THROUGHPUT_UPLOAD_BYTES" \
+    "$SMOKE_ROOT/network-throughput.json" <<'PY' >&2 || die 'network throughput measurement is incomplete'
+import json
+import statistics
+import sys
+
+path, download_bytes, upload_bytes, receipt = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+rates = {"host": {"download": [], "upload": []}, "guest": {"download": [], "upload": []}}
+with open(path, "r", encoding="ascii") as source:
+    for line in source:
+        place, _round, d_code, d_size, d_speed, u_code, u_size, u_speed = line.split()
+        if d_code != "200" or int(d_size) != download_bytes:
+            raise SystemExit(f"{place} download returned {d_code} with {d_size} bytes")
+        if u_code != "200" or int(u_size) != upload_bytes:
+            raise SystemExit(f"{place} upload returned {u_code} with {u_size} bytes")
+        rates[place]["download"].append(float(d_speed) / 1e6)
+        rates[place]["upload"].append(float(u_speed) / 1e6)
+summary = {}
+for direction in ("download", "upload"):
+    host = statistics.median(rates["host"][direction])
+    guest = statistics.median(rates["guest"][direction])
+    summary[direction] = {
+        "host_mb_s": [round(value, 2) for value in rates["host"][direction]],
+        "guest_mb_s": [round(value, 2) for value in rates["guest"][direction]],
+        "host_median_mb_s": round(host, 2),
+        "guest_median_mb_s": round(guest, 2),
+        "guest_host_ratio": round(guest / host, 3),
+    }
+    print(f"[native-local-environment-smoke] network: throughput {direction} "
+          f"guest median {guest:.2f} MB/s, host median {host:.2f} MB/s, "
+          f"guest/host {guest / host:.3f} (guest {summary[direction]['guest_mb_s']}, "
+          f"host {summary[direction]['host_mb_s']})")
+with open(receipt, "w", encoding="ascii") as sink:
+    json.dump({"download_bytes": download_bytes, "upload_bytes": upload_bytes, **summary}, sink,
+              sort_keys=True)
+PY
+  cat "$SMOKE_ROOT/network-throughput.json" >>"$TRANSCRIPT"
+}
+
+run_network_qualification() {
+  log 'network: reading the serving packet worker descriptor table under the running VM'
+  require_serving_worker_boundary serving
+  log 'network: measuring guest and host single-stream HTTPS throughput'
+  measure_network_throughput
+  require_network_kill_fails_closed __native-network-worker worker network_worker_exit
+  require_serving_worker_boundary after-worker-restart
+  require_network_kill_fails_closed __native-egress-broker broker egress_broker_exit
+  require_serving_worker_boundary after-broker-restart
+  log 'network: qualification passed'
 }
 
 run_public_data_smoke() {
@@ -2009,6 +2543,11 @@ cleanup() {
   trap - EXIT HUP INT TERM
   ALLOW_REGISTRY_EGRESS=0
   CW_COMMAND_TIMEOUT_SECONDS=180
+  if [[ -n "$NETWORK_PROBE_PID" ]]; then
+    pkill -TERM -P "$NETWORK_PROBE_PID" 2>/dev/null || true
+    kill -TERM "$NETWORK_PROBE_PID" 2>/dev/null || true
+    wait "$NETWORK_PROBE_PID" 2>/dev/null || true
+  fi
   if [[ "$ENV_CREATED" -eq 1 && -f "$STATE_ROOT/supervisor.db" ]]; then
     if [[ "$status" -eq 0 ]]; then
       log 'cleaning native environment after incomplete smoke'
@@ -2473,6 +3012,10 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     .[0].protected_store_persistence == "operating_system" and
     .[0].cleanup_pending == false
   ' "$LAST_STDOUT" >/dev/null || die 'synthetic SSH revocation metadata drifted'
+
+  if [[ "$NETWORK_QUALIFICATION" -eq 1 ]]; then
+    run_network_qualification
+  fi
 
   log 'stopping the VM before scanning all durable test-owned state'
   run_cw env stop --local "$NAME" --output json
@@ -3249,6 +3792,10 @@ run_docker_persistence_smoke docker-resize-persistence-ok
 run_cw_expect_failure env resize --local "$NAME" --disk 20Gi --yes --output json
 rg -qF 'disk shrink is not supported' "$LAST_STDERR" ||
   die 'native disk shrink did not fail with an actionable error'
+
+if [[ "$NETWORK_QUALIFICATION" -eq 1 ]]; then
+  run_network_qualification
+fi
 
 log 'deleting the environment and proving complete owned-object cleanup'
 run_cw env rm --local "$NAME" --yes

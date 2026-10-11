@@ -122,7 +122,7 @@ ensure_review_origin() {
 #   public GHCR mirror publishes the same digests.
 # - dind: Docker Hub's official image, pulled by its index digest alone.
 RUNTIME_IMAGES=(
-  'workspace crates/codewire-server-core/src/runtime_images.rs DEFAULT_WORKSPACE_IMAGE ^registry\.example\.invalid/codewire/([a-z0-9-]+)@(sha256:[0-9a-f]{64})$ ghcr.io/codewiresh/\1@\2'
+  'workspace crates/codewire-workspace-image/src/pin.rs HARBOR_IMAGE ^registry\.example\.invalid/codewire/([a-z0-9-]+)@(sha256:[0-9a-f]{64})$ ghcr.io/codewiresh/\1@\2'
   'dind crates/codewire-orchestration/src/sandbox/template/mod.rs DEFAULT_DIND_IMAGE ^docker\.io/library/docker:[0-9]+\.[0-9]+\.[0-9]+-dind@(sha256:[0-9a-f]{64})$ docker.io/library/docker@\1'
 )
 
