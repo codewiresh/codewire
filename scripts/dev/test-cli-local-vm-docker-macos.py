@@ -17,7 +17,7 @@ It proves #1913's acceptance list on Apple silicon, with stock arm64 images:
 - filling the Docker disk's bytes or inodes fails with ENOSPC inside Docker
   only, container logs stay bounded, and the disk keeps its size;
 - images, volumes and the guest's Docker login persist across restart, a
-  runtime-generation update, VMM death, runner death and a dockerd crash
+  runtime install while stopped, VMM death, runner death and a dockerd crash
   (each repaired with `cw env --local daemon repair`);
 - removing the environment removes its Docker disk and ends the VM.
 
@@ -197,9 +197,12 @@ class DockerJourney(local_vm.LocalVmJourney):
         self.call("env", "--local", "start", local_vm.NAME, timeout=600)
         after = json.loads(self.call("env", "--local", "runtime", "info", local_vm.NAME, "--output", "json",
                                      timeout=300).stdout)
-        print(f"local-vm-docker: runtime generation {before.get('generation')} -> {after.get('generation')}")
+        def runtime(view):
+            return (view.get("selection") or {}).get("catalog", {}).get("active_sha256", "")[:12]
+        print(f"local-vm-docker: VM generation {before.get('generation')} -> {after.get('generation')}, "
+              f"active runtime catalog {runtime(before)} -> {runtime(after)}")
         self.require(self.sh(PERSISTENCE).stdout, "docker-persistence-ok")
-        self.check("a runtime-generation update keeps Docker state")
+        self.check("installing another runtime while stopped keeps Docker state")
 
         helper = self.helper_pid()
         os.kill(helper, signal.SIGKILL)
