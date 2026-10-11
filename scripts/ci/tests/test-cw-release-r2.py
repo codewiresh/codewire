@@ -525,6 +525,19 @@ class PublisherTest(unittest.TestCase):
             "Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"))
         self.assertIn("SignedHeaders=host;range;x-amz-content-sha256;x-amz-date", headers["authorization"])
 
+    def test_public_readback_names_its_user_agent(self):
+        # The public origin answers Python's default User-Agent with 403.
+        seen = []
+
+        class Recording:
+            def request(self, method, host, path, headers, body=None, limit=None):
+                seen.append((method, host, dict(headers)))
+                return r2.Response(200, {}, b"x")
+
+        r2.PublicOrigin(Recording()).get("cw/v1/releases/v9.9.9/SHA256SUMS")
+        self.assertEqual(seen, [("GET", r2.PUBLIC_HOST, {"user-agent": r2.PUBLIC_USER_AGENT})])
+        self.assertNotIn("python", r2.PUBLIC_USER_AGENT.lower())
+
     def test_object_keys_and_hosts_are_confined(self):
         for key in ("other/x", "cw/v1/../x", "cw/v1//x", "cw/v2/x"):
             with self.subTest(key), self.assertRaises(r2.PublishError):

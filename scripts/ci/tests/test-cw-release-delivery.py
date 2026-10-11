@@ -394,8 +394,8 @@ class DeliveryTest(unittest.TestCase):
             release.verify_detached(manifest, b"-----BEGIN PGP SIGNATURE-----\nbad\n", self.signer.trust)
 
     def test_synthetic_keys_never_satisfy_production_trust(self):
-        installer = (ROOT / "apps/cli/install.sh").read_text()
-        self.assertIn(f'PRODUCTION_FINGERPRINT = "{release.PRODUCTION_FINGERPRINT}"', installer)
+        compiled = (ROOT / "crates/codewire-cli/src/public_fetch.rs").read_text()
+        self.assertIn(f'const TRUST_FINGERPRINT: &str = "{release.PRODUCTION_FINGERPRINT}";', compiled)
         self.assertNotEqual(self.signer.fingerprint, release.PRODUCTION_FINGERPRINT)
         with self.assertRaises(release.ReleaseError):
             release.verify_delivery(self.dist, release.PRODUCTION_TRUST)

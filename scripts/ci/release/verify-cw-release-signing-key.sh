@@ -39,6 +39,12 @@ expected_fingerprint="$(
 
 tmp="$(mktemp -d)"
 cleanup() {
+  # Stop both agents before their homes disappear; the signing agent holds the
+  # unlocked key, and neither may outlive this check.
+  local home
+  for home in "$tmp/signing" "$tmp/verify"; do
+    [ ! -d "$home" ] || GNUPGHOME="$home" gpgconf --kill all >/dev/null 2>&1 || true
+  done
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -86,7 +92,7 @@ signature="$probe.asc"
 printf 'codewire release signing preflight\n' >"$probe"
 if ! printf '%s' "$CW_RELEASE_GPG_PASSPHRASE" |
   GNUPGHOME="$signing_home" gpg --batch --yes --pinentry-mode loopback \
-    --passphrase-fd 0 --local-user "$expected_fingerprint" --armor \
+    --passphrase-fd 0 --local-user "$expected_fingerprint!" --armor \
     --detach-sign --output "$signature" "$probe" >/dev/null 2>&1; then
   die 'private key/passphrase signing probe failed'
 fi

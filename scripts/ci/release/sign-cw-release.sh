@@ -48,6 +48,9 @@ work="$(mktemp -d)"
 cleanup() {
   local result=$?
   trap - EXIT
+  # Stop the agent that holds the unlocked key before its home disappears;
+  # otherwise it outlives signing with the key material in memory.
+  [ ! -d "$work/gnupg" ] || GNUPGHOME="$work/gnupg" gpgconf --kill all >/dev/null 2>&1 || true
   if ! { find "$work" -type f -exec shred -u {} + && rm -rf "$work"; }; then
     printf 'sign-cw-release: private cleanup failed\n' >&2
     result=1
@@ -64,10 +67,12 @@ export GNUPGHOME="$work/gnupg"
 printf '%s\n' "$CW_RELEASE_GPG_PRIVATE_KEY" | gpg --batch --import >/dev/null 2>&1 ||
   die 'CW_RELEASE_GPG_PRIVATE_KEY is not a valid OpenPGP private key'
 
+# The trailing ! selects the pinned primary key itself, never a subkey: cw's
+# built-in verifier admits only primary-key signatures.
 sign() {
   local input="$1" output="$2"
   local -a args=(--batch --yes --pinentry-mode loopback --armor --detach-sign
-    --local-user "$fingerprint" --output "$output")
+    --local-user "$fingerprint!" --output "$output")
   if [ -n "${CW_RELEASE_GPG_PASSPHRASE:-}" ]; then
     printf '%s' "$CW_RELEASE_GPG_PASSPHRASE" | gpg "${args[@]}" --passphrase-fd 0 "$input" >/dev/null 2>&1
   else

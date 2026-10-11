@@ -674,6 +674,13 @@ fn self_install_records_this_build_and_reinstall_adds_a_version() {
     assert!(again.store.verify(&first).is_ok());
 }
 
+/// rustix has no mkfifoat on Apple targets; libc's mkfifo is portable.
+fn mkfifo(path: &Path) {
+    use std::os::unix::ffi::OsStrExt as _;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+}
+
 #[test]
 fn fifo_and_symlink_candidates_are_refused_without_mutation() {
     for special in ["fifo", "symlink"] {
@@ -683,7 +690,7 @@ fn fifo_and_symlink_candidates_are_refused_without_mutation() {
         let original = candidate.executable.with_extension("original");
         fs::rename(&candidate.executable, &original).unwrap();
         if special == "fifo" {
-            rfs::mkfifoat(rfs::CWD, &candidate.executable, Mode::from_raw_mode(0o600)).unwrap();
+            mkfifo(&candidate.executable);
         } else {
             symlink(&original, &candidate.executable).unwrap();
         }
@@ -714,7 +721,7 @@ fn fifo_state_version_and_lock_files_are_refused_promptly() {
         let mode = fs::metadata(parent).unwrap().mode() & 0o7777;
         set_mode(parent, 0o700).unwrap();
         fs::remove_file(&path).unwrap();
-        rfs::mkfifoat(rfs::CWD, &path, Mode::from_raw_mode(0o600)).unwrap();
+        mkfifo(&path);
         set_mode(parent, mode).unwrap();
         let started = Instant::now();
         let result = match selected {
@@ -838,6 +845,9 @@ fn different_stores_share_the_entry_lock_and_only_one_can_select() {
     assert!(fs::symlink_metadata(&fixture.entry).is_err());
     drop(held);
 
+    // The race waits as long as a real selection does: on APFS the winner's
+    // fsyncs can outlast the short timeout used above.
+    let two = Store::open(&other_root, DEFAULT_LOCK_TIMEOUT).unwrap();
     let barrier = Arc::new(Barrier::new(2));
     let threads: Vec<_> = [(one, a), (two, b)]
         .into_iter()
