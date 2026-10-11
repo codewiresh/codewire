@@ -183,6 +183,12 @@ impl SessionEngine {
         let origin = owner.launch_origin()?;
         let image = ImagePin::admit(&self.inner.config, &origin)?;
         let provider = ProviderPin::admit(origin.agent, &origin.provider)?;
+        // The binding's selection is fixed for its generation, so the route
+        // the private home records now stays the selected one.
+        let route = origin
+            .agent
+            .route(self.inner.config.managed_credential_clients)
+            .ok_or(Error::Refused)?;
         self.ensure_platform_records(false).await?;
         let admission = self.inner.retention_admission.lock().await;
         let session = format!("session-{}", origin.driver_id);
@@ -285,7 +291,7 @@ impl SessionEngine {
             .transpose()
             .map_err(|_| Error::Refused)?;
         let value=image.helper(&origin,&session,1,json!({"op":"prepare","model":launch.model,"effort":launch.effort,"working_dir":launch.working_dir,
-            "name":launch.name,"prompt":launch.prompt,"parent_session_id":launch.parent_session_id,"initial_message_id":message})).await?;
+            "name":launch.name,"prompt":launch.prompt,"parent_session_id":launch.parent_session_id,"initial_message_id":message,"route":route})).await?;
         if value["driver_id"].as_str() != Some(origin.driver_id.as_str())
             || value["message_id"].as_str() != Some(message.as_deref().unwrap_or_default())
         {
