@@ -3732,6 +3732,8 @@ wait_for_pid_death "$RUNNER_PID" || die 'pidfd-signalled runner process remained
 wait_for_pid_death "$VMM_PID" || die 'VMM remained live after its runner died'
 wait_for_environment_state error ||
   die 'runner death was not classified as an environment error'
+jq -e '.error_code == "runner_exit"' "$LAST_STDOUT" >/dev/null ||
+  die 'runner death did not report error_code runner_exit'
 run_cw env --local daemon repair "$NAME" --output json
 jq -e '.replaced_pod_name == "" and .status.state == "ready" and .status.pod_name == ""' \
   "$LAST_STDOUT" >/dev/null || die 'environment daemon did not repair after exact runner death'

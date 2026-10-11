@@ -630,7 +630,7 @@ local_platform_cleanup_environment() {
                  "network_worker_failed", "guest_start_failed", "input_cleanup_failed",
                  "guest_shutdown", "vmm_exit", "direct_share_exit", "network_worker_exit",
                  "egress_broker_exit", "ingress_forwarder_exit", "mesh_transport_exit",
-                 "mesh_ingress_receiver_exit", "network_stack_failed"] as $codes |
+                 "mesh_ingress_receiver_exit", "network_stack_failed", "runner_exit"] as $codes |
                 ($codes | any(. == $code)) as $recognized |
                 {observation:"observed",id:.id,state:.state,
                  code_recognized:$recognized,

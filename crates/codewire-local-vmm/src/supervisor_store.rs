@@ -558,6 +558,13 @@ impl SupervisorStore {
         Ok(())
     }
 
+    pub(crate) fn recent_environment_operations(
+        &self,
+        environment_id: Uuid,
+    ) -> Result<Vec<OperationRecord>, SupervisorStoreError> {
+        recent_environment_operations(&self.connection, environment_id)
+    }
+
     pub(crate) fn operation_by_request(
         &self,
         request_id: Uuid,
@@ -759,27 +766,35 @@ impl SupervisorOperationReader {
         &self,
         environment_id: Uuid,
     ) -> Result<Vec<OperationRecord>, SupervisorStoreError> {
-        validate_non_nil(environment_id)?;
-        let limit = i64::try_from(MAXIMUM_DIAGNOSTIC_OPERATIONS)
-            .map_err(|_| SupervisorStoreError::InvalidOperation)?;
-        let mut statement = self.connection.prepare(
-            "SELECT operation_id, request_id, environment_id, kind, phase, checkpoint,
-                    payload_json, result_json, error_code, created_unix_ms, updated_unix_ms
-             FROM operations
-             WHERE environment_id = ?1
-             ORDER BY updated_unix_ms DESC, operation_id DESC
-             LIMIT ?2",
-        )?;
-        let rows = statement.query_map(
-            params![environment_id.to_string(), limit],
-            decode_operation_row,
-        )?;
-        let mut operations = rows
-            .map(|row| row.map_err(Into::into))
-            .collect::<Result<Vec<_>, SupervisorStoreError>>()?;
-        operations.reverse();
-        Ok(operations)
+        recent_environment_operations(&self.connection, environment_id)
     }
+}
+
+/// An environment's most recent operations, oldest first.
+fn recent_environment_operations(
+    connection: &Connection,
+    environment_id: Uuid,
+) -> Result<Vec<OperationRecord>, SupervisorStoreError> {
+    validate_non_nil(environment_id)?;
+    let limit = i64::try_from(MAXIMUM_DIAGNOSTIC_OPERATIONS)
+        .map_err(|_| SupervisorStoreError::InvalidOperation)?;
+    let mut statement = connection.prepare(
+        "SELECT operation_id, request_id, environment_id, kind, phase, checkpoint,
+                payload_json, result_json, error_code, created_unix_ms, updated_unix_ms
+         FROM operations
+         WHERE environment_id = ?1
+         ORDER BY updated_unix_ms DESC, operation_id DESC
+         LIMIT ?2",
+    )?;
+    let rows = statement.query_map(
+        params![environment_id.to_string(), limit],
+        decode_operation_row,
+    )?;
+    let mut operations = rows
+        .map(|row| row.map_err(Into::into))
+        .collect::<Result<Vec<_>, SupervisorStoreError>>()?;
+    operations.reverse();
+    Ok(operations)
 }
 
 fn open_database(root: &PrivateRoot) -> Result<(Connection, bool), SupervisorStoreError> {
