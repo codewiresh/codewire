@@ -112,6 +112,9 @@ use crate::workspace_plan::{
 
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// An environment's runner is gone while the environment should be running;
+/// `cw env --local daemon repair` or a restart recovers it.
+const RUNNER_EXIT_ERROR_CODE: &str = "runner_exit";
 /// How long a client keeps connecting after its replacement supervisor exited
 /// without taking the lock, in case a concurrently started one is binding.
 const STALE_ENDPOINT_GRACE: Duration = Duration::from_secs(2);
@@ -624,8 +627,47 @@ impl SupervisorCore {
         let mut projected = environment.proto(self.selected(name));
         if self.incompatible_runners.contains(&environment.id) {
             projected.error_code = "runner_protocol_unsupported".to_owned();
+        } else if environment.state == StoredEnvironmentState::Error
+            && environment.runner.is_none()
+            && let Some(error_code) = self.error_transition_code(environment.id)?
+        {
+            projected.error_code = error_code;
         }
         Ok(projected)
+    }
+
+    /// Why an environment without a runner is in Error: the error code of the
+    /// reconcile that moved it there (#2568). Operations recorded since, while
+    /// it stayed in Error, do not replace that code; a completed operation that
+    /// left it in another state means the code no longer applies.
+    fn error_transition_code(
+        &self,
+        environment_id: Uuid,
+    ) -> Result<Option<String>, SupervisorError> {
+        let operations = self.store.recent_environment_operations(environment_id)?;
+        for operation in operations.into_iter().rev() {
+            if operation.phase != OperationPhase::Completed {
+                continue;
+            }
+            if operation.kind == OperationKind::Reconcile
+                && let Ok(parameters) = reconcile_operation_parameters(&operation)
+                && parameters.state == StoredEnvironmentState::Error
+            {
+                if parameters.precondition.state == StoredEnvironmentState::Error {
+                    continue;
+                }
+                return Ok(parameters.runner_error_code);
+            }
+            let state = operation
+                .result
+                .as_ref()
+                .and_then(|result: &serde_json::Value| result.get("state"))
+                .and_then(serde_json::Value::as_str);
+            if state.is_some_and(|state| state != StoredEnvironmentState::Error.as_str()) {
+                return Ok(None);
+            }
+        }
+        Ok(None)
     }
 
     fn save(&self) -> Result<(), SupervisorError> {
@@ -2636,7 +2678,12 @@ impl SupervisorCore {
             environment.state
         };
         let generation = environment.generation;
-        self.record_reconcile_observation(name, state, generation, true, None)
+        // The runner record that carries error codes is cleared here, so the
+        // reconcile itself records why the environment failed (#2568).
+        let error_code = (state == StoredEnvironmentState::Error
+            && environment.state != StoredEnvironmentState::Error)
+            .then_some(RUNNER_EXIT_ERROR_CODE);
+        self.record_reconcile_observation(name, state, generation, true, error_code)
     }
 
     async fn runner_client_for_artifact(
@@ -6979,7 +7026,11 @@ fn reconcile_operation_parameters(
         }
         _ => return Err(SupervisorError::InvalidState),
     };
-    if clear_runner && runner_error_code.is_some()
+    // A kept runner records a code exactly when the environment is in Error.
+    // A cleared runner records one only for the transition into Error: the
+    // code is then the record of why the runner is gone (#2568). Operations
+    // written before that carry none, and still validate.
+    if clear_runner && runner_error_code.is_some() && target_state != StoredEnvironmentState::Error
         || (target_state == StoredEnvironmentState::Error) != runner_error_code.is_some()
             && !clear_runner
     {
@@ -15627,5 +15678,156 @@ mod tests {
                 RunnerArtifactDisposition::ReplaceStopped
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod runner_exit_tests {
+    use super::tests::{project_environment, test_supervisor_core};
+    use super::*;
+
+    fn running_with_a_runner(core: &mut SupervisorCore) -> Uuid {
+        let environment = core.environment_mut("dev").unwrap();
+        let artifact_generation = environment
+            .active_artifact_generation
+            .clone()
+            .unwrap_or_else(|| "a".repeat(64));
+        environment.state = StoredEnvironmentState::Running;
+        environment.runner = Some(RunnerRecord {
+            cw_runtime_catalog_generation: None,
+            process: ProcessIdentity {
+                pid: 42,
+                boot_id: "boot".to_owned(),
+                start_time_ticks: 7,
+                executable: PathBuf::from("/proc/self/exe"),
+                executable_file: crate::host::path::FileIdentity {
+                    device: 1,
+                    inode: 2,
+                    size: 3,
+                    uid: 4,
+                    mode: 0o100500,
+                    links: 1,
+                },
+                executable_sha256: "f".repeat(64),
+            },
+            socket: SocketIdentity {
+                device: 1,
+                inode: 2,
+                uid: 4,
+                mode: 0o140600,
+            },
+            artifact_generation,
+            error_code: None,
+        });
+        let id = environment.id;
+        core.save().unwrap();
+        id
+    }
+
+    fn shown_error_code(core: &SupervisorCore) -> String {
+        core.environment_proto("dev").unwrap().error_code
+    }
+
+    fn operation(core: &SupervisorCore, id: Uuid, kind: OperationKind) -> OperationRecord {
+        core.store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(id),
+                kind,
+                &serde_json::json!({"name": "dev"}),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn runner_death_says_runner_exit_until_the_environment_leaves_error() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let id = running_with_a_runner(&mut core);
+        core.mark_runner_dead("dev").unwrap();
+        let environment = core.environment("dev").unwrap();
+        assert_eq!(environment.state, StoredEnvironmentState::Error);
+        assert!(environment.runner.is_none());
+        assert_eq!(shown_error_code(&core), RUNNER_EXIT_ERROR_CODE);
+
+        // Operations recorded while it stays in Error do not replace why it
+        // failed: a failed stop, and another observation of Error.
+        let stop = operation(&core, id, OperationKind::Stop);
+        core.fail_operation(&stop, "stop_failed").unwrap();
+        let generation = core.environment("dev").unwrap().generation;
+        core.record_reconcile_observation(
+            "dev",
+            StoredEnvironmentState::Error,
+            generation + 1,
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(shown_error_code(&core), RUNNER_EXIT_ERROR_CODE);
+
+        // Once it has run again, a later failure that records no reconcile
+        // never shows the old code.
+        core.record_reconcile_observation(
+            "dev",
+            StoredEnvironmentState::Running,
+            generation + 1,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(shown_error_code(&core), "");
+        let start = operation(&core, id, OperationKind::Start);
+        core.fail_operation_with_environment_error(&start, "dev", "start_interrupted")
+            .unwrap();
+        assert_eq!(
+            core.environment("dev").unwrap().state,
+            StoredEnvironmentState::Error
+        );
+        assert_eq!(shown_error_code(&core), "");
+    }
+
+    #[test]
+    fn a_runner_with_its_own_code_keeps_it() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        running_with_a_runner(&mut core);
+        let generation = core.environment("dev").unwrap().generation;
+        core.record_reconcile_observation(
+            "dev",
+            StoredEnvironmentState::Error,
+            generation,
+            false,
+            Some("vmm_exit"),
+        )
+        .unwrap();
+        assert_eq!(shown_error_code(&core), "vmm_exit");
+    }
+
+    #[test]
+    fn a_cleared_runner_carries_a_code_only_into_error() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let id = running_with_a_runner(&mut core);
+        let environment = core.environment("dev").unwrap().clone();
+        let validate = |state: StoredEnvironmentState, code: Option<&str>| {
+            let payload = reconcile_operation_payload(&environment, state, 1, true, code);
+            let operation = core
+                .store
+                .begin_operation(Uuid::new_v4(), Some(id), OperationKind::Reconcile, &payload)
+                .unwrap();
+            reconcile_operation_parameters(&operation).is_ok()
+        };
+        // Written before #2568: a cleared runner and no code.
+        assert!(validate(StoredEnvironmentState::Error, None));
+        assert!(validate(StoredEnvironmentState::Stopped, None));
+        assert!(validate(
+            StoredEnvironmentState::Error,
+            Some(RUNNER_EXIT_ERROR_CODE)
+        ));
+        assert!(!validate(
+            StoredEnvironmentState::Stopped,
+            Some(RUNNER_EXIT_ERROR_CODE)
+        ));
+        assert!(!validate(
+            StoredEnvironmentState::Running,
+            Some(RUNNER_EXIT_ERROR_CODE)
+        ));
     }
 }

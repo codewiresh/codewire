@@ -124,11 +124,14 @@ class DockerJourney(local_vm.LocalVmJourney):
         return self.until(self.info, lambda value: value["state"] == wanted, timeout,
                           f"the environment turning {wanted}")
 
-    def repair(self, what):
-        """After a crash: the environment is in error; repair restores it and
+    def repair(self, what, error_code=None):
+        """After a crash: the environment is in error with a code saying what
+        failed (exactly `error_code` when given); repair restores it and
         everything Docker held persists."""
         info = self.wait_state("error", 60)
         print(f"local-vm-docker: {what} -> error {info.get('error_code')}", flush=True)
+        assert info.get("error_code"), f"{what} left error without an error_code: {info}"
+        assert error_code is None or info["error_code"] == error_code, info
         self.call("env", "--local", "daemon", "repair", local_vm.NAME, "--output", "json", timeout=600)
         self.wait_state("running", 120)
         self.require(self.sh(PERSISTENCE).stdout, "docker-persistence-ok")
@@ -211,7 +214,7 @@ class DockerJourney(local_vm.LocalVmJourney):
         runner = self.role_pid("__native-runner")
         assert runner, "no runner process for the environment"
         os.kill(runner, signal.SIGKILL)
-        self.repair("runner death")
+        self.repair("runner death", "runner_exit")
 
         self.sh("docker run --rm --privileged --pid=host alpine:3.22 sh -c 'kill -9 $(pidof dockerd)'",
                 ok=False, timeout=120)
