@@ -44,7 +44,7 @@ pub(crate) struct CredentialBridge {
 
 struct BridgeOwner {
     accepting: Mutex<bool>,
-    // One active epoch, the hosted epoch draining behind it and one prepared
+    // One active epoch, the epoch draining behind it and one prepared
     // replacement; no unbounded Open waiters.
     permits: Arc<Semaphore>,
     tasks: TaskTracker,
@@ -237,8 +237,12 @@ impl CredentialBridge {
         if let Some(capabilities) = local_capabilities {
             // Keep the local eager-Open contract: RPC headers are sent only
             // after this already-authenticated host has actually activated.
+            // The local authority starts the next broker before the current
+            // one's lifetime ends and stops the replaced one itself: that
+            // epoch finishes only the requests already sent on it, for at
+            // most 90 seconds, and new ones go here.
             let connection = prepared
-                .activate_with_capabilities(input, &capabilities)
+                .activate_with_replacement(input, &capabilities, EpochReplacement::Drain)
                 .await?;
             drop(self.owner.tasks.spawn(async move {
                 let _permit = permit;
@@ -1345,11 +1349,33 @@ mod tests {
         harness.stop().await;
     }
 
-    /// Local transport keeps fail-pending replacement; the hosted transport
-    /// drains instead (`hosted_replacement_completes_the_request_pending_on_
-    /// the_replaced_epoch`).
+    async fn receive_request(bridge: &mut crate::client::CredentialBridgeConnection) -> String {
+        let frame = bridge.receive().await.expect("host frame").expect("frame");
+        let Some(GuestPayload::Request(request)) = frame.payload else {
+            panic!("credential bridge did not carry a request");
+        };
+        request.request_id
+    }
+
+    async fn answer_no_content(bridge: &crate::client::CredentialBridgeConnection, id: String) {
+        bridge
+            .send_response_start(v1::CredentialBridgeResponseStart {
+                request_id: id.clone(),
+                status_code: 204,
+                headers: Vec::new(),
+            })
+            .await
+            .expect("response start");
+        bridge
+            .send_response_end(v1::CredentialBridgeResponseEnd { request_id: id })
+            .await
+            .expect("response end");
+    }
+
+    /// A local broker's successor takes new work at once while the replaced
+    /// epoch, like a hosted one, finishes the request already sent on it.
     #[tokio::test]
-    async fn local_replacement_closes_stale_stream_and_fails_its_pending_request() {
+    async fn local_replacement_drains_the_replaced_epoch_and_completes_its_pending_request() {
         let harness = Harness::start().await;
         let client = harness.client(TEST_TOKEN).await;
         let mut first = client
@@ -1360,11 +1386,8 @@ mod tests {
             first.receive().await.unwrap().unwrap().payload,
             Some(GuestPayload::Ready(_))
         ));
-        let request_task = tokio::spawn(raw_request(harness.socket.clone(), b"{}"));
-        assert!(matches!(
-            first.receive().await.unwrap().unwrap().payload,
-            Some(GuestPayload::Request(_))
-        ));
+        let pending = tokio::spawn(raw_request(harness.socket.clone(), b"{}"));
+        let pending_id = receive_request(&mut first).await;
 
         let mut second = client
             .open_credential_bridge(harness.environment_id, harness.generation)
@@ -1374,9 +1397,39 @@ mod tests {
             second.receive().await.unwrap().unwrap().payload,
             Some(GuestPayload::Ready(_))
         ));
-        let response = request_task.await.expect("pending request");
-        assert!(response.starts_with(b"HTTP/1.1 503 Service Unavailable"));
-        assert!(first.receive().await.unwrap().is_none());
+        // New work reaches only the successor.
+        let next = tokio::spawn(raw_request(harness.socket.clone(), b"{}"));
+        let next_id = receive_request(&mut second).await;
+        answer_no_content(&second, next_id).await;
+        assert!(
+            next.await
+                .expect("successor request")
+                .starts_with(b"HTTP/1.1 204 No Content")
+        );
+        // The request sent before the successor activated still completes.
+        answer_no_content(&first, pending_id).await;
+        assert!(
+            pending
+                .await
+                .expect("pending request")
+                .starts_with(b"HTTP/1.1 204 No Content")
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), first.receive())
+                .await
+                .is_err()
+        );
+        // Its broker ends the drained epoch; the successor keeps serving.
+        drop(first);
+        let after = tokio::spawn(raw_request(harness.socket.clone(), b"{}"));
+        let after_id = receive_request(&mut second).await;
+        answer_no_content(&second, after_id).await;
+        assert!(
+            after
+                .await
+                .expect("request after the drain")
+                .starts_with(b"HTTP/1.1 204 No Content")
+        );
 
         harness.stop().await;
     }
