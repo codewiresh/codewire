@@ -155,7 +155,7 @@ permits direct registry and Git egress; every later command receives dead proxy
 endpoints. It proves digest-pinned OCI workspace execution, exact
 credential-free git.example.invalid/GitHub preparation, independent copy preparation,
 create/info, loopback-only host-port publication, bounded daemon diagnostics and
-repair, stock Codex 0.157.0 over the synthetic credential bridge, bare run and
+repair, stock Codex 0.160.0 over the synthetic credential bridge, bare run and
 shell, PTY behavior, saved output and nonzero status,
 cached-runtime restart after the installed artifact lock advances, offline
 disk/CPU/memory resize, supervisor crash recovery, Mesh attachment and typed
@@ -2770,7 +2770,7 @@ run_cw env port add --local "$DYNAMIC_GUEST_PORT" --host-port "$DYNAMIC_HOST_POR
 published_ports_include "$DYNAMIC_HOST_PORT" "$DYNAMIC_GUEST_PORT" ||
   die 'a withdrawn host port could not be published again'
 
-log 'checking stock Codex 0.157.0 over the synthetic guest credential bridge'
+log 'checking stock Codex 0.160.0 over the synthetic guest credential bridge'
 run_codex_credential_bridge_smoke
 
 log 'checking bounded public daemon status over the owner-only supervisor UDS'

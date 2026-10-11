@@ -91,7 +91,7 @@ impl Fixture {
             provider: crate::platform_managed::ProviderIdentity {
                 sha256: [9; 32],
                 size: 1024,
-                version: "0.157.0".into(),
+                version: "0.160.0".into(),
             },
             parent_generation: None,
         };
@@ -289,7 +289,7 @@ fn platform_managed_origin_serialization_preserves_full_u64_and_denies_unknown_f
         provider: crate::platform_managed::ProviderIdentity {
             sha256: [3; 32],
             size: 1024,
-            version: "0.157.0".into(),
+            version: "0.160.0".into(),
         },
         parent_generation: None,
     };

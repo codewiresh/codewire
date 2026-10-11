@@ -2,8 +2,8 @@
 """Managed Kind only: Codex's own ChatGPT login, kept by the workspace daemon.
 
 The caller pipes this file into the actual workspace's python3, as with
-codex_session.py, with one mode argument. Protocol is pinned to Codex 0.157.0
-commit 00c972ed5d6ff6499317fd41b7f23605b8e6850d. The synthetic ChatGPT backend
+codex_session.py, with one mode argument. Protocol is pinned to Codex 0.160.0
+commit a956835d020762cb2b570053af06f643a11c0ecc. The synthetic ChatGPT backend
 listens only on 127.0.0.1 and accepts only the bearer the daemon delivered.
 Stdout is the closed acceptance event stream: never a token, header, file
 content, RPC payload, Codex stderr or digest.

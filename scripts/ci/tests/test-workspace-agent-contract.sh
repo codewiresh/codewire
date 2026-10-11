@@ -68,7 +68,7 @@ if [ "${FAIL_AGENT:-}" = "$(basename "$0")" ]; then
   exit 42
 fi
 if [ "$(basename "$0")" = codex ]; then
-  printf 'codex-cli %s\n' "${FAKE_CODEX_VERSION:-0.157.0}"
+  printf 'codex-cli %s\n' "${FAKE_CODEX_VERSION:-0.160.0}"
 else
   printf '%s test-version\n' "$(basename "$0")"
 fi
@@ -81,7 +81,7 @@ if [ "$*" = "config get allow-scripts" ]; then
 fi
 case "$*" in
   'config get prefix') printf '/home/codewire/.npm-global\n' ;;
-  'install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.157.0')
+  'install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.160.0')
     [ -f "$FAKE_PREFIX_STATE" ] || exit 254
     printf 'npm dry-run OK\n' ;;
   '--version') printf 'npm test-version\n' ;;
@@ -163,7 +163,7 @@ run_contract() {
     FAIL_BIN_STAT="${FAIL_BIN_STAT:-false}" \
     MALFORMED_BIN_STAT="${MALFORMED_BIN_STAT:-false}" \
     FAIL_AGENT="${FAIL_AGENT:-}" \
-    FAKE_CODEX_VERSION="${FAKE_CODEX_VERSION:-0.157.0}" \
+    FAKE_CODEX_VERSION="${FAKE_CODEX_VERSION:-0.160.0}" \
     FAKE_PREFIX_STATE="$work/prefix-state" \
     FAKE_FIXTURE_UID="$fixture_uid" \
     FAKE_SSH_EXPECTED_UID="${FAKE_SSH_EXPECTED_UID:-$fixture_uid}" \
@@ -178,7 +178,7 @@ printf '2048\n' >"$work/cgroup/pids.max"
 printf 'max 0\n' >"$work/cgroup/pids.events"
 run_contract >"$work/success.out" 2>"$work/success.err"
 [[ ! -s "$work/success.err" ]] || fail 'successful contract emitted failure evidence'
-grep -Fxq 'codex-cli 0.157.0' "$work/success.out" || fail 'agent checks did not run'
+grep -Fxq 'codex-cli 0.160.0' "$work/success.out" || fail 'agent checks did not run'
 grep -Fxq 'npm dry-run OK' "$work/success.out" || fail 'Codex install-plan check did not run'
 grep -Fxq 'workspace image verification: inert SSH fixture contract passed' "$work/success.out" ||
   fail 'prepared SSH fixture was not checked'

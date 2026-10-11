@@ -19,7 +19,7 @@
 //! - `anthropic-beta` always carries `oauth-2025-04-20`, which the provider
 //!   requires for an OAuth bearer; it is appended when the caller omitted it.
 //! - Claude Code's bounded client-identity headers are forwarded. Probed
-//!   against Claude Code 2.1.238 in subscription mode, every model request
+//!   against Claude Code 2.1.238 and 2.1.288 in subscription mode, every model request
 //!   carries `user-agent: claude-cli/<version> (...)`, `x-app: cli`,
 //!   `anthropic-dangerous-direct-browser-access: true` and a UUID
 //!   `x-claude-code-session-id`. The provider may treat subscription requests
@@ -57,7 +57,8 @@ const PLACEHOLDER_AUTHORIZATION: &[u8] = b"Bearer codewire-managed";
 const MAX_USER_AGENT_BYTES: usize = 256;
 const MAX_APP_BYTES: usize = 32;
 const MAX_SESSION_ID_BYTES: usize = 64;
-/// Unified subscription rate-limit headers read by Claude Code 2.1.238.
+/// Unified subscription rate-limit headers read by Claude Code 2.1.238 and
+/// 2.1.288.
 const SUBSCRIPTION_RATE_LIMIT_HEADERS: &[&str] = &[
     "anthropic-ratelimit-unified-status",
     "anthropic-ratelimit-unified-reset",
@@ -70,6 +71,9 @@ const SUBSCRIPTION_RATE_LIMIT_HEADERS: &[&str] = &[
     "anthropic-ratelimit-unified-7d-reset",
     "anthropic-ratelimit-unified-7d-surpassed-threshold",
     "anthropic-ratelimit-unified-7d-utilization",
+    "anthropic-ratelimit-unified-7d_oi-reset",
+    "anthropic-ratelimit-unified-7d_oi-surpassed-threshold",
+    "anthropic-ratelimit-unified-7d_oi-utilization",
     "anthropic-ratelimit-unified-grace-status",
     "anthropic-ratelimit-unified-grace-5h-utilization",
     "anthropic-ratelimit-unified-grace-7d-utilization",
@@ -82,6 +86,13 @@ const SUBSCRIPTION_RATE_LIMIT_HEADERS: &[&str] = &[
     "anthropic-ratelimit-unified-overage-period",
     "anthropic-ratelimit-unified-overage-period-channel-utilization",
     "anthropic-ratelimit-unified-overage-period-monthly-utilization",
+    "anthropic-ratelimit-unified-overage-scope",
+    "anthropic-ratelimit-unified-slow-status",
+    "anthropic-ratelimit-unified-slow-offer",
+    "anthropic-ratelimit-unified-slow-budget-reset",
+    "anthropic-ratelimit-unified-slow-budget-utilization",
+    "anthropic-ratelimit-unified-slow-max-wait",
+    "anthropic-ratelimit-unified-slow-retry-after",
 ];
 
 /// Response headers returned for this form: the API-key adapter's, then the

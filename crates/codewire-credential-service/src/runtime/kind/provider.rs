@@ -1553,7 +1553,7 @@ mod tests {
             for (name, value) in [
                 ("authorization", "Bearer codewire-managed"),
                 ("anthropic-beta", "claude-code-20250219"),
-                ("user-agent", "claude-cli/2.1.238 (external, sdk-cli)"),
+                ("user-agent", "claude-cli/2.1.288 (external, sdk-cli)"),
                 ("x-app", "cli"),
             ] {
                 request.headers.push(CredentialHttpHeader {
@@ -2204,7 +2204,7 @@ mod tests {
                 );
                 headers.insert(
                     "user-agent",
-                    HeaderValue::from_static("claude-cli/2.1.238 (external, sdk-cli)"),
+                    HeaderValue::from_static("claude-cli/2.1.288 (external, sdk-cli)"),
                 );
                 headers.insert("x-app", HeaderValue::from_static("cli"));
             }
