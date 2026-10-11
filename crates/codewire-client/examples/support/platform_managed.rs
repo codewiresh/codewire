@@ -119,8 +119,8 @@ impl Journey {
                     && support.provider_size > 0
                     && support.provider_version
                         == match kind {
-                            rpc::EnvironmentAgentKind::Codex => "0.157.0",
-                            _ => "2.1.238",
+                            rpc::EnvironmentAgentKind::Codex => "0.160.0",
+                            _ => "2.1.288",
                         },
                 "stock provider identity is not the selected pinned version"
             );

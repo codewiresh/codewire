@@ -92,8 +92,8 @@ impl Origin {
             || !(4..=512 * 1024 * 1024).contains(&self.provider.size)
             || self.provider.version
                 != match self.agent {
-                    Agent::Codex => "0.157.0",
-                    Agent::Claude => "2.1.238",
+                    Agent::Codex => "0.160.0",
+                    Agent::Claude => "2.1.288",
                 }
             || self.parent_generation == Some(0)
             || session != format!("session-{}", self.driver_id)
@@ -402,7 +402,7 @@ mod tests {
             provider: ProviderIdentity {
                 sha256: [9; 32],
                 size: 1024,
-                version: "0.157.0".into(),
+                version: "0.160.0".into(),
             },
             parent_generation: None,
         };

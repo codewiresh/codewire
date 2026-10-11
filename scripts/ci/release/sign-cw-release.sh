@@ -48,6 +48,9 @@ work="$(mktemp -d)"
 cleanup() {
   local result=$?
   trap - EXIT
+  # Stop the agent that holds the unlocked key before its home disappears;
+  # otherwise it outlives signing with the key material in memory.
+  [ ! -d "$work/gnupg" ] || GNUPGHOME="$work/gnupg" gpgconf --kill all >/dev/null 2>&1 || true
   if ! { find "$work" -type f -exec shred -u {} + && rm -rf "$work"; }; then
     printf 'sign-cw-release: private cleanup failed\n' >&2
     result=1

@@ -51,6 +51,9 @@ BUCKET = "codewire-releases"
 S3_HOST = f"{ACCOUNT_ID}.r2.cloudflarestorage.com"
 REGION = "auto"
 PUBLIC_HOST = "releases.codewire.sh"
+# The public origin's edge rejects Python's default User-Agent with 403, which
+# made every public readback "differ" (release run 12039); name the tool.
+PUBLIC_USER_AGENT = "codewire-cw-release/1 (+https://codewire.sh)"
 IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
 CHANNEL_CACHE = "no-cache"
 MAX_OBJECT = release.MAX_EXECUTABLE + 8 * 1024 * 1024
@@ -212,7 +215,7 @@ class PublicOrigin:
     def get(self, key, limit=MAX_OBJECT):
         object_path(key)
         return self.transport.request("GET", PUBLIC_HOST, "/" + urllib.parse.quote(key, safe="/-_.~"),
-                                      {}, None, limit)
+                                      {"user-agent": PUBLIC_USER_AGENT}, None, limit)
 
 
 def log(message):
