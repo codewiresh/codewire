@@ -580,10 +580,9 @@ impl Endpoint {
         if input.is_some() {
             command.stdin(Stdio::piped());
         }
-        let mut child = tokio::process::Command::from(command)
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+        let mut command = tokio::process::Command::from(command);
+        command.kill_on_drop(true);
+        let mut child = cw_fixture::spawn_written(|| command.spawn()).unwrap();
         if let Some(input) = input {
             child
                 .stdin

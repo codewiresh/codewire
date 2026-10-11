@@ -89,6 +89,24 @@ pub(crate) fn test_child(command: &mut std::process::Command) -> &mut std::proce
     }
     command
 }
+
+/// Spawn an executable this test process just wrote or copied. A concurrent
+/// test's fork child holds the write descriptor until its own exec, so the
+/// kernel briefly refuses this exec with ETXTBSY; retry only that, bounded.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn spawn_written<T>(
+    mut spawn: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    for _ in 1..50 {
+        match spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+    spawn()
+}
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod oci;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

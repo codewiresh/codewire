@@ -89,3 +89,18 @@ pub fn prepare(path: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o500)).unwrap();
     assert_eq!(fs::symlink_metadata(path).unwrap().mode() & 0o7777, 0o500);
 }
+
+/// Spawn an executable a test process just wrote or copied. A concurrent
+/// test's fork child holds the write descriptor until its own exec, so the
+/// kernel briefly refuses this exec with ETXTBSY; retry only that, bounded.
+pub fn spawn_written<T>(mut spawn: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    for _ in 1..50 {
+        match spawn() {
+            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+    spawn()
+}

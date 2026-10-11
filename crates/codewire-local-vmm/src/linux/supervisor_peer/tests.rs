@@ -96,7 +96,8 @@ while time.monotonic() < end:
 "#,
         )
         .unwrap();
-        let mut child = Command::new(&config.executable)
+        let mut command = Command::new(&config.executable);
+        command
             .args(supervisor_argv(&config).into_iter().skip(1))
             .args(extra)
             .env_clear()
@@ -105,9 +106,8 @@ while time.monotonic() < end:
             .current_dir(&root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        let mut child = crate::spawn_written(|| command.spawn()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while !root.join("ready").exists() {
             assert!(
