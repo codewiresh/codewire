@@ -47,7 +47,28 @@ or a requested stop completes, and 1 when the VM fails to start or stops with
 an error. It removes the socket only if that path is still the one it bound.
 The VM has no network, console or graphics device. The helper needs the
 `com.apple.security.virtualization` entitlement; developer builds are signed
-ad hoc with `developer-entitlements.plist`.
+ad hoc with the hardened runtime and `developer-entitlements.plist`
+(`scripts/dev/macos-local-runtime.py` refuses a helper without either).
+
+Posture, observed with `lsof`, `codesign` and `sandbox_check` while a VM ran
+on macOS 26:
+- The helper runs as the user, as a child of the runner, signed ad hoc with
+  the hardened runtime and that one entitlement. It holds `/dev/null` for
+  standard I/O, its `vz.json`, the VM's `vm.lock` and three Unix sockets. It
+  holds no internet socket and no other file, and writes no log of its own. It
+  has no Seatbelt profile.
+- Virtualization.framework runs the VM in Apple's
+  `com.apple.Virtualization.VirtualMachine` XPC service. That process is
+  sandboxed by Apple, has the hardened runtime and holds exactly:
+  - the kernel and the initial ramdisk;
+  - the four VM disks;
+  - the granted shares.
+  It holds no internet socket.
+- The helper does not parse guest data. It copies vsock bytes to and from
+  connections on its owner-only socket, and it reads only `CONNECT <port>`
+  lines, from those host-side clients.
+- Distribution needs Developer ID signing and notarization in place of the
+  ad hoc signature.
 
 The sections below describe the earlier fixed-topology developer fixtures.
 
