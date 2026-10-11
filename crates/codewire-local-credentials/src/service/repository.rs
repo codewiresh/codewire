@@ -35,6 +35,16 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 const EXECUTION_TIMEOUT: Duration = Duration::from_secs(310);
 const CHANNEL_CLOSE_GRACE: Duration = Duration::from_secs(1);
 const PROCESS_GROUP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a caller waits for a prepared repository: the authority's own
+/// bounds on starting, running and cleaning up the executor, plus slack for
+/// the reply.
+pub(crate) const REPOSITORY_PREPARATION_TIMEOUT: Duration = Duration::from_secs(
+    START_TIMEOUT.as_secs()
+        + EXECUTION_TIMEOUT.as_secs()
+        + CHANNEL_CLOSE_GRACE.as_secs()
+        + PROCESS_GROUP_CLEANUP_TIMEOUT.as_secs()
+        + 10,
+);
 
 pub(super) struct RepositoryProcessManager<S: ProtectedStore> {
     authority: Arc<LocalCredentialAuthority<S>>,
@@ -81,6 +91,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
         self: &Arc<Self>,
         authorization: RepositoryCredentialLeaseRequest,
         platform: Option<crate::RepositoryPlatformAccess>,
+        git: Option<crate::LocalRepositoryGit>,
     ) -> Result<PreparedRepository, Status> {
         validate_repository_lease_request(&authorization)
             .map_err(|_| Status::invalid_argument("invalid repository preparation request"))?;
@@ -113,7 +124,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
                 complete: false,
             };
             let result = manager
-                .prepare_owned(authorization, platform, &mut cancellation)
+                .prepare_owned(authorization, platform, git, &mut cancellation)
                 .await;
             let result = match cancellation.ensure_live() {
                 Ok(()) => result,
@@ -176,6 +187,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
         &self,
         authorization: RepositoryCredentialLeaseRequest,
         platform: Option<crate::RepositoryPlatformAccess>,
+        git: Option<crate::LocalRepositoryGit>,
         cancellation: &mut JobCancellation,
     ) -> Result<PreparedRepository, Status> {
         let mut connection = match platform {
@@ -199,6 +211,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
         let outcome = AssertUnwindSafe(self.prepare_execution(
             authorization,
             connection.as_mut(),
+            git,
             cancellation,
         ))
         .catch_unwind()
@@ -219,6 +232,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
         &self,
         authorization: RepositoryCredentialLeaseRequest,
         platform: Option<&mut PlatformRepositoryConnection>,
+        git: Option<crate::LocalRepositoryGit>,
         cancellation: &mut JobCancellation,
     ) -> Result<PreparedRepository, Status> {
         cancellation.ensure_live()?;
@@ -268,6 +282,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
             ssh_runtime_directory: ssh_cleanup
                 .as_ref()
                 .and_then(|cleanup| cleanup.path.clone()),
+            git,
         };
         config.validate().map_err(|_| unavailable())?;
         let (authority_stream, executor_stream) =
@@ -292,6 +307,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
         }
         let (ready_tx, mut ready_rx) = oneshot::channel();
         let (lease_shutdown, shutdown_rx) = watch::channel(false);
+        let last_admission = Arc::new(std::sync::Mutex::new(None));
         let mut lease_task = tokio::spawn(serve_repository_lease_channel_with_ready(
             Arc::clone(&self.authority),
             authority_stream,
@@ -300,6 +316,7 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
             platform_checkout,
             ready_tx,
             shutdown_rx,
+            Arc::clone(&last_admission),
         ));
         let mut lease_result = None;
         // The process and lease handles live OUTSIDE the caught operation.
@@ -346,12 +363,20 @@ impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
         }
         cancellation.ensure_live()?;
         if let Some(admitted) = admitted {
+            // The executor may have refreshed the login through this channel;
+            // compare with the last admission it was issued, so any other
+            // change while Git ran still fails the checkout.
+            let expected = last_admission
+                .lock()
+                .map_err(|_| unavailable())?
+                .take()
+                .unwrap_or(admitted);
             let authority = Arc::clone(&self.authority);
             let current = run_blocking(move || {
                 authority.admit_repository_credential_operation(&authorization)
             })
             .await?;
-            if current != admitted {
+            if current != expected {
                 return Err(Status::permission_denied(
                     "repository authorization changed",
                 ));
@@ -529,72 +554,74 @@ async fn wait_for_executor(
 }
 
 enum RepositoryChild {
-    GitHub(Child),
-    Ssh(SshRepositoryChild),
+    Single(Child),
+    Group(GroupRepositoryChild),
 }
 
 impl RepositoryChild {
     fn new(mut child: Child, transport: LocalRepositoryTransport) -> Self {
-        match transport {
-            LocalRepositoryTransport::GitHubOAuth => Self::GitHub(child),
-            LocalRepositoryTransport::Ssh => {
-                let pid = child
-                    .id()
-                    .and_then(|pid| i32::try_from(pid).ok())
-                    .and_then(Pid::from_raw)
-                    .filter(|pid| pid.as_raw_pid() > 1);
-                let stderr = child
-                    .stderr
-                    .take()
-                    .map(|stderr| tokio::spawn(discard_stderr(stderr)));
-                Self::Ssh(SshRepositoryChild {
-                    child,
-                    pid,
-                    stderr,
-                    cleanup_failed: false,
-                })
-            }
+        // Darwin has no parent-death signal for Git and its helpers, so a
+        // macOS executor of either transport leads its own process group,
+        // pipes stderr, and is stopped and drained like an SSH executor.
+        let group = cfg!(target_os = "macos") || transport == LocalRepositoryTransport::Ssh;
+        if !group {
+            return Self::Single(child);
         }
+        let pid = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .and_then(Pid::from_raw)
+            .filter(|pid| pid.as_raw_pid() > 1);
+        let stderr = child
+            .stderr
+            .take()
+            .map(|stderr| tokio::spawn(discard_stderr(stderr)));
+        Self::Group(GroupRepositoryChild {
+            child,
+            pid,
+            stderr,
+            cleanup_failed: false,
+        })
     }
 
     fn construction_valid(&self) -> bool {
         match self {
-            Self::GitHub(_) => true,
-            Self::Ssh(child) => child.pid.is_some() && child.stderr.is_some(),
+            Self::Single(_) => true,
+            Self::Group(child) => child.pid.is_some() && child.stderr.is_some(),
         }
     }
 
     async fn wait(&mut self) -> Result<bool, Status> {
         match self {
-            Self::GitHub(child) => child
+            Self::Single(child) => child
                 .wait()
                 .await
                 .map(|status| status.success())
                 .map_err(|_| unavailable()),
-            Self::Ssh(child) => child.wait_without_reaping().await,
+            Self::Group(child) => child.wait_without_reaping().await,
         }
     }
 
     async fn stop_and_drain(&mut self, already_waited: bool) -> bool {
         match self {
-            Self::GitHub(_) if already_waited => true,
-            Self::GitHub(child) => {
+            Self::Single(_) if already_waited => true,
+            Self::Single(child) => {
                 let _ = child.start_kill();
                 child.wait().await.is_ok()
             }
-            Self::Ssh(child) => child.stop_and_drain().await.is_ok(),
+            Self::Group(child) => child.stop_and_drain().await.is_ok(),
         }
     }
 }
 
-struct SshRepositoryChild {
+struct GroupRepositoryChild {
     child: Child,
     pid: Option<Pid>,
     stderr: Option<tokio::task::JoinHandle<Result<(), Status>>>,
     cleanup_failed: bool,
 }
 
-impl SshRepositoryChild {
+impl GroupRepositoryChild {
     async fn wait_without_reaping(&self) -> Result<bool, Status> {
         let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())
             .map_err(|_| unavailable())?;
@@ -617,6 +644,11 @@ impl SshRepositoryChild {
         if let Some(pid) = self.pid.take() {
             match rustix::process::kill_process_group(pid, Signal::KILL) {
                 Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+                // Darwin refuses to signal a group whose members have all
+                // exited (the unreaped executor is a zombie). The stderr EOF
+                // and reap below still prove that every member exited.
+                #[cfg(target_os = "macos")]
+                Err(rustix::io::Errno::PERM) => {}
                 Err(_) => self.cleanup_failed = true,
             }
         } else {
@@ -646,7 +678,7 @@ impl SshRepositoryChild {
     }
 }
 
-impl Drop for SshRepositoryChild {
+impl Drop for GroupRepositoryChild {
     fn drop(&mut self) {
         if let Some(pid) = self.pid.take() {
             let _ = rustix::process::kill_process_group(pid, Signal::KILL);

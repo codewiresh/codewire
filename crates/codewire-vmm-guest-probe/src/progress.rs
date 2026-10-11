@@ -41,6 +41,8 @@ pub enum GuestBootStage {
     DaemonStarted = 16,
     SetupFailed = 17,
     WorkspaceFailed = 18,
+    /// Docker is enabled but the workspace image has no Docker tooling.
+    DockerToolingMissing = 19,
 }
 
 impl GuestBootStage {
@@ -62,6 +64,7 @@ impl GuestBootStage {
             "runc-running" => Some(Self::RuncRunning),
             "workspace-running" => Some(Self::WorkspaceRunning),
             "daemon-started" => Some(Self::DaemonStarted),
+            "workspace-docker-tooling-missing" => Some(Self::DockerToolingMissing),
             value if value.starts_with("setup-") => Some(Self::SetupFailed),
             value if value.starts_with("workspace-") || value == "workspace-container-exited" => {
                 Some(Self::WorkspaceFailed)
@@ -73,12 +76,18 @@ impl GuestBootStage {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::DaemonStarted | Self::SetupFailed | Self::WorkspaceFailed
+            Self::DaemonStarted
+                | Self::SetupFailed
+                | Self::WorkspaceFailed
+                | Self::DockerToolingMissing
         )
     }
 
     pub fn is_failure(self) -> bool {
-        matches!(self, Self::SetupFailed | Self::WorkspaceFailed)
+        matches!(
+            self,
+            Self::SetupFailed | Self::WorkspaceFailed | Self::DockerToolingMissing
+        )
     }
 
     fn flags(self) -> u16 {
@@ -110,6 +119,7 @@ impl TryFrom<u16> for GuestBootStage {
             16 => Ok(Self::DaemonStarted),
             17 => Ok(Self::SetupFailed),
             18 => Ok(Self::WorkspaceFailed),
+            19 => Ok(Self::DockerToolingMissing),
             _ => Err(ProgressError::InvalidStage),
         }
     }
@@ -387,5 +397,19 @@ mod tests {
             Some(GuestBootStage::WorkspaceFailed)
         );
         assert_eq!(GuestBootStage::from_persisted("arbitrary-guest-text"), None);
+    }
+
+    #[test]
+    fn missing_docker_tooling_is_its_own_terminal_failure() {
+        let stage = GuestBootStage::from_persisted("workspace-docker-tooling-missing");
+        assert_eq!(stage, Some(GuestBootStage::DockerToolingMissing));
+        let stage = stage.unwrap();
+        assert!(stage.is_failure() && stage.is_terminal());
+        assert_eq!(GuestBootStage::try_from(19).unwrap(), stage);
+        assert!(GuestBootStage::try_from(20).is_err());
+        assert_eq!(
+            GuestBootStage::from_persisted("workspace-docker-root-failed"),
+            Some(GuestBootStage::WorkspaceFailed)
+        );
     }
 }

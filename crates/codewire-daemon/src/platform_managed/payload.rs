@@ -26,14 +26,14 @@ pub struct ProviderPin {
 fn layout(agent: Agent) -> (&'static str, &'static str, &'static str) {
     match agent {
         Agent::Codex => (
-            "/opt/codewire/agents/npm/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex",
+            "/opt/codewire/agents/npm/lib/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex",
             "/opt/codewire/agents/npm/lib/node_modules/@openai/codex/package.json",
-            "0.157.0",
+            "0.160.0",
         ),
         Agent::Claude => (
             "/opt/codewire/agents/npm/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
             "/opt/codewire/agents/npm/lib/node_modules/@anthropic-ai/claude-code/package.json",
-            "2.1.238",
+            "2.1.288",
         ),
     }
 }

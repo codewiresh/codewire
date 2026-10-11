@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
-use std::process::Child;
+use std::process::{Child, ExitStatus};
 use std::time::Duration;
 
 use codewire_access::{
@@ -22,15 +22,17 @@ use crate::broker_channel::MAX_BROKER_LEASE_AUDIT_LIST_LIMIT;
 use crate::control::v1::local_credential_authority_service_client::LocalCredentialAuthorityServiceClient;
 use crate::control::v1::{self, CredentialAuthenticationKind};
 use crate::repository::{MAX_GIT_BUNDLE_BYTES, valid_git_selector};
+use crate::service::REPOSITORY_PREPARATION_TIMEOUT;
 use crate::service::auth_kind_to_proto;
 use crate::transport::{
     AUTHORITY_PROTOCOL_VERSION, AuthorityRuntimeConfig, AuthorityRuntimeError, connect_owner_only,
+    connect_owner_only_with_timeout, store_error_from_exit_status,
 };
 use crate::{
-    AccessProfileRecord, AccessProfileRevisionRecord, BrokerLeaseAuditDecision,
-    BrokerLeaseAuditEvent, CredentialRecord, EnvironmentAccessBindingRecord,
-    EnvironmentBrokerRuntime, LOCAL_OWNER_ID, LocalSecretProject, NewCredential,
-    ResolvedWorkloadSecretMetadata, WorkloadSecretMetadata, WorkloadSecretSelection,
+    AccessProfileRecord, AccessProfileRevisionRecord, AuthorityProtectedStore,
+    BrokerLeaseAuditDecision, BrokerLeaseAuditEvent, CredentialRecord,
+    EnvironmentAccessBindingRecord, EnvironmentBrokerRuntime, LOCAL_OWNER_ID, LocalSecretProject,
+    NewCredential, ResolvedWorkloadSecretMetadata, WorkloadSecretMetadata, WorkloadSecretSelection,
     WorkloadSecretSource, ensure_private_root,
 };
 
@@ -44,10 +46,34 @@ fn valid_object_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorityInfo {
     pub protocol_version: u32,
     pub protected_store_persistence: ProtectedStorePersistence,
+    /// `None` from an authority that predates the recorded store; it used
+    /// the platform default backend.
+    pub protected_store: Option<AuthorityProtectedStore>,
+}
+
+/// An authority process the starting client still owns until admission.
+pub trait SpawnedAuthority {
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>>;
+    fn kill(&mut self) -> std::io::Result<()>;
+    fn wait(&mut self) -> std::io::Result<ExitStatus>;
+}
+
+impl SpawnedAuthority for Child {
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        Child::try_wait(self)
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        Child::kill(self)
+    }
+
+    fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        Child::wait(self)
+    }
 }
 
 #[derive(Clone)]
@@ -66,6 +92,8 @@ pub struct LocalCredentialClient {
 pub struct LocalCredentialControlClient {
     inner: LocalCredentialAuthorityServiceClient<tonic::transport::Channel>,
     info: AuthorityInfo,
+    /// Repository preparation reconnects with its own, longer deadline.
+    config: AuthorityRuntimeConfig,
 }
 
 /// Credential-free output stream from one authority-owned repository
@@ -148,9 +176,11 @@ impl std::fmt::Debug for LocalCredentialClient {
 
 impl LocalCredentialClient {
     /// Admit a currently running authority without starting one when its
-    /// endpoint is absent. An incompatible or unconnectable existing endpoint
-    /// fails closed without shutdown, replacement or request replay.
-    /// The legacy method signature is retained; its spawner is never invoked.
+    /// endpoint is absent. A socket nothing listens on, left by an authority
+    /// that died, counts as absent and is left in place. Any other
+    /// unconnectable or incompatible endpoint fails closed without shutdown,
+    /// replacement or request replay. The legacy method signature is
+    /// retained; its spawner is never invoked.
     pub async fn admit_existing_or_replace_with<F>(
         config: &AuthorityRuntimeConfig,
         _spawn: F,
@@ -169,22 +199,33 @@ impl LocalCredentialClient {
         if !socket_exists(config)? {
             return Ok(None);
         }
-        Self::connect(config).await.map(Some)
+        match Self::connect(config).await {
+            Err(AuthorityRuntimeError::Connect) if endpoint_refuses(config) => Ok(None),
+            result => result.map(Some),
+        }
     }
 
-    /// Reuse a compatible authority, or start an owned child only when the
-    /// endpoint is absent. A present endpoint's admission error never grants
-    /// permission to shut it down, unlink it or launch a replacement.
-    pub async fn connect_or_start_with<F>(
+    /// Reuse a compatible authority, or start an owned child when the endpoint
+    /// is absent or nothing listens on it. A dead authority's socket is then
+    /// replaced only by the new authority after it takes the singleton lock,
+    /// which every live authority holds for its whole life, so a live one
+    /// keeps its socket. The client itself never unlinks anything, and any
+    /// other admission error never grants permission to shut an endpoint
+    /// down, unlink it or launch a replacement.
+    pub async fn connect_or_start_with<F, C>(
         config: &AuthorityRuntimeConfig,
         spawn: F,
     ) -> Result<Self, AuthorityRuntimeError>
     where
-        F: FnOnce(&AuthorityRuntimeConfig) -> Result<Child, AuthorityRuntimeError>,
+        F: FnOnce(&AuthorityRuntimeConfig) -> Result<C, AuthorityRuntimeError>,
+        C: SpawnedAuthority,
     {
         config.prepare_root()?;
         if socket_exists(config)? {
-            return Self::connect(config).await;
+            match Self::connect(config).await {
+                Err(AuthorityRuntimeError::Connect) if endpoint_refuses(config) => {}
+                result => return result,
+            }
         }
 
         let mut child = spawn(config)?;
@@ -201,11 +242,15 @@ impl LocalCredentialClient {
                     }
                 }
             }
-            if !child_exited {
-                child_exited = child
-                    .try_wait()
-                    .map_err(|_| AuthorityRuntimeError::Spawn)?
-                    .is_some();
+            if !child_exited
+                && let Some(status) = child.try_wait().map_err(|_| AuthorityRuntimeError::Spawn)?
+            {
+                child_exited = true;
+                // A store failure is final for this start: the child held
+                // the singleton lock, so no other live authority is coming.
+                if let Some(error) = store_error_from_exit_status(status) {
+                    return Err(AuthorityRuntimeError::Credential(error));
+                }
             }
             if tokio::time::Instant::now() >= deadline {
                 if child_exited {
@@ -269,12 +314,13 @@ impl LocalCredentialClient {
                 response.protected_store_persistence,
             )
             .map_err(|_| AuthorityRuntimeError::ProtocolMismatch)?,
+            protected_store: store_from_proto(&response.protected_store_backend)?,
         };
         Ok(Self { inner, info })
     }
 
     pub fn info(&self) -> AuthorityInfo {
-        self.info
+        self.info.clone()
     }
 
     pub async fn shutdown(mut self) -> Result<(), Status> {
@@ -806,11 +852,34 @@ impl LocalCredentialControlClient {
         Ok(Self {
             inner: client.inner,
             info: client.info,
+            config: config.clone(),
         })
     }
 
     pub fn info(&self) -> AuthorityInfo {
-        self.info
+        self.info.clone()
+    }
+
+    /// The capability slots the authority grants this environment generation
+    /// now. Grants are material-free; GitHub appears only while the profile
+    /// includes it and the store holds an active connection.
+    pub async fn environment_grant_slots(
+        &mut self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+    ) -> Result<std::collections::BTreeSet<String>, Status> {
+        Ok(self
+            .inner
+            .evaluate_environment_grants(v1::EvaluateEnvironmentGrantsRequest {
+                environment_id: environment_id.to_string(),
+                environment_generation,
+            })
+            .await?
+            .into_inner()
+            .grants
+            .into_iter()
+            .map(|grant| grant.capability_slot)
+            .collect())
     }
 
     /// Read material-free client-slot metadata from an exact immutable profile
@@ -869,6 +938,7 @@ impl LocalCredentialControlClient {
         revision: String,
         known_hosts: Vec<String>,
         platform: Option<crate::RepositoryPlatformAccess>,
+        git: Option<crate::LocalRepositoryGit>,
     ) -> Result<PreparedGitRepository, Status> {
         let authorization = crate::RepositoryCredentialLeaseRequest {
             request_id,
@@ -887,8 +957,33 @@ impl LocalCredentialControlClient {
         if let Some(platform) = &platform {
             platform.validate(&authorization)?;
         }
-        let mut stream = self
-            .inner
+        if git.as_ref().is_some_and(|git| git.validate().is_err()) {
+            return Err(Status::invalid_argument(
+                "invalid repository preparation request",
+            ));
+        }
+        // The authority answers only after git has fetched and bundled the
+        // repository, which can take minutes; the 30 s control deadline
+        // would cut it off. Use one connection with the preparation
+        // deadline, checked against the same authority protocol.
+        let channel = connect_owner_only_with_timeout(&self.config, REPOSITORY_PREPARATION_TIMEOUT)
+            .await
+            .map_err(|_| Status::unavailable("local credential authority is unavailable"))?;
+        let mut repositories = LocalCredentialAuthorityServiceClient::new(channel)
+            .max_decoding_message_size(MAX_RPC_MESSAGE_BYTES)
+            .max_encoding_message_size(MAX_RPC_MESSAGE_BYTES);
+        let protocol_version = repositories
+            .get_authority_info(v1::GetAuthorityInfoRequest {})
+            .await?
+            .into_inner()
+            .protocol_version;
+        if protocol_version != self.info.protocol_version {
+            return Err(Status::failed_precondition(
+                "local credential authority changed during repository preparation",
+            ));
+        }
+        let started = std::time::Instant::now();
+        let mut stream = match repositories
             .prepare_git_repository(v1::PrepareGitRepositoryRequest {
                 request_id: request_id.to_string(),
                 profile_id: profile_id.to_string(),
@@ -898,9 +993,20 @@ impl LocalCredentialControlClient {
                 revision,
                 known_hosts,
                 platform: platform.map(crate::RepositoryPlatformAccess::into_proto),
+                git: git.as_ref().map(crate::LocalRepositoryGit::to_proto),
             })
-            .await?
-            .into_inner();
+            .await
+        {
+            Ok(response) => response.into_inner(),
+            // The channel deadline ends the call without a status of its own.
+            Err(_) if started.elapsed() >= REPOSITORY_PREPARATION_TIMEOUT => {
+                return Err(Status::deadline_exceeded(format!(
+                    "repository preparation timed out after {} s",
+                    REPOSITORY_PREPARATION_TIMEOUT.as_secs()
+                )));
+            }
+            Err(status) => return Err(status),
+        };
         let first = stream
             .message()
             .await?
@@ -1286,11 +1392,29 @@ fn broker_lease_audit_event_from_proto(
     })
 }
 
-fn terminate_unadmitted_child(child: &mut Child) {
+fn store_from_proto(value: &str) -> Result<Option<AuthorityProtectedStore>, AuthorityRuntimeError> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    AuthorityProtectedStore::from_record(value)
+        .map(Some)
+        .ok_or(AuthorityRuntimeError::ProtocolMismatch)
+}
+
+fn terminate_unadmitted_child(child: &mut impl SpawnedAuthority) {
     if child.try_wait().ok().flatten().is_none() {
         let _ = child.kill();
         let _ = child.wait();
     }
+}
+
+/// Nothing listens on the existing endpoint: the socket of an authority that
+/// is no longer running.
+fn endpoint_refuses(config: &AuthorityRuntimeConfig) -> bool {
+    matches!(
+        std::os::unix::net::UnixStream::connect(config.socket()),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused
+    )
 }
 
 fn socket_exists(config: &AuthorityRuntimeConfig) -> Result<bool, AuthorityRuntimeError> {

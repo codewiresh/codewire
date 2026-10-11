@@ -95,10 +95,10 @@ impl Config {
         let Some(host) = &self.host else {
             return Ok(());
         };
-        if !cfg!(target_os = "linux") {
+        if !cfg!(any(target_os = "linux", target_os = "macos")) {
             // A process-group-only fallback cannot truthfully clean ordinary
             // PTY job-control groups. Admit no host placement until that
-            // platform has an equivalent owned-identity implementation.
+            // platform has an owned-session cleanup (host_process.rs).
             return Err(ConfigError::HostUnsupportedPlatform);
         }
         let root = clean_path(&host.state_root);
@@ -550,7 +550,7 @@ fn valid_binding_url(url: &str) -> bool {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ConfigError {
-    #[error("trusted host session ownership currently requires Linux")]
+    #[error("trusted host session ownership currently requires Linux or macOS")]
     HostUnsupportedPlatform,
     #[error(
         "host requires a dedicated absolute state root, Native execution and no managed credential or projection configuration"
@@ -669,7 +669,7 @@ mod tests {
         assert_eq!(config.validate_host(), Err(ConfigError::InvalidHost));
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn unsupported_host_ownership_is_rejected_before_effects_without_affecting_guests() {
         let mut config = fixture();

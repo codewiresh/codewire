@@ -58,6 +58,10 @@ FORBIDDEN_DEFINES = (
     "HAVE_MAGIC_H", "HAVE_ARCHIVE_H", "HAVE_LIBARCHIVE",
     "ENABLE_NLS", "CONFIG_TESTIO_DEBUG", "CONFIG_DLOPEN_LIBARCHIVE",
 )
+# The programs the macOS local runtime ships (macos-local-runtime.py): make
+# directory and target. Build mode also builds the checker, resizer and
+# debugfs beside the formatter; probe mode exercises only mke2fs.
+TOOLS = (("misc", "mke2fs"), ("e2fsck", "e2fsck"), ("resize", "resize2fs"), ("debugfs", "debugfs"))
 CASES = ((256, "CWROOT"), (513, "CWSTATE"))
 # initialize.c removes an undersized final block group and retries. For the
 # fixed 513 MiB case its 256-block tail cannot fit the inode table + overhead.
@@ -313,10 +317,11 @@ def build_binary(archive, output, env, command, result):
     result["config_h_sha256"] = developer_loop.digest(config)
     result["make_config_sha256"] = developer_loop.digest(make_config)
     command(["/usr/bin/make", "-j4", "libs"], output / "build", env)
-    command(["/usr/bin/make", "-j4", "-C", "misc", "mke2fs"], output / "build", env)
-    binary = output / "bundle" / "mke2fs"
-    shutil.copyfile(output / "build" / "misc/mke2fs", binary)
-    binary.chmod(0o500)
+    for directory, name in TOOLS:
+        command(["/usr/bin/make", "-j4", "-C", directory, name], output / "build", env)
+        binary = output / "bundle" / name
+        shutil.copyfile(output / "build" / directory / name, binary)
+        binary.chmod(0o500)
     for name in ("NOTICE", "lib/uuid/COPYING"):
         write_new(output / "bundle" / ("NOTICE" if name == "NOTICE" else "libuuid-COPYING"),
                   (source / name).read_bytes(), 0o400)
@@ -376,14 +381,21 @@ def run(archive, output, probe_binary=None, binary_sha=None):
         # its output once, before any external validation, rather than blessing
         # whatever bytes happen to remain after those commands return.
         result["binary_sha256"] = binary_sha if probe_binary else developer_loop.digest(binary)
-        with admitted_file(binary, result["binary_sha256"], 16 * 1024 * 1024, 0o500):
-            dependencies = command(["/usr/bin/otool", "-L", str(binary)], output, env)
-            validate_dependencies(dependencies)
-            result["dependencies"] = ["/usr/lib/libSystem.B.dylib"]
-            architecture = command(["/usr/bin/lipo", "-archs", str(binary)], output, env).strip()
-            if architecture != "arm64":
-                raise ValueError("formatter architecture mismatch")
-            command(["/usr/bin/codesign", "--verify", "--strict", str(binary)], output, env)
+        tools = {"mke2fs": result["binary_sha256"]}
+        if not probe_binary:
+            tools.update({name: developer_loop.digest(output / "bundle" / name)
+                          for _directory, name in TOOLS[1:]})
+        result["tools"] = tools
+        for name, checksum in tools.items():
+            program = output / "bundle" / name
+            with admitted_file(program, checksum, 16 * 1024 * 1024, 0o500):
+                dependencies = command(["/usr/bin/otool", "-L", str(program)], output, env)
+                validate_dependencies(dependencies)
+                architecture = command(["/usr/bin/lipo", "-archs", str(program)], output, env).strip()
+                if architecture != "arm64":
+                    raise ValueError(f"{name} architecture mismatch")
+                command(["/usr/bin/codesign", "--verify", "--strict", str(program)], output, env)
+        result["dependencies"] = ["/usr/lib/libSystem.B.dylib"]
         result["configuration_sha256"] = CONFIG_SHA256
         result["images"] = [format_empty(output / "bundle", result["binary_sha256"],
                                          output / "probe", size, label, command)

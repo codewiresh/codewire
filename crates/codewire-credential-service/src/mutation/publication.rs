@@ -71,27 +71,23 @@ pub(super) async fn enroll(
                 };
                 let prepared = scope
                     .wait(
-                        completed.wait_for_publication(shared.store.prepare_creation(
-                            &scope.owner,
-                            registration,
-                            &material,
-                        )),
+                        shared
+                            .store
+                            .prepare_creation(&scope.owner, registration, &material),
                     )
-                    .await??
+                    .await?
                     .map_err(store_error)?;
                 Ok(Mutation::Create(Box::new(prepared)))
             }
             EnrollmentTarget::Reconnect(expected) => {
                 let prepared = scope
-                    .wait(
-                        completed.wait_for_publication(shared.store.prepare_replacement(
-                            &scope.owner,
-                            &expected,
-                            &material,
-                            account_hint,
-                        )),
-                    )
-                    .await??
+                    .wait(shared.store.prepare_replacement(
+                        &scope.owner,
+                        &expected,
+                        &material,
+                        account_hint,
+                    ))
+                    .await?
                     .map_err(store_error)?;
                 Ok(Mutation::Replace(Box::new(prepared)))
             }
@@ -109,7 +105,7 @@ pub(super) async fn enroll(
         }
     };
     let github_create = completed.provider() == "github" && matches!(prepared, Mutation::Create(_));
-    let result = publish(shared, scope, Some(completed), prepared).await;
+    let result = publish(shared, scope, prepared).await;
     Publication {
         outcome: result.outcome,
         result: result
@@ -138,7 +134,7 @@ pub(super) async fn add_api_key(
         .await?
         .map_err(store_error)?;
     drop(material);
-    publish(shared, scope, None, Mutation::Create(Box::new(prepared)))
+    publish(shared, scope, Mutation::Create(Box::new(prepared)))
         .await
         .result?
         .ok_or(Error::PublicationUnknown)
@@ -155,7 +151,6 @@ pub(super) async fn rename(
     publish(
         shared,
         scope,
-        None,
         Mutation::Rename {
             id,
             revision,
@@ -202,7 +197,7 @@ pub(super) async fn rotate_api_key(
         .await?
         .map_err(store_error)?;
     drop(material);
-    publish(shared, scope, None, Mutation::Replace(Box::new(prepared)))
+    publish(shared, scope, Mutation::Replace(Box::new(prepared)))
         .await
         .result?
         .ok_or(Error::PublicationUnknown)
@@ -265,7 +260,7 @@ pub(super) async fn add_claude_subscription_token(
         }
     };
     drop(material);
-    publish(shared, scope, None, mutation)
+    publish(shared, scope, mutation)
         .await
         .result?
         .ok_or(Error::PublicationUnknown)
@@ -286,7 +281,7 @@ pub(super) async fn add_ssh(
         )
         .await?
         .map_err(store_error)?;
-    publish(shared, scope, None, Mutation::Create(Box::new(prepared)))
+    publish(shared, scope, Mutation::Create(Box::new(prepared)))
         .await
         .result?
         .ok_or(Error::PublicationUnknown)
@@ -304,13 +299,12 @@ pub(super) async fn lifecycle(
     } else {
         Mutation::Revoke { id, revision }
     };
-    publish(shared, scope, None, mutation).await.result
+    publish(shared, scope, mutation).await.result
 }
 
 async fn publish(
     shared: &Shared,
     scope: &Scope,
-    completed: Option<&Completed>,
     mutation: Mutation,
 ) -> Publication<Option<CredentialMetadata>> {
     let deadline = scope.deadline.min(Instant::now() + MUTATION_TIMEOUT);
@@ -328,14 +322,7 @@ async fn publish(
     let transaction = {
         let prepared = tokio::time::timeout_at(
             deadline,
-            prepare_publication(
-                &mut connection,
-                shared,
-                scope,
-                completed,
-                mutation,
-                deadline,
-            ),
+            prepare_publication(&mut connection, shared, scope, mutation, deadline),
         )
         .await;
         match prepared {
@@ -395,7 +382,6 @@ async fn prepare_publication<'connection>(
     connection: &'connection mut PgConnection,
     shared: &Shared,
     scope: &Scope,
-    completed: Option<&Completed>,
     mutation: Mutation,
     deadline: Instant,
 ) -> Result<
@@ -428,9 +414,6 @@ async fn prepare_publication<'connection>(
     // There is no await between these final original-authority checks and
     // issuing COMMIT. A cancellation after issuance cannot uncommit it.
     let admitted = scope.check().and_then(|()| {
-        if let Some(completed) = completed {
-            completed.check_active()?;
-        }
         if Instant::now() >= deadline {
             return Err(Error::Expired);
         }

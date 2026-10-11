@@ -94,13 +94,13 @@ mod linux {
     use codewire_local_vmm::cw_runtime::AdmittedCwRuntimeDisk;
     use codewire_local_vmm::generation::{RootGenerationDisk, ensure_empty_root_generation};
     use codewire_local_vmm::host_port::HostPortBinding;
-    use codewire_local_vmm::linux::runner::ExitClass;
-    use codewire_local_vmm::linux::state::{
-        StateDiskIdentity, VmPhase, cleanup_trashed_vm, move_stopped_vm_to_trash,
-    };
     use codewire_local_vmm::mesh_ingress::MeshAttachment;
     use codewire_local_vmm::network_worker::{
         BoxedBrokerStream, BrokerDnsAnswer, EgressBroker, TcpFlow,
+    };
+    use codewire_local_vmm::runner::ExitClass;
+    use codewire_local_vmm::state::{
+        StateDiskIdentity, VmPhase, cleanup_trashed_vm, move_stopped_vm_to_trash,
     };
     use codewire_local_vmm::{
         CloudHypervisorRunner, CreateVmRequest, LiveProcess, PreparedVm, ProcessIdentity,
@@ -1186,6 +1186,7 @@ mod linux {
             RunnerError::NetworkWorkerSpawn => "network-worker-spawn",
             RunnerError::NetworkWorkerStartTimeout => "network-worker-start-timeout",
             RunnerError::NetworkWorkerBootstrap => "network-worker-bootstrap",
+            RunnerError::GuestDockerToolingMissing => "guest-docker-tooling-missing",
             RunnerError::NetworkWorkerStartup(failure) => failure.code(),
             RunnerError::NetworkWorkerWait => "network-worker-wait",
             RunnerError::NetworkWorkerKillTimeout => "network-worker-kill-timeout",

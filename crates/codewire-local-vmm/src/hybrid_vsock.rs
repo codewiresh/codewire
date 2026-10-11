@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tonic::transport::Endpoint;
 
-use crate::linux::path::{PathError, SocketIdentity};
+use crate::host::path::{PathError, SocketIdentity};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -53,13 +53,13 @@ pub async fn connect_hybrid_vsock(
 pub(crate) async fn connect_runtime_publisher(
     socket: &Path,
     identity: &SocketIdentity,
-    expected_vmm: &crate::linux::ProcessIdentity,
+    expected_vmm: &crate::host::process::ProcessIdentity,
 ) -> Result<(UnixStream, std::os::fd::OwnedFd), HybridVsockError> {
     let port = codewire_vmm_guest_probe::cw_runtime_live::LIVE_RUNTIME_VSOCK_PORT;
     validate_target(socket, port)?;
     identity.revalidate(socket)?;
     let stream = connect_stream(UnixStream::connect(socket), CONNECT_TIMEOUT).await?;
-    let peer = crate::linux::supervisor_peer::admit_known_process_stream(&stream, expected_vmm)
+    let peer = crate::host::supervisor_peer::admit_known_process_stream(&stream, expected_vmm)
         .map_err(|_| HybridVsockError::InvalidAcknowledgement)?;
     identity.revalidate(socket)?;
     let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, complete_handshake(stream, port))
@@ -276,6 +276,14 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
+    /// Socket identity requires an owner-private parent on Darwin.
+    fn private_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap()
+    }
+
     async fn read_connect(stream: &mut UnixStream) -> String {
         let mut line = Vec::new();
         loop {
@@ -290,7 +298,7 @@ mod tests {
 
     #[tokio::test]
     async fn fake_hybrid_socket_serves_authenticated_daemon_without_host_tcp_listener() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let workspace = temp.path().join("workspace");
         let home = temp.path().join("home");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -354,7 +362,7 @@ mod tests {
 
     #[tokio::test]
     async fn acknowledgement_parser_does_not_consume_following_bytes() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let socket = temp.path().join("hybrid.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         privatize(&socket);
@@ -376,7 +384,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_acknowledgements_fail_closed() {
         for acknowledgement in [b"NO 42\n".as_slice(), b"OK 0\n", b"OK 1 extra\n"] {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = private_tempdir();
             let socket = temp.path().join("hybrid.sock");
             let listener = UnixListener::bind(&socket).unwrap();
             privatize(&socket);
@@ -395,7 +403,7 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_daemon_token_is_rejected_through_hybrid_transport() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let workspace = temp.path().join("workspace");
         let home = temp.path().join("home");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -442,7 +450,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_and_eof_acknowledgements_fail_closed() {
         for acknowledgement in [Some(vec![b'A'; MAX_ACK_BYTES]), None] {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = private_tempdir();
             let socket = temp.path().join("hybrid.sock");
             let listener = UnixListener::bind(&socket).unwrap();
             privatize(&socket);
@@ -469,7 +477,7 @@ mod tests {
             Err(HybridVsockError::ConnectTimeout)
         ));
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let socket = temp.path().join("hybrid.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         privatize(&socket);

@@ -1,8 +1,5 @@
 use std::collections::BTreeMap;
 use std::io::IsTerminal as _;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::Duration;
 
 use anyhow::Context as _;
 #[cfg(test)]
@@ -11,30 +8,25 @@ use codewire_access::{
     AccessProfileName, CapabilitySlot, CredentialAuthKind, CredentialStatus, Owner, ProviderId,
     builtin_provider_catalog,
 };
-use codewire_credential_broker::codex_enrollment::{
-    CodexEnrollmentConfig, CodexEnrollmentOwner, CodexPublicationOutcome, CompletedCodexEnrollment,
-};
-use codewire_credential_broker::provider_enrollment::{
-    PrivateProviderHome, resolve_provider_executable,
-};
 use codewire_local_credentials::{
     AccessProfileRecord, AccessProfileRevisionRecord, CredentialRecord, LocalCredentialClient,
     NewCredential,
 };
 #[cfg(test)]
 use codewire_protected_store::MAX_PROTECTED_VALUE_BYTES;
-use codewire_protected_store::{ProtectedStorePersistence, ProtectedValue};
+use codewire_protected_store::ProtectedStorePersistence;
+use codewire_protected_store::ProtectedValue;
 use serde::Serialize;
-use tokio::io::AsyncReadExt as _;
-use zeroize::Zeroizing;
 
 #[cfg(test)]
 use super::CredentialsArgs;
+#[cfg(test)]
+use super::credential_input::CODEX_DEVICE_AUTHORIZATION_GUIDANCE;
 use super::credential_input::{
-    CODEX_DEVICE_AUTHORIZATION_GUIDANCE, CredentialOperation, GITHUB_ALWAYS_INCLUDED,
-    ParsedCredentialSelector, ParsedProfileSelector, parse_credential_selector,
-    parse_profile_selector, profile_set_credential, prompt_credential_material, read_ssh_import,
-    supported_profile_slot, validate_ssh_generation, validate_ssh_import,
+    CredentialOperation, GITHUB_ALWAYS_INCLUDED, ParsedCredentialSelector, ParsedProfileSelector,
+    parse_credential_selector, parse_profile_selector, profile_set_credential,
+    prompt_credential_material, read_ssh_import, supported_profile_slot, validate_ssh_generation,
+    validate_ssh_import,
 };
 #[cfg(test)]
 use super::credential_input::{
@@ -51,11 +43,6 @@ use super::{
     CredentialRotateArgs, CredentialSelectorArgs, CredentialsCommand, OutputFormat,
     connect_local_credential_authority, prompt_confirm_default_no, trimmed_required,
 };
-
-const GITHUB_HOST: &str = "github.com";
-const GITHUB_CHILD_PATH: &str = "/usr/bin:/bin";
-const GITHUB_TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_GITHUB_TOKEN_BYTES: usize = 4 * 1024;
 
 pub(crate) async fn handle_local_credentials_command(
     operation: CredentialOperation,
@@ -119,91 +106,17 @@ async fn connect_codex(
     let Some(target) = prepare_oauth_connection(client, &args, "openai").await? else {
         return Ok(());
     };
-    let path = provider_search_path("Codex CLI")?;
-    let executable = resolve_provider_executable("codex", &path)
-        .context("resolve the official Codex CLI executable")?;
-    let config = CodexEnrollmentConfig::new(executable, provider_login_runtime()?, path)
-        .context("configure isolated Codex enrollment")?;
-    // Install handlers before starting a child. The isolated process group
-    // does not share the terminal's signals; its owner is responsible for drain.
-    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-        .context("install Codex enrollment interrupt handler")?;
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .context("install Codex enrollment termination handler")?;
-    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .context("install Codex enrollment hangup handler")?;
-    let owner = CodexEnrollmentOwner::new(config);
-    let result = tokio::select! {
-        biased;
-        _ = interrupt.recv() => Err(anyhow::anyhow!("Codex enrollment cancelled; any acknowledged or possibly stored credential was not revoked")),
-        _ = terminate.recv() => Err(anyhow::anyhow!("Codex enrollment cancelled; any acknowledged or possibly stored credential was not revoked")),
-        _ = hangup.recv() => Err(anyhow::anyhow!("Codex enrollment cancelled; any acknowledged or possibly stored credential was not revoked")),
-        result = connect_codex_with_owner(client, target, &owner) => result,
-    };
-    // Even if the public future was cancelled during a placement RPC, the
-    // worker drains and cleans using Unknown, never automatic provider logout.
-    owner.shutdown().await.context(
-        "drain isolated Codex enrollment; stored or possibly stored credentials were not revoked",
-    )?;
-    result
-}
-
-async fn connect_codex_with_owner(
-    client: &mut LocalCredentialClient,
-    target: OAuthConnectionTarget,
-    owner: &CodexEnrollmentOwner,
-) -> anyhow::Result<()> {
-    let mut completed = run_isolated_codex_login(owner, true).await?;
-    let imported = match completed.take_import() {
-        Ok(imported) => imported,
-        Err(error) => {
-            completed
-                .finish(CodexPublicationOutcome::NotPublished)
-                .await
-                .context("clean up unpublished Codex enrollment")?;
-            return Err(error).context("admit completed Codex enrollment");
-        }
-    };
-    let (bundle, account_hint) = imported.into_parts();
+    let (bundle, account_hint) = super::provider_login::codex_device_login()
+        .await?
+        .into_parts();
     let mut bytes = bundle.into_bytes();
-    let material = match ProtectedValue::new(std::mem::take(&mut *bytes)) {
-        Ok(material) => material,
-        Err(error) => {
-            completed
-                .finish(CodexPublicationOutcome::NotPublished)
-                .await
-                .context("clean up unpublished Codex enrollment")?;
-            return Err(error).context("prepare protected Codex credential");
-        }
-    };
-    let publication = completed
-        .wait_for_publication(publish_oauth_connection(
-            client,
-            target,
-            material,
-            account_hint,
-        ))
+    let material = ProtectedValue::new(std::mem::take(&mut *bytes))
+        .context("prepare protected Codex credential")?;
+    let record = publish_oauth_connection(client, target, material, account_hint)
         .await
-        .map_err(anyhow::Error::from)
-        .and_then(|result| result.map_err(anyhow::Error::from));
-    let record = match publication {
-        Ok(record) => record,
-        Err(error) => {
-            // The client also reports post-commit transport/response-decoding
-            // failures as Status. No status code proves publication did not
-            // occur. The original enrollment deadline also bounds this wait,
-            // not the store's commit: an uncertain ACK must never revoke tokens.
-            completed.finish(CodexPublicationOutcome::Unknown).await.context(
-                "clean up Codex enrollment after an unknown storage acknowledgement; any stored credential was not revoked",
-            )?;
-            return Err(error).context(
-                "local Codex storage acknowledgement is unknown; inspect the credential list before retrying; no credential was revoked",
-            );
-        }
-    };
-    completed.finish(CodexPublicationOutcome::Published).await.context(
-        "local Codex credential was stored, but transient enrollment cleanup failed; the stored credential was not revoked",
-    )?;
+        .context(
+            "local Codex storage acknowledgement is unknown; inspect the credential list before retrying",
+        )?;
     eprintln!(
         "Local Codex credential {:?} connected ({}).",
         record.metadata.display_name, record.metadata.id
@@ -218,33 +131,66 @@ async fn connect_github(
     let Some(target) = prepare_oauth_connection(client, &args, "github").await? else {
         return Ok(());
     };
-    let CompletedGitHubLogin {
-        material,
-        login_home,
-    } = run_isolated_github_login().await?;
-    let record = match publish_oauth_connection(client, target, material, None).await {
-        Ok(record) => record,
-        Err(error) => {
-            if let Err(cleanup_error) = login_home.remove() {
-                return Err(cleanup_error).context(
-                    "remove transient GitHub login material after an unknown storage acknowledgement; any stored credential was not revoked",
-                );
-            }
-            return Err(error).context(
-                "local GitHub storage acknowledgement is unknown; inspect the credential list before retrying; no credential was revoked",
-            );
-        }
-    };
-    if let Err(error) = login_home.remove() {
-        return Err(error).context(
-            "local GitHub credential was stored, but transient enrollment cleanup failed; the stored credential was not revoked or deleted",
+    let mut import = super::provider_login::github_device_login().await?;
+    let reach = import.reach().to_vec();
+    // A reconnect keeps the GitHub account its profiles already follow.
+    if let Some(expected) = target
+        .existing
+        .as_ref()
+        .and_then(|record| record.metadata.account_hint.as_deref())
+    {
+        anyhow::ensure!(
+            expected == import.account_hint(),
+            "the approved GitHub account {:?} is not the connected account {expected:?}; no credential was changed",
+            import.account_hint(),
         );
     }
+    let (mut bytes, account_hint) = import
+        .take_import()
+        .context("prepare protected GitHub credential")?;
+    let material = ProtectedValue::new(std::mem::take(&mut *bytes))
+        .context("prepare protected GitHub credential")?;
+    let record = publish_oauth_connection(client, target, material, account_hint)
+        .await
+        .context(
+            "local GitHub storage acknowledgement is unknown; inspect the credential list before retrying",
+        )?;
     eprintln!(
         "Local GitHub credential {:?} connected ({}).",
         record.metadata.display_name, record.metadata.id
     );
+    eprintln!("{}", github_reach_summary(&reach));
     Ok(())
+}
+
+/// What the Codewire GitHub App can reach for this login, and where to change
+/// it. GitHub decides access per installation, not per Codewire credential.
+fn github_reach_summary(
+    reach: &[codewire_credential_broker::GitHubAppInstallationReach],
+) -> String {
+    let accounts = reach
+        .iter()
+        .map(|installation| {
+            let scope = if installation.all_repositories {
+                "all repositories"
+            } else {
+                "selected repositories"
+            };
+            format!("{} ({scope})", installation.account)
+        })
+        .collect::<Vec<_>>();
+    let reach = if accounts.is_empty() {
+        "Codewire can read repositories where the Codewire GitHub App is installed.".to_owned()
+    } else {
+        format!(
+            "Codewire can read repositories in: {}.",
+            accounts.join(", ")
+        )
+    };
+    format!(
+        "{reach}\nTo add an account or organization, or choose repositories: {}",
+        codewire_credential_broker::provider_oauth::github::codewire_github_app_install_url()
+    )
 }
 
 struct OAuthConnectionTarget {
@@ -388,214 +334,6 @@ async fn publish_oauth_connection(
             )
             .await
     }
-}
-
-struct CompletedGitHubLogin {
-    material: ProtectedValue,
-    login_home: PrivateProviderHome,
-}
-
-async fn run_isolated_github_login() -> anyhow::Result<CompletedGitHubLogin> {
-    let login_home = PrivateProviderHome::create_in(&provider_login_runtime()?)
-        .context("create private GitHub login staging")?;
-    let executable = resolve_github_executable()?;
-    run_isolated_github_login_with(
-        login_home,
-        executable,
-        std::ffi::OsString::from(GITHUB_CHILD_PATH),
-        true,
-    )
-    .await
-}
-
-async fn run_isolated_github_login_with(
-    login_home: PrivateProviderHome,
-    executable: PathBuf,
-    path: std::ffi::OsString,
-    interactive: bool,
-) -> anyhow::Result<CompletedGitHubLogin> {
-    if interactive {
-        eprintln!(
-            "Starting an isolated GitHub CLI OAuth login. No ambient GitHub login will be read."
-        );
-    }
-    let mut command = isolated_github_command(&executable, &path, &login_home);
-    command.args([
-        "auth",
-        "login",
-        "--hostname",
-        GITHUB_HOST,
-        "--git-protocol",
-        "https",
-        "--web",
-        "--insecure-storage",
-        "--skip-ssh-key",
-    ]);
-    if interactive {
-        command
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-    } else {
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-    }
-    let status = match command.status().await {
-        Ok(status) => status,
-        Err(error) => {
-            login_home
-                .remove()
-                .context("remove GitHub login staging after launch failure")?;
-            return Err(error).context("run isolated GitHub CLI login");
-        }
-    };
-    if !status.success() {
-        login_home
-            .remove()
-            .context("remove GitHub login staging after incomplete authorization")?;
-        anyhow::bail!("GitHub CLI OAuth login did not complete; no local credential was stored");
-    }
-    let material = match read_isolated_github_token(&executable, &path, &login_home).await {
-        Ok(material) => material,
-        Err(error) => {
-            login_home
-                .remove()
-                .context("remove GitHub login staging after token import failure")?;
-            return Err(error).context(
-                "import isolated GitHub CLI login; the completed authorization may remain active and can be revoked in GitHub settings",
-            );
-        }
-    };
-    Ok(CompletedGitHubLogin {
-        material,
-        login_home,
-    })
-}
-
-fn isolated_github_command(
-    executable: &Path,
-    path: &std::ffi::OsStr,
-    login_home: &PrivateProviderHome,
-) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(executable);
-    command
-        .env_clear()
-        .env("PATH", path)
-        .env("HOME", login_home.path())
-        .env("GH_CONFIG_DIR", login_home.path())
-        .env("XDG_CONFIG_HOME", login_home.path())
-        .env("XDG_CACHE_HOME", login_home.path())
-        .env("TMPDIR", login_home.path())
-        .current_dir(login_home.path())
-        .kill_on_drop(true);
-    command
-}
-
-async fn read_isolated_github_token(
-    executable: &Path,
-    path: &std::ffi::OsStr,
-    login_home: &PrivateProviderHome,
-) -> anyhow::Result<ProtectedValue> {
-    let mut command = isolated_github_command(executable, path, login_home);
-    command
-        .args(["auth", "token", "--hostname", GITHUB_HOST])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = command.spawn().context("read isolated GitHub CLI token")?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("GitHub CLI token output was unavailable"))?;
-    let output_limit =
-        u64::try_from(MAX_GITHUB_TOKEN_BYTES + 3).expect("GitHub token output bound fits u64");
-    let output = tokio::time::timeout(GITHUB_TOKEN_TIMEOUT, async move {
-        let mut output = Zeroizing::new(Vec::with_capacity(MAX_GITHUB_TOKEN_BYTES + 2));
-        stdout
-            .take(output_limit)
-            .read_to_end(&mut output)
-            .await
-            .context("read isolated GitHub CLI token")?;
-        if output.len() > MAX_GITHUB_TOKEN_BYTES + 2 {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            anyhow::bail!("GitHub CLI token output exceeded the safety limit");
-        }
-        let status = child
-            .wait()
-            .await
-            .context("wait for isolated GitHub CLI token export")?;
-        if !status.success() {
-            anyhow::bail!("GitHub CLI could not export its isolated OAuth token");
-        }
-        Ok::<_, anyhow::Error>(output)
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("GitHub CLI token export timed out"))??;
-    parse_github_token_output(output)
-}
-
-fn parse_github_token_output(mut output: Zeroizing<Vec<u8>>) -> anyhow::Result<ProtectedValue> {
-    if output.last() == Some(&b'\n') {
-        output.pop();
-        if output.last() == Some(&b'\r') {
-            output.pop();
-        }
-    }
-    if output.is_empty()
-        || output.len() > MAX_GITHUB_TOKEN_BYTES
-        || !output.iter().all(u8::is_ascii_graphic)
-    {
-        anyhow::bail!("GitHub CLI returned an invalid OAuth token");
-    }
-    ProtectedValue::new(std::mem::take(&mut *output)).context("prepare protected GitHub credential")
-}
-
-fn resolve_github_executable() -> anyhow::Result<PathBuf> {
-    let path = provider_search_path("GitHub CLI")?;
-    resolve_provider_executable("gh", &path).context("resolve the official GitHub CLI executable")
-}
-
-fn provider_search_path(label: &str) -> anyhow::Result<std::ffi::OsString> {
-    std::env::var_os("PATH")
-        .ok_or_else(|| anyhow::anyhow!("PATH is unavailable; install the official {label}"))
-}
-
-fn provider_login_runtime() -> anyhow::Result<PathBuf> {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            anyhow::anyhow!("XDG_RUNTIME_DIR is required for private provider login staging")
-        })
-}
-
-async fn run_isolated_codex_login(
-    owner: &CodexEnrollmentOwner,
-    interactive: bool,
-) -> anyhow::Result<CompletedCodexEnrollment> {
-    if interactive {
-        eprintln!("{CODEX_DEVICE_AUTHORIZATION_GUIDANCE}");
-    }
-    let mut pending = owner.start().context("start isolated Codex enrollment")?;
-    let challenge = pending
-        .challenge()
-        .await
-        .context("read Codex device challenge")?;
-    if interactive {
-        // Only the fixed provider URL, accepted code and bounded deadline are
-        // displayed. No child stdout/stderr or imported material is forwarded.
-        eprintln!(
-            "Open {} and enter this one-time code: {}\nThe code expires within 15 minutes. Continue only if you started this login in Codewire.",
-            challenge.verification_url(),
-            challenge.user_code(),
-        );
-    }
-    pending
-        .complete()
-        .await
-        .context("complete isolated Codex enrollment")
 }
 
 async fn add_credential(
@@ -1250,9 +988,9 @@ mod tests {
         assert!(super::read_protected_value(input.as_slice(), false).is_err());
     }
     use std::io::Cursor;
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
+    use std::time::Duration;
 
-    use base64::Engine as _;
     use clap::Parser as _;
     use codewire_access::{
         AccessProfile, AccessProfileScope, CredentialMetadata, OwnerId, Placement,
@@ -1315,13 +1053,6 @@ mod tests {
             created_at_unix_ms: 10,
             updated_at_unix_ms: 20,
         }
-    }
-
-    fn synthetic_jwt(payload: serde_json::Value) -> String {
-        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&payload).unwrap());
-        format!("{header}.{payload}.synthetic-signature")
     }
 
     #[test]
@@ -2174,129 +1905,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn isolated_codex_login_uses_only_its_private_tmpfs_home() {
-        let root = tempfile::Builder::new()
-            .prefix("codewire-codex-login-test-")
-            .tempdir_in("/dev/shm")
-            .expect("private tmpfs test root");
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
-            .expect("make tmpfs test root private");
-        // A stable fixture avoids a write-then-execute race with concurrent test tooling.
-        let executable = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/synthetic-codex-login.sh");
-        let auth = serde_json::to_string(&serde_json::json!({
-            "auth_mode": "chatgpt",
-            "OPENAI_API_KEY": null,
-            "tokens": {
-                "id_token": synthetic_jwt(serde_json::json!({
-                    "email": "developer@example.test",
-                    "https://api.openai.com/auth": {
-                        "chatgpt_account_id": "account-work",
-                        "chatgpt_account_is_fedramp": false
-                    }
-                })),
-                "access_token": "synthetic.access.token",
-                "refresh_token": "synthetic-refresh-token",
-                "account_id": "account-work"
-            }
-        }))
-        .unwrap();
-        assert!(!auth.contains('\''));
-        std::fs::write(root.path().join("synthetic-auth.fixture.json"), auth)
-            .expect("write synthetic Codex auth fixture");
-        for outcome in [
-            CodexPublicationOutcome::Published,
-            CodexPublicationOutcome::Unknown,
-            CodexPublicationOutcome::NotPublished,
-        ] {
-            let owner = CodexEnrollmentOwner::new(
-                CodexEnrollmentConfig::new(
-                    executable.clone(),
-                    root.path().to_owned(),
-                    std::ffi::OsString::from("/usr/bin:/bin"),
-                )
-                .expect("trusted synthetic enrollment configuration"),
-            );
-            let mut completed = run_isolated_codex_login(&owner, false)
-                .await
-                .expect("synthetic isolated login");
-            assert_eq!(
-                completed.take_import().unwrap().account_hint(),
-                Some("developer@example.test")
-            );
-            let homes: Vec<_> = std::fs::read_dir(root.path())
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .filter(|path| path.is_dir())
-                .collect();
-            assert_eq!(homes.len(), 1);
-            assert!(homes[0].join("auth.json").is_file());
-            completed
-                .finish(outcome)
-                .await
-                .expect("resolve synthetic publication outcome");
-            owner
-                .shutdown()
-                .await
-                .expect("await synthetic enrollment cleanup");
-            assert!(!homes[0].exists());
-            assert_eq!(
-                root.path().join("logout.called").exists(),
-                outcome == CodexPublicationOutcome::NotPublished
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn isolated_github_login_uses_only_its_private_tmpfs_configuration() {
-        let root = tempfile::Builder::new()
-            .prefix("codewire-github-login-test-")
-            .tempdir_in("/dev/shm")
-            .expect("private tmpfs test root");
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
-            .expect("make tmpfs test root private");
-        // A stable fixture avoids a write-then-execute race with concurrent test tooling.
-        let executable = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/synthetic-github-login.sh");
-        let login_home = PrivateProviderHome::create_in(root.path()).expect("isolated login home");
-        let completed = run_isolated_github_login_with(
-            login_home,
-            executable,
-            std::ffi::OsString::from("/usr/bin:/bin"),
-            false,
-        )
-        .await
-        .expect("synthetic isolated login");
-        assert_eq!(
-            completed.material.expose_secret(),
-            b"synthetic-github-oauth-material"
-        );
-        let login_path = completed.login_home.path().to_owned();
-        completed
-            .login_home
-            .remove()
-            .expect("remove isolated login home");
-        assert!(!login_path.exists());
-    }
-
-    #[test]
-    fn github_token_import_is_single_line_ascii_and_bounded() {
-        let token = parse_github_token_output(Zeroizing::new(b"synthetic-token\r\n".to_vec()))
-            .expect("valid synthetic GitHub token");
-        assert_eq!(token.expose_secret(), b"synthetic-token");
-
-        for rejected in [
-            Vec::new(),
-            b"one\ntwo\n".to_vec(),
-            b"contains space\n".to_vec(),
-            vec![0xff, b'\n'],
-            vec![b'x'; MAX_GITHUB_TOKEN_BYTES + 1],
-        ] {
-            assert!(parse_github_token_output(Zeroizing::new(rejected)).is_err());
-        }
-    }
-
     #[test]
     fn metadata_output_has_no_material_or_internal_store_reference() {
         let view = CredentialView::from(&credential());
@@ -2312,5 +1920,29 @@ mod tests {
         assert!(text.contains("work@example.test"));
         assert!(text.contains("operating_system"));
         assert!(!text.contains("account_hint"));
+    }
+
+    #[test]
+    fn github_reach_names_each_installation_and_the_install_page() {
+        use codewire_credential_broker::GitHubAppInstallationReach;
+        let summary = github_reach_summary(&[
+            GitHubAppInstallationReach {
+                account: "codewiresh".into(),
+                all_repositories: true,
+            },
+            GitHubAppInstallationReach {
+                account: "noeljackson".into(),
+                all_repositories: false,
+            },
+        ]);
+        assert_eq!(
+            summary,
+            "Codewire can read repositories in: codewiresh (all repositories), noeljackson (selected repositories).\n\
+             To add an account or organization, or choose repositories: \
+             https://github.com/apps/codewire-sh/installations/new"
+        );
+        assert!(github_reach_summary(&[]).starts_with(
+            "Codewire can read repositories where the Codewire GitHub App is installed."
+        ));
     }
 }

@@ -10,7 +10,7 @@ fn authorization() -> HeaderValue {
     HeaderValue::from_str(&format!(
         "Basic {}",
         base64::engine::general_purpose::STANDARD
-            .encode("x-access-token:gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+            .encode(format!("x-access-token:{GITHUB_APP_USER_TOKEN}"))
     ))
     .unwrap()
 }

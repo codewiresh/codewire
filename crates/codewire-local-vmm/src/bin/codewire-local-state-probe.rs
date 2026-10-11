@@ -956,7 +956,7 @@ mod linux {
                     protocol_version: 1,
                     record_version: 1,
                     package_version: "0.1.0".into(),
-                    target: "x86_64-unknown-linux-musl".into(),
+                    target: codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_TARGET.into(),
                     source_revision: "c".repeat(40),
                     source_tree_sha256: "d".repeat(64),
                     rustc: "rustc 1.93.0 (synthetic journal fixture)".into(),

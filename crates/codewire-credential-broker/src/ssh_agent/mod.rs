@@ -15,7 +15,9 @@
 mod one_shot;
 mod protocol;
 pub use one_shot::sign_once;
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
+mod darwin_tests;
+#[cfg(all(test, target_os = "linux"))]
 mod tests;
 
 use std::future::Future;
@@ -41,9 +43,11 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::provider_enrollment::{
-    PrivateProviderHome, validate_executable, validate_private_tmpfs_runtime,
-};
+#[cfg(target_os = "macos")]
+use crate::provider_enrollment::validate_private_directory;
+#[cfg(target_os = "linux")]
+use crate::provider_enrollment::validate_private_tmpfs_runtime;
+use crate::provider_enrollment::{PrivateProviderHome, validate_executable};
 use protocol::{FAILURE, MAX_FRAME_BYTES, REQUEST_IDENTITIES};
 pub use protocol::{SshKeyAlgorithm, SshPublicIdentity};
 
@@ -57,6 +61,11 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const ASKPASS_HELPER: &[u8] = include_bytes!("askpass.sh");
+/// `sockaddr_un.sun_path` capacity, including the terminating NUL.
+#[cfg(target_os = "linux")]
+const SOCKET_PATH_BYTES: usize = 108;
+#[cfg(target_os = "macos")]
+const SOCKET_PATH_BYTES: usize = 104;
 
 /// Exact public helper bytes for trusted packaging/composition. This script
 /// reads only the authority-selected private FIFO; it contains no credentials.
@@ -91,14 +100,31 @@ pub struct SshAgentConfig {
     agent: PathBuf,
     add: PathBuf,
     askpass: PathBuf,
-    #[cfg(test)]
+    #[cfg(target_os = "macos")]
+    darwin: DarwinProcessPrimitives,
+    #[cfg(all(test, target_os = "linux"))]
     phase_probe: Option<Arc<tests::PhaseProbe>>,
+}
+
+/// Darwin process primitives the trusted composer supplies, because this
+/// crate forbids unsafe code. Darwin creates some descriptors without an
+/// atomic close-on-exec flag, so every OpenSSH child must start holding only
+/// its standard descriptors; rustix offers no Apple `mkfifo`.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+pub struct DarwinProcessPrimitives {
+    /// Arrange for the spawned child to mark every inherited descriptor above
+    /// stderr close-on-exec before it executes.
+    pub prepare_child: fn(&mut Command),
+    /// Create an owner-only (0600) FIFO at exactly this new path.
+    pub make_fifo: fn(&std::path::Path) -> std::io::Result<()>,
 }
 
 impl SshAgentConfig {
     /// Validate trusted OpenSSH executables and the installed fixed askpass
     /// helper. The helper must be executable outside a noexec tmpfs, use the
     /// checked-in script, and receive only the private FIFO path in its env.
+    #[cfg(target_os = "linux")]
     pub fn new(
         runtime: PathBuf,
         agent: PathBuf,
@@ -113,6 +139,28 @@ impl SshAgentConfig {
             askpass: validate_askpass_helper(&askpass)?,
             #[cfg(test)]
             phase_probe: None,
+        })
+    }
+
+    /// As on Linux, but macOS has no per-user tmpfs: `runtime` must be a
+    /// private directory, and the staging inside it receives only the agent
+    /// socket and the passphrase FIFO (see
+    /// `PrivateProviderHome::create_signer_staging_in`).
+    #[cfg(target_os = "macos")]
+    pub fn new(
+        runtime: PathBuf,
+        agent: PathBuf,
+        add: PathBuf,
+        askpass: PathBuf,
+        darwin: DarwinProcessPrimitives,
+    ) -> Result<Self, SshAgentError> {
+        validate_private_directory(&runtime).map_err(|_| SshAgentError::Configuration)?;
+        Ok(Self {
+            runtime,
+            agent: validate_executable(&agent).map_err(|_| SshAgentError::Configuration)?,
+            add: validate_executable(&add).map_err(|_| SshAgentError::Configuration)?,
+            askpass: validate_askpass_helper(&askpass)?,
+            darwin,
         })
     }
 }
@@ -520,7 +568,11 @@ async fn run_worker(
     ready: oneshot::Sender<Result<SshPublicIdentity, SshAgentError>>,
     mut requests: mpsc::Receiver<AgentOperation>,
 ) -> Result<(), SshAgentError> {
-    let home = match PrivateProviderHome::create_in(&config.runtime) {
+    #[cfg(target_os = "linux")]
+    let home = PrivateProviderHome::create_in(&config.runtime);
+    #[cfg(target_os = "macos")]
+    let home = PrivateProviderHome::create_signer_staging_in(&config.runtime);
+    let home = match home {
         Ok(home) => home,
         Err(_) => {
             let _ = ready.send(Err(SshAgentError::Configuration));
@@ -543,7 +595,7 @@ async fn run_worker(
             let home = state.home.as_ref().ok_or(SshAgentError::Cleanup)?;
             let started = tokio::time::timeout_at(deadline.min(Instant::now() + START_TIMEOUT), start_agent(&config, home, &mut key, &mut passphrase, &mut state.agent, &mut state.add)).await.map_err(|_| SshAgentError::Expired)?;
             let (identity, mut socket) = started?;
-            #[cfg(test)]
+            #[cfg(all(test, target_os = "linux"))]
             config.reach_phase(tests::Phase::Ready, home, state.agent.as_ref(), None).await;
             let sender = ready.take().ok_or(SshAgentError::Unavailable)?;
             sender.send(Ok(identity.clone())).map_err(|_| SshAgentError::Cancelled)?;
@@ -558,7 +610,7 @@ async fn run_worker(
                         None => Ok(identity.identities_response()),
                         Some(algorithm) => {
                             write_frame(&mut socket, &operation.payload).await?;
-                            #[cfg(test)]
+                            #[cfg(all(test, target_os = "linux"))]
                             config.reach_phase(tests::Phase::SignDispatched, home, state.agent.as_ref(), None).await;
                             let response = read_frame(&mut socket).await?.ok_or(SshAgentError::Failed)?;
                             identity.validate_signature(&response, algorithm)?;
@@ -583,7 +635,7 @@ async fn run_worker(
     passphrase.zeroize();
     cancel.cancel();
     requests.close();
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     if let Some(home) = state.home.as_ref() {
         config
             .reach_phase(
@@ -633,11 +685,11 @@ async fn start_agent(
     // helper again immediately before starting the material-bearing tools.
     validate_askpass_helper(&config.askpass)?;
     let path = home.path().join("a");
-    // Linux sockaddr_un has a short, fixed path bound. Do not truncate names.
-    if path.as_os_str().as_encoded_bytes().len() >= 108 {
+    // sockaddr_un has a short, fixed path bound. Do not truncate names.
+    if path.as_os_str().as_encoded_bytes().len() >= SOCKET_PATH_BYTES {
         return Err(SshAgentError::Configuration);
     }
-    let mut command = isolated_command(&config.agent, home);
+    let mut command = isolated_command(config, &config.agent, home);
     command.args(["-D", "-a"]).arg(&path).args(["-P", ""]);
     *agent = Some(GroupChild::spawn(&mut command)?);
     let mut socket = loop {
@@ -657,6 +709,7 @@ async fn start_agent(
     // Fresh process, and no inherited agent: importing must yield exactly one
     // supported identity. No ssh-add -D against any ambient socket is needed.
     let fifo = home.path().join("askpass.fifo");
+    #[cfg(target_os = "linux")]
     rustix::fs::mknodat(
         rustix::fs::CWD,
         &fifo,
@@ -665,7 +718,9 @@ async fn start_agent(
         0,
     )
     .map_err(|_| SshAgentError::Configuration)?;
-    let mut command = isolated_command(&config.add, home);
+    #[cfg(target_os = "macos")]
+    (config.darwin.make_fifo)(&fifo).map_err(|_| SshAgentError::Configuration)?;
+    let mut command = isolated_command(config, &config.add, home);
     command
         .args(["-q", "-"])
         .stdin(Stdio::piped())
@@ -675,7 +730,7 @@ async fn start_agent(
         .env("DISPLAY", "codewire:0")
         .env("CODEWIRE_SSH_ASKPASS_FIFO", &fifo);
     *add = Some(GroupChild::spawn(&mut command)?);
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     config
         .reach_phase(
             tests::Phase::ImportSpawned,
@@ -705,7 +760,7 @@ async fn start_agent(
                     Err(_) => return Err(SshAgentError::Failed),
                 }
             };
-            #[cfg(test)]
+            #[cfg(all(test, target_os = "linux"))]
             config
                 .reach_phase(
                     tests::Phase::FifoConnected,
@@ -745,7 +800,11 @@ async fn start_agent(
     Ok((identity, socket))
 }
 
-fn isolated_command(executable: &std::path::Path, home: &PrivateProviderHome) -> Command {
+fn isolated_command(
+    config: &SshAgentConfig,
+    executable: &std::path::Path,
+    home: &PrivateProviderHome,
+) -> Command {
     let mut command = Command::new(executable);
     command
         .env_clear()
@@ -758,6 +817,10 @@ fn isolated_command(executable: &std::path::Path, home: &PrivateProviderHome) ->
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .process_group(0);
+    #[cfg(target_os = "macos")]
+    (config.darwin.prepare_child)(&mut command);
+    #[cfg(target_os = "linux")]
+    let _ = config;
     command
 }
 
@@ -811,6 +874,11 @@ impl GroupChild {
             // Clear signal authority before any wait, including error paths.
             match rustix::process::kill_process_group(pid, Signal::KILL) {
                 Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+                // Darwin refuses to signal a group whose members have all
+                // exited (an unreaped leader is a zombie). The drain below
+                // still proves that every member exited.
+                #[cfg(target_os = "macos")]
+                Err(rustix::io::Errno::PERM) => {}
                 Err(_) => self.cleanup_failed = true,
             }
         }

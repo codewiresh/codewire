@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Build the pinned, patched Linux VMM kernel without acquiring or installing it.
 
-The baseline configuration came from the qualified codewire1 build. Its sole
-configuration change is PROC_CHILDREN, required by managed-agent custody.
-Recorded build metadata is reconstructed; this command does not claim to
-reproduce the original kernel or verify its historical signing transaction.
+Each architecture's baseline configuration came from its qualified codewire1
+build: x86_64 for Cloud Hypervisor, arm64 for Virtualization.framework. The
+sole configuration change is PROC_CHILDREN, required by managed-agent custody.
+Both architectures share the pinned source, DAX compatibility patch, bc and
+build identity. Recorded build metadata is reconstructed; this command does not
+claim to reproduce the original kernel or verify its historical signing
+transaction.
 """
 import argparse
 import ctypes
@@ -24,6 +27,16 @@ import time
 INPUTS = Path(__file__).resolve().with_name("linux-vmm-kernel")
 STOP = None
 WALL = 0x40000000
+HOST_TOOLS = ("git", "gcc", "ld", "as", "ar", "nm", "objcopy", "objdump", "make", "patch")
+TARGET_TOOLS = ("gcc", "ld", "as", "ar", "nm", "objcopy", "objdump")
+# Build shape per architecture; pinned identities live in provenance.json.
+ARCHITECTURES = {
+    "x86_64": {"config": "x86_64.config", "make": ("ARCH=x86_64",), "prefix": "",
+               "target": "bzImage", "image": "arch/x86/boot/bzImage", "published": "vmlinuz-"},
+    "arm64": {"config": "arm64.config", "make": ("ARCH=arm64", "CROSS_COMPILE=aarch64-linux-gnu-"),
+              "prefix": "aarch64-linux-gnu-", "target": "Image", "image": "arch/arm64/boot/Image",
+              "published": "Image-"},
+}
 
 
 def require(value, message):
@@ -98,6 +111,16 @@ def private_directory(path):
             "created output directory lost private ownership")
 
 
+def architecture_pins(document, architecture):
+    """Shared source/build pins plus exactly one architecture's config and toolchain pins."""
+    shared = {key: value for key, value in document.items() if key != "architectures"}
+    require(set(document["architectures"]) == set(ARCHITECTURES)
+            and architecture in ARCHITECTURES, "kernel architecture pins differ")
+    specific = document["architectures"][architecture]
+    require(not set(shared) & set(specific), "architecture pins shadow shared kernel pins")
+    return {**shared, **specific, "architecture": architecture}
+
+
 def configuration(raw, pins):
     require(hashlib.sha256(raw).hexdigest() == pins["config_sha256"], "kernel config differs from its pin")
     before = raw.replace(b"CONFIG_PROC_CHILDREN=y\n", b"# CONFIG_PROC_CHILDREN is not set\n")
@@ -106,7 +129,23 @@ def configuration(raw, pins):
             "kernel config has more than the admitted child-listing change")
     require(b"CONFIG_PROC_FS=y\n" in raw and b"# CONFIG_CHECKPOINT_RESTORE is not set\n" in raw,
             "kernel process-listing prerequisites differ")
+    # pahole only reports its version to Kconfig: no BTF is generated.
+    pahole = pins["pahole_version"]
+    detected = 0 if pahole is None else int(pahole.removeprefix("v").replace(".", ""))
+    require(b"CONFIG_DEBUG_INFO_NONE=y\n" in raw
+            and raw.count(b"CONFIG_PAHOLE_VERSION=%d\n" % detected) == 1,
+            "kernel config pahole detection differs from its pinned tool")
     return before
+
+
+def check_image(raw, pins):
+    release = pins["release"].encode()
+    if pins["architecture"] == "x86_64":
+        require(release in raw[:65536], "kernel header does not contain its release")
+    else:
+        # arm64 Image: header magic at 0x38; the uncompressed banner names the release.
+        require(raw[0x38:0x3c] == b"ARM\x64" and b"Linux version " + release + b" " in raw,
+                "arm64 kernel image header or release banner differs")
 
 
 def arm_custody():
@@ -269,8 +308,10 @@ def on_signal(sig, _frame):
 
 
 def build(args):
-    pins = json.loads(regular(INPUTS / "provenance.json"))
-    config = regular(INPUTS / "x86_64.config")
+    shape = ARCHITECTURES[args.arch]
+    pins = architecture_pins(json.loads(regular(INPUTS / "provenance.json")), args.arch)
+    config_path = INPUTS / shape["config"]
+    config = regular(config_path)
     configuration(config, pins)
     patch = regular(INPUTS / "dax.patch")
     require(hashlib.sha256(patch).hexdigest() == pins["patch_sha256"], "kernel compatibility patch changed")
@@ -287,18 +328,37 @@ def build(args):
                    "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
     def query(command):
         return subprocess.check_output(command, cwd=source, env=environment, text=True, timeout=15).strip()
+    def system_tool(name):
+        found = shutil.which(name, path="/usr/bin:/bin")
+        require(found, "kernel build tool is missing: " + name)
+        return Path(found).resolve(strict=True)
     require(query(["git", "rev-parse", pins["source_commit"] + "^{tree}"]) == pins["source_tree"],
             "kernel source commit/tree does not match")
-    require(query(["gcc", "--version"]).splitlines()[0] == pins["gcc_version"], "kernel GCC differs")
-    require(query(["ld", "--version"]).splitlines()[0] == pins["ld_version"], "kernel linker differs")
-    admitted = {"source_commit": pins["source_commit"], "source_tree": pins["source_tree"],
-                "config_sha256": digest(INPUTS / "x86_64.config"), "patch_sha256": digest(INPUTS / "dax.patch"),
+    prefix = shape["prefix"]
+    require(query([prefix + "gcc", "--version"]).splitlines()[0] == pins["gcc_version"], "kernel GCC differs")
+    require(query([prefix + "ld", "--version"]).splitlines()[0] == pins["ld_version"], "kernel linker differs")
+    names = [*HOST_TOOLS, *(prefix + name for name in TARGET_TOOLS if prefix)]
+    if pins["pahole_version"] is None:
+        # The qualified x86_64 config predates the host's optional pahole
+        # installation. Keep its detected version 0; BTF is disabled.
+        pahole_setting = "PAHOLE="
+        pahole_note = "PAHOLE=: preserve baseline CONFIG_PAHOLE_VERSION=0"
+    else:
+        # The qualified arm64 config detected pahole; BTF is still disabled,
+        # so pahole only reports the version that Kconfig records.
+        pahole = system_tool("pahole")
+        require(query([str(pahole), "--version"]) == pins["pahole_version"], "kernel pahole differs")
+        names.append("pahole")
+        pahole_setting = "PAHOLE=" + str(pahole)
+        pahole_note = pahole_setting + " " + pins["pahole_version"] + ": preserve baseline CONFIG_PAHOLE_VERSION; BTF disabled"
+    admitted = {"architecture": args.arch, "source_commit": pins["source_commit"], "source_tree": pins["source_tree"],
+                "config_sha256": digest(config_path), "patch_sha256": digest(INPUTS / "dax.patch"),
                 "release": pins["release"], "bc_sha256": pins["bc_sha256"]}
-    input_paths = [Path(__file__).resolve(), INPUTS / "x86_64.config", INPUTS / "dax.patch", INPUTS / "provenance.json"]
+    input_paths = [Path(__file__).resolve(), config_path, INPUTS / "dax.patch", INPUTS / "provenance.json"]
     producer_inputs = {str(p.relative_to(INPUTS.parent)): digest(p) for p in input_paths}
     tool_identities = {}
-    for name in ("git", "gcc", "ld", "as", "ar", "nm", "objcopy", "objdump", "make", "patch"):
-        executable = Path(shutil.which(name, path="/usr/bin:/bin")).resolve(strict=True)
+    for name in names:
+        executable = system_tool(name)
         metadata = executable.stat()
         require(metadata.st_uid == 0 and stat.S_ISREG(metadata.st_mode) and not metadata.st_mode & 0o022,
                 "kernel build tool is not a trusted system executable")
@@ -310,7 +370,8 @@ def build(args):
         signal.signal(sig, on_signal)
     private_directory(target)
     home = target / "home"; private_directory(home)
-    environment["HOME"] = str(home)
+    scratch = target / "tmp"; private_directory(scratch)
+    environment.update({"HOME": str(home), "TMPDIR": str(scratch)})
     deadline = time.monotonic() + args.timeout
     commands = []
     def run(argv, name, cwd=source):
@@ -323,6 +384,8 @@ def build(args):
     tree = target / "source"; private_directory(tree)
     with tarfile.open(archive) as tar:
         tar.extractall(tree, filter="data")
+    # Kata applies this fs/dax.c fix to every 6.18 guest kernel. The upstream
+    # report is an arm64 boot panic; both qualified codewire1 builds carried it.
     run(["patch", "--fuzz=0", "-p1", "--input=" + str(INPUTS / "dax.patch")], "patch", tree)
     require(digest(tree / "fs/dax.c") == pins["patched_dax_sha256"], "patched kernel source differs")
     (tree / ".config").write_bytes(config)
@@ -334,19 +397,16 @@ def build(args):
     environment.update({"PATH": str(tools) + ":/usr/bin:/bin", "KBUILD_BUILD_USER": "codewire",
                         "KBUILD_BUILD_HOST": "codewire", "KBUILD_BUILD_VERSION": "1",
                         "KBUILD_BUILD_TIMESTAMP": pins["build_timestamp"]})
-    # The qualified config predates the host's optional pahole installation.
-    # Keep its detected version0; BTF is disabled in the pinned baseline.
-    make = ["make", "ARCH=x86_64", "LOCALVERSION=-codewire2", "PAHOLE="]
+    make = ["make", *shape["make"], "LOCALVERSION=-codewire2", pahole_setting]
     run([*make, "olddefconfig"], "configure", tree)
     require(regular(tree / ".config") == config, "processed kernel config drifted")
-    run([*make, "-j" + str(args.jobs), "bzImage"], "compile", tree)
+    run([*make, "-j" + str(args.jobs), shape["target"]], "compile", tree)
     require(regular(tree / ".config") == config, "compiled kernel config drifted")
     require(regular(tree / "include/config/kernel.release").decode().strip() == pins["release"], "kernel release differs")
-    kernel = tree / "arch/x86/boot/bzImage"
-    raw = regular(kernel, 64 * 1024 * 1024)
-    require(pins["release"].encode() in raw[:65536], "kernel header does not contain its release")
+    raw = regular(tree / shape["image"], 64 * 1024 * 1024)
+    check_image(raw, pins)
     require(STOP is None and time.monotonic() < deadline, "kernel publication cancelled or expired")
-    published = target / ("vmlinuz-" + pins["release"])
+    published = target / (shape["published"] + pins["release"])
     with published.open("xb") as output:
         output.write(raw)
     published.chmod(0o400)
@@ -356,9 +416,9 @@ def build(args):
               "producer_inputs": producer_inputs, "tools": tool_identities,
               "build_settings": {"origin": "reconstructed-recorded-metadata", "baseline_reproduction": False,
                                  "user": "codewire", "host": "codewire", "version": 1, "timestamp": pins["build_timestamp"],
-                                 "gcc": pins["gcc_version"], "ld": pins["ld_version"], "jobs": args.jobs,
-                                 "pahole": "PAHOLE=: preserve baseline CONFIG_PAHOLE_VERSION=0"},
-              "kernel": {"path": str(published), "sha256": digest(published, 64 * 1024 * 1024), "size": len(raw), "architecture": "x86_64"},
+                                 "make": make[1:], "gcc": pins["gcc_version"], "ld": pins["ld_version"], "jobs": args.jobs,
+                                 "pahole": pahole_note},
+              "kernel": {"path": str(published), "sha256": digest(published, 64 * 1024 * 1024), "size": len(raw), "architecture": args.arch},
               "commands": commands, "cleanup_unknown": False, "observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
     require(producer_inputs == {str(p.relative_to(INPUTS.parent)): digest(p) for p in input_paths},
             "kernel producer inputs changed during the build")
@@ -373,6 +433,8 @@ def build(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--arch", choices=sorted(ARCHITECTURES), default="x86_64",
+                        help="guest architecture: x86_64 bzImage or arm64 Image (cross-compiled)")
     parser.add_argument("--source", type=Path, required=True, help="existing pinned upstream Linux Git repository")
     parser.add_argument("--bc", type=Path, required=True, help="pinned static BusyBox executable, invoked as bc")
     parser.add_argument("--output", type=Path, required=True, help="fresh private build directory; never an installed kernel path")

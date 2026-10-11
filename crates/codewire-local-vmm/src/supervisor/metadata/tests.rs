@@ -5,8 +5,8 @@ use codewire_access::{AccessProfileId, EnvironmentAccessBinding, EnvironmentId};
 use uuid::Uuid;
 
 use crate::control::v1;
+use crate::host::path::FileIdentity;
 use crate::host_port::HostPortBinding;
-use crate::linux::path::FileIdentity;
 use crate::mesh_ingress::{MeshAttachment, MeshEnrollmentAuthSource};
 use crate::oci::{OciArchitecture, ResolvedDescriptor, ResolvedImage, Sha256Digest};
 use crate::supervisor_metadata::CwRuntimeBinding;

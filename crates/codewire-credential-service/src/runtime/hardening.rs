@@ -5,9 +5,9 @@
 //! a value for up to two minutes. The process is therefore not dumpable, so
 //! another process of the same user without `CAP_SYS_PTRACE` can neither
 //! attach to it nor read its `/proc/<pid>/mem`, and its core-file limit is
-//! zero, soft and hard. Helpers it executes (`codex`, `gh`, `ssh-agent`,
-//! `ssh-add`) are dumpable again after `exec`, because Linux resets the flag,
-//! but inherit the zero core-file limit.
+//! zero, soft and hard. Helpers it executes (`ssh-agent`, `ssh-add`) are
+//! dumpable again after `exec`, because Linux resets the flag, but inherit the
+//! zero core-file limit.
 
 use super::RuntimeError;
 

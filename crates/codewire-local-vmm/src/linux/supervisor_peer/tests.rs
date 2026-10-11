@@ -8,7 +8,7 @@ use tokio::net::UnixListener;
 use tower::ServiceExt as _;
 
 use super::*;
-use crate::supervisor::NativeSupervisorClient;
+use crate::supervisor::{NativeSupervisorClient, SupervisorError};
 use crate::uds::{capture_supervisor_peer, supervisor_peer_connector};
 
 struct Sentinel(Child);
@@ -322,8 +322,11 @@ async fn private_and_public_connector_clones_refuse_replacement_before_any_paylo
     assert!(fixture.child.try_wait().unwrap().is_none());
 }
 
+/// A refused endpoint starts a replacement, but only a supervisor that takes
+/// the lock may replace the socket. This replacement exits without binding,
+/// so the client reports that and the original socket is left untouched.
 #[tokio::test]
-async fn dead_peer_refuses_startup_fallback_and_preserves_original_socket() {
+async fn dead_peer_starts_a_replacement_but_never_unlinks_the_socket_itself() {
     let mut fixture = Fixture::start(true, &[]);
     let pin = pin(&fixture).await;
     let socket = fixture.config.supervisor_socket();
@@ -332,12 +335,15 @@ async fn dead_peer_refuses_startup_fallback_and_preserves_original_socket() {
     fixture.child.kill().unwrap();
     fixture.child.wait().unwrap();
     assert!(pin.revalidate(Instant::now() + ADMISSION_TIMEOUT).is_err());
+    let error = NativeSupervisorClient::connect_or_start(&request)
+        .await
+        .err()
+        .expect("a replacement that never binds cannot serve");
     assert!(
-        NativeSupervisorClient::connect_or_start(&request)
-            .await
-            .is_err()
+        matches!(&error, SupervisorError::EndpointNotReplaced(path) if *path == socket),
+        "{error:?}"
     );
-    assert!(!fixture.parent.path().join("spawned").exists());
+    assert!(fixture.parent.path().join("spawned").exists());
     identity.revalidate(&socket).unwrap();
 }
 

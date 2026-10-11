@@ -263,8 +263,8 @@ type CredentialMutationServiceClient interface {
 	// Missing terminal metadata is an uncertain outcome: reconcile by name using
 	// GetCredential, never automatically reenroll or revoke the provider login.
 	EnrollCodex(context.Context, *connect.Request[v1.EnrollCodexRequest]) (*connect.ServerStreamForClient[v1.EnrollCodexResponse], error)
-	// Same owned challenge/publication protocol, using the pinned GitHub CLI.
-	// This remains the device-code path used by the `cw` CLI.
+	// Same owned challenge/publication protocol, using the Codewire GitHub
+	// App's device login. This remains the device-code path used by `cw`.
 	EnrollGithub(context.Context, *connect.Request[v1.EnrollGithubRequest]) (*connect.ServerStreamForClient[v1.EnrollGithubResponse], error)
 	// Browser GitHub connections use the configured GitHub App installation and
 	// user-to-server callback flow. The authorization code is write-only and is
@@ -450,8 +450,8 @@ type CredentialMutationServiceHandler interface {
 	// Missing terminal metadata is an uncertain outcome: reconcile by name using
 	// GetCredential, never automatically reenroll or revoke the provider login.
 	EnrollCodex(context.Context, *connect.Request[v1.EnrollCodexRequest], *connect.ServerStream[v1.EnrollCodexResponse]) error
-	// Same owned challenge/publication protocol, using the pinned GitHub CLI.
-	// This remains the device-code path used by the `cw` CLI.
+	// Same owned challenge/publication protocol, using the Codewire GitHub
+	// App's device login. This remains the device-code path used by `cw`.
 	EnrollGithub(context.Context, *connect.Request[v1.EnrollGithubRequest], *connect.ServerStream[v1.EnrollGithubResponse]) error
 	// Browser GitHub connections use the configured GitHub App installation and
 	// user-to-server callback flow. The authorization code is write-only and is

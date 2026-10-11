@@ -1,8 +1,5 @@
 //! Errors shared by the complete supervisor SQL codec and host stores.
-#[cfg(target_os = "macos")]
-use crate::darwin::path::PathError;
-#[cfg(target_os = "linux")]
-use crate::linux::path::PathError;
+use crate::host::path::PathError;
 use std::io;
 use std::path::PathBuf;
 

@@ -5,7 +5,7 @@ use std::future::Future;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use codewire_workload_secrets::launcher::now_unix_ms;
-use codewire_workload_secrets::{MAX_PROJECTION_LIFETIME_MS, ProjectionContext};
+use codewire_workload_secrets::{PROJECTION_REQUEST_LIFETIME_MS, ProjectionContext};
 use rustix::process::{Pid, PidfdFlags, pidfd_open};
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -83,7 +83,7 @@ impl StartupProjectionIngress {
             operation_generation: self.generation,
             selection_sha256: self.selection,
             deadline_unix_ms: now_unix_ms()?
-                .checked_add(MAX_PROJECTION_LIFETIME_MS)
+                .checked_add(PROJECTION_REQUEST_LIFETIME_MS)
                 .ok_or_else(denied)?,
         };
         context.validate_at(now_unix_ms()?).map_err(|_| denied())?;

@@ -27,38 +27,6 @@
 ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 ARG TARGETARCH
 
-# Official Codex 0.149.0 native enrollment executable, the same accepted
-# version as the workspace contract. No Node/npm runtime or install script.
-# Archive bytes also match the upstream npm SHA-512 integrity values recorded
-# in docs/SECRETS.md. Only the selected target's artifact stage is built.
-FROM ${DEBIAN_IMAGE} AS codex-amd64
-ADD --checksum=sha256:e06f3d106fe8bb058a6bfd30075d89ea17deaee7c8425e0c5d23072df0fdd0e7 \
-    https://registry.npmjs.org/@openai/codex/-/codex-0.149.0-linux-x64.tgz /codex.tgz
-RUN mkdir /codex && tar -xzf /codex.tgz -C /codex --strip-components=4 \
-    package/vendor/x86_64-unknown-linux-musl/bin/codex
-
-FROM ${DEBIAN_IMAGE} AS codex-arm64
-ADD --checksum=sha256:2d8e3032f4a058d1597606aba9ed8cc6eff59de678e2f81083ee11b898250e07 \
-    https://registry.npmjs.org/@openai/codex/-/codex-0.149.0-linux-arm64.tgz /codex.tgz
-RUN mkdir /codex && tar -xzf /codex.tgz -C /codex --strip-components=4 \
-    package/vendor/aarch64-unknown-linux-musl/bin/codex
-
-FROM codex-${TARGETARCH} AS codex-enrollment
-
-# Same pinned official GitHub CLI artifacts as images/base/Dockerfile.
-# Only the selected architecture is fetched; no package/install scripts run.
-FROM ${DEBIAN_IMAGE} AS github-amd64
-ADD --checksum=sha256:a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112 \
-    https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_linux_amd64.tar.gz /gh.tgz
-RUN mkdir /gh && tar -xzf /gh.tgz -C /gh --strip-components=1
-
-FROM ${DEBIAN_IMAGE} AS github-arm64
-ADD --checksum=sha256:73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5 \
-    https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_linux_arm64.tar.gz /gh.tgz
-RUN mkdir /gh && tar -xzf /gh.tgz -C /gh --strip-components=1
-
-FROM github-${TARGETARCH} AS github-enrollment
-
 # Only the two selected-agent tools and their missing crypto library are
 # extracted. These official Bookworm artifacts are independently checksum
 # pinned for both architectures; no package scripts or dependency resolver run.
@@ -197,10 +165,6 @@ COPY --from=builder /out/kind-fixtures/ /codewire-kind-fixtures/
 # libtest payload above, this directory is empty outside kind-e2e + profile ci.
 COPY --from=builder /out/kind-git-runtime/ /
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=codex-enrollment /codex/codex /usr/local/bin/codex
-COPY --from=github-enrollment /gh/bin/gh /usr/local/bin/gh
-COPY --from=github-enrollment /gh/LICENSE /usr/share/licenses/gh/LICENSE
-COPY deployments/docker/licenses/codex-LICENSE deployments/docker/licenses/codex-NOTICE /usr/share/licenses/codex/
 USER 65532:65532
 # Exercise the minimal Git closure in the actual non-root runtime, including
 # CGI advertisement/pack transfer and child cleanup. Release proves absence.

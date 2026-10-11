@@ -51,7 +51,6 @@ pub(crate) enum WorkspaceInput {
 }
 
 impl WorkspacePlan {
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn from_inputs(inputs: Vec<WorkspaceInput>) -> Result<Self, WorkspacePlanError> {
         let plan = Self {
             schema_version: WORKSPACE_PLAN_SCHEMA_VERSION,
@@ -203,7 +202,6 @@ impl WorkspacePlan {
         Ok(format!("{:x}", Sha256::digest(self.encode_canonical()?)))
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn retained_bundles(&self) -> impl Iterator<Item = (&Sha256Digest, u64)> {
         self.inputs.iter().filter_map(|input| match input {
             WorkspaceInput::Repository {
@@ -328,76 +326,79 @@ pub enum WorkspacePlanError {
         "native remote repositories currently require anonymous HTTPS; protected repositories are added by #1922/#1912"
     )]
     UnsupportedRepositorySource,
-    #[cfg(target_os = "linux")]
     #[error("SSH repository checkout requires a selected credential profile")]
     MissingRepositoryCredentialProfile,
-    #[cfg(target_os = "linux")]
     #[error("repository host trust is missing or noncanonical")]
     InvalidRepositoryHostTrust,
-    #[cfg(target_os = "linux")]
     #[error("remote repository has no valid default branch")]
     InvalidRemoteHead,
-    #[cfg(target_os = "linux")]
     #[error("remote repository did not resolve to a valid commit")]
     InvalidRemoteCommit,
-    #[cfg(target_os = "linux")]
     #[error("remote repository tree is malformed")]
     InvalidRemoteTree,
-    #[cfg(target_os = "linux")]
     #[error("Git submodules are not supported by this repository slice")]
     SubmoduleUnsupported,
-    #[cfg(target_os = "linux")]
-    #[error("Git is required to prepare native remote repositories")]
+    #[cfg_attr(
+        target_os = "linux",
+        error("Git is required to prepare native remote repositories")
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error(
+            "the local VM runtime's git is missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+        )
+    )]
     GitUnavailable,
-    #[cfg(target_os = "linux")]
     #[error("remote Git preparation failed")]
     GitCommandFailed,
-    #[cfg(target_os = "linux")]
     #[error("local credential authority is unavailable for protected repository preparation")]
     CredentialAuthorityUnavailable,
-    #[cfg(target_os = "linux")]
     #[error("protected repository preparation is unavailable")]
     CredentialRepositoryUnavailable,
-    #[cfg(target_os = "linux")]
-    #[error("protected repository preparation was rejected ({0:?})")]
+    #[error(
+        "protected repository preparation was rejected ({0:?}){hint}",
+        hint = repository_rejection_hint(*.0)
+    )]
     CredentialRepositoryRejected(tonic::Code),
-    #[cfg(target_os = "linux")]
     #[error("protected repository output is invalid")]
     CredentialRepositoryInvalid,
-    #[cfg(target_os = "linux")]
     #[error("remote Git preparation timed out")]
     GitTimeout,
-    #[cfg(target_os = "linux")]
     #[error("remote Git output exceeded the safety limit")]
     GitOutputTooLarge,
-    #[cfg(target_os = "linux")]
     #[error("remote Git returned invalid text")]
     InvalidGitOutput,
-    #[cfg(target_os = "linux")]
     #[error("remote Git bundle exceeds the content bound")]
     BundleTooLarge,
-    #[cfg(target_os = "linux")]
     #[error("remote Git bundle changed while it was admitted")]
     BundleChanged,
-    #[cfg(target_os = "linux")]
     #[error("direct-share source is unsafe or unsupported")]
     DirectShareInvalid,
-    #[cfg(target_os = "linux")]
     #[error("direct-share source changed after admission")]
     DirectShareChanged,
-    #[cfg(target_os = "linux")]
     #[error("remote repository preparation path is unsafe: {0}")]
     UnsafePreparation(PathBuf),
-    #[cfg(target_os = "linux")]
     #[error(transparent)]
     Content(#[from] crate::oci::ContentStoreError),
-    #[cfg(target_os = "linux")]
     #[error(transparent)]
-    Path(#[from] crate::linux::path::PathError),
-    #[cfg(target_os = "linux")]
+    Path(#[from] crate::host::path::PathError),
     #[error("repository preparation filesystem operation failed for {path}: {source}")]
     Io {
         path: PathBuf,
         source: std::io::Error,
     },
+}
+
+/// A fixed next step for refusals the user can fix. The authority's own
+/// message is never shown: it may carry provider text.
+fn repository_rejection_hint(code: tonic::Code) -> &'static str {
+    match code {
+        tonic::Code::FailedPrecondition
+        | tonic::Code::PermissionDenied
+        | tonic::Code::Unauthenticated
+        | tonic::Code::NotFound => {
+            "; check that GitHub is connected and can read the repository: cw credentials --local list"
+        }
+        _ => "",
+    }
 }

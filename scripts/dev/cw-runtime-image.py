@@ -7,7 +7,9 @@ filesystem or executes image code. The independently supplied index digest is
 the admission pin. The resulting boot provenance binds all image descriptors.
 The cw provenance must be exactly the identity the shared producer
 (scripts/ci/release/cw_release.py) derives from the payload bytes and their
-embedded build record.
+embedded build record. A local VM runs its host's architecture, so the payload
+is a static musl cw for x86_64 (Linux hosts) or aarch64 (Apple Silicon Macs);
+the image platform names that same architecture.
 """
 import argparse
 import hashlib
@@ -28,7 +30,11 @@ MAX_CW = 256 * 1024 * 1024
 MAX_ARCHIVE = MAX_CW + 4 * 1024 * 1024
 MAX_JSON = 16 * 1024
 MAX_MEMBERS = 32
+# The platform image target. A local VM runtime pack may also carry the
+# aarch64 target of an Apple Silicon host. Each target maps to its OCI
+# architecture and ELF e_machine.
 TARGET = "x86_64-unknown-linux-musl"
+TARGETS = {TARGET: ("amd64", 62), "aarch64-unknown-linux-musl": ("arm64", 183)}
 CW_PATH = "usr/local/bin/cw"
 META_PATH = "usr/local/share/codewire/cw-runtime.json"
 DIRECTORIES = ("usr", "usr/local", "usr/local/bin", "usr/local/share", "usr/local/share/codewire")
@@ -84,9 +90,11 @@ def read_regular(path, limit, private=False):
         return data
 
 
-def static_elf(data):
+def static_elf(data, target):
+    machine = TARGETS[target][1]
     require(64 <= len(data) <= MAX_CW and data[:7] == b"\x7fELF\x02\x01\x01"
-            and struct.unpack_from("<HH", data, 16) in ((2, 62), (3, 62)), "cw must be a static x86_64 ELF")
+            and struct.unpack_from("<HH", data, 16) in ((2, machine), (3, machine)),
+            f"cw must be a static {target} ELF")
     offset, = struct.unpack_from("<Q", data, 32)
     size, count = struct.unpack_from("<HH", data, 54)
     require(offset >= 64 and size == 56 and 0 < count <= 128 and offset + count * size <= len(data), "invalid ELF program headers")
@@ -112,17 +120,18 @@ def validate_payload(metadata, cw):
             and type(metadata["record_version"]) is int and metadata["record_version"] == 1
             and isinstance(metadata["package_version"], str) and 0 < len(metadata["package_version"]) <= 64
             and all(c.isascii() and (c.isalnum() or c in ".-+") for c in metadata["package_version"])
-            and metadata["target"] == TARGET
+            and metadata["target"] in TARGETS
             and hex_value(metadata["source_revision"], 40)
             and hex_value(metadata["source_tree_sha256"])
             and isinstance(metadata["rustc"], str) and metadata["rustc"].startswith("rustc 1.93.0 ")
             and len(metadata["rustc"]) <= 128
             and metadata["sha256"] == sha(cw)
             and type(metadata["size"]) is int and metadata["size"] == len(cw), "invalid cw provenance")
-    static_elf(cw)
+    static_elf(cw, metadata["target"])
     try:
-        admitted = release.make_identity(cw, TARGET, metadata["package_version"], metadata["source_revision"],
-                                         metadata["source_tree_sha256"], metadata["rustc"])
+        admitted = release.make_identity(cw, metadata["target"], metadata["package_version"],
+                                         metadata["source_revision"], metadata["source_tree_sha256"],
+                                         metadata["rustc"], targets=tuple(TARGETS))
     except release.ReleaseError as error:
         raise ValueError(f"cw build record contradicts its provenance: {error}") from None
     require(admitted == metadata, "cw provenance differs from the identity its bytes admit")
@@ -212,7 +221,9 @@ def admit(image, index_sha256):
             and isinstance(index["manifests"], list) and len(index["manifests"]) == 1, "one image manifest required")
     require(isinstance(index["manifests"][0], dict), "manifest descriptor must be an object")
     selection = dict(index["manifests"][0])
-    require(selection.pop("platform", None) == {"os": "linux", "architecture": "amd64"}, "unsupported image platform")
+    platform = selection.pop("platform", None)
+    require(platform in [{"os": "linux", "architecture": arch} for arch, _ in TARGETS.values()],
+            "unsupported image platform")
 
     def blob(value, media_type):
         digest = checked_descriptor(value, media_type)
@@ -228,7 +239,7 @@ def admit(image, index_sha256):
     config_raw = blob(manifest["config"], CONFIG)
     config = decode(config_raw)
     require(set(config) == {"os", "architecture", "config", "rootfs"}
-            and config["os"] == "linux" and config["architecture"] == "amd64"
+            and config["os"] == "linux" and config["architecture"] == platform["architecture"]
             and config["config"] == {} and set(config["rootfs"]) == {"type", "diff_ids"}
             and config["rootfs"]["type"] == "layers", "unsupported image configuration")
     layer_raw = blob(manifest["layers"][0], LAYER)
@@ -243,6 +254,7 @@ def admit(image, index_sha256):
     metadata = decode(payload_files[META_PATH])
     cw = payload_files[CW_PATH]
     validate_payload(metadata, cw)
+    require(TARGETS[metadata["target"]][0] == platform["architecture"], "cw target differs from the image platform")
 
     def identity(item):
         return {"sha256": item["digest"][7:], "size": item["size"]}
@@ -275,14 +287,15 @@ def build(artifact_path, output):
     cw = read_regular(cw_path, MAX_CW, private=True)
     artifact["size"] = len(cw)
     validate_payload(artifact, cw)
+    architecture = TARGETS[artifact["target"]][0]
     layer = tar_bytes([(name, 0o555, None) for name in DIRECTORIES]
                       + [(CW_PATH, 0o555, cw), (META_PATH, 0o444, encode(artifact))])
-    config = encode({"os": "linux", "architecture": "amd64", "config": {},
+    config = encode({"os": "linux", "architecture": architecture, "config": {},
                      "rootfs": {"type": "layers", "diff_ids": ["sha256:" + sha(layer)]}})
     manifest = encode({"schemaVersion": 2, "mediaType": MANIFEST,
                        "config": descriptor(CONFIG, config), "layers": [descriptor(LAYER, layer)]})
     selection = descriptor(MANIFEST, manifest)
-    selection["platform"] = {"os": "linux", "architecture": "amd64"}
+    selection["platform"] = {"os": "linux", "architecture": architecture}
     index = encode({"schemaVersion": 2, "manifests": [selection]})
     image = tar_bytes([("oci-layout", 0o444, encode({"imageLayoutVersion": "1.0.0"})),
                        ("index.json", 0o444, index)]

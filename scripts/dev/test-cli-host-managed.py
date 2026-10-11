@@ -35,7 +35,7 @@ MAX_MANIFEST = 1024 * 1024
 MAX_FILES = 4096
 WALL = 0x40000000  # Linux __WALL: include non-SIGCHLD clone children.
 PEERPIDFD = 77  # Linux SO_PEERPIDFD; unsupported kernels refuse.
-VERSIONS = {"codex": "0.157.0", "claude": "2.1.238"}
+VERSIONS = {"codex": "0.160.0", "claude": "2.1.288"}
 SONAMES = sorted(["ld-linux-x86-64.so.2", "libc.so.6", "libdl.so.2", "libm.so.6",
                   "libpthread.so.0", "librt.so.1", "libtinfo.so.6"])
 SOURCE = Path(__file__).resolve().parents[2]

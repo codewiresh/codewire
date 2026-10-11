@@ -85,10 +85,6 @@ spec:
               value: /run/codewire-credential-tls/tls.crt
             - name: CREDENTIAL_BROKER_TLS_KEY_FILE
               value: /run/codewire-credential-tls/tls.key
-            - name: CREDENTIAL_CODEX_EXECUTABLE
-              value: /usr/local/bin/codex
-            - name: CREDENTIAL_GITHUB_EXECUTABLE
-              value: /usr/local/bin/gh
             - name: CREDENTIAL_GITHUB_APP_CLIENT_ID
               valueFrom:
                 secretKeyRef:

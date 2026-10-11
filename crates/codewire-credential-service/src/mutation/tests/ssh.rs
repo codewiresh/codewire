@@ -69,7 +69,7 @@ async fn ssh_rpc_is_oauth_only_create_only_and_returns_only_derived_public_ident
         ensure!(!imported.to_string().contains(&encoded));
         ensure!(!imported.to_string().contains("BEGIN OPENSSH PRIVATE KEY"));
         h.drained().await?;
-        ensure!(h.count().await? == 2 && !h.control("native.pid").exists());
+        ensure!(h.count().await? == 2);
         Ok(())
     }.await;
     h.finish(result).await

@@ -13,10 +13,7 @@ use super::*;
 use crate::control::v1::local_supervisor_service_server::{
     LocalSupervisorService, LocalSupervisorServiceServer,
 };
-#[cfg(target_os = "macos")]
-use crate::darwin::path as host_path;
-#[cfg(target_os = "linux")]
-use crate::linux::path as host_path;
+use crate::host::path as host_path;
 use crate::supervisor_config::{NATIVE_SUPERVISOR_PROTOCOL_VERSION, NativeRuntimeConfig};
 
 #[derive(Clone)]
@@ -30,6 +27,9 @@ struct ProtocolPeer {
     info: Result<v1::SupervisorInfo, tonic::Code>,
     calls: Arc<Mutex<Vec<String>>>,
     replies: Arc<Mutex<VecDeque<WatchReply>>>,
+    /// Whether `get` finds the environment; false answers NotFound, as after
+    /// a failed create's rollback.
+    environment_present: bool,
 }
 
 impl ProtocolPeer {
@@ -72,6 +72,9 @@ impl LocalSupervisorService for ProtocolPeer {
         assert!(request.request_id.is_empty());
         assert!(request.environment_id.is_empty());
         self.record("get");
+        if !self.environment_present {
+            return Err(Status::not_found("local environment was not found"));
+        }
         Ok(Response::new(environment()))
     }
 
@@ -103,9 +106,11 @@ impl LocalSupervisorService for ProtocolPeer {
 
     async fn create_environment(
         &self,
-        _: Request<v1::CreateEnvironmentRequest>,
+        request: Request<v1::CreateEnvironmentRequest>,
     ) -> Result<Response<v1::Operation>, Status> {
-        Err(Status::unimplemented("unused synthetic method"))
+        assert_eq!(request.into_inner().name, "dev");
+        self.record("create");
+        Ok(Response::new(operation(v1::OperationPhase::Intent)))
     }
 
     async fn select_environment(
@@ -146,6 +151,13 @@ impl LocalSupervisorService for ProtocolPeer {
     async fn resize_environment(
         &self,
         _: Request<v1::ResizeEnvironmentRequest>,
+    ) -> Result<Response<v1::Operation>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
+
+    async fn update_host_ports(
+        &self,
+        _: Request<v1::UpdateHostPortsRequest>,
     ) -> Result<Response<v1::Operation>, Status> {
         Err(Status::unimplemented("unused synthetic method"))
     }
@@ -208,6 +220,14 @@ impl TestServer {
         info: impl FnOnce(&NativeRuntimeConfig) -> Result<v1::SupervisorInfo, tonic::Code>,
         replies: Vec<WatchReply>,
     ) -> Self {
+        Self::start_with_environment(info, replies, true)
+    }
+
+    fn start_with_environment(
+        info: impl FnOnce(&NativeRuntimeConfig) -> Result<v1::SupervisorInfo, tonic::Code>,
+        replies: Vec<WatchReply>,
+        environment_present: bool,
+    ) -> Self {
         // Keep Unix paths short and canonical on both hosts. This creates only
         // an owned fixture; production input is never silently canonicalized.
         let parent = tempfile::Builder::new()
@@ -234,6 +254,7 @@ impl TestServer {
             info: info(&config),
             calls: calls.clone(),
             replies: Arc::new(Mutex::new(replies.into())),
+            environment_present,
         };
         let (shutdown, receiver) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -475,7 +496,7 @@ async fn connect_only_stream_failure_has_no_restart_authority() {
             .await
             .unwrap();
         let initial = operation(v1::OperationPhase::Intent);
-        let error = bounded(client.follow_operation(initial.clone()))
+        let error = bounded(client.follow_operation(initial.clone(), &mut |_| {}))
             .await
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::Unavailable);
@@ -492,6 +513,77 @@ async fn connect_only_stream_failure_has_no_restart_authority() {
 }
 
 #[tokio::test]
+async fn observe_sees_the_initial_and_each_non_terminal_update() {
+    let mut started = operation(v1::OperationPhase::EffectApplied);
+    started.stage = v1::OperationStage::StartVm as i32;
+    let server = TestServer::start(
+        valid_info,
+        vec![WatchReply::Updates(vec![
+            Ok(started.clone()),
+            Ok(operation(v1::OperationPhase::Completed)),
+        ])],
+    );
+    let mut client = bounded(NativeSupervisorClient::connect(&server.socket))
+        .await
+        .unwrap();
+    let initial = operation(v1::OperationPhase::Intent);
+    let mut seen = Vec::new();
+    let mut observe = |update: &v1::Operation| seen.push(update.clone());
+    bounded(client.follow_operation(initial.clone(), &mut observe))
+        .await
+        .unwrap();
+    assert_eq!(seen, [initial, started]);
+    drop(client);
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn a_failed_create_says_whether_its_rollback_removed_it() {
+    for (present, expected) in [
+        (false, " Nothing was kept."),
+        (
+            true,
+            " The failed environment could not be removed; run `cw env --local rm dev`.",
+        ),
+    ] {
+        let mut failed = operation(v1::OperationPhase::Failed);
+        failed.error_code = "create_registry_platform".to_owned();
+        let server = TestServer::start_with_environment(
+            valid_info,
+            vec![WatchReply::Updates(vec![Ok(failed)])],
+            present,
+        );
+        let mut client = bounded(NativeSupervisorClient::connect(&server.socket))
+            .await
+            .unwrap();
+        let error = bounded(client.create(v1::CreateEnvironmentRequest {
+            name: "dev".to_owned(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            error
+                .message()
+                .contains("failed: create_registry_platform (")
+        );
+        assert!(error.message().ends_with(expected), "{}", error.message());
+        assert_eq!(
+            server.calls(),
+            [
+                "info",
+                "create",
+                "watch:f30e0037-c1b1-46d0-8d8d-cd512049a002",
+                "get"
+            ]
+        );
+        drop(client);
+        server.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn terminal_initial_result_does_not_open_a_watch() {
     let server = TestServer::start(valid_info, vec![]);
     let mut client = bounded(NativeSupervisorClient::connect(&server.socket))
@@ -499,7 +591,7 @@ async fn terminal_initial_result_does_not_open_a_watch() {
         .unwrap();
     let terminal = operation(v1::OperationPhase::Completed);
     assert_eq!(
-        bounded(client.follow_operation(terminal.clone()))
+        bounded(client.follow_operation(terminal.clone(), &mut |_| {}))
             .await
             .unwrap(),
         terminal
@@ -530,7 +622,7 @@ async fn stream_failures_and_invalid_phases_do_not_become_success() {
             .await
             .unwrap();
         let initial = operation(v1::OperationPhase::Intent);
-        let error = bounded(client.follow_operation(initial.clone()))
+        let error = bounded(client.follow_operation(initial.clone(), &mut |_| {}))
             .await
             .unwrap_err();
         assert_eq!(error.code(), expected_code);
@@ -599,9 +691,10 @@ async fn linux_watch_reconnect_is_bounded_to_three_attempts() {
     .unwrap();
     client.reconnect_enabled = true;
     let started = tokio::time::Instant::now();
-    let error = bounded(client.follow_operation(operation(v1::OperationPhase::Intent)))
-        .await
-        .unwrap_err();
+    let error =
+        bounded(client.follow_operation(operation(v1::OperationPhase::Intent), &mut |_| {}))
+            .await
+            .unwrap_err();
     assert_eq!(error.code(), tonic::Code::Unavailable);
     assert!(started.elapsed() >= Duration::from_millis(300));
     let calls = server.calls();
@@ -638,7 +731,7 @@ async fn watch_reconnect_refuses_replacement_and_preserves_original_operation_wi
     let original_calls = server.calls.clone();
     let initial = operation(v1::OperationPhase::Intent);
     let expected_id = initial.operation_id.clone();
-    let follower = tokio::spawn(async move { client.follow_operation(initial).await });
+    let follower = tokio::spawn(async move { client.follow_operation(initial, &mut |_| {}).await });
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     while original_calls.lock().unwrap().len() < 2 {
         assert!(tokio::time::Instant::now() < deadline);
@@ -657,6 +750,7 @@ async fn watch_reconnect_refuses_replacement_and_preserves_original_operation_wi
         info: valid_info(&server.config),
         calls: replacement_calls.clone(),
         replies: Arc::new(Mutex::new(VecDeque::new())),
+        environment_present: true,
     };
     let (shutdown, receiver) = oneshot::channel();
     server.task = tokio::spawn(async move {
@@ -679,4 +773,20 @@ async fn watch_reconnect_refuses_replacement_and_preserves_original_operation_wi
     assert!(replacement_calls.lock().unwrap().is_empty());
     server.identity.revalidate(&server.socket).unwrap();
     server.finish().await;
+}
+
+#[test]
+fn direct_share_change_failures_name_the_moved_source() {
+    for code in ["create_direct_share_changed", "start_direct_share_changed"] {
+        let hint = operation_error_hint(code);
+        assert!(
+            hint.contains("direct-mount source directory"),
+            "{code}: {hint}"
+        );
+        assert!(
+            hint.contains("put the original directory back"),
+            "{code}: {hint}"
+        );
+    }
+    assert_eq!(operation_error_hint("start_failed"), "");
 }

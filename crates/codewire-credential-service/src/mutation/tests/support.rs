@@ -1,22 +1,21 @@
-//! Real generated Connect mount, restricted LOGIN, and synthetic local login.
+//! Real generated Connect mount, restricted LOGIN, and a synthetic in-process
+//! provider for the native device logins.
 
 use super::*;
-use std::ffi::OsString;
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
+use async_trait::async_trait;
 use base64::Engine as _;
-use codewire_credential_broker::codex_enrollment::{CodexEnrollmentConfig, CodexEnrollmentOwner};
-use codewire_credential_broker::github_enrollment::{
-    GitHubEnrollmentConfig, GitHubEnrollmentOwner,
+use codewire_credential_broker::provider_oauth::github::GitHubDeviceLoginConfig;
+use codewire_credential_broker::{
+    BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport,
 };
 use codewire_server_core::auth::{
     AuthState, SESSION_COOKIE_NAME, hash_api_key, hash_oauth_token, hash_session_token,
 };
 use codewire_server_core::connect::{ConnectAuthLayer, connect_router_with_auth};
 use reqwest::{Client, Response, StatusCode};
-use tempfile::TempDir;
 use tokio::task::JoinHandle;
 
 pub const ALICE: &str = "mutation-alice";
@@ -26,14 +25,120 @@ pub const ACCESS: &str = "private-mutation-access-canary";
 pub const REFRESH: &str = "private-mutation-refresh-canary";
 pub const SESSION: &str = "private-mutation-session-canary";
 pub const API_KEY_MATERIAL: &str = "private-api-key-material-canary";
-pub const GITHUB_TOKEN: &str = "gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+pub const GITHUB_TOKEN: &str = "ghu_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+pub const USER_CODE: &str = "ABCD-EFGH";
+const GITHUB_APP_SLUG: &str = "codewire-synthetic";
 const SERVICE: &str = "codewire.v1.CredentialMutationService";
-const SHELL: &str = include_str!(
-    "../../../../codewire-credential-broker/src/codex_enrollment/tests/synthetic-codex.sh"
-);
-const GITHUB_SHELL: &str = include_str!(
-    "../../../../codewire-credential-broker/src/github_enrollment/tests/synthetic-gh.sh"
-);
+
+/// The provider side of both device logins. A test holds the first request,
+/// approves the code, and gives each login distinct tokens; nothing runs
+/// outside this process.
+#[derive(Default)]
+pub struct DeviceProvider {
+    hold: AtomicBool,
+    released: tokio::sync::Notify,
+    approved: AtomicBool,
+    started: AtomicUsize,
+    suffix: Mutex<String>,
+}
+
+impl DeviceProvider {
+    /// Device logins started (user or device code requested).
+    pub fn started(&self) -> usize {
+        self.started.load(Ordering::SeqCst)
+    }
+
+    fn answer(&self, target: &str, body: &[u8]) -> Option<(http::StatusCode, Value)> {
+        let suffix = self.suffix.lock().unwrap().clone();
+        let approved = self.approved.load(Ordering::SeqCst);
+        Some(match target {
+            "https://auth.openai.com/api/accounts/deviceauth/usercode" => (
+                http::StatusCode::OK,
+                json!({"device_auth_id":"synthetic-device-auth","user_code":USER_CODE,"interval":"1"}),
+            ),
+            "https://auth.openai.com/api/accounts/deviceauth/token" if approved => (
+                http::StatusCode::OK,
+                json!({"authorization_code":"synthetic-code","code_challenge":"synthetic-challenge",
+                    "code_verifier":"synthetic-verifier"}),
+            ),
+            "https://auth.openai.com/api/accounts/deviceauth/token" => {
+                (http::StatusCode::FORBIDDEN, json!({}))
+            }
+            "https://auth.openai.com/oauth/token" => {
+                let id_payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                    serde_json::to_vec(&json!({"email":"person@example.test",
+                        "https://api.openai.com/auth":{"chatgpt_account_id":"synthetic-account"}}))
+                    .ok()?,
+                );
+                (
+                    http::StatusCode::OK,
+                    json!({"id_token":format!("e30.{id_payload}.c2ln"),
+                        "access_token":format!("{ACCESS}{suffix}"),
+                        "refresh_token":format!("{REFRESH}{suffix}")}),
+                )
+            }
+            "https://github.com/login/device/code" => (
+                http::StatusCode::OK,
+                json!({"device_code":"synthetic-device-code","user_code":USER_CODE,
+                    "verification_uri":"https://github.com/login/device","expires_in":900,"interval":1}),
+            ),
+            "https://github.com/login/oauth/access_token" if approved => (
+                http::StatusCode::OK,
+                json!({"access_token":GITHUB_TOKEN,"token_type":"bearer"}),
+            ),
+            "https://github.com/login/oauth/access_token" => (
+                http::StatusCode::OK,
+                json!({"error":"authorization_pending"}),
+            ),
+            "https://api.github.com/user" => (
+                http::StatusCode::OK,
+                json!({"id":7,"login":"synthetic-user"}),
+            ),
+            "https://api.github.com/user/installations?per_page=100&page=1" => (
+                http::StatusCode::OK,
+                json!({"installations":[{"id":41,"app_slug":GITHUB_APP_SLUG}]}),
+            ),
+            _ => return None,
+        })
+        .filter(|_| body.len() <= 64 * 1024)
+    }
+}
+
+#[async_trait]
+impl BrokerUpstreamTransport for DeviceProvider {
+    async fn execute(
+        &self,
+        request: BrokerUpstreamRequest,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        let (_method, target, _headers, body) = request.into_parts();
+        if matches!(
+            target.as_str(),
+            "https://auth.openai.com/api/accounts/deviceauth/usercode"
+                | "https://github.com/login/device/code"
+        ) {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            while self.hold.load(Ordering::SeqCst) {
+                let released = self.released.notified();
+                if !self.hold.load(Ordering::SeqCst) {
+                    break;
+                }
+                released.await;
+            }
+        }
+        let (status, value) = self
+            .answer(target.as_str(), &body)
+            .ok_or(BrokerUpstreamError::Protocol)?;
+        let body = serde_json::to_vec(&value).map_err(|_| BrokerUpstreamError::Protocol)?;
+        Ok(BrokerUpstreamResponse::new(
+            status,
+            http::HeaderMap::from_iter([(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            )]),
+            Box::pin(futures::stream::once(async move { Ok(body.into()) })),
+        ))
+    }
+}
 
 pub fn oauth(user: &str) -> String {
     format!("private-mutation-oauth-{user}")
@@ -388,8 +493,7 @@ pub struct Harness {
     pub store: Arc<PlatformCredentialStore>,
     pub owner: Arc<CredentialMutationOwner>,
     pub rpc: Rpc,
-    root: TempDir,
-    _executable: TempDir,
+    pub device: Arc<DeviceProvider>,
     server: Option<(oneshot::Sender<()>, JoinHandle<std::io::Result<()>>)>,
 }
 
@@ -421,34 +525,16 @@ impl Harness {
             ] {
                 sqlx::query(&format!("GRANT {grant} TO {}", quote_ident(&role))).execute(&db.pool).await?;
             }
-            let root = tempfile::Builder::new().prefix("cw-mutation-synthetic-").tempdir_in("/dev/shm")?;
-            std::fs::set_permissions(root.path(),std::fs::Permissions::from_mode(0o700))?;
-            let id_payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&json!({
-                "email":"person@example.test", "https://api.openai.com/auth":{"chatgpt_account_id":"synthetic-account"}
-            }))?);
-            let auth = serde_json::to_vec(&json!({"auth_mode":"chatgpt","OPENAI_API_KEY":null,
-                "tokens":{"id_token":format!("e30.{id_payload}.c2ln"),"access_token":ACCESS,
-                "refresh_token":REFRESH,"account_id":"synthetic-account"}}))?;
-            std::fs::write(root.path().join("synthetic-auth.fixture.json"),auth)?;
-            // Executable TMPDIR is a documented local fixture input. Secret
-            // staging itself must be owned tmpfs; there is no persistent fallback.
-            let executable = tempfile::Builder::new().prefix("cw-mutation-executable-").tempdir()?;
-            let script = executable.path().join("codex");
-            let gate = "#!/bin/sh\nset -eu\nfixture_root=${CODEX_HOME%/*}\nif [ \"${1-}\" = login ]; then\n  printf '%s\\n' \"$$\" > \"$fixture_root/before-challenge.pid\"\n  while [ -f \"$fixture_root/hold-before-challenge\" ]; do sleep 0.02; done\nfi\n";
-            std::fs::write(&script,format!("{gate}{}",SHELL.strip_prefix("#!/bin/sh\n").context("pinned shell fixture header")?))?;
-            std::fs::set_permissions(&script,std::fs::Permissions::from_mode(0o700))?;
-            let enrollment = CodexEnrollmentOwner::new(CodexEnrollmentConfig::new(script,root.path().to_owned(),OsString::from("/usr/bin:/bin"))
-                .map_err(|_|anyhow::anyhow!("synthetic enrollment configuration"))?);
-            let github_script = executable.path().join("gh");
-            std::fs::write(&github_script, GITHUB_SHELL)?;
-            std::fs::set_permissions(&github_script,std::fs::Permissions::from_mode(0o700))?;
-            let github_token = GITHUB_TOKEN;
-            std::fs::write(root.path().join("hosts.fixture.yml"), format!("github.com:\n    users:\n        synthetic-user:\n            oauth_token: {github_token}\n    git_protocol: https\n    oauth_token: {github_token}\n    user: synthetic-user\n"))?;
-            let github = GitHubEnrollmentOwner::new(GitHubEnrollmentConfig::new(github_script,root.path().to_owned(),OsString::from("/usr/bin:/bin"))
-                .map_err(|_|anyhow::anyhow!("synthetic GitHub enrollment configuration"))?);
+            let device = Arc::new(DeviceProvider::default());
+            let codex_login = CodexDeviceLogin::new(device.clone());
+            let github_login = GitHubDeviceLogin::new(
+                GitHubDeviceLoginConfig::new("Iv1.synthetic".into(), GITHUB_APP_SLUG.into())
+                    .map_err(|_| anyhow::anyhow!("synthetic GitHub App configuration"))?,
+                device.clone(),
+            );
             let provider = Arc::new(SyntheticKek::default());
             let store = Arc::new(PlatformCredentialStore::new(pool.clone(),provider.clone(),builtin_provider_catalog()));
-            let owner = Arc::new(CredentialMutationOwner::new(pool.clone(),store.clone(),enrollment,github,None));
+            let owner = Arc::new(CredentialMutationOwner::new(pool.clone(),store.clone(),codex_login,Some(github_login),None));
             let rpc = Rpc {client:Client::builder().no_proxy().timeout(TIMEOUT).build()?,url:format!("http://{address}")};
             let server = listener.map(|listener| {
                 let app = connect_router_with_auth(owner.router(),ConnectAuthLayer::credential_mutation(AuthState{pool:pool.clone()},http::HeaderValue::from_static("https://codewire.example")));
@@ -458,10 +544,10 @@ impl Harness {
                 });
                 (stop,server)
             });
-            Ok::<_,anyhow::Error>((pool,role,provider,store,owner,root,executable,server,rpc))
+            Ok::<_,anyhow::Error>((pool,role,provider,store,owner,device,server,rpc))
         }.await;
         match setup {
-            Ok((pool, role, provider, store, owner, root, executable, server, rpc)) => Ok(Self {
+            Ok((pool, role, provider, store, owner, device, server, rpc)) => Ok(Self {
                 db,
                 pool,
                 role,
@@ -469,8 +555,7 @@ impl Harness {
                 store,
                 owner,
                 rpc,
-                root,
-                _executable: executable,
+                device,
                 server,
             }),
             Err(error) => {
@@ -480,85 +565,50 @@ impl Harness {
         }
     }
 
-    pub fn control(&self, name: &str) -> PathBuf {
-        self.root.path().join(name)
-    }
+    /// Approve the device code: the next poll completes the login.
     pub fn release(&self) -> Result<()> {
-        Ok(std::fs::write(
-            self.control("release"),
-            b"synthetic release",
-        )?)
-    }
-    pub fn hold_challenge(&self) -> Result<()> {
-        Ok(std::fs::write(
-            self.control("hold-before-challenge"),
-            b"synthetic gate",
-        )?)
-    }
-    pub fn logged_out(&self) -> bool {
-        self.control("logout.called").exists()
+        self.device.approved.store(true, Ordering::SeqCst);
+        Ok(())
     }
 
-    pub async fn wait_file(&self, name: &str) -> Result<()> {
+    /// Hold every device login at its first provider request.
+    pub fn hold_challenge(&self) -> Result<()> {
+        self.device.hold.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub async fn wait_started(&self) -> Result<()> {
         tokio::time::timeout(TIMEOUT, async {
-            while !self.control(name).exists() {
+            while self.device.started() == 0 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .context("synthetic Codex did not reach its file barrier")?;
+        .context("no device login reached the provider")?;
         Ok(())
     }
 
     pub async fn drained(&self) -> Result<()> {
         tokio::time::timeout(TIMEOUT, async {
-            loop {
-                let homes =
-                    std::fs::read_dir(self.root.path())?.collect::<std::io::Result<Vec<_>>>()?;
-                if self.owner.workers.is_empty()
-                    && !homes.iter().any(|entry| {
-                        entry
-                            .file_name()
-                            .to_string_lossy()
-                            .starts_with(".codewire-provider-login-")
-                    })
-                {
-                    return Ok::<_, anyhow::Error>(());
-                }
+            while !self.owner.workers.is_empty() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .context("mutation/provider owner did not drain")??;
+        .context("mutation owner did not drain")?;
         Ok(())
     }
 
     pub async fn reset_login(&self) -> Result<()> {
         self.drained().await?;
-        for name in [
-            "release",
-            "logout.called",
-            "wrapper.pid",
-            "native.pid",
-            "native.finished",
-            "before-challenge.pid",
-            "hold-before-challenge",
-        ] {
-            match std::fs::remove_file(self.control(name)) {
-                Ok(()) => (),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-                Err(error) => return Err(error.into()),
-            }
-        }
+        self.device.hold.store(false, Ordering::SeqCst);
+        self.device.released.notify_waiters();
+        self.device.approved.store(false, Ordering::SeqCst);
+        self.device.started.store(0, Ordering::SeqCst);
         // Distinct device logins mint distinct synthetic credentials, including
         // a rejected duplicate-name enrollment. They must not alias the first
         // successful login whose protected bytes remain stored.
-        let path = self.control("synthetic-auth.fixture.json");
-        let mut auth: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-        let suffix = uuid::Uuid::new_v4().simple().to_string();
-        auth["tokens"]["access_token"] = json!(format!("{ACCESS}-{suffix}"));
-        auth["tokens"]["refresh_token"] = json!(format!("{REFRESH}-{suffix}"));
-        std::fs::write(path, serde_json::to_vec(&auth)?)?;
+        *self.device.suffix.lock().unwrap() = format!("-{}", uuid::Uuid::new_v4().simple());
         Ok(())
     }
 

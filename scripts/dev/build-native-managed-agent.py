@@ -7,6 +7,9 @@ binds the result: the source digest is taken before the build and rechecked
 after it, every compiled input must be digested, and the executable's own
 build record must name the explicit effective version, target, compiler and
 source. This prepares local artifacts; it never publishes or changes a VM.
+A local VM runs its host's architecture: the default x86_64 target serves
+Linux hosts, and --target aarch64-unknown-linux-musl serves Apple Silicon Macs
+(build it natively on an arm64 Linux host, never under emulation).
 """
 import argparse
 import json
@@ -23,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/ci/release"))
 import cw_release as release  # noqa: E402
 
-TARGET = release.RUNTIME_TARGET
+TARGETS = (release.RUNTIME_TARGET, "aarch64-unknown-linux-musl")
 
 
 def bounded_build(command, environment, output, timeout):
@@ -56,6 +59,8 @@ def main():
     parser.add_argument("--rust-tools", type=Path, required=True)
     parser.add_argument("--protoc", type=Path, required=True)
     parser.add_argument("--target-dir", type=Path)
+    parser.add_argument("--target", choices=TARGETS, default=release.RUNTIME_TARGET,
+                        help="static musl guest target [default: %(default)s]")
     parser.add_argument("--version", help="effective compiled version [default: the workspace version]")
     parser.add_argument("--cargo-cache", type=Path, default=Path.home() / ".cargo",
                         help="public Cargo source cache whose registry/ and git/ are reused [default: ~/.cargo]")
@@ -91,16 +96,16 @@ def main():
         **release.build_environment(version, revision, before),
     }
     command = [str(tools / "cargo"), "build", "--offline", "--locked", "--profile", "ci",
-               "--target", TARGET, "-p", "codewire-cli-bin", "--bin", "cw"]
+               "--target", args.target, "-p", "codewire-cli-bin", "--bin", "cw"]
     log = args.output / "build.log"
     with log.open("wb") as output:
         exit_code = bounded_build(command, environment, output, 1200)
     if exit_code:
         raise RuntimeError(f"static cw build exit{exit_code}; inspect {log}")
-    binary = target_dir / TARGET / "ci/cw"
+    binary = target_dir / args.target / "ci/cw"
     data, identity, inputs = release.admit_build(
-        ROOT, binary, binary.with_name("cw.d"), TARGET, version, revision, before, rustc,
-        (target_dir, public_cargo / "registry", public_cargo / "git"))
+        ROOT, binary, binary.with_name("cw.d"), args.target, version, revision, before, rustc,
+        (target_dir, public_cargo / "registry", public_cargo / "git"), targets=TARGETS)
     destination = args.output / "cw"
     release.write_new(destination, data, 0o500)
     # The image producer's build input: the identity without its size, plus

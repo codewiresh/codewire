@@ -5,6 +5,7 @@
 //! records keep every lifecycle transition recoverable across process death.
 
 use std::collections::BTreeMap;
+#[cfg(any(target_os = "linux", test))]
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -20,10 +21,10 @@ use rusqlite::{
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::host::path::{PathError, PrivateRoot};
 #[cfg(test)]
 use crate::host_port::HostPortBinding;
 use crate::host_port::validate_canonical_host_port_bindings;
-use crate::linux::path::{PathError, PrivateRoot};
 #[cfg(test)]
 use crate::mesh_ingress::MeshAttachment;
 #[cfg(test)]
@@ -67,6 +68,7 @@ pub(crate) enum OperationKind {
     Reconcile,
     UpdateCwRuntime,
     RollbackCwRuntime,
+    UpdateHostPorts,
 }
 
 impl OperationKind {
@@ -87,6 +89,7 @@ impl OperationKind {
             Self::Reconcile => "reconcile",
             Self::UpdateCwRuntime => "update_cw_runtime",
             Self::RollbackCwRuntime => "rollback_cw_runtime",
+            Self::UpdateHostPorts => "update_host_ports",
         }
     }
 
@@ -104,6 +107,7 @@ impl OperationKind {
             "reconcile" => Some(Self::Reconcile),
             "update_cw_runtime" => Some(Self::UpdateCwRuntime),
             "rollback_cw_runtime" => Some(Self::RollbackCwRuntime),
+            "update_host_ports" => Some(Self::UpdateHostPorts),
             _ => None,
         }
     }
@@ -275,61 +279,67 @@ impl SupervisorStore {
         kind: OperationKind,
         payload: &serde_json::Value,
     ) -> Result<OperationRecord, SupervisorStoreError> {
-        validate_non_nil(request_id)?;
-        if let Some(environment_id) = environment_id {
-            validate_non_nil(environment_id)?;
-        }
-        let payload_bytes = encode_operation_json(payload)?;
-        let operation_id = Uuid::new_v4();
-        let now = unix_millis()?;
         let transaction =
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
-        // A live selector intent fences lifecycle births and disruption for
-        // this UUID, while read/history/message paths remain available. The
-        // check and admission share the same authoritative write transaction.
-        if let Some(environment_id) = environment_id
-            && kind != OperationKind::Reconcile
-        {
-            let collision: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM operations WHERE environment_id=?1
-                 AND request_id!=?2 AND kind!='reconcile' AND phase NOT IN ('completed','failed','interrupted')
-                 AND (kind IN ('update_cw_runtime','rollback_cw_runtime') OR ?3))",
-                params![
-                    environment_id.to_string(),
-                    request_id.to_string(),
-                    kind.cw_runtime()
-                ],
-                |row| row.get(0),
-            )?;
-            if collision {
-                return Err(SupervisorStoreError::JournalConflict);
-            }
-        }
-        transaction.execute(
-            "INSERT OR IGNORE INTO operations(
-               operation_id, request_id, environment_id, kind, phase, checkpoint,
-               payload_json, result_json, error_code, created_unix_ms, updated_unix_ms
-             ) VALUES (?1, ?2, ?3, ?4, 'intent', 0, ?5, NULL, NULL, ?6, ?6)",
-            params![
-                operation_id.to_string(),
-                request_id.to_string(),
-                environment_id.map(|id| id.to_string()),
-                kind.as_str(),
-                payload_bytes,
-                now,
-            ],
+        let record = begin_operation_in_transaction(
+            &transaction,
+            request_id,
+            environment_id,
+            kind,
+            payload,
         )?;
-        let record = operation_for_request(&transaction, request_id)?
-            .ok_or(SupervisorStoreError::InvalidOperation)?;
-        if record.environment_id != environment_id
-            || record.kind != kind
-            || record.payload != *payload
-        {
-            return Err(SupervisorStoreError::RequestCollision);
-        }
         transaction.commit()?;
         let _ = self.operation_events.send(record.clone());
         Ok(record)
+    }
+
+    /// Fails `failed_operation_id`, writes `state` and, in the same
+    /// transaction, begins `kind` for `environment_id`. A failed create uses
+    /// this to begin its rollback delete, so no replay can see the failure
+    /// without the rollback that removes what the create left.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn fail_operation_and_begin(
+        &self,
+        state: &SupervisorState,
+        failed_operation_id: Uuid,
+        expected_checkpoint: u32,
+        error_code: &str,
+        request_id: Uuid,
+        environment_id: Uuid,
+        kind: OperationKind,
+        payload: &serde_json::Value,
+    ) -> Result<(OperationRecord, OperationRecord), SupervisorStoreError> {
+        state
+            .validate()
+            .map_err(|_| SupervisorStoreError::InvalidState)?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let (failed, advanced) = advance_operation_in_transaction(
+            &transaction,
+            failed_operation_id,
+            expected_checkpoint,
+            OperationPhase::Failed,
+            None,
+            Some(error_code),
+        )?;
+        if failed.environment_id != Some(environment_id) {
+            return Err(SupervisorStoreError::InvalidOperation);
+        }
+        if advanced {
+            write_state(&transaction, state)?;
+        }
+        let begun = begin_operation_in_transaction(
+            &transaction,
+            request_id,
+            Some(environment_id),
+            kind,
+            payload,
+        )?;
+        transaction.commit()?;
+        validate_database_files(&PrivateRoot::open(&self.root)?, true)?;
+        let _ = self.operation_events.send(failed.clone());
+        let _ = self.operation_events.send(begun.clone());
+        Ok((failed, begun))
     }
 
     pub(crate) fn advance_operation(
@@ -1271,7 +1281,11 @@ fn write_state(
             ("state_disk", format!("{vm}/disks/state.raw"), None),
             ("vmm_api_socket", format!("{vm}/api/api.sock"), None),
             ("vmm_api_lock", format!("{vm}/api/api.sock.lock"), None),
-            ("hybrid_vsock", format!("{vm}/vsock/vsock.sock"), None),
+            (
+                "hybrid_vsock",
+                format!("{vm}/vsock/{}", crate::state::VSOCK_SOCKET_NAME),
+                None,
+            ),
         ] {
             transaction.execute(
                 "INSERT INTO owned_objects(
@@ -1443,6 +1457,64 @@ fn operation_for_id(
         )
         .optional()
         .map_err(Into::into)
+}
+
+fn begin_operation_in_transaction(
+    transaction: &Transaction<'_>,
+    request_id: Uuid,
+    environment_id: Option<Uuid>,
+    kind: OperationKind,
+    payload: &serde_json::Value,
+) -> Result<OperationRecord, SupervisorStoreError> {
+    validate_non_nil(request_id)?;
+    if let Some(environment_id) = environment_id {
+        validate_non_nil(environment_id)?;
+    }
+    let payload_bytes = encode_operation_json(payload)?;
+    let operation_id = Uuid::new_v4();
+    let now = unix_millis()?;
+    // A live selector intent fences lifecycle births and disruption for
+    // this UUID, while read/history/message paths remain available. The
+    // check and admission share the same authoritative write transaction.
+    if let Some(environment_id) = environment_id
+        && kind != OperationKind::Reconcile
+    {
+        let collision: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operations WHERE environment_id=?1
+             AND request_id!=?2 AND kind!='reconcile' AND phase NOT IN ('completed','failed','interrupted')
+             AND (kind IN ('update_cw_runtime','rollback_cw_runtime') OR ?3))",
+            params![
+                environment_id.to_string(),
+                request_id.to_string(),
+                kind.cw_runtime()
+            ],
+            |row| row.get(0),
+        )?;
+        if collision {
+            return Err(SupervisorStoreError::JournalConflict);
+        }
+    }
+    transaction.execute(
+        "INSERT OR IGNORE INTO operations(
+           operation_id, request_id, environment_id, kind, phase, checkpoint,
+           payload_json, result_json, error_code, created_unix_ms, updated_unix_ms
+         ) VALUES (?1, ?2, ?3, ?4, 'intent', 0, ?5, NULL, NULL, ?6, ?6)",
+        params![
+            operation_id.to_string(),
+            request_id.to_string(),
+            environment_id.map(|id| id.to_string()),
+            kind.as_str(),
+            payload_bytes,
+            now,
+        ],
+    )?;
+    let record = operation_for_request(transaction, request_id)?
+        .ok_or(SupervisorStoreError::InvalidOperation)?;
+    if record.environment_id != environment_id || record.kind != kind || record.payload != *payload
+    {
+        return Err(SupervisorStoreError::RequestCollision);
+    }
+    Ok(record)
 }
 
 fn advance_operation_in_transaction(
@@ -1681,6 +1753,7 @@ fn validate_database_files(root: &PrivateRoot, writable: bool) -> Result<(), Sup
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn current_boot_id() -> Result<String, SupervisorStoreError> {
     let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id").map_err(|source| {
         SupervisorStoreError::Io {
@@ -1689,6 +1762,16 @@ fn current_boot_id() -> Result<String, SupervisorStoreError> {
         }
     })?;
     let boot_id = boot_id.trim().to_owned();
+    validate_boot_id(&boot_id)?;
+    Ok(boot_id)
+}
+
+/// Darwin's boot session UUID stands in for the Linux kernel boot ID.
+#[cfg(target_os = "macos")]
+fn current_boot_id() -> Result<String, SupervisorStoreError> {
+    let boot_id = crate::host::process::BootSessionId::current()
+        .map_err(|_| SupervisorStoreError::InvalidBootId)?
+        .to_hyphenated();
     validate_boot_id(&boot_id)?;
     Ok(boot_id)
 }
@@ -1707,6 +1790,7 @@ fn validate_boot_id(boot_id: &str) -> Result<(), SupervisorStoreError> {
 
 fn path_error_is_not_found(error: &PathError) -> bool {
     match error {
+        #[cfg(target_os = "linux")]
         PathError::Openat2 { source, .. } => *source == rustix::io::Errno::NOENT,
         PathError::Io { source, .. } => source.kind() == io::ErrorKind::NotFound,
         _ => false,
@@ -1722,8 +1806,8 @@ mod tests {
     use codewire_vmm_guest_probe::{SetupArchitecture, Sha256Value, oci_root_generation};
     use sha2::{Digest as _, Sha256};
 
-    use crate::linux::path::{FileIdentity, SocketIdentity, current_uid};
-    use crate::linux::process::ProcessIdentity;
+    use crate::host::path::{FileIdentity, SocketIdentity, current_uid};
+    use crate::host::process::ProcessIdentity;
     use crate::oci::{
         OciArchitecture, ResolvedDescriptor, ResolvedImage, ResolvedLayer, Sha256Digest,
     };
@@ -1813,7 +1897,7 @@ mod tests {
             project_spec_json: String::from_utf8(project_spec_json.to_vec()).unwrap(),
             artifact_generation: "c".repeat(64),
             image,
-            root_disk_bytes: crate::linux::state::MINIMUM_ROOT_DISK_BYTES,
+            root_disk_bytes: crate::state::MINIMUM_ROOT_DISK_BYTES,
             skill_snapshot: None,
         }
     }
@@ -1855,7 +1939,7 @@ mod tests {
             state,
             vcpus: 2,
             memory_mib: 16 * 1024,
-            disk_bytes: crate::linux::state::MINIMUM_STATE_DISK_BYTES,
+            disk_bytes: crate::state::MINIMUM_STATE_DISK_BYTES,
             docker_disk_bytes: 0,
             generation: 7,
             host_ports: vec![HostPortBinding::new(18_080, 3_000).unwrap()],
@@ -3054,7 +3138,7 @@ mod tests {
         let (_parent, root) = root();
         let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
         let mut environment = environment(StoredEnvironmentState::Stopped, None);
-        environment.docker_disk_bytes = crate::linux::state::MINIMUM_DOCKER_DISK_BYTES;
+        environment.docker_disk_bytes = crate::state::MINIMUM_DOCKER_DISK_BYTES;
         let environment_id = environment.id;
         let expected = state(environment);
         store.replace_state(&expected).unwrap();
@@ -3081,7 +3165,7 @@ mod tests {
         assert_eq!(loaded, expected);
         assert_eq!(
             loaded.environments["dev"].docker_disk_bytes,
-            crate::linux::state::MINIMUM_DOCKER_DISK_BYTES
+            crate::state::MINIMUM_DOCKER_DISK_BYTES
         );
     }
 

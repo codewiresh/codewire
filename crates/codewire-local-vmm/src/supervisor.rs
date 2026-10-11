@@ -53,21 +53,16 @@ use crate::control::v1;
 use crate::control::v1::local_supervisor_service_server::{
     LocalSupervisorService, LocalSupervisorServiceServer,
 };
-use crate::cw_runtime::{AdmittedCwRuntimeDisk, CwRuntimeError, CwRuntimeStore};
+use crate::cw_runtime::{CwRuntimeError, CwRuntimeStore};
 use crate::generation::{GenerationError, ensure_root_generation};
+use crate::host::path::{PathError, PrivateRoot, SocketIdentity};
+#[cfg(test)]
+use crate::host::process::ProcessIdentity;
+use crate::host::process::{LiveProcess, RecoveryError, signal_unreaped_child};
 use crate::host_port::{
     HostPortBinding, canonical_host_port_bindings, validate_canonical_host_port_bindings,
 };
 use crate::lifecycle::{EffectDurability, LifecycleEffect, next_effect};
-#[cfg(test)]
-use crate::linux::ProcessIdentity;
-use crate::linux::path::{PathError, PrivateRoot, SocketIdentity};
-use crate::linux::process::signal_unreaped_child;
-use crate::linux::state::{
-    DeletionTreeLocation, StateError, cleanup_trashed_vm, cleanup_unreferenced_root_generations,
-    deletion_tree_location, move_stopped_vm_to_trash,
-};
-use crate::linux::{LiveProcess, RecoveryError, VmPaths};
 use crate::mesh_ingress::{MeshAttachment, MeshEnrollmentAuthSource};
 use crate::oci::{
     ContentStore, ContentStoreError, RegistryReference, RegistryReferenceError, RegistryResolver,
@@ -78,6 +73,10 @@ use crate::setup_pack::{SetupPackError, SetupPackRequest, ensure_setup_pack};
 use crate::skill_snapshot::{
     SkillSnapshotPreparationError, SkillSnapshotRequest, cleanup_interrupted_skill_snapshot,
     prepare_skill_snapshot,
+};
+use crate::state::{
+    DeletionTreeLocation, StateError, VmPaths, cleanup_trashed_vm,
+    cleanup_unreferenced_root_generations, deletion_tree_location, move_stopped_vm_to_trash,
 };
 pub use crate::supervisor_client::NativeSupervisorClient;
 use crate::supervisor_client::{SupervisorClientError, operation_watch_failure};
@@ -113,6 +112,13 @@ use crate::workspace_plan::{
 
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a client keeps connecting after its replacement supervisor exited
+/// without taking the lock, in case a concurrently started one is binding.
+const STALE_ENDPOINT_GRACE: Duration = Duration::from_secs(2);
+/// How long a new supervisor waits for a previous supervisor's runner, which
+/// exits as soon as it sees its parent exit.
+#[cfg(target_os = "macos")]
+const PREVIOUS_RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 const _: () = assert!(
     RUNNER_EXIT_TIMEOUT.as_nanos() > crate::runner_service::RUNNER_SERVER_DRAIN_TIMEOUT.as_nanos()
 );
@@ -136,6 +142,7 @@ async fn request_runner_shutdown_and_observe(
     let _ = client.shutdown(environment_id, generation).await;
     live.wait_exited(RUNNER_EXIT_TIMEOUT).await
 }
+#[cfg(target_os = "linux")]
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
 mod public_api;
@@ -169,12 +176,14 @@ struct OperationProgress {
     event: v1::RunnerEvent,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 struct LinuxCapabilityHeader {
     version: u32,
     pid: i32,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct LinuxCapabilityData {
@@ -281,13 +290,23 @@ impl NativeSupervisorClient {
         Self::connect_for_config(&config.supervisor_socket(), config).await
     }
 
+    /// Connect to the supervisor, starting one when no endpoint exists or when
+    /// the existing endpoint refuses connections.
+    ///
+    /// A refused endpoint is only replaced by a new supervisor that holds
+    /// `supervisor.lock`. Every supervisor holds that lock for its whole life
+    /// and binds its socket only after taking it, so a supervisor that is alive
+    /// (even one not accepting) keeps its socket: the new one fails to take the
+    /// lock and exits without touching the endpoint. The client never unlinks
+    /// anything itself.
     pub async fn connect_or_start(config: &NativeRuntimeConfig) -> Result<Self, SupervisorError> {
         config.validate()?;
         let socket = config.supervisor_socket();
         match fs::symlink_metadata(&socket) {
-            // Existing endpoints are connect-only. Missing/dead/unsupported
-            // peer admission never authorizes a replacement or stale unlink.
-            Ok(_) => return Self::connect_for_config(&socket, config).await,
+            Ok(_) => match Self::connect_for_config(&socket, config).await {
+                Err(error) if error.refused_connection() => {}
+                result => return result,
+            },
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(source) => {
                 return Err(SupervisorError::Io {
@@ -299,6 +318,7 @@ impl NativeSupervisorClient {
         prepare_runtime_root(&config.root)?;
         let mut child = spawn_supervisor(config)?;
         let deadline = tokio::time::Instant::now() + RUNNER_START_TIMEOUT;
+        let mut exited_at = None;
         loop {
             if fs::symlink_metadata(&socket).is_ok() {
                 match Self::connect_for_config(&socket, config).await {
@@ -316,13 +336,21 @@ impl NativeSupervisorClient {
                     }
                 }
             }
-            if child
-                .try_wait()
-                .map_err(|_| SupervisorError::SpawnSupervisor)?
-                .is_some()
-                && fs::symlink_metadata(&socket).is_err()
+            if exited_at.is_none()
+                && child
+                    .try_wait()
+                    .map_err(|_| SupervisorError::SpawnSupervisor)?
+                    .is_some()
             {
-                return Err(SupervisorError::SpawnSupervisor);
+                if fs::symlink_metadata(&socket).is_err() {
+                    return Err(SupervisorError::SpawnSupervisor);
+                }
+                exited_at = Some(tokio::time::Instant::now());
+            }
+            // A supervisor that exits while the old endpoint still refuses did
+            // not get the lock. Allow a concurrent winner a moment to bind.
+            if exited_at.is_some_and(|exited| exited.elapsed() >= STALE_ENDPOINT_GRACE) {
+                return Err(SupervisorError::EndpointNotReplaced(socket));
             }
             if tokio::time::Instant::now() >= deadline {
                 terminate_unadmitted_child(&mut child);
@@ -406,10 +434,11 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         operation_progress: operation_progress.clone(),
         _lock: lock,
     };
-    #[cfg(feature = "synthetic-oci-input-smoke")]
+    #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
     core.admit_synthetic_workspace_image_pin()?;
     core.recover_host_reboot_workspace_transitions()?;
     core.reconcile_exposing_runners_for_startup().await?;
+    core.begin_rollback_of_failed_creates()?;
     let service = SupervisorRpc {
         info: supervisor_info(&config),
         core: Arc::new(Mutex::new(core)),
@@ -515,7 +544,7 @@ fn orphan_inventory_response(
         })
         .collect();
     let retained_content = referenced_content_blobs(state)?;
-    #[cfg(feature = "synthetic-oci-input-smoke")]
+    #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
     let retained_content = {
         let mut retained_content = retained_content;
         let engine = root.open_private_directory(Path::new("engine"), 0o700)?;
@@ -604,7 +633,7 @@ impl SupervisorCore {
         Ok(())
     }
 
-    #[cfg(feature = "synthetic-oci-input-smoke")]
+    #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
     fn synthetic_workspace_image_pin(&self) -> Result<Option<ResolvedImage>, SupervisorError> {
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         let content = ContentStore::create(&engine)?;
@@ -612,7 +641,7 @@ impl SupervisorCore {
             .map_err(|_| SupervisorError::InvalidState)
     }
 
-    #[cfg(feature = "synthetic-oci-input-smoke")]
+    #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
     fn admit_synthetic_workspace_image_pin(&mut self) -> Result<(), SupervisorError> {
         let _ = self.synthetic_workspace_image_pin()?;
         Ok(())
@@ -622,13 +651,13 @@ impl SupervisorCore {
         &self,
         reference: &RegistryReference,
     ) -> Result<Option<ResolvedImage>, SupervisorError> {
-        #[cfg(feature = "synthetic-oci-input-smoke")]
+        #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
         {
             Ok(self
                 .synthetic_workspace_image_pin()?
                 .filter(|image| image.source_reference == reference.original()))
         }
-        #[cfg(not(feature = "synthetic-oci-input-smoke"))]
+        #[cfg(not(all(target_os = "linux", feature = "synthetic-oci-input-smoke")))]
         {
             let _ = reference;
             Ok(None)
@@ -731,6 +760,7 @@ impl SupervisorCore {
     async fn managed_credential_clients_for_boot(
         &mut self,
         environment: &EnvironmentRecord,
+        generation: u64,
     ) -> Result<codewire_access::ManagedCredentialClients, SupervisorError> {
         let project: codewire_project::ProjectSpec = serde_json::from_slice(
             environment
@@ -771,12 +801,26 @@ impl SupervisorCore {
         {
             return Err(SupervisorError::EnvironmentAccessUnavailable);
         }
+        // The store's one GitHub connection is never a profile entry: the
+        // authority grants it to profiles that include GitHub while it is
+        // active. Configure git for it exactly then, so a missing connection
+        // never routes GitHub remotes to a route that cannot serve them.
+        let github = authority
+            .environment_grant_slots(&expected.environment_id, generation)
+            .await
+            .map_err(credential_control_error)?
+            .contains("github");
         // Local profiles never hold a Claude subscription token: the local
         // authority refuses Anthropic OAuth, so slot names fix every form here.
         // TODO(native-claude-subscription-form): revisit with the platform
         // source path in sources::platform::managed_clients.
         let clients = codewire_access::ManagedCredentialClients::from_profile_slots(
-            revision.profile.entries.keys().map(|slot| slot.as_str()),
+            revision
+                .profile
+                .entries
+                .keys()
+                .map(|slot| slot.as_str())
+                .chain(github.then_some("github")),
         )
         .map_err(|_| SupervisorError::EnvironmentAccessUnavailable)?;
         clients
@@ -856,6 +900,21 @@ impl SupervisorCore {
             .map_err(|_| SupervisorError::ArtifactStore)
     }
 
+    #[cfg(target_os = "macos")]
+    fn require_vz_helper(&self) -> Result<(), SupervisorError> {
+        let lock = crate::artifact::ArtifactLock::read(&self.config.artifact_lock)?;
+        let helper = self.config.artifact_root.join(&lock.vz_runner.path);
+        match crate::host::vz_helper_problem(&helper) {
+            None => Ok(()),
+            Some(crate::host::VzHelperProblem::Missing) => {
+                Err(SupervisorError::VzHelperMissing(helper))
+            }
+            Some(crate::host::VzHelperProblem::Unentitled) => {
+                Err(SupervisorError::VzHelperUnentitled(helper))
+            }
+        }
+    }
+
     async fn admit_cached_artifact_generation(
         &mut self,
         artifact_generation: &str,
@@ -870,6 +929,8 @@ impl SupervisorCore {
     }
 
     async fn preflight(&mut self) -> Result<String, SupervisorError> {
+        #[cfg(target_os = "macos")]
+        self.require_vz_helper()?;
         let artifact_generation = self.admit_current_artifact_generation().await?;
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         RuntimeArtifactStore::create(&engine)
@@ -886,6 +947,7 @@ impl SupervisorCore {
                 .map_err(|_| SupervisorError::ArtifactStore)?
                 .require_live_cw_runtime_publisher()?;
         }
+        #[cfg(target_os = "linux")]
         crate::linux::preflight::preflight().map_err(RunnerError::from)?;
         Ok(artifact_generation)
     }
@@ -895,6 +957,13 @@ impl SupervisorCore {
         request: &v1::CreateEnvironmentRequest,
         environment_id: Uuid,
     ) -> Result<WorkspacePlan, SupervisorError> {
+        // Repository preparation runs the runtime's git before preflight
+        // admits the VM inputs. Without an admissible runtime, git-backed
+        // preparation reports the reinstall guidance and preflight the rest.
+        #[cfg(target_os = "macos")]
+        if let Ok(lock) = crate::artifact::ArtifactLock::read(&self.config.artifact_lock) {
+            let _ = lock.admit_host_tools(&self.config.artifact_root);
+        }
         let project: codewire_project::ProjectSpec =
             serde_json::from_slice(&request.project_spec_json)
                 .map_err(|_| SupervisorError::InvalidRequest)?;
@@ -1237,7 +1306,7 @@ impl SupervisorCore {
 
     fn collect_unreferenced_content(&mut self) -> Result<(), SupervisorError> {
         let mut retained = referenced_content_blobs(&self.state)?;
-        #[cfg(feature = "synthetic-oci-input-smoke")]
+        #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
         if let Some(image) = self.synthetic_workspace_image_pin()? {
             retain_image_content(&mut retained, &image)?;
         }
@@ -1461,14 +1530,14 @@ impl SupervisorCore {
                     } else {
                         let artifact_generation = self.preflight().await?;
                         let cw_runtime =
-                            self.admit_installed_cw_runtime()
-                                .await?
-                                .map(|disk| CwRuntimeBinding {
+                            self.admit_installed_cw_runtime().await?.map(|generation| {
+                                CwRuntimeBinding {
                                     schema_version: 1,
-                                    active_catalog_generation: disk.generation,
+                                    active_catalog_generation: generation,
                                     staging_catalog_generation: None,
                                     rollback_catalog_generation: None,
-                                });
+                                }
+                            });
                         let vcpus = u8::try_from(request.vcpus)
                             .map_err(|_| SupervisorError::InvalidRequest)?;
                         next_state.environments.insert(
@@ -1632,7 +1701,8 @@ impl SupervisorCore {
                         } else {
                             create_failure_code(&error)
                         };
-                        self.fail_replayed_operation(&operation, name, error_code)?;
+                        self.roll_back_failed_create(&operation, name, error_code, recovering)
+                            .await?;
                         // If failure happened before RecordEnvironment, the
                         // prepared repository bundles have no durable owner.
                         // If it happened later, the recorded plan retains
@@ -1656,9 +1726,21 @@ impl SupervisorCore {
                     Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
                         return Err(SupervisorError::CredentialAuthorityUnavailable);
                     }
-                    Err(_) => {
+                    Err(SupervisorError::WorkspacePlan(WorkspacePlanError::DirectShareChanged))
+                        if !recovering =>
+                    {
+                        self.fail_replayed_operation(
+                            &operation,
+                            name,
+                            "start_direct_share_changed",
+                        )?;
+                        continue;
+                    }
+                    Err(error) => {
                         let error_code = if recovering {
                             "start_interrupted"
+                        } else if matches!(error, SupervisorError::HostPortUnavailable) {
+                            "start_host_port_unavailable"
                         } else {
                             "start_failed"
                         };
@@ -1693,13 +1775,8 @@ impl SupervisorCore {
                 continue;
             }
             if operation.kind == OperationKind::Delete {
-                let (operation, cleanup_pending) = self.delete(name, &operation).await?;
-                let result = serde_json::json!({
-                    "name": name,
-                    "removed": true,
-                    "cleanup_pending": cleanup_pending,
-                });
-                self.complete_operation(&operation, &result)?;
+                self.run_delete_operation(name, &operation, recovering)
+                    .await?;
                 continue;
             }
             if matches!(
@@ -1787,6 +1864,30 @@ impl SupervisorCore {
             }
             if operation.kind == OperationKind::UpdateEnvironmentSources {
                 self.execute_source_operation(&operation).await?;
+                continue;
+            }
+            if operation.kind == OperationKind::UpdateHostPorts {
+                // A failed update changes nothing recorded and leaves the
+                // environment as it was.
+                let operation = match self.update_host_ports(name, &operation).await {
+                    Ok(operation) => operation,
+                    Err(error) => {
+                        let error_code = match error {
+                            SupervisorError::HostPortUnavailable => "host_port_unavailable",
+                            _ if recovering => "host_ports_interrupted",
+                            _ => "host_ports_failed",
+                        };
+                        self.fail_pending_operation(&operation, error_code)?;
+                        continue;
+                    }
+                };
+                let result = self
+                    .state
+                    .environments
+                    .get(name)
+                    .map(environment_operation_result)
+                    .ok_or(SupervisorError::InvalidState)?;
+                self.complete_operation(&operation, &result)?;
                 continue;
             }
             if operation.kind == OperationKind::Reconcile {
@@ -1894,6 +1995,129 @@ impl SupervisorCore {
         Ok(())
     }
 
+    /// Runs one delete to its end. A delete that fails before its tree
+    /// reaches trash keeps the environment and records why; later failures
+    /// stop the worker, because only finishing the same delete is safe.
+    async fn run_delete_operation(
+        &mut self,
+        name: &str,
+        operation: &OperationRecord,
+        recovering: bool,
+    ) -> Result<(), SupervisorError> {
+        let (operation, cleanup_pending) = match self.delete(name, operation).await {
+            Ok(result) => result,
+            Err(error) => {
+                let error_code = if recovering {
+                    "delete_interrupted"
+                } else {
+                    "delete_failed"
+                };
+                if self.retain_failed_delete(operation, name, error_code)? {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        };
+        let result = serde_json::json!({
+            "name": name,
+            "removed": true,
+            "cleanup_pending": cleanup_pending,
+        });
+        self.complete_operation(&operation, &result)?;
+        Ok(())
+    }
+
+    /// Environments that an earlier failed create left in `error` (never run:
+    /// generation 0 and no active workspace generation) get the ordinary
+    /// delete, which the startup worker then runs like any pending delete.
+    fn begin_rollback_of_failed_creates(&mut self) -> Result<(), SupervisorError> {
+        let stranded = self
+            .state
+            .environments
+            .values()
+            .filter(|environment| {
+                environment.state == StoredEnvironmentState::Error
+                    && environment.generation == 0
+                    && environment.active_workspace_generation.is_none()
+            })
+            // Store validation at load already rejects invalid access
+            // metadata; a cleanup scan never stops the supervisor starting.
+            .filter_map(|environment| {
+                let revoke_access = environment_uses_access_profile(environment).ok()?;
+                Some((environment.name.clone(), environment.id, revoke_access))
+            })
+            .collect::<Vec<_>>();
+        for (name, environment_id, revoke_access) in stranded {
+            if self.store.has_pending_lifecycle_operation(environment_id)? {
+                continue;
+            }
+            self.store.begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::Delete,
+                &serde_json::json!({ "name": name, "revoke_access": revoke_access }),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A failed create leaves nothing behind (#2491). Once the environment
+    /// is recorded, the create fails in the same transaction that begins the
+    /// ordinary delete of that environment, which then runs at once. The
+    /// create keeps its own error code; the delete records its own outcome,
+    /// so a delete that cannot finish leaves a visible `error` environment
+    /// and a failed delete, never a silent record or a false "removed".
+    async fn roll_back_failed_create(
+        &mut self,
+        failed: &OperationRecord,
+        name: &str,
+        error_code: &str,
+        recovering: bool,
+    ) -> Result<(), SupervisorError> {
+        let current = self
+            .store
+            .operation_by_request(failed.request_id)?
+            .ok_or(SupervisorError::InvalidState)?;
+        let environment_id = current
+            .environment_id
+            .ok_or(SupervisorError::InvalidState)?;
+        let Some(environment) = self
+            .state
+            .environments
+            .get(name)
+            .filter(|environment| environment.id == environment_id)
+        else {
+            // Nothing was recorded; there is nothing to remove.
+            self.fail_operation(&current, error_code)?;
+            return Ok(());
+        };
+        let payload = serde_json::json!({
+            "name": name,
+            "revoke_access": environment_uses_access_profile(environment)?,
+        });
+        // Marked `error` as any failed create is, which is how the delete
+        // recognizes a never-started environment and removes it without
+        // booting a runner.
+        let mut next_state = self.state.clone();
+        next_state
+            .environments
+            .get_mut(name)
+            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?
+            .state = StoredEnvironmentState::Error;
+        let (_, rollback) = self.store.fail_operation_and_begin(
+            &next_state,
+            current.operation_id,
+            current.checkpoint,
+            error_code,
+            Uuid::new_v4(),
+            environment_id,
+            OperationKind::Delete,
+            &payload,
+        )?;
+        self.state = next_state;
+        self.run_delete_operation(name, &rollback, recovering).await
+    }
+
     fn fail_replayed_operation(
         &mut self,
         replayed: &OperationRecord,
@@ -1906,6 +2130,46 @@ impl SupervisorCore {
             .ok_or(SupervisorError::InvalidState)?;
         self.fail_operation_with_environment_error(&current, name, error_code)?;
         Ok(())
+    }
+
+    /// Nothing is removed until the environment tree moves to trash. A delete
+    /// that fails before then keeps the environment, marks it `error` and
+    /// records why, so a retry starts over and later supervisors do not stop
+    /// at replay. Returns false once the tree is in trash: only finishing the
+    /// same delete is safe then.
+    fn retain_failed_delete(
+        &mut self,
+        failed: &OperationRecord,
+        name: &str,
+        error_code: &str,
+    ) -> Result<bool, SupervisorError> {
+        let current = self
+            .store
+            .operation_by_request(failed.request_id)?
+            .ok_or(SupervisorError::InvalidState)?;
+        let environment_id = current
+            .environment_id
+            .ok_or(SupervisorError::InvalidState)?;
+        let trashed = matches!(
+            deletion_tree_location(
+                &self.config.engine_root(),
+                environment_id,
+                current.operation_id
+            ),
+            Ok(DeletionTreeLocation::Trash(_))
+        );
+        if trashed
+            || supervisor_effect(current.kind, current.checkpoint)?.is_none_or(|effect| {
+                !matches!(
+                    effect,
+                    LifecycleEffect::PrepareDelete | LifecycleEffect::MoveToTrash
+                )
+            })
+        {
+            return Ok(false);
+        }
+        self.fail_operation_with_environment_error(&current, name, error_code)?;
+        Ok(true)
     }
 
     fn fail_pending_operation(
@@ -2127,6 +2391,23 @@ impl SupervisorCore {
                 }
                 Err(RecoveryError::IdentityMismatch) => {
                     self.mark_orphaned(name)?;
+                    return Ok(());
+                }
+                // A runner exits with its supervisor on Darwin. One still
+                // alive belongs to the previous supervisor; wait for it to
+                // finish exiting, and never adopt it.
+                #[cfg(target_os = "macos")]
+                Err(RecoveryError::Unowned) => {
+                    if LiveProcess::wait_recorded_exit(
+                        &record.process,
+                        PREVIOUS_RUNNER_EXIT_TIMEOUT,
+                    )
+                    .await?
+                    {
+                        self.mark_runner_dead(name)?;
+                    } else {
+                        self.mark_orphaned(name)?;
+                    }
                     return Ok(());
                 }
                 Err(error) => return Err(error.into()),
@@ -2458,6 +2739,7 @@ impl SupervisorCore {
         // SAFETY: these libc calls use only scalar arguments between fork and
         // exec. PDEATHSIG closes the spawn-to-manifest orphan window; the
         // runner clears it only after its exact identity is durable.
+        #[cfg(target_os = "linux")]
         unsafe {
             command.pre_exec(move || {
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0
@@ -2472,6 +2754,19 @@ impl SupervisorCore {
                 {
                     return Err(io::Error::last_os_error());
                 }
+                libc::umask(0o077);
+                Ok(())
+            });
+        }
+        // SAFETY: as above. Darwin has no parent-death signal: the runner
+        // watches this process and exits with it.
+        #[cfg(target_os = "macos")]
+        unsafe {
+            command.pre_exec(move || {
+                if libc::getppid() != expected_parent || libc::setsid() < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                crate::darwin::process::mark_inherited_descriptors_close_on_exec();
                 libc::umask(0o077);
                 Ok(())
             });
@@ -2611,9 +2906,8 @@ impl SupervisorCore {
         Ok(())
     }
 
-    async fn admit_installed_cw_runtime(
-        &mut self,
-    ) -> Result<Option<AdmittedCwRuntimeDisk>, SupervisorError> {
+    /// Admit the installed cw runtime source and return its catalog generation.
+    async fn admit_installed_cw_runtime(&mut self) -> Result<Option<String>, SupervisorError> {
         let engine_root = self.config.engine_root();
         let source = self.config.cw_runtime_lock();
         tokio::task::spawn_blocking(move || {
@@ -2627,17 +2921,19 @@ impl SupervisorCore {
             let asset = store.admit_source(&source)?;
             store
                 .prepare_catalog(&asset.provenance, &BTreeMap::new())
-                .map(Some)
+                .map(|disk| Some(disk.generation))
         })
         .await
         .map_err(|_| SupervisorError::CwRuntimeProvisionTask)?
         .map_err(Into::into)
     }
 
+    /// Revalidate an environment's bound cw runtime catalog and return its
+    /// generation.
     async fn admit_environment_cw_runtime(
         &mut self,
         name: &str,
-    ) -> Result<Option<AdmittedCwRuntimeDisk>, SupervisorError> {
+    ) -> Result<Option<String>, SupervisorError> {
         // Unbound legacy/raw environments remain unbound across an ordinary
         // start or restart. Only creation or explicit update selects a source.
         let Some(binding) = self.environment(name)?.cw_runtime.clone() else {
@@ -2653,7 +2949,7 @@ impl SupervisorCore {
                 .unwrap_or(&binding.active_catalog_generation);
             CwRuntimeStore::create(&engine)?
                 .open_catalog(selected)
-                .map(Some)
+                .map(|disk| Some(disk.generation))
         })
         .await
         .map_err(|_| SupervisorError::CwRuntimeProvisionTask)?
@@ -2675,10 +2971,7 @@ impl SupervisorCore {
         self.require_environment_guest_seed_abi(name, staging)
             .await?;
         let cw_runtime = self.admit_environment_cw_runtime(name).await?;
-        let expected_cw_runtime_generation = cw_runtime
-            .as_ref()
-            .map(|disk| disk.generation.clone())
-            .unwrap_or_default();
+        let expected_cw_runtime_generation = cw_runtime.clone().unwrap_or_default();
         validate_environment_workload_secret_delivery(&environment, staging)?;
         let mut client = self
             .runner_client_for_artifact(name, &expected_artifact_generation)
@@ -2727,7 +3020,7 @@ impl SupervisorCore {
         .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)??;
         let projection_environment = sources::projection_environment_for_boot(&environment)?;
         let managed_credential_clients = self
-            .managed_credential_clients_for_boot(&projection_environment)
+            .managed_credential_clients_for_boot(&projection_environment, generation)
             .await?;
         let broker_request =
             self.credential_broker_request_for_environment(&projection_environment, generation)?;
@@ -2841,6 +3134,12 @@ impl SupervisorCore {
             (Ok(info), None) => info,
             (Err(status), Some(error_code)) => {
                 self.record_runner_start_failure(name, &error_code)?;
+                if error_code == crate::runner_service::GUEST_DOCKER_TOOLING_MISSING {
+                    return Err(SupervisorError::GuestDockerToolingMissing);
+                }
+                if error_code == crate::runner_service::HOST_PORT_UNAVAILABLE {
+                    return Err(SupervisorError::HostPortUnavailable);
+                }
                 return Err(SupervisorError::VmStart(status.message().to_owned()));
             }
             (Ok(_), Some(_)) | (Err(_), None) => {
@@ -2875,7 +3174,7 @@ impl SupervisorCore {
             .runner
             .as_mut()
             .ok_or(SupervisorError::InvalidState)?
-            .cw_runtime_catalog_generation = cw_runtime.map(|disk| disk.generation);
+            .cw_runtime_catalog_generation = cw_runtime;
         self.save()
     }
 
@@ -3192,6 +3491,70 @@ impl SupervisorCore {
         Ok(())
     }
 
+    async fn update_host_ports(
+        &mut self,
+        name: &str,
+        operation: &OperationRecord,
+    ) -> Result<OperationRecord, SupervisorError> {
+        let target = operation
+            .payload
+            .get("target")
+            .cloned()
+            .and_then(|target| serde_json::from_value::<Vec<HostPortBinding>>(target).ok())
+            .ok_or(SupervisorError::InvalidState)?;
+        validate_canonical_host_port_bindings(&target)
+            .map_err(|_| SupervisorError::InvalidState)?;
+        let environment_id = operation
+            .environment_id
+            .ok_or(SupervisorError::InvalidState)?;
+        let mut operation = operation.clone();
+        loop {
+            let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? else {
+                return Ok(operation);
+            };
+            match effect {
+                LifecycleEffect::ApplyHostPorts => {
+                    let environment = self.environment(name)?;
+                    if environment.id != environment_id {
+                        return Err(SupervisorError::InvalidState);
+                    }
+                    if environment.state == StoredEnvironmentState::Running {
+                        let generation = environment.generation;
+                        let artifact_generation =
+                            artifact_generation_for_boot(environment, false)?.to_owned();
+                        let mut runner = self
+                            .runner_client_for_artifact(name, &artifact_generation)
+                            .await?;
+                        runner
+                            .set_host_ports(environment_id, generation, &target)
+                            .await
+                            .map_err(|status| {
+                                if status
+                                    .message()
+                                    .starts_with(crate::runner_service::HOST_PORT_UNAVAILABLE)
+                                {
+                                    SupervisorError::HostPortUnavailable
+                                } else {
+                                    SupervisorError::InvalidRunnerResponse
+                                }
+                            })?;
+                    }
+                    operation = self.checkpoint_operation(&operation)?;
+                }
+                LifecycleEffect::RecordHostPorts => {
+                    let mut next_state = self.state.clone();
+                    next_state
+                        .environments
+                        .get_mut(name)
+                        .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?
+                        .host_ports = target.clone();
+                    operation = self.checkpoint_state_operation(&operation, next_state)?;
+                }
+                _ => return Err(SupervisorError::InvalidState),
+            }
+        }
+    }
+
     async fn prepare_environment_for_delete(&mut self, name: &str) -> Result<(), SupervisorError> {
         let environment = self.environment(name)?;
         let environment_id = environment.id;
@@ -3220,7 +3583,7 @@ impl SupervisorCore {
                 return Ok(());
             }
             let artifact_generation =
-                artifact_generation_for_boot(self.environment(name)?, false)?.to_owned();
+                delete_cleanup_artifact_generation(self.environment(name)?)?.to_owned();
             let _ = self
                 .runner_client_for_artifact(name, &artifact_generation)
                 .await?;
@@ -3650,7 +4013,19 @@ impl SupervisorCore {
                         }
                         DeletionTreeLocation::Trash(_) => {}
                         DeletionTreeLocation::Missing => {
-                            if self.state.environments.contains_key(name) {
+                            // A create that failed before provisioning (for
+                            // example at access binding) recorded the
+                            // environment but never made its tree; there is
+                            // nothing to trash. Any other recorded
+                            // environment must still have one.
+                            if self
+                                .state
+                                .environments
+                                .get(name)
+                                .is_some_and(|environment| {
+                                    !environment_never_provisioned(environment)
+                                })
+                            {
                                 return Err(SupervisorError::State(
                                     StateError::MissingTrashSource(
                                         engine_root.join("vms").join(environment_id.to_string()),
@@ -3907,6 +4282,14 @@ impl LocalSupervisorService for SupervisorRpc {
                 operation
             }
             None => {
+                // A new create for a taken name fails here, before anything
+                // is recorded. Replay above has already finished any rollback
+                // of a failed create, so its name is free again.
+                if core.state.environments.contains_key(&request.name) {
+                    return Err(Status::from(SupervisorError::AlreadyExists(
+                        request.name.clone(),
+                    )));
+                }
                 // Allocate the eventual environment identity before repository
                 // preparation. Successful preparation journals this SAME ID;
                 // failure abandons it and keeps offline replay unchanged.
@@ -4408,6 +4791,89 @@ impl LocalSupervisorService for SupervisorRpc {
         Ok(Response::new(response))
     }
 
+    async fn update_host_ports(
+        &self,
+        request: Request<v1::UpdateHostPortsRequest>,
+    ) -> Result<Response<v1::Operation>, Status> {
+        let request = request.into_inner();
+        if !valid_environment_name(&request.name) {
+            return Err(Status::from(SupervisorError::InvalidRequest));
+        }
+        let request_id = parse_request_id(&request.request_id).map_err(Status::from)?;
+        let expected_environment_id =
+            parse_optional_environment_id(&request.environment_id).map_err(Status::from)?;
+        let add = request
+            .add
+            .iter()
+            .map(|binding| serde_json::json!([binding.host_port, binding.guest_port]))
+            .collect::<Vec<_>>();
+        let mut core = self.core.lock().await;
+        core.replay_pending_operations()
+            .await
+            .map_err(Status::from)?;
+        let environment = core
+            .environment(&request.name)
+            .map_err(Status::from)?
+            .clone();
+        require_expected_environment(&environment, expected_environment_id)?;
+        let existing = core
+            .store
+            .operation_by_request(request_id)
+            .map_err(SupervisorError::from)
+            .map_err(Status::from)?;
+        let operation = if let Some(operation) = existing {
+            if operation.kind != OperationKind::UpdateHostPorts
+                || operation.environment_id != Some(environment.id)
+                || operation
+                    .payload
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(request.name.as_str())
+                || operation.payload.get("add") != Some(&serde_json::json!(add))
+                || operation.payload.get("remove") != Some(&serde_json::json!(request.remove))
+            {
+                return Err(Status::aborted("local lifecycle request ID collision"));
+            }
+            operation
+        } else {
+            if !matches!(
+                environment.state,
+                StoredEnvironmentState::Running | StoredEnvironmentState::Stopped
+            ) || core
+                .store
+                .has_pending_lifecycle_operation(environment.id)
+                .map_err(SupervisorError::from)
+                .map_err(Status::from)?
+            {
+                return Err(Status::failed_precondition(
+                    "host ports change only on a running or stopped environment",
+                ));
+            }
+            let target = updated_host_ports(&environment.host_ports, &request)?;
+            let payload = serde_json::json!({
+                "name": request.name,
+                "add": add,
+                "remove": request.remove,
+                "target": target,
+            });
+            core.store
+                .begin_operation(
+                    request_id,
+                    Some(environment.id),
+                    OperationKind::UpdateHostPorts,
+                    &payload,
+                )
+                .map_err(SupervisorError::from)
+                .map_err(Status::from)?
+        };
+        let response = operation_proto(&operation)?;
+        drop(core);
+        if !operation.phase.terminal() {
+            self.schedule_operation_worker(false);
+        }
+        Ok(Response::new(response))
+    }
+
     async fn update_environment_sources(
         &self,
         request: Request<v1::UpdateEnvironmentSourcesRequest>,
@@ -4519,6 +4985,14 @@ impl LocalSupervisorService for SupervisorRpc {
         // read remain queued and are de-duplicated by checkpoint below.
         let mut events = self.operation_events.subscribe();
         let mut progress_events = self.operation_progress.subscribe();
+        // A supervisor stopping after a failed operation drains its open
+        // connections; a watch of an unfinished operation must end, not wait.
+        let mut shutdown = self.shutdown.subscribe();
+        if *shutdown.borrow() {
+            return Err(Status::unavailable(
+                "native local supervisor stopped before the operation finished; run the command again",
+            ));
+        }
         let initial = self.operation(operation_id).await?;
         let initial_terminal = initial.phase.terminal();
         let initial_checkpoint = initial.checkpoint;
@@ -4534,6 +5008,16 @@ impl LocalSupervisorService for SupervisorRpc {
             let mut progress_open = true;
             loop {
                 tokio::select! {
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            let _ = sender
+                                .send(Err(Status::unavailable(
+                                    "native local supervisor stopped before the operation finished; run the command again",
+                                )))
+                                .await;
+                            return;
+                        }
+                    }
                     journal = events.recv() => {
                         let operation = match journal {
                             Ok(operation)
@@ -4910,6 +5394,7 @@ fn operation_proto(operation: &OperationRecord) -> Result<v1::Operation, Status>
         OperationKind::Reconcile => v1::OperationKind::Reconcile,
         OperationKind::UpdateCwRuntime => v1::OperationKind::UpdateCwRuntime,
         OperationKind::RollbackCwRuntime => v1::OperationKind::RollbackCwRuntime,
+        OperationKind::UpdateHostPorts => v1::OperationKind::UpdateHostPorts,
     };
     let phase = match operation.phase {
         OperationPhase::Intent => v1::OperationPhase::Intent,
@@ -5031,6 +5516,8 @@ fn operation_stage(operation: &OperationRecord) -> Result<v1::OperationStage, St
         LifecycleEffect::RemoveEnvironment => v1::OperationStage::RemoveEnvironment,
         LifecycleEffect::CleanupTrash => v1::OperationStage::CleanupTrash,
         LifecycleEffect::RecordObservation => v1::OperationStage::RecordObservation,
+        LifecycleEffect::ApplyHostPorts => v1::OperationStage::ApplyHostPorts,
+        LifecycleEffect::RecordHostPorts => v1::OperationStage::RecordHostPorts,
     })
 }
 
@@ -5364,10 +5851,10 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
         || request.vcpus == 0
         || request.vcpus > 32
         || !(128..=65_536).contains(&request.memory_mib)
-        || request.disk_bytes < crate::linux::state::MINIMUM_STATE_DISK_BYTES
+        || request.disk_bytes < crate::state::MINIMUM_STATE_DISK_BYTES
         || !request.disk_bytes.is_multiple_of(1024 * 1024)
         || (request.docker_disk_bytes != 0
-            && (request.docker_disk_bytes < crate::linux::state::MINIMUM_DOCKER_DISK_BYTES
+            && (request.docker_disk_bytes < crate::state::MINIMUM_DOCKER_DISK_BYTES
                 || !request.docker_disk_bytes.is_multiple_of(1024 * 1024)))
         || validate_project_intent(
             &request.project_spec_json,
@@ -5500,6 +5987,15 @@ fn access_environment_id(environment_id: Uuid) -> Result<EnvironmentId, Supervis
     EnvironmentId::parse(environment_id.to_string()).map_err(|_| SupervisorError::InvalidState)
 }
 
+/// Recorded by a create that never reached a workspace generation or a
+/// runner, so nothing of it exists on disk except possibly a partial tree.
+fn environment_never_provisioned(environment: &EnvironmentRecord) -> bool {
+    environment.active_workspace_generation.is_none()
+        && environment.staging_workspace_generation.is_none()
+        && environment.runner.is_none()
+        && environment.generation == 0
+}
+
 fn environment_uses_access_profile(
     environment: &EnvironmentRecord,
 ) -> Result<bool, SupervisorError> {
@@ -5556,7 +6052,7 @@ fn validate_resize(request: &v1::ResizeEnvironmentRequest) -> Result<Uuid, Super
         || request.vcpus == 0
         || request.vcpus > 32
         || !(128..=65_536).contains(&request.memory_mib)
-        || request.disk_bytes < crate::linux::state::MINIMUM_STATE_DISK_BYTES
+        || request.disk_bytes < crate::state::MINIMUM_STATE_DISK_BYTES
         || !request.disk_bytes.is_multiple_of(1024 * 1024)
         || request.public_request_id.len() > 128
         || !matches!(
@@ -5567,6 +6063,56 @@ fn validate_resize(request: &v1::ResizeEnvironmentRequest) -> Result<Uuid, Super
         return Err(SupervisorError::InvalidRequest);
     }
     parse_request_id(&request.request_id)
+}
+
+/// The exact canonical set after withdrawing `remove` and publishing `add`.
+/// A published host port must be withdrawn before it is published again.
+fn updated_host_ports(
+    current: &[HostPortBinding],
+    request: &v1::UpdateHostPortsRequest,
+) -> Result<Vec<HostPortBinding>, Status> {
+    if request.add.is_empty() && request.remove.is_empty() {
+        return Err(Status::invalid_argument(
+            "no host ports to publish or withdraw",
+        ));
+    }
+    let mut target = current.to_vec();
+    for port in &request.remove {
+        let before = target.len();
+        target.retain(|binding| u32::from(binding.host_port) != *port);
+        if target.len() == before {
+            return Err(Status::failed_precondition(format!(
+                "host port {port} is not published"
+            )));
+        }
+    }
+    for binding in &request.add {
+        let (Ok(host_port), Ok(guest_port)) = (
+            u16::try_from(binding.host_port),
+            u16::try_from(binding.guest_port),
+        ) else {
+            return Err(Status::invalid_argument("ports are 1 to 65535"));
+        };
+        if target.iter().any(|current| current.host_port == host_port) {
+            return Err(Status::failed_precondition(format!(
+                "host port {host_port} is already published; withdraw it first"
+            )));
+        }
+        if target
+            .iter()
+            .any(|current| current.guest_port == guest_port)
+        {
+            return Err(Status::failed_precondition(format!(
+                "guest port {guest_port} is already published"
+            )));
+        }
+        target.push(HostPortBinding {
+            host_port,
+            guest_port,
+        });
+    }
+    canonical_host_port_bindings(target)
+        .map_err(|error| Status::invalid_argument(error.to_string()))
 }
 
 fn parse_request_id(value: &str) -> Result<Uuid, SupervisorError> {
@@ -6148,6 +6694,17 @@ fn runner_artifact_disposition(
     RunnerArtifactDisposition::ReplaceStopped
 }
 
+/// The artifact generation a replacement runner boots to clean up before a
+/// delete. A create that failed at VM start reserved generation 1 but never
+/// promoted its staged workspace, so it has only the staged generation.
+fn delete_cleanup_artifact_generation(
+    environment: &EnvironmentRecord,
+) -> Result<&str, SupervisorError> {
+    let staged_only = environment.active_workspace_generation.is_none()
+        && environment.staging_workspace_generation.is_some();
+    artifact_generation_for_boot(environment, staged_only)
+}
+
 fn artifact_generation_for_boot(
     environment: &EnvironmentRecord,
     staging: bool,
@@ -6514,8 +7071,7 @@ fn resize_operation_parameters(
         .get("disk_bytes")
         .and_then(serde_json::Value::as_u64)
         .filter(|value| {
-            *value >= crate::linux::state::MINIMUM_STATE_DISK_BYTES
-                && value.is_multiple_of(1024 * 1024)
+            *value >= crate::state::MINIMUM_STATE_DISK_BYTES && value.is_multiple_of(1024 * 1024)
         })
         .ok_or(SupervisorError::InvalidState)?;
     let was_running = fields
@@ -6847,6 +7403,7 @@ fn spawn_supervisor(config: &NativeRuntimeConfig) -> Result<Child, SupervisorErr
     // SAFETY: scalar-only libc operations and one fixed-layout capset syscall
     // prepare a capability-empty, no-new-privileges, FD-clean detached
     // singleton before exec. The supervisor intentionally outlives this CLI.
+    #[cfg(target_os = "linux")]
     unsafe {
         command.pre_exec(|| {
             confine_spawned_process()?;
@@ -6864,6 +7421,18 @@ fn spawn_supervisor(config: &NativeRuntimeConfig) -> Result<Child, SupervisorErr
             Ok(())
         });
     }
+    // SAFETY: scalar-only libc operations before exec. Darwin has no capset.
+    #[cfg(target_os = "macos")]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            crate::darwin::process::mark_inherited_descriptors_close_on_exec();
+            libc::umask(0o077);
+            Ok(())
+        });
+    }
     command
         .spawn()
         .map_err(|_| SupervisorError::SpawnSupervisor)
@@ -6876,6 +7445,7 @@ fn terminate_unadmitted_child(child: &mut Child) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn confine_spawned_process() -> io::Result<()> {
     let header = LinuxCapabilityHeader {
         version: LINUX_CAPABILITY_VERSION_3,
@@ -6941,11 +7511,17 @@ impl From<SupervisorError> for Status {
                 Status::failed_precondition(resolver.to_string())
             }
             SupervisorError::Runner(_) => Status::failed_precondition(error.to_string()),
+            #[cfg(target_os = "macos")]
+            SupervisorError::VzHelperMissing(_) | SupervisorError::VzHelperUnentitled(_) => {
+                Status::failed_precondition(error.to_string())
+            }
             SupervisorError::Artifact(
                 crate::artifact::ArtifactError::GuestSeedProtocolUnsupported(_),
-            )
-            | SupervisorError::CwRuntime(_) => Status::failed_precondition(error.to_string()),
+            ) => Status::failed_precondition(error.to_string()),
+            SupervisorError::CwRuntime(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::VmStart(_)
+            | SupervisorError::GuestDockerToolingMissing
+            | SupervisorError::HostPortUnavailable
             | SupervisorError::VmStop
             | SupervisorError::VmResize
             | SupervisorError::VmDelete => Status::failed_precondition(error.to_string()),
@@ -6983,6 +7559,8 @@ impl From<SupervisorConfigError> for SupervisorError {
                 Self::SupervisorConfigurationMismatch
             }
             SupervisorConfigError::Io { path, source } => Self::Io { path, source },
+            #[cfg(target_os = "macos")]
+            SupervisorConfigError::SocketPathTooLong(root) => Self::SocketPathTooLong(root),
         }
     }
 }
@@ -6991,6 +7569,19 @@ impl From<SupervisorConfigError> for SupervisorError {
 pub enum SupervisorError {
     #[error("native runtime configuration is invalid")]
     InvalidConfiguration,
+    #[cfg(target_os = "macos")]
+    #[error(
+        "local state root {0} is too long for macOS Unix sockets (103 bytes); choose a shorter path"
+    )]
+    SocketPathTooLong(PathBuf),
+    #[cfg(target_os = "macos")]
+    #[error("the Virtualization.framework helper {0} is missing")]
+    VzHelperMissing(PathBuf),
+    #[cfg(target_os = "macos")]
+    #[error(
+        "the Virtualization.framework helper {0} lacks the com.apple.security.virtualization entitlement"
+    )]
+    VzHelperUnentitled(PathBuf),
     #[error("native environment request is invalid")]
     InvalidRequest,
     #[error("local environment {0:?} already exists")]
@@ -7019,6 +7610,10 @@ pub enum SupervisorError {
     SpawnSupervisor,
     #[error("native supervisor startup timed out")]
     SupervisorStartTimeout,
+    #[error(
+        "nothing accepts connections at {0}, and no new native local supervisor could take it over because another one still holds its lock"
+    )]
+    EndpointNotReplaced(PathBuf),
     #[error("the running native supervisor does not implement the required compatibility protocol")]
     SupervisorProtocolUnavailable,
     #[error(
@@ -7053,6 +7648,14 @@ pub enum SupervisorError {
     ArtifactGenerationChanged,
     #[error("native VM start failed: {0}")]
     VmStart(String),
+    #[error(
+        "Docker is enabled but the workspace image has no Docker tooling (dockerd, xtables-nft-multi); create with --no-docker or choose an image that includes Docker"
+    )]
+    GuestDockerToolingMissing,
+    #[error(
+        "a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; stop it, or publish a different host port"
+    )]
+    HostPortUnavailable,
     #[error("native VM stop failed")]
     VmStop,
     #[error("native VM resize failed")]
@@ -7118,6 +7721,13 @@ pub enum SupervisorError {
 // or owner paths. The existing operation error_code is the diagnostic surface.
 fn create_failure_code(error: &SupervisorError) -> &'static str {
     match error {
+        SupervisorError::AlreadyExists(_) => "create_name_taken",
+        SupervisorError::GuestDockerToolingMissing => "create_guest_docker_tooling_missing",
+        SupervisorError::HostPortUnavailable => "create_host_port_unavailable",
+        #[cfg(target_os = "macos")]
+        SupervisorError::VzHelperMissing(_) => "create_vz_helper_missing",
+        #[cfg(target_os = "macos")]
+        SupervisorError::VzHelperUnentitled(_) => "create_vz_helper_unentitled",
         SupervisorError::CredentialAuthorityUnavailable => {
             "create_credential_authority_unavailable"
         }
@@ -7159,6 +7769,9 @@ fn create_failure_code(error: &SupervisorError) -> &'static str {
             _ => "create_registry_admission",
         },
         SupervisorError::RegistryReference(_) => "create_registry_reference",
+        SupervisorError::WorkspacePlan(WorkspacePlanError::DirectShareChanged) => {
+            "create_direct_share_changed"
+        }
         SupervisorError::SkillSnapshot(_) => "create_skill_snapshot",
         SupervisorError::WorkspaceGenerationProvisionTask => "create_workspace_generation_task",
         SupervisorError::WorkspaceGeneration => "create_workspace_generation_invalid",
@@ -7171,6 +7784,21 @@ fn create_failure_code(error: &SupervisorError) -> &'static str {
 }
 
 impl SupervisorError {
+    /// Nothing listens on the supervisor endpoint.
+    fn refused_connection(&self) -> bool {
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(self);
+        while let Some(error) = cause {
+            if error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|error| error.kind() == io::ErrorKind::ConnectionRefused)
+            {
+                return true;
+            }
+            cause = error.source();
+        }
+        false
+    }
+
     fn incompatible_supervisor(&self) -> bool {
         matches!(
             self,
@@ -7195,10 +7823,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
-    use crate::artifact::{
-        ARTIFACT_LOCK_SCHEMA_VERSION, ArtifactArchitecture, ArtifactLock, ArtifactSpec,
-        CLOUD_HYPERVISOR_RELEASE, ExecutableArtifactSpec,
-    };
+    use crate::artifact::{ArtifactArchitecture, ArtifactLock, ArtifactSpec};
     use crate::oci::{OciArchitecture, ResolvedDescriptor, ResolvedImage, Sha256Digest};
     use crate::uds::bind_owner_only;
     use codewire_access::builtin_provider_catalog;
@@ -7240,16 +7865,8 @@ mod tests {
         let cloud_hypervisor = spec("bin/cloud-hypervisor", b"cloud-hypervisor");
         let kernel = spec("boot/kernel", kernel_bytes);
         let initramfs = spec("boot/initramfs", b"initramfs");
-        let lock = ArtifactLock {
-            schema_version: ARTIFACT_LOCK_SCHEMA_VERSION,
-            cloud_hypervisor: ExecutableArtifactSpec {
-                artifact: cloud_hypervisor.clone(),
-                version: CLOUD_HYPERVISOR_RELEASE.to_owned(),
-            },
-            virtiofsd: None,
-            kernel: kernel.clone(),
-            initramfs: initramfs.clone(),
-        };
+        let lock =
+            ArtifactLock::for_test(cloud_hypervisor.clone(), kernel.clone(), initramfs.clone());
         RuntimeArtifactStore::create(engine).unwrap();
         let blobs = engine.path().join("runtime-artifacts/blobs");
         for (prefix, artifact, bytes, permissions) in [
@@ -7325,16 +7942,11 @@ mod tests {
         let cloud_hypervisor = spec("bin/cloud-hypervisor", &elf);
         let kernel_spec = spec("boot/kernel", &kernel);
         let initramfs_spec = spec("boot/initramfs", &initramfs);
-        let lock = ArtifactLock {
-            schema_version: ARTIFACT_LOCK_SCHEMA_VERSION,
-            cloud_hypervisor: ExecutableArtifactSpec {
-                artifact: cloud_hypervisor.clone(),
-                version: CLOUD_HYPERVISOR_RELEASE.to_owned(),
-            },
-            virtiofsd: None,
-            kernel: kernel_spec.clone(),
-            initramfs: initramfs_spec.clone(),
-        };
+        let lock = ArtifactLock::for_test(
+            cloud_hypervisor.clone(),
+            kernel_spec.clone(),
+            initramfs_spec.clone(),
+        );
         RuntimeArtifactStore::create(engine).unwrap();
         let store = engine.path().join("runtime-artifacts");
         for (prefix, spec, bytes, mode) in [
@@ -7401,7 +8013,7 @@ mod tests {
                 },
                 layers: Vec::new(),
             },
-            crate::linux::state::MINIMUM_ROOT_DISK_BYTES,
+            crate::state::MINIMUM_ROOT_DISK_BYTES,
         )
         .unwrap()
     }
@@ -7480,6 +8092,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn direct_workspace_plan(source: &Path) -> WorkspacePlan {
         let admitted = crate::direct_share::admit_direct_share(source, &[]).unwrap();
         WorkspacePlan::from_inputs(vec![WorkspaceInput::direct(
@@ -7736,6 +8349,83 @@ mod tests {
         (parent, core)
     }
 
+    /// Leave a dead owner-only endpoint at `socket`: bound, then closed.
+    fn stale_supervisor_endpoint(socket: &Path) -> SocketIdentity {
+        drop(std::os::unix::net::UnixListener::bind(socket).unwrap());
+        fs::set_permissions(socket, fs::Permissions::from_mode(0o600)).unwrap();
+        SocketIdentity::capture(socket).unwrap()
+    }
+
+    #[tokio::test]
+    async fn refused_endpoint_is_replaced_only_by_the_lock_holder() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let mut config = core.config.clone();
+        config.executable = std::env::current_exe().unwrap();
+        drop(core);
+        fs::set_permissions(_parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = config.supervisor_socket();
+        let stale = stale_supervisor_endpoint(&socket);
+        let error = NativeSupervisorClient::connect_for_config(&socket, &config)
+            .await
+            .err()
+            .expect("a closed endpoint refuses connections");
+        assert!(error.refused_connection(), "{error:?}");
+
+        // A live owner keeps the lock for its whole life. A second supervisor
+        // then fails before it binds, and the endpoint stays exactly as it is.
+        let held = SupervisorLock::acquire(&PrivateRoot::open(&config.root).unwrap()).unwrap();
+        let error = serve_supervisor(config.clone()).await.unwrap_err();
+        assert!(
+            matches!(error, SupervisorError::AlreadyRunning),
+            "{error:?}"
+        );
+        assert_eq!(SocketIdentity::capture(&socket).unwrap(), stale);
+
+        // Once no owner holds the lock, the new supervisor replaces it.
+        drop(held);
+        let mut supervisor = tokio::spawn(serve_supervisor(config.clone()));
+        let replaced = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(identity) = SocketIdentity::capture(&socket)
+                    && identity != stale
+                    && NativeSupervisorClient::connect(&socket).await.is_ok()
+                {
+                    break identity;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the lock holder replaced the refused endpoint");
+        assert_ne!(replaced, stale);
+        assert!(!supervisor.is_finished());
+        supervisor.abort();
+        assert!((&mut supervisor).await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn client_leaves_a_refused_endpoint_whose_lock_is_held() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let mut config = core.config.clone();
+        // The started process exits at once, as a supervisor that cannot take
+        // the lock does; the client itself never unlinks the endpoint.
+        config.executable = PathBuf::from("/usr/bin/false");
+        drop(core);
+        fs::set_permissions(_parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = config.supervisor_socket();
+        let stale = stale_supervisor_endpoint(&socket);
+        let _held = SupervisorLock::acquire(&PrivateRoot::open(&config.root).unwrap()).unwrap();
+        let error = NativeSupervisorClient::connect_or_start(&config)
+            .await
+            .err()
+            .expect("no supervisor can take over a held lock");
+        assert!(
+            matches!(&error, SupervisorError::EndpointNotReplaced(path) if *path == socket),
+            "{error:?}"
+        );
+        assert_eq!(SocketIdentity::capture(&socket).unwrap(), stale);
+    }
+
     pub(super) fn test_supervisor_service(core: SupervisorCore) -> SupervisorRpc {
         let operation_reader = SupervisorOperationReader::open(&core.root).unwrap();
         let operation_events = core.store.operation_events();
@@ -7857,6 +8547,13 @@ mod tests {
             self.unexpected_use()
         }
 
+        async fn set_host_ports(
+            &self,
+            _request: Request<v1::SetHostPortsRequest>,
+        ) -> Result<Response<v1::SetHostPortsResponse>, Status> {
+            self.unexpected_use()
+        }
+
         async fn prepare_retire_runner(
             &self,
             _request: Request<v1::PrepareRetireRunnerRequest>,
@@ -7934,6 +8631,19 @@ mod tests {
         attach_named_test_runner_process(core, "dev", socket_identity)
     }
 
+    fn running_executable(pid: u32) -> Option<PathBuf> {
+        #[cfg(target_os = "linux")]
+        {
+            fs::read_link(format!("/proc/{pid}/exe")).ok()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            ProcessIdentity::capture(pid)
+                .ok()
+                .map(|identity| identity.executable)
+        }
+    }
+
     // These two shutdown fixtures retain the unreaped Child before any readiness
     // assertion, including the single strict LiveProcess capture.
     struct ShutdownTestChild(Child);
@@ -7946,11 +8656,7 @@ mod tests {
                     self.0.try_wait().unwrap().is_none(),
                     "shutdown test child exited before its expected executable"
                 );
-                if fs::read_link(format!("/proc/{}/exe", self.0.id()))
-                    .ok()
-                    .as_deref()
-                    == Some(executable)
-                {
+                if running_executable(self.0.id()).as_deref() == Some(executable) {
                     break;
                 }
                 assert!(
@@ -8004,9 +8710,14 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let socket = parent.path().join("shutdown.sock");
+        // Darwin's /bin/sh re-executes the selected shell, so its image would
+        // change under the capture; start that real shell directly.
+        #[cfg(target_os = "macos")]
+        let executable = fs::canonicalize("/bin/bash").unwrap();
+        #[cfg(target_os = "linux")]
         let executable = fs::canonicalize("/bin/sh").unwrap();
         let mut child = ShutdownTestChild(
-            Command::new(&executable)
+            crate::test_child(&mut Command::new(&executable))
                 .args([
                     "-c",
                     "read -r retirement_command; test \"$retirement_command\" = retire",
@@ -8017,7 +8728,7 @@ mod tests {
         );
         let live = child.capture(&executable);
         let service = TestRunnerProtocolService {
-            reply: TestRunnerProtocolReply::Version(4),
+            reply: TestRunnerProtocolReply::Version(5),
             useful_calls: Arc::new(AtomicUsize::new(0)),
             shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.0.stdin.take()))),
         };
@@ -8055,9 +8766,14 @@ mod tests {
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let socket = parent.path().join("unresponsive.sock");
         let (identity, calls, stop, server) =
-            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(4));
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(5));
         let executable = fs::canonicalize("/bin/sleep").unwrap();
-        let mut child = ShutdownTestChild(Command::new(&executable).arg("60").spawn().unwrap());
+        let mut child = ShutdownTestChild(
+            crate::test_child(&mut Command::new(&executable))
+                .arg("60")
+                .spawn()
+                .unwrap(),
+        );
         let live = child.capture(&executable);
         let mut client = RunnerClient::connect(&socket).await.unwrap();
         assert!(
@@ -8082,13 +8798,12 @@ mod tests {
         socket_identity: SocketIdentity,
     ) -> (Uuid, ProcessIdentity) {
         let executable = fs::canonicalize("/bin/sleep").unwrap();
-        let child = Command::new(&executable).arg("60").spawn().unwrap();
+        let child = crate::test_child(&mut Command::new(&executable))
+            .arg("60")
+            .spawn()
+            .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while fs::read_link(format!("/proc/{}/exe", child.id()))
-            .ok()
-            .as_deref()
-            != Some(executable.as_path())
-        {
+        while running_executable(child.id()).as_deref() != Some(executable.as_path()) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "test runner child did not reach its expected executable"
@@ -9852,7 +10567,7 @@ mod tests {
                 boot_id: "boot".to_owned(),
                 start_time_ticks: 7,
                 executable: PathBuf::from("/proc/self/exe"),
-                executable_file: crate::linux::path::FileIdentity {
+                executable_file: crate::host::path::FileIdentity {
                     device: 1,
                     inode: 2,
                     size: 3,
@@ -9921,6 +10636,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn admitted_active_workspace_boots_without_registry_or_cas_access() {
         let engine = tempfile::tempdir().unwrap();
@@ -9956,6 +10672,7 @@ mod tests {
         assert!(!engine.path().join("content").exists());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn source_only_changes_reuse_the_admitted_root_setup_and_skill_identity() {
         let engine = tempfile::tempdir().unwrap();
@@ -9998,7 +10715,7 @@ mod tests {
             assert!(boot.setup_header_sha256.is_empty());
             assert_eq!(boot.setup_total_bytes, 0);
             assert_eq!(
-                crate::linux::state::StateDiskIdentity::capture(&root.path).unwrap(),
+                crate::state::StateDiskIdentity::capture(&root.path).unwrap(),
                 identity
             );
             assert_eq!(
@@ -10293,6 +11010,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn staging_workspace_never_boots_when_exact_cached_content_is_absent() {
         let engine = tempfile::tempdir().unwrap();
@@ -10447,7 +11165,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 16 * 1024,
             disk_bytes: 20 * 1024 * 1024 * 1024,
-            docker_disk_bytes: crate::linux::state::MINIMUM_DOCKER_DISK_BYTES,
+            docker_disk_bytes: crate::state::MINIMUM_DOCKER_DISK_BYTES,
             request_id: Uuid::new_v4().to_string(),
             project_spec_json,
             project_spec_sha256,
@@ -10478,7 +11196,7 @@ mod tests {
             Err(SupervisorError::InvalidRequest)
         ));
         let mut invalid_docker = request.clone();
-        invalid_docker.docker_disk_bytes = crate::linux::state::MINIMUM_DOCKER_DISK_BYTES - 1;
+        invalid_docker.docker_disk_bytes = crate::state::MINIMUM_DOCKER_DISK_BYTES - 1;
         assert!(matches!(
             validate_create(&invalid_docker),
             Err(SupervisorError::InvalidRequest)
@@ -10521,6 +11239,108 @@ mod tests {
         );
         assert_eq!(binding.profile_revision, 7);
         assert_eq!(reference.to_string(), "user/work");
+    }
+
+    #[test]
+    fn host_port_updates_withdraw_then_publish_into_one_canonical_set() {
+        let current = vec![HostPortBinding::new(18_080, 3_000).unwrap()];
+        let request = |add: &[(u32, u32)], remove: &[u32]| v1::UpdateHostPortsRequest {
+            name: "dev".to_owned(),
+            request_id: Uuid::new_v4().to_string(),
+            environment_id: String::new(),
+            add: add
+                .iter()
+                .map(|(host_port, guest_port)| v1::HostPortBinding {
+                    host_port: *host_port,
+                    guest_port: *guest_port,
+                })
+                .collect(),
+            remove: remove.to_vec(),
+        };
+        assert_eq!(
+            updated_host_ports(&current, &request(&[(18_079, 47_321)], &[])).unwrap(),
+            vec![
+                HostPortBinding::new(18_079, 47_321).unwrap(),
+                HostPortBinding::new(18_080, 3_000).unwrap(),
+            ]
+        );
+        assert_eq!(
+            updated_host_ports(&current, &request(&[(18_080, 47_321)], &[18_080])).unwrap(),
+            vec![HostPortBinding::new(18_080, 47_321).unwrap()]
+        );
+        assert!(
+            updated_host_ports(&current, &request(&[], &[18_080]))
+                .unwrap()
+                .is_empty()
+        );
+        for (add, remove, code) in [
+            (&[][..], &[][..], tonic::Code::InvalidArgument),
+            (
+                &[(18_080, 47_321)][..],
+                &[][..],
+                tonic::Code::FailedPrecondition,
+            ),
+            (
+                &[(18_081, 3_000)][..],
+                &[][..],
+                tonic::Code::FailedPrecondition,
+            ),
+            (&[][..], &[18_081][..], tonic::Code::FailedPrecondition),
+            (
+                &[(18_081, 7_777)][..],
+                &[][..],
+                tonic::Code::InvalidArgument,
+            ),
+            (&[(0, 47_321)][..], &[][..], tonic::Code::InvalidArgument),
+            (
+                &[(70_000, 47_321)][..],
+                &[][..],
+                tonic::Code::InvalidArgument,
+            ),
+        ] {
+            assert_eq!(
+                updated_host_ports(&current, &request(add, remove))
+                    .unwrap_err()
+                    .code(),
+                code,
+                "{add:?} {remove:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stopped_environment_records_updated_host_ports_for_its_next_start() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        core.environment_mut("dev").unwrap().state = StoredEnvironmentState::Stopped;
+        core.save().unwrap();
+        let environment_id = core.environment("dev").unwrap().id;
+        // Any guest port may be published after create, not only declared ones.
+        let target = vec![HostPortBinding::new(18_080, 47_321).unwrap()];
+        let operation = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::UpdateHostPorts,
+                &serde_json::json!({
+                    "name": "dev",
+                    "add": [[18_080, 47_321]],
+                    "remove": [],
+                    "target": target,
+                }),
+            )
+            .unwrap();
+        let completed = core.update_host_ports("dev", &operation).await.unwrap();
+        assert!(
+            supervisor_effect(completed.kind, completed.checkpoint)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(core.environment("dev").unwrap().host_ports, target);
+        assert_eq!(
+            SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"].host_ports,
+            target
+        );
     }
 
     #[test]
@@ -10749,6 +11569,7 @@ mod tests {
         plan.validate_for_project(&project).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn create_preparation_binds_an_explicit_direct_mount_for_durable_replay() {
         let source = tempfile::tempdir().unwrap();
@@ -10838,6 +11659,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn create_revalidates_a_direct_share_before_its_first_lifecycle_effect() {
         let source = tempfile::tempdir().unwrap();
@@ -10904,6 +11726,7 @@ mod tests {
         assert!(core.live_runners.is_empty());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn replayed_create_quarantines_its_live_runner_when_private_roots_are_unresolvable() {
         let source = tempfile::tempdir().unwrap();
@@ -10985,6 +11808,7 @@ mod tests {
         runner_server.await.unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn start_revalidates_a_direct_share_before_access_and_runner_effects() {
         let source = tempfile::tempdir().unwrap();
@@ -11027,6 +11851,7 @@ mod tests {
         assert!(core.live_runners.is_empty());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn workspace_transition_revalidates_a_direct_share_before_access_and_staging() {
         let source = tempfile::tempdir().unwrap();
@@ -11084,6 +11909,7 @@ mod tests {
         assert!(core.live_runners.is_empty());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn restart_revalidates_a_direct_share_before_access_and_stop_effects() {
         let source = tempfile::tempdir().unwrap();
@@ -11133,6 +11959,7 @@ mod tests {
         assert!(core.live_runners.is_empty());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn ensure_vm_started_revalidates_a_direct_share_as_defense_in_depth() {
         let source = tempfile::tempdir().unwrap();
@@ -11154,6 +11981,7 @@ mod tests {
         assert!(core.environment("dev").unwrap().runner.is_none());
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn ensure_vm_started_quarantines_a_live_runner_for_an_unresolvable_private_root() {
         let source = tempfile::tempdir().unwrap();
@@ -11485,8 +12313,7 @@ mod tests {
         environment.active_workspace_generation = Some(active);
         let paths = VmPaths::create(&engine, environment.id).unwrap();
         for storage in [&active_storage, &stale_storage] {
-            let generation =
-                crate::linux::state::RootGenerationPaths::create(&paths, storage).unwrap();
+            let generation = crate::state::RootGenerationPaths::create(&paths, storage).unwrap();
             fs::write(&generation.root_disk, b"root").unwrap();
             fs::set_permissions(&generation.root_disk, fs::Permissions::from_mode(0o600)).unwrap();
         }
@@ -11693,7 +12520,7 @@ mod tests {
         let (_parent, mut core) = test_supervisor_core(project_environment());
         let empty = core.environment("dev").unwrap().clone();
         assert_eq!(
-            core.managed_credential_clients_for_boot(&empty)
+            core.managed_credential_clients_for_boot(&empty, 1)
                 .await
                 .unwrap(),
             Default::default()
@@ -11702,15 +12529,37 @@ mod tests {
         let binding = bind_test_environment_access(&mut core, &mut authority).await;
         let environment = core.environment("dev").unwrap().clone();
         assert_eq!(
-            core.managed_credential_clients_for_boot(&environment)
+            core.managed_credential_clients_for_boot(&environment, 1)
                 .await
                 .unwrap(),
             Default::default()
         );
+        // The store's GitHub connection is granted to the profile, never an
+        // entry of it; once it exists, boot configures git for it.
+        authority
+            .add_credential(
+                codewire_local_credentials::NewCredential {
+                    provider: codewire_access::ProviderId::parse("github").unwrap(),
+                    authentication_kind: codewire_access::CredentialAuthKind::OAuth,
+                    display_name: "github".to_owned(),
+                    account_hint: None,
+                    expires_at_unix: None,
+                },
+                codewire_protected_store::ProtectedValue::from_slice(b"synthetic-github-login")
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            core.managed_credential_clients_for_boot(&environment, 1)
+                .await
+                .unwrap(),
+            codewire_access::ManagedCredentialClients::from_profile_slots(["github"]).unwrap()
+        );
         let mut wrong = environment.clone();
         wrong.access_binding.as_mut().unwrap().profile_revision = binding.profile_revision + 1;
         assert!(matches!(
-            core.managed_credential_clients_for_boot(&wrong).await,
+            core.managed_credential_clients_for_boot(&wrong, 1).await,
             Err(SupervisorError::EnvironmentAccessUnavailable)
         ));
         let mut platform = environment.clone();
@@ -11719,7 +12568,7 @@ mod tests {
         spec.credentials.as_mut().unwrap().profile = format!("platform:id:{}", binding.profile_id);
         set_test_current_project(&mut platform, &spec);
         assert!(matches!(
-            core.managed_credential_clients_for_boot(&platform).await,
+            core.managed_credential_clients_for_boot(&platform, 1).await,
             Err(SupervisorError::EnvironmentAccessUnavailable)
         ));
         drop(authority);
@@ -11749,6 +12598,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn credential_broker_rpc_quarantines_an_unsafe_runner_before_authority_use() {
         let source = tempfile::tempdir().unwrap();
@@ -11825,6 +12675,8 @@ mod tests {
         assert!(environment.runner.is_none());
     }
 
+    // Adopts the detached runner through recovery, which Darwin never does.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn credential_broker_rejects_a_replaced_runner_socket_before_authority_use() {
         let environment = project_environment_with_access();
@@ -11914,11 +12766,11 @@ mod tests {
                 boot_id: "synthetic-boot".to_owned(),
                 start_time_ticks: u64::from(pid),
                 executable: PathBuf::from("/usr/bin/true"),
-                executable_file: crate::linux::path::FileIdentity {
+                executable_file: crate::host::path::FileIdentity {
                     device: 1,
                     inode,
                     size: 1,
-                    uid: crate::linux::path::current_uid(),
+                    uid: crate::host::path::current_uid(),
                     mode: 0o100755,
                     links: 1,
                 },
@@ -11927,7 +12779,7 @@ mod tests {
             socket: SocketIdentity {
                 device: 1,
                 inode,
-                uid: crate::linux::path::current_uid(),
+                uid: crate::host::path::current_uid(),
                 mode: 0o140600,
             },
             artifact_generation: "b".repeat(64),
@@ -12003,6 +12855,7 @@ mod tests {
         assert_eq!(core.environment("dev").unwrap(), &before);
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn startup_quarantines_an_exposing_unsafe_runner_before_listen_but_preserves_an_idle_one()
     {
@@ -12088,6 +12941,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn startup_replay_cannot_restore_a_runner_quarantined_for_an_unsafe_share() {
         let source = tempfile::tempdir().unwrap();
@@ -12178,6 +13032,7 @@ mod tests {
         runner_server.await.unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn startup_quarantines_an_exposing_runner_when_a_private_root_is_unresolvable() {
         let source = tempfile::tempdir().unwrap();
@@ -12223,6 +13078,7 @@ mod tests {
         runner_server.await.unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn startup_quarantines_every_unsafe_runner_before_returning_an_earlier_runner_error() {
         let unsafe_source = tempfile::tempdir().unwrap();
@@ -12708,6 +13564,141 @@ mod tests {
         drop(listener);
     }
 
+    #[test]
+    fn delete_cleanup_boots_the_staged_artifact_of_a_create_that_failed_at_vm_start() {
+        let mut environment = project_environment();
+        let artifact = environment.active_artifact_generation.clone().unwrap();
+        environment.generation = 1;
+        environment.state = StoredEnvironmentState::Error;
+        // Without any workspace generation there is nothing to boot.
+        assert!(matches!(
+            delete_cleanup_artifact_generation(&environment),
+            Err(SupervisorError::InvalidState)
+        ));
+        let generation = test_workspace_generation_with_artifact(
+            environment.project_spec_json.as_deref().unwrap(),
+            environment.project_spec_sha256.as_deref().unwrap(),
+            &artifact,
+            b"failed-at-vm-start",
+        );
+        environment.staging_workspace_generation = Some(generation.clone());
+        assert_eq!(
+            delete_cleanup_artifact_generation(&environment).unwrap(),
+            artifact
+        );
+        // A promoted environment keeps using its active generation.
+        environment.active_workspace_generation = Some(generation);
+        environment.staging_workspace_generation = None;
+        assert_eq!(
+            delete_cleanup_artifact_generation(&environment).unwrap(),
+            artifact
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delete_that_fails_before_trash_is_retained_and_does_not_stop_the_worker() {
+        for recovering in [true, false] {
+            let mut environment = project_environment();
+            // Booted, no runner and no workspace to boot: PrepareDelete fails.
+            environment.generation = 1;
+            environment.state = StoredEnvironmentState::Stopped;
+            let environment_id = environment.id;
+            let (_parent, mut core) = test_supervisor_core(environment);
+            let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+            let paths = VmPaths::create(&engine, environment_id).unwrap();
+            let delete = core
+                .store
+                .begin_operation(
+                    Uuid::new_v4(),
+                    Some(environment_id),
+                    OperationKind::Delete,
+                    &serde_json::json!({"name": "dev", "revoke_access": false}),
+                )
+                .unwrap();
+
+            if recovering {
+                core.replay_pending_operations().await.unwrap();
+            } else {
+                core.execute_pending_operations().await.unwrap();
+            }
+
+            let failed = SupervisorOperationReader::open(&core.root)
+                .unwrap()
+                .operation_by_id(delete.operation_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(failed.phase, OperationPhase::Failed);
+            assert_eq!(
+                failed.error_code.as_deref(),
+                Some(if recovering {
+                    "delete_interrupted"
+                } else {
+                    "delete_failed"
+                })
+            );
+            assert_eq!(
+                core.environment("dev").unwrap().state,
+                StoredEnvironmentState::Error
+            );
+            assert!(paths.vm_dir.exists());
+            assert!(core.store.pending_operations().unwrap().is_empty());
+            // Replaying again finds nothing to do.
+            core.replay_pending_operations().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_watch_of_an_unfinished_operation_ends_when_the_supervisor_stops() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let service = test_supervisor_service(core);
+        let operation = {
+            let core = service.core.lock().await;
+            let environment = core.environment("dev").unwrap();
+            core.store
+                .begin_operation(
+                    Uuid::new_v4(),
+                    Some(environment.id),
+                    OperationKind::Delete,
+                    &serde_json::json!({"name": "dev", "revoke_access": false}),
+                )
+                .unwrap()
+        };
+        let mut stream = service
+            .watch_operation(Request::new(v1::WatchOperationRequest {
+                operation_id: operation.operation_id.to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let initial = tokio::time::timeout(
+            Duration::from_secs(5),
+            futures::StreamExt::next(&mut stream),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(initial.is_ok());
+        service.shutdown.send(true).unwrap();
+        let ended = tokio::time::timeout(
+            Duration::from_secs(5),
+            futures::StreamExt::next(&mut stream),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(ended.code(), tonic::Code::Unavailable);
+        assert!(ended.message().contains("run the command again"));
+        let refused = service
+            .watch_operation(Request::new(v1::WatchOperationRequest {
+                operation_id: operation.operation_id.to_string(),
+            }))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(refused.code(), tonic::Code::Unavailable);
+    }
+
     #[tokio::test]
     async fn delete_replay_preserves_the_stable_environment_precondition() {
         let environment = project_environment();
@@ -12912,8 +13903,9 @@ mod tests {
             error.to_string(),
             "the running native supervisor uses a different runtime configuration"
         );
-        // The production entry additionally refuses this non-role process,
-        // before any startup fallback or metadata effects.
+        // The production entry additionally refuses this process, whose
+        // executable is neither this cw nor a retained managed version, before
+        // any startup fallback or metadata effects.
         assert!(matches!(
             NativeSupervisorClient::connect_or_start(&wrong_config).await,
             Err(SupervisorError::Uds(UdsError::SupervisorPeerAdmission(_)))
@@ -12927,6 +13919,7 @@ mod tests {
         remove_bound_socket(&socket, &socket_identity).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn reconcile_quarantines_an_unsafe_recovered_runner_without_trusting_its_socket() {
         for replace_socket in [false, true] {
@@ -13464,7 +14457,7 @@ mod tests {
                 boot_id: "boot".to_owned(),
                 start_time_ticks: 1,
                 executable: PathBuf::from("/bin/cw"),
-                executable_file: crate::linux::path::FileIdentity {
+                executable_file: crate::host::path::FileIdentity {
                     device: 1,
                     inode: 1,
                     size: 1,
@@ -13814,8 +14807,7 @@ mod tests {
         let stale_storage = "f".repeat(64);
         let paths = VmPaths::create(&engine, create.environment("dev").unwrap().id).unwrap();
         for storage in [&candidate_storage, &stale_storage] {
-            let generation =
-                crate::linux::state::RootGenerationPaths::create(&paths, storage).unwrap();
+            let generation = crate::state::RootGenerationPaths::create(&paths, storage).unwrap();
             fs::write(&generation.root_disk, b"root").unwrap();
             fs::set_permissions(&generation.root_disk, fs::Permissions::from_mode(0o600)).unwrap();
         }
@@ -13888,7 +14880,7 @@ mod tests {
         assert!(!artifact_blobs.join(format!("r-{stale_kernel}")).exists());
     }
 
-    #[cfg(feature = "synthetic-oci-input-smoke")]
+    #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
     #[tokio::test]
     async fn synthetic_image_pin_reopens_matches_exactly_and_survives_precreate_collection() {
         let (_parent, mut core) = test_supervisor_core(project_environment());
@@ -14077,6 +15069,10 @@ mod tests {
         const CANARY: &str = "synthetic-create-failure-secret-must-not-escape";
         let cases = [
             (
+                SupervisorError::AlreadyExists(CANARY.to_owned()),
+                "create_name_taken",
+            ),
+            (
                 SupervisorError::CredentialAuthorityUnavailable,
                 "create_credential_authority_unavailable",
             ),
@@ -14158,6 +15154,14 @@ mod tests {
                 "create_filesystem",
             ),
             (SupervisorError::VmStart(CANARY.to_owned()), "create_failed"),
+            (
+                SupervisorError::GuestDockerToolingMissing,
+                "create_guest_docker_tooling_missing",
+            ),
+            (
+                SupervisorError::HostPortUnavailable,
+                "create_host_port_unavailable",
+            ),
         ];
         for (error, expected) in cases {
             let code = create_failure_code(&error);
@@ -14225,11 +15229,30 @@ mod tests {
             assert_eq!(persisted.checkpoint, 4);
             assert_eq!(persisted.error_code.as_deref(), Some(expected_code));
             assert!(persisted.result.is_none());
-            let environment = core.environment("dev").unwrap();
-            assert_eq!(environment.state, StoredEnvironmentState::Error);
-            assert_eq!(environment.generation, 0);
-            assert!(environment.runner.is_none());
-            assert!(environment.staging_workspace_generation.is_none());
+            // The failed create rolled back through the ordinary delete: no
+            // record remains, and the create keeps its own error code.
+            let history = reader
+                .recent_environment_operations(environment_id)
+                .unwrap();
+            assert!(
+                matches!(core.environment("dev"), Err(SupervisorError::NotFound(_))),
+                "{expected_code}: environment {:?}; operations {:?}",
+                core.environment("dev").map(|environment| environment.state),
+                history
+                    .iter()
+                    .map(|operation| (
+                        operation.kind,
+                        operation.phase,
+                        operation.error_code.clone()
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            let rollback = history
+                .into_iter()
+                .find(|operation| operation.kind == OperationKind::Delete)
+                .expect("the failed create began its rollback delete");
+            assert_eq!(rollback.phase, OperationPhase::Completed);
+            assert!(core.store.pending_operations().unwrap().is_empty());
             assert!(unexpected.is_file(), "unsafe objects remain quarantined");
             let public = operation_proto(&persisted).unwrap();
             assert_eq!(public.error_code, expected_code);
@@ -14237,7 +15260,13 @@ mod tests {
             assert_eq!(public.stage, v1::OperationStage::Failed as i32);
             let failure = operation_outcome(public).unwrap_err();
             assert_eq!(failure.code(), tonic::Code::FailedPrecondition);
-            assert!(failure.message().ends_with(expected_code));
+            assert!(
+                failure
+                    .message()
+                    .contains(&format!("failed: {expected_code}")),
+                "{}",
+                failure.message()
+            );
             assert!(!failure.message().contains(CANARY));
             assert!(
                 !serde_json::to_string(&persisted.payload)
@@ -14245,6 +15274,43 @@ mod tests {
                     .contains(CANARY)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn startup_rolls_back_environments_left_by_failed_creates() {
+        // Left in `error` by a create that failed before rollback existed.
+        let mut stranded = project_environment();
+        stranded.state = StoredEnvironmentState::Error;
+        stranded.generation = 0;
+        let stranded_id = stranded.id;
+        let (_parent, mut core) = test_supervisor_core(stranded);
+        // A once-running environment in `error` is recoverable, not stranded.
+        let mut recoverable = project_environment();
+        recoverable.name = "kept".to_owned();
+        recoverable.state = StoredEnvironmentState::Error;
+        let mut next_state = core.state.clone();
+        next_state
+            .environments
+            .insert("kept".to_owned(), recoverable.clone());
+        core.store.replace_state(&next_state).unwrap();
+        core.state = next_state;
+
+        core.begin_rollback_of_failed_creates().unwrap();
+        // A second start before the worker ran begins nothing new.
+        core.begin_rollback_of_failed_creates().unwrap();
+        let pending = core.store.pending_operations().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].kind, OperationKind::Delete);
+        assert_eq!(pending[0].environment_id, Some(stranded_id));
+
+        core.run_pending_operations(true).await.unwrap();
+
+        assert!(matches!(
+            core.environment("dev"),
+            Err(SupervisorError::NotFound(_))
+        ));
+        assert_eq!(core.environment("kept").unwrap(), &recoverable);
+        assert!(core.store.pending_operations().unwrap().is_empty());
     }
 
     #[test]
@@ -14265,7 +15331,7 @@ mod tests {
             state: StoredEnvironmentState::Running,
             vcpus: 2,
             memory_mib: 16 * 1024,
-            disk_bytes: crate::linux::state::MINIMUM_STATE_DISK_BYTES,
+            disk_bytes: crate::state::MINIMUM_STATE_DISK_BYTES,
             docker_disk_bytes: 0,
             generation: 1,
             host_ports: Vec::new(),
@@ -14420,6 +15486,7 @@ mod tests {
         assert!(!runner_artifact_identity_matches("", ""));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn managed_cw_runtime_binds_selected_uuid_and_active_runner_artifacts() {
         let mut environment = project_environment();
@@ -14432,7 +15499,7 @@ mod tests {
                 boot_id: "synthetic".to_owned(),
                 start_time_ticks: 7,
                 executable: PathBuf::from("/proc/self/exe"),
-                executable_file: crate::linux::path::FileIdentity {
+                executable_file: crate::host::path::FileIdentity {
                     device: 1,
                     inode: 2,
                     size: 3,

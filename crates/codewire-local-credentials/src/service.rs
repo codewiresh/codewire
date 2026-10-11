@@ -13,7 +13,7 @@ use codewire_access::{
     EnvironmentId, ProviderCatalog, ProviderId, builtin_provider_catalog,
 };
 use codewire_protected_store::{
-    MAX_PROTECTED_VALUE_BYTES, OsProtectedStore, ProtectedStore, ProtectedStorePersistence,
+    MAX_PROTECTED_VALUE_BYTES, ProtectedStore, ProtectedStoreError, ProtectedStorePersistence,
     ProtectedValue,
     ssh_material::{SshMaterialError, generate_ed25519, import_openssh},
 };
@@ -25,6 +25,8 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+#[cfg(target_os = "linux")]
+use crate::AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES;
 use crate::broker_channel::{
     BrokerChannelRefreshLifetime, BrokerLeaseAuditLog, BrokerLeaseChannelControl,
     LocalSshOperationRuntime, LocalSshSigner, MAX_BROKER_LEASE_AUDIT_LIST_LIMIT,
@@ -40,12 +42,11 @@ use crate::transport::{
     remove_bound_socket,
 };
 use crate::{
-    AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, AccessProfileRecord, AccessProfileRevisionRecord,
-    CredentialRecord, EnvironmentAccessBindingRecord, EnvironmentBrokerRuntime,
-    LocalBrokerProcessConfig, LocalBrokerProcessSpawner, LocalCredentialAuthority,
-    LocalCredentialError, LocalSecretProject, NewCredential, RepositoryCredentialLeaseRequest,
-    ResolvedWorkloadSecretMetadata, WorkloadSecretMetadata, WorkloadSecretSelection,
-    WorkloadSecretSource,
+    AccessProfileRecord, AccessProfileRevisionRecord, AuthorityProtectedStore, CredentialRecord,
+    EnvironmentAccessBindingRecord, EnvironmentBrokerRuntime, LocalBrokerProcessConfig,
+    LocalBrokerProcessSpawner, LocalCredentialAuthority, LocalCredentialError, LocalSecretProject,
+    NewCredential, RepositoryCredentialLeaseRequest, ResolvedWorkloadSecretMetadata,
+    WorkloadSecretMetadata, WorkloadSecretSelection, WorkloadSecretSource,
 };
 
 const MAX_RPC_MESSAGE_BYTES: usize = MAX_PROTECTED_VALUE_BYTES + 64 * 1024;
@@ -64,6 +65,7 @@ const MAX_SSH_ENROLLMENT_WORKERS: u32 = 8;
 const SSH_ENROLLMENT_DEADLINE: Duration = Duration::from_secs(30);
 
 mod repository;
+pub(crate) use repository::REPOSITORY_PREPARATION_TIMEOUT;
 use repository::{PreparedRepository, RepositoryProcessManager, cleanup_repository_ssh_runtimes};
 
 struct AuthorityRpc<S: ProtectedStore> {
@@ -180,47 +182,21 @@ pub async fn serve_local_credential_authority<S: ProtectedStore + 'static>(
     serve_until(config, protected_store, catalog, std::future::pending()).await
 }
 
-/// Run the production local authority against the operating-system protected
-/// store and the exact capability catalog compiled into this binary.
-pub async fn serve_os_local_credential_authority(
-    config: AuthorityRuntimeConfig,
-) -> Result<(), AuthorityRuntimeError> {
-    verify_production_process_confinement()?;
-    serve_local_credential_authority(config, OsProtectedStore, builtin_provider_catalog()).await
-}
-
-/// Run the production authority with an authority-owned isolated broker
-/// launcher. No control client receives the inherited lease-channel peer.
-pub async fn serve_os_local_credential_authority_with_broker_spawner(
-    config: AuthorityRuntimeConfig,
-    spawner: Arc<dyn LocalBrokerProcessSpawner>,
-) -> Result<(), AuthorityRuntimeError> {
-    verify_production_process_confinement()?;
-    serve_until_with_spawner(
-        config,
-        OsProtectedStore,
-        builtin_provider_catalog(),
-        std::future::pending(),
-        Some(spawner),
-    )
-    .await
-}
-
 /// Run the production authority with both authority-owned credential-bearing
 /// child launchers. Neither launcher is exposed through the owner RPC API.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub async fn serve_os_local_credential_authority_with_process_spawners(
     config: AuthorityRuntimeConfig,
+    store: AuthorityProtectedStore,
     broker_spawner: Arc<dyn LocalBrokerProcessSpawner>,
     repository_spawner: Arc<dyn LocalRepositoryProcessSpawner>,
     ssh_signer: Arc<dyn LocalSshSigner>,
     platform_connector: Arc<dyn crate::PlatformCredentialConnector>,
 ) -> Result<(), AuthorityRuntimeError> {
     verify_production_process_confinement()?;
-    serve_until_with_process_spawners(
+    serve_selected(
         config,
-        OsProtectedStore,
-        builtin_provider_catalog(),
-        std::future::pending(),
+        store,
         AuthorityRuntimeAdapters {
             broker_spawner: Some(broker_spawner),
             repository_spawner: Some(repository_spawner),
@@ -229,6 +205,27 @@ pub async fn serve_os_local_credential_authority_with_process_spawners(
         },
     )
     .await
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn serve_selected(
+    config: AuthorityRuntimeConfig,
+    store: AuthorityProtectedStore,
+    adapters: AuthorityRuntimeAdapters,
+) -> Result<(), AuthorityRuntimeError> {
+    config.prepare_root()?;
+    let authority =
+        LocalCredentialAuthority::open_selected(&config.root, &store, builtin_provider_catalog())?;
+    serve_authority(config, authority, std::future::pending(), adapters).await
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+async fn serve_selected(
+    _config: AuthorityRuntimeConfig,
+    _store: AuthorityProtectedStore,
+    _adapters: AuthorityRuntimeAdapters,
+) -> Result<(), AuthorityRuntimeError> {
+    Err(AuthorityRuntimeError::UnsupportedPlatform)
 }
 
 #[cfg(target_os = "linux")]
@@ -263,7 +260,25 @@ fn verify_production_process_confinement() -> Result<(), AuthorityRuntimeError> 
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+/// macOS has no capabilities or no-new-privileges bit. The launcher
+/// supplies a new session, an empty environment and only standard
+/// descriptors (`posix_spawn` with `POSIX_SPAWN_CLOEXEC_DEFAULT`); the
+/// authority never runs as root. CoreFoundation, which cw links, sets
+/// `__CF_USER_TEXT_ENCODING` itself while the process loads, from the user
+/// ID rather than from the parent, so that one name is not ambient input.
+#[cfg(target_os = "macos")]
+fn verify_production_process_confinement() -> Result<(), AuthorityRuntimeError> {
+    if rustix::process::geteuid().is_root()
+        || rustix::process::getsid(None).map_err(|_| AuthorityRuntimeError::ProcessNotConfined)?
+            != rustix::process::getpid()
+        || std::env::vars_os().any(|(name, _)| name != "__CF_USER_TEXT_ENCODING")
+    {
+        return Err(AuthorityRuntimeError::ProcessNotConfined);
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn verify_production_process_confinement() -> Result<(), AuthorityRuntimeError> {
     Err(AuthorityRuntimeError::UnsupportedPlatform)
 }
@@ -324,20 +339,33 @@ where
     S: ProtectedStore + 'static,
     F: Future<Output = ()> + Send + 'static,
 {
+    config.prepare_root()?;
+    let authority = LocalCredentialAuthority::open(&config.root, protected_store, catalog)?;
+    serve_authority(config, authority, shutdown, adapters).await
+}
+
+async fn serve_authority<S, F>(
+    config: AuthorityRuntimeConfig,
+    authority: LocalCredentialAuthority<S>,
+    shutdown: F,
+    adapters: AuthorityRuntimeAdapters,
+) -> Result<(), AuthorityRuntimeError>
+where
+    S: ProtectedStore + 'static,
+    F: Future<Output = ()> + Send + 'static,
+{
     let AuthorityRuntimeAdapters {
         broker_spawner,
         repository_spawner,
         ssh_signer,
         platform_connector,
     } = adapters;
-    config.prepare_root()?;
     let authority_root = config.root.clone();
-    let authority = Arc::new(LocalCredentialAuthority::open(
-        &config.root,
-        protected_store,
-        catalog,
-    )?);
+    let authority = Arc::new(authority);
     cleanup_repository_staging(&authority_root)
+        .map_err(|_| AuthorityRuntimeError::InvalidPrivatePath)?;
+    #[cfg(target_os = "macos")]
+    crate::repository::cleanup_repository_credential_sockets(&authority_root)
         .map_err(|_| AuthorityRuntimeError::InvalidPrivatePath)?;
     cleanup_repository_ssh_runtimes(&authority_root)?;
     // The persistence singleton lock is held before a stale endpoint is ever
@@ -962,6 +990,11 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
             protected_store_persistence: persistence_to_proto(
                 self.authority.protected_store_persistence(),
             ) as i32,
+            protected_store_backend: self
+                .authority
+                .protected_store_identity()
+                .map(AuthorityProtectedStore::to_record)
+                .unwrap_or_default(),
         }))
     }
 
@@ -1600,7 +1633,15 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
             .platform
             .map(crate::RepositoryPlatformAccess::from_proto)
             .transpose()?;
-        let prepared = self.repositories.prepare(authorization, platform).await?;
+        let git = request
+            .git
+            .map(crate::LocalRepositoryGit::from_proto)
+            .transpose()
+            .map_err(|()| Status::invalid_argument("invalid repository preparation request"))?;
+        let prepared = self
+            .repositories
+            .prepare(authorization, platform, git)
+            .await?;
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         tokio::spawn(stream_prepared_repository(prepared, sender));
         Ok(Response::new(ReceiverStream::new(receiver)))
@@ -2098,7 +2139,17 @@ fn status_for_error(error: LocalCredentialError) -> Status {
         // AccessError is deliberately material-free and carries the stable
         // provider/profile diagnostic needed to repair a rejected selection.
         LocalCredentialError::Access(error) => Status::failed_precondition(error.to_string()),
-        LocalCredentialError::DatabaseUnavailable | LocalCredentialError::ProtectedStore(_) => {
+        LocalCredentialError::ProtectedStore(ProtectedStoreError::AccessDenied) => {
+            Status::unavailable(
+                "local protected storage is locked or inaccessible; unlock it and retry",
+            )
+        }
+        LocalCredentialError::ProtectedStore(ProtectedStoreError::TimedOut) => {
+            Status::unavailable("local protected storage did not respond in time")
+        }
+        LocalCredentialError::DatabaseUnavailable
+        | LocalCredentialError::ProtectedStore(_)
+        | LocalCredentialError::ProtectedStoreSwitch(_) => {
             Status::unavailable("local credential authority storage is unavailable")
         }
         LocalCredentialError::AlreadyRunning => {

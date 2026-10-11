@@ -20,7 +20,7 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::direct_share::AdmittedDirectShare;
-use crate::linux::path::{PrivateRoot, current_uid};
+use crate::host::path::{PrivateRoot, current_uid};
 use crate::oci::ContentStore;
 use crate::workspace::{
     WorkspaceError, WorkspaceSelection, WorkspaceSourceMode, inspect_workspace, manifest_directory,
@@ -688,7 +688,7 @@ pub enum SkillSnapshotPreparationError {
     #[error(transparent)]
     Content(#[from] crate::oci::ContentStoreError),
     #[error(transparent)]
-    Path(#[from] crate::linux::path::PathError),
+    Path(#[from] crate::host::path::PathError),
     #[error("skill snapshot filesystem operation failed for {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
 }
@@ -698,6 +698,7 @@ mod tests {
     use super::*;
     use codewire_project::{AgentsSpec, SkillSelection};
 
+    #[cfg(target_os = "linux")]
     use crate::direct_share::admit_direct_share;
 
     fn private_temp() -> tempfile::TempDir {
@@ -822,6 +823,7 @@ mod tests {
         assert!(second.root().is_dir());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn direct_destination_root_is_copied_from_its_pinned_admission() {
         let engine = private_temp();

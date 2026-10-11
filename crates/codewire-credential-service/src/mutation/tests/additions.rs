@@ -104,7 +104,7 @@ async fn generated_reconnect_validates_before_challenge_and_preserves_named_iden
                 .await?;
             h.drained().await?;
             ensure!(
-                !h.control("native.pid").exists(),
+                h.device.started() == 0,
                 "rejected replacement started provider login"
             );
         }
@@ -124,7 +124,7 @@ async fn generated_reconnect_validates_before_challenge_and_preserves_named_iden
             metadata["accountHint"] == "person@example.test"
                 && metadata["revocationGeneration"] == "2"
         );
-        ensure!(h.count().await? == 2 && !h.logged_out());
+        ensure!(h.count().await? == 2);
         let stored = h
             .store
             .record(&original.metadata.owner, &original.metadata.id)
@@ -168,7 +168,6 @@ async fn generated_reconnect_cannot_overwrite_a_revoke_during_device_login() -> 
         h.release()?;
         response.error("failed_precondition").await?;
         h.drained().await?;
-        ensure!(h.logged_out());
         ensure!(
             h.store
                 .record(&original.metadata.owner, &original.metadata.id)
@@ -245,7 +244,6 @@ async fn generated_reconnect_cancellation_preserves_the_exact_publication_bounda
                 h.count().await? == 1
                     && material_count(&h.db.pool, original.metadata.id.as_str()).await? == 1
             );
-            ensure!(h.logged_out() != after_issue);
             ensure!(h.owner.capacity.available_permits() == MAX_OPERATIONS);
             Ok(())
         }
@@ -282,7 +280,7 @@ async fn generated_api_key_import_rechecks_original_oauth_after_envelope_prepara
         let (status, response) = tokio::time::timeout(TIMEOUT, request).await???;
         ensure!(!status.is_success() && response["code"] == "unauthenticated");
         h.drained().await?;
-        ensure!(h.count().await? == 0 && !h.control("native.pid").exists());
+        ensure!(h.count().await? == 0);
         ensure!(h.owner.capacity.available_permits() == MAX_OPERATIONS);
         Ok(())
     }
@@ -360,7 +358,7 @@ async fn generated_api_key_import_is_oauth_only_write_only_and_create_only() -> 
             ensure!(h.store.record(&owner, &record.metadata.id).await? == record);
         }
         h.drained().await?;
-        ensure!(h.count().await? == 2 && !h.control("native.pid").exists());
+        ensure!(h.count().await? == 2);
         Ok(())
     }
     .await;
@@ -548,7 +546,7 @@ async fn generated_claude_subscription_token_import_is_personal_write_only_and_r
                 == REPLACEMENT_TOKEN
         );
         h.drained().await?;
-        ensure!(h.count().await? == 2 && !h.control("native.pid").exists());
+        ensure!(h.count().await? == 2);
         Ok(())
     }
     .await;

@@ -285,6 +285,8 @@ async fn exact_repository_upload_only_routes_and_loopback_host_are_required() {
     }
 }
 
+// Platform delegation is the Linux consumption path; macOS stores only.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn streaming_eof_waits_for_shared_response_end() {
     let mut fixture = Fixture::new().await;

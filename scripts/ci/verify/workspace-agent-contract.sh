@@ -109,7 +109,7 @@ for agent in codex claude gemini kimi pi aider; do
   if [ "$agent" = codex ]; then
     version="$("$agent" --version)"
     printf '%s\n' "$version"
-    test "$version" = 'codex-cli 0.157.0'
+    test "$version" = 'codex-cli 0.160.0'
   else
     "$agent" --version
   fi
@@ -124,7 +124,7 @@ test "$(npm config get allow-scripts)" = @anthropic-ai/claude-code
 # creates automatically. Establish that dry-run-only precondition as the same
 # unprivileged user; do not seed an agent or change any runtime startup path.
 mkdir -p /home/codewire/.npm-global/lib
-npm install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.157.0
+npm install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.160.0
 
 # The shipped agents live outside the persistent home. A self-updater that
 # wrote there would appear to succeed and then revert on the next restart, so
@@ -146,6 +146,7 @@ for route in \
   'pi update self=npm install --global @earendil-works/pi-coding-agent@latest' \
   'pi update=npm install --global @earendil-works/pi-coding-agent@latest' \
   'kimi upgrade=npm install --global @moonshot-ai/kimi-code@latest' \
+  'kimi update --yes=npm install --global @moonshot-ai/kimi-code@latest' \
   'aider --upgrade=pipx install --force aider-chat'; do
   command_line="${route%%=*}"
   # shellcheck disable=SC2086 # Each route is a fixed, space-separated command line.

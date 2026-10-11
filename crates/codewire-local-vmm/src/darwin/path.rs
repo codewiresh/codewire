@@ -14,20 +14,11 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use super::acl;
+pub use crate::supervisor_metadata::legacy::{FileIdentity, SocketIdentity};
 
 const O_RESOLVE_BENEATH: libc::c_int = 0x1000;
 const O_UNIQUE: libc::c_int = 0x2000;
 const PRIVATE_FLAGS: libc::c_int = libc::O_CLOEXEC | libc::O_NOFOLLOW_ANY | O_RESOLVE_BENEATH;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileIdentity {
-    pub device: u64,
-    pub inode: u64,
-    pub size: u64,
-    pub uid: u32,
-    pub mode: u32,
-    pub links: u64,
-}
 
 impl FileIdentity {
     pub fn from_metadata(metadata: &Metadata) -> Self {
@@ -342,38 +333,6 @@ impl PrivateRoot {
             self.revalidate_named()?;
             Ok(admitted)
         })
-    }
-
-    /// Revalidate a retained regular file without opening or closing that inode.
-    /// SQLite uses process-owned POSIX locks: even closing an unrelated descriptor
-    /// for its database or SHM would release locks outside SQLite's bookkeeping.
-    pub(crate) fn revalidate_regular(
-        &self,
-        relative: &Path,
-        retained: &ConfinedFile,
-    ) -> Result<(), PathError> {
-        single_name(relative)?;
-        self.revalidate_named()?;
-        let path = self.path.join(relative);
-        self.require_mount(retained.file(), &path)?;
-        let identity = regular_identity(
-            retained.file(),
-            &path,
-            None,
-            false,
-            Some(retained.identity().mode & 0o777),
-        )?;
-        let expected = retained.identity();
-        if identity.device != expected.device
-            || identity.inode != expected.inode
-            || identity.uid != expected.uid
-            || identity.mode != expected.mode
-            || identity.links != expected.links
-        {
-            return Err(PathError::ObjectIdentityChanged(path));
-        }
-        self.require_named_file(relative, retained.file())?;
-        self.revalidate_named()
     }
 
     pub fn atomic_replace(
@@ -693,14 +652,6 @@ impl PrivateRoot {
             source: Box::new(source),
         })
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SocketIdentity {
-    pub device: u64,
-    pub inode: u64,
-    pub uid: u32,
-    pub mode: u32,
 }
 
 impl SocketIdentity {

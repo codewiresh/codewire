@@ -100,7 +100,7 @@ fn main() {
         }
         return;
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if std::env::args_os()
         .next()
         .as_deref()
@@ -161,7 +161,19 @@ fn main() {
             )
         )
     });
-    #[cfg(not(target_os = "linux"))]
+    // The macOS credential-bearing roles confine themselves at entry.
+    #[cfg(target_os = "macos")]
+    let broker = std::env::args_os().nth(1).is_some_and(|argument| {
+        matches!(
+            argument.to_str(),
+            Some(
+                "__local-credential-broker"
+                    | "__local-git-repository-executor"
+                    | "__local-git-credential-helper"
+            )
+        )
+    });
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let broker = false;
 
     #[cfg(target_os = "linux")]
@@ -186,9 +198,19 @@ fn main() {
         eprintln!("failed to initialize async runtime: {error}");
         std::process::exit(1);
     });
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let credential_authority = std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "__local-credential-authority");
     if let Err(err) = runtime.block_on(codewire_cli::run()) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if credential_authority
+            && let Some(exit_code) = codewire_cli::local_credential_authority_exit_code(&err)
+        {
+            std::process::exit(exit_code);
+        }
         if isolated_process {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             let exit_code = if network_worker {
                 codewire_cli::native_network_worker_exit_code(&err)
             } else if egress_broker {
@@ -201,7 +223,7 @@ fn main() {
                 None
             }
             .unwrap_or(1);
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let exit_code = 1;
             std::process::exit(exit_code);
         }

@@ -49,3 +49,4 @@ codewire-local-vmm = { path = "../codewire-local-vmm" }
 libc = "0.2"
 tempfile = { workspace = true }
 tonic = { workspace = true }
+uuid = { workspace = true }

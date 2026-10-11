@@ -2097,7 +2097,7 @@ FAKE_CLAUDE = r"""
 import json, os, sys, time
 mode = os.environ.get("FAKE_CLAUDE_MODE", "ok")
 if sys.argv[1:] == ["--version"]:
-    print("9.9.9 (Not Claude)" if mode == "bad-version" else "2.1.238 (Claude Code)")
+    print("9.9.9 (Not Claude)" if mode == "bad-version" else "2.1.288 (Claude Code)")
     sys.exit(0)
 record = os.environ.get("FAKE_CLAUDE_RECORD")
 if record:
@@ -2205,7 +2205,7 @@ class ClaudeSessionDriver(unittest.TestCase):
                 self.assertEqual(events, [
                     {"event": "claude_projection", "form": form, "source": "daemon_session"},
                     {"event": "claude_session", "form": form, "outcome": "success",
-                     "client_version": "2.1.238"},
+                     "client_version": "2.1.288"},
                     {"event": "complete", "form": form, "outcome": "success"},
                 ])
                 self.assertNotIn("canary", output)
@@ -2251,7 +2251,7 @@ class ClaudeSessionDriver(unittest.TestCase):
                                            self.environ("refused"))
         self.assertEqual(status, 0, output)
         self.assertEqual(events[1], {"event": "claude_session", "form": "subscription_token",
-                                     "outcome": "refused", "client_version": "2.1.238"})
+                                     "outcome": "refused", "client_version": "2.1.288"})
         self.assertEqual(events[-1], {"event": "complete", "form": "subscription_token",
                                       "outcome": "refused"})
         self.assertNotIn("canary", output)
@@ -2465,7 +2465,7 @@ class ClaudeSessionHarness(unittest.TestCase):
         return (json.dumps({"event": "claude_projection", "form": form,
                             "source": "daemon_session"}) + "\n"
                 + json.dumps({"event": "claude_session", "form": form, "outcome": outcome,
-                              "client_version": "2.1.238"}) + "\n"
+                              "client_version": "2.1.288"}) + "\n"
                 + json.dumps({"event": "complete", "form": form, "outcome": outcome}) + "\n")
 
     def test_claude_runs_in_a_daemon_session_and_passes_only_on_its_closed_events(self):

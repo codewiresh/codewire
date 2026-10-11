@@ -24,7 +24,7 @@ use codewire_credential_broker::platform::{
     PlatformPodIdentity, PlatformRuntimeAuthority, PlatformRuntimeError, PlatformRuntimeSession,
 };
 use codewire_credential_broker::{
-    BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, import_codex_auth_json,
+    BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, import_codex_tokens,
 };
 use codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION;
 use codewire_daemon_proto::broker::v1::credential_broker_service_client::CredentialBrokerServiceClient;
@@ -577,11 +577,11 @@ async fn refresh_fixture(
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&json!({
             "https://api.openai.com/auth":{"chatgpt_account_id":"synthetic-account"}
         }))?);
-    let imported = import_codex_auth_json(&serde_json::to_vec(&json!({
-        "auth_mode":"chatgpt","tokens":{"access_token":token(1)?,
-        "refresh_token":"synthetic-runtime-refresh-old","id_token":format!("e30.{id_payload}.synthetic-signature"),
-        "account_id":"synthetic-account"}
-    }))?)?;
+    let imported = import_codex_tokens(
+        zeroize::Zeroizing::new(format!("e30.{id_payload}.synthetic-signature")),
+        zeroize::Zeroizing::new(token(1)?),
+        zeroize::Zeroizing::new("synthetic-runtime-refresh-old".to_owned()),
+    )?;
     let record = h
         .store
         .create(
@@ -755,7 +755,7 @@ async fn shutdown_drains_issued_enrollment_commit_and_real_refresh_past_transpor
         ensure!(h.count().await? == 1, "blocked enrollment published before its COMMIT was released");
         blocker.rollback().await?;
         h.drained().await?;
-        ensure!(h.count().await? == 2 && !h.logged_out(), "issued enrollment was lost or logged out during runtime shutdown");
+        ensure!(h.count().await? == 2, "issued enrollment was lost during runtime shutdown");
 
         // Transport grace may end, but the provider-accepted refresh must
         // retain its worker and finish publication, independently of RPC peers.
@@ -802,8 +802,8 @@ fn credential_database_pool_does_not_ping_on_every_acquire() {
 }
 
 /// Only this long-lived service's broker upstream keeps provider connections
-/// alive. Its GitHub App authorization transport and the per-environment local
-/// broker open one connection per request.
+/// alive. Its GitHub App authorization and Codex device-login transports and
+/// the per-environment local broker open one connection per request.
 #[test]
 fn only_the_long_lived_broker_upstream_pools_provider_connections() {
     let service = include_str!("../runtime.rs");
@@ -817,7 +817,7 @@ fn only_the_long_lived_broker_upstream_pools_provider_connections() {
     assert!(service.contains("let upstream = ProviderHttpsTransport::resolve_pooled("));
     assert_eq!(
         service.matches("ProviderHttpsTransport::resolve(").count(),
-        1
+        2
     );
     assert!(local.contains("ProviderHttpsTransport::resolve(&http_providers)"));
     assert!(!local.contains("resolve_pooled"));

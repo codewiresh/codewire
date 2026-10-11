@@ -23,8 +23,7 @@ use connectrpc::client::{ClientConfig, Http2Connection, SharedHttp2Connection};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::linux::supervisor_peer::SupervisorPeerPin;
-
+use crate::host::supervisor_peer::SupervisorPeerPin;
 use crate::supervisor::{NativeRuntimeConfig, NativeSupervisorClient, SupervisorError};
 use crate::uds::{UdsError, supervisor_peer_connector};
 
