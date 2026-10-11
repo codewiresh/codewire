@@ -492,7 +492,10 @@ def pack(kernel: Path, initramfs: Path, e2fsprogs: Path, git: Path, release: Pat
                                 "pack": put_blob(release, cw_runtime / CW_RUNTIME_PACK)}
     document = {"schema": LOCAL_RUNTIME_SCHEMA, "source_revision": revision,
                 "targets": {TARGET: target}}
-    (release / LOCAL_RUNTIME_DOCUMENT).write_text(json.dumps(document, indent=2) + "\n")
+    # cw decodes the document strictly: canonical JSON (sorted keys, compact,
+    # ASCII, one trailing newline), exactly as a release's cw embeds it.
+    (release / LOCAL_RUNTIME_DOCUMENT).write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n")
     for key, name, _mode in ARTIFACTS:
         log("%-9s %s sha256=%s size=%d" % (key, name, lock[key]["sha256"], lock[key]["size"]))
     for group in ("e2fsprogs", "git"):
