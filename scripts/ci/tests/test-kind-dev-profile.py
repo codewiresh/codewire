@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -61,7 +64,9 @@ tool = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 entry = {"tool": tool, "args": args, "cluster": os.environ.get("KIND_CLUSTER_NAME"),
          "kubeconfig": os.environ.get("KUBECONFIG"), "smokes": os.environ.get("CARGO_CI_DIR"),
-         "watch_addr": os.environ.get("CODEWIRE_DASHBOARD_LISTEN_ADDR")}
+         "watch_addr": os.environ.get("CODEWIRE_DASHBOARD_LISTEN_ADDR"),
+         "skip_current": os.environ.get("KIND_DEPLOY_SKIP_CURRENT"),
+         "crate": os.environ.get("KIND_DEV_CRATE")}
 if tool == "docker" and args[:2] == ["buildx", "build"]:
     entry["dockerfile"] = sys.stdin.read()
 with (state / "calls").open("a") as log: log.write(json.dumps(entry) + "\n")
@@ -87,7 +92,12 @@ elif tool == "kubectl":
         print("kind: ConfigMap")
     elif "apply" in args: sys.stdin.read()
     elif "get" in args:
-        if "pods" in args: print("pod/old-one\npod/old-two")
+        if any("imageID" in a for a in args): print(os.environ.get("FAKE_POD_IMAGE", "sha256:" + "c" * 64))
+        elif any(".metadata.annotations" in a for a in args):
+            service = next(a for a in args if ".metadata.annotations" in a).split("source-", 1)[1].split('"', 1)[0]
+            records = json.loads(os.environ.get("FAKE_RECORDS", "{}"))
+            print(records.get(service, records.get("*", "<no value>")))
+        elif "pods" in args: print("pod/old-one\npod/old-two")
         elif any(a.startswith("go-template=") for a in args): print("app=selected,")
         elif any("command[0]" in a for a in args): print("/codewire-kind-fixtures/credential-service")
         elif any("FRONTEND_URL" in a or "CREDENTIAL_PUBLIC_ORIGIN" in a for a in args):
@@ -96,7 +106,8 @@ elif tool == "kubectl":
         elif any(a.startswith("jsonpath=") and a.endswith(".image}") for a in args):
             if os.environ.get("FAKE_SAME_IMAGE") == "1": print((state / "last-image").read_text())
             else: print("codewire-services:e2e")
-    elif "set" in args or "rollout" in args or "wait" in args:
+    elif "exec" in args: sys.stdout.write(os.environ.get("FAKE_LEFTOVERS", ""))
+    elif "set" in args or "rollout" in args or "wait" in args or "annotate" in args:
         if os.environ.get("FAKE_KUBE_FAIL") and os.environ["FAKE_KUBE_FAIL"] in args: sys.exit(29)
     else: sys.exit(64)
 elif tool == "docker":
@@ -157,6 +168,57 @@ sys.exit(int(os.environ.get("FAKE_SUITE_STATUS", "0")))
 '''
 
 
+# Stands in for service-sources.py, which needs a Git checkout and Cargo.
+FAKE_SOURCES = r'''#!/usr/bin/env python3
+import os, sys
+if sys.argv[1] == "changes":
+    if os.environ.get("FAKE_CHANGES_FAIL"): sys.exit(1)
+    sys.stdout.write("".join(line + "\n" for line in os.environ.get("FAKE_CHANGES", "").split(";") if line))
+elif sys.argv[1] == "digest":
+    print(os.environ.get("FAKE_DIGEST", "d" * 64))
+else:
+    sys.exit(64)
+'''
+
+# Stands in for scripts/dev/kind/trust-roots.sh, which deploy-service.sh's own
+# fixtures cover.
+FAKE_TRUST_ROOTS = r'''#!/usr/bin/env python3
+import json, os, pathlib
+with (pathlib.Path(os.environ["FAKE_STATE"]) / "calls").open("a") as log:
+    log.write(json.dumps({"tool": "trust-roots", "args": []}) + "\n")
+'''
+
+# Stands in for scripts/dev/preflight.sh --explain.
+FAKE_PREFLIGHT = r'''#!/usr/bin/env bash
+printf 'preflight classification: %s\n' "${FAKE_CLASSIFICATION:-changed}"
+printf 'preflight required local mode: %s\n' "${FAKE_MODE:-default}"
+printf 'preflight selection: |valid:v3|%s|complete|\n' "${FAKE_SELECTION:-}"
+'''
+
+
+def record_digest(service_digest: str, crate: str, features: str = "", fixture_features: str = "") -> str:
+    """The digest deploy-service.sh records: the source digest and its build parameters."""
+    return hashlib.sha256(f"{service_digest} {crate} {features} {fixture_features}\n".encode()).hexdigest()
+
+
+# deploy-service.sh build parameters: crate, features, fixture features.
+BUILDS = {
+    "idp": ("codewire-idp", "", ""), "orchestration": ("codewire-orchestration", "kind-e2e", ""),
+    "credential-service": ("codewire-credential-service", "enrollment,kind-e2e", "enrollment,kind-e2e"),
+    "billing": ("codewire-billing", "", ""), "coordinator": ("codewire-coordinator", "", ""),
+    "mesh": ("codewire-mesh", "", ""), "dashboard": ("codewire-dashboard-web", "", ""),
+    "daemon": ("codewire-cli-bin", "", ""),
+}
+
+
+def current_records(*stale: str, digest: str = "d" * 64, pod_image: str = "sha256:" + "c" * 64) -> str:
+    """Deployment records saying the cluster runs this tree's source, except for STALE services."""
+    # A named profile's daemon identity is the renderer's image, which the fake reports.
+    return json.dumps({service: f"{record_digest(digest, *build)} "
+                       + ("codewire-daemon:e2e" if service == "daemon" else pod_image)
+                       for service, build in BUILDS.items() if service not in stale})
+
+
 class DeveloperProfileTests(unittest.TestCase):
     def setUp(self) -> None:
         (ROOT / ".tmp").mkdir(exist_ok=True)
@@ -182,6 +244,9 @@ class DeveloperProfileTests(unittest.TestCase):
         shutil.copy2(ROOT / "scripts/dev/kind/profile.sh", self.tree / "scripts/dev/kind/profile.sh")
         self.write_program(self.tree / "scripts/dev/kind/cluster-profile.py", FAKE_CORE)
         self.write_program(self.tree / "scripts/ci/verify/kind-e2e.sh", FAKE_SUITE)
+        self.write_program(self.tree / "scripts/dev/kind/service-sources.py", FAKE_SOURCES)
+        self.write_program(self.tree / "scripts/dev/kind/trust-roots.sh", FAKE_TRUST_ROOTS)
+        self.write_program(self.tree / "scripts/dev/preflight.sh", FAKE_PREFLIGHT)
         for tool in ("kind", "docker", "kubectl", "ss", "curl", "cat"):
             self.write_program(self.tools / tool, FAKE_TOOL)
         # A Bash builtin kill is mocked too: a regression must never signal a
@@ -199,7 +264,8 @@ class DeveloperProfileTests(unittest.TestCase):
                     "HOME": str(self.home), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
                     "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "maintenance.auto", "GIT_CONFIG_VALUE_0": "false",
                     "GIT_CONFIG_KEY_1": "gc.auto", "GIT_CONFIG_VALUE_1": "0",
-                    "BASH_ENV": str(self.bash_env), "CLUSTER": "dev-a", "KIND_PROFILE_LOCK_TIMEOUT_SECONDS": "1"}
+                    "BASH_ENV": str(self.bash_env), "CLUSTER": "dev-a", "KIND_PROFILE_LOCK_TIMEOUT_SECONDS": "1",
+                    "PREFLIGHT_BASE_SHA": "f" * 40, "FAKE_RECORDS": current_records()}
         for name, offset in (("dev-a", 0), ("dev-b", 20)):
             self.create_profile(name, offset)
 
@@ -260,10 +326,10 @@ class DeveloperProfileTests(unittest.TestCase):
         (directory / "fields.json").write_text(json.dumps(list(values.items())))
         if name == "dev-a": self.values = values
 
-    def run_script(self, script: str, *args: str, **environment: str) -> subprocess.CompletedProcess[str]:
+    def run_script(self, script: str, *args: str, timeout: int = 30, **environment: str) -> subprocess.CompletedProcess[str]:
         env = self.env | environment
         return subprocess.run(["bash", str(self.tree / "scripts/dev/kind" / script), *args],
-                              env=env, text=True, capture_output=True, timeout=8)
+                              env=env, text=True, capture_output=True, timeout=timeout)
 
     def run_adapter(self, command: str, **environment: str) -> subprocess.CompletedProcess[str]:
         env = self.env | environment | {"FIXTURE_TREE": str(self.tree)}
@@ -619,6 +685,357 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         result = self.run_script("deploy-service.sh", "idp", FAKE_KUBE_FAIL="wait")
         self.assertEqual(result.returncode, 29, result.stderr)
         self.assertNotIn("is running the current source", result.stderr)
+        self.assertFalse([call for call in self.calls("kubectl") if "annotate" in call["args"]])
+
+    def test_deploy_records_source_and_running_image(self) -> None:
+        result = self.run_script("deploy-service.sh", "credential-service", FAKE_DIGEST="1" * 64,
+                                 FAKE_POD_IMAGE="sha256:" + "2" * 64)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = record_digest("1" * 64, "codewire-credential-service", "enrollment,kind-e2e", "enrollment,kind-e2e")
+        annotate, = [call["args"] for call in self.calls("kubectl") if "annotate" in call["args"]]
+        self.assertEqual(annotate[-2:], ["deployment/codewire-credential-service",
+                                         f"dev.codewire.kind-dev/source-credential-service={expected} sha256:{'2' * 64}"])
+        # Recorded only after the replaced Pods are gone.
+        calls = [call["args"] for call in self.calls("kubectl")]
+        self.assertLess(max(i for i, args in enumerate(calls) if "wait" in args), calls.index(annotate))
+
+    def test_deploy_skips_a_service_running_this_source(self) -> None:
+        digest = record_digest("1" * 64, "codewire-idp")
+        result = self.run_script("deploy-service.sh", "idp", KIND_DEPLOY_SKIP_CURRENT="1", FAKE_DIGEST="1" * 64,
+                                 FAKE_RECORDS=json.dumps({"idp": f"{digest} sha256:{'2' * 64}"}), FAKE_POD_IMAGE="sha256:" + "2" * 64)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already runs this tree's source", result.stderr)
+        self.assertFalse(self.calls("docker"))
+        self.assertFalse(self.calls("kind")[1:])
+
+    def test_deploy_rebuilds_when_source_image_or_request_differs(self) -> None:
+        digest = record_digest("1" * 64, "codewire-idp")
+        for name, environment in (
+            ("changed source", {"KIND_DEPLOY_SKIP_CURRENT": "1", "FAKE_DIGEST": "3" * 64,
+                                "FAKE_RECORDS": json.dumps({"idp": f"{digest} sha256:{'2' * 64}"}), "FAKE_POD_IMAGE": "sha256:" + "2" * 64}),
+            ("replaced Pod image", {"KIND_DEPLOY_SKIP_CURRENT": "1", "FAKE_DIGEST": "1" * 64,
+                                    "FAKE_RECORDS": json.dumps({"idp": f"{digest} sha256:{'2' * 64}"}), "FAKE_POD_IMAGE": "sha256:" + "4" * 64}),
+            ("explicit deploy", {"FAKE_DIGEST": "1" * 64, "FAKE_RECORDS": json.dumps({"idp": f"{digest} sha256:{'2' * 64}"}),
+                                 "FAKE_POD_IMAGE": "sha256:" + "2" * 64}),
+        ):
+            with self.subTest(name):
+                self.calls_path.write_text("")
+                result = self.run_script("deploy-service.sh", "idp", **environment)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("already runs", result.stderr)
+                self.assertTrue([call for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]])
+
+    def test_record_only_records_the_running_image(self) -> None:
+        result = self.run_script("deploy-service.sh", "orchestration", KIND_DEPLOY_RECORD_ONLY="1",
+                                 FAKE_DIGEST="5" * 64, FAKE_POD_IMAGE="sha256:" + "6" * 64)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.calls("docker"))
+        annotate, = [call["args"] for call in self.calls("kubectl") if "annotate" in call["args"]]
+        expected = record_digest("5" * 64, "codewire-orchestration", "kind-e2e")
+        self.assertEqual(annotate[-1], f"dev.codewire.kind-dev/source-orchestration={expected} sha256:{'6' * 64}")
+
+    def test_mesh_deploys_into_its_own_image(self) -> None:
+        result = self.run_script("deploy-service.sh", "mesh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = (self.state / "last-image").read_text()
+        self.assertTrue(output.startswith(self.values["KIND_PROFILE_IMAGE_PREFIX"] + "-mesh:dev-"))
+        build, = [call for call in self.calls("docker") if call["args"][:2] == ["buildx", "build"]]
+        self.assertIn("COPY codewire-mesh /usr/local/bin/codewire-mesh", build["dockerfile"])
+        self.assertTrue([call for call in self.calls("kubectl")
+                         if call["args"][-4:] == ["set", "image", "deployment/codewire-mesh", "mesh=" + output]])
+
+    def test_selected_deploys_changed_services_before_suites(self) -> None:
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="workspace-services",
+                                 FAKE_CHANGES="crate codewire-daemon;service orchestration;service daemon",
+                                 FAKE_RECORDS=current_records("orchestration", "daemon"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        bakes = [i for i, call in enumerate(calls) if call["tool"] == "docker" and call["args"][:2] == ["buildx", "bake"]]
+        self.assertEqual([calls[i]["crate"] for i in bakes], ["codewire-orchestration", "codewire-cli-bin"])
+        self.assertTrue(all(calls[i]["skip_current"] == "1" for i in bakes))
+        suite, = [i for i, call in enumerate(calls) if call["tool"] == "suite"]
+        roots, = [i for i, call in enumerate(calls) if call["tool"] == "trust-roots"]
+        self.assertLess(max(bakes), roots)
+        self.assertLess(roots, suite)
+        self.assertIn("suite workspace-services: requested", result.stderr)
+        self.assertRegex(result.stderr, r"all selected suites green: deploy \d+s workspace-services \d+s")
+        self.assertIn("idp already runs this tree's source", result.stderr)
+
+    def test_selected_redeploys_a_service_left_on_other_source(self) -> None:
+        # Every Deployment records a deploy from other source; none is current.
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="edge-contract", timeout=60,
+                                 FAKE_RECORDS=json.dumps({"*": "0" * 64 + " sha256:" + "c" * 64}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sources = load_service_sources()
+        self.assertEqual([call["crate"] for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]],
+                         list(sources.SERVICES.values()))
+
+    def test_selected_prints_each_suite_with_its_reasons(self) -> None:
+        result = self.run_script("test-selected.sh", FAKE_SELECTION="rust|rust_pkg_codewire_billing|rust_pkg_codewire_tls",
+                                 FAKE_CHANGES="crate codewire-billing;crate codewire-tls;service billing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("suite edge-contract: rust_pkg_codewire_billing, rust_pkg_codewire_tls", result.stderr)
+        self.assertIn("suite credentials: rust_pkg_codewire_tls", result.stderr)
+        self.assertIn("suite integrated: rust_pkg_codewire_billing, rust_pkg_codewire_tls", result.stderr)
+        self.assertLess(result.stderr.index("suite edge-contract:"), result.stderr.index("[kind-deploy]"))
+        self.assertEqual([call["args"][1] for call in self.calls("suite")], ["edge-contract", "credentials", "integrated"])
+
+    def test_selected_full_gate_runs_and_deploys_nothing(self) -> None:
+        for name, environment, reason in (
+            ("migration", {"KIND_TEST_SUITES": "credentials",
+                           "FAKE_CHANGES": "crate codewire-server-core;migration crates/codewire-server-core/migrations/0099_x.sql;service idp"},
+             "shared database"),
+            ("server core", {"FAKE_SELECTION": "rust|rust_pkg_codewire_server_core|rust_pkg_codewire_orchestration",
+                             "FAKE_CHANGES": "crate codewire-server-core;service idp"}, "every service compiles it"),
+            ("unmapped crate", {"FAKE_SELECTION": "rust|rust_pkg_codewire_future_crate"}, "no retained suite is mapped"),
+            ("unclassified", {"FAKE_CLASSIFICATION": "unclassified", "FAKE_SELECTION": "web"}, "cannot classify"),
+            ("manifest only", {"FAKE_SELECTION": "deploy|policy"}, "no narrower suite"),
+            ("Kind harness or ingress", {"FAKE_MODE": "kind", "FAKE_SELECTION": "policy|policy_shell"}, "no narrower suite"),
+        ):
+            with self.subTest(name):
+                self.calls_path.write_text("")
+                result = self.run_script("test-selected.sh", **environment)
+                self.assertEqual(result.returncode, 3, result.stderr)
+                self.assertIn("only the full CI Kind gate covers this change", result.stderr)
+                self.assertIn(reason, result.stderr)
+                self.assertFalse([call for call in self.calls() if call["tool"] in ("docker", "kind", "suite")])
+
+    def test_selected_workspace_pin_alone_is_observed_on_dev(self) -> None:
+        selection = ("rust|rust_pkg_codewire_workspace_image|rust_pkg_codewire_server_core|"
+                     "rust_pkg_codewire_orchestration|rust_pkg_codewire_dashboard_web|rust_pkg_codewire_cli")
+        result = self.run_script("test-selected.sh", FAKE_SELECTION=selection, FAKE_CHANGES="crate codewire-workspace-image")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("a workspace image pin is observed on Dev", result.stderr)
+        self.assertIn("nothing to run", result.stderr)
+        self.assertFalse([call for call in self.calls() if call["tool"] in ("docker", "kind", "suite")])
+        # A pin bump beside a real orchestration change still runs its suites.
+        result = self.run_script("test-selected.sh", FAKE_SELECTION=selection,
+                                 FAKE_CHANGES="crate codewire-workspace-image;crate codewire-orchestration;service orchestration")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("suite final-fencing: rust_pkg_codewire_orchestration", result.stderr)
+        self.assertNotIn("rust_pkg_codewire_cli", result.stderr)
+
+    def test_selected_unobservable_change_runs_nothing(self) -> None:
+        result = self.run_script("test-selected.sh", FAKE_SELECTION="transport|transport_pkg_codewire_local_vmm",
+                                 FAKE_CHANGES="crate codewire-local-vmm;service daemon")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("not observable in Kind: transport_pkg_codewire_local_vmm", result.stderr)
+        self.assertFalse([call for call in self.calls() if call["tool"] in ("docker", "kind", "suite")])
+
+    def test_selected_stops_when_a_deploy_fails(self) -> None:
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="credentials",
+                                 FAKE_CHANGES="service credential-service", FAKE_MISSING_FIXTURE="1",
+                                 FAKE_RECORDS=current_records("credential-service"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("deploying credential-service failed", result.stderr)
+        self.assertFalse(self.calls("suite"))
+
+    def test_service_sources_names_the_crate_each_deploy_builds(self) -> None:
+        sources = load_service_sources()
+        selected = (CONSUMERS / "scripts/dev/kind/test-selected.sh").read_text()
+        services = re.search(r"^SERVICES=\(([^)]*)\)", selected, re.M)
+        self.assertIsNotNone(services)
+        self.assertEqual(services.group(1).split(), list(sources.SERVICES))
+        for service, crate in sources.SERVICES.items():
+            with self.subTest(service=service):
+                self.calls_path.write_text("")
+                result = self.run_script("deploy-service.sh", service)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual([call["crate"] for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]],
+                                 [crate])
+
+    def test_selected_refuses_live_leftover_environments(self) -> None:
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="credentials", FAKE_CHANGES="service idp",
+                                 FAKE_LEFTOVERS="00000000-0000-4000-8000-0000000000aa kind-profile-1-2 running\n")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("refusing to start", result.stderr)
+        self.assertIn("kind-profile-1-2 running", result.stderr)
+        self.assertFalse([call for call in self.calls() if call["tool"] in ("docker", "kind", "suite")])
+        query, = [call["args"] for call in self.calls("kubectl") if "exec" in call["args"]]
+        self.assertIn("name LIKE 'kind-%' AND desired_state <> 'destroyed'", query[-1])
+
+    def test_selected_stops_when_changes_are_unknown(self) -> None:
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="credentials", FAKE_CHANGES_FAIL="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse([call for call in self.calls() if call["tool"] != "profile"])
+
+
+def load_service_sources():
+    spec = importlib.util.spec_from_file_location("service_sources", CONSUMERS / "scripts/dev/kind/service-sources.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class SelectionTableTests(unittest.TestCase):
+    def test_every_crate_has_its_own_suite_row(self) -> None:
+        selected = (CONSUMERS / "scripts/dev/kind/test-selected.sh").read_text()
+        table = selected[selected.index("map_token() {"):selected.index("rust_pkg_* | transport_pkg_*)")]
+        # The selector reports these crates through another crate's token.
+        aliases = {"codewire-ui": "codewire-desktop"}
+        for manifest in sorted((ROOT / "crates").glob("*/Cargo.toml")):
+            crate = aliases.get(manifest.parent.name, manifest.parent.name).replace("-", "_")
+            with self.subTest(crate=manifest.parent.name):
+                self.assertRegex(table, rf"(rust|transport)_pkg_{crate}\b")
+
+    def test_inputs_are_what_the_kind_dev_build_copies(self) -> None:
+        sources = load_service_sources()
+        dockerfile = (ROOT / "deployments/docker/kind-dev-binary.Dockerfile").read_text()
+        builder = dockerfile[:dockerfile.index("FROM scratch")]
+        copied = {source for line in builder.splitlines() if line.startswith("COPY ") and "--from" not in line
+                  for source in line.split()[1:-1]}
+        declared = {"crates"} | {path for path in sources.SHARED_INPUTS if not path.startswith("deployments/")}
+        declared |= {path for paths in sources.CRATE_INPUTS.values() for path in paths}
+        self.assertEqual(copied, declared)
+        for path in sources.SHARED_INPUTS:
+            self.assertTrue((ROOT / path).exists(), path)
+
+
+SYNTHETIC_CRATES = {
+    # name: (normal dependencies, dev-dependencies)
+    "codewire-idp": (["codewire-server-core"], []),
+    "codewire-orchestration": (["codewire-server-core"], []),
+    "codewire-credential-service": (["codewire-server-core"], ["codewire-test-support"]),
+    "codewire-billing": (["codewire-server-core"], []),
+    "codewire-coordinator": ([], []),
+    "codewire-mesh": (["codewire-server-core"], []),
+    "codewire-dashboard-web": (["codewire-server-core"], []),
+    "codewire-cli-bin": (["codewire-cli"], []),
+    "codewire-cli": (["codewire-local-vmm"], ["codewire-billing"]),
+    "codewire-local-vmm": ([], []),
+    "codewire-server-core": (["codewire-workspace-image"], []),
+    "codewire-workspace-image": ([], []),
+    "codewire-test-support": (["codewire-email"], []),
+    "codewire-email": ([], []),
+}
+
+FAKE_CARGO = r'''#!/usr/bin/env python3
+import os, sys
+assert sys.argv[1:5] == ["metadata", "--no-deps", "--offline", "--format-version"], sys.argv
+sys.stdout.write(open(os.environ["FAKE_METADATA"]).read())
+'''
+
+
+class ServiceSourcesTests(unittest.TestCase):
+    """The real helper against a synthetic checkout; Cargo metadata is canned."""
+
+    def setUp(self) -> None:
+        (ROOT / ".tmp").mkdir(exist_ok=True)
+        temp = tempfile.TemporaryDirectory(prefix="kind-service-sources.", dir=ROOT / ".tmp")
+        self.addCleanup(temp.cleanup)
+        self.repo = Path(temp.name) / "repo"
+        tools = Path(temp.name) / "bin"
+        tools.mkdir()
+        (tools / "cargo").write_text(FAKE_CARGO)
+        (tools / "cargo").chmod(0o755)
+        packages = []
+        for name, (normal, dev) in SYNTHETIC_CRATES.items():
+            directory = self.repo / "crates" / name
+            (directory / "src").mkdir(parents=True)
+            (directory / "Cargo.toml").write_text(f'[package]\nname = "{name}"\n')
+            (directory / "src/lib.rs").write_text(f"// {name}\n")
+            packages.append({"name": name, "manifest_path": str(directory / "Cargo.toml"), "dependencies":
+                             [{"name": dep, "kind": None, "path": str(self.repo / "crates" / dep)} for dep in normal]
+                             + [{"name": dep, "kind": "dev", "path": str(self.repo / "crates" / dep)} for dep in dev]
+                             + [{"name": "serde", "kind": None}]})
+        (self.repo / "crates/codewire-server-core/migrations").mkdir()
+        (self.repo / "crates/codewire-server-core/migrations/0001_init.sql").write_text("select 1;\n")
+        for path in ("Cargo.toml", "Cargo.lock", "proto/codewire/v1/a.proto", "libs/daemon-proto/proto/b.proto",
+                     "packages/codewire-design/styles.css", "apps/cli/install.sh", "apps/cli/GPG_PUBLIC_KEY.asc",
+                     "deployments/docker/rust-base.Dockerfile", "deployments/docker/kind-dev-binary.Dockerfile",
+                     "docs/README.md"):
+            (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / path).write_text(path + "\n")
+        (self.repo / ".gitignore").write_text("target/\n")
+        helper = self.repo / "scripts/dev/kind/service-sources.py"
+        helper.parent.mkdir(parents=True)
+        shutil.copy2(CONSUMERS / "scripts/dev/kind/service-sources.py", helper)
+        metadata = Path(temp.name) / "metadata.json"
+        metadata.write_text(json.dumps({"packages": packages}))
+        self.env = {"PATH": f"{tools}:{os.environ['PATH']}", "FAKE_METADATA": str(metadata),
+                    "HOME": temp.name, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+                    "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}
+        self.git("init", "-q", "-b", "main")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "base")
+
+    def git(self, *args: str) -> str:
+        return subprocess.run(["git", "-C", str(self.repo), *args], env=self.env, check=True,
+                              text=True, capture_output=True).stdout
+
+    def helper(self, *args: str) -> str:
+        result = subprocess.run(["python3", "-B", str(self.repo / "scripts/dev/kind/service-sources.py"), *args],
+                                env=self.env, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def changes(self) -> list[str]:
+        return self.helper("changes", "--base", "main").splitlines()
+
+    def edit(self, path: str, text: str = "changed\n") -> None:
+        target = self.repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+
+    def test_unchanged_checkout_feeds_nothing(self) -> None:
+        self.assertEqual(self.changes(), [])
+
+    def test_shared_crate_feeds_every_service_that_compiles_it(self) -> None:
+        self.edit("crates/codewire-server-core/src/lib.rs")
+        self.assertEqual(self.changes(), ["crate codewire-server-core"] + [
+            f"service {name}" for name in ("idp", "orchestration", "credential-service", "billing", "mesh", "dashboard")])
+
+    def test_untracked_migration_is_reported(self) -> None:
+        self.edit("crates/codewire-server-core/migrations/0002_next.sql", "select 2;\n")
+        self.assertIn("migration crates/codewire-server-core/migrations/0002_next.sql", self.changes())
+
+    def test_root_dev_dependencies_count_but_transitive_ones_do_not(self) -> None:
+        self.edit("crates/codewire-email/src/lib.rs")
+        self.assertEqual(self.changes(), ["crate codewire-email", "service credential-service"])
+        # Billing is only a dev-dependency of codewire-cli, never of the daemon binary.
+        self.edit("crates/codewire-email/src/lib.rs", "// codewire-email\n")
+        self.edit("crates/codewire-billing/src/lib.rs")
+        self.assertEqual(self.changes(), ["crate codewire-billing", "service billing"])
+
+    def test_embedded_design_feeds_only_the_dashboard(self) -> None:
+        self.edit("packages/codewire-design/styles.css")
+        self.assertEqual(self.changes(), ["service dashboard"])
+
+    def test_protobuf_sources_feed_every_service(self) -> None:
+        self.edit("proto/codewire/v1/a.proto")
+        sources = load_service_sources()
+        self.assertEqual(self.changes(), [f"service {name}" for name in sources.SERVICES])
+
+    def test_workspace_image_pin_feeds_no_service(self) -> None:
+        self.edit("crates/codewire-workspace-image/src/lib.rs")
+        self.assertEqual(self.changes(), ["crate codewire-workspace-image"])
+
+    def test_committed_branch_change_counts_from_the_merge_base(self) -> None:
+        self.git("checkout", "-q", "-b", "feature")
+        self.edit("crates/codewire-coordinator/src/lib.rs")
+        self.git("commit", "-q", "-am", "coordinator")
+        self.git("checkout", "-q", "main")
+        self.edit("docs/README.md", "main moved\n")
+        self.git("commit", "-q", "-am", "main moved")
+        self.git("checkout", "-q", "feature")
+        self.assertEqual(self.changes(), ["crate codewire-coordinator", "service coordinator"])
+
+    def test_digest_follows_exactly_the_service_inputs(self) -> None:
+        before = self.helper("digest", "idp").strip()
+        self.assertRegex(before, r"^[0-9a-f]{64}$")
+        self.edit("crates/codewire-coordinator/src/lib.rs")
+        self.edit("target/build-output", "ignored\n")
+        self.edit("docs/README.md", "unrelated\n")
+        self.assertEqual(self.helper("digest", "idp").strip(), before)
+        self.edit("crates/codewire-server-core/src/lib.rs")
+        changed = self.helper("digest", "idp").strip()
+        self.assertNotEqual(changed, before)
+        self.edit("crates/codewire-server-core/src/lib.rs", "// codewire-server-core\n")
+        self.assertEqual(self.helper("digest", "idp").strip(), before)
+        self.assertNotEqual(self.helper("digest", "billing").strip(), before)
+        # Reading the working tree never changes the checkout's own index.
+        self.assertEqual(self.git("status", "--porcelain"), " M crates/codewire-coordinator/src/lib.rs\n M docs/README.md\n")
 
 
 if __name__ == "__main__":

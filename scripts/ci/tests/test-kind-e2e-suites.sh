@@ -1185,6 +1185,7 @@ kubectl() {
 }
 validate_retained_cluster() { record validate; }
 build_retained_kind_smokes() { record smokes; }
+restart_credential_service() { record restart; }
 kind_credential_native_smoke() (
   record native-start
   false
@@ -3216,5 +3217,116 @@ python3 -B "$ROOT/scripts/ci/tests/test-kind-cw-runtime.py"
     fi
   done
 )
+
+# The credentials suite restarts the credential-service, then waits until the
+# Service's endpoints are only the new ready Pods: `rollout status` alone
+# returned while the replaced Pod still terminated, and the first enrollment
+# was refused.
+(
+  polls="$FIXTURE/credential-endpoint-polls"
+  : >"$polls"
+  : >"$CALLS"
+  sleep() { :; }
+  kubectl() {
+    case "$*" in
+      *'get service/codewire-credential-service'*) printf 'app=credential-service,' ;;
+      *'get pods -l app=credential-service -o name'*) printf 'pod/credential-old\n' ;;
+      *'rollout restart'* | *'rollout status'*) record "kubectl:$*" ;;
+      *'get endpointslices -l kubernetes.io/service-name=codewire-credential-service'*)
+        printf . >>"$polls"
+        case "$(wc -c <"$polls")" in
+          1) printf 'pod/credential-old false\npod/credential-new true\n' ;;
+          2) printf 'pod/credential-old true\npod/credential-new true\n' ;;
+          3) printf 'pod/credential-new false\n' ;;
+          *) printf 'pod/credential-new true\n' ;;
+        esac
+        ;;
+      *) fail "unexpected kubectl call: $*" ;;
+    esac
+  }
+  restart_credential_service >"$FIXTURE/credential-restart.out" 2>&1 ||
+    fail 'the credential-service restart did not settle on its new ready Pod'
+  [ "$(wc -c <"$polls")" -eq 4 ] ||
+    fail 'the credential-service restart returned before its endpoints were only new ready Pods'
+  [ "$(grep -c '^kubectl:-n codewire-e2e rollout ' "$CALLS")" -eq 2 ] ||
+    fail 'the credential-service restart skipped its rollout'
+)
+
+# A credential stage that fails removes what it created, in dependency order
+# and best-effort: a leftover Sandbox kept authenticating to the bridge and
+# failed the next run's same-identity evidence.
+(
+  : >"$CALLS"
+  # Earlier cases stub the stages; restore the real ones.
+  # shellcheck source=scripts/ci/verify/kind/credentials.sh
+  source "$CREDENTIALS"
+  export CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci
+  log() { record "log:$*"; }
+  kind_workspace_runtime_image() { printf 'workspace:fixture\n'; }
+  prepare_kind_credential_cli() { :; }
+  assert_kind_credential_claude_token() { :; }
+  mktemp() { command mktemp -d "$FIXTURE/claude-home.XXXXXX"; }
+  stat() { printf 'tmpfs\n'; }
+  kind_credential_cli() {
+    record "cli:$*"
+    case "$*" in
+      'org current') printf 'ID: org_contract_1\n' ;;
+      'credentials --platform add '*) cat >/dev/null ;;
+      'credentials --platform get '*)
+        printf '[{"name":"%s","provider":"anthropic","status":"CREDENTIAL_STATUS_ACTIVE","authenticationKind":"CREDENTIAL_AUTHENTICATION_KIND_API_KEY"}]\n' "$4" ;;
+      'env --platform create '*) printf '{"id":"00000000-0000-4000-8000-0000000000cc"}\n' ;;
+      'env --platform rm '*) return 1 ;;
+    esac
+  }
+  # The new environment never becomes running.
+  wait_kind_credential_environment() { record "wait:$1 $2"; [ "$2" != running ]; }
+  # A plain statement, as the suite calls it: errexit is ignored under `if`.
+  set +e
+  (set -e; kind_credential_claude_session) >"$FIXTURE/claude-cleanup.out" 2>&1
+  stage_status=$?
+  set -e
+  [ "$stage_status" -ne 0 ] || fail 'the failing Claude stage fixture passed'
+  sed -n 's/^cli:\(env --platform rm\|credentials --platform --profile [^ ]* delete\|credentials --platform revoke\|credentials --platform delete\) .*/\1/p' "$CALLS" \
+    >"$FIXTURE/claude-cleanup.calls"
+  printf '%s\n' 'env --platform rm' \
+      'credentials --platform --profile kind-claude-key-* delete' \
+      'credentials --platform --profile kind-claude-token-* delete' \
+      'credentials --platform revoke' 'credentials --platform delete' \
+      'credentials --platform revoke' 'credentials --platform delete' \
+    | cmp -s - <(sed 's/--profile kind-claude-key-[0-9-]* delete/--profile kind-claude-key-* delete/; s/--profile kind-claude-token-[0-9-]* delete/--profile kind-claude-token-* delete/' "$FIXTURE/claude-cleanup.calls") ||
+    fail "a failed Claude stage did not remove its environment, profiles and credentials in order: $(tr '\n' ';' <"$FIXTURE/claude-cleanup.calls")"
+  grep -Fq 'log:could not remove environment 00000000-0000-4000-8000-0000000000cc' "$CALLS" ||
+    fail 'a failed environment removal was not logged'
+  grep -Fq 'log:deleted credential kind-claude-token-' "$CALLS" ||
+    fail 'stage cleanup stopped at the first failed removal'
+  ! ls -d "$FIXTURE"/claude-home.* >/dev/null 2>&1 || fail 'a failed Claude stage kept its CLI home'
+)
+
+# A new retained development cluster records each service's source through
+# deploy-service.sh, best-effort; CI shard clusters and release images do not.
+(
+  record_root="$FIXTURE/record-root"
+  mkdir -p "$record_root/scripts/dev/kind"
+  cat >"$record_root/scripts/dev/kind/deploy-service.sh" <<'RECORDER'
+#!/usr/bin/env bash
+printf 'record-only=%s %s\n' "${KIND_DEPLOY_RECORD_ONLY:-}" "$1" >>"$CALLS"
+[ "$1" != mesh ]
+RECORDER
+  chmod +x "$record_root/scripts/dev/kind/deploy-service.sh"
+  ROOT="$record_root"
+  export CALLS
+  : >"$CALLS"
+  log() { record "log:$*"; }
+  CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci record_retained_cluster_sources
+  printf 'record-only=1 %s\n' idp orchestration credential-service billing coordinator mesh dashboard daemon \
+    | cmp -s - <(grep '^record-only=' "$CALLS") || fail 'a new retained cluster did not record every service'
+  grep -Fxq 'log:could not record the source of mesh; make kind-test will rebuild it' "$CALLS" ||
+    fail 'a failed source record was not logged'
+  : >"$CALLS"
+  CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release record_retained_cluster_sources
+  [ ! -s "$CALLS" ] || fail 'release images were recorded as this tree'"'"'s source'
+)
+grep -Fq '  if [ "$KIND_SHARD_TRANSACTION" != 1 ]; then
+    record_retained_cluster_sources' "$UP" || fail 'kind-e2e.sh up does not record a retained cluster'"'"'s sources'
 
 printf '[test-kind-e2e-suites] dispatcher, order, prerequisites, and cleanup passed\n'

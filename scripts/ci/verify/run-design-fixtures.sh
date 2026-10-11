@@ -84,26 +84,7 @@ source "$ROOT/scripts/ci/verify/playwright-browser-runtime.sh"
 
 [ -x "$PLAYWRIGHT" ] || die "dashboard Playwright dependencies are missing; run PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bun install --frozen-lockfile --ignore-scripts"
 
-# Prefer an explicit browser, then a pinned download already verified into this
-# checkout, and only then download and verify the pinned archive.
-resolve_chromium() {
-  local expected candidate
-  if [ -n "${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}" ]; then
-    printf '%s\n' "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
-    return
-  fi
-  expected="$(sed -n "s/^readonly chromium_version='\([^']*\)'/\1/p" \
-    "$ROOT/scripts/ci/install-pinned-playwright-chromium.sh")"
-  for candidate in "$ROOT"/.tmp/playwright-chromium.*/chrome-linux64/chrome; do
-    if [ -x "$candidate" ] && "$candidate" --version 2>/dev/null | grep -Fq " $expected"; then
-      printf '%s\n' "$candidate"
-      return
-    fi
-  done
-  "$ROOT/scripts/ci/install-pinned-playwright-chromium.sh"
-}
-
-chromium="$(resolve_chromium)"
+chromium="$(resolve_pinned_playwright_chromium "$ROOT")"
 prepare_playwright_browser_runtime "$chromium" "$ROOT"
 
 mkdir -p "$ROOT/.tmp"

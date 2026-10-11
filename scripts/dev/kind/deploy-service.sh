@@ -4,7 +4,7 @@
 #
 #   KIND_CLUSTER_NAME=<cluster> scripts/dev/kind/deploy-service.sh <service>
 #
-# Services: idp, orchestration, credential-service, billing, coordinator,
+# Services: idp, orchestration, credential-service, billing, coordinator, mesh,
 # dashboard (what the cluster ingress serves, so `make kind-test` exercises the
 # current dashboard source; `make kind-watch` serves it for review), and daemon
 # (the in-workspace `cw` carried by the daemon image; sandboxes created
@@ -13,6 +13,14 @@
 # from the gate or `up` resets it. credential-service also rebuilds the
 # synthetic fixture (/codewire-kind-fixtures/credential-service) that the
 # gate's fake credential mode runs, so both modes run the current source.
+#
+# Each deploy records on the Deployment that runs the binary the digest of the
+# source it was built from (scripts/dev/kind/service-sources.py) and the image
+# its Pods then run. KIND_DEPLOY_SKIP_CURRENT=1 (what `make kind-test` uses)
+# skips the build when the cluster still runs exactly that: an unchanged
+# digest and the recorded image. KIND_DEPLOY_RECORD_ONLY=1 builds nothing and
+# records the running image as this tree's source; a new retained cluster does
+# that for the images it was just built from.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -39,6 +47,10 @@ fixture=""
 fixture_features=""
 case "$SERVICE" in
   idp | billing | coordinator) ;;
+  mesh)
+    image=codewire-mesh
+    destination=/usr/local/bin/
+    ;;
   orchestration) features="kind-e2e" ;;
   credential-service)
     features="enrollment,kind-e2e"
@@ -58,9 +70,14 @@ case "$SERVICE" in
     bin=cw
     destination=/usr/local/bin/
     ;;
-  *) die "usage: $0 <idp|orchestration|credential-service|billing|coordinator|dashboard|daemon>" ;;
+  *) die "usage: $0 <idp|orchestration|credential-service|billing|coordinator|mesh|dashboard|daemon>" ;;
 esac
 deployment="codewire-${SERVICE}"
+if [ "$SERVICE" = daemon ]; then
+  # The renderer reads this Deployment environment for future sandboxes.
+  # Loading a new tag alone would leave it using the original daemon image.
+  deployment=codewire-orchestration
+fi
 IMAGE="${image}:e2e"
 STATE="$ROOT/.tmp/kind-dev/${KIND_CLUSTER_NAME}"
 if [ "$image" != codewire-services ]; then
@@ -76,6 +93,75 @@ fi
 
 kind get clusters 2>/dev/null | grep -Fxq "$KIND_CLUSTER_NAME" \
   || die "cluster ${KIND_CLUSTER_NAME} does not exist; create it with make kind-up"
+kube() { kubectl --context "kind-${KIND_CLUSTER_NAME}" -n "$NAMESPACE" "$@"; }
+RECORD_KEY="dev.codewire.kind-dev/source-${SERVICE}"
+
+source_digest() {
+  local digest
+  digest="$(python3 -B "$ROOT/scripts/dev/kind/service-sources.py" digest "$SERVICE")" || return 0
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 0
+  # The build parameters belong to the binary as much as its source.
+  printf '%s %s %s %s\n' "$digest" "$crate" "$features" "$fixture_features" | sha256sum | cut -c1-64
+}
+
+# What the cluster runs for this service now: the daemon image future
+# sandboxes get, or the one image ID every live Pod of the Deployment reports.
+running_identity() {
+  local ids selector
+  if [ "$SERVICE" = daemon ]; then
+    if [ "$KIND_PROFILE" = 1 ]; then
+      kube get "deployment/${deployment}" \
+        -o 'jsonpath={.spec.template.spec.containers[?(@.name=="orchestration")].env[?(@.name=="SANDBOX_DAEMON_IMAGE")].value}'
+    else
+      docker image inspect --format '{{.Id}}' "$IMAGE"
+    fi
+    return
+  fi
+  selector="$(deployment_selector)" || return 1
+  # shellcheck disable=SC2016 # a Go template, expanded by kubectl
+  ids="$(kube get pods -l "$selector" -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{range .status.containerStatuses}}{{.imageID}}{{"\n"}}{{end}}{{end}}{{end}}' \
+    | sort -u)" || return $?
+  # A Deployment scaled to zero (Mesh until a suite needs it) runs nothing.
+  if [ -z "$ids" ]; then
+    printf 'none\n'
+  elif [ "$(wc -l <<<"$ids")" = 1 ]; then
+    printf '%s\n' "$ids"
+  fi
+}
+
+# Record what the cluster now runs for this service, only when the source did
+# not change meanwhile and its Pods agree on one image.
+record_deploy() {
+  local identity
+  [ -n "$digest" ] && [ "$(source_digest)" = "$digest" ] || return 1
+  identity="$(running_identity)" && [ -n "$identity" ] || return 1
+  kube annotate --overwrite "deployment/${deployment}" "${RECORD_KEY}=${digest} ${identity}" >/dev/null
+}
+
+deployment_selector() {
+  local selector
+  # shellcheck disable=SC2016 # a Go template, expanded by kubectl
+  selector="$(kube get "deployment/${deployment}" \
+    -o go-template='{{range $k, $v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}')" || return $?
+  [ -n "$selector" ] || die "deployment/${deployment} has no label selector"
+  printf '%s\n' "${selector%,}"
+}
+
+digest="$(source_digest)"
+[ -n "$digest" ] || log 'cannot compute the source digest; this deploy will not be recorded'
+if [ "${KIND_DEPLOY_RECORD_ONLY:-0}" = 1 ]; then
+  record_deploy || die "cannot record ${SERVICE}: no source digest, or its Pods run more than one image"
+  log "recorded ${SERVICE}'s running image as this tree's source (${digest:0:12})"
+  exit 0
+fi
+if [ "${KIND_DEPLOY_SKIP_CURRENT:-0}" = 1 ] && [ -n "$digest" ]; then
+  recorded="$(kube get "deployment/${deployment}" -o "go-template={{index .metadata.annotations \"${RECORD_KEY}\"}}" 2>/dev/null || true)"
+  identity="$(running_identity 2>/dev/null || true)"
+  if [ -n "$identity" ] && [ "$recorded" = "${digest} ${identity}" ]; then
+    log "${SERVICE} already runs this tree's source (${digest:0:12}); not rebuilding"
+    exit 0
+  fi
+fi
 if [ "$KIND_PROFILE" = 1 ]; then
   base="$(kind_profile_image_base "$image")" || exit $?
   current="$(docker image inspect --format '{{.Id}}' "$base")" \
@@ -109,7 +195,7 @@ for binary in "$STATE/bin/"*; do
   fi
   case "${binary##*/}" in
     codewire-idp|codewire-billing|codewire-coordinator|codewire-orchestration|\
-    codewire-credential-service|codewire-dashboard-web|cw) ;;
+    codewire-credential-service|codewire-mesh|codewire-dashboard-web|cw) ;;
     *) die 'dev binary state contains an unknown binary' ;;
   esac
 done
@@ -190,24 +276,17 @@ kind load docker-image "$IMAGE" --name "$KIND_CLUSTER_NAME" >/dev/null
 # Republish the synthetic trust roots before anything restarts, so a cluster
 # past its 72-hour root renewal still trusts the leaves its services present.
 publish_kind_trust_roots --context "kind-${KIND_CLUSTER_NAME}"
+
+unrecorded() { log "${SERVICE}'s source or running image changed meanwhile; this deploy is not recorded"; }
 if [ "$SERVICE" = daemon ] && [ "$KIND_PROFILE" != 1 ]; then
+  record_deploy || unrecorded
   log "sandboxes created from now on run the current daemon"
   exit 0
-fi
-kube() { kubectl --context "kind-${KIND_CLUSTER_NAME}" -n "$NAMESPACE" "$@"; }
-if [ "$SERVICE" = daemon ]; then
-  # The renderer reads this Deployment environment for future sandboxes.
-  # Loading a new tag alone would leave it using the original daemon image.
-  deployment=codewire-orchestration
 fi
 # A rollout reports done while the previous pods are still terminating and can
 # still answer requests; wait for them to go so the next request, such as
 # `make kind-test`, reaches the current source.
-# shellcheck disable=SC2016 # a Go template, expanded by kubectl
-selector="$(kube get "deployment/${deployment}" \
-  -o go-template='{{range $k, $v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}')"
-selector="${selector%,}"
-[ -n "$selector" ] || die "deployment/${deployment} has no label selector"
+selector="$(deployment_selector)"
 previous="$(kube get pods -l "$selector" -o name)"
 if [ "$KIND_PROFILE" = 1 ]; then
   if [ "$SERVICE" = daemon ]; then
@@ -232,6 +311,7 @@ if [ -n "$previous" ]; then
   # shellcheck disable=SC2086 # one argument for each captured Pod
   kube wait --for=delete $previous --timeout=120s >/dev/null
 fi
+record_deploy || unrecorded
 if [ "$SERVICE" = daemon ]; then
   log 'sandboxes created from now on run the current daemon'
 fi

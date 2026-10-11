@@ -794,6 +794,19 @@ mark_retained_cluster_prepared() {
     --dry-run=client -o yaml | kubectl_apply -f -
 }
 
+# A retained development cluster records, on each Deployment, the source its
+# images were just built from (scripts/dev/kind/deploy-service.sh), so
+# `make kind-test` deploys only what later differs. Best-effort: a service it
+# cannot record is rebuilt on the first `make kind-test`.
+record_retained_cluster_sources() {
+  local service
+  [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = build-ci ] || return 0
+  for service in idp orchestration credential-service billing coordinator mesh dashboard daemon; do
+    KIND_DEPLOY_RECORD_ONLY=1 "$ROOT/scripts/dev/kind/deploy-service.sh" "$service" \
+      || log "could not record the source of ${service}; make kind-test will rebuild it"
+  done
+}
+
 reclaim_cancelled_ci_clusters() {
   local kind_config="$1"
   local clusters cluster running_containers ports port owners
@@ -1812,12 +1825,11 @@ require_dashboard_browser_host_dependencies() {
     return 1
   fi
 
-  chromium="${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}"
-  if [ -z "$chromium" ]; then
-    chromium="$(command -v chromium || command -v google-chrome || command -v google-chrome-stable || true)"
-  fi
+  # An explicit browser, else the pinned one, installed into this checkout on
+  # first use. A system Chromium is another version and would fail below.
+  chromium="$(resolve_pinned_playwright_chromium "$ROOT")" || chromium=""
   if [ -z "$chromium" ] || [ ! -x "$chromium" ]; then
-    echo "::error::the Kind browser gate requires a pre-provisioned Chromium executable; set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
+    echo "::error::the Kind browser gate requires the pinned Chromium; scripts/ci/install-pinned-playwright-chromium.sh could not provide it"
     return 1
   fi
 
@@ -1870,10 +1882,7 @@ dashboard_browser_e2e() (
       ;;
   esac
   playwright="$ROOT/apps/dashboard/node_modules/.bin/playwright"
-  chromium="${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}"
-  if [ -z "$chromium" ]; then
-    chromium="$(command -v chromium || command -v google-chrome || command -v google-chrome-stable || true)"
-  fi
+  chromium="$(resolve_pinned_playwright_chromium "$ROOT")" || return $?
 
   prepare_playwright_browser_runtime "$chromium" "$ROOT" || return $?
 
