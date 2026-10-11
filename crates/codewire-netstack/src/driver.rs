@@ -288,23 +288,35 @@ impl Driver {
     ///   its own SYN-ACK, and a spare LISTEN socket cannot take the SYN and
     ///   open a second connection for the same 4-tuple.
     fn admit_syns(&mut self) {
-        if self.listeners.is_empty() || self.device.inbound.is_empty() {
+        if self.listeners.is_empty()
+            || !self
+                .device
+                .inbound
+                .iter()
+                .any(|packet| initial_syn(packet).is_some())
+        {
             return;
         }
+        self.prune_closed_listening();
+        // Every 4-tuple a socket still holds, in any state: a late duplicate
+        // SYN for a closing connection is as much a repeat as one for a live
+        // handshake. A closed or reaped socket holds none, so a reused client
+        // port still connects.
         let mut open: HashSet<(IpEndpoint, IpEndpoint)> = self
             .sockets
             .iter()
             .filter_map(|(_, socket)| {
                 let socket = tcp::Socket::downcast(socket)?;
-                if !matches!(
-                    socket.state(),
-                    tcp::State::SynReceived | tcp::State::Established
-                ) {
-                    return None;
-                }
                 Some((socket.local_endpoint()?, socket.remote_endpoint()?))
             })
             .collect();
+        // Unaccepted sockets count against the connection limit too, so a
+        // peer cannot hold buffers beyond it across many listeners.
+        let mut unaccepted: usize = self
+            .listeners
+            .values()
+            .map(|slot| slot.listening.len())
+            .sum();
         let mut free: HashMap<IpListenEndpoint, usize> = self
             .listeners
             .iter()
@@ -338,11 +350,13 @@ impl Driver {
             let available = free.entry(endpoint).or_default();
             if *available == 0
                 && self.listeners[&endpoint].listening.len() < self.limits.accept_queue
+                && self.conns.len() + unaccepted < self.limits.max_connections
             {
                 if let Some(handle) = self.spawn_listen_socket(endpoint) {
                     if let Some(slot) = self.listeners.get_mut(&endpoint) {
                         slot.listening.push(handle);
                     }
+                    unaccepted += 1;
                     *available += 1;
                 }
             }
@@ -356,6 +370,25 @@ impl Driver {
             }
             *available -= 1;
             self.device.inbound.push_back(packet);
+        }
+    }
+
+    /// A listening socket whose handshake timed out, or that was reset before
+    /// it was promoted, is closed: it must stop counting against the accept
+    /// queue, or a few lost handshakes would wedge the listener.
+    fn prune_closed_listening(&mut self) {
+        let mut closed = Vec::new();
+        for slot in self.listeners.values_mut() {
+            slot.listening.retain(|&handle| {
+                let done = self.sockets.get::<tcp::Socket>(handle).state() == tcp::State::Closed;
+                if done {
+                    closed.push(handle);
+                }
+                !done
+            });
+        }
+        for handle in closed {
+            self.sockets.remove(handle);
         }
     }
 
