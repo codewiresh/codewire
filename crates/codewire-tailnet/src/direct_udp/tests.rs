@@ -37,6 +37,8 @@ mod derp_first;
 mod disco_transport;
 #[path = "tests/discovery.rs"]
 mod discovery;
+#[path = "tests/heartbeat.rs"]
+mod heartbeat;
 #[path = "tests/peer_relay.rs"]
 mod peer_relay;
 
@@ -358,6 +360,8 @@ fn peer_state(node_key: NodePublic, disco_key: DiscoPublic, endpoint: SocketAddr
         endpoints: vec![endpoint],
         verified_endpoint: None,
         direct_probe: DirectProbeState::Inactive,
+        direct_heartbeat: None,
+        last_wg_send: None,
         relay_endpoint: None,
         preferred_derp: 1,
     }

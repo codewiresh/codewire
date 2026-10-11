@@ -17,7 +17,8 @@ use crate::endpoint_tracker::EndpointTracker;
 use crate::node::{AddrPort, DiscoPublic, Node, NodePublic};
 
 use super::{
-    Options, PeerRelayAllocationEvent, PeerRelayEndpointState, Stats, VERIFIED_ENDPOINT_TTL,
+    Options, PeerRelayAllocationEvent, PeerRelayEndpointState, Stats,
+    DIRECT_SESSION_ACTIVE_TIMEOUT, VERIFIED_ENDPOINT_TTL,
 };
 
 #[derive(Default)]
@@ -218,9 +219,16 @@ pub(super) struct VerifiedEndpoint {
 }
 
 impl VerifiedEndpoint {
-    pub(super) fn is_fresh(&self) -> bool {
-        self.verified_at.elapsed() <= VERIFIED_ENDPOINT_TTL
+    pub(super) fn is_fresh(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.verified_at) <= VERIFIED_ENDPOINT_TTL
     }
+}
+
+/// The latest heartbeat ping sent to a peer's verified endpoint.
+#[derive(Clone, Copy)]
+pub(super) struct DirectHeartbeat {
+    pub(super) sent_at: Instant,
+    pub(super) tx_id: [u8; 12],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -299,15 +307,24 @@ pub(super) struct PeerState {
     pub(super) endpoints: Vec<SocketAddr>,
     pub(super) verified_endpoint: Option<VerifiedEndpoint>,
     pub(super) direct_probe: DirectProbeState,
+    pub(super) direct_heartbeat: Option<DirectHeartbeat>,
+    /// When this side last sent the peer WireGuard, on any path.
+    pub(super) last_wg_send: Option<Instant>,
     pub(super) relay_endpoint: Option<RelayPeerEndpoint>,
     pub(super) preferred_derp: i32,
 }
 
 impl PeerState {
-    pub(super) fn active_verified_endpoint(&self) -> Option<SocketAddr> {
+    pub(super) fn active_verified_endpoint(&self, now: Instant) -> Option<SocketAddr> {
         self.verified_endpoint
-            .filter(VerifiedEndpoint::is_fresh)
+            .filter(|verified| verified.is_fresh(now))
             .map(|verified| verified.addr)
+    }
+
+    pub(super) fn in_use(&self, now: Instant) -> bool {
+        self.last_wg_send.is_some_and(|sent| {
+            now.saturating_duration_since(sent) <= DIRECT_SESSION_ACTIVE_TIMEOUT
+        })
     }
 
     pub(super) fn active_relay_endpoint(&self, now: Instant) -> Option<SocketAddr> {
@@ -501,20 +518,41 @@ pub(super) fn verified_peer_for_endpoint(
     let state = shared.state.lock().unwrap();
     let peer_key = state.peers_by_endpoint.get(&endpoint)?;
     let peer = state.peers_by_node.get(peer_key)?;
-    if peer.active_verified_endpoint() != Some(endpoint) {
+    if peer.active_verified_endpoint(Instant::now()) != Some(endpoint) {
         return None;
     }
     Some(NodePublic::from_raw(*peer_key))
 }
 
 impl State {
-    pub(super) fn verify_endpoint(&mut self, peer_key: [u8; 32], endpoint: SocketAddr) {
+    /// Verify a pong's UDP source when the pong answers a ping this side
+    /// sent the peer. A DERP pong only retires its transaction.
+    pub(super) fn accept_pong(
+        &mut self,
+        peer_key: [u8; 32],
+        tx_id: &[u8; 12],
+        source: Option<SocketAddr>,
+        now: Instant,
+    ) {
+        if self.pending_tx.remove(tx_id) == Some(peer_key) {
+            if let Some(addr) = source {
+                self.verify_endpoint(peer_key, addr, now);
+            }
+        }
+    }
+
+    pub(super) fn verify_endpoint(
+        &mut self,
+        peer_key: [u8; 32],
+        endpoint: SocketAddr,
+        now: Instant,
+    ) {
         if !is_acceptable_peer_endpoint(endpoint, self.public_peer_endpoints_only) {
             return;
         }
         let mut retired_transactions = Vec::new();
         if let Some(peer) = self.peers_by_node.get_mut(&peer_key) {
-            let already_verified = peer.active_verified_endpoint() == Some(endpoint);
+            let already_verified = peer.active_verified_endpoint(now) == Some(endpoint);
             if let DirectProbeState::Active(probe) =
                 std::mem::replace(&mut peer.direct_probe, DirectProbeState::Inactive)
             {
@@ -527,7 +565,7 @@ impl State {
             }
             if let Some(old) = peer.verified_endpoint.replace(VerifiedEndpoint {
                 addr: endpoint,
-                verified_at: Instant::now(),
+                verified_at: now,
             }) {
                 self.peers_by_endpoint.remove(&old.addr);
             }
@@ -551,17 +589,22 @@ pub(super) enum ActivePeerPath {
     Relay { addr: SocketAddr, vni: u32 },
 }
 
-pub(super) fn active_path_for_peer(shared: &Shared, peer_key: &[u8; 32]) -> Option<ActivePeerPath> {
+/// Choose the path for one WireGuard datagram sent to the peer at `now`, and
+/// mark the peer in use. A lapsed direct endpoint is left for
+/// `maintain_direct_paths` to probe again.
+pub(super) fn active_path_for_peer(
+    shared: &Shared,
+    peer_key: &[u8; 32],
+    now: Instant,
+) -> Option<ActivePeerPath> {
     let mut state = shared.state.lock().unwrap();
-    let mut expired_direct = None;
     let mut expired_relay = None;
     let path = {
         let peer = state.peers_by_node.get_mut(peer_key)?;
-        if let Some(endpoint) = peer.active_verified_endpoint() {
+        peer.last_wg_send = Some(now);
+        if let Some(endpoint) = peer.active_verified_endpoint(now) {
             Some(ActivePeerPath::Direct(endpoint))
         } else {
-            expired_direct = peer.verified_endpoint.take().map(|old| old.addr);
-            let now = Instant::now();
             if let Some(relay) = peer.relay_endpoint.as_ref() {
                 if let Some(addr) = relay.active_addr(now) {
                     return Some(ActivePeerPath::Relay {
@@ -577,13 +620,6 @@ pub(super) fn active_path_for_peer(shared: &Shared, peer_key: &[u8; 32]) -> Opti
             None
         }
     };
-    if let Some(old) = expired_direct {
-        state.peers_by_endpoint.remove(&old);
-        tracing::debug!(
-            endpoint = %old,
-            "rust tailnet direct UDP endpoint expired"
-        );
-    }
     if let Some(old) = expired_relay {
         state.remove_relay_keys_for_peer(peer_key);
         tracing::debug!(
@@ -596,16 +632,16 @@ pub(super) fn active_path_for_peer(shared: &Shared, peer_key: &[u8; 32]) -> Opti
 }
 
 pub(super) fn path_for_peer(shared: &Shared, peer: NodePublic) -> PeerPath {
+    let now = Instant::now();
     let mut state = shared.state.lock().unwrap();
-    let (preferred_derp, expired_direct, expired_relay) = {
+    let (preferred_derp, expired_relay) = {
         let Some(peer_state) = state.peers_by_node.get_mut(peer.as_bytes()) else {
             return PeerPath::unknown();
         };
         let preferred_derp = peer_state.preferred_derp;
-        if let Some(endpoint) = peer_state.active_verified_endpoint() {
+        if let Some(endpoint) = peer_state.active_verified_endpoint(now) {
             return PeerPath::direct_udp(endpoint);
         }
-        let now = Instant::now();
         if let Some(endpoint) = peer_state.active_relay_endpoint(now) {
             return PeerPath::peer_relay(endpoint);
         }
@@ -616,15 +652,8 @@ pub(super) fn path_for_peer(shared: &Shared, peer: NodePublic) -> PeerPath {
         if expired_relay.is_some() {
             peer_state.relay_endpoint = None;
         }
-        let expired_direct = peer_state
-            .verified_endpoint
-            .take()
-            .map(|verified| verified.addr);
-        (preferred_derp, expired_direct, expired_relay)
+        (preferred_derp, expired_relay)
     };
-    if let Some(old) = expired_direct {
-        state.peers_by_endpoint.remove(&old);
-    }
     if expired_relay.is_some() {
         state.remove_relay_keys_for_peer(peer.as_bytes());
     }

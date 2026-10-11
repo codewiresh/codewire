@@ -369,14 +369,18 @@ fn public_only_drops_private_node_endpoints_and_unverifies_private_sources() {
         [public]
     );
     // A disco source on a private address never becomes the direct path.
-    state.verify_endpoint(*peer_node.as_bytes(), "192.168.1.20:41641".parse().unwrap());
+    state.verify_endpoint(
+        *peer_node.as_bytes(),
+        "192.168.1.20:41641".parse().unwrap(),
+        Instant::now(),
+    );
     assert!(state
         .peers_by_node
         .get(peer_node.as_bytes())
         .unwrap()
         .verified_endpoint
         .is_none());
-    state.verify_endpoint(*peer_node.as_bytes(), public);
+    state.verify_endpoint(*peer_node.as_bytes(), public, Instant::now());
     assert_eq!(
         state
             .peers_by_node
@@ -493,7 +497,7 @@ fn logged_while_verifying(endpoint: SocketAddr, level: tracing::Level) -> String
         .with_writer(move || writer.clone())
         .finish();
     tracing::subscriber::with_default(subscriber, || {
-        state.verify_endpoint(*peer_node.as_bytes(), endpoint);
+        state.verify_endpoint(*peer_node.as_bytes(), endpoint, Instant::now());
     });
     assert!(state
         .peers_by_node
