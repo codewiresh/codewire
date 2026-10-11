@@ -790,6 +790,7 @@ mod tests {
                     ingress_gid: unsafe { libc::getegid() },
                 }),
                 managed_credential_clients: Default::default(),
+                session_working_dir: None,
             };
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
             let server = tokio::spawn(async move {

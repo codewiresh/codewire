@@ -195,6 +195,8 @@ async fn db_the_live_binding_carries_the_environment_generation() -> Result<()> 
         // The binding's own generation, and the environment's current one
         // that peer tokens and host keys are bound to.
         ensure!(binding.operation_generation == 3 && binding.environment_generation == 5);
+        // The environment's declared working directory travels with it.
+        ensure!(binding.working_directory == "/workspace");
         set_generation(&db, 6).await?;
         let binding = store
             .live_binding(POD, NAMESPACE, &pod_name)

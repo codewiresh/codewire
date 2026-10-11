@@ -59,6 +59,7 @@ impl Fixture {
             managed_credential_clients: Default::default(),
             host: None,
             launch_projection: None,
+            session_working_dir: None,
         };
         let engine = SessionEngine::new(&config, CredentialBridge::new(None));
         let record = engine.launch(v1::LaunchSessionRequest {

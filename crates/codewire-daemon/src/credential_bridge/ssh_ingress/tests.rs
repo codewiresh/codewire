@@ -55,6 +55,7 @@ fn daemon_config(root: &Path) -> Config {
             selection_sha256: [1; 32],
             native: None,
         }),
+        session_working_dir: None,
     }
 }
 

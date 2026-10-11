@@ -686,6 +686,7 @@ mod tests {
             managed_credential_clients: Default::default(),
             host: None,
             launch_projection: None,
+            session_working_dir: None,
         };
         let service = Service {
             inner: Arc::new(Inner {
@@ -845,6 +846,7 @@ mod tests {
             managed_credential_clients: Default::default(),
             host: None,
             launch_projection: None,
+            session_working_dir: None,
         };
         // Only the in-memory admission predicate, not availability, Info,
         // original channel or actual provider launch, is under test here.

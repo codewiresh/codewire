@@ -46,6 +46,10 @@ pub struct Config {
     pub launch_projection: Option<LaunchProjectionConfig>,
     /// Explicit trusted-host placement. Guest defaults always leave this None.
     pub host: Option<HostConfig>,
+    /// Hosted only: where a session launched without a working directory
+    /// starts. Local and host daemons leave this None and keep their own
+    /// defaults.
+    pub session_working_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,6 +269,7 @@ impl HostedPlacement {
     fn into_config(self, auth_token: DaemonAuthToken) -> Config {
         Config {
             listen_addr: self.listen_addr,
+            session_working_dir: Some(self.workspace_root.clone()),
             workspace_root: self.workspace_root,
             home_root: self.home_root,
             auth_token,
@@ -367,6 +372,7 @@ pub struct BindResponseFields<'a> {
     pub daemon_credential: &'a str,
     pub projection_selection_sha256: &'a str,
     pub managed_credential_clients: &'a str,
+    pub working_directory: &'a str,
 }
 
 /// A bind response the daemon accepted. Its credential never appears in
@@ -378,6 +384,7 @@ pub struct WorkspaceBinding {
     daemon_credential: DaemonAuthToken,
     projection_selection_sha256: Option<[u8; 32]>,
     managed_credential_clients: ManagedCredentialClients,
+    working_directory: Option<PathBuf>,
 }
 
 impl fmt::Debug for WorkspaceBinding {
@@ -395,6 +402,7 @@ impl fmt::Debug for WorkspaceBinding {
                 "managed_credential_clients",
                 &self.managed_credential_clients.encode(),
             )
+            .field("working_directory", &self.working_directory)
             .finish()
     }
 }
@@ -492,6 +500,7 @@ impl WorkspaceBindingConfig {
             daemon_credential,
             projection_selection_sha256,
             managed_credential_clients,
+            working_directory: declared_working_directory(response.working_directory),
         })
     }
 
@@ -501,6 +510,9 @@ impl WorkspaceBindingConfig {
         let mut config = self
             .placement
             .into_config(binding.daemon_credential.clone());
+        if let Some(directory) = &binding.working_directory {
+            config.session_working_dir = Some(directory.clone());
+        }
         if let Some(selection_sha256) = binding.projection_selection_sha256 {
             config.apply_hosted_projection(
                 binding.environment_id,
@@ -511,6 +523,18 @@ impl WorkspaceBindingConfig {
         }
         config
     }
+}
+
+/// The environment's declared working directory, accepted only as a clean
+/// absolute path. Anything else is ignored rather than refusing the bind, so
+/// sessions fall back to the workspace root and the daemon still serves.
+fn declared_working_directory(value: &str) -> Option<PathBuf> {
+    const MAX_BYTES: usize = 4096;
+    if value.len() > MAX_BYTES || value.chars().any(char::is_control) {
+        return None;
+    }
+    let path = clean_path(Path::new(value));
+    (value.starts_with('/') && path.as_os_str() == value).then_some(path)
 }
 
 fn parse_selection_digest(digest: &str) -> Option<[u8; 32]> {
@@ -630,6 +654,8 @@ mod tests {
             managed_credential_clients: ManagedCredentialClients::default(),
             host: None,
             launch_projection: None,
+            // Hosted placement starts unlisted sessions in the workspace root.
+            session_working_dir: Some(DEFAULT_WORKSPACE_ROOT.into()),
         }
     }
 
@@ -925,6 +951,7 @@ mod tests {
             daemon_credential: SYNTHETIC_CREDENTIAL,
             projection_selection_sha256: "",
             managed_credential_clients: "v1:none",
+            working_directory: "",
         }
     }
 
@@ -1085,6 +1112,54 @@ mod tests {
             ManagedCredentialClients::default()
         );
         assert_eq!(served.process_execution, ProcessExecution::Native);
+    }
+
+    #[test]
+    fn a_bound_working_directory_becomes_the_session_default() {
+        let config = binding_config();
+        let declared = config
+            .validate(&BindResponseFields {
+                working_directory: "/workspace/app",
+                ..response()
+            })
+            .unwrap();
+        assert_eq!(
+            config.clone().into_config(&declared).session_working_dir,
+            Some(PathBuf::from("/workspace/app"))
+        );
+        // Anything but a clean absolute path falls back to the workspace
+        // root; it never refuses the bind.
+        for value in [
+            "",
+            "workspace/app",
+            "/workspace/../etc",
+            "/workspace/./app",
+            "/workspace/app/",
+            "/workspace/a\nb",
+            &format!("/{}", "a".repeat(4096)),
+        ] {
+            let binding = config
+                .validate(&BindResponseFields {
+                    working_directory: value,
+                    ..response()
+                })
+                .unwrap_or_else(|_| panic!("{value:?} refused the bind"));
+            assert_eq!(
+                config.clone().into_config(&binding).session_working_dir,
+                Some(PathBuf::from(DEFAULT_WORKSPACE_ROOT)),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn environment_token_placement_starts_sessions_in_the_workspace_root() {
+        let config =
+            Config::from_lookup(lookup_from(&[(DAEMON_AUTH_TOKEN_ENV, "synthetic")])).unwrap();
+        assert_eq!(
+            config.session_working_dir,
+            Some(PathBuf::from(DEFAULT_WORKSPACE_ROOT))
+        );
     }
 
     #[test]
@@ -1261,6 +1336,7 @@ mod tests {
             managed_credential_clients: ManagedCredentialClients::default(),
             host: None,
             launch_projection: None,
+            session_working_dir: None,
         };
 
         let debug = format!("{config:?}");

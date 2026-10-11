@@ -42,6 +42,7 @@ fn config() -> Config {
             selection_sha256: [7; 32],
             native: None,
         }),
+        session_working_dir: None,
     }
 }
 

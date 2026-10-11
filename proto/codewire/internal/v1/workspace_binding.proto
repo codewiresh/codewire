@@ -57,6 +57,9 @@ message BindWorkspaceResponse {
   string managed_credential_clients = 6;
   // The environment's tailnet and SSH access for this Pod.
   WorkspaceAccess access = 7;
+  // The environment's declared working directory, or empty. Sessions launched
+  // without a working directory start here when it exists.
+  string working_directory = 8;
 }
 
 // WorkspaceAccess is everything the bound daemon needs to serve its
