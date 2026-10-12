@@ -67,7 +67,7 @@ entry = {"tool": tool, "args": args, "cluster": os.environ.get("KIND_CLUSTER_NAM
          "watch_addr": os.environ.get("CODEWIRE_DASHBOARD_LISTEN_ADDR"),
          "skip_current": os.environ.get("KIND_DEPLOY_SKIP_CURRENT"),
          "crate": os.environ.get("KIND_DEV_CRATE"), "bins": os.environ.get("KIND_DEV_BIN"),
-         "features": os.environ.get("KIND_DEV_FEATURES")}
+         "features": os.environ.get("KIND_DEV_FEATURES"), "cwd": os.getcwd()}
 if tool == "docker" and args[:2] == ["buildx", "build"]:
     entry["dockerfile"] = sys.stdin.read()
 with (state / "calls").open("a") as log: log.write(json.dumps(entry) + "\n")
@@ -365,8 +365,9 @@ class DeveloperProfileTests(unittest.TestCase):
 
     def run_script(self, script: str, *args: str, timeout: int = 30, **environment: str) -> subprocess.CompletedProcess[str]:
         env = self.env | environment
+        # Started outside the tree, as from another worktree's directory.
         return subprocess.run(["bash", str(self.tree / "scripts/dev/kind" / script), *args],
-                              env=env, text=True, capture_output=True, timeout=timeout)
+                              env=env, text=True, capture_output=True, timeout=timeout, cwd=self.directory)
 
     def run_adapter(self, command: str, **environment: str) -> subprocess.CompletedProcess[str]:
         env = self.env | environment | {"FIXTURE_TREE": str(self.tree)}
@@ -797,7 +798,7 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         smokes, receipt = self.directory / "smokes", self.directory / "run" / "billing-contract-build.jsonl"
         result = subprocess.run(["bash", str(self.tree / "scripts/dev/kind/build-smokes.sh"), str(smokes), str(receipt)],
                                 env=self.env | {"CLUSTER": "", "KIND_CLUSTER_NAME": "codewire-ux-2099"} | environment,
-                                text=True, capture_output=True, timeout=30)
+                                text=True, capture_output=True, timeout=30, cwd=self.directory)
         return result, smokes, receipt
 
     @staticmethod
@@ -810,7 +811,8 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         result = self.run_script("deploy-service.sh", "idp", CLUSTER="", KIND_CLUSTER_NAME="codewire-ux-2099",
                                  FAKE_RECORDS=current_records("idp", daemon=IMAGE_ID))
         self.assertEqual(result.returncode, 0, result.stderr)
-        deploy, = [call["args"] for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]]
+        deploy_call, = [call for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]]
+        deploy = deploy_call["args"]
         self.calls_path.write_text("")
         result, smokes, receipt = self.run_smokes()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -820,7 +822,11 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         bakes = [call for call in self.calls("docker") if call["args"][:2] == ["buildx", "bake"]]
         self.assertEqual([(call["crate"], call["features"], call["bins"], self.bake_arg(call["args"], "KIND_DEV_EXAMPLES"),
                            self.bake_arg(call["args"], "KIND_DEV_TEST")) for call in bakes], self.SMOKE_BUILDS)
+        # Bake takes its build context from the working directory: both build
+        # this worktree's source, whatever directory they were started from.
+        self.assertEqual(deploy_call["cwd"], str(self.tree))
         for call in bakes:
+            self.assertEqual(call["cwd"], str(self.tree))
             # The deploy's builder and the worktree's own target: a smoke only
             # links what the deploy compiled and never another tree's crates.
             self.assertEqual(call["args"][call["args"].index("--builder") + 1],

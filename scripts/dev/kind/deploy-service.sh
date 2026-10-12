@@ -222,11 +222,13 @@ log "compiling ${crate} ${bin}${features:+ (features ${features})}${fixture:+ an
 out="$(mktemp -d "$STATE/out.XXXXXX")"
 trap 'rm -rf "$out"' EXIT
 tree="$(kind_dev_tree "$ROOT")"
-KIND_DEV_CRATE="$crate" KIND_DEV_BIN="$bin" KIND_DEV_FEATURES="$features" \
+# Bake resolves the build context against the working directory, not the bake
+# file: build this worktree's source into this worktree's target.
+(cd "$ROOT" && KIND_DEV_CRATE="$crate" KIND_DEV_BIN="$bin" KIND_DEV_FEATURES="$features" \
   docker buildx bake --builder "$BUILDER" --file "$ROOT/docker-bake.hcl" \
     --set "kind-dev-binary.args.KIND_DEV_TREE=${tree}" \
     --set "kind-dev-binary.args.KIND_DEV_FIXTURE_FEATURES=${fixture_features}" \
-    --set "kind-dev-binary.output=type=local,dest=${out}" kind-dev-binary
+    --set "kind-dev-binary.output=type=local,dest=${out}" kind-dev-binary)
 [ -x "$out/$bin" ] || die "the build produced no ${bin} binary"
 install -m 0755 "$out/$bin" "$STATE/bin/$bin"
 if [ -n "$fixture" ]; then

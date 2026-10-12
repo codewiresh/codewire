@@ -37,12 +37,13 @@ smoke() {
   local crate="$1" features="$2" bins="$3" examples="$4" test_name="$5" out
   out="$(mktemp -d "$work/out.XXXXXX")"
   log "building ${crate}${bins:+ ${bins}}${examples:+ examples ${examples}}${test_name:+ test ${test_name}}${features:+ (features ${features})}"
-  KIND_DEV_CRATE="$crate" KIND_DEV_BIN="$bins" KIND_DEV_FEATURES="$features" \
+  # Bake resolves the build context against the working directory.
+  (cd "$ROOT" && KIND_DEV_CRATE="$crate" KIND_DEV_BIN="$bins" KIND_DEV_FEATURES="$features" \
     docker buildx bake --builder "$BUILDER" --file "$ROOT/docker-bake.hcl" \
       --set "kind-dev-binary.args.KIND_DEV_TREE=${TREE}" \
       --set "kind-dev-binary.args.KIND_DEV_EXAMPLES=${examples}" \
       --set "kind-dev-binary.args.KIND_DEV_TEST=${test_name}" \
-      --set "kind-dev-binary.output=type=local,dest=${out}" kind-dev-binary
+      --set "kind-dev-binary.output=type=local,dest=${out}" kind-dev-binary)
   local name
   for name in $bins; do
     [ -x "$out/$name" ] || die "the build produced no ${name}"
