@@ -139,8 +139,11 @@ shellcheck_changed() {
   # owns them. The full ShellCheck domain runs in merge qualification.
   # shellcheck source=scripts/ci/verify/shellcheck-baseline.sh
   source "$ROOT/scripts/ci/verify/shellcheck-baseline.sh"
+  # The policy check analyzes each script together with every script it
+  # sources (check-shell-scripts.sh), so a variable a sourced file reads is
+  # used. Follow the sources here too; findings stay those of the changed files.
   # Status 1 means findings; anything else above 0 is a ShellCheck failure.
-  report="$(shellcheck --severity=warning --format=json1 "${shell_files[@]}")" || status=$?
+  report="$(shellcheck --external-sources --severity=warning --format=json1 "${shell_files[@]}")" || status=$?
   if [ "$status" -gt 1 ]; then
     echo "push-check: shellcheck failed with status $status" >&2
     return 1
@@ -161,7 +164,7 @@ shellcheck_changed() {
       | LC_ALL=C sort
   )"
   if [ "$findings" != "$expected" ]; then
-    shellcheck --severity=warning "${shell_files[@]}" || true
+    shellcheck --external-sources --severity=warning "${shell_files[@]}" || true
     printf 'push-check: ShellCheck findings differ from the reviewed baseline\n' >&2
     return 1
   fi

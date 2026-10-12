@@ -3612,6 +3612,7 @@ bash -n \
 
 "$ROOT/scripts/ci/tests/test-local-prepush-receipt.sh"
 "$ROOT/scripts/ci/tests/test-pre-push-worktree.sh"
+"$ROOT/scripts/ci/tests/test-push-check-shellcheck.sh"
 "$ROOT/scripts/ci/tests/test-emit-verification-matrices.sh"
 
 # Main CI runs queue one at a time and Forgejo keeps every queued run. A main
