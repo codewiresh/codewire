@@ -41,8 +41,10 @@ PRODUCERS = {
     "kind-daemon": "daemon",
     "kind-smokes": "smokes",
 }
+# A superseded main run builds no Kind producer; main's newer run does.
 PRODUCER_IF = (
     "${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' "
+    "&& needs.verification-selection.outputs.superseded != 'true' "
     "&& contains(needs.verification-selection.outputs.selection, '|kind|') }}"
 )
 KIND_STEP_IF = (

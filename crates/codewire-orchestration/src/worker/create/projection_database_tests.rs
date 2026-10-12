@@ -562,7 +562,7 @@ async fn database_capture_selects_the_anthropic_form_of_the_pinned_credential() 
         }
         ensure!(
             token_environment.get("ANTHROPIC_BASE_URL").map(String::as_str)
-                == Some("http://127.0.0.1:38081")
+                == Some("http://127.0.0.1:38081/_codewire/anthropic")
         );
 
         // The form follows the pinned revision, never the profile's current

@@ -12,7 +12,7 @@ fn request(method: &str, uri: &str, host: Option<&str>) -> Request<Body> {
 }
 
 #[test]
-fn closed_provider_families_preserve_exact_paths_and_queries() {
+fn provider_families_keep_provider_relative_paths_and_queries() {
     for (method, uri, host, slot, route, path, query) in [
         (
             "POST",
@@ -24,39 +24,66 @@ fn closed_provider_families_preserve_exact_paths_and_queries() {
             None,
         ),
         (
-            "POST",
-            "/v1/messages",
+            "GET",
+            "/v1/models?client_version=0.160.0",
             None,
-            "anthropic",
-            "anthropic-api",
-            "/messages",
+            "codex",
+            "openai-api",
+            "/models",
+            Some("client_version=0.160.0"),
+        ),
+        (
+            "POST",
+            "/_codewire/openai/v1/chat/completions",
+            None,
+            "openai",
+            "openai-api",
+            "/chat/completions",
             None,
         ),
         (
             "POST",
-            "/v1/messages?beta=true",
+            "/_codewire/anthropic/v1/messages",
+            None,
+            "anthropic",
+            "anthropic-api",
+            "/v1/messages",
+            None,
+        ),
+        (
+            "POST",
+            "/_codewire/anthropic/v1/messages?beta=true",
             Some("127.0.0.1:38081"),
             "anthropic",
             "anthropic-api",
-            "/messages",
+            "/v1/messages",
             Some("beta=true"),
         ),
         (
             "POST",
-            "/v1/messages/count_tokens?beta=true",
+            "/_codewire/anthropic/v1/messages/count_tokens?beta=true",
             Some("gateway.example"),
             "anthropic",
             "anthropic-api",
-            "/messages/count_tokens",
+            "/v1/messages/count_tokens",
             Some("beta=true"),
         ),
         (
-            "POST",
-            "/v1/messages/count_tokens",
+            "GET",
+            "/_codewire/anthropic/api/oauth/usage",
             Some("[::1]:38081"),
             "anthropic",
             "anthropic-api",
-            "/messages/count_tokens",
+            "/api/oauth/usage",
+            None,
+        ),
+        (
+            "DELETE",
+            "/_codewire/anthropic/v1/files/file%2Dabc",
+            None,
+            "anthropic",
+            "anthropic-api",
+            "/v1/files/file%2Dabc",
             None,
         ),
         (
@@ -182,15 +209,21 @@ async fn explicit_openai_prefix_selects_only_its_distinct_api_key_slot() {
         .await
         .unwrap();
     assert_eq!(codex.capability_slot, "codex");
-    for (method, uri, host) in [
-        ("GET", path.clone(), None),
-        ("POST", path.clone(), Some("api.github.com")),
-        ("POST", format!("{path}?query=x"), None),
+    for (method, uri) in [
+        ("GET", path.clone()),
+        ("POST", format!("{path}?query=x")),
         (
             "POST",
             format!("{MANAGED_OPENAI_API_PREFIX}/chat/completions"),
-            None,
         ),
+    ] {
+        let request = request(method, &uri, None);
+        let classified =
+            classify_http_request(request.method(), request.uri(), request.headers()).unwrap();
+        assert_eq!(classified.capability_slot, "openai", "{method} {uri}");
+    }
+    for (method, uri, host) in [
+        ("POST", path.clone(), Some("api.github.com")),
         (
             "POST",
             format!("{MANAGED_OPENAI_API_PREFIX}0/responses"),
@@ -209,23 +242,26 @@ async fn explicit_openai_prefix_selects_only_its_distinct_api_key_slot() {
 
 fn rejected_routes() -> Vec<(&'static str, &'static str, Option<&'static str>)> {
     vec![
-        ("GET", "/v1/responses", None),
-        ("GET", "/_codewire/openai/v1/responses", None),
-        ("POST", "/_codewire/openai/v1/responses?x=1", None),
+        // Provider families admit anything below their base path, so only
+        // paths outside every base, unsafe paths and GitHub hosts fail.
+        ("POST", "/", None),
+        ("GET", "/v2/models", None),
+        ("POST", "/messages", None),
+        ("POST", "/_codewire/anthropic0/v1/messages", None),
+        ("POST", "/_codewire/anthropic/v1/../messages", None),
+        ("POST", "/_codewire/anthropic/v1//messages", None),
+        ("POST", "/_codewire/openai/v10/responses", None),
         (
             "POST",
             "/_codewire/openai/v1/responses",
             Some("api.github.com"),
         ),
-        ("POST", "/_codewire/openai/v1/messages", None),
-        ("POST", "/v1/responses?x=1", None),
-        ("GET", "/v1/messages", None),
-        ("POST", "/v1/messages?beta=false", None),
-        ("POST", "/v1/messages?beta=true&beta=true", None),
-        ("POST", "/v1/messages?", None),
-        ("POST", "/v1/models", None),
         ("POST", "/v1/responses", Some("api.github.com")),
-        ("POST", "/v1/messages", Some("api.github.com")),
+        (
+            "POST",
+            "/_codewire/anthropic/v1/messages",
+            Some("api.github.com"),
+        ),
         (
             "POST",
             "/_codewire/github/owner/repo/git-upload-pack",
@@ -462,20 +498,20 @@ async fn active_bridge_emits_exact_provider_frames_and_preserves_body() {
         ),
         (
             "POST",
-            "/v1/messages?beta=true",
+            "/_codewire/anthropic/v1/messages?beta=true",
             None,
             "anthropic",
             "anthropic-api",
-            "/messages",
+            "/v1/messages",
             "beta=true",
         ),
         (
-            "POST",
-            "/v1/messages/count_tokens",
+            "GET",
+            "/_codewire/anthropic/api/oauth/usage",
             None,
             "anthropic",
             "anthropic-api",
-            "/messages/count_tokens",
+            "/api/oauth/usage",
             "",
         ),
         (
@@ -676,7 +712,7 @@ async fn newly_routed_requests_keep_existing_body_and_header_limits() {
     let bridge = CredentialBridge::new(Uuid::new_v4(), 7).unwrap();
     for (uri, host) in [
         ("/_codewire/openai/v1/responses", None),
-        ("/v1/messages", None),
+        ("/_codewire/anthropic/v1/messages", None),
         ("/graphql", Some("api.github.com")),
         ("/_codewire/github/owner/repo.git/git-upload-pack", None),
     ] {

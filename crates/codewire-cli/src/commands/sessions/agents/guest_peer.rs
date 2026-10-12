@@ -313,23 +313,25 @@ pub(crate) async fn run_agent_peer(args: AgentPeerArgs) -> anyhow::Result<()> {
     // signal follows the thread that forks it, and this thread outlives it.
     agent_peer(args, CUSTODY).map_err(|error| anyhow::anyhow!(bounded_error(&format!("{error:#}"))))
 }
+/// The platform guardian. `lockdown` is the managed login lockdown its
+/// provider gets over the environment this guardian inherited.
 pub(super) async fn run_platform_peer(
     args: AgentPeerArgs,
-    environment: Vec<(String, String)>,
+    lockdown: Vec<(String, String)>,
 ) -> anyhow::Result<()> {
-    agent_peer_projected(args, CUSTODY, Some(&environment))
+    agent_peer_locked(args, CUSTODY, Some(&lockdown))
         .map_err(|_| anyhow::anyhow!("platform guardian refused"))
 }
 
 /// Returns only after the family is reaped. A nonzero provider status exits
 /// this process with that status once the clean receipt is durable.
 fn agent_peer(args: AgentPeerArgs, custody: Custody) -> anyhow::Result<()> {
-    agent_peer_projected(args, custody, None)
+    agent_peer_locked(args, custody, None)
 }
-fn agent_peer_projected(
+fn agent_peer_locked(
     args: AgentPeerArgs,
     custody: Custody,
-    environment: Option<&[(String, String)]>,
+    lockdown: Option<&[(String, String)]>,
 ) -> anyhow::Result<()> {
     let mut guardian = Guardian::admit(&args, custody)?;
     if args.host_member_custody {
@@ -346,12 +348,10 @@ fn agent_peer_projected(
             return Err(io::Error::last_os_error().into());
         }
     }
-    let failure = match environment {
-        Some(values) => guardian.start_projected(&args.program, &args.arguments, Some(values)),
-        None => guardian.start(&args.program, &args.arguments),
-    }
-    .err()
-    .map(|error| bounded_error(&format!("{error:#}")));
+    let failure = guardian
+        .start(&args.program, &args.arguments, lockdown)
+        .err()
+        .map(|error| bounded_error(&format!("{error:#}")));
     let reason = match &failure {
         Some(failure) => format!("startup failed: {failure}"),
         None => guardian.monitor(),
@@ -441,14 +441,11 @@ impl Guardian {
     /// Everything that must hold before the provider exists, then the spawn.
     /// Under the instance lock an unclaimed receipt proves no earlier family,
     /// so a failure here is still finished only after `ECHILD`.
-    fn start(&mut self, program: &Path, arguments: &[String]) -> anyhow::Result<()> {
-        self.start_projected(program, arguments, None)
-    }
-    fn start_projected(
+    fn start(
         &mut self,
         program: &Path,
         arguments: &[String],
-        environment: Option<&[(String, String)]>,
+        lockdown: Option<&[(String, String)]>,
     ) -> anyhow::Result<()> {
         self.wake = Some(install_signal_handlers().context("install guardian signal handling")?);
         // Armed before the parent check: a driver exit in between still
@@ -473,7 +470,7 @@ impl Guardian {
             anyhow::bail!("guardian received {signal} before the provider started");
         }
         seal_inherited_descriptors().context("close private descriptors before the provider")?;
-        let pid = spawn_provider(program, arguments, environment)?;
+        let pid = spawn_provider(program, arguments, lockdown)?;
         self.provider_pid = Some(pid);
         self.receipt.provider_pid = Some(pid);
         self.persist();
@@ -740,21 +737,32 @@ impl Guardian {
     }
 }
 
-fn spawn_provider(
+/// The provider's command. Its environment is this guardian's own, which on
+/// every placement is the session environment the daemon built for the
+/// driver: nothing is cleared. A platform provider gets only its managed
+/// login lockdown set over it.
+pub(super) fn provider_command(
     program: &Path,
     arguments: &[String],
-    environment: Option<&[(String, String)]>,
-) -> anyhow::Result<u32> {
-    let guardian = std::process::id();
-    let platform = environment.is_some();
+    lockdown: Option<&[(String, String)]>,
+) -> std::process::Command {
     let mut command = std::process::Command::new(program);
     // Native stdin, stdout and stderr are inherited unchanged.
     command.args(arguments);
-    if let Some(environment) = environment {
-        command
-            .env_clear()
-            .envs(environment.iter().map(|(k, v)| (k, v)));
+    if let Some(lockdown) = lockdown {
+        command.envs(lockdown.iter().map(|(name, value)| (name, value)));
     }
+    command
+}
+
+fn spawn_provider(
+    program: &Path,
+    arguments: &[String],
+    lockdown: Option<&[(String, String)]>,
+) -> anyhow::Result<u32> {
+    let guardian = std::process::id();
+    let platform = lockdown.is_some();
+    let mut command = provider_command(program, arguments, lockdown);
     // SAFETY: the hook runs after fork and before exec. It calls only the
     // async-signal-safe prctl and getppid and allocates nothing.
     unsafe {
@@ -1308,6 +1316,9 @@ esac
         std::process::exit(match role.as_str() {
             "driver" => driver_role(serde_json::from_str(&spec).unwrap()),
             "guardian" => guardian_role(serde_json::from_str(&spec).unwrap()),
+            "provider-environment" => {
+                provider_environment_role(serde_json::from_str(&spec).unwrap())
+            }
             "fixture" => orphan_fixture_role(serde_json::from_str(&spec).unwrap()),
             _ => 2,
         });
@@ -2559,6 +2570,108 @@ esac
                 .contains(&std::process::id())
         );
         assert!(sentinel.alive());
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct ProviderEnvironmentSpec {
+        output: PathBuf,
+        lockdown: Option<Vec<(String, String)>>,
+    }
+
+    /// Stands in for a guardian: starts `env` through the provider command
+    /// and saves what that child saw.
+    fn provider_environment_role(spec: ProviderEnvironmentSpec) -> i32 {
+        let mut command =
+            provider_command(Path::new("/usr/bin/env"), &[], spec.lockdown.as_deref());
+        command
+            .stdin(Stdio::null())
+            .stdout(fs::File::create(&spec.output).unwrap());
+        command.status().unwrap().code().unwrap_or(1)
+    }
+
+    /// A provider's environment is its guardian's, which is the session
+    /// environment the daemon built and projected: nothing is cleared, so the
+    /// Git route, the SSH signer socket, declared values and a projected
+    /// application secret reach it exactly as they reach a session the user
+    /// starts. A platform provider gets only its lockdown set over that, and
+    /// when the session has no application secret the provider has none.
+    #[test]
+    fn provider_inherits_the_guardian_environment_with_only_the_lockdown_set_over_it() {
+        let work = tempfile::tempdir().unwrap();
+        let session = [
+            ("PATH", "/usr/bin:/bin"),
+            ("HOME", "/home/codewire"),
+            ("GIT_CONFIG_COUNT", "1"),
+            (
+                "GIT_CONFIG_KEY_0",
+                "url.http://127.0.0.1:38081/_codewire/github/.insteadOf",
+            ),
+            ("GIT_CONFIG_VALUE_0", "https://github.com/"),
+            ("SSH_AUTH_SOCK", "/codewire/run/ssh-agent.sock"),
+            ("CODEX_HOME", "/home/codewire/.codex"),
+            ("DECLARED", "by the project"),
+        ];
+        // What the launch projection adds when a secret source is selected.
+        let secret = ("DATABASE_URL", "synthetic-application-value");
+        let lockdown = vec![(
+            "CODEX_HOME".to_owned(),
+            "/synthetic/private/codex".to_owned(),
+        )];
+        let cases = [
+            (false, None),
+            (false, Some(lockdown.clone())),
+            (true, None),
+            (true, Some(lockdown)),
+        ];
+        for (index, (selected, lockdown)) in cases.into_iter().enumerate() {
+            let output = work.path().join(format!("environment-{index}"));
+            let mut command = role(
+                "provider-environment",
+                &ProviderEnvironmentSpec {
+                    output: output.clone(),
+                    lockdown: lockdown.clone(),
+                },
+            );
+            // The stand-in guardian runs in exactly the synthetic session
+            // environment plus the two names that select its role.
+            let selector: Vec<(String, String)> = command
+                .get_envs()
+                .map(|(name, value)| {
+                    (
+                        name.to_str().unwrap().to_owned(),
+                        value.unwrap().to_str().unwrap().to_owned(),
+                    )
+                })
+                .collect();
+            let session: Vec<(&str, &str)> = session
+                .into_iter()
+                .chain(selected.then_some(secret))
+                .collect();
+            command
+                .env_clear()
+                .envs(selector.iter().map(|(name, value)| (name, value)))
+                .envs(session.iter().copied());
+            assert!(command.status().unwrap().success());
+            let seen: BTreeMap<String, String> = fs::read_to_string(&output)
+                .unwrap()
+                .lines()
+                .map(|entry| {
+                    let (name, value) = entry.split_once('=').unwrap();
+                    (name.to_owned(), value.to_owned())
+                })
+                .collect();
+            let expected: BTreeMap<String, String> = session
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .chain(selector)
+                .chain(lockdown.unwrap_or_default())
+                .collect();
+            assert_eq!(seen, expected);
+            assert_eq!(
+                seen.get(secret.0).map(String::as_str),
+                selected.then_some(secret.1)
+            );
+        }
     }
 
     #[test]

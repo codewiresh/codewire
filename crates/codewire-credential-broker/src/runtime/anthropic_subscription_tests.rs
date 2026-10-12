@@ -143,7 +143,7 @@ fn request(request_id: Uuid) -> v1::CredentialBridgeRequest {
         capability_slot: "anthropic".into(),
         route: "anthropic-api".into(),
         method: "POST".into(),
-        path: "/messages".into(),
+        path: "/v1/messages".into(),
         query: "beta=true".into(),
         headers: vec![
             header("content-type", "application/json"),
@@ -224,7 +224,8 @@ async fn an_api_key_401_is_returned_unchanged_and_marks_nothing() {
     let (_, headers) = &requests[0];
     assert_eq!(headers["x-api-key"].as_bytes(), TOKEN);
     assert!(!headers.contains_key("authorization"));
-    assert!(!headers.contains_key("x-app"));
+    // The API-key form is transparent too: Claude Code's headers pass.
+    assert_eq!(headers["x-app"], "cli");
     assert_eq!(headers["anthropic-beta"], "claude-code-20250219");
     let (status, _, body) = response.into_parts();
     assert_eq!(status, StatusCode::UNAUTHORIZED);

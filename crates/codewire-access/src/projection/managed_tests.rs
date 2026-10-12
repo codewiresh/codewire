@@ -296,7 +296,10 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
         assert_eq!(
             anthropic.environment,
             BTreeMap::from([
-                ("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:38081".into()),
+                (
+                    "ANTHROPIC_BASE_URL".into(),
+                    "http://127.0.0.1:38081/_codewire/anthropic".into()
+                ),
                 ("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into()),
                 ("ANTHROPIC_API_KEY".into(), String::new()),
                 ("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new()),
@@ -315,6 +318,7 @@ fn managed_client_projection_is_selected_only_and_same_route_in_both_placements(
     }
     assert_eq!(MANAGED_HTTP_PORT, 38_081);
     assert_eq!(MANAGED_OPENAI_API_PREFIX, "/_codewire/openai/v1");
+    assert_eq!(MANAGED_ANTHROPIC_API_PREFIX, "/_codewire/anthropic");
     assert_eq!(MANAGED_GITHUB_GIT_PREFIX, "/_codewire/github/");
     assert_eq!(CODEX_NATIVE_HOME, "/run/codewire-agent/codex");
     assert_eq!(SSH_NATIVE_AUTH_SOCK, "/run/codewire-host/ssh-agent.sock");
@@ -496,7 +500,10 @@ fn anthropic_subscription_projection_is_the_exact_claude_code_oauth_placeholder(
         assert_eq!(
             projection.environment,
             BTreeMap::from([
-                ("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:38081".into()),
+                (
+                    "ANTHROPIC_BASE_URL".into(),
+                    "http://127.0.0.1:38081/_codewire/anthropic".into()
+                ),
                 ("CLAUDE_CODE_OAUTH_TOKEN".into(), "codewire-managed".into()),
                 ("ANTHROPIC_AUTH_TOKEN".into(), String::new()),
                 ("ANTHROPIC_API_KEY".into(), String::new()),
@@ -506,7 +513,10 @@ fn anthropic_subscription_projection_is_the_exact_claude_code_oauth_placeholder(
         assert_eq!(
             clients(&["anthropic"]).for_placement(placement).environment,
             BTreeMap::from([
-                ("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:38081".into()),
+                (
+                    "ANTHROPIC_BASE_URL".into(),
+                    "http://127.0.0.1:38081/_codewire/anthropic".into()
+                ),
                 ("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into()),
                 ("ANTHROPIC_API_KEY".into(), String::new()),
                 ("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new()),
@@ -553,4 +563,80 @@ fn a_declared_git_configuration_is_refused_while_github_is_selected() {
         github.check_collisions(["GIT_CONFIG_KEY_1", "GIT_AUTHOR_NAME"]),
         Ok(())
     );
+}
+
+/// Every managed HTTP route is the workspace's loopback ingress, so a proxy
+/// the user declares must never receive those requests. The exemption list is
+/// extended, never replaced, and only while an HTTP client is selected.
+#[test]
+fn a_declared_proxy_is_bypassed_for_loopback_while_an_http_client_is_selected() {
+    assert_eq!(MANAGED_NO_PROXY, ["127.0.0.1", "localhost", "::1"]);
+    assert_eq!(NO_PROXY_NAMES, ["NO_PROXY", "no_proxy"]);
+    for slots in [
+        &["codex"][..],
+        &["openai"],
+        &["anthropic"],
+        &["github"],
+        &["ssh", "github"],
+        &["codex", "openai", "anthropic", "ssh", "github"],
+    ] {
+        let selected = clients(slots);
+        assert!(selected.uses_loopback_http(), "{slots:?}");
+        // Nothing declared: exactly the loopback destinations.
+        for empty in [None, Some("")] {
+            assert_eq!(
+                selected.no_proxy(empty).as_deref(),
+                Some("127.0.0.1,localhost,::1"),
+                "{slots:?}"
+            );
+        }
+        // A declared list keeps its entries, as written and in order.
+        assert_eq!(
+            selected
+                .no_proxy(Some("corp.example, 10.0.0.0/8,.internal"))
+                .as_deref(),
+            Some("corp.example, 10.0.0.0/8,.internal,127.0.0.1,localhost,::1")
+        );
+        // An entry already listed is not repeated, whatever its case.
+        assert_eq!(
+            selected
+                .no_proxy(Some("LOCALHOST,corp.example,127.0.0.1"))
+                .as_deref(),
+            Some("LOCALHOST,corp.example,127.0.0.1,::1")
+        );
+        assert_eq!(
+            selected.no_proxy(Some("*")).as_deref(),
+            Some("*,127.0.0.1,localhost,::1")
+        );
+        assert_eq!(
+            selected.no_proxy(Some("corp.example,")).as_deref(),
+            Some("corp.example,127.0.0.1,localhost,::1")
+        );
+        // Applying it again changes nothing.
+        let once = selected.no_proxy(Some("corp.example")).unwrap();
+        assert_eq!(selected.no_proxy(Some(&once)), Some(once));
+    }
+    // SSH alone, or nothing, uses no HTTP route: the value is the caller's.
+    for slots in [&[][..], &["ssh"]] {
+        let selected = clients(slots);
+        assert!(!selected.uses_loopback_http());
+        assert_eq!(selected.no_proxy(None), None);
+        assert_eq!(
+            selected.no_proxy(Some("corp.example")).as_deref(),
+            Some("corp.example")
+        );
+    }
+    // The names are not reserved and not part of the projected variables:
+    // a declared list is extended by each placement's environment builder.
+    let all = clients(&["codex", "openai", "anthropic", "ssh", "github"]);
+    assert_eq!(all.check_collisions(NO_PROXY_NAMES), Ok(()));
+    for placement in [
+        ManagedCredentialClientPlacement::Native,
+        ManagedCredentialClientPlacement::Platform,
+    ] {
+        let projection = all.for_placement(placement);
+        for name in NO_PROXY_NAMES {
+            assert!(!projection.environment.contains_key(name));
+        }
+    }
 }

@@ -179,7 +179,8 @@ workspace_cache_layer_args() {
   if [[ "$layer_cache_mode" == disabled ]]; then
     layer_args+=(--no-cache)
   else
-    [[ "$target" != workspace ]] || layer_args+=(--no-cache-filter workspace-floating-tools)
+    [[ "$target" != workspace ]] || layer_args+=(--no-cache-filter workspace-floating-tools
+      --no-cache-filter workspace-floating-go)
   fi
   if [[ "$layer_cache_mode" == r2 ]]; then
     common="type=s3,bucket=$WORKSPACE_CACHE_BUCKET,region=auto,endpoint_url=$WORKSPACE_CACHE_ENDPOINT,use_path_style=true,prefix=$WORKSPACE_CACHE_PREFIX"

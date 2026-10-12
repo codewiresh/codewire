@@ -103,4 +103,41 @@ if VERIFICATION_SELECTION='|valid:v3|complete|' \
   exit 1
 fi
 
+# A superseded main commit dispatches nothing, whatever it selected; the same
+# selection on main's tip (or with the input unset) dispatches as before.
+all_groups=(policy standard tooling rust_transport database services_control
+  services_runtime edge_kind cw_release_assets workspace_image)
+everything='|valid:v3|future_capability|complete|'
+superseded_emit() {
+  local superseded="$1" output="$TMP/superseded-output"
+  : > "$output"
+  VERIFICATION_SUPERSEDED="$superseded" \
+    VERIFICATION_SELECTION="$everything" \
+    VERIFICATION_TESTED_TREE_RECEIPT=fallback \
+    CW_PACKAGE_SELECTED=true \
+    DESKTOP_PACKAGE_SELECTED=true \
+    WORKSPACE_IMAGE_SELECTED=true \
+    GITHUB_OUTPUT="$output" \
+    "$CHECK" 2>/dev/null || return 1
+  cat "$output"
+}
+superseded_output="$(superseded_emit true)"
+for group in "${all_groups[@]}"; do
+  assert_output "$superseded_output" "$group" false
+done
+tip_output="$(superseded_emit false)"
+for group in "${all_groups[@]}"; do
+  assert_output "$tip_output" "$group" true
+done
+[[ "$tip_output" == "$(emit "$everything" fallback true true true 2>/dev/null)" ]] || {
+  echo 'an unset supersession dispatches differently from main'"'"'s tip' >&2
+  exit 1
+}
+for invalid in yes 1 TRUE; do
+  if superseded_emit "$invalid" >/dev/null; then
+    echo "matrix selector accepted supersession ${invalid}" >&2
+    exit 1
+  fi
+done
+
 echo '[test-emit-verification-matrices] trusted capability expectation contract passed'

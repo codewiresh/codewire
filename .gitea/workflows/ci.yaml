@@ -82,6 +82,8 @@ jobs:
       edge_kind_expected: ${{ steps.dispatch.outputs.edge_kind_expected }}
       cw_release_assets_expected: ${{ steps.dispatch.outputs.cw_release_assets_expected }}
       workspace_image_expected: ${{ steps.dispatch.outputs.workspace_image_expected }}
+      superseded: ${{ steps.superseded.outputs.superseded }}
+      superseded_by: ${{ steps.superseded.outputs.superseded_by }}
       workspace_cache_experiment: ${{ steps.cache-experiment.outputs.workspace_cache_experiment }}
       workspace_cache_measurement_matrix: ${{ steps.cache-experiment.outputs.workspace_cache_measurement_matrix }}
       kind_workspace_source: ${{ steps.kind-workspace.outputs.kind_workspace_source }}
@@ -182,9 +184,43 @@ jobs:
           fi
           "$receipt_checker"
 
+      # Main runs queue one at a time and Forgejo keeps every queued run. A
+      # main push that starts after main moved on runs this selection, records
+      # which commit superseded it, and dispatches no capability group: the
+      # newer commit's run, queued behind it, verifies the cumulative change.
+      # The run for main's tip always verifies everything selected, and a run
+      # that has started its groups is never stopped.
+      - name: Skip a superseded main commit
+        id: superseded
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != push ] || [ "$EVENT_REF" != refs/heads/main ]; then
+            echo 'superseded=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          canonical_main_sha="$(
+            git ls-remote origin refs/heads/main |
+              awk '$2 == "refs/heads/main" { print $1 }'
+          )"
+          [[ "$canonical_main_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$canonical_main_sha" == "$GITHUB_SHA" ]]; then
+            echo 'superseded=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf 'superseded=true\nsuperseded_by=%s\n' "$canonical_main_sha" >> "$GITHUB_OUTPUT"
+          message="superseded by ${canonical_main_sha}: main's queued run verifies this commit's changes"
+          echo "$message"
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            echo "$message" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Emit trusted capability dispatch decisions
         id: dispatch
         env:
+          VERIFICATION_SUPERSEDED: ${{ steps.superseded.outputs.superseded }}
           VERIFICATION_SELECTION: ${{ steps.select.outputs.selection }}
           VERIFICATION_TESTED_TREE_RECEIPT: ${{ steps.receipt.outputs.tested_tree_receipt }}
           CW_PACKAGE_SELECTED: ${{ steps.select.outputs.cw_package_selected }}
@@ -1583,7 +1619,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 55
     needs: [verification-selection]
-    if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
+    if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.superseded != 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
     outputs:
       artifact_name: ${{ steps.export.outputs.artifact_name }}
       manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}
@@ -1690,7 +1726,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 35
     needs: [verification-selection]
-    if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
+    if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.superseded != 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
     outputs:
       artifact_name: ${{ steps.export.outputs.artifact_name }}
       manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}
@@ -1842,7 +1878,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 35
     needs: [verification-selection]
-    if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
+    if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.superseded != 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
     outputs:
       artifact_name: ${{ steps.export.outputs.artifact_name }}
       manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}

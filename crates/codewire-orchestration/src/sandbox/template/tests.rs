@@ -394,6 +394,7 @@ mod tests {
                 CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
             );
             assert_eq!(spec["automountServiceAccountToken"], false);
+            assert_eq!(spec["enableServiceLinks"], false);
             let volume = spec["volumes"]
                 .as_array()
                 .unwrap()
@@ -697,6 +698,101 @@ mod tests {
         assert_eq!(value("CODEWIRE_GATEWAY_TOKEN"), None);
     }
 
+    /// Every variable the workspace container is given is in the workspace
+    /// daemon's own environment, and the daemon passes that environment on to
+    /// every session, command and managed agent, except the names it treats
+    /// as internal. So each rendered name is listed here on purpose: a new
+    /// one fails this test until the daemon filters it or it is accepted as
+    /// visible to everything that runs in the Sandbox.
+    #[test]
+    fn workspace_environment_names_are_an_explicit_child_visible_list() {
+        use std::collections::BTreeSet;
+
+        use codewire_access::{ManagedCredentialClientPlacement, ManagedCredentialClients};
+        const CHILD_VISIBLE: [&str; 9] = [
+            "CODEWIRE_ENVIRONMENT_ID",
+            "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
+            "CODEWIRE_ENVIRONMENT_PROJECTION_SHA256",
+            "CODEWIRE_POD_UID",
+            "CODEWIRE_WORKSPACE_BINDING_URL",
+            "CODEWIRE_WORKSPACE_SHIM_ADDR",
+            "DOCKER_HOST",
+            "HOME",
+            "USER",
+        ];
+        const DAEMON_ONLY: [&str; 2] = [
+            "CODEWIRE_DAEMON_AUTH_TOKEN",
+            "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS",
+        ];
+        let all = ManagedCredentialClients::from_profile_slots([
+            "codex",
+            "openai",
+            "anthropic",
+            "ssh",
+            "github",
+        ])
+        .unwrap();
+        // The managed client projection is child-visible by design; its exact
+        // names and values are pinned in codewire-access.
+        let projected: BTreeSet<String> = all
+            .for_placement(ManagedCredentialClientPlacement::Platform)
+            .environment
+            .into_keys()
+            .collect();
+        let selected = TemplateOpts {
+            managed_credential_clients: all,
+            ..credential_opts()
+        };
+        let binding = TemplateOpts {
+            managed_credential_clients: all,
+            ..identity_free_opts()
+        };
+        let mut visible = BTreeSet::new();
+        let mut daemon_only = BTreeSet::new();
+        // Both identity modes, with and without a selection, on every
+        // runtime profile: whatever a workspace container can be given.
+        for opts in [commodity_opts(), credential_opts(), selected, binding] {
+            for profile in [
+                RUNTIME_PROFILE_COMMODITY,
+                RUNTIME_PROFILE_CONFIDENTIAL,
+                RUNTIME_PROFILE_RUNC,
+            ] {
+                let opts = TemplateOpts {
+                    runtime_profile: profile.into(),
+                    ..opts.clone()
+                };
+                let rendered = render_sandbox_template("dev-sandboxes", &opts);
+                let workspace = &rendered["spec"]["podTemplate"]["spec"]["containers"][0];
+                assert_eq!(workspace["name"], "workspace");
+                for entry in workspace["env"].as_array().unwrap() {
+                    let name = entry["name"].as_str().unwrap();
+                    if projected.contains(name) {
+                        continue;
+                    }
+                    if codewire_daemon::env::is_internal_environment_name(name) {
+                        daemon_only.insert(name.to_owned());
+                    } else {
+                        visible.insert(name.to_owned());
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            daemon_only,
+            DAEMON_ONLY.into_iter().map(str::to_owned).collect()
+        );
+        assert_eq!(
+            visible,
+            CHILD_VISIBLE.into_iter().map(str::to_owned).collect()
+        );
+        // No listed child-visible name is a credential or a capability: the
+        // daemon token and the client selection are the daemon-only ones.
+        for name in CHILD_VISIBLE {
+            assert!(!codewire_daemon::env::is_internal_environment_name(name));
+            assert!(!name.contains("TOKEN") && !name.contains("SECRET") && !name.contains("KEY"));
+        }
+    }
+
     #[test]
     fn extracted_template_modules_keep_one_way_dependencies() {
         let leaves = [
@@ -975,6 +1071,17 @@ mod tests {
         assert!(bootstrap.contains("chown 1000:1000 \"$codewire_dir\""));
         assert!(bootstrap.contains("chmod 0755 \"$codewire_dir\""));
         assert!(!bootstrap.contains("0775"));
+        // The bootstrap stored Sandboxes carry from before 531fc0f7e differs
+        // only in that mode; Start and Pod replacement re-render it (#2639).
+        assert_eq!(
+            LEGACY_DIND_BOOTSTRAP_SCRIPT.replace(
+                "chmod 0775 \"$codewire_dir\"",
+                "# Owner-writable only: the workspace daemon refuses a group- or\n\
+                 # world-writable ancestor of its platform session store.\n\
+                 chmod 0755 \"$codewire_dir\""
+            ),
+            bootstrap
+        );
         assert!(bootstrap.contains("--data-root \"$data_root\""));
         assert!(bootstrap.contains("--storage-driver vfs"));
         assert!(dind["env"].as_array().unwrap().iter().any(|env| {
@@ -2545,6 +2652,9 @@ mod tests {
         );
         assert_eq!(volume["projected"]["defaultMode"], 0o440);
         assert_eq!(spec["automountServiceAccountToken"], false);
+        // No other environment's Service reaches workspace processes as
+        // `*_SERVICE_HOST` variables.
+        assert_eq!(spec["enableServiceLinks"], false);
         for container in spec["containers"]
             .as_array()
             .unwrap()
