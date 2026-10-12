@@ -14,7 +14,9 @@ fail() {
   exit 1
 }
 
-install -d "$HOME/.cache"
+# mkdir, not install -d: install would reset the mode of an existing shared
+# directory that checks running beside this one hold open.
+mkdir -p "$HOME/.cache"
 work="$(mktemp -d "$HOME/.cache/codewire-prod-dispatch-test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/capture" "$work/runner"
