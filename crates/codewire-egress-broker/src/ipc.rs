@@ -37,7 +37,7 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, timeout, timeout_at};
 use uuid::Uuid;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{
     BrokerAdapterFailure, BrokerClock, BrokerDnsResponse, BrokerError, DnsRecordFamily,
@@ -59,9 +59,11 @@ const FRAME_MAX_LEN: usize = FRAME_HEADER_LEN + FRAME_MAX_PAYLOAD_LEN + FRAME_TA
 const FRAME_DOMAIN: &[u8] = b"codewire.egress-broker-ipc/v1\0";
 const DESCRIPTOR_MARKER: u8 = b'F';
 // Queue admission cannot consume the adapter's transaction budget. The latter
-// includes the production DNS/TCP deadline plus IPC and descriptor delivery.
+// includes the production DNS/TCP deadline plus IPC and descriptor delivery,
+// with a margin: a transaction that outlives it fails its session, which ends
+// the broker.
 const BROKER_IPC_QUEUE_TIMEOUT: Duration = Duration::from_secs(2);
-const BROKER_IPC_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(6);
+const BROKER_IPC_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Sessions that resolve DNS, so at most this many upstream lookups run at
 /// once. A guest name lookup is an A and an AAAA query sent together, so four
@@ -178,9 +180,13 @@ impl BrokerIpcKey {
                 HmacSha256::new_from_slice(bytes).map_err(|_| BrokerIpcError::InvalidKey)?;
             mac.update(SESSION_KEY_DOMAIN);
             mac.update(&[index]);
-            let mut derived = Zeroizing::new([0_u8; BROKER_IPC_KEY_LEN]);
-            derived.copy_from_slice(&mac.finalize().into_bytes());
-            Self::from_bytes(*derived)
+            let mut output: [u8; BROKER_IPC_KEY_LEN] = mac.finalize().into_bytes().into();
+            let derived = Zeroizing::new(output);
+            output.zeroize();
+            if derived.iter().all(|byte| *byte == 0) {
+                return Err(BrokerIpcError::InvalidKey);
+            }
+            Ok(Self(derived))
         })
     }
 }
@@ -452,16 +458,17 @@ impl BrokerIpcClient {
         // The descriptor is part of this operation, not the next frame. A
         // cancelled receive must never leave it for a subsequent request.
         state.failed = true;
-        let received = timeout_at(
-            deadline,
-            receive_connected_descriptor(&state.stream, destination),
-        )
-        .await;
-        match received.unwrap_or(Err(BrokerIpcError::FrameIo)) {
-            Ok(descriptor) => {
-                state.failed = false;
-                Ok(descriptor)
-            }
+        let descriptor = timeout_at(deadline, receive_descriptor(&state.stream))
+            .await
+            .unwrap_or(Err(BrokerIpcError::FrameIo))?;
+        // The marker and its one descriptor are read: the session is in step
+        // again, whatever the connection itself turns out to be.
+        state.failed = false;
+        match admit_connected_descriptor(descriptor, destination) {
+            Ok(descriptor) => Ok(descriptor),
+            // The connection closed or reset after the broker's handshake:
+            // this request fails, the session carries on (#2638).
+            Err(BrokerIpcError::RemoteUnavailable) => Err(BrokerIpcError::RemoteUnavailable),
             Err(error) => {
                 state.failed = true;
                 Err(error)
@@ -1163,10 +1170,8 @@ async fn send_connected_descriptor(
     }
 }
 
-async fn receive_connected_descriptor(
-    stream: &UnixStream,
-    expected_peer: SocketAddr,
-) -> Result<OwnedFd, BrokerIpcError> {
+/// Read the descriptor marker and exactly one untruncated descriptor.
+async fn receive_descriptor(stream: &UnixStream) -> Result<OwnedFd, BrokerIpcError> {
     let mut marker = [0_u8; 1];
     let descriptors = loop {
         stream
@@ -1209,10 +1214,20 @@ async fn receive_connected_descriptor(
     if descriptors.len() != 1 {
         return Err(BrokerIpcError::DescriptorInvalid);
     }
-    let descriptor = descriptors
+    descriptors
         .into_iter()
         .next()
-        .ok_or(BrokerIpcError::DescriptorMissing)?;
+        .ok_or(BrokerIpcError::DescriptorMissing)
+}
+
+/// Accept a received descriptor only as a TCP stream connected to exactly
+/// `expected_peer`. A connection the peer already closed or reset is
+/// `RemoteUnavailable`, an ordinary failed connect; any other socket, or a
+/// different peer, is `DescriptorInvalid`.
+fn admit_connected_descriptor(
+    descriptor: OwnedFd,
+    expected_peer: SocketAddr,
+) -> Result<OwnedFd, BrokerIpcError> {
     fcntl_setfd(&descriptor, FdFlags::CLOEXEC).map_err(|_| BrokerIpcError::DescriptorInvalid)?;
     if rustix::net::sockopt::socket_type(&descriptor)
         .map_err(|_| BrokerIpcError::DescriptorInvalid)?
@@ -1221,17 +1236,23 @@ async fn receive_connected_descriptor(
         return Err(BrokerIpcError::DescriptorInvalid);
     }
     let connected = StdTcpStream::from(descriptor);
-    connected
-        .nodelay()
-        .map_err(|_| BrokerIpcError::DescriptorInvalid)?;
-    connected
-        .set_nonblocking(true)
-        .map_err(|_| BrokerIpcError::DescriptorInvalid)?;
-    if connected
-        .peer_addr()
-        .map_err(|_| BrokerIpcError::DescriptorInvalid)?
-        != expected_peer
-    {
+    let gone = |error: io::Error| match error.raw_os_error() {
+        Some(libc_errno)
+            if [
+                rustix::io::Errno::NOTCONN,
+                rustix::io::Errno::CONNRESET,
+                rustix::io::Errno::INVAL,
+            ]
+            .iter()
+            .any(|errno| errno.raw_os_error() == libc_errno) =>
+        {
+            BrokerIpcError::RemoteUnavailable
+        }
+        _ => BrokerIpcError::DescriptorInvalid,
+    };
+    connected.nodelay().map_err(gone)?;
+    connected.set_nonblocking(true).map_err(gone)?;
+    if connected.peer_addr().map_err(gone)? != expected_peer {
         return Err(BrokerIpcError::DescriptorInvalid);
     }
     Ok(OwnedFd::from(connected))
@@ -1315,8 +1336,9 @@ mod tests {
     #[test]
     fn transaction_deadline_exceeds_production_adapter_deadlines() {
         use crate::adapters::{SYSTEM_DNS_QUERY_TIMEOUT, SYSTEM_TCP_CONNECT_TIMEOUT};
-        assert!(BROKER_IPC_TRANSACTION_TIMEOUT > SYSTEM_DNS_QUERY_TIMEOUT);
-        assert!(BROKER_IPC_TRANSACTION_TIMEOUT > SYSTEM_TCP_CONNECT_TIMEOUT);
+        let margin = Duration::from_secs(3);
+        assert!(BROKER_IPC_TRANSACTION_TIMEOUT >= SYSTEM_DNS_QUERY_TIMEOUT + margin);
+        assert!(BROKER_IPC_TRANSACTION_TIMEOUT >= SYSTEM_TCP_CONNECT_TIMEOUT + margin);
     }
 
     const KEY_BYTES: [u8; BROKER_IPC_KEY_LEN] = [0x5a; BROKER_IPC_KEY_LEN];
@@ -1605,8 +1627,12 @@ rules:
         );
     }
 
+    /// A request cancelled mid-flight leaves its session out of step, so the
+    /// session is retired, and the broker, finding it closed, ends every
+    /// session: the environment fails closed rather than lose a session
+    /// silently.
     #[tokio::test]
-    async fn cancelling_an_in_flight_dns_request_retires_only_its_session() {
+    async fn cancelling_an_in_flight_request_retires_its_session_and_ends_the_broker() {
         let policy = named_policy();
         let binding = binding(&policy);
         let resolver = Arc::new(BlockingResolver::default());
@@ -1632,20 +1658,22 @@ rules:
             }
         }
         // The cancelled session may hold an unread response, so it is never
-        // reused; the other DNS sessions still answer.
+        // reused.
         assert_eq!(client.dns.len(), BROKER_IPC_DNS_SESSIONS - 1);
+        resolver.release.notify_one();
         assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("the broker kept serving without the retired session")
+                .unwrap(),
+            Err(BrokerIpcError::FrameIo)
+        );
+        assert!(
             client
                 .resolve_dns("denied.example.com", DnsRecordFamily::Ipv4)
-                .await,
-            Err(BrokerIpcError::Denied)
+                .await
+                .is_err()
         );
-        resolver.release.notify_one();
-        drop(client);
-        let _ = tokio::time::timeout(Duration::from_secs(2), server)
-            .await
-            .expect("server did not close")
-            .unwrap();
     }
 
     /// Every session of a class checked out, as if each were in flight.
@@ -2027,37 +2055,52 @@ rules:
         drop(server_streams);
     }
 
+    /// An authenticated frame replayed on its own session, of any class, is
+    /// out of sequence and ends the broker.
     #[tokio::test]
     async fn authenticated_replay_terminates_the_server_session() {
-        let policy = CompiledPolicy::developer_baseline();
-        let binding = binding(&policy);
-        let broker = Arc::new(PolicyEgressBroker::new(
-            policy,
-            RouteClass::General,
-            Arc::new(FakeResolver::new([])),
-            Arc::new(NoConnector::default()),
-            Arc::new(FakeClock::default()),
-        ));
-        let (mut clients, server_streams) = session_pairs();
-        let server = tokio::spawn(serve_broker_ipc(server_streams, binding, key(), broker));
-        let client = &mut clients[0];
-        let payload =
-            encode_tcp_request(OP_AUTHORIZE_TCP, SocketAddr::new(PUBLIC_V4, 443)).unwrap();
-        let replay =
-            encode_frame(FRAME_KIND_REQUEST, 1, binding, &session_key(0), &payload).unwrap();
-        client.write_all(&replay).await.unwrap();
-        let response = read_frame(client, FRAME_KIND_RESPONSE, 1, binding, &session_key(0))
-            .await
+        let destination = SocketAddr::new(PUBLIC_V4, 443);
+        let requests = [
+            (
+                0,
+                encode_tcp_request(OP_AUTHORIZE_TCP, destination).unwrap(),
+            ),
+            (
+                FIRST_DNS,
+                encode_dns_request("example.com", DnsRecordFamily::Ipv4).unwrap(),
+            ),
+            (
+                FIRST_CONNECT,
+                encode_tcp_request(OP_CONNECT_TCP, destination).unwrap(),
+            ),
+        ];
+        for (index, payload) in requests {
+            let (binding, broker) = developer_broker(Arc::default());
+            let (mut clients, server_streams) = session_pairs();
+            let server = tokio::spawn(serve_broker_ipc(server_streams, binding, key(), broker));
+            let client = &mut clients[index];
+            let replay = encode_frame(
+                FRAME_KIND_REQUEST,
+                1,
+                binding,
+                &session_key(index),
+                &payload,
+            )
             .unwrap();
-        assert_eq!(response, [OP_AUTHORIZE_TCP, STATUS_OK]);
-        client.write_all(&replay).await.unwrap();
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(2), server)
+            client.write_all(&replay).await.unwrap();
+            read_frame(client, FRAME_KIND_RESPONSE, 1, binding, &session_key(index))
                 .await
-                .expect("server did not reject replay")
-                .unwrap(),
-            Err(BrokerIpcError::SequenceMismatch)
-        );
+                .unwrap();
+            client.write_all(&replay).await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), server)
+                    .await
+                    .expect("server did not reject replay")
+                    .unwrap(),
+                Err(BrokerIpcError::SequenceMismatch),
+                "session {index}"
+            );
+        }
     }
 
     #[test]
@@ -2151,6 +2194,10 @@ rules:
             (
                 FIRST_DNS,
                 encode_tcp_request(OP_CONNECT_TCP, destination).unwrap(),
+            ),
+            (
+                FIRST_DNS,
+                encode_tcp_request(OP_AUTHORIZE_TCP, destination).unwrap(),
             ),
             (
                 FIRST_CONNECT,
@@ -2375,6 +2422,81 @@ rules:
             assert_eq!(result.unwrap(), Err(BrokerIpcError::RemoteUnavailable));
         }
         assert_eq!(client.connect.len(), BROKER_IPC_CONNECT_SESSIONS);
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server did not close");
+    }
+
+    /// Connects to a local listener that resets each connection as soon as
+    /// it is accepted, as a server that closes right after the handshake.
+    struct ResettingConnector {
+        listener: TcpListener,
+    }
+
+    #[async_trait]
+    impl TcpConnector for ResettingConnector {
+        type Stream = StdTcpStream;
+
+        async fn connect(
+            &self,
+            _destination: SocketAddr,
+        ) -> Result<Self::Stream, BrokerAdapterFailure> {
+            let connected = StdTcpStream::connect(self.listener.local_addr().unwrap()).unwrap();
+            let (accepted, _) = self.listener.accept().unwrap();
+            rustix::net::sockopt::set_socket_linger(&accepted, Some(Duration::ZERO)).unwrap();
+            drop(accepted);
+            // Wait until the reset has arrived.
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while connected.peer_addr().is_ok() {
+                assert!(std::time::Instant::now() < deadline, "no reset arrived");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(connected)
+        }
+    }
+
+    /// #2638 review: a connection the server resets right after the
+    /// handshake fails only its own request. Its session, and every other,
+    /// carries on, and the broker keeps serving.
+    #[tokio::test]
+    async fn a_connection_reset_after_the_handshake_fails_only_its_request() {
+        let policy = CompiledPolicy::developer_baseline();
+        let binding = binding(&policy);
+        let broker = Arc::new(PolicyEgressBroker::new(
+            policy,
+            RouteClass::General,
+            Arc::new(FakeResolver::new([])),
+            Arc::new(ResettingConnector {
+                listener: TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap(),
+            }),
+            Arc::new(FakeClock::default()),
+        ));
+        let (client_streams, server_streams) = session_pairs();
+        let mut server = tokio::spawn(serve_broker_ipc(server_streams, binding, key(), broker));
+        let client = client(client_streams, binding);
+        let destination = SocketAddr::new(PUBLIC_V4, 443);
+
+        // Every connect session in turn, then the first again.
+        for _ in 0..=BROKER_IPC_CONNECT_SESSIONS {
+            assert_eq!(
+                client.connect_tcp(destination).await.unwrap_err(),
+                BrokerIpcError::RemoteUnavailable
+            );
+        }
+        assert_eq!(client.connect.len(), BROKER_IPC_CONNECT_SESSIONS);
+        client.authorize_tcp(destination).await.unwrap();
+        assert_eq!(
+            client.resolve_dns("localhost", DnsRecordFamily::Ipv4).await,
+            Err(BrokerIpcError::Denied)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut server)
+                .await
+                .is_err(),
+            "the broker ended"
+        );
+
         drop(client);
         let _ = tokio::time::timeout(Duration::from_secs(2), server)
             .await

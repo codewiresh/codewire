@@ -365,6 +365,14 @@ async fn dispatch_packets<B: EgressBroker>(
             if question.source.ip() != IpAddr::V4(GUEST_IP) {
                 continue;
             }
+            // Count only questions still in flight.
+            while let Some(answered) = dns_questions.try_join_next() {
+                match answered {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) => return Err(NetworkSessionError::Engine),
+                }
+            }
             if dns_questions.len() >= MAX_DNS_IN_FLIGHT {
                 let response =
                     build_ipv4_dns_response(&question, DnsAnswer::ServerFailure, 0, NETWORK_MTU)

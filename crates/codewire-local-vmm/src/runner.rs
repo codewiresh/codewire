@@ -3998,6 +3998,10 @@ fn egress_broker_exit_error(status: std::process::ExitStatus) -> RunnerError {
 /// Inherited sources are duplicated at or above this descriptor, above every
 /// fixed target a child uses, so placing one never overwrites another.
 const INHERITED_SOURCE_FLOOR: RawFd = 64;
+const _: () = assert!(
+    EGRESS_BROKER_FIRST_SESSION_FD + EGRESS_BROKER_INHERITED_SESSIONS as RawFd
+        <= INHERITED_SOURCE_FLOOR
+);
 
 /// The soft open-file limit of the network worker and egress broker (#2638).
 /// The worker holds up to 256 guest connections, 64 inbound streams and every
@@ -4062,9 +4066,16 @@ fn prepare_isolated_child(
 /// Sources are duplicated at [`INHERITED_SOURCE_FLOOR`] or above and every
 /// target is below it, so no target overwrites a source.
 fn inherit_descriptors(descriptors: &[(RawFd, RawFd)]) -> io::Result<()> {
-    if descriptors.iter().any(|&(source, target)| {
-        source < INHERITED_SOURCE_FLOOR || target >= INHERITED_SOURCE_FLOOR
-    }) {
+    let duplicate_target = descriptors.iter().enumerate().any(|(index, &(_, target))| {
+        descriptors[index + 1..]
+            .iter()
+            .any(|&(_, other)| other == target)
+    });
+    if duplicate_target
+        || descriptors.iter().any(|&(source, target)| {
+            source < INHERITED_SOURCE_FLOOR || target >= INHERITED_SOURCE_FLOOR
+        })
+    {
         return Err(io::Error::from_raw_os_error(libc::EINVAL));
     }
     for &(source, target) in descriptors {
@@ -5482,13 +5493,15 @@ mod tests {
 
     #[test]
     fn inherited_descriptors_must_sit_above_every_target() {
-        // A source below the floor, or a target at or above it, could be
-        // overwritten while descriptors are placed.
-        for descriptors in [[(9, 4)], [(70, INHERITED_SOURCE_FLOOR)]] {
+        // A source below the floor, a target at or above it, or two sources
+        // for one target could be overwritten while descriptors are placed.
+        for descriptors in [
+            &[(9, 4)][..],
+            &[(70, INHERITED_SOURCE_FLOOR)],
+            &[(70, 4), (71, 4)],
+        ] {
             assert_eq!(
-                inherit_descriptors(&descriptors)
-                    .unwrap_err()
-                    .raw_os_error(),
+                inherit_descriptors(descriptors).unwrap_err().raw_os_error(),
                 Some(libc::EINVAL)
             );
         }
