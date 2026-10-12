@@ -53,6 +53,21 @@ pub enum DnsAnswer {
     Ipv6(Ipv6Addr),
     NoData,
     NameError,
+    /// The policy refused the name: REFUSED, with no record.
+    Refused,
+    /// The lookup failed for any other reason: SERVFAIL, with no record.
+    ServerFailure,
+}
+
+impl DnsAnswer {
+    fn response_code(self) -> u16 {
+        match self {
+            Self::Ipv4(_) | Self::Ipv6(_) | Self::NoData => 0,
+            Self::ServerFailure => 2,
+            Self::NameError => 3,
+            Self::Refused => 5,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,7 +244,13 @@ pub fn build_ipv4_dns_response(
             answer_storage.copy_from_slice(&ip.octets());
             Some(16)
         }
-        (_, DnsAnswer::NoData | DnsAnswer::NameError) => None,
+        (
+            _,
+            DnsAnswer::NoData
+            | DnsAnswer::NameError
+            | DnsAnswer::Refused
+            | DnsAnswer::ServerFailure,
+        ) => None,
         _ => return Err(DnsBoundaryError::AnswerTypeMismatch),
     };
 
@@ -239,9 +260,7 @@ pub fn build_ipv4_dns_response(
     if question.recursion_desired {
         flags |= 0x0100;
     }
-    if matches!(answer, DnsAnswer::NameError) {
-        flags |= 3;
-    }
+    flags |= answer.response_code();
     dns.extend_from_slice(&flags.to_be_bytes());
     dns.extend_from_slice(&1u16.to_be_bytes());
     dns.extend_from_slice(&u16::from(answer_len.is_some()).to_be_bytes());
@@ -511,6 +530,32 @@ mod tests {
             build_ipv4_dns_response(&question, DnsAnswer::Ipv4(Ipv4Addr::LOCALHOST), 30, 32),
             Err(DnsBoundaryError::ResponseTooLarge)
         );
+    }
+
+    /// A refusal or failure is the query's ID and question with a response
+    /// code: no record, and nothing else.
+    #[test]
+    fn a_refusal_or_failure_reply_is_only_the_question_and_a_code() {
+        let dns = dns_query("example.com");
+        let question = parse(&dns).unwrap();
+        for (answer, code) in [
+            (DnsAnswer::NoData, 0),
+            (DnsAnswer::ServerFailure, 2),
+            (DnsAnswer::NameError, 3),
+            (DnsAnswer::Refused, 5),
+        ] {
+            let response = build_ipv4_dns_response(&question, answer, 30, 1500).unwrap();
+            let ipv4 = Ipv4Packet::new_checked(response.as_slice()).unwrap();
+            assert_eq!(ipv4.dst_addr().octets(), GUEST.octets());
+            let udp = UdpPacket::new_checked(ipv4.payload()).unwrap();
+            assert_eq!(udp.dst_port(), 53000);
+            let reply = udp.payload();
+            // QR, RD and RA with the code; one question and no other record.
+            assert_eq!(&reply[..2], &dns[..2]);
+            assert_eq!(u16::from_be_bytes([reply[2], reply[3]]), 0x8180 | code);
+            assert_eq!(&reply[4..DNS_HEADER_LEN], &[0, 1, 0, 0, 0, 0, 0, 0]);
+            assert_eq!(&reply[DNS_HEADER_LEN..], &dns[DNS_HEADER_LEN..]);
+        }
     }
 
     /// An OPT record: `name`, type, class (the payload size), TTL (the
