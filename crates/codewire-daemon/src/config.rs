@@ -33,7 +33,8 @@ pub use codewire_access::MANAGED_CREDENTIAL_CLIENTS_ENV;
 pub const ENVIRONMENT_ID_ENV: &str = "CODEWIRE_ENVIRONMENT_ID";
 pub const ENVIRONMENT_GENERATION_ENV: &str = "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION";
 pub const HOSTED_PROCESS_DIRECTORY: &str = "/codewire/run/processes";
-pub const HOSTED_CREDENTIAL_SOCKET: &str = "/codewire/run/credentials.sock";
+/// The hosted HTTP ingress socket, where the shared projection points `gh`.
+pub const HOSTED_CREDENTIAL_SOCKET: &str = codewire_access::MANAGED_HTTP_PLATFORM_SOCKET;
 
 pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:7777";
 pub const DEFAULT_WORKSPACE_ROOT: &str = "/workspace";

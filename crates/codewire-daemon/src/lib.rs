@@ -12,6 +12,8 @@ pub mod env;
 pub mod execution;
 pub mod files;
 #[cfg(target_os = "linux")]
+pub mod gh_config;
+#[cfg(target_os = "linux")]
 pub mod host_control;
 #[cfg(unix)]
 mod host_process;
