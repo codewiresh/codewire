@@ -572,6 +572,131 @@ def cache_modes():
     return values
 
 
+PLANNER = "scripts/ci/plan/planner.py"
+PLANNED_ARTIFACT = "workspace_image_verification"
+UNAFFECTED_SCHEMA = "codewire.workspace-image-unaffected/v1"
+
+
+def unaffected_record_path(receipt):
+    return receipt.with_name(receipt.name + ".unaffected")
+
+
+# A build can read these, so a change here always rebuilds the image locally,
+# even when the planner's fingerprint of the image is unchanged.
+BUILD_READABLE_ROOTS = ("crates/", "apps/", "packages/", "proto/", "libs/", "images/", ".cargo/")
+BUILD_READABLE_FILES = {"Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".dockerignore", ".gitignore"}
+
+
+def build_readable(path):
+    return path in BUILD_READABLE_FILES or path.startswith(BUILD_READABLE_ROOTS) or "/" not in path
+
+
+def load_planner(root):
+    name = "workspace_receipt_planner"
+    spec = importlib.util.spec_from_file_location(name, root / PLANNER)
+    planner = importlib.util.module_from_spec(spec)
+    # The planner's dataclasses resolve their module through sys.modules.
+    sys.modules[name] = planner
+    try:
+        spec.loader.exec_module(planner)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return planner
+
+
+def planner_unaffected(root, receipt_source, head):
+    """Whether the canonical artifact planner proves the workspace image unchanged.
+
+    `workspace_image_verification` covers the image definition, its verifier,
+    contract and build tooling, and the Rust closure of the `cw` it carries. It
+    is unchanged when the planner classifies it unaffected, or when its
+    fingerprint is unchanged and every changed path lies outside anything a
+    build can read: the planner leaves a path it has no ownership rule for
+    (a new test, say) unclassified, which selects CI work but says nothing about
+    this image. A policy change, an unclassifiable fingerprint, or a receipt
+    commit that is not the merge base of the head is treated as changed.
+    """
+    planner = load_planner(root)
+    try:
+        document = planner.plan(root, receipt_source, head)
+        baseline = document.get("baseline") if isinstance(document, dict) else None
+        artifacts = document.get("artifacts") if isinstance(document, dict) else None
+        if not isinstance(baseline, dict) or not isinstance(artifacts, dict):
+            return False
+        if baseline.get("baseline_commit") != receipt_source or baseline.get("head_commit") != head:
+            return False
+        planned = artifacts.get(PLANNED_ARTIFACT)
+        if not isinstance(planned, dict):
+            return False
+        if planned.get("state") == "unaffected":
+            return True
+        before, after = planned.get("baseline_fingerprint"), planned.get("head_fingerprint")
+        if not isinstance(before, str) or not re.fullmatch(r"[0-9a-f]{64}", before) or before != after:
+            return False
+        return not any(build_readable(path) for path in planner.changed_paths(root, receipt_source, head))
+    except planner.PlannerError:
+        return False
+
+
+def read_unaffected_record(path):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, "rb") as source:
+        info = os.fstat(source.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_nlink != 1 or info.st_size > 4096):
+            return None
+        raw = source.read(4097)
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def write_unaffected_record(path, value):
+    descriptor, temporary = tempfile.mkstemp(prefix=".workspace-image-unaffected-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w") as output:
+            json.dump(value, output, sort_keys=True)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def unaffected_since_receipt(root, receipt, raw, receipt_source, current):
+    """Accept a verified image for a different tree only when nothing it is built from changed.
+
+    The planner's answer is recorded next to the receipt for this exact receipt
+    and tree, so repeated consumers of one checkout pay for it once.
+    """
+    record_path = unaffected_record_path(receipt)
+    expected = {
+        "schema": UNAFFECTED_SCHEMA,
+        "receipt_sha256": hashlib.sha256(raw).hexdigest(),
+        "receipt_source_sha": receipt_source,
+        "source_tree": current["source_tree"],
+        "artifact": PLANNED_ARTIFACT,
+    }
+    if read_unaffected_record(record_path) == expected:
+        return True
+    if not planner_unaffected(root, receipt_source, current["source_sha"]):
+        return False
+    try:
+        write_unaffected_record(record_path, expected)
+    except OSError:
+        print("workspace image artifact: unaffected decision not recorded", file=sys.stderr)
+    return True
+
+
 def reuse(root, receipt, *, native=False, for_build=False):
     current = source_identity(root)
     if receipt.is_symlink() or not receipt.is_file():
@@ -595,13 +720,18 @@ def reuse(root, receipt, *, native=False, for_build=False):
         raise ValueError("receipt cache mode mismatch")
     if not isinstance(value["source_sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", value["source_sha"]):
         raise ValueError("invalid receipt source")
-    # Identical committed content can retain proof across a merge commit.
+    # Identical committed content can retain proof across a merge commit. A
+    # different tree retains it only while the planner proves every input of
+    # the verified image unchanged; the verifier's own inputs must match.
     original_tree = command("git", "-C", str(root), "rev-parse", value["source_sha"] + "^{tree}")
     for key in current:
-        if key != "source_sha" and value[key] != current[key]:
+        if key not in ("source_sha", "source_tree") and value[key] != current[key]:
             raise ValueError("receipt source/input mismatch")
-    if original_tree != current["source_tree"]:
+    if original_tree != value["source_tree"]:
         raise ValueError("receipt source commit mismatch")
+    if value["source_tree"] != current["source_tree"] \
+            and not unaffected_since_receipt(root, receipt, raw, value["source_sha"], current):
+        raise ValueError("receipt source/input mismatch")
     digest(value["base_manifest_digest"])
     image_id = digest(value["workspace_image_id"])
     alias = alias_for(image_id)
