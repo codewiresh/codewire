@@ -669,7 +669,8 @@ class WorkflowContract(unittest.TestCase):
         self.assertIn("needs.workspace-cache-measurement.result == 'success'", body)
         self.assertIn("workspace_cache_experiment == 'true'", body)
         self.assertIn("    needs: [verification-selection, workspace-image, kind-workspace, workspace-cache-measurement]", body)
-        self.assertIn("    runs-on: ci-heavy\n", body)
+        self.assertIn("    runs-on: " + chr(36) + "{{ github.event_name == 'push' && github.ref == "
+                      "'refs/heads/main' && 'ci-heavy-main' || 'ci-heavy' }}\n", body)
         self.assertIn("    timeout-minutes: 55\n", body)
         self.assertNotIn("continue-on-error", body)
         self.assertEqual(body.count("run: scripts/ci/setup/select-untrusted-workspace-cache.sh "), 1)
