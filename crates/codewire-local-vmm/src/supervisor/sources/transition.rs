@@ -564,16 +564,30 @@ impl SupervisorCore {
                     .environment(&transition.name)
                     .is_ok_and(|environment| Some(environment.id) == current.environment_id)
                 {
+                    // The cause is closed vocabulary (#2595): the error class,
+                    // or the runner's own code for a failed VM start. Read the
+                    // runner's code before the stop below retires it.
+                    let code = if matches!(error, SupervisorError::EnvironmentAccessUnavailable) {
+                        "environment_sources_conflict".to_owned()
+                    } else {
+                        lifecycle_failure_code(
+                            "environment_sources",
+                            &error,
+                            self.recorded_runner_error_code(&transition.name),
+                        )
+                    };
+                    self.log_operation_failure(&current, &transition.name, &error, &code);
                     // If a target launch partially succeeded, prove it stopped
                     // before publishing terminal failure. Never roll back pins.
                     self.ensure_vm_stopped(&transition.name).await?;
-                    let code = if matches!(error, SupervisorError::EnvironmentAccessUnavailable) {
-                        "environment_sources_conflict"
-                    } else {
-                        "environment_sources_update_failed"
-                    };
-                    self.fail_operation_with_environment_error(&current, &transition.name, code)?;
+                    self.fail_operation_with_environment_error(&current, &transition.name, &code)?;
                 } else {
+                    self.log_operation_failure(
+                        &current,
+                        &transition.name,
+                        &error,
+                        "environment_sources_conflict",
+                    );
                     self.fail_operation(&current, "environment_sources_conflict")?;
                 }
                 Ok(())

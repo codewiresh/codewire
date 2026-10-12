@@ -19,6 +19,8 @@ pub mod cw_runtime;
 #[cfg(target_os = "macos")]
 pub mod darwin;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod diagnostic_log;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod direct_share;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod egress_broker;

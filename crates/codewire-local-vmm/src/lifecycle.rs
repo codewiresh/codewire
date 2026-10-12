@@ -49,6 +49,41 @@ pub(crate) enum EffectDurability {
 }
 
 impl LifecycleEffect {
+    /// Closed diagnostic name of the effect, as the supervisor log records it.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::RecordEnvironment => "record_environment",
+            Self::BindEnvironmentAccess => "bind_environment_access",
+            Self::RequireEnvironmentAccess => "require_environment_access",
+            Self::ProvisionWorkspace => "provision_workspace",
+            Self::StageWorkspaceGeneration => "stage_workspace_generation",
+            Self::RecordStarting => "record_starting",
+            Self::EnsureRunner => "ensure_runner",
+            Self::StartVm => "start_vm",
+            Self::RecordRunning => "record_running",
+            Self::StopVm => "stop_vm",
+            Self::RecordStopped => "record_stopped",
+            Self::GrowDisk => "grow_disk",
+            Self::RecordResources => "record_resources",
+            Self::RestartVm => "restart_vm",
+            Self::RecordResizeOutcome => "record_resize_outcome",
+            Self::StageRollbackGeneration => "stage_rollback_generation",
+            Self::RestoreDesiredPower => "restore_desired_power",
+            Self::RecordWorkspaceTransition => "record_workspace_transition",
+            Self::ApplySourceAccessBinding => "apply_source_access_binding",
+            Self::RecordEnvironmentSources => "record_environment_sources",
+            Self::RecordSourceOutcome => "record_source_outcome",
+            Self::PrepareDelete => "prepare_delete",
+            Self::MoveToTrash => "move_to_trash",
+            Self::RevokeEnvironmentAccess => "revoke_environment_access",
+            Self::RemoveEnvironment => "remove_environment",
+            Self::CleanupTrash => "cleanup_trash",
+            Self::RecordObservation => "record_observation",
+            Self::ApplyHostPorts => "apply_host_ports",
+            Self::RecordHostPorts => "record_host_ports",
+        }
+    }
+
     pub(crate) fn durability(self) -> EffectDurability {
         match self {
             Self::RecordEnvironment
@@ -312,6 +347,27 @@ mod tests {
         assert_eq!(plan[5], LifecycleEffect::RecordStarting);
         assert_eq!(plan[6], LifecycleEffect::EnsureRunner);
         assert_eq!(plan[7], LifecycleEffect::StartVm);
+    }
+
+    #[test]
+    fn every_planned_effect_has_a_distinct_closed_log_name() {
+        let mut names = BTreeSet::new();
+        for kind in KINDS {
+            for effect in effects(*kind) {
+                let name = effect.name();
+                assert!(
+                    !name.is_empty()
+                        && name.len() <= 64
+                        && name
+                            .bytes()
+                            .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+                    "{name}"
+                );
+                names.insert((name, *effect));
+            }
+        }
+        let distinct = names.iter().map(|(name, _)| *name).collect::<BTreeSet<_>>();
+        assert_eq!(distinct.len(), names.len());
     }
 
     #[test]
