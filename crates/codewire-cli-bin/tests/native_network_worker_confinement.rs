@@ -15,9 +15,11 @@ use std::time::{Duration, Instant};
 
 use codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN;
 use codewire_local_vmm::egress_broker::{
-    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_PREPARED_MESSAGE,
-    EGRESS_BROKER_READY_MESSAGE, encode_developer_egress_broker_bootstrap,
+    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_HOST_ADDRESSES_FD,
+    EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE,
+    encode_developer_egress_broker_bootstrap,
 };
+use codewire_local_vmm::host_addresses::{HostAddressSet, encode_frame};
 use codewire_local_vmm::mesh_ingress::MESH_INGRESS_CONTROL_KEY_LEN;
 use codewire_local_vmm::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, WORKER_BROKER_READY_MESSAGE,
@@ -216,13 +218,21 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
         vm_id,
         generation,
     );
-    inherit_only(
+    // The broker also takes the runner's host-address control socket (#2614).
+    let (mut control, control_child) = UnixStream::pair().unwrap();
+    inherit_descriptors_only(
         &mut broker_command,
-        broker_child.as_raw_fd(),
-        EGRESS_BROKER_BOOTSTRAP_FD,
+        [
+            (broker_child.as_raw_fd(), EGRESS_BROKER_BOOTSTRAP_FD),
+            (control_child.as_raw_fd(), EGRESS_BROKER_HOST_ADDRESSES_FD),
+        ],
     );
     let mut broker = ChildGuard(broker_command.spawn().unwrap());
     drop(broker_child);
+    drop(control_child);
+    control
+        .write_all(&encode_frame(&HostAddressSet::default()))
+        .unwrap();
     broker_parent
         .write_all(
             encode_developer_egress_broker_bootstrap(vm_id, generation, &broker_key)
@@ -390,6 +400,35 @@ fn set_timeouts(stream: &UnixStream) {
 /// The child inherits standard I/O and `source` at `target`, nothing else:
 /// a descriptor another test thread opened without close-on-exec yet is
 /// closed on exec too.
+/// Like `inherit_only`, for several (source, target) pairs; sources are well
+/// above every target.
+fn inherit_descriptors_only<const N: usize>(command: &mut Command, pairs: [(RawFd, RawFd); N]) {
+    // SAFETY: the hook performs only async-signal-safe descriptor syscalls.
+    unsafe {
+        command.pre_exec(move || {
+            for fd in 3..libc::getdtablesize() {
+                if !pairs.iter().any(|(source, _)| *source == fd) {
+                    libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                }
+            }
+            for (source, target) in pairs {
+                if source != target && libc::dup2(source, target) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(target, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            for (source, target) in pairs {
+                if source != target {
+                    libc::fcntl(source, libc::F_SETFD, libc::FD_CLOEXEC);
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
 fn inherit_only(command: &mut Command, source: RawFd, target: RawFd) {
     // SAFETY: the hook performs only async-signal-safe descriptor syscalls.
     unsafe {

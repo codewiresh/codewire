@@ -26,11 +26,12 @@ use std::time::{Duration, Instant};
 
 use codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN;
 use codewire_local_vmm::egress_broker::{
-    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_PREPARED_MESSAGE,
-    EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES, EgressBrokerStartupFailure,
-    EgressBrokerStartupStatus, decode_egress_broker_startup_status,
+    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_HOST_ADDRESSES_FD,
+    EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES,
+    EgressBrokerStartupFailure, EgressBrokerStartupStatus, decode_egress_broker_startup_status,
     encode_developer_egress_broker_bootstrap,
 };
+use codewire_local_vmm::host_addresses::{HostAddressSet, encode_frame};
 use codewire_local_vmm::host_port::HOST_PORT_CONTROL_KEY_LEN;
 use codewire_local_vmm::mesh_ingress::MESH_INGRESS_CONTROL_KEY_LEN;
 use codewire_local_vmm::network_worker::{
@@ -54,7 +55,12 @@ const AUDIT_ARCH_NATIVE: u32 = 0xc000_003e;
 #[cfg(target_arch = "aarch64")]
 const AUDIT_ARCH_NATIVE: u32 = 0xc000_00b7;
 
-struct ChildGuard(Child);
+/// The child, and for a broker the runner's end of its host-address control
+/// socket, held open for the broker's lifetime.
+struct ChildGuard(
+    Child,
+    #[allow(dead_code, reason = "held open, never read")] Option<UnixStream>,
+);
 
 impl ChildGuard {
     fn pid(&self) -> u32 {
@@ -119,6 +125,9 @@ fn spawn_role(
     let (environment_id, generation) = identity();
     let mut filter = refused.map(refusal_filter);
     let source = child_socket.as_raw_fd();
+    // A broker also takes the runner's host-address control socket (#2614).
+    let control = (role == "__native-egress-broker").then(|| UnixStream::pair().unwrap());
+    let control_source = control.as_ref().map(|(_, child)| child.as_raw_fd());
     let mut command = Command::new(env!("CARGO_BIN_EXE_cw"));
     command
         .arg(role)
@@ -155,6 +164,12 @@ fn spawn_role(
             if libc::fcntl(target_fd, libc::F_SETFD, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
+            if let Some(control_source) = control_source
+                && (libc::dup2(control_source, EGRESS_BROKER_HOST_ADDRESSES_FD) == -1
+                    || libc::fcntl(EGRESS_BROKER_HOST_ADDRESSES_FD, libc::F_SETFD, 0) == -1)
+            {
+                return Err(std::io::Error::last_os_error());
+            }
             if let Some(filter) = filter.as_mut() {
                 let program = libc::sock_fprog {
                     len: filter.len() as u16,
@@ -169,7 +184,14 @@ fn spawn_role(
     }
     let child = command.spawn().unwrap();
     drop(child_socket);
-    (parent, ChildGuard(child))
+    let control = control.map(|(mut control, control_child)| {
+        drop(control_child);
+        control
+            .write_all(&encode_frame(&HostAddressSet::default()))
+            .unwrap();
+        control
+    });
+    (parent, ChildGuard(child, control))
 }
 
 fn refusal_filter(refused: RefusedSyscall) -> Vec<libc::sock_filter> {

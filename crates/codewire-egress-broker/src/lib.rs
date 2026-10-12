@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use codewire_egress_policy::host_addresses::HostAddressSet;
 use codewire_egress_policy::lease::{
     Admission, AdmittedDnsQuery, AdmittedDnsResolution, DnsResolution, EgressLeaseTable,
     LeaseError, LeaseInstant, TcpAdmission,
@@ -195,6 +196,12 @@ where
 
     pub async fn policy_digest(&self) -> PolicyDigest {
         self.state.lock().await.policy_digest()
+    }
+
+    /// Replace the addresses local to the host this broker dials from (#2614);
+    /// later admissions, including a dial already authorized, refuse them.
+    pub async fn set_host_addresses(&self, addresses: HostAddressSet) {
+        self.state.lock().await.set_host_addresses(addresses);
     }
 
     /// Resolve only after the policy admits the canonical query, then bind the
@@ -590,6 +597,74 @@ rules:
         assert_eq!(connection.admission().hostname(), None);
         assert!(resolver.requests().is_empty());
         assert_eq!(connector.destinations(), [destination]);
+    }
+
+    #[tokio::test]
+    async fn addresses_local_to_the_host_are_refused_before_any_dial() {
+        // #2614: the host's interface address and the public address its
+        // network is seen from, which the fixed protected ranges cannot know.
+        const INTERFACE: IpAddr = IpAddr::V4(Ipv4Addr::new(203, 0, 114, 7));
+        const LEARNED: IpAddr = IpAddr::V4(Ipv4Addr::new(87, 0, 0, 180));
+        let connector = Arc::new(FakeConnector::new([Ok(21), Ok(22)]));
+        let broker = broker(
+            CompiledPolicy::developer_baseline(),
+            RouteClass::General,
+            Arc::new(FakeResolver::new([])),
+            Arc::clone(&connector),
+            Arc::new(FakeClock::default()),
+        );
+        // Before the host's addresses are known, both are ordinary egress.
+        let before = SocketAddr::new(LEARNED, HTTPS);
+        assert!(broker.authorize_tcp(before).await.is_ok());
+
+        broker
+            .set_host_addresses(HostAddressSet::new([INTERFACE], [LEARNED]).unwrap())
+            .await;
+        for (destination, reason) in [
+            (
+                SocketAddr::new(INTERFACE, 22),
+                "protected-address-host-interface",
+            ),
+            (
+                SocketAddr::new(LEARNED, HTTPS),
+                "protected-address-network-public",
+            ),
+            (
+                SocketAddr::new(
+                    IpAddr::V6(Ipv4Addr::new(87, 0, 0, 180).to_ipv6_mapped()),
+                    80,
+                ),
+                "protected-address-network-public",
+            ),
+        ] {
+            for result in [
+                broker.authorize_tcp(destination).await.err(),
+                broker.connect_tcp(destination).await.err(),
+            ] {
+                match result {
+                    Some(BrokerError::Denied(decision)) => {
+                        assert_eq!(decision.reason_code(), reason)
+                    }
+                    other => panic!("{destination} was not refused: {other:?}"),
+                }
+            }
+        }
+        // An address authorized before the update is checked again at the dial.
+        assert!(matches!(
+            broker.connect_tcp(before).await.err(),
+            Some(BrokerError::Denied(_))
+        ));
+        assert!(connector.destinations().is_empty());
+
+        // Any other public address still dials, and an unchanged update keeps
+        // refusing.
+        let other = SocketAddr::new(PUBLIC_V4, HTTPS);
+        assert_eq!(broker.connect_tcp(other).await.unwrap().stream(), &21);
+        broker
+            .set_host_addresses(HostAddressSet::new([INTERFACE], [LEARNED]).unwrap())
+            .await;
+        assert!(broker.connect_tcp(before).await.is_err());
+        assert_eq!(connector.destinations(), [other]);
     }
 
     #[tokio::test]
