@@ -810,3 +810,42 @@ fn github_cli_names_do_not_change_the_reserved_set() {
             .contains(&"GH_TOKEN")
     );
 }
+
+/// One rule picks a managed agent's provider client on every placement.
+#[test]
+fn a_managed_agent_uses_the_codex_slot_first_and_the_api_key_slot_only_without_it() {
+    use ManagedCredentialClient::{Anthropic, Codex, OpenAi};
+    for (slots, codex, claude) in [
+        (&[][..], None, None),
+        (&["codex"], Some(Codex), None),
+        (&["openai"], Some(OpenAi), None),
+        (&["codex", "openai"], Some(Codex), None),
+        (&["anthropic"], None, Some(Anthropic)),
+        (&["ssh", "github"], None, None),
+        (
+            &["codex", "openai", "anthropic", "ssh", "github"],
+            Some(Codex),
+            Some(Anthropic),
+        ),
+    ] {
+        let selected = clients(slots);
+        assert_eq!(
+            selected.managed_agent_client(ManagedAgent::Codex),
+            codex,
+            "{slots:?}"
+        );
+        assert_eq!(
+            selected.managed_agent_client(ManagedAgent::Claude),
+            claude,
+            "{slots:?}"
+        );
+    }
+    // The subscription form is still the Anthropic client.
+    let subscription = clients(&["anthropic"])
+        .with_anthropic_subscription_token()
+        .unwrap();
+    assert_eq!(
+        subscription.managed_agent_client(ManagedAgent::Claude),
+        Some(Anthropic)
+    );
+}

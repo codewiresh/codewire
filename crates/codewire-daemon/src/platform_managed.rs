@@ -62,19 +62,18 @@ impl Agent {
     }
 
     /// The route this agent's private home uses with the binding's `selected`
-    /// slots, or `None` when no selected slot serves it. Codex prefers the
-    /// Codex slot, as Codex's own `~/.codex` configuration in the Sandbox
-    /// does; the OpenAI API-key slot serves it only without one.
+    /// slots, or `None` when no selected slot serves it, by the rule every
+    /// placement shares ([`ManagedCredentialClients::managed_agent_client`]).
     pub(crate) fn route(self, selected: ManagedCredentialClients) -> Option<Route> {
-        match self {
-            Self::Codex if selected.contains(ManagedCredentialClient::Codex) => Some(Route::Codex),
-            Self::Codex if selected.contains(ManagedCredentialClient::OpenAi) => {
-                Some(Route::OpenAi)
-            }
-            Self::Claude if selected.contains(ManagedCredentialClient::Anthropic) => {
-                Some(Route::Anthropic)
-            }
-            _ => None,
+        let agent = match self {
+            Self::Codex => codewire_access::ManagedAgent::Codex,
+            Self::Claude => codewire_access::ManagedAgent::Claude,
+        };
+        match selected.managed_agent_client(agent)? {
+            ManagedCredentialClient::Codex => Some(Route::Codex),
+            ManagedCredentialClient::OpenAi => Some(Route::OpenAi),
+            ManagedCredentialClient::Anthropic => Some(Route::Anthropic),
+            ManagedCredentialClient::Ssh | ManagedCredentialClient::GitHub => None,
         }
     }
 }

@@ -68,6 +68,13 @@ pub const NO_PROXY_NAMES: [&str; 2] = ["NO_PROXY", "no_proxy"];
 /// Stock clients configured by selected profile slots, not credential auth
 /// kinds. The Anthropic client alone has two forms: see
 /// [`ManagedCredentialClients::with_anthropic_subscription_token`].
+/// The coding agent a managed conversation runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagedAgent {
+    Codex,
+    Claude,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManagedCredentialClient {
     Codex,
@@ -303,6 +310,26 @@ impl ManagedCredentialClients {
             return Err(ProjectionError::ManagedEnvironmentCollision);
         }
         Ok(())
+    }
+
+    /// The selected client a managed agent reaches its provider through, on
+    /// every placement, or `None` when the selection has none for it. Codex
+    /// uses the Codex slot, as Codex's own configuration does, and the OpenAI
+    /// API-key slot only without one; Claude uses the Anthropic slot. Hosted
+    /// and local VM managed agents both qualify and route by this rule.
+    pub fn managed_agent_client(self, agent: ManagedAgent) -> Option<ManagedCredentialClient> {
+        match agent {
+            ManagedAgent::Codex if self.contains(ManagedCredentialClient::Codex) => {
+                Some(ManagedCredentialClient::Codex)
+            }
+            ManagedAgent::Codex if self.contains(ManagedCredentialClient::OpenAi) => {
+                Some(ManagedCredentialClient::OpenAi)
+            }
+            ManagedAgent::Claude if self.contains(ManagedCredentialClient::Anthropic) => {
+                Some(ManagedCredentialClient::Anthropic)
+            }
+            _ => None,
+        }
     }
 
     /// Whether a selected client reaches its route over the loopback HTTP
