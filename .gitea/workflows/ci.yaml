@@ -1803,7 +1803,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 35
     needs: [verification-selection]
-    if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
+    if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.superseded != 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
     outputs:
       artifact_name: ${{ steps.export.outputs.artifact_name }}
       manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}

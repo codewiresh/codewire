@@ -3727,7 +3727,7 @@ dispatch_line="$(grep -n -m1 'name: Emit trusted capability dispatch decisions' 
   exit 1
 }
 producer_gate="    if: \${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.superseded != 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') }}"
-[[ "$(grep -cxF -- "$producer_gate" "$WORKFLOW")" -eq 3 ]] || {
+[[ "$(grep -cxF -- "$producer_gate" "$WORKFLOW")" -eq 4 ]] || {
   echo 'a superseded main run still builds a Kind producer' >&2
   exit 1
 }
