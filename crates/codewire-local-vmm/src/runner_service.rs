@@ -853,11 +853,46 @@ impl RunnerRpc {
         guest: Option<&GuestStartFailure>,
         started: std::time::Instant,
     ) {
+        self.log_start_failure_fields(environment_id, generation, error_code, None, guest, started);
+    }
+
+    /// Logs a failed prepare or VMM start. Their error codes cover every
+    /// runner error alike, so the line also names which error it was (#2595).
+    fn log_runner_start_failure(
+        &self,
+        environment_id: Uuid,
+        generation: u64,
+        error_code: &str,
+        error: &RunnerError,
+        started: std::time::Instant,
+    ) {
+        self.log_start_failure_fields(
+            environment_id,
+            generation,
+            error_code,
+            Some(error.variant_name()),
+            None,
+            started,
+        );
+    }
+
+    fn log_start_failure_fields(
+        &self,
+        environment_id: Uuid,
+        generation: u64,
+        error_code: &str,
+        runner_error: Option<&'static str>,
+        guest: Option<&GuestStartFailure>,
+        started: std::time::Instant,
+    ) {
         let mut fields = vec![
             ("environment", LogField::Id(environment_id)),
             ("generation", LogField::Count(generation)),
             ("error_code", LogField::Code(error_code)),
         ];
+        if let Some(runner_error) = runner_error {
+            fields.push(("detail", LogField::Name(runner_error)));
+        }
         if let Some(guest) = guest {
             fields.push(("detail", LogField::Name(guest.detail)));
             fields.push((
@@ -1068,11 +1103,11 @@ impl EnvironmentRunnerService for RunnerRpc {
             Ok(prepared) => prepared,
             Err(error) => {
                 let error_code = prepare_error_code(&error);
-                self.log_start_failure(
+                self.log_runner_start_failure(
                     environment_id,
                     request.generation,
                     error_code,
-                    None,
+                    &error,
                     started,
                 );
                 // A failed attempt consumes its generation as a prepared one
@@ -1108,11 +1143,11 @@ impl EnvironmentRunnerService for RunnerRpc {
         let mut running = match state.runner.start(prepared).await {
             Ok(running) => running,
             Err(error) => {
-                self.log_start_failure(
+                self.log_runner_start_failure(
                     environment_id,
                     request.generation,
                     "vmm_start_failed",
-                    None,
+                    &error,
                     started,
                 );
                 state.state = v1::EnvironmentState::Error;
@@ -2344,6 +2379,62 @@ mod tests {
             "{}",
             lines[4]
         );
+        assert!(!log.contains(CANARY));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_timed_out_vmm_start_logs_which_runner_error_it_was() {
+        const CANARY: &str = "synthetic-path-must-not-be-logged";
+        let (parent, mut rpc) = bootstrap_rpc();
+        let root_path = parent.path().join("runtime");
+        std::fs::create_dir(&root_path).unwrap();
+        std::fs::set_permissions(&root_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = PrivateRoot::open(&std::fs::canonicalize(&root_path).unwrap()).unwrap();
+        let environment_id = Uuid::new_v4();
+        let name = diagnostic_log::runner_log_name(environment_id);
+        rpc.log = Some(Arc::new(
+            DiagnosticLog::adopt(diagnostic_log::open_child_log(&root, &name).unwrap()).unwrap(),
+        ));
+
+        // The VMM answered no API request in time, the VMM exited, and an
+        // error that carries a path: one error code, three named errors.
+        let failures = [
+            (
+                RunnerError::Api(crate::ch_api::ChApiError::RequestTimeout),
+                "api_request_timeout",
+            ),
+            (RunnerError::ExitedDuringStart, "exited_during_start"),
+            (
+                RunnerError::Io {
+                    path: PathBuf::from(format!("/{CANARY}")),
+                    source: io::Error::other(CANARY),
+                },
+                "io",
+            ),
+        ];
+        for (error, _) in &failures {
+            rpc.log_runner_start_failure(
+                environment_id,
+                2,
+                "vmm_start_failed",
+                error,
+                std::time::Instant::now(),
+            );
+        }
+
+        let log = std::fs::read_to_string(root.path().join("logs").join(&name)).unwrap();
+        let lines = log.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), failures.len(), "{log}");
+        for (line, (_, detail)) in lines.iter().zip(&failures) {
+            assert!(
+                line.contains(&format!(
+                    " event=vm_start_failed environment={environment_id} generation=2 \
+                     error_code=vmm_start_failed detail={detail} elapsed_ms="
+                )),
+                "{line}"
+            );
+        }
         assert!(!log.contains(CANARY));
     }
 

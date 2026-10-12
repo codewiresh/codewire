@@ -80,6 +80,26 @@ pub enum ChApiError {
     SocketIdentity(#[from] PathError),
 }
 
+impl ChApiError {
+    /// This error's variant as a fixed name for a diagnostic log line.
+    pub(crate) fn variant_name(&self) -> &'static str {
+        match self {
+            Self::InvalidSocketPath => "api_invalid_socket_path",
+            Self::ConnectTimeout => "api_connect_timeout",
+            Self::Connect => "api_connect",
+            Self::RequestTimeout => "api_request_timeout",
+            Self::Io => "api_io",
+            Self::MalformedResponse => "api_malformed_response",
+            Self::HttpStatus(_) => "api_http_status",
+            Self::InvalidJson => "api_invalid_json",
+            Self::ForbiddenDiskAccepted => "api_forbidden_disk_accepted",
+            Self::EncodeRequest => "api_encode_request",
+            Self::AmbiguousDiskDenial => "api_ambiguous_disk_denial",
+            Self::SocketIdentity(_) => "api_socket_identity",
+        }
+    }
+}
+
 impl ChApiClient {
     pub fn new(socket: impl Into<PathBuf>) -> Result<Self, ChApiError> {
         let socket = socket.into();
