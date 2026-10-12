@@ -3,13 +3,17 @@
 //! The Linux counterparts of the macOS #1905 conditions, run against the real
 //! `cw` packet worker and egress broker started as the runner starts them.
 //!
-//! - Condition 1: when Landlock, seccomp or the privilege lock cannot be
+//! - Condition 1: when Landlock, seccomp or the capability drop cannot be
 //!   applied, the worker and the broker report the typed failure, exit with
 //!   its status and never serve. A seccomp filter installed before exec makes
 //!   the one confinement syscall fail, as a kernel without that feature would.
 //! - Condition 2: a serving worker holds only the descriptors it was given.
 //!   Its `/proc/<pid>/fd` table is read and every Unix socket's peer is
 //!   resolved through `sock_diag`, as macOS reads the table with libproc.
+//!
+//! The roles are started with whatever capabilities this test process holds
+//! (every default one as root in a CI container, an inherited one in some
+//! shells), so a serving role with none proves that it discarded them itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read as _, Write as _};
@@ -97,7 +101,8 @@ struct RefusedSyscall {
 
 /// Starts a hidden `cw` role the way the runner does: an empty environment,
 /// standard I/O on `/dev/null`, exactly one inherited bootstrap descriptor,
-/// the parent-death signal and `no_new_privs`.
+/// the parent-death signal and `no_new_privs`. Unlike the runner it leaves
+/// the role this test's capabilities; discarding them is the role's own job.
 fn spawn_role(
     role: &str,
     directory: &std::path::Path,
@@ -304,6 +309,20 @@ const SECCOMP_UNAVAILABLE: RefusedSyscall = RefusedSyscall {
     errno: libc::EINVAL,
 };
 
+/// A process that may not change its capability sets gets `EPERM`.
+const CAPABILITY_DROP_REFUSED: RefusedSyscall = RefusedSyscall {
+    number: libc::SYS_capset,
+    errno: libc::EPERM,
+};
+
+#[test]
+fn worker_refuses_to_serve_without_its_capability_drop() {
+    worker_refusal(
+        CAPABILITY_DROP_REFUSED,
+        NetworkWorkerStartupFailure::PrivilegeConfinement,
+    );
+}
+
 #[test]
 fn worker_refuses_to_serve_without_landlock() {
     worker_refusal(
@@ -323,10 +342,7 @@ fn worker_refuses_to_serve_without_seccomp() {
 #[test]
 fn broker_refuses_to_serve_without_its_privilege_lock() {
     broker_refusal(
-        RefusedSyscall {
-            number: libc::SYS_capset,
-            errno: libc::EPERM,
-        },
+        CAPABILITY_DROP_REFUSED,
         EgressBrokerStartupFailure::PrivilegeConfinement,
     );
 }
@@ -376,6 +392,7 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
         read_status_frame(&mut broker_bootstrap, EGRESS_BROKER_STATUS_MAX_BYTES),
         EGRESS_BROKER_READY_MESSAGE
     );
+    require_confined_without_capabilities(broker.pid());
 
     let key = network_key();
     let (mut worker_bootstrap, mut worker) = spawn_role(
@@ -430,18 +447,9 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
     );
 
     let pid = worker.pid();
+    require_confined_without_capabilities(pid);
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
-    for (field, expected) in [
-        ("Threads", "1"),
-        ("NoNewPrivs", "1"),
-        ("Seccomp", "2"),
-        ("CapInh", "0000000000000000"),
-        ("CapPrm", "0000000000000000"),
-        ("CapEff", "0000000000000000"),
-        ("CapAmb", "0000000000000000"),
-    ] {
-        assert_eq!(status_field(&status, field), expected, "{field}: {status}");
-    }
+    assert_eq!(status_field(&status, "Threads"), "1", "{status}");
 
     // Serving, the worker holds standard I/O on /dev/null, its epoll and
     // eventfd, and Unix streams that lead only to this test (bootstrap and
@@ -516,6 +524,48 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
         Some(NetworkWorkerStartupFailure::FrameIo.exit_code())
     );
     broker.wait_bounded();
+}
+
+const NO_CAPABILITIES: &str = "0000000000000000";
+
+/// A serving role is under `no_new_privs` and a seccomp filter and holds no
+/// capability in any set it can change. Its bounding set is empty too when
+/// it started able to change it.
+fn require_confined_without_capabilities(pid: u32) {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    for (field, expected) in [
+        ("NoNewPrivs", "1"),
+        ("Seccomp", "2"),
+        ("CapInh", NO_CAPABILITIES),
+        ("CapPrm", NO_CAPABILITIES),
+        ("CapEff", NO_CAPABILITIES),
+        ("CapAmb", NO_CAPABILITIES),
+    ] {
+        assert_eq!(status_field(&status, field), expected, "{field}: {status}");
+    }
+    if role_starts_able_to_empty_its_bounding_set() {
+        assert_eq!(
+            status_field(&status, "CapBnd"),
+            NO_CAPABILITIES,
+            "CapBnd: {status}"
+        );
+    }
+}
+
+/// Whether a role started by this test begins with `CAP_SETPCAP`, which the
+/// kernel requires to drop a bounding capability. Across an exec under
+/// `no_new_privs` root keeps the permitted capabilities its inheritable and
+/// bounding sets allow; any other user keeps only its ambient set.
+fn role_starts_able_to_empty_its_bounding_set() -> bool {
+    const CAP_SETPCAP: u64 = 1 << 8;
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let set = |field| u64::from_str_radix(status_field(&status, field), 16).unwrap();
+    let kept = if unsafe { libc::geteuid() } == 0 {
+        set("CapPrm") & (set("CapInh") | set("CapBnd"))
+    } else {
+        set("CapAmb")
+    };
+    kept & CAP_SETPCAP != 0
 }
 
 fn status_field<'a>(status: &'a str, field: &str) -> &'a str {
