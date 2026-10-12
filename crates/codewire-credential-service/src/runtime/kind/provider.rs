@@ -525,7 +525,7 @@ impl SyntheticProvider {
                 let status = if admitted.refused { 401_u16 } else { 200 };
                 // `client_identity` is a closed boolean: whether Claude Code's
                 // own `x-app` and `user-agent` reached the provider, which the
-                // broker forwards for the subscription form only.
+                // transparent broker route forwards in both forms.
                 tracing::info!(target: TARGET, event = "anthropic_response",
                     kind = admitted.kind.name(), route = admitted.route.name(),
                     stream = admitted.stream, status, refused = admitted.refused,

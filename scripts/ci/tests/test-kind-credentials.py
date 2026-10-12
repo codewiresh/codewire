@@ -2531,9 +2531,9 @@ kind_credential_claude_stage workspace-pod
 
     def test_provider_events_must_be_new_answers_for_exactly_the_expected_form(self):
         api = {"event": "anthropic_response", "kind": "api_key", "route": "messages",
-               "stream": True, "status": 200, "refused": False, "client_identity": False,
+               "stream": True, "status": 200, "refused": False, "client_identity": True,
                "anthropic_calls": 1}
-        token = dict(api, kind="subscription_token", client_identity=True, anthropic_calls=3)
+        token = dict(api, kind="subscription_token", anthropic_calls=3)
         refused = dict(token, status=401, refused=True, anthropic_calls=5)
         unrelated = {"event": "provider_response", "scenario": "baseline"}
         events = [unrelated, api, dict(api, anthropic_calls=2), token,
@@ -2550,7 +2550,7 @@ kind_credential_claude_stage workspace-pod
                 ([], 2, "subscription_token", 200),
                 ([dict(token, status=500)], 2, "subscription_token", 200),
                 ([dict(token, client_identity=False)], 2, "subscription_token", 200),
-                ([dict(api, client_identity=True)], 2, "api_key", 200),
+                ([dict(api, client_identity=False)], 2, "api_key", 200),
                 ([refused], 2, "subscription_token", 200),
                 ([dict(refused, refused=False)], 2, "subscription_token", 401),
                 ([{"event": "anthropic_rejected", "reason": "placeholder",
