@@ -15,7 +15,9 @@ its faux/echo and faux/script models; noel gets a private HOME and pi agent
 directory, offline. Both noel journeys kill noel and its driver mid-turn with
 SIGKILL and prove noel resumes the run once. Both also take the environment
 down mid-turn and prove that the message is paused, not ended, and that
-starting the environment resumes the run with no `cw restart`.
+starting the environment resumes the run with no `cw restart`. Both stop a
+conversation while the host daemon's record helper fails and prove that the
+message is never paused and never resumed.
 All runtime/config/workspace files and processes belong to this invocation.
 Linux joins every owned descendant through a child subreaper. Darwin has none,
 so macOS runs the journey as a new session leader and requires that no live
@@ -42,6 +44,8 @@ WALL = 0x40000000  # Linux __WALL includes non-SIGCHLD clone children.
 IDENTITY = ("CW_ENVIRONMENT", "CW_SESSION_ID")
 INTERRUPT_LOGGED = "interrupted the active run before stopping"
 PAUSE_LOGGED = "paused the active run before shutting down"
+HELPER_FAILED_LOGGED = "could not check for an active run to interrupt before stopping"
+STOPPED_IN_FLIGHT = "its conversation was stopped while this was in flight; outcome unknown; not replayed"
 RESUME_LOGGED = "restarted paused noel conversation"
 LINUX = sys.platform.startswith("linux")
 MACOS = sys.platform == "darwin"
@@ -446,6 +450,10 @@ class Journey:
             self.prove_signalled("paused-lead")
             self.check("host-shutdown-signals-daemon-and-driver-at-once/driver-pauses-by-takedown-marker/"
                        "daemon-start-in-running-environment-resumes")
+            for killed_first in (False, True):
+                self.prove_stopped_without_helper("paused-noel", "paused-lead", killed_first)
+            self.check("explicit-stop-with-failed-record-helper/daemon-stop-intent-on-disk/never-paused/"
+                       "driver-killed-first-never-resumed/lead-hears-once")
             self.prove_removed()
             self.check("env-rm-removes-paused-message/waiting-cw-wait-ends-unknown")
         self.check("graceful-shutdown/reload/workspace-preserved")
@@ -705,6 +713,69 @@ class Journey:
         assert self.daemon_logged("paused-noel", RESUME_LOGGED) == resumes + 1
         self.call("restart", env, lead)
         self.told_pause_then_final(lead, message)
+
+    def stop_intent(self, name):
+        """Where the host daemon records an explicit stop of NAME before it
+        signals the conversation."""
+        return (self.root / "hosts" / self.environment / "sessions" / self.session_ids[name]
+                / "stop-intent.json")
+
+    def stop_without_helper(self, name, killed_first):
+        """`cw stop NAME` while the host daemon's record helper fails: the
+        daemon refuses to run its helper from an image with a second link, so
+        nothing interrupts the run and no stop interrupt is recorded. With
+        KILLED_FIRST the driver cannot act on its signal either: it is
+        stopped, so the daemon kills it when the grace ends. The daemon's own
+        stop intent is on disk all the same."""
+        refused = self.daemon_logged(name, HELPER_FAILED_LOGGED)
+        interrupts = self.interrupts_logged(name)
+        intent = self.stop_intent(name)
+        assert not intent.exists(), intent
+        driver = self.driver_pid(name)
+        link = Path(self.cw + ".second-link")
+        os.link(self.cw, link)
+        try:
+            if killed_first:
+                os.kill(driver, signal.SIGSTOP)
+            stopped = self.call("stop", self.environment, name, "--output", "json", data=True)[0]
+        finally:
+            link.unlink()
+        assert stopped["state"] == "Stopped" and not stopped["cleanup_unknown"], stopped
+        assert self.daemon_logged(name, HELPER_FAILED_LOGGED) == refused + 1
+        assert self.interrupts_logged(name) == interrupts
+        assert intent.exists(), "the host daemon recorded no stop intent"
+
+    def prove_stopped_without_helper(self, name, lead, killed_first):
+        """An explicit stop whose record helper failed never pauses NAME's
+        running message and nothing resumes it: the driver that handles its
+        signal ends the message unknown by the daemon's stop intent, and the
+        driver that is killed first leaves it running for the next start,
+        which ends it unknown by the same intent. LEAD hears of it once."""
+        env = self.environment
+        message, run = self.hold(name)
+        self.stop_without_helper(name, killed_first)
+        record = self.record_file(name, message["id"])
+        assert record["state"] in ("running", "unknown") and "pause" not in record, record
+        if killed_first:
+            assert record["state"] == "running", record
+        records = self.root / "hosts" / env / "agents" / self.driver_ids[name] / "messages"
+        stops = [r for r in (json.loads(path.read_text()) for path in records.glob("*.json"))
+                 if r["action"] == "interrupt" and r.get("expected_active_message_id") == message["id"]]
+        assert not stops, stops
+        self.call("restart", env, name)
+        self.idle(name)
+        done = self.wait_message(message["id"], ok=False)
+        assert done["state"] == "unknown" and "pause" not in done and "native_resumed" not in done, done
+        if killed_first:
+            assert done["error"] == STOPPED_IN_FLIGHT, done
+        assert not self.stop_intent(name).exists(), "the next start left the stop intent"
+        received = [entry["received"] for entry in self.noel_trace(name) if "received" in entry]
+        assert not any(r["type"] == "resume_run" and r.get("expectedRunId") == run for r in received), received
+        self.heard_once(lead, message)
+        notes = self.notices(lead, message["id"])
+        assert len(notes) == 1 and "paused message" not in notes[0]["text"], notes
+        reply = self.call("msg", env, name, "AFTER", "--output", "json", data=True)
+        assert self.wait_message(reply["id"])["result"] == "[faux/echo] AFTER"
 
     def prove_removed(self):
         """Removing an environment removes a paused message with it. A `cw
@@ -1657,7 +1728,8 @@ class Journey:
         main = self.environment
         script, log = self.root / "pause-script.json", self.root / "pause-requests.jsonl"
         script.write_text(json.dumps([[{"wait_for_file": "never-pause"}, {"text": "never sent"}],
-                                      [{"text": "Answered after the environment came back."}]]))
+                                      [{"text": "Answered after the environment came back."}],
+                                      [{"wait_for_file": "never-stop"}, {"text": "never sent"}]]))
         daemon = dict(self.env)
         daemon.update(value.split("=", 1) for value in private + [
             f"PI_FAUX_SCRIPT={script}", f"PI_FAUX_SCRIPT_LOG={log}", "SHELL=/bin/sh"])
@@ -1730,11 +1802,34 @@ class Journey:
                 return [e["message"]["content"] for e in entries
                         if e.get("type") == "message" and e["message"]["role"] == "user"]
             self.told_pause_then_final(lead, message, lead_said)
-            self.call("env", "rm", "--local", env, "--yes")
-            self.extra_environments.remove(env)
             self.check("real-noel-env-stop-pauses-run/env-start-resumes-without-restart/"
                        "model-request-sent-again-once/wait-goes-on/lead-hears-pause-then-final/"
                        "codex-and-claude-unknown-and-not-restarted")
+
+            # An explicit stop whose record helper fails and whose driver is
+            # killed before it acts: only the host daemon's stop intent says
+            # the stop was explicit. The next start never resumes the run:
+            # its cut-off model request is not sent again.
+            def sent():
+                return [json.loads(line) for line in log.read_text().splitlines()]
+            asked = len(sent())
+            stopped, stopped_run = self.held("pause-worker", "Hold the harbour.")
+            self.until(sent, lambda requests: len(requests) == asked + 1)
+            self.stop_without_helper("pause-worker", killed_first=True)
+            assert self.record_file("pause-worker", stopped["id"])["state"] == "running"
+            self.call("restart", env, "pause-worker")
+            self.idle("pause-worker")
+            done = self.wait_message(stopped["id"], ok=False)
+            assert done["state"] == "unknown" and done["error"] == STOPPED_IN_FLIGHT, done
+            assert "pause" not in done and "native_resumed" not in done, done
+            assert not self.stop_intent("pause-worker").exists()
+            assert journal_runs(journal).get(stopped_run) != "completed", journal_runs(journal)
+            self.heard_once(lead, stopped, lead_said)
+            assert len(sent()) == asked + 1, sent()
+            self.check("real-noel-explicit-stop-with-failed-record-helper/driver-killed-first/"
+                       "never-resumed/model-request-not-sent-again/lead-hears-once")
+            self.call("env", "rm", "--local", env, "--yes")
+            self.extra_environments.remove(env)
         finally:
             self.environment = main
 
