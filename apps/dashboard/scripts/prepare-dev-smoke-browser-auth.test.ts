@@ -359,10 +359,19 @@ test("wrong identity prevents all UX mutation and revokes the owned login", asyn
   expect(await readFile(join(value.directory, "audit"), "utf8")).toBe("logout\n");
 });
 
+// Time budgets only: in ux-timeout the walkthrough never resolves, so the
+// total deadline fires whatever its length; it must merely outlast reaching
+// the walkthrough, which takes longer on a loaded host. Every other mode
+// finishes well inside its deadline, which stays inside the test timeout.
+const UX_TIMEOUT_DEADLINE_MS = 2_000;
+const UX_DEADLINE_MS = 20_000;
+const UX_TEST_TIMEOUT_MS = 30_000;
+
 for (const mode of ["ux-success", "ux-failure", "ux-signal", "ux-timeout", "ux-cleanup-failure"]) {
   test(`${mode}: cleanup is independent of browser and precedes OAuth logout`, async () => {
     const value = await fixture(mode);
-    const result = await helper.main([...value.args, "--ux-walkthrough", "enabled"], mode === "ux-timeout" ? 50 : 5000)
+    const deadline = mode === "ux-timeout" ? UX_TIMEOUT_DEADLINE_MS : UX_DEADLINE_MS;
+    const result = await helper.main([...value.args, "--ux-walkthrough", "enabled"], deadline)
       .catch((error) => error);
     expect(uxInvocations).toBe(1);
     const audit = await readFile(join(value.directory, "audit"), "utf8");
@@ -381,7 +390,7 @@ for (const mode of ["ux-success", "ux-failure", "ux-signal", "ux-timeout", "ux-c
       if (mode === "ux-signal") expect(result.stage).toBe("signal-sigterm");
       if (mode === "ux-timeout") expect(result.stage).toBe("total-timeout");
     }
-  });
+  }, UX_TEST_TIMEOUT_MS);
 }
 
 test("external redirects are rejected before each credential or device action", async () => {
