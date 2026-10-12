@@ -23,7 +23,7 @@ pub(crate) const STATE: &str = "/home/codewire/.local/state/codewire/platform-ma
 const MAX_IMAGE: u64 = 256 * 1024 * 1024;
 const MAX_REQUEST: usize = 512 * 1024;
 mod files;
-pub(crate) use files::{Tree, publish_session};
+pub(crate) use files::{Tree, leaf_refusal, publish_session, tree_refusal};
 mod payload;
 pub use payload::{ProviderIdentity, ProviderPin};
 mod service;
@@ -50,6 +50,14 @@ impl Agent {
         match self {
             Self::Codex => 1,
             Self::Claude => 2,
+        }
+    }
+
+    /// The provider's product name, for user-facing messages.
+    pub(crate) fn product(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude Code",
         }
     }
 
@@ -119,32 +127,92 @@ pub(crate) struct Origin {
 }
 
 impl Origin {
+    /// The shape plus this release's provider pin. Launch and Restart run the
+    /// record's provider, so they require both; nothing else may.
     pub(crate) fn validate(&self, session: &str) -> Result<(), Error> {
-        for value in [&self.environment_id, &self.pod_uid, &self.driver_id] {
-            canonical_uuid(value)?;
-        }
-        if self.version != 1
-            || self.org_id.is_empty()
-            || self.org_id.len() > 256
-            || self.org_id.trim() != self.org_id
-            || self.org_id.chars().any(char::is_control)
-            || self.binding_generation == 0
-            || self.projection_selection_sha256 == [0; 32]
-            || self.support_image_sha256 == [0; 32]
-            || !(4..=MAX_IMAGE).contains(&self.support_image_size)
-            || self.provider.sha256 == [0; 32]
-            || !(4..=512 * 1024 * 1024).contains(&self.provider.size)
-            || self.provider.version
-                != match self.agent {
-                    Agent::Codex => "0.160.0",
-                    Agent::Claude => "2.1.288",
-                }
-            || self.parent_generation == Some(0)
-            || session != format!("session-{}", self.driver_id)
-        {
+        self.validate_shape(session)?;
+        if !self.current_provider() {
             return Err(Error::Refused);
         }
         Ok(())
+    }
+
+    /// What a retained record must satisfy to load, list, be read or be
+    /// stopped. It names no value that changes between releases, so a record
+    /// an earlier daemon wrote keeps loading after an upgrade.
+    pub(crate) fn validate_shape(&self, session: &str) -> Result<(), Error> {
+        match self.shape_fault(session) {
+            Some(_) => Err(Error::Refused),
+            None => Ok(()),
+        }
+    }
+
+    /// The first shape check this origin fails, named without any of its
+    /// values, for the store's refusal reason.
+    pub(crate) fn shape_fault(&self, session: &str) -> Option<&'static str> {
+        if [&self.environment_id, &self.pod_uid, &self.driver_id]
+            .into_iter()
+            .any(|value| canonical_uuid(value).is_err())
+        {
+            return Some("an origin identity is not a canonical UUID");
+        }
+        let version = &self.provider.version;
+        [
+            (self.version != 1, "the origin version is not 1"),
+            (
+                self.org_id.is_empty()
+                    || self.org_id.len() > 256
+                    || self.org_id.trim() != self.org_id
+                    || self.org_id.chars().any(char::is_control),
+                "the origin organization is malformed",
+            ),
+            (
+                self.binding_generation == 0,
+                "the origin binding generation is zero",
+            ),
+            (
+                self.projection_selection_sha256 == [0; 32],
+                "the origin projection selection is empty",
+            ),
+            (
+                self.support_image_sha256 == [0; 32]
+                    || !(4..=MAX_IMAGE).contains(&self.support_image_size),
+                "the origin support image is malformed",
+            ),
+            (
+                self.provider.sha256 == [0; 32]
+                    || !(4..=512 * 1024 * 1024).contains(&self.provider.size),
+                "the origin provider identity is malformed",
+            ),
+            (
+                version.is_empty()
+                    || version.len() > 64
+                    || !version.starts_with(|c: char| c.is_ascii_digit())
+                    || !version
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b)),
+                "the origin provider version is malformed",
+            ),
+            (
+                self.parent_generation == Some(0),
+                "the origin parent generation is zero",
+            ),
+            (
+                session != format!("session-{}", self.driver_id),
+                "the origin driver does not name its session",
+            ),
+        ]
+        .into_iter()
+        .find_map(|(failed, check)| failed.then_some(check))
+    }
+
+    /// Whether this record's provider is the one this release runs.
+    pub(crate) fn current_provider(&self) -> bool {
+        self.provider.version
+            == match self.agent {
+                Agent::Codex => "0.160.0",
+                Agent::Claude => "2.1.288",
+            }
     }
 
     pub(crate) fn command(&self) -> Vec<String> {
@@ -165,6 +233,10 @@ pub enum Error {
     Refused,
     #[error("platform managed outcome is unknown; observe the original request")]
     Unknown,
+    /// Restart of a record an earlier release's provider wrote, refused before
+    /// any effect. It names only the product.
+    #[error("this managed agent was started with an earlier {}; start a new conversation", .0.product())]
+    EarlierProvider(Agent),
 }
 
 fn canonical_uuid(value: &str) -> Result<(), Error> {
