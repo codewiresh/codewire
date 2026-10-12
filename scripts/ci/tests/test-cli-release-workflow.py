@@ -421,6 +421,11 @@ def check_dry_run(text):
     blocks = jobs(text)
     need(list(blocks) == ["protected-main", "build-runtime-linux", "build-darwin", "assemble"],
          "unexpected dry-run job set")
+    # Forgejo cancels the older push run of a workflow with no `concurrency`
+    # block. With a group and `cancel-in-progress: false`, runs queue in push
+    # order and each one finishes.
+    need("\nconcurrency:\n  group: cw-release-dry-run-${{ github.ref }}\n  cancel-in-progress: false\n\n" in text,
+         "a newer main push can cancel a running dry run")
     guard, runtime = blocks.get("protected-main", ""), blocks.get("build-runtime-linux", "")
     darwin, assemble = blocks.get("build-darwin", ""), blocks.get("assemble", "")
     need("    runs-on: ci-lite\n" in guard and "actions-checkout" not in guard
@@ -468,6 +473,9 @@ def check_dry_run(text):
 
 
 DRY_RUN_MUTATIONS = {
+    "cancellable dry run": lambda t: t.replace("  cancel-in-progress: false\n", "  cancel-in-progress: true\n", 1),
+    "dry run without a concurrency group": lambda t: t.replace(
+        "  group: cw-release-dry-run-${{ github.ref }}\n", "", 1),
     "pull requests": lambda t: t.replace("on:\n  push:", "on:\n  pull_request:\n  push:", 1),
     "secret": lambda t: t.replace("    runs-on: ci-protected\n", "    runs-on: ci-protected\n    env:\n"
                                   "      KEY: ${{ secrets.CW_RELEASE_GPG_PRIVATE_KEY }}\n", 1),
