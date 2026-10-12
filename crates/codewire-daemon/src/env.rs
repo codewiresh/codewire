@@ -92,9 +92,17 @@ fn build_managed_process_env_from(
     let mut entries =
         build_process_env_from(config, persisted, extra, term, inherited, fallback_shell);
     bypass_proxy_for_loopback(config.managed_credential_clients, &mut entries);
+    let mut override_names = command_override_names(extra, term);
+    // The launch projection would otherwise replace the extended list with
+    // an application secret of the same name, dropping the loopback entries.
+    // While an HTTP client is selected the list above is final; declared
+    // entries belong in the environment configuration, which it extends.
+    if config.managed_credential_clients.uses_loopback_http() {
+        override_names.extend(codewire_access::NO_PROXY_NAMES.map(str::to_owned));
+    }
     Ok(ProcessEnvironment {
         entries,
-        override_names: command_override_names(extra, term),
+        override_names,
     })
 }
 
@@ -541,6 +549,12 @@ mod tests {
                         .collect::<Vec<_>>(),
                     ["NO_PROXY=command.example,localhost,127.0.0.1,::1"]
                 );
+                // An application secret of either name is not applied over
+                // the extended list: both are launch override names.
+                assert_eq!(
+                    environment.override_names,
+                    BTreeSet::from(["NO_PROXY".to_owned(), "no_proxy".to_owned()])
+                );
             }
             // SSH alone, or no selection, has no HTTP route: nothing is set
             // and a declared list is the workload's own.
@@ -559,6 +573,17 @@ mod tests {
             );
             assert_eq!(environment["NO_PROXY"], "corp.example");
             assert!(!environment.contains_key("no_proxy"));
+            let overrides = build_managed_process_env_from(
+                &config,
+                vec!["NO_PROXY=corp.example".into()],
+                &[],
+                "",
+                [],
+                "/bin/sh",
+            )
+            .unwrap()
+            .override_names;
+            assert!(overrides.is_empty());
         }
     }
 
