@@ -160,6 +160,12 @@ case " ${families[*]} " in
     while IFS= read -r producer_log; do
       grep -E 'Finished `|CODEWIRE_CI_PHASE|Compile requests  |Cache hits rate  |Cache misses  |Non-cacheable calls|Average compiler' \
         "$producer_log" | sed 's/^/cw-producer: /' || true
+      # Every producer step that took at least five seconds, with its name.
+      awk '
+        match($0, /^#[0-9]+ \[/) { id = substr($1, 2); if (!(id in name)) name[id] = substr($0, RSTART + RLENGTH - 1, 120) }
+        $2 == "DONE" && $1 ~ /^#[0-9]+$/ { id = substr($1, 2); seconds = $3; sub(/s$/, "", seconds)
+          if (seconds + 0 >= 5) printf "cw-producer step: %6.1fs %s\n", seconds, name[id] }
+      ' "$producer_log" || true
     done < <(find "$work" -path '*/cw-producer.*' -name build.log -type f 2>/dev/null)
     ;;
 esac
