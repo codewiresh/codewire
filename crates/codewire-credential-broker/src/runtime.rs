@@ -2077,13 +2077,14 @@ where
     ) -> Result<(), BrokerRequestError> {
         let permit = match leases.start_credential_refresh(reservation).await {
             Ok(permit) => permit,
-            // Start consumed the reservation. Even definite denial must end
-            // this epoch so a still-Reserved attempt cannot retain an owner
-            // that no caller can release. An uncertain ACK takes the same
-            // drain path, but recovery never retries a Started attempt.
-            // A Codex login answers this error without ending its epoch; that
-            // relies on the platform store's durable deadlines (see
-            // `send_codex_login_response` in bridge.rs).
+            // Start consumed the reservation. Even a definite denial answers
+            // AuthorityUnavailable, the one request failure that ends the
+            // epoch (`request_failure_ends_epoch`): a local owner whose Start
+            // failed is released only when its lease channel closes. An
+            // uncertain ACK takes the same path, but recovery never retries a
+            // Started attempt. A Codex login answers this error without
+            // ending its epoch; that relies on the platform store's durable
+            // deadlines (see `send_codex_login_response` in bridge.rs).
             Err(error) => {
                 RefreshFailure::Start(error).warn(CODEX_REFRESH_PROVIDER);
                 return Err(BrokerRequestError::AuthorityUnavailable);
@@ -2097,7 +2098,7 @@ where
                         .await
                         .map_err(|error| {
                             RefreshFailure::Publication(error).warn(CODEX_REFRESH_PROVIDER);
-                            map_refresh_error(error)
+                            publication_failure()
                         });
                 }
                 Err(failed) => failed,
@@ -2287,7 +2288,7 @@ where
                     .await
                     .map_err(|error| {
                         RefreshFailure::Publication(error).warn(GITHUB_REFRESH_PROVIDER);
-                        map_refresh_error(error)
+                        publication_failure()
                     });
             }
             Err(failed) => failed,
@@ -2634,6 +2635,13 @@ fn map_lease_error(error: BrokerLeaseError) -> BrokerRequestError {
     }
 }
 
+/// Every failed commit of a started refresh ends the epoch, like a failed
+/// Start: a local commit the authority refused, even a definite denial,
+/// leaves its owner held until the lease channel closes.
+fn publication_failure() -> BrokerRequestError {
+    BrokerRequestError::AuthorityUnavailable
+}
+
 fn map_refresh_error(error: BrokerRefreshError) -> BrokerRequestError {
     match error {
         BrokerRefreshError::InvalidRequest | BrokerRefreshError::Denied => {
@@ -2950,6 +2958,9 @@ mod tests {
         commit_return_gate: Arc<CommitReturnGate>,
         begin_control: Option<Arc<BlockingRefreshControl>>,
         deny_login: Arc<AtomicBool>,
+        /// The authority refuses the commit and keeps its owner, as a local
+        /// authority does until the lease channel closes.
+        refuse_commit: bool,
     }
 
     #[async_trait]
@@ -3108,7 +3119,8 @@ mod tests {
             permit: Self::StartedRefresh,
             material: CanonicalCodexOAuthBundle,
         ) -> Result<(), BrokerRefreshError> {
-            if !self.refresh_active.load(Ordering::Acquire)
+            if self.refuse_commit
+                || !self.refresh_active.load(Ordering::Acquire)
                 || permit.credential_id != self.credential_id
                 || permit.material_generation
                     != self.material_generation.load(Ordering::Acquire) as u64
@@ -3651,6 +3663,7 @@ mod tests {
                 commit_return_gate,
                 begin_control: None,
                 deny_login: Arc::new(AtomicBool::new(false)),
+                refuse_commit: false,
             },
             OAuthSyntheticUpstream {
                 refresh_status,
@@ -4995,6 +5008,88 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn refresh_headers_and_body_share_one_timeout_budget() {
         assert_refresh_timeout(Duration::from_secs(20), Duration::from_secs(20)).await;
+    }
+
+    /// A refresh that fails at the provider answers only its own request
+    /// (502) and finalizes its reservation; its epoch keeps serving.
+    async fn assert_failed_refresh_keeps_the_epoch_serving(
+        broker: OpenAiBroker<OAuthTestLeaseProvider, OAuthSyntheticUpstream>,
+        state: &OAuthTestState,
+    ) {
+        use crate::bridge::tests::{Answer, TestEpoch};
+        let refresh_active = Arc::clone(&broker.leases.refresh_active);
+        let mut epoch = TestEpoch::start(Arc::new(broker)).await;
+        assert_eq!(
+            epoch.answer(request()).await,
+            Answer::Failure(v1::CredentialBridgeFailureReason::UpstreamFailed)
+        );
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 1);
+        assert!(!refresh_active.load(Ordering::Acquire));
+        // The next request is answered on the same epoch: the failed login
+        // now needs Reconnect, and nothing refreshes it again.
+        assert_eq!(
+            epoch.answer(request()).await,
+            Answer::Failure(v1::CredentialBridgeFailureReason::Denied)
+        );
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+        assert_eq!(state.commit_count.load(Ordering::Relaxed), 0);
+        epoch.close().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_refresh_answers_only_its_request_and_the_epoch_keeps_serving() {
+        let (mut broker, state) =
+            oauth_broker(StatusCode::OK, Vec::new(), "unused".into(), Duration::ZERO);
+        Arc::get_mut(&mut broker.upstream).unwrap().refresh_delay = Duration::from_secs(90);
+        assert_failed_refresh_keeps_the_epoch_serving(broker, &state).await;
+    }
+
+    #[tokio::test]
+    async fn an_uncertain_5xx_refresh_answers_only_its_request_and_the_epoch_keeps_serving() {
+        let (broker, state) = oauth_broker(
+            StatusCode::SERVICE_UNAVAILABLE,
+            br#"{"error":"synthetic-unavailable"}"#.to_vec(),
+            "unused-access-token".into(),
+            Duration::ZERO,
+        );
+        assert_failed_refresh_keeps_the_epoch_serving(broker, &state).await;
+    }
+
+    #[tokio::test]
+    async fn a_refused_refresh_commit_ends_the_epoch_to_release_its_owner() {
+        use crate::bridge::tests::{Answer, TestEpoch};
+        let access_token = jwt(json!({
+            "exp": current_unix_time().expect("current time") + 3_600
+        }));
+        let refresh_response = serde_json::to_vec(&json!({
+            "access_token": access_token.clone(),
+            "refresh_token": "synthetic-new-refresh-token",
+            "token_type": "bearer"
+        }))
+        .unwrap();
+        let (mut broker, state) = oauth_broker(
+            StatusCode::OK,
+            refresh_response,
+            access_token,
+            Duration::ZERO,
+        );
+        Arc::get_mut(&mut broker.leases).unwrap().refuse_commit = true;
+        let refresh_active = Arc::clone(&broker.leases.refresh_active);
+        let mut epoch = TestEpoch::start(Arc::new(broker)).await;
+        assert_eq!(
+            epoch.answer(request()).await,
+            Answer::Failure(v1::CredentialBridgeFailureReason::Unavailable)
+        );
+        // Even a definite refusal ends the epoch: only closing its lease
+        // channel releases the owner the refused commit left held.
+        assert_eq!(
+            epoch.ended().await,
+            Err(crate::BrokerBridgeError::Unavailable)
+        );
+        assert!(refresh_active.load(Ordering::Acquire));
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+        assert_eq!(state.commit_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

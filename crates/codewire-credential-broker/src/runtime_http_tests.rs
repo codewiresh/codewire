@@ -1,6 +1,6 @@
 use std::sync::{
     Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use super::*;
@@ -500,6 +500,11 @@ struct AppRefreshAuthority {
     begins: Arc<AtomicUsize>,
     starts: Arc<AtomicUsize>,
     commits: Arc<AtomicUsize>,
+    /// Recorded refresh failures. A failed login then needs Reconnect.
+    failures: Arc<AtomicUsize>,
+    /// The authority refuses the commit and keeps its owner, as a local
+    /// authority does until the lease channel closes.
+    refuse_commit: bool,
 }
 
 #[async_trait]
@@ -518,6 +523,7 @@ impl BrokerLeaseProvider for AppRefreshAuthority {
         if slot.as_str() != "github"
             || operation.as_str() != "rest"
             || route.as_str() != "github-api"
+            || self.failures.load(Ordering::SeqCst) > 0
         {
             return Err(BrokerLeaseError::Denied);
         }
@@ -583,6 +589,9 @@ impl BrokerLeaseProvider for AppRefreshAuthority {
         permit: Self::StartedRefresh,
         bundle: GitHubAppUserOAuthBundle,
     ) -> Result<(), BrokerRefreshError> {
+        if self.refuse_commit {
+            return Err(BrokerRefreshError::Denied);
+        }
         let mut material = bundle.into_bytes();
         GitHubAppUserOAuthBundle::parse(&material)
             .map_err(|_| BrokerRefreshError::InvalidResponse)?;
@@ -617,7 +626,8 @@ impl BrokerLeaseProvider for AppRefreshAuthority {
         &self,
         _: Self::StartedRefresh,
     ) -> Result<(), BrokerRefreshError> {
-        Err(BrokerRefreshError::Denied)
+        self.failures.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn wait_for_active_operations(&self) -> Result<(), BrokerRefreshError> {
@@ -629,6 +639,8 @@ struct AppAuthorizationUpstream {
     calls: AtomicUsize,
     refreshes: AtomicUsize,
     initial_access_lifetime: u64,
+    /// The refresh exchange fails in transport, after it may have been sent.
+    refresh_unreachable: AtomicBool,
 }
 
 impl AppAuthorizationUpstream {
@@ -637,6 +649,7 @@ impl AppAuthorizationUpstream {
             calls: AtomicUsize::new(0),
             refreshes: AtomicUsize::new(0),
             initial_access_lifetime,
+            refresh_unreachable: AtomicBool::new(false),
         }
     }
 }
@@ -686,6 +699,9 @@ impl BrokerUpstreamTransport for AppAuthorizationUpstream {
                     == Some(APP_INITIAL_REFRESH_TOKEN)
             {
                 self.refreshes.fetch_add(1, Ordering::SeqCst);
+                if self.refresh_unreachable.load(Ordering::SeqCst) {
+                    return Err(BrokerUpstreamError::Connect);
+                }
                 return Ok(json_upstream_response(serde_json::json!({
                     "access_token": APP_REFRESHED_ACCESS_TOKEN,
                     "token_type": "bearer",
@@ -874,6 +890,8 @@ async fn github_app_401_refreshes_once_then_retries_with_the_direct_successor() 
             begins: begins.clone(),
             starts: starts.clone(),
             commits: commits.clone(),
+            failures: Arc::new(AtomicUsize::new(0)),
+            refuse_commit: false,
         },
         GitAppUpstream {
             authorizations: authorizations.clone(),
@@ -956,6 +974,8 @@ async fn github_app_early_refresh_does_not_rotate_again_after_a_successor_401() 
             begins: begins.clone(),
             starts: starts.clone(),
             commits: commits.clone(),
+            failures: Arc::new(AtomicUsize::new(0)),
+            refuse_commit: false,
         },
         GitAppUpstream {
             authorizations: authorizations.clone(),
@@ -992,4 +1012,101 @@ async fn github_app_early_refresh_does_not_rotate_again_after_a_successor_401() 
     assert_eq!(begins.load(Ordering::SeqCst), 1);
     assert_eq!(starts.load(Ordering::SeqCst), 1);
     assert_eq!(commits.load(Ordering::SeqCst), 1);
+}
+
+/// A GitHub App broker whose access token is due for renewal, so its first
+/// request refreshes through the App owner before it is sent.
+async fn due_github_app_broker(
+    upstream: Arc<AppAuthorizationUpstream>,
+    refuse_commit: bool,
+) -> (
+    OpenAiBroker<AppRefreshAuthority, GitAppUpstream>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+) {
+    let owner = Arc::new(GitHubAppAuthorizationOwner::new(
+        app_authorization_config(),
+        upstream,
+    ));
+    let mut import = owner
+        .complete(Zeroizing::new(b"synthetic-code-123".to_vec()))
+        .await
+        .expect("initial App authorization");
+    let (material, _) = import.take_import().expect("protected App import");
+    let failures = Arc::new(AtomicUsize::new(0));
+    let commits = Arc::new(AtomicUsize::new(0));
+    let broker = OpenAiBroker::new(
+        AppRefreshAuthority {
+            state: Arc::new(Mutex::new(AppRefreshState {
+                material,
+                revocation_generation: 7,
+                material_generation: 2,
+            })),
+            begins: Arc::new(AtomicUsize::new(0)),
+            starts: Arc::new(AtomicUsize::new(0)),
+            commits: commits.clone(),
+            failures: failures.clone(),
+            refuse_commit,
+        },
+        GitAppUpstream {
+            authorizations: Arc::new(Mutex::new(Vec::new())),
+            refreshed_status: StatusCode::OK,
+        },
+    )
+    .expect("broker")
+    .with_github_app_authorization_owner(owner);
+    (broker, failures, commits)
+}
+
+fn github_user_request() -> v1::CredentialBridgeRequest {
+    request(
+        "github",
+        "github-api",
+        "GET",
+        "/user",
+        b"",
+        "application/json",
+    )
+}
+
+#[tokio::test]
+async fn a_failed_github_app_refresh_answers_only_its_request_and_the_epoch_keeps_serving() {
+    use crate::bridge::tests::{Answer, TestEpoch};
+    let upstream = Arc::new(AppAuthorizationUpstream::new(60));
+    upstream.refresh_unreachable.store(true, Ordering::SeqCst);
+    let (broker, failures, commits) = due_github_app_broker(upstream.clone(), false).await;
+    let mut epoch = TestEpoch::start(Arc::new(broker)).await;
+    assert_eq!(
+        epoch.answer(github_user_request()).await,
+        Answer::Failure(v1::CredentialBridgeFailureReason::UpstreamFailed)
+    );
+    // The started attempt was finalized as failed, not left for the epoch.
+    assert_eq!(failures.load(Ordering::SeqCst), 1);
+    assert_eq!(commits.load(Ordering::SeqCst), 0);
+    // The same epoch answers the next request: the login needs Reconnect.
+    assert_eq!(
+        epoch.answer(github_user_request()).await,
+        Answer::Failure(v1::CredentialBridgeFailureReason::Denied)
+    );
+    assert_eq!(upstream.refreshes.load(Ordering::SeqCst), 1);
+    epoch.close().await;
+}
+
+#[tokio::test]
+async fn a_refused_github_app_refresh_commit_ends_the_epoch_to_release_its_owner() {
+    use crate::bridge::tests::{Answer, TestEpoch};
+    let upstream = Arc::new(AppAuthorizationUpstream::new(60));
+    let (broker, failures, commits) = due_github_app_broker(upstream.clone(), true).await;
+    let mut epoch = TestEpoch::start(Arc::new(broker)).await;
+    assert_eq!(
+        epoch.answer(github_user_request()).await,
+        Answer::Failure(v1::CredentialBridgeFailureReason::Unavailable)
+    );
+    assert_eq!(
+        epoch.ended().await,
+        Err(crate::BrokerBridgeError::Unavailable)
+    );
+    assert_eq!(upstream.refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(failures.load(Ordering::SeqCst), 0);
+    assert_eq!(commits.load(Ordering::SeqCst), 0);
 }

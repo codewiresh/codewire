@@ -3,13 +3,17 @@
 //! The Linux counterparts of the macOS #1905 conditions, run against the real
 //! `cw` packet worker and egress broker started as the runner starts them.
 //!
-//! - Condition 1: when Landlock, seccomp or the privilege lock cannot be
+//! - Condition 1: when Landlock, seccomp or the capability drop cannot be
 //!   applied, the worker and the broker report the typed failure, exit with
 //!   its status and never serve. A seccomp filter installed before exec makes
 //!   the one confinement syscall fail, as a kernel without that feature would.
 //! - Condition 2: a serving worker holds only the descriptors it was given.
 //!   Its `/proc/<pid>/fd` table is read and every Unix socket's peer is
 //!   resolved through `sock_diag`, as macOS reads the table with libproc.
+//!
+//! The roles are started with whatever capabilities this test process holds
+//! (every default one as root in a CI container, an inherited one in some
+//! shells), so a serving role with none proves that it discarded them itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read as _, Write as _};
@@ -22,11 +26,12 @@ use std::time::{Duration, Instant};
 
 use codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN;
 use codewire_local_vmm::egress_broker::{
-    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_PREPARED_MESSAGE,
-    EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES, EgressBrokerStartupFailure,
-    EgressBrokerStartupStatus, decode_egress_broker_startup_status,
+    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_HOST_ADDRESSES_FD,
+    EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES,
+    EgressBrokerStartupFailure, EgressBrokerStartupStatus, decode_egress_broker_startup_status,
     encode_developer_egress_broker_bootstrap,
 };
+use codewire_local_vmm::host_addresses::{HostAddressSet, encode_frame};
 use codewire_local_vmm::host_port::HOST_PORT_CONTROL_KEY_LEN;
 use codewire_local_vmm::mesh_ingress::MESH_INGRESS_CONTROL_KEY_LEN;
 use codewire_local_vmm::network_worker::{
@@ -50,7 +55,12 @@ const AUDIT_ARCH_NATIVE: u32 = 0xc000_003e;
 #[cfg(target_arch = "aarch64")]
 const AUDIT_ARCH_NATIVE: u32 = 0xc000_00b7;
 
-struct ChildGuard(Child);
+/// The child, and for a broker the runner's end of its host-address control
+/// socket, held open for the broker's lifetime.
+struct ChildGuard(
+    Child,
+    #[allow(dead_code, reason = "held open, never read")] Option<UnixStream>,
+);
 
 impl ChildGuard {
     fn pid(&self) -> u32 {
@@ -97,7 +107,8 @@ struct RefusedSyscall {
 
 /// Starts a hidden `cw` role the way the runner does: an empty environment,
 /// standard I/O on `/dev/null`, exactly one inherited bootstrap descriptor,
-/// the parent-death signal and `no_new_privs`.
+/// the parent-death signal and `no_new_privs`. Unlike the runner it leaves
+/// the role this test's capabilities; discarding them is the role's own job.
 fn spawn_role(
     role: &str,
     directory: &std::path::Path,
@@ -114,6 +125,9 @@ fn spawn_role(
     let (environment_id, generation) = identity();
     let mut filter = refused.map(refusal_filter);
     let source = child_socket.as_raw_fd();
+    // A broker also takes the runner's host-address control socket (#2614).
+    let control = (role == "__native-egress-broker").then(|| UnixStream::pair().unwrap());
+    let control_source = control.as_ref().map(|(_, child)| child.as_raw_fd());
     let mut command = Command::new(env!("CARGO_BIN_EXE_cw"));
     command
         .arg(role)
@@ -150,6 +164,12 @@ fn spawn_role(
             if libc::fcntl(target_fd, libc::F_SETFD, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
+            if let Some(control_source) = control_source
+                && (libc::dup2(control_source, EGRESS_BROKER_HOST_ADDRESSES_FD) == -1
+                    || libc::fcntl(EGRESS_BROKER_HOST_ADDRESSES_FD, libc::F_SETFD, 0) == -1)
+            {
+                return Err(std::io::Error::last_os_error());
+            }
             if let Some(filter) = filter.as_mut() {
                 let program = libc::sock_fprog {
                     len: filter.len() as u16,
@@ -164,7 +184,14 @@ fn spawn_role(
     }
     let child = command.spawn().unwrap();
     drop(child_socket);
-    (parent, ChildGuard(child))
+    let control = control.map(|(mut control, control_child)| {
+        drop(control_child);
+        control
+            .write_all(&encode_frame(&HostAddressSet::default()))
+            .unwrap();
+        control
+    });
+    (parent, ChildGuard(child, control))
 }
 
 fn refusal_filter(refused: RefusedSyscall) -> Vec<libc::sock_filter> {
@@ -304,6 +331,20 @@ const SECCOMP_UNAVAILABLE: RefusedSyscall = RefusedSyscall {
     errno: libc::EINVAL,
 };
 
+/// A process that may not change its capability sets gets `EPERM`.
+const CAPABILITY_DROP_REFUSED: RefusedSyscall = RefusedSyscall {
+    number: libc::SYS_capset,
+    errno: libc::EPERM,
+};
+
+#[test]
+fn worker_refuses_to_serve_without_its_capability_drop() {
+    worker_refusal(
+        CAPABILITY_DROP_REFUSED,
+        NetworkWorkerStartupFailure::PrivilegeConfinement,
+    );
+}
+
 #[test]
 fn worker_refuses_to_serve_without_landlock() {
     worker_refusal(
@@ -323,10 +364,7 @@ fn worker_refuses_to_serve_without_seccomp() {
 #[test]
 fn broker_refuses_to_serve_without_its_privilege_lock() {
     broker_refusal(
-        RefusedSyscall {
-            number: libc::SYS_capset,
-            errno: libc::EPERM,
-        },
+        CAPABILITY_DROP_REFUSED,
         EgressBrokerStartupFailure::PrivilegeConfinement,
     );
 }
@@ -376,6 +414,7 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
         read_status_frame(&mut broker_bootstrap, EGRESS_BROKER_STATUS_MAX_BYTES),
         EGRESS_BROKER_READY_MESSAGE
     );
+    require_confined_without_capabilities(broker.pid());
 
     let key = network_key();
     let (mut worker_bootstrap, mut worker) = spawn_role(
@@ -430,18 +469,9 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
     );
 
     let pid = worker.pid();
+    require_confined_without_capabilities(pid);
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
-    for (field, expected) in [
-        ("Threads", "1"),
-        ("NoNewPrivs", "1"),
-        ("Seccomp", "2"),
-        ("CapInh", "0000000000000000"),
-        ("CapPrm", "0000000000000000"),
-        ("CapEff", "0000000000000000"),
-        ("CapAmb", "0000000000000000"),
-    ] {
-        assert_eq!(status_field(&status, field), expected, "{field}: {status}");
-    }
+    assert_eq!(status_field(&status, "Threads"), "1", "{status}");
 
     // Serving, the worker holds standard I/O on /dev/null, its epoll and
     // eventfd, and Unix streams that lead only to this test (bootstrap and
@@ -516,6 +546,48 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
         Some(NetworkWorkerStartupFailure::FrameIo.exit_code())
     );
     broker.wait_bounded();
+}
+
+const NO_CAPABILITIES: &str = "0000000000000000";
+
+/// A serving role is under `no_new_privs` and a seccomp filter and holds no
+/// capability in any set it can change. Its bounding set is empty too when
+/// it started able to change it.
+fn require_confined_without_capabilities(pid: u32) {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    for (field, expected) in [
+        ("NoNewPrivs", "1"),
+        ("Seccomp", "2"),
+        ("CapInh", NO_CAPABILITIES),
+        ("CapPrm", NO_CAPABILITIES),
+        ("CapEff", NO_CAPABILITIES),
+        ("CapAmb", NO_CAPABILITIES),
+    ] {
+        assert_eq!(status_field(&status, field), expected, "{field}: {status}");
+    }
+    if role_starts_able_to_empty_its_bounding_set() {
+        assert_eq!(
+            status_field(&status, "CapBnd"),
+            NO_CAPABILITIES,
+            "CapBnd: {status}"
+        );
+    }
+}
+
+/// Whether a role started by this test begins with `CAP_SETPCAP`, which the
+/// kernel requires to drop a bounding capability. Across an exec under
+/// `no_new_privs` root keeps the permitted capabilities its inheritable and
+/// bounding sets allow; any other user keeps only its ambient set.
+fn role_starts_able_to_empty_its_bounding_set() -> bool {
+    const CAP_SETPCAP: u64 = 1 << 8;
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let set = |field| u64::from_str_radix(status_field(&status, field), 16).unwrap();
+    let kept = if unsafe { libc::geteuid() } == 0 {
+        set("CapPrm") & (set("CapInh") | set("CapBnd"))
+    } else {
+        set("CapAmb")
+    };
+    kept & CAP_SETPCAP != 0
 }
 
 fn status_field<'a>(status: &'a str, field: &str) -> &'a str {

@@ -13,6 +13,7 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 mod cidr;
+pub mod host_addresses;
 mod hostname;
 pub mod lease;
 
@@ -158,6 +159,10 @@ pub enum AddressClass {
     Benchmark,
     Mapped,
     Reserved,
+    /// One of the host's own interface addresses (#2614).
+    HostInterface,
+    /// A public address the host's network is seen from (#2614).
+    NetworkPublic,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,6 +229,12 @@ impl PolicyDecision {
                 "protected-address-benchmark"
             }
             DecisionReason::ProtectedAddress(AddressClass::Mapped) => "protected-address-mapped",
+            DecisionReason::ProtectedAddress(AddressClass::HostInterface) => {
+                "protected-address-host-interface"
+            }
+            DecisionReason::ProtectedAddress(AddressClass::NetworkPublic) => {
+                "protected-address-network-public"
+            }
             DecisionReason::ProtectedAddress(AddressClass::Reserved) => {
                 "protected-address-reserved"
             }

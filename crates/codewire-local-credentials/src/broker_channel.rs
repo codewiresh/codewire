@@ -2260,6 +2260,216 @@ mod tests {
         server.abort();
     }
 
+    /// One OAuth credential selected for one environment generation.
+    struct RefreshFixture {
+        _temp: tempfile::TempDir,
+        store: TestProtectedStore,
+        authority: Arc<LocalCredentialAuthority<TestProtectedStore>>,
+        environment_id: EnvironmentId,
+        credential_id: CredentialId,
+    }
+
+    impl RefreshFixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let store = TestProtectedStore::default();
+            let authority = Arc::new(
+                LocalCredentialAuthority::open(
+                    &temp.path().join("authority"),
+                    store.clone(),
+                    catalog_with_authentication(CredentialAuthKind::OAuth),
+                )
+                .unwrap(),
+            );
+            let credential = authority
+                .add_credential(
+                    NewCredential {
+                        provider: ProviderId::parse("openai").unwrap(),
+                        authentication_kind: CredentialAuthKind::OAuth,
+                        display_name: "synthetic-oauth".into(),
+                        account_hint: None,
+                        expires_at_unix: None,
+                    },
+                    ProtectedValue::from_slice(b"synthetic-old-oauth-bundle").unwrap(),
+                )
+                .unwrap();
+            let profile = authority
+                .create_profile(
+                    AccessProfileName::parse("synthetic-oauth").unwrap(),
+                    BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+                )
+                .unwrap();
+            let environment_id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
+            authority
+                .create_environment_access_binding(EnvironmentAccessBinding {
+                    environment_id: environment_id.clone(),
+                    profile_id: profile.profile.id,
+                    profile_revision: profile.profile.revision,
+                })
+                .unwrap();
+            Self {
+                _temp: temp,
+                store,
+                authority,
+                environment_id,
+                credential_id: credential.metadata.id,
+            }
+        }
+
+        async fn channel(
+            &self,
+        ) -> (
+            tokio::task::JoinHandle<Result<(), BrokerLeaseChannelError>>,
+            LocalCredentialBrokerLeaseClient<TestProtectedStore>,
+        ) {
+            let (server_stream, client_stream) = UnixStream::pair().unwrap();
+            let server = tokio::spawn(serve_broker_lease_channel(
+                Arc::clone(&self.authority),
+                server_stream,
+                self.environment_id.clone(),
+                7,
+                Some(
+                    self.authority
+                        .get_environment_access_binding(&self.environment_id)
+                        .unwrap()
+                        .binding,
+                ),
+            ));
+            let client = LocalCredentialBrokerLeaseClient::connect(
+                client_stream,
+                self.store.clone(),
+                self.environment_id.clone(),
+                7,
+            )
+            .await
+            .unwrap();
+            (server, client)
+        }
+    }
+
+    async fn begin_refresh(
+        client: &mut LocalCredentialBrokerLeaseClient<TestProtectedStore>,
+    ) -> Result<BrokerCredentialRefreshAdmission, BrokerLeaseChannelError> {
+        let lease = client
+            .lease_operation(
+                Uuid::new_v4(),
+                CapabilitySlot::codex(),
+                BrokerOperationId::parse("responses").unwrap(),
+                BrokerRouteId::parse("openai-api").unwrap(),
+            )
+            .await?;
+        let grant = lease.grant.clone();
+        let material_generation = lease.material_generation();
+        client
+            .begin_credential_refresh(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                grant,
+                BrokerOperationId::parse("responses").unwrap(),
+                BrokerRouteId::parse("openai-api").unwrap(),
+                material_generation,
+            )
+            .await
+    }
+
+    /// A failed refresh releases its owner itself: the same open channel
+    /// reserves the credential's next refresh without its epoch ending.
+    #[tokio::test]
+    async fn a_failed_refresh_releases_its_owner_while_the_channel_stays_open() {
+        let fixture = RefreshFixture::new();
+        let (server, mut client) = fixture.channel().await;
+        let BrokerCredentialRefreshAdmission::Reserved(permit) =
+            begin_refresh(&mut client).await.unwrap()
+        else {
+            panic!("expected reservation");
+        };
+        let permit = client.start_credential_refresh(permit).await.unwrap();
+        client.fail_credential_refresh(permit).await.unwrap();
+        // Reconnect makes the credential refreshable again.
+        let observed = fixture
+            .authority
+            .get_credential(&fixture.credential_id)
+            .unwrap();
+        fixture
+            .authority
+            .rotate_credential_material(
+                &fixture.credential_id,
+                observed.metadata.revocation_generation,
+                ProtectedValue::from_slice(b"synthetic-reconnected-oauth-bundle").unwrap(),
+                None,
+                observed.metadata.account_hint,
+            )
+            .unwrap();
+        let BrokerCredentialRefreshAdmission::Reserved(next) =
+            begin_refresh(&mut client).await.unwrap()
+        else {
+            panic!("expected the next reservation");
+        };
+        assert!(!server.is_finished());
+        client.abort_credential_refresh(next).await.unwrap();
+        drop(client);
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    /// A commit the authority refuses keeps its owner, so the credential
+    /// cannot refresh anywhere else until that lease channel closes. This is
+    /// why the broker ends its epoch on every refresh commit failure.
+    #[tokio::test]
+    async fn a_refused_commit_holds_its_owner_until_the_lease_channel_closes() {
+        let fixture = RefreshFixture::new();
+        let (server, mut client) = fixture.channel().await;
+        let BrokerCredentialRefreshAdmission::Reserved(permit) =
+            begin_refresh(&mut client).await.unwrap()
+        else {
+            panic!("expected reservation");
+        };
+        let permit = client.start_credential_refresh(permit).await.unwrap();
+        // No staged generation: the authority refuses to promote it.
+        let refused = client
+            .inner
+            .commit_credential_refresh(v1::BrokerCredentialRefreshCommitRequest {
+                refresh_id: permit.reservation.refresh_id.to_string(),
+                request_id: permit.reservation.request_id.to_string(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(map_client_status(refused), BrokerLeaseChannelError::Denied);
+        let (other_server, mut other) = fixture.channel().await;
+        assert_eq!(
+            begin_refresh(&mut other).await,
+            Err(BrokerLeaseChannelError::RefreshInProgress)
+        );
+        drop(client);
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        // Closing the channel released the owner. The next admission then
+        // reconciles the abandoned Started attempt: it staged nothing, so the
+        // old token is invalidated and the login needs Reconnect, never a
+        // second refresh.
+        assert_eq!(
+            begin_refresh(&mut other).await,
+            Err(BrokerLeaseChannelError::Denied)
+        );
+        assert_eq!(
+            fixture
+                .authority
+                .get_credential(&fixture.credential_id)
+                .unwrap()
+                .metadata
+                .status,
+            codewire_access::CredentialStatus::RefreshFailed
+        );
+        drop(other);
+        other_server.abort();
+    }
+
     #[tokio::test]
     async fn manual_rotation_excludes_refresh_until_its_store_mutation_finishes() {
         let temp = tempfile::tempdir().unwrap();

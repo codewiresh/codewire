@@ -37,7 +37,7 @@ use crate::host_port::{
 #[cfg(target_os = "linux")]
 use crate::linux::confinement::{
     install_denied_syscalls, install_deny_all_filesystem_domain as restrict_filesystem,
-    require_single_threaded_process as require_single_thread,
+    lock_exec_process_privileges, require_single_threaded_process as require_single_thread,
 };
 use crate::mesh_ingress::{
     MAX_MESH_INGRESS_PORTS, MESH_INGRESS_CONTROL_KEY_LEN, MeshIngressControlReceiver,
@@ -146,6 +146,7 @@ pub enum NetworkWorkerStartupFailure {
     Protocol,
     FrameIo,
     Engine,
+    PrivilegeConfinement,
 }
 
 impl NetworkWorkerStartupFailure {
@@ -170,6 +171,7 @@ impl NetworkWorkerStartupFailure {
             Self::Protocol => "protocol",
             Self::FrameIo => "frame-io",
             Self::Engine => "engine",
+            Self::PrivilegeConfinement => "privilege-confinement",
         }
     }
 
@@ -194,6 +196,7 @@ impl NetworkWorkerStartupFailure {
             Self::Protocol => 36,
             Self::FrameIo => 37,
             Self::Engine => 38,
+            Self::PrivilegeConfinement => 39,
         }
     }
 
@@ -218,6 +221,7 @@ impl NetworkWorkerStartupFailure {
             Self::Protocol => "network_worker_protocol",
             Self::FrameIo => "network_worker_frame_io",
             Self::Engine => "network_worker_engine",
+            Self::PrivilegeConfinement => "network_worker_privilege_confinement",
         }
     }
 
@@ -242,6 +246,7 @@ impl NetworkWorkerStartupFailure {
             36 => Self::Protocol,
             37 => Self::FrameIo,
             38 => Self::Engine,
+            39 => Self::PrivilegeConfinement,
             _ => return None,
         })
     }
@@ -267,6 +272,7 @@ impl NetworkWorkerStartupFailure {
             Self::Protocol => b"CWNETW1 failed-protocol\n",
             Self::FrameIo => b"CWNETW1 failed-frame-io\n",
             Self::Engine => b"CWNETW1 failed-engine\n",
+            Self::PrivilegeConfinement => b"CWNETW1 failed-privilege-confinement\n",
         }
     }
 }
@@ -301,6 +307,7 @@ pub fn decode_worker_startup_status(bytes: &[u8]) -> Option<NetworkWorkerStartup
         NetworkWorkerStartupFailure::Protocol,
         NetworkWorkerStartupFailure::FrameIo,
         NetworkWorkerStartupFailure::Engine,
+        NetworkWorkerStartupFailure::PrivilegeConfinement,
     ]
     .into_iter()
     .find(|failure| bytes == failure.message())
@@ -742,8 +749,9 @@ pub async fn run_inherited_worker(vm_id: Uuid, generation: u64) -> Result<(), Ne
             return Err(error);
         }
     };
-    let confinement =
-        install_deny_all_filesystem_domain().and_then(|()| install_network_worker_seccomp());
+    let confinement = drop_process_privileges()
+        .and_then(|()| install_deny_all_filesystem_domain())
+        .and_then(|()| install_network_worker_seccomp());
     if let Err(error) = confinement {
         let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
         return Err(error);
@@ -830,8 +838,9 @@ pub async fn run_inherited_worker_with_broker<B: EgressBroker>(
             return Err(error);
         }
     };
-    let confinement =
-        install_deny_all_filesystem_domain().and_then(|()| install_network_worker_seccomp());
+    let confinement = drop_process_privileges()
+        .and_then(|()| install_deny_all_filesystem_domain())
+        .and_then(|()| install_network_worker_seccomp());
     if let Err(error) = confinement {
         let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
         return Err(error);
@@ -1233,6 +1242,21 @@ fn install_deny_all_filesystem_domain() -> Result<(), NetworkWorkerError> {
     restrict_filesystem().map_err(|_| NetworkWorkerError::FilesystemConfinement)
 }
 
+/// Drop every capability set in the worker itself. The runner drops them
+/// before exec, but exec gives root its full set again and keeps any
+/// inheritable capability of the launching process. The worker stays
+/// inspectable by its parent, which admits its executable.
+#[cfg(target_os = "linux")]
+fn drop_process_privileges() -> Result<(), NetworkWorkerError> {
+    lock_exec_process_privileges().map_err(|_| NetworkWorkerError::PrivilegeConfinement)
+}
+
+/// Darwin has no capability sets to drop.
+#[cfg(target_os = "macos")]
+fn drop_process_privileges() -> Result<(), NetworkWorkerError> {
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn require_single_threaded_process() -> Result<(), NetworkWorkerError> {
     crate::host::sandbox::require_single_thread().map_err(|_| NetworkWorkerError::ThreadConfinement)
@@ -1604,6 +1628,8 @@ pub enum NetworkWorkerError {
     BootstrapIo,
     #[error("network worker bootstrap is invalid")]
     InvalidBootstrap,
+    #[error("network worker privilege confinement failed")]
+    PrivilegeConfinement,
     #[error("network worker filesystem confinement failed")]
     FilesystemConfinement,
     #[error("network worker syscall confinement failed")]
@@ -1678,6 +1704,7 @@ impl NetworkWorkerError {
             Self::Protocol => NetworkWorkerStartupFailure::Protocol,
             Self::FrameIo => NetworkWorkerStartupFailure::FrameIo,
             Self::Engine => NetworkWorkerStartupFailure::Engine,
+            Self::PrivilegeConfinement => NetworkWorkerStartupFailure::PrivilegeConfinement,
         }
     }
 }
@@ -1743,6 +1770,7 @@ mod tests {
             NetworkWorkerStartupFailure::Protocol,
             NetworkWorkerStartupFailure::FrameIo,
             NetworkWorkerStartupFailure::Engine,
+            NetworkWorkerStartupFailure::PrivilegeConfinement,
         ] {
             assert!(failure.message().len() <= WORKER_STATUS_MAX_BYTES);
             assert_eq!(

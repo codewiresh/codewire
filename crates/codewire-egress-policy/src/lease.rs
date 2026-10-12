@@ -10,8 +10,12 @@ use std::net::IpAddr;
 
 use thiserror::Error;
 
+use crate::host_addresses::HostAddressSet;
 use crate::hostname::{canonical_hostname, protected_name};
-use crate::{CompiledPolicy, EgressRequest, PolicyDecision, PolicyDigest, PolicyError, RouteClass};
+use crate::{
+    CompiledPolicy, DecisionReason, EgressRequest, PolicyDecision, PolicyDigest, PolicyError,
+    RouteClass,
+};
 
 pub const MAX_CNAME_CHAIN: usize = 8;
 pub const MAX_DNS_ADDRESSES: usize = 16;
@@ -247,6 +251,7 @@ pub struct EgressLeaseTable {
     policy: CompiledPolicy,
     leases: Vec<DnsLease>,
     maximum_leases: usize,
+    host_addresses: HostAddressSet,
 }
 
 impl EgressLeaseTable {
@@ -255,7 +260,14 @@ impl EgressLeaseTable {
             policy,
             leases: Vec::new(),
             maximum_leases: MAX_ACTIVE_DNS_LEASES,
+            host_addresses: HostAddressSet::default(),
         }
+    }
+
+    /// Replace the addresses local to the host this table's broker dials from
+    /// (#2614). Every later TCP admission refuses them.
+    pub fn set_host_addresses(&mut self, addresses: HostAddressSet) {
+        self.host_addresses = addresses;
     }
 
     pub fn with_maximum_leases(
@@ -269,6 +281,7 @@ impl EgressLeaseTable {
             policy,
             leases: Vec::new(),
             maximum_leases,
+            host_addresses: HostAddressSet::default(),
         })
     }
 
@@ -422,6 +435,14 @@ impl EgressLeaseTable {
     ) -> Result<Admission<TcpAdmission>, LeaseError> {
         self.purge_expired(now);
         let direct_request = EgressRequest::tcp(address, port, None, route_class)?;
+        // An address local to the host is refused whatever the rules or leases
+        // say, like a private address.
+        if let Some(class) = self.host_addresses.classify(address) {
+            return Ok(Admission::Denied(
+                self.policy
+                    .deny(DecisionReason::ProtectedAddress(class), None),
+            ));
+        }
         let direct_decision = self.policy.evaluate(&direct_request);
         if direct_decision.is_allowed() {
             return Ok(Admission::Allowed(TcpAdmission {

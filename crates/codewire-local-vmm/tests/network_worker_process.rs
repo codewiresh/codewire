@@ -9,10 +9,11 @@ use std::time::{Duration, Instant};
 
 use codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN;
 use codewire_local_vmm::egress_broker::{
-    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_PREPARED_MESSAGE,
-    EGRESS_BROKER_READY_MESSAGE, EgressBrokerStartupFailure,
+    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_HOST_ADDRESSES_FD,
+    EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE, EgressBrokerStartupFailure,
     encode_developer_egress_broker_bootstrap,
 };
+use codewire_local_vmm::host_addresses::{HostAddressSet, encode_frame};
 use codewire_local_vmm::host_port::{
     HOST_PORT_CONTROL_KEY_LEN, HostPortBinding, HostPortControlFrame,
 };
@@ -245,13 +246,26 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    prepare_inherited_descriptor(
+    // The broker also takes the runner's host-address control socket (#2614).
+    let (mut _host_address_control, control_child_socket) =
+        std::os::unix::net::UnixStream::pair().unwrap();
+    let broker_high = duplicate_high_fd(broker_source);
+    let control_high = duplicate_high_fd(control_child_socket.as_raw_fd());
+    prepare_inherited_descriptor_pair(
         &mut broker_command,
-        broker_source,
+        broker_high.as_raw_fd(),
         EGRESS_BROKER_BOOTSTRAP_FD,
+        control_high.as_raw_fd(),
+        EGRESS_BROKER_HOST_ADDRESSES_FD,
     );
     let mut broker = ChildGuard(broker_command.spawn().unwrap());
     drop(broker_child_socket);
+    drop(control_child_socket);
+    drop(broker_high);
+    drop(control_high);
+    _host_address_control
+        .write_all(&encode_frame(&HostAddressSet::default()))
+        .unwrap();
     let broker_bootstrap =
         encode_developer_egress_broker_bootstrap(vm_id, generation, &broker_key).unwrap();
     broker_parent.write_all(broker_bootstrap.as_ref()).unwrap();
