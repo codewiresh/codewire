@@ -464,9 +464,9 @@ pub(super) async fn run(
     require_native_agent_profile(
         environment_id,
         if agent == AgentKind::Codex {
-            "codex"
+            codewire_access::ManagedAgent::Codex
         } else {
-            "anthropic"
+            codewire_access::ManagedAgent::Claude
         },
     )
     .await?;
