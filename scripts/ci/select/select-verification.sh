@@ -1694,6 +1694,7 @@ if [ "$event_selected" = false ]; then
       keys/production-release.asc|\
       .gitea/workflows/observe-*.yaml|\
       scripts/ci/images/build-push-image.sh|scripts/ci/images/build-push-runtime-images.sh|\
+      scripts/ci/images/build-support-platform.sh|\
       scripts/ci/images/compute-image-tags.sh|\
       scripts/ci/images/copy-image-to-ghcr.sh|\
       scripts/ci/images/publish-image-to-harbor.sh|\
