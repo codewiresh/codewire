@@ -195,7 +195,7 @@ url=new URL(process.env.OPENAI_BASE_URL+'/responses');
 headers={'content-type':'application/json','authorization':'Bearer '+process.env.OPENAI_API_KEY};
 input={model:'codewire-synthetic',input:'Return the synthetic marker.',stream:true};
 }else if(mode==='count-tokens'){
-if(process.env.ANTHROPIC_BASE_URL!=='http://127.0.0.1:38081/_codewire/anthropic'||process.env.ANTHROPIC_AUTH_TOKEN!=='codewire-managed'||process.env.ANTHROPIC_API_KEY!==''||process.env.CLAUDE_CODE_OAUTH_TOKEN!=='')process.exit(82);
+if(process.env.ANTHROPIC_BASE_URL!=='http://127.0.0.1:38081/_codewire/anthropic'||process.env.ANTHROPIC_AUTH_TOKEN!=='codewire-managed'||'ANTHROPIC_API_KEY' in process.env||'CLAUDE_CODE_OAUTH_TOKEN' in process.env)process.exit(82);
 url=new URL(process.env.ANTHROPIC_BASE_URL+'/v1/messages/count_tokens');
 headers={'content-type':'application/json','anthropic-version':'2023-06-01','authorization':'Bearer '+process.env.ANTHROPIC_AUTH_TOKEN};
 input={model:'claude-sonnet-4-6',messages:[{role:'user',content:'Return the synthetic marker.'}]};
@@ -208,8 +208,8 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
     const CLAUDE_ENV_EXEC_SCRIPT: &str = concat!(
         "test \"${ANTHROPIC_BASE_URL-}\" = 'http://127.0.0.1:38081/_codewire/anthropic' && ",
         "test \"${ANTHROPIC_AUTH_TOKEN-}\" = codewire-managed && ",
-        "test \"${ANTHROPIC_API_KEY+x}\" = x && test -z \"$ANTHROPIC_API_KEY\" && ",
-        "test \"${CLAUDE_CODE_OAUTH_TOKEN+x}\" = x && test -z \"$CLAUDE_CODE_OAUTH_TOKEN\" && ",
+        "test -z \"${ANTHROPIC_API_KEY+x}\" && ",
+        "test -z \"${CLAUDE_CODE_OAUTH_TOKEN+x}\" && ",
         "exec \"$@\"",
     );
 
@@ -3125,8 +3125,6 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
                     "http://127.0.0.1:38081/_codewire/anthropic",
                 )
                 .env("ANTHROPIC_AUTH_TOKEN", "codewire-managed")
-                .env("ANTHROPIC_API_KEY", "")
-                .env("CLAUDE_CODE_OAUTH_TOKEN", "")
                 .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
                 .env("CLAUDE_CODE_MAX_RETRIES", "0")
                 .current_dir(home)
@@ -3555,8 +3553,8 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
         }
 
         const SELECTED_HTTP_FIXTURE: &str = r#"const vm=require('vm');
-const env={OPENAI_BASE_URL:'http://127.0.0.1:38081/_codewire/openai/v1',OPENAI_API_KEY:'codewire-managed',ANTHROPIC_BASE_URL:'http://127.0.0.1:38081/_codewire/anthropic',ANTHROPIC_AUTH_TOKEN:'codewire-managed',ANTHROPIC_API_KEY:'',CLAUDE_CODE_OAUTH_TOKEN:''};
-const mode=process.argv[2];const change=process.argv[3];if(change==='missing-api')delete env.ANTHROPIC_API_KEY;else if(change==='oauth')env.CLAUDE_CODE_OAUTH_TOKEN='synthetic-competing';else if(change==='base')env.OPENAI_BASE_URL='https://unselected.invalid/v1';else if(change==='key')env.OPENAI_API_KEY='synthetic-competing';
+const env={OPENAI_BASE_URL:'http://127.0.0.1:38081/_codewire/openai/v1',OPENAI_API_KEY:'codewire-managed',ANTHROPIC_BASE_URL:'http://127.0.0.1:38081/_codewire/anthropic',ANTHROPIC_AUTH_TOKEN:'codewire-managed'};
+const mode=process.argv[2];const change=process.argv[3];if(change==='blank-api')env.ANTHROPIC_API_KEY='';else if(change==='oauth')env.CLAUDE_CODE_OAUTH_TOKEN='synthetic-competing';else if(change==='base')env.OPENAI_BASE_URL='https://unselected.invalid/v1';else if(change==='key')env.OPENAI_API_KEY='synthetic-competing';
 let calls=0;let exitCode=0;let captured=null;let output='';let timeoutMs=0;const handlers=new Map();
 const response={statusCode:200,headers:{'content-type':mode==='openai'?'text/event-stream':'application/json','x-request-id':'[REDACTED]','request-id':'[REDACTED]'},on:(name,callback)=>{handlers.set(name,callback);return response;}};
 const request={setTimeout:(ms)=>{timeoutMs=ms;return request;},on:()=>request,destroy:()=>{},end:(body)=>{captured.body=JSON.parse(body);}};
@@ -3672,7 +3670,7 @@ process.stdout.write(JSON.stringify({calls,exit_code:exitCode,captured,output,ti
             for (mode, change) in [
                 ("openai", "base"),
                 ("openai", "key"),
-                ("count-tokens", "missing-api"),
+                ("count-tokens", "blank-api"),
                 ("count-tokens", "oauth"),
                 ("other", "unchanged"),
             ] {
