@@ -113,6 +113,16 @@ fn provider_families_keep_provider_relative_paths_and_queries() {
             "/graphql",
             None,
         ),
+        // The API root `gh auth status` reads: GET only, with no query.
+        (
+            "GET",
+            "/",
+            Some("api.github.com"),
+            "github",
+            "github-api",
+            "/",
+            None,
+        ),
         (
             "PATCH",
             "/repos/owner/repo/issues/7",
@@ -275,6 +285,44 @@ fn rejected_routes() -> Vec<(&'static str, &'static str, Option<&'static str>)> 
         ("POST", "/graphql?query=anything", Some("api.github.com")),
         ("HEAD", "/repos/owner/repo/issues", Some("api.github.com")),
         ("GET", "/admin", Some("api.github.com")),
+        // Near misses of the API root, and the README `gh repo view` reads:
+        // a private repository's README carries a GitHub-minted download
+        // token, and no token enters the Sandbox.
+        ("GET", "/repos/owner/repo/readme", Some("api.github.com")),
+        ("GET", "/?x=1", Some("api.github.com")),
+        ("GET", "/?", Some("api.github.com")),
+        ("POST", "/", Some("api.github.com")),
+        ("HEAD", "/", Some("api.github.com")),
+        ("PUT", "/", Some("api.github.com")),
+        ("DELETE", "/", Some("api.github.com")),
+        ("GET", "//", Some("api.github.com")),
+        (
+            "GET",
+            "/repos/owner/repo/readme/docs",
+            Some("api.github.com"),
+        ),
+        (
+            "GET",
+            "/repos/owner/repo/readme?ref=x",
+            Some("api.github.com"),
+        ),
+        ("GET", "/repos/owner/repo/readme/", Some("api.github.com")),
+        ("GET", "/repos/owner/repo/./readme", Some("api.github.com")),
+        (
+            "GET",
+            "/repos/owner/repo/../repo/readme",
+            Some("api.github.com"),
+        ),
+        ("POST", "/repos/owner/repo/readme", Some("api.github.com")),
+        ("HEAD", "/repos/owner/repo/readme", Some("api.github.com")),
+        // The same requests on the Git host or with no host never reach the
+        // API: there is no GitHub route for them.
+        ("GET", "/", Some("github.com")),
+        ("GET", "/", None),
+        ("GET", "/repos/owner/repo/readme", Some("github.com")),
+        ("GET", "/repos/owner/repo/readme", None),
+        ("GET", "/_codewire/github/owner/repo/readme", None),
+        ("GET", "/_codewire/github/", None),
         ("GET", "/repos/owner/repo/actions", Some("api.github.com")),
         ("GET", "/repos/owner/repo/secrets", Some("api.github.com")),
         (

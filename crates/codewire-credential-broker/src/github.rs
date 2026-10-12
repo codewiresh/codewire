@@ -429,6 +429,15 @@ pub(crate) fn classify_request(
     if path.len() > 2048 || !path.starts_with('/') {
         return Err(denied);
     }
+    // The API root, which stock `gh auth status` reads after its login query:
+    // only GET and only with no query. Every other path has segments.
+    if route == "github-api" && path == "/" {
+        return if method == Method::GET && query.is_none_or(str::is_empty) {
+            Ok(GitHubOperation::Rest)
+        } else {
+            Err(denied)
+        };
+    }
     let parts = path[1..].split('/').collect::<Vec<_>>();
     if parts.iter().any(|part| {
         part.is_empty()
