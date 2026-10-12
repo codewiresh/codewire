@@ -35,6 +35,9 @@ MAX_MEMBERS = 32
 # architecture and ELF e_machine.
 TARGET = "x86_64-unknown-linux-musl"
 TARGETS = {TARGET: ("amd64", 62), "aarch64-unknown-linux-musl": ("arm64", 183)}
+# The sealed release toolchains a cw payload may name, as the guest and host
+# admit them (crates/codewire-vmm-guest-probe/src/cw_runtime.rs).
+RUSTC_RELEASES = ("1.93.0", "1.99.0")
 CW_PATH = "usr/local/bin/cw"
 META_PATH = "usr/local/share/codewire/cw-runtime.json"
 DIRECTORIES = ("usr", "usr/local", "usr/local/bin", "usr/local/share", "usr/local/share/codewire")
@@ -123,7 +126,8 @@ def validate_payload(metadata, cw):
             and metadata["target"] in TARGETS
             and hex_value(metadata["source_revision"], 40)
             and hex_value(metadata["source_tree_sha256"])
-            and isinstance(metadata["rustc"], str) and metadata["rustc"].startswith("rustc 1.93.0 ")
+            and isinstance(metadata["rustc"], str)
+            and metadata["rustc"].startswith(tuple(f"rustc {release} " for release in RUSTC_RELEASES))
             and len(metadata["rustc"]) <= 128
             and metadata["sha256"] == sha(cw)
             and type(metadata["size"]) is int and metadata["size"] == len(cw), "invalid cw provenance")

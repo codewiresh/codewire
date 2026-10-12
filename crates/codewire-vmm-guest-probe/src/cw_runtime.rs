@@ -162,6 +162,19 @@ impl CwRuntimeCatalog {
     }
 }
 
+/// The sealed release toolchains a cw payload may name. A catalog retains the
+/// payloads of earlier releases for their conversations, so a toolchain move
+/// adds its release and keeps the previous one for as long as a catalog may
+/// still hold a payload built with it.
+const CW_RUNTIME_RUSTC_RELEASES: [&str; 2] = ["1.93.0", "1.99.0"];
+
+fn sealed_rustc(identity: &str) -> bool {
+    identity
+        .strip_prefix("rustc ")
+        .and_then(|rest| rest.split_once(' '))
+        .is_some_and(|(release, _)| CW_RUNTIME_RUSTC_RELEASES.contains(&release))
+}
+
 fn hex(value: &str, size: usize) -> bool {
     value.len() == size
         && value
@@ -204,7 +217,7 @@ impl CwRuntimeProvenance {
             || !hex(&payload.source_revision, 40)
             || !hex(&payload.source_tree_sha256, 64)
             || !hex(&payload.sha256, 64)
-            || !payload.rustc.starts_with("rustc 1.93.0 ")
+            || !sealed_rustc(&payload.rustc)
             || payload.rustc.len() > 128
             || !(64..=CW_RUNTIME_MAX_BYTES as u64).contains(&payload.size)
         {
@@ -356,6 +369,9 @@ mod tests {
         let mut current = old.clone();
         current.payload.sha256 = "f".repeat(64);
         current.payload.source_revision = "e".repeat(40);
+        // The retained payload was built by the previous sealed toolchain.
+        assert_eq!(old.payload.rustc, "rustc 1.93.0 (synthetic fixture)");
+        current.payload.rustc = "rustc 1.99.0 (synthetic fixture)".to_owned();
         let catalog = CwRuntimeCatalog {
             schema_version: 1,
             active_sha256: current.payload.sha256.clone(),
@@ -373,6 +389,16 @@ mod tests {
         changed = catalog.clone();
         changed.runtimes.reverse();
         assert!(changed.validate().is_err());
+        for unsealed in [
+            "rustc 1.98.1 (synthetic fixture)",
+            "rustc 1.99.0",
+            "rustc 1.99.0-beta.1 (synthetic fixture)",
+            "cargo 1.99.0 (synthetic fixture)",
+        ] {
+            changed = catalog.clone();
+            changed.runtimes[1].payload.rustc = unsealed.to_owned();
+            assert!(changed.validate().is_err(), "{unsealed}");
+        }
         changed = catalog;
         changed.runtimes = vec![old; CW_RUNTIME_MAX_VERSIONS + 1];
         assert!(changed.validate().is_err());

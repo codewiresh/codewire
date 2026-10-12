@@ -16,7 +16,7 @@ linux   x86_64 Linux with Docker, from a checkout whose HEAD is SHA. Takes
         the arm64 and x86_64 kernels from the parts cache or builds them in
         the pinned Arch container; builds the arm64 and x86_64 guest roots and
         the aarch64 and x86_64 sealed cw runtimes (a cw of VERSION) in the
-        pinned Rust 1.93.0 container; fetches the pinned Cloud Hypervisor and
+        pinned Rust container; fetches the pinned Cloud Hypervisor and
         virtiofsd and the third-party sources. It never changes the host's
         Rust toolchain. For the macOS target DIR gets initramfs.cpio, kernel/,
         sources/, cw-runtime-aarch64/ and built/ (the cache records of its
@@ -268,7 +268,7 @@ side_by_side() {
 }
 
 # The TARGET guest root at FILE: the sealed probe built twice, with the pinned
-# Alpine BusyBox and official runc, in the pinned Rust 1.93.0 container (the
+# Alpine BusyBox and official runc, in the pinned Rust container (the
 # runner's sealed toolchain has no arm64 musl target).
 guest_root() {
   local target="$1" file="$2" member
