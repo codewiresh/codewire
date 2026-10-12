@@ -636,6 +636,37 @@ KIND_MATERIAL_REUSE_SECONDS=120
 KIND_BRIDGE_RENEWAL_MAX_SECONDS=900
 # About one request a second; a window spanning one renewal sees hundreds.
 KIND_BRIDGE_RENEWAL_MIN_REQUESTS=60
+# An epoch ends at the earlier of the relay's and the workspace's projected
+# token expiries. The stage restarts the relay just before the workspace Pod
+# it relays for starts, so both tokens expire less than this many seconds
+# apart: the band where a successor can only extend the epoch by less than a
+# minute until kubelet rotates the later token (#2641).
+KIND_RELAY_TOKEN_BAND_SECONDS=55
+
+# Restart orchestration, which runs the credential relay, and return once the
+# replaced Pod has gone: a rollout reports done while it still terminates.
+restart_kind_orchestration() {
+  local previous
+  previous="$(kubectl -n "$NS" get pods \
+    -l app.kubernetes.io/name=codewire,app.kubernetes.io/component=orchestration -o name)" || return $?
+  kubectl -n "$NS" rollout restart deployment/codewire-orchestration >/dev/null || return $?
+  kubectl -n "$NS" rollout status deployment/codewire-orchestration --timeout=180s >/dev/null ||
+    return $?
+  if [ -n "$previous" ]; then
+    # shellcheck disable=SC2086 # one argument for each replaced Pod
+    kubectl -n "$NS" wait --for=delete $previous --timeout=120s >/dev/null || return $?
+  fi
+}
+
+# How many seconds after the relay Pod RELAY_POD the workspace Pod POD
+# started; each Pod's projected token is issued as it starts.
+kind_credential_relay_token_lead() {
+  local pod="$1" relay_pod="$2" workspace relay
+  workspace="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.status.startTime}')" || return $?
+  relay="$(kubectl -n "$NS" get pod "$relay_pod" -o 'jsonpath={.status.startTime}')" || return $?
+  jq -nr --arg workspace "$workspace" --arg relay "$relay" \
+    '($workspace | fromdateiso8601) - ($relay | fromdateiso8601)'
+}
 # Bound on asking the in-Pod probe to stop.
 KIND_BRIDGE_RENEWAL_STOP_TIMEOUT=15s
 
@@ -725,11 +756,14 @@ stop_kind_credential_bridge_renewal() {
 # Every proxied request through the renewal window was answered by the broker
 # (the unselected slot's 403): none failed with 503 for want of an epoch. The
 # relay also logged admitting this environment's successor while its
-# predecessor drained, inside that same window. Log timestamps have one-second
+# predecessor drained, inside that same window; every successor there expires
+# later than the epoch it replaced, and no epoch ended without one (#2641).
+# The smallest extension is logged: under a minute shows a successor admitted
+# before kubelet rotated the later token. Log timestamps have one-second
 # resolution after their fraction is dropped; allow two seconds of slack at
 # each end.
 assert_kind_credential_bridge_renewal() {
-  local probe="$1" environment="$2" relay_pod="$3" window logs
+  local probe="$1" environment="$2" relay_pod="$3" window logs events
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
   [[ "$relay_pod" =~ ^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$ ]] || return 1
   window="$(jq -sce --argjson minimum "$KIND_BRIDGE_RENEWAL_MIN_REQUESTS" '
@@ -751,19 +785,36 @@ assert_kind_credential_bridge_renewal() {
     echo '::error::could not read the credential relay log for bridge renewal evidence' >&2
     return 1
   }
-  jq -Rne --argjson window "$window" --arg environment "$environment" '
+  events="$(jq -Rnc --argjson window "$window" --arg environment "$environment" '
     [inputs | fromjson? | select(type == "object"
         and .target == "codewire_orchestration::worker::credential_relay::epoch"
         and (.fields | type == "object")
-        and .fields.event == "credential_bridge_epoch_overlap"
+        and (.fields.event == "credential_bridge_epoch_overlap"
+          or .fields.event == "credential_bridge_epoch_ended")
         and .fields.environment_id == $environment)
-      | .timestamp | strings | sub("\\.[0-9]+Z$"; "Z") | (fromdateiso8601? // empty)
-      | . * 1000]
-    | any(.[]; . >= $window.started - 2000 and . <= $window.ended + 2000)
-  ' <<<"$logs" >/dev/null || {
+      | {event: .fields.event, previous: .fields.previous_ends_in_ms,
+         next: .fields.next_ends_in_ms,
+         at: (.timestamp | strings | sub("\\.[0-9]+Z$"; "Z") | (fromdateiso8601? // empty) | . * 1000)}
+      | select(.at >= $window.started - 2000 and .at <= $window.ended + 2000)]
+  ' <<<"$logs")" || return 1
+  if jq -e 'any(.[]; .event == "credential_bridge_epoch_ended")' <<<"$events" >/dev/null; then
+    echo '::error::a credential relay epoch ended with no successor while proxied requests were running' >&2
+    return 1
+  fi
+  if ! jq -e 'map(select(.event == "credential_bridge_epoch_overlap")) | length > 0' \
+      <<<"$events" >/dev/null; then
     echo '::error::the credential relay logged no epoch overlap while proxied requests were running' >&2
     return 1
-  }
+  fi
+  if ! jq -e 'all(.[] | select(.event == "credential_bridge_epoch_overlap");
+      (.previous | type == "number") and (.next | type == "number") and .next > .previous)' \
+      <<<"$events" >/dev/null; then
+    echo '::error::a credential relay successor did not expire later than the epoch it replaced' >&2
+    return 1
+  fi
+  log "the credential relay's smallest successor extension in the renewal window: $(jq -r \
+    '[.[] | select(.event == "credential_bridge_epoch_overlap") | .next - .previous] | min / 1000 | floor' \
+    <<<"$events")s"
 }
 
 kind_credential_fixture_events() {
@@ -1105,7 +1156,7 @@ kind_credential_native_smoke() (
     return 0
   fi
   log "running public platform enrollment/profile/native Codex acceptance with synthetic credentials"
-  local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation relay relay_pod relay_uid
+  local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation relay relay_pod relay_uid token_lead
   local workspace_image marker
   local login_events login_generation update restart_generation renewal_stop renewal_pid=""
   local member_role_changed="" bound_revision journey_from served
@@ -1153,6 +1204,10 @@ kind_credential_native_smoke() (
   stage_environment="$environment"
   wait_kind_credential_environment "$environment" running
   kind_credential_probe "$environment" unselected
+  # The profile update restarts the workspace Pod. Restart the relay just
+  # before, so the two Pods' tokens expire within a minute of each other and
+  # the renewal below runs in that band every time (#2641).
+  restart_kind_orchestration
   update="$(kind_credential_cli env --platform update "$environment" \
     --profile "platform:$profile_name" --yes --output json)"
   printf '%s\n' "$update"
@@ -1168,6 +1223,13 @@ kind_credential_native_smoke() (
   relay="$(kind_credential_relay_pod)"
   relay_pod="$(sed -n '1p' <<<"$relay")"
   relay_uid="$(sed -n '2p' <<<"$relay")"
+  token_lead="$(kind_credential_relay_token_lead "$pod" "$relay_pod")" || return $?
+  if ! [[ "$token_lead" =~ ^[0-9]+$ ]] || [ "$token_lead" -lt 1 ] ||
+      [ "$token_lead" -ge "$KIND_RELAY_TOKEN_BAND_SECONDS" ]; then
+    echo "::error::the workspace Pod started ${token_lead}s after the credential relay, outside the 1-$((KIND_RELAY_TOKEN_BAND_SECONDS - 1))s band this stage forces" >&2
+    return 1
+  fi
+  log "the workspace Pod started ${token_lead}s after the credential relay: their tokens expire that far apart"
   # The creator's own login reaches Codex's auth.json; stock Codex reads it as
   # ChatGPT, reads usage and completes a turn against a synthetic backend.
   login_events="$(kind_credential_codex_login "$environment" deliver)" || return $?
