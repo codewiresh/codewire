@@ -629,8 +629,8 @@ async fn send_projection_response<S: CredentialBridgeResponseSink>(
 /// organization-owned or another user's credential, Codex not selected), so
 /// the daemon removes the one it wrote; UNAVAILABLE changes nothing.
 ///
-/// Unlike an HTTP failure (`request_failure_ends_epoch`), neither answer ends
-/// the epoch. That is safe only because the platform placement is the one
+/// Unlike an HTTP request's `AuthorityUnavailable` (`request_failure_ends_epoch`),
+/// neither answer ends the epoch. That is safe only because the platform placement is the one
 /// implementing `BrokerLeaseProvider::lease_codex_login`: a refresh the login
 /// started is drained by the shared refresh owner, and a refresh Start that
 /// fails is fenced by the platform store's durable reservation and execution
@@ -798,11 +798,14 @@ async fn finish_with_failure<S: CredentialBridgeResponseSink>(
     }
 }
 
+/// A failure belongs to the request that hit it. A provider's transport,
+/// TLS, timeout or uncertain refresh failure answers only that request (502)
+/// and the epoch keeps serving every slot. Only an authority fault ends the
+/// shared epoch: a lost Start owner, an unproven SSH drain or a refused local
+/// refresh commit is released when its lease channel closes, and a hosted
+/// successor rechecks authority.
 fn request_failure_ends_epoch(error: BrokerRequestError) -> bool {
-    matches!(
-        error,
-        BrokerRequestError::AuthorityUnavailable | BrokerRequestError::UpstreamFailed
-    )
+    matches!(error, BrokerRequestError::AuthorityUnavailable)
 }
 
 fn response_headers_to_proto(
@@ -1467,15 +1470,179 @@ pub(crate) mod tests {
         assert!(output_rx.try_recv().is_err());
     }
 
+    /// Answers by path: one provider's upstream failure, an authority
+    /// fault, or a request that succeeds once `release` is notified.
+    #[derive(Default)]
+    struct SlotExecutor {
+        gated: Notify,
+        release: Notify,
+    }
+
+    #[async_trait]
+    impl BrokerRequestExecutor for SlotExecutor {
+        async fn execute_request(
+            &self,
+            request: v1::CredentialBridgeRequest,
+        ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+            match request.path.as_str() {
+                "/upstream-failure" => return Err(BrokerRequestError::UpstreamFailed),
+                "/authority-failure" => return Err(BrokerRequestError::AuthorityUnavailable),
+                "/gated" => {
+                    self.gated.notify_one();
+                    self.release.notified().await;
+                }
+                _ => {}
+            }
+            Ok(BrokerHttpResponse::new(
+                StatusCode::OK,
+                HeaderMap::new(),
+                Box::pin(stream::iter([Ok(Bytes::from(request.capability_slot))])),
+            ))
+        }
+    }
+
+    fn slot_request(
+        slot: &str,
+        route: &str,
+        id: Uuid,
+        path: &str,
+    ) -> v1::CredentialBridgeGuestMessage {
+        let mut message = request(id, path);
+        let Some(v1::credential_bridge_guest_message::Payload::Request(request)) =
+            message.payload.as_mut()
+        else {
+            unreachable!();
+        };
+        request.capability_slot = slot.into();
+        request.route = route.into();
+        message
+    }
+
+    /// How one request was answered on its epoch.
+    #[derive(Debug, PartialEq, Eq)]
+    pub(crate) enum Answer {
+        Response {
+            status: u32,
+            body: Vec<u8>,
+        },
+        Failure(v1::CredentialBridgeFailureReason),
+        /// The epoch ended before answering it.
+        EpochEnded,
+    }
+
+    /// One admitted epoch over channels, for executors that need a whole
+    /// bridge around them.
+    pub(crate) struct TestEpoch {
+        input: mpsc::Sender<v1::CredentialBridgeGuestMessage>,
+        output: mpsc::Receiver<v1::credential_bridge_host_message::Payload>,
+        task: tokio::task::JoinHandle<Result<(), BrokerBridgeError>>,
+    }
+
+    impl TestEpoch {
+        pub(crate) async fn start<E: BrokerRequestExecutor + 'static>(broker: Arc<E>) -> Self {
+            let environment_id = Uuid::new_v4();
+            let (input, input_rx) = mpsc::channel(8);
+            let (output_tx, output) = mpsc::channel(8);
+            input.send(ready(environment_id, 5)).await.unwrap();
+            let task = tokio::spawn(run_bridge(
+                broker,
+                FakeBridge {
+                    input: input_rx,
+                    output: output_tx,
+                },
+                environment_id,
+                5,
+            ));
+            Self {
+                input,
+                output,
+                task,
+            }
+        }
+
+        /// Send `request` alone and read frames until it is answered. The
+        /// bound is generous for tests on a paused clock.
+        pub(crate) async fn answer(&mut self, request: v1::CredentialBridgeRequest) -> Answer {
+            let request_id = request.request_id.clone();
+            if self
+                .input
+                .send(v1::CredentialBridgeGuestMessage {
+                    payload: Some(v1::credential_bridge_guest_message::Payload::Request(
+                        request,
+                    )),
+                })
+                .await
+                .is_err()
+            {
+                return Answer::EpochEnded;
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(600), async {
+                use v1::credential_bridge_host_message::Payload;
+                let mut status = None;
+                let mut body = Vec::new();
+                loop {
+                    match self.output.recv().await {
+                        None => return Answer::EpochEnded,
+                        Some(Payload::ResponseStart(start)) if start.request_id == request_id => {
+                            status = Some(start.status_code);
+                        }
+                        Some(Payload::ResponseBody(chunk)) if chunk.request_id == request_id => {
+                            body.extend(chunk.data);
+                        }
+                        Some(Payload::ResponseEnd(end)) if end.request_id == request_id => {
+                            return Answer::Response {
+                                status: status.expect("response start before end"),
+                                body,
+                            };
+                        }
+                        Some(Payload::ResponseFailure(failure))
+                            if failure.request_id == request_id =>
+                        {
+                            return Answer::Failure(
+                                v1::CredentialBridgeFailureReason::try_from(failure.reason)
+                                    .expect("closed failure reason"),
+                            );
+                        }
+                        Some(other) => panic!("unexpected bridge frame {other:?}"),
+                    }
+                }
+            })
+            .await
+            .expect("the request is answered or its epoch ends")
+        }
+
+        /// The epoch's own result, once it ended without its peer closing.
+        /// For tests on a real clock.
+        pub(crate) async fn ended(self) -> Result<(), BrokerBridgeError> {
+            let Self { input, task, .. } = self;
+            let result = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+                .await
+                .expect("the epoch ended")
+                .unwrap();
+            drop(input);
+            result
+        }
+
+        /// Close the peer of a still-serving epoch.
+        pub(crate) async fn close(self) {
+            let Self { input, task, .. } = self;
+            assert!(
+                !task.is_finished(),
+                "the epoch ended before its peer closed"
+            );
+            drop(input);
+            assert_eq!(task.await.unwrap(), Err(BrokerBridgeError::Unavailable));
+        }
+    }
+
     #[tokio::test]
-    async fn transport_failure_reports_once_and_ends_the_dns_epoch() {
+    async fn upstream_failure_fails_only_its_request_and_the_epoch_keeps_serving() {
         let environment_id = Uuid::new_v4();
-        let (input_tx, input_rx) = mpsc::channel(2);
-        let (output_tx, mut output_rx) = mpsc::channel(2);
+        let (input_tx, input_rx) = mpsc::channel(4);
+        let (output_tx, mut output_rx) = mpsc::channel(8);
+        let executor = Arc::new(SlotExecutor::default());
         let task = tokio::spawn(run_bridge(
-            Arc::new(FakeExecutor {
-                slow_started: Arc::new(AtomicBool::new(false)),
-            }),
+            Arc::clone(&executor),
             FakeBridge {
                 input: input_rx,
                 output: output_tx,
@@ -1483,20 +1650,132 @@ pub(crate) mod tests {
             environment_id,
             3,
         ));
-        let request_id = Uuid::new_v4();
         input_tx.send(ready(environment_id, 3)).await.unwrap();
+        // Another provider's request is in flight when one provider fails.
+        let in_flight = Uuid::new_v4();
         input_tx
-            .send(request(request_id, "/upstream-failure"))
+            .send(slot_request(
+                "anthropic",
+                "anthropic-api",
+                in_flight,
+                "/gated",
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), executor.gated.notified())
+            .await
+            .unwrap();
+        let failed = Uuid::new_v4();
+        input_tx
+            .send(slot_request(
+                "codex",
+                "openai-api",
+                failed,
+                "/upstream-failure",
+            ))
             .await
             .unwrap();
         assert!(matches!(
             output_rx.recv().await,
             Some(v1::credential_bridge_host_message::Payload::ResponseFailure(
                 v1::CredentialBridgeResponseFailure { request_id: id, reason }
-            )) if id == request_id.to_string()
+            )) if id == failed.to_string()
                 && reason == v1::CredentialBridgeFailureReason::UpstreamFailed as i32
         ));
+        // The other provider's request still completes on the same epoch...
+        executor.release.notify_one();
+        for _ in 0..3 {
+            match output_rx.recv().await {
+                Some(
+                    v1::credential_bridge_host_message::Payload::ResponseStart(
+                        v1::CredentialBridgeResponseStart { request_id, .. },
+                    )
+                    | v1::credential_bridge_host_message::Payload::ResponseEnd(
+                        v1::CredentialBridgeResponseEnd { request_id },
+                    ),
+                ) => assert_eq!(request_id, in_flight.to_string()),
+                Some(v1::credential_bridge_host_message::Payload::ResponseBody(body)) => {
+                    assert_eq!(
+                        (body.request_id.as_str(), body.data.as_slice()),
+                        (in_flight.to_string().as_str(), b"anthropic".as_slice())
+                    );
+                }
+                other => panic!("in-flight request was not completed: {other:?}"),
+            }
+        }
+        // ...and a new request on yet another provider is served.
+        let next = Uuid::new_v4();
+        input_tx
+            .send(slot_request("github", "github-api", next, "/ok"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            output_rx.recv().await,
+            Some(v1::credential_bridge_host_message::Payload::ResponseStart(
+                v1::CredentialBridgeResponseStart { request_id, status_code: 200, .. }
+            )) if request_id == next.to_string()
+        ));
+        assert!(!task.is_finished());
+        drop(input_tx);
         assert_eq!(task.await.unwrap(), Err(BrokerBridgeError::Unavailable));
+    }
+
+    #[tokio::test]
+    async fn authority_failure_ends_the_http_epoch() {
+        let environment_id = Uuid::new_v4();
+        let (input_tx, input_rx) = mpsc::channel(4);
+        let (output_tx, mut output_rx) = mpsc::channel(8);
+        let executor = Arc::new(SlotExecutor::default());
+        let task = tokio::spawn(run_bridge(
+            Arc::clone(&executor),
+            FakeBridge {
+                input: input_rx,
+                output: output_tx,
+            },
+            environment_id,
+            3,
+        ));
+        input_tx.send(ready(environment_id, 3)).await.unwrap();
+        input_tx
+            .send(slot_request(
+                "anthropic",
+                "anthropic-api",
+                Uuid::new_v4(),
+                "/gated",
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), executor.gated.notified())
+            .await
+            .unwrap();
+        let failed = Uuid::new_v4();
+        input_tx
+            .send(slot_request(
+                "codex",
+                "openai-api",
+                failed,
+                "/authority-failure",
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            output_rx.recv().await,
+            Some(v1::credential_bridge_host_message::Payload::ResponseFailure(
+                v1::CredentialBridgeResponseFailure { request_id: id, reason }
+            )) if id == failed.to_string()
+                && reason == v1::CredentialBridgeFailureReason::Unavailable as i32
+        ));
+        // The epoch ends by itself, its peer still connected, and the other
+        // request ends with it: its owner closes and drains the channel.
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), task)
+                .await
+                .expect("an authority fault ends the epoch")
+                .unwrap(),
+            Err(BrokerBridgeError::Unavailable)
+        );
+        assert!(output_rx.recv().await.is_none());
+        drop(input_tx);
     }
 
     #[tokio::test]
