@@ -8634,9 +8634,131 @@ mod tests {
 
     /// Leave a dead owner-only endpoint at `socket`: bound, then closed.
     fn stale_supervisor_endpoint(socket: &Path) -> SocketIdentity {
-        drop(std::os::unix::net::UnixListener::bind(socket).unwrap());
+        drop(bound_unlistened_socket(socket));
         fs::set_permissions(socket, fs::Permissions::from_mode(0o600)).unwrap();
         SocketIdentity::capture(socket).unwrap()
+    }
+
+    /// A Unix stream socket bound at `socket` that never listens, as a dead
+    /// supervisor's endpoint is. A closed listener is not dead: a child that
+    /// another test thread forks while it is open holds it until that child
+    /// execs, and it accepts connections meanwhile (CI run 12471).
+    fn bound_unlistened_socket(socket: &Path) -> std::os::fd::OwnedFd {
+        use std::os::fd::FromRawFd as _;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        #[cfg(target_os = "linux")]
+        let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+        #[cfg(not(target_os = "linux"))]
+        let kind = libc::SOCK_STREAM;
+        // SAFETY: plain socket creation; the descriptor is owned at once.
+        let descriptor = unsafe { libc::socket(libc::AF_UNIX, kind, 0) };
+        assert!(descriptor >= 0, "{}", io::Error::last_os_error());
+        // SAFETY: the descriptor was just created and is owned only here.
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(descriptor) };
+        #[cfg(not(target_os = "linux"))]
+        // SAFETY: setting the close-on-exec flag of an owned descriptor.
+        assert_eq!(
+            unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) },
+            0
+        );
+        // SAFETY: an all-zero sockaddr_un is a valid empty address.
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let path = socket.as_os_str().as_bytes();
+        assert!(path.len() < address.sun_path.len());
+        for (slot, byte) in address.sun_path.iter_mut().zip(path) {
+            *slot = *byte as libc::c_char;
+        }
+        let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1;
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = u8::try_from(length).unwrap();
+        }
+        // SAFETY: the address is a live, correctly sized local.
+        let bound = unsafe {
+            libc::bind(
+                descriptor,
+                (&raw const address).cast(),
+                libc::socklen_t::try_from(length).unwrap(),
+            )
+        };
+        assert_eq!(bound, 0, "{}", io::Error::last_os_error());
+        owned
+    }
+
+    /// Other tests in this binary fork children from their own threads. A
+    /// stale endpoint must still refuse while one of those children holds its
+    /// inherited descriptor.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_stale_endpoint_refuses_while_a_forked_child_holds_it() {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        use std::os::unix::process::CommandExt as _;
+
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let mut config = core.config.clone();
+        config.executable = std::env::current_exe().unwrap();
+        drop(core);
+        fs::set_permissions(_parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = config.supervisor_socket();
+        let endpoint = bound_unlistened_socket(&socket);
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Another thread forks a child that inherits `endpoint` and holds it
+        // until it execs, half a second after it reports that it exists.
+        let mut forked = [0; 2];
+        // SAFETY: `forked` has room for the two descriptors.
+        assert_eq!(
+            unsafe { libc::pipe2(forked.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        // SAFETY: pipe(2) returned two new descriptors owned only here.
+        let (ready, report) = unsafe {
+            (
+                std::fs::File::from_raw_fd(forked[0]),
+                std::os::fd::OwnedFd::from_raw_fd(forked[1]),
+            )
+        };
+        let report_fd = report.as_raw_fd();
+        let endpoint_fd = endpoint.as_raw_fd();
+        let forking = std::thread::spawn(move || {
+            let mut command = std::process::Command::new("/usr/bin/true");
+            // SAFETY: only async-signal-safe calls between fork and exec.
+            unsafe {
+                command.pre_exec(move || {
+                    // Keep only the endpoint and the report pipe through the
+                    // wait, so this child holds no other test's descriptors.
+                    let low = endpoint_fd.min(report_fd) as u32;
+                    let high = endpoint_fd.max(report_fd) as u32;
+                    for (first, end) in [(3, low), (low + 1, high), (high + 1, u32::MAX)] {
+                        if first < end
+                            && libc::syscall(libc::SYS_close_range, first, end - 1, 0) != 0
+                        {
+                            return Err(io::Error::last_os_error());
+                        }
+                    }
+                    if libc::write(report_fd, b"f".as_ptr().cast(), 1) != 1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    libc::usleep(500_000);
+                    Ok(())
+                });
+            }
+            let status = command.status().unwrap();
+            drop(report);
+            status
+        });
+        let mut byte = [0_u8; 1];
+        io::Read::read_exact(&mut &ready, &mut byte).unwrap();
+        drop(endpoint);
+
+        let error = NativeSupervisorClient::connect_for_config(&socket, &config)
+            .await
+            .err()
+            .expect("a stale endpoint refuses connections");
+        assert!(error.refused_connection(), "{error:?}");
+        assert!(forking.join().unwrap().success());
     }
 
     #[tokio::test]
@@ -8644,7 +8766,10 @@ mod tests {
         let (_parent, core) = test_supervisor_core(project_environment());
         let mut config = core.config.clone();
         config.executable = std::env::current_exe().unwrap();
-        drop(core);
+        // Keep the core's lock rather than releasing and taking it again: a
+        // child another test thread forks meanwhile would hold the released
+        // lock until it execs.
+        let SupervisorCore { _lock: held, .. } = core;
         fs::set_permissions(_parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let socket = config.supervisor_socket();
         let stale = stale_supervisor_endpoint(&socket);
@@ -8656,7 +8781,6 @@ mod tests {
 
         // A live owner keeps the lock for its whole life. A second supervisor
         // then fails before it binds, and the endpoint stays exactly as it is.
-        let held = SupervisorLock::acquire(&PrivateRoot::open(&config.root).unwrap()).unwrap();
         let error = serve_supervisor(config.clone()).await.unwrap_err();
         assert!(
             matches!(error, SupervisorError::AlreadyRunning),
@@ -8664,11 +8788,21 @@ mod tests {
         );
         assert_eq!(SocketIdentity::capture(&socket).unwrap(), stale);
 
-        // Once no owner holds the lock, the new supervisor replaces it.
+        // Once no owner holds the lock, the new supervisor replaces it. Until
+        // a child another test thread forked has execed, it may still hold
+        // the released lock, so a supervisor that meets it is started again.
         drop(held);
         let mut supervisor = tokio::spawn(serve_supervisor(config.clone()));
         let replaced = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
+                if supervisor.is_finished() {
+                    let finished = (&mut supervisor).await.unwrap();
+                    assert!(
+                        matches!(finished, Err(SupervisorError::AlreadyRunning)),
+                        "{finished:?}"
+                    );
+                    supervisor = tokio::spawn(serve_supervisor(config.clone()));
+                }
                 if let Ok(identity) = SocketIdentity::capture(&socket)
                     && identity != stale
                     && NativeSupervisorClient::connect(&socket).await.is_ok()
@@ -8693,11 +8827,11 @@ mod tests {
         // The started process exits at once, as a supervisor that cannot take
         // the lock does; the client itself never unlinks the endpoint.
         config.executable = PathBuf::from("/usr/bin/false");
-        drop(core);
+        // Keep the core's lock rather than releasing and taking it again.
+        let SupervisorCore { _lock: _held, .. } = core;
         fs::set_permissions(_parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let socket = config.supervisor_socket();
         let stale = stale_supervisor_endpoint(&socket);
-        let _held = SupervisorLock::acquire(&PrivateRoot::open(&config.root).unwrap()).unwrap();
         let error = NativeSupervisorClient::connect_or_start(&config)
             .await
             .err()
