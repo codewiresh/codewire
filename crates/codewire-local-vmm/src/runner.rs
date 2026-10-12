@@ -5281,6 +5281,98 @@ pub enum RunnerError {
     Io { path: PathBuf, source: io::Error },
 }
 
+impl RunnerError {
+    /// This error's variant as a fixed name for a diagnostic log line: never
+    /// its message, a path or a value. A Cloud Hypervisor API failure names
+    /// which one it was, because a request that timed out and a connection
+    /// that was refused have different causes.
+    pub(crate) fn variant_name(&self) -> &'static str {
+        match self {
+            Self::GuestDockerToolingMissing => "guest_docker_tooling_missing",
+            #[cfg(target_os = "macos")]
+            Self::OrphanedVmm(_) => "orphaned_vmm",
+            Self::CwRuntimeDiskChanged => "cw_runtime_disk_changed",
+            Self::CwRuntime(_) => "cw_runtime",
+            Self::InvalidRequest => "invalid_request",
+            Self::InvalidArtifactStagingLayout => "invalid_artifact_staging_layout",
+            Self::Artifact(_) => "artifact",
+            Self::Path(_) => "path",
+            Self::State(_) => "state",
+            #[cfg(target_os = "linux")]
+            Self::Preflight(_) => "preflight",
+            Self::Recovery(_) => "recovery",
+            #[cfg(target_os = "linux")]
+            Self::Config(_) => "config",
+            #[cfg(target_os = "linux")]
+            Self::Api(error) => error.variant_name(),
+            Self::HybridVsock(_) => "hybrid_vsock",
+            Self::Seed(_) => "seed",
+            Self::MissingSeedAfterReadiness => "missing_seed_after_readiness",
+            Self::MissingSetupAfterReadiness => "missing_setup_after_readiness",
+            Self::SetupDiskIdentityChanged => "setup_disk_identity_changed",
+            Self::MissingPreformattedStateDisk => "missing_preformatted_state_disk",
+            Self::MissingPreformattedDockerDisk => "missing_preformatted_docker_disk",
+            Self::UnexpectedDockerDisk => "unexpected_docker_disk",
+            Self::MissingPreformattedRootDisk => "missing_preformatted_root_disk",
+            Self::StateDiskSizeMismatch { .. } => "state_disk_size_mismatch",
+            Self::DockerDiskSizeMismatch { .. } => "docker_disk_size_mismatch",
+            Self::RootDiskSizeMismatch { .. } => "root_disk_size_mismatch",
+            Self::PersistedRootGenerationMismatch => "persisted_root_generation_mismatch",
+            Self::InvalidDiskGrowth(_) => "invalid_disk_growth",
+            Self::DiskShrinkUnsupported { .. } => "disk_shrink_unsupported",
+            Self::StateDiskGrowthIdentityMismatch(_) => "state_disk_growth_identity_mismatch",
+            Self::E2fsckUnavailable => "e2fsck_unavailable",
+            Self::E2fsckFailed(_) => "e2fsck_failed",
+            Self::Resize2fsUnavailable => "resize2fs_unavailable",
+            Self::Resize2fsFailed(_) => "resize2fs_failed",
+            Self::GenerationNotAdvanced { .. } => "generation_not_advanced",
+            Self::Spawn => "spawn",
+            Self::ExitedDuringStart => "exited_during_start",
+            Self::StartTimeout => "start_timeout",
+            Self::VirtiofsdUnavailable => "virtiofsd_unavailable",
+            Self::DirectShareChanged => "direct_share_changed",
+            Self::VirtiofsdSpawn => "virtiofsd_spawn",
+            Self::VirtiofsdConfinement => "virtiofsd_confinement",
+            Self::VirtiofsdExitedDuringStart => "virtiofsd_exited_during_start",
+            Self::VirtiofsdStartTimeout => "virtiofsd_start_timeout",
+            Self::VirtiofsdPidFile => "virtiofsd_pid_file",
+            Self::VirtiofsdWait => "virtiofsd_wait",
+            Self::VirtiofsdKillTimeout => "virtiofsd_kill_timeout",
+            Self::InvalidNetworkWorker => "invalid_network_worker",
+            Self::NetworkWorkerSpawn => "network_worker_spawn",
+            Self::NetworkWorkerStartTimeout => "network_worker_start_timeout",
+            Self::NetworkWorkerBootstrap => "network_worker_bootstrap",
+            Self::NetworkWorkerStartup(_) => "network_worker_startup",
+            Self::NetworkWorkerWait => "network_worker_wait",
+            Self::NetworkWorkerKillTimeout => "network_worker_kill_timeout",
+            Self::HostPortUnavailable(_) => "host_port_unavailable",
+            Self::IngressControl => "ingress_control",
+            Self::EgressBrokerSpawn => "egress_broker_spawn",
+            Self::EgressBrokerStartTimeout => "egress_broker_start_timeout",
+            Self::EgressBrokerBootstrap => "egress_broker_bootstrap",
+            Self::EgressBrokerStartup(_) => "egress_broker_startup",
+            Self::EgressBrokerWait => "egress_broker_wait",
+            Self::EgressBrokerKillTimeout => "egress_broker_kill_timeout",
+            Self::MeshTransportSpawn => "mesh_transport_spawn",
+            Self::MeshTransportStartTimeout => "mesh_transport_start_timeout",
+            Self::MeshTransportBootstrap => "mesh_transport_bootstrap",
+            Self::MeshTransportStartup(_) => "mesh_transport_startup",
+            Self::MeshEnrollmentBrokerSpawn => "mesh_enrollment_broker_spawn",
+            Self::MeshEnrollmentBrokerStartTimeout => "mesh_enrollment_broker_start_timeout",
+            Self::MeshEnrollmentBrokerBootstrap => "mesh_enrollment_broker_bootstrap",
+            Self::MeshEnrollmentBrokerStartup(_) => "mesh_enrollment_broker_startup",
+            Self::MeshProcessWait => "mesh_process_wait",
+            Self::MeshProcessKillTimeout => "mesh_process_kill_timeout",
+            Self::Wait => "wait",
+            Self::KillTimeout => "kill_timeout",
+            Self::GuestPoweroff => "guest_poweroff",
+            Self::VmStillRunning => "vm_still_running",
+            Self::PersistedIdentityMismatch => "persisted_identity_mismatch",
+            Self::Io { .. } => "io",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
