@@ -112,14 +112,15 @@ Iterate on one retained local Kind cluster; commands live in
   or keep the gate's cluster), then deploy changed services into it
   (`make kind-deploy`) and serve UI from source (`make kind-watch`).
 - Run only the Kind suites a change needs (`make kind-test`). It maps the
-  repository classifier's selection to retained suites. If a narrow change asks
-  for the full gate only because a mapping is missing, add the mapping and its
-  suite instead of running the full gate.
-- The full `make e2e-kind` is not a landing gate. Land on the required CI plus
-  the focused suites and journeys the change needs; a CLI change needs no Kind
-  run unless it changes a platform or dashboard path. Run the full gate only when
-  the owner asks, never as an iteration step, and never twice for an unchanged
-  tree.
+  repository classifier's selection to retained suites, deploys only the
+  services whose source differs from what the cluster runs, and removes what a
+  failed suite created. If a narrow change asks for the full gate only because
+  a mapping is missing, add the mapping and its suite instead of running the
+  full gate.
+- The full `make e2e-kind` is not a landing gate. Land on the merge rule in
+  "Delivery and verification"; a CLI change needs no Kind run unless it changes
+  a platform or dashboard path. Run the full gate only when the owner asks,
+  never as an iteration step, and never twice for an unchanged tree.
 - Switch the credential-service to `real` only for journeys that need a real
   provider; the synthetic fixture remains the gate's default.
 
@@ -140,10 +141,9 @@ Program mutation except read-only diagnosis and control repair.
 For long-running work, use one staged proof loop: confirm canonical control and
 risk; get an independent design/security read before broad implementation;
 build the smallest coherent slice; run focused checks and review the diff before
-committing a credible candidate. Then complete the selected exact-tree
-qualification once, locally before push or on self-hosted Forgejo when the
-owner selects CI, reusing valid evidence. Complete remaining exact-head landing
-gates before merge. Each PR states one bounded
+committing a credible candidate. Then push it, and complete the merge rule's
+checks once for the exact tree before merge, reusing valid evidence. Each PR
+states one bounded
 outcome, its dependencies, affected contracts, and acceptance; keep generated
 contracts and their consumers atomic. Update Program control at admissions and
 material transitions, with evidence labeled accurately. Parallelize read-only
@@ -182,11 +182,32 @@ legacy `tea` CLI is not part of the supported agent workflow.
 
 Use the smallest check that can catch the affected failure class, plus the
 product journey that "Done means observed working" requires. Local checks
-are the development loop. Hosted CI is required only when a hosted-only claim
-(such as scheduling, credentials, permissions, cache, or timing) lacks
-equivalent accepted exact local/read-only evidence, or repository protection
-explicitly requires it. Otherwise CI is optional confirmation, not a reason to
-delay equivalent exact-tree proof.
+are the development loop.
+
+A push is never a long gate. The pre-push hook runs only the fast push check:
+formatting, lints and unit tests for the changed crates, and quick checks for
+the changed file types. Do not bypass the hook.
+
+Each pull request merges alone. Never bundle pull requests into a train or an
+integration branch: one failure then hides in several changes. Bring the branch
+up to date with `main`, which branch protection requires, and merge on:
+
+- the focused checks the change needs. `scripts/dev/preflight.sh --for-merge`
+  runs the families the selection names, in parallel, with the same scripts as
+  CI on the shared compiler cache. Use it when a change crosses crates or
+  contracts; the changed crates' tests and lints are enough when it does not;
+- its product journey;
+- for a change to credential, broker, bridge or relay code, a green
+  `make kind-test SUITES=credentials` on the retained cluster.
+
+When `main` moves after a check passed, bring the branch up to date again and
+reuse the result if the new commits touch none of the change's inputs. Rerun
+only what overlaps.
+
+Hosted CI confirms after merge; it is not a merge gate. The exception is a
+hosted-only claim (such as scheduling, credentials, permissions, cache, or
+timing) that lacks equivalent accepted exact local/read-only evidence. Every
+`main` run finishes: never cancel one by hand, and fix forward when it fails.
 
 Local and hosted policy checks share one checked-in core. Never maintain a
 separate local subset; preserve capability-selected expensive checks. A failing
@@ -198,20 +219,15 @@ Kind suite only because classification is missing, repair the classifier and
 its fixtures; do not use an expensive unrelated suite as the classifier. An
 unknown result blocks the affected mutation, not unrelated work.
 
-When the repository owner selects self-hosted Forgejo for full image or
-integration verification, complete focused local checks and diff review before
-committing. The same CI route remains available after the owner explicitly
-accepts locally observed frontend behavior and asks to land it. For a clean,
-current, single-feature-branch update, use
-`CODEWIRE_PREFLIGHT_MODE=ci git push ...` to defer the selected exact-tree
-qualification to required Forgejo CI. Reuse accepted local evidence; do not
-rebuild integration, Kind, or product images locally solely to create or refresh
-a push receipt. This mode is unavailable for `main`, tags, deletions, multi-ref
+For a clean, current, single-feature-branch update whose checks already ran,
+`CODEWIRE_PREFLIGHT_MODE=ci git push ...` skips the local push check and leaves
+the rest to hosted CI. Reuse accepted local evidence; do not rebuild
+integration, Kind, or product images locally solely to create or refresh a push
+receipt. This mode is unavailable for `main`, tags, deletions, multi-ref
 pushes, Tier 3 effects, or work whose acceptance depends on local-only hardware.
-It is not a waiver: bind the pushed head once and do not merge until every
-required exact-head gate succeeds. CI never substitutes for the local product
-journey. The frontend iteration checkpoint still
-requires an explicit landing instruction.
+It is not a waiver of the merge rule, and CI never substitutes for the local
+product journey. The frontend iteration checkpoint still requires an explicit
+landing instruction.
 
 Bind a hosted run once and use a transition watcher; never spend turns polling
 unchanged CI. Inspect component logs after failure before proposing a mechanism.
