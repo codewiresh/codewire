@@ -898,9 +898,9 @@ grep -qF -- 'GIT_REMOTE=https://git.example.invalid/codewire/codewire.git' \
   "$FAKE_DOCKER_CALLS" || fail 'protected provenance does not build from the canonical source remote'
 grep -qF -- 'Provenance.SLSA' \
   "$FAKE_DOCKER_CALLS" || fail 'protected publication did not verify its emitted SLSA predicate'
-{ grep -qF -- '--sbom=generator=registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7' \
+{ grep -qF -- '--sbom=generator=registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9' \
   "$FAKE_DOCKER_CALLS" ||
-  grep -qF -- '--sbom generator=registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:13864237fb990943433f89d698590aad1de38d4a7e13d38e7b12f2488c1952e7' \
+  grep -qF -- '--sbom generator=registry.example.invalid/oci-approved/docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9' \
     "$FAKE_DOCKER_CALLS"; } ||
   fail 'protected publication did not request an SBOM from the approved exact generator'
 grep -qF ' login registry.example.invalid ' "$FAKE_DOCKER_CALLS" ||
