@@ -40,8 +40,8 @@ pub use runtime_policy::{
 #[cfg(test)]
 use workspace::custom_workspace_supervisor_command;
 pub(crate) use workspace::{
-    CLIENT_BOOTSTRAP_CONTAINER, DAEMON_INIT_CONTAINER, DAEMON_VOLUME,
-    render_workspace_client_bootstrap,
+    CLIENT_BOOTSTRAP_CONTAINER, DAEMON_INIT_CONTAINER, DAEMON_VOLUME, LEGACY_DIND_BOOTSTRAP_SCRIPT,
+    dind_bootstrap_script, render_workspace_client_bootstrap,
 };
 pub use workspace::{
     ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP, orchestration_internal_tls_host,

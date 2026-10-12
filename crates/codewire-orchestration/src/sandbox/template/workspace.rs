@@ -710,7 +710,34 @@ pub(crate) fn render_workspace_client_bootstrap(opts: &TemplateOpts) -> Value {
     })
 }
 
-pub(super) fn dind_bootstrap_script() -> String {
+/// The DinD bootstrap Sandboxes were rendered with before 531fc0f7e, exactly
+/// as their stored Pod specs carry it. It made the workspace home's
+/// `.codewire` group-writable (0775) at every Pod start, so a workspace daemon
+/// with the hosted credential bridge refused its platform session store. A
+/// Start or Pod replacement re-renders it (#2639); nothing renders it now.
+pub(crate) const LEGACY_DIND_BOOTSTRAP_SCRIPT: &str = r#"data_image="${CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}"
+data_root="${CODEWIRE_DOCKER_DATA_ROOT:-/var/lib/docker}"
+data_size="${CODEWIRE_DOCKER_DATA_SIZE:-8G}"
+mount_mode="${CODEWIRE_DOCKER_MOUNT_MODE:-loop}"
+codewire_dir="$(dirname "$data_image")"
+mkdir -p "$codewire_dir" "$data_root"
+chown 1000:1000 "$codewire_dir"
+chmod 0775 "$codewire_dir"
+if [ "$mount_mode" = "loop" ]; then
+  if [ ! -s "$data_image" ]; then
+    truncate -s "$data_size" "$data_image"
+    mkfs.ext4 -q -F "$data_image"
+  fi
+  if ! awk -v target="$data_root" '$2 == target && $3 == "ext4" { found = 1 } END { exit found ? 0 : 1 }' /proc/mounts; then
+    mount -o loop "$data_image" "$data_root"
+  fi
+elif [ "$mount_mode" != "none" ]; then
+  echo "unsupported CODEWIRE_DOCKER_MOUNT_MODE=$mount_mode" >&2
+  exit 1
+fi
+exec dockerd --host "unix:///var/run/docker/docker.sock" --group 1000 --data-root "$data_root" --storage-driver vfs"#;
+
+pub(crate) fn dind_bootstrap_script() -> String {
     format!(
         r#"data_image="${{CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}}"
 data_root="${{CODEWIRE_DOCKER_DATA_ROOT:-/var/lib/docker}}"
