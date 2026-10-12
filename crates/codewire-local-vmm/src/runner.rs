@@ -8,7 +8,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use codewire_daemon::client::SessionClient;
-use codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN;
+use codewire_egress_broker::ipc::{BROKER_IPC_KEY_LEN, BROKER_IPC_SESSIONS};
 use codewire_vmm_guest_probe::{
     DirectSharePlan, GUEST_NETWORK_VSOCK_PORT, GUEST_PROGRESS_VSOCK_PORT, GuestBootStage,
     NetworkKey, PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN, ProgressFrame, ProgressRequest, Seed,
@@ -35,7 +35,8 @@ use crate::cw_runtime::{AdmittedCwRuntimeDisk, CwRuntimeError, CwRuntimeStore};
 use crate::direct_share::{AdmittedDirectShare, DirectShareRequest};
 use crate::egress_broker::{
     EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE,
-    EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT, EGRESS_BROKER_HOST_ADDRESSES_FD,
+    EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT, EGRESS_BROKER_FIRST_SESSION_FD,
+    EGRESS_BROKER_HOST_ADDRESSES_FD, EGRESS_BROKER_INHERITED_SESSIONS,
     EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES,
     EgressBrokerStartupFailure, EgressBrokerStartupStatus, decode_egress_broker_startup_status,
     encode_developer_egress_broker_bootstrap,
@@ -1983,7 +1984,8 @@ enum NetworkWorkerMode {
 
 enum WorkerBrokerAttachment {
     Product {
-        endpoint: StdUnixStream,
+        /// The worker's end of every broker IPC session, in session order.
+        endpoints: Vec<StdUnixStream>,
         key: Zeroizing<[u8; BROKER_IPC_KEY_LEN]>,
     },
     InjectedVerification,
@@ -2007,7 +2009,7 @@ impl Drop for HostAddressTask {
 
 struct EgressBrokerLaunch {
     process: EgressBrokerProcess,
-    endpoint: StdUnixStream,
+    endpoints: Vec<StdUnixStream>,
     key: Zeroizing<[u8; BROKER_IPC_KEY_LEN]>,
 }
 
@@ -3391,10 +3393,10 @@ async fn spawn_network_stack_processes(
     let (attachment, mut broker) = match launch {
         Some(EgressBrokerLaunch {
             process,
-            endpoint,
+            endpoints,
             key,
         }) => (
-            WorkerBrokerAttachment::Product { endpoint, key },
+            WorkerBrokerAttachment::Product { endpoints, key },
             Some(process),
         ),
         None => (WorkerBrokerAttachment::InjectedVerification, None),
@@ -3446,6 +3448,29 @@ async fn spawn_egress_broker_process(
     let inherited_control = duplicate_inherited_descriptor(control_child.as_raw_fd())
         .map_err(|_| RunnerError::EgressBrokerSpawn)?;
     let control_fd = inherited_control.as_raw_fd();
+    // Every IPC session but the admission session, which is the bootstrap
+    // stream (#2638): the broker inherits one end, the worker gets the other.
+    let mut worker_endpoints = Vec::with_capacity(EGRESS_BROKER_INHERITED_SESSIONS);
+    let mut inherited_sessions = Vec::with_capacity(EGRESS_BROKER_INHERITED_SESSIONS);
+    for _ in 0..EGRESS_BROKER_INHERITED_SESSIONS {
+        let (worker_end, broker_end) =
+            StdUnixStream::pair().map_err(|_| RunnerError::EgressBrokerSpawn)?;
+        inherited_sessions.push(
+            duplicate_inherited_descriptor(broker_end.as_raw_fd())
+                .map_err(|_| RunnerError::EgressBrokerSpawn)?,
+        );
+        worker_endpoints.push(worker_end);
+    }
+    let mut descriptors = vec![
+        (bootstrap_fd, EGRESS_BROKER_BOOTSTRAP_FD),
+        (control_fd, EGRESS_BROKER_HOST_ADDRESSES_FD),
+    ];
+    descriptors.extend(
+        inherited_sessions
+            .iter()
+            .zip(EGRESS_BROKER_FIRST_SESSION_FD..)
+            .map(|(session, target)| (session.as_raw_fd(), target)),
+    );
     let expected_parent = unsafe { libc::getpid() };
     let mut command = tokio::process::Command::new(context.executable);
     command
@@ -3461,13 +3486,8 @@ async fn spawn_egress_broker_process(
         .stderr(Stdio::null());
     unsafe {
         command.pre_exec(move || {
-            prepare_isolated_child(
-                expected_parent,
-                &[
-                    (bootstrap_fd, EGRESS_BROKER_BOOTSTRAP_FD),
-                    (control_fd, EGRESS_BROKER_HOST_ADDRESSES_FD),
-                ],
-            )
+            raise_open_file_limit()?;
+            prepare_isolated_child(expected_parent, &descriptors)
         });
     }
     let child = command
@@ -3477,6 +3497,9 @@ async fn spawn_egress_broker_process(
     drop(bootstrap_child);
     drop(inherited_control);
     drop(control_child);
+    // Dropping the duplicates closes the broker's ends here; the child holds
+    // its own copies.
+    drop(inherited_sessions);
     let mut startup = EgressBrokerStartup::new(child);
     let Some(pid) = startup.child_mut().id() else {
         reap_failed_egress_broker_startup(&mut startup).await?;
@@ -3576,6 +3599,9 @@ async fn spawn_egress_broker_process(
     let endpoint = bootstrap
         .into_std()
         .map_err(|_| RunnerError::EgressBrokerBootstrap)?;
+    let mut endpoints = Vec::with_capacity(BROKER_IPC_SESSIONS);
+    endpoints.push(endpoint);
+    endpoints.extend(worker_endpoints);
     let mut process = startup.disarm();
     process.host_addresses = Some(HostAddressTask(tokio::spawn(async move {
         let _ = monitor
@@ -3584,7 +3610,7 @@ async fn spawn_egress_broker_process(
     })));
     Ok(EgressBrokerLaunch {
         process,
-        endpoint,
+        endpoints,
         key,
     })
 }
@@ -3605,9 +3631,9 @@ async fn spawn_network_worker_process(
     let product_worker = matches!(&attachment, WorkerBrokerAttachment::Product { .. });
     let host_port_key = product_worker.then(fresh_host_port_control_key);
     let mesh_ingress_key = product_worker.then(fresh_mesh_ingress_control_key);
-    let (bytes, mut broker_endpoint) = match attachment {
+    let (bytes, mut broker_endpoints) = match attachment {
         WorkerBrokerAttachment::Product {
-            endpoint,
+            endpoints,
             key: broker_key,
         } => (
             encode_product_worker_bootstrap(
@@ -3627,7 +3653,7 @@ async fn spawn_network_worker_process(
                     .unwrap_or_default(),
             )
             .map(|bytes| Zeroizing::new(bytes.to_vec())),
-            Some(endpoint),
+            Some(endpoints),
         ),
         WorkerBrokerAttachment::InjectedVerification => (
             encode_worker_bootstrap(context.vm_id, context.generation, &key)
@@ -3658,6 +3684,7 @@ async fn spawn_network_worker_process(
         .stderr(Stdio::null());
     unsafe {
         command.pre_exec(move || {
+            raise_open_file_limit()?;
             prepare_isolated_child(expected_parent, &[(bootstrap_fd, NETWORK_BOOTSTRAP_FD)])
         });
     }
@@ -3722,19 +3749,22 @@ async fn spawn_network_worker_process(
     };
     startup.admit(process);
 
-    if let Some(endpoint) = broker_endpoint.as_ref() {
-        if let Err(error) = transfer_worker_descriptor(
-            &bootstrap,
-            endpoint.as_raw_fd(),
-            context.deadline,
-            send_worker_broker_descriptor,
-        )
-        .await
-        {
-            reap_failed_network_worker_startup(&mut startup).await?;
-            return Err(error);
+    if let Some(endpoints) = broker_endpoints.as_ref() {
+        // One message per session, in session order.
+        for endpoint in endpoints {
+            if let Err(error) = transfer_worker_descriptor(
+                &bootstrap,
+                endpoint.as_raw_fd(),
+                context.deadline,
+                send_worker_broker_descriptor,
+            )
+            .await
+            {
+                reap_failed_network_worker_startup(&mut startup).await?;
+                return Err(error);
+            }
         }
-        drop(broker_endpoint.take());
+        drop(broker_endpoints.take());
 
         let status = match read_worker_status_frame(&mut bootstrap, context.deadline).await {
             Ok(status) => status,
@@ -3965,8 +3995,38 @@ fn egress_broker_exit_error(status: std::process::ExitStatus) -> RunnerError {
         )
 }
 
+/// Inherited sources are duplicated at or above this descriptor, above every
+/// fixed target a child uses, so placing one never overwrites another.
+const INHERITED_SOURCE_FLOOR: RawFd = 64;
+
+/// The soft open-file limit of the network worker and egress broker (#2638).
+/// The worker holds up to 256 guest connections, 64 inbound streams and every
+/// broker session; macOS starts processes at 256. Never above the hard limit.
+const NETWORK_ROLE_OPEN_FILE_LIMIT: libc::rlim_t = 1024;
+
+/// Raise the soft open-file limit to [`NETWORK_ROLE_OPEN_FILE_LIMIT`], or to
+/// the hard limit if that is lower. Runs in the child before exec.
+fn raise_open_file_limit() -> io::Result<()> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let wanted = NETWORK_ROLE_OPEN_FILE_LIMIT.min(limit.rlim_max);
+    if limit.rlim_cur < wanted {
+        limit.rlim_cur = wanted;
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 fn duplicate_inherited_descriptor(descriptor: i32) -> io::Result<OwnedFd> {
-    let duplicated = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 10) };
+    let duplicated =
+        unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, INHERITED_SOURCE_FLOOR) };
     if duplicated == -1 {
         return Err(io::Error::last_os_error());
     }
@@ -3999,8 +4059,14 @@ fn prepare_isolated_child(
 }
 
 /// Place each (source, target) descriptor at its fixed number for the child.
-/// Sources are duplicated at 10 or above, so no target overwrites a source.
+/// Sources are duplicated at [`INHERITED_SOURCE_FLOOR`] or above and every
+/// target is below it, so no target overwrites a source.
 fn inherit_descriptors(descriptors: &[(RawFd, RawFd)]) -> io::Result<()> {
+    if descriptors.iter().any(|&(source, target)| {
+        source < INHERITED_SOURCE_FLOOR || target >= INHERITED_SOURCE_FLOOR
+    }) {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
     for &(source, target) in descriptors {
         if source != target && unsafe { libc::dup2(source, target) } == -1 {
             return Err(io::Error::last_os_error());
@@ -5377,6 +5443,56 @@ impl RunnerError {
 mod tests {
     use super::*;
     use crate::host_port::tests::{free_loopback_port, once_released};
+
+    /// #2638: a network role starts with at least 1024 open files, or its
+    /// hard limit, even from a process that has the macOS default of 256.
+    #[test]
+    fn network_roles_start_with_their_open_file_limit() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "ulimit -Sn; ulimit -Hn"]);
+        // SAFETY: only getrlimit and setrlimit run between fork and exec.
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+                let mut limit = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                limit.rlim_cur = limit.rlim_cur.min(256);
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                raise_open_file_limit()
+            });
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        let mut lines = text.lines();
+        let soft: u64 = lines.next().unwrap().parse().unwrap();
+        let hard = lines.next().unwrap();
+        let expected = match hard.parse::<u64>() {
+            Ok(hard) => hard.min(NETWORK_ROLE_OPEN_FILE_LIMIT),
+            Err(_) => NETWORK_ROLE_OPEN_FILE_LIMIT,
+        };
+        assert_eq!(soft, expected, "{text}");
+    }
+
+    #[test]
+    fn inherited_descriptors_must_sit_above_every_target() {
+        // A source below the floor, or a target at or above it, could be
+        // overwritten while descriptors are placed.
+        for descriptors in [[(9, 4)], [(70, INHERITED_SOURCE_FLOOR)]] {
+            assert_eq!(
+                inherit_descriptors(&descriptors)
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(libc::EINVAL)
+            );
+        }
+    }
     use std::fs;
     use std::io::{Seek, SeekFrom, Write};
     use std::net::SocketAddrV4;

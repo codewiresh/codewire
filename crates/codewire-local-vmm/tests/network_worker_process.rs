@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN;
 use codewire_local_vmm::egress_broker::{
-    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_HOST_ADDRESSES_FD,
+    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_FIRST_SESSION_FD,
+    EGRESS_BROKER_HOST_ADDRESSES_FD, EGRESS_BROKER_INHERITED_SESSIONS,
     EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE, EgressBrokerStartupFailure,
     encode_developer_egress_broker_bootstrap,
 };
@@ -246,23 +247,39 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // The broker also takes the runner's host-address control socket (#2614).
+    // The broker also takes the runner's host-address control socket (#2614)
+    // and its IPC sessions after the admission session (#2638).
     let (mut _host_address_control, control_child_socket) =
         std::os::unix::net::UnixStream::pair().unwrap();
-    let broker_high = duplicate_high_fd(broker_source);
-    let control_high = duplicate_high_fd(control_child_socket.as_raw_fd());
-    prepare_inherited_descriptor_pair(
+    let mut high = vec![
+        (
+            duplicate_above_targets(broker_source),
+            EGRESS_BROKER_BOOTSTRAP_FD,
+        ),
+        (
+            duplicate_above_targets(control_child_socket.as_raw_fd()),
+            EGRESS_BROKER_HOST_ADDRESSES_FD,
+        ),
+    ];
+    let mut broker_sessions = Vec::new();
+    for index in 0..EGRESS_BROKER_INHERITED_SESSIONS {
+        let (worker_end, broker_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        high.push((
+            duplicate_above_targets(broker_end.as_raw_fd()),
+            EGRESS_BROKER_FIRST_SESSION_FD + index as RawFd,
+        ));
+        broker_sessions.push(worker_end);
+    }
+    prepare_inherited_descriptors(
         &mut broker_command,
-        broker_high.as_raw_fd(),
-        EGRESS_BROKER_BOOTSTRAP_FD,
-        control_high.as_raw_fd(),
-        EGRESS_BROKER_HOST_ADDRESSES_FD,
+        high.iter()
+            .map(|(source, target)| (source.as_raw_fd(), *target))
+            .collect(),
     );
     let mut broker = ChildGuard(broker_command.spawn().unwrap());
     drop(broker_child_socket);
     drop(control_child_socket);
-    drop(broker_high);
-    drop(control_high);
+    drop(high);
     _host_address_control
         .write_all(&encode_frame(&HostAddressSet::default()))
         .unwrap();
@@ -325,12 +342,16 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
         read_status_frame(&mut worker_parent),
         WORKER_PREPARED_MESSAGE
     );
-    send_descriptor(
-        worker_parent.as_raw_fd(),
-        broker_parent.as_raw_fd(),
-        BROKER_DESCRIPTOR_MARKER,
-    );
+    // The admission session (the broker's bootstrap stream), then the rest.
+    for session in std::iter::once(&broker_parent).chain(&broker_sessions) {
+        send_descriptor(
+            worker_parent.as_raw_fd(),
+            session.as_raw_fd(),
+            BROKER_DESCRIPTOR_MARKER,
+        );
+    }
     drop(broker_parent);
+    drop(broker_sessions);
     assert_eq!(
         read_status_frame(&mut worker_parent),
         WORKER_BROKER_READY_MESSAGE
@@ -631,6 +652,42 @@ fn prepare_inherited_descriptor(command: &mut Command, source: RawFd, target: Ra
             }
             if libc::fcntl(target, libc::F_SETFD, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// A duplicate above every fixed target a role inherits, as the runner makes.
+fn duplicate_above_targets(source: RawFd) -> OwnedFd {
+    let duplicated = unsafe { libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 64) };
+    assert!(
+        duplicated >= 64,
+        "could not duplicate inherited fixture descriptor"
+    );
+    unsafe { OwnedFd::from_raw_fd(duplicated) }
+}
+
+/// Admit exactly `descriptors` at their targets; every source is above them.
+fn prepare_inherited_descriptors(command: &mut Command, descriptors: Vec<(RawFd, RawFd)>) {
+    assert!(descriptors.iter().all(|(source, _)| *source >= 64));
+    // SAFETY: the sources are kept alive through spawn and sit above every
+    // target. The hook performs only descriptor syscalls before exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::syscall(
+                libc::SYS_close_range,
+                3_u32,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            for &(source, target) in &descriptors {
+                if libc::dup2(source, target) == -1 || libc::fcntl(target, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             Ok(())
         });

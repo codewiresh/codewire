@@ -18,8 +18,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use codewire_egress_broker::DnsRecordFamily;
 use codewire_egress_broker::ipc::{
-    BROKER_IPC_KEY_LEN, BrokerIpcBinding, BrokerIpcClient, BrokerIpcDnsResponse, BrokerIpcError,
-    BrokerIpcKey,
+    BROKER_IPC_KEY_LEN, BROKER_IPC_SESSIONS, BrokerIpcBinding, BrokerIpcClient,
+    BrokerIpcDnsResponse, BrokerIpcError, BrokerIpcKey,
 };
 use codewire_egress_policy::CompiledPolicy;
 use codewire_netstack::{DnsAnswer, DnsQuestion, DnsRecordType};
@@ -528,23 +528,24 @@ pub struct IpcEgressBroker {
 }
 
 impl IpcEgressBroker {
-    fn new(stream: tokio::net::UnixStream, binding: BrokerIpcBinding, key: BrokerIpcKey) -> Self {
-        Self {
-            client: BrokerIpcClient::new(stream, binding, key),
-        }
+    fn new(
+        streams: Vec<tokio::net::UnixStream>,
+        binding: BrokerIpcBinding,
+        key: BrokerIpcKey,
+    ) -> Result<Self, NetworkWorkerError> {
+        Ok(Self {
+            client: BrokerIpcClient::new(streams, binding, key)
+                .map_err(|_| NetworkWorkerError::InheritedDescriptor)?,
+        })
     }
 
-    /// Prove the authenticated binding without opening a network connection.
-    /// The compiled policy must deny this protected loopback destination.
+    /// Prove every session's authenticated binding without opening a network
+    /// connection: the compiled policy refuses each verification request.
     async fn verify_binding(&self) -> Result<(), NetworkWorkerError> {
-        match self
-            .client
-            .authorize_tcp(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1))
+        self.client
+            .verify_sessions()
             .await
-        {
-            Err(BrokerIpcError::Denied) => Ok(()),
-            Ok(()) | Err(_) => Err(NetworkWorkerError::Protocol),
-        }
+            .map_err(|_| NetworkWorkerError::Protocol)
     }
 
     fn admit_guest_flow(flow: TcpFlow) -> io::Result<SocketAddr> {
@@ -761,25 +762,23 @@ pub async fn run_inherited_worker(vm_id: Uuid, generation: u64) -> Result<(), Ne
         .map_err(|_| NetworkWorkerError::BootstrapIo)?;
     write_worker_control_message(&bootstrap, WORKER_PREPARED_MESSAGE)
         .map_err(|_| NetworkWorkerError::PreparedIo)?;
-    let broker_descriptor = match receive_worker_broker_descriptor(bootstrap.as_raw_fd()) {
-        Ok(descriptor) => descriptor,
+    // One descriptor per broker IPC session, in session order (#2638).
+    let broker_streams = (0..BROKER_IPC_SESSIONS)
+        .map(|_| {
+            receive_worker_broker_descriptor(bootstrap.as_raw_fd())
+                .and_then(transferred_tokio_unix_stream)
+        })
+        .collect::<Result<Vec<_>, NetworkWorkerError>>()
+        .and_then(|streams| {
+            IpcEgressBroker::new(streams, prepared.broker_binding, prepared.broker_key)
+        });
+    let broker = match broker_streams {
+        Ok(broker) => Arc::new(broker),
         Err(error) => {
             let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
             return Err(error);
         }
     };
-    let broker_stream = match transferred_tokio_unix_stream(broker_descriptor) {
-        Ok(stream) => stream,
-        Err(error) => {
-            let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
-            return Err(error);
-        }
-    };
-    let broker = Arc::new(IpcEgressBroker::new(
-        broker_stream,
-        prepared.broker_binding,
-        prepared.broker_key,
-    ));
     if let Err(error) = broker.verify_binding().await {
         let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
         return Err(error);

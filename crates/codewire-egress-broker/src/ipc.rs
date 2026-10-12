@@ -1,19 +1,25 @@
 //! Authenticated capability IPC between one confined packet worker and its
 //! separate per-environment egress broker.
 //!
-//! The transport is an already-created connected AF_UNIX stream. Every frame
-//! is HMAC-authenticated and bound to one environment, boot generation, policy
-//! digest, direction, and strictly increasing request sequence. The broker may
-//! transfer only one already-connected TCP descriptor after an authenticated
-//! successful connect response; the client validates its socket type and exact
-//! peer before accepting it.
+//! The transport is a fixed set of already-created connected AF_UNIX streams,
+//! one session each (#2638): one admits TCP flows, a pool resolves DNS and a
+//! pool connects TCP, so a slow upstream lookup or connect delays only its own
+//! session. Each session has its own key derived from the bootstrap key, and
+//! the broker refuses a request outside its session's class. Every frame is
+//! HMAC-authenticated and bound to one environment, boot generation, policy
+//! digest, direction, and strictly increasing per-session request sequence.
+//! The broker may transfer only one already-connected TCP descriptor after an
+//! authenticated successful connect response; the client validates its socket
+//! type and exact peer before accepting it.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream as StdTcpStream};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 
 use codewire_egress_policy::{PolicyDigest, RouteClass};
@@ -27,7 +33,8 @@ use sha2::Sha256;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, Interest};
 use tokio::net::UnixStream;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::task::JoinSet;
 use tokio::time::{Instant, timeout, timeout_at};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -55,6 +62,50 @@ const DESCRIPTOR_MARKER: u8 = b'F';
 // includes the production DNS/TCP deadline plus IPC and descriptor delivery.
 const BROKER_IPC_QUEUE_TIMEOUT: Duration = Duration::from_secs(2);
 const BROKER_IPC_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Sessions that resolve DNS, so at most this many upstream lookups run at
+/// once. A guest name lookup is an A and an AAAA query sent together, so four
+/// names resolve at once, and three lookups hung for the resolver's 3 s
+/// timeout still leave room for others.
+pub const BROKER_IPC_DNS_SESSIONS: usize = 8;
+/// Sessions that connect TCP, so at most this many upstream connects run at
+/// once. A connect holds its session for one handshake (up to the connector's
+/// 5 s timeout); 16 covers a package manager's parallel downloads.
+pub const BROKER_IPC_CONNECT_SESSIONS: usize = 16;
+/// Every session between one worker and its broker: admission first, then the
+/// DNS sessions, then the connect sessions.
+pub const BROKER_IPC_SESSIONS: usize = 1 + BROKER_IPC_DNS_SESSIONS + BROKER_IPC_CONNECT_SESSIONS;
+const SESSION_KEY_DOMAIN: &[u8] = b"codewire.egress-broker-ipc/session-key/v1\0";
+
+/// What one session may carry. Admission is a local policy check that never
+/// waits on anything upstream, so it has a session of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrokerIpcSessionClass {
+    Admission,
+    Dns,
+    Connect,
+}
+
+impl BrokerIpcSessionClass {
+    /// The class of the session at `index` in [`BROKER_IPC_SESSIONS`] order.
+    pub fn of(index: usize) -> Option<Self> {
+        match index {
+            0 => Some(Self::Admission),
+            index if index <= BROKER_IPC_DNS_SESSIONS => Some(Self::Dns),
+            index if index < BROKER_IPC_SESSIONS => Some(Self::Connect),
+            _ => None,
+        }
+    }
+
+    fn carries(self, request: &BrokerRequest) -> bool {
+        matches!(
+            (self, request),
+            (Self::Admission, BrokerRequest::AuthorizeTcp(_))
+                | (Self::Dns, BrokerRequest::ResolveDns { .. })
+                | (Self::Connect, BrokerRequest::ConnectTcp(_))
+        )
+    }
+}
 
 const OP_RESOLVE_DNS: u8 = 1;
 const OP_AUTHORIZE_TCP: u8 = 2;
@@ -116,6 +167,22 @@ impl BrokerIpcKey {
     fn with_bytes<T>(&self, apply: impl FnOnce(&[u8; BROKER_IPC_KEY_LEN]) -> T) -> T {
         apply(&self.0)
     }
+
+    /// The key of the session at `index`: HMAC-SHA256 of the session-key
+    /// domain and the index. Frames are authenticated only with session keys,
+    /// so a frame from one session fails authentication on any other.
+    fn for_session(&self, index: usize) -> Result<Self, BrokerIpcError> {
+        let index = u8::try_from(index).map_err(|_| BrokerIpcError::SessionCount)?;
+        self.with_bytes(|bytes| {
+            let mut mac =
+                HmacSha256::new_from_slice(bytes).map_err(|_| BrokerIpcError::InvalidKey)?;
+            mac.update(SESSION_KEY_DOMAIN);
+            mac.update(&[index]);
+            let mut derived = Zeroizing::new([0_u8; BROKER_IPC_KEY_LEN]);
+            derived.copy_from_slice(&mac.finalize().into_bytes());
+            Self::from_bytes(*derived)
+        })
+    }
 }
 
 impl fmt::Debug for BrokerIpcKey {
@@ -144,6 +211,10 @@ pub enum BrokerIpcError {
     SessionClosed,
     #[error("broker IPC session is busy")]
     SessionBusy,
+    #[error("broker IPC session count is wrong")]
+    SessionCount,
+    #[error("broker IPC request is outside its session's class")]
+    SessionClassMismatch,
     #[error("broker IPC frame I/O failed")]
     FrameIo,
     #[error("broker IPC frame is malformed")]
@@ -178,27 +249,157 @@ struct ClientState {
     failed: bool,
 }
 
-pub struct BrokerIpcClient {
-    state: Mutex<ClientState>,
+/// Sessions of one class. A request checks out an idle session and gives it
+/// back when it is done; a session that failed is never given back.
+struct SessionPool {
+    idle: StdMutex<VecDeque<ClientState>>,
+    available: Semaphore,
+    live: AtomicUsize,
 }
 
-impl BrokerIpcClient {
-    pub fn new(stream: UnixStream, binding: BrokerIpcBinding, key: BrokerIpcKey) -> Self {
+impl SessionPool {
+    fn new(sessions: Vec<ClientState>) -> Self {
         Self {
-            state: Mutex::new(ClientState {
-                stream,
-                binding,
-                key,
-                next_sequence: 1,
-                failed: false,
-            }),
+            available: Semaphore::new(sessions.len()),
+            live: AtomicUsize::new(sessions.len()),
+            idle: StdMutex::new(sessions.into()),
         }
     }
 
-    async fn lock_state(&self) -> Result<MutexGuard<'_, ClientState>, BrokerIpcError> {
-        timeout(BROKER_IPC_QUEUE_TIMEOUT, self.state.lock())
-            .await
-            .map_err(|_| BrokerIpcError::SessionBusy)
+    fn len(&self) -> usize {
+        self.live.load(Ordering::Acquire)
+    }
+
+    /// Take the longest-idle session, waiting at most the queue timeout for one.
+    async fn checkout(&self) -> Result<CheckedOut<'_>, BrokerIpcError> {
+        let permit = match timeout(BROKER_IPC_QUEUE_TIMEOUT, self.available.acquire()).await {
+            Err(_) => return Err(BrokerIpcError::SessionBusy),
+            // Closed once every session of the class has failed.
+            Ok(Err(_)) => return Err(BrokerIpcError::SessionClosed),
+            Ok(Ok(permit)) => permit,
+        };
+        // One permit per idle session, so the queue cannot be empty here.
+        let state = self
+            .idle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop_front()
+            .ok_or(BrokerIpcError::SessionClosed)?;
+        Ok(CheckedOut {
+            pool: self,
+            state: Some(state),
+            permit: Some(permit),
+        })
+    }
+}
+
+/// A checked-out session. Dropping it, including when its request is
+/// cancelled, returns it only if it can carry another request.
+struct CheckedOut<'a> {
+    pool: &'a SessionPool,
+    state: Option<ClientState>,
+    permit: Option<SemaphorePermit<'a>>,
+}
+
+impl std::ops::Deref for CheckedOut<'_> {
+    type Target = ClientState;
+
+    fn deref(&self) -> &ClientState {
+        self.state
+            .as_ref()
+            .expect("a checked-out session holds its state")
+    }
+}
+
+impl std::ops::DerefMut for CheckedOut<'_> {
+    fn deref_mut(&mut self) -> &mut ClientState {
+        self.state
+            .as_mut()
+            .expect("a checked-out session holds its state")
+    }
+}
+
+impl Drop for CheckedOut<'_> {
+    fn drop(&mut self) {
+        let (Some(state), Some(permit)) = (self.state.take(), self.permit.take()) else {
+            return;
+        };
+        if state.failed {
+            permit.forget();
+            if self.pool.live.fetch_sub(1, Ordering::AcqRel) == 1 {
+                self.pool.available.close();
+            }
+        } else {
+            self.pool
+                .idle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push_back(state);
+            drop(permit);
+        }
+    }
+}
+
+/// The worker's end of every session to its broker.
+pub struct BrokerIpcClient {
+    admission: SessionPool,
+    dns: SessionPool,
+    connect: SessionPool,
+}
+
+impl BrokerIpcClient {
+    /// One client over [`BROKER_IPC_SESSIONS`] connected streams, in session
+    /// order. Each session uses its own key derived from `key`.
+    pub fn new(
+        streams: Vec<UnixStream>,
+        binding: BrokerIpcBinding,
+        key: BrokerIpcKey,
+    ) -> Result<Self, BrokerIpcError> {
+        if streams.len() != BROKER_IPC_SESSIONS {
+            return Err(BrokerIpcError::SessionCount);
+        }
+        let (mut admission, mut dns, mut connect) = (Vec::new(), Vec::new(), Vec::new());
+        for (index, stream) in streams.into_iter().enumerate() {
+            let state = ClientState {
+                stream,
+                binding,
+                key: key.for_session(index)?,
+                next_sequence: 1,
+                failed: false,
+            };
+            match BrokerIpcSessionClass::of(index).ok_or(BrokerIpcError::SessionCount)? {
+                BrokerIpcSessionClass::Admission => admission.push(state),
+                BrokerIpcSessionClass::Dns => dns.push(state),
+                BrokerIpcSessionClass::Connect => connect.push(state),
+            }
+        }
+        Ok(Self {
+            admission: SessionPool::new(admission),
+            dns: SessionPool::new(dns),
+            connect: SessionPool::new(connect),
+        })
+    }
+
+    /// Prove every session's key and binding with a request the policy
+    /// refuses before any upstream effect: a protected loopback destination,
+    /// and for DNS the protected name `localhost`.
+    pub async fn verify_sessions(&self) -> Result<(), BrokerIpcError> {
+        let protected = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+        // Checkouts rotate through the idle queue, so each session is used once.
+        for _ in 0..self.admission.len() {
+            expect_denied(self.authorize_tcp(protected).await)?;
+        }
+        for _ in 0..self.dns.len() {
+            expect_denied(
+                self.resolve_dns("localhost", DnsRecordFamily::Ipv4)
+                    .await
+                    .map(drop),
+            )?;
+        }
+        for _ in 0..self.connect.len() {
+            expect_denied(self.connect_tcp(protected).await.map(drop))?;
+        }
+        Ok(())
     }
 
     pub async fn resolve_dns(
@@ -207,7 +408,7 @@ impl BrokerIpcClient {
         family: DnsRecordFamily,
     ) -> Result<BrokerIpcDnsResponse, BrokerIpcError> {
         let request = encode_dns_request(name, family)?;
-        let mut state = self.lock_state().await?;
+        let mut state = self.dns.checkout().await?;
         let deadline = Instant::now() + BROKER_IPC_TRANSACTION_TIMEOUT;
         let response = state.request(&request, deadline).await?;
         match decode_dns_response(&response, family) {
@@ -222,7 +423,7 @@ impl BrokerIpcClient {
 
     pub async fn authorize_tcp(&self, destination: SocketAddr) -> Result<(), BrokerIpcError> {
         let request = encode_tcp_request(OP_AUTHORIZE_TCP, destination)?;
-        let mut state = self.lock_state().await?;
+        let mut state = self.admission.checkout().await?;
         let deadline = Instant::now() + BROKER_IPC_TRANSACTION_TIMEOUT;
         let response = state.request(&request, deadline).await?;
         match decode_empty_response(&response, OP_AUTHORIZE_TCP) {
@@ -237,7 +438,7 @@ impl BrokerIpcClient {
 
     pub async fn connect_tcp(&self, destination: SocketAddr) -> Result<OwnedFd, BrokerIpcError> {
         let request = encode_tcp_request(OP_CONNECT_TCP, destination)?;
-        let mut state = self.lock_state().await?;
+        let mut state = self.connect.checkout().await?;
         let deadline = Instant::now() + BROKER_IPC_TRANSACTION_TIMEOUT;
         let response = state.request(&request, deadline).await?;
         match decode_empty_response(&response, OP_CONNECT_TCP) {
@@ -251,13 +452,12 @@ impl BrokerIpcClient {
         // The descriptor is part of this operation, not the next frame. A
         // cancelled receive must never leave it for a subsequent request.
         state.failed = true;
-        match timeout_at(
+        let received = timeout_at(
             deadline,
             receive_connected_descriptor(&state.stream, destination),
         )
-        .await
-        .unwrap_or(Err(BrokerIpcError::FrameIo))
-        {
+        .await;
+        match received.unwrap_or(Err(BrokerIpcError::FrameIo)) {
             Ok(descriptor) => {
                 state.failed = false;
                 Ok(descriptor)
@@ -383,6 +583,14 @@ async fn read_client_frame(
     decode_frame(&frame, expected_kind, expected_sequence, binding, key)
 }
 
+fn expect_denied(result: Result<(), BrokerIpcError>) -> Result<(), BrokerIpcError> {
+    match result {
+        Err(BrokerIpcError::Denied) => Ok(()),
+        Ok(()) => Err(BrokerIpcError::BindingMismatch),
+        Err(error) => Err(error),
+    }
+}
+
 impl BrokerIpcError {
     fn is_valid_remote_result(&self) -> bool {
         matches!(
@@ -392,8 +600,10 @@ impl BrokerIpcError {
     }
 }
 
+/// Serve every session of one worker until the first one fails, which ends
+/// them all. `streams` are the broker's ends in [`BROKER_IPC_SESSIONS`] order.
 pub async fn serve_broker_ipc<R, C, K>(
-    mut stream: UnixStream,
+    streams: Vec<UnixStream>,
     binding: BrokerIpcBinding,
     key: BrokerIpcKey,
     broker: Arc<PolicyEgressBroker<R, C, K>>,
@@ -409,10 +619,50 @@ where
     {
         return Err(BrokerIpcError::BindingMismatch);
     }
+    if streams.len() != BROKER_IPC_SESSIONS {
+        return Err(BrokerIpcError::SessionCount);
+    }
+    let mut sessions = JoinSet::new();
+    for (index, stream) in streams.into_iter().enumerate() {
+        let class = BrokerIpcSessionClass::of(index).ok_or(BrokerIpcError::SessionCount)?;
+        sessions.spawn(serve_session(
+            stream,
+            binding,
+            key.for_session(index)?,
+            class,
+            Arc::clone(&broker),
+        ));
+    }
+    // A session ends only on an error; dropping the set aborts the others.
+    match sessions.join_next().await {
+        Some(Ok(Err(error))) => Err(error),
+        Some(Ok(Ok(()))) | Some(Err(_)) | None => Err(BrokerIpcError::SessionClosed),
+    }
+}
+
+async fn serve_session<R, C, K>(
+    mut stream: UnixStream,
+    binding: BrokerIpcBinding,
+    key: BrokerIpcKey,
+    class: BrokerIpcSessionClass,
+    broker: Arc<PolicyEgressBroker<R, C, K>>,
+) -> Result<(), BrokerIpcError>
+where
+    R: DnsResolver,
+    C: TcpConnector,
+    C::Stream: AsFd,
+    K: BrokerClock,
+{
     let mut sequence = 1_u64;
     loop {
         let payload = read_frame(&mut stream, FRAME_KIND_REQUEST, sequence, binding, &key).await?;
         let request = decode_request(&payload)?;
+        if !class.carries(&request) {
+            return Err(BrokerIpcError::SessionClassMismatch);
+        }
+        // `connect_tcp` evaluates policy again for the exact destination
+        // under the broker's state lock: an earlier admission on the
+        // admission session grants nothing here.
         match request {
             BrokerRequest::ResolveDns { name, family } => {
                 let response = broker.resolve_dns(&name, family).await;
@@ -1072,8 +1322,43 @@ mod tests {
     const KEY_BYTES: [u8; BROKER_IPC_KEY_LEN] = [0x5a; BROKER_IPC_KEY_LEN];
     const PUBLIC_V4: IpAddr = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
 
+    const FIRST_DNS: usize = 1;
+    const FIRST_CONNECT: usize = 1 + BROKER_IPC_DNS_SESSIONS;
+
     fn key() -> BrokerIpcKey {
         BrokerIpcKey::from_bytes(KEY_BYTES).unwrap()
+    }
+
+    fn session_key(index: usize) -> BrokerIpcKey {
+        key().for_session(index).unwrap()
+    }
+
+    /// Connected session streams in session order: the client's ends and the
+    /// broker's.
+    fn session_pairs() -> (Vec<UnixStream>, Vec<UnixStream>) {
+        raise_open_file_limit();
+        (0..BROKER_IPC_SESSIONS)
+            .map(|_| UnixStream::pair().unwrap())
+            .unzip()
+    }
+
+    /// Each pool test holds two descriptors per session and the tests run in
+    /// parallel, past the 256 open files macOS starts a process with.
+    fn raise_open_file_limit() {
+        static RAISED: std::sync::Once = std::sync::Once::new();
+        RAISED.call_once(|| {
+            use rustix::process::{Resource, getrlimit, setrlimit};
+            let mut limit = getrlimit(Resource::Nofile);
+            let wanted = limit.maximum.map_or(4096, |maximum| maximum.min(4096));
+            if limit.current.is_some_and(|current| current < wanted) {
+                limit.current = Some(wanted);
+                setrlimit(Resource::Nofile, limit).unwrap();
+            }
+        });
+    }
+
+    fn client(streams: Vec<UnixStream>, binding: BrokerIpcBinding) -> BrokerIpcClient {
+        BrokerIpcClient::new(streams, binding, key()).unwrap()
     }
 
     fn binding(policy: &CompiledPolicy) -> BrokerIpcBinding {
@@ -1276,9 +1561,9 @@ rules:
             connector,
             Arc::new(FakeClock::default()),
         ));
-        let (client_stream, server_stream) = UnixStream::pair().unwrap();
-        let server = tokio::spawn(serve_broker_ipc(server_stream, binding, key(), broker));
-        let client = BrokerIpcClient::new(client_stream, binding, key());
+        let (client_streams, server_streams) = session_pairs();
+        let server = tokio::spawn(serve_broker_ipc(server_streams, binding, key(), broker));
+        let client = client(client_streams, binding);
 
         assert_eq!(
             client
@@ -1321,7 +1606,7 @@ rules:
     }
 
     #[tokio::test]
-    async fn cancelling_an_in_flight_dns_request_fails_the_client_session_closed() {
+    async fn cancelling_an_in_flight_dns_request_retires_only_its_session() {
         let policy = named_policy();
         let binding = binding(&policy);
         let resolver = Arc::new(BlockingResolver::default());
@@ -1332,9 +1617,9 @@ rules:
             Arc::new(NoConnector::default()),
             Arc::new(FakeClock::default()),
         ));
-        let (client_stream, server_stream) = UnixStream::pair().unwrap();
-        let server = tokio::spawn(serve_broker_ipc(server_stream, binding, key(), broker));
-        let client = BrokerIpcClient::new(client_stream, binding, key());
+        let (client_streams, server_streams) = session_pairs();
+        let server = tokio::spawn(serve_broker_ipc(server_streams, binding, key(), broker));
+        let client = client(client_streams, binding);
 
         {
             let request = client.resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4);
@@ -1346,77 +1631,69 @@ rules:
                 }
             }
         }
+        // The cancelled session may hold an unread response, so it is never
+        // reused; the other DNS sessions still answer.
+        assert_eq!(client.dns.len(), BROKER_IPC_DNS_SESSIONS - 1);
+        assert_eq!(
+            client
+                .resolve_dns("denied.example.com", DnsRecordFamily::Ipv4)
+                .await,
+            Err(BrokerIpcError::Denied)
+        );
         resolver.release.notify_one();
-
-        let reused = tokio::time::timeout(
-            Duration::from_secs(2),
-            client.resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4),
-        )
-        .await
-        .expect("reused client request did not complete");
         drop(client);
         let _ = tokio::time::timeout(Duration::from_secs(2), server)
             .await
             .expect("server did not close")
             .unwrap();
+    }
 
-        assert_eq!(reused, Err(BrokerIpcError::SessionClosed));
+    /// Every session of a class checked out, as if each were in flight.
+    async fn hold_all(pool: &SessionPool) -> Vec<CheckedOut<'_>> {
+        let mut held = Vec::new();
+        for _ in 0..pool.len() {
+            held.push(pool.checkout().await.unwrap());
+        }
+        held
     }
 
     #[tokio::test]
-    async fn cancelling_a_request_waiting_for_client_mutex_preserves_active_session() {
+    async fn cancelling_a_request_waiting_for_a_session_keeps_the_pool_whole() {
         let policy = named_policy();
         let binding = binding(&policy);
-        let resolver = Arc::new(BlockingResolver::default());
         let broker = Arc::new(PolicyEgressBroker::new(
             policy,
             RouteClass::General,
-            Arc::clone(&resolver),
+            Arc::new(FakeResolver::new([])),
             Arc::new(NoConnector::default()),
             Arc::new(FakeClock::default()),
         ));
-        let (client_stream, server_stream) = UnixStream::pair().unwrap();
-        let server = tokio::spawn(serve_broker_ipc(server_stream, binding, key(), broker));
-        let client = BrokerIpcClient::new(client_stream, binding, key());
+        let (client_streams, server_streams) = session_pairs();
+        let server = tokio::spawn(serve_broker_ipc(server_streams, binding, key(), broker));
+        let client = client(client_streams, binding);
 
-        let active_result = {
-            let active = client.resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4);
-            tokio::pin!(active);
+        let held = hold_all(&client.dns).await;
+        {
+            let waiting = client.resolve_dns("denied.example.com", DnsRecordFamily::Ipv4);
+            tokio::pin!(waiting);
             tokio::select! {
-                () = resolver.entered.notified() => {}
-                result = &mut active => {
-                    panic!("active DNS request completed before resolver release: {result:?}")
+                biased;
+                result = &mut waiting => {
+                    panic!("a request without a session completed: {result:?}")
                 }
+                () = tokio::task::yield_now() => {}
             }
-
-            {
-                let waiting = client.resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4);
-                tokio::pin!(waiting);
-                tokio::select! {
-                    biased;
-                    result = &mut waiting => {
-                        panic!("mutex-waiting request completed unexpectedly: {result:?}")
-                    }
-                    () = tokio::task::yield_now() => {}
-                }
-            }
-
-            resolver.release.notify_one();
-            active.await
-        };
-        assert_eq!(
-            active_result.unwrap(),
-            BrokerIpcDnsResponse::Addresses {
-                addresses: vec![PUBLIC_V4],
-                ttl_seconds: 60,
-            }
-        );
-        assert!(
-            client
-                .authorize_tcp(SocketAddr::new(PUBLIC_V4, 443))
-                .await
-                .is_ok()
-        );
+        }
+        drop(held);
+        assert_eq!(client.dns.len(), BROKER_IPC_DNS_SESSIONS);
+        for _ in 0..BROKER_IPC_DNS_SESSIONS {
+            assert_eq!(
+                client
+                    .resolve_dns("denied.example.com", DnsRecordFamily::Ipv4)
+                    .await,
+                Err(BrokerIpcError::Denied)
+            );
+        }
 
         drop(client);
         assert_eq!(
@@ -1429,51 +1706,39 @@ rules:
     }
 
     #[tokio::test]
-    async fn client_mutex_timeout_does_not_poison_the_active_session() {
+    async fn a_request_waits_at_most_the_queue_timeout_for_a_session() {
         let policy = named_policy();
         let binding = binding(&policy);
-        let resolver = Arc::new(BlockingResolver::default());
         let broker = Arc::new(PolicyEgressBroker::new(
             policy,
             RouteClass::General,
-            Arc::clone(&resolver),
+            Arc::new(FakeResolver::new([])),
             Arc::new(NoConnector::default()),
             Arc::new(FakeClock::default()),
         ));
-        let (client_stream, server_stream) = UnixStream::pair().unwrap();
-        let server = tokio::spawn(serve_broker_ipc(server_stream, binding, key(), broker));
-        let client = Arc::new(BrokerIpcClient::new(client_stream, binding, key()));
-        let active = tokio::spawn({
-            let client = Arc::clone(&client);
-            async move {
-                client
-                    .resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4)
-                    .await
-            }
-        });
+        let (client_streams, server_streams) = session_pairs();
+        let server = tokio::spawn(serve_broker_ipc(server_streams, binding, key(), broker));
+        let client = client(client_streams, binding);
 
-        resolver.entered.notified().await;
+        let held = hold_all(&client.dns).await;
         tokio::time::pause();
+        let started = tokio::time::Instant::now();
         let busy = client
-            .resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4)
+            .resolve_dns("denied.example.com", DnsRecordFamily::Ipv4)
             .await;
+        let waited = started.elapsed();
+        assert!(waited >= BROKER_IPC_QUEUE_TIMEOUT && waited < BROKER_IPC_TRANSACTION_TIMEOUT);
         tokio::time::resume();
         assert_eq!(busy, Err(BrokerIpcError::SessionBusy));
-
-        resolver.release.notify_one();
+        // Waiting for a DNS session never holds up admission.
         assert_eq!(
-            active.await.unwrap().unwrap(),
-            BrokerIpcDnsResponse::Addresses {
-                addresses: vec![PUBLIC_V4],
-                ttl_seconds: 60,
-            }
-        );
-        assert!(
             client
-                .authorize_tcp(SocketAddr::new(PUBLIC_V4, 443))
-                .await
-                .is_ok()
+                .authorize_tcp(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443))
+                .await,
+            Err(BrokerIpcError::Denied)
         );
+        drop(held);
+        assert_eq!(client.dns.len(), BROKER_IPC_DNS_SESSIONS);
 
         drop(client);
         assert_eq!(
@@ -1486,20 +1751,26 @@ rules:
     }
 
     #[tokio::test]
-    async fn stalled_response_timeout_fails_the_client_session_closed() {
+    async fn stalled_response_timeout_retires_the_session() {
         let policy = named_policy();
         let binding = binding(&policy);
         let request_observed = Arc::new(Notify::new());
         let close_server = Arc::new(Notify::new());
-        let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        let (client_streams, mut server_streams) = session_pairs();
+        let mut server_stream = server_streams.remove(FIRST_DNS);
         let server = tokio::spawn({
             let request_observed = Arc::clone(&request_observed);
             let close_server = Arc::clone(&close_server);
             async move {
-                let request =
-                    read_frame(&mut server_stream, FRAME_KIND_REQUEST, 1, binding, &key())
-                        .await
-                        .unwrap();
+                let request = read_frame(
+                    &mut server_stream,
+                    FRAME_KIND_REQUEST,
+                    1,
+                    binding,
+                    &session_key(FIRST_DNS),
+                )
+                .await
+                .unwrap();
                 assert!(matches!(
                     decode_request(&request).unwrap(),
                     BrokerRequest::ResolveDns { name, family }
@@ -1509,7 +1780,7 @@ rules:
                 close_server.notified().await;
             }
         });
-        let client = BrokerIpcClient::new(client_stream, binding, key());
+        let client = client(client_streams, binding);
 
         let stalled = client.resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4);
         tokio::pin!(stalled);
@@ -1523,12 +1794,8 @@ rules:
         let stalled_result = stalled.await;
         tokio::time::resume();
         assert_eq!(stalled_result, Err(BrokerIpcError::FrameIo));
-        assert_eq!(
-            client
-                .resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4)
-                .await,
-            Err(BrokerIpcError::SessionClosed)
-        );
+        assert_eq!(client.dns.len(), BROKER_IPC_DNS_SESSIONS - 1);
+        drop(server_streams);
 
         close_server.notify_one();
         server.await.unwrap();
@@ -1545,7 +1812,7 @@ rules:
             Arc::new(NoConnector::default()),
             Arc::new(SystemBrokerClock::new()),
         ));
-        let (_client, server) = UnixStream::pair().unwrap();
+        let (_client, server) = session_pairs();
         assert_eq!(
             serve_broker_ipc(server, wrong_binding, key(), broker).await,
             Err(BrokerIpcError::BindingMismatch)
@@ -1560,11 +1827,18 @@ rules:
         let destination = listener.local_addr().unwrap();
         let connected = StdTcpStream::connect(destination).unwrap();
         let (mut accepted, _) = listener.accept().unwrap();
-        let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        let (client_streams, mut server_streams) = session_pairs();
+        let mut server_stream = server_streams.remove(FIRST_CONNECT);
         let server = tokio::spawn(async move {
-            let request = read_frame(&mut server_stream, FRAME_KIND_REQUEST, 1, binding, &key())
-                .await
-                .unwrap();
+            let request = read_frame(
+                &mut server_stream,
+                FRAME_KIND_REQUEST,
+                1,
+                binding,
+                &session_key(FIRST_CONNECT),
+            )
+            .await
+            .unwrap();
             assert!(matches!(
                 decode_request(&request).unwrap(),
                 BrokerRequest::ConnectTcp(actual) if actual == destination
@@ -1574,7 +1848,7 @@ rules:
                 FRAME_KIND_RESPONSE,
                 1,
                 binding,
-                &key(),
+                &session_key(FIRST_CONNECT),
                 &[OP_CONNECT_TCP, STATUS_OK],
             )
             .await
@@ -1583,8 +1857,9 @@ rules:
                 .await
                 .unwrap();
         });
-        let client = BrokerIpcClient::new(client_stream, binding, key());
+        let client = client(client_streams, binding);
         let descriptor = client.connect_tcp(destination).await.unwrap();
+        drop(server_streams);
         assert!(
             rustix::io::fcntl_getfd(&descriptor)
                 .unwrap()
@@ -1607,15 +1882,21 @@ rules:
         let requested = SocketAddr::new(PUBLIC_V4, 443);
         let response_sent = Arc::new(Notify::new());
         let close_server = Arc::new(Notify::new());
-        let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        let (client_streams, mut server_streams) = session_pairs();
+        let mut server_stream = server_streams.remove(FIRST_CONNECT);
         let server = tokio::spawn({
             let response_sent = Arc::clone(&response_sent);
             let close_server = Arc::clone(&close_server);
             async move {
-                let request =
-                    read_frame(&mut server_stream, FRAME_KIND_REQUEST, 1, binding, &key())
-                        .await
-                        .unwrap();
+                let request = read_frame(
+                    &mut server_stream,
+                    FRAME_KIND_REQUEST,
+                    1,
+                    binding,
+                    &session_key(FIRST_CONNECT),
+                )
+                .await
+                .unwrap();
                 assert!(matches!(
                     decode_request(&request).unwrap(),
                     BrokerRequest::ConnectTcp(actual) if actual == requested
@@ -1625,7 +1906,7 @@ rules:
                     FRAME_KIND_RESPONSE,
                     1,
                     binding,
-                    &key(),
+                    &session_key(FIRST_CONNECT),
                     &[OP_CONNECT_TCP, STATUS_OK],
                 )
                 .await
@@ -1634,7 +1915,7 @@ rules:
                 close_server.notified().await;
             }
         });
-        let client = BrokerIpcClient::new(client_stream, binding, key());
+        let client = client(client_streams, binding);
 
         {
             let connect = client.connect_tcp(requested);
@@ -1653,18 +1934,12 @@ rules:
                 () = tokio::task::yield_now() => {}
             }
         }
-        {
-            let state = client.state.lock().await;
-            assert_eq!(state.next_sequence, 2);
-            assert!(state.failed);
-        }
+        // The session may hold the descriptor, so it is never reused.
+        assert_eq!(client.connect.len(), BROKER_IPC_CONNECT_SESSIONS - 1);
 
         close_server.notify_one();
         server.await.unwrap();
-        assert_eq!(
-            client.authorize_tcp(requested).await,
-            Err(BrokerIpcError::SessionClosed)
-        );
+        drop(server_streams);
     }
 
     #[tokio::test]
@@ -1675,17 +1950,24 @@ rules:
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let connected = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (_accepted, _) = listener.accept().unwrap();
-        let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        let (client_streams, mut server_streams) = session_pairs();
+        let mut server_stream = server_streams.remove(FIRST_CONNECT);
         let server = tokio::spawn(async move {
-            let _ = read_frame(&mut server_stream, FRAME_KIND_REQUEST, 1, binding, &key())
-                .await
-                .unwrap();
+            let _ = read_frame(
+                &mut server_stream,
+                FRAME_KIND_REQUEST,
+                1,
+                binding,
+                &session_key(FIRST_CONNECT),
+            )
+            .await
+            .unwrap();
             write_frame(
                 &mut server_stream,
                 FRAME_KIND_RESPONSE,
                 1,
                 binding,
-                &key(),
+                &session_key(FIRST_CONNECT),
                 &[OP_CONNECT_TCP, STATUS_OK],
             )
             .await
@@ -1694,16 +1976,14 @@ rules:
                 .await
                 .unwrap();
         });
-        let client = BrokerIpcClient::new(client_stream, binding, key());
+        let client = client(client_streams, binding);
         assert!(matches!(
             client.connect_tcp(requested).await,
             Err(BrokerIpcError::DescriptorInvalid)
         ));
-        assert_eq!(
-            client.authorize_tcp(requested).await,
-            Err(BrokerIpcError::SessionClosed)
-        );
+        assert_eq!(client.connect.len(), BROKER_IPC_CONNECT_SESSIONS - 1);
         server.await.unwrap();
+        drop(server_streams);
     }
 
     #[tokio::test]
@@ -1712,17 +1992,24 @@ rules:
         let binding = binding(&policy);
         let requested = SocketAddr::new(PUBLIC_V4, 443);
         let (foreign, _foreign_peer) = StdUnixStream::pair().unwrap();
-        let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        let (client_streams, mut server_streams) = session_pairs();
+        let mut server_stream = server_streams.remove(FIRST_CONNECT);
         let server = tokio::spawn(async move {
-            let _ = read_frame(&mut server_stream, FRAME_KIND_REQUEST, 1, binding, &key())
-                .await
-                .unwrap();
+            let _ = read_frame(
+                &mut server_stream,
+                FRAME_KIND_REQUEST,
+                1,
+                binding,
+                &session_key(FIRST_CONNECT),
+            )
+            .await
+            .unwrap();
             write_frame(
                 &mut server_stream,
                 FRAME_KIND_RESPONSE,
                 1,
                 binding,
-                &key(),
+                &session_key(FIRST_CONNECT),
                 &[OP_CONNECT_TCP, STATUS_OK],
             )
             .await
@@ -1731,12 +2018,13 @@ rules:
                 .await
                 .unwrap();
         });
-        let client = BrokerIpcClient::new(client_stream, binding, key());
+        let client = client(client_streams, binding);
         assert!(matches!(
             client.connect_tcp(requested).await,
             Err(BrokerIpcError::DescriptorInvalid)
         ));
         server.await.unwrap();
+        drop(server_streams);
     }
 
     #[tokio::test]
@@ -1750,13 +2038,15 @@ rules:
             Arc::new(NoConnector::default()),
             Arc::new(FakeClock::default()),
         ));
-        let (mut client, server_stream) = UnixStream::pair().unwrap();
-        let server = tokio::spawn(serve_broker_ipc(server_stream, binding, key(), broker));
+        let (mut clients, server_streams) = session_pairs();
+        let server = tokio::spawn(serve_broker_ipc(server_streams, binding, key(), broker));
+        let client = &mut clients[0];
         let payload =
             encode_tcp_request(OP_AUTHORIZE_TCP, SocketAddr::new(PUBLIC_V4, 443)).unwrap();
-        let replay = encode_frame(FRAME_KIND_REQUEST, 1, binding, &key(), &payload).unwrap();
+        let replay =
+            encode_frame(FRAME_KIND_REQUEST, 1, binding, &session_key(0), &payload).unwrap();
         client.write_all(&replay).await.unwrap();
-        let response = read_frame(&mut client, FRAME_KIND_RESPONSE, 1, binding, &key())
+        let response = read_frame(client, FRAME_KIND_RESPONSE, 1, binding, &session_key(0))
             .await
             .unwrap();
         assert_eq!(response, [OP_AUTHORIZE_TCP, STATUS_OK]);
@@ -1768,5 +2058,326 @@ rules:
                 .unwrap(),
             Err(BrokerIpcError::SequenceMismatch)
         );
+    }
+
+    #[test]
+    fn session_keys_are_distinct_and_never_the_bootstrap_key() {
+        let keys: Vec<[u8; BROKER_IPC_KEY_LEN]> = (0..BROKER_IPC_SESSIONS)
+            .map(|index| session_key(index).with_bytes(|bytes| *bytes))
+            .collect();
+        for (index, derived) in keys.iter().enumerate() {
+            assert_ne!(*derived, KEY_BYTES);
+            assert!(keys[index + 1..].iter().all(|other| other != derived));
+        }
+        // The same derivation on both sides.
+        assert_eq!(keys[3], session_key(3).with_bytes(|bytes| *bytes));
+        assert_eq!(
+            key().for_session(256).unwrap_err(),
+            BrokerIpcError::SessionCount
+        );
+        assert_eq!(
+            BrokerIpcSessionClass::of(0),
+            Some(BrokerIpcSessionClass::Admission)
+        );
+        assert_eq!(
+            BrokerIpcSessionClass::of(FIRST_DNS),
+            Some(BrokerIpcSessionClass::Dns)
+        );
+        assert_eq!(
+            BrokerIpcSessionClass::of(FIRST_CONNECT - 1),
+            Some(BrokerIpcSessionClass::Dns)
+        );
+        assert_eq!(
+            BrokerIpcSessionClass::of(FIRST_CONNECT),
+            Some(BrokerIpcSessionClass::Connect)
+        );
+        assert_eq!(
+            BrokerIpcSessionClass::of(BROKER_IPC_SESSIONS - 1),
+            Some(BrokerIpcSessionClass::Connect)
+        );
+        assert_eq!(BrokerIpcSessionClass::of(BROKER_IPC_SESSIONS), None);
+    }
+
+    /// The broker for the protected-destination and cross-session tests.
+    fn developer_broker(
+        connector: Arc<NoConnector>,
+    ) -> (
+        BrokerIpcBinding,
+        Arc<PolicyEgressBroker<FakeResolver, NoConnector, FakeClock>>,
+    ) {
+        let policy = CompiledPolicy::developer_baseline();
+        let binding = binding(&policy);
+        let broker = Arc::new(PolicyEgressBroker::new(
+            policy,
+            RouteClass::General,
+            Arc::new(FakeResolver::new([])),
+            connector,
+            Arc::new(FakeClock::default()),
+        ));
+        (binding, broker)
+    }
+
+    #[tokio::test]
+    async fn a_frame_from_one_session_fails_authentication_on_another() {
+        let payload = encode_dns_request("example.com", DnsRecordFamily::Ipv4).unwrap();
+        let (binding, _) = developer_broker(Arc::default());
+        for foreign in [session_key(0), session_key(FIRST_DNS + 1), key()] {
+            let (_, broker) = developer_broker(Arc::default());
+            let (mut clients, server_streams) = session_pairs();
+            let server = tokio::spawn(serve_broker_ipc(server_streams, binding, key(), broker));
+            let frame = encode_frame(FRAME_KIND_REQUEST, 1, binding, &foreign, &payload).unwrap();
+            clients[FIRST_DNS].write_all(&frame).await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), server)
+                    .await
+                    .expect("server accepted a foreign frame")
+                    .unwrap(),
+                Err(BrokerIpcError::Authentication)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_outside_its_session_class_ends_every_session() {
+        let connector = Arc::new(NoConnector::default());
+        let (binding, broker) = developer_broker(Arc::clone(&connector));
+        let destination = SocketAddr::new(PUBLIC_V4, 443);
+        let wrong_class = [
+            (0, encode_tcp_request(OP_CONNECT_TCP, destination).unwrap()),
+            (
+                0,
+                encode_dns_request("example.com", DnsRecordFamily::Ipv4).unwrap(),
+            ),
+            (
+                FIRST_DNS,
+                encode_tcp_request(OP_CONNECT_TCP, destination).unwrap(),
+            ),
+            (
+                FIRST_CONNECT,
+                encode_tcp_request(OP_AUTHORIZE_TCP, destination).unwrap(),
+            ),
+            (
+                FIRST_CONNECT,
+                encode_dns_request("example.com", DnsRecordFamily::Ipv4).unwrap(),
+            ),
+        ];
+        for (index, payload) in wrong_class {
+            let (mut clients, server_streams) = session_pairs();
+            let server = tokio::spawn(serve_broker_ipc(
+                server_streams,
+                binding,
+                key(),
+                Arc::clone(&broker),
+            ));
+            let frame = encode_frame(
+                FRAME_KIND_REQUEST,
+                1,
+                binding,
+                &session_key(index),
+                &payload,
+            )
+            .unwrap();
+            clients[index].write_all(&frame).await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), server)
+                    .await
+                    .expect("server served a request outside its class")
+                    .unwrap(),
+                Err(BrokerIpcError::SessionClassMismatch)
+            );
+        }
+        assert_eq!(connector.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn every_session_is_verified_without_an_upstream_effect() {
+        let connector = Arc::new(NoConnector::default());
+        let (binding, broker) = developer_broker(Arc::clone(&connector));
+        let (client_streams, server_streams) = session_pairs();
+        let server = tokio::spawn(serve_broker_ipc(server_streams, binding, key(), broker));
+        let client = client(client_streams, binding);
+        client.verify_sessions().await.unwrap();
+        assert_eq!(connector.calls.load(Ordering::Relaxed), 0);
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server did not close");
+
+        // A worker holding the wrong key fails verification.
+        let (_, broker) = developer_broker(Arc::default());
+        let (client_streams, server_streams) = session_pairs();
+        let server = tokio::spawn(serve_broker_ipc(server_streams, binding, key(), broker));
+        let wrong = BrokerIpcClient::new(
+            client_streams,
+            binding,
+            BrokerIpcKey::from_bytes([0x33; BROKER_IPC_KEY_LEN]).unwrap(),
+        )
+        .unwrap();
+        assert!(wrong.verify_sessions().await.is_err());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("server did not refuse the wrong key")
+                .unwrap(),
+            Err(BrokerIpcError::Authentication)
+        );
+    }
+
+    /// A connect on a connect session never relies on an admission granted
+    /// on the admission session: it is refused once the lease expires or the
+    /// address becomes local to the host.
+    #[tokio::test]
+    async fn a_connect_evaluates_policy_again_after_admission_on_another_session() {
+        let policy = named_policy();
+        let binding = binding(&policy);
+        let clock = Arc::new(FakeClock::default());
+        let connector = Arc::new(NoConnector::default());
+        let broker = Arc::new(PolicyEgressBroker::new(
+            policy,
+            RouteClass::General,
+            Arc::new(FakeResolver::new([
+                positive(PUBLIC_V4, 60),
+                positive(PUBLIC_V4, 60),
+            ])),
+            Arc::clone(&connector),
+            Arc::clone(&clock),
+        ));
+        let (client_streams, server_streams) = session_pairs();
+        let server = tokio::spawn(serve_broker_ipc(
+            server_streams,
+            binding,
+            key(),
+            Arc::clone(&broker),
+        ));
+        let client = client(client_streams, binding);
+        let destination = SocketAddr::new(PUBLIC_V4, 443);
+
+        client
+            .resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4)
+            .await
+            .unwrap();
+        client.authorize_tcp(destination).await.unwrap();
+        clock.0.store(61_000, Ordering::Relaxed);
+        assert_eq!(
+            client.connect_tcp(destination).await.unwrap_err(),
+            BrokerIpcError::Denied
+        );
+
+        client
+            .resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4)
+            .await
+            .unwrap();
+        client.authorize_tcp(destination).await.unwrap();
+        broker
+            .set_host_addresses(
+                codewire_egress_policy::host_addresses::HostAddressSet::new([], [PUBLIC_V4])
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(
+            client.connect_tcp(destination).await.unwrap_err(),
+            BrokerIpcError::Denied
+        );
+        assert_eq!(connector.calls.load(Ordering::Relaxed), 0);
+        // A refusal is an answer, not a session failure.
+        assert_eq!(client.connect.len(), BROKER_IPC_CONNECT_SESSIONS);
+
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server did not close");
+    }
+
+    /// Connects that never complete, as to a host that drops SYNs.
+    #[derive(Default)]
+    struct StalledConnector {
+        entered: AtomicUsize,
+        release: Notify,
+    }
+
+    #[async_trait]
+    impl TcpConnector for StalledConnector {
+        type Stream = StdTcpStream;
+
+        async fn connect(
+            &self,
+            _destination: SocketAddr,
+        ) -> Result<Self::Stream, BrokerAdapterFailure> {
+            self.entered.fetch_add(1, Ordering::AcqRel);
+            self.release.notified().await;
+            Err(BrokerAdapterFailure::Timeout)
+        }
+    }
+
+    /// #2638: with every connect session stalled upstream, DNS and admission
+    /// still answer at once, and one more connect waits at most the queue
+    /// timeout.
+    #[tokio::test]
+    async fn stalled_connects_leave_dns_and_admission_working() {
+        let policy = CompiledPolicy::developer_baseline();
+        let binding = binding(&policy);
+        let connector = Arc::new(StalledConnector::default());
+        let resolver = Arc::new(FakeResolver::new([positive(PUBLIC_V4, 60)]));
+        let broker = Arc::new(PolicyEgressBroker::new(
+            policy,
+            RouteClass::General,
+            Arc::clone(&resolver),
+            Arc::clone(&connector),
+            Arc::new(FakeClock::default()),
+        ));
+        let (client_streams, server_streams) = session_pairs();
+        let server = tokio::spawn(serve_broker_ipc(server_streams, binding, key(), broker));
+        let client = Arc::new(client(client_streams, binding));
+        let destination = SocketAddr::new(PUBLIC_V4, 443);
+
+        let mut stalled = JoinSet::new();
+        for _ in 0..BROKER_IPC_CONNECT_SESSIONS {
+            let client = Arc::clone(&client);
+            stalled.spawn(async move { client.connect_tcp(destination).await.map(drop) });
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while connector.entered.load(Ordering::Acquire) < BROKER_IPC_CONNECT_SESSIONS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("every connect session reached the connector");
+
+        let prompt = Duration::from_millis(500);
+        let resolved = tokio::time::timeout(
+            prompt,
+            client.resolve_dns("example.com", DnsRecordFamily::Ipv4),
+        )
+        .await
+        .expect("DNS waited on a stalled connect");
+        assert_eq!(
+            resolved.unwrap(),
+            BrokerIpcDnsResponse::Addresses {
+                addresses: vec![PUBLIC_V4],
+                ttl_seconds: 60,
+            }
+        );
+        tokio::time::timeout(prompt, client.authorize_tcp(destination))
+            .await
+            .expect("admission waited on a stalled connect")
+            .unwrap();
+
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let queued = client.connect_tcp(destination).await;
+        let waited = started.elapsed();
+        assert!(waited >= BROKER_IPC_QUEUE_TIMEOUT && waited < BROKER_IPC_TRANSACTION_TIMEOUT);
+        tokio::time::resume();
+        assert_eq!(queued.unwrap_err(), BrokerIpcError::SessionBusy);
+
+        connector.release.notify_waiters();
+        while let Some(result) = stalled.join_next().await {
+            assert_eq!(result.unwrap(), Err(BrokerIpcError::RemoteUnavailable));
+        }
+        assert_eq!(client.connect.len(), BROKER_IPC_CONNECT_SESSIONS);
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server did not close");
     }
 }
