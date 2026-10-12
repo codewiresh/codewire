@@ -26,6 +26,7 @@ mod direct_share;
 pub mod egress_broker;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod generation;
+pub mod host_addresses;
 #[cfg(target_os = "linux")]
 pub mod host_port;
 #[cfg(target_os = "macos")]
