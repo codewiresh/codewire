@@ -17,8 +17,22 @@
   },
   "kernel_bc": {
     "origin": "docker.io/library/busybox:1.36.1-uclibc (docker-library/busybox), file bin/busybox; a build-time tool only, never shipped",
+    "image": "docker.io/library/busybox@sha256:0872fb3a7632ba9d0ae46a8e832a62b30ce83a6f220b8bb52903d9cf477dabe3",
+    "path": "/bin/busybox",
     "layer": "sha256:07eb0d14fd35353b75db907ce5754d161603d55fc8311acee8ce6200d8f18e0d",
     "sha256": "36cb337928452e9379f349f11a3095e36a9b3aed8cefc50e2ae060bf9c6cf70f"
+  },
+  "initramfs_inputs": {
+    "busybox": {
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/busybox-static-1.37.0-r30.apk",
+      "sha256": "44c9abdfb970f398fa72c8382fe2d8808eea16beaf82daf6ac708b92f1b8659e",
+      "member": "bin/busybox.static",
+      "member_sha256": "198f6f675a49ac734082e054b823d3e2e947180ca2f632852ae1c09e950fd676"
+    },
+    "runc": {
+      "url": "https://github.com/opencontainers/runc/releases/download/v1.5.1/runc.arm64",
+      "sha256": "ca70e7dbd6616ca782a59b5d3ac86909123fdaa9fa3f89dcf29051c70eee7ce9"
+    }
   },
   "sources": {
     "linux": {

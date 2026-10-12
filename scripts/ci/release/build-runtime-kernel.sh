@@ -4,6 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 usage: build-runtime-kernel.sh --source LINUX_GIT_DIR --bc BUSYBOX --output DIR [--jobs N]
+                               [--job-container CONTAINER]
 
 Builds the local VM runtime's arm64 guest kernel (#2539) with
 scripts/ci/verify/build-linux-vmm-kernel.py inside the pinned Arch Linux
@@ -12,8 +13,12 @@ pinned archive.archlinux.org snapshot and installs exactly the cross toolchain
 the kernel recipe requires; the recipe checks those versions again.
 
 The build runs as the caller's uid. The kernel source and this checkout are
-mounted read-only at their own paths. DIR must not exist; its parent must be
-owned by the caller. On success DIR holds the recipe's Image and build.json,
+mounted read-only at their own paths. A CI job runs in a container beside its
+Docker daemon, which resolves bind sources in its own namespace, so there
+--job-container names the job's container: for each path the build mounts the
+job's volume or bind that holds it, at its own path, and nothing else (never
+the job's Docker socket). DIR must not exist; its parent must be owned by the
+caller. On success DIR holds the recipe's Image and build.json,
 plus linux-source.tar.xz: the exact source the recipe archived, compressed
 deterministically, published as the kernel's GPL source.
 EOF
@@ -24,13 +29,14 @@ die() {
   exit 1
 }
 
-source_dir="" bc="" output="" jobs=4
+source_dir="" bc="" output="" jobs=4 job_container=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --source) source_dir="${2:-}"; shift 2 ;;
     --bc) bc="${2:-}"; shift 2 ;;
     --output) output="${2:-}"; shift 2 ;;
     --jobs) jobs="${2:-}"; shift 2 ;;
+    --job-container) job_container="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
@@ -84,18 +90,47 @@ for pinned in $PACKAGES; do
   [ "$installed" = "${pinned#*=}" ] || { echo "build-runtime-kernel: ${pinned%%=*} is $installed, pinned ${pinned#*=}" >&2; exit 1; }
 done
 groupadd -g "$BUILD_GID" builder 2>/dev/null || true
-useradd -u "$BUILD_UID" -g "$BUILD_GID" -M -d /nonexistent builder
+# A CI job runs as root, which the image already has.
+getent passwd "$BUILD_UID" >/dev/null || useradd -u "$BUILD_UID" -g "$BUILD_GID" -M -d /nonexistent builder
 exec setpriv --reuid="$BUILD_UID" --regid="$BUILD_GID" --init-groups \
   python3 "$REPO/scripts/ci/verify/build-linux-vmm-kernel.py" --arch arm64 \
   --source "$SOURCE" --bc "$BC" --output "$OUTPUT" --jobs "$JOBS"
 '
+mounts=()
+if [ -n "$job_container" ]; then
+  [[ "$job_container" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || die "--job-container is not a container name"
+  # Each mount's type, its source in the daemon's namespace (a volume name or
+  # a path) and its destination in the job container.
+  job_mounts="$(docker inspect --format '{{range .Mounts}}{{.Type}}{{"\t"}}{{if eq .Type "volume"}}{{.Name}}{{else}}{{.Source}}{{end}}{{"\t"}}{{.Destination}}{{println}}{{end}}' "$job_container")" ||
+    die "cannot inspect container $job_container"
+  declare -A shared=()
+  for path in "$repo" "$git_common" "$source_dir" "$bc" "$parent"; do
+    best="" best_length=0
+    while IFS=$'\t' read -r type source destination; do
+      case "$type" in volume|bind) ;; *) continue ;; esac
+      case "$destination" in /?*) ;; *) continue ;; esac
+      case "$path/" in "${destination%/}/"*) ;; *) continue ;; esac
+      if [ "${#destination}" -gt "$best_length" ]; then
+        best="type=$type,source=$source,target=$destination" best_length="${#destination}"
+      fi
+    done <<<"$job_mounts"
+    [ -n "$best" ] || die "$path is not on a mount of $job_container"
+    shared["$best"]=1
+  done
+  for mount in "${!shared[@]}"; do
+    mounts+=(--mount "$mount")
+  done
+else
+  mounts+=(
+    --mount "type=bind,source=$repo,target=$repo,readonly"
+    --mount "type=bind,source=$git_common,target=$git_common,readonly"
+    --mount "type=bind,source=$source_dir,target=$source_dir,readonly"
+    --mount "type=bind,source=$bc,target=$bc,readonly"
+    --mount "type=bind,source=$parent,target=$parent"
+  )
+fi
 started="$(date +%s)"
-docker run --rm --init \
-  --mount "type=bind,source=$repo,target=$repo,readonly" \
-  --mount "type=bind,source=$git_common,target=$git_common,readonly" \
-  --mount "type=bind,source=$source_dir,target=$source_dir,readonly" \
-  --mount "type=bind,source=$bc,target=$bc,readonly" \
-  --mount "type=bind,source=$parent,target=$parent" \
+docker run --rm --init "${mounts[@]}" \
   -e SNAPSHOT="$snapshot" -e TOOLS="$tools" -e PACKAGES="$packages" \
   -e BUILD_UID="$uid" -e BUILD_GID="$gid" -e REPO="$repo" -e SOURCE="$source_dir" \
   -e BC="$bc" -e OUTPUT="$output" -e JOBS="$jobs" \
