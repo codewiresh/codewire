@@ -19,6 +19,8 @@ the network boundary:
 - adding an interface, address or route;
 - AF_VSOCK to host ports, to the guest's own daemon and network agent, and
   binding their ports;
+- TLS and DNS while another connection's dial hangs, which must not stop
+  them (#2638);
 - bursts toward the network worker: malformed DNS questions to the guest
   resolver address, 300 parallel connects and, where a raw socket exists,
   crafted fragments, spoofed sources, IP options and odd TCP flags. The
@@ -32,8 +34,10 @@ an answer, and the container's traffic must still leave only through cw0.
 
 Each case's outcome is judged here: `pass`; `bypass`, which fails the run;
 `review`, a reachable path that may still authenticate, which is reported and
-fails the run until its finding is recorded in ACCEPTED_REVIEWS; or `info`,
-recorded only. Needs network egress for the image pulls and the controls.
+fails the run until its finding is recorded in ACCEPTED_REVIEWS; `broken`,
+the network path no longer serving after a burst, which fails the run;
+`degraded`, the VM's own DNS answering again only after a delay, which is
+reported; or `info`, recorded only. Needs network egress for the image pulls and the controls.
 """
 import argparse
 import importlib.util
@@ -75,14 +79,24 @@ def judge(case, outcome, detail, where="workload"):
     """(verdict, reason) for one probe result."""
     if case.startswith("control-"):
         kind = case.rsplit("-", 1)[-1]
-        ok = (outcome == "resolved" if kind == "dns" or case.startswith("control-dns") else
-              outcome == "connected" if kind == "tcp" or case.startswith("control-tcp") else
+        if case.startswith("control-after-") and kind == "dns":
+            if outcome != "resolved":
+                return "broken", f"DNS did not answer within {detail} s of the burst"
+            return ("pass", "") if float(detail) < 1 else \
+                ("degraded", f"DNS answered again after {detail} s (this VM only)")
+        ok = (outcome == "resolved" if kind == "dns" or case.startswith("control-dns-") else
+              outcome == "connected" if kind == "tcp" or case.startswith("control-tcp-") else
+              outcome == "answered" if kind == "http" or case.startswith("control-http-") else
+              outcome == "handshake" if case.startswith("control-tls-") else
               outcome == "status" and detail == "200")
         if ok:
             return "pass", "allowed traffic works"
         if case.startswith("control-after-"):
-            return "bypass", "the network path stopped serving after the burst"
+            return "broken", "the network path stopped serving after the burst"
         return "invalid", "an allowed control failed"
+    if case.startswith("concurrency-"):
+        ok = outcome in {"handshake", "resolved"}
+        return ("pass", "") if ok else ("broken", "a pending dial stopped other traffic (#2638)")
     if case.startswith("info-") or case == "done" or case.endswith("-burst"):
         return "info", ""
     if case == "raw-icmp-socket":
@@ -224,7 +238,7 @@ def main():
     counts = report(rows)
     if counts.get("invalid"):
         raise SystemExit("hostile-guest: INVALID, an allowed control failed")
-    if counts.get("bypass") or counts.get("review"):
+    if counts.get("bypass") or counts.get("review") or counts.get("broken"):
         raise SystemExit("hostile-guest: FAIL")
     print("hostile-guest: all checks PASS")
 

@@ -19,6 +19,7 @@ import errno
 import json
 import os
 import socket
+import ssl
 import struct
 import subprocess
 import time
@@ -212,11 +213,65 @@ def connect_burst():
     emit("tcp-connect-burst", "opened", f"{len(sockets)} sockets, {refused} failed at once")
 
 
+def http_head(case, host, port=80):
+    """An HTTP request over TCP that must be answered end to end, not just accepted
+    by the worker's local handshake."""
+    try:
+        with socket.create_connection((host, port), timeout=TIMEOUT) as sock:
+            sock.sendall(f"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n".encode())
+            data = sock.recv(64)
+            emit(case, "answered" if data.startswith(b"HTTP/") else "no-http", data[:12])
+    except socket.timeout:
+        emit(case, "timeout")
+    except OSError as error:
+        emit(case, error_name(error))
+
+
+def tls(case, host, server_name):
+    try:
+        context = ssl.create_default_context()
+        if server_name is None:
+            context.check_hostname = False
+        with socket.create_connection((host, 443), timeout=TIMEOUT) as raw:
+            with context.wrap_socket(raw, server_hostname=server_name) as sock:
+                emit(case, "handshake", sock.version())
+    except socket.timeout:
+        emit(case, "timeout")
+    except (OSError, ssl.SSLError) as error:
+        emit(case, error_name(error), error)
+
+
+def while_dial_pends():
+    """TLS and DNS must keep working while another connection's dial hangs: TCP to an
+    allowed port where nothing answers completes the worker's local handshake, then
+    waits on the broker's dial (#2638)."""
+    pending = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    pending.settimeout(TIMEOUT)
+    try:
+        pending.connect(("1.1.1.1", 22))
+    except OSError:
+        pass
+    time.sleep(0.5)
+    tls("concurrency-tls-while-dial-pends", "1.1.1.1", "one.one.one.one")
+    resolve("concurrency-dns-while-dial-pends", "example.com")
+    pending.close()
+
+
 def controls(label):
-    """The allowed controls, again, after a burst: the worker must still serve."""
-    time.sleep(2)
-    resolve(f"control-after-{label}-dns", "example.com")
-    tcp(f"control-after-{label}-tcp", "1.1.1.1", 443)
+    """The allowed controls again after a burst. A lookup may stall while the worker
+    drains the burst; record how long it took to answer again, up to 10 s."""
+    started = time.monotonic()
+    while True:
+        try:
+            socket.getaddrinfo("example.com", 443, socket.AF_INET)
+            emit(f"control-after-{label}-dns", "resolved", f"{time.monotonic() - started:.1f}")
+            break
+        except socket.gaierror:
+            if time.monotonic() - started > 10:
+                emit(f"control-after-{label}-dns", "unresolved", f"{time.monotonic() - started:.1f}")
+                break
+            time.sleep(0.5)
+    http_head(f"control-after-{label}-http", "1.1.1.1")
 
 
 def ping_socket():
@@ -313,6 +368,8 @@ def main():
     # Controls: the battery means nothing unless allowed traffic works.
     resolve("control-dns-example.com", "example.com")
     tcp("control-tcp-1.1.1.1-443", "1.1.1.1", 443)
+    http_head("control-http-1.1.1.1-80", "1.1.1.1")
+    tls("control-tls-1.1.1.1", "1.1.1.1", "one.one.one.one")
     try:
         with urllib.request.urlopen("https://example.com", timeout=10) as response:
             emit("control-https-example.com", "status", response.status)
@@ -344,7 +401,7 @@ def main():
     resolve("dns-metadata-answer-169.254.169.254.nip.io", "169.254.169.254.nip.io")
     # Allowed by the v1 policy, recorded for the record: an allowed port to a
     # public address with nothing listening, and DNS over HTTPS.
-    tcp("info-tcp-1.1.1.1-22", "1.1.1.1", 22)
+    tls("info-tls-1.1.1.1-no-sni", "1.1.1.1", None)
     try:
         request = urllib.request.Request("https://1.1.1.1/dns-query?name=example.com&type=A",
                                          headers={"accept": "application/dns-json"})
@@ -354,6 +411,7 @@ def main():
         emit("info-doh-1.1.1.1", "status", error.code)
     except OSError as error:
         emit("info-doh-1.1.1.1", error_name(error), getattr(error, "reason", ""))
+    while_dial_pends()
     interfaces()
     if not args.skip_vsock:
         vsock()
