@@ -849,3 +849,24 @@ fn a_managed_agent_uses_the_codex_slot_first_and_the_api_key_slot_only_without_i
         Some(Anthropic)
     );
 }
+
+#[test]
+fn a_launch_without_a_usable_github_connection_omits_only_the_github_client() {
+    let all = clients(&["codex", "openai", "anthropic", "ssh", "github"]);
+    assert_eq!(
+        all.without_github(),
+        clients(&["codex", "openai", "anthropic", "ssh"])
+    );
+    assert_eq!(clients(&["github"]).without_github(), clients(&[]));
+    assert_eq!(clients(&["codex"]).without_github(), clients(&["codex"]));
+    // The Anthropic form is unaffected.
+    let subscription = clients(&["anthropic", "github"])
+        .with_anthropic_subscription_token()
+        .unwrap();
+    assert_eq!(
+        subscription.without_github(),
+        clients(&["anthropic"])
+            .with_anthropic_subscription_token()
+            .unwrap()
+    );
+}

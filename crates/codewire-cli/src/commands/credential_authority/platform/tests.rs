@@ -492,3 +492,89 @@ async fn relay_invalid_response_ends_stream_and_closes_both_directions() {
         .unwrap();
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
 }
+
+/// A local VM asks, at each start, whether the creator's GitHub connection is
+/// usable now. Only an active, unexpired GitHub OAuth credential counts; the
+/// answer is read as the pinned creator, from metadata alone.
+#[tokio::test]
+async fn github_connection_state_is_read_as_the_creator_from_metadata_only() {
+    use codewire_client as rpc;
+    let github = |status: rpc::CredentialStatus, expires_at_unix: Option<u64>| rpc::Credential {
+        id: "github-credential".into(),
+        provider: "github".into(),
+        authentication_kind: rpc::CredentialAuthenticationKind::Oauth.into(),
+        status: status.into(),
+        expires_at_unix,
+        ..Default::default()
+    };
+    let other = rpc::Credential {
+        id: "openai-credential".into(),
+        provider: "openai".into(),
+        authentication_kind: rpc::CredentialAuthenticationKind::Oauth.into(),
+        status: rpc::CredentialStatus::Active.into(),
+        ..Default::default()
+    };
+    for (credentials, expected) in [
+        (
+            vec![other.clone(), github(rpc::CredentialStatus::Active, None)],
+            true,
+        ),
+        (
+            vec![github(rpc::CredentialStatus::Active, Some(u64::MAX / 2))],
+            true,
+        ),
+        (vec![], false),
+        (vec![other.clone()], false),
+        (vec![github(rpc::CredentialStatus::Revoked, None)], false),
+        (
+            vec![github(rpc::CredentialStatus::RefreshFailed, None)],
+            false,
+        ),
+        (vec![github(rpc::CredentialStatus::Active, Some(1))], false),
+    ] {
+        let server = MockServer::start().await;
+        let directory = tempfile::tempdir().unwrap();
+        saved(directory.path(), &server.uri(), "synthetic-access", true);
+        userinfo(&server, "synthetic-access", "synthetic-owner").await;
+        Mock::given(method("POST"))
+            .and(path("/codewire.v1.CredentialService/ListCredentials"))
+            .and(header("authorization", "Bearer synthetic-access"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(
+                        rpc::ListCredentialsResponse {
+                            credentials: credentials.clone(),
+                            ..Default::default()
+                        }
+                        .encode_to_vec(),
+                    ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let connected = NativePlatformCredentialConnector
+            .github_connected(
+                binding(directory.path(), &server.uri()),
+                Instant::now() + WAIT,
+            )
+            .await
+            .unwrap();
+        assert_eq!(connected, expected, "{credentials:?}");
+    }
+
+    // Another account's login is refused before any metadata is read.
+    let server = MockServer::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    saved(directory.path(), &server.uri(), "synthetic-access", true);
+    userinfo(&server, "synthetic-access", "another-owner").await;
+    let error = NativePlatformCredentialConnector
+        .github_connected(
+            binding(directory.path(), &server.uri()),
+            Instant::now() + WAIT,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::PermissionDenied);
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}

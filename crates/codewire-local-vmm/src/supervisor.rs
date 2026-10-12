@@ -814,6 +814,27 @@ impl SupervisorCore {
         Ok(())
     }
 
+    /// Ask the credential authority, which asks the platform as the pinned
+    /// creator, whether that account's GitHub connection is usable now.
+    /// Material-free. `None` when it cannot answer at this start.
+    async fn platform_github_connected(
+        &mut self,
+        environment: &EnvironmentRecord,
+        generation: u64,
+    ) -> Option<bool> {
+        let mut binding =
+            sources::platform::broker_binding(environment, &self.config.platform_config_dir)
+                .ok()??;
+        sources::platform::resolve_config_directory(&mut binding).ok()?;
+        let environment_id = access_environment_id(environment.id).ok()?;
+        self.access_control_client()
+            .await
+            .ok()?
+            .platform_github_connected(&environment_id, generation, binding)
+            .await
+            .ok()
+    }
+
     /// Capture only client-slot metadata from the exact selected revision.
     /// This configures clients; each broker request still evaluates live grants.
     async fn managed_credential_clients_for_boot(
@@ -833,8 +854,18 @@ impl SupervisorCore {
         if project.environment.contains_key("CODEX_HOME") {
             return Err(SupervisorError::InvalidRequest);
         }
-        if let Some(clients) = sources::platform::managed_clients(environment)? {
-            return Ok(clients);
+        if let Some(pinned) = sources::platform::managed_clients(environment)? {
+            let github_connected =
+                if pinned.contains(codewire_access::ManagedCredentialClient::GitHub) {
+                    self.platform_github_connected(environment, generation)
+                        .await
+                } else {
+                    None
+                };
+            return Ok(sources::platform::clients_for_start(
+                pinned,
+                github_connected,
+            ));
         }
         let Some(expected) = &environment.access_binding else {
             return Ok(codewire_access::ManagedCredentialClients::default());

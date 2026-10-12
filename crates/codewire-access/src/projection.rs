@@ -283,6 +283,13 @@ impl ManagedCredentialClients {
         self.0 & client.bit() != 0
     }
 
+    /// This selection without the GitHub client: a launch whose account has
+    /// no usable GitHub connection omits it, never fabricates it. GitHub's
+    /// reserved names stay with the profile, which still selects it.
+    pub fn without_github(self) -> Self {
+        Self(self.0 & !ManagedCredentialClient::GitHub.bit())
+    }
+
     /// Provider names owned only while their client is selected. Generic
     /// runtime and GitHub names remain their adapters' responsibility.
     pub fn reserved_environment_keys(self) -> BTreeSet<&'static str> {

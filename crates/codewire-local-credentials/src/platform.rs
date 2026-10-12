@@ -147,6 +147,24 @@ pub trait PlatformCredentialConnector: Send + Sync + 'static {
         input: PlatformCredentialInput,
         deadline: Instant,
     ) -> BoxFuture<'static, Result<PlatformCredentialOutput, Status>>;
+
+    /// Whether the selection's creator has an active, unexpired GitHub
+    /// connection on the platform now, authenticated as that creator under
+    /// `deadline`. Material-free: it reads credential metadata, never a token
+    /// or provider material. A local VM configures its guest for GitHub at a
+    /// start exactly when this holds, as a hosted Sandbox does at its start.
+    /// A connector that cannot answer reports unavailable.
+    fn github_connected(
+        &self,
+        _binding: PlatformCredentialBinding,
+        _deadline: Instant,
+    ) -> BoxFuture<'static, Result<bool, Status>> {
+        Box::pin(async {
+            Err(Status::unavailable(
+                "platform GitHub connection state is unavailable",
+            ))
+        })
+    }
 }
 
 #[cfg(test)]

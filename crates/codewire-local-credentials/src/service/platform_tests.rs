@@ -166,3 +166,96 @@ fn platform_startup_budget_does_not_extend_the_drain_bound() {
     assert_eq!(BROKER_LOCAL_START_TIMEOUT, Duration::from_secs(10));
     assert_eq!(BROKER_DRAIN_TIMEOUT, Duration::from_secs(10));
 }
+
+struct GitHubState(Option<bool>);
+
+impl crate::PlatformCredentialConnector for GitHubState {
+    fn connect(
+        &self,
+        _: crate::PlatformCredentialBinding,
+        _: CredentialBridgeReady,
+        _: crate::PlatformCredentialInput,
+        _: tokio::time::Instant,
+    ) -> BoxFuture<'static, Result<crate::PlatformCredentialOutput, Status>> {
+        panic!("a GitHub state question never opens a delegation")
+    }
+
+    fn github_connected(
+        &self,
+        binding: crate::PlatformCredentialBinding,
+        deadline: tokio::time::Instant,
+    ) -> BoxFuture<'static, Result<bool, Status>> {
+        // The exact pinned creator and a bounded deadline reach the connector.
+        assert_eq!(binding.selection.creator, "synthetic-owner");
+        assert!(deadline > tokio::time::Instant::now());
+        assert!(deadline <= tokio::time::Instant::now() + PLATFORM_GITHUB_STATE_DEADLINE);
+        let state = self.0;
+        Box::pin(async move { state.ok_or_else(|| Status::unavailable("synthetic")) })
+    }
+}
+
+/// A local VM with a platform profile decides GitHub at each start from the
+/// platform account's connection, asked through the connector as the pinned
+/// creator. A connector that cannot answer, or no connector, is unavailable.
+#[tokio::test]
+async fn a_platform_start_asks_the_connector_for_the_creators_github_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = |connector: Option<Arc<dyn crate::PlatformCredentialConnector>>| {
+        BrokerProcessManager::new(
+            Arc::new(
+                LocalCredentialAuthority::open(
+                    &directory
+                        .path()
+                        .join(format!("authority-{}", Uuid::new_v4())),
+                    EphemeralProtectedStore::default(),
+                    builtin_provider_catalog(),
+                )
+                .unwrap(),
+            ),
+            None,
+            Arc::new(BrokerLeaseAuditLog::default()),
+            LocalSshOperationRuntime::new(None),
+            connector,
+        )
+    };
+    let selected = || binding(directory.path().join("explicit-platform-config")).into_proto();
+    for (state, expected) in [
+        (Some(true), Some(true)),
+        (Some(false), Some(false)),
+        (None, None),
+    ] {
+        let answer = manager(Some(Arc::new(GitHubState(state))))
+            .platform_github_connected(selected())
+            .await;
+        match expected {
+            Some(connected) => assert_eq!(answer.unwrap(), connected),
+            None => assert_eq!(answer.unwrap_err().code(), tonic::Code::Unavailable),
+        }
+    }
+    // The default connector method and a missing connector cannot answer.
+    assert_eq!(
+        manager(Some(Arc::new(NeverConnect)))
+            .platform_github_connected(selected())
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::Unavailable
+    );
+    assert_eq!(
+        manager(None)
+            .platform_github_connected(selected())
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::Unavailable
+    );
+    // A malformed selection is refused before the connector runs.
+    let mut malformed = selected();
+    malformed.owner_id.clear();
+    assert!(
+        manager(Some(Arc::new(GitHubState(Some(true)))))
+            .platform_github_connected(malformed)
+            .await
+            .is_err()
+    );
+}

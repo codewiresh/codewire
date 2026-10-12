@@ -60,6 +60,72 @@ impl PlatformCredentialConnector for NativePlatformCredentialConnector {
             .map_err(|_| expired())?
         })
     }
+
+    fn github_connected(
+        &self,
+        binding: PlatformCredentialBinding,
+        deadline: Instant,
+    ) -> BoxFuture<'static, Result<bool, Status>> {
+        Box::pin(async move {
+            tokio::time::timeout_at(deadline, async move {
+                live(deadline)?;
+                binding.validate()?;
+                // As the selection's creator, exactly as a delegation opens.
+                let client = authenticated_client(&binding, deadline).await?;
+                live(deadline)?;
+                account_github_connected(&client).await
+            })
+            .await
+            .map_err(|_| expired())?
+        })
+    }
+}
+
+const CREDENTIAL_METADATA_PAGE_SIZE: i32 = 100;
+const MAX_CREDENTIAL_METADATA_PAGES: usize = 10;
+
+/// Whether the authenticated account has an active, unexpired GitHub OAuth
+/// connection: the same facts the platform's delegation authority requires
+/// before it authorizes GitHub for a launch. Reads metadata only.
+async fn account_github_connected(client: &CodewireClient) -> Result<bool, Status> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| unavailable())?
+        .as_secs();
+    let mut page_token = String::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..MAX_CREDENTIAL_METADATA_PAGES {
+        let response = client
+            .list_credentials(codewire_client::ListCredentialsRequest {
+                page_size: CREDENTIAL_METADATA_PAGE_SIZE,
+                page_token,
+                ..Default::default()
+            })
+            .await
+            .map_err(client_error)?;
+        if response.credentials.len() > CREDENTIAL_METADATA_PAGE_SIZE as usize {
+            return Err(unavailable());
+        }
+        if response.credentials.iter().any(|credential| {
+            credential.provider == "github"
+                && credential.authentication_kind
+                    == codewire_client::CredentialAuthenticationKind::Oauth
+                && credential.status == codewire_client::CredentialStatus::Active
+                && credential
+                    .expires_at_unix
+                    .is_none_or(|expires| expires > now)
+        }) {
+            return Ok(true);
+        }
+        if response.next_page_token.is_empty() {
+            return Ok(false);
+        }
+        if !seen.insert(response.next_page_token.clone()) {
+            return Err(unavailable());
+        }
+        page_token = response.next_page_token;
+    }
+    Err(unavailable())
 }
 
 fn opening(

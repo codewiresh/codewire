@@ -441,11 +441,13 @@ async fn supervisor_selects_platform_broker_and_clients_without_local_profile_or
             platform.config_directory,
             fs::canonicalize(&core.config.platform_config_dir).unwrap()
         );
+        // With no credential authority to ask, the start keeps the pinned
+        // clients but omits GitHub; it neither fails nor fabricates it.
         assert_eq!(
             core.managed_credential_clients_for_boot(&environment, 1)
                 .await
                 .unwrap(),
-            managed_clients(&environment).unwrap().unwrap()
+            clients_for_start(managed_clients(&environment).unwrap().unwrap(), None)
         );
         core.require_environment_access(&environment.name)
             .await
@@ -611,4 +613,27 @@ fn initial_repository_binding_uses_eventual_create_identity_and_provider_profile
     );
     changed.project_spec_sha256 = "0".repeat(64);
     assert!(repository_binding(&changed, &project, eventual_id, temporary.path()).is_err());
+}
+
+/// Every personal platform profile pins GitHub; a start configures the guest
+/// for it only while the creator's connection is usable then, and an
+/// unanswered question omits it rather than failing the start.
+#[test]
+fn a_platform_start_configures_github_only_while_the_connection_is_usable() {
+    let slots = |names: &[&str]| {
+        ManagedCredentialClients::from_profile_slots(names.iter().copied()).unwrap()
+    };
+    let pinned = slots(&["codex", "anthropic", "github"]);
+    assert_eq!(clients_for_start(pinned, Some(true)), pinned);
+    for unusable in [Some(false), None] {
+        assert_eq!(
+            clients_for_start(pinned, unusable),
+            slots(&["codex", "anthropic"])
+        );
+    }
+    // A selection without GitHub never gains it.
+    let without = slots(&["codex"]);
+    for answer in [Some(true), Some(false), None] {
+        assert_eq!(clients_for_start(without, answer), without);
+    }
 }
