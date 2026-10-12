@@ -96,41 +96,12 @@ exec setpriv --reuid="$BUILD_UID" --regid="$BUILD_GID" --init-groups \
   python3 "$REPO/scripts/ci/verify/build-linux-vmm-kernel.py" --arch arm64 \
   --source "$SOURCE" --bc "$BC" --output "$OUTPUT" --jobs "$JOBS"
 '
-mounts=()
-if [ -n "$job_container" ]; then
-  [[ "$job_container" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || die "--job-container is not a container name"
-  # Each mount's type, its source in the daemon's namespace (a volume name or
-  # a path) and its destination in the job container.
-  job_mounts="$(docker inspect --format '{{range .Mounts}}{{.Type}}{{"\t"}}{{if eq .Type "volume"}}{{.Name}}{{else}}{{.Source}}{{end}}{{"\t"}}{{.Destination}}{{println}}{{end}}' "$job_container")" ||
-    die "cannot inspect container $job_container"
-  declare -A shared=()
-  for path in "$repo" "$git_common" "$source_dir" "$bc" "$parent"; do
-    best="" best_length=0
-    while IFS=$'\t' read -r type source destination; do
-      case "$type" in volume|bind) ;; *) continue ;; esac
-      case "$destination" in /?*) ;; *) continue ;; esac
-      case "$path/" in "${destination%/}/"*) ;; *) continue ;; esac
-      if [ "${#destination}" -gt "$best_length" ]; then
-        best="type=$type,source=$source,target=$destination" best_length="${#destination}"
-      fi
-    done <<<"$job_mounts"
-    [ -n "$best" ] || die "$path is not on a mount of $job_container"
-    shared["$best"]=1
-  done
-  for mount in "${!shared[@]}"; do
-    mounts+=(--mount "$mount")
-  done
-else
-  mounts+=(
-    --mount "type=bind,source=$repo,target=$repo,readonly"
-    --mount "type=bind,source=$git_common,target=$git_common,readonly"
-    --mount "type=bind,source=$source_dir,target=$source_dir,readonly"
-    --mount "type=bind,source=$bc,target=$bc,readonly"
-    --mount "type=bind,source=$parent,target=$parent"
-  )
-fi
+# shellcheck source=scripts/ci/release/runtime-container.sh
+. "$repo/scripts/ci/release/runtime-container.sh"
+runtime_container_mounts "$job_container" "$repo" "$git_common" "$source_dir" "$bc" -- "$parent" ||
+  die "the build's paths cannot be mounted"
 started="$(date +%s)"
-docker run --rm --init "${mounts[@]}" \
+docker run --rm --init "${RUNTIME_MOUNTS[@]}" \
   -e SNAPSHOT="$snapshot" -e TOOLS="$tools" -e PACKAGES="$packages" \
   -e BUILD_UID="$uid" -e BUILD_GID="$gid" -e REPO="$repo" -e SOURCE="$source_dir" \
   -e BC="$bc" -e OUTPUT="$output" -e JOBS="$jobs" \

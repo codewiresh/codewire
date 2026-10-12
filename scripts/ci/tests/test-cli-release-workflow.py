@@ -28,6 +28,28 @@ CAPABILITIES = ("enable-openid-connect", "secrets.", "fetch-openbao-", "sign-cw-
                 "mint-github-app-token", "publish-cw-release", "GH_MIRROR_TOKEN_FILE")
 
 
+def sealed_targets():
+    """The Rust targets the sealed CI runner image ships (assert-ci-runner-image.sh)."""
+    text = (ROOT / "scripts/ci/setup/assert-ci-runner-image.sh").read_text()
+    block = re.search(r"^readonly -a rust_targets=\(\n(.*?)^\)$", text, re.M | re.S).group(1)
+    host = re.search(r"^readonly rust_host='([^']+)'$", text, re.M).group(1)
+    return {host if line.strip() == '"$rust_host"' else line.strip() for line in block.splitlines()}
+
+
+def runner_targets_sealed(text):
+    """Every Rust target built on a pool runner is one its sealed toolchain ships."""
+    unsealed = []
+    for name, block in jobs(text).items():
+        if "    runs-on: macos-arm64\n" in block:
+            continue
+        for targets in re.findall(r"CW_RELEASE_TARGETS='([^']*)'", block):
+            unsealed += [target for target in targets.split() if target not in sealed_targets()]
+        unsealed += re.findall(r"cargo [^\n]*--target[ =](\S+)", block)
+        if re.search(r"\brustup\b", block):
+            unsealed.append(f"{name}: rustup")
+    return unsealed
+
+
 def jobs(text):
     """Split the jobs: mapping into name -> block text."""
     body = text.split("\njobs:\n", 1)[1]
@@ -94,6 +116,8 @@ def check(text, ci_text):
          and 'LOCAL_RUNTIME_JOB_CONTAINER="${HOSTNAME:?}"' in runtime_build,
          "the runtime's Linux side is not built by the release source's own scripts in this job's container")
     need("LOCAL_RUNTIME_NO_BUILD" not in text, "a release refuses to build an uncached runtime part")
+    need(not runner_targets_sealed(text), "a Linux runner job needs a Rust target or rustup change its sealed "
+         f"toolchain lacks: {runner_targets_sealed(text)}")
     for upload, job in (("Hand the Linux side to the macOS build", runtime),
                         ("Hand the runtime part records to publication", darwin)):
         need("          include-hidden-files: true\n" in dict(steps(job)).get(upload, ""),
@@ -278,6 +302,13 @@ MUTATIONS = {
     "unbound records": lambda t: t.replace('= "$RECORDS_SHA256" ]', "] || true", 1),
     "records on a retained retry": lambda t: t.replace('if [ "$CW_RELEASE_R2_STATE" = retained ]; then',
                                                        "if false; then", 1),
+    "unsealed Linux target": lambda t: t.replace(f"CW_RELEASE_TARGETS='{LINUX_TARGETS}'",
+                                                 f"CW_RELEASE_TARGETS='{LINUX_TARGETS} aarch64-unknown-linux-musl'", 1),
+    "rustup on the runner": lambda t: t.replace(
+        "      - name: Build the Linux side\n        id: build\n        working-directory: .release-source\n"
+        "        run: |\n          set -euo pipefail\n",
+        "      - name: Build the Linux side\n        id: build\n        working-directory: .release-source\n"
+        "        run: |\n          set -euo pipefail\n          rustup target add aarch64-unknown-linux-musl\n", 1),
     "one Mac target": lambda t: t.replace(f"CW_RELEASE_TARGETS='{DARWIN_TARGETS}'",
                                           "CW_RELEASE_TARGETS='aarch64-apple-darwin'", 1),
     "no macOS import": lambda t: t.replace("CW_RELEASE_IMPORT_DIR=dist-darwin", "CW_RELEASE_IMPORT_DIR=", 1),
@@ -429,6 +460,8 @@ def check_dry_run(text):
          "the dry-run assembly does not bind the received macOS pair")
     need('verified targets=4 version=$DRY_RUN_VERSION runtime_equal=true signed=false' in assemble,
          "the dry run does not verify the four-target delivery")
+    need(not runner_targets_sealed(text), "a dry-run Linux runner job needs a Rust target or rustup change its "
+         f"sealed toolchain lacks: {runner_targets_sealed(text)}")
     need("    branches: [main]" in text and "pull_request" not in text,
          "the dry run is not limited to main")
     return errors
@@ -458,6 +491,12 @@ DRY_RUN_MUTATIONS = {
     "runtime never selected": lambda t: t.replace("          mode=full\n", "          mode=parts\n", 1),
     "no parts check": lambda t: t.replace("build-local-runtime.sh macos --check", "true", 1),
     "unbound dry-run Linux side": lambda t: t.replace('= "$LINUX_SHA256" ]', "] || true", 1),
+    "dry-run rustup on the runner": lambda t: t.replace(
+        "      - name: Build the Linux side from cached parts\n        id: build\n"
+        "        if: steps.select.outputs.mode == 'full'\n        run: |\n          set -euo pipefail\n",
+        "      - name: Build the Linux side from cached parts\n        id: build\n"
+        "        if: steps.select.outputs.mode == 'full'\n        run: |\n          set -euo pipefail\n"
+        "          rustup target add aarch64-unknown-linux-musl\n", 1),
     "embedded runtime unchecked": lambda t: t.replace(
         "            grep -q '^cw-release: local runtime document_sha256=' <<<\"$verified\"\n",
         "            true\n", 1),
