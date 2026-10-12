@@ -81,6 +81,9 @@ grep -qxF 'FROM ${BASE_IMAGE_REF} AS stock-ssh-fixture' "$workspace_dockerfile" 
   fail 'workspace SSH fixture does not inherit the exact verified base'
 grep -qF 'download openssh-server=1:9.6p1-3ubuntu13.18 libwrap0=7.6.q-33' "$workspace_dockerfile" ||
   fail 'workspace SSH fixture package versions are not pinned'
+# Codex's Linux sandbox needs the system bubblewrap, from the same snapshot.
+grep -qF '      bubblewrap=0.9.0-1ubuntu0.1 ' "$workspace_dockerfile" ||
+  fail 'workspace image does not install the pinned bubblewrap for the Codex sandbox'
 grep -qF 'APT::Update::Error-Mode=any' "$workspace_dockerfile" ||
   fail 'SSH artifact preparation tolerates partial package-index failures'
 # shellcheck disable=SC2016 # Match the literal package loop, not this test's environment.
