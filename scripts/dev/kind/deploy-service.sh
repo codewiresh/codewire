@@ -29,6 +29,8 @@ source "$ROOT/scripts/dev/kind/profile.sh"
 kind_profile_load "$ROOT" || exit $?
 # shellcheck source=scripts/ci/verify/kind/credentials.sh
 source "$ROOT/scripts/ci/verify/kind/credentials.sh"
+# shellcheck source=scripts/dev/kind/dev-builder.sh
+source "$ROOT/scripts/dev/kind/dev-builder.sh"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire-e2e-ci}"
 SERVICE="${1:-}"
 BUILDER="codewire-kind-dev"
@@ -215,41 +217,11 @@ if [ "$(cat "$STATE/base" 2>/dev/null || true)" != "$base" ]; then
   printf '%s\n' "$base" >"$STATE/base"
 fi
 
-# BuildKit's default GC policy prunes cache mounts past 488 MiB and empties the
-# store to 9 GiB whenever the disk has under 20 percent free, which evicted every
-# worktree's target, the compiler cache and the registry between deploys: each
-# deploy was cold. Keep up to 80 GB of them instead, at least 40 GB unless the
-# disk falls under 40 GB free, and anything unused for two weeks goes. The
-# builder name carries the policy's digest, so a changed policy gets a builder
-# that runs it rather than reusing one created with another.
-buildkit_config='[worker.oci]
-  gc = true
-  [[worker.oci.gcpolicy]]
-    filters = ["type==source.local", "type==source.git.checkout"]
-    keepDuration = "48h"
-    maxUsedSpace = "512MB"
-  [[worker.oci.gcpolicy]]
-    keepDuration = "336h"
-    reservedSpace = "40GB"
-    maxUsedSpace = "80GB"
-    minFreeSpace = "40GB"
-  [[worker.oci.gcpolicy]]
-    all = true
-    reservedSpace = "40GB"
-    maxUsedSpace = "80GB"
-    minFreeSpace = "40GB"'
-BUILDER="${BUILDER}-$(printf '%s\n' "$buildkit_config" | sha256sum | cut -c1-8)"
-if ! docker buildx inspect "$BUILDER" >/dev/null 2>&1; then
-  printf '%s\n' "$buildkit_config" >"$STATE/buildkitd.toml"
-  docker buildx create --name "$BUILDER" --driver docker-container \
-    --buildkitd-config "$STATE/buildkitd.toml" >/dev/null
-fi
+BUILDER="$(kind_dev_builder "$BUILDER" "$STATE")"
 log "compiling ${crate} ${bin}${features:+ (features ${features})}${fixture:+ and the ${fixture} fixture}"
 out="$(mktemp -d "$STATE/out.XXXXXX")"
 trap 'rm -rf "$out"' EXIT
-# One build target per worktree: crates built from another worktree's source
-# must never be reused here.
-tree="$(printf '%s' "$ROOT" | sha256sum | cut -c1-16)"
+tree="$(kind_dev_tree "$ROOT")"
 KIND_DEV_CRATE="$crate" KIND_DEV_BIN="$bin" KIND_DEV_FEATURES="$features" \
   docker buildx bake --builder "$BUILDER" --file "$ROOT/docker-bake.hcl" \
     --set "kind-dev-binary.args.KIND_DEV_TREE=${tree}" \
