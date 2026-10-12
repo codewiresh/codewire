@@ -28,6 +28,8 @@ use crate::linux::confinement::{
 };
 
 pub const EGRESS_BROKER_BOOTSTRAP_FD: RawFd = 4;
+/// The runner's one-way host-address control socket (#2614).
+pub const EGRESS_BROKER_HOST_ADDRESSES_FD: RawFd = 5;
 pub const EGRESS_BROKER_PREPARED_MESSAGE: &[u8] = b"CWEBB1 prepared\n";
 pub const EGRESS_BROKER_CONFINE_MESSAGE: &[u8] = b"CWEBB1 confine\n";
 pub const EGRESS_BROKER_READY_MESSAGE: &[u8] = b"CWEBB1 ready\n";
@@ -140,6 +142,7 @@ pub enum EgressBrokerStartupFailure {
     SyscallConfinement,
     StatusIo,
     Protocol,
+    HostAddresses,
 }
 
 impl EgressBrokerStartupFailure {
@@ -158,6 +161,7 @@ impl EgressBrokerStartupFailure {
             Self::SyscallConfinement => "syscall-confinement",
             Self::StatusIo => "status-io",
             Self::Protocol => "protocol",
+            Self::HostAddresses => "host-addresses",
         }
     }
 
@@ -176,6 +180,7 @@ impl EgressBrokerStartupFailure {
             Self::SyscallConfinement => 70,
             Self::StatusIo => 71,
             Self::Protocol => 72,
+            Self::HostAddresses => 73,
         }
     }
 
@@ -194,6 +199,7 @@ impl EgressBrokerStartupFailure {
             Self::SyscallConfinement => "egress_broker_syscall_confinement",
             Self::StatusIo => "egress_broker_status_io",
             Self::Protocol => "egress_broker_protocol",
+            Self::HostAddresses => "egress_broker_host_addresses",
         }
     }
 
@@ -218,11 +224,12 @@ impl EgressBrokerStartupFailure {
             Self::SyscallConfinement => b"CWEBB1 failed-syscall-confinement\n",
             Self::StatusIo => b"CWEBB1 failed-status-io\n",
             Self::Protocol => b"CWEBB1 failed-protocol\n",
+            Self::HostAddresses => b"CWEBB1 failed-host-addresses\n",
         }
     }
 }
 
-const ALL_FAILURES: [EgressBrokerStartupFailure; 13] = [
+const ALL_FAILURES: [EgressBrokerStartupFailure; 14] = [
     EgressBrokerStartupFailure::InvalidIdentity,
     EgressBrokerStartupFailure::InheritedDescriptor,
     EgressBrokerStartupFailure::AmbientEnvironment,
@@ -236,6 +243,7 @@ const ALL_FAILURES: [EgressBrokerStartupFailure; 13] = [
     EgressBrokerStartupFailure::SyscallConfinement,
     EgressBrokerStartupFailure::StatusIo,
     EgressBrokerStartupFailure::Protocol,
+    EgressBrokerStartupFailure::HostAddresses,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,6 +290,10 @@ pub enum EgressBrokerProcessError {
     StatusIo,
     #[error("egress broker authenticated protocol failed")]
     Protocol,
+    /// The runner's host addresses could not be read: the broker never runs
+    /// without them (#2614).
+    #[error("egress broker host-address control failed")]
+    HostAddresses,
 }
 
 impl EgressBrokerProcessError {
@@ -304,6 +316,7 @@ impl EgressBrokerProcessError {
             Self::SyscallConfinement => EgressBrokerStartupFailure::SyscallConfinement,
             Self::StatusIo => EgressBrokerStartupFailure::StatusIo,
             Self::Protocol => EgressBrokerStartupFailure::Protocol,
+            Self::HostAddresses => EgressBrokerStartupFailure::HostAddresses,
         }
     }
 }
@@ -346,6 +359,7 @@ pub async fn run_inherited_egress_broker(
     generation: u64,
 ) -> Result<(), EgressBrokerProcessError> {
     let mut bootstrap = inherited_std_unix_stream(EGRESS_BROKER_BOOTSTRAP_FD)?;
+    let control = inherited_std_unix_stream(EGRESS_BROKER_HOST_ADDRESSES_FD)?;
     bootstrap
         .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
         .map_err(|_| EgressBrokerProcessError::BootstrapIo)?;
@@ -371,6 +385,16 @@ pub async fn run_inherited_egress_broker(
         Arc::new(SystemTcpConnector::new()),
         Arc::new(SystemBrokerClock::new()),
     ));
+
+    // The host's own addresses arrive before the broker can admit anything,
+    // and every later update replaces them (#2614).
+    let mut control = match receive_host_addresses(control, &broker).await {
+        Ok(control) => control,
+        Err(error) => {
+            let _ = write_status(&bootstrap, error.startup_failure().message());
+            return Err(error);
+        }
+    };
 
     if let Err(error) = await_confinement_admission(&mut bootstrap) {
         let _ = write_status(&bootstrap, error.startup_failure().message());
@@ -418,9 +442,47 @@ pub async fn run_inherited_egress_broker(
         .flush()
         .await
         .map_err(|_| EgressBrokerProcessError::StatusIo)?;
-    serve_broker_ipc(stream, decoded.binding, decoded.key, broker)
-        .await
-        .map_err(|_| EgressBrokerProcessError::Protocol)
+    let updated = Arc::clone(&broker);
+    let updates = async move {
+        loop {
+            match crate::host_addresses::read_frame(&mut control).await {
+                Ok(addresses) => updated.set_host_addresses(addresses).await,
+                Err(error) => break error,
+            }
+        }
+    };
+    // A malformed update or a closed control socket fails the broker closed.
+    tokio::select! {
+        served = serve_broker_ipc(stream, decoded.binding, decoded.key, broker) => {
+            served.map_err(|_| EgressBrokerProcessError::Protocol)
+        }
+        _ = updates => Err(EgressBrokerProcessError::HostAddresses),
+    }
+}
+
+async fn receive_host_addresses<R, C, K>(
+    control: StdUnixStream,
+    broker: &PolicyEgressBroker<R, C, K>,
+) -> Result<tokio::net::UnixStream, EgressBrokerProcessError>
+where
+    R: codewire_egress_broker::DnsResolver,
+    C: codewire_egress_broker::TcpConnector,
+    K: codewire_egress_broker::BrokerClock,
+{
+    control
+        .set_nonblocking(true)
+        .map_err(|_| EgressBrokerProcessError::HostAddresses)?;
+    let mut control = tokio::net::UnixStream::from_std(control)
+        .map_err(|_| EgressBrokerProcessError::HostAddresses)?;
+    let addresses = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        crate::host_addresses::read_frame(&mut control),
+    )
+    .await
+    .map_err(|_| EgressBrokerProcessError::HostAddresses)?
+    .map_err(|_| EgressBrokerProcessError::HostAddresses)?;
+    broker.set_host_addresses(addresses).await;
+    Ok(control)
 }
 
 fn await_confinement_admission(

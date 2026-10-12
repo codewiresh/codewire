@@ -35,15 +35,18 @@ use crate::cw_runtime::{AdmittedCwRuntimeDisk, CwRuntimeError, CwRuntimeStore};
 use crate::direct_share::{AdmittedDirectShare, DirectShareRequest};
 use crate::egress_broker::{
     EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE,
-    EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT, EGRESS_BROKER_PREPARED_MESSAGE,
-    EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES, EgressBrokerStartupFailure,
-    EgressBrokerStartupStatus, decode_egress_broker_startup_status,
+    EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT, EGRESS_BROKER_HOST_ADDRESSES_FD,
+    EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES,
+    EgressBrokerStartupFailure, EgressBrokerStartupStatus, decode_egress_broker_startup_status,
     encode_developer_egress_broker_bootstrap,
 };
 #[cfg(target_os = "linux")]
 use crate::host::path::current_uid;
 use crate::host::path::{FileIdentity, PathError, PrivateRoot, set_socket_private};
 use crate::host::process::{LiveProcess, RecoveryError, signal_unreaped_child};
+use crate::host_addresses::{
+    HostAddressMonitor, INTERFACE_POLL, PUBLIC_RELEARN, SystemHostAddressSource, encode_frame,
+};
 use crate::host_port::{
     HOST_PORT_CONTROL_KEY_LEN, HostPortBinding, HostPortControlFrame, bind_loopback_listener,
     validate_canonical_host_port_bindings,
@@ -1989,6 +1992,17 @@ enum WorkerBrokerAttachment {
 struct EgressBrokerProcess {
     child: tokio::process::Child,
     process: LiveProcess,
+    /// The runner's host-address monitor for this broker (#2614).
+    host_addresses: Option<HostAddressTask>,
+}
+
+/// Ends the host-address monitor with its broker.
+struct HostAddressTask(tokio::task::JoinHandle<()>);
+
+impl Drop for HostAddressTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 struct EgressBrokerLaunch {
@@ -2226,6 +2240,7 @@ impl EgressBrokerStartup {
                 .process
                 .take()
                 .expect("admitted egress broker owns its process identity"),
+            host_addresses: None,
         }
     }
 }
@@ -2370,6 +2385,7 @@ async fn stop_mesh_transport_process(mesh: &mut MeshTransportProcess) -> Result<
 }
 
 async fn stop_egress_broker_process(broker: &mut EgressBrokerProcess) -> Result<(), RunnerError> {
+    broker.host_addresses.take();
     if broker
         .child
         .try_wait()
@@ -3415,6 +3431,21 @@ async fn spawn_egress_broker_process(
     let inherited_bootstrap = duplicate_inherited_descriptor(bootstrap_child.as_raw_fd())
         .map_err(|_| RunnerError::EgressBrokerSpawn)?;
     let bootstrap_fd = inherited_bootstrap.as_raw_fd();
+    // The host's own addresses, which the broker refuses (#2614): sent before
+    // it can admit anything, then kept current by the monitor.
+    let (control_parent, control_child) =
+        StdUnixStream::pair().map_err(|_| RunnerError::EgressBrokerSpawn)?;
+    control_parent
+        .set_nonblocking(true)
+        .map_err(|_| RunnerError::EgressBrokerSpawn)?;
+    let mut control = tokio::net::UnixStream::from_std(control_parent)
+        .map_err(|_| RunnerError::EgressBrokerSpawn)?;
+    let (monitor, host_addresses) =
+        HostAddressMonitor::start(SystemHostAddressSource::from_environment())
+            .map_err(|_| RunnerError::EgressBrokerSpawn)?;
+    let inherited_control = duplicate_inherited_descriptor(control_child.as_raw_fd())
+        .map_err(|_| RunnerError::EgressBrokerSpawn)?;
+    let control_fd = inherited_control.as_raw_fd();
     let expected_parent = unsafe { libc::getpid() };
     let mut command = tokio::process::Command::new(context.executable);
     command
@@ -3430,7 +3461,13 @@ async fn spawn_egress_broker_process(
         .stderr(Stdio::null());
     unsafe {
         command.pre_exec(move || {
-            prepare_isolated_child(expected_parent, bootstrap_fd, EGRESS_BROKER_BOOTSTRAP_FD)
+            prepare_isolated_child(
+                expected_parent,
+                &[
+                    (bootstrap_fd, EGRESS_BROKER_BOOTSTRAP_FD),
+                    (control_fd, EGRESS_BROKER_HOST_ADDRESSES_FD),
+                ],
+            )
         });
     }
     let child = command
@@ -3438,6 +3475,8 @@ async fn spawn_egress_broker_process(
         .map_err(|_| RunnerError::EgressBrokerSpawn)?;
     drop(inherited_bootstrap);
     drop(bootstrap_child);
+    drop(inherited_control);
+    drop(control_child);
     let mut startup = EgressBrokerStartup::new(child);
     let Some(pid) = startup.child_mut().id() else {
         reap_failed_egress_broker_startup(&mut startup).await?;
@@ -3450,7 +3489,9 @@ async fn spawn_egress_broker_process(
     );
     let bootstrap_write = tokio::time::timeout_at(ready_deadline, async {
         bootstrap.write_all(bytes.as_ref()).await?;
-        bootstrap.flush().await
+        bootstrap.flush().await?;
+        control.write_all(&encode_frame(&host_addresses)).await?;
+        control.flush().await
     })
     .await;
     match bootstrap_write {
@@ -3535,8 +3576,14 @@ async fn spawn_egress_broker_process(
     let endpoint = bootstrap
         .into_std()
         .map_err(|_| RunnerError::EgressBrokerBootstrap)?;
+    let mut process = startup.disarm();
+    process.host_addresses = Some(HostAddressTask(tokio::spawn(async move {
+        let _ = monitor
+            .run(control, host_addresses, INTERFACE_POLL, PUBLIC_RELEARN)
+            .await;
+    })));
     Ok(EgressBrokerLaunch {
-        process: startup.disarm(),
+        process,
         endpoint,
         key,
     })
@@ -3611,7 +3658,7 @@ async fn spawn_network_worker_process(
         .stderr(Stdio::null());
     unsafe {
         command.pre_exec(move || {
-            prepare_isolated_child(expected_parent, bootstrap_fd, NETWORK_BOOTSTRAP_FD)
+            prepare_isolated_child(expected_parent, &[(bootstrap_fd, NETWORK_BOOTSTRAP_FD)])
         });
     }
     let child = command
@@ -3929,8 +3976,7 @@ fn duplicate_inherited_descriptor(descriptor: i32) -> io::Result<OwnedFd> {
 #[cfg(target_os = "linux")]
 fn prepare_isolated_child(
     expected_parent: libc::pid_t,
-    bootstrap_fd: RawFd,
-    target_fd: RawFd,
+    descriptors: &[(RawFd, RawFd)],
 ) -> io::Result<()> {
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } == -1
         || unsafe { libc::getppid() } != expected_parent
@@ -3948,13 +3994,22 @@ fn prepare_isolated_child(
     {
         return Err(io::Error::last_os_error());
     }
-    if bootstrap_fd != target_fd && unsafe { libc::dup2(bootstrap_fd, target_fd) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    if unsafe { libc::fcntl(target_fd, libc::F_SETFD, 0) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
+    inherit_descriptors(descriptors)?;
     lock_process_privileges()
+}
+
+/// Place each (source, target) descriptor at its fixed number for the child.
+/// Sources are duplicated at 10 or above, so no target overwrites a source.
+fn inherit_descriptors(descriptors: &[(RawFd, RawFd)]) -> io::Result<()> {
+    for &(source, target) in descriptors {
+        if source != target && unsafe { libc::dup2(source, target) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(target, libc::F_SETFD, 0) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// Darwin has no parent-death signal or privilege lock: the child exits with
@@ -3962,20 +4017,13 @@ fn prepare_isolated_child(
 #[cfg(target_os = "macos")]
 fn prepare_isolated_child(
     expected_parent: libc::pid_t,
-    bootstrap_fd: RawFd,
-    target_fd: RawFd,
+    descriptors: &[(RawFd, RawFd)],
 ) -> io::Result<()> {
     if unsafe { libc::getppid() } != expected_parent {
         return Err(io::Error::from_raw_os_error(libc::ECHILD));
     }
     crate::darwin::process::mark_inherited_descriptors_close_on_exec();
-    if bootstrap_fd != target_fd && unsafe { libc::dup2(bootstrap_fd, target_fd) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    if unsafe { libc::fcntl(target_fd, libc::F_SETFD, 0) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    inherit_descriptors(descriptors)
 }
 
 #[cfg(target_os = "linux")]
@@ -5679,6 +5727,7 @@ mod tests {
             broker: Some(EgressBrokerProcess {
                 child: broker_child,
                 process: broker_process,
+                host_addresses: None,
             }),
             ingress_control: None,
             host_port_key: None,

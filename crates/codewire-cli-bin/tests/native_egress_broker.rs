@@ -13,10 +13,14 @@ use codewire_egress_broker::ipc::{
 };
 use codewire_egress_policy::CompiledPolicy;
 use codewire_local_vmm::egress_broker::{
-    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_POLICY_DIGEST_OFFSET,
-    EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES,
-    EgressBrokerStartupFailure, EgressBrokerStartupStatus, decode_egress_broker_startup_status,
+    EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_HOST_ADDRESSES_FD,
+    EGRESS_BROKER_POLICY_DIGEST_OFFSET, EGRESS_BROKER_PREPARED_MESSAGE,
+    EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES, EgressBrokerStartupFailure,
+    EgressBrokerStartupStatus, decode_egress_broker_startup_status,
     encode_developer_egress_broker_bootstrap,
+};
+use codewire_local_vmm::host_addresses::{
+    HostAddressMonitor, HostAddressSet, SystemHostAddressSource, encode_frame,
 };
 use uuid::Uuid;
 
@@ -62,8 +66,19 @@ fn identity() -> (Uuid, u64) {
     )
 }
 
-fn spawn_broker(ambient_environment: bool) -> (std::os::unix::net::UnixStream, ChildGuard) {
+/// The broker's bootstrap and host-address control sockets (runner ends) and
+/// the broker, which has been sent `host_addresses` as its first control frame.
+fn spawn_broker(
+    ambient_environment: bool,
+    host_addresses: &[u8],
+) -> (
+    std::os::unix::net::UnixStream,
+    std::os::unix::net::UnixStream,
+    ChildGuard,
+) {
     let (parent, child_socket) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (mut control, control_child) = std::os::unix::net::UnixStream::pair().unwrap();
+    let control_source = control_child.as_raw_fd();
     parent
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -88,7 +103,8 @@ fn spawn_broker(ambient_environment: bool) -> (std::os::unix::net::UnixStream, C
         command.env("CODEWIRE_FORGED_BROKER_ENVIRONMENT", "rejected");
     }
     // SAFETY: the hook performs only descriptor syscalls before exec. It
-    // admits exactly one connected bootstrap capability at the fixed fd.
+    // admits exactly the connected bootstrap and host-address control
+    // capabilities at their fixed fds; both sources are well above them.
     unsafe {
         command.pre_exec(move || {
             if libc::syscall(
@@ -100,20 +116,29 @@ fn spawn_broker(ambient_environment: bool) -> (std::os::unix::net::UnixStream, C
             {
                 return Err(std::io::Error::last_os_error());
             }
-            if source != EGRESS_BROKER_BOOTSTRAP_FD
-                && libc::dup2(source, EGRESS_BROKER_BOOTSTRAP_FD) == -1
-            {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::fcntl(EGRESS_BROKER_BOOTSTRAP_FD, libc::F_SETFD, 0) == -1 {
-                return Err(std::io::Error::last_os_error());
+            for (source, target) in [
+                (source, EGRESS_BROKER_BOOTSTRAP_FD),
+                (control_source, EGRESS_BROKER_HOST_ADDRESSES_FD),
+            ] {
+                if source != target && libc::dup2(source, target) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(target, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             Ok(())
         });
     }
     let child = command.spawn().unwrap();
     drop(child_socket);
-    (parent, ChildGuard(Some(child)))
+    drop(control_child);
+    control.write_all(host_addresses).unwrap();
+    (parent, control, ChildGuard(Some(child)))
+}
+
+fn no_host_addresses() -> Vec<u8> {
+    encode_frame(&HostAddressSet::default())
 }
 
 #[test]
@@ -156,7 +181,7 @@ fn cw_hidden_egress_broker_preserves_its_typed_failure_exit() {
 
 #[test]
 fn product_broker_rejects_ambient_environment_bootstrap_policy_and_admission_forgery() {
-    let (ambient_parent, mut ambient_child) = spawn_broker(true);
+    let (ambient_parent, _control, mut ambient_child) = spawn_broker(true, &no_host_addresses());
     assert_eq!(
         decode_egress_broker_startup_status(&read_status_frame(&ambient_parent)),
         Some(EgressBrokerStartupStatus::Failed(
@@ -172,7 +197,8 @@ fn product_broker_rejects_ambient_environment_bootstrap_policy_and_admission_for
     let mut invalid =
         encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
     invalid[0] ^= 1;
-    let (mut invalid_parent, mut invalid_child) = spawn_broker(false);
+    let (mut invalid_parent, _control, mut invalid_child) =
+        spawn_broker(false, &no_host_addresses());
     invalid_parent.write_all(invalid.as_ref()).unwrap();
     assert_eq!(
         decode_egress_broker_startup_status(&read_status_frame(&invalid_parent)),
@@ -188,7 +214,7 @@ fn product_broker_rejects_ambient_environment_bootstrap_policy_and_admission_for
     let mut wrong_policy =
         encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
     wrong_policy[EGRESS_BROKER_POLICY_DIGEST_OFFSET] ^= 1;
-    let (mut policy_parent, mut policy_child) = spawn_broker(false);
+    let (mut policy_parent, _control, mut policy_child) = spawn_broker(false, &no_host_addresses());
     policy_parent.write_all(wrong_policy.as_ref()).unwrap();
     assert_eq!(
         decode_egress_broker_startup_status(&read_status_frame(&policy_parent)),
@@ -203,7 +229,8 @@ fn product_broker_rejects_ambient_environment_bootstrap_policy_and_admission_for
 
     let bootstrap =
         encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
-    let (mut admission_parent, mut admission_child) = spawn_broker(false);
+    let (mut admission_parent, _control, mut admission_child) =
+        spawn_broker(false, &no_host_addresses());
     admission_parent.write_all(bootstrap.as_ref()).unwrap();
     assert_eq!(
         read_status_frame(&admission_parent),
@@ -225,11 +252,100 @@ fn product_broker_rejects_ambient_environment_bootstrap_policy_and_admission_for
 }
 
 #[test]
+fn a_broker_without_readable_host_addresses_fails_closed_before_ready() {
+    let (environment_id, generation) = identity();
+    let bootstrap =
+        encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
+    let mut malformed = no_host_addresses();
+    malformed[0] ^= 1;
+    let (mut parent, _control, mut child) = spawn_broker(false, &malformed);
+    parent.write_all(bootstrap.as_ref()).unwrap();
+    assert_eq!(
+        decode_egress_broker_startup_status(&read_status_frame(&parent)),
+        Some(EgressBrokerStartupStatus::Failed(
+            EgressBrokerStartupFailure::HostAddresses
+        ))
+    );
+    assert_eq!(
+        child.wait_bounded().code(),
+        Some(EgressBrokerStartupFailure::HostAddresses.exit_code())
+    );
+}
+
+#[test]
+fn confined_product_broker_refuses_host_addresses_and_fails_closed_without_their_control() {
+    // #2614: the host's own addresses arrive before ready and are refused like
+    // private ones; an update replaces them; losing the runner's control
+    // socket ends the broker.
+    let host = IpAddr::V4(Ipv4Addr::new(203, 0, 114, 7));
+    let public = IpAddr::V4(Ipv4Addr::new(87, 0, 0, 180));
+    let other = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 443);
+    let (environment_id, generation) = identity();
+    let bootstrap =
+        encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
+    let initial = encode_frame(&HostAddressSet::new([host], [public]).unwrap());
+    let (mut parent, mut control, mut child) = spawn_broker(false, &initial);
+    parent.write_all(bootstrap.as_ref()).unwrap();
+    assert_eq!(read_status_frame(&parent), EGRESS_BROKER_PREPARED_MESSAGE);
+    parent.write_all(EGRESS_BROKER_CONFINE_MESSAGE).unwrap();
+    assert_eq!(read_status_frame(&parent), EGRESS_BROKER_READY_MESSAGE);
+
+    parent.set_read_timeout(None).unwrap();
+    parent.set_write_timeout(None).unwrap();
+    parent.set_nonblocking(true).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .unwrap();
+    let client = runtime.block_on(async {
+        let policy = CompiledPolicy::developer_baseline();
+        let binding = BrokerIpcBinding::new(environment_id, generation, policy.digest()).unwrap();
+        let key = BrokerIpcKey::from_bytes(TEST_KEY).unwrap();
+        let client = BrokerIpcClient::new(
+            tokio::net::UnixStream::from_std(parent).unwrap(),
+            binding,
+            key,
+        );
+        for refused in [SocketAddr::new(host, 22), SocketAddr::new(public, 443)] {
+            assert_eq!(
+                client.authorize_tcp(refused).await,
+                Err(BrokerIpcError::Denied)
+            );
+        }
+        assert!(client.authorize_tcp(other).await.is_ok());
+        client
+    });
+    control
+        .write_all(&encode_frame(
+            &HostAddressSet::new([host], [public, other.ip()]).unwrap(),
+        ))
+        .unwrap();
+    runtime.block_on(async {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while client.authorize_tcp(other).await.is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "the host-address update was not applied"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    drop(control);
+    assert_eq!(
+        child.wait_bounded().code(),
+        Some(EgressBrokerStartupFailure::HostAddresses.exit_code())
+    );
+    drop(client);
+    drop(runtime);
+}
+
+#[test]
 fn confined_product_broker_serves_authenticated_policy_and_closes_with_its_capability() {
     let (environment_id, generation) = identity();
     let bootstrap =
         encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
-    let (mut parent, mut child) = spawn_broker(false);
+    let (mut parent, _control, mut child) = spawn_broker(false, &no_host_addresses());
     parent.write_all(bootstrap.as_ref()).unwrap();
     assert_eq!(read_status_frame(&parent), EGRESS_BROKER_PREPARED_MESSAGE);
     parent.write_all(EGRESS_BROKER_CONFINE_MESSAGE).unwrap();
@@ -264,6 +380,72 @@ fn confined_product_broker_serves_authenticated_policy_and_closes_with_its_capab
     assert_eq!(
         child.wait_bounded().code(),
         Some(EgressBrokerStartupFailure::Protocol.exit_code())
+    );
+}
+
+/// One `connect_tcp` through a confined broker that was sent `host_addresses`.
+fn connect_through_broker(
+    host_addresses: &[u8],
+    destination: SocketAddr,
+) -> Result<std::os::fd::OwnedFd, BrokerIpcError> {
+    let (environment_id, generation) = identity();
+    let bootstrap =
+        encode_developer_egress_broker_bootstrap(environment_id, generation, &TEST_KEY).unwrap();
+    let (mut parent, _control, _child) = spawn_broker(false, host_addresses);
+    parent.write_all(bootstrap.as_ref()).unwrap();
+    assert_eq!(read_status_frame(&parent), EGRESS_BROKER_PREPARED_MESSAGE);
+    parent.write_all(EGRESS_BROKER_CONFINE_MESSAGE).unwrap();
+    assert_eq!(read_status_frame(&parent), EGRESS_BROKER_READY_MESSAGE);
+    parent.set_read_timeout(None).unwrap();
+    parent.set_write_timeout(None).unwrap();
+    parent.set_nonblocking(true).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .unwrap();
+    runtime.block_on(async move {
+        let policy = CompiledPolicy::developer_baseline();
+        let binding = BrokerIpcBinding::new(environment_id, generation, policy.digest()).unwrap();
+        let client = BrokerIpcClient::new(
+            tokio::net::UnixStream::from_std(parent).unwrap(),
+            binding,
+            BrokerIpcKey::from_bytes(TEST_KEY).unwrap(),
+        );
+        client.connect_tcp(destination).await
+    })
+}
+
+/// #2614 against a real interface. Run it in a network namespace whose
+/// interface holds the public address named by `CODEWIRE_TEST_HOST_ADDRESS`
+/// (the loopback interface must be up), with `--ignored`.
+///
+/// A broker that does not know the host's addresses dials a listener on that
+/// address. Sent the addresses exactly as the runner reads them, it refuses.
+#[test]
+#[ignore = "needs a network namespace with a public interface address"]
+fn a_connection_to_the_hosts_own_interface_address_is_refused() {
+    let host: IpAddr = std::env::var("CODEWIRE_TEST_HOST_ADDRESS")
+        .expect("CODEWIRE_TEST_HOST_ADDRESS")
+        .parse()
+        .unwrap();
+    let destination = SocketAddr::new(host, 443);
+    let listener = std::net::TcpListener::bind(destination).unwrap();
+    let (_monitor, addresses) =
+        HostAddressMonitor::start(SystemHostAddressSource::from_environment()).unwrap();
+    assert!(addresses.interfaces().any(|address| address == host));
+
+    connect_through_broker(&no_host_addresses(), destination).unwrap();
+    listener.accept().unwrap();
+
+    assert_eq!(
+        connect_through_broker(&encode_frame(&addresses), destination).err(),
+        Some(BrokerIpcError::Denied)
+    );
+    listener.set_nonblocking(true).unwrap();
+    assert!(
+        listener.accept().is_err(),
+        "the refused connection reached the host"
     );
 }
 
