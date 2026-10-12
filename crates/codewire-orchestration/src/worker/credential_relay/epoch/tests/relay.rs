@@ -368,3 +368,18 @@ async fn fresh_epochs_wait_while_the_broker_cannot_admit_them() {
     assert_eq!((resumed.started_at, resumed.succeeds), (relay.at(60), None));
     relay.stop().await.unwrap();
 }
+
+/// Every admission log states when its epoch ends: the Kind journey reads it
+/// to keep an authority change clear of the relay's next renewal.
+#[test]
+fn an_admission_reports_the_time_until_its_epoch_ends() {
+    let now = Instant::now();
+    assert_eq!(ends_in_ms(None, now), 0);
+    let renewal = Renewal {
+        expires_at_unix: 1,
+        ends_at: now + Duration::from_secs(510),
+        successor_at: now + Duration::from_secs(420),
+    };
+    assert_eq!(ends_in_ms(Some(renewal), now), 510_000);
+    assert_eq!(ends_in_ms(Some(renewal), now + Duration::from_secs(600)), 0);
+}

@@ -217,6 +217,36 @@ def later(delay, action):
     return thread
 
 
+class CheckPeriod(unittest.TestCase):
+    def setUp(self):
+        saved = (driver.CHECK_PERIOD, driver.FULL_CHECK, driver.NEXT_CHECK)
+        self.addCleanup(lambda: setattr(driver, "CHECK_PERIOD", saved[0]))
+        self.addCleanup(lambda: setattr(driver, "FULL_CHECK", saved[1]))
+        self.addCleanup(lambda: setattr(driver, "NEXT_CHECK", saved[2]))
+
+    def test_unset_keeps_the_production_period(self):
+        driver.configure({})
+        self.assertEqual((driver.CHECK_PERIOD, driver.FULL_CHECK, driver.NEXT_CHECK),
+                         (120.0, 135.0, 150.0))
+
+    def test_every_window_follows_the_daemons_configured_period(self):
+        driver.configure({driver.CHECK_PERIOD_ENV: "30"})
+        self.assertEqual((driver.CHECK_PERIOD, driver.FULL_CHECK, driver.NEXT_CHECK),
+                         (30.0, 45.0, 60.0))
+
+    def test_a_period_the_daemon_would_refuse_fails_closed(self):
+        for value in ("", "9", "121", "030", "30s", " 30"):
+            with self.subTest(value=value), self.assertRaisesRegex(driver.Failure, "check_period"):
+                driver.configure({driver.CHECK_PERIOD_ENV: value})
+
+    def test_the_period_bounds_match_the_daemon(self):
+        config = SOURCE.parents[4] / "crates/codewire-daemon/src/config.rs"
+        text = config.read_text()
+        self.assertIn(f'pub const CODEX_LOGIN_CHECK_PERIOD_ENV: &str = "{driver.CHECK_PERIOD_ENV}";', text)
+        self.assertIn("pub const CODEX_LOGIN_CHECK_PERIOD: Duration = Duration::from_secs(120);", text)
+        self.assertIn("pub const CODEX_LOGIN_CHECK_PERIOD_MIN: Duration = Duration::from_secs(10);", text)
+
+
 class LoginFile(unittest.TestCase):
     def setUp(self):
         self.workspace = Workspace(self)

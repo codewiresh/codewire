@@ -1,7 +1,8 @@
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use codewire_access::ManagedCredentialClients;
 use codewire_daemon_proto::DaemonAuthToken;
@@ -17,6 +18,15 @@ use crate::execution::ProcessExecution;
 pub const SHIM_ADDR_ENV: &str = "CODEWIRE_WORKSPACE_SHIM_ADDR";
 pub const WORKSPACE_ROOT_ENV: &str = "CODEWIRE_WORKSPACE_ROOT";
 pub const HOME_ROOT_ENV: &str = "CODEWIRE_HOME_ROOT";
+/// How often a hosted daemon checks a delivered Codex login for rotation and
+/// revocation. Production never sets it, so the period stays
+/// [`CODEX_LOGIN_CHECK_PERIOD`]; orchestration renders it only when built for
+/// the Kind test deployment, which shortens its credential journey with it.
+pub const CODEX_LOGIN_CHECK_PERIOD_ENV: &str = "CODEWIRE_CODEX_LOGIN_CHECK_PERIOD_SECONDS";
+/// The production period, and the longest one accepted.
+pub const CODEX_LOGIN_CHECK_PERIOD: Duration = Duration::from_secs(120);
+/// The shortest accepted period.
+pub const CODEX_LOGIN_CHECK_PERIOD_MIN: Duration = Duration::from_secs(10);
 pub const DAEMON_AUTH_TOKEN_ENV: &str = "CODEWIRE_DAEMON_AUTH_TOKEN";
 pub const HOSTED_PROJECTION_SHA256_ENV: &str = "CODEWIRE_ENVIRONMENT_PROJECTION_SHA256";
 pub use codewire_access::MANAGED_CREDENTIAL_CLIENTS_ENV;
@@ -310,6 +320,8 @@ impl HostedDaemonMode {
     /// every rendered identity variable. Without it the environment token is
     /// required, as before; neither is a configuration error.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<OsString>) -> Result<Self, ConfigError> {
+        // Refused before binding or listening; the hosted server reads it again.
+        codex_login_check_period(lookup(CODEX_LOGIN_CHECK_PERIOD_ENV).as_deref())?;
         let Some(binding_url) = lookup(WORKSPACE_BINDING_URL_ENV) else {
             return Config::from_lookup(lookup)
                 .map(|config| Self::EnvironmentToken(Box::new(config)));
@@ -590,6 +602,29 @@ pub enum ConfigError {
     BindingModeIdentity,
     #[error("workspace binding configuration is invalid")]
     InvalidWorkspaceBinding,
+    #[error("{CODEX_LOGIN_CHECK_PERIOD_ENV} must be whole seconds from 10 to 120")]
+    InvalidCodexLoginCheckPeriod,
+}
+
+/// The Codex login check period `value` selects: [`CODEX_LOGIN_CHECK_PERIOD`]
+/// when unset, otherwise canonical whole seconds from
+/// [`CODEX_LOGIN_CHECK_PERIOD_MIN`] to [`CODEX_LOGIN_CHECK_PERIOD`]. It can
+/// only make checks more frequent; anything else is refused.
+pub fn codex_login_check_period(value: Option<&OsStr>) -> Result<Duration, ConfigError> {
+    let Some(value) = value else {
+        return Ok(CODEX_LOGIN_CHECK_PERIOD);
+    };
+    value
+        .to_str()
+        .filter(|text| {
+            (1..=3).contains(&text.len())
+                && !text.starts_with('0')
+                && text.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .and_then(|text| text.parse().ok())
+        .map(Duration::from_secs)
+        .filter(|period| (CODEX_LOGIN_CHECK_PERIOD_MIN..=CODEX_LOGIN_CHECK_PERIOD).contains(period))
+        .ok_or(ConfigError::InvalidCodexLoginCheckPeriod)
 }
 
 fn lookup_value(lookup: &impl Fn(&str) -> Option<OsString>, key: &str) -> Option<String> {
@@ -952,6 +987,60 @@ mod tests {
             projection_selection_sha256: "",
             managed_credential_clients: "v1:none",
             working_directory: "",
+        }
+    }
+
+    #[test]
+    fn codex_login_check_period_keeps_the_production_default_and_its_bounds() {
+        assert_eq!(CODEX_LOGIN_CHECK_PERIOD, Duration::from_secs(120));
+        assert_eq!(CODEX_LOGIN_CHECK_PERIOD_MIN, Duration::from_secs(10));
+        assert_eq!(codex_login_check_period(None), Ok(CODEX_LOGIN_CHECK_PERIOD));
+        for (value, seconds) in [("10", 10), ("30", 30), ("120", 120)] {
+            assert_eq!(
+                codex_login_check_period(Some(OsStr::new(value))),
+                Ok(Duration::from_secs(seconds))
+            );
+        }
+        for value in [
+            "", "0", "9", "121", "600", "999", "1000", "010", "30 ", " 30", "+30", "-30", "30s",
+            "3e1", "٣٠",
+        ] {
+            assert_eq!(
+                codex_login_check_period(Some(OsStr::new(value))),
+                Err(ConfigError::InvalidCodexLoginCheckPeriod),
+                "{value:?}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            assert_eq!(
+                codex_login_check_period(Some(OsStr::from_bytes(b"3\xff"))),
+                Err(ConfigError::InvalidCodexLoginCheckPeriod)
+            );
+        }
+    }
+
+    #[test]
+    fn a_hosted_daemon_refuses_an_out_of_range_check_period_in_either_mode() {
+        for mode in [
+            &[(DAEMON_AUTH_TOKEN_ENV, "synthetic-environment-token")][..],
+            &[
+                (WORKSPACE_BINDING_URL_ENV, BINDING_URL),
+                (WORKSPACE_POD_UID_ENV, POD),
+            ],
+        ] {
+            for period in ["9", "121"] {
+                let mut values = mode.to_vec();
+                values.push((CODEX_LOGIN_CHECK_PERIOD_ENV, period));
+                assert_eq!(
+                    binding_mode(&values).unwrap_err(),
+                    ConfigError::InvalidCodexLoginCheckPeriod
+                );
+            }
+            let mut values = mode.to_vec();
+            values.push((CODEX_LOGIN_CHECK_PERIOD_ENV, "30"));
+            assert!(binding_mode(&values).is_ok());
         }
     }
 

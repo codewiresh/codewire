@@ -627,6 +627,50 @@ class AcceptanceTests(unittest.TestCase):
         self.assertGreater(clock[0], 600)
         self.assertLess(clock[0], 601)
 
+    def test_a_fresh_token_admission_ends_the_idle_once_the_token_is_replaced(self):
+        clock = [0.0]
+        marked = [False]
+        class Idle:
+            def pump(self, duration):
+                clock[0] += duration
+                # The host marks the admission at 300 s; the token rotates at 470 s.
+                marked[0] = clock[0] >= 300
+        fingerprint = lambda: b"new" if clock[0] >= 470 else b"old"
+        with patch.object(driver.time, "monotonic", lambda: clock[0]), \
+                patch.object(driver, "token_fingerprint", fingerprint):
+            rotated, fresh = driver.observe_rotation(Idle(), b"old", 0.0, lambda: marked[0])
+        # A mark alone does not end the idle: the replaced token is required too.
+        self.assertTrue(fresh)
+        self.assertGreaterEqual(rotated, 470)
+        self.assertLess(rotated, 471)
+        self.assertLess(clock[0], 471)
+
+    def test_without_a_mark_the_epoch_bound_still_ends_the_idle(self):
+        clock = [0.0]
+        class Idle:
+            def pump(self, duration):
+                clock[0] += duration
+        fingerprint = lambda: b"new" if clock[0] >= 470 else b"old"
+        with patch.object(driver.time, "monotonic", lambda: clock[0]), \
+                patch.object(driver, "token_fingerprint", fingerprint):
+            rotated, fresh = driver.observe_rotation(Idle(), b"old", 0.0)
+        self.assertFalse(fresh)
+        self.assertGreaterEqual(rotated, 470)
+        self.assertGreater(clock[0], 600)
+
+    def test_the_evidence_line_states_when_the_token_rotated(self):
+        _, events = self.workflow()
+        rotated = events[1]
+        self.assertEqual(rotated["event"], "projected_token_rotated")
+        self.assertEqual((rotated["rotated_ms"], rotated["fresh_admission"]), (470000, True))
+
+    def test_the_admission_marker_argument_is_closed(self):
+        for argv in (["/tmp/other"], ["/tmp/codewire-kind-fresh-admission-1", "extra"],
+                     ["/tmp/codewire-kind-fresh-admission-x"]):
+            with self.subTest(argv=argv), contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(driver.main(argv), 1)
+            self.assertIn('"reason":"arguments"', output.getvalue())
+
     def test_epoch_bound_matches_production_relay(self):
         relay = SOURCE.parents[4] / "crates/codewire-orchestration/src/worker/credential_relay/epoch.rs"
         self.assertIn("const EPOCH_MAX_LIFETIME: Duration = Duration::from_secs(600);",
@@ -675,7 +719,7 @@ class AcceptanceTests(unittest.TestCase):
                 patch.object(driver, "codex_exec_calls", lambda _: [0.0] * codex_calls), \
                 patch.object(driver.time, "monotonic", lambda: clock[0]), \
                 patch.object(driver, "token_fingerprint", lambda: b"synthetic"), \
-                patch.object(driver, "observe_rotation"), \
+                patch.object(driver, "observe_rotation", lambda *_: (470.0, True)), \
                 contextlib.redirect_stdout(output):
             driver.run(workflow, None)
         return workflow, [json.loads(line) for line in output.getvalue().splitlines()]
