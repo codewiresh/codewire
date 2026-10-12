@@ -1719,6 +1719,9 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/cw_release_fixtures.py|scripts/ci/tests/test-cli-release-workflow.py|\
       scripts/ci/tests/test-cw-release-delivery.py|scripts/ci/tests/test-cw-release-r2.py|\
       scripts/ci/tests/test-package-cw-release.py|\
+      scripts/ci/release/local_runtime_parts.py|scripts/ci/release/local_runtime_sources.py|\
+      scripts/ci/release/local-runtime-sources.json|scripts/ci/release/build-runtime-kernel.sh|\
+      scripts/ci/tests/test-local-runtime-parts.py|\
       scripts/ci/tests/test-cw-install.py|\
       scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh|\
       scripts/ci/tests/test-fetch-openbao-release-signing-key.sh|\

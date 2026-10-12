@@ -1,0 +1,159 @@
+{
+  "schema": "codewire.local-runtime-sources/v1",
+  "kernel_builder": {
+    "image": "docker.io/library/archlinux@sha256:4e77cf2ea5f410e6f8be5abf93ccf17ce2436e87a138c167208356711a405dbd",
+    "snapshot": "2026/08/20",
+    "packages": {
+      "aarch64-linux-gnu-binutils": "2.47-1",
+      "aarch64-linux-gnu-gcc": "16.1.0-1",
+      "pahole": "1:1.31-2",
+      "rust": "1:1.97.1-1"
+    },
+    "tools": [
+      "base-devel",
+      "git",
+      "python"
+    ]
+  },
+  "kernel_bc": {
+    "origin": "docker.io/library/busybox:1.36.1-uclibc (docker-library/busybox), file bin/busybox; a build-time tool only, never shipped",
+    "layer": "sha256:07eb0d14fd35353b75db907ce5754d161603d55fc8311acee8ce6200d8f18e0d",
+    "sha256": "36cb337928452e9379f349f11a3095e36a9b3aed8cefc50e2ae060bf9c6cf70f"
+  },
+  "sources": {
+    "linux": {
+      "version": "6.18.48",
+      "license": "GPL-2.0-only WITH Linux-syscall-note",
+      "from": "kernel-build",
+      "note": "the exact source build-linux-vmm-kernel.py archives at the pinned commit, as linux-source.tar.xz"
+    },
+    "busybox": {
+      "version": "1.37.0",
+      "license": "GPL-2.0-only",
+      "url": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+      "sha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4"
+    },
+    "busybox-alpine-build": {
+      "version": "1.37.0-r30",
+      "license": "GPL-2.0-only",
+      "note": "Alpine's patches and build configuration for the pinned busybox-static APK, as one tar",
+      "aports": {
+        "base": "https://gitlab.alpinelinux.org/alpine/aports/-/raw",
+        "commit": "1e823a60eb85606954b3a5af5f8e5bbd1ea680cf",
+        "path": "main/busybox",
+        "files": {
+          "0001-awk-fix-handling-of-literal-backslashes-in-replaceme.patch": "522e48b25b320b854885419f3ee3a092bd58ad2ed111da87a57cafbc8420feae",
+          "0001-blkdiscard-ship-link-to-sbin-instead-of-usr-bin.patch": "f490ce643412a33dfd3c92aaaeff501a10c0f78662172d1cf55e5d632b7f8033",
+          "0001-hexdump-fix-regression-with-n4-e-u.patch": "c289b3ed7096557846069f6814e063226b2552e6d26a959c9e35116469dddf35",
+          "0001-init-add-support-for-separate-reboot-action.patch": "df5b272582ebf19de062341469ade926b1c747278871190855ac0d16c079f519",
+          "0001-mount-fix-parsing-proc-mounts-with-long-lines.patch": "5971026ad9e4b252370bf4be615f7da6ab146cccc58a7e5cb3f21b92c32ae50d",
+          "0001-netstat-sanitize-process-names.patch": "daf4282120acbc4eb1d90721565d2e01c9ddc3eeeabed4c5f5faa04fe3d33dd3",
+          "0001-tar-fix-16018-masking-of-potentially-malicious-tar-cpio-content.patch": "8b4262ffbaaa721d3c1d6a2b1deb84a794a99252b1b15e974ec76ccb9eb3c517",
+          "0001-tar-fix-TOCTOU-symlink-race-condition.patch": "1a65d0870075fc83d58d75e91a2e518d1bee1898083086fb950281eb79b7d3a8",
+          "0001-tunctl-fix-segfault-on-ioctl-failure.patch": "d8488651d7af4450310dce234bc62cf5737a473478f67e298a1ad50c6205a78c",
+          "0001-wget-add-header-Accept.patch": "0edc53c34e0b7f82efb4010ac417c42c182890088f83944f1fb557ba5826968b",
+          "0002-adduser-default-to-sbin-nologin-as-shell-for-system-.patch": "1f7d95849b0cda0a75d608afca994d782f0a67fe0f1cb47578424ebadeb266c7",
+          "0003-ash-add-built-in-BB_ASH_VERSION-variable.patch": "9059fe07e7a872ed16e66f9cb711dbfcf4d5d28308f20dd9a6c36956326911c9",
+          "0004-Avoid-redefined-warnings-when-buiding-with-utmps.patch": "8ac54787fe6bfeb42a6c13e49b39ac7c61e839c4cea243d273c71ba10f1b4a2c",
+          "0005-libbb-sockaddr2str-ensure-only-printable-characters-.patch": "3d16e43c11fa3afeb441c64129071168ce9a7a9e584fc78ccc18bbae99feda87",
+          "0006-modinfo-add-k-option-for-kernel-version.patch": "6832669fa413d9a236a22bb4d0519e6cc89771a0ef24abd723afd99ce52e900f",
+          "0007-nologin-Install-applet-to-sbin-instead-of-usr-sbin.patch": "3bf06e5cdd1a0d4a0ad541c8a838004fd0c4e46e44ad3af6d146ad2f69967d3b",
+          "0008-pgrep-add-support-for-matching-against-UID-and-RUID.patch": "c43b6ede059656adb473481aff2aa29239d232b998f735302e97a324650e77a3",
+          "0009-properly-fix-wget-https-support.patch": "4be0a9d28acaa4c117c694a4816fad4a2d3f78e224676dfc2d1407d3ad0dc17a",
+          "0010-fsck-resolve-LABEL-.-UUID-.-spec-to-device.patch": "f45615c7a985b30465da5d93a3535404636f45a83cbeefafbd0bcb6b0c86371f",
+          "0011-nslookup-sanitize-all-printed-strings-with-printable.patch": "a1f28268047e9e268f9760f3f3c9bf53f41eb5a712e0922f105dd23b96c00dc7",
+          "0012-ash-exec-busybox.static.patch": "813555bb69bc9b97ff3d7ec14569eb2763ec16bfd9650bba5f1f08ba5cd4226c",
+          "0013-app-location-for-cpio-vi-and-lspci.patch": "7f083b5705dac1cfa80953e32e83aaa65e4234c41a59f1578bfc403a1abf4eed",
+          "0014-udhcpc-set-default-discover-retries-to-5.patch": "3e306b052a2df4134de61012de907893aebeb9cd107e9410e81770d60608c41d",
+          "0015-ping-make-ping-work-without-root-privileges.patch": "802827589eb1c04f634ba8f69158cf0ba87e41061935ba5047ccc8322bf20f41",
+          "0016-fbsplash-support-console-switching.patch": "4db1b0fe9178c1a04f8ea63a9915db86159120398e8bd619c0231afa303472d4",
+          "0017-fbsplash-support-image-and-bar-alignment-and-positio.patch": "d128fa633cfad0845d6bd5f0aee634ab9971b2edd6001ad91d99b3c1be8aee91",
+          "0018-depmod-support-generating-kmod-binary-index-files.patch": "6817e14f68dae612a91aa7d75e76b1212a5bba8e9cfdff11336e606bdeed98eb",
+          "0019-Add-flag-for-not-following-symlinks-when-recursing.patch": "a4f0e598874e0229071c6fe59380cd6c739d68ecbc74e1eef2de76e60ea49030",
+          "0020-udhcpc-Don-t-background-if-n-is-given.patch": "3cc2b21429514b57d75e66a48b6e4c2068c931f91e993e8625a8f22d04daad4b",
+          "0021-tests-fix-tarball-creation.patch": "dd4c10e0d2a1479d2367cf116e05bda09f0f2921636f65af99428d0cff542412",
+          "0022-tests-musl-doesn-t-seem-to-recognize-UTC0-as-a-timez.patch": "ab1f225416915acf048a2cce3571dbbe942ecd7b114492401b9e0634567e633a",
+          "0023-Hackfix-to-disable-HW-acceleration-for-MD5-SHA1-on-x.patch": "bb9858725f62c1aec9baeeace4a217a4a216ae8488a4a04e92fc225ef4f063c5",
+          "0024-umount-Implement-O-option-to-unmount-by-mount-option.patch": "fe1b1ed4983c26960bf9d88062e52f6f1f2735a54d15234361d2b2c53eef14ce",
+          "0025-find-fix-xdev-depth-and-delete.patch": "d88146dbec6996345b825805408a8c855e616decb4ad25555012b37d605c6b62",
+          "0026-awk.c-fix-CVE-2023-42366-bug-15874.patch": "34a52455ba3866c43d53558047fa40edba5118218930a3f860d1d343dc7d09a8",
+          "0027-awk-Mark-test-for-handling-of-start-of-word-pattern-.patch": "f478b2c38a12fad318b43839f4aa97c6116087d4c986ed6ce11320e19b8409c1",
+          "0028-od-Skip-od-B-on-big-endian.patch": "83483a14589224a6f7e7c03883abd8b54d68dc46f00628be59a61ecc68d79067",
+          "0029-ash-reject-unknown-long-options.patch": "4ed1b9592b75abb740878804dc8cc48cffc5e6da6cd6d4319a8c35082b6b1a77",
+          "0030-hexdump-Skip-a-single-test-on-big-endian-systems.patch": "a03e66c5768d4fa5acb2778943019c1ccc96c9f7f5b8b56206df917c9d28967c",
+          "0031-syslogd-fix-wrong-OPT_locallog-flag-detection.patch": "a4b8e95aefd53ac360bfc898f0f08ca7d86ef5178058a3499783a99e37247412",
+          "0032-lineedit-fix-some-tab-completions-written-to-stdout.patch": "032a2e416980a21a6dca1b702543b29b675a8ef843998d9c24d31eacb7fc27cb",
+          "0033-lineedit-use-stdout-for-shell-history-builtin.patch": "61265873d32d0d0b12c429a736de6c949f0dbcd434e1ead1765bf3fd19cfc084",
+          "0034-adduser-remove-preconfigured-GECOS-full-name-field.patch": "b1b62318d5b4550c2a4ae6cad74330bbb9159dacdd8f0617759311d9d977dbbf",
+          "0035-cpio-map-F-to-file-long-option.patch": "6a65af49b8497220eb8ef502167d76bf12a30f7cf1a12eb620041e1efd0747b5",
+          "APKBUILD": "fb2323ac3121c6cd1122c42cabbd19ec28a29a1cf434a4c0759792c63a1c63a8",
+          "acpid-poweroff.sh": "745a5f25dd586f7574f5867fdb3d9b0f7cda97224cadc7a178fc72e26b51b7e7",
+          "acpid.initd": "e9a57d04084733e20b57c4f17e94e8d277ef42f2836f33d96be1250e9672b2a8",
+          "acpid.logrotate": "d608a3b7715886b5735def0cc50a6359fd364fac2e0e0a459c588c04be471031",
+          "bbsuid.c": "99f6275a53a4005d8f03d87e5361699419b33a52b2b2e2fe1c45e90ab6d51f58",
+          "busybox-extras.post-install": "d9fc2353305920237a46b75c8b184166e6a2f9b6aaba5c96ed80d5234534141c",
+          "busybox-extras.pre-deinstall": "921289ece87e6a645d15dcd7fea4cd96e3c1a3ad393f7a98f6cad03bb7266aea",
+          "busybox.post-install": "13c120a1c714ecafa7fe1fc748406a89dfffc549118ebce324b53d4bbb4ba75f",
+          "busybox.post-upgrade": "3cf0a22d2d6c6ed34be6b77ed3973b7c0b7434525744026c0159f5a76f827f49",
+          "busybox.trigger": "c7840b111dd82669de2074ea3c7e345c063928db2bbff650a81289777b3ff98f",
+          "busyboxconfig": "65b29f6085cd79ab5f032d7e4299534a86c3efad240e78c16186a19bf847fcca",
+          "busyboxconfig-extras": "1d539797a78b17e815acb6afb97e8883fe65d0c094801395c014ac5f7b3a7e98",
+          "crond.confd": "d058d9ed0824f877b4e88158fe25d71ad76fca4b71542c4c6d7991ee2ecd20f8",
+          "crond.initd": "9c7955d5227326ea4a1e55c225606e34d148a831cca3e05b23ad5c58f525c8e0",
+          "dad.if-up": "2fd20d1bc67d9ee711990002b24f156635a73f56b8935b2f76592938817fa4e7",
+          "default.script": "c7b39bba4d7f1ce05dbdeba7d2fd97b96a8c3c0c1ebc0259f641fb8e1c3827d2",
+          "dnsd.initd": "4a2b86475c9a3e06729265093cfc71711575089472b68671fe59158999f829c3",
+          "httpd.initd": "834284a025ef92049ffb6b67264591de2da0e61b85226eb48bd2eead52dce860",
+          "inetd.initd": "bc35f55a9cb9930f5ffbde4cd93037b29a384b155a45a9bd1e1c7ea0a9139138",
+          "klogd.confd": "f6cd63d6e5f384dcb01a4906c9a0b6c5923794380235dfe0d79b48a686b03c5d",
+          "klogd.initd": "855bf399d4c689dcb8c67a1062e02f1f925297eb18e7ac6942219ab84330a547",
+          "loadkmap.confd": "85de66e8a23c60061d8ddf20075ce89ae3cab368a4b995aa863a6e9ec552a0d0",
+          "loadkmap.initd": "7778397c308a89ab2b49e22be498051808ee97c2918afca6563638c0d9d6aae3",
+          "mdev.initd": "754d37775157f138ed8834e041765ee6aed3a14915a783be480d1f34a6d5783d",
+          "ntpd.confd": "4224e5c6b5ffeb815c15f3e9f17ddaa169d4e6b7da169dbd0939fe06dbe8914d",
+          "ntpd.initd": "7c64ee24b972bee7397407955198d3d336c71deb83a784c7e2656709802c0040",
+          "rdate.confd": "521f5171e20a353e68155620ce7c847c53dcfb7c45ab02d7566efd99cff2dbf2",
+          "rdate.initd": "0c6eb4dc269386472f475cf9c549ba53b73aa33f044fbfb3b6bc6dd2574bb341",
+          "securetty": "713fcea5109728883b9147e822429133fcc8b5e253afd3c2a197b10cd0bc3b4d",
+          "ssl_client.c": "f36fb83637a12fe0706f828a3e9a4181ac6ed452b59d5d30fcf4dbe1884b8aed",
+          "syslog.confd": "47b6e2ae625578903f8cf78410a981ab3103cb6de156a853034c57363bf39e0a",
+          "syslog.initd": "f5e471c5bf96a706655b043516403f7aabe2c893f9597e345aa625b6a6375a7f",
+          "udhcpc.conf": "5b372209e01cda07c87b8afa6d1ab3d7e8daf18a1f2332d744203a6dc289eb1a",
+          "udhcpd.initd": "5c2d05f2cb2a47847c345881ea41de15afe7d1c10f76f8e3cbbadeb0cba4dc50",
+          "watchdog.confd": "77f6f9069afdbb477a7e822aa2c7265d64fd22fdd9338bb3beb0cee901d202ce",
+          "watchdog.initd": "8bf9f4caa14f2e0a1ded5f76130bfec07c325e89045e5ba6fc10f890270b5752"
+        }
+      }
+    },
+    "runc": {
+      "version": "1.5.1",
+      "license": "Apache-2.0",
+      "url": "https://github.com/opencontainers/runc/releases/download/v1.5.1/runc-1.5.1.tar.xz",
+      "sha256": "db743b39fd7de8da88adce5a61a54529a494928cd59227fffb622f5cb4ba6ef9"
+    },
+    "libseccomp": {
+      "version": "2.6.0",
+      "license": "LGPL-2.1-only",
+      "url": "https://github.com/opencontainers/runc/releases/download/v1.5.1/libseccomp-2.6.0.tar.gz",
+      "sha256": "83b6085232d1588c379dc9b9cae47bb37407cf262e6e74993c61ba72d2a784dc"
+    },
+    "libpathrs": {
+      "version": "0.2.5",
+      "license": "MPL-2.0 OR LGPL-3.0-or-later",
+      "url": "https://github.com/opencontainers/runc/releases/download/v1.5.1/libpathrs-0.2.5.tar.xz",
+      "sha256": "f8f4a9419eb839cd5decbd120b65f0495bf6eac07155477fe39a8c2a23da589d"
+    },
+    "e2fsprogs": {
+      "version": "1.47.4",
+      "license": "GPL-2.0-only AND LGPL-2.0-only AND BSD-3-Clause AND MIT",
+      "url": "https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.4/e2fsprogs-1.47.4.tar.gz",
+      "sha256": "da274408bebbfd13a5a2fc3cfc66e3ffff17c48534673aa67f88d49b99123b96"
+    },
+    "git": {
+      "version": "2.56.0",
+      "license": "GPL-2.0-only",
+      "url": "https://www.kernel.org/pub/software/scm/git/git-2.56.0.tar.xz",
+      "sha256": "26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3"
+    }
+  }
+}

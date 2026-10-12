@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -459,10 +460,61 @@ def source_revision(given: str = "") -> str:
     return revision
 
 
+COMPONENT_FIELDS = {"name", "version", "license", "file"}
+
+
+def check_document(release: Path, revision: str) -> None:
+    """The release scripts' strict check of a packed runtime directory, the
+    same one a release applies before a cw embeds it."""
+    spec = importlib.util.spec_from_file_location("cw_release", REPOSITORY / "scripts/ci/release/cw_release.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("cw_release", module)
+    spec.loader.exec_module(module)
+    try:
+        document, _pinned = module.load_local_runtime_dir(release)
+    except module.ReleaseError as error:
+        raise InstallError("the packed runtime does not verify: %s" % error) from None
+    if json.loads(document)["source_revision"] != revision:
+        raise InstallError("the packed runtime names another source revision")
+
+
+def read_components(directories) -> list:
+    """Third-party sources, from `local_runtime_sources.py fetch` outputs.
+
+    Each directory holds components.json, a list of {name, version, license,
+    file}, beside the files it names. A release publishes each file as the
+    exact source of a component the runtime ships (#2539).
+    """
+    components = []
+    for directory in directories:
+        directory = Path(directory)
+        if not directory.is_absolute() or not directory.is_dir():
+            raise InstallError("COMPONENTS must be an absolute directory: %s" % directory)
+        try:
+            listed = json.loads((directory / "components.json").read_text())
+        except (OSError, ValueError):
+            raise InstallError("%s has no readable components.json" % directory) from None
+        if not isinstance(listed, list) or not listed:
+            raise InstallError("%s/components.json lists no components" % directory)
+        for entry in listed:
+            if not isinstance(entry, dict) or set(entry) != COMPONENT_FIELDS:
+                raise InstallError("%s/components.json has a malformed entry" % directory)
+            source = directory / entry["file"]
+            if ("/" in entry["file"] or entry["file"] in (".", "..") or source.is_symlink()
+                    or not source.is_file()):
+                raise InstallError("component %s source is not a file beside its listing" % entry["name"])
+            components.append((entry, source))
+    names = [entry["name"] for entry, _source in components]
+    if len(names) != len(set(names)):
+        raise InstallError("a component is listed twice")
+    return sorted(components, key=lambda item: item[0]["name"])
+
+
 def pack(kernel: Path, initramfs: Path, e2fsprogs: Path, git: Path, release: Path, cw_runtime=None,
-         revision: str = "") -> Path:
+         revision: str = "", components=()) -> Path:
     """Write the release directory for this Mac's runtime into `release`."""
     require_host()
+    components = read_components(components)
     check_kernel(kernel)
     check_initramfs(initramfs)
     if cw_runtime is not None:
@@ -502,12 +554,16 @@ def pack(kernel: Path, initramfs: Path, e2fsprogs: Path, git: Path, release: Pat
     if cw_runtime is not None:
         target["cw_runtime"] = {"lock": put_blob(release, cw_runtime / CW_RUNTIME_LOCK),
                                 "pack": put_blob(release, cw_runtime / CW_RUNTIME_PACK)}
+    if components:
+        target["components"] = [{"name": entry["name"], "version": entry["version"], "license": entry["license"],
+                                 "source": put_blob(release, source)} for entry, source in components]
     document = {"schema": LOCAL_RUNTIME_SCHEMA, "source_revision": revision,
                 "targets": {TARGET: target}}
     # cw decodes the document strictly: canonical JSON (sorted keys, compact,
     # ASCII, one trailing newline), exactly as a release's cw embeds it.
     (release / LOCAL_RUNTIME_DOCUMENT).write_text(
         json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n")
+    check_document(release, revision)
     for key, name, _mode in ARTIFACTS:
         log("%-9s %s sha256=%s size=%d" % (key, name, lock[key]["sha256"], lock[key]["size"]))
     for group in ("e2fsprogs", "git"):
@@ -538,6 +594,8 @@ def main(argv=None) -> int:
                         help="absolute directory holding a sealed aarch64 cw-runtime.lock.json and runtime.pack")
     parser.add_argument("--pack", default="", help="only write the release directory to this new path")
     parser.add_argument("--cw", default="cw", help="the cw that installs the runtime (default: cw on PATH)")
+    parser.add_argument("--components", action="append", default=[],
+                        help="absolute directory from local_runtime_sources.py fetch; repeatable")
     parser.add_argument("--source-revision", default="",
                         help="the source commit, for a tree without Git metadata (default: git rev-parse HEAD)")
     args = parser.parse_args(argv)
@@ -559,7 +617,8 @@ def main(argv=None) -> int:
             release = Path(args.pack)
             if not release.is_absolute():
                 raise InstallError("--pack must be an absolute path: %s" % args.pack)
-            pack(kernel, initramfs, e2fsprogs, git, release, cw_runtime, args.source_revision)
+            pack(kernel, initramfs, e2fsprogs, git, release, cw_runtime, args.source_revision,
+                 [Path(directory) for directory in args.components])
             return 0
         return install(kernel, initramfs, e2fsprogs, git, args.replace, args.cw, cw_runtime,
                        args.source_revision)
