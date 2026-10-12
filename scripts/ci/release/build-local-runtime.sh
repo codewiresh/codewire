@@ -11,9 +11,10 @@ Builds the macOS local VM runtime that a release's arm64 cw embeds (#2539),
 from this checkout. Run it from the release source; its scripts are that
 source's own.
 
-linux   x86_64 Linux with Docker and the pinned Rust 1.93.0. Builds the arm64
-        guest root, takes the arm64 kernel from the parts cache or builds it in
-        the pinned container, and fetches the Linux-side third-party sources.
+linux   x86_64 Linux with Docker. Builds the arm64 guest root in the pinned
+        Rust 1.93.0 container, takes the arm64 kernel from the parts cache or
+        builds it in the pinned Arch container, and fetches the Linux-side
+        third-party sources. It never changes the host's Rust toolchain.
         DIR gets initramfs.cpio, kernel/, sources/ and built/ (the cache
         records of parts built in this run).
 macos   An Apple silicon Mac. Takes e2fsprogs and git from the parts cache or
@@ -144,20 +145,28 @@ check() {
 }
 
 linux() {
+  local -a shared=()
+  [ -z "${LOCAL_RUNTIME_JOB_CONTAINER:-}" ] || shared=(--job-container "$LOCAL_RUNTIME_JOB_CONTAINER")
   # The guest root: the sealed probe built twice for arm64, with the pinned
-  # Alpine BusyBox and official runc.
+  # Alpine BusyBox and official runc, in the pinned Rust 1.93.0 container
+  # (the runner's sealed toolchain has no arm64 musl target).
   log "building the arm64 guest root"
-  rustup target add aarch64-unknown-linux-musl >/dev/null
   fetch "$(pin initramfs_inputs busybox url)" "$(pin initramfs_inputs busybox sha256)" "$work/busybox.apk"
   mkdir "$work/busybox"
   tar -xzf "$work/busybox.apk" -C "$work/busybox" "$(pin initramfs_inputs busybox member)" 2>/dev/null ||
     die "the BusyBox package holds no $(pin initramfs_inputs busybox member)"
   fetch "$(pin initramfs_inputs runc url)" "$(pin initramfs_inputs runc sha256)" "$work/runc.arm64"
-  "$root/scripts/ci/verify/build-local-vmm-initramfs.sh" --verify-root --target aarch64-unknown-linux-musl \
-    --busybox "$work/busybox/$(pin initramfs_inputs busybox member)" \
-    --busybox-sha256 "$(pin initramfs_inputs busybox member_sha256)" \
-    --runc "$work/runc.arm64" --runc-sha256 "$(pin initramfs_inputs runc sha256)" \
-    --output "$output/initramfs.cpio"
+  local target
+  local -a rust_std=()
+  for target in aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
+    fetch "$(pin guest_root_builder rust_std "$target" url)" "$(pin guest_root_builder rust_std "$target" sha256)" \
+      "$work/rust-std-$target.tar.xz"
+    rust_std+=(--rust-std "$work/rust-std-$target.tar.xz")
+  done
+  fetch "$(pin guest_root_builder protoc url)" "$(pin guest_root_builder protoc sha256)" "$work/protoc.zip"
+  "$release_dir/build-runtime-guest-root.sh" --busybox "$work/busybox/$(pin initramfs_inputs busybox member)" \
+    --runc "$work/runc.arm64" "${rust_std[@]}" --protoc-zip "$work/protoc.zip" \
+    --output "$output/initramfs.cpio" ${shared[@]+"${shared[@]}"}
 
   local recipe
   recipe="$(python3 "$parts" recipe --part kernel-arm64)"
@@ -184,8 +193,6 @@ linux() {
     docker rm "$container" >/dev/null
     [ "$(sha256_of "$work/bc")" = "$(pin kernel_bc sha256)" ] || die "bc differs from its pin"
     mkdir -m 0700 "$work/kernel-parent"
-    local shared=()
-    [ -z "${LOCAL_RUNTIME_JOB_CONTAINER:-}" ] || shared=(--job-container "$LOCAL_RUNTIME_JOB_CONTAINER")
     "$release_dir/build-runtime-kernel.sh" --source "$linux_source" --bc "$work/bc" \
       --output "$work/kernel-parent/kernel" --jobs "${LOCAL_RUNTIME_JOBS:-4}" ${shared[@]+"${shared[@]}"}
     mkdir -m 0700 "$output/kernel"

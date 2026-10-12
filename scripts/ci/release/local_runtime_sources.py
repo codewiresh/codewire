@@ -50,7 +50,8 @@ def require(condition, reason):
 def load_pins(path=PINS):
     pins = json.loads(Path(path).read_bytes())
     require(isinstance(pins, dict) and pins.get("schema") == SCHEMA
-            and set(pins) == {"schema", "kernel_builder", "kernel_bc", "initramfs_inputs", "sources"},
+            and set(pins) == {"schema", "kernel_builder", "kernel_bc", "guest_root_builder", "initramfs_inputs",
+                          "sources"},
             "local runtime source pins are not the expected shape")
     sources = pins["sources"]
     require(set(sources) == {name for names in SIDES.values() for name in names}, "pinned sources are not the set")
@@ -79,11 +80,18 @@ def file_name(name, source):
 
 
 def download(url, digest, limit=release.MAX_OBJECT):
-    """HTTPS bytes that must hash to `digest`; redirects are followed."""
-    request = urllib.request.Request(url, headers={"user-agent": "codewire-release-sources/1"})
-    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-        require(response.geturl().startswith("https://"), f"{url} redirected off HTTPS")
-        data = response.read(limit + 1)
+    """HTTPS bytes that must hash to `digest`; redirects are followed.
+
+    The request carries urllib's own user agent: Alpine's GitLab serves a bot
+    challenge to agents it does not recognize, a custom one included, and
+    answers 418 when the challenge is not passed.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=TIMEOUT) as response:
+            require(response.geturl().startswith("https://"), f"{url} redirected off HTTPS")
+            data = response.read(limit + 1)
+    except OSError as error:
+        raise SourcesError(f"{url}: {error}") from None
     require(len(data) <= limit, f"{url} exceeds its bound")
     require(hashlib.sha256(data).hexdigest() == digest, f"{url} differs from its pinned SHA-256")
     return data
