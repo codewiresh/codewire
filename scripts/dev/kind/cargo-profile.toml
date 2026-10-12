@@ -1,0 +1,16 @@
+# Cargo profile for local Kind development builds only
+# (deployments/docker/kind-dev-binary.Dockerfile passes it with --config):
+# what `make kind-deploy` layers onto a retained cluster and the smokes
+# `make kind-test` runs. The workspace's own crates, which a change
+# recompiles, build at a low optimization level in many units; external crates
+# keep the ci profile's settings, so they come from the shared compiler cache
+# and keep the services fast. It lives here rather than in the workspace
+# manifest so that nothing shipped or verified in CI can select it.
+[profile.kind-dev]
+inherits = "ci"
+opt-level = 1
+codegen-units = 256
+
+[profile.kind-dev.package."*"]
+opt-level = 3
+codegen-units = 16
