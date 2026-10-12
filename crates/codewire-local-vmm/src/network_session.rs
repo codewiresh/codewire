@@ -352,10 +352,21 @@ async fn dispatch_packets<B: EgressBroker>(
             if question.source.ip() != IpAddr::V4(GUEST_IP) {
                 continue;
             }
-            let answer = match broker.resolve_dns(&question).await {
-                Ok(answer) => answer,
-                Err(_) => continue,
-            };
+            // A lookup that fails is answered at once, with the query's ID and
+            // question only, so the guest does not wait out its timeout:
+            // REFUSED when the policy refused, SERVFAIL for anything else.
+            let answer =
+                broker
+                    .resolve_dns(&question)
+                    .await
+                    .unwrap_or_else(|error| BrokerDnsAnswer {
+                        answer: if error.kind() == io::ErrorKind::PermissionDenied {
+                            DnsAnswer::Refused
+                        } else {
+                            DnsAnswer::ServerFailure
+                        },
+                        ttl_seconds: 0,
+                    });
             let response =
                 build_ipv4_dns_response(&question, answer.answer, answer.ttl_seconds, NETWORK_MTU)
                     .map_err(|_| NetworkSessionError::Engine)?;
@@ -456,6 +467,7 @@ async fn serve_listener<B: EgressBroker>(mut listener: TcpListener, broker: Arc<
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use codewire_netstack::DnsRecordType;
@@ -503,6 +515,204 @@ mod tests {
                 ttl_seconds: 30,
             })
         }
+    }
+
+    type DnsOutcome = fn() -> io::Result<BrokerDnsAnswer>;
+
+    /// Records every DNS question it is asked and answers each the same way.
+    struct RecordingBroker {
+        questions: Mutex<Vec<DnsQuestion>>,
+        outcome: DnsOutcome,
+    }
+
+    impl RecordingBroker {
+        fn new(outcome: DnsOutcome) -> Arc<Self> {
+            Arc::new(Self {
+                questions: Mutex::new(Vec::new()),
+                outcome,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl EgressBroker for RecordingBroker {
+        async fn authorize_tcp(&self, _flow: TcpFlow) -> io::Result<()> {
+            Err(denied())
+        }
+
+        async fn connect_tcp(&self, _flow: TcpFlow) -> io::Result<BoxedBrokerStream> {
+            Err(denied())
+        }
+
+        async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<BrokerDnsAnswer> {
+            self.questions.lock().unwrap().push(question.clone());
+            (self.outcome)()
+        }
+    }
+
+    /// The guest's end of a ready, authenticated session served by `broker`.
+    async fn ready_session<B: EgressBroker>(broker: Arc<B>) -> (DuplexStream, NetworkSession) {
+        let (vm_id, generation) = identity();
+        let (host_endpoint, mut guest_endpoint) = duplex(128 * 1024);
+        let host_key = NetworkKey::derive(TOKEN, vm_id, generation).unwrap();
+        tokio::spawn(run_network_session(
+            host_endpoint,
+            host_key,
+            vm_id,
+            generation,
+            broker,
+            || Ok(()),
+        ));
+        let guest_key = NetworkKey::derive(TOKEN, vm_id, generation).unwrap();
+        let session =
+            authenticate_guest_endpoint(&mut guest_endpoint, &guest_key, vm_id, generation)
+                .await
+                .unwrap();
+        (guest_endpoint, session)
+    }
+
+    /// Send one guest packet and read the packet that comes back.
+    async fn exchange(
+        stream: &mut DuplexStream,
+        session: &mut NetworkSession,
+        packet: &[u8],
+    ) -> Vec<u8> {
+        write_guest_packet(stream, session, packet).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), read_guest_packet(stream, session))
+            .await
+            .expect("the reply timed out")
+            .unwrap()
+    }
+
+    /// One EDNS OPT record: the root name, type 41, then the given payload
+    /// size, flags and options.
+    fn opt_record(payload_size: u16, flags: u32, options: &[u8]) -> Vec<u8> {
+        let mut record = vec![0, 0, 41];
+        record.extend_from_slice(&payload_size.to_be_bytes());
+        record.extend_from_slice(&flags.to_be_bytes());
+        record.extend_from_slice(&(options.len() as u16).to_be_bytes());
+        record.extend_from_slice(options);
+        record
+    }
+
+    /// Nothing in a query's OPT record reaches the broker or the reply: not
+    /// the payload size, the DO bit, the version, a cookie or a client subnet.
+    #[tokio::test]
+    async fn an_edns_record_changes_neither_the_broker_request_nor_the_reply() {
+        let broker = RecordingBroker::new(|| {
+            Ok(BrokerDnsAnswer {
+                answer: DnsAnswer::Ipv4(TEST_DNS_ANSWER),
+                ttl_seconds: 30,
+            })
+        });
+        let (mut guest, mut session) = ready_session(Arc::clone(&broker)).await;
+
+        let cookie = [0, 10, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8];
+        let client_subnet = [0, 8, 0, 7, 0, 1, 24, 0, 198, 51, 100];
+        let queries = [
+            dns_query_packet(WORKER_IP, 53, TEST_DNS_NAME),
+            dns_query_packet_with(WORKER_IP, 53, TEST_DNS_NAME, &opt_record(1232, 0, &[])),
+            dns_query_packet_with(
+                WORKER_IP,
+                53,
+                TEST_DNS_NAME,
+                &opt_record(4096, 0x0000_8000, &cookie),
+            ),
+            dns_query_packet_with(
+                WORKER_IP,
+                53,
+                TEST_DNS_NAME,
+                &opt_record(512, 0x0001_0000, &client_subnet),
+            ),
+        ];
+        let mut replies = Vec::new();
+        for query in &queries {
+            replies.push(exchange(&mut guest, &mut session, query).await);
+        }
+
+        assert!(replies[0].ends_with(&TEST_DNS_ANSWER.octets()));
+        assert!(replies.iter().all(|reply| reply == &replies[0]));
+        let questions = broker.questions.lock().unwrap();
+        assert_eq!(questions.len(), queries.len());
+        assert!(questions.iter().all(|question| question == &questions[0]));
+    }
+
+    /// The low flags byte of a DNS reply packet (RA and the response code),
+    /// after checking that it is addressed to the guest's source and repeats
+    /// only the query's ID and question.
+    fn reply_code(reply: &[u8], query: &[u8]) -> u8 {
+        const DNS: usize = 28;
+        assert_eq!(&reply[12..16], &WORKER_IP.octets());
+        assert_eq!(&reply[16..20], &GUEST_IP.octets());
+        assert_eq!(&reply[20..22], &53_u16.to_be_bytes());
+        assert_eq!(&reply[22..24], &query[20..22]);
+        assert_eq!(&reply[DNS..DNS + 2], &query[DNS..DNS + 2]);
+        assert_eq!(reply[DNS + 2], 0x81);
+        assert_eq!(&reply[DNS + 4..DNS + 12], &[0, 1, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&reply[DNS + 12..], &query[DNS + 12..]);
+        reply[DNS + 3]
+    }
+
+    #[tokio::test]
+    async fn a_refused_or_failed_lookup_is_answered_at_once() {
+        let query = dns_query_packet(WORKER_IP, 53, TEST_DNS_NAME);
+        let outcomes: [(DnsOutcome, u8); 4] = [
+            (|| Err(denied()), 5),
+            (|| Err(io::ErrorKind::ConnectionRefused.into()), 2),
+            (|| Err(io::ErrorKind::ConnectionAborted.into()), 2),
+            (|| Err(io::ErrorKind::InvalidData.into()), 2),
+        ];
+        for (outcome, code) in outcomes {
+            let broker = RecordingBroker::new(outcome);
+            let (mut guest, mut session) = ready_session(Arc::clone(&broker)).await;
+            let reply = exchange(&mut guest, &mut session, &query).await;
+            assert_eq!(reply_code(&reply, &query), 0x80 | code);
+            assert_eq!(broker.questions.lock().unwrap().len(), 1);
+        }
+
+        // The deny-all broker refuses, and the session keeps serving.
+        let (mut guest, mut session) = ready_session(Arc::new(DenyBroker)).await;
+        for _ in 0..2 {
+            let reply = exchange(&mut guest, &mut session, &query).await;
+            assert_eq!(reply_code(&reply, &query), 0x80 | 5);
+        }
+    }
+
+    /// A question the worker does not admit gets no reply, whatever the
+    /// broker would say: it never reaches the broker.
+    #[tokio::test]
+    async fn an_unadmitted_question_is_still_dropped_without_a_reply() {
+        let broker = RecordingBroker::new(|| Err(denied()));
+        let (mut guest, mut session) = ready_session(Arc::clone(&broker)).await;
+        let admitted = dns_query_packet(WORKER_IP, 53, TEST_DNS_NAME);
+        let unadmitted = [
+            dns_query_packet(Ipv4Addr::new(8, 8, 8, 8), 53, TEST_DNS_NAME),
+            dns_query_packet(WORKER_IP, 5_353, TEST_DNS_NAME),
+            dns_query_packet_with(
+                WORKER_IP,
+                53,
+                TEST_DNS_NAME,
+                &[opt_record(1232, 0, &[]), opt_record(1232, 0, &[])].concat(),
+            ),
+            // A well-formed question from a source that is not the guest: a
+            // reply to it would make the worker a reflector.
+            udp_packet(
+                Ipv4Addr::new(198, 51, 100, 9),
+                WORKER_IP,
+                53_000,
+                53,
+                &dns_query(TEST_DNS_NAME, &[]),
+            ),
+        ];
+        for packet in &unadmitted {
+            write_guest_packet(&mut guest, &mut session, packet)
+                .await
+                .unwrap();
+        }
+        // The one reply that arrives is for the admitted question sent last.
+        let reply = exchange(&mut guest, &mut session, &admitted).await;
+        assert_eq!(reply_code(&reply, &admitted), 0x80 | 5);
+        assert_eq!(broker.questions.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -643,11 +853,27 @@ mod tests {
     }
 
     fn dns_query_packet(server: Ipv4Addr, port: u16, name: &str) -> Vec<u8> {
+        dns_query_packet_with(server, port, name, &[])
+    }
+
+    /// A query whose additional section is `additional`, counted as one
+    /// record unless it is empty.
+    fn dns_query_packet_with(
+        server: Ipv4Addr,
+        port: u16,
+        name: &str,
+        additional: &[u8],
+    ) -> Vec<u8> {
+        udp_packet(GUEST_IP, server, 53_000, port, &dns_query(name, additional))
+    }
+
+    fn dns_query(name: &str, additional: &[u8]) -> Vec<u8> {
         let mut dns = Vec::new();
         dns.extend_from_slice(&0x1234_u16.to_be_bytes());
         dns.extend_from_slice(&0x0100_u16.to_be_bytes());
         dns.extend_from_slice(&1_u16.to_be_bytes());
-        dns.extend_from_slice(&[0_u8; 6]);
+        dns.extend_from_slice(&[0_u8; 4]);
+        dns.extend_from_slice(&u16::from(!additional.is_empty()).to_be_bytes());
         for label in name.split('.') {
             dns.push(label.len() as u8);
             dns.extend_from_slice(label.as_bytes());
@@ -655,7 +881,8 @@ mod tests {
         dns.push(0);
         dns.extend_from_slice(&1_u16.to_be_bytes());
         dns.extend_from_slice(&1_u16.to_be_bytes());
-        udp_packet(GUEST_IP, server, 53_000, port, &dns)
+        dns.extend_from_slice(additional);
+        dns
     }
 
     fn udp_packet(
