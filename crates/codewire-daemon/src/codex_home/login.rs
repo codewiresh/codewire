@@ -56,8 +56,10 @@ pub const CODEX_MANAGED_REFRESH_TOKEN: &str = "codewire-managed-no-refresh-token
 const _: () = assert!(!CODEX_MANAGED_REFRESH_TOKEN.is_empty());
 /// Container-local state: a new container (a Sandbox restart) starts empty.
 pub const CODEX_LOGIN_STATE_DIRECTORY: &str = "/tmp/codewire-codex-login";
-/// How often a delivered login is checked for rotation and revocation.
-pub const CODEX_LOGIN_CHECK_PERIOD: Duration = Duration::from_secs(120);
+/// How often a delivered login is checked for rotation and revocation, unless
+/// the Kind test deployment selects a shorter period
+/// ([`crate::config::CODEX_LOGIN_CHECK_PERIOD_ENV`]).
+pub use crate::config::CODEX_LOGIN_CHECK_PERIOD;
 /// With no delivery for this long while the bridge fails (no epoch, no
 /// capability, or unavailable), Codewire's login is removed: when the whole
 /// Sandbox loses credential authority, the relay reports the broker's
@@ -810,15 +812,16 @@ impl CodexLoginSource for codewire_credential_bridge::CredentialBridge {
 }
 
 /// The hosted daemon's login task: check at start, then every
-/// [`CODEX_LOGIN_CHECK_PERIOD`], retrying sooner with jittered backoff while
-/// no epoch is admitted or the broker is unavailable. Stops when `shutdown`
-/// turns true.
+/// `check_period` ([`CODEX_LOGIN_CHECK_PERIOD`] outside Kind), retrying sooner
+/// with jittered backoff while no epoch is admitted or the broker is
+/// unavailable. Stops when `shutdown` turns true.
 pub(crate) async fn run_codex_login_writer(
     mut writer: CodexLoginWriter,
     source: impl CodexLoginSource,
+    check_period: Duration,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let mut retry = Retry::default();
+    let mut retry = Retry::new(check_period);
     let mut previous = None;
     loop {
         let delivery = tokio::select! {
@@ -874,24 +877,32 @@ fn unix_now() -> u64 {
 
 /// When to check next: the period after a decision, jittered backoff from
 /// [`CODEX_LOGIN_RETRY_MIN`] up to the period while nothing was delivered.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Retry {
     failures: u32,
+    period: Duration,
 }
 
 impl Retry {
+    fn new(period: Duration) -> Self {
+        Self {
+            failures: 0,
+            period,
+        }
+    }
+
     fn after(&mut self, outcome: CodexLoginSync) -> Duration {
         match outcome {
             CodexLoginSync::Unavailable | CodexLoginSync::Expired | CodexLoginSync::Lapsed => {
                 let ceiling = CODEX_LOGIN_RETRY_MIN
                     .saturating_mul(1 << self.failures.min(16))
-                    .min(CODEX_LOGIN_CHECK_PERIOD);
+                    .min(self.period);
                 self.failures = self.failures.saturating_add(1);
                 jitter(ceiling, 50)
             }
             _ => {
                 self.failures = 0;
-                jitter(CODEX_LOGIN_CHECK_PERIOD, 90)
+                jitter(self.period, 90)
             }
         }
     }

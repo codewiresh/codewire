@@ -282,6 +282,27 @@ pub struct SandboxWorkerCfg {
     /// the RKE2 controller in `kube-system`.
     pub ingress_namespace: String,
     pub ingress_pod_name: String,
+    /// How often an environment's workspace daemon checks its delivered Codex
+    /// login. Only the Kind test deployment sets it
+    /// ([`KIND_CODEX_LOGIN_CHECK_PERIOD_ENV`], read only when built with
+    /// `kind-e2e`); `None` keeps the daemon's production period.
+    pub codex_login_check_period_seconds: Option<u64>,
+}
+
+/// Kind's test deployment only: the workspace daemon's Codex login check
+/// period, in whole seconds from 10 to 120 (the daemon's own bounds).
+pub const KIND_CODEX_LOGIN_CHECK_PERIOD_ENV: &str = "SANDBOX_CODEX_LOGIN_CHECK_PERIOD_SECONDS";
+
+/// [`KIND_CODEX_LOGIN_CHECK_PERIOD_ENV`], checked exactly as the daemon will
+/// check it; anything the daemon would refuse stops orchestration instead.
+/// Builds without `kind-e2e` never read it.
+fn kind_codex_login_check_period_seconds(value: Option<std::ffi::OsString>) -> Option<u64> {
+    if !cfg!(feature = "kind-e2e") {
+        return None;
+    }
+    let period = codewire_daemon::codex_login_check_period(Some(value?.as_os_str()))
+        .unwrap_or_else(|error| panic!("{KIND_CODEX_LOGIN_CHECK_PERIOD_ENV}: {error}"));
+    Some(period.as_secs())
 }
 
 impl SandboxWorkerCfg {
@@ -378,6 +399,9 @@ impl SandboxWorkerCfg {
             coordinator_extra_roots: getenv("SANDBOX_COORDINATOR_EXTRA_ROOTS", "false") == "true",
             ingress_namespace: getenv("SANDBOX_INGRESS_NAMESPACE", ""),
             ingress_pod_name: getenv("SANDBOX_INGRESS_POD_NAME", ""),
+            codex_login_check_period_seconds: kind_codex_login_check_period_seconds(
+                std::env::var_os(KIND_CODEX_LOGIN_CHECK_PERIOD_ENV),
+            ),
         }
     }
 }
@@ -486,6 +510,7 @@ pub fn environment_template_opts(
         projection_selection_sha256,
         managed_credential_clients,
         daemon_auth_token: daemon_auth_token.to_string(),
+        codex_login_check_period_seconds: cfg.codex_login_check_period_seconds,
         ..shape_template_opts(cfg, image_ref, &runtime_spec, shape)
     })
 }
@@ -551,6 +576,10 @@ pub fn shape_template_opts(
         coordinator_extra_roots: cfg.coordinator_extra_roots,
         ingress_namespace: cfg.ingress_namespace.clone(),
         ingress_pod_name: cfg.ingress_pod_name.clone(),
+        // An environment's own rendering sets this. A warm pool member keeps
+        // the production period: pool template admission names no such
+        // variable.
+        codex_login_check_period_seconds: None,
         derp_host: cfg.derp_host.clone(),
         derp_port: parse_derp_port(&cfg.derp_port),
         stun_host: cfg.stun_host.clone(),
@@ -2675,6 +2704,56 @@ mod tests {
     /// access-ready. Confidential keeps its rendered token until B2c; a
     /// configuration without the orchestration namespace or a coordinator,
     /// which a sandbox worker refuses at startup, renders one too.
+    /// The Kind-only Codex login check period: read only by `kind-e2e`
+    /// builds, refused outside the daemon's 10-120 second bounds, and given to
+    /// an environment's rendering but never to a warm pool's.
+    #[test]
+    fn the_kind_codex_login_check_period_is_bounded_and_environment_only() {
+        use std::ffi::OsString;
+        assert_eq!(kind_codex_login_check_period_seconds(None), None);
+        let thirty = kind_codex_login_check_period_seconds(Some(OsString::from("30")));
+        if cfg!(feature = "kind-e2e") {
+            assert_eq!(thirty, Some(30));
+            for refused in ["9", "121", "", "030", "30s"] {
+                let outcome = std::panic::catch_unwind(|| {
+                    kind_codex_login_check_period_seconds(Some(OsString::from(refused)))
+                });
+                assert!(outcome.is_err(), "{refused:?}");
+            }
+        } else {
+            assert_eq!(thirty, None);
+            assert_eq!(
+                kind_codex_login_check_period_seconds(Some(OsString::from("9"))),
+                None
+            );
+        }
+
+        let cfg = SandboxWorkerCfg {
+            runtime_profile: "commodity".into(),
+            pod_namespace: "dev".into(),
+            api_base_url: "https://codewire-dev.sh".into(),
+            codex_login_check_period_seconds: Some(30),
+            ..Default::default()
+        };
+        let environment = environment_template_opts(
+            &cfg,
+            "ghcr.io/codewiresh/workspace:1",
+            "base",
+            &identity_mode_env(),
+            7,
+            "daemon-tok",
+        )
+        .unwrap();
+        assert_eq!(environment.codex_login_check_period_seconds, Some(30));
+        let shape = WorkspaceShape {
+            cpu_millicores: 500,
+            memory_mib: 1024,
+            disk_gib: 5,
+        };
+        let pool = warm_pool_template_opts(&cfg, shape).unwrap();
+        assert_eq!(pool.codex_login_check_period_seconds, None);
+    }
+
     #[test]
     fn commodity_workspaces_always_render_identity_free() {
         for supported in ["", "binding", " binding "] {

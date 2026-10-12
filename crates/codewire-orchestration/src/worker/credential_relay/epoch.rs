@@ -266,6 +266,8 @@ where
                     // one finishes only what was already sent on it.
                     log_overlap(environment_id, previous.renewal, renewal);
                     retiring.push(previous.future);
+                } else {
+                    log_admitted(environment_id, renewal);
                 }
                 match finished {
                     None => {
@@ -488,19 +490,34 @@ impl FirstAdmission {
     }
 }
 
+/// Milliseconds until an admitted epoch ends; 0 when the broker reported no
+/// usable expiry, so the relay plans no successor for it.
+fn ends_in_ms(renewal: Option<Renewal>, now: Instant) -> u64 {
+    renewal.map_or(0, |renewal| {
+        u64::try_from(renewal.ends_at.saturating_duration_since(now).as_millis())
+            .unwrap_or(u64::MAX)
+    })
+}
+
+/// An epoch admitted with none serving: the first one, or the next after one
+/// ended without a successor. With [`log_overlap`], every admission states
+/// when its epoch ends, and so when the relay will next renew.
+fn log_admitted(environment_id: Uuid, admitted: Option<Renewal>) {
+    tracing::info!(
+        event = "credential_bridge_epoch_admitted",
+        %environment_id,
+        ends_in_ms = ends_in_ms(admitted, Instant::now()),
+        "credential relay admitted an epoch with none serving"
+    );
+}
+
 fn log_overlap(environment_id: Uuid, previous: Option<Renewal>, next: Option<Renewal>) {
     let now = Instant::now();
-    let ends_in = |renewal: Option<Renewal>| {
-        renewal.map_or(0, |renewal| {
-            u64::try_from(renewal.ends_at.saturating_duration_since(now).as_millis())
-                .unwrap_or(u64::MAX)
-        })
-    };
     tracing::info!(
         event = "credential_bridge_epoch_overlap",
         %environment_id,
-        previous_ends_in_ms = ends_in(previous),
-        next_ends_in_ms = ends_in(next),
+        previous_ends_in_ms = ends_in_ms(previous, now),
+        next_ends_in_ms = ends_in_ms(next, now),
         "credential relay admitted the next epoch; the previous epoch finishes only its pending requests"
     );
 }
