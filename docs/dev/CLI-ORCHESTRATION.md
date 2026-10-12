@@ -395,7 +395,12 @@ verified workspace OCI receipt and existing broker assertions remain required.
 Before the first conversation, the journey observes root ownership, read-only
 mount flags, image identity and payload digest. It then checks native
 acknowledgement, two turns, resume, guest tool execution, held-turn controls,
-parent continuation, history and cleanup. Custody cases exercise detached and
+parent continuation, history and cleanup. Before the first conversation it
+stages decoy `codex` and `claude` in `~/.npm-global/bin`, shows they come first
+on PATH, and proves both managed agents run the pinned clients at their pinned
+versions while no decoy ever runs. `--synthetic-peers` needs an image without
+admitted pinned clients, since only then do the staged peers on PATH run; each
+launch must report that fallback. Custody cases exercise detached and
 TERM-resistant tools, a cancelled stop caller, driver death, safe generation
 admission, missing/stale receipt refusal and an unrelated sentinel. Provider
 responses are synthetic; live provider enrollment remains under #1902.

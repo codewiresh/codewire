@@ -10,9 +10,17 @@ The default drives the pinned guest Codex and Claude through the environment's
 already-selected synthetic protected profile. Steps that depend on the
 upstream fixture send CW_FIXTURE_* prompt markers; the proof reports the exact
 response each marker needs and fails closed when the fixture does not supply
-it. --synthetic-peers changes only this harness's expectations, for
-fixtures/agent-peer.py staged as the guest codex and claude by checked-in
-verification; it is not a product override.
+it. Before the first conversation it stages decoy codex and claude in the
+user's npm prefix, first on PATH as a user's own update would be, and proves
+the managed agents still run the image's pinned clients at their pinned
+versions and never the decoys.
+
+--synthetic-peers changes only this harness's expectations, for
+fixtures/agent-peer.py staged as the guest codex and claude on PATH. A local
+VM runs the image's pinned clients whenever the image ships admitted ones, so
+this mode needs an image without them, such as a custom image: every managed
+launch must then report that it runs the staged peer from PATH, and why. It
+is not a product override.
 
 The caller's isolated CW_CONFIG_DIR, native state and artifact environment are
 inherited unchanged. The host CLI launches every session, all uniquely
@@ -27,6 +35,7 @@ import argparse
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import secrets
 import signal
@@ -65,6 +74,7 @@ COMMON_REQUIRED = (
 )
 SYNTHETIC_REQUIRED = COMMON_REQUIRED + (
     "preflight/guest-agents-synthetic-peers-staged",
+    "pinned/synthetic-peers-run-from-path-with-recorded-reason",
     "controls/codex-expected-turn-steer/mismatch-refused/claude-steer-refused/claude-interrupt",
     "driver-exit/lead-stop-in-flight-unknown-not-replayed/stopped-refuses-msg/parent-adopts-after-restart/resume",
     "driver-exit/native-startup-failure/task-error/parent-notified/session-ended/msg-refused",
@@ -72,6 +82,8 @@ SYNTHETIC_REQUIRED = COMMON_REQUIRED + (
 ACTUAL_REQUIRED = COMMON_REQUIRED + (
     "preflight/protected-profile-selected",
     "preflight/guest-agents-actual-not-synthetic",
+    "pinned/user-updated-decoys-first-on-path",
+    "pinned/managed-agents-run-image-pin-at-pinned-version/decoys-never-ran",
     "guest-tool-marker/actual-codex-shell-tool",
     "controls/actual-detected-capabilities/idle-and-unsupported-refused-without-record",
     "controls/actual-codex-held-turn-interrupt",
@@ -337,6 +349,97 @@ print(json.dumps({"peer":value, "current":current, "receipt_sha256":hashlib.sha2
 '''
 
 
+# The image's pinned clients, as the guest admits them on either architecture,
+# and the versions this release pins.
+PINNED_CLIENTS = {
+    "codex": (
+        "/opt/codewire/agents/npm/lib/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex",
+        "/opt/codewire/agents/npm/lib/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex",
+    ),
+    "claude": ("/opt/codewire/agents/npm/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",),
+}
+PINNED_VERSIONS = {"codex": "0.160.0", "claude": "2.1.288"}
+# `cw run --agent` names a client it runs from PATH in one stderr line.
+FALLBACK_NOTICE = re.compile(r"^(codex|claude) runs (/\S+) from PATH, not the image's pinned client: (.+)$")
+
+# Stages decoy clients in the user's npm prefix, which the image puts first on
+# PATH, as a user's own update would. A decoy only records that it ran. An
+# existing file there is never replaced.
+DECOY_STAGE = r'''import os, re, sys
+prefix, = sys.argv[1:]
+assert re.fullmatch(r"cwnm-[0-9a-f]{8}", prefix)
+home = "/home/codewire"
+directory = os.path.join(home, ".npm-global", "bin")
+os.makedirs(directory, mode=0o755, exist_ok=True)
+for name in ("codex", "claude"):
+    body = f"#!/bin/sh\n: > {home}/.{prefix}-decoy-{name}-ran\nexit 97\n"
+    fd = os.open(os.path.join(directory, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o755)
+    with os.fdopen(fd, "w") as stream:
+        stream.write(body)
+'''
+DECOY_ON_PATH = 'for name in codex claude; do printf "%s=%s\\n" "$name" "$(command -v "$name")"; done'
+
+# Reads which pinned or user-prefix clients are running, the pinned packages'
+# versions and whether a decoy ran. It changes nothing. A process's /proc exe
+# is the proof; its argv[0], which the managed driver sets to the program it
+# launched, stands in where a client makes itself non-dumpable, as Codex does,
+# so another process cannot read its exe link.
+PINNED_PROBE = r'''import json, os, re, sys
+prefix, = sys.argv[1:]
+assert re.fullmatch(r"cwnm-[0-9a-f]{8}", prefix)
+home = "/home/codewire"
+packages = {"codex": "/opt/codewire/agents/npm/lib/node_modules/@openai/codex/package.json",
+            "claude": "/opt/codewire/agents/npm/lib/node_modules/@anthropic-ai/claude-code/package.json"}
+executables, launched = set(), set()
+for pid in os.listdir("/proc"):
+    if not pid.isdigit():
+        continue
+    try:
+        executables.add(os.readlink(f"/proc/{pid}/exe"))
+    except OSError:
+        pass
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as stream:
+            launched.add(stream.read(4096).split(b"\0", 1)[0].decode("utf-8", "replace"))
+    except OSError:
+        pass
+versions = {}
+for name, path in packages.items():
+    with open(path, "rb") as stream:
+        versions[name] = json.loads(stream.read(65537)).get("version")
+keep = lambda paths: sorted(path for path in paths if path.startswith(("/opt/codewire/agents/", home + "/.npm-global/")))
+markers = sorted(entry for entry in os.listdir(home) if entry.startswith(f".{prefix}-decoy-"))
+print(json.dumps({"executables": keep(executables), "argv0": keep(launched), "versions": versions,
+                  "markers": markers}))
+'''
+
+# Removes exactly the staged decoys and any marker they wrote, and reports
+# the markers, which fail the run.
+DECOY_REMOVE = r'''import json, os, re, stat, sys
+prefix, = sys.argv[1:]
+assert re.fullmatch(r"cwnm-[0-9a-f]{8}", prefix)
+home = "/home/codewire"
+removed, markers = [], []
+for name in ("codex", "claude"):
+    path = os.path.join(home, ".npm-global", "bin", name)
+    body = f"#!/bin/sh\n: > {home}/.{prefix}-decoy-{name}-ran\nexit 97\n".encode()
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        continue
+    with os.fdopen(fd, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        assert stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.geteuid() and metadata.st_nlink == 1
+        assert stream.read(len(body) + 1) == body
+    os.unlink(path)
+    removed.append(name)
+for entry in sorted(os.listdir(home)):
+    if entry.startswith(f".{prefix}-decoy-") and entry.endswith("-ran"):
+        os.unlink(os.path.join(home, entry))
+        markers.append(entry)
+print(json.dumps({"removed": removed, "markers": markers}))
+'''
+
 BOOT_ASSET_PROBE = r'''import hashlib, json, os, stat, sys
 expected_index, expected_manifest, expected_cw, expected_environment, expected_bootstrap = sys.argv[1:]
 flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -412,6 +515,24 @@ class Failure(Exception):
 def require(condition, message):
     if not condition:
         raise Failure(message)
+
+
+def decode_json(verb, stdout, expect):
+    if not stdout.strip():
+        require(expect != "ok", f"cw {verb} returned no JSON")
+        return None
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError as error:
+        raise Failure(f"cw {verb} returned invalid JSON: {error}") from None
+
+
+def program_fallback(agent, stderr):
+    """The client a launch reports running from PATH, and why, or None."""
+    notices = [match for match in map(FALLBACK_NOTICE.match, stderr.splitlines()) if match]
+    require(len(notices) <= 1 and all(match.group(1) == agent for match in notices),
+            f"managed {agent} launch reported another program fallback")
+    return (notices[0].group(2), notices[0].group(3)) if notices else None
 
 
 def is_uuid(value):
@@ -491,6 +612,27 @@ def require_live_family(proof, nonce):
                 "fixture did not prove both detached and double-forked process shapes")
 
 
+def require_pinned_clients(proof):
+    """Both managed agents run the image's pinned clients at the pinned
+    versions, and no decoy on PATH ever ran. Returns, per agent, whether its
+    /proc exe or only its argv[0] showed it."""
+    require(isinstance(proof, dict) and set(proof) == {"executables", "argv0", "versions", "markers"},
+            "the pinned client probe returned another proof shape")
+    executables, launched = set(proof["executables"]), set(proof["argv0"])
+    evidence = {}
+    for name, paths in PINNED_CLIENTS.items():
+        if executables & set(paths):
+            evidence[name] = "exe"
+        else:
+            require(launched & set(paths), f"no managed {name} runs the image's pinned client")
+            evidence[name] = "argv0"
+    require(not any(path.startswith("/home/codewire/.npm-global/") for path in executables | launched),
+            "a client from the user's npm prefix is running")
+    require(proof["versions"] == PINNED_VERSIONS, "the image's pinned clients are not the pinned versions")
+    require(not proof["markers"], "a decoy on PATH ran instead of the pinned client")
+    return evidence
+
+
 def require_clean_custody(proof, expected, original_family):
     peer = proof.get("peer") or {}
     require(peer.get("identity") == expected and peer.get("cleanup_unknown") is False and
@@ -549,6 +691,7 @@ class Journey:
         self.pending_callers = []
         self.tool_file = None
         self.tool_token = None
+        self.decoys_staged = False
 
     # -- CLI -------------------------------------------------------------
 
@@ -598,13 +741,7 @@ class Journey:
 
     def data(self, *args, expect="ok", timeout=30):
         code, stdout, _ = self.call(*args, expect=expect, timeout=timeout)
-        if not stdout.strip():
-            require(expect != "ok", f"cw {args[0]} returned no JSON")
-            return code, None
-        try:
-            return code, json.loads(stdout)
-        except json.JSONDecodeError as error:
-            raise Failure(f"cw {args[0]} returned invalid JSON: {error}") from None
+        return code, decode_json(args[0], stdout, expect)
 
     def wait_seconds(self, requested):
         seconds = int(self.budget(requested + 15)) - 15
@@ -668,7 +805,8 @@ class Journey:
         args += ["--parent", parent] if parent else []
         args += ["--prompt", prompt] if prompt else []
         try:
-            _, launched = self.data(*args, expect=expect, timeout=90)
+            _, stdout, stderr = self.call(*args, expect=expect, timeout=90)
+            launched = decode_json(args[0], stdout, expect)
         except Failure:
             self.adopt_name(name)
             raise
@@ -681,6 +819,15 @@ class Journey:
         require(launched["session"].get("name") == name and launched["agent"] == agent and
                 is_uuid(launched["driver_id"]), f"managed launch {name} returned another identity")
         self.drivers[sid] = launched["driver_id"]
+        fallback = program_fallback(agent, stderr)
+        if self.synthetic:
+            # Synthetic peers run only from PATH, on an image without pins.
+            require(fallback is not None and os.path.basename(fallback[0]) == agent,
+                    f"synthetic {agent} did not report running the staged peer from PATH")
+            self.agents[agent]["program_fallback"] = scrub(fallback[1], 200)
+        else:
+            require(fallback is None,
+                    f"managed {agent} ran a client from PATH: {scrub(fallback[1] if fallback else '', 200)}")
         return launched
 
     def guest(self, label, script, *argv):
@@ -933,6 +1080,7 @@ class Journey:
             for name in ("codex", "claude"):
                 self.agents[name]["guest_version"] = scrub(versions.get(name, "").strip(), 80)
             self.check("preflight/guest-agents-actual-not-synthetic")
+            self.stage_decoys()
 
         self.sentinel = self.launch_command("sentinel", ["sh"], tty=True)
         self.until(lambda: self.sessions().get(self.sentinel), lambda v: v and v["state"] == "Running",
@@ -1057,6 +1205,41 @@ class Journey:
         self.lead_turns.append(continued["id"])
         self.routed = [(self.lead_turns[0], self.lead), (initial["id"], self.worker), (parent_turn["id"], self.lead)]
         self.check("claude-worker/same-vm-parent/native-ack/deterministic-notification/parent-continuation")
+        if self.synthetic:
+            self.check("pinned/synthetic-peers-run-from-path-with-recorded-reason")
+        else:
+            self.prove_pinned_clients()
+
+    def stage_decoys(self):
+        self.stage = "pinned-decoys"
+        sid = self.launch_command("decoy-stage", ["python3", "-I", "-c", DECOY_STAGE, self.prefix])
+        self.decoys_staged = True
+        seconds = self.wait_seconds(20)
+        code, waited = self.data("wait", self.environment, sid, "--timeout", f"{seconds}s", "--output", "json",
+                                 expect="any", timeout=seconds + 15)
+        require(code == 0 and waited.get("eof") and waited["session"]["exit_code"] == 0,
+                "the user's npm prefix already holds codex or claude, or the decoys could not be staged")
+        code, output = self.guest("decoy-path", DECOY_ON_PATH)
+        resolved = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+        require(code == 0 and resolved == {name: f"/home/codewire/.npm-global/bin/{name}"
+                                           for name in ("codex", "claude")},
+                f"the decoys are not first on the guest PATH: {scrub(output, 200)}")
+        self.check("pinned/user-updated-decoys-first-on-path")
+
+    def prove_pinned_clients(self):
+        self.stage = "pinned-clients"
+        sid = self.launch_command("pinned-probe", ["python3", "-I", "-c", PINNED_PROBE, self.prefix])
+        seconds = self.wait_seconds(20)
+        code, waited = self.data("wait", self.environment, sid, "--timeout", f"{seconds}s", "--output", "json",
+                                 expect="any", timeout=seconds + 15)
+        require(code == 0 and waited.get("eof") and waited["session"]["exit_code"] == 0,
+                "the pinned client probe did not finish successfully")
+        proof = json.loads(waited.get("output", ""))
+        evidence = require_pinned_clients(proof)
+        for name in ("codex", "claude"):
+            self.agents[name]["pinned_version"] = proof["versions"][name]
+            self.agents[name]["pinned_evidence"] = evidence[name]
+        self.check("pinned/managed-agents-run-image-pin-at-pinned-version/decoys-never-ran")
 
     def prove_history_and_routing(self):
         self.stage = "history"
@@ -1567,6 +1750,19 @@ with os.fdopen(fd, "rb") as stream:
                 self.tool_file = self.tool_token = None
             except Exception as error:
                 errors.append(str(error))
+        if self.decoys_staged:
+            try:
+                sid = self.launch_command("decoy-cleanup", ["python3", "-I", "-c", DECOY_REMOVE, self.prefix])
+                seconds = self.wait_seconds(20)
+                code, waited = self.data("wait", self.environment, sid, "--timeout", f"{seconds}s",
+                                         "--output", "json", expect="any", timeout=seconds + 15)
+                require(code == 0 and waited.get("eof") and waited["session"]["exit_code"] == 0,
+                        "cleanup did not remove the exact staged decoys")
+                removed = json.loads(waited.get("output", ""))
+                self.decoys_staged = False
+                require(not removed["markers"], "a decoy on PATH ran instead of the pinned client")
+            except Exception as error:
+                errors.append(str(error))
         try:
             views = self.sessions()
         except Failure as error:
@@ -1793,6 +1989,67 @@ def contract_tests():
                             node.func.attr in ("kill", "killpg", "pidfd_open", "pidfd_send_signal")]
             self.assertEqual(sorted(signal_calls), ["pidfd_open", "pidfd_send_signal"])
             self.assertIn('assert current == expected', CUSTODY_PROBE)
+
+        def test_fallback_notice_is_the_cli_line_for_this_agent_only(self):
+            source = (Path(__file__).resolve().parents[2] /
+                      "crates/codewire-cli/src/commands/sessions/agents/native_host.rs").read_text()
+            self.assertIn('"{} runs {program} from PATH, not the image\'s pinned client: {reason}"', source)
+            line = "claude runs /usr/local/bin/claude from PATH, not the image's pinned client: the image has no pinned Claude Code\n"
+            self.assertEqual(program_fallback("claude", "warning: other\n" + line),
+                             ("/usr/local/bin/claude", "the image has no pinned Claude Code"))
+            self.assertIsNone(program_fallback("claude", "warning: other\n"))
+            for stderr in (line.replace("claude runs", "codex runs"), line + line):
+                with self.assertRaises(Failure):
+                    program_fallback("claude", stderr)
+
+        def test_launch_requires_path_peers_in_synthetic_mode_and_refuses_them_otherwise(self):
+            sid = "session-00000000-0000-4000-8000-000000000006"
+            notice = "claude runs /home/codewire/bin/claude from PATH, not the image's pinned client: the image has no pinned Claude Code\n"
+
+            def launch(synthetic, stderr):
+                journey = Journey("/not/executed/cw", environment, synthetic, None, None)
+                launched = {"session": {"session_id": sid, "name": f"{journey.prefix}-worker"},
+                            "agent": "claude", "driver_id": driver, "message": None}
+                with mock.patch.object(journey, "call", return_value=(0, json.dumps(launched), stderr)), \
+                        mock.patch.object(journey, "own", return_value=sid):
+                    journey.launch_agent("worker", "claude")
+                return journey
+
+            self.assertEqual(launch(True, notice).agents["claude"]["program_fallback"],
+                             "the image has no pinned Claude Code")
+            self.assertNotIn("program_fallback", launch(False, "").agents["claude"])
+            for synthetic, stderr in ((True, ""), (False, notice)):
+                with self.subTest(synthetic=synthetic), self.assertRaises(Failure):
+                    launch(synthetic, stderr)
+
+        def test_pinned_clients_require_the_pin_its_version_and_no_decoy(self):
+            proof = {"executables": [PINNED_CLIENTS["claude"][0]], "argv0": list(PINNED_CLIENTS["codex"][:1]),
+                     "versions": dict(PINNED_VERSIONS), "markers": []}
+            self.assertEqual(require_pinned_clients(proof), {"codex": "argv0", "claude": "exe"})
+            for change in ({"executables": [], "argv0": [PINNED_CLIENTS["codex"][0]]},
+                           {"argv0": [PINNED_CLIENTS["codex"][0], "/home/codewire/.npm-global/bin/claude"]},
+                           {"versions": {"codex": "0.160.0", "claude": "2.1.300"}},
+                           {"markers": [".cwnm-0a1b2c3d-decoy-claude-ran"]},
+                           {"extra": True}):
+                with self.subTest(change=change), self.assertRaises(Failure):
+                    require_pinned_clients(dict(proof, **change))
+
+        def test_decoy_programs_are_fixed_and_cleanup_removes_only_the_staged_bytes(self):
+            for program in (DECOY_STAGE, PINNED_PROBE, DECOY_REMOVE):
+                tree = ast.parse(program)
+                calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+                self.assertFalse(any(isinstance(node.func, ast.Name) and node.func.id in ("exec", "eval")
+                                     for node in calls))
+                self.assertIn('assert re.fullmatch(r"cwnm-[0-9a-f]{8}", prefix)', program)
+            body = 'f"#!/bin/sh\\n: > {home}/.{prefix}-decoy-{name}-ran\\nexit 97\\n"'
+            self.assertIn(body, DECOY_STAGE)
+            self.assertIn(body, DECOY_REMOVE)
+            self.assertIn("os.O_EXCL", DECOY_STAGE)
+            self.assertNotIn("unlink", PINNED_PROBE)
+            self.assertIn("pinned/user-updated-decoys-first-on-path", ACTUAL_REQUIRED)
+            self.assertIn("pinned/synthetic-peers-run-from-path-with-recorded-reason", SYNTHETIC_REQUIRED)
+            self.assertFalse({name for name in ACTUAL_REQUIRED if name.startswith("pinned/")} &
+                             set(SYNTHETIC_REQUIRED))
 
     result = unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.loadTestsFromTestCase(Contracts))
     print(json.dumps({"status":"passed" if result.wasSuccessful() else "failed", "proof":"source-contracts",
