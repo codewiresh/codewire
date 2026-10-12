@@ -288,14 +288,12 @@ fn decode_lookup(
     let mut aliases = BTreeMap::<String, (String, u32)>::new();
     let mut addresses = Vec::<(String, IpAddr, u32)>::new();
     for record in lookup.answers() {
-        if record.dns_class != DNSClass::IN || record.ttl == 0 {
+        if record.dns_class != DNSClass::IN {
             return Err(BrokerAdapterFailure::Malformed);
         }
         let owner = canonical_record_name(&record.name.to_ascii())?;
-        let ttl = record.ttl.min(remaining_ttl).min(MAX_DNS_TTL_SECONDS);
-        if ttl == 0 {
-            return Err(BrokerAdapterFailure::Malformed);
-        }
+        // A TTL of 0 means "this lookup only": it lasts one second (#2621).
+        let ttl = record.ttl.clamp(1, remaining_ttl);
         match &record.data {
             RData::CNAME(target) => {
                 if aliases.len() == MAX_CNAME_CHAIN {
@@ -347,15 +345,16 @@ fn decode_lookup(
     DnsResolution::new(chain, addresses).map_err(|_| BrokerAdapterFailure::Malformed)
 }
 
+/// Whole seconds the lookup may still be used, never less than one. A caching
+/// resolver counts every record down through a TTL of 1, which leaves under a
+/// second here; an answer that arrived valid is usable for one second (#2621).
 fn remaining_lookup_ttl(lookup: &Lookup) -> Result<u32, BrokerAdapterFailure> {
     let remaining = lookup
         .valid_until()
         .saturating_duration_since(Instant::now());
     u32::try_from(remaining.as_secs())
-        .ok()
-        .filter(|seconds| *seconds > 0)
-        .map(|seconds| seconds.min(MAX_DNS_TTL_SECONDS))
-        .ok_or(BrokerAdapterFailure::Malformed)
+        .map(|seconds| seconds.clamp(1, MAX_DNS_TTL_SECONDS))
+        .map_err(|_| BrokerAdapterFailure::Malformed)
 }
 
 fn canonical_record_name(value: &str) -> Result<String, BrokerAdapterFailure> {
@@ -368,7 +367,9 @@ fn canonical_record_name(value: &str) -> Result<String, BrokerAdapterFailure> {
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::str::FromStr as _;
+    use std::sync::Arc;
 
+    use codewire_egress_policy::{DecisionReason, PolicyDecision, PolicyDocument, RouteClass};
     use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig};
     use hickory_resolver::net::NoRecords;
     use hickory_resolver::proto::op::{Message, Query};
@@ -379,6 +380,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+    use crate::{BrokerDnsResponse, BrokerError, PolicyEgressBroker, SystemBrokerClock};
 
     const TEST_NAME: &str = "allowed.example.com";
     const TEST_ALIAS: &str = "edge.example.net";
@@ -417,6 +419,33 @@ mod tests {
         ResolverConfig::from_parts(None, vec![name("search-path.invalid.")], vec![server])
     }
 
+    /// A resolver whose loopback server answers its one query with `answers`.
+    async fn resolver_answering(
+        answers: Vec<Record>,
+    ) -> (SystemDnsResolver, tokio::task::JoinHandle<()>) {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut buffer = [0_u8; 1_232];
+            let (length, peer) = socket.recv_from(&mut buffer).await.unwrap();
+            let mut response = Message::from_vec(&buffer[..length])
+                .unwrap()
+                .into_response();
+            response.metadata.recursion_available = true;
+            response.add_answers(answers);
+            socket
+                .send_to(&response.to_vec().unwrap(), peer)
+                .await
+                .unwrap();
+        });
+        let resolver = SystemDnsResolver::from_config(
+            loopback_resolver_config(address),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        (resolver, server)
+    }
+
     #[test]
     fn complete_cname_chain_is_canonical_bounded_and_family_specific() {
         let records = vec![
@@ -452,8 +481,10 @@ mod tests {
     }
 
     #[test]
-    fn disconnected_cycles_duplicates_and_expired_records_fail_closed() {
+    fn disconnected_cycles_duplicates_and_foreign_classes_fail_closed() {
         let valid_address = a(&format!("{TEST_NAME}."), TEST_V4, 60);
+        let mut chaos_class = valid_address.clone();
+        chaos_class.dns_class = DNSClass::CH;
         let invalid_sets = [
             vec![
                 cname(&format!("{TEST_NAME}."), "edge.example.net.", 60),
@@ -464,8 +495,8 @@ mod tests {
                 cname(&format!("{TEST_NAME}."), "edge.example.net.", 60),
                 cname("edge.example.net.", &format!("{TEST_NAME}."), 60),
             ],
-            vec![valid_address.clone(), valid_address.clone()],
-            vec![a(&format!("{TEST_NAME}."), TEST_V4, 0)],
+            vec![valid_address.clone(), valid_address],
+            vec![chaos_class],
         ];
         for records in invalid_sets {
             assert_eq!(
@@ -477,14 +508,37 @@ mod tests {
                 Err(BrokerAdapterFailure::Malformed)
             );
         }
-        assert_eq!(
+    }
+
+    #[test]
+    fn ttls_are_at_least_one_second_and_still_capped() {
+        let chain = |ttl| {
+            vec![
+                cname(&format!("{TEST_NAME}."), "edge.example.net.", 60),
+                a("edge.example.net.", TEST_V4, ttl),
+            ]
+        };
+        let decode = |ttl, lifetime| {
             decode_lookup(
                 TEST_NAME,
                 DnsRecordFamily::Ipv4,
-                &lookup(vec![valid_address], Duration::ZERO),
-            ),
-            Err(BrokerAdapterFailure::Malformed)
-        );
+                &lookup(chain(ttl), lifetime),
+            )
+            .unwrap()
+        };
+
+        // A record with no TTL, in a lookup with time left.
+        let no_ttl = decode(0, Duration::from_secs(60));
+        assert_eq!(no_ttl.addresses()[0].ttl_seconds(), 1);
+        assert!((1..=60).contains(&no_ttl.aliases()[0].ttl_seconds()));
+        // A lookup in its last second, and one with none left.
+        for lifetime in [Duration::from_millis(900), Duration::ZERO] {
+            let last_second = decode(60, lifetime);
+            assert_eq!(last_second.addresses()[0].ttl_seconds(), 1);
+            assert_eq!(last_second.aliases()[0].ttl_seconds(), 1);
+        }
+        let long = decode(86_400, Duration::from_secs(86_400));
+        assert_eq!(long.addresses()[0].ttl_seconds(), MAX_DNS_TTL_SECONDS);
     }
 
     #[test]
@@ -563,6 +617,106 @@ mod tests {
         assert_eq!(observed_name.to_ascii_lowercase(), "allowed.example.com.");
         assert_eq!(observed_type, RecordType::A);
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_dns_answers_in_their_last_second_resolve_for_one_second() {
+        for ttl in [1, 0] {
+            let (resolver, server) = resolver_answering(vec![
+                cname("allowed.example.com.", "edge.example.net.", 60),
+                a("edge.example.net.", TEST_V4, ttl),
+            ])
+            .await;
+            let outcome = resolver
+                .resolve(DnsResolverRequest {
+                    name: TEST_NAME.to_string(),
+                    family: DnsRecordFamily::Ipv4,
+                })
+                .await;
+            let Ok(DnsResolverOutcome::Positive(resolution)) = outcome else {
+                panic!("an answer with a TTL of {ttl} resolved to {outcome:?}");
+            };
+            assert_eq!(resolution.aliases()[0].ttl_seconds(), 1);
+            assert_eq!(resolution.addresses()[0].address(), IpAddr::V4(TEST_V4));
+            assert_eq!(resolution.addresses()[0].ttl_seconds(), 1);
+            server.await.unwrap();
+        }
+    }
+
+    /// The one-second floor does not let an answer past the address classes: a
+    /// rebinding answer is refused for its address, whatever its TTL.
+    #[tokio::test]
+    async fn an_answer_without_a_ttl_is_still_refused_for_a_protected_address() {
+        let broker_answering = |address| async move {
+            let policy = PolicyDocument::parse_yaml(
+                br#"
+version: 1
+default: deny
+rules:
+  - id: named-dns
+    action: allow
+    protocols: [dns]
+    ports: [53]
+    destinations: [allowed.example.com]
+    route_classes: [general]
+  - id: named-tcp
+    action: allow
+    protocols: [tcp]
+    ports: [443]
+    destinations: [allowed.example.com]
+    route_classes: [general]
+"#,
+            )
+            .unwrap();
+            let (resolver, server) =
+                resolver_answering(vec![a(&format!("{TEST_NAME}."), address, 0)]).await;
+            let broker = PolicyEgressBroker::new(
+                policy,
+                RouteClass::General,
+                Arc::new(resolver),
+                Arc::new(SystemTcpConnector::new()),
+                Arc::new(SystemBrokerClock::new()),
+            );
+            let resolved = broker.resolve_dns(TEST_NAME, DnsRecordFamily::Ipv4).await;
+            server.await.unwrap();
+            (broker, resolved)
+        };
+
+        let (broker, resolved) = broker_answering(TEST_V4).await;
+        let Ok(BrokerDnsResponse::Positive(admitted)) = resolved else {
+            panic!("a public answer without a TTL resolved to {resolved:?}");
+        };
+        assert_eq!(admitted.ttl_seconds(), 1);
+        assert!(
+            broker
+                .authorize_tcp(SocketAddr::new(IpAddr::V4(TEST_V4), 443))
+                .await
+                .is_ok()
+        );
+
+        for protected in [
+            Ipv4Addr::LOCALHOST,
+            Ipv4Addr::new(10, 0, 0, 7),
+            Ipv4Addr::new(169, 254, 169, 254),
+        ] {
+            let (broker, resolved) = broker_answering(protected).await;
+            assert!(
+                matches!(
+                    resolved,
+                    Err(BrokerError::Denied(PolicyDecision {
+                        reason: DecisionReason::ProtectedAddress(_),
+                        ..
+                    }))
+                ),
+                "{protected} resolved to {resolved:?}"
+            );
+            assert!(matches!(
+                broker
+                    .authorize_tcp(SocketAddr::new(IpAddr::V4(protected), 443))
+                    .await,
+                Err(BrokerError::Denied(_))
+            ));
+        }
     }
 
     #[tokio::test]
