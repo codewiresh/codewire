@@ -89,10 +89,31 @@ fn build_managed_process_env_from(
     let mut inherited = inherited.into_iter().collect::<Vec<_>>();
     inherited.retain(|(name, _)| !managed_names.contains(name));
     inherited.extend(managed.environment);
+    // A managed client variable is Codewire's while its client is selected.
+    // Most are reserved, so a declared one was refused above or at
+    // admission. The rest (the `gh` names) cannot be reserved without
+    // refusing running environments, so here the managed value simply wins
+    // over a declared one, on every placement: a declared environment entry
+    // is dropped, and an application secret of that name is not applied. Only
+    // an explicit value for this one command still outranks it.
+    let reserved = config
+        .managed_credential_clients
+        .reserved_environment_keys();
+    let mut persisted = persisted;
+    persisted.retain(|entry| {
+        entry
+            .split_once('=')
+            .is_none_or(|(name, _)| !managed_names.contains(name))
+    });
     let mut entries =
         build_process_env_from(config, persisted, extra, term, inherited, fallback_shell);
     bypass_proxy_for_loopback(config.managed_credential_clients, &mut entries);
     let mut override_names = command_override_names(extra, term);
+    override_names.extend(
+        managed_names
+            .into_iter()
+            .filter(|name| !reserved.contains(name.as_str())),
+    );
     // The launch projection would otherwise replace the extended list with
     // an application secret of the same name, dropping the loopback entries.
     // While an HTTP client is selected the list above is final; declared
@@ -550,11 +571,13 @@ mod tests {
                     ["NO_PROXY=command.example,localhost,127.0.0.1,::1"]
                 );
                 // An application secret of either name is not applied over
-                // the extended list: both are launch override names.
-                assert_eq!(
-                    environment.override_names,
-                    BTreeSet::from(["NO_PROXY".to_owned(), "no_proxy".to_owned()])
-                );
+                // the extended list: both are launch override names, beside
+                // the gh names while GitHub is selected.
+                let mut expected = BTreeSet::from(["NO_PROXY".to_owned(), "no_proxy".to_owned()]);
+                if slots.contains(&"github") {
+                    expected.extend(["GH_CONFIG_DIR".to_owned(), "GH_TOKEN".to_owned()]);
+                }
+                assert_eq!(environment.override_names, expected);
             }
             // SSH alone, or no selection, has no HTTP route: nothing is set
             // and a declared list is the workload's own.
@@ -584,6 +607,136 @@ mod tests {
             .unwrap()
             .override_names;
             assert!(overrides.is_empty());
+        }
+    }
+
+    /// The `gh` names are projected without being reserved, so a declared
+    /// value cannot be refused. On both placements the managed value wins
+    /// over a declared environment entry and over an application secret of
+    /// the same name; only an explicit per-command value outranks it.
+    #[test]
+    fn a_declared_gh_configuration_loses_to_the_managed_one_on_both_placements() {
+        for (transport, directory) in [
+            (
+                CredentialBridgeTransport::Local,
+                codewire_access::GH_NATIVE_CONFIG_DIR,
+            ),
+            (
+                CredentialBridgeTransport::Hosted,
+                codewire_access::GH_PLATFORM_CONFIG_DIR,
+            ),
+        ] {
+            let config = selected_config(PathBuf::from("/home/codewire"), &["github"], transport);
+            let build = |persisted: &[&str], extra: &[&str]| {
+                build_managed_process_env_from(
+                    &config,
+                    persisted.iter().map(|entry| (*entry).to_owned()).collect(),
+                    &extra
+                        .iter()
+                        .map(|entry| (*entry).to_owned())
+                        .collect::<Vec<_>>(),
+                    "",
+                    [
+                        ("GH_CONFIG_DIR".to_owned(), "/image/gh".to_owned()),
+                        ("GH_TOKEN".to_owned(), "image-value".to_owned()),
+                    ],
+                    "/bin/sh",
+                )
+                .unwrap()
+            };
+            // The gh names, and the proxy exemption list every HTTP client
+            // selection fixes.
+            let gh_names = BTreeSet::from(
+                ["GH_CONFIG_DIR", "GH_TOKEN", "NO_PROXY", "no_proxy"].map(str::to_owned),
+            );
+
+            // Nothing declared: the managed values, each exactly once.
+            let plain = build(&[], &[]);
+            let values = env_map(&plain.entries);
+            assert_eq!(values["GH_CONFIG_DIR"], directory);
+            assert_eq!(values["GH_TOKEN"], codewire_access::GH_TOKEN_PLACEHOLDER);
+            assert_eq!(
+                plain
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.starts_with("GH_"))
+                    .count(),
+                2
+            );
+            // An application secret of either name is not applied over them.
+            assert_eq!(plain.override_names, gh_names);
+
+            // A declared environment entry loses, and nothing else of the
+            // declared environment is touched.
+            let declared = build(
+                &[
+                    "GH_CONFIG_DIR=/home/codewire/.config/gh",
+                    "GH_TOKEN=declared",
+                    "APPLICATION=declared",
+                ],
+                &[],
+            );
+            let values = env_map(&declared.entries);
+            assert_eq!(values["GH_CONFIG_DIR"], directory);
+            assert_eq!(values["GH_TOKEN"], codewire_access::GH_TOKEN_PLACEHOLDER);
+            assert_eq!(values["APPLICATION"], "declared");
+            assert_eq!(
+                declared
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.starts_with("GH_"))
+                    .count(),
+                2
+            );
+            assert_eq!(declared.override_names, gh_names);
+
+            // An explicit value for this one command is the user's own.
+            let explicit = build(
+                &["GH_CONFIG_DIR=/home/codewire/.config/gh"],
+                &["GH_CONFIG_DIR=/explicit/gh"],
+            );
+            let values = env_map(&explicit.entries);
+            assert_eq!(values["GH_CONFIG_DIR"], "/explicit/gh");
+            assert_eq!(values["GH_TOKEN"], codewire_access::GH_TOKEN_PLACEHOLDER);
+            assert_eq!(explicit.override_names, gh_names);
+
+            // The reserved Git names are still refused, never merged.
+            assert_eq!(
+                build_managed_process_env_from(
+                    &config,
+                    vec!["GIT_CONFIG_COUNT=2".into()],
+                    &[],
+                    "",
+                    [],
+                    "/bin/sh",
+                )
+                .unwrap_err()
+                .kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        // Without GitHub the names are the workload's own on both placements.
+        for transport in [
+            CredentialBridgeTransport::Local,
+            CredentialBridgeTransport::Hosted,
+        ] {
+            let config = selected_config(PathBuf::from("/home/codewire"), &["codex"], transport);
+            let environment = build_managed_process_env_from(
+                &config,
+                vec!["GH_CONFIG_DIR=/home/codewire/.config/gh".into()],
+                &[],
+                "",
+                [("GH_TOKEN".to_owned(), "image-value".to_owned())],
+                "/bin/sh",
+            )
+            .unwrap();
+            let values = env_map(&environment.entries);
+            assert_eq!(values["GH_CONFIG_DIR"], "/home/codewire/.config/gh");
+            assert_eq!(values["GH_TOKEN"], "image-value");
+            assert_eq!(
+                environment.override_names,
+                BTreeSet::from(["NO_PROXY".to_owned(), "no_proxy".to_owned()])
+            );
         }
     }
 
