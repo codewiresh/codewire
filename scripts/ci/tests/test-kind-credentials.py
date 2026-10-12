@@ -2196,7 +2196,7 @@ class BridgeRenewalProbe(unittest.TestCase):
         for connection in self.connections:
             self.assertEqual(connection.args, (("127.0.0.1", 38081), {"timeout": 20}))
             request = connection.request.call_args
-            self.assertEqual(request.args, ("POST", "/v1/messages"))
+            self.assertEqual(request.args, ("POST", "/_codewire/anthropic/v1/messages"))
             self.assertEqual(request.kwargs["headers"],
                              {"Host": "localhost", "Content-Type": "application/json"})
             self.assertNotIn("Authorization", request.kwargs["headers"])
@@ -2429,10 +2429,10 @@ class ClaudeSessionDriver(unittest.TestCase):
     The environment passed in stands for what the workspace daemon projected
     into the session; the driver must only observe it."""
 
-    SUBSCRIPTION = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081",
+    SUBSCRIPTION = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081/_codewire/anthropic",
                     "CLAUDE_CODE_OAUTH_TOKEN": "codewire-managed",
                     "ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_API_KEY": ""}
-    API_KEY = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081",
+    API_KEY = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081/_codewire/anthropic",
                "ANTHROPIC_AUTH_TOKEN": "codewire-managed",
                "ANTHROPIC_API_KEY": "", "CLAUDE_CODE_OAUTH_TOKEN": ""}
 
@@ -2820,9 +2820,9 @@ kind_credential_claude_stage workspace-pod
 
     def test_provider_events_must_be_new_answers_for_exactly_the_expected_form(self):
         api = {"event": "anthropic_response", "kind": "api_key", "route": "messages",
-               "stream": True, "status": 200, "refused": False, "client_identity": False,
+               "stream": True, "status": 200, "refused": False, "client_identity": True,
                "anthropic_calls": 1}
-        token = dict(api, kind="subscription_token", client_identity=True, anthropic_calls=3)
+        token = dict(api, kind="subscription_token", anthropic_calls=3)
         refused = dict(token, status=401, refused=True, anthropic_calls=5)
         unrelated = {"event": "provider_response", "scenario": "baseline"}
         events = [unrelated, api, dict(api, anthropic_calls=2), token,
@@ -2839,7 +2839,7 @@ kind_credential_claude_stage workspace-pod
                 ([], 2, "subscription_token", 200),
                 ([dict(token, status=500)], 2, "subscription_token", 200),
                 ([dict(token, client_identity=False)], 2, "subscription_token", 200),
-                ([dict(api, client_identity=True)], 2, "api_key", 200),
+                ([dict(api, client_identity=False)], 2, "api_key", 200),
                 ([refused], 2, "subscription_token", 200),
                 ([dict(refused, refused=False)], 2, "subscription_token", 401),
                 ([{"event": "anthropic_rejected", "reason": "placeholder",

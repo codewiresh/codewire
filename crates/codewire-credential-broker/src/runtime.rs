@@ -608,6 +608,13 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
         if let Some(answer) = Self::device_login(&method, &target, &body)? {
             return Ok(answer);
         }
+        if let Some(host) = unserved_host(&method, &target) {
+            return if Self::unserved_credential(host, &headers) {
+                Ok(Self::not_found(host))
+            } else {
+                Err(BrokerUpstreamError::Protocol)
+            };
+        }
         if target.host_str() == Some("api.anthropic.com") {
             return Self::anthropic(method, target, headers, body);
         }
@@ -679,7 +686,7 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
             "x-request-id",
             HeaderValue::from_str(protected_value).map_err(|_| BrokerUpstreamError::Protocol)?,
         );
-        response_headers.insert("x-error-json", Self::opaque_reflection(protected_value)?);
+        response_headers.insert("x-error-json", Self::reflection(protected_value)?);
         Ok(BrokerUpstreamResponse::new(
             StatusCode::OK,
             response_headers,
@@ -688,8 +695,141 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
     }
 }
 
+/// A transparent provider route's pinned host (#2536), as the synthetic
+/// fixtures classify a request they do not serve.
+#[cfg(feature = "local-broker-synthetic-smoke")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyntheticProviderHost {
+    /// `https://chatgpt.com/backend-api/codex/`, the ChatGPT-login Codex base.
+    Codex,
+    /// `https://api.openai.com/v1/`, the OpenAI API-key base.
+    OpenAi,
+    /// `https://api.anthropic.com`, the Anthropic origin.
+    Anthropic,
+}
+
+#[cfg(feature = "local-broker-synthetic-smoke")]
+impl SyntheticProviderHost {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+        }
+    }
+}
+
+/// The pinned host of a request on a transparent route that no synthetic
+/// fixture serves: any method, path or query on a provider base other than
+/// the exact POST routes they implement. A structurally foreign target
+/// (another scheme, port or host, user info or a fragment) is no provider
+/// request at all and stays `None`.
+#[cfg(feature = "local-broker-synthetic-smoke")]
+fn unserved_host(method: &Method, target: &Url) -> Option<SyntheticProviderHost> {
+    if target.scheme() != "https"
+        || target.port().is_some()
+        || !target.username().is_empty()
+        || target.password().is_some()
+        || target.fragment().is_some()
+    {
+        return None;
+    }
+    let (path, query) = (target.path(), target.query());
+    let (host, served) = match target.host_str()? {
+        "chatgpt.com" if path.starts_with("/backend-api/codex/") => (
+            SyntheticProviderHost::Codex,
+            path == "/backend-api/codex/responses" && query.is_none(),
+        ),
+        "api.openai.com" if path.starts_with("/v1/") => (
+            SyntheticProviderHost::OpenAi,
+            path == "/v1/responses" && query.is_none(),
+        ),
+        "api.anthropic.com" => (
+            SyntheticProviderHost::Anthropic,
+            matches!(path, "/v1/messages" | "/v1/messages/count_tokens")
+                && matches!(query, None | Some("beta=true")),
+        ),
+        _ => return None,
+    };
+    (*method != Method::POST || !served).then_some(host)
+}
+
 #[cfg(feature = "local-broker-synthetic-smoke")]
 impl SyntheticOpenAiSmokeTransport {
+    /// The pinned host of a request on a transparent route (#2536) that no
+    /// synthetic fixture serves. Only the method and target are read.
+    pub fn unserved_host(request: &BrokerUpstreamRequest) -> Option<SyntheticProviderHost> {
+        unserved_host(&request.method, &request.target)
+    }
+
+    /// The fixtures' answer to an unserved request: what the provider answers
+    /// for a route it lacks, a fixed 404 that reflects nothing. A transport
+    /// failure would be wrong twice over: no provider fails that way, and the
+    /// broker reports one as UpstreamFailed, which ends the whole bridge epoch
+    /// and with it every other slot's requests.
+    pub fn not_found(host: SyntheticProviderHost) -> BrokerUpstreamResponse {
+        let body: &'static [u8] = match host {
+            SyntheticProviderHost::Anthropic => {
+                br#"{"type":"error","error":{"type":"not_found_error","message":"Synthetic provider route not served"}}"#
+            }
+            SyntheticProviderHost::Codex | SyntheticProviderHost::OpenAi => {
+                br#"{"error":{"message":"Synthetic provider route not served","type":"invalid_request_error","param":null,"code":"not_found"}}"#
+            }
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+        BrokerUpstreamResponse::new(
+            StatusCode::NOT_FOUND,
+            headers,
+            Box::pin(stream::once(async move { Ok(Bytes::from_static(body)) })),
+        )
+    }
+
+    /// An unserved request still carries exactly the credential this fixture
+    /// expects the broker to inject for that host, and nothing a guest could
+    /// have supplied in its place.
+    fn unserved_credential(host: SyntheticProviderHost, headers: &HeaderMap) -> bool {
+        let single = |name: &str| headers.get_all(name).iter().count() == 1;
+        let bearer = |prefix: &str| {
+            single("authorization")
+                && headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.strip_prefix("Bearer "))
+                    .is_some_and(|value| Self::canary(value, prefix))
+        };
+        if ["cookie", "proxy-authorization", "host"]
+            .iter()
+            .any(|name| headers.contains_key(*name))
+        {
+            return false;
+        }
+        match host {
+            SyntheticProviderHost::Codex => {
+                !headers.contains_key("x-api-key")
+                    && bearer("cwlocalbroker")
+                    && single("chatgpt-account-id")
+                    && headers
+                        .get("chatgpt-account-id")
+                        .and_then(|value| value.to_str().ok())
+                        == Some(SYNTHETIC_CODEX_ACCOUNT_ID)
+            }
+            SyntheticProviderHost::OpenAi => {
+                !headers.contains_key("x-api-key")
+                    && !headers.contains_key("chatgpt-account-id")
+                    && bearer("cwlocalopenai")
+            }
+            SyntheticProviderHost::Anthropic => {
+                !headers.contains_key("authorization")
+                    && single("x-api-key")
+                    && headers
+                        .get("x-api-key")
+                        .and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| Self::canary(value, "cwlocalanthropic"))
+            }
+        }
+    }
+
     /// Select only the fixed API family before route validation. An invalid
     /// URL on either API host must stay in this branch and be refused instead
     /// of falling through to an OAuth fixture.
@@ -746,42 +886,18 @@ impl SyntheticOpenAiSmokeTransport {
         expected: &str,
     ) -> Result<(), BrokerUpstreamError> {
         let denied = BrokerUpstreamError::Protocol;
-        let (route, path, query, prefix, authority) = match request.target.as_str() {
+        let (route, prefix, authority) = match request.target.as_str() {
             "https://api.openai.com/v1/responses" => (
                 crate::openai::openai_responses_route(),
-                "/responses",
-                None,
                 "cwlocalopenai",
                 "authorization",
             ),
-            "https://api.anthropic.com/v1/messages" => (
-                crate::anthropic::route(),
-                "/messages",
-                None,
-                "cwlocalanthropic",
-                "x-api-key",
-            ),
-            "https://api.anthropic.com/v1/messages?beta=true" => (
-                crate::anthropic::route(),
-                "/messages",
-                Some("beta=true"),
-                "cwlocalanthropic",
-                "x-api-key",
-            ),
-            "https://api.anthropic.com/v1/messages/count_tokens" => (
-                crate::anthropic::route(),
-                "/messages/count_tokens",
-                None,
-                "cwlocalanthropic",
-                "x-api-key",
-            ),
-            "https://api.anthropic.com/v1/messages/count_tokens?beta=true" => (
-                crate::anthropic::route(),
-                "/messages/count_tokens",
-                Some("beta=true"),
-                "cwlocalanthropic",
-                "x-api-key",
-            ),
+            "https://api.anthropic.com/v1/messages"
+            | "https://api.anthropic.com/v1/messages?beta=true"
+            | "https://api.anthropic.com/v1/messages/count_tokens"
+            | "https://api.anthropic.com/v1/messages/count_tokens?beta=true" => {
+                (crate::anthropic::route(), "cwlocalanthropic", "x-api-key")
+            }
             _ => return Err(denied),
         };
         if !Self::canary(expected, prefix)
@@ -792,16 +908,24 @@ impl SyntheticOpenAiSmokeTransport {
         {
             return Err(denied);
         }
+        // Transparent routes forward the client's own headers. Only
+        // credentials, framing and the other form's authority must be absent;
+        // the OpenAI form also never forwards a guest account selector.
+        let other_authority = if authority == "authorization" {
+            "x-api-key"
+        } else {
+            "authorization"
+        };
         let mut header_bytes = 0_usize;
         for (name, value) in &request.headers {
             if request.headers.get_all(name).iter().count() != 1
                 || value.as_bytes().len() > 8 * 1024
-                || !(name.as_str() == authority
-                    || name == http::header::ACCEPT_ENCODING
-                    || route
-                        .allowed_request_headers
-                        .iter()
-                        .any(|allowed| allowed == name.as_str()))
+                || matches!(
+                    name.as_str(),
+                    "cookie" | "proxy-authorization" | "host" | "connection" | "upgrade"
+                )
+                || name.as_str() == other_authority
+                || (authority == "authorization" && name.as_str() == "chatgpt-account-id")
             {
                 return Err(denied);
             }
@@ -820,7 +944,15 @@ impl SyntheticOpenAiSmokeTransport {
         } else {
             supplied
         };
+        let mut content_types = request.headers.get_all(http::header::CONTENT_TYPE).iter();
+        let json = content_types
+            .next()
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"));
         if supplied != Some(expected)
+            || content_types.next().is_some()
+            || !json
             || request
                 .headers
                 .get(http::header::ACCEPT_ENCODING)
@@ -839,15 +971,6 @@ impl SyntheticOpenAiSmokeTransport {
         {
             return Err(denied);
         }
-        av_credential_proxy::validate_proxy_request(
-            &route,
-            path,
-            query,
-            &request.method,
-            &request.headers,
-            request.body.len(),
-        )
-        .map_err(|_| denied)?;
         Ok(())
     }
 
@@ -941,12 +1064,11 @@ impl SyntheticOpenAiSmokeTransport {
         })
     }
 
-    fn opaque_reflection(value: &str) -> Result<HeaderValue, BrokerUpstreamError> {
-        use base64::Engine as _;
-
-        let opaque =
-            base64::engine::general_purpose::STANDARD.encode(format!("{{\"error\":\"{value}\"}}"));
-        HeaderValue::from_str(&opaque).map_err(|_| BrokerUpstreamError::Protocol)
+    /// A provider diagnostic header reflecting the credential inside JSON.
+    /// Transparent routes return it with the credential redacted.
+    fn reflection(value: &str) -> Result<HeaderValue, BrokerUpstreamError> {
+        HeaderValue::from_str(&format!("{{\"error\":\"{value}\"}}"))
+            .map_err(|_| BrokerUpstreamError::Protocol)
     }
 
     fn anthropic(
@@ -968,14 +1090,9 @@ impl SyntheticOpenAiSmokeTransport {
             || body.is_empty()
             || body.len() > 4 * 1024 * 1024
             || headers.keys().any(|name| {
-                !matches!(
+                matches!(
                     name.as_str(),
-                    "accept"
-                        | "content-type"
-                        | "anthropic-version"
-                        | "anthropic-beta"
-                        | "accept-encoding"
-                        | "x-api-key"
+                    "authorization" | "cookie" | "proxy-authorization" | "host"
                 )
             })
             || headers
@@ -1023,9 +1140,7 @@ impl SyntheticOpenAiSmokeTransport {
             "request-id",
             HeaderValue::from_str(protected_value).map_err(|_| BrokerUpstreamError::Protocol)?,
         );
-        // Opaque provider diagnostics must be dropped, not mistaken for a
-        // header whose contents can safely be forwarded after raw redaction.
-        response_headers.insert("x-error-json", Self::opaque_reflection(protected_value)?);
+        response_headers.insert("x-error-json", Self::reflection(protected_value)?);
         if !messages {
             return Ok(BrokerUpstreamResponse::new(
                 StatusCode::OK,
@@ -1585,7 +1700,7 @@ where
                 request.body,
             )
             .map_err(map_adapter_error)?;
-        let operation = BrokerOperationId::parse(validated.operation().operation_name())
+        let operation = BrokerOperationId::parse(crate::anthropic::OPERATION)
             .map_err(|_| BrokerRequestError::InvalidRequest)?;
         let lease = self
             .leases
@@ -3797,7 +3912,14 @@ mod tests {
             let response = broker.execute(request()).await.unwrap();
             let (status, headers, mut body) = response.into_parts();
             assert_eq!(status, StatusCode::OK);
-            assert!(!headers.contains_key(http::header::CONTENT_ENCODING));
+            assert!(
+                headers
+                    .get(http::header::CONTENT_ENCODING)
+                    .is_none_or(|value| value
+                        .as_bytes()
+                        .trim_ascii()
+                        .eq_ignore_ascii_case(b"identity"))
+            );
             assert_eq!(headers.get("x-request-id").unwrap(), "[REDACTED]");
             let mut output = Vec::new();
             while let Some(chunk) = body.next().await {
@@ -3833,8 +3955,10 @@ mod tests {
             ));
         }
 
+        // Transparent routes admit any query; an unsafe path is still refused
+        // before any lease.
         let mut denied = request();
-        denied.query = "exfiltrate=true".into();
+        denied.path = "/../responses".into();
         assert!(matches!(
             broker.execute(denied).await,
             Err(BrokerRequestError::Denied)

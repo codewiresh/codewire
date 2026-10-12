@@ -6,7 +6,7 @@ umask 077
 
 readonly CLAUDE_BIN=/opt/codewire/agents/npm/bin/claude
 readonly EXPECTED_VERSION='2.1.288 (Claude Code)'
-readonly EXPECTED_ANTHROPIC_BASE_URL=http://127.0.0.1:38081
+readonly EXPECTED_ANTHROPIC_BASE_URL=http://127.0.0.1:38081/_codewire/anthropic
 readonly EXPECTED_ANTHROPIC_AUTH_TOKEN=codewire-managed
 readonly CAPTURE_LIMIT_BYTES=1048576
 readonly SCRATCH_PARENT=/dev/shm
@@ -85,7 +85,7 @@ provider_anthropic_run() (
     # shellcheck disable=SC2016 # The child shell validates its inherited projection.
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_MAX_RETRIES=0 \
       timeout --kill-after=5s 120s /bin/sh -c '
-        test "${ANTHROPIC_BASE_URL-}" = "http://127.0.0.1:38081" &&
+        test "${ANTHROPIC_BASE_URL-}" = "http://127.0.0.1:38081/_codewire/anthropic" &&
         test "${ANTHROPIC_AUTH_TOKEN-}" = codewire-managed &&
         test "${ANTHROPIC_API_KEY+x}" = x && test -z "$ANTHROPIC_API_KEY" &&
         test "${CLAUDE_CODE_OAUTH_TOKEN+x}" = x && test -z "$CLAUDE_CODE_OAUTH_TOKEN" &&

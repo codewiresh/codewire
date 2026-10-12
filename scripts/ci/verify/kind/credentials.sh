@@ -1452,11 +1452,11 @@ kind_credential_claude_run() {
 
 # The fixture's Anthropic events since its pod started. Prints their count
 # after asserting that every event after the first `baseline` ones answered
-# exactly `form`, with at least one, and all with `status`. Claude Code's own
-# identity headers reach the provider for the subscription form only, so the
-# closed `client_identity` flag distinguishes the forms at the provider too.
-# A rejection of any kind, including the Sandbox placeholder reaching the
-# provider, fails.
+# exactly `form`, with at least one, and all with `status`. The broker's
+# Anthropic route is transparent, so Claude Code's own identity headers reach
+# the provider in both forms and the closed `client_identity` flag is set on
+# every answer. A rejection of any kind, including the Sandbox placeholder
+# reaching the provider, fails.
 assert_kind_credential_anthropic_events() {
   local baseline="$1" form="$2" status="$3"
   [[ "$baseline" =~ ^[0-9]+$ ]] || return 1
@@ -1468,7 +1468,7 @@ assert_kind_credential_anthropic_events() {
     | if ($all | length) > $baseline
         and all($all[$baseline:][]; .event == "anthropic_response" and .kind == $kind
           and .status == $status and .refused == ($status == 401)
-          and .client_identity == ($kind == "subscription_token")
+          and .client_identity == true
           and (.route == "messages" or .route == "count_tokens"))
       then ($all | length) else error("unexpected Anthropic provider events") end' || {
     echo "::error::the synthetic provider did not see only the ${form} credential answering ${status}" >&2

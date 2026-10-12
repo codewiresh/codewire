@@ -30,9 +30,13 @@ pub const MANAGED_HTTP_PORT: u16 = 38_081;
 /// Workspace environment variable carrying the managed clients orchestration
 /// rendered for one Pod, in [`ManagedCredentialClients::encode`] form.
 pub const MANAGED_CREDENTIAL_CLIENTS_ENV: &str = "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS";
-/// Base-URL path for the distinct OpenAI API-key profile slot. Only POST
-/// responses is admitted; ordinary Codex configuration retains its own route.
+/// Base-URL path for the distinct OpenAI API-key profile slot. Every request
+/// under it reaches the OpenAI API unchanged except for its credential;
+/// ordinary Codex configuration retains its own route.
 pub const MANAGED_OPENAI_API_PREFIX: &str = "/_codewire/openai/v1";
+/// Base-URL path for the Anthropic profile slot. Every request under it
+/// reaches the Anthropic API unchanged except for its credential.
+pub const MANAGED_ANTHROPIC_API_PREFIX: &str = "/_codewire/anthropic";
 /// Smart Git prefix on the existing managed HTTP ingress. Only the selected
 /// GitHub adapter may resolve this route to an upstream provider.
 pub const MANAGED_GITHUB_GIT_PREFIX: &str = "/_codewire/github/";
@@ -301,7 +305,10 @@ impl ManagedCredentialClients {
             environment.insert("OPENAI_API_KEY".into(), "codewire-managed".into());
         }
         if self.contains(ManagedCredentialClient::Anthropic) {
-            environment.insert("ANTHROPIC_BASE_URL".into(), origin.clone());
+            environment.insert(
+                "ANTHROPIC_BASE_URL".into(),
+                format!("{origin}{MANAGED_ANTHROPIC_API_PREFIX}"),
+            );
             if self.anthropic_subscription_token() {
                 // Claude Code's subscription mode: the placeholder makes it
                 // send its own OAuth form (bearer plus the OAuth beta) to
