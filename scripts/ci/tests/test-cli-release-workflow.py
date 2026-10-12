@@ -27,8 +27,9 @@ DARWIN_TARGETS = "aarch64-apple-darwin x86_64-apple-darwin"
 LINUX_TARGETS = "x86_64-unknown-linux-musl aarch64-unknown-linux-gnu"
 GPG = ("CW_RELEASE_GPG_PRIVATE_KEY", "CW_RELEASE_GPG_PASSPHRASE", "CW_RELEASE_GPG_KEY_ID")
 CAPABILITIES = ("enable-openid-connect", "secrets.", "fetch-openbao-", "sign-cw-release", "cw_release_r2",
-                "mint-github-app-token", "publish-cw-release", "GH_MIRROR_TOKEN_FILE", "sign-macos-cw",
-                "rcodesign")
+                "mint-github-app-token", "publish-cw-release", "GH_MIRROR_TOKEN_FILE")
+# macOS signing runs only in its own job (the dry run's runs a stand-in).
+MACOS_SIGNING = ("sign-macos-cw", "rcodesign")
 # What the macOS signing job must never hold: release OpenPGP, mirror and R2.
 NOT_IN_MACOS_SIGNING = ("secrets.", "fetch-openbao-release-signing-key", "fetch-openbao-releases-r2",
                         "fetch-openbao-github-mirror", "sign-cw-release", "cw_release_r2", "mint-github-app-token",
@@ -116,7 +117,7 @@ def check(text, ci_text):
     # no capability; only the publishing job records the parts it built.
     need("    needs: [release-selection]\n    runs-on: ci-protected\n" in runtime,
          "the runtime's Linux side does not follow release selection on a protected runner")
-    for capability in CAPABILITIES:
+    for capability in CAPABILITIES + MACOS_SIGNING:
         need(capability not in runtime, f"runtime build job holds capability {capability}")
     runtime_build = dict(steps(runtime)).get("Build the Linux side", "")
     need("        working-directory: .release-source\n" in runtime_build
@@ -144,7 +145,7 @@ def check(text, ci_text):
          == ["Record the runtime parts this release built"],
          "runtime part records are written outside the publishing step")
     need("    runs-on: macos-arm64\n" in darwin, "the macOS build does not run on the protected Mac runner")
-    for capability in CAPABILITIES:
+    for capability in CAPABILITIES + MACOS_SIGNING:
         need(capability not in darwin, f"macOS build job holds capability {capability}")
     need(f"CW_RELEASE_TARGETS='{DARWIN_TARGETS}'" in darwin, "the macOS build does not build exactly the Mac pair")
     need("darwin_sums_sha256" in darwin and "name: cw-release-darwin-${{ github.run_id }}" in darwin,
@@ -180,6 +181,7 @@ def check(text, ci_text):
     need('find "$macos_work" -type f -exec shred -u {} +' in signing, "the Apple keys are not shredded")
     need("darwin_sums_sha256" in signing and "name: cw-release-darwin-signed-${{ github.run_id }}" in macos_signing,
          "macOS signing does not hand over and bind the signed pair")
+    need("rcodesign-stand-in" not in text, "the release signs with the rcodesign stand-in")
 
     need("    needs: [release-selection, sign-darwin]" in build,
          "build does not depend on release selection and the signed macOS pair")
@@ -187,8 +189,10 @@ def check(text, ci_text):
          and "name: cw-release-darwin-${{ github.run_id }}" not in build
          and "DARWIN_SUMS_SHA256: ${{ needs.sign-darwin.outputs.darwin_sums_sha256 }}" in build,
          "build does not package exactly the signed macOS pair")
-    for capability in CAPABILITIES:
+    for capability in CAPABILITIES + MACOS_SIGNING:
         need(capability not in build, f"build job holds capability {capability}")
+    for capability in MACOS_SIGNING:
+        need(capability not in package, f"publication job holds macOS signing {capability}")
     need(f"CW_RELEASE_TARGETS='{LINUX_TARGETS}'" in build and "CW_RELEASE_IMPORT_DIR=dist-darwin" in build,
          "build does not package the four release targets from the Linux and macOS pairs")
     need('[ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$DARWIN_SUMS_SHA256" ]' in build,
@@ -328,6 +332,11 @@ MUTATIONS = {
         "          export GH_MIRROR_TOKEN_FILE=\"$github_work/token\"\n"
         "          ../scripts/ci/setup/fetch-openbao-macos-signing.sh \"$github_work/apple\"\n", 1),
     "Apple keys not shredded": lambda t: t.replace("          trap cleanup_macos_keys EXIT\n", "", 1),
+    "release signs with the stand-in": lambda t: t.replace(
+        '          scripts/ci/release/sign-macos-cw.sh .rcodesign/rcodesign "$macos_work/keys" \\\n',
+        '          scripts/ci/tests/fixtures/rcodesign-stand-in.sh --install "$macos_work/stand-in"\n'
+        '          scripts/ci/release/sign-macos-cw.sh "$macos_work/stand-in/bin/rcodesign" "$macos_work/keys" \\\n'
+        '          # .rcodesign/rcodesign "$macos_work/keys"\n', 1),
     "Apple keys outlive signing": lambda t: t.replace("          cleanup_macos_keys\n          trap - EXIT\n",
                                                        "          trap - EXIT\n", 1),
     "signed pair not handed over": lambda t: t.replace(
@@ -489,7 +498,7 @@ def route_guard_cases(text):
         return len(cases)
 
 
-def check_dry_run(text):
+def check_dry_run(text, release):
     """main builds and verifies the four-target delivery the way a release does."""
     errors = []
 
@@ -498,8 +507,8 @@ def check_dry_run(text):
             errors.append(message)
 
     blocks = jobs(text)
-    need(list(blocks) == ["protected-main", "superseded", "build-runtime-linux", "build-darwin", "assemble"],
-         "unexpected dry-run job set")
+    need(list(blocks) == ["protected-main", "superseded", "build-runtime-linux", "build-darwin", "sign-darwin",
+                          "assemble"], "unexpected dry-run job set")
     # Forgejo cancels the older push run of a workflow with no `concurrency`
     # block. With a group and `cancel-in-progress: false`, runs queue in push
     # order and each one finishes.
@@ -549,8 +558,37 @@ def check_dry_run(text):
         need(capability not in text, f"dry run holds capability {capability}")
     need("    runs-on: macos-arm64\n" in darwin, "the dry-run macOS build is not on the protected Mac runner")
     need(f"CW_RELEASE_TARGETS='{DARWIN_TARGETS}'" in darwin, "the dry-run macOS build is not the Mac pair")
-    need("    needs: [protected-main, build-darwin]" in assemble and "    runs-on: ci-protected\n" in assemble,
-         "the dry-run assembly does not follow the macOS build on a protected runner")
+    need("    needs: [protected-main, build-darwin, sign-darwin]\n" in assemble and "    runs-on: ci-protected\n" in assemble,
+         "the dry-run assembly does not follow the macOS build and its signing job on a protected runner")
+    # The release's macOS signing job, with the rcodesign stand-in in place of
+    # Apple: the same pinned install and signer, never a key or a signature.
+    sign = blocks.get("sign-darwin", "")
+    need([job for job, body in blocks.items() if any(token in body for token in MACOS_SIGNING)] == ["sign-darwin"],
+         "the dry run signs outside its macOS signing job")
+    release_jobs = jobs(release)
+    release_header, header = release.split("\njobs:\n", 1)[0], text.split("\njobs:\n", 1)[0]
+    pins = [re.findall(r"^  (RCODESIGN_[A-Z0-9_]+: \S+)$", part, re.M) for part in (release_header, header)]
+    need(len(pins[0]) == 2 and pins[0] == pins[1], "the dry run does not pin the release's rcodesign")
+    need("    needs: [protected-main, build-darwin]\n    runs-on: ci-protected\n" in sign,
+         "the dry-run macOS signing does not follow the macOS build on a protected runner")
+    need(dict(steps(sign)).get("Install rcodesign (pinned)")
+         == dict(steps(release_jobs.get("sign-darwin", ""))).get("Install rcodesign (pinned)", ""),
+         "the dry run does not install rcodesign exactly as the release does")
+    stand_in = dict(steps(sign)).get("Sign the macOS pair with the rcodesign stand-in", "")
+    need('scripts/ci/tests/fixtures/rcodesign-stand-in.sh --install "$stand_in"' in stand_in
+         and 'scripts/ci/release/sign-macos-cw.sh "$stand_in/bin/rcodesign" "$stand_in/keys"' in stand_in
+         and ".rcodesign/rcodesign \"" not in stand_in
+         and "'sign sign verify print-signature-info verify print-signature-info encode-app-store-connect-api-key "
+             "notary-submit ' ]" in stand_in,
+         "the dry run does not run the signer against the stand-in and check its calls")
+    need("UNSIGNED_SUMS_SHA256: ${{ needs.build-darwin.outputs.darwin_sums_sha256 }}" in sign
+         and '[ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$UNSIGNED_SUMS_SHA256" ]' in sign
+         and "name: cw-dry-run-darwin-signed-${{ github.run_id }}" in sign,
+         "the dry-run macOS signing does not bind the built pair and hand over its own")
+    need("name: cw-dry-run-darwin-signed-${{ github.run_id }}" in assemble
+         and "name: cw-dry-run-darwin-${{ github.run_id }}" not in assemble
+         and "DARWIN_SUMS_SHA256: ${{ needs.sign-darwin.outputs.darwin_sums_sha256 }}" in assemble,
+         "the dry-run assembly does not package exactly the stand-in-signed pair")
     need(f"CW_RELEASE_TARGETS='{LINUX_TARGETS}'" in assemble and "CW_RELEASE_IMPORT_DIR=dist-darwin" in assemble,
          "the dry-run assembly does not package the four targets")
     need('[ "$(sha256sum dist-darwin/SHA256SUMS | cut -c1-64)" = "$DARWIN_SUMS_SHA256" ]' in assemble,
@@ -572,7 +610,7 @@ DRY_RUN_MUTATIONS = {
     "secret": lambda t: t.replace("    runs-on: ci-protected\n", "    runs-on: ci-protected\n    env:\n"
                                   "      KEY: ${{ secrets.CW_RELEASE_GPG_PRIVATE_KEY }}\n", 1),
     "pool Mac": lambda t: t.replace("    runs-on: macos-arm64\n", "    runs-on: ci-heavy\n", 1),
-    "dry run notarizes": lambda t: t.replace(
+    "signer in the dry-run assembly": lambda t: t.replace(
         "            CW_RELEASE_IMPORT_DIR=dist-darwin \\\n",
         "            CW_RELEASE_IMPORT_DIR=dist-darwin \\\n            CW_SIGN=scripts/ci/release/sign-macos-cw.sh \\\n", 1),
     "no verification": lambda t: t.replace("runtime_equal=true signed=false", "runtime_equal=true", 1),
@@ -614,6 +652,37 @@ DRY_RUN_MUTATIONS = {
         "      - name: Build the Linux side from cached parts\n        id: build\n"
         "        if: steps.select.outputs.mode == 'full'\n        run: |\n          set -euo pipefail\n"
         "          rustup target add aarch64-unknown-linux-musl\n", 1),
+    "dry-run assembly from the unsigned pair": lambda t: t.replace(
+        "          name: cw-dry-run-darwin-signed-${{ github.run_id }}\n          path: dist-darwin\n",
+        "          name: cw-dry-run-darwin-${{ github.run_id }}\n          path: dist-darwin\n", 1),
+    "dry-run assembly skips signing": lambda t: t.replace(
+        "    needs: [protected-main, build-darwin, sign-darwin]\n", "    needs: [protected-main, build-darwin]\n", 1),
+    "dry-run assembly binds the unsigned digest": lambda t: t.replace(
+        "DARWIN_SUMS_SHA256: ${{ needs.sign-darwin.outputs.darwin_sums_sha256 }}",
+        "DARWIN_SUMS_SHA256: ${{ needs.build-darwin.outputs.darwin_sums_sha256 }}", 1),
+    "dry-run signing with OIDC": lambda t: t.replace(
+        "    name: Sign the macOS pair with the rcodesign stand-in (never signs)\n"
+        "    needs: [protected-main, build-darwin]\n    runs-on: ci-protected\n",
+        "    name: Sign the macOS pair with the rcodesign stand-in (never signs)\n"
+        "    needs: [protected-main, build-darwin]\n    runs-on: ci-protected\n    enable-openid-connect: true\n", 1),
+    "dry run reads the Apple keys": lambda t: t.replace(
+        '          scripts/ci/tests/fixtures/rcodesign-stand-in.sh --install "$stand_in"\n',
+        '          scripts/ci/tests/fixtures/rcodesign-stand-in.sh --install "$stand_in"\n'
+        '          scripts/ci/setup/fetch-openbao-macos-signing.sh "$stand_in/apple"\n', 1),
+    "dry run signs with the real rcodesign": lambda t: t.replace(
+        'scripts/ci/release/sign-macos-cw.sh "$stand_in/bin/rcodesign" "$stand_in/keys"',
+        'scripts/ci/release/sign-macos-cw.sh .rcodesign/rcodesign "$stand_in/keys"', 1),
+    "dry-run stand-in calls unchecked": lambda t: re.sub(
+        r"          \[ \"\$\(cut -d' ' -f1 \"\$stand_in/calls\".*?\n.*?\n", "", t, count=1, flags=re.S),
+    "dry-run rcodesign pin differs": lambda t: t.replace(
+        "RCODESIGN_X86_64_LINUX_SHA256: dbe85ced", "RCODESIGN_X86_64_LINUX_SHA256: 00000000", 1),
+    "dry-run rcodesign installed differently": lambda t: t.replace(
+        "          .rcodesign/rcodesign --version\n", "", 1),
+    "dry-run signing without the macOS build": lambda t: t.replace(
+        "    name: Sign the macOS pair with the rcodesign stand-in (never signs)\n"
+        "    needs: [protected-main, build-darwin]\n",
+        "    name: Sign the macOS pair with the rcodesign stand-in (never signs)\n"
+        "    needs: [protected-main]\n", 1),
     "embedded runtime unchecked": lambda t: t.replace(
         "            grep -q '^cw-release: local runtime document_sha256=' <<<\"$verified\"\n",
         "            true\n", 1),
@@ -624,10 +693,10 @@ def main():
     text, ci_text = WORKFLOW.read_text(), CI.read_text()
     errors = check(text, ci_text)
     dry_run = DRY_RUN.read_text()
-    errors += check_dry_run(dry_run)
+    errors += check_dry_run(dry_run, text)
     for name, mutate in DRY_RUN_MUTATIONS.items():
         mutated = mutate(dry_run)
-        if mutated == dry_run or not check_dry_run(mutated):
+        if mutated == dry_run or not check_dry_run(mutated, text):
             errors.append(f"dry-run mutation {name!r} was not rejected")
     if errors:
         print("test-cli-release-workflow: FAIL\n  " + "\n  ".join(errors), file=sys.stderr)
