@@ -54,6 +54,7 @@ use crate::control::v1::local_supervisor_service_server::{
     LocalSupervisorService, LocalSupervisorServiceServer,
 };
 use crate::cw_runtime::{CwRuntimeError, CwRuntimeStore};
+use crate::diagnostic_log::{self, DiagnosticLog, LogField};
 use crate::generation::{GenerationError, ensure_root_generation};
 use crate::host::path::{PathError, PrivateRoot, SocketIdentity};
 #[cfg(test)]
@@ -82,7 +83,6 @@ pub use crate::supervisor_client::NativeSupervisorClient;
 use crate::supervisor_client::{SupervisorClientError, operation_watch_failure};
 #[cfg(test)]
 use crate::supervisor_client::{operation_outcome, operation_terminal, read_selector};
-#[cfg(test)]
 use crate::supervisor_config::NATIVE_SUPERVISOR_PROTOCOL_VERSION;
 pub use crate::supervisor_config::NativeRuntimeConfig;
 use crate::supervisor_config::{SupervisorConfigError, supervisor_info};
@@ -318,8 +318,8 @@ impl NativeSupervisorClient {
                 });
             }
         }
-        prepare_runtime_root(&config.root)?;
-        let mut child = spawn_supervisor(config)?;
+        let root = prepare_runtime_root(&config.root)?;
+        let mut child = spawn_supervisor(config, &root)?;
         let deadline = tokio::time::Instant::now() + RUNNER_START_TIMEOUT;
         let mut exited_at = None;
         loop {
@@ -420,6 +420,20 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
     config.validate()?;
     let root = prepare_runtime_root(&config.root)?;
     let lock = SupervisorLock::acquire(&root)?;
+    // Only the lock holder logs; a losing supervisor's exit error still
+    // reaches the same file through stderr.
+    let log = DiagnosticLog::inherited();
+    diagnostic_log::record(
+        log.as_ref(),
+        "supervisor_started",
+        &[
+            ("pid", LogField::Count(u64::from(std::process::id()))),
+            (
+                "protocol",
+                LogField::Count(u64::from(NATIVE_SUPERVISOR_PROTOCOL_VERSION)),
+            ),
+        ],
+    );
     let (store, state) = SupervisorStore::open(&root)?;
     let operation_events = store.operation_events();
     let operation_reader = SupervisorOperationReader::open(&root)?;
@@ -435,6 +449,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         runtime_operations: BTreeSet::new(),
         incompatible_runners: BTreeSet::new(),
         operation_progress: operation_progress.clone(),
+        log,
         _lock: lock,
     };
     #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
@@ -601,6 +616,8 @@ struct SupervisorCore {
     // retirement authority, and does not rewrite the durable lifecycle state.
     incompatible_runners: BTreeSet<Uuid>,
     operation_progress: broadcast::Sender<OperationProgress>,
+    // The bounded owner-only log its spawner gave this supervisor, if any.
+    log: Option<DiagnosticLog>,
     _lock: SupervisorLock,
 }
 
@@ -1743,6 +1760,7 @@ impl SupervisorCore {
                         } else {
                             create_failure_code(&error)
                         };
+                        self.log_operation_failure(&operation, name, &error, error_code);
                         self.roll_back_failed_create(&operation, name, error_code, recovering)
                             .await?;
                         // If failure happened before RecordEnvironment, the
@@ -1768,25 +1786,20 @@ impl SupervisorCore {
                     Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
                         return Err(SupervisorError::CredentialAuthorityUnavailable);
                     }
-                    Err(SupervisorError::WorkspacePlan(WorkspacePlanError::DirectShareChanged))
-                        if !recovering =>
-                    {
-                        self.fail_replayed_operation(
-                            &operation,
-                            name,
-                            "start_direct_share_changed",
-                        )?;
-                        continue;
-                    }
                     Err(error) => {
-                        let error_code = if recovering {
-                            "start_interrupted"
-                        } else if matches!(error, SupervisorError::HostPortUnavailable) {
-                            "start_host_port_unavailable"
-                        } else {
-                            "start_failed"
+                        let error_code = match error {
+                            SupervisorError::WorkspacePlan(
+                                WorkspacePlanError::DirectShareChanged,
+                            ) if !recovering => "start_direct_share_changed".to_owned(),
+                            _ if recovering => "start_interrupted".to_owned(),
+                            _ => lifecycle_failure_code(
+                                "start",
+                                &error,
+                                self.recorded_runner_error_code(name),
+                            ),
                         };
-                        self.fail_replayed_operation(&operation, name, error_code)?;
+                        self.log_operation_failure(&operation, name, &error, &error_code);
+                        self.fail_replayed_operation(&operation, name, &error_code)?;
                         continue;
                     }
                 };
@@ -1802,8 +1815,10 @@ impl SupervisorCore {
             if operation.kind == OperationKind::Stop {
                 let (_, operation) = match self.stop(name, &operation).await {
                     Ok(result) => result,
-                    Err(_) => {
-                        self.fail_pending_operation(&operation, "stop_failed")?;
+                    Err(error) => {
+                        let error_code = lifecycle_failure_code("stop", &error, None);
+                        self.log_operation_failure(&operation, name, &error, &error_code);
+                        self.fail_pending_operation(&operation, &error_code)?;
                         continue;
                     }
                 };
@@ -1827,20 +1842,26 @@ impl SupervisorCore {
             ) {
                 let operation = match self.resize(name, &operation).await {
                     Ok(operation) => operation,
-                    Err(SupervisorError::ReplacementPreflight(_)) => {
+                    Err(error @ SupervisorError::ReplacementPreflight(_)) => {
+                        self.log_operation_failure(&operation, name, &error, "restart_preflight");
                         self.fail_pending_operation(&operation, "restart_preflight")?;
                         continue;
                     }
                     Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
                         return Err(SupervisorError::CredentialAuthorityUnavailable);
                     }
-                    Err(_) => {
+                    Err(error) => {
                         let error_code = if recovering {
-                            "resize_interrupted"
+                            "resize_interrupted".to_owned()
                         } else {
-                            "resize_failed"
+                            lifecycle_failure_code(
+                                "resize",
+                                &error,
+                                self.recorded_runner_error_code(name),
+                            )
                         };
-                        self.fail_replayed_operation(&operation, name, error_code)?;
+                        self.log_operation_failure(&operation, name, &error, &error_code);
+                        self.fail_replayed_operation(&operation, name, &error_code)?;
                         continue;
                     }
                 };
@@ -1859,7 +1880,7 @@ impl SupervisorCore {
             ) {
                 let operation = match self.workspace_transition(name, &operation).await {
                     Ok(operation) => operation,
-                    Err(SupervisorError::ReplacementPreflight(_)) => {
+                    Err(error @ SupervisorError::ReplacementPreflight(_)) => {
                         let current = self
                             .store
                             .operation_by_request(operation.request_id)?
@@ -1869,6 +1890,7 @@ impl SupervisorCore {
                         } else {
                             "workspace_rollback_preflight"
                         };
+                        self.log_operation_failure(&operation, name, &error, error_code);
                         self.abort_workspace_transition_with_stop(
                             &current, name, error_code, false,
                         )
@@ -1878,19 +1900,23 @@ impl SupervisorCore {
                     Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
                         return Err(SupervisorError::CredentialAuthorityUnavailable);
                     }
-                    Err(_) => {
-                        let error_code = match operation.kind {
-                            OperationKind::UpdateWorkspace if recovering => {
-                                "workspace_update_interrupted"
-                            }
-                            OperationKind::UpdateWorkspace => "workspace_update_failed",
-                            OperationKind::RollbackWorkspace if recovering => {
-                                "workspace_rollback_interrupted"
-                            }
-                            OperationKind::RollbackWorkspace => "workspace_rollback_failed",
+                    Err(error) => {
+                        let prefix = match operation.kind {
+                            OperationKind::UpdateWorkspace => "workspace_update",
+                            OperationKind::RollbackWorkspace => "workspace_rollback",
                             _ => return Err(SupervisorError::InvalidState),
                         };
-                        self.abort_replayed_workspace_transition(&operation, name, error_code)
+                        let error_code = if recovering {
+                            format!("{prefix}_interrupted")
+                        } else {
+                            lifecycle_failure_code(
+                                prefix,
+                                &error,
+                                self.recorded_runner_error_code(name),
+                            )
+                        };
+                        self.log_operation_failure(&operation, name, &error, &error_code);
+                        self.abort_replayed_workspace_transition(&operation, name, &error_code)
                             .await?;
                         continue;
                     }
@@ -1915,11 +1941,14 @@ impl SupervisorCore {
                     Ok(operation) => operation,
                     Err(error) => {
                         let error_code = match error {
-                            SupervisorError::HostPortUnavailable => "host_port_unavailable",
-                            _ if recovering => "host_ports_interrupted",
-                            _ => "host_ports_failed",
+                            SupervisorError::HostPortUnavailable => {
+                                "host_port_unavailable".to_owned()
+                            }
+                            _ if recovering => "host_ports_interrupted".to_owned(),
+                            _ => lifecycle_failure_code("host_ports", &error, None),
                         };
-                        self.fail_pending_operation(&operation, error_code)?;
+                        self.log_operation_failure(&operation, name, &error, &error_code);
+                        self.fail_pending_operation(&operation, &error_code)?;
                         continue;
                     }
                 };
@@ -2054,6 +2083,7 @@ impl SupervisorCore {
                 } else {
                     "delete_failed"
                 };
+                self.log_operation_failure(operation, name, &error, error_code);
                 if self.retain_failed_delete(operation, name, error_code)? {
                     return Ok(());
                 }
@@ -2066,6 +2096,12 @@ impl SupervisorCore {
             "cleanup_pending": cleanup_pending,
         });
         self.complete_operation(&operation, &result)?;
+        if let Some(environment_id) = operation.environment_id {
+            diagnostic_log::remove_log(
+                &self.root,
+                &diagnostic_log::runner_log_name(environment_id),
+            );
+        }
         Ok(())
     }
 
@@ -2317,6 +2353,58 @@ impl SupervisorCore {
         )?;
         self.state = next_state;
         Ok(updated)
+    }
+
+    /// The closed code a runner recorded for its failed start, while the
+    /// environment still records that runner.
+    fn recorded_runner_error_code(&self, name: &str) -> Option<&str> {
+        self.state
+            .environments
+            .get(name)?
+            .runner
+            .as_ref()?
+            .error_code
+            .as_deref()
+            .filter(|code| runner_event_error_code_valid(code))
+    }
+
+    /// Logs why a lifecycle operation failed, before its failure is
+    /// journaled: the effect it was running and the closed cause. Never the
+    /// error's text.
+    fn log_operation_failure(
+        &self,
+        operation: &OperationRecord,
+        name: &str,
+        error: &SupervisorError,
+        error_code: &str,
+    ) {
+        let Some(log) = self.log.as_ref() else {
+            return;
+        };
+        let current = self
+            .store
+            .operation_by_request(operation.request_id)
+            .ok()
+            .flatten();
+        let current = current.as_ref().unwrap_or(operation);
+        let effect = supervisor_effect(current.kind, current.checkpoint)
+            .ok()
+            .flatten()
+            .map_or("none", LifecycleEffect::name);
+        let mut fields = vec![
+            ("kind", LogField::Name(current.kind.as_str())),
+            ("operation", LogField::Id(current.operation_id)),
+            ("effect", LogField::Name(effect)),
+            ("cause", LogField::Name(lifecycle_failure_cause(error))),
+        ];
+        if let Some(environment_id) = current.environment_id {
+            fields.push(("environment", LogField::Id(environment_id)));
+        }
+        if let Some(code) = self.recorded_runner_error_code(name) {
+            fields.push(("runner_error", LogField::Code(code)));
+        }
+        fields.push(("error_code", LogField::Code(error_code)));
+        log.record("operation_failed", &fields);
     }
 
     fn fail_operation(
@@ -2790,11 +2878,17 @@ impl SupervisorCore {
             .arg("--platform-config-dir")
             .arg(&self.config.platform_config_dir)
             .env_clear();
+        // The runner's own bounded owner-only log, not /dev/null (#2595). Its
+        // isolated children keep their null stdio.
+        let (stdout, stderr) = diagnostic_log::child_stdio(
+            &self.root,
+            &diagnostic_log::runner_log_name(environment_id),
+        );
         command
             .current_dir(&self.config.root)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(stdout)
+            .stderr(stderr);
         // SAFETY: these libc calls use only scalar arguments between fork and
         // exec. PDEATHSIG closes the spawn-to-manifest orphan window; the
         // runner clears it only after its exact identity is durable.
@@ -7441,7 +7535,13 @@ fn prepare_runtime_root(path: &Path) -> Result<PrivateRoot, SupervisorError> {
     Ok(root)
 }
 
-fn spawn_supervisor(config: &NativeRuntimeConfig) -> Result<Child, SupervisorError> {
+fn spawn_supervisor(
+    config: &NativeRuntimeConfig,
+    root: &PrivateRoot,
+) -> Result<Child, SupervisorError> {
+    // Its bounded owner-only log, not /dev/null: the supervisor's exit error or
+    // panic and its closed diagnostic events (#2595).
+    let (stdout, stderr) = diagnostic_log::child_stdio(root, diagnostic_log::SUPERVISOR_LOG);
     let mut command = Command::new(&config.executable);
     command
         .arg("__native-supervisor")
@@ -7461,8 +7561,8 @@ fn spawn_supervisor(config: &NativeRuntimeConfig) -> Result<Child, SupervisorErr
     command
         .current_dir(&config.root)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(stdout)
+        .stderr(stderr);
     // SAFETY: scalar-only libc operations and one fixed-layout capset syscall
     // prepare a capability-empty, no-new-privileges, FD-clean detached
     // singleton before exec. The supervisor intentionally outlives this CLI.
@@ -7843,6 +7943,125 @@ fn create_failure_code(error: &SupervisorError) -> &'static str {
         SupervisorError::InvalidState => "create_state_invalid",
         SupervisorError::InvalidConfiguration => "create_configuration_invalid",
         _ => "create_failed",
+    }
+}
+
+/// The closed cause class of a failed lifecycle effect (#2595). Like
+/// [`create_failure_code`], it names the error, never its Display, Debug or
+/// source chain, so no path, upstream text or secret value reaches the journal
+/// or the log. Every cause is a `[a-z_]` token of at most
+/// [`MAXIMUM_LIFECYCLE_CAUSE_BYTES`], so `<operation prefix>_<cause>` stays a
+/// valid journal error code. The match is exhaustive: a new error variant must
+/// be named here.
+fn lifecycle_failure_cause(error: &SupervisorError) -> &'static str {
+    match error {
+        SupervisorError::InvalidConfiguration => "invalid_configuration",
+        #[cfg(target_os = "macos")]
+        SupervisorError::SocketPathTooLong(_) => "socket_path_too_long",
+        #[cfg(target_os = "macos")]
+        SupervisorError::VzHelperMissing(_) => "vz_helper_missing",
+        #[cfg(target_os = "macos")]
+        SupervisorError::VzHelperUnentitled(_) => "vz_helper_unentitled",
+        SupervisorError::InvalidRequest => "invalid_request",
+        SupervisorError::AlreadyExists(_) => "already_exists",
+        SupervisorError::InvalidState => "invalid_state",
+        SupervisorError::SecretInState => "secret_in_state",
+        SupervisorError::CredentialAuthorityUnavailable => "credential_authority_unavailable",
+        SupervisorError::WorkloadSecretDeliveryUnavailable => {
+            "workload_secret_delivery_unavailable"
+        }
+        SupervisorError::EnvironmentAccessUnavailable => "access_unavailable",
+        SupervisorError::EnvironmentAccessBindingRejected(code) => match code {
+            tonic::Code::InvalidArgument => "access_binding_invalid",
+            tonic::Code::NotFound => "access_binding_not_found",
+            tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => "access_binding_denied",
+            tonic::Code::FailedPrecondition => "access_binding_precondition",
+            tonic::Code::DataLoss => "access_binding_metadata",
+            _ => "access_binding_rejected",
+        },
+        SupervisorError::NotFound(_) => "not_found",
+        SupervisorError::NotRunning => "not_running",
+        SupervisorError::Orphaned => "orphaned",
+        SupervisorError::AlreadyRunning => "already_running",
+        SupervisorError::SpawnSupervisor => "supervisor_spawn",
+        SupervisorError::SupervisorStartTimeout => "supervisor_start_timeout",
+        SupervisorError::EndpointNotReplaced(_) => "endpoint_not_replaced",
+        SupervisorError::SupervisorProtocolUnavailable => "supervisor_protocol_unavailable",
+        SupervisorError::SupervisorProtocolMismatch { .. } => "supervisor_protocol_mismatch",
+        SupervisorError::InvalidSupervisorInfo => "supervisor_info_invalid",
+        SupervisorError::SupervisorInfoUnavailable => "supervisor_info_unavailable",
+        SupervisorError::SupervisorConfigurationMismatch => "supervisor_configuration_mismatch",
+        SupervisorError::SpawnRunner => "runner_spawn",
+        SupervisorError::RunnerStartTimeout => "runner_start_timeout",
+        SupervisorError::RunnerAdoption => "runner_adoption",
+        SupervisorError::RunnerUnavailable => "runner_unavailable",
+        SupervisorError::RunnerProtocolUnsupported => "runner_protocol_unsupported",
+        SupervisorError::RunnerExitTimeout => "runner_exit_timeout",
+        SupervisorError::RunnerRetirement => "runner_retirement",
+        SupervisorError::InvalidRunnerResponse => "runner_response_invalid",
+        SupervisorError::ArtifactGenerationChanged => "artifact_generation_changed",
+        SupervisorError::VmStart(_) => "vm_start",
+        SupervisorError::GuestDockerToolingMissing => "guest_docker_tooling_missing",
+        SupervisorError::HostPortUnavailable => "host_port_unavailable",
+        SupervisorError::VmStop => "vm_stop",
+        SupervisorError::VmResize => "vm_resize",
+        SupervisorError::VmDelete => "vm_delete",
+        SupervisorError::WorkspaceProvisionTask => "workspace_provision_task",
+        SupervisorError::WorkspaceGenerationProvisionTask => "workspace_generation_task",
+        SupervisorError::OperationTerminal => "operation_terminal",
+        SupervisorError::Serve => "serve",
+        SupervisorError::Runner(_) => "runner",
+        SupervisorError::Artifact(_) => "artifact",
+        SupervisorError::ArtifactStore => "artifact_store",
+        SupervisorError::CwRuntime(_) => "cw_runtime",
+        SupervisorError::CwRuntimeProvisionTask => "cw_runtime_task",
+        SupervisorError::ReplacementPreflight(_) => "replacement_preflight",
+        SupervisorError::RunnerService(_) => "runner_service",
+        SupervisorError::Recovery(_) => "process_recovery",
+        SupervisorError::Workspace(_) => "workspace",
+        SupervisorError::WorkspacePlan(WorkspacePlanError::DirectShareChanged) => {
+            "direct_share_changed"
+        }
+        SupervisorError::WorkspacePlan(_) => "workspace_plan",
+        SupervisorError::RegistryReference(_) => "registry_reference",
+        SupervisorError::RegistryResolver(_) => "registry",
+        SupervisorError::ContentStore(_) => "content_store",
+        SupervisorError::SetupPack(_) => "setup_pack",
+        SupervisorError::SkillSnapshot(_) => "skill_snapshot",
+        SupervisorError::WorkspaceGeneration => "workspace_generation",
+        SupervisorError::Generation(_) => "root_generation",
+        SupervisorError::Uds(_) => "local_socket",
+        SupervisorError::Path(_) => "path",
+        SupervisorError::State(_) => "vm_state",
+        SupervisorError::Store(_) => "store",
+        SupervisorError::Io { .. } => "filesystem",
+    }
+}
+
+const MAXIMUM_LIFECYCLE_CAUSE_BYTES: usize = 40;
+
+/// The journal error code `<prefix>_<cause>` of a failed lifecycle operation.
+/// A failed VM start names the runner's own closed code (for example
+/// `guest_start_failed`) when the runner reported one.
+fn lifecycle_failure_code(
+    prefix: &str,
+    error: &SupervisorError,
+    runner_error_code: Option<&str>,
+) -> String {
+    let cause = match (error, runner_error_code) {
+        (SupervisorError::VmStart(_), Some(code))
+            if runner_event_error_code_valid(code)
+                && code.len() <= MAXIMUM_LIFECYCLE_CAUSE_BYTES =>
+        {
+            code
+        }
+        _ => lifecycle_failure_cause(error),
+    };
+    let code = format!("{prefix}_{cause}");
+    if runner_event_error_code_valid(&code) {
+        code
+    } else {
+        format!("{prefix}_failed")
     }
 }
 
@@ -8407,6 +8626,7 @@ mod tests {
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
+            log: None,
             _lock: lock,
         };
         (parent, core)
@@ -8958,6 +9178,7 @@ mod tests {
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
+            log: None,
             _lock: lock,
         };
         (parent, core)
@@ -12423,6 +12644,7 @@ mod tests {
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
+            log: None,
             _lock: lock,
         };
 
@@ -15238,6 +15460,198 @@ mod tests {
         }
     }
 
+    #[test]
+    fn lifecycle_failure_causes_are_closed_codes_that_discard_error_text() {
+        const CANARY: &str = "synthetic-secret-value-in-error-text-must-not-escape";
+        let cases = [
+            (SupervisorError::VmStart(CANARY.to_owned()), "vm_start"),
+            (SupervisorError::NotFound(CANARY.to_owned()), "not_found"),
+            (
+                SupervisorError::AlreadyExists(CANARY.to_owned()),
+                "already_exists",
+            ),
+            (
+                SupervisorError::EndpointNotReplaced(PathBuf::from(CANARY)),
+                "endpoint_not_replaced",
+            ),
+            (
+                SupervisorError::Io {
+                    path: PathBuf::from(CANARY),
+                    source: io::Error::other(CANARY),
+                },
+                "filesystem",
+            ),
+            (
+                SupervisorError::ContentStore(ContentStoreError::Io(io::Error::other(CANARY))),
+                "content_store",
+            ),
+            (
+                SupervisorError::SkillSnapshot(
+                    SkillSnapshotPreparationError::MissingRepositorySkill(CANARY.to_owned()),
+                ),
+                "skill_snapshot",
+            ),
+            (
+                SupervisorError::ReplacementPreflight(Box::new(SupervisorError::VmStart(
+                    CANARY.to_owned(),
+                ))),
+                "replacement_preflight",
+            ),
+            (
+                SupervisorError::WorkspacePlan(WorkspacePlanError::DirectShareChanged),
+                "direct_share_changed",
+            ),
+            (
+                SupervisorError::EnvironmentAccessBindingRejected(tonic::Code::PermissionDenied),
+                "access_binding_denied",
+            ),
+            (
+                SupervisorError::WorkloadSecretDeliveryUnavailable,
+                "workload_secret_delivery_unavailable",
+            ),
+            (SupervisorError::RunnerStartTimeout, "runner_start_timeout"),
+            (SupervisorError::NotRunning, "not_running"),
+            (
+                SupervisorError::HostPortUnavailable,
+                "host_port_unavailable",
+            ),
+        ];
+        for (error, expected) in &cases {
+            let cause = lifecycle_failure_cause(error);
+            assert_eq!(cause, *expected);
+            assert!(cause.len() <= MAXIMUM_LIFECYCLE_CAUSE_BYTES, "{cause}");
+            assert!(runner_event_error_code_valid(cause), "{cause}");
+            for prefix in [
+                "start",
+                "stop",
+                "resize",
+                "workspace_update",
+                "workspace_rollback",
+                "host_ports",
+                "environment_sources",
+            ] {
+                let code = lifecycle_failure_code(prefix, error, None);
+                assert_eq!(code, format!("{prefix}_{cause}"));
+                assert!(runner_event_error_code_valid(&code), "{code}");
+                assert!(!code.contains(CANARY));
+            }
+        }
+        // The kept start codes are the general rule's own results.
+        assert_eq!(
+            lifecycle_failure_code("start", &SupervisorError::HostPortUnavailable, None),
+            "start_host_port_unavailable"
+        );
+        assert_eq!(
+            lifecycle_failure_code(
+                "start",
+                &SupervisorError::WorkspacePlan(WorkspacePlanError::DirectShareChanged),
+                None
+            ),
+            "start_direct_share_changed"
+        );
+
+        // A failed VM start names the runner's own closed code, and only a
+        // valid one: a runner cannot pass text through it.
+        let start = SupervisorError::VmStart(CANARY.to_owned());
+        for (runner_code, expected) in [
+            (
+                Some("guest_start_failed"),
+                "environment_sources_guest_start_failed",
+            ),
+            (
+                Some("vmm_start_failed"),
+                "environment_sources_vmm_start_failed",
+            ),
+            (Some(CANARY), "environment_sources_vm_start"),
+            (None, "environment_sources_vm_start"),
+        ] {
+            assert_eq!(
+                lifecycle_failure_code("environment_sources", &start, runner_code),
+                expected
+            );
+        }
+        // Another error never takes a stale runner code.
+        assert_eq!(
+            lifecycle_failure_code(
+                "environment_sources",
+                &SupervisorError::NotRunning,
+                Some("guest_start_failed")
+            ),
+            "environment_sources_not_running"
+        );
+    }
+
+    #[tokio::test]
+    async fn operation_failure_log_names_effect_and_cause_but_never_error_text() {
+        const CANARY: &str = "synthetic-application-secret-value-must-not-be-logged";
+        let environment = project_environment();
+        let environment_id = environment.id;
+        let (_parent, mut core) = test_supervisor_core(environment);
+        core.log = Some(
+            DiagnosticLog::adopt(
+                diagnostic_log::open_child_log(&core.root, diagnostic_log::SUPERVISOR_LOG).unwrap(),
+            )
+            .unwrap(),
+        );
+        core.environment_mut("dev").unwrap().runner = Some(RunnerRecord {
+            cw_runtime_catalog_generation: None,
+            process: ProcessIdentity {
+                pid: 42,
+                boot_id: "boot".to_owned(),
+                start_time_ticks: 7,
+                executable: PathBuf::from("/proc/self/exe"),
+                executable_file: crate::host::path::FileIdentity {
+                    device: 1,
+                    inode: 2,
+                    size: 3,
+                    uid: 4,
+                    mode: 0o100500,
+                    links: 1,
+                },
+                executable_sha256: "f".repeat(64),
+            },
+            socket: SocketIdentity {
+                device: 1,
+                inode: 2,
+                uid: 4,
+                mode: 0o140600,
+            },
+            artifact_generation: "b".repeat(64),
+            error_code: Some("guest_start_failed".to_owned()),
+        });
+        let operation = begin_and_advance_test_operation(
+            &core.store,
+            environment_id,
+            OperationKind::Start,
+            &serde_json::json!({ "name": "dev" }),
+            4,
+        );
+        let error = SupervisorError::VmStart(CANARY.to_owned());
+        let code = lifecycle_failure_code("start", &error, core.recorded_runner_error_code("dev"));
+        assert_eq!(code, "start_guest_start_failed");
+        core.log_operation_failure(&operation, "dev", &error, &code);
+
+        let log = fs::read_to_string(
+            core.root
+                .path()
+                .join(diagnostic_log::LOG_DIRECTORY)
+                .join(diagnostic_log::SUPERVISOR_LOG),
+        )
+        .unwrap();
+        let line = log.lines().next().unwrap();
+        assert!(
+            line.ends_with(&format!(
+                " event=operation_failed kind=start operation={} effect=start_vm cause=vm_start \
+                 environment={environment_id} runner_error=guest_start_failed \
+                 error_code=start_guest_start_failed",
+                operation.operation_id
+            )),
+            "{line}"
+        );
+        assert_eq!(log.lines().count(), 1);
+        assert!(!log.contains(CANARY));
+    }
+
     #[tokio::test]
     async fn create_failure_code_survives_replay_storage_and_public_operation_without_details() {
         const CANARY: &str = "synthetic-content-path-must-not-escape";
@@ -15449,6 +15863,7 @@ mod tests {
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
+            log: None,
             _lock: lock,
         };
 
@@ -15517,6 +15932,7 @@ mod tests {
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             operation_progress: broadcast::channel(OPERATION_PROGRESS_CAPACITY).0,
+            log: None,
             _lock: lock,
         };
 
