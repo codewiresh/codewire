@@ -66,7 +66,10 @@ MAX_LINE = 1024 * 1024
 MAX_OUTPUT = 8 * MAX_LINE
 MAX_BODY = 4 * 1024 * 1024
 # The daemon checks at most CHECK_PERIOD apart once a login is delivered, so
-# any FULL_CHECK window holds at least one check.
+# any FULL_CHECK window holds at least one check. Its period is 120 seconds
+# unless the Kind deployment renders a shorter one into this container, which
+# the daemon reads too; configure() derives every window from it.
+CHECK_PERIOD_ENV = "CODEWIRE_CODEX_LOGIN_CHECK_PERIOD_SECONDS"
 CHECK_PERIOD = 120.0
 FULL_CHECK = CHECK_PERIOD + 15.0
 NEXT_CHECK = CHECK_PERIOD + 30.0
@@ -716,6 +719,20 @@ def revoked():
          waited_ms=int((time.monotonic() - started) * 1000))
 
 
+def configure(environ):
+    """Derive every window from the period the daemon was given: whole
+    seconds from 10 to 120, as it accepts them. Unset keeps 120 seconds."""
+    global CHECK_PERIOD, FULL_CHECK, NEXT_CHECK
+    value = environ.get(CHECK_PERIOD_ENV)
+    if value is None:
+        return
+    if not re.fullmatch(r"[1-9][0-9]{0,2}", value) or not 10 <= int(value) <= 120:
+        raise Failure("check_period")
+    CHECK_PERIOD = float(value)
+    FULL_CHECK = CHECK_PERIOD + 15.0
+    NEXT_CHECK = CHECK_PERIOD + 30.0
+
+
 def main(argv):
     mode = argv[0] if argv else None
     def interrupted(_signum, _frame):
@@ -725,6 +742,7 @@ def main(argv):
     try:
         if mode not in MODES or len(argv) != (2 if mode == "rotation" else 1):
             raise Failure("arguments")
+        configure(os.environ)
         validate_projection()
         if mode == "deliver":
             deliver()

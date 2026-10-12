@@ -1185,6 +1185,7 @@ kubectl() {
 }
 validate_retained_cluster() { record validate; }
 build_retained_kind_smokes() { record smokes; }
+apply_kind_codex_login_check_period() { record period; }
 restart_credential_service() { record restart; }
 kind_credential_native_smoke() (
   record native-start
@@ -1241,6 +1242,10 @@ for errexit_mode in suite shard; do
   [ "$driver_status" -eq 1 ] ||
     fail "${errexit_mode} dispatch did not fail with the unchecked probe's status: ${driver_status}"
   grep -Fxq native-start "$CALLS" || fail "${errexit_mode} dispatch never reached the failing probe"
+  # The overlay's settings reach orchestration before the credential-service
+  # restarts for the journey's fresh provider event log.
+  [ "$(grep -Fx -e period -e restart -e native-start "$CALLS" | tr '\n' ' ')" = 'period restart native-start ' ] ||
+    fail "${errexit_mode} dispatch did not apply the overlay's Codex login check period before the journey"
   if grep -Fxq native-continued-after-failure "$CALLS"; then
     fail "${errexit_mode} dispatch continued past a failed unchecked probe"
   fi
@@ -3263,6 +3268,107 @@ python3 -B "$ROOT/scripts/ci/tests/test-kind-cw-runtime.py"
     fail 'the credential-service restart returned before its endpoints were only new ready Pods'
   [ "$(grep -c '^kubectl:-n codewire-e2e rollout ' "$CALLS")" -eq 2 ] ||
     fail 'the credential-service restart skipped its rollout'
+)
+
+# A retained cluster keeps the codewire-config it was created with, so the
+# credentials suite gives orchestration the overlay's Codex login check period
+# itself: the value is read from the checked-in overlay, and only a changed
+# setting patches the ConfigMap and restarts orchestration, once.
+(
+  period_key=SANDBOX_CODEX_LOGIN_CHECK_PERIOD_SECONDS
+  [ "$(grep -c "^  ${period_key}: " "$ROOT/tests/e2e/kind/support.yaml")" -eq 1 ] ||
+    fail "the Kind overlay does not set ${period_key} exactly once"
+  checked_in="$(kind_overlay_codex_login_check_period)" ||
+    fail "the Kind overlay's Codex login check period is not 10-120 whole seconds"
+  grep -Fxq "  ${period_key}: \"${checked_in}\"" "$ROOT/tests/e2e/kind/support.yaml" ||
+    fail "the Codex login check period read is not the Kind overlay's: ${checked_in}"
+  grep -Eq '^  apply_kind_codex_login_check_period$' "$ROOT/scripts/ci/verify/kind/suites/credential-journey.sh" ||
+    fail 'the credentials suite no longer applies the Codex login check period as a plain statement'
+
+  # Every case below reads this overlay, never a value repeated in the suite.
+  ROOT="$FIXTURE/period-overlay"
+  mkdir -p "$ROOT/tests/e2e/kind"
+  write_period_overlay() {
+    {
+      printf 'kind: ConfigMap\nmetadata:\n  name: codewire-config\ndata:\n  SANDBOX_IMAGE_CACHE: disabled\n'
+      printf '%s\n' "$@"
+    } >"$ROOT/tests/e2e/kind/support.yaml"
+  }
+  period_in_cluster=""
+  period_failure=""
+  # Earlier cases spy on the log; this one reads the suite's own lines, and
+  # keeps this test's own failures out of the captured output.
+  log() { printf '[kind-e2e] %s\n' "$*"; }
+  exec 3>&2
+  kubectl() {
+    record "kubectl:$*"
+    case "$*" in
+      "-n codewire-e2e get configmap codewire-config -o jsonpath={.data.${period_key}}")
+        [ "$period_failure" != get ] || return 31
+        printf '%s' "$period_in_cluster"
+        ;;
+      '-n codewire-e2e get pods -l app.kubernetes.io/name=codewire,app.kubernetes.io/component=orchestration -o name')
+        printf 'pod/orchestration-old\n'
+        ;;
+      "-n codewire-e2e patch configmap codewire-config --type merge -p {\"data\":{\"${period_key}\":\"45\"}}")
+        [ "$period_failure" != patch ] || return 32
+        ;;
+      '-n codewire-e2e rollout restart deployment/codewire-orchestration') ;;
+      '-n codewire-e2e rollout status deployment/codewire-orchestration --timeout=180s')
+        [ "$period_failure" != status ] || return 33
+        ;;
+      '-n codewire-e2e wait --for=delete pod/orchestration-old --timeout=120s') ;;
+      *) fail "unexpected kubectl call: $*" 2>&3 ;;
+    esac
+  }
+  apply_period() {
+    : >"$CALLS"
+    period_status=0
+    apply_kind_codex_login_check_period >"$FIXTURE/period.out" 2>&1 || period_status=$?
+  }
+  write_period_overlay "  ${period_key}: \"45\""
+  for period_in_cluster in '' 120 30; do
+    apply_period
+    [ "$period_status" -eq 0 ] || fail "applying the overlay period over '${period_in_cluster}' failed"
+    [ "$(sed 's/ -o .*//; s/ -p .*//; s/ --timeout.*//' "$CALLS" | tr '\n' ' ')" = \
+      'kubectl:-n codewire-e2e get configmap codewire-config kubectl:-n codewire-e2e get pods -l app.kubernetes.io/name=codewire,app.kubernetes.io/component=orchestration kubectl:-n codewire-e2e patch configmap codewire-config --type merge kubectl:-n codewire-e2e rollout restart deployment/codewire-orchestration kubectl:-n codewire-e2e rollout status deployment/codewire-orchestration kubectl:-n codewire-e2e wait --for=delete pod/orchestration-old ' ] ||
+      fail "a changed period did not patch the ConfigMap, restart orchestration once and wait out its old Pod, in that order"
+    [ "$(cat "$FIXTURE/period.out")" = "[kind-e2e] set the overlay's Codex login check period in codewire-config (${period_in_cluster:-unset} -> 45s) and restarted orchestration, which reads it" ] ||
+      fail "a changed period did not print its one line: $(cat "$FIXTURE/period.out")"
+  done
+  period_in_cluster=45
+  apply_period
+  [ "$period_status" -eq 0 ] || fail 'an unchanged period failed'
+  [ "$(wc -l <"$CALLS")" -eq 1 ] || fail 'an unchanged period touched the cluster beyond reading its ConfigMap'
+  [ "$(cat "$FIXTURE/period.out")" = "[kind-e2e] codewire-config already sets the overlay's Codex login check period (45s)" ] ||
+    fail "an unchanged period did not print its one line: $(cat "$FIXTURE/period.out")"
+  # A failed step stops there with its status: nothing restarts on a
+  # ConfigMap that was not read or not patched, and no line claims a restart.
+  period_in_cluster=120
+  for period_failure in get:31:1 patch:32:3 status:33:5; do
+    expected_calls="${period_failure##*:}"
+    expected_status="${period_failure#*:}"
+    expected_status="${expected_status%%:*}"
+    period_failure="${period_failure%%:*}"
+    apply_period
+    [ "$period_status" -eq "$expected_status" ] ||
+      fail "a failed ${period_failure} did not fail the period step with its status: ${period_status}"
+    [ "$(wc -l <"$CALLS")" -eq "$expected_calls" ] || fail "the period step continued past a failed ${period_failure}"
+    [ ! -s "$FIXTURE/period.out" ] || fail "the period step reported a change after a failed ${period_failure}"
+  done
+  period_failure=""
+  # An overlay without one valid period is refused before the cluster is read.
+  for invalid_overlay in '' "  ${period_key}: \"9\"" "  ${period_key}: \"121\"" "  ${period_key}: \"030\"" \
+      "  ${period_key}: 30" "  ${period_key}: \"30s\"" "  ${period_key}: \"\"" \
+      "  ${period_key}: \"30\"
+  ${period_key}: \"45\""; do
+    write_period_overlay "$invalid_overlay"
+    apply_period
+    [ "$period_status" -eq 1 ] || fail "an overlay with '${invalid_overlay}' was applied"
+    [ ! -s "$CALLS" ] || fail "an overlay with '${invalid_overlay}' reached the cluster"
+    grep -Fq "must set ${period_key} once, to 10-120 whole seconds" "$FIXTURE/period.out" ||
+      fail "an overlay with '${invalid_overlay}' was refused without naming the setting"
+  done
 )
 
 # A credential stage that fails removes what it created, in dependency order

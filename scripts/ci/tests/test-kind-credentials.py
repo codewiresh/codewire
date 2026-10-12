@@ -218,7 +218,8 @@ class HarnessGuards(unittest.TestCase):
     def session_events():
         return [
             {"event": "baseline_completed", "codex_processes": 1, "legacy_auth_commands": 0},
-            {"event": "projected_token_rotated", "changed": True, "elapsed_ms": 600001},
+            {"event": "projected_token_rotated", "changed": True, "rotated_ms": 471000,
+             "fresh_admission": True, "elapsed_ms": 478000},
             {"event": "rotation_turn_completed", "legacy_auth_commands": 0},
             {"event": "broker_retry_completed", "legacy_auth_commands": 0, "elapsed_ms": 12},
             {"event": "broker_retry_exhausted", "legacy_auth_commands": 0, "elapsed_ms": 13},
@@ -245,6 +246,7 @@ class HarnessGuards(unittest.TestCase):
             self.session_events() if session is None else session)))
         return self.shell('''
 RUN_DIR='%s'
+log() { printf '[kind-e2e] %%s\\n' "$*"; }
 kind_credential_fixture_events() { printf '%%s\\n' '%s'; }
 assert_kind_credential_rotation '%s' 2 '%s' '%s' '%s'
 ''' % (self.rotation_directory, json.dumps(events), ENVIRONMENT, WORKSPACE_UID, RELAY_UID, path))
@@ -346,7 +348,9 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
     def test_rotation_requires_composed_token_time_authentication_and_stock_turn_proof(self):
         result = self.rotation_proof(self.rotation_events())
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "")
+        # Only the closed evidence line: times, never fixture values.
+        self.assertEqual(result.stdout, "[kind-e2e] projected workspace token replaced 471s after "
+                         "the baseline; idle ended at 478s on a fresh-token admission\n")
 
     def test_initial_unbound_auth_is_not_selected_epoch_evidence(self):
         # A queued source restart legitimately retains its workflow generation.
@@ -410,10 +414,50 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
             with self.subTest(events=reordered):
                 self.assertNotEqual(self.rotation_proof(reordered).returncode, 0)
 
+    def admission_watch(self, events):
+        directory = tempfile.TemporaryDirectory(prefix="kind-admission-watch-")
+        self.addCleanup(directory.cleanup)
+        calls = Path(directory.name) / "calls"
+        result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+KIND_ADMISSION_WATCH_SECONDS=1
+sleep() { :; }
+kind_credential_fixture_events() { printf '%%s\\n' '%s'; }
+kubectl() { printf '%%s\\n' "$*" >> '%s'; }
+watch_kind_credential_fresh_admission '%s' workspace-pod /tmp/codewire-kind-fresh-admission-7
+''' % (json.dumps(events), calls, ENVIRONMENT))
+        return result.returncode, calls.read_text() if calls.exists() else ""
+
+    def test_the_admission_mark_follows_only_a_fresh_token_after_baseline(self):
+        baseline = {"event": "provider_response", "scenario": "baseline", "attempt": 1,
+                    "status": 200, "response_calls": 1, "refresh_calls": 0}
+        def auth(environment=ENVIRONMENT, changed=True):
+            return {"event": "bridge_authenticated", "environment_id": environment,
+                    "workspace_token_changed": changed}
+        self.assertEqual(self.admission_watch([auth(changed=False), baseline, auth()]), (
+            0, "-n dev-sandboxes exec workspace-pod -c workspace -- "
+               "touch /tmp/codewire-kind-fresh-admission-7\n"))
+        for events in ([auth(), baseline], [baseline, auth(changed=False)],
+                       [baseline, auth(environment=WORKSPACE_UID)], [auth()]):
+            with self.subTest(events=events):
+                self.assertEqual(self.admission_watch(events), (1, ""))
+
+    def test_rotation_ends_at_an_admission_mark_or_else_past_the_epoch_bound(self):
+        for changes in ({}, {"fresh_admission": False, "rotated_ms": 590000, "elapsed_ms": 600001}):
+            session = self.session_events()
+            session[1].update(changes)
+            with self.subTest(changes=changes):
+                result = self.rotation_proof(self.rotation_events(), session)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_authentication_alone_cannot_replace_rotation_duration_or_failed_terminal(self):
         for index, changes in ((0, {"codex_processes": 2}), (0, {"legacy_auth_commands": 1}),
                                (1, {"changed": False}), (1, {"elapsed_ms": 30001}),
-                               (1, {"elapsed_ms": 600000}), (1, {"elapsed_ms": 720000}),
+                               (1, {"elapsed_ms": 720000}), (1, {"rotated_ms": 479000}),
+                               (1, {"rotated_ms": -1}), (1, {"rotated_ms": None}),
+                               # Without the fixture's admission mark the epoch bound must pass.
+                               (1, {"fresh_admission": False}),
+                               (1, {"fresh_admission": False, "elapsed_ms": 600000}),
                                (2, {"legacy_auth_commands": 2}),
                                (4, {"event": "native_reread_completed"}),
                                (4, {"elapsed_ms": 30000}), (5, {"failed": 0, "completed": 4}),
@@ -615,8 +659,8 @@ assert_kind_credential_material_reuse
         probes, statuses = [], []
         replaced = False
         for mode, status, requests, within in journey:
-            if mode == "sandbox_replaced":
-                probes.append({"event": "sandbox_replaced"})
+            if mode in ("sandbox_replaced", "epoch_renewed"):
+                probes.append({"event": mode})
                 replaced = True
                 continue
             served = 0
@@ -665,7 +709,7 @@ assert_kind_credential_material_reuse
             lines.append(timed(fields))
         return lines, probes
 
-    def authority_changes(self, lines, probes, earlier=3):
+    def authority_changes(self, lines, probes, earlier=3, login_check_seconds=None):
         directory = tempfile.TemporaryDirectory(prefix="kind-authority-changes-")
         self.addCleanup(directory.cleanup)
         path = Path(directory.name) / "probes.jsonl"
@@ -678,8 +722,8 @@ kubectl() {
     return 99
   printf '%%s\\n' '%s'
 }
-assert_kind_credential_authority_changes %d '%s'
-''' % (logs, earlier, path))
+assert_kind_credential_authority_changes %d '%s' %s
+''' % (logs, earlier, path, "" if login_check_seconds is None else login_check_seconds))
 
     def test_authority_changes_reach_the_connected_epoch_within_the_bound(self):
         result = self.authority_changes(*self.authority_lines())
@@ -767,6 +811,175 @@ assert_kind_credential_authority_changes %d '%s'
         lines, probes = self.authority_lines(earlier=5)
         self.assertEqual(self.authority_changes(lines, probes, earlier=5).returncode, 0)
         self.assertNotEqual(self.authority_changes(lines, probes, earlier=4).returncode, 0)
+
+    def test_a_recorded_epoch_renewal_starts_the_next_change_on_a_warm_epoch(self):
+        # The journey waited for the relay's next admission before a change
+        # (#2574): the record, then one plain request, cold on the new epoch.
+        for at in (2, 5):
+            journey = list(self.JOURNEY)
+            journey[at:at] = [("epoch_renewed", None, 0, None), ("success", 200, 1, None)]
+            with self.subTest(at=at):
+                lines, probes = self.authority_lines(journey)
+                result = self.authority_changes(lines, probes)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                # The record without an admitted epoch, or a warm first request.
+                lines, probes = self.authority_lines(journey, replaced_admission=False)
+                self.assertNotEqual(self.authority_changes(lines, probes).returncode, 0)
+                lines, probes = self.authority_lines(journey, outcomes={at + 1: {"cache": "hit"}})
+                self.assertNotEqual(self.authority_changes(lines, probes).returncode, 0)
+        # An admission no record explains still fails a plain request after it.
+        lines, probes = self.authority_lines(
+            admitted_before=(5,), outcomes={5: {"cache": "miss", "material_reads": 1, "unwraps": 1}})
+        self.assertNotEqual(self.authority_changes(lines, probes).returncode, 0)
+
+    def test_login_rereads_are_bounded_by_the_daemons_check_period(self):
+        slow = list(self.JOURNEY)
+        slow[2] = ("denied", 403, 61, self.WITHIN)
+        reread = {"cache": "miss", "material_reads": 1, "unwraps": 1}
+        three = self.authority_lines(slow, outcomes={number: reread for number in (10, 30, 50)})
+        seven = self.authority_lines(
+            slow, outcomes={number: reread for number in (5, 10, 20, 30, 40, 50, 60)})
+        # Production's 120 seconds: one check, so one re-read, per change.
+        self.assertNotEqual(self.authority_changes(*three).returncode, 0)
+        self.assertNotEqual(self.authority_changes(*three, login_check_seconds=120).returncode, 0)
+        # Kind's 30 seconds: up to three checks fall inside a 65-second window.
+        result = self.authority_changes(*three, login_check_seconds=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(self.authority_changes(*seven, login_check_seconds=30).returncode, 0)
+        for invalid in (0, 5, 1000, "x"):
+            with self.subTest(invalid=invalid):
+                self.assertNotEqual(
+                    self.authority_changes(*three, login_check_seconds=invalid).returncode, 0)
+
+    @staticmethod
+    def epoch_line(at_ms, event, environment=ENVIRONMENT, **fields):
+        stamp = datetime.fromtimestamp(at_ms // 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        return json.dumps({
+            "timestamp": "%s.%03d123Z" % (stamp, at_ms % 1000), "level": "INFO",
+            "target": "codewire_orchestration::worker::credential_relay::epoch",
+            "fields": {"event": event, "environment_id": environment, **fields}})
+
+    def epoch_shell(self, lines, body, later=()):
+        directory = tempfile.TemporaryDirectory(prefix="kind-epoch-headroom-")
+        self.addCleanup(directory.cleanup)
+        log = Path(directory.name) / "relay.log"
+        log.write_text("".join(line + "\n" for line in lines))
+        later_log = Path(directory.name) / "later.log"
+        later_log.write_text("".join(line + "\n" for line in later))
+        return self.shell('''
+NS=codewire-e2e
+NOW_MS=%d
+log() { printf '[kind-e2e] %%s\\n' "$*"; }
+date() { printf '%%s\\n' "$NOW_MS"; }
+# Each poll's sleep is when the relay logs what happens later.
+sleep() { cat '%s' >> '%s'; : > '%s'; }
+kubectl() {
+  [ "$*" = '-n codewire-e2e logs pod/relay-pod -c orchestration' ] || return 99
+  cat '%s'
+}
+%s
+''' % (self.NOW_MS, later_log, log, later_log, log, body))
+
+    NOW_MS = 1791801611000
+
+    def test_epoch_admissions_are_read_from_the_relays_own_log(self):
+        now = self.NOW_MS
+        lines = [
+            self.epoch_line(now - 400000, "credential_bridge_epoch_admitted", ends_in_ms=510000),
+            "not json",
+            self.epoch_line(now - 300000, "credential_bridge_epoch_admitted",
+                            environment=WORKSPACE_UID, ends_in_ms=1),
+            self.epoch_line(now - 200000, "credential_bridge_epoch_ended"),
+            self.epoch_line(now - 100000, "credential_bridge_epoch_overlap",
+                            previous_ends_in_ms=88000, next_ends_in_ms=509876),
+            self.epoch_line(now - 50000, "credential_bridge_epoch_admitted", ends_in_ms=0),
+            self.epoch_line(now - 40000, "credential_bridge_epoch_admitted", ends_in_ms="soon"),
+        ]
+        result = self.epoch_shell(lines, "kind_credential_epoch_admissions '%s' relay-pod" % ENVIRONMENT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "%d 510000" % (now - 400000), "%d 509876" % (now - 100000), "%d 0" % (now - 50000)])
+        self.assertNotEqual(self.epoch_shell(lines, "kind_credential_epoch_admissions other relay-pod").returncode, 0)
+
+    def await_headroom(self, lines, later=()):
+        return self.epoch_shell(lines, "KIND_AUTHORITY_EPOCH_WAIT_SECONDS=1\n"
+                                "await_kind_credential_epoch_headroom '%s' relay-pod" % ENVIRONMENT, later)
+
+    def test_a_change_starts_at_once_on_an_epoch_with_headroom(self):
+        now = self.NOW_MS
+        for lines in (
+            # 510 s admitted 300 s ago: 210 s left.
+            [self.epoch_line(now - 300000, "credential_bridge_epoch_admitted", ends_in_ms=510000)],
+            # A later admission replaces an earlier one that had none.
+            [self.epoch_line(now - 500000, "credential_bridge_epoch_admitted", ends_in_ms=510000),
+             self.epoch_line(now - 80000, "credential_bridge_epoch_overlap",
+                             previous_ends_in_ms=90000, next_ends_in_ms=570000)],
+            # Exactly the headroom.
+            [self.epoch_line(now - 100000, "credential_bridge_epoch_overlap",
+                             previous_ends_in_ms=1, next_ends_in_ms=280000)],
+            # No expiry reported: the relay plans no renewal.
+            [self.epoch_line(now - 900000, "credential_bridge_epoch_admitted", ends_in_ms=0)],
+        ):
+            with self.subTest(lines=lines):
+                result = self.await_headroom(lines)
+                self.assertEqual((result.returncode, result.stdout), (0, "current\n"), result.stderr)
+
+    def test_a_change_waits_for_the_next_admission_when_renewal_is_near(self):
+        now = self.NOW_MS
+        # 179.999 s left: the successor could be admitted inside the change window.
+        near = [self.epoch_line(now - 330001, "credential_bridge_epoch_admitted", ends_in_ms=510000)]
+        overlap = self.epoch_line(now, "credential_bridge_epoch_overlap",
+                                  previous_ends_in_ms=70000, next_ends_in_ms=509000)
+        result = self.await_headroom(near, later=[overlap])
+        self.assertEqual((result.returncode, result.stdout), (0, "renewed\n"), result.stderr)
+        self.assertIn("waiting for the relay's next admission", result.stderr)
+        # A short next epoch has none either: the wait spans it to the one after.
+        short = self.epoch_line(now - 1000, "credential_bridge_epoch_overlap",
+                                previous_ends_in_ms=60000, next_ends_in_ms=150000)
+        result = self.await_headroom(near + [short], later=[overlap])
+        self.assertEqual((result.returncode, result.stdout), (0, "renewed\n"), result.stderr)
+        # An ended epoch's fresh successor counts too.
+        fresh = self.epoch_line(now, "credential_bridge_epoch_admitted", ends_in_ms=600000)
+        ended = [self.epoch_line(now - 700000, "credential_bridge_epoch_admitted", ends_in_ms=600000)]
+        result = self.await_headroom(ended, later=[fresh])
+        self.assertEqual((result.returncode, result.stdout), (0, "renewed\n"), result.stderr)
+        # No admission, one for another environment, or one without headroom: bounded.
+        for later in ([], [self.epoch_line(now, "credential_bridge_epoch_overlap", environment=WORKSPACE_UID,
+                                           previous_ends_in_ms=1, next_ends_in_ms=509000)],
+                      [self.epoch_line(now, "credential_bridge_epoch_admitted", ends_in_ms=5000)]):
+            with self.subTest(later=later):
+                result = self.await_headroom(near, later=later)
+                self.assertEqual((result.returncode, result.stdout), (1, ""), result.stderr)
+                self.assertIn("admitted no epoch with 180s of headroom within 1s", result.stderr)
+        # A relay that never logged an admission is not evidence of headroom.
+        result = self.await_headroom([])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("logged no epoch admission", result.stderr)
+
+    def test_the_headroom_wait_spans_two_renewals(self):
+        result = self.shell('''
+printf '%s %s\\n' "$KIND_AUTHORITY_EPOCH_HEADROOM_MS" "$KIND_AUTHORITY_EPOCH_WAIT_SECONDS"
+''')
+        # The successor lead and the change window fit the headroom; an epoch
+        # is renewed at most 90 seconds before its end, twice in a row.
+        self.assertEqual(result.stdout, "180000 360\n", result.stderr)
+
+    def test_a_renewal_inside_a_change_window_fails_by_name(self):
+        now = self.NOW_MS
+        before = self.epoch_line(now - 60000, "credential_bridge_epoch_admitted", ends_in_ms=510000)
+        check = "assert_kind_credential_no_renewal_since '%s' relay-pod %d" % (ENVIRONMENT, now - 30000)
+        result = self.epoch_shell([before], check)
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        other = self.epoch_line(now - 10000, "credential_bridge_epoch_overlap", environment=WORKSPACE_UID,
+                                previous_ends_in_ms=1, next_ends_in_ms=2)
+        self.assertEqual(self.epoch_shell([before, other], check).returncode, 0)
+        for event, fields in (("credential_bridge_epoch_overlap",
+                               {"previous_ends_in_ms": 80000, "next_ends_in_ms": 509000}),
+                              ("credential_bridge_epoch_admitted", {"ends_in_ms": 600000})):
+            with self.subTest(event=event):
+                result = self.epoch_shell([before, self.epoch_line(now - 10000, event, **fields)], check)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("::error::renewal inside change window", result.stderr)
 
     def test_daemon_probe_runs_the_daemon_path_script_in_the_exact_workspace(self):
         directory = tempfile.TemporaryDirectory(prefix="kind-daemon-probe-")
@@ -1337,6 +1550,8 @@ wait_kind_credential_environment() { return 0; }
 kind_credential_probe() { :; }
 wait_kind_credential_restarted_workspace() { printf 'sandbox-x\\n'; }
 kind_credential_relay_pod() { printf 'codewire-orchestration-a\\n%%s\\n' '%(relay)s'; }
+restart_kind_orchestration() { :; }
+kind_credential_relay_token_lead() { printf '40\\n'; }
 kubectl() {
   case "$*" in
     "-n dev-sandboxes get pod sandbox-x -o jsonpath={.metadata.uid}") printf '%%s\\n' '%(uid)s' ;;
@@ -1349,6 +1564,93 @@ kind_credential_native_smoke
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn('::error::the delivered Codex login event is missing its generation',
                       result.stderr)
+
+    def relay_band(self, lead):
+        return self.shell('''
+log() { printf '[kind-e2e] %%s\\n' "$*"; }
+SANDBOX_NS=dev-sandboxes
+kind_workspace_runtime_image() { printf 'localhost/synthetic:latest\\n'; }
+prepare_kind_credential_cli() { :; }
+kind_credential_cli() {
+  case "$*" in
+    'org list --output json')
+      printf '[{"id":"org_contract_1","role":"member"},{"id":"org_contract_2","role":"owner"}]\\n' ;;
+    'org current') printf 'ID: org_contract_1\\n' ;;
+    'credentials --platform get'*)
+      printf '[{"name":"%%s","provider":"openai","status":"CREDENTIAL_STATUS_ACTIVE"}]\\n' "$4" ;;
+    'env --platform create'*) printf '{"id":"%%s"}\\n' '%(env)s' ;;
+    'env --platform update'*) printf '{"operation_generation":1}\\n' ;;
+    *) return 0 ;;
+  esac
+}
+wait_kind_credential_environment() { return 0; }
+kind_credential_probe() { :; }
+wait_kind_credential_restarted_workspace() { printf 'sandbox-x\\n'; }
+kind_credential_relay_pod() { printf 'codewire-orchestration-a\\n%%s\\n' '%(relay)s'; }
+restart_kind_orchestration() { :; }
+kind_credential_relay_token_lead() {
+  [ "$*" = 'sandbox-x codewire-orchestration-a' ] || return 97
+  printf '%%s\\n' '%(lead)s'
+}
+kubectl() {
+  case "$*" in
+    "-n dev-sandboxes get pod sandbox-x -o jsonpath={.metadata.uid}") printf '%%s\\n' '%(uid)s' ;;
+    *) return 99 ;;
+  esac
+}
+kind_credential_codex_login() { echo reached-delivery >&2; return 98; }
+kind_credential_native_smoke
+''' % {"env": ENVIRONMENT, "relay": RELAY_UID, "uid": WORKSPACE_UID, "lead": lead})
+
+    def test_native_acceptance_forces_the_near_coincident_token_band(self):
+        result = self.relay_band(40)
+        self.assertIn("[kind-e2e] the workspace Pod started 40s after the credential relay: "
+                      "their tokens expire that far apart\n", result.stdout)
+        self.assertIn("reached-delivery", result.stderr)
+        for lead in (0, 55, 60, 600, -3, "", "40.5"):
+            with self.subTest(lead=lead):
+                result = self.relay_band(lead)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("::error::the workspace Pod started %ss after the credential relay, "
+                              "outside the 1-54s band this stage forces" % lead, result.stderr)
+                self.assertNotIn("reached-delivery", result.stderr)
+        flow = HELPERS.read_text().split("kind_credential_native_smoke() (", 1)[1]
+        unselected = flow.index('kind_credential_probe "$environment" unselected')
+        restart = flow.index("\n  restart_kind_orchestration\n")
+        update = flow.index('kind_credential_cli env --platform update "$environment"')
+        relay = flow.index('relay_pod="$(sed -n \'1p\' <<<"$relay")"')
+        lead = flow.index('token_lead="$(kind_credential_relay_token_lead "$pod" "$relay_pod")" || return $?')
+        deliver = flow.index('kind_credential_codex_login "$environment" deliver')
+        renewal = flow.index('start_kind_credential_bridge_renewal "$pod"')
+        order = [unselected, restart, update, relay, lead, deliver, renewal]
+        self.assertEqual(sorted(order), order)
+        # The restart is the only step between the projection probe and the
+        # profile update that restarts the workspace Pod.
+        self.assertEqual(flow[unselected:update].count("\n  "), 5)
+
+    def relay_token_lead(self, workspace, relay, status=0):
+        return self.shell('''
+NS=codewire-e2e
+SANDBOX_NS=dev-sandboxes
+kubectl() {
+  case "$*" in
+    '-n dev-sandboxes get pod sandbox-x -o jsonpath={.status.startTime}') printf '%%s' '%s' ;;
+    '-n codewire-e2e get pod codewire-orchestration-a -o jsonpath={.status.startTime}')
+      printf '%%s' '%s'; return %d ;;
+    *) return 99 ;;
+  esac
+}
+kind_credential_relay_token_lead sandbox-x codewire-orchestration-a
+''' % (workspace, relay, status))
+
+    def test_the_relay_token_lead_is_the_two_pods_start_times_apart(self):
+        result = self.relay_token_lead("2026-10-12T14:00:18Z", "2026-10-12T13:59:37Z")
+        self.assertEqual((result.returncode, result.stdout), (0, "41\n"), result.stderr)
+        result = self.relay_token_lead("2026-10-12T13:59:37Z", "2026-10-12T14:00:18Z")
+        self.assertEqual((result.returncode, result.stdout), (0, "-41\n"), result.stderr)
+        self.assertNotEqual(self.relay_token_lead("", "2026-10-12T13:59:37Z").returncode, 0)
+        self.assertNotEqual(
+            self.relay_token_lead("2026-10-12T14:00:18Z", "2026-10-12T13:59:37Z", status=1).returncode, 0)
 
     def test_native_acceptance_arms_its_error_trap_before_io(self):
         source = HELPERS.read_text()
@@ -1634,12 +1936,12 @@ prepare_kind_credential_support_images
     @classmethod
     def relay_line(cls, offset_ms, event="credential_bridge_epoch_overlap",
                    target="codewire_orchestration::worker::credential_relay::epoch",
-                   environment=ENVIRONMENT):
+                   environment=ENVIRONMENT, previous=29000, following=509000):
         stamp = datetime.fromtimestamp((cls.RENEWAL_STARTED_MS + offset_ms) / 1000, timezone.utc)
         return json.dumps({
             "timestamp": stamp.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), "level": "INFO",
             "fields": {"event": event, "environment_id": environment,
-                       "previous_ends_in_ms": 29000, "next_ends_in_ms": 509000,
+                       "previous_ends_in_ms": previous, "next_ends_in_ms": following,
                        "message": "credential relay admitted the next epoch"},
             "target": target,
         })
@@ -1654,6 +1956,7 @@ prepare_kind_credential_support_images
         logs_path.write_text("".join(f"{line}\n" for line in logs))
         return self.shell('''
 NS=dev
+log() { printf '[kind-e2e] %%s\\n' "$*"; }
 kubectl() {
   [ "$*" = '-n dev logs pod/codewire-orchestration-7d9c8-x2k4p -c orchestration' ] || { echo unexpected-kubectl >&2; return 99; }
   cat '%s'
@@ -1663,13 +1966,28 @@ assert_kind_credential_bridge_renewal '%s' '%s' '%s'
 ''' % (logs_path, log_status, probe_path, environment, pod))
 
     def test_bridge_renewal_requires_only_broker_answers_and_an_overlap_in_the_window(self):
+        # An epoch that ended before the window, another environment's, and
+        # one outside the relay's epoch target are not this renewal's.
         noise = ["not-json", json.dumps({"timestamp": "x", "fields": "x"}),
-                 self.relay_line(100_000, event="credential_bridge_epoch_ended")]
+                 self.relay_line(-100_000, event="credential_bridge_epoch_ended"),
+                 self.relay_line(100_000, event="credential_bridge_epoch_ended",
+                                 environment="6f1d1e9a-0b1c-4a52-9a4e-2c1f00000009"),
+                 self.relay_line(100_000, event="credential_bridge_epoch_ended",
+                                 target="codewire_orchestration::worker::credential_relay")]
         for offset in (300_000, -2_000, 702_000):
             with self.subTest(offset=offset):
                 result = self.renewal_assertion(
                     [self.renewal_probe()], [*noise, self.relay_line(offset)])
                 self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "[kind-e2e] the credential relay's smallest "
+                                 "successor extension in the renewal window: 480s\n")
+        # The smallest extension is evidence, not a bound: 41 seconds passes.
+        result = self.renewal_assertion([self.renewal_probe()], [
+            self.relay_line(100_000, previous=88_000, following=129_000),
+            self.relay_line(140_000, previous=89_000, following=569_000)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "[kind-e2e] the credential relay's smallest "
+                         "successor extension in the renewal window: 41s\n")
         # About one request a second: the minimum is a short renewal window.
         result = self.renewal_assertion([self.renewal_probe(requests=60)],
                                         [self.relay_line(300_000)])
@@ -1704,7 +2022,6 @@ assert_kind_credential_bridge_renewal '%s' '%s' '%s'
                 [],
                 [self.relay_line(-3_000)],
                 [self.relay_line(703_000)],
-                [self.relay_line(300_000, event="credential_bridge_epoch_ended")],
                 [self.relay_line(300_000, target="codewire_orchestration::worker::credential_relay")],
                 [self.relay_line(300_000, environment="6f1d1e9a-0b1c-4a52-9a4e-2c1f00000009")],
                 [self.relay_line(300_000).replace("Z\"", "+00:00\"")]):
@@ -1712,6 +2029,67 @@ assert_kind_credential_bridge_renewal '%s' '%s' '%s'
                 result = self.renewal_assertion([self.renewal_probe()], logs)
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn("credential relay logged no epoch overlap", result.stderr)
+
+    def test_bridge_renewal_fails_when_an_epoch_ends_without_a_successor(self):
+        for offset in (-2_000, 300_000, 702_000):
+            with self.subTest(offset=offset):
+                result = self.renewal_assertion([self.renewal_probe()], [
+                    self.relay_line(100_000),
+                    self.relay_line(offset, event="credential_bridge_epoch_ended")])
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("::error::a credential relay epoch ended with no successor "
+                              "while proxied requests were running", result.stderr)
+
+    def test_bridge_renewal_fails_when_a_successor_does_not_extend_the_epoch(self):
+        for previous, following in ((88_000, 88_000), (88_000, 87_000), (None, 509_000),
+                                    (29_000, None), ("29000", 509_000)):
+            with self.subTest(previous=previous, following=following):
+                result = self.renewal_assertion([self.renewal_probe()], [
+                    self.relay_line(100_000),
+                    self.relay_line(300_000, previous=previous, following=following)])
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("::error::a credential relay successor did not expire later "
+                              "than the epoch it replaced", result.stderr)
+
+    # Run J on #2616 (2026-10-12): the relay's and the workspace's tokens
+    # expired 41 seconds apart, every successor was refused for want of 60
+    # seconds more, the epoch ended at 14:09:37 with none, and one request in
+    # the next second got 503 (#2641). The relay log and probe, as recorded.
+    RUN_J_ENVIRONMENT = "8ab72e99-a52c-48cc-bc04-7c408f324584"
+    RUN_J_PROBE = ('{"event":"bridge_renewal_probe","started_unix_ms":1791813629634,'
+                   '"ended_unix_ms":1791814186922,"requests":556,"statuses":{"403":555,"503":1}}')
+    RUN_J_RELAY = [
+        ("14:00:25.976980", {"event": "credential_bridge_first_epoch_admitted", "attempts": 1,
+                             "after_admissible_ms": 76}),
+        ("14:00:25.977001", {"event": "credential_bridge_epoch_admitted", "ends_in_ms": 551022}),
+        *[(at, {"event": "credential_bridge_successor_refused", "reason": "expiry_not_extended"})
+          for at in ("14:08:07.402307", "14:08:10.494415", "14:08:16.606922", "14:08:28.714600",
+                     "14:08:43.837725", "14:08:58.894501", "14:09:13.930888", "14:09:29.030291")],
+        ("14:09:37.002221", {"event": "credential_bridge_epoch_ended"}),
+        ("14:09:38.054562", {"event": "credential_bridge_epoch_admitted", "ends_in_ms": 530945}),
+        ("14:09:48.025961", {"event": "credential_bridge_epoch_ended"}),
+    ]
+
+    def test_run_j_fails_the_renewal_assertion_on_both_checks(self):
+        logs = [json.dumps({
+            "timestamp": f"2026-10-12T{at}Z", "level": "INFO",
+            "fields": {**fields, "environment_id": self.RUN_J_ENVIRONMENT},
+            "target": "codewire_orchestration::worker::credential_relay::epoch"})
+            for at, fields in self.RUN_J_RELAY]
+        # The 503 in the gap.
+        result = self.renewal_assertion([self.RUN_J_PROBE], logs,
+                                        environment=self.RUN_J_ENVIRONMENT)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("a proxied request failed or the probe was incomplete", result.stderr)
+        # Had every request been answered, the epoch that ended with no
+        # successor inside the window still fails it.
+        answered = json.loads(self.RUN_J_PROBE)
+        answered["statuses"] = {"403": answered["requests"]}
+        result = self.renewal_assertion([json.dumps(answered)], logs,
+                                        environment=self.RUN_J_ENVIRONMENT)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("::error::a credential relay epoch ended with no successor "
+                      "while proxied requests were running", result.stderr)
 
     def test_bridge_renewal_fails_closed_on_log_or_pod_name_failure(self):
         result = self.renewal_assertion([self.renewal_probe()], [self.relay_line(300_000)],
@@ -1865,6 +2243,82 @@ exit 0
         cleared = flow.index('member_role_changed=""\n', member)
         self.assertEqual(sorted([armed, admin, member, cleared]), [armed, admin, member, cleared])
 
+    def test_each_authority_change_runs_in_a_window_no_epoch_renews_in(self):
+        flow = HELPERS.read_text().split("kind_credential_native_smoke() (", 1)[1]
+        index = flow.index
+        awaited = ('headroom="$(await_kind_credential_epoch_headroom "$environment" "$relay_pod")" '
+                   '|| return $?\n')
+        opened = '  authority_window_from="$(date +%s%3N)"\n'
+        recorded = ('  if [ "$headroom" = renewed ]; then\n'
+                    "    printf '%s\\n' '{\"event\":\"epoch_renewed\"}' >> \"$KIND_DAEMON_PROBE_LOG\"\n"
+                    '    kind_credential_daemon_probe "$environment" success\n'
+                    '  fi\n')
+        closed = ('kind_credential_daemon_probe "$environment" success\n'
+                  '  assert_kind_credential_no_renewal_since "$environment" "$relay_pod" '
+                  '"$authority_window_from"\n'
+                  '  authority_window_from=""\n')
+        self.assertEqual((flow.count(awaited), flow.count(opened), flow.count(closed)), (2, 2, 2))
+        self.assertEqual(flow.count(recorded), 1)
+        # The first window opens before the epoch's first request: a renewal
+        # waited for there needs no record, and the warm-up, the reuse,
+        # Reconnect and the role change are all observed on one epoch.
+        counted = index("assert_kind_credential_provider_counts 2",
+                        index('kind_credential_probe "$environment" selected'))
+        first = index(awaited + opened, counted)
+        warm = index('kind_credential_daemon_probe "$environment" success\n', first)
+        self.assertEqual(flow[first + len(awaited + opened):warm], "  ")
+        admin = index('set_kind_credential_member_role "$environment" admin', warm)
+        readmitted = index('kind_credential_daemon_probe "$environment" success '
+                           '"$KIND_AUTHORITY_CHANGE_WITHIN_MS"', admin)
+        role_closed = index(closed, readmitted)
+        # The second opens right before the rebind, on a warm epoch.
+        rebind = index(awaited + recorded + opened, role_closed)
+        unset = index('--profile "$profile_name" unset codex', rebind)
+        self.assertEqual(flow[rebind + len(awaited + recorded + opened):unset],
+                         '  kind_credential_cli credentials --platform ')
+        recovered = index('kind_credential_daemon_probe "$environment" success '
+                          '"$KIND_AUTHORITY_CHANGE_WITHIN_MS"', unset)
+        rebind_closed = index(closed, recovered)
+        replaced = index('replace_kind_credential_sandbox "$environment"', rebind_closed)
+        order = [counted, first, warm, admin, readmitted, role_closed, rebind, unset, recovered,
+                 rebind_closed, replaced]
+        self.assertEqual(sorted(order), order)
+        # No daemon-path request is made between the two windows.
+        self.assertNotIn("kind_credential_daemon_probe", flow[role_closed + len(closed):rebind])
+        # A probe that fails inside a window names the renewal that caused it.
+        trap = flow.split("' EXIT", 1)[0].rsplit("trap '", 1)[1]
+        self.assertTrue(trap.startswith(
+            '[ -z "$authority_window_from" ] || assert_kind_credential_no_renewal_since '
+            '"$environment" "$relay_pod" "$authority_window_from" || true; '))
+        # The assertion reads the journey with the period the daemon was given.
+        period = index('login_check_seconds="$(kind_credential_codex_login_check_period "$pod")" || return $?')
+        self.assertLess(period, admin)
+        self.assertIn('assert_kind_credential_authority_changes "$journey_from" "$KIND_DAEMON_PROBE_LOG" \\\n'
+                      '    "$login_check_seconds"\n', flow)
+
+    def login_check_period(self, value, status=0):
+        return self.shell('''
+SANDBOX_NS=dev-sandboxes
+kubectl() {
+  [ "$*" = '-n dev-sandboxes get pod sandbox-1 -o jsonpath={.spec.containers[?(@.name=="workspace")].env[?(@.name=="CODEWIRE_CODEX_LOGIN_CHECK_PERIOD_SECONDS")].value}' ] || return 99
+  printf '%%s' '%s'
+  return %d
+}
+kind_credential_codex_login_check_period sandbox-1
+''' % (value, status))
+
+    def test_the_login_check_period_is_read_from_the_workspace_daemon(self):
+        for value, period in (("", "120"), ("30", "30"), ("10", "10"), ("120", "120")):
+            with self.subTest(value=value):
+                result = self.login_check_period(value)
+                self.assertEqual((result.returncode, result.stdout), (0, period + "\n"), result.stderr)
+        for value in ("9", "121", "030", "1e2", "30 ", "-30"):
+            with self.subTest(value=value):
+                result = self.login_check_period(value)
+                self.assertEqual((result.returncode, result.stdout), (1, ""), result.stderr)
+                self.assertIn("invalid Codex login check period", result.stderr)
+        self.assertNotEqual(self.login_check_period("30", status=1).returncode, 0)
+
 
 class BridgeRenewalProbe(unittest.TestCase):
     STOP = "/tmp/codewire-kind-bridge-renewal-123"
@@ -1907,7 +2361,7 @@ class BridgeRenewalProbe(unittest.TestCase):
         for connection in self.connections:
             self.assertEqual(connection.args, (("127.0.0.1", 38081), {"timeout": 20}))
             request = connection.request.call_args
-            self.assertEqual(request.args, ("POST", "/v1/messages"))
+            self.assertEqual(request.args, ("POST", "/_codewire/anthropic/v1/messages"))
             self.assertEqual(request.kwargs["headers"],
                              {"Host": "localhost", "Content-Type": "application/json"})
             self.assertNotIn("Authorization", request.kwargs["headers"])
@@ -2140,10 +2594,10 @@ class ClaudeSessionDriver(unittest.TestCase):
     The environment passed in stands for what the workspace daemon projected
     into the session; the driver must only observe it."""
 
-    SUBSCRIPTION = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081",
+    SUBSCRIPTION = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081/_codewire/anthropic",
                     "CLAUDE_CODE_OAUTH_TOKEN": "codewire-managed",
                     "ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_API_KEY": ""}
-    API_KEY = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081",
+    API_KEY = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:38081/_codewire/anthropic",
                "ANTHROPIC_AUTH_TOKEN": "codewire-managed",
                "ANTHROPIC_API_KEY": "", "CLAUDE_CODE_OAUTH_TOKEN": ""}
 
@@ -2531,9 +2985,9 @@ kind_credential_claude_stage workspace-pod
 
     def test_provider_events_must_be_new_answers_for_exactly_the_expected_form(self):
         api = {"event": "anthropic_response", "kind": "api_key", "route": "messages",
-               "stream": True, "status": 200, "refused": False, "client_identity": False,
+               "stream": True, "status": 200, "refused": False, "client_identity": True,
                "anthropic_calls": 1}
-        token = dict(api, kind="subscription_token", client_identity=True, anthropic_calls=3)
+        token = dict(api, kind="subscription_token", anthropic_calls=3)
         refused = dict(token, status=401, refused=True, anthropic_calls=5)
         unrelated = {"event": "provider_response", "scenario": "baseline"}
         events = [unrelated, api, dict(api, anthropic_calls=2), token,
@@ -2550,7 +3004,7 @@ kind_credential_claude_stage workspace-pod
                 ([], 2, "subscription_token", 200),
                 ([dict(token, status=500)], 2, "subscription_token", 200),
                 ([dict(token, client_identity=False)], 2, "subscription_token", 200),
-                ([dict(api, client_identity=True)], 2, "api_key", 200),
+                ([dict(api, client_identity=False)], 2, "api_key", 200),
                 ([refused], 2, "subscription_token", 200),
                 ([dict(refused, refused=False)], 2, "subscription_token", 401),
                 ([{"event": "anthropic_rejected", "reason": "placeholder",

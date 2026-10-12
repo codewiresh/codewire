@@ -42,7 +42,9 @@ on:
 # A newer main push must never cancel a running dry run. Without this block
 # Forgejo cancels the older push run of the same workflow and ref. With a group
 # and `cancel-in-progress: false` it queues: one run at a time, in push order,
-# and each one finishes.
+# and each one finishes. Forgejo keeps every queued run, so a queued run that
+# starts after main moved on builds nothing when a newer queued run covers it
+# (see "Skip a superseded commit").
 concurrency:
   group: cw-release-dry-run-${{ github.ref }}
   cancel-in-progress: false
@@ -70,9 +72,31 @@ jobs:
           [ "$GITHUB_REF" = 'refs/heads/main' ]
           [ "$GITHUB_REF_NAME" = 'main' ]
 
+  superseded:
+    # Only the newest queued commit needs the protected builders and the
+    # single Mac runner: scripts/ci/release/dry-run-superseded.sh says when an
+    # older one may skip without losing a check. The run already building when
+    # main moves on still finishes.
+    name: Skip a superseded commit
+    needs: [protected-main]
+    runs-on: ci-lite
+    outputs:
+      superseded: ${{ steps.canonical.outputs.superseded }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Skip a superseded commit
+        id: canonical
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: scripts/ci/release/dry-run-superseded.sh "$GITHUB_SHA" "$BEFORE"
+
   build-runtime-linux:
     name: Build or check the local runtime's Linux side
-    needs: [protected-main]
+    needs: [protected-main, superseded]
+    if: needs.superseded.outputs.superseded == 'false'
     runs-on: ci-protected
     outputs:
       mode: ${{ steps.select.outputs.mode }}
@@ -159,7 +183,8 @@ jobs:
 
   build-darwin:
     name: Build the macOS cw natively
-    needs: [protected-main, build-runtime-linux]
+    needs: [protected-main, superseded, build-runtime-linux]
+    if: needs.superseded.outputs.superseded == 'false'
     runs-on: macos-arm64
     outputs:
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}

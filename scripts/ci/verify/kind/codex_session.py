@@ -28,6 +28,7 @@ import selectors
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -67,6 +68,11 @@ ROTATION_TIMEOUT = 720.0
 # baseline's epoch. Host-side authenticated admission logs prove fresh tokens;
 # time or the changed file by itself is not sufficient acceptance evidence.
 HOSTED_EPOCH_MAX_LIFETIME = 600.0
+# The host creates this file when the credential fixture records a fresh-token
+# admission for this environment: the relay's successor epoch authenticated
+# with the replaced workspace token. With the replaced token it ends the idle
+# before the epoch bound (codex_session.py <marker>).
+ADMISSION_MARKER = re.compile(r"/tmp/codewire-kind-fresh-admission-[0-9]{1,12}")
 SCENARIO_TIMEOUT = 30.0
 SHUTDOWN_GRACE = 5.0
 
@@ -450,19 +456,29 @@ class Server:
             self.process.stderr.close()
 
 
-def observe_rotation(server, initial, baseline_completed):
+def observe_rotation(server, initial, baseline_completed, admitted=lambda: False):
+    """Idle until the projected token has been replaced and a fresh-token
+    epoch admitted: the host's admission mark, or else waiting past the epoch
+    bound. Returns the seconds after baseline when the replacement was seen,
+    and whether the admission mark ended the idle."""
     server.phase = "token_rotation"
     deadline = time.monotonic() + ROTATION_TIMEOUT
+    rotated = None
     while True:
-        if time.monotonic() >= deadline:
+        now = time.monotonic()
+        if now >= deadline:
             raise Failure("projected_token_rotation_timeout")
-        changed = token_fingerprint() != initial
-        if changed and time.monotonic() - baseline_completed > HOSTED_EPOCH_MAX_LIFETIME:
-            return
+        if rotated is None and token_fingerprint() != initial:
+            rotated = now - baseline_completed
+        if rotated is not None:
+            if admitted():
+                return rotated, True
+            if now - baseline_completed > HOSTED_EPOCH_MAX_LIFETIME:
+                return rotated, False
         server.pump(0.25)
 
 
-def run(server, trace):
+def run(server, trace, admitted=lambda: False):
     server.initialize()
     thread_id = server.thread()
     server.turn(thread_id, "CW_KIND_BASELINE")
@@ -472,8 +488,9 @@ def run(server, trace):
     initial = token_fingerprint()
     validate_process_trace(trace)
     emit("baseline_completed", codex_processes=1, legacy_auth_commands=0)
-    observe_rotation(server, initial, baseline_completed)
-    emit("projected_token_rotated", changed=True,
+    rotated, fresh_admission = observe_rotation(server, initial, baseline_completed, admitted)
+    emit("projected_token_rotated", changed=True, rotated_ms=int(rotated * 1000),
+         fresh_admission=fresh_admission,
          elapsed_ms=int((time.monotonic() - baseline_completed) * 1000))
     # The same stock process continues through the new hosted epoch. The
     # remaining original deadlines bound the entire retry/exhaustion journey,
@@ -532,7 +549,7 @@ def validate_projection():
         raise Failure("unexpected_projection")
 
 
-def main():
+def main(argv=()):
     stage = "startup"
     server = None
     success = False
@@ -542,6 +559,13 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     try:
+        if len(argv) > 1 or (argv and not ADMISSION_MARKER.fullmatch(argv[0])):
+            raise Failure("arguments")
+        marker = Path(argv[0]) if argv else None
+        if marker is not None and os.path.lexists(marker):
+            raise Failure("admission_marker_present")
+        def admitted():
+            return marker is not None and marker.is_file()
         validate_projection()
         if Path(CODEX_HOME).resolve() != Path(CODEX_HOME):
             raise Failure("unexpected_home_path")
@@ -554,7 +578,7 @@ def main():
             ], "/workspace")
             stage = "session"
             try:
-                run(server, trace)
+                run(server, trace, admitted)
             except BaseException:
                 # Repeated interruption must not abandon an owned child while
                 # the first cancellation is being drained. Keep the original
@@ -590,4 +614,4 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

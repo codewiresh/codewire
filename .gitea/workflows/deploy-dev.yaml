@@ -8,9 +8,9 @@ on:
 # A newer main push must never cancel a running delivery. Without this block
 # Forgejo cancels the older push run of the same workflow and ref. With a group
 # and `cancel-in-progress: false` it queues: one run at a time, in push order,
-# and each one finishes. Forgejo keeps every queued run (it has no "newest
-# pending only" mode), so a queued run that starts after main moved on builds
-# nothing; see "Skip a superseded commit" below.
+# and each one finishes and delivers. Forgejo keeps every queued run (it has no
+# "newest pending only" mode), so a queued run that starts after main moved on
+# builds nothing; see "Skip a superseded commit" below.
 concurrency:
   group: deploy-dev-${{ github.ref }}
   cancel-in-progress: false
@@ -47,10 +47,12 @@ jobs:
       - name: Verify sealed Rust toolchain
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
-      # Delivery dispatches only the canonical main commit, so a queued run
-      # for an older commit would build an image set it must then refuse to
-      # dispatch. The newer commit's run is queued behind this one and plans
-      # against the deployed source, so it delivers the cumulative change.
+      # Forgejo keeps every queued run, so a burst of merges would otherwise
+      # build one image set per merge. A run that starts after main moved on
+      # builds nothing: the newer commit's run is queued behind this one and
+      # plans against the deployed source, so it delivers the cumulative
+      # change. A run already building when main moves on still delivers; see
+      # "Require a canonical main commit that moves Dev forward".
       - name: Skip a superseded commit
         id: canonical
         run: |
@@ -188,7 +190,17 @@ jobs:
             "${RUNNER_TEMP:?}/codewire-dev-image-bundle.json" \
             scripts/ci/trust/codewire-runtime-signing.pub
 
-      - name: Require the exact current canonical main commit
+      # Dev receives canonical main in push order. The commit at the head of
+      # main is always deliverable. A commit main has moved past while its set
+      # was built is still deliverable when it lies on canonical main and
+      # descends from the source Dev ran when this delivery was planned:
+      # deliveries queue one at a time (see `concurrency`), so it is the next
+      # commit Dev should run and Dev never moves backwards. Anything else
+      # stops here, after publication and before dispatch.
+      - name: Require a canonical main commit that moves Dev forward
+        env:
+          DEPLOYED_SOURCE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}
+          DEPLOYED_SOURCE_VALID: ${{ needs.deploy-selection.outputs.baseline_valid }}
         run: |
           set -euo pipefail
           canonical_main_sha="$(
@@ -196,9 +208,24 @@ jobs:
               awk '$2 == "refs/heads/main" { print $1 }'
           )"
           [[ "$canonical_main_sha" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$canonical_main_sha" == "$GITHUB_SHA" ]]
+          if [[ "$canonical_main_sha" == "$GITHUB_SHA" ]]; then
+            echo 'delivering the canonical main commit'
+            exit 0
+          fi
+          [[ "$DEPLOYED_SOURCE_VALID" == true ]]
+          [[ "$DEPLOYED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          # Judge ancestry on the history actually fetched, not on the earlier
+          # reading, so a further merge in between cannot be misjudged.
+          unshallow=()
+          [[ "$(git rev-parse --is-shallow-repository)" != true ]] || unshallow=(--unshallow)
+          git fetch --quiet --no-tags "${unshallow[@]}" origin '+refs/heads/main:refs/remotes/origin/main'
+          canonical_main_sha="$(git rev-parse --verify 'refs/remotes/origin/main^{commit}')"
+          git merge-base --is-ancestor "$GITHUB_SHA" "$canonical_main_sha"
+          git merge-base --is-ancestor "$DEPLOYED_SOURCE_SHA" "$GITHUB_SHA"
+          echo "main is now ${canonical_main_sha}; delivering its ancestor ${GITHUB_SHA}, which descends from deployed ${DEPLOYED_SOURCE_SHA}"
 
       - name: Dispatch only the canonical source SHA
+        # The step above admitted this exact commit of canonical main.
         run: scripts/ci/deploy/dispatch-deploy-dev.sh "${GITHUB_SHA:?}"
 
       # The public GHCR mirror is best effort: Dev already pulls from Harbor,

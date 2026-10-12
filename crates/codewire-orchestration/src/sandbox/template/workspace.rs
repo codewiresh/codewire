@@ -791,6 +791,18 @@ fn dind_container(
 }
 
 fn build_workspace_env(opts: &TemplateOpts) -> Vec<Value> {
+    let mut environment = workspace_identity_env(opts);
+    // Kind's test deployment only; production renders no such variable.
+    if let Some(seconds) = opts.codex_login_check_period_seconds {
+        environment.push(json!({
+            "name": codewire_daemon::CODEX_LOGIN_CHECK_PERIOD_ENV,
+            "value": seconds.to_string(),
+        }));
+    }
+    environment
+}
+
+fn workspace_identity_env(opts: &TemplateOpts) -> Vec<Value> {
     if let Some(binding_url) = opts.workspace_binding_url() {
         // Design §13: no daemon token, environment ID, generation, projection
         // digest, managed clients or derived client variables. The daemon

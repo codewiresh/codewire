@@ -171,17 +171,73 @@ grep -qF -- '--tmpfs /home/codewire:rw,exec,uid=1000,gid=1000,mode=0700,size=256
   fail 'verification omits the fresh persistent-home boundary'
 grep -qF "!contains(needs.verification-selection.outputs.selection, '|kind|')" <<<"$workspace_job" ||
   fail 'standalone workspace verification duplicates selected Kind ownership'
-PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/ci/tests/test-workspace-image-artifact.py"
+# The companion suites are independent programs with private scratch
+# directories. The experiment suite asserts a real one-second timeout, so it
+# runs first and alone, as before. The others run in two lanes beside the
+# verifier fixture below and are joined, in this order, before the contract
+# is reported: every suite still runs every case, and any failure fails this
+# test.
+mkdir -p "$ROOT/.tmp"
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/ci/tests/test-workspace-cache-experiment.py"
-PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/ci/tests/test-workspace-cache-probes.py"
-"$ROOT/scripts/ci/tests/test-select-untrusted-workspace-cache.sh"
-"$ROOT/scripts/ci/tests/test-workspace-cache.sh"
+work=''
+companions="$(mktemp -d "$ROOT/.tmp/workspace-image-companions.XXXXXX")"
+companion_names=()
+companion_pids=()
+cleanup() {
+  local pid
+  for pid in "${companion_pids[@]}"; do
+    # A lane leads its own process group when setsid is available.
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in "${companion_pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+  rm -rf "$work" "$companions"
+}
+trap cleanup EXIT
+start_companion_lane() {
+  local name="$1"
+  shift
+  local -a leader=()
+  ! command -v setsid >/dev/null || leader=(setsid)
+  # shellcheck disable=SC2016 # The lane's own shell expands its arguments.
+  "${leader[@]}" bash -euo pipefail -c '
+    for suite; do
+      case "$suite" in
+        *.py) PYTHONDONTWRITEBYTECODE=1 python3 "$suite" ;;
+        *) "$suite" ;;
+      esac
+    done
+  ' bash "$@" >"$companions/$name.out" 2>"$companions/$name.err" &
+  companion_names+=("$name")
+  companion_pids+=("$!")
+}
+join_companion_lanes() {
+  local index status failed=false
+  for index in "${!companion_pids[@]}"; do
+    status=0
+    wait "${companion_pids[$index]}" || status=$?
+    cat "$companions/${companion_names[$index]}.out"
+    cat "$companions/${companion_names[$index]}.err" >&2
+    if [[ "$status" != 0 ]]; then
+      printf '[test-workspace-image-verify-workflow] ERROR: companion lane %s failed with status %s\n' \
+        "${companion_names[$index]}" "$status" >&2
+      failed=true
+    fi
+  done
+  companion_pids=()
+  [[ "$failed" == false ]] || exit 1
+}
+start_companion_lane artifact-and-probes \
+  "$ROOT/scripts/ci/tests/test-workspace-image-artifact.py" \
+  "$ROOT/scripts/ci/tests/test-workspace-cache-probes.py"
+start_companion_lane selector-and-cache \
+  "$ROOT/scripts/ci/tests/test-select-untrusted-workspace-cache.sh" \
+  "$ROOT/scripts/ci/tests/test-workspace-cache.sh"
 
 # Execute the verifier against a fake Docker client. This catches command-order,
 # digest-handoff, cleanup, and fail-closed regressions without building an image.
-mkdir -p "$ROOT/.tmp"
 work="$(mktemp -d "$ROOT/.tmp/workspace-image-verifier-test.XXXXXX")"
-trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/tmp"
 # Execute the actual workflow decision, not a second handwritten selector.
 awk '
@@ -783,7 +839,12 @@ rmdir "$fixture_receipt"
   fail 'receipt failure leaked its staging directory'
 
 : >"$work/docker.log"
-MOCK_REUSE=disabled run_mock_verifier slow-cleanup valid docker slow-cleanup >"$work/slow-cleanup.out" 2>&1
+# This case's output goes to a file that the exit trap removes; show it when
+# the verification fails instead of exiting silently.
+MOCK_REUSE=disabled run_mock_verifier slow-cleanup valid docker slow-cleanup >"$work/slow-cleanup.out" 2>&1 || {
+  cat "$work/slow-cleanup.out" >&2
+  fail 'verification with a slow but bounded state deletion failed'
+}
 [[ -s "$fixture_receipt" ]] || fail 'bounded slow state deletion failed verification'
 cleanup_line="$(grep -n '^buildx rm ' "$work/docker.log" | cut -d: -f1)"
 contract_line="$(grep -n '^run --rm ' "$work/docker.log" | head -n1 | cut -d: -f1)"
@@ -834,7 +895,9 @@ grep -q 'workspace cache cleanup: phase=credential-erasure status=45 elapsed_sec
 MOCK_EXEC=true MOCK_COMPILER=r2 MOCK_LAYERS=r2 MOCK_CREDENTIALS="$work/r2.aws" MOCK_REUSE=disabled \
   run_mock_verifier hanging-contract valid docker hang-contract >"$work/hanging-contract.out" 2>&1 &
 verifier_pid=$!
-for ((attempt=0; attempt<200; attempt++)); do
+# A readiness wait only (up to 60 s on a loaded host): the state asserted
+# next is the same whenever the contract starts.
+for ((attempt=0; attempt<1200; attempt++)); do
   [[ ! -s "$work/contract-child" ]] || break
   sleep 0.05
 done
@@ -863,7 +926,8 @@ crash_owned_sampler() {
 import os, select, signal, stat, sys, time
 from pathlib import Path
 
-deadline = time.monotonic() + 10
+# A readiness budget only: every check below asserts state, not speed.
+deadline = time.monotonic() + 60
 pins = {}
 paused = False
 sampler = None
@@ -1146,4 +1210,5 @@ PY
   printf 'workspace copied-CW policy: exact prior accepts / current refuses before contracts; original producer retained\n'
 fi
 
+join_companion_lanes
 echo 'workspace-image verification workflow contract: OK'

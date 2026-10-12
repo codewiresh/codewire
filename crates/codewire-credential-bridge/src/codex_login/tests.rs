@@ -357,7 +357,9 @@ async fn malformed_or_unsolicited_login_answers_end_the_epoch() {
 #[tokio::test]
 async fn application_http_ingress_cannot_request_a_login() {
     let harness = Harness::new(bridge(), &capabilities()).await;
-    for path in ["/codex-login", "/v1/codex-login", "/_codewire/codex-login"] {
+    // `/v1/...` is the Codex client's transparent provider base, so a path
+    // there is an ordinary proxied provider request, never a login.
+    for path in ["/codex-login", "/_codewire/codex-login"] {
         let response = harness
             .bridge
             .respond(

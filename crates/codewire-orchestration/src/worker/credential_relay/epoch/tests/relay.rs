@@ -368,3 +368,68 @@ async fn fresh_epochs_wait_while_the_broker_cannot_admit_them() {
     assert_eq!((resumed.started_at, resumed.succeeds), (relay.at(60), None));
     relay.stop().await.unwrap();
 }
+
+/// Every admission log states when its epoch ends: the Kind journey reads it
+/// to keep an authority change clear of the relay's next renewal.
+#[test]
+fn an_admission_reports_the_time_until_its_epoch_ends() {
+    let now = Instant::now();
+    assert_eq!(ends_in_ms(None, now), 0);
+    let renewal = Renewal {
+        expires_at_unix: 1,
+        ends_at: now + Duration::from_secs(510),
+        successor_at: now + Duration::from_secs(420),
+    };
+    assert_eq!(ends_in_ms(Some(renewal), now), 510_000);
+    assert_eq!(ends_in_ms(Some(renewal), now + Duration::from_secs(600)), 0);
+}
+
+/// The relay's and the workspace's tokens expire 40 seconds apart and kubelet
+/// rotates the later one late (#2641): a successor admitted with only those
+/// 40 seconds overlaps the current epoch, and once its predecessor has ended
+/// its own successor is admitted with overlap as soon as the later token
+/// rotates. No epoch ends without a successor already serving.
+#[tokio::test(start_paused = true)]
+async fn a_successor_that_extends_by_less_than_its_lead_still_overlaps() {
+    let mut relay = Relay::start();
+    let mut first = relay.next().await;
+    first.admit(1_200, Some(200));
+    let mut second = relay.next().await;
+    assert_eq!(
+        (second.started_at, second.succeeds),
+        (relay.at(110), Some(1_200))
+    );
+    // Only the earlier token rotated: 40 seconds more, ending at 240.
+    second.admit(1_240, Some(130));
+    // Its successor is due at 150, but starts only once the first epoch,
+    // left to its broker, has ended at 200.
+    relay.none_until(200).await;
+    first.not_cancelled();
+    first.send(Control::End(Ok(())));
+    let third = relay.next().await;
+    assert_eq!(
+        (third.started_at, third.succeeds),
+        (relay.at(200), Some(1_240))
+    );
+    // The later token has not rotated yet: refused, and tried again.
+    third.send(Control::Refuse);
+    let mut fourth = relay.next().await;
+    assert_eq!(
+        (fourth.started_at, fourth.succeeds),
+        (relay.at(203), Some(1_240))
+    );
+    fourth.admit(1_840, Some(637));
+    // The second epoch serves its pending requests until its own end.
+    tokio::time::sleep_until(relay.at(240)).await;
+    second.not_cancelled();
+    fourth.not_cancelled();
+    second.send(Control::End(Ok(())));
+    // Here the relay's own lifetime ends first: 203 + 600 - 90.
+    let fifth = relay.next().await;
+    assert_eq!(
+        (fifth.started_at, fifth.succeeds),
+        (relay.at(713), Some(1_840))
+    );
+    drop(fifth);
+    relay.stop().await.unwrap();
+}

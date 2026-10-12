@@ -292,9 +292,10 @@ async fn invalid_coordinates_and_unadmitted_connection_enqueue_nothing() {
 #[tokio::test]
 async fn application_http_ingress_cannot_request_a_projection() {
     let harness = Harness::new(bridge()).await;
+    // `/v1/...` is the Codex client's transparent provider base, so a path
+    // there is an ordinary proxied provider request, never a projection.
     for path in [
         "/environment-projection",
-        "/v1/environment-projection",
         "/internal/environment-projection",
     ] {
         let response = harness

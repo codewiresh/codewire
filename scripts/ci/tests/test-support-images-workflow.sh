@@ -86,9 +86,9 @@ for output in build_support_images build_confidential_probe_image reason matched
   grep -Fq "      ${output}: \${{ steps.select.outputs.${output} }}" <<<"$selection_job" ||
     fail "support selection omits ${output} planner output"
 done
-grep -Fq "if: \${{ needs.support-selection.outputs.build_support_images == 'true' }}" \
+grep -Fq "if: \${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' }}" \
   "$WORKFLOW" || fail 'support-pair publication is not independently selected'
-grep -Fq "if: \${{ needs.support-selection.outputs.build_confidential_probe_image == 'true' }}" \
+grep -Fq "if: \${{ needs.support-selection.outputs.build_confidential_probe_image == 'true' && needs.support-selection.outputs.superseded == 'false' }}" \
   "$WORKFLOW" || fail 'confidential-probe publication is not independently selected'
 [[ "$(grep -Fc 'needs: [support-selection]' "$WORKFLOW")" -eq 2 ]] ||
   fail 'independent publisher jobs do not both wait for support selection'
@@ -504,5 +504,63 @@ for mutation in "${pin_mutations[@]}"; do
   [[ "$mutated" != "$pin_job" ]] || fail "pin job mutation did not apply: $label"
   [[ -n "$(pin_job_violation "$mutated")" ]] || fail "pin job mutation was accepted: $label"
 done
+
+# Forgejo keeps every queued run, so one that starts after main moved on must
+# publish nothing; the newer commit's run is queued behind it and plans against
+# the published pair. The rule is deploy-dev.yaml's own: execute the checked-in
+# step for the current, superseded, unreadable and malformed cases, and require
+# both workflows to carry the same step.
+step_of() {
+  awk '
+    /- name: Skip a superseded commit/ { scope = 1 }
+    scope && /^        run: \|$/ { run = 1; next }
+    run && /^          / { print substr($0, 11); next }
+    run { exit }
+  ' "$1"
+}
+superseded_step="$(mktemp)"
+superseded_bin="$(mktemp -d)"
+trap 'rm -rf -- "$superseded_step" "$superseded_bin"' EXIT
+step_of "$WORKFLOW" >"$superseded_step"
+[[ -s "$superseded_step" ]] || fail 'support selection has no superseded-commit step'
+deploy_step="$(step_of "$ROOT/.gitea/workflows/deploy-dev.yaml")"
+[[ "$(sed 's/publishes this/delivers this/' "$superseded_step")" == "$deploy_step" ]] ||
+  fail 'support publication and Dev delivery judge a superseded commit differently'
+# shellcheck disable=SC2016 # Match the literal workflow expression.
+grep -Fq '      superseded: ${{ steps.canonical.outputs.superseded }}' <<<"$selection_job" ||
+  fail 'support selection does not expose whether its commit was superseded'
+superseded_line="$(grep -n -m1 'name: Skip a superseded commit' <<<"$selection_job" | cut -d: -f1)"
+resolve_line="$(grep -n -m1 'name: Resolve untrusted published support pair' <<<"$selection_job" | cut -d: -f1)"
+[[ "$superseded_line" -lt "$resolve_line" ]] ||
+  fail 'support selection resolves the published pair before it knows whether its commit was superseded'
+[[ "$(grep -Fc "needs.support-selection.outputs.superseded == 'false'" "$WORKFLOW")" -eq 2 ]] ||
+  fail 'a superseded commit still reaches a support publisher'
+cat >"$superseded_bin/git" <<'GIT'
+#!/usr/bin/env bash
+[[ "$*" == 'ls-remote origin refs/heads/main' ]] || exit 64
+[[ -n "${FAKE_MAIN_SHA:-}" ]] || exit 1
+printf '%s\trefs/heads/main\n' "$FAKE_MAIN_SHA"
+GIT
+chmod +x "$superseded_bin/git"
+superseded_case() {
+  local main="$1" output
+  output="$(mktemp)"
+  if env PATH="$superseded_bin:$PATH" FAKE_MAIN_SHA="$main" \
+      GITHUB_SHA=1111111111111111111111111111111111111111 GITHUB_OUTPUT="$output" \
+      bash "$superseded_step" >/dev/null 2>&1; then
+    cat "$output"
+  else
+    printf 'failed\n'
+  fi
+  rm -f -- "$output"
+}
+[[ "$(superseded_case 1111111111111111111111111111111111111111)" == superseded=false ]] ||
+  fail 'the canonical main commit was treated as superseded'
+[[ "$(superseded_case 2222222222222222222222222222222222222222)" == superseded=true ]] ||
+  fail 'a commit behind canonical main was not skipped'
+[[ "$(superseded_case '')" == failed ]] ||
+  fail 'an unreadable canonical main did not fail closed'
+[[ "$(superseded_case not-a-commit)" == failed ]] ||
+  fail 'a malformed canonical main did not fail closed'
 
 echo 'support-image workflow contract: OK'

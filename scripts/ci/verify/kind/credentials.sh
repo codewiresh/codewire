@@ -383,6 +383,109 @@ kind_credential_probe() {
 # polled once a second. A credential change applies to the very next request.
 KIND_AUTHORITY_CHANGE_WITHIN_MS=65000
 
+# An authority change is observed on one connected epoch. The relay admits an
+# epoch's natural successor about 90 seconds before it ends, and a successor
+# keeps the scope it was admitted with (credential-service authority.rs,
+# Resolved::same_authority): admitted inside a change window, it never answers
+# the expected denial, or can never serve the restore. A change therefore
+# starts only while the serving epoch has this long left: the 90-second
+# successor lead, the 65-second change window, and 25 seconds for the requests
+# before the change, the changes themselves and the restore (the two windows
+# measured 63 and 62 seconds end to end). Otherwise the journey first waits
+# for the relay's next admission (#2574). An epoch ends with the earlier of
+# the relay's and the workspace's projected tokens, which expire at unrelated
+# times, so the next epoch can be a short one and the wait can span two
+# renewals: at most this many seconds.
+KIND_AUTHORITY_EPOCH_HEADROOM_MS=180000
+KIND_AUTHORITY_EPOCH_WAIT_SECONDS=360
+
+# The relay's epoch admissions for ENVIRONMENT in log order, one
+# "admitted_unix_ms ends_in_ms" line each: a first or fresh epoch and each
+# overlap state when their epoch ends (credential_relay/epoch.rs). 0 means the
+# broker reported no expiry, so the relay plans no renewal.
+kind_credential_epoch_admissions() {
+  local environment="$1" relay_pod="$2" logs
+  [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
+  logs="$(kubectl -n "$NS" logs "pod/$relay_pod" -c orchestration)" || return $?
+  jq -Rr --arg environment "$environment" '
+    fromjson? | select(type == "object"
+      and .target == "codewire_orchestration::worker::credential_relay::epoch"
+      and (.fields | type == "object") and .fields.environment_id == $environment)
+    | (if .fields.event == "credential_bridge_epoch_admitted" then .fields.ends_in_ms
+       elif .fields.event == "credential_bridge_epoch_overlap" then .fields.next_ends_in_ms
+       else empty end) as $ends
+    | select(($ends | type) == "number" and $ends >= 0)
+    | (.timestamp | strings | capture("^(?<whole>[^.Z]+)(\\.(?<fraction>[0-9]+))?Z$")) as $t
+    | (($t.whole + "Z" | fromdateiso8601) * 1000
+        + ((($t.fraction // "") + "000")[0:3] | tonumber)) as $at
+    | "\($at) \($ends | floor)"' <<<"$logs"
+}
+
+# Whether the serving epoch, the last of ADMISSIONS, has the headroom an
+# authority change needs at NOW_MS.
+kind_credential_epoch_has_headroom() {
+  local admissions="$1" now_ms="$2" at ends
+  read -r at ends <<<"$(tail -n 1 <<<"$admissions")"
+  [[ "$at" =~ ^[0-9]+$ && "$ends" =~ ^[0-9]+$ ]] || return 1
+  [ "$ends" -eq 0 ] || [ "$((at + ends - now_ms))" -ge "$KIND_AUTHORITY_EPOCH_HEADROOM_MS" ]
+}
+
+# Before an authority change: print "current" when the serving epoch has the
+# headroom, or wait for the relay's next admission with it and print "renewed".
+await_kind_credential_epoch_headroom() {
+  local environment="$1" relay_pod="$2" admissions deadline
+  admissions="$(kind_credential_epoch_admissions "$environment" "$relay_pod")" || return $?
+  if [ -z "$admissions" ]; then
+    echo "::error::the credential relay logged no epoch admission for ${environment}" >&2
+    return 1
+  fi
+  if kind_credential_epoch_has_headroom "$admissions" "$(date +%s%3N)"; then
+    printf 'current\n'
+    return 0
+  fi
+  log "the serving epoch renews within $((KIND_AUTHORITY_EPOCH_HEADROOM_MS / 1000))s; waiting for the relay's next admission before the authority change" >&2
+  deadline=$((SECONDS + KIND_AUTHORITY_EPOCH_WAIT_SECONDS))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 2
+    # An epoch's time left only falls, so headroom means a later admission.
+    admissions="$(kind_credential_epoch_admissions "$environment" "$relay_pod")" || return $?
+    if kind_credential_epoch_has_headroom "$admissions" "$(date +%s%3N)"; then
+      printf 'renewed\n'
+      return 0
+    fi
+  done
+  echo "::error::the credential relay admitted no epoch with $((KIND_AUTHORITY_EPOCH_HEADROOM_MS / 1000))s of headroom within ${KIND_AUTHORITY_EPOCH_WAIT_SECONDS}s" >&2
+  return 1
+}
+
+# After an authority change window that opened at FROM_MS, or when a probe
+# inside it failed: the relay must not have admitted an epoch for ENVIRONMENT
+# since. If it did, the probes say nothing about one connected epoch.
+assert_kind_credential_no_renewal_since() {
+  local environment="$1" relay_pod="$2" from_ms="$3" admissions
+  [[ "$from_ms" =~ ^[0-9]+$ ]] || return 1
+  admissions="$(kind_credential_epoch_admissions "$environment" "$relay_pod")" || return $?
+  if awk -v from="$from_ms" '$1 >= from { found = 1 } END { exit !found }' <<<"$admissions"; then
+    echo "::error::renewal inside change window: the credential relay admitted an epoch for ${environment} during an authority change, so its probes are not evidence about one connected epoch; rerun the suite" >&2
+    return 1
+  fi
+}
+
+# The Codex login check period the workspace daemon in POD was given: 120
+# seconds, or the shorter one the Kind deployment rendered for it.
+kind_credential_codex_login_check_period() {
+  local pod="$1" value
+  value="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o \
+    'jsonpath={.spec.containers[?(@.name=="workspace")].env[?(@.name=="CODEWIRE_CODEX_LOGIN_CHECK_PERIOD_SECONDS")].value}')" ||
+    return $?
+  value="${value:-120}"
+  if ! [[ "$value" =~ ^[1-9][0-9]{1,2}$ ]] || [ "$value" -lt 10 ] || [ "$value" -gt 120 ]; then
+    echo '::error::the workspace daemon was given an invalid Codex login check period' >&2
+    return 1
+  fi
+  printf '%s\n' "$value"
+}
+
 # Proxied Codex requests through the workspace daemon's loopback ingress, on
 # its long-lived bridge epoch: the path stock Codex's proxy provider uses, and
 # the one on which an epoch reuses decrypted material and must see an
@@ -529,12 +632,75 @@ KIND_MATERIAL_REUSE_SECONDS=120
 # Proxied requests through the bridge while a natural epoch renewal happens.
 # The probe stops at its stop file, or after this bound as a backstop only: an
 # overlap happens within the first ten minutes, and the Codex session it spans
-# normally ends within twelve.
+# normally ends soon after it.
 KIND_BRIDGE_RENEWAL_MAX_SECONDS=900
 # About one request a second; a window spanning one renewal sees hundreds.
 KIND_BRIDGE_RENEWAL_MIN_REQUESTS=60
+# An epoch ends at the earlier of the relay's and the workspace's projected
+# token expiries. The stage restarts the relay just before the workspace Pod
+# it relays for starts, so both tokens expire less than this many seconds
+# apart: the band where a successor can only extend the epoch by less than a
+# minute until kubelet rotates the later token (#2641).
+KIND_RELAY_TOKEN_BAND_SECONDS=55
+
+# Restart orchestration, which runs the credential relay, and return once the
+# replaced Pod has gone: a rollout reports done while it still terminates.
+restart_kind_orchestration() {
+  local previous
+  previous="$(kubectl -n "$NS" get pods \
+    -l app.kubernetes.io/name=codewire,app.kubernetes.io/component=orchestration -o name)" || return $?
+  kubectl -n "$NS" rollout restart deployment/codewire-orchestration >/dev/null || return $?
+  kubectl -n "$NS" rollout status deployment/codewire-orchestration --timeout=180s >/dev/null ||
+    return $?
+  if [ -n "$previous" ]; then
+    # shellcheck disable=SC2086 # one argument for each replaced Pod
+    kubectl -n "$NS" wait --for=delete $previous --timeout=120s >/dev/null || return $?
+  fi
+}
+
+# How many seconds after the relay Pod RELAY_POD the workspace Pod POD
+# started; each Pod's projected token is issued as it starts.
+kind_credential_relay_token_lead() {
+  local pod="$1" relay_pod="$2" workspace relay
+  workspace="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.status.startTime}')" || return $?
+  relay="$(kubectl -n "$NS" get pod "$relay_pod" -o 'jsonpath={.status.startTime}')" || return $?
+  jq -nr --arg workspace "$workspace" --arg relay "$relay" \
+    '($workspace | fromdateiso8601) - ($relay | fromdateiso8601)'
+}
 # Bound on asking the in-Pod probe to stop.
 KIND_BRIDGE_RENEWAL_STOP_TIMEOUT=15s
+
+# The Codex session's rotation idle ends once the workspace token is replaced
+# and a fresh-token epoch is admitted, rather than after the full 600-second
+# epoch bound. The admission is what the credential fixture records: this
+# environment's first bridge authentication with a replaced workspace token
+# after the baseline response. Poll for it in the background of the calling
+# shell (KIND_ADMISSION_WATCH_PID) and mark it in the workspace; the session
+# still requires the replaced token itself, and assert_kind_credential_rotation
+# still asserts the whole transcript.
+KIND_ADMISSION_WATCH_SECONDS=720
+start_kind_credential_admission_watch() {
+  local environment="$1" pod="$2" marker="$3"
+  [[ "$marker" =~ ^/tmp/codewire-kind-fresh-admission-[0-9]{1,12}$ ]] || return 1
+  watch_kind_credential_fresh_admission "$environment" "$pod" "$marker" &
+  KIND_ADMISSION_WATCH_PID=$!
+}
+
+watch_kind_credential_fresh_admission() {
+  local environment="$1" pod="$2" marker="$3" deadline=$((SECONDS + KIND_ADMISSION_WATCH_SECONDS))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if kind_credential_fixture_events 2>/dev/null | jq -e --arg environment "$environment" '
+        (map(.event == "provider_response" and .scenario == "baseline"
+          and .attempt == 1 and .status == 200) | index(true)) as $baseline |
+        $baseline != null and (to_entries | any(.[]; .key > $baseline
+          and .value.event == "bridge_authenticated" and .value.environment_id == $environment
+          and .value.workspace_token_changed == true))' >/dev/null 2>&1; then
+      kubectl -n "$SANDBOX_NS" exec "$pod" -c workspace -- touch "$marker" && return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
 
 # Start bridge_renewal.py in the exact workspace, in the background of the
 # calling shell, and set KIND_BRIDGE_RENEWAL_PID. Its stdout is the closed
@@ -590,11 +756,14 @@ stop_kind_credential_bridge_renewal() {
 # Every proxied request through the renewal window was answered by the broker
 # (the unselected slot's 403): none failed with 503 for want of an epoch. The
 # relay also logged admitting this environment's successor while its
-# predecessor drained, inside that same window. Log timestamps have one-second
+# predecessor drained, inside that same window; every successor there expires
+# later than the epoch it replaced, and no epoch ended without one (#2641).
+# The smallest extension is logged: under a minute shows a successor admitted
+# before kubelet rotated the later token. Log timestamps have one-second
 # resolution after their fraction is dropped; allow two seconds of slack at
 # each end.
 assert_kind_credential_bridge_renewal() {
-  local probe="$1" environment="$2" relay_pod="$3" window logs
+  local probe="$1" environment="$2" relay_pod="$3" window logs events
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
   [[ "$relay_pod" =~ ^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$ ]] || return 1
   window="$(jq -sce --argjson minimum "$KIND_BRIDGE_RENEWAL_MIN_REQUESTS" '
@@ -616,19 +785,36 @@ assert_kind_credential_bridge_renewal() {
     echo '::error::could not read the credential relay log for bridge renewal evidence' >&2
     return 1
   }
-  jq -Rne --argjson window "$window" --arg environment "$environment" '
+  events="$(jq -Rnc --argjson window "$window" --arg environment "$environment" '
     [inputs | fromjson? | select(type == "object"
         and .target == "codewire_orchestration::worker::credential_relay::epoch"
         and (.fields | type == "object")
-        and .fields.event == "credential_bridge_epoch_overlap"
+        and (.fields.event == "credential_bridge_epoch_overlap"
+          or .fields.event == "credential_bridge_epoch_ended")
         and .fields.environment_id == $environment)
-      | .timestamp | strings | sub("\\.[0-9]+Z$"; "Z") | (fromdateiso8601? // empty)
-      | . * 1000]
-    | any(.[]; . >= $window.started - 2000 and . <= $window.ended + 2000)
-  ' <<<"$logs" >/dev/null || {
+      | {event: .fields.event, previous: .fields.previous_ends_in_ms,
+         next: .fields.next_ends_in_ms,
+         at: (.timestamp | strings | sub("\\.[0-9]+Z$"; "Z") | (fromdateiso8601? // empty) | . * 1000)}
+      | select(.at >= $window.started - 2000 and .at <= $window.ended + 2000)]
+  ' <<<"$logs")" || return 1
+  if jq -e 'any(.[]; .event == "credential_bridge_epoch_ended")' <<<"$events" >/dev/null; then
+    echo '::error::a credential relay epoch ended with no successor while proxied requests were running' >&2
+    return 1
+  fi
+  if ! jq -e 'map(select(.event == "credential_bridge_epoch_overlap")) | length > 0' \
+      <<<"$events" >/dev/null; then
     echo '::error::the credential relay logged no epoch overlap while proxied requests were running' >&2
     return 1
-  }
+  fi
+  if ! jq -e 'all(.[] | select(.event == "credential_bridge_epoch_overlap");
+      (.previous | type == "number") and (.next | type == "number") and .next > .previous)' \
+      <<<"$events" >/dev/null; then
+    echo '::error::a credential relay successor did not expire later than the epoch it replaced' >&2
+    return 1
+  fi
+  log "the credential relay's smallest successor extension in the renewal window: $(jq -r \
+    '[.[] | select(.event == "credential_bridge_epoch_overlap") | .next - .previous] | min / 1000 | floor' \
+    <<<"$events")s"
 }
 
 kind_credential_fixture_events() {
@@ -742,20 +928,22 @@ assert_kind_credential_material_reuse() {
 # while a refusal was awaited, and repeated requests, reused the epoch's
 # authority decision: no authority check, resolve or grant evaluation, and
 # one record read. Repeated requests also reused the login, with no material
-# read. A request served while a refusal is awaited may read it again, at
-# most once per change: a full-check lease that the same change refuses on
-# that epoch, such as the daemon's Codex login check, clears the epoch's
-# material cache. A refusal, a restore and a revocation evaluated the
-# decision; a refusal answered while a restore was awaited may come from
-# either. A `sandbox_replaced` record marks the next request as the first on
-# a new epoch: one was admitted before it, cold.
+# read. A request served while a refusal is awaited may read it again, once
+# for each daemon Codex login check that can fall inside a change window (one
+# at production's 120-second period, LOGIN_CHECK_SECONDS): a full-check lease
+# that the same change refuses on that epoch clears the epoch's material
+# cache. A refusal, a restore and a revocation evaluated the decision; a
+# refusal answered while a restore was awaited may come from either. A
+# `sandbox_replaced` or `epoch_renewed` record marks the next request as the
+# first on a new epoch: one was admitted before it, cold.
 assert_kind_credential_authority_changes() {
-  local from="$1" probes="$2" logs
+  local from="$1" probes="$2" login_check_seconds="${3:-120}" logs
   [[ "$from" =~ ^[0-9]+$ ]] || return 1
+  [[ "$login_check_seconds" =~ ^[1-9][0-9]{1,2}$ ]] || return 1
   logs="$(kubectl -n "$NS" logs deployment/codewire-credential-service -c credential-service)" ||
     return $?
   jq -Rse --argjson from "$from" --argjson within "$KIND_AUTHORITY_CHANGE_WITHIN_MS" \
-    --slurpfile probes "$probes" '
+    --argjson period "$login_check_seconds" --slurpfile probes "$probes" '
     [split("\n")[] | fromjson? | select(type == "object")] as $lines |
     [$lines[] | select(.target == "codewire_credential_broker::timing")
       | select((.fields.event == "proxied_request" and .fields.slot == "codex")
@@ -766,7 +954,8 @@ assert_kind_credential_authority_changes() {
     # from before the change until its last request.
     [range(0; $probes | length) as $at | $probes[$at] | select(.event == "daemon_probe")
       | . as $probe
-      | ($at > 0 and $probes[$at - 1].event == "sandbox_replaced") as $replaced
+      | ($at > 0 and ($probes[$at - 1].event | . == "sandbox_replaced" or . == "epoch_renewed"))
+        as $replaced
       | (if $probe.within_ms == null then [] else
           [range(1; $probe.requests) | {status: (if $probe.status == 200 then 403 else 200 end),
             mode: "before", change: false}] end)
@@ -796,8 +985,10 @@ assert_kind_credential_authority_changes() {
     ([range(0; $seen | length) as $index
       | select($seen[$index].mode == "before" and $seen[$index].status == 200
           and $logged[$index].value.cache != "hit")] | length)
-      <= ([$probes[] | select(.within_ms != null and .status == 403)] | length) and
-    all($probes[]; .event == "sandbox_replaced" or (.event == "daemon_probe"
+      <= ([$probes[] | select(.within_ms != null and .status == 403)] | length)
+        # The daemon checks at least 90% of its period apart.
+        * ((($within / ($period * 900)) | floor) + 1) and
+    all($probes[]; .event == "sandbox_replaced" or .event == "epoch_renewed" or (.event == "daemon_probe"
       and (.within_ms == null or (.within_ms == $within and .waited_ms <= $within)))) and
     all(range(0; $seen | length);
       . as $index | $seen[$index] as $now | $logged[$index] as $log |
@@ -868,20 +1059,24 @@ assert_kind_credential_rotation() {
   evidence="$(save_kind_credential_rotation_evidence "$environment" "$generation" \
     "$workspace_uid" "$relay_uid" <<<"$events")" || return $?
   # Authentication is not Ready/admission by itself. Compose the exact live
-  # authenticator transcript with the >600s epoch bound and a successful stock
-  # turn after actual projected-token replacement; never print token digests.
+  # authenticator transcript with a successful stock turn after actual
+  # projected-token replacement and a fresh-token epoch: the fixture's
+  # admission mark, or else the >600s epoch bound. Never print token digests.
   jq -es '
     map(.event) == ["baseline_completed", "projected_token_rotated", "rotation_turn_completed",
       "broker_retry_completed", "broker_retry_exhausted", "complete"] and
     .[0].codex_processes == 1 and
     ([.[0,2,3,4].legacy_auth_commands] == [0,0,0,0]) and
-    .[1].changed == true and .[1].elapsed_ms > 600000 and .[1].elapsed_ms < 720000 and
+    .[1].changed == true and .[1].elapsed_ms < 720000 and
+    (.[1].rotated_ms | type == "number" and . >= 0) and .[1].rotated_ms <= .[1].elapsed_ms and
+    (.[1].fresh_admission == true or .[1].elapsed_ms > 600000) and
     all(.[3,4]; .elapsed_ms >= 0 and .elapsed_ms < 30000) and
     .[5] == {event:"complete", turns:4, completed:3, failed:1, same_process:true, token_changed:true}
   ' "$session" >/dev/null || {
     echo "::error::stock Codex hosted rotation/session evidence is incomplete; fixture record: $evidence" >&2
     return 1
   }
+  log "$(jq -sr '.[1] | "projected workspace token replaced \(.rotated_ms / 1000 | floor)s after the baseline; idle ended at \(.elapsed_ms / 1000 | floor)s " + (if .fresh_admission then "on a fresh-token admission" else "at the epoch bound" end)' "$session")"
   jq -e --arg environment "$environment" --argjson generation "$generation" \
     --arg workspace "$workspace_uid" --arg relay "$relay_uid" '
     def uuid: type == "string" and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
@@ -961,11 +1156,12 @@ kind_credential_native_smoke() (
     return 0
   fi
   log "running public platform enrollment/profile/native Codex acceptance with synthetic credentials"
-  local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation relay relay_pod relay_uid
+  local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation relay relay_pod relay_uid token_lead
   local workspace_image marker
   local login_events login_generation update restart_generation renewal_stop renewal_pid=""
   local member_role_changed="" bound_revision journey_from served
-  local stage_environment="" stage_profiles="" stage_credentials=""
+  local stage_environment="" stage_profiles="" stage_credentials="" admission admission_pid=""
+  local authority_window_from="" headroom login_check_seconds
   # The acceptance must never die with a bare exit status again (runs 10381,
   # 10459, 10465 all lost the failing command to a silent jq exit 4). Report
   # the exact failing command before errexit unwinds the suite.
@@ -976,7 +1172,7 @@ kind_credential_native_smoke() (
   # A failed step must not leave the renewal probe running, here or in the
   # Pod, and a failure while the creator is an admin restores the seeded
   # member role, so a retained cluster can run this suite again.
-  trap '[ -z "$renewal_pid" ] || abandon_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid"; [ -z "$member_role_changed" ] || set_kind_credential_member_role "$environment" member >/dev/null 2>&1 || true; cleanup_kind_credential_stage "$stage_environment" "$stage_profiles" "$stage_credentials"; rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
+  trap '[ -z "$authority_window_from" ] || assert_kind_credential_no_renewal_since "$environment" "$relay_pod" "$authority_window_from" || true; [ -z "$admission_pid" ] || { kill "$admission_pid" 2>/dev/null; wait "$admission_pid" 2>/dev/null; }; [ -z "$renewal_pid" ] || abandon_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid"; [ -z "$member_role_changed" ] || set_kind_credential_member_role "$environment" member >/dev/null 2>&1 || true; cleanup_kind_credential_stage "$stage_environment" "$stage_profiles" "$stage_credentials"; rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
   [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ] || return 1
   credential_name="kind-codex-${RANDOM}-${RANDOM}"
   profile_name="kind-profile-${RANDOM}-${RANDOM}"
@@ -1008,6 +1204,10 @@ kind_credential_native_smoke() (
   stage_environment="$environment"
   wait_kind_credential_environment "$environment" running
   kind_credential_probe "$environment" unselected
+  # The profile update restarts the workspace Pod. Restart the relay just
+  # before, so the two Pods' tokens expire within a minute of each other and
+  # the renewal below runs in that band every time (#2641).
+  restart_kind_orchestration
   update="$(kind_credential_cli env --platform update "$environment" \
     --profile "platform:$profile_name" --yes --output json)"
   printf '%s\n' "$update"
@@ -1023,6 +1223,13 @@ kind_credential_native_smoke() (
   relay="$(kind_credential_relay_pod)"
   relay_pod="$(sed -n '1p' <<<"$relay")"
   relay_uid="$(sed -n '2p' <<<"$relay")"
+  token_lead="$(kind_credential_relay_token_lead "$pod" "$relay_pod")" || return $?
+  if ! [[ "$token_lead" =~ ^[0-9]+$ ]] || [ "$token_lead" -lt 1 ] ||
+      [ "$token_lead" -ge "$KIND_RELAY_TOKEN_BAND_SECONDS" ]; then
+    echo "::error::the workspace Pod started ${token_lead}s after the credential relay, outside the 1-$((KIND_RELAY_TOKEN_BAND_SECONDS - 1))s band this stage forces" >&2
+    return 1
+  fi
+  log "the workspace Pod started ${token_lead}s after the credential relay: their tokens expire that far apart"
   # The creator's own login reaches Codex's auth.json; stock Codex reads it as
   # ChatGPT, reads usage and completes a turn against a synthetic backend.
   login_events="$(kind_credential_codex_login "$environment" deliver)" || return $?
@@ -1041,8 +1248,14 @@ kind_credential_native_smoke() (
   renewal_pid="$KIND_BRIDGE_RENEWAL_PID"
   # The proxy session forces the proxy provider; its broker refreshes rotate
   # the delivered login too.
-  kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- python3 -B -u - \
+  admission="/tmp/codewire-kind-fresh-admission-${RANDOM}${RANDOM}"
+  start_kind_credential_admission_watch "$environment" "$pod" "$admission" || return $?
+  admission_pid="$KIND_ADMISSION_WATCH_PID"
+  kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- python3 -B -u - "$admission" \
     < "$ROOT/scripts/ci/verify/kind/codex_session.py" | tee "$RUN_DIR/credential-native-session.jsonl"
+  kill "$admission_pid" 2>/dev/null || true
+  wait "$admission_pid" 2>/dev/null || true
+  admission_pid=""
   stop_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid" || return $?
   renewal_pid=""
   assert_kind_credential_rotation "$environment" "$generation" "$pod_uid" "$relay_uid" \
@@ -1087,7 +1300,12 @@ kind_credential_native_smoke() (
   # The daemon's long-lived bridge epoch: its first proxied request reads the
   # login and fills the epoch's material cache; the next one, inside two
   # minutes, reuses it. Reconnect then replaces the login: the next request
-  # on the same epoch must present the new one.
+  # on the same epoch must present the new one. These requests and the role
+  # change after them are observed on one epoch, so they start only on one
+  # with headroom before its natural renewal; after a wait, the first request
+  # below is the new epoch's first.
+  headroom="$(await_kind_credential_epoch_headroom "$environment" "$relay_pod")" || return $?
+  authority_window_from="$(date +%s%3N)"
   kind_credential_daemon_probe "$environment" success
   kind_credential_daemon_probe "$environment" success
   kind_credential_cli credentials --platform connect codex --name "$credential_name" --yes
@@ -1099,6 +1317,7 @@ kind_credential_native_smoke() (
   # each change refuses requests once that decision reaches its minute, and
   # each restore serves them again, within the bound.
   journey_from="$(kind_credential_codex_request_count)" || return $?
+  login_check_seconds="$(kind_credential_codex_login_check_period "$pod")" || return $?
   KIND_DAEMON_PROBE_LOG="$(mktemp "$RUN_DIR/credential-daemon-authority.XXXXXX")" || return $?
   kind_credential_daemon_probe "$environment" success
   kind_credential_daemon_probe "$environment" success
@@ -1109,15 +1328,28 @@ kind_credential_native_smoke() (
   member_role_changed=""
   kind_credential_daemon_probe "$environment" success "$KIND_AUTHORITY_CHANGE_WITHIN_MS"
   kind_credential_daemon_probe "$environment" success
+  assert_kind_credential_no_renewal_since "$environment" "$relay_pod" "$authority_window_from"
+  authority_window_from=""
   # A rebind under the connected epoch, to a revision without Codex, then
   # back to the revision the epoch was admitted with.
   bound_revision="$(kind_credential_bound_revision "$environment")" || return $?
+  # The rebind too starts only on an epoch with headroom. After a wait, the
+  # first request on the new epoch is a plain one, recorded as such, so the
+  # change is still observed on a warm epoch.
+  headroom="$(await_kind_credential_epoch_headroom "$environment" "$relay_pod")" || return $?
+  if [ "$headroom" = renewed ]; then
+    printf '%s\n' '{"event":"epoch_renewed"}' >> "$KIND_DAEMON_PROBE_LOG"
+    kind_credential_daemon_probe "$environment" success
+  fi
+  authority_window_from="$(date +%s%3N)"
   kind_credential_cli credentials --platform --profile "$profile_name" unset codex
   rebind_kind_credential_environment "$environment"
   kind_credential_daemon_probe "$environment" denied "$KIND_AUTHORITY_CHANGE_WITHIN_MS"
   rebind_kind_credential_environment "$environment" "$bound_revision"
   kind_credential_daemon_probe "$environment" success "$KIND_AUTHORITY_CHANGE_WITHIN_MS"
   kind_credential_daemon_probe "$environment" success
+  assert_kind_credential_no_renewal_since "$environment" "$relay_pod" "$authority_window_from"
+  authority_window_from=""
   # Pod replacement admits a new epoch, which serves at once.
   replace_kind_credential_sandbox "$environment"
   printf '%s\n' '{"event":"sandbox_replaced"}' >> "$KIND_DAEMON_PROBE_LOG"
@@ -1125,7 +1357,8 @@ kind_credential_native_smoke() (
   # Revocation refuses the very next request on that epoch.
   kind_credential_cli credentials --platform revoke "$credential_name" --output json
   kind_credential_daemon_probe "$environment" revoked
-  assert_kind_credential_authority_changes "$journey_from" "$KIND_DAEMON_PROBE_LOG"
+  assert_kind_credential_authority_changes "$journey_from" "$KIND_DAEMON_PROBE_LOG" \
+    "$login_check_seconds"
   # Revocation exposes nothing to the workspace either.
   kind_credential_probe "$environment" selected
   # Revocation is an explicit denial: the daemon removes Codewire's login and
@@ -1281,11 +1514,11 @@ kind_credential_claude_run() {
 
 # The fixture's Anthropic events since its pod started. Prints their count
 # after asserting that every event after the first `baseline` ones answered
-# exactly `form`, with at least one, and all with `status`. Claude Code's own
-# identity headers reach the provider for the subscription form only, so the
-# closed `client_identity` flag distinguishes the forms at the provider too.
-# A rejection of any kind, including the Sandbox placeholder reaching the
-# provider, fails.
+# exactly `form`, with at least one, and all with `status`. The broker's
+# Anthropic route is transparent, so Claude Code's own identity headers reach
+# the provider in both forms and the closed `client_identity` flag is set on
+# every answer. A rejection of any kind, including the Sandbox placeholder
+# reaching the provider, fails.
 assert_kind_credential_anthropic_events() {
   local baseline="$1" form="$2" status="$3"
   [[ "$baseline" =~ ^[0-9]+$ ]] || return 1
@@ -1297,7 +1530,7 @@ assert_kind_credential_anthropic_events() {
     | if ($all | length) > $baseline
         and all($all[$baseline:][]; .event == "anthropic_response" and .kind == $kind
           and .status == $status and .refused == ($status == 401)
-          and .client_identity == ($kind == "subscription_token")
+          and .client_identity == true
           and (.route == "messages" or .route == "count_tokens"))
       then ($all | length) else error("unexpected Anthropic provider events") end' || {
     echo "::error::the synthetic provider did not see only the ${form} credential answering ${status}" >&2
