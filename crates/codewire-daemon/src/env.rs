@@ -273,7 +273,9 @@ pub fn load_persisted_environment(config: &Config) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn is_internal_environment_name(name: &str) -> bool {
+/// Daemon configuration that no session, command or managed agent may see.
+/// Every other variable of the daemon's own environment is child-visible.
+pub fn is_internal_environment_name(name: &str) -> bool {
     matches!(name, DAEMON_AUTH_TOKEN_ENV | MANAGED_CREDENTIAL_CLIENTS_ENV)
 }
 

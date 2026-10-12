@@ -4673,6 +4673,44 @@ mod tests {
         assert!(guest.sandbox());
     }
 
+    /// A trusted host is never a Sandbox placement, so managed Claude there
+    /// can never be given auto mode: its launch passes no permission mode,
+    /// whatever else changes.
+    #[test]
+    fn a_trusted_host_is_not_a_sandbox_placement_and_never_gets_auto_mode() {
+        for runtime_root in [None, Some(PathBuf::from("/synthetic/runtime"))] {
+            let host = DriverEnvironment::Host(HostEnvironment {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "synthetic-host".into(),
+                path: PathBuf::from("/synthetic/project"),
+                created_at: now(),
+                state: "running".into(),
+                runtime_root,
+            });
+            assert!(!host.sandbox());
+            assert!(host.host().is_some());
+            assert_eq!(
+                agent_policy(host.sandbox(), AgentKind::Claude),
+                CLAUDE_POLICY
+            );
+            let session = uuid::Uuid::new_v4().to_string();
+            for established in [false, true] {
+                let arguments = claude_arguments(
+                    &claude_config(Some("high")),
+                    host.sandbox(),
+                    established,
+                    &session,
+                );
+                assert!(
+                    !arguments
+                        .iter()
+                        .any(|argument| argument == "--permission-mode" || argument == "auto"),
+                    "{arguments:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn codex_launch_trusts_exactly_its_working_directory_as_a_project() {
         let arguments = codex_app_server_arguments("/workspace/github");

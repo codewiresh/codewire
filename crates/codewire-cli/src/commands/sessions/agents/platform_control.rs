@@ -605,36 +605,54 @@ pub(crate) async fn run_platform_agent_peer(
         binding.session_id == args.session_id && args.program == context.provider.path(),
         "platform peer binding differs"
     );
-    let prefix = lockdown::arguments(context.route);
+    // Claude's arguments name its saved conversation, which the driver keeps
+    // in its state record.
+    let state: Option<DriverState> = match config.agent {
+        AgentKind::Codex => None,
+        AgentKind::Claude => Some(private_record(&dir.join("state.json"))?),
+    };
+    check_peer_arguments(&config, context.route, state.as_ref(), &args.arguments)?;
+    let locked = context.lockdown(&dir)?;
+    guest_peer::run_platform_peer(args, locked)
+        .await
+        .map_err(|_| anyhow::anyhow!("platform peer refused"))
+}
+/// The only provider arguments a hosted guardian starts: the login lockdown
+/// of this driver's route, then exactly what its driver builds for a Sandbox
+/// placement, and nothing more. A caller cannot add, drop or change one, so
+/// it cannot widen the permission mode or drop the lockdown.
+fn check_peer_arguments(
+    config: &AgentConfig,
+    route: Route,
+    state: Option<&DriverState>,
+    arguments: &[String],
+) -> anyhow::Result<()> {
+    let prefix = lockdown::arguments(route);
     ensure!(
-        args.arguments.starts_with(&prefix),
+        arguments.starts_with(&prefix),
         "platform peer lockdown arguments differ"
     );
-    let native = &args.arguments[prefix.len()..];
+    let native = &arguments[prefix.len()..];
     match config.agent {
         AgentKind::Codex => ensure!(
             native == codex_app_server_arguments(&config.working_dir).as_slice(),
             "platform Codex peer differs"
         ),
         AgentKind::Claude => {
-            let state: DriverState = private_record(&dir.join("state.json"))?;
+            let state = state.context("platform Claude native thread missing")?;
             let session = state
                 .native_thread_id
                 .as_deref()
                 .context("platform Claude native thread missing")?;
             id(session)?;
-            // A hosted Sandbox is a Sandbox placement: exactly the arguments
-            // its driver builds, auto mode included, and nothing more.
+            // A hosted Sandbox is a Sandbox placement: auto mode included.
             ensure!(
-                native == claude_arguments(&config, true, state.native_thread_established, session),
+                native == claude_arguments(config, true, state.native_thread_established, session),
                 "platform Claude peer differs"
             );
         }
     }
-    let locked = context.lockdown(&dir)?;
-    guest_peer::run_platform_peer(args, locked)
-        .await
-        .map_err(|_| anyhow::anyhow!("platform peer refused"))
+    Ok(())
 }
 fn handle_fixed(environment: &DriverEnvironment, request: Envelope) -> anyhow::Result<Value> {
     validate_envelope(environment.id(), &request)?;

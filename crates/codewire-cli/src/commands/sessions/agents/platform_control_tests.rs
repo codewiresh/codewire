@@ -616,6 +616,152 @@ fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() 
     }
 }
 
+/// The hosted guardian starts a provider only with exactly the arguments its
+/// driver builds: the route's login lockdown, then the driver's own. Nothing
+/// can be added, dropped or changed, so a caller cannot widen Claude's
+/// permission mode, pass a bypass option or drop Codex's lockdown.
+#[test]
+fn platform_peer_arguments_are_exactly_the_drivers_for_its_route() {
+    let f = Fixture::new();
+    let codex: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
+    let strings = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+
+    for route in [Route::Codex, Route::OpenAi] {
+        let mut exact = lockdown::arguments(route);
+        exact.extend(codex_app_server_arguments(&codex.working_dir));
+        assert!(check_peer_arguments(&codex, route, None, &exact).is_ok());
+        // Another route's lockdown, no lockdown, or anything extra.
+        let other = if route == Route::Codex {
+            Route::OpenAi
+        } else {
+            Route::Codex
+        };
+        let mut wrong_route = lockdown::arguments(other);
+        wrong_route.extend(codex_app_server_arguments(&codex.working_dir));
+        assert!(check_peer_arguments(&codex, route, None, &wrong_route).is_err());
+        assert!(
+            check_peer_arguments(
+                &codex,
+                route,
+                None,
+                &codex_app_server_arguments(&codex.working_dir)
+            )
+            .is_err()
+        );
+        for extra in [
+            &["--dangerously-bypass-approvals-and-sandbox"][..],
+            &["-c", "model_provider=\"openai\""],
+            &["exec"],
+        ] {
+            let mut widened = exact.clone();
+            widened.extend(strings(extra));
+            assert!(
+                check_peer_arguments(&codex, route, None, &widened).is_err(),
+                "{extra:?}"
+            );
+        }
+        let mut elsewhere = lockdown::arguments(route);
+        elsewhere.extend(codex_app_server_arguments("/other"));
+        assert!(check_peer_arguments(&codex, route, None, &elsewhere).is_err());
+        assert!(check_peer_arguments(&codex, route, None, &exact[..exact.len() - 1]).is_err());
+    }
+
+    let mut claude = codex.clone();
+    claude.agent = AgentKind::Claude;
+    let session = uuid::Uuid::new_v4().to_string();
+    let state = |established: bool, thread: Option<&str>| DriverState {
+        version: 1,
+        driver_id: claude.driver_id.clone(),
+        agent: AgentKind::Claude,
+        phase: DriverPhase::Starting,
+        native_thread_id: thread.map(str::to_owned),
+        native_thread_established: established,
+        current_turn_id: None,
+        active_message_id: None,
+        queued: 0,
+        capabilities: AgentCapabilities {
+            steer: false,
+            interrupt: false,
+            note: "synthetic".into(),
+        },
+        policy: String::new(),
+        last_error: None,
+        started_at: now(),
+        updated_at: now(),
+    };
+    for established in [false, true] {
+        let saved = state(established, Some(&session));
+        // Exactly the Sandbox launch, auto mode included.
+        let exact = claude_arguments(&claude, true, established, &session);
+        assert_eq!(exact[exact.len() - 2..], ["--permission-mode", "auto"]);
+        assert!(check_peer_arguments(&claude, Route::Anthropic, Some(&saved), &exact).is_ok());
+        // A trusted host's launch (no permission mode) is not a hosted one.
+        let host = claude_arguments(&claude, false, established, &session);
+        assert!(check_peer_arguments(&claude, Route::Anthropic, Some(&saved), &host).is_err());
+        for widened in [
+            &["--dangerously-skip-permissions"][..],
+            &["--allow-dangerously-skip-permissions"],
+            &["--permission-mode", "bypassPermissions"],
+            &[
+                "--settings",
+                "{\"permissions\":{\"defaultMode\":\"bypassPermissions\"}}",
+            ],
+            &["--allowedTools", "Bash"],
+        ] {
+            let mut arguments = exact.clone();
+            arguments.extend(strings(widened));
+            assert!(
+                check_peer_arguments(&claude, Route::Anthropic, Some(&saved), &arguments).is_err(),
+                "{widened:?}"
+            );
+        }
+        let mut bypass = exact.clone();
+        *bypass.last_mut().unwrap() = "bypassPermissions".into();
+        assert!(check_peer_arguments(&claude, Route::Anthropic, Some(&saved), &bypass).is_err());
+        // The other conversation flag, another model or another conversation.
+        let flipped = state(!established, Some(&session));
+        assert!(check_peer_arguments(&claude, Route::Anthropic, Some(&flipped), &exact).is_err());
+        let mut model = claude.clone();
+        model.model = "another-model".into();
+        assert!(check_peer_arguments(&model, Route::Anthropic, Some(&saved), &exact).is_err());
+        let another = state(established, Some(&uuid::Uuid::new_v4().to_string()));
+        assert!(check_peer_arguments(&claude, Route::Anthropic, Some(&another), &exact).is_err());
+        // No saved conversation, or one that is not a conversation identity.
+        assert!(check_peer_arguments(&claude, Route::Anthropic, None, &exact).is_err());
+        assert!(
+            check_peer_arguments(
+                &claude,
+                Route::Anthropic,
+                Some(&state(established, None)),
+                &exact
+            )
+            .is_err()
+        );
+        let unsafe_name = state(established, Some("../session"));
+        assert!(
+            check_peer_arguments(
+                &claude,
+                Route::Anthropic,
+                Some(&unsafe_name),
+                &claude_arguments(&claude, true, established, "../session")
+            )
+            .is_err()
+        );
+    }
+    // Claude has no lockdown prefix, so Codex's is not admitted for it.
+    let mut prefixed = lockdown::arguments(Route::Codex);
+    prefixed.extend(claude_arguments(&claude, true, false, &session));
+    assert!(
+        check_peer_arguments(
+            &claude,
+            Route::Anthropic,
+            Some(&state(false, Some(&session))),
+            &prefixed
+        )
+        .is_err()
+    );
+}
+
 #[test]
 fn platform_control_directories_below_a_setgid_home_are_exactly_private() {
     // A Pod fsGroup home is setgid; directories made below it inherit setgid.
