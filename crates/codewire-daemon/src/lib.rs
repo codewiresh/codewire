@@ -28,6 +28,7 @@ mod private_files;
 pub mod server;
 pub mod service;
 pub mod session;
+pub mod stop_evidence;
 
 pub use codewire_daemon_proto::{DaemonAuthToken, HOSTED_EXEC_AMBIGUOUS_EXIT_CODE};
 pub use config::{
@@ -38,6 +39,7 @@ pub use config::{
     NativeLaunchProjectionConfig, SHIM_ADDR_ENV, WORKSPACE_ROOT_ENV, WorkspaceBinding,
     WorkspaceBindingConfig, codex_login_check_period,
 };
+pub use durable_session::NeverRestarts;
 pub use server::serve_grpc_with_incoming;
 #[cfg(target_os = "linux")]
 pub use server::serve_host_control_grpc_with_incoming;

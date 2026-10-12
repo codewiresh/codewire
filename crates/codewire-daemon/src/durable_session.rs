@@ -350,6 +350,68 @@ pub enum SessionError {
     /// names paths, modes and record checks, never values.
     #[error("session store refused: {0}")]
     StoreRefused(String),
+    /// A restart that is refused the same way on every later attempt.
+    #[error("{1}")]
+    NeverRestarts(NeverRestarts, String),
+}
+
+/// Why a session can never be started again. A restart refused for one of
+/// these is refused the same way on every later attempt, so a caller that
+/// keeps work for the session's next start can stop waiting for it.
+///
+/// The reason travels with the refusal's gRPC status as metadata, beside the
+/// code and message the refusal always had: [`Self::status`] writes it and
+/// [`Self::of`] reads it. No caller decides this from a message's text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NeverRestarts {
+    /// The daemon has no record of the session.
+    NoSession,
+    /// The session was launched with inline environment values, which are
+    /// not kept across a daemon restart.
+    ProjectionLost,
+    /// The cleanup of the session's last process was never confirmed.
+    CleanupUnconfirmed,
+    /// The session has used every launch generation.
+    GenerationExhausted,
+}
+
+impl NeverRestarts {
+    pub const ALL: [Self; 4] = [
+        Self::NoSession,
+        Self::ProjectionLost,
+        Self::CleanupUnconfirmed,
+        Self::GenerationExhausted,
+    ];
+    const METADATA_KEY: &str = "codewire-never-restarts";
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::NoSession => "no-session",
+            Self::ProjectionLost => "projection-lost",
+            Self::CleanupUnconfirmed => "cleanup-unconfirmed",
+            Self::GenerationExhausted => "generation-exhausted",
+        }
+    }
+
+    /// The refusal as the daemon answers it.
+    pub fn status(self, message: impl Into<String>) -> Status {
+        let mut status = match self {
+            Self::NoSession => Status::not_found(message),
+            Self::ProjectionLost | Self::CleanupUnconfirmed => Status::failed_precondition(message),
+            Self::GenerationExhausted => Status::resource_exhausted(message),
+        };
+        status.metadata_mut().insert(
+            Self::METADATA_KEY,
+            tonic::metadata::MetadataValue::from_static(self.name()),
+        );
+        status
+    }
+
+    /// The reason a refusal carries, if it carries one.
+    pub fn of(status: &Status) -> Option<Self> {
+        let name = status.metadata().get(Self::METADATA_KEY)?.to_str().ok()?;
+        Self::ALL.into_iter().find(|reason| reason.name() == name)
+    }
 }
 
 impl SessionEngine {
@@ -418,7 +480,17 @@ impl SessionEngine {
         self.inner.shutdown.clone().drop_guard()
     }
 
+    /// The daemon is going down: nothing more launches. A host daemon first
+    /// marks its environment as being taken down, so the marker is on disk
+    /// before a cancelled launch or [`Self::shutdown`] signals any session.
+    /// A marker that cannot be written is logged; a driver without it leaves
+    /// its run to the next start, as after a crash.
     pub(crate) fn cancel_launches(&self) {
+        if let Some(host) = &self.inner.config.host
+            && let Err(error) = crate::stop_evidence::mark_takedown(&host.state_root)
+        {
+            tracing::warn!(%error, "could not mark the environment as being taken down");
+        }
         let _admission = lock(&self.inner.launch_admission);
         self.inner.shutdown.cancel();
         self.inner.launches.close();
@@ -670,11 +742,61 @@ impl SessionEngine {
         Ok(self.handle(session_id)?.metadata.lock().await.to_record())
     }
 
-    /// An explicit stop: a client asked for it. A managed conversation whose
-    /// agent takes it has its active run interrupted first; see
+    /// An explicit stop: a client asked for it. A host owner's managed
+    /// conversation has the stop recorded first; see
+    /// [`Self::record_stop_intent`]. A managed conversation whose agent takes
+    /// it then has its active run interrupted; see
     /// [`Self::interrupt_active_run_before_stop`].
     pub async fn stop(&self, session_id: &str) -> Result<v1::SessionRecord, SessionError> {
         let handle = self.admit_stop(session_id).await?;
+        #[cfg(target_os = "linux")]
+        if owner_conversation(&self.inner.config, &*handle.metadata.lock().await).is_some() {
+            // From its recorded intent on, the stop finishes even if this
+            // caller goes away: a conversation is never left running with a
+            // stop recorded against it.
+            let engine = self.clone();
+            let session_id = session_id.to_owned();
+            return tokio::spawn(async move {
+                engine.record_stop_intent(&session_id)?;
+                engine.stop_admitted(&session_id, handle).await
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Internal("session stop outcome could not be confirmed".into())
+            })?;
+        }
+        self.stop_admitted(session_id, handle).await
+    }
+
+    /// Records, before anything of an explicit stop or restart can signal a
+    /// host owner's managed conversation, that the stop is explicit: a stop
+    /// intent in the session's own directory (see [`crate::stop_evidence`]).
+    /// The daemon writes it itself, so it does not depend on the
+    /// conversation's record helper. The conversation's driver reads it when
+    /// its stop signal arrives and never pauses the run; if the driver is
+    /// killed first, the conversation's next start reads it and never resumes
+    /// the run. A stop whose intent cannot be written signals nothing and
+    /// fails.
+    #[cfg(target_os = "linux")]
+    fn record_stop_intent(&self, session_id: &str) -> Result<(), SessionError> {
+        let Some(host) = &self.inner.config.host else {
+            return Ok(());
+        };
+        crate::stop_evidence::record_stop_intent(&host.state_root, session_id).map_err(|error| {
+            SessionError::Internal(format!(
+                "could not record the stop of session {session_id}; nothing was signalled: {error}"
+            ))
+        })
+    }
+
+    async fn stop_admitted(
+        &self,
+        session_id: &str,
+        handle: Arc<SessionHandle>,
+    ) -> Result<v1::SessionRecord, SessionError> {
+        // Interrupt a pending projection before waiting for the serial session
+        // operation lock. A queued Stop must not wait for secret delivery.
+        handle.launch_cancellation.send_replace(true);
         #[cfg(target_os = "linux")]
         if let Some(interrupt) = self
             .interrupt_active_run_before_stop(session_id, &handle)
@@ -721,33 +843,15 @@ impl SessionEngine {
         if lock(&self.inner.active).contains_key(session_id) {
             return;
         }
-        let Some(environment) = self
-            .inner
-            .config
-            .host
-            .as_ref()
-            .and_then(|host| host.state_root.file_name())
-            .and_then(|name| name.to_str())
-            .map(str::to_owned)
-        else {
-            return;
-        };
-        let driver_id = {
+        let (environment, driver_id) = {
             let metadata = handle.metadata.lock().await;
-            let Some(driver_id) = metadata.command.get(5).cloned() else {
-                return;
-            };
-            if is_live_state(metadata.state)
-                || metadata.pty
-                || metadata.platform_managed_origin.is_some()
-                || metadata.control_origin.is_some()
-                || crate::host_control::canonical_uuid(&environment).is_err()
-                || crate::host_control::canonical_uuid(&driver_id).is_err()
-                || !managed::driver_command_shape(&metadata.command, &environment, &driver_id)
-            {
+            if is_live_state(metadata.state) {
                 return;
             }
-            driver_id
+            let Some(conversation) = owner_conversation(&self.inner.config, &metadata) else {
+                return;
+            };
+            conversation
         };
         #[cfg(test)]
         self.inner
@@ -789,6 +893,7 @@ impl SessionEngine {
     /// [`Self::pause_active_run_before_shutdown`].
     async fn stop_for_shutdown(&self, session_id: &str) -> Result<v1::SessionRecord, SessionError> {
         let handle = self.admit_stop(session_id).await?;
+        handle.launch_cancellation.send_replace(true);
         let _operation = handle.operation.lock().await;
         self.stop_active(session_id, &handle).await
     }
@@ -811,35 +916,15 @@ impl SessionEngine {
     #[cfg(target_os = "linux")]
     async fn pause_active_run_before_shutdown(&self, session_id: &str, handle: &SessionHandle) {
         use crate::host_control::managed;
-        let Some(environment) = self
-            .inner
-            .config
-            .host
-            .as_ref()
-            .and_then(|host| host.state_root.file_name())
-            .and_then(|name| name.to_str())
-            .map(str::to_owned)
-        else {
-            return;
-        };
-        let driver_id = {
+        let (environment, driver_id) = {
             let metadata = handle.metadata.lock().await;
-            let Some(driver_id) = metadata.command.get(5).cloned() else {
-                return;
-            };
-            // A member's conversation never pauses: only the host owner's
-            // own agent can resume a run.
-            if metadata.state != v1::SessionLifecycleState::Running as i32
-                || metadata.pty
-                || metadata.platform_managed_origin.is_some()
-                || metadata.control_origin.is_some()
-                || crate::host_control::canonical_uuid(&environment).is_err()
-                || crate::host_control::canonical_uuid(&driver_id).is_err()
-                || !managed::driver_command_shape(&metadata.command, &environment, &driver_id)
-            {
+            if metadata.state != v1::SessionLifecycleState::Running as i32 {
                 return;
             }
-            driver_id
+            let Some(conversation) = owner_conversation(&self.inner.config, &metadata) else {
+                return;
+            };
+            conversation
         };
         #[cfg(test)]
         self.inner
@@ -877,9 +962,6 @@ impl SessionEngine {
         let handle = self.handle(session_id)?;
         #[cfg(target_os = "linux")]
         refuse_platform_managed_bypass(&*handle.metadata.lock().await)?;
-        // Interrupt a pending projection before waiting for the serial session
-        // operation lock. A queued Stop must not wait for secret delivery.
-        handle.launch_cancellation.send_replace(true);
         Ok(handle)
     }
 
@@ -1122,7 +1204,12 @@ impl SessionEngine {
             admission = self.inner.retention_admission.lock() => admission,
         };
         validate_session_id(session_id)?;
-        let handle = self.handle(session_id)?;
+        let handle = self.handle(session_id).map_err(|error| match error {
+            SessionError::NotFound(message) => {
+                SessionError::NeverRestarts(NeverRestarts::NoSession, message)
+            }
+            error => error,
+        })?;
         if cancel.is_cancelled() {
             return Err(launch_cancelled_error());
         }
@@ -1147,7 +1234,8 @@ impl SessionEngine {
                     "member managed restart requires its exact guardian and target-owned generation transaction".into()));
             }
             if metadata.environment_projection_required && metadata.env.is_empty() {
-                return Err(SessionError::FailedPrecondition(
+                return Err(SessionError::NeverRestarts(
+                    NeverRestarts::ProjectionLost,
                     "the launch environment projection is no longer available after daemon recovery; launch a new session with the required environment overrides".into(),
                 ));
             }
@@ -1186,26 +1274,36 @@ impl SessionEngine {
                 }
             }
             if metadata.cleanup_unknown {
-                return Err(SessionError::FailedPrecondition(
+                return Err(SessionError::NeverRestarts(
+                    NeverRestarts::CleanupUnconfirmed,
                     "session launch cleanup is unconfirmed; restart is unavailable".into(),
                 ));
             }
             metadata.launch_generation.checked_add(1).ok_or_else(|| {
-                SessionError::ResourceExhausted(
+                SessionError::NeverRestarts(
+                    NeverRestarts::GenerationExhausted,
                     "session launch generation is exhausted; launch a new session".into(),
                 )
             })?
         };
         if lock(&self.inner.active).contains_key(session_id) {
-            // An explicit restart interrupts an agent's active run first, as
-            // an explicit stop does.
+            // An explicit restart of a running conversation records its stop
+            // and interrupts an agent's active run first, as an explicit
+            // stop does. A restart of a conversation that is not running
+            // stops nothing and records nothing: it is how a run resumes.
             #[cfg(target_os = "linux")]
-            if let Some(interrupt) = self
-                .interrupt_active_run_before_stop(session_id, &handle)
-                .await
             {
-                self.finish_interrupt_before_stop(session_id, interrupt)
-                    .await;
+                if owner_conversation(&self.inner.config, &*handle.metadata.lock().await).is_some()
+                {
+                    self.record_stop_intent(session_id)?;
+                }
+                if let Some(interrupt) = self
+                    .interrupt_active_run_before_stop(session_id, &handle)
+                    .await
+                {
+                    self.finish_interrupt_before_stop(session_id, interrupt)
+                        .await;
+                }
             }
             // Once Stop is dispatched, retain the operation lock until the
             // previous monitor settles. Caller loss cannot cancel its cleanup.
@@ -1214,7 +1312,8 @@ impl SessionEngine {
         // Stop can settle Interrupted when group/join/drain cleanup failed.
         // Do not overwrite that newly published fence with a new launch.
         if handle.metadata.lock().await.cleanup_unknown {
-            return Err(SessionError::FailedPrecondition(
+            return Err(SessionError::NeverRestarts(
+                NeverRestarts::CleanupUnconfirmed,
                 "session process cleanup is unconfirmed; restart is unavailable".into(),
             ));
         }
@@ -3000,6 +3099,7 @@ impl SessionEngineInner {
                     OUTPUT_FILE,
                     METADATA_TEMP_FILE,
                     OUTPUT_TEMP_FILE,
+                    crate::stop_evidence::STOP_INTENT_FILE,
                 ] {
                     if let Ok(metadata) = tokio::fs::symlink_metadata(entry.path().join(name)).await
                         && !metadata.is_file()
@@ -3335,6 +3435,30 @@ fn prepare_pipe_process(
     .map_err(|error| format!("prepare session process: {error}"))
 }
 
+/// The environment and driver IDs of a host owner's own managed
+/// conversation: the only kind of session whose run can pause or resume. A
+/// member's or the platform's conversation, a terminal and every other
+/// command are none.
+#[cfg(target_os = "linux")]
+fn owner_conversation(
+    config: &crate::Config,
+    metadata: &PersistedSession,
+) -> Option<(String, String)> {
+    let environment = config.host.as_ref()?.state_root.file_name()?.to_str()?;
+    let driver_id = metadata.command.get(5)?;
+    (!metadata.pty
+        && metadata.platform_managed_origin.is_none()
+        && metadata.control_origin.is_none()
+        && crate::host_control::canonical_uuid(environment).is_ok()
+        && crate::host_control::canonical_uuid(driver_id).is_ok()
+        && crate::host_control::managed::driver_command_shape(
+            &metadata.command,
+            environment,
+            driver_id,
+        ))
+    .then(|| (environment.to_owned(), driver_id.clone()))
+}
+
 /// Before retention removes a stopped managed conversation's session record
 /// on a trusted host, asks its record helper to resolve what can then never
 /// resume: a message that the environment's takedown paused ends unknown and
@@ -3350,31 +3474,10 @@ async fn retire_managed_before_prune(
     handle: &SessionHandle,
 ) {
     use crate::host_control::managed;
-    let Some(environment) = inner
-        .config
-        .host
-        .as_ref()
-        .and_then(|host| host.state_root.file_name())
-        .and_then(|name| name.to_str())
-        .map(str::to_owned)
+    let Some((environment, driver_id)) =
+        owner_conversation(&inner.config, &*handle.metadata.lock().await)
     else {
         return;
-    };
-    let driver_id = {
-        let metadata = handle.metadata.lock().await;
-        let Some(driver_id) = metadata.command.get(5).cloned() else {
-            return;
-        };
-        if metadata.pty
-            || metadata.platform_managed_origin.is_some()
-            || metadata.control_origin.is_some()
-            || crate::host_control::canonical_uuid(&environment).is_err()
-            || crate::host_control::canonical_uuid(&driver_id).is_err()
-            || !managed::driver_command_shape(&metadata.command, &environment, &driver_id)
-        {
-            return;
-        }
-        driver_id
     };
     #[cfg(test)]
     inner
@@ -4798,6 +4901,7 @@ pub fn status_from_session_error(error: SessionError) -> Status {
         // A code no other session refusal uses: orchestration reports it as a
         // known precondition, never as an ambiguous launch or restart outcome.
         SessionError::StoreRefused(_) => Status::data_loss(error.to_string()),
+        SessionError::NeverRestarts(reason, message) => reason.status(message),
     }
 }
 
@@ -5083,7 +5187,10 @@ mod tests {
         assert!(!record.status_message.contains("not rendered"));
         assert!(matches!(
             engine.restart(&record.session_id).await,
-            Err(SessionError::FailedPrecondition(_))
+            Err(SessionError::NeverRestarts(
+                NeverRestarts::CleanupUnconfirmed,
+                _
+            ))
         ));
         assert_eq!(
             engine.stop(&record.session_id).await.unwrap().state,
@@ -5095,7 +5202,10 @@ mod tests {
         let recovered = SessionEngine::new(&config, CredentialBridge::new(None));
         assert!(matches!(
             recovered.restart(&record.session_id).await,
-            Err(SessionError::FailedPrecondition(_))
+            Err(SessionError::NeverRestarts(
+                NeverRestarts::CleanupUnconfirmed,
+                _
+            ))
         ));
         assert!(!marker.exists());
         assert!(recovered.shutdown().await.is_err());
@@ -5281,7 +5391,10 @@ mod tests {
         assert!(engine.inner.root.join(&id).exists());
         assert!(matches!(
             engine.restart(&id).await,
-            Err(SessionError::FailedPrecondition(_))
+            Err(SessionError::NeverRestarts(
+                NeverRestarts::CleanupUnconfirmed,
+                _
+            ))
         ));
         assert!(engine.shutdown().await.is_err());
     }
@@ -5365,7 +5478,10 @@ mod tests {
         );
         assert!(matches!(
             recovered.restart(&metadata.session_id).await,
-            Err(SessionError::FailedPrecondition(_))
+            Err(SessionError::NeverRestarts(
+                NeverRestarts::CleanupUnconfirmed,
+                _
+            ))
         ));
     }
 
@@ -5839,6 +5955,50 @@ mod tests {
         assert!(recovered.handle(&ambiguous).is_ok());
     }
 
+    #[test]
+    fn a_restart_that_is_never_admitted_carries_its_reason_beside_the_same_code_and_message() {
+        for (reason, code) in [
+            (NeverRestarts::NoSession, tonic::Code::NotFound),
+            (
+                NeverRestarts::ProjectionLost,
+                tonic::Code::FailedPrecondition,
+            ),
+            (
+                NeverRestarts::CleanupUnconfirmed,
+                tonic::Code::FailedPrecondition,
+            ),
+            (
+                NeverRestarts::GenerationExhausted,
+                tonic::Code::ResourceExhausted,
+            ),
+        ] {
+            let status =
+                status_from_session_error(SessionError::NeverRestarts(reason, "refused".into()));
+            assert_eq!((status.code(), status.message()), (code, "refused"));
+            assert_eq!(NeverRestarts::of(&status), Some(reason));
+            assert!(NeverRestarts::ALL.contains(&reason));
+        }
+        // No other refusal carries a reason, whatever its code and words.
+        for other in [
+            SessionError::NotFound("session not found".into()),
+            SessionError::FailedPrecondition(
+                "session launch cleanup is unconfirmed; restart is unavailable".into(),
+            ),
+            SessionError::ResourceExhausted(
+                "session launch generation is exhausted; launch a new session".into(),
+            ),
+        ] {
+            assert_eq!(NeverRestarts::of(&status_from_session_error(other)), None);
+        }
+        // A reason this build does not know decides nothing.
+        let mut unknown = Status::failed_precondition("refused");
+        unknown.metadata_mut().insert(
+            NeverRestarts::METADATA_KEY,
+            tonic::metadata::MetadataValue::from_static("a-later-reason"),
+        );
+        assert_eq!(NeverRestarts::of(&unknown), None);
+    }
+
     #[tokio::test]
     async fn restart_waiting_for_retention_cannot_resurrect_a_pruned_record() {
         let temp = tempfile::tempdir().unwrap();
@@ -5856,7 +6016,7 @@ mod tests {
         drop(admission);
         assert!(matches!(
             task.await.unwrap(),
-            Err(SessionError::NotFound(_))
+            Err(SessionError::NeverRestarts(NeverRestarts::NoSession, _))
         ));
         assert!(!engine.inner.root.join(&oldest).exists());
         assert!(!lock(&engine.inner.active).contains_key(&oldest));
