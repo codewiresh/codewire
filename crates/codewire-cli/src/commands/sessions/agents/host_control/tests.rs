@@ -120,6 +120,7 @@ impl Fixture {
             capabilities: AgentCapabilities {
                 steer: true,
                 interrupt: true,
+                resume: false,
                 note: "synthetic".into(),
             },
             policy: CODEX_POLICY.into(),
@@ -142,6 +143,7 @@ impl Fixture {
             control_pending: HashMap::new(),
             settled: HashSet::new(),
             stopping: false,
+            noel: noel::Recovery::default(),
         }
     }
 }
@@ -889,6 +891,7 @@ impl Fixture {
                 capabilities: AgentCapabilities {
                     steer: true,
                     interrupt: true,
+                    resume: false,
                     note: "synthetic".into(),
                 },
                 policy: NOEL_POLICY.into(),
