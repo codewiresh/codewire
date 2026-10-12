@@ -31,10 +31,11 @@ pub use model::{
 };
 pub use projection::{
     CODEX_CONFIG_FILE_NAME, CODEX_MANAGED_CONFIG_HEADER, CODEX_NATIVE_HOME, CODEX_PLATFORM_HOME,
-    CODEX_PLATFORM_TOKEN_FILE, CodexProviderProjection, MANAGED_CREDENTIAL_CLIENTS_ENV,
-    MANAGED_GITHUB_GIT_PREFIX, MANAGED_HTTP_PORT, MANAGED_OPENAI_API_PREFIX,
-    ManagedCredentialClient, ManagedCredentialClientPlacement, ManagedCredentialClientProjection,
-    ManagedCredentialClients, ProjectionError, SSH_NATIVE_AUTH_SOCK, SSH_PLATFORM_AUTH_SOCK,
+    CODEX_PLATFORM_TOKEN_FILE, CodexProviderProjection, MANAGED_ANTHROPIC_API_PREFIX,
+    MANAGED_CREDENTIAL_CLIENTS_ENV, MANAGED_GITHUB_GIT_PREFIX, MANAGED_HTTP_PORT,
+    MANAGED_OPENAI_API_PREFIX, ManagedCredentialClient, ManagedCredentialClientPlacement,
+    ManagedCredentialClientProjection, ManagedCredentialClients, ProjectionError,
+    SSH_NATIVE_AUTH_SOCK, SSH_PLATFORM_AUTH_SOCK,
 };
 
 use thiserror::Error;

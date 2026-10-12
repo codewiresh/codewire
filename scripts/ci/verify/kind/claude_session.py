@@ -42,7 +42,7 @@ import tempfile
 
 CLAUDE = "/opt/codewire/agents/npm/bin/claude"
 CLAUDE_ARGV = (CLAUDE,)
-BASE_URL = "http://127.0.0.1:38081"
+BASE_URL = "http://127.0.0.1:38081/_codewire/anthropic"
 PLACEHOLDER = "codewire-managed"
 MARKER = "CWCLAUDE kind"
 PROMPT = "Reply with the Codewire Kind marker."

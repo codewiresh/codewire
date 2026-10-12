@@ -42,10 +42,15 @@ const SUCCESSOR_LEAD: Duration = Duration::from_secs(90);
 /// seconds, doubling to at most 15.
 const SUCCESSOR_RETRY_FIRST: Duration = Duration::from_secs(3);
 const SUCCESSOR_RETRY_MAX: Duration = Duration::from_secs(15);
-/// A successor must expire at least this much later than the current epoch.
-/// Otherwise kubelet has not rotated a projected token yet and the successor
-/// would end with the current one.
-const SUCCESSOR_MIN_EXTENSION_SECS: u64 = 60;
+/// A successor must expire at least this much later than the current epoch:
+/// strictly later, so it cannot end with the current one. An epoch ends at the
+/// earlier of the relay's and the workspace's token expiries. When those fall
+/// close together, a successor admitted once the earlier token rotated serves
+/// until the later one expires, and the next is admitted once that token
+/// rotates too. Requiring more would leave the current epoch to end with no
+/// successor whenever kubelet rotates the later token late (#2641). Churn
+/// stays bounded: an expiry rises only when a token rotates.
+const SUCCESSOR_MIN_EXTENSION_SECS: u64 = 1;
 /// A projected token lasts 600 seconds; allow some clock skew, no more.
 const EXPIRY_MAX_AHEAD_SECS: u64 = 660;
 /// Decimal digits in a `u64` Unix time.
@@ -116,8 +121,8 @@ type EpochFuture<'a> = Pin<Box<dyn Future<Output = Result<(), DrainFailure>> + S
 /// identity expires; new requests move to it, and the old epoch finishes only
 /// the requests already sent on it, until its own identity expires. It keeps
 /// the current epoch and either its successor or its draining predecessor.
-/// The successor's Open is sent only when the broker reports an expiry at
-/// least 60 seconds later; otherwise the still-prepared successor is dropped,
+/// The successor's Open is sent only when the broker reports a later expiry
+/// than the current epoch's; otherwise the still-prepared successor is dropped,
 /// the daemon is unaffected, and another is tried after 3 seconds, doubling
 /// to 15, until the current epoch expires.
 ///
@@ -907,7 +912,7 @@ fn credential_metadata(relay: &str, workspace: &[u8]) -> Result<tonic::metadata:
     Ok(metadata)
 }
 
-/// Whether a successor's reported expiry outlives the current epoch enough.
+/// Whether a successor's reported expiry outlives the current epoch.
 fn extends(expiry: Option<BrokerExpiry>, current: u64) -> bool {
     let Some(required) = current.checked_add(SUCCESSOR_MIN_EXTENSION_SECS) else {
         return false;

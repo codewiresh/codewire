@@ -32,6 +32,7 @@ mod runtime;
 #[cfg(all(feature = "ssh-agent", any(target_os = "linux", target_os = "macos")))]
 pub mod ssh_agent;
 pub mod timing;
+mod transparent;
 
 pub use codewire_access::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection};
 pub use codex_oauth::{
@@ -47,14 +48,14 @@ pub use openai::{
     OpenAiApiKeyAdapter, OpenAiStreamingResponse, PreparedOpenAiRequest, PreparedOpenAiResponse,
     ValidatedOpenAiRequest,
 };
-#[cfg(feature = "local-broker-synthetic-smoke")]
-pub use runtime::SyntheticOpenAiSmokeTransport;
 pub use runtime::{
     BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest, BrokerHttpResponse,
     BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError,
     BrokerRequestError, BrokerResponseBody, BrokerUpstreamError, BrokerUpstreamRequest,
     BrokerUpstreamResponse, BrokerUpstreamTransport, OpenAiBroker,
 };
+#[cfg(feature = "local-broker-synthetic-smoke")]
+pub use runtime::{SyntheticOpenAiSmokeTransport, SyntheticProviderHost};
 
 use codewire_access::{CredentialMetadata, DerivedGrant, GrantPermission};
 use thiserror::Error;

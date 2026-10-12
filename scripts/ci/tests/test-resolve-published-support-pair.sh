@@ -11,7 +11,9 @@ fail() {
   exit 1
 }
 
-install -d "$ROOT/.tmp"
+# mkdir, not install -d: install would reset the mode of an existing shared
+# directory that checks running beside this one hold open.
+mkdir -p "$ROOT/.tmp"
 work="$(mktemp -d "$ROOT/.tmp/support-baseline-test.XXXXXX")"
 cleanup() {
   rm -rf "$work"

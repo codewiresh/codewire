@@ -112,9 +112,9 @@ grep -Fq '      superseded: ${{ steps.canonical.outputs.superseded }}' <<<"$sele
   fail "deploy selection does not expose whether its commit was superseded"
 
 # Queued runs are all kept, so one that starts after main moved on must build
-# nothing: delivery dispatches only the canonical main commit. Execute the
-# checked-in step against a stub remote for the current, superseded and
-# unreadable cases; the last must fail closed.
+# nothing: the newer commit's queued run delivers the cumulative change.
+# Execute the checked-in step against a stub remote for the current,
+# superseded and unreadable cases; the last must fail closed.
 superseded_step="$(mktemp)"
 superseded_bin="$(mktemp -d)"
 trap 'rm -rf -- "$superseded_step" "$superseded_bin"' EXIT
@@ -293,7 +293,8 @@ validation_line="$(grep -n 'scripts/ci/images/image-bundle.py create' <<<"$publi
 first_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$publish_job" | head -1 | cut -d: -f1)"
 last_copy_line="$(grep -n 'scripts/ci/images/publish-image-to-harbor.sh' <<<"$publish_job" | tail -1 | cut -d: -f1)"
 signer_line="$(grep -n 'scripts/ci/images/sign-runtime-image-set.sh' <<<"$publish_job" | head -1 | cut -d: -f1)"
-canonical_line="$(grep -n 'canonical_main_sha=' <<<"$publish_job" | cut -d: -f1)"
+canonical_line="$(grep -n 'canonical_main_sha=' <<<"$publish_job" | head -1 | cut -d: -f1)"
+canonical_last_line="$(grep -n 'merge-base --is-ancestor' <<<"$publish_job" | tail -1 | cut -d: -f1)"
 dispatch_line="$(grep -n 'scripts/ci/deploy/dispatch-deploy-dev.sh' <<<"$publish_job" | cut -d: -f1)"
 ghcr_mirror_line="$(grep -n 'scripts/ci/images/publish-image-to-ghcr.sh' <<<"$publish_job" | cut -d: -f1)"
 ghcr_signer_line="$(grep -n 'sign-runtime-image-set.sh --ghcr-mirror' <<<"$publish_job" | cut -d: -f1)"
@@ -302,8 +303,91 @@ ghcr_signer_line="$(grep -n 'sign-runtime-image-set.sh --ghcr-mirror' <<<"$publi
 [[ -n "$last_copy_line" && -n "$signer_line" && "$last_copy_line" -lt "$signer_line" ]] ||
   fail "runtime signing does not follow every Harbor copy"
 [[ -n "$signer_line" && -n "$canonical_line" && -n "$dispatch_line" \
-  && "$signer_line" -lt "$canonical_line" && "$canonical_line" -lt "$dispatch_line" ]] ||
-  fail "deploy dispatch does not follow signing and canonical-head verification"
+  && "$signer_line" -lt "$canonical_line" && "$canonical_line" -lt "$dispatch_line" \
+  && -n "$canonical_last_line" && "$canonical_last_line" -lt "$dispatch_line" ]] ||
+  fail "deploy dispatch does not follow signing and canonical-main verification"
+
+# A delivery main moved past while it built still reaches Dev when its commit
+# lies on canonical main and descends from the source Dev ran when it was
+# planned; deliveries queue one at a time, so Dev moves forward in push order.
+# Execute the checked-in step in real shallow checkouts of a synthetic history:
+#   deployed -- built -- head        (canonical main)
+#          \-- stray                 (never on main)
+# shellcheck disable=SC2016 # Match the literal workflow expressions.
+grep -Fq '          DEPLOYED_SOURCE_SHA: ${{ needs.deploy-selection.outputs.baseline_sha }}' <<<"$publish_job" ||
+  fail "canonical-main verification is not bound to the planned deployed source"
+# shellcheck disable=SC2016 # Match the literal workflow expressions.
+grep -Fq '          DEPLOYED_SOURCE_VALID: ${{ needs.deploy-selection.outputs.baseline_valid }}' <<<"$publish_job" ||
+  fail "canonical-main verification does not require a valid deployed source"
+forward_step="$(mktemp)"
+forward_root="$(mktemp -d)"
+trap 'rm -rf -- "$superseded_step" "$superseded_bin" "$forward_step" "$forward_root"' EXIT
+awk '
+  /- name: Require a canonical main commit that moves Dev forward/ { scope = 1 }
+  scope && /^        run: \|$/ { run = 1; next }
+  run && /^          / { print substr($0, 11); next }
+  run { exit }
+' "$WORKFLOW" >"$forward_step"
+[[ -s "$forward_step" ]] || fail "canonical-main verification step was not extracted"
+forward_git() {
+  git -c user.name=fixture -c user.email=fixture@example.invalid -c init.defaultBranch=main \
+    -c commit.gpgsign=false "$@"
+}
+forward_git init -q "$forward_root/origin"
+forward_commit() {
+  forward_git -C "$forward_root/origin" commit -q --allow-empty -m "$1"
+  git -C "$forward_root/origin" rev-parse HEAD
+}
+deployed_sha="$(forward_commit deployed)"
+forward_git -C "$forward_root/origin" checkout -q -b stray
+stray_sha="$(forward_commit stray)"
+forward_git -C "$forward_root/origin" checkout -q main
+built_sha="$(forward_commit built)"
+head_sha="$(forward_commit head)"
+forward_case() {
+  local name="$1" sha="$2" deployed="$3" valid="$4" checkout="$forward_root/checkout-$1"
+  # A depth-1 checkout of the built commit, as the hosted job has.
+  forward_git init -q "$checkout"
+  forward_git -C "$checkout" remote add origin "file://$forward_root/origin"
+  forward_git -C "$checkout" -c protocol.file.allow=always fetch -q --depth=1 origin "$sha"
+  forward_git -C "$checkout" checkout -q FETCH_HEAD
+  (
+    cd "$checkout"
+    env GITHUB_SHA="$sha" DEPLOYED_SOURCE_SHA="$deployed" DEPLOYED_SOURCE_VALID="$valid" \
+      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=protocol.file.allow GIT_CONFIG_VALUE_0=always \
+      bash "$forward_step" >"$forward_root/$name.out" 2>&1
+  )
+}
+git -C "$forward_root/origin" config uploadpack.allowAnySHA1InWant true
+forward_case head "$head_sha" "$deployed_sha" true ||
+  fail "the canonical main commit was refused"
+grep -Fxq 'delivering the canonical main commit' "$forward_root/head.out" ||
+  fail "the canonical main commit did not take the direct path"
+forward_case head-without-baseline "$head_sha" "$head_sha" false ||
+  fail "the canonical main commit needs no deployed-source proof"
+forward_case ancestor "$built_sha" "$deployed_sha" true ||
+  fail "an ancestor of main that descends from the deployed source was refused"
+grep -Fq "delivering its ancestor $built_sha, which descends from deployed $deployed_sha" \
+  "$forward_root/ancestor.out" || fail "the ancestor delivery did not state what it admitted"
+if forward_case stray "$stray_sha" "$deployed_sha" true; then
+  fail "a commit that is not on canonical main was delivered"
+fi
+if forward_case backwards "$deployed_sha" "$built_sha" true; then
+  fail "a delivery that would move Dev backwards was admitted"
+fi
+if forward_case unrelated-baseline "$built_sha" "$stray_sha" true; then
+  fail "a delivery that does not descend from the deployed source was admitted"
+fi
+if forward_case invalid-baseline "$built_sha" "$deployed_sha" false; then
+  fail "a superseded delivery without a valid deployed source was admitted"
+fi
+if forward_case malformed-baseline "$built_sha" not-a-commit true; then
+  fail "a superseded delivery with a malformed deployed source was admitted"
+fi
+git -C "$forward_root/origin" update-ref -d refs/heads/main
+if forward_case unreadable-main "$built_sha" "$deployed_sha" true; then
+  fail "an unreadable canonical main did not fail closed"
+fi
 [[ -n "$ghcr_mirror_line" && -n "$ghcr_signer_line" \
   && "$dispatch_line" -lt "$ghcr_mirror_line" && "$ghcr_mirror_line" -lt "$ghcr_signer_line" ]] ||
   fail "the GHCR mirror does not follow the deploy dispatch"

@@ -434,12 +434,34 @@ run_family() {
   fi
 }
 
+# Merge qualification runs the policy family as its independent parts, one
+# lane each. The product runner owns the list of parts for the selection; the
+# other modes run the policy family in place, which runs the same parts in
+# order.
+queue_policy_parts() {
+  local label="$1" parts part
+  parts="$(env VERIFICATION_SELECTION="$VERIFICATION_SELECTION" "$PRODUCT_RUNNER" policy-parts)" \
+    || fail "policy parts"
+  [ -n "$parts" ] || fail "policy parts are empty"
+  while IFS= read -r part; do
+    [[ "$part" =~ ^policy-[a-z0-9-]+$ ]] || fail "policy part ${part} is malformed"
+    run_family "$part" "${label} (${part#policy-})" env \
+      VERIFICATION_SELECTION="$VERIFICATION_SELECTION" \
+      VERIFICATION_PR_BASE_SHA="$PREFLIGHT_EFFECTIVE_BASE_SHA" \
+      "$PRODUCT_RUNNER" "$part"
+  done <<<"$parts"
+}
+
 run_selected_family() {
   local token="$1" family="$2" label="$3" step_environment=()
   # The same environment as the family's CI step: release provenance checks
   # a source capsule that Python bytecode caches would pollute.
   [ "$family" != release ] || step_environment=(PYTHONDONTWRITEBYTECODE=1)
   if selection_has "$token"; then
+    if [ "$family" = policy ] && [ "$PREFLIGHT_SCOPE" = merge ]; then
+      queue_policy_parts "$label"
+      return
+    fi
     run_family "$family" "$label" env "${step_environment[@]}" \
       VERIFICATION_SELECTION="$VERIFICATION_SELECTION" \
       VERIFICATION_PR_BASE_SHA="$PREFLIGHT_EFFECTIVE_BASE_SHA" \
@@ -619,7 +641,8 @@ run_queued_step() {
 
 lane_of() {
   case "$1" in
-    policy) printf 'policy\n' ;;
+    # Each policy part is independent and gets its own lane.
+    policy|policy-*) printf '%s\n' "$1" ;;
     contracts) printf 'contracts\n' ;;
     rust-compile) printf 'compile\n' ;;
     rust|transport|rust-curated-locks) printf 'rust\n' ;;
@@ -702,9 +725,13 @@ await_lanes "${PREFLIGHT_LANE_PIDS[@]}"
 # ShellCheck shards and Cargo, so it also runs alone.
 start_lane javascript
 await_lanes "${PREFLIGHT_LANE_PIDS[@]}"
-# Policy needs no build; it runs beside the compile gate. Every other lane
-# waits for every Rust target to compile, so compile errors fail first.
-start_lane policy
+# Policy needs no build; its parts run beside the compile gate. Every other
+# lane waits for every Rust target to compile, so compile errors fail first.
+for lane in "${PREFLIGHT_LANES[@]}"; do
+  case "$lane" in
+    policy|policy-*) start_lane "$lane" ;;
+  esac
+done
 start_lane compile
 compile_pid="${PREFLIGHT_LANE_STARTED[compile]:-}"
 if [ -n "$compile_pid" ]; then
@@ -712,7 +739,7 @@ if [ -n "$compile_pid" ]; then
 fi
 for lane in "${PREFLIGHT_LANES[@]}"; do
   case "$lane" in
-    contracts|javascript|policy|compile) ;;
+    contracts|javascript|policy|policy-*|compile) ;;
     *) start_lane "$lane" ;;
   esac
 done
