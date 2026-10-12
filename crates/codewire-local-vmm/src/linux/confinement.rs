@@ -7,6 +7,8 @@ use std::path::Path;
 use rustix::fs::{Mode, OFlags, open};
 
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+/// Version 3 capability sets hold 64 bits.
+const MAXIMUM_CAPABILITY: libc::c_ulong = 63;
 
 const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1 << 0;
 const LANDLOCK_ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
@@ -247,7 +249,33 @@ pub(crate) fn lock_exec_process_privileges() -> io::Result<()> {
     lock_process_privileges_inner(false)
 }
 
-fn lock_process_privileges_inner(disable_dumpability: bool) -> io::Result<()> {
+/// Discard every capability this process holds, whoever started it.
+///
+/// The ambient, effective, permitted and inheritable sets are emptied and
+/// read back; a process that cannot empty them fails here. The bounding set
+/// is emptied too when the process may change it, which takes `CAP_SETPCAP`
+/// (a root-started process has it). Otherwise it stays as inherited: it
+/// grants nothing by itself, and every caller also sets `no_new_privs`, under
+/// which an exec cannot draw on it once the permitted set is empty. Only
+/// syscalls are made and nothing is allocated, so this is safe between fork
+/// and exec.
+pub(crate) fn drop_all_capabilities() -> io::Result<()> {
+    for capability in 0..=MAXIMUM_CAPABILITY {
+        match unsafe { libc::prctl(libc::PR_CAPBSET_READ, capability, 0, 0, 0) } {
+            0 => {}
+            1 => {
+                if unsafe { libc::prctl(libc::PR_CAPBSET_DROP, capability, 0, 0, 0) } == -1 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::EPERM) {
+                        break;
+                    }
+                    return Err(error);
+                }
+            }
+            // Past the kernel's last capability.
+            _ => break,
+        }
+    }
     if unsafe {
         libc::prctl(
             libc::PR_CAP_AMBIENT,
@@ -273,6 +301,25 @@ fn lock_process_privileges_inner(disable_dumpability: bool) -> io::Result<()> {
     if unsafe { libc::syscall(libc::SYS_capset, &raw const header, data.as_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    let mut held = [CapabilityData {
+        effective: u32::MAX,
+        permitted: u32::MAX,
+        inheritable: u32::MAX,
+    }; 2];
+    if unsafe { libc::syscall(libc::SYS_capget, &raw const header, held.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if held
+        .iter()
+        .any(|set| set.effective != 0 || set.permitted != 0 || set.inheritable != 0)
+    {
+        return Err(io::Error::from_raw_os_error(libc::EPERM));
+    }
+    Ok(())
+}
+
+fn lock_process_privileges_inner(disable_dumpability: bool) -> io::Result<()> {
+    drop_all_capabilities()?;
     if disable_dumpability && unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == -1 {
         return Err(io::Error::last_os_error());
     }
