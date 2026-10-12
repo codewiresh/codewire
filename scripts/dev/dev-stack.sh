@@ -197,6 +197,9 @@ fi
 
 # ── Builds ──────────────────────────────────────────────────────────────
 echo "dev-stack: building Rust services..."
+# shellcheck source=scripts/ci/verify/local-rust-cache.sh
+source "$ROOT/scripts/ci/verify/local-rust-cache.sh"
+select_local_rust_cache "$ROOT" || true
 (cd "$ROOT" && cargo build --profile ci -p codewire-orchestration -p codewire-billing >/dev/null)
 RUST_BIN_DIR="$ROOT/target/ci"
 
