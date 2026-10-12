@@ -569,7 +569,16 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         let events = client
             .list_recent_broker_lease_audit_events(MAX_AUDIT_EVENTS)
             .await?;
-        validate_audit_events(&events, environment, selected, expected)
+        let result = validate_audit_events(&events, environment, selected, expected);
+        if result.is_err() {
+            // Counts only: no event's identifiers or credentials are printed.
+            eprintln!(
+                "codewire-local-codex-bridge-smoke: lease audit mismatch expected_events={} listed_events={}",
+                expected.len(),
+                events.len()
+            );
+        }
+        result
     }
 
     fn validate_audit_events(
@@ -783,20 +792,62 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         };
         if output.exit_code != 0 || output.stdout != expected || !output.stderr.is_empty() {
             eprintln!(
-                "codewire-local-codex-bridge-smoke: stock SSH client command exit={} stdout_bytes={} stderr_bytes={}",
+                "codewire-local-codex-bridge-smoke: stock SSH client command exit={} stdout_bytes={} stderr_bytes={} reason={}",
                 output.exit_code,
                 output.stdout.len(),
-                output.stderr.len()
+                output.stderr.len(),
+                stock_ssh_failure_reason(&output.stderr)
             );
         }
         require(output.exit_code == 0 && output.stdout == expected && output.stderr.is_empty())?;
         Ok(host_key)
     }
 
+    /// The workload's own fixed failure messages for its Git push, each with
+    /// the name this proof prints for it. The workload accepts the push as the
+    /// sixth authentication only when its target accepted five before it and
+    /// exactly one more for it, from the selected public key.
+    const STOCK_SSH_PUSH_FAILURES: [(&str, &str); 6] = [
+        (
+            "target did not accept exactly five authentications before the Git push",
+            "authentications-before-git-push",
+        ),
+        ("Git-over-SSH push failed", "git-push-failed"),
+        (
+            "Git-over-SSH push did not authenticate to the target exactly once",
+            "git-push-not-authenticated",
+        ),
+        (
+            "Git-over-SSH push did not authenticate with the selected public key",
+            "git-push-another-key",
+        ),
+        (
+            "Git-over-SSH push did not advance the target branch",
+            "git-push-not-applied",
+        ),
+        ("Git-over-SSH pushed content drifted", "git-push-content"),
+    ];
+
+    /// Names why the stock SSH workload failed, from a closed set chosen by
+    /// matching the workload's fixed messages. The guest's bytes are never
+    /// printed.
+    fn stock_ssh_failure_reason(stderr: &[u8]) -> &'static str {
+        let stderr = String::from_utf8_lossy(stderr);
+        STOCK_SSH_PUSH_FAILURES
+            .iter()
+            .find(|(message, _)| stderr.contains(&format!("ERROR: {message}\n")))
+            .map_or("other", |(_, reason)| reason)
+    }
+
+    /// How many times `stock-ssh-workload.sh prove` authenticates to its target.
+    const STOCK_SSH_AUTHENTICATIONS: usize = 6;
+
     fn record_stock_ssh_audit(expected: &mut Vec<ExpectedAudit>) {
-        // Each of SSH, two SCP transfers, SFTP and Git performs one identity
-        // lookup followed by one signature with the sole selected key.
-        for _ in 0..5 {
+        // Each of SSH, two SCP transfers, SFTP, the Git clone and the Git push
+        // performs one identity lookup followed by one signature with the
+        // sole selected key: the six authentications stock-ssh-workload.sh
+        // requires its target to have accepted.
+        for _ in 0..STOCK_SSH_AUTHENTICATIONS {
             expected.insert(0, ExpectedAudit::SshIdentities);
             expected.insert(0, ExpectedAudit::SshSignAdmitted);
         }
@@ -2448,15 +2499,75 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
         }
 
         #[test]
-        fn stock_ssh_audit_preserves_five_identity_signature_pairs_and_prior_events() {
+        fn stock_ssh_audit_preserves_six_identity_signature_pairs_and_prior_events() {
             let mut events = vec![ExpectedAudit::CodexAdmitted];
             record_stock_ssh_audit(&mut events);
-            assert_eq!(events.len(), 11);
-            for pair in events[..10].chunks_exact(2) {
+            assert_eq!(events.len(), 13);
+            for pair in events[..12].chunks_exact(2) {
                 assert!(matches!(pair[0], ExpectedAudit::SshSignAdmitted));
                 assert!(matches!(pair[1], ExpectedAudit::SshIdentities));
             }
-            assert!(matches!(events[10], ExpectedAudit::CodexAdmitted));
+            assert!(matches!(events[12], ExpectedAudit::CodexAdmitted));
+        }
+
+        const STOCK_SSH_WORKLOAD: &str =
+            include_str!("../../../../scripts/ci/verify/stock-ssh-workload.sh");
+
+        /// The workload script and this proof must count the same
+        /// authentications, or the audit comparison fails in a VM only.
+        #[test]
+        fn stock_ssh_audit_matches_the_authentications_the_workload_requires() {
+            assert!(STOCK_SSH_WORKLOAD.contains(&format!(
+                "[[ \"$after\" == {STOCK_SSH_AUTHENTICATIONS} ]] || fail \"target accepted $after authentications, want {STOCK_SSH_AUTHENTICATIONS}\""
+            )));
+        }
+
+        /// The sixth authentication is the Git push's own: the workload counts
+        /// five before the push and six after it, and requires the newest
+        /// accepted key to be the selected one.
+        #[test]
+        fn the_workload_attributes_its_sixth_authentication_to_the_git_push() {
+            let before = STOCK_SSH_WORKLOAD
+                .find("[[ \"$(accepted_count)\" == 5 ]] || fail 'target did not accept exactly five authentications before the Git push'")
+                .unwrap();
+            let push = STOCK_SSH_WORKLOAD
+                .find("push --quiet origin HEAD:refs/heads/main")
+                .unwrap();
+            let after = STOCK_SSH_WORKLOAD
+                .find("[[ \"$(accepted_count)\" == 6 ]] || fail 'Git-over-SSH push did not authenticate to the target exactly once'")
+                .unwrap();
+            let key = STOCK_SSH_WORKLOAD
+                .find("fail 'Git-over-SSH push did not authenticate with the selected public key'")
+                .unwrap();
+            assert!(before < push && push < after && after < key);
+        }
+
+        #[test]
+        fn stock_ssh_push_failures_are_named_from_the_workload_s_own_messages() {
+            for (message, reason) in STOCK_SSH_PUSH_FAILURES {
+                assert!(
+                    STOCK_SSH_WORKLOAD.contains(&format!("fail '{message}'")),
+                    "{message}"
+                );
+                assert!(
+                    reason
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'-'),
+                    "{reason}"
+                );
+                assert_eq!(
+                    stock_ssh_failure_reason(
+                        format!("[stock-ssh-workload] ERROR: {message}\n").as_bytes()
+                    ),
+                    reason
+                );
+            }
+            // Anything else, including a guest value, is only ever "other".
+            assert_eq!(
+                stock_ssh_failure_reason(b"[stock-ssh-workload] ERROR: synthetic-secret-value\n"),
+                "other"
+            );
+            assert_eq!(stock_ssh_failure_reason(b""), "other");
         }
 
         fn claude_frames() -> Vec<Value> {
