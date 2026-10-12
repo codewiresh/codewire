@@ -750,18 +750,25 @@ install_caddy() {
 # 1000), and its kernel fixture requires that identity. Hosted jobs run as
 # root, where the fixture failed and cancelled every Edge/Kind run. Run it
 # there as that user, on a private copy of the committed tree it can write to.
+# Like the Pod's home, every directory above the copy must be owned by root or
+# that user and writable by neither group nor others; the job's temporary
+# directory is world-writable (/tmp is 1777), so the copy goes in a fresh
+# root-owned directory directly under PARENT (the filesystem root).
 run_kind_cw_runtime_probe_fixture() {
+  local parent="${1:-/}"
   if [[ "$(id -u)" != 0 ]]; then
     python3 -B scripts/ci/tests/test-kind-cw-runtime-probe.py
     return
   fi
   local scratch status=0
-  scratch="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/codewire-cw-probe-fixture.XXXXXX")"
+  scratch="$(mktemp -d "${parent%/}/codewire-cw-probe-fixture.XXXXXX")"
   {
-    git archive --format=tar HEAD | tar -x -C "$scratch" \
-      && mkdir "$scratch/.tmp" \
-      && chown -R 1000:1000 "$scratch" \
-      && (cd "$scratch" && HOME="$scratch/.tmp" setpriv --reuid=1000 --regid=1000 --clear-groups \
+    chmod 0755 "$scratch" \
+      && mkdir "$scratch/tree" \
+      && git archive --format=tar HEAD | tar -x -C "$scratch/tree" \
+      && mkdir "$scratch/tree/.tmp" \
+      && chown -R 1000:1000 "$scratch/tree" \
+      && (cd "$scratch/tree" && HOME="$scratch/tree/.tmp" setpriv --reuid=1000 --regid=1000 --clear-groups \
             python3 -B scripts/ci/tests/test-kind-cw-runtime-probe.py)
   } || status=$?
   rm -rf -- "$scratch"

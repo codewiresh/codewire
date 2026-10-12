@@ -2925,6 +2925,12 @@ awk '
   echo 'probe fixture helper must run the owning fixture on both identity paths' >&2
   exit 1
 }
+# Hosted, the copy sits in a fresh directory under the filesystem root: the
+# probe refuses any group- or world-writable ancestor, such as /tmp.
+grep -Fxq '  local parent="${1:-/}"' "$probe_fixture_runner" || {
+  echo 'hosted probe fixture must copy the tree directly under the filesystem root' >&2
+  exit 1
+}
 probe_fixture_tree="$TMP/probe-fixture-tree"
 mkdir -p "$probe_fixture_tree/bin" "$probe_fixture_tree/scripts/ci/tests"
 git -C "$probe_fixture_tree" init -q
@@ -2958,8 +2964,8 @@ run_probe_fixture_case() {
   (
     cd "$probe_fixture_tree"
     env PATH="$probe_fixture_tree/bin:$PATH" PROBE_FIXTURE_UID="$uid" PROBE_FIXTURE_STATUS="$status" \
-      PROBE_FIXTURE_CALLS="$TMP/probe-fixture-calls" RUNNER_TEMP="$TMP" \
-      bash -euo pipefail -c 'source "$1"; run_kind_cw_runtime_probe_fixture' _ "$probe_fixture_runner"
+      PROBE_FIXTURE_CALLS="$TMP/probe-fixture-calls" \
+      bash -euo pipefail -c 'source "$1"; run_kind_cw_runtime_probe_fixture "$2"' _ "$probe_fixture_runner" "$TMP"
   )
 }
 run_probe_fixture_case 1000 0
@@ -2968,7 +2974,7 @@ run_probe_fixture_case 1000 0
   exit 1
 }
 run_probe_fixture_case 0 0
-grep -Eq '^chown -R 1000:1000 .*/codewire-cw-probe-fixture\.[A-Za-z0-9]+$' "$TMP/probe-fixture-calls" || {
+grep -Eq '^chown -R 1000:1000 .*/codewire-cw-probe-fixture\.[A-Za-z0-9]+/tree$' "$TMP/probe-fixture-calls" || {
   echo 'root probe fixture must own a private copy as the workspace user' >&2
   exit 1
 }
@@ -2976,7 +2982,7 @@ grep -Fxq 'setpriv --reuid=1000 --regid=1000 --clear-groups' "$TMP/probe-fixture
   echo 'root probe fixture must drop to the workspace user' >&2
   exit 1
 }
-grep -Eq '^python3 cwd=.*/codewire-cw-probe-fixture\.[A-Za-z0-9]+ uid=1000 args=-B scripts/ci/tests/test-kind-cw-runtime-probe.py$' \
+grep -Eq '^python3 cwd=.*/codewire-cw-probe-fixture\.[A-Za-z0-9]+/tree uid=1000 args=-B scripts/ci/tests/test-kind-cw-runtime-probe.py$' \
   "$TMP/probe-fixture-calls" || {
   echo 'root probe fixture must run the committed copy as the workspace user' >&2
   exit 1
