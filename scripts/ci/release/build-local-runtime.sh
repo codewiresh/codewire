@@ -268,8 +268,8 @@ side_by_side() {
 }
 
 # The TARGET guest root at FILE: the sealed probe built twice, with the pinned
-# Alpine BusyBox and official runc, in the pinned Rust container (the
-# runner's sealed toolchain has no arm64 musl target).
+# Alpine BusyBox and official runc, in the pinned Rust container (not on the
+# runner's sealed toolchain).
 guest_root() {
   local target="$1" file="$2" member
   log "building the $target guest root"
