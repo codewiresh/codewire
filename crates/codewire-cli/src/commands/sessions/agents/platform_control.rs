@@ -623,28 +623,10 @@ pub(crate) async fn run_platform_agent_peer(
                 .as_deref()
                 .context("platform Claude native thread missing")?;
             id(session)?;
-            let mut expected = vec![
-                "-p",
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--replay-user-messages",
-                "--model",
-                config.model.as_str(),
-                if state.native_thread_established {
-                    "--resume"
-                } else {
-                    "--session-id"
-                },
-                session,
-            ];
-            if let Some(effort) = &config.effort {
-                expected.extend(["--effort", effort]);
-            }
+            // A hosted Sandbox is a Sandbox placement: exactly the arguments
+            // its driver builds, auto mode included, and nothing more.
             ensure!(
-                native.iter().map(String::as_str).eq(expected),
+                native == claude_arguments(&config, true, state.native_thread_established, session),
                 "platform Claude peer differs"
             );
         }

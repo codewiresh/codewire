@@ -75,14 +75,20 @@ The native supervisor owns the VM lifecycle and the guest daemon owns its
 sessions. Launch the lead and workers through the host CLI. Their parent must
 be a running managed session in this same VM.
 
+In a VM or a platform sandbox, managed Claude starts in auto mode
+(`--permission-mode auto`), so it can run tools such as Bash without a prompt.
+It keeps the Sandbox user's Claude settings and permission rules; setting
+`permissions.disableAutoMode` there turns auto mode off.
+
 ### Platform sandbox
 
 Sign in and select your organization, then use your repository URL and an
 existing platform credential profile with a credential for each agent. Codex
 uses the profile's Codex credential (your ChatGPT sign-in or an API key), or
 its OpenAI API key when it has no Codex credential. Claude uses its Anthropic
-credential. Codewire adds the credential outside the Sandbox; a managed
-agent's own Codex or Claude home holds only the local route:
+credential. Codewire adds the credential outside the Sandbox. A managed Codex
+agent's own Codex home holds only the local route; a managed Claude agent uses
+the Sandbox's own Claude settings and the same local route as your terminal:
 
 ```bash
 cw setup

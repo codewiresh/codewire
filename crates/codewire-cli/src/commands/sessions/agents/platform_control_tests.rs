@@ -278,33 +278,35 @@ fn platform_control_private_homes_never_copy_a_saved_login_and_set_only_the_lock
     assert!(lockdown::environment(&f.dir, &config, Route::OpenAi).is_err());
 }
 
+/// A hosted managed Claude agent has no lockdown: no private home, no variable
+/// and no fixed argument, so it runs as `claude` does for the user in that
+/// Sandbox. Its credential form is the session's, which outranks a saved login.
 #[test]
-fn platform_control_claude_lockdown_is_its_private_home_and_no_credential_form() {
+fn platform_control_claude_has_no_hosted_only_lockdown() {
     let f = Fixture::new();
     let mut config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
     config.agent = AgentKind::Claude;
+    let before: Vec<_> = fs::read_dir(&f.dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
     lockdown::prepare(&f.dir, &config, Route::Anthropic).unwrap();
-    // The API-key or subscription form is the shared projection's, inherited
-    // from the session; a hand-written form here would ignore the selection.
+    // Nothing is written: no private Claude home, settings file or `HOME`.
+    let after: Vec<_> = fs::read_dir(&f.dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(before, after);
+    assert_eq!(lockdown::check(&f.dir, &config).unwrap(), Route::Anthropic);
     assert_eq!(
         lockdown::environment(&f.dir, &config, Route::Anthropic).unwrap(),
-        [
-            (
-                "CLAUDE_CONFIG_DIR".to_owned(),
-                f.dir.join("claude").to_string_lossy().into_owned()
-            ),
-            (
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_owned(),
-                "1".to_owned()
-            ),
-        ]
+        []
     );
-    assert_eq!(
-        fs::read(f.dir.join("claude/settings.json")).unwrap(),
-        b"{}\n"
-    );
-    assert!(!f.dir.join("home").exists());
-    assert!(!f.dir.join("codex").exists());
+    assert_eq!(lockdown::arguments(Route::Anthropic), [] as [String; 0]);
+    // Claude's one route is never another agent's.
+    for route in [Route::Codex, Route::OpenAi] {
+        assert!(lockdown::environment(&f.dir, &config, route).is_err());
+    }
 }
 
 /// One daemon's session configuration with `selected` bound, as the hosted
@@ -489,22 +491,23 @@ fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() 
             for name in GIT.into_iter().chain([SSH]) {
                 assert_eq!(managed.get(name), shell.get(name), "{context} {name}");
             }
-            // Every provider variable is the session's too, except the home
-            // the lockdown replaces.
-            let private_home = match agent {
-                AgentKind::Codex => "CODEX_HOME",
-                AgentKind::Claude => "CLAUDE_CONFIG_DIR",
-            };
+            // Every provider variable is the session's too. Codex alone has
+            // a lockdown, which replaces its home; Claude has none, so its
+            // environment is the session's exactly.
+            let private_home = (*agent == AgentKind::Codex).then_some("CODEX_HOME");
             for (name, value) in &projected {
                 assert_eq!(shell.get(name), Some(value), "{context} {name}");
-                if name != private_home {
+                if Some(name.as_str()) != private_home {
                     assert_eq!(managed.get(name), Some(value), "{context} {name}");
                 }
             }
-            assert!(
-                managed[private_home].starts_with(f.dir.to_str().unwrap()),
-                "{context}"
-            );
+            match private_home {
+                Some(home) => assert!(
+                    managed[home].starts_with(f.dir.to_str().unwrap()),
+                    "{context}"
+                ),
+                None => assert_eq!(managed, driver, "{context}"),
+            }
             // The managed launch differs from the session by its lockdown
             // alone: nothing else is set, changed or removed.
             for (name, value) in &locked {
@@ -535,23 +538,6 @@ fn platform_control_directories_below_a_setgid_home_are_exactly_private() {
             "{made:?}"
         );
     }
-}
-
-#[test]
-fn platform_control_claude_prefix_uses_the_pinned_cli_option_names() {
-    // Claude 2.1.288 exits during startup on an unknown option such as
-    // `--settings-sources`; these are the names it accepts.
-    assert_eq!(
-        lockdown::arguments(Route::Anthropic),
-        [
-            "--setting-sources",
-            "",
-            "--strict-mcp-config",
-            "--mcp-config",
-            "{\"mcpServers\":{}}",
-            "--disable-slash-commands",
-        ]
-    );
 }
 
 #[test]
@@ -781,9 +767,11 @@ fn platform_control_private_home_is_written_only_for_a_route_of_its_agent() {
         assert!(lockdown::prepare(&stage, config, route).is_err());
         assert_eq!(fs::read_dir(&stage).unwrap().count(), 0, "{route:?}");
     }
+    // Claude's own route is admitted, and writes nothing.
     let stage = f._temp.path().join("claude-stage");
     private_directory(&stage).unwrap();
     lockdown::prepare(&stage, &claude, Route::Anthropic).unwrap();
+    assert_eq!(fs::read_dir(&stage).unwrap().count(), 0);
     assert_eq!(lockdown::check(&stage, &claude).unwrap(), Route::Anthropic);
 }
 
