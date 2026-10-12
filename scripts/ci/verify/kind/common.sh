@@ -1209,6 +1209,17 @@ build_retained_kind_smokes() {
     log "consumed Kind smoke binaries verified for the retained suite"
     return 0
   fi
+  if [ "${KIND_RETAINED_USE_CLUSTER_WORKSPACE:-0}" = 1 ]; then
+    # `make kind-test` deploys changed services from this worktree's kind-dev
+    # BuildKit target (scripts/dev/kind/deploy-service.sh). Building the smokes
+    # and the host cw in that target links what the deploy already compiled
+    # instead of compiling the product a second time on the host.
+    CARGO_CI_DIR="$ROOT/.tmp/kind-dev/${KIND_CLUSTER_NAME}/smokes"
+    log "building Rust kind smoke binaries for the retained suite in the kind-dev target"
+    KIND_CLUSTER_NAME="$KIND_CLUSTER_NAME" "$ROOT/scripts/dev/kind/build-smokes.sh" \
+      "$CARGO_CI_DIR" "$RUN_DIR/billing-contract-build.jsonl"
+    return $?
+  fi
   log "building Rust kind smoke binaries for the retained suite"
   "$ROOT/scripts/ci/images/build-kind-smokes.sh" "$RUN_DIR/billing-contract-build.jsonl"
 }
@@ -4390,6 +4401,7 @@ rust_reconciler_ttl_e2e() {
     SMOKE_SESSION_TOKEN=contract-admin-session-token \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_WORKSPACE_IMAGE="$workspace_image" \
+    SMOKE_KIND_E2E="$ROOT/scripts/ci/verify/kind-e2e.sh" \
     "$CARGO_CI_DIR/reconciler-ttl-smoke"
 }
 

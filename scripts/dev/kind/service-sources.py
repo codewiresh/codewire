@@ -56,6 +56,8 @@ SHARED_INPUTS = (
 CRATE_INPUTS = {
     "codewire-dashboard-web": ("packages/codewire-design", "apps/cli/install.sh"),
     "codewire-cli": ("apps/cli/GPG_PUBLIC_KEY.asc",),
+    # Embedded by the cw runtime smoke example, which build-smokes.sh compiles.
+    "codewire-client": ("scripts/ci/verify/kind/cw_runtime_probe.py",),
 }
 # Every service compiles the published workspace image pin, but a retained
 # cluster keeps the workspace image it was prepared with, so a pin change is
