@@ -1763,7 +1763,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/*observer*.tsv|\
       scripts/ci/release/verify-cw-release-signing-key.sh|scripts/ci/release/verify-release-tag-ref.sh|\
       apps/cli/GPG_PUBLIC_KEY.asc|\
-      apps/cli/README.md|apps/cli/install.sh|\
+      apps/cli/README.md|apps/cli/install.sh|scripts/dev/test-cw-release-update.py|\
       apps/cli/aur/PKGBUILD|apps/cli/nfpm.yaml|\
       apps/cli/scripts/update-homebrew-formula.sh|install.sh)
         select_token release
