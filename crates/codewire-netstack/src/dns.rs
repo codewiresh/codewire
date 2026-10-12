@@ -3,8 +3,9 @@
 //! This module does not resolve names or open sockets. It accepts only one
 //! canonical, unfragmented DNS question sent to the caller-selected virtual
 //! resolver address, surfaces bounded policy metadata, and builds a bounded
-//! reply from an already-authorized answer. All other UDP stays outside the
-//! admitted interface.
+//! reply from an already-authorized answer. A query may carry one EDNS OPT
+//! record, which is ignored. All other UDP stays outside the admitted
+//! interface.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -52,6 +53,21 @@ pub enum DnsAnswer {
     Ipv6(Ipv6Addr),
     NoData,
     NameError,
+    /// The policy refused the name: REFUSED, with no record.
+    Refused,
+    /// The lookup failed for any other reason: SERVFAIL, with no record.
+    ServerFailure,
+}
+
+impl DnsAnswer {
+    fn response_code(self) -> u16 {
+        match self {
+            Self::Ipv4(_) | Self::Ipv6(_) | Self::NoData => 0,
+            Self::ServerFailure => 2,
+            Self::NameError => 3,
+            Self::Refused => 5,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,21 +168,33 @@ pub fn parse_ipv4_dns_question(
     let nscount = u16::from_be_bytes([dns[8], dns[9]]);
     let arcount = u16::from_be_bytes([dns[10], dns[11]]);
     // Admit only a standard single-question query. RD, AD and CD are the only
-    // request flags admitted; compressed names and EDNS are intentionally a
-    // later, separately bounded extension. AD in a query only says the client
+    // request flags admitted; compressed names are intentionally a later,
+    // separately bounded extension. AD in a query only says the client
     // understands AD in a reply (RFC 6840 5.7); musl's res_mkquery sets it,
     // so BusyBox nslookup sends it. Replies never set AD.
     if flags & !(0x0100 | 0x0020 | 0x0010) != 0
         || qdcount != 1
         || ancount != 0
         || nscount != 0
-        || arcount != 0
+        || arcount > 1
     {
         return Err(DnsBoundaryError::UnsupportedDnsShape);
     }
 
     let (name, cursor) = parse_qname(dns, DNS_HEADER_LEN)?;
-    if cursor.checked_add(4) != Some(dns.len()) {
+    let additional = cursor
+        .checked_add(4)
+        .and_then(|end| dns.get(end..))
+        .ok_or(DnsBoundaryError::UnsupportedDnsShape)?;
+    // The only additional record admitted is one EDNS OPT, which Go's resolver
+    // and dig send with every query. Nothing in it is read, kept or forwarded:
+    // not its payload size, DO bit, version or options. Replies never carry
+    // one, so the client sees a resolver without EDNS.
+    let admitted = match arcount {
+        0 => additional.is_empty(),
+        _ => is_edns_opt(additional),
+    };
+    if !admitted {
         return Err(DnsBoundaryError::UnsupportedDnsShape);
     }
     let record_type = match u16::from_be_bytes([dns[cursor], dns[cursor + 1]]) {
@@ -216,7 +244,13 @@ pub fn build_ipv4_dns_response(
             answer_storage.copy_from_slice(&ip.octets());
             Some(16)
         }
-        (_, DnsAnswer::NoData | DnsAnswer::NameError) => None,
+        (
+            _,
+            DnsAnswer::NoData
+            | DnsAnswer::NameError
+            | DnsAnswer::Refused
+            | DnsAnswer::ServerFailure,
+        ) => None,
         _ => return Err(DnsBoundaryError::AnswerTypeMismatch),
     };
 
@@ -226,9 +260,7 @@ pub fn build_ipv4_dns_response(
     if question.recursion_desired {
         flags |= 0x0100;
     }
-    if matches!(answer, DnsAnswer::NameError) {
-        flags |= 3;
-    }
+    flags |= answer.response_code();
     dns.extend_from_slice(&flags.to_be_bytes());
     dns.extend_from_slice(&1u16.to_be_bytes());
     dns.extend_from_slice(&u16::from(answer_len.is_some()).to_be_bytes());
@@ -281,6 +313,20 @@ pub fn build_ipv4_dns_response(
         ipv4.fill_checksum();
     }
     Ok(packet)
+}
+
+/// Whether `additional` is exactly one EDNS OPT pseudo-record (RFC 6891): the
+/// root name as a single zero byte, type 41, and a data length that ends the
+/// message. The data length is only compared, and nothing else is read.
+fn is_edns_opt(additional: &[u8]) -> bool {
+    const OPT_TYPE: u16 = 41;
+    // Root name, type, class, TTL and data length.
+    const OPT_FIXED_LEN: usize = 1 + 2 + 2 + 4 + 2;
+    additional.len() >= OPT_FIXED_LEN
+        && additional[0] == 0
+        && u16::from_be_bytes([additional[1], additional[2]]) == OPT_TYPE
+        && usize::from(u16::from_be_bytes([additional[9], additional[10]]))
+            == additional.len() - OPT_FIXED_LEN
 }
 
 fn parse_qname(dns: &[u8], mut cursor: usize) -> Result<(String, usize), DnsBoundaryError> {
@@ -484,5 +530,152 @@ mod tests {
             build_ipv4_dns_response(&question, DnsAnswer::Ipv4(Ipv4Addr::LOCALHOST), 30, 32),
             Err(DnsBoundaryError::ResponseTooLarge)
         );
+    }
+
+    /// A refusal or failure is the query's ID and question with a response
+    /// code: no record, and nothing else.
+    #[test]
+    fn a_refusal_or_failure_reply_is_only_the_question_and_a_code() {
+        let dns = dns_query("example.com");
+        let question = parse(&dns).unwrap();
+        for (answer, code) in [
+            (DnsAnswer::NoData, 0),
+            (DnsAnswer::ServerFailure, 2),
+            (DnsAnswer::NameError, 3),
+            (DnsAnswer::Refused, 5),
+        ] {
+            let response = build_ipv4_dns_response(&question, answer, 30, 1500).unwrap();
+            let ipv4 = Ipv4Packet::new_checked(response.as_slice()).unwrap();
+            assert_eq!(ipv4.dst_addr().octets(), GUEST.octets());
+            let udp = UdpPacket::new_checked(ipv4.payload()).unwrap();
+            assert_eq!(udp.dst_port(), 53000);
+            let reply = udp.payload();
+            // QR, RD and RA with the code; one question and no other record.
+            assert_eq!(&reply[..2], &dns[..2]);
+            assert_eq!(u16::from_be_bytes([reply[2], reply[3]]), 0x8180 | code);
+            assert_eq!(&reply[4..DNS_HEADER_LEN], &[0, 1, 0, 0, 0, 0, 0, 0]);
+            assert_eq!(&reply[DNS_HEADER_LEN..], &dns[DNS_HEADER_LEN..]);
+        }
+    }
+
+    /// An OPT record: `name`, type, class (the payload size), TTL (the
+    /// extended code, version and flags), then the options.
+    fn opt_record(name: &[u8], record_type: u16, class: u16, ttl: u32, options: &[u8]) -> Vec<u8> {
+        let mut record = name.to_vec();
+        record.extend_from_slice(&record_type.to_be_bytes());
+        record.extend_from_slice(&class.to_be_bytes());
+        record.extend_from_slice(&ttl.to_be_bytes());
+        record.extend_from_slice(&(options.len() as u16).to_be_bytes());
+        record.extend_from_slice(options);
+        record
+    }
+
+    /// `dns_query` with `additional_count` in its header and `additional`
+    /// after the question.
+    fn dns_query_with(name: &str, additional_count: u16, additional: &[u8]) -> Vec<u8> {
+        let mut dns = dns_query(name);
+        dns[10..12].copy_from_slice(&additional_count.to_be_bytes());
+        dns.extend_from_slice(additional);
+        dns
+    }
+
+    fn parse(dns: &[u8]) -> Result<DnsQuestion, DnsBoundaryError> {
+        parse_ipv4_dns_question(&query_packet(DNS_PORT, dns), RESOLVER, 1232)
+    }
+
+    /// Go's resolver and dig send an OPT record with every query.
+    #[test]
+    fn one_edns_opt_record_is_admitted_and_nothing_in_it_is_used() {
+        let plain = parse(&dns_query("example.com")).expect("query without EDNS");
+        let answer = DnsAnswer::Ipv4(Ipv4Addr::new(203, 0, 113, 44));
+        let plain_reply = build_ipv4_dns_response(&plain, answer, 30, 1500).unwrap();
+
+        // Go: a 1232-byte payload size and no options.
+        let go = opt_record(&[0], 41, 1232, 0, &[]);
+        // dig: a 4096-byte payload size, the DO bit, and a cookie option.
+        let dig = opt_record(
+            &[0],
+            41,
+            4096,
+            0x0000_8000,
+            &[0, 10, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8],
+        );
+        // An unknown version, a client-subnet option and an unknown option.
+        let other = opt_record(
+            &[0],
+            41,
+            512,
+            0x0001_0000,
+            &[
+                0, 8, 0, 7, 0, 1, 24, 0, 198, 51, 100, 0xff, 0xfe, 0, 1, 0x2a,
+            ],
+        );
+        for additional in [go, dig, other] {
+            let question = parse(&dns_query_with("example.com", 1, &additional))
+                .expect("query with one OPT record");
+            assert_eq!(question, plain);
+            assert_eq!(
+                build_ipv4_dns_response(&question, answer, 30, 1500).unwrap(),
+                plain_reply
+            );
+        }
+        // The reply to an EDNS query has no additional record.
+        let ipv4 = Ipv4Packet::new_checked(plain_reply.as_slice()).unwrap();
+        let udp = UdpPacket::new_checked(ipv4.payload()).unwrap();
+        assert_eq!(&udp.payload()[10..12], &[0, 0]);
+    }
+
+    #[test]
+    fn any_other_additional_section_is_dropped() {
+        let opt = opt_record(&[0], 41, 1232, 0, &[]);
+        let with_options = opt_record(&[0], 41, 1232, 0, &[0, 10, 0, 2, 7, 7]);
+        let mut one_short = with_options.clone();
+        one_short[10] -= 1;
+        let mut one_long = with_options.clone();
+        one_long[10] += 1;
+        let mut trailing = opt.clone();
+        trailing.push(0);
+        // TSIG is type 250; its name here is the root.
+        let tsig = opt_record(&[0], 250, 255, 0, &[]);
+        let rejected: [(&str, u16, Vec<u8>); 13] = [
+            ("a type other than OPT", 1, opt_record(&[0], 1, 1, 0, &[])),
+            ("TSIG alone", 1, tsig.clone()),
+            (
+                "a name that is not the root",
+                1,
+                opt_record(&[3, b'c', b'o', b'm', 0], 41, 1232, 0, &[]),
+            ),
+            (
+                "a compression pointer for a name",
+                1,
+                opt_record(&[0xc0, 0x0c], 41, 1232, 0, &[]),
+            ),
+            ("a data length one short", 1, one_short),
+            ("a data length one long", 1, one_long),
+            ("bytes after the OPT record", 1, trailing),
+            (
+                "two OPT records counted as one",
+                1,
+                [opt.clone(), opt.clone()].concat(),
+            ),
+            ("two OPT records", 2, [opt.clone(), opt.clone()].concat()),
+            ("OPT then TSIG", 2, [opt.clone(), tsig.clone()].concat()),
+            ("an OPT record that is not counted", 0, opt.clone()),
+            ("a counted record that is absent", 1, Vec::new()),
+            ("a truncated OPT record", 1, opt[..opt.len() - 1].to_vec()),
+        ];
+        for (case, count, additional) in rejected {
+            assert_eq!(
+                parse(&dns_query_with("example.com", count, &additional)),
+                Err(DnsBoundaryError::UnsupportedDnsShape),
+                "{case}"
+            );
+        }
+        // Answer and authority records stay refused beside a valid OPT.
+        for count_offset in [6, 8] {
+            let mut dns = dns_query_with("example.com", 1, &opt);
+            dns[count_offset + 1] = 1;
+            assert_eq!(parse(&dns), Err(DnsBoundaryError::UnsupportedDnsShape));
+        }
     }
 }
