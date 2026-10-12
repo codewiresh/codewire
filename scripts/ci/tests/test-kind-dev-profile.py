@@ -80,6 +80,8 @@ elif tool == "kubectl":
         import base64
         name = args[args.index("secret") + 1]
         print(base64.b64encode((state / "roots" / f"{name}.pem").read_bytes()).decode(), end="")
+    elif "get" in args and "codewire-config" in args and any("FRONTEND_URL" in a for a in args):
+        print(os.environ.get("FAKE_FRONTEND_URL", os.environ.get("KIND_PUBLIC_ORIGIN", "")), end="")
     elif "get" in args and "configmap" in args:
         name = args[args.index("configmap") + 1]
         published = state / "configmaps" / f"{args[args.index('-n') + 1]}-{name}.pem"
@@ -891,6 +893,20 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("KIND_POSTGRES_HOST_PORT=25432 is not the port codewire-ux-2099 publishes (25433)", result.stderr)
         self.assertFalse(self.calls("suite"))
+
+    def test_browser_suite_needs_the_ingress_origin(self) -> None:
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="dashboard-browser")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("dashboard-browser browses http://127.0.0.1:31100, but dev-a serves http://127.0.0.1:31106",
+                      result.stderr)
+        self.assertIn("make kind-credentials-fake", result.stderr)
+        self.assertFalse([call for call in self.calls() if call["tool"] in ("docker", "suite")])
+        (self.tree / "apps/dashboard/node_modules/.bin").mkdir(parents=True)
+        self.write_program(self.tree / "apps/dashboard/node_modules/.bin/playwright", "#!/bin/sh\n")
+        result = self.run_script("test-selected.sh", KIND_TEST_SUITES="dashboard-browser",
+                                 FAKE_FRONTEND_URL="http://127.0.0.1:31100")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([call["args"] for call in self.calls("suite")], [["suite", "dashboard-browser"]])
 
     def test_selected_stops_when_changes_are_unknown(self) -> None:
         result = self.run_script("test-selected.sh", KIND_TEST_SUITES="credentials", FAKE_CHANGES_FAIL="1")

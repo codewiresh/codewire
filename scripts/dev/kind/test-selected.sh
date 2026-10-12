@@ -260,6 +260,20 @@ if [ -n "$leftovers" ]; then
   exit 1
 fi
 
+# The browser suite browses the ingress origin. `make kind-watch` points the
+# cluster at the review origin instead, where its sign-in, Origin and device
+# flows fail; say so rather than run it into those failures.
+if [[ " ${selected[*]} " == *" dashboard-browser "* ]]; then
+  ingress="${KIND_INGRESS_URL:-http://127.0.0.1:${KIND_INGRESS_HOST_PORT:-8090}}"
+  frontend="$(kubectl --context "kind-${KIND_CLUSTER_NAME}" -n codewire-e2e get configmap codewire-config \
+    -o 'jsonpath={.data.FRONTEND_URL}')" || die "cannot read the cluster's browser origin"
+  if [ "$frontend" != "$ingress" ]; then
+    log "refusing to start: dashboard-browser browses ${ingress}, but ${KIND_CLUSTER_NAME} serves ${frontend:-no origin}"
+    log 'run make kind-credentials-fake to restore the ingress origin (restart make kind-watch afterwards to review again)'
+    exit 1
+  fi
+fi
+
 # The browser suite drives the dashboard's frozen Playwright install (its
 # pinned Chromium it installs itself); provide it as CI does, once per checkout.
 if [[ " ${selected[*]} " == *" dashboard-browser "* ]] \
