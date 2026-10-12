@@ -245,10 +245,13 @@ where
 
 /// [`serve_hosted_grpc_with_incoming`] for a bound daemon that serves the
 /// environment's application ports: `SetAppPorts` replaces the set in
-/// `app_ports`.
+/// `app_ports`. `pod_uid` is this Pod's downward-API UID, which its binding
+/// was checked against; the platform managed service keeps this Pod's own
+/// request book under it.
 #[cfg(target_os = "linux")]
 pub async fn serve_bound_hosted_grpc_with_incoming<I, IO, IE, F>(
     config: Config,
+    pod_uid: &str,
     codex_home: crate::codex_home::CodexHome,
     app_ports: crate::app_ports::AppPortsSender,
     incoming: I,
@@ -266,7 +269,7 @@ where
         DaemonRuntimeState::ready(),
         Some(codex_login),
         None,
-        Some(app_ports),
+        Some((app_ports, pod_uid)),
         incoming,
         shutdown,
     )
@@ -307,7 +310,8 @@ async fn serve<I, IO, IE, F>(
     runtime_state: DaemonRuntimeState,
     codex_home: Option<CodexLoginHome>,
     host_control_binding: Option<HostControlBinding>,
-    app_ports: Option<crate::app_ports::AppPortsSender>,
+    // A bound daemon's application ports and its own Pod UID.
+    bound: Option<(crate::app_ports::AppPortsSender, &str)>,
     incoming: I,
     shutdown: F,
 ) -> Result<()>
@@ -318,6 +322,7 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     config.validate_host()?;
+    let (app_ports, pod_uid) = bound.unzip();
     #[cfg(target_os = "linux")]
     let codex_login = codex_home.and_then(|login| {
         crate::codex_home::login::hosted_writer(&config, login.home)
@@ -339,8 +344,13 @@ where
     }
     let session_owner = implementation.session_engine();
     #[cfg(target_os = "linux")]
-    let platform_managed =
-        crate::platform_managed::Service::new(startup_config.clone(), session_owner.clone());
+    let platform_managed = crate::platform_managed::Service::new(
+        startup_config.clone(),
+        session_owner.clone(),
+        pod_uid,
+    );
+    #[cfg(not(target_os = "linux"))]
+    let _ = pod_uid;
     let _session_cancellation = session_owner.cancel_on_drop();
     #[cfg(target_os = "linux")]
     let host_control = match host_control_binding {

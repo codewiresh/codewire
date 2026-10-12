@@ -24,6 +24,10 @@ pub(crate) struct Service {
 struct Inner {
     config: Config,
     engine: SessionEngine,
+    /// This daemon's own Pod UID, from the downward API and checked against
+    /// its binding. Its request book is this Pod's alone (#2651), and a scope
+    /// naming any other Pod is refused.
+    pod_uid: String,
     gate: Mutex<()>,
     active: std::sync::Mutex<BTreeSet<String>>,
 }
@@ -100,11 +104,19 @@ impl Service {
             && unsafe { libc::geteuid() } == 1000
             && unsafe { libc::getegid() } == 1000
     }
-    pub(crate) fn new(config: Config, engine: SessionEngine) -> Option<Self> {
+    /// Only a bound daemon, which knows its own Pod, serves managed agents;
+    /// orchestration reaches them only through a Pod-scope binding.
+    pub(crate) fn new(
+        config: Config,
+        engine: SessionEngine,
+        pod_uid: Option<&str>,
+    ) -> Option<Self> {
+        let pod_uid = pod_uid.filter(|uid| wire::valid_uuid(uid))?.to_owned();
         Self::available(&config).then(|| Self {
             inner: Arc::new(Inner {
                 config,
                 engine,
+                pod_uid,
                 gate: Mutex::new(()),
                 active: std::sync::Mutex::new(BTreeSet::new()),
             }),
@@ -154,6 +166,7 @@ impl Service {
     }
     fn check_scope(&self, scope: &v1::PlatformManagedScope) -> Result<(), Error> {
         wire::validate_scope(scope).map_err(|_| Error::Refused)?;
+        this_pod(scope, &self.inner.pod_uid)?;
         self.check_info(&v1::PlatformManagedInfoRequest {
             environment_id: scope.environment_id.clone(),
             binding_generation: scope.binding_generation,
@@ -166,17 +179,18 @@ impl Service {
         Ok(())
     }
     fn root(&self) -> Result<PathBuf, Error> {
-        Ok(Path::new(STATE)
-            .join(
-                self.inner
-                    .config
-                    .credential_bridge
-                    .as_ref()
-                    .ok_or(Error::Refused)?
-                    .environment_id
-                    .to_string(),
-            )
-            .join("requests"))
+        let environment = self
+            .inner
+            .config
+            .credential_bridge
+            .as_ref()
+            .ok_or(Error::Refused)?
+            .environment_id;
+        Ok(book_root(
+            Path::new(STATE),
+            environment,
+            &self.inner.pod_uid,
+        ))
     }
     fn read_row(tree: &files::Tree, id: &str) -> Result<Option<v1::PlatformManagedReceipt>, Error> {
         Stored::read(tree, id)?.map(|saved| saved.row()).transpose()
@@ -313,12 +327,7 @@ impl Service {
         let _guard = self.inner.gate.lock().await;
         let tree = files::Tree::open(&self.root()?, true)?;
         let _lock = tree.lock()?;
-        let scope_bytes = scope.encode_to_vec();
-        match tree.read("scope.bin", 4096)? {
-            Some(saved) if saved == scope_bytes => {}
-            None => tree.write("scope.bin", &scope_bytes, false)?,
-            _ => return Err(Error::Refused),
-        }
+        admit_scope(&tree, scope)?;
         let owner = Owner {
             service: self.clone(),
             request: request.clone(),
@@ -555,6 +564,41 @@ impl Owner {
         Ok(row)
     }
 }
+/// One request book per Pod incarnation (#2651), as orchestration keys its
+/// journal by Pod. A Start, repair, resize or replacement brings a new Pod
+/// and so a new book; a daemon restart inside one Pod keeps its book, whose
+/// barriers still guard processes an earlier daemon there started. Books of
+/// earlier Pods, and the book from before this layout at
+/// `<environment>/requests`, stay on disk unread: every process they concern
+/// went with their Pod.
+fn book_root(state: &Path, environment: uuid::Uuid, pod_uid: &str) -> PathBuf {
+    state
+        .join(environment.to_string())
+        .join("pods")
+        .join(pod_uid)
+        .join("requests")
+}
+
+/// A scope names the Pod it was captured for; only this daemon's own Pod is
+/// served, so no caller can open another Pod's book or a fresh one.
+fn this_pod(scope: &v1::PlatformManagedScope, pod_uid: &str) -> Result<(), Error> {
+    if scope.pod_uid != pod_uid {
+        return Err(Error::Refused);
+    }
+    Ok(())
+}
+
+/// A book holds exactly one scope: the first request records it and every
+/// later one must repeat it byte for byte.
+fn admit_scope(tree: &files::Tree, scope: &v1::PlatformManagedScope) -> Result<(), Error> {
+    let scope_bytes = scope.encode_to_vec();
+    match tree.read("scope.bin", 4096)? {
+        Some(saved) if saved == scope_bytes => Ok(()),
+        None => tree.write("scope.bin", &scope_bytes, false),
+        _ => Err(Error::Refused),
+    }
+}
+
 fn valid_settlement(
     request: &v1::PlatformManagedMutationRequest,
     row: &v1::PlatformManagedReceipt,
@@ -742,6 +786,165 @@ impl PlatformManagedService for Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn scope(environment: uuid::Uuid, pod: &str) -> v1::PlatformManagedScope {
+        v1::PlatformManagedScope {
+            environment_id: environment.to_string(),
+            org_id: "fixture-org".into(),
+            pod_uid: pod.into(),
+            binding_generation: 7,
+            projection_selection_sha256: vec![1; 32],
+            support_image_sha256: vec![2; 32],
+            support_image_size: 1024,
+        }
+    }
+    fn launch(scope: &v1::PlatformManagedScope) -> v1::PlatformManagedMutationRequest {
+        v1::PlatformManagedMutationRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            scope: Some(scope.clone()),
+            operation: Some(v1::platform_managed_mutation_request::Operation::Launch(
+                v1::PlatformManagedLaunch {
+                    agent: v1::PlatformManagedAgent::Codex as i32,
+                    model: "fixture-model".into(),
+                    expected_provider_sha256: vec![3; 32],
+                    expected_provider_size: 1024,
+                    expected_provider_version: "0.160.0".into(),
+                    ..Default::default()
+                },
+            )),
+        }
+    }
+    /// The row `claim` writes for a launch, after the daemon issued it: an
+    /// outcome still open in its book.
+    fn issued(request: &v1::PlatformManagedMutationRequest) -> Stored {
+        let row = v1::PlatformManagedReceipt {
+            request_id: request.request_id.clone(),
+            scope: request.scope.clone(),
+            fingerprint_sha256: wire::platform_managed_request_fingerprint(request).unwrap(),
+            phase: 2,
+            session_id: format!("session-{}", request.request_id),
+            driver_id: request.request_id.clone(),
+            launch_generation: 1,
+            cleanup_unknown: true,
+            reason: "issued".into(),
+            ..Default::default()
+        };
+        Stored::new(request, &row).unwrap()
+    }
+    /// The book's lock. A child another test forks in this process holds a
+    /// copy of a just-closed lock descriptor until its exec, so a quick
+    /// relock may briefly find it held.
+    fn lock(tree: &files::Tree) -> std::fs::File {
+        for _ in 0..200 {
+            if let Ok(lock) = tree.lock() {
+                return lock;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the request book lock stayed held");
+    }
+    fn files_of(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let bytes = std::fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect::<Vec<_>>();
+        files.sort();
+        files
+    }
+
+    /// #2651: `claim`'s book steps (open, lock, scope, existing books,
+    /// barriers, the new row) on real held files, in the paths `root()` uses.
+    #[test]
+    fn platform_book_is_one_per_pod_and_kept_across_a_daemon_restart_in_that_pod() {
+        let state = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let environment = uuid::Uuid::new_v4();
+        let (pod_a, pod_b) = (
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        let (scope_a, scope_b) = (scope(environment, &pod_a), scope(environment, &pod_b));
+        let root_a = book_root(state.path(), environment, &pod_a);
+        let root_b = book_root(state.path(), environment, &pod_b);
+        assert_eq!(
+            root_a,
+            state
+                .path()
+                .join(environment.to_string())
+                .join("pods")
+                .join(&pod_a)
+                .join("requests")
+        );
+        assert_ne!(root_a, root_b);
+
+        // Pod A's daemon admits a launch whose outcome stays open.
+        let first = launch(&scope_a);
+        {
+            let tree = files::Tree::open(&root_a, true).unwrap();
+            let _lock = lock(&tree);
+            admit_scope(&tree, &scope_a).unwrap();
+            let books = Service::books(&tree, &root_a).unwrap();
+            Service::enforce_barriers(&books, &first, None).unwrap();
+            issued(&first).write(&tree, false).unwrap();
+        }
+        // A daemon restart inside Pod A opens the same book: its scope is
+        // admitted again and its open outcome still bars another request.
+        let tree = files::Tree::open(&root_a, false).unwrap();
+        let _lock = lock(&tree);
+        admit_scope(&tree, &scope_a).unwrap();
+        let books = Service::books(&tree, &root_a).unwrap();
+        assert_eq!(books.len(), 1);
+        assert!(matches!(
+            Service::enforce_barriers(&books, &launch(&scope_a), None),
+            Err(Error::Refused)
+        ));
+        // A's book keeps refusing any other scope, as the single book did.
+        assert!(matches!(admit_scope(&tree, &scope_b), Err(Error::Refused)));
+        drop(_lock);
+        let a_before = files_of(&root_a);
+
+        // Pod B gets a fresh book: A's open row no longer bars it, and B
+        // admits and records its own launch.
+        let second = launch(&scope_b);
+        let tree = files::Tree::open(&root_b, true).unwrap();
+        let _lock = lock(&tree);
+        admit_scope(&tree, &scope_b).unwrap();
+        let books = Service::books(&tree, &root_b).unwrap();
+        assert!(books.is_empty());
+        Service::enforce_barriers(&books, &second, None).unwrap();
+        issued(&second).write(&tree, false).unwrap();
+        assert_eq!(
+            tree.read("scope.bin", 4096).unwrap().unwrap(),
+            scope_b.encode_to_vec()
+        );
+        // Pod A's book is left exactly as it was.
+        assert_eq!(files_of(&root_a), a_before);
+    }
+
+    /// Only this daemon's own Pod is served: a scope that names any other
+    /// Pod, including the same UID spelled differently, is refused.
+    #[test]
+    fn platform_scope_naming_another_pod_is_refused() {
+        let environment = uuid::Uuid::new_v4();
+        let pod = uuid::Uuid::new_v4().to_string();
+        this_pod(&scope(environment, &pod), &pod).unwrap();
+        for other in [
+            uuid::Uuid::new_v4().to_string(),
+            pod.to_uppercase(),
+            String::new(),
+        ] {
+            assert!(matches!(
+                this_pod(&scope(environment, &other), &pod),
+                Err(Error::Refused)
+            ));
+        }
+    }
+
     #[test]
     fn platform_service_names_only_an_earlier_provider_and_keeps_other_refusals_opaque() {
         for (agent, message) in [
