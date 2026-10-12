@@ -383,7 +383,19 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
             .map(|key| key.openssh.clone())
             .filter(|key| !key.is_empty())
             .ok_or_else(failed)?;
-        require_audit(&mut credentials, environment, &selected, &expected_audit).await?;
+        // An earlier journey of the same smoke (managed agent sessions) leases
+        // through this authority too, so its events are already in the ring.
+        // This proof is exact from here on: everything recorded above the
+        // newest sequence at this point must be exactly what it expects.
+        let audit_baseline = newest_audit_sequence(&mut credentials).await?;
+        require_audit(
+            &mut credentials,
+            environment,
+            &selected,
+            audit_baseline,
+            &expected_audit,
+        )
+        .await?;
 
         stage("managed-policy-denial");
         let denied = run_http_probe(
@@ -394,7 +406,14 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         .await?;
         require(denied.status == 403)?;
         require(!denied.body.contains(GUEST_CALLER_BEARER))?;
-        require_audit(&mut credentials, environment, &selected, &expected_audit).await?;
+        require_audit(
+            &mut credentials,
+            environment,
+            &selected,
+            audit_baseline,
+            &expected_audit,
+        )
+        .await?;
 
         stage("managed-injection-redaction");
         let admitted =
@@ -406,33 +425,75 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
                 && !admitted.body.contains(GUEST_CALLER_BEARER),
         )?;
         expected_audit.insert(0, ExpectedAudit::CodexAdmitted);
-        require_audit(&mut credentials, environment, &selected, &expected_audit).await?;
+        require_audit(
+            &mut credentials,
+            environment,
+            &selected,
+            audit_baseline,
+            &expected_audit,
+        )
+        .await?;
 
         stage("managed-codex-exec");
         require_managed_codex(daemon, &environment.working_directory).await?;
         expected_audit.insert(0, ExpectedAudit::CodexAdmitted);
-        require_audit(&mut credentials, environment, &selected, &expected_audit).await?;
+        require_audit(
+            &mut credentials,
+            environment,
+            &selected,
+            audit_baseline,
+            &expected_audit,
+        )
+        .await?;
 
         stage("managed-openai-api-responses");
         require_managed_openai(daemon, &environment.working_directory).await?;
         expected_audit.insert(0, ExpectedAudit::OpenAi);
-        require_audit(&mut credentials, environment, &selected, &expected_audit).await?;
+        require_audit(
+            &mut credentials,
+            environment,
+            &selected,
+            audit_baseline,
+            &expected_audit,
+        )
+        .await?;
 
         stage("managed-anthropic-count-tokens");
         require_managed_count_tokens(daemon, &environment.working_directory).await?;
         expected_audit.insert(0, ExpectedAudit::AnthropicCountTokens);
-        require_audit(&mut credentials, environment, &selected, &expected_audit).await?;
+        require_audit(
+            &mut credentials,
+            environment,
+            &selected,
+            audit_baseline,
+            &expected_audit,
+        )
+        .await?;
 
         stage("managed-claude-streaming");
         require_managed_claude(daemon, &environment.working_directory).await?;
         expected_audit.insert(0, ExpectedAudit::AnthropicMessages);
-        require_audit(&mut credentials, environment, &selected, &expected_audit).await?;
+        require_audit(
+            &mut credentials,
+            environment,
+            &selected,
+            audit_baseline,
+            &expected_audit,
+        )
+        .await?;
 
         stage("managed-ssh-identities");
         require_managed_ssh_identities(daemon, &environment.working_directory, &ssh_public_key)
             .await?;
         expected_audit.insert(0, ExpectedAudit::SshIdentities);
-        require_audit(&mut credentials, environment, &selected, &expected_audit).await?;
+        require_audit(
+            &mut credentials,
+            environment,
+            &selected,
+            audit_baseline,
+            &expected_audit,
+        )
+        .await?;
 
         stage("managed-ssh-sign");
         require_managed_ssh_sign(
@@ -443,14 +504,28 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         )
         .await?;
         expected_audit.insert(0, ExpectedAudit::SshSignAdmitted);
-        require_audit(&mut credentials, environment, &selected, &expected_audit).await?;
+        require_audit(
+            &mut credentials,
+            environment,
+            &selected,
+            audit_baseline,
+            &expected_audit,
+        )
+        .await?;
 
         stage("managed-stock-ssh-workload");
         let stock_ssh_host_key =
             require_stock_ssh_workload(daemon, &environment.working_directory, "prove", None)
                 .await?;
         record_stock_ssh_audit(&mut expected_audit);
-        require_audit(&mut credentials, environment, &selected, &expected_audit).await?;
+        require_audit(
+            &mut credentials,
+            environment,
+            &selected,
+            audit_baseline,
+            &expected_audit,
+        )
+        .await?;
 
         stage("managed-broker-crash");
         let broker_pid = wait_for_exact_broker(args, environment, None).await?;
@@ -471,7 +546,14 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         stage("managed-codex-after-restart");
         require_managed_codex(daemon, &environment.working_directory).await?;
         expected_audit.insert(0, ExpectedAudit::CodexAdmitted);
-        require_audit(&mut credentials, environment, &selected, &expected_audit).await?;
+        require_audit(
+            &mut credentials,
+            environment,
+            &selected,
+            audit_baseline,
+            &expected_audit,
+        )
+        .await?;
 
         stage("managed-ssh-after-restart");
         require_managed_ssh_sign(
@@ -482,7 +564,14 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         )
         .await?;
         expected_audit.insert(0, ExpectedAudit::SshSignAdmitted);
-        require_audit(&mut credentials, environment, &selected, &expected_audit).await?;
+        require_audit(
+            &mut credentials,
+            environment,
+            &selected,
+            audit_baseline,
+            &expected_audit,
+        )
+        .await?;
 
         stage("managed-ssh-revocation");
         credentials.revoke_credential(&selected.ssh).await?;
@@ -494,7 +583,14 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         )
         .await?;
         expected_audit.insert(0, ExpectedAudit::SshSignDenied);
-        require_audit(&mut credentials, environment, &selected, &expected_audit).await?;
+        require_audit(
+            &mut credentials,
+            environment,
+            &selected,
+            audit_baseline,
+            &expected_audit,
+        )
+        .await?;
 
         stage("managed-stock-ssh-revocation");
         require_stock_ssh_workload(
@@ -505,7 +601,14 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         )
         .await?;
         expected_audit.insert(0, ExpectedAudit::SshIdentitiesDenied);
-        require_audit(&mut credentials, environment, &selected, &expected_audit).await?;
+        require_audit(
+            &mut credentials,
+            environment,
+            &selected,
+            audit_baseline,
+            &expected_audit,
+        )
+        .await?;
 
         stage("managed-revocation");
         credentials.revoke_credential(&selected.codex).await?;
@@ -513,7 +616,14 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
             run_http_probe(daemon, &environment.working_directory, "/v1/responses").await?;
         require(revoked.status == 403 && !revoked.body.contains(GUEST_CALLER_BEARER))?;
         expected_audit.insert(0, ExpectedAudit::CodexDenied);
-        require_audit(&mut credentials, environment, &selected, &expected_audit).await?;
+        require_audit(
+            &mut credentials,
+            environment,
+            &selected,
+            audit_baseline,
+            &expected_audit,
+        )
+        .await?;
 
         stage("managed-authority-loss-probe-ready");
         let mut probe =
@@ -560,36 +670,66 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
         )
     }
 
+    /// The sequence of the newest lease-audit event, or zero for an empty ring.
+    async fn newest_audit_sequence(client: &mut LocalCredentialClient) -> SmokeResult<u64> {
+        Ok(client
+            .list_recent_broker_lease_audit_events(1)
+            .await?
+            .first()
+            .map_or(0, |event| event.sequence))
+    }
+
     async fn require_audit(
         client: &mut LocalCredentialClient,
         environment: &local_v1::Environment,
         selected: &ManagedCredentials,
+        baseline: u64,
         expected: &[ExpectedAudit],
     ) -> SmokeResult<()> {
         let events = client
             .list_recent_broker_lease_audit_events(MAX_AUDIT_EVENTS)
             .await?;
-        let result = validate_audit_events(&events, environment, selected, expected);
+        let result = validate_audit_events(&events, baseline, environment, selected, expected);
         if result.is_err() {
             // Counts only: no event's identifiers or credentials are printed.
             eprintln!(
-                "codewire-local-codex-bridge-smoke: lease audit mismatch expected_events={} listed_events={}",
+                "codewire-local-codex-bridge-smoke: lease audit mismatch expected_events={} listed_events={} above_baseline={}",
                 expected.len(),
-                events.len()
+                events.len(),
+                events
+                    .iter()
+                    .filter(|event| event.sequence > baseline)
+                    .count()
             );
         }
         result
     }
 
+    /// `events` is the newest-first ring response and `baseline` the newest
+    /// sequence when the proof began (zero for an empty ring). Everything
+    /// recorded since must be exactly `expected`: contiguous sequences
+    /// directly above the baseline, nothing extra and nothing missing.
     fn validate_audit_events(
         events: &[BrokerLeaseAuditEvent],
+        baseline: u64,
         environment: &local_v1::Environment,
         selected: &ManagedCredentials,
         expected: &[ExpectedAudit],
     ) -> SmokeResult<()> {
-        // Examine the complete newest-first ring response. Never filter by
-        // slot/environment or accept a truncated list as complete evidence.
-        require(expected.len() < MAX_AUDIT_EVENTS && events.len() == expected.len())?;
+        // Never filter by slot or environment, and never accept a truncated
+        // list as complete: the response must hold the whole window and,
+        // below it, the baseline event itself or (for an empty ring) nothing.
+        require(expected.len() < MAX_AUDIT_EVENTS)?;
+        let window = events
+            .iter()
+            .take_while(|event| event.sequence > baseline)
+            .count();
+        require(window == expected.len())?;
+        match events.get(window) {
+            Some(event) => require(baseline > 0 && event.sequence == baseline)?,
+            None => require(baseline == 0)?,
+        }
+        let events = &events[..window];
         let environment_id = EnvironmentId::parse(environment.id.clone())?;
         let mut request_ids = BTreeSet::new();
         for (index, (event, expected)) in events.iter().zip(expected).enumerate() {
@@ -659,7 +799,7 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
                 ),
             };
             require(
-                event.sequence == (events.len() - index) as u64
+                event.sequence == baseline + (events.len() - index) as u64
                     && event.environment_id == environment_id
                     && event.environment_generation == environment.generation
                     && !event.request_id.is_nil()
@@ -3110,8 +3250,14 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
             }
         }
 
-        #[test]
-        fn selected_audit_is_complete_ordered_exact_identity_and_revision_not_filtered() {
+        /// One environment, its selected credentials, six expected leases and
+        /// the ring events for them, numbered 6..=1 as from an empty ring.
+        fn audit_fixture() -> (
+            local_v1::Environment,
+            ManagedCredentials,
+            [ExpectedAudit; 6],
+            Vec<BrokerLeaseAuditEvent>,
+        ) {
             let environment = local_v1::Environment {
                 id: "00000000-0000-4000-8000-000000000001".into(),
                 generation: 7,
@@ -3176,7 +3322,13 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
                 },
             )
             .collect();
-            assert!(validate_audit_events(&events, &environment, &selected, &expected).is_ok());
+            (environment, selected, expected, events)
+        }
+
+        #[test]
+        fn selected_audit_is_complete_ordered_exact_identity_and_revision_not_filtered() {
+            let (environment, selected, expected, events) = audit_fixture();
+            assert!(validate_audit_events(&events, 0, &environment, &selected, &expected).is_ok());
             let mut denied = events.clone();
             denied[0].decision = BrokerLeaseAuditDecision::Denied;
             denied[0].credential_id = None;
@@ -3186,7 +3338,8 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
             let mut denied_expected = expected;
             denied_expected[0] = ExpectedAudit::SshSignDenied;
             assert!(
-                validate_audit_events(&denied, &environment, &selected, &denied_expected).is_ok()
+                validate_audit_events(&denied, 0, &environment, &selected, &denied_expected)
+                    .is_ok()
             );
             for corruption in 0..10 {
                 let mut invalid = events.clone();
@@ -3206,10 +3359,105 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
                     _ => unreachable!(),
                 }
                 assert!(
-                    validate_audit_events(&invalid, &environment, &selected, &expected).is_err(),
+                    validate_audit_events(&invalid, 0, &environment, &selected, &expected).is_err(),
                     "corruption {corruption}"
                 );
             }
+        }
+
+        /// The ring after an earlier journey: three earlier leases numbered
+        /// 3..=1 below the proof's six, which are renumbered 9..=4.
+        fn audit_fixture_after_earlier_leases() -> (
+            local_v1::Environment,
+            ManagedCredentials,
+            [ExpectedAudit; 6],
+            Vec<BrokerLeaseAuditEvent>,
+        ) {
+            let (environment, selected, expected, mut events) = audit_fixture();
+            let earlier: Vec<_> = (1..=3_u64)
+                .rev()
+                .map(|sequence| {
+                    let mut event = events[5].clone();
+                    event.sequence = sequence;
+                    event.request_id = Uuid::from_u128(100 + u128::from(sequence));
+                    event
+                })
+                .collect();
+            for event in &mut events {
+                event.sequence += 3;
+            }
+            events.extend(earlier);
+            (environment, selected, expected, events)
+        }
+
+        #[test]
+        fn audit_after_earlier_leases_is_exact_above_the_baseline_not_from_an_empty_ring() {
+            let (environment, selected, expected, events) = audit_fixture_after_earlier_leases();
+            // The former check, exact from an empty ring, cannot pass once
+            // earlier leases exist.
+            assert!(validate_audit_events(&events, 0, &environment, &selected, &expected).is_err());
+            assert!(validate_audit_events(&events, 3, &environment, &selected, &expected).is_ok());
+            // The baseline must be the newest earlier event, not any other.
+            for baseline in [1, 2, 4, 9] {
+                assert!(
+                    validate_audit_events(&events, baseline, &environment, &selected, &expected)
+                        .is_err(),
+                    "baseline {baseline}"
+                );
+            }
+        }
+
+        #[test]
+        fn an_unexpected_lease_inside_the_proof_window_fails_above_a_baseline() {
+            let (environment, selected, expected, events) = audit_fixture_after_earlier_leases();
+            // One more lease than expected, newest.
+            let mut newest = events.clone();
+            let mut extra = events[0].clone();
+            extra.sequence = 10;
+            extra.request_id = Uuid::from_u128(200);
+            newest.insert(0, extra);
+            assert!(validate_audit_events(&newest, 3, &environment, &selected, &expected).is_err());
+            // One more lease in the middle of the window, the rest renumbered.
+            let mut middle = events.clone();
+            let mut extra = events[2].clone();
+            extra.request_id = Uuid::from_u128(201);
+            for event in &mut middle[..3] {
+                event.sequence += 1;
+            }
+            middle.insert(3, extra);
+            assert!(validate_audit_events(&middle, 3, &environment, &selected, &expected).is_err());
+        }
+
+        #[test]
+        fn a_gap_in_the_proof_window_fails_above_a_baseline() {
+            let (environment, selected, expected, events) = audit_fixture_after_earlier_leases();
+            // An expected lease is missing from the window.
+            for missing in 0..6 {
+                let mut gap = events.clone();
+                gap.remove(missing);
+                assert!(
+                    validate_audit_events(&gap, 3, &environment, &selected, &expected).is_err(),
+                    "missing {missing}"
+                );
+            }
+            // A sequence number is skipped although six events are listed.
+            let mut skipped = events.clone();
+            for event in &mut skipped[..2] {
+                event.sequence += 1;
+            }
+            assert!(
+                validate_audit_events(&skipped, 3, &environment, &selected, &expected).is_err()
+            );
+            // The baseline event itself is not directly below the window.
+            let mut detached = events.clone();
+            detached.remove(6);
+            assert!(
+                validate_audit_events(&detached, 3, &environment, &selected, &expected).is_err()
+            );
+            // A list cut off at the window is not complete evidence.
+            assert!(
+                validate_audit_events(&events[..6], 3, &environment, &selected, &expected).is_err()
+            );
         }
 
         const SELECTED_HTTP_FIXTURE: &str = r#"const vm=require('vm');
