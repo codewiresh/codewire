@@ -41,6 +41,12 @@ pub const MANAGED_ANTHROPIC_API_PREFIX: &str = "/_codewire/anthropic";
 /// Smart Git prefix on the existing managed HTTP ingress. Only the selected
 /// GitHub adapter may resolve this route to an upstream provider.
 pub const MANAGED_GITHUB_GIT_PREFIX: &str = "/_codewire/github/";
+/// Destinations a workspace process must reach directly, whatever proxy it is
+/// told to use: every managed HTTP route is the workspace's own loopback
+/// ingress, and a request to it carries prompts and repository content.
+pub const MANAGED_NO_PROXY: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
+/// Both spellings of the proxy exemption list that HTTP clients read.
+pub const NO_PROXY_NAMES: [&str; 2] = ["NO_PROXY", "no_proxy"];
 
 /// Stock clients configured by selected profile slots, not credential auth
 /// kinds. The Anthropic client alone has two forms: see
@@ -272,6 +278,50 @@ impl ManagedCredentialClients {
             return Err(ProjectionError::ManagedEnvironmentCollision);
         }
         Ok(())
+    }
+
+    /// Whether a selected client reaches its route over the loopback HTTP
+    /// ingress: every client but SSH, whose signer is a Unix socket.
+    pub fn uses_loopback_http(self) -> bool {
+        [
+            ManagedCredentialClient::Codex,
+            ManagedCredentialClient::OpenAi,
+            ManagedCredentialClient::Anthropic,
+            ManagedCredentialClient::GitHub,
+        ]
+        .into_iter()
+        .any(|client| self.contains(client))
+    }
+
+    /// The value of [`NO_PROXY_NAMES`] for a process of this selection, given
+    /// the value `current` it would otherwise have. While an HTTP client is
+    /// selected, [`MANAGED_NO_PROXY`] is appended to it, so a declared
+    /// `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` never receives a managed
+    /// route's loopback request. The declared entries stay as written and in
+    /// order, and an entry already listed is not repeated. Without an HTTP
+    /// client the value is the caller's, unchanged.
+    ///
+    /// The names are deliberately not reserved: a declared list is extended,
+    /// never refused, and the reserved set is bound into every environment's
+    /// projection selection digest.
+    pub fn no_proxy(self, current: Option<&str>) -> Option<String> {
+        if !self.uses_loopback_http() {
+            return current.map(str::to_owned);
+        }
+        let mut value = current.unwrap_or_default().to_owned();
+        for destination in MANAGED_NO_PROXY {
+            if value
+                .split(',')
+                .any(|entry| entry.trim().eq_ignore_ascii_case(destination))
+            {
+                continue;
+            }
+            if !value.is_empty() && !value.ends_with(',') {
+                value.push(',');
+            }
+            value.push_str(destination);
+        }
+        Some(value)
     }
 
     /// Generate only fixed public routing inputs for the selected clients.

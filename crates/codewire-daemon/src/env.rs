@@ -24,8 +24,23 @@ pub fn build_process_env(
     extra: &[String],
     term: &str,
 ) -> io::Result<ProcessEnvironment> {
+    build_process_env_in(config, extra, term, std::env::vars())
+}
+
+/// [`build_process_env`] over an explicit daemon environment instead of this
+/// process's own. The daemon itself always passes its own; tests pass a
+/// synthetic one, so that no value of the environment they run in enters
+/// them or their failure output.
+pub fn build_process_env_in(
+    config: &Config,
+    extra: &[String],
+    term: &str,
+    daemon_environment: impl IntoIterator<Item = (String, String)>,
+) -> io::Result<ProcessEnvironment> {
     let persisted = load_persisted_environment(config);
-    let inherited = config.process_execution.base_environment(std::env::vars());
+    let inherited = config
+        .process_execution
+        .base_environment(daemon_environment);
     let fallback_shell = default_shell_for(config);
     build_managed_process_env_from(config, persisted, extra, term, inherited, &fallback_shell)
 }
@@ -74,10 +89,39 @@ fn build_managed_process_env_from(
     let mut inherited = inherited.into_iter().collect::<Vec<_>>();
     inherited.retain(|(name, _)| !managed_names.contains(name));
     inherited.extend(managed.environment);
+    let mut entries =
+        build_process_env_from(config, persisted, extra, term, inherited, fallback_shell);
+    bypass_proxy_for_loopback(config.managed_credential_clients, &mut entries);
     Ok(ProcessEnvironment {
-        entries: build_process_env_from(config, persisted, extra, term, inherited, fallback_shell),
+        entries,
         override_names: command_override_names(extra, term),
     })
+}
+
+/// Every managed HTTP route is this workspace's loopback ingress. A proxy the
+/// image, the project or one command names (`HTTP_PROXY`, `HTTPS_PROXY`,
+/// `ALL_PROXY`) must never receive those requests, which carry prompts and
+/// repository content. Whatever exemption list a process would get, the
+/// loopback destinations are appended to it, in both spellings; a declared
+/// list is extended, never replaced. The rule is `codewire-access`'s, shared
+/// with every placement.
+fn bypass_proxy_for_loopback(
+    clients: codewire_access::ManagedCredentialClients,
+    entries: &mut Vec<String>,
+) {
+    for name in codewire_access::NO_PROXY_NAMES {
+        let prefix = format!("{name}=");
+        // A later entry of the same name is the one a process sees.
+        let current = entries.iter().rposition(|entry| entry.starts_with(&prefix));
+        let Some(value) = clients.no_proxy(current.map(|index| &entries[index][prefix.len()..]))
+        else {
+            continue;
+        };
+        match current {
+            Some(index) => entries[index] = format!("{prefix}{value}"),
+            None => entries.push(format!("{prefix}{value}")),
+        }
+    }
 }
 
 fn environment_names(entries: &[String]) -> impl Iterator<Item = &str> {
@@ -416,6 +460,103 @@ mod tests {
             assert_eq!(values["APPLICATION"], "declared");
             assert_eq!(values["REQUEST"], "explicit");
             assert!(!values.contains_key(MANAGED_CREDENTIAL_CLIENTS_ENV));
+        }
+    }
+
+    /// A proxy the image, the project or one command names never receives a
+    /// managed route's loopback request: the exemption list every process
+    /// gets ends with the loopback destinations, on both placements, whether
+    /// or not a list was declared. A declared list keeps its own entries.
+    #[test]
+    fn a_declared_proxy_is_bypassed_for_loopback_on_both_placements() {
+        const LOOPBACK: &str = "127.0.0.1,localhost,::1";
+        for transport in [
+            CredentialBridgeTransport::Local,
+            CredentialBridgeTransport::Hosted,
+        ] {
+            for slots in [&["anthropic"][..], &["codex", "github", "ssh"]] {
+                let config = selected_config(PathBuf::from("/home/codewire"), slots, transport);
+                let build = |persisted: &[&str], extra: &[&str], inherited: &[(&str, &str)]| {
+                    env_map(
+                        &build_managed_process_env_from(
+                            &config,
+                            persisted.iter().map(|entry| (*entry).to_owned()).collect(),
+                            &extra
+                                .iter()
+                                .map(|entry| (*entry).to_owned())
+                                .collect::<Vec<_>>(),
+                            "",
+                            inherited
+                                .iter()
+                                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned())),
+                            "/bin/sh",
+                        )
+                        .unwrap()
+                        .entries,
+                    )
+                };
+                // Nothing declared: exactly the loopback destinations.
+                let empty = build(&[], &[], &[]);
+                assert_eq!(empty["NO_PROXY"], LOOPBACK);
+                assert_eq!(empty["no_proxy"], LOOPBACK);
+
+                // The proxy itself is the user's and stays as declared.
+                let declared = build(
+                    &[
+                        "HTTPS_PROXY=http://proxy.example:3128",
+                        "NO_PROXY=corp.example,10.0.0.0/8",
+                    ],
+                    &[],
+                    &[
+                        ("http_proxy", "http://image-proxy.example:3128"),
+                        ("no_proxy", ".image.example"),
+                    ],
+                );
+                assert_eq!(declared["HTTPS_PROXY"], "http://proxy.example:3128");
+                assert_eq!(declared["http_proxy"], "http://image-proxy.example:3128");
+                assert_eq!(
+                    declared["NO_PROXY"],
+                    format!("corp.example,10.0.0.0/8,{LOOPBACK}")
+                );
+                assert_eq!(declared["no_proxy"], format!(".image.example,{LOOPBACK}"));
+
+                // One command's own list is extended too, and its entry is
+                // the only one of that name.
+                let environment = build_managed_process_env_from(
+                    &config,
+                    vec!["NO_PROXY=corp.example".into()],
+                    &["NO_PROXY=command.example,localhost".into()],
+                    "",
+                    [("NO_PROXY".to_owned(), "image.example".to_owned())],
+                    "/bin/sh",
+                )
+                .unwrap();
+                assert_eq!(
+                    environment
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.starts_with("NO_PROXY="))
+                        .collect::<Vec<_>>(),
+                    ["NO_PROXY=command.example,localhost,127.0.0.1,::1"]
+                );
+            }
+            // SSH alone, or no selection, has no HTTP route: nothing is set
+            // and a declared list is the workload's own.
+            let config = selected_config(PathBuf::from("/home/codewire"), &["ssh"], transport);
+            let environment = env_map(
+                &build_managed_process_env_from(
+                    &config,
+                    vec!["NO_PROXY=corp.example".into()],
+                    &[],
+                    "",
+                    [],
+                    "/bin/sh",
+                )
+                .unwrap()
+                .entries,
+            );
+            assert_eq!(environment["NO_PROXY"], "corp.example");
+            assert!(!environment.contains_key("no_proxy"));
         }
     }
 

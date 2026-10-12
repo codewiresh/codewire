@@ -254,6 +254,15 @@ impl WorkspacePlan {
             })
             .collect::<Result<_, _>>()?;
         environment.extend(projection.environment);
+        // Every managed HTTP route is the workspace's loopback ingress. A
+        // proxy the image or the project declares must never receive those
+        // requests, so the exemption list is extended (never replaced) by
+        // the shared rule, as the daemon does for the sessions it starts.
+        for name in codewire_access::NO_PROXY_NAMES {
+            if let Some(value) = clients.no_proxy(environment.get(name).map(String::as_str)) {
+                environment.insert(name.to_owned(), value);
+            }
+        }
         self.environment = environment
             .into_iter()
             .map(|(key, value)| format!("{key}={value}"))
@@ -1064,6 +1073,64 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    /// The workspace's own environment exempts loopback from a declared proxy
+    /// while an HTTP client is selected, by the rule the daemon applies to
+    /// the sessions it starts: a declared list is extended, never replaced.
+    #[test]
+    fn a_declared_proxy_is_bypassed_for_loopback_while_an_http_client_is_selected() {
+        use codewire_access::ManagedCredentialClients;
+        const LOOPBACK: &str = "127.0.0.1,localhost,::1";
+        let root = root();
+        let config = config(json!({}));
+        let header = setup(&config);
+        let plain =
+            WorkspacePlan::from_verified_setup(&project(), &config, &header, root.path()).unwrap();
+        let mut declared = plain.clone();
+        for (name, value) in [
+            ("HTTPS_PROXY", "http://proxy.example:3128"),
+            ("NO_PROXY", "corp.example,10.0.0.0/8"),
+        ] {
+            declared.environment.push(format!("{name}={value}"));
+            declared.explicit_environment_keys.push(name.into());
+        }
+        declared.environment.sort();
+        declared.explicit_environment_keys.sort();
+        let values = |plan: WorkspacePlan, slots: &[&str]| -> BTreeMap<String, String> {
+            plan.with_managed_credential_clients(
+                ManagedCredentialClients::from_profile_slots(slots.iter().copied()).unwrap(),
+            )
+            .unwrap()
+            .environment
+            .iter()
+            .map(|entry| {
+                let (name, value) = entry.split_once('=').unwrap();
+                (name.to_owned(), value.to_owned())
+            })
+            .collect()
+        };
+        for slots in [&["anthropic"][..], &["codex", "github", "ssh"]] {
+            let environment = values(plain.clone(), slots);
+            assert_eq!(environment["NO_PROXY"], LOOPBACK, "{slots:?}");
+            assert_eq!(environment["no_proxy"], LOOPBACK, "{slots:?}");
+
+            let environment = values(declared.clone(), slots);
+            assert_eq!(environment["HTTPS_PROXY"], "http://proxy.example:3128");
+            assert_eq!(
+                environment["NO_PROXY"],
+                format!("corp.example,10.0.0.0/8,{LOOPBACK}")
+            );
+            assert_eq!(environment["no_proxy"], LOOPBACK);
+        }
+        // The signer alone, or no selection, uses no HTTP route.
+        for slots in [&[][..], &["ssh"]] {
+            let environment = values(plain.clone(), slots);
+            assert!(!environment.contains_key("NO_PROXY") && !environment.contains_key("no_proxy"));
+            let environment = values(declared.clone(), slots);
+            assert_eq!(environment["NO_PROXY"], "corp.example,10.0.0.0/8");
+            assert!(!environment.contains_key("no_proxy"));
+        }
     }
 
     #[test]

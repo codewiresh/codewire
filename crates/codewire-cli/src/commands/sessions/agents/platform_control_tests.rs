@@ -309,6 +309,8 @@ fn platform_control_claude_has_no_hosted_only_lockdown() {
     }
 }
 
+type Environment = std::collections::BTreeMap<String, String>;
+
 /// One daemon's session configuration with `selected` bound, as the hosted
 /// workspace daemon or a local VM's guest daemon holds it.
 fn session_config(
@@ -341,28 +343,35 @@ fn session_config(
 }
 
 /// What the daemon's one shared builder gives a session started with `term`
-/// and no other input.
+/// and no other input, over the synthetic `daemon` environment. Nothing of
+/// the environment this test runs in is read, so nothing of it can appear in
+/// a failure.
 fn session_environment(
     config: &codewire_daemon::Config,
     term: &str,
-) -> std::collections::BTreeMap<String, String> {
-    codewire_daemon::env::build_process_env(config, &[], term)
-        .unwrap()
-        .entries
-        .into_iter()
-        .map(|entry| {
-            let (name, value) = entry.split_once('=').unwrap();
-            (name.to_owned(), value.to_owned())
-        })
-        .collect()
+    daemon: &[(&str, &str)],
+) -> Environment {
+    codewire_daemon::env::build_process_env_in(
+        config,
+        &[],
+        term,
+        daemon
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned())),
+    )
+    .unwrap()
+    .entries
+    .into_iter()
+    .map(|entry| {
+        let (name, value) = entry.split_once('=').unwrap();
+        (name.to_owned(), value.to_owned())
+    })
+    .collect()
 }
 
 /// What a provider sees when the guardian that starts it runs in `inherited`:
 /// the guardian's own provider command decides what is set over it.
-fn provider_environment(
-    inherited: &std::collections::BTreeMap<String, String>,
-    lockdown: &[(String, String)],
-) -> std::collections::BTreeMap<String, String> {
+fn provider_environment(inherited: &Environment, lockdown: &[(String, String)]) -> Environment {
     let command = guest_peer::provider_command(Path::new("/proc/self/exe"), &[], Some(lockdown));
     let mut environment = inherited.clone();
     for (name, value) in command.get_envs() {
@@ -375,20 +384,59 @@ fn provider_environment(
     environment
 }
 
+/// The names two environments disagree on, never their values.
+fn differing<'a>(left: &'a Environment, right: &'a Environment) -> Vec<&'a str> {
+    left.keys()
+        .chain(right.keys())
+        .filter(|name| left.get(*name) != right.get(*name))
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// For the same selected slots, a hosted managed agent, a hosted interactive
-/// session and a local VM session get the same Git and SSH environment, byte
-/// for byte, from the one shared builder. The managed launch differs from the
-/// session it runs in by its login lockdown alone.
+/// session and a local VM session get the same Git, SSH and proxy-exemption
+/// environment, byte for byte, from the one shared builder. The managed
+/// launch differs from the session it runs in by its login lockdown alone.
+/// Each selection runs twice: with nothing declared, and with a proxy and an
+/// exemption list declared by the image and by the project.
 #[test]
 fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() {
     use codewire_access::{
         ManagedCredentialClient, ManagedCredentialClientPlacement, ManagedCredentialClients,
-        SSH_NATIVE_AUTH_SOCK, SSH_PLATFORM_AUTH_SOCK,
+        NO_PROXY_NAMES, SSH_NATIVE_AUTH_SOCK, SSH_PLATFORM_AUTH_SOCK,
     };
     use codewire_daemon::CredentialBridgeTransport;
     const GIT: [&str; 3] = ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"];
     const SSH: &str = "SSH_AUTH_SOCK";
-    let home = tempfile::tempdir().unwrap();
+    const LOOPBACK: &str = "127.0.0.1,localhost,::1";
+    // A daemon's own environment, as its placement renders it.
+    const PLAIN: [(&str, &str); 4] = [
+        ("HOME", "/home/codewire"),
+        ("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        ("SHELL", "/bin/sh"),
+        ("IMAGE_VALUE", "visible"),
+    ];
+    // The same with a proxy and an exemption list from the image.
+    const PROXIED: [(&str, &str); 7] = [
+        ("HOME", "/home/codewire"),
+        ("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        ("SHELL", "/bin/sh"),
+        ("IMAGE_VALUE", "visible"),
+        ("http_proxy", "http://image-proxy.example:3128"),
+        ("ALL_PROXY", "socks5://image-proxy.example:1080"),
+        ("no_proxy", ".image.example"),
+    ];
+    let plain_home = tempfile::tempdir().unwrap();
+    // The project declares a proxy and its own exemptions.
+    let proxied_home = tempfile::tempdir().unwrap();
+    fs::create_dir(proxied_home.path().join(".codewire")).unwrap();
+    fs::write(
+        proxied_home.path().join(".codewire/environment.json"),
+        br#"{"HTTPS_PROXY":"http://proxy.example:3128","NO_PROXY":"corp.example,10.0.0.0/8"}"#,
+    )
+    .unwrap();
     struct Case {
         slots: &'static [&'static str],
         claude_subscription: bool,
@@ -434,6 +482,8 @@ fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() 
                 &[(AgentKind::Claude, Route::Anthropic)],
             )
         },
+        // The signer alone uses no HTTP route, and no agent can launch.
+        case(&["ssh"], &[]),
     ];
     for Case {
         slots,
@@ -446,79 +496,121 @@ fn platform_managed_agent_git_and_ssh_environment_is_the_interactive_sessions() 
         if claude_subscription {
             selected = selected.with_anthropic_subscription_token().unwrap();
         }
-        let hosted = session_config(home.path(), selected, CredentialBridgeTransport::Hosted);
-        let native = session_config(home.path(), selected, CredentialBridgeTransport::Local);
-        // A hosted interactive session, with its terminal.
-        let shell = session_environment(&hosted, "xterm-256color");
-        // The hosted managed driver: the daemon starts it through the same
-        // builder, with no input of its own.
-        let driver = session_environment(&hosted, "");
-        // A local VM session, which a local managed agent inherits unchanged.
-        let local = session_environment(&native, "");
-        let projected = selected
-            .for_placement(ManagedCredentialClientPlacement::Platform)
-            .environment;
+        for (declared, home, daemon) in [
+            (false, plain_home.path(), &PLAIN[..]),
+            (true, proxied_home.path(), &PROXIED[..]),
+        ] {
+            let context = format!("{slots:?} declared proxy: {declared}");
+            let hosted = session_config(home, selected, CredentialBridgeTransport::Hosted);
+            let native = session_config(home, selected, CredentialBridgeTransport::Local);
+            // A hosted interactive session, with its terminal.
+            let shell = session_environment(&hosted, "xterm-256color", daemon);
+            // The hosted managed driver: the daemon starts it through the
+            // same builder, with no input of its own.
+            let driver = session_environment(&hosted, "", daemon);
+            // A local VM session, which a local managed agent inherits.
+            let local = session_environment(&native, "", daemon);
+            let projected = selected
+                .for_placement(ManagedCredentialClientPlacement::Platform)
+                .environment;
 
-        // An unselected name is this test process's own, if it has one; the
-        // builder passes it through to every session alike.
-        let github = selected.contains(ManagedCredentialClient::GitHub);
-        let ssh = selected.contains(ManagedCredentialClient::Ssh);
-        for name in GIT {
-            assert_eq!(projected.contains_key(name), github, "{slots:?} {name}");
-            if github {
-                assert_eq!(shell.get(name), projected.get(name), "{slots:?} {name}");
+            let github = selected.contains(ManagedCredentialClient::GitHub);
+            let ssh = selected.contains(ManagedCredentialClient::Ssh);
+            for name in GIT {
+                assert_eq!(shell.contains_key(name), github, "{context} {name}");
+                assert_eq!(shell.get(name), projected.get(name), "{context} {name}");
+                assert_eq!(local.get(name), shell.get(name), "{context} {name}");
             }
-            assert_eq!(local.get(name), shell.get(name), "{slots:?} {name}");
-        }
-        // Each placement's signer socket is where its daemon listens.
-        assert_eq!(projected.contains_key(SSH), ssh, "{slots:?}");
-        if ssh {
-            assert_eq!(shell[SSH], SSH_PLATFORM_AUTH_SOCK, "{slots:?}");
-            assert_eq!(local[SSH], SSH_NATIVE_AUTH_SOCK, "{slots:?}");
-        } else {
-            assert_eq!(local.get(SSH), shell.get(SSH), "{slots:?}");
-        }
-
-        for (agent, route) in launches {
-            let f = Fixture::new();
-            let mut config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
-            config.agent = *agent;
-            lockdown::prepare(&f.dir, &config, *route).unwrap();
-            let locked = lockdown::environment(&f.dir, &config, *route).unwrap();
-            let managed = provider_environment(&driver, &locked);
-            let context = format!("{slots:?} {route:?}");
-
-            for name in GIT.into_iter().chain([SSH]) {
-                assert_eq!(managed.get(name), shell.get(name), "{context} {name}");
-            }
-            // Every provider variable is the session's too. Codex alone has
-            // a lockdown, which replaces its home; Claude has none, so its
-            // environment is the session's exactly.
-            let private_home = (*agent == AgentKind::Codex).then_some("CODEX_HOME");
-            for (name, value) in &projected {
-                assert_eq!(shell.get(name), Some(value), "{context} {name}");
-                if Some(name.as_str()) != private_home {
-                    assert_eq!(managed.get(name), Some(value), "{context} {name}");
+            // Each placement's signer socket is where its daemon listens.
+            assert_eq!(
+                shell.get(SSH).map(String::as_str),
+                ssh.then_some(SSH_PLATFORM_AUTH_SOCK),
+                "{context}"
+            );
+            assert_eq!(
+                local.get(SSH).map(String::as_str),
+                ssh.then_some(SSH_NATIVE_AUTH_SOCK),
+                "{context}"
+            );
+            // A proxy is the user's own and stays as declared; every managed
+            // HTTP route is exempt from it, on both placements alike.
+            let expected_no_proxy = |name: &str| -> Option<String> {
+                let own = match (declared, name) {
+                    (true, "NO_PROXY") => Some("corp.example,10.0.0.0/8"),
+                    (true, "no_proxy") => Some(".image.example"),
+                    _ => None,
+                };
+                if selected.uses_loopback_http() {
+                    Some(match own {
+                        Some(own) => format!("{own},{LOOPBACK}"),
+                        None => LOOPBACK.to_owned(),
+                    })
+                } else {
+                    own.map(str::to_owned)
                 }
-            }
-            match private_home {
-                Some(home) => assert!(
-                    managed[home].starts_with(f.dir.to_str().unwrap()),
-                    "{context}"
-                ),
-                None => assert_eq!(managed, driver, "{context}"),
-            }
-            // The managed launch differs from the session by its lockdown
-            // alone: nothing else is set, changed or removed.
-            for (name, value) in &locked {
-                assert_eq!(managed.get(name), Some(value), "{context} {name}");
-            }
-            for name in driver.keys().chain(managed.keys()) {
-                assert!(
-                    managed.get(name) == driver.get(name)
-                        || locked.iter().any(|(set, _)| set == name),
+            };
+            for name in NO_PROXY_NAMES {
+                assert_eq!(
+                    shell.get(name),
+                    expected_no_proxy(name).as_ref(),
                     "{context} {name}"
                 );
+                assert_eq!(local.get(name), shell.get(name), "{context} {name}");
+            }
+            for (name, value) in [
+                ("HTTPS_PROXY", "http://proxy.example:3128"),
+                ("http_proxy", "http://image-proxy.example:3128"),
+                ("ALL_PROXY", "socks5://image-proxy.example:1080"),
+            ] {
+                for environment in [&shell, &driver, &local] {
+                    assert_eq!(
+                        environment.get(name).map(String::as_str),
+                        declared.then_some(value),
+                        "{context} {name}"
+                    );
+                }
+            }
+            // The driver's session differs from the terminal's by the
+            // terminal alone.
+            assert_eq!(differing(&driver, &shell), ["TERM"], "{context}");
+
+            for (agent, route) in launches {
+                let f = Fixture::new();
+                let mut config: AgentConfig = private_record(&f.dir.join("config.json")).unwrap();
+                config.agent = *agent;
+                lockdown::prepare(&f.dir, &config, *route).unwrap();
+                let locked = lockdown::environment(&f.dir, &config, *route).unwrap();
+                let managed = provider_environment(&driver, &locked);
+                let context = format!("{context} {route:?}");
+
+                for name in GIT.into_iter().chain([SSH]).chain(NO_PROXY_NAMES) {
+                    assert_eq!(managed.get(name), shell.get(name), "{context} {name}");
+                }
+                // Every provider variable is the session's too. Codex alone
+                // has a lockdown, which replaces its home; Claude has none,
+                // so its environment is the session's exactly.
+                let private_home = (*agent == AgentKind::Codex).then_some("CODEX_HOME");
+                for (name, value) in &projected {
+                    assert_eq!(shell.get(name), Some(value), "{context} {name}");
+                    if Some(name.as_str()) != private_home {
+                        assert_eq!(managed.get(name), Some(value), "{context} {name}");
+                    }
+                }
+                // The managed launch differs from the session by its lockdown
+                // alone: nothing else is set, changed or removed.
+                let locked_names: Vec<&str> =
+                    locked.iter().map(|(name, _)| name.as_str()).collect();
+                assert_eq!(differing(&managed, &driver), locked_names, "{context}");
+                for (name, value) in &locked {
+                    assert_eq!(managed.get(name), Some(value), "{context} {name}");
+                }
+                match private_home {
+                    Some(home) => assert!(
+                        managed[home].starts_with(f.dir.to_str().unwrap()),
+                        "{context}"
+                    ),
+                    None => assert!(locked.is_empty(), "{context}"),
+                }
             }
         }
     }
