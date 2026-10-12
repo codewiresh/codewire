@@ -998,6 +998,9 @@ class CommonConsumerContractTests(unittest.TestCase):
                 prepare_playwright_browser_runtime() {
                   export CODEWIRE_PLAYWRIGHT_USE_DEV_SHM=0
                 }
+                resolve_pinned_playwright_chromium() {
+                  printf '%s\n' "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
+                }
                 require_get_code() { :; }
                 kubectl() {
                   record "dashboard-kubectl $*"

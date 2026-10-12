@@ -434,6 +434,8 @@ if [ "$event_selected" = false ]; then
       scripts/dev/macos-local-runtime.py|scripts/dev/test-macos-local-runtime.py|\
       scripts/dev/macos-app-sandbox-canary.py|scripts/dev/test-macos-app-sandbox-canary.py|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
+      scripts/dev/pre-push.sh|scripts/dev/preflight-push.sh|\
+      scripts/dev/preflight-environment.sh|\
       scripts/ci/select/emit-verification-matrices.sh|\
       scripts/ci/select/require-verification-results.sh|\
       scripts/ci/receipts/local-prepush-receipt.py|\
@@ -1763,7 +1765,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/*observer*.tsv|\
       scripts/ci/release/verify-cw-release-signing-key.sh|scripts/ci/release/verify-release-tag-ref.sh|\
       apps/cli/GPG_PUBLIC_KEY.asc|\
-      apps/cli/README.md|apps/cli/install.sh|\
+      apps/cli/README.md|apps/cli/install.sh|scripts/dev/test-cw-release-update.py|\
       apps/cli/aur/PKGBUILD|apps/cli/nfpm.yaml|\
       apps/cli/scripts/update-homebrew-formula.sh|install.sh)
         select_token release

@@ -366,7 +366,7 @@ pub(crate) async fn create_native_environment(
 ) -> anyhow::Result<Option<v1::Environment>> {
     host_support::require_local_vm_host()?;
     reject_unsupported_native_create_options(&args)?;
-    require_pinned_runtime()?;
+    ensure_pinned_runtime().await?;
     if args.name.as_deref().and_then(trimmed_str).is_none() {
         args.name = Some(default_native_name(
             args.path.as_deref(),
@@ -1031,7 +1031,7 @@ pub(crate) async fn select_native_environment(name: &str) -> anyhow::Result<v1::
 
 pub(crate) async fn start_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
     host_support::require_local_vm_host()?;
-    require_pinned_runtime()?;
+    ensure_pinned_runtime().await?;
     let mut client = native_client().await?;
     get_native_environment_with_required_authority(&mut client, name).await?;
     let progress = native_progress();
@@ -1056,7 +1056,7 @@ pub(crate) async fn stop_native_environment(name: &str) -> anyhow::Result<v1::En
 
 pub(crate) async fn restart_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
     host_support::require_local_vm_host()?;
-    require_pinned_runtime()?;
+    ensure_pinned_runtime().await?;
     let mut client = native_client().await?;
     let environment = get_native_environment_with_required_authority(&mut client, name).await?;
     client
@@ -1769,24 +1769,7 @@ pub(crate) async fn setup_local_runtime(
         let document = crate::local_runtime_pin::embedded()?.context(
             "this cw is a development build with no pinned local VM runtime; pass --from DIR with a runtime directory built from the same source",
         )?;
-        // Files this host already holds (the current or previous runtime) are
-        // reused; only the rest is downloaded, so rolling back to the previous
-        // runtime or re-running setup downloads nothing. A damaged local file
-        // fails its digest check, and the whole runtime is downloaded once.
-        let wanted = runtime_install::host_runtime(&document)?.install_blobs();
-        let local = runtime_install::LocalBlobs::open(&paths)?;
-        let missing: Vec<_> = wanted
-            .iter()
-            .filter(|blob| !local.has(&blob.sha256))
-            .cloned()
-            .collect();
-        match install_pinned_runtime(&paths, &document, &local, &missing).await {
-            Err(error) if local_file_damaged(&error) => {
-                let empty = runtime_install::LocalBlobs::empty();
-                install_pinned_runtime(&paths, &document, &empty, &wanted).await
-            }
-            result => result,
-        }?;
+        report_runtime_install(install_embedded_runtime(&paths, &document).await?);
         return Ok(());
     };
     let source = DirectoryBlobSource::new(&from);
@@ -1808,6 +1791,33 @@ pub(crate) async fn setup_local_runtime(
     Ok(())
 }
 
+/// Installs this cw's pinned runtime (#2539), for `cw setup --local` and
+/// before a local VM starts (#2582). Files this host already holds (the
+/// current or previous runtime) are reused; only the rest is downloaded, so
+/// rolling back to the previous runtime or re-running setup downloads
+/// nothing. A damaged local file fails its digest check, and the whole
+/// runtime is downloaded once.
+async fn install_embedded_runtime(
+    paths: &codewire_local_vmm::runtime_install::RuntimePaths,
+    document: &codewire_local_vmm::runtime_install::LocalRuntimeDocument,
+) -> anyhow::Result<codewire_local_vmm::runtime_install::InstallOutcome> {
+    use codewire_local_vmm::runtime_install;
+    let wanted = runtime_install::host_runtime(document)?.install_blobs();
+    let local = runtime_install::LocalBlobs::open(paths)?;
+    let missing: Vec<_> = wanted
+        .iter()
+        .filter(|blob| !local.has(&blob.sha256))
+        .cloned()
+        .collect();
+    match install_pinned_runtime(paths, document, &local, &missing).await {
+        Err(error) if local_file_damaged(&error) => {
+            let empty = runtime_install::LocalBlobs::empty();
+            install_pinned_runtime(paths, document, &empty, &wanted).await
+        }
+        result => result,
+    }
+}
+
 /// Installs `document`'s runtime from `local` files plus a download of
 /// `download`, replacing whatever another cw installed (kept as the previous
 /// runtime). Running VMs keep the generation they started with.
@@ -1816,11 +1826,10 @@ async fn install_pinned_runtime(
     document: &codewire_local_vmm::runtime_install::LocalRuntimeDocument,
     local: &codewire_local_vmm::runtime_install::LocalBlobs,
     download: &[codewire_cw_release::local_runtime::BlobRef],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<codewire_local_vmm::runtime_install::InstallOutcome> {
     use codewire_local_vmm::runtime_install::{self, WithLocal};
     if download.is_empty() {
-        report_runtime_install(runtime_install::install(paths, document, local, true).await?);
-        return Ok(());
+        return Ok(runtime_install::install(paths, document, local, true).await?);
     }
     let megabytes = download.iter().map(|blob| blob.size).sum::<u64>() / (1024 * 1024);
     eprintln!(
@@ -1834,8 +1843,9 @@ async fn install_pinned_runtime(
     };
     let installed = runtime_install::install(paths, document, &source, true).await;
     let cleanup = fetched.cleanup();
-    report_runtime_install(installed?);
-    cleanup.context("the runtime is installed, but its download scratch was retained")
+    let outcome = installed?;
+    cleanup.context("the runtime is installed, but its download scratch was retained")?;
+    Ok(outcome)
 }
 
 /// Why `--from` could not read its runtime document. Only a document that
@@ -1880,15 +1890,20 @@ fn report_runtime_install(outcome: codewire_local_vmm::runtime_install::InstallO
     }
 }
 
-/// Require the runtime this cw pins before a local VM starts (#2539).
-fn require_pinned_runtime() -> anyhow::Result<()> {
+/// Before a local VM starts, install the runtime this cw pins when it is
+/// missing, incomplete or another cw's (#2539, #2582). Running VMs keep the
+/// generation they started with.
+async fn ensure_pinned_runtime() -> anyhow::Result<()> {
     let config = native_runtime_config()?;
-    crate::local_runtime_pin::require_installed(
-        &codewire_local_vmm::runtime_install::RuntimePaths {
-            artifact_root: config.artifact_root,
-            artifact_lock: config.artifact_lock,
-        },
-    )
+    let paths = codewire_local_vmm::runtime_install::RuntimePaths {
+        artifact_root: config.artifact_root,
+        artifact_lock: config.artifact_lock,
+    };
+    let paths = &paths;
+    crate::local_runtime_pin::ensure_installed(paths, |document| async move {
+        install_embedded_runtime(paths, &document).await
+    })
+    .await
 }
 
 fn absolute_override(name: &str) -> anyhow::Result<Option<PathBuf>> {
