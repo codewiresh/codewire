@@ -1244,13 +1244,16 @@ impl SessionEngine {
         })?;
         self.make_record_room_preserving(None).await?;
         if let Some(managed) = &managed {
+            let refused =
+                |_| SessionError::FailedPrecondition("managed preparation refused".into());
             let prepared = crate::host_control::managed::helper(
                 &self.inner.config,
                 owner.environment_id(),
-                crate::host_control::managed::prepare(&request.origin(), managed),
+                crate::host_control::managed::prepare(&request.origin(), managed)
+                    .map_err(refused)?,
             )
             .await
-            .map_err(|_| SessionError::FailedPrecondition("managed preparation refused".into()))?;
+            .map_err(refused)?;
             if prepared["driver_id"].as_str() != Some(request.request_id.as_str())
                 || prepared["message_id"].as_str()
                     != Some(if managed.prompt.is_some() {
@@ -1496,7 +1499,7 @@ impl SessionEngine {
             let queued = managed::helper(
                 &self.inner.config,
                 owner.environment_id(),
-                managed::queue(&request.origin(), &control),
+                managed::queue(&request.origin(), &control)?,
             )
             .await?;
             if queued["message_id"].as_str() != Some(request.request_id.as_str()) {
