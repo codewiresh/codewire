@@ -56,6 +56,27 @@ PARTS = {
         "host": True,
     },
 }
+# Every input of the runtime a release builds: the slow parts' producers, the
+# guest root's probe, the VZ helper and the scripts that assemble and check
+# them. The four-target dry run builds the runtime when one changes, and
+# otherwise only checks the slow parts are cached. A trailing / names a tree.
+RUNTIME_INPUTS = (
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "crates/codewire-vmm-guest-probe/",
+    "crates/codewire-local-vmm/macos-vz-runner/",
+    "scripts/ci/verify/build-local-vmm-initramfs.sh",
+    "scripts/ci/verify/build-linux-vmm-kernel.py",
+    "scripts/ci/verify/linux-vmm-kernel/",
+    "scripts/ci/release/",
+    "scripts/ci/select/",
+    "scripts/dev/macos-local-runtime.py",
+    "scripts/dev/macos-ext4-tool.py",
+    "scripts/dev/macos-git-tool.py",
+    "scripts/dev/macos-cli.py",
+    ".gitea/workflows/cli-release.yaml",
+    ".gitea/workflows/cw-release-dry-run.yaml",
+)
 
 
 class PartsError(Exception):
@@ -152,6 +173,24 @@ def fetch(origin, name, recipe_sha256, output):
     return True
 
 
+def present(origin, name, recipe_sha256):
+    """Whether the cache records this recipe; its blobs are not read."""
+    response = origin.get(record_key(recipe_sha256), release.MAX_JSON)
+    if response.status == 404:
+        return False
+    require(response.status == 200, f"runtime part record returned status {response.status}")
+    parse_record(response.body, name, recipe_sha256)
+    return True
+
+
+def runtime_mode(paths):
+    """'full' when a changed path is a runtime input, otherwise 'parts'."""
+    for path in paths:
+        if any(path == entry or (entry.endswith("/") and path.startswith(entry)) for entry in RUNTIME_INPUTS):
+            return "full"
+    return "parts"
+
+
 def publish(s3, dist, records):
     """Write the cache records of the parts this release built.
 
@@ -191,19 +230,27 @@ def main(argv=None):
     publisher.add_argument("--dist", type=Path, required=True)
     publisher.add_argument("--records", type=Path, required=True)
     publisher.add_argument("--credentials", type=Path, required=True)
-    for command in ("recipe", "fetch", "record"):
+    sub.add_parser("runtime-mode", help="read changed paths on stdin; print full or parts")
+    for command in ("recipe", "fetch", "present", "record"):
         each = sub.add_parser(command)
         each.add_argument("--part", required=True, choices=sorted(PARTS))
         if command == "recipe":
             each.add_argument("--host-facts", type=Path, help="JSON object: macos, sdk, clang (Mac-native parts)")
         else:
             each.add_argument("--recipe", required=True)
-            each.add_argument("--dir", type=Path, required=True)
+            if command != "present":
+                each.add_argument("--dir", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "publish":
             s3 = r2.S3(r2.HttpsTransport(), r2.load_credentials(args.credentials))
             print(f"runtime-part: published records={publish(s3, args.dist, args.records)}")
+        elif args.command == "runtime-mode":
+            print(runtime_mode(line for line in sys.stdin.read().splitlines() if line))
+        elif args.command == "present":
+            hit = present(r2.PublicOrigin(r2.HttpsTransport()), args.part, args.recipe)
+            print(f"runtime-part: {args.part} recipe={args.recipe} cache={'hit' if hit else 'miss'}")
+            return 0 if hit else 3
         elif args.command == "recipe":
             host = json.loads(args.host_facts.read_bytes()) if args.host_facts else None
             print(recipe(args.part, host=host))

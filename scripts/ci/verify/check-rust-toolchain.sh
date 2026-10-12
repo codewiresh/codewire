@@ -41,7 +41,7 @@ readonly CI_RUST_CARGO_HOME='${{ github.workspace }}/target/ci-rust-cargo-home'
 readonly CI_CARGO_CAPACITY_CHECK='scripts/ci/setup/assert-cargo-cache-capacity.sh "$CARGO_HOME"'
 readonly -a PINNED_WORKFLOWS=(
   '.gitea/workflows/ci.yaml:11'
-  '.gitea/workflows/cli-release.yaml:1'
+  '.gitea/workflows/cli-release.yaml:2'
   '.gitea/workflows/connect-apikey-smoke.yaml:1'
   '.gitea/workflows/deploy-dev.yaml:1'
   '.gitea/workflows/manual-diagnostics.yaml:1'
