@@ -255,8 +255,9 @@ semantic depends on the scope of the stop, not on the client or route, which
 keeps everything consistent.
 
 Before signalling a running managed conversation for a stop or restart, the
-host daemon asks the conversation's record helper whether its agent takes an
-interrupt first. For noel with an active run, the helper records the fenced
+host daemon records the stop's intent (see below) and then asks the
+conversation's record helper whether its agent takes an interrupt first. For
+noel with an active run, the helper records the fenced
 interrupt `cw interrupt` sends, the daemon delivers it, and the helper waits
 for the message to end and the parent's notification to be written. noel
 aborts the run and records it aborted, and the driver starts nothing queued
@@ -269,55 +270,87 @@ helper run, which answers at once. The host CLI allows a stop or restart 20 s.
 shutdown, it asks the same record helper, for each running managed
 conversation, to pause the active run (`pause_before_shutdown`), bounded at
 2 s. The helper pauses only a run whose driver reported `capabilities.resume`,
-and never one for which an explicit stop recorded its interrupt. It writes the
-message `paused` and queues the parent's notice in the parent's inbox; the
-parent shares the environment and adopts the notice when it runs again. So the
-pause is on disk before the first signal. The daemon signals SIGTERM and,
-250 ms later, SIGKILL: a driver that is killed before it acts leaves the same
-records as one that handles its signal, and the next start resumes both to the
-same outcome.
+and never one an explicit stop is recorded for. It writes the message `paused`
+and queues the parent's notice in the parent's inbox; the parent shares the
+environment and adopts the notice when it runs again. So the pause is on disk
+before the first signal. The daemon signals SIGTERM and, 250 ms later,
+SIGKILL: a driver that is killed before it acts leaves the same records as one
+that handles its signal, and the next start resumes both to the same outcome.
 
-The driver pauses a run itself only with evidence that its stop is the whole
-environment's:
+**What a stop means is on disk before its signal.** The host daemon writes
+the evidence itself, before anything of a stop can signal a session, so it
+does not depend on the record helper:
 
-- its message is already paused, or
-- the environment's takedown marker exists (`shutdown.json` in the
-  environment's runtime root). `cw env stop`, `restart` and `rm` write it
-  before they ask the daemon to stop. The daemon writes it first when a
-  signal stops it, because a host that shuts down signals every process at
-  once and the driver may be signalled before the daemon's helper runs. The
-  daemon removes it when it starts.
+- **A takedown:** the environment's takedown marker, `shutdown.json` in the
+  environment's runtime root. `cw env stop`, `restart` and `rm` write it to
+  ask the daemon to stop. For any other shutdown the daemon writes it before
+  it cancels a launch or stops a session. The daemon removes it when it
+  starts. The message the helper paused is a takedown's second evidence.
+- **An explicit stop or restart:** a stop intent, `stop-intent.json` in the
+  session's directory under the environment's runtime root. The daemon
+  writes it for a host owner's managed conversation before the stop cancels
+  a launch, runs the helper or signals. `cw stop` records it whether or not
+  the conversation is running. `cw restart` records it only when it stops a
+  running conversation: restarting a stopped one is how a run resumes. A
+  stop whose intent cannot be written signals nothing and fails. From the
+  intent on, the stop finishes even if its caller goes away. The
+  conversation's next start acts on the intent and removes it.
 
-The daemon signals a conversation only after it has written what its stop
-means: an explicit stop's interrupt, or a takedown's pause or marker. The
-driver therefore also reads who sent its signal, which the kernel reports:
+A driver that is signalled reads the disk:
 
-- **From its daemon:** what is on disk decides at once. Without evidence of a
-  takedown the message ends unknown, as before, and the parent hears once.
-- **From anything else:** it is not an explicit stop, which only the daemon
-  sends. It is a host shutting down, or a stray signal. The driver waits up
-  to 3 s for the marker its daemon writes when it is signalled too, and
-  pauses when it comes. With no marker the message ends unknown, as before.
+- **An explicit stop is recorded**, by the stop intent or by the stop's
+  interrupt for the message: the run ends as an explicit stop, at once. It
+  is never paused.
+- **A takedown is recorded**, by the marker or by the message already
+  paused: the run is paused, at once.
+- **Neither:** the signal is not the daemon's. It is a host shutting down,
+  which signals every process at once, or a stray signal. The driver waits
+  up to 3 s for the marker its daemon writes when it is signalled too, and
+  pauses when it comes. With no marker the message ends unknown, as before,
+  and the parent hears once.
 
 **An explicit stop never pauses a message, and nothing resumes it later.**
 
-- The explicit stop's interrupt record is the evidence. The helper writes it
-  before the daemon signals, also when the run has not reported its ID yet
-  and while noel is starting again after a crash. With that record neither
-  the helper nor the driver pauses the message, and a next start that finds
-  the message still running aborts its run instead of resuming it.
+- The evidence is the daemon's stop intent and, when the helper worked, the
+  stop's interrupt for the message. The helper writes that interrupt before
+  the daemon signals, also when the run has not reported its ID yet and
+  while noel is starting again after a crash. With either, neither the
+  helper nor the driver pauses the message.
+- A helper that fails changes nothing. The daemon's stop intent is already
+  on disk, so the driver ends the message unknown when its signal arrives.
+  A driver that is killed before it acts leaves the message running, and
+  the conversation's next start finds the intent and ends the message
+  unknown ("its conversation was stopped while this was in flight"). When
+  the helper did record the stop's interrupt, that start aborts the run
+  instead and the message ends interrupted. Neither resumes it, and the
+  parent hears once.
 - `cw stop` of a conversation that is not running ends a message its
   environment's takedown paused (`stop_paused`): unknown, "its conversation
   was stopped before it resumed". So a paused run is cancelled by stopping
-  its conversation, whether or not it has resumed yet.
-- A stop during the startup handshake of a paused message ends it unknown,
-  unless the takedown marker shows the environment is going down again.
-- Degraded: if the helper fails and records nothing, the driver still ends
-  the message unknown when its signal arrives. Only if the driver is also
-  killed before that write does the message stay running, and a later `cw
-  restart` then resumes it as after a crash. Likewise a takedown whose
-  helper failed and whose driver was killed first resumes as a crash,
-  without the pause notice.
+  its conversation, whether or not it has resumed yet. If that helper fails,
+  the stop intent ends the message at the conversation's next start, and a
+  daemon that starts does not restart the conversation for it. A message a
+  crash left running ends unknown at that start too: its owner stopped the
+  conversation since.
+- An explicit stop during the startup handshake of a paused message ends it
+  unknown. A takedown during the handshake leaves it paused.
+
+What remains, each on the safe side, where a run is not resumed against an
+explicit stop:
+
+- A takedown whose helper failed and whose driver was killed before it
+  acted, or whose marker could not be written, leaves the message running.
+  The next start resumes it as a crash: counted, and without the pause
+  notice.
+- A daemon that dies without shutting down kills its sessions and records
+  nothing. That is a crash, as before.
+- A start that cannot remove the stop intent logs it. The conversation's
+  next stop signal is then read as explicit, and its run ends unknown
+  instead of pausing.
+- A launch the daemon abandons, or that another restart of the same
+  conversation cancels, kills a driver that has only just started, with
+  nothing recorded. The driver records nothing either, and the next start
+  decides the message.
 
 **A paused message never waits for a start that cannot come.**
 
@@ -329,7 +362,11 @@ driver therefore also reads who sent its signal, which the kernel reports:
   launched with inline `--env` values, which are not kept across a daemon
   restart; one whose process cleanup is unknown; and one whose session
   record retention removes (128 records per environment), for which the
-  daemon asks the helper first (`retire_before_prune`).
+  daemon asks the helper first (`retire_before_prune`). The daemon names
+  the reason with its refusal: the restart's gRPC status carries
+  `codewire-never-restarts` metadata (`no-session`, `projection-lost`,
+  `cleanup-unconfirmed` or `generation-exhausted`) beside its code and
+  message. Nothing is decided from a refusal's text.
 - A start whose noel cannot resume the run, or whose startup fails, ends
   the message unknown, as for a crash.
 - A host that loses power fences its sessions (cleanup unknown) as before:
@@ -571,34 +608,39 @@ fixtures. It covers input, names, process ownership, parent wake, native
 controls, durable outbox recovery, startup failure, and launch projection
 recovery. It runs on Linux and macOS; [MACOS-CLI.md](MACOS-CLI.md) describes
 the macOS process-ownership check. The second uses ordinary installed
-Codex/Claude login and observes conversation resume, Claude xhigh and a resumed
-lead invoking `cw` itself.
-The synthetic noel peer sends the records the noel binary sends for its
-`faux/echo` model; it adds only a dialog, which noel never opens, and a
-JSON-RPC mode for an older pi build. The real-noel journey runs a built noel
-with `faux/echo`, offline, with a private HOME and pi agent directory. It
-observes the first answer in `cw inbox`, a second turn in the same session,
-a worker waking its lead once per finished message, a slow turn's refused
-and acknowledged steers and interrupt, and a restart whose next message
-answers normally in the same session. Both prove the stop rules above: a
-direct stop, a restart, `stop --all` and the confirmed cascade interrupt every
-noel run first (the synthetic noel receives `abort {expectedRunId}` before its
-signal; the real noel's journal records the run aborted), while `cw env stop`
-leaves it interrupted in noel's journal, as `get_state.lastRun` reports, and
-its message paused. Both also prove the pause: the host daemon pauses the
-message before it signals, the lead's inbox holds one pause notice, a waiting
-`cw wait` says the message is paused and goes on, and `cw env start` resumes
-the run with no `cw restart`. The wait then returns the reply, and the
-restarted lead hears of the pause once and then of the final state once. Codex
-and Claude end unknown and are not restarted. The synthetic journey repeats
-the takedown with the driver stopped, so the daemon kills it when the grace
-ends, and with the daemon and the driver signalled together, as a host that
-shuts down does; the outcome is the same, and the second is resumed by the
-daemon start that the next command causes. It also removes an environment
-under a waiting `cw wait`, which ends at once. The real-noel journey resumes a
-run whose model request the takedown cut off, which noel sends again once, and
-shows that a conversation launched with inline `--env` values, which can never
-restart, resolves its paused message unknown. The synthetic journey also
+Codex/Claude login and observes conversation resume, Claude xhigh and a
+resumed lead invoking `cw` itself. The synthetic noel peer sends the records
+the noel binary sends for its `faux/echo` model; it adds only a dialog, which
+noel never opens, and a JSON-RPC mode for an older pi build. The real-noel
+journey runs a built noel with `faux/echo`, offline, with a private HOME and
+pi agent directory. It observes the first answer in `cw inbox`, a second turn
+in the same session, a worker waking its lead once per finished message, a
+slow turn's refused and acknowledged steers and interrupt, and a restart whose
+next message answers normally in the same session. Both prove the stop rules
+above: a direct stop, a restart, `stop --all` and the confirmed cascade
+interrupt every noel run first (the synthetic noel receives `abort
+{expectedRunId}` before its signal; the real noel's journal records the run
+aborted), while `cw env stop` leaves it interrupted in noel's journal, as
+`get_state.lastRun` reports, and its message paused. Both also prove the
+pause: the host daemon pauses the message before it signals, the lead's inbox
+holds one pause notice, a waiting `cw wait` says the message is paused and
+goes on, and `cw env start` resumes the run with no `cw restart`. The wait
+then returns the reply, and the restarted lead hears of the pause once and
+then of the final state once. Codex and Claude end unknown and are not
+restarted. The synthetic journey repeats the takedown with the driver stopped,
+so the daemon kills it when the grace ends, and with the daemon and the driver
+signalled together, as a host that shuts down does; the outcome is the same,
+and the second is resumed by the daemon start that the next command causes. It
+stops a conversation while the daemon's record helper fails, with a driver
+that handles its signal and with one that is killed first: the daemon's stop
+intent is on disk, the message is never paused, the next start never resumes
+it, and the lead hears once. It also removes an environment under a waiting
+`cw wait`, which ends at once. The real-noel journey resumes a run whose model
+request the takedown cut off, which noel sends again once, and shows that a
+conversation launched with inline `--env` values, which can never restart,
+resolves its paused message unknown. It also stops a conversation while the
+record helper fails and its driver is killed first: the run is never resumed,
+and its cut-off model request is not sent again. The synthetic journey also
 proves Codex and Claude keep their unknown outcome on each of those routes,
 and that each agent, and no other session, receives its conversation identity.
 The real-noel journey needs noel built from pi commit `ef09c03f` or later.
